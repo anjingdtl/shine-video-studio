@@ -43,6 +43,8 @@ logs/
 tmp/
 temp/
 .cache/
+/.local-data/
+*.tsbuildinfo
 
 # Model weights and generated media
 *.safetensors

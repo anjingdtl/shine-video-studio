@@ -1,0 +1,1 @@
+"""Shine Video Studio backend."""
