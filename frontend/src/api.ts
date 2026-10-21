@@ -73,6 +73,16 @@ export type JobAttempt = {
   failure_code: string | null; submit_intent_at: string; submit_ack_at: string | null;
   progress: number; output_sha256: string | null; output_bytes: number | null;
   reconciliation_state: string | null; request_fingerprint: string;
+  attempt_kind?: string; parent_attempt_id?: string | null; prompt_sha256?: string | null;
+  parameter_sha256?: string | null; manifest_sha256?: string | null;
+  prompt_graph_sha256?: string | null; repair_reason?: string | null;
+};
+
+export type QualityGate = {
+  id: string; job_id: string; attempt_id: string | null; artifact_id: string | null;
+  gate_name: string; status: string; required: boolean; is_mock: boolean;
+  model: string | null; confidence: number | null; error_code: string | null;
+  coverage: string; evidence: Record<string, unknown>; created_at: string;
 };
 
 export type RepairRecord = {
@@ -87,6 +97,7 @@ export type Job = {
   style_version_id: string; generation_mode: string | null; workflow_profile_id: string | null;
   compiled_prompt_sha256: string | null; artifact_id: string | null; last_qc_result: string | null;
   last_repair_plan: Record<string, unknown> | null;
+  request_revision?: number; quality_verification?: string | null;
   request: {
     reference_manifest: Array<{ label: string; asset_id: string; sha256: string; use_as: string }>;
     compiled_prompt_sha256?: string; compiler_version?: string; rule_version?: string;

@@ -38,7 +38,7 @@ def _silence_check(path: Path, ffmpeg_path: str) -> TechnicalCheck:
         "silencedetect=noise=-50dB:d=2",
         "-f",
         "null",
-        "-",
+        "--",
     ]
     try:
         completed = subprocess.run(command, capture_output=True, timeout=120, check=False)
@@ -54,6 +54,45 @@ def _silence_check(path: Path, ffmpeg_path: str) -> TechnicalCheck:
             measured=len(starts),
         )
     return _check("audio_silence", "pass", "No silent span longer than 2 seconds was detected")
+
+
+def _full_decode_check(path: Path, ffmpeg_path: str) -> TechnicalCheck:
+    """Decode every frame of the file.
+
+    FFprobe only parses container metadata; it never proves that the coded
+    frames are decodable. This check is the only one that may claim a full
+    decode, and it is honestly ``unavailable`` when FFmpeg is not installed.
+    """
+    executable = shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+    if not executable:
+        return _check(
+            "decode",
+            "unavailable",
+            "FFmpeg is not installed; the coded frames were not decoded",
+        )
+    command = [
+        executable,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=300, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return _check("decode", "unavailable", "The full decode check could not run")
+    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+    if completed.returncode != 0:
+        return _check(
+            "decode",
+            "fail",
+            f"The media could not be decoded end to end: {stderr[:300] or 'ffmpeg reported an error'}",
+        )
+    return _check("decode", "pass", "Every frame was decoded without error")
 
 
 class TechnicalQC:
@@ -80,7 +119,7 @@ class TechnicalQC:
         checks.append(
             _check("file_nonempty", "pass" if content else "fail", "Artifact byte size", measured=len(content))
         )
-        info: MediaInfo = probe_file(path, ffprobe_path=self.ffprobe_path)
+        info: MediaInfo = probe_file(path, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
         checks.append(
             _check(
                 "container",
@@ -90,11 +129,17 @@ class TechnicalQC:
             )
         )
         if info.decoded:
-            checks.append(_check("decode", "pass", "FFprobe opened and decoded stream metadata"))
+            checks.append(
+                _check(
+                    "stream_metadata",
+                    "pass",
+                    "FFprobe parsed the container metadata and the stream list",
+                )
+            )
         else:
             checks.append(
                 _check(
-                    "decode",
+                    "stream_metadata",
                     "unavailable" if expectations.require_decodable else "skipped",
                     "FFprobe is unavailable; only container structure was inspected",
                 )
@@ -145,6 +190,7 @@ class TechnicalQC:
             else:
                 checks.append(_check("audio_track", "pass", "Audio is not required for this shot"))
         checks.append(_silence_check(path, self.ffmpeg_path))
+        checks.append(_full_decode_check(path, self.ffmpeg_path))
 
         if any(check.status == "fail" for check in checks):
             result = "failed"

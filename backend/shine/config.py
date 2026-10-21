@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from shine.security import is_loopback_url
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -37,6 +39,7 @@ class Settings:
     worker_offline_after_seconds: int = 30
     comfyui_base_url: str = "http://127.0.0.1:8188"
     render_provider: str = "mock"
+    allow_remote_comfyui: bool = False
     secret_store_dir: Path | None = None
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
@@ -53,6 +56,13 @@ class Settings:
         render_provider = os.getenv("SHINE_RENDER_PROVIDER", "mock").strip().lower()
         if render_provider not in {"mock", "comfyui"}:
             raise ValueError("SHINE_RENDER_PROVIDER must be 'mock' or 'comfyui'")
+        allow_remote = os.getenv("SHINE_ALLOW_REMOTE_COMFYUI", "").strip().lower() in {"1", "true", "yes"}
+        comfyui_base_url = os.getenv("SHINE_COMFYUI_URL", "http://127.0.0.1:8188").strip()
+        if not allow_remote and not is_loopback_url(comfyui_base_url):
+            raise ValueError(
+                "SHINE_COMFYUI_URL must point at this machine. "
+                "Set SHINE_ALLOW_REMOTE_COMFYUI=1 to allow a remote renderer explicitly."
+            )
         return cls(
             data_dir=data_dir,
             database_url=database_url,
@@ -60,8 +70,9 @@ class Settings:
             worker_lease_seconds=_env_int("SHINE_WORKER_LEASE_SECONDS", 30),
             worker_heartbeat_seconds=_env_int("SHINE_WORKER_HEARTBEAT_SECONDS", 10),
             worker_offline_after_seconds=_env_int("SHINE_WORKER_OFFLINE_SECONDS", 30),
-            comfyui_base_url=os.getenv("SHINE_COMFYUI_URL", "http://127.0.0.1:8188").strip(),
+            comfyui_base_url=comfyui_base_url,
             render_provider=render_provider,
+            allow_remote_comfyui=allow_remote,
             secret_store_dir=data_dir / "secrets",
             ffprobe_path=os.getenv("SHINE_FFPROBE", "ffprobe"),
             ffmpeg_path=os.getenv("SHINE_FFMPEG", "ffmpeg"),

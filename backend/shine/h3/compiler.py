@@ -177,10 +177,9 @@ def _infer_mode(manifest: list[ReferenceManifestItem], hint: GenerationMode | No
             return GenerationMode.L2VA
         return GenerationMode.I2VA
     if len(pictures) == 2:
-        if FrameRole.LAST in roles or {FrameRole.FIRST, FrameRole.LAST}.issubset(roles):
+        if {FrameRole.FIRST, FrameRole.LAST}.issubset(roles):
             return GenerationMode.FL2VA
-        if len(pictures) == 2:
-            return GenerationMode.FL2VA
+        return GenerationMode.REF2VA
     return GenerationMode.REF2VA
 
 
@@ -199,6 +198,25 @@ def _check_mode_hint(mode: GenerationMode, manifest: list[ReferenceManifestItem]
         )
     if mode == GenerationMode.REF2VA and not manifest:
         raise PromptCompilationError("H3_MODE_REFERENCE_MISMATCH", "Ref2VA requires at least one reference file")
+
+
+def _check_frame_roles(mode: GenerationMode, pictures: list[ReferenceManifestItem]) -> None:
+    """Each generation mode has its own frame-role contract."""
+    roles = {item.frame_role for item in pictures if item.frame_role}
+    if mode == GenerationMode.I2VA and FrameRole.LAST in roles:
+        raise PromptCompilationError(
+            "H3_FRAME_ROLE_MISMATCH", "I2VA cannot use a last-frame picture"
+        )
+    if mode == GenerationMode.L2VA and FrameRole.FIRST in roles:
+        raise PromptCompilationError(
+            "H3_FRAME_ROLE_MISMATCH", "L2VA cannot use a first-frame picture"
+        )
+    if mode == GenerationMode.FL2VA:
+        if not {FrameRole.FIRST, FrameRole.LAST}.issubset(roles):
+            raise PromptCompilationError(
+                "H3_FRAME_ROLE_MISMATCH",
+                "FL2VA requires one first-frame picture and one last-frame picture",
+            )
 
 
 def _speaker_mapping(spec: ShotSpec) -> tuple[dict[str, str], list[str]]:
@@ -410,6 +428,7 @@ class H3PromptCompiler:
     ) -> CompiledPrompt:
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
+        _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
         speaker_labels, speaker_order = _speaker_mapping(spec)
         ctx = _Context(
             spec=spec,

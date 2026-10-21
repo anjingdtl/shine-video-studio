@@ -8,6 +8,7 @@ decoded a codec.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -313,10 +314,80 @@ def _ffprobe_json(path: Path, ffprobe_path: str, timeout_s: float = 30) -> dict[
         return None
 
 
-def probe_file(path: Path, *, ffprobe_path: str = "ffprobe", content_type: str = "") -> MediaInfo:
+_DURATION_PATTERN = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}\.\d+)")
+_VIDEO_PATTERN = re.compile(
+    r"Stream #\d+:\d+.*?:\s*Video:\s*(?P<codec>[A-Za-z0-9_]+).*?(?P<width>\d+)x(?P<height>\d+)",
+    re.DOTALL,
+)
+_FPS_PATTERN = re.compile(r"(?P<fps>\d+(?:\.\d+)?)\s*fps")
+_AUDIO_PATTERN = re.compile(r"Stream #\d+:\d+.*?:\s*Audio:\s*(?P<codec>[A-Za-z0-9_]+)", re.DOTALL)
+
+
+def _ffmpeg_metadata(path: Path, ffmpeg_path: str, timeout_s: float = 30) -> dict[str, Any] | None:
+    """Read stream metadata with FFmpeg when FFprobe is not installed.
+
+    FFmpeg prints the same container facts to stderr. This keeps the technical
+    QC honest on installations that ship only ``ffmpeg``.
+    """
+    executable = shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+    if not executable:
+        return None
+    command = [executable, "-hide_banner", "-i", str(path)]
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=timeout_s, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    if "Invalid data found" in stderr or "No such file" in stderr:
+        return None
+    streams: list[dict[str, Any]] = []
+    duration_s: float | None = None
+    match = _DURATION_PATTERN.search(stderr)
+    if match:
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        seconds = float(match.group(3))
+        duration_s = hours * 3600 + minutes * 60 + seconds
+    video = _VIDEO_PATTERN.search(stderr)
+    if video:
+        stream: dict[str, Any] = {
+            "codec_type": "video",
+            "codec_name": video.group("codec"),
+            "width": int(video.group("width")),
+            "height": int(video.group("height")),
+        }
+        fps_match = _FPS_PATTERN.search(stderr[video.end() : video.end() + 200])
+        if fps_match:
+            stream["avg_frame_rate"] = f"{fps_match.group('fps')}/1"
+        streams.append(stream)
+    audio = _AUDIO_PATTERN.search(stderr)
+    if audio:
+        streams.append({"codec_type": "audio", "codec_name": audio.group("codec")})
+    if not streams:
+        return None
+    return {
+        "streams": streams,
+        "format": {
+            "duration": str(duration_s) if duration_s else "",
+            "format_name": Path(path).suffix.lstrip(".").lower() or "media",
+        },
+    }
+
+
+def probe_file(
+    path: Path,
+    *,
+    ffprobe_path: str = "ffprobe",
+    content_type: str = "",
+    ffmpeg_path: str = "ffmpeg",
+) -> MediaInfo:
     if not path.exists() or not path.is_file():
         return MediaInfo(container="missing", notes=("file_missing",))
     probe = _ffprobe_json(path, ffprobe_path)
+    tool = "ffprobe"
+    if probe is None:
+        probe = _ffmpeg_metadata(path, ffmpeg_path)
+        tool = "ffmpeg"
     size = path.stat().st_size
     if probe is None:
         data = path.read_bytes() if size <= 32 * 1024 * 1024 else path.read_bytes()[: 32 * 1024 * 1024]
@@ -343,7 +414,7 @@ def probe_file(path: Path, *, ffprobe_path: str = "ffprobe", content_type: str =
         has_audio=audio is not None,
         video_codec=video.get("codec_name") if video else None,
         audio_codec=audio.get("codec_name") if audio else None,
-        tool="ffprobe",
+        tool=tool,
         decoded=True,
         raw={"streams": streams, "format": fmt},
     )

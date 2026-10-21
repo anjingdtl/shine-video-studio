@@ -52,7 +52,9 @@ JOB_TRANSITIONS = {
     "QC_PENDING": {"PASSED", "REPAIR_PENDING", "NEEDS_REVIEW", "FAILED"},
     "PASSED": {"NEEDS_REVIEW"},
     "REPAIR_PENDING": {"READY", "FAILED", "NEEDS_REVIEW", "QUEUED"},
-    "NEEDS_REVIEW": set(),
+    # NEEDS_REVIEW may only move forward again through external
+    # reconciliation, which proves that the original submission exists.
+    "NEEDS_REVIEW": {"RUNNING"},
     "FAILED": set(),
 }
 
@@ -354,6 +356,64 @@ def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
     )
 
 
+def build_reference_manifest(
+    bindings: list[ShotBindingInput], assets: dict[str, Asset]
+) -> list[ReferenceManifestItem]:
+    """Build the deterministic, request-local H3 label manifest."""
+    ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
+    label_counts = {"subject": 0, "picture": 0, "video": 0, "audio": 0}
+    manifest: list[ReferenceManifestItem] = []
+    for binding in ordered:
+        asset = assets[binding.asset_id]
+        label_name = {
+            "subject": "Subject",
+            "picture": "Picture",
+            "video": "Video",
+            "audio": "Audio",
+        }[binding.use_as.value]
+        label_counts[binding.use_as.value] += 1
+        manifest.append(
+            ReferenceManifestItem(
+                label=f"<{label_name} {label_counts[binding.use_as.value]}>",
+                asset_id=asset.id,
+                sha256=asset.sha256,
+                storage_key=asset.storage_path,
+                content_type=asset.content_type,
+                use_as=binding.use_as,
+                role=binding.role,
+                frame_role=binding.frame_role,
+                ordinal=binding.ordinal,
+                duration_s=asset.duration_s,
+                entity_id=asset.entity_id,
+            )
+        )
+    return manifest
+
+
+def manifest_from_shot_bindings(db: Session, shot: Shot) -> list[ReferenceManifestItem]:
+    """Rebuild the manifest from the shot's saved, authoritative bindings."""
+    rows = _binding_rows(db, shot)
+    if not rows:
+        return []
+    assets = {
+        asset.id: asset
+        for asset in db.scalars(
+            select(Asset).where(Asset.id.in_([row.asset_id for row in rows]))
+        ).all()
+    }
+    bindings = [
+        ShotBindingInput(
+            asset_id=row.asset_id,
+            use_as=row.use_as,
+            role=row.role,
+            frame_role=row.frame_role,
+            ordinal=row.ordinal,
+        )
+        for row in rows
+    ]
+    return build_reference_manifest(bindings, assets)
+
+
 def make_render_request(
     db: Session,
     project: Project,
@@ -405,32 +465,7 @@ def make_render_request(
         raise HTTPException(status_code=422, detail="Render references are missing assets required by the shot")
 
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
-    label_counts = {"subject": 0, "picture": 0, "video": 0, "audio": 0}
-    manifest: list[ReferenceManifestItem] = []
-    for binding in ordered:
-        asset = assets[binding.asset_id]
-        label_name = {
-            "subject": "Subject",
-            "picture": "Picture",
-            "video": "Video",
-            "audio": "Audio",
-        }[binding.use_as.value]
-        label_counts[binding.use_as.value] += 1
-        manifest.append(
-            ReferenceManifestItem(
-                label=f"<{label_name} {label_counts[binding.use_as.value]}>",
-                asset_id=asset.id,
-                sha256=asset.sha256,
-                storage_key=asset.storage_path,
-                content_type=asset.content_type,
-                use_as=binding.use_as,
-                role=binding.role,
-                frame_role=binding.frame_role,
-                ordinal=binding.ordinal,
-                duration_s=asset.duration_s,
-                entity_id=asset.entity_id,
-            )
-        )
+    manifest = build_reference_manifest(ordered, assets)
 
     compiler = H3PromptCompiler()
     try:

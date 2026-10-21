@@ -21,6 +21,7 @@ dev = [
   "httpx==0.28.1",
   "pytest==8.4.1",
   "ruff==0.12.3",
+  "imageio-ffmpeg==0.6.0",
 ]
 
 [build-system]

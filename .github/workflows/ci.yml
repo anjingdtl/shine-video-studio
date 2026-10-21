@@ -15,6 +15,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install FFmpeg and FFprobe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -23,6 +29,60 @@ jobs:
       - run: uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
       - run: uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
       - run: uv run --project backend alembic -c backend/alembic.ini upgrade head
+
+  backend-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install FFmpeg and FFprobe
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y
+          ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --project backend --locked
+      - name: Backend tests (Windows, no GPU)
+        run: uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
+      - name: Lint
+        run: uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
+      - name: Migrate a fresh database
+        shell: pwsh
+        run: |
+          $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-data'
+          New-Item -ItemType Directory -Path $env:SHINE_DATA_DIR | Out-Null
+          uv run --project backend alembic -c backend/alembic.ini upgrade head
+      - name: Start the local workbench and check the health endpoint
+        shell: pwsh
+        run: |
+          $env:SHINE_RENDER_PROVIDER = 'mock'
+          $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-data'
+          $api = Start-Process -PassThru -WindowStyle Hidden `
+            -FilePath 'uv' `
+            -ArgumentList @('run','--project','backend','uvicorn','shine.main:app','--host','127.0.0.1','--port','8123')
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 2
+              try {
+                $response = Invoke-RestMethod -Uri 'http://127.0.0.1:8123/health' -TimeoutSec 5
+                $ok = $true
+                break
+              } catch { }
+            }
+            if (-not $ok) { throw 'The local API did not answer on 127.0.0.1:8123' }
+            Write-Host "health: $($response | ConvertTo-Json -Compress)"
+            $status = Invoke-RestMethod -Uri 'http://127.0.0.1:8123/api/v1/system/status' -TimeoutSec 10
+            Write-Host "status: $($status.render_mode) api_online=$($status.api_online)"
+          } finally {
+            Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue
+          }
 
   frontend:
     runs-on: ubuntu-latest

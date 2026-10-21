@@ -9,8 +9,14 @@ Do not upload private assets or model weights to cloud services during acceptanc
 | Area | Status |
 | --- | --- |
 | ComfyUI HTTP client, upload, `/prompt`, `/queue`, `/history`, `/view`, interrupt | `IMPLEMENTED` / `MOCK_VERIFIED` with Fake ComfyUI |
+| Per-family reference media transfer (extension, upload path, loader capability) | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| Intent-first submission and conservative reconciliation (no duplicate render) | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| Automatic collection and re-check of finished external tasks | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| Named quality gates (`technical`/`semantic`/`audio`/`style`/`final`) and the per-project policy | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| Automatic repair that produces a different request revision | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | Workflow Profile schema and strict template validation | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | Real H3 API workflow mapping for the user's nodes/checkpoints | `BLOCKED` — no exported workflow JSON was available |
+| Real video/audio media transport for the user's H3 loader nodes | `BLOCKED` — the nodes are unknown; the profile must declare `media_transfers` |
 | H3 prompt compiler T2VA/I2VA/FL2VA/L2VA/Ref2VA | `IMPLEMENTED` / `TESTED_OFFLINE` against the pinned official skill format |
 | Real T2VA/Ref2VA generation, identity/lip-sync/quality | `PENDING_LOCAL_H3` |
 | FFprobe decode / FFmpeg silence QC | `PENDING_LOCAL_H3` if tools are not installed |
@@ -52,17 +58,19 @@ Do not include API keys, absolute source-media paths that disclose personal info
 3. **Register the real workflow:** Export the user's ComfyUI **API workflow JSON**. Register it as a Workflow Profile with:
    - mode `T2VA`, `FL2VA`, or `Ref2VA`;
    - the exact required node class names;
-   - a `parameter_map` mapping `positive_prompt`, `seed`, `duration`, and any reference slots (`reference_picture_1`, `reference_subject_1`, `reference_video_1`, `reference_audio_1`, …) to real `node.inputs.field` paths;
+   - a `parameter_map` mapping `positive_prompt`, `seed`, `duration`, and any reference slots (`reference_picture_1`, `reference_subject_1`, `reference_video_1`, `reference_audio_1`, …) to real `node.inputs.field` paths. **A missing reference slot blocks the render with `PENDING_WORKFLOW_MAPPING`; it is never skipped.**
+   - a `media_transfers` declaration for the `video` and `audio` families, naming the upload path, the multipart field, the subfolder and the loader node classes the files need. Image uses ComfyUI's documented `/upload/image` default; **video and audio have no default** and the render is blocked until they are declared.
    - the intended H3-Base checkpoint family.
-   The generic template shipped in the UI is **not** an H3-validated mapping. Replace it before any real job.
+   The generic template shipped in the UI is **not** an H3-validated mapping. Replace it before any real job. Then call `POST /api/v1/workflow-profiles/{id}/validate` and record the result.
 4. **Assets and style:** Upload only original, user-authorized assets. Set role/entity/tags, approve, and lock them. Fill all seven Style Bible dimensions, freeze V1, and confirm every new shot references the current frozen version.
 5. **T2VA smoke test:** Create a 4–6 second T2VA shot with no references. Preview the compiled prompt and verify `integrated_multimodal_description`, `overall_soundscape`, and `non_diegetic_music` are present. Select `provider=comfyui`, create the job, and keep the worker running. Record the durable submit-intent ID, ComfyUI `prompt_id`, request/prompt/workflow hashes, and output path.
 6. **Probe the output:** Run FFprobe and technical QC. Verify a decodable video, expected audio stream, 24 FPS, 4–15 second duration, intended aspect ratio, and local H3-Base resolution. A local H3-Base result must not be described as the full hosted H3-Context-IR + H3-Regenerate-2K workflow. If FFprobe is missing, QC must remain `needs_review`, never `passed`.
 7. **Ref2VA test:** Bind an approved character subject, a first/last frame picture, a video reference, and an audio reference as applicable. Verify each `<Subject/Picture/Video/Audio N>` label maps to its own file hash; enforce 9 images, 3 videos, 3 audio, 12 total, and 15 seconds per media type. A global asset ID must never substitute for a request-local label. Add one dialogue line and verify the speaker maps to a bound subject.
-8. **Uncertain submission:** Stop ComfyUI after a persisted submit intent and before acknowledgement. Restart Shine and reconcile against `/history` and `/queue`. Demonstrate that an unknown result becomes `NEEDS_REVIEW` and is never blindly resubmitted. Repeat after acknowledgement and verify recovery resumes QC without a second ComfyUI job.
+8. **Uncertain submission:** Stop ComfyUI after a persisted submit intent and before acknowledgement. Restart Shine and reconcile against `/history` and `/queue`. Demonstrate that an unknown result becomes `NEEDS_REVIEW` and is never blindly resubmitted. Repeat after acknowledgement and verify recovery resumes QC without a second ComfyUI job. Verify the ComfyUI queue/history shows exactly **one** external task for that logical attempt.
 9. **Revision during render:** Revise a shot while ComfyUI is rendering. Verify the worker discards the stale result, does not write it into the passed library, and marks downstream continuity jobs stale while independent shots remain intact.
-10. **Repair:** Force a deterministic technical failure (for example, a wrong duration or missing audio stream). Verify technical QC fails, the repair engine classifies it, the semantic budget stops automatic retries, and the job escalates rather than claiming success.
-11. **Retain evidence:** Keep only non-sensitive evidence: environment manifest, workflow/checkpoint hashes, prompt mode + hash, compiler/rule version, ComfyUI task IDs, FFprobe output, test scene result, QC checks, and audit events. Mark acceptance `PASS`, `FAIL`, or `BLOCKED`.
+10. **Repair:** Force a deterministic technical failure (for example, a wrong duration or missing audio stream). Verify technical QC fails, the repair engine classifies it, the semantic budget stops automatic retries, and the job escalates rather than claiming success. When an automatic repair does run, verify that the new attempt has a different `request_fingerprint` and a different `prompt_sha256` and that `request_revision` advanced.
+11. **Quality gates:** Configure a real VLM/ASR profile, enable `allow_remote_review` for the project, and verify `GET /api/v1/jobs/{id}/quality-gates` shows a covered `semantic` and `audio` gate with the real model name and `is_mock=false`. Verify that a shot with a passing technical gate but no semantic review stays `needs_review`.
+12. **Retain evidence:** Keep only non-sensitive evidence: environment manifest, workflow/checkpoint hashes, prompt mode + hash, compiler/rule version, ComfyUI task IDs, FFprobe output, test scene result, QC checks, the gate ledger, and audit events. Mark acceptance `PASS`, `FAIL`, or `BLOCKED`.
 
 ## Do not claim
 

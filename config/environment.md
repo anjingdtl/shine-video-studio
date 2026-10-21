@@ -10,13 +10,14 @@ permission-restricted `0600` file on non-Windows hosts) and are never returned b
 | `SHINE_DATA_DIR` | `.local-data` | SQLite database, content-addressed user assets, artifacts, and secret files |
 | `SHINE_DATABASE_URL` | SQLite file under `SHINE_DATA_DIR` | Optional SQLAlchemy URL override |
 | `SHINE_RENDER_PROVIDER` | `mock` | `mock` or `comfyui`. `comfyui` is only valid after local H3 acceptance |
-| `SHINE_COMFYUI_URL` | `http://127.0.0.1:8188` | Local ComfyUI API endpoint |
+| `SHINE_COMFYUI_URL` | `http://127.0.0.1:8188` | Local ComfyUI API endpoint. It must point at this machine unless `SHINE_ALLOW_REMOTE_COMFYUI=1` is set |
+| `SHINE_ALLOW_REMOTE_COMFYUI` | unset | Explicit opt-in for a non-loopback ComfyUI. Reference bytes are uploaded to the renderer, so a remote renderer is a cloud transmission of user media |
 | `SHINE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Configurable upload limit for reference media |
 | `SHINE_WORKER_LEASE_SECONDS` | `30` | Job lease duration |
 | `SHINE_WORKER_HEARTBEAT_SECONDS` | `10` | Worker heartbeat interval |
 | `SHINE_WORKER_OFFLINE_SECONDS` | `30` | Age after which a worker is reported offline |
 | `SHINE_FFPROBE` | `ffprobe` | Probe executable. Missing tools are reported as unavailable, never passed |
-| `SHINE_FFMPEG` | `ffmpeg` | FFmpeg executable for silence detection and later delivery work |
+| `SHINE_FFMPEG` | `ffmpeg` | FFmpeg executable. It is used for the silence check, the full decode check and, when FFprobe is missing, for the stream metadata |
 
 The API and Vite development server bind to `127.0.0.1`. There is no user
 authentication yet; do not expose the API to a LAN or the internet. Remote LLM/VLM

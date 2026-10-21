@@ -16,6 +16,7 @@ from shine.schemas import (
     WorkflowProfileCreate,
     WorkflowProfilePublic,
 )
+from shine.security import require_loopback_url
 from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["comfyui"])
@@ -30,6 +31,7 @@ def _profile_data(profile: WorkflowProfile, *, include_graph: bool = False) -> d
         "mode": profile.mode,
         "graph_sha256": profile.graph_sha256,
         "parameter_map": profile.parameter_map,
+        "media_transfers": profile.media_transfers,
         "required_nodes": profile.required_nodes,
         "checkpoint_id": profile.checkpoint_id,
         "validated_against": profile.validated_against,
@@ -53,8 +55,9 @@ def comfy_config(settings: SettingsDep, db: DBSession) -> dict[str, Any]:
 
 
 @router.post("/comfy/test", response_model=ComfyTestResult)
-def test_comfy(body: ComfyConnectionConfig, db: DBSession) -> ComfyTestResult:
-    client = ComfyUIClient(body.base_url, timeout_s=body.timeout_s)
+def test_comfy(body: ComfyConnectionConfig, settings: SettingsDep, db: DBSession) -> ComfyTestResult:
+    base_url = require_loopback_url(body.base_url, allow_remote=settings.allow_remote_comfyui)
+    client = ComfyUIClient(base_url, timeout_s=body.timeout_s)
     try:
         stats = client.system_stats()
         object_info = client.object_info()
@@ -131,12 +134,35 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
             status_code=422,
             detail="A workflow profile must map the compiled H3 prompt to a node input",
         )
+    if "duration" not in body.parameter_map:
+        raise HTTPException(
+            status_code=422,
+            detail="A workflow profile must map the target duration to a node input",
+        )
+    for family, transfer in (body.media_transfers or {}).items():
+        if family not in {"image", "video", "audio"}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown media transfer family: {family}",
+            )
+        if not isinstance(transfer, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"The media transfer for {family} must be an object",
+            )
+        upload_path = str(transfer.get("upload_path") or "")
+        if not upload_path.startswith("/"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"The media transfer for {family} needs an absolute upload_path",
+            )
     profile = WorkflowProfile(
         project_id=body.project_id,
         name=body.name,
         mode=body.mode.value,
         graph=body.graph,
         parameter_map=body.parameter_map,
+        media_transfers=body.media_transfers,
         required_nodes=body.required_nodes,
         checkpoint_id=body.checkpoint_id,
         graph_sha256=graph_hash(body.graph),
@@ -154,6 +180,37 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
             "graph_sha256": profile.graph_sha256,
             "required_nodes": profile.required_nodes,
             "parameter_map": sorted(profile.parameter_map),
+            "media_transfers": sorted(profile.media_transfers or {}),
+        },
+        project_id=profile.project_id,
+    )
+    db.commit()
+    db.refresh(profile)
+    return WorkflowProfilePublic.model_validate(_profile_data(profile))
+
+
+@router.post("/workflow-profiles/{profile_id}/validate", response_model=WorkflowProfilePublic)
+def validate_workflow_profile(profile_id: str, settings: SettingsDep, db: DBSession) -> WorkflowProfilePublic:
+    """Check the registered profile against the live ComfyUI node inventory."""
+    profile = db.get(WorkflowProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Workflow profile not found")
+    client = ComfyUIClient(settings.comfyui_base_url, timeout_s=30)
+    try:
+        object_info = client.object_info()
+    except ComfyError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from exc
+    validation = validate_against_object_info(profile.graph or {}, profile.parameter_map, object_info)
+    profile.validated_against = validation
+    add_audit(
+        db,
+        "user",
+        "WORKFLOW_PROFILE_VALIDATED",
+        "workflow_profile",
+        profile.id,
+        {
+            "missing_nodes": validation["missing_nodes"],
+            "missing_input_count": len(validation["missing_inputs"]),
         },
         project_id=profile.project_id,
     )

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from ipaddress import ip_address
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, UploadFile
 
@@ -18,6 +20,8 @@ MAX_REFERENCE_COUNTS = {"image": 9, "video": 3, "audio": 3}
 MAX_TOTAL_REFERENCES = 12
 MAX_REFERENCE_DURATION_S = 15.0
 ALLOWED_ASSET_ROLES = {"character", "costume", "scene", "prop", "voice", "style_reference", "generic"}
+
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 _SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|secret|password|credential|authorization)", re.IGNORECASE)
 _SENSITIVE_VALUE = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,})")
@@ -84,6 +88,43 @@ def probe_upload(kind: str, content: bytes, content_type: str) -> MediaInfo:
     if kind == "video" and info.container == "unknown":
         raise HTTPException(status_code=415, detail="Unsupported video container")
     return info
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the URL points at the local machine."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if host in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def require_loopback_url(url: str, *, allow_remote: bool = False) -> str:
+    """Reject any renderer URL that is not on this machine.
+
+    Reference bytes are uploaded to the renderer. Sending master assets to a
+    remote host is a cloud transmission of user media and therefore requires an
+    explicit opt-in.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=422, detail="The renderer URL must start with http:// or https://")
+    if allow_remote:
+        return url
+    if not is_loopback_url(url):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The renderer URL must point at this machine. Uploading master assets to a remote "
+                "renderer requires the explicit SHINE_ALLOW_REMOTE_COMFYUI=1 opt-in."
+            ),
+        )
+    return url
 
 
 def validate_asset_role(role: str | None) -> str | None:

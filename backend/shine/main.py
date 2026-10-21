@@ -26,12 +26,14 @@ from shine.models import (
     MediaArtifact,
     Project,
     QCReport,
+    QualityGate,
     RepairRecord,
     Shot,
     StyleVersion,
     WorkerInstance,
     utcnow,
 )
+from shine.quality.gates import DEFAULT_PRIORITY_THRESHOLDS, HARD_RULES, QualityPolicy
 from shine.quality.repair import RepairEngine
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
 from shine.schemas import (
@@ -44,6 +46,7 @@ from shine.schemas import (
     FusedQCResult,
     HardFailure,
     ProjectSettings,
+    QualityPolicyUpdate,
     RepairPlan,
     ReplaceBindings,
     ShotSpec,
@@ -99,6 +102,7 @@ def _project_data(project: Project) -> dict[str, Any]:
         "style_draft": project.style_draft,
         "allow_remote_review": project.allow_remote_review,
         "auto_repair_enabled": project.auto_repair_enabled,
+        "quality_policy": project.quality_policy,
     }
 
 
@@ -196,6 +200,8 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
         "provider_job_id": job.provider_job_id,
         "semantic_retries": job.semantic_retries,
         "max_semantic_retries": job.max_semantic_retries,
+        "request_revision": job.request_revision,
+        "quality_verification": job.quality_verification,
         "style_version_id": job.style_version_id,
         "generation_mode": job.generation_mode,
         "workflow_profile_id": job.workflow_profile_id,
@@ -226,6 +232,13 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
                 "submit_intent_at": attempt.submit_intent_at,
                 "submit_ack_at": attempt.submit_ack_at,
                 "request_fingerprint": attempt.request_fingerprint,
+                "attempt_kind": attempt.attempt_kind,
+                "parent_attempt_id": attempt.parent_attempt_id,
+                "prompt_sha256": attempt.prompt_sha256,
+                "parameter_sha256": attempt.parameter_sha256,
+                "manifest_sha256": attempt.manifest_sha256,
+                "prompt_graph_sha256": attempt.prompt_graph_sha256,
+                "repair_reason": attempt.repair_reason,
                 "progress": attempt.progress,
                 "output_sha256": attempt.output_sha256,
                 "output_bytes": attempt.output_bytes,
@@ -627,7 +640,7 @@ def create_app(
         return jsonable_encoder(_shot_data(db, shot)["bindings"])
 
     @app.put("/api/v1/shots/{shot_id}/bindings")
-    def replace_bindings(shot_id: str, body: ReplaceBindings, db: DBSession) -> dict[str, Any]:
+    def replace_bindings(shot_id: str, body: ReplaceBindings, db: DBSession) -> list[dict[str, Any]]:
         shot = db.get(Shot, shot_id)
         if not shot:
             raise HTTPException(status_code=404, detail="Shot not found")
@@ -987,6 +1000,80 @@ def create_app(
         )
         db.commit()
         return jsonable_encoder(result.model_dump(mode="json"))
+
+    @app.get("/api/v1/projects/{project_id}/quality-policy")
+    def get_quality_policy(project_id: str, db: DBSession) -> dict[str, Any]:
+        project = require_project(db, project_id)
+        return {
+            "project_id": project.id,
+            "policy": QualityPolicy.from_dict(project.quality_policy).to_dict(),
+            "configured": project.quality_policy is not None,
+        }
+
+    @app.put("/api/v1/projects/{project_id}/quality-policy")
+    def update_quality_policy(
+        project_id: str, body: QualityPolicyUpdate, db: DBSession
+    ) -> dict[str, Any]:
+        project = require_project(db, project_id)
+        payload = body.model_dump()
+        if not payload.get("priority_thresholds"):
+            payload["priority_thresholds"] = dict(DEFAULT_PRIORITY_THRESHOLDS)
+        if not payload.get("hard_rules"):
+            payload["hard_rules"] = list(HARD_RULES)
+        project.quality_policy = payload
+        add_audit(
+            db,
+            "user",
+            "QUALITY_POLICY_UPDATED",
+            "project",
+            project.id,
+            {
+                "require_semantic_review": payload["require_semantic_review"],
+                "require_audio_review": payload["require_audio_review"],
+                "require_style_review": payload["require_style_review"],
+                "min_confidence": payload["min_confidence"],
+                "accept_mock_review": payload["accept_mock_review"],
+                "allow_unverified_technical": payload["allow_unverified_technical"],
+                "priority_thresholds": payload["priority_thresholds"],
+            },
+            project_id=project.id,
+        )
+        db.commit()
+        db.refresh(project)
+        return {
+            "project_id": project.id,
+            "policy": QualityPolicy.from_dict(project.quality_policy).to_dict(),
+            "configured": True,
+        }
+
+    @app.get("/api/v1/jobs/{job_id}/quality-gates")
+    def get_job_quality_gates(job_id: str, db: DBSession) -> list[dict[str, Any]]:
+        if not db.get(Job, job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        rows = db.scalars(
+            select(QualityGate).where(QualityGate.job_id == job_id).order_by(QualityGate.created_at)
+        ).all()
+        return jsonable_encoder(
+            [
+                {
+                    "id": row.id,
+                    "job_id": row.job_id,
+                    "attempt_id": row.attempt_id,
+                    "artifact_id": row.artifact_id,
+                    "gate_name": row.gate_name,
+                    "status": row.status,
+                    "required": row.required,
+                    "is_mock": row.is_mock,
+                    "model": row.model,
+                    "confidence": row.confidence,
+                    "error_code": row.error_code,
+                    "coverage": row.coverage,
+                    "evidence": row.evidence,
+                    "created_at": row.created_at,
+                }
+                for row in rows
+            ]
+        )
 
     @app.get("/api/v1/projects/{project_id}/events", response_model=AuditPage)
     def list_events(

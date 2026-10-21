@@ -109,7 +109,12 @@ class FakeOpenAIServer(_BaseServer):
 
 
 class FakeComfyServer(_BaseServer):
-    """Fake ComfyUI HTTP server covering queue, history, uploads, and outputs."""
+    """Fake ComfyUI HTTP server covering queue, history, uploads, and outputs.
+
+    The server records every upload and every submitted prompt so tests can
+    assert that no reference was silently dropped and that a logical attempt
+    never produced two external submissions.
+    """
 
     def __init__(self) -> None:
         self.mode = "ok"
@@ -120,14 +125,46 @@ class FakeComfyServer(_BaseServer):
         self.output_bytes = b"fake-video-bytes"
         self.output_filename = "shine_output.mp4"
         self.upload_count = 0
+        self.uploads: list[dict[str, Any]] = []
         self.prompt_count = 0
         self.timeout_sleep_s = 0.6
+        self.submitted_prompts: list[dict[str, Any]] = []
+        self.upload_paths: list[str] = []
         super().__init__()
+
+    def _history_record(self, prompt_id: str) -> dict[str, Any] | None:
+        record = self.prompts.get(prompt_id)
+        if record is None:
+            return None
+        status = "success" if self.mode != "error" else "error"
+        outputs = (
+            {}
+            if self.mode == "missing_output"
+            else {
+                "9": {
+                    "gifs": [
+                        {
+                            "filename": self.output_filename,
+                            "subfolder": "",
+                            "type": "output",
+                        }
+                    ]
+                }
+            }
+        )
+        return {
+            "prompt": record.get("prompt"),
+            "extra_data": record.get("extra_data"),
+            "status": {"status_str": status},
+            "outputs": outputs,
+        }
 
     def _handler(self):
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, *_args):
                 return
 
@@ -158,6 +195,8 @@ class FakeComfyServer(_BaseServer):
                                 }
                             },
                             "SaveVideo": {"input": {"required": {"images": ["IMAGE"]}}},
+                            "LoadVideo": {"input": {"required": {"video": ["STRING"]}}},
+                            "LoadAudio": {"input": {"required": {"audio": ["STRING"]}}},
                         },
                     )
                     return
@@ -166,33 +205,16 @@ class FakeComfyServer(_BaseServer):
                     return
                 if parsed.path.startswith("/history/"):
                     prompt_id = parsed.path.rsplit("/", 1)[-1]
-                    record = outer.prompts.get(prompt_id)
-                    if record is None:
-                        self._json(200, {})
-                    else:
-                        status = "success" if outer.mode != "error" else "error"
-                        outputs = (
-                            {}
-                            if outer.mode == "missing_output"
-                            else {
-                                "9": {
-                                    "gifs": [
-                                        {
-                                            "filename": outer.output_filename,
-                                            "subfolder": "",
-                                            "type": "output",
-                                        }
-                                    ]
-                                }
-                            }
-                        )
-                        self._json(
-                            200,
-                            {prompt_id: {"status": {"status_str": status}, "outputs": outputs}},
-                        )
+                    record = outer._history_record(prompt_id)
+                    self._json(200, {} if record is None else {prompt_id: record})
                     return
                 if parsed.path == "/history":
-                    self._json(200, outer.prompts)
+                    payload = {}
+                    for prompt_id in outer.prompts:
+                        record = outer._history_record(prompt_id)
+                        if record is not None:
+                            payload[prompt_id] = record
+                    self._json(200, payload)
                     return
                 if parsed.path == "/view":
                     query = parse_qs(parsed.query)
@@ -211,14 +233,32 @@ class FakeComfyServer(_BaseServer):
                 parsed = urlparse(self.path)
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
-                if parsed.path == "/upload/image":
+                if parsed.path.startswith("/upload/"):
                     outer.upload_count += 1
+                    outer.upload_paths.append(parsed.path)
                     filename = "upload.png"
+                    content_type = "application/octet-stream"
                     marker = b'filename="'
                     if marker in raw:
                         start = raw.index(marker) + len(marker)
                         end = raw.index(b'"', start)
                         filename = raw[start:end].decode("utf-8", errors="replace")
+                    type_marker = b"Content-Type: "
+                    if type_marker in raw:
+                        start = raw.index(type_marker) + len(type_marker)
+                        end = raw.index(b"\r\n", start)
+                        content_type = raw[start:end].decode("utf-8", errors="replace")
+                    outer.uploads.append(
+                        {
+                            "path": parsed.path,
+                            "filename": filename,
+                            "content_type": content_type,
+                            "size": len(raw),
+                        }
+                    )
+                    if outer.mode == "upload_failure":
+                        self._json(500, {"error": "upload failed"})
+                        return
                     self._json(200, {"name": filename, "subfolder": "shine", "type": "input"})
                     return
                 if parsed.path == "/prompt":
@@ -236,9 +276,21 @@ class FakeComfyServer(_BaseServer):
                         prompt_id = outer.idempotency[key]
                     elif key:
                         outer.idempotency[key] = prompt_id
-                    outer.prompts[prompt_id] = {"prompt": body.get("prompt")}
+                    outer.prompts[prompt_id] = {
+                        "prompt": body.get("prompt"),
+                        "extra_data": body.get("extra_data"),
+                    }
+                    outer.submitted_prompts.append(body)
                     if outer.mode == "timeout_then_accept":
                         time.sleep(outer.timeout_sleep_s)
+                    if outer.mode == "accept_then_drop":
+                        # The prompt was accepted but the response never arrives.
+                        self.close_connection = True
+                        try:
+                            self.connection.close()
+                        except OSError:
+                            pass
+                        return
                     self._json(200, {"prompt_id": prompt_id, "number": 1, "node_errors": {}})
                     return
                 if parsed.path == "/interrupt":

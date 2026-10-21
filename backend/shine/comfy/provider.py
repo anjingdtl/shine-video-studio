@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shine.comfy.client import ComfyError, ComfyUIError, ComfyUnavailable
+from shine.comfy.client import (
+    ComfyError,
+    ComfyNodeUnavailable,
+    ComfyPromptRejected,
+    ComfyUIError,
+    ComfyUnavailable,
+    ComfyWorkflowVersionMismatch,
+)
+from shine.comfy.media import (
+    ComfyPendingWorkflowMapping,
+    ComfyReferenceError,
+    MediaTransfer,
+    check_transfer_capability,
+    extension_for,
+    family_for_content_type,
+    transfer_from_profile,
+)
 from shine.comfy.workflow import (
     apply_parameters,
     generic_h3_parameters,
@@ -16,6 +33,25 @@ from shine.comfy.workflow import (
 from shine.media.artifacts import content_type_for_name, safe_asset_path
 from shine.models import Asset
 from shine.schemas import RenderProvider, RenderRequest
+from shine.security import sha256_bytes
+
+REQUIRED_LOGICAL_PARAMETERS = ("positive_prompt", "duration")
+
+
+@dataclass(frozen=True)
+class PreparedSubmission:
+    """A fully prepared ComfyUI prompt, ready to be queued.
+
+    The prompt graph hash is computed *before* the external call so the
+    submission intent can be persisted first. If the request is then accepted
+    but the response is lost, the hash is enough to find the original task in
+    ComfyUI's history without ever submitting a second one.
+    """
+
+    prompt: dict[str, Any]
+    prompt_graph_sha256: str
+    workflow_hash: str
+    uploaded_references: int
 
 
 @dataclass(frozen=True)
@@ -23,6 +59,8 @@ class ComfySubmission:
     prompt_id: str
     workflow_hash: str
     uploaded_references: int
+    prompt_graph_sha256: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +71,57 @@ class ComfyResult:
     content: bytes | None = None
     content_type: str | None = None
     error: str | None = None
+    error_code: str | None = None
+
+
+def graph_class_types(graph: dict[str, Any]) -> set[str]:
+    return {
+        str(node.get("class_type"))
+        for node in (graph or {}).values()
+        if isinstance(node, dict) and node.get("class_type")
+    }
+
+
+def reference_slots(manifest) -> list[tuple[str, Any]]:
+    """Map every manifest entry onto its deterministic logical workflow slot."""
+    counters: dict[str, int] = {}
+    slots: list[tuple[str, Any]] = []
+    for item in manifest:
+        family = item.use_as.value
+        counters[family] = counters.get(family, 0) + 1
+        slots.append((f"reference_{family}_{counters[family]}", item))
+    return slots
+
+
+def validate_required_parameters(parameter_map: dict[str, str], *, needs_seed: bool) -> None:
+    missing = [name for name in REQUIRED_LOGICAL_PARAMETERS if name not in parameter_map]
+    if needs_seed and "seed" not in parameter_map:
+        missing.append("seed")
+    if missing:
+        raise ComfyPendingWorkflowMapping(
+            "The workflow profile does not map every required generation parameter",
+            details={"missing_parameters": missing, "mapped_parameters": sorted(parameter_map)},
+        )
+
+
+def validate_reference_slots(parameter_map: dict[str, str], manifest) -> list[tuple[str, Any]]:
+    """Every reference in this request must have a workflow slot.
+
+    Silently dropping a reference is forbidden: the render would silently lose
+    a user-approved asset.
+    """
+    slots = reference_slots(manifest)
+    missing = [logical for logical, _item in slots if logical not in parameter_map]
+    if missing:
+        raise ComfyPendingWorkflowMapping(
+            "The workflow profile has no mapping for one or more required references",
+            details={
+                "missing_reference_slots": missing,
+                "mapped_parameters": sorted(parameter_map),
+                "reference_count": len(slots),
+            },
+        )
+    return slots
 
 
 class ComfyUIRenderService:
@@ -47,45 +136,201 @@ class ComfyUIRenderService:
         validate_graph(graph, required_nodes=profile.required_nodes)
         return graph
 
+    @staticmethod
+    def _check_profile_compatibility(profile) -> None:
+        """Refuse a profile that the live ComfyUI already proved incompatible.
+
+        The stored validation is refreshed by ``/comfy/capabilities`` and
+        ``POST /workflow-profiles/{id}/validate``. A missing node class and a
+        changed node definition are different failures and are reported apart.
+        """
+        validation = getattr(profile, "validated_against", None) or {}
+        missing_nodes = list(validation.get("missing_nodes") or [])
+        missing_inputs = list(validation.get("missing_inputs") or [])
+        if missing_nodes:
+            raise ComfyNodeUnavailable(
+                "The workflow needs node classes that this ComfyUI does not provide",
+                details={"missing_nodes": sorted(set(missing_nodes))},
+            )
+        if missing_inputs:
+            raise ComfyWorkflowVersionMismatch(
+                "The installed node definition no longer matches the registered parameter mapping",
+                details={"missing_inputs": missing_inputs[:20]},
+            )
+
+    def _profile_transfers(self, profile) -> dict[str, Any]:
+        return getattr(profile, "media_transfers", None) or {}
+
+    def _resolve_transfer(
+        self,
+        profile,
+        *,
+        family: str,
+        content_type: str,
+        graph_class_types_: set[str],
+        object_info: dict[str, Any] | None,
+    ) -> MediaTransfer:
+        transfer = transfer_from_profile(self._profile_transfers(profile), family, content_type)
+        check_transfer_capability(
+            transfer,
+            graph_class_types=graph_class_types_,
+            object_info=object_info,
+        )
+        return transfer
+
+    def _verify_asset_for_upload(
+        self,
+        item,
+        asset: Asset,
+        *,
+        project_id: str | None,
+    ) -> bytes:
+        """Re-check the master asset right before it leaves the machine."""
+        if not asset.approved:
+            raise ComfyReferenceError(
+                "A reference asset is not approved by the user",
+                details={"asset_id": asset.id, "label": item.label},
+            )
+        if not asset.locked:
+            raise ComfyReferenceError(
+                "A reference asset is not locked by the user",
+                details={"asset_id": asset.id, "label": item.label},
+            )
+        if project_id and asset.project_id != project_id:
+            raise ComfyReferenceError(
+                "A reference asset belongs to another project",
+                details={"asset_id": asset.id, "label": item.label},
+            )
+        if asset.sha256 != item.sha256:
+            raise ComfyReferenceError(
+                "The reference manifest hash does not match the current master asset",
+                details={"asset_id": asset.id, "label": item.label},
+            )
+        path = safe_asset_path(self.asset_root, asset.storage_path)
+        if not path.is_file():
+            raise ComfyReferenceError(
+                "A reference asset file is missing on disk",
+                details={"asset_id": asset.id, "label": item.label},
+            )
+        content = path.read_bytes()
+        digest = sha256_bytes(content)
+        if digest != asset.sha256:
+            raise ComfyReferenceError(
+                "The reference asset file changed on disk after it was approved",
+                details={"asset_id": asset.id, "label": item.label, "expected": asset.sha256, "actual": digest},
+            )
+        expected_family = family_for_content_type(asset.content_type)
+        declared_family = {"subject": "image", "picture": "image"}.get(item.use_as.value, item.use_as.value)
+        if expected_family != declared_family:
+            raise ComfyReferenceError(
+                "A reference asset media type does not match the role it is bound to",
+                details={
+                    "asset_id": asset.id,
+                    "label": item.label,
+                    "use_as": item.use_as.value,
+                    "content_type": asset.content_type,
+                },
+            )
+        return content
+
     def _upload_references(
-        self, request: RenderRequest, assets: dict[str, Asset], parameter_map: dict[str, str]
+        self,
+        request: RenderRequest,
+        assets: dict[str, Asset],
+        parameter_map: dict[str, str],
+        *,
+        project_id: str | None = None,
+        graph_class_types_: set[str] | None = None,
+        object_info: dict[str, Any] | None = None,
+        profile=None,
     ) -> dict[str, str]:
         uploaded: dict[str, str] = {}
-        counts: dict[str, int] = {}
-        for item in request.reference_manifest:
-            counts[item.use_as.value] = counts.get(item.use_as.value, 0) + 1
-            logical = f"reference_{item.use_as.value}_{counts[item.use_as.value]}"
-            if logical not in parameter_map:
-                continue
+        graph_types = graph_class_types_ or set()
+        for logical, item in reference_slots(request.reference_manifest):
             asset = assets.get(item.asset_id)
             if asset is None:
-                raise ComfyUIError("A manifest asset is missing from the local asset registry")
-            path = safe_asset_path(self.asset_root, asset.storage_path)
-            if not path.is_file():
-                raise ComfyUIError("A manifest asset file is missing on disk", details={"asset_id": asset.id})
-            response = self.client.upload_image(
-                f"shine_{asset.id}{path.suffix or '.bin'}",
-                path.read_bytes(),
-                subfolder="shine",
+                raise ComfyReferenceError(
+                    "A manifest asset is missing from the local asset registry",
+                    details={"label": item.label, "asset_id": item.asset_id},
+                )
+            content = self._verify_asset_for_upload(item, asset, project_id=project_id)
+            family = family_for_content_type(asset.content_type)
+            transfer = (
+                self._resolve_transfer(
+                    profile,
+                    family=family,
+                    content_type=asset.content_type,
+                    graph_class_types_=graph_types,
+                    object_info=object_info,
+                )
+                if profile is not None
+                else transfer_from_profile({}, family, asset.content_type)
+            )
+            extension = extension_for(asset.content_type, asset.filename)
+            upload_name = f"shine_{asset.id}{extension}"
+            response = self.client.upload_file(
+                upload_name,
+                content,
+                upload_path=transfer.upload_path,
+                field_name=transfer.field_name,
+                subfolder=transfer.subfolder,
                 content_type=asset.content_type,
+                style=transfer.style,
             )
             name = response.get("name")
             if not name:
-                raise ComfyUIError("ComfyUI upload response did not include a filename")
+                raise ComfyUIError(
+                    "ComfyUI upload response did not include a filename",
+                    details={"label": item.label, "asset_id": asset.id},
+                )
+            returned_suffix = Path(str(name)).suffix.lower()
+            if returned_suffix and returned_suffix != extension.lower():
+                raise ComfyUIError(
+                    "ComfyUI stored the reference under an unexpected file name",
+                    details={
+                        "label": item.label,
+                        "asset_id": asset.id,
+                        "expected_extension": extension,
+                        "returned_name": str(name),
+                    },
+                )
             subfolder = response.get("subfolder") or ""
             uploaded[logical] = f"{subfolder}/{name}" if subfolder else str(name)
+        if len(uploaded) != len(request.reference_manifest):
+            raise ComfyReferenceError(
+                "Not every reference in the manifest was transferred to ComfyUI",
+                details={
+                    "manifest_count": len(request.reference_manifest),
+                    "uploaded_count": len(uploaded),
+                },
+            )
         return uploaded
 
-    def submit(
+    def prepare(
         self,
         request: RenderRequest,
         profile,
         assets: dict[str, Asset],
         *,
         seed: int | None = None,
-    ) -> ComfySubmission:
+        project_id: str | None = None,
+        object_info: dict[str, Any] | None = None,
+    ) -> PreparedSubmission:
+        """Upload the references and build the exact prompt graph to submit."""
         graph = self._profile_graph(profile)
-        uploaded = self._upload_references(request, assets, profile.parameter_map)
+        self._check_profile_compatibility(profile)
+        class_types = graph_class_types(graph)
+        validate_required_parameters(profile.parameter_map, needs_seed=seed is not None)
+        validate_reference_slots(profile.parameter_map, request.reference_manifest)
+        uploaded = self._upload_references(
+            request,
+            assets,
+            profile.parameter_map,
+            project_id=project_id,
+            graph_class_types_=class_types,
+            object_info=object_info,
+            profile=profile,
+        )
         values = generic_h3_parameters(
             prompt=request.compiled_prompt or "",
             seed=seed,
@@ -96,13 +341,27 @@ class ComfyUIRenderService:
         if "positive_prompt" in profile.parameter_map and not mapped.get("positive_prompt"):
             raise ComfyUIError("The workflow profile does not accept the compiled H3 prompt")
         prompt = apply_parameters(graph, profile.parameter_map, mapped)
+        return PreparedSubmission(
+            prompt=prompt,
+            prompt_graph_sha256=graph_hash(prompt),
+            workflow_hash=graph_hash(graph),
+            uploaded_references=len(uploaded),
+        )
+
+    def submit_prepared(
+        self,
+        prepared: PreparedSubmission,
+        request: RenderRequest,
+    ) -> ComfySubmission:
+        """Queue a prepared prompt. The caller must persist the intent first."""
         body = self.client.queue_prompt(
-            prompt,
+            prepared.prompt,
             extra_data={
                 "shine": {
                     "job_id": request.shot_id,
                     "idempotency_key": request.idempotency_key,
                     "prompt_sha256": request.prompt_sha256,
+                    "prompt_graph_sha256": prepared.prompt_graph_sha256,
                     "style_version_id": request.style_version_id,
                     "provider": RenderProvider.COMFYUI.value,
                 }
@@ -110,9 +369,31 @@ class ComfyUIRenderService:
         )
         return ComfySubmission(
             prompt_id=str(body["prompt_id"]),
-            workflow_hash=graph_hash(graph),
-            uploaded_references=len(uploaded),
+            workflow_hash=prepared.workflow_hash,
+            uploaded_references=prepared.uploaded_references,
+            prompt_graph_sha256=prepared.prompt_graph_sha256,
+            idempotency_key=request.idempotency_key,
         )
+
+    def submit(
+        self,
+        request: RenderRequest,
+        profile,
+        assets: dict[str, Asset],
+        *,
+        seed: int | None = None,
+        project_id: str | None = None,
+        object_info: dict[str, Any] | None = None,
+    ) -> ComfySubmission:
+        prepared = self.prepare(
+            request,
+            profile,
+            assets,
+            seed=seed,
+            project_id=project_id,
+            object_info=object_info,
+        )
+        return self.submit_prepared(prepared, request)
 
     def _queue_state(self, prompt_id: str) -> str:
         queue = self.client.queue()
@@ -128,7 +409,11 @@ class ComfyUIRenderService:
         if record:
             status = (record.get("status") or {})
             if status.get("status_str") == "error":
-                return ComfyResult(status="failed", error="ComfyUI reported an execution error")
+                return ComfyResult(
+                    status="failed",
+                    error="ComfyUI reported an execution error",
+                    error_code="COMFY_EXECUTION_ERROR",
+                )
             outputs = record.get("outputs") or {}
             for _node_id, node_output in outputs.items():
                 for key in ("gifs", "videos", "images", "audio"):
@@ -148,11 +433,19 @@ class ComfyUIRenderService:
                             content=content,
                             content_type=content_type_for_name(filename),
                         )
-            return ComfyResult(status="completed_without_output")
+            return ComfyResult(
+                status="completed_without_output",
+                error="ComfyUI finished the prompt without producing an output file",
+                error_code="COMFY_OUTPUT_MISSING",
+            )
         queue_state = self._queue_state(prompt_id)
         if queue_state in {"running", "pending"}:
             return ComfyResult(status=queue_state)
-        return ComfyResult(status="not_found")
+        return ComfyResult(
+            status="not_found",
+            error="ComfyUI has no record of this prompt",
+            error_code="COMFY_JOB_NOT_FOUND",
+        )
 
     def wait(self, prompt_id: str, *, timeout_s: float = 120.0, interval_s: float = 0.2) -> ComfyResult:
         deadline = time.monotonic() + timeout_s
@@ -161,7 +454,7 @@ class ComfyUIRenderService:
             if result.status not in {"running", "pending"}:
                 return result
             if time.monotonic() >= deadline:
-                return ComfyResult(status="timeout")
+                return ComfyResult(status="timeout", error_code="COMFY_TIMEOUT")
             time.sleep(interval_s)
 
     def reconcile(self, prompt_id: str) -> str:
@@ -170,6 +463,66 @@ class ComfyUIRenderService:
         except ComfyError as exc:
             return f"unavailable:{exc.code}"
         return result.status
+
+    def find_submission(
+        self,
+        *,
+        prompt_id: str | None,
+        prompt_graph_sha256: str | None,
+    ) -> tuple[str | None, str]:
+        """Look for an existing ComfyUI submission that matches this request.
+
+        Returns ``(prompt_id, status)``. The status is one of ``completed``,
+        ``running``, ``pending``, ``failed``, ``completed_without_output`` or
+        ``not_found``. An empty prompt id means "no matching submission could
+        be identified" and the caller must escalate to a human.
+        """
+        if prompt_id:
+            try:
+                result = self.poll(prompt_id)
+            except ComfyError as exc:
+                return None, f"unavailable:{exc.code}"
+            if result.status.startswith("unavailable:"):
+                # ComfyUI is unreachable, so nothing can be proven either way.
+                return None, result.status
+            if result.status != "not_found":
+                return prompt_id, result.status
+        if not prompt_graph_sha256:
+            return None, "not_found"
+        try:
+            history = self.client.history()
+        except ComfyError as exc:
+            return None, f"unavailable:{exc.code}"
+        if not isinstance(history, dict):
+            return None, "unavailable:COMFY_PROVIDER_ERROR"
+        for candidate_id, record in history.items():
+            if not isinstance(record, dict):
+                continue
+            prompt_graph = record.get("prompt")
+            if not isinstance(prompt_graph, dict):
+                continue
+            if graph_hash(prompt_graph) != prompt_graph_sha256:
+                continue
+            status = (record.get("status") or {}).get("status_str")
+            if status == "error":
+                return str(candidate_id), "failed"
+            outputs = record.get("outputs") or {}
+            has_output = any(
+                node_output.get(key)
+                for node_output in outputs.values()
+                if isinstance(node_output, dict)
+                for key in ("gifs", "videos", "images", "audio")
+            )
+            return str(candidate_id), "completed" if has_output else "completed_without_output"
+        try:
+            queue = self.client.queue()
+        except ComfyError as exc:
+            return None, f"unavailable:{exc.code}"
+        for key, state in (("queue_running", "running"), ("queue_pending", "pending")):
+            for item in queue.get(key) or []:
+                if isinstance(item, list) and len(item) > 1 and str(item[1]) == prompt_id:
+                    return str(item[1]), state
+        return None, "not_found"
 
     def capabilities(self, profile=None) -> dict[str, Any]:
         stats = self.client.system_stats()
@@ -193,4 +546,20 @@ def is_comfy_configured(settings) -> bool:
     return bool(settings.render_provider == "comfyui" and settings.comfyui_base_url)
 
 
-__all__ = ["ComfyResult", "ComfySubmission", "ComfyUIRenderService", "ComfyUnavailable"]
+def request_fingerprint(request: RenderRequest) -> str:
+    return hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest()
+
+
+__all__ = [
+    "ComfyPendingWorkflowMapping",
+    "ComfyPromptRejected",
+    "ComfyReferenceError",
+    "ComfyResult",
+    "ComfySubmission",
+    "ComfyUIRenderService",
+    "ComfyUnavailable",
+    "graph_class_types",
+    "reference_slots",
+    "validate_reference_slots",
+    "validate_required_parameters",
+]

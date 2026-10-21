@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, Sparkles, Wrench } from 'lucide-react';
-import type { Job, QCReport, RepairSuggestion, SystemStatus } from '../api';
+import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
+import type { Job, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
 import { statusLabels } from '../constants';
 
 type Props = {
@@ -11,13 +11,17 @@ type Props = {
   setScenario: (value: string) => void;
   onTogglePause: (job: Job) => void;
   onLoadQC: (jobId: string) => Promise<QCReport[]>;
+  onLoadGates: (jobId: string) => Promise<QualityGate[]>;
   onSuggest: (jobId: string) => Promise<RepairSuggestion>;
   onRepair: (jobId: string, plan: Record<string, unknown>) => void;
 };
 
-export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onSuggest, onRepair }: Props) {
+const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
+
+export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair }: Props) {
   const [selected, setSelected] = useState('');
   const [qc, setQc] = useState<QCReport[]>([]);
+  const [gates, setGates] = useState<QualityGate[]>([]);
   const [suggestion, setSuggestion] = useState<RepairSuggestion | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
 
@@ -25,7 +29,11 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
     setSelected(job.id);
     setSuggestion(null);
     setDetailBusy(true);
-    try { setQc(await onLoadQC(job.id)); } finally { setDetailBusy(false); }
+    try {
+      const [reports, ledger] = await Promise.all([onLoadQC(job.id), onLoadGates(job.id)]);
+      setQc(reports);
+      setGates(ledger);
+    } finally { setDetailBusy(false); }
   }
 
   async function suggest(job: Job) {
@@ -34,6 +42,9 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
   }
 
   const selectedJob = jobs.find((job) => job.id === selected);
+  const latestGates = gateOrder
+    .map((name) => [...gates].reverse().find((gate) => gate.gate_name === name))
+    .filter((gate): gate is QualityGate => Boolean(gate));
   return (
     <div className="card section-card monitor-card">
       <div className="section-heading compact">
@@ -114,6 +125,19 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
             </>}
           </div>
           <div>
+            <span className="detail-label"><ShieldCheck size={11} /> 质量门禁</span>
+            {detailBusy && <div className="empty-inline">读取中…</div>}
+            {!detailBusy && latestGates.length === 0 && <div className="empty-inline">尚无门禁记录。</div>}
+            {latestGates.map((gate) => (
+              <div className="qc-row" key={gate.id}>
+                <div>
+                  <b>{gate.gate_name}</b>
+                  <span>{gate.status}{gate.required ? ' · 必需' : ' · 可选'}{gate.is_mock ? ' · MOCK' : ''}</span>
+                </div>
+                <small>覆盖：{gate.coverage}{gate.error_code ? ` · ${gate.error_code}` : ''}{gate.model ? ` · ${gate.model}` : ''}</small>
+              </div>
+            ))}
+            {selectedJob.quality_verification && <small>验证级别：{selectedJob.quality_verification}</small>}
             <span className="detail-label"><Activity size={11} /> QC 证据</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
             {!detailBusy && qc.length === 0 && <div className="empty-inline">尚无 QC 报告。</div>}

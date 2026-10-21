@@ -9,7 +9,10 @@ from shine.schemas import RepairAction, RepairPlan
 REFERENCE_CODES = {
     "REFERENCE_MISSING",
     "REFERENCE_WRONG",
+    "COMFY_REFERENCE_INVALID",
     "ASSET_NOT_APPROVED",
+    "ASSET_NOT_LOCKED",
+    "ASSET_WRONG",
     "IDENTITY_MISMATCH",
     "COSTUME_DRIFT",
     "SPEAKER_MISMATCH",
@@ -23,8 +26,45 @@ DIALOGUE_CODES = {
     "H3_SPEAKER_REFERENCE_MISSING",
 }
 PROMPT_CODES = {"STYLE_DRIFT", "PROMPT_INVALID", "H3_UNRESOLVED_LABEL", "H3_LABEL_MISMATCH", "H3_SECTION_MISSING"}
-WORKFLOW_CODES = {"COMFY_WORKFLOW_INVALID", "COMFY_PROVIDER_ERROR", "WORKFLOW_PARAMETER_MISMATCH"}
+WORKFLOW_CODES = {
+    "COMFY_WORKFLOW_INVALID",
+    "COMFY_PROVIDER_ERROR",
+    "COMFY_PROMPT_REJECTED",
+    "WORKFLOW_PARAMETER_MISMATCH",
+    "PENDING_WORKFLOW_MAPPING",
+}
 TRANSIENT_CODES = {"COMFY_TIMEOUT", "COMFY_UNAVAILABLE", "TECHNICAL_FILE_EXISTS", "TECHNICAL_FILE_NONEMPTY"}
+EXECUTION_CODES = {"COMFY_EXECUTION_ERROR", "COMFY_OUTPUT_MISSING"}
+REVIEW_CODES = {
+    "SEMANTIC_REVIEW_NOT_CONFIGURED",
+    "SEMANTIC_REVIEW_FAILED",
+    "SEMANTIC_REVIEW_TIMEOUT",
+    "SEMANTIC_REVIEW_INVALID_JSON",
+    "ASR_NOT_CONFIGURED",
+    "ASR_FAILED",
+    "MOCK_REVIEW_NOT_ACCEPTED",
+    "STYLE_REVIEW_NOT_COVERED",
+}
+
+#: Failure codes an automatic repair may address on its own. Identity, costume
+#: and speaker problems are creative decisions and always go to a human.
+AUTO_FIXABLE_CODES = {
+    "REFERENCE_MISSING",
+    "REFERENCE_WRONG",
+    "MISSING_ASSET",
+    "ASSET_NOT_APPROVED",
+    "ASSET_NOT_LOCKED",
+    "STYLE_DRIFT",
+    "PROMPT_INVALID",
+    "H3_UNRESOLVED_LABEL",
+    "H3_LABEL_MISMATCH",
+    "H3_SECTION_MISSING",
+    "COMFY_TIMEOUT",
+    "COMFY_UNAVAILABLE",
+    "COMFY_WORKFLOW_INVALID",
+    "COMFY_PROMPT_REJECTED",
+    "WORKFLOW_PARAMETER_MISMATCH",
+}
 
 
 def categorize(code: str) -> str:
@@ -38,6 +78,10 @@ def categorize(code: str) -> str:
         return "WORKFLOW_WRONG"
     if code in TRANSIENT_CODES:
         return "TRANSIENT"
+    if code in EXECUTION_CODES:
+        return "EXECUTION_ERROR"
+    if code in REVIEW_CODES:
+        return "REVIEW_NOT_COVERED"
     if code.startswith("TECHNICAL_"):
         return "TECHNICAL_FAILURE"
     return "UNKNOWN"
@@ -88,11 +132,20 @@ class RepairEngine:
         *,
         retries_left: int,
         auto_repair_enabled: bool = False,
+        repeated_root_cause: bool = False,
     ) -> RepairDecision:
         codes = [failure.code for failure in report.hard_failures]
         categories = [categorize(code) for code in codes]
         preferred: str | None = None
-        for candidate in ("REFERENCE_WRONG", "DIALOGUE_WRONG", "PROMPT_WRONG", "WORKFLOW_WRONG", "TRANSIENT"):
+        for candidate in (
+            "REFERENCE_WRONG",
+            "DIALOGUE_WRONG",
+            "PROMPT_WRONG",
+            "WORKFLOW_WRONG",
+            "EXECUTION_ERROR",
+            "REVIEW_NOT_COVERED",
+            "TRANSIENT",
+        ):
             if candidate in categories:
                 preferred = candidate
                 break
@@ -107,8 +160,19 @@ class RepairEngine:
         if report.review_confidence < 0.5:
             action = RepairAction.WAIT_FOR_HUMAN
             changes = ["QC confidence is too low for an automatic decision", "Escalate to a human operator"]
-        if preferred == "UNKNOWN" and report.result != "passed":
+        if repeated_root_cause:
             action = RepairAction.WAIT_FOR_HUMAN
+            changes = [
+                "The same root cause was already repaired once for this job",
+                "Repeating the repair would only reroll the same failing condition",
+                "Escalate to a human operator",
+            ]
+        if preferred in {"EXECUTION_ERROR", "REVIEW_NOT_COVERED", "UNKNOWN"}:
+            action = RepairAction.WAIT_FOR_HUMAN
+            changes = [
+                "This failure class cannot be repaired automatically within the authorised fields",
+                "Escalate to a human operator",
+            ]
         plan = RepairPlan(
             action=action,
             root_cause=(
@@ -123,13 +187,19 @@ class RepairEngine:
             auto_repair_enabled
             and not plan.human_review_required
             and plan.max_additional_attempts > 0
+            and bool(codes)
+            and all(code in AUTO_FIXABLE_CODES for code in codes)
             and action
             in {
                 RepairAction.RERENDER_AFTER_TRANSIENT,
                 RepairAction.ADJUST_PROMPT_STRATEGY,
                 RepairAction.ADJUST_WORKFLOW_PARAMETERS,
+                RepairAction.REBUILD_REFERENCE_BINDINGS,
             }
         )
+        if not auto_apply and action != RepairAction.WAIT_FOR_HUMAN and codes:
+            # A failure class outside the automatic set must never be "applied".
+            plan = plan.model_copy(update={"human_review_required": True})
         return RepairDecision(plan=plan, auto_apply=auto_apply, error_category=preferred)
 
     @staticmethod

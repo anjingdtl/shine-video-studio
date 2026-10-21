@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import {
   api, json, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
-  type PromptPreview, type ProviderProfile, type QCReport, type RepairSuggestion, type Shot,
+  type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion, type Shot,
   type Style, type StyleVersion, type SystemHealth, type SystemStatus, type WorkflowProfile,
 } from './api';
 import { emptyStyle } from './constants';
@@ -213,6 +213,10 @@ function App() {
     return api<QCReport[]>(`/jobs/${jobId}/qc`);
   }
 
+  async function loadJobGates(jobId: string): Promise<QualityGate[]> {
+    return api<QualityGate[]>(`/jobs/${jobId}/quality-gates`);
+  }
+
   async function suggestRepair(jobId: string): Promise<RepairSuggestion> {
     return api<RepairSuggestion>(`/jobs/${jobId}/repair/suggest`, { method: 'POST' });
   }
@@ -399,6 +403,7 @@ function App() {
                 setScenario={setMockScenario}
                 onTogglePause={togglePause}
                 onLoadQC={loadJobQC}
+                onLoadGates={loadJobGates}
                 onSuggest={suggestRepair}
                 onRepair={applyRepair}
               />

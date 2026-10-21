@@ -21,6 +21,24 @@ class ProjectSettings(APIModel):
     language: str | None = Field(default=None, min_length=2, max_length=32)
     allow_remote_review: bool | None = None
     auto_repair_enabled: bool | None = None
+    quality_policy: dict[str, Any] | None = None
+
+
+class QualityPolicyUpdate(APIModel):
+    """Per-project quality gate configuration.
+
+    The policy may relax non-critical thresholds per shot priority, but hard
+    rules (identity, master asset, key dialogue) are never relaxed.
+    """
+
+    require_semantic_review: bool = True
+    require_audio_review: bool = True
+    require_style_review: bool = True
+    min_confidence: float = Field(default=0.7, ge=0, le=1)
+    accept_mock_review: bool = False
+    allow_unverified_technical: bool = False
+    priority_thresholds: dict[str, float] = Field(default_factory=dict)
+    hard_rules: list[str] = Field(default_factory=list, max_length=64)
 
 
 class AssetMetadataUpdate(APIModel):
@@ -501,6 +519,7 @@ class WorkflowProfileCreate(APIModel):
     mode: GenerationMode
     graph: dict[str, Any]
     parameter_map: dict[str, str] = Field(default_factory=dict)
+    media_transfers: dict[str, Any] | None = None
     required_nodes: list[str] = Field(default_factory=list, max_length=100)
     checkpoint_id: str = Field(default="MiniMax-H3-Base", max_length=160)
     project_id: str | None = None
@@ -513,6 +532,7 @@ class WorkflowProfilePublic(APIModel):
     mode: GenerationMode
     graph_sha256: str
     parameter_map: dict[str, str]
+    media_transfers: dict[str, Any] | None = None
     required_nodes: list[str]
     checkpoint_id: str
     validated_against: dict[str, Any] | None

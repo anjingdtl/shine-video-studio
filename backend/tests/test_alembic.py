@@ -45,6 +45,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
             "external_job_reconciliations",
             "app_settings",
             "worker_instances",
+            "quality_gates",
         }.issubset(tables)
         job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
         assert {
@@ -54,7 +55,25 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
             "compiled_prompt_sha256",
             "artifact_id",
             "last_qc_result",
+            "request_revision",
+            "pending_repair_context",
+            "quality_verification",
         }.issubset(job_columns)
+        attempt_columns = {row[1] for row in connection.execute("PRAGMA table_info(job_attempts)")}
+        assert {
+            "attempt_kind",
+            "parent_attempt_id",
+            "request_snapshot",
+            "prompt_sha256",
+            "parameter_sha256",
+            "manifest_sha256",
+            "prompt_graph_sha256",
+            "repair_reason",
+        }.issubset(attempt_columns)
+        profile_columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_profiles)")}
+        assert "media_transfers" in profile_columns
+        project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+        assert "quality_policy" in project_columns
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
         assert {
             "role",
@@ -68,7 +87,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
         }.issubset(asset_columns)
         audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_events)")}
         assert "project_id" in audit_columns
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "9f2c4d7a10b3"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "c3d81f6a2b45"
     finally:
         connection.close()
 

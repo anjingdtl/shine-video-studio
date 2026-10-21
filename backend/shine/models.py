@@ -29,6 +29,7 @@ class Project(Base):
     frozen_style_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     allow_remote_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    quality_policy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     assets: Mapped[list[Asset]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -163,6 +164,9 @@ class Job(Base):
     semantic_retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_semantic_retries: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     last_repair_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    request_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    pending_repair_context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    quality_verification: Mapped[str | None] = mapped_column(String(24), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -212,8 +216,43 @@ class JobAttempt(Base):
     reconciliation_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_kind: Mapped[str] = mapped_column(String(16), default="initial", nullable=False)
+    parent_attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    request_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    prompt_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parameter_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_graph_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    repair_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    repair_root_cause: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     job: Mapped[Job] = relationship(back_populates="attempts")
+
+
+class QualityGate(Base):
+    """One named quality gate decision for a single job attempt.
+
+    A gate records what was actually checked, not just an overall verdict, so
+    a shot can never be marked final-passed while a required semantic or audio
+    review was never executed.
+    """
+
+    __tablename__ = "quality_gates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    gate_name: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_mock: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    coverage: Mapped[str] = mapped_column(String(32), default="not_covered", nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class QCReport(Base):
@@ -300,6 +339,7 @@ class WorkflowProfile(Base):
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     graph: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     parameter_map: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    media_transfers: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     required_nodes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     checkpoint_id: Mapped[str] = mapped_column(String(160), default="MiniMax-H3-Base", nullable=False)
     graph_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
