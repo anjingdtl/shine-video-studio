@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -11,12 +12,38 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.models import Asset, AuditEvent, Job, JobDependency, Project, Shot, StyleVersion
-from shine.schemas import CreateJob, ReferenceManifestItem, RenderRequest, ShotSpec, StyleBible
-from shine.security import MAX_REFERENCE_COUNTS, sha256_bytes
+from shine.h3.compiler import CompiledPrompt, H3PromptCompiler, PromptCompilationError
+from shine.models import (
+    Asset,
+    AuditEvent,
+    Job,
+    JobDependency,
+    Project,
+    Shot,
+    ShotAssetBinding,
+    StyleVersion,
+)
+from shine.schemas import (
+    CreateJob,
+    ReferenceManifestItem,
+    ReferenceUse,
+    RenderProvider,
+    RenderRequest,
+    ShotBindingInput,
+    ShotSpec,
+    StyleBible,
+)
+from shine.security import (
+    MAX_REFERENCE_COUNTS,
+    MAX_REFERENCE_DURATION_S,
+    MAX_TOTAL_REFERENCES,
+    sanitize_payload,
+    sha256_bytes,
+    storage_relative_path,
+)
 
 JOB_TRANSITIONS = {
-    "PLANNED": {"QUEUED", "NEEDS_REVIEW"},
+    "PLANNED": {"QUEUED", "NEEDS_REVIEW", "WAITING_ASSET"},
     "WAITING_ASSET": {"PLANNED", "NEEDS_REVIEW"},
     "READY": {"QUEUED", "NEEDS_REVIEW"},
     "QUEUED": {"SUBMITTING", "NEEDS_REVIEW"},
@@ -24,10 +51,12 @@ JOB_TRANSITIONS = {
     "RUNNING": {"QC_PENDING", "FAILED", "NEEDS_REVIEW"},
     "QC_PENDING": {"PASSED", "REPAIR_PENDING", "NEEDS_REVIEW", "FAILED"},
     "PASSED": {"NEEDS_REVIEW"},
-    "REPAIR_PENDING": {"READY", "FAILED", "NEEDS_REVIEW"},
+    "REPAIR_PENDING": {"READY", "FAILED", "NEEDS_REVIEW", "QUEUED"},
     "NEEDS_REVIEW": set(),
     "FAILED": set(),
 }
+
+ACTIVE_JOB_STATUSES = {"QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING"}
 
 
 def canonical_json(value: Any) -> str:
@@ -41,14 +70,18 @@ def add_audit(
     entity_type: str,
     entity_id: str,
     payload: dict[str, Any] | None = None,
+    *,
+    project_id: str | None = None,
 ) -> None:
+    resolved_project = project_id or (entity_id if entity_type == "project" else None)
     db.add(
         AuditEvent(
+            project_id=resolved_project,
             actor=actor,
             event_type=event_type,
             entity_type=entity_type,
             entity_id=entity_id,
-            payload=payload or {},
+            payload=sanitize_payload(payload or {}),
         )
     )
 
@@ -60,6 +93,15 @@ def transition(job: Job, next_status: str) -> None:
             detail=f"Illegal job transition: {job.status} -> {next_status}",
         )
     job.status = next_status
+    job.state_version = (job.state_version or 0) + 1
+
+
+def try_transition(job: Job, next_status: str) -> bool:
+    if next_status not in JOB_TRANSITIONS.get(job.status, set()):
+        return False
+    job.status = next_status
+    job.state_version = (job.state_version or 0) + 1
+    return True
 
 
 def require_project(db: Session, project_id: str) -> Project:
@@ -69,30 +111,50 @@ def require_project(db: Session, project_id: str) -> Project:
     return project
 
 
+def require_shot(db: Session, project_id: str, shot_id: str) -> Shot:
+    shot = db.get(Shot, shot_id)
+    if not shot or shot.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Shot not found in this project")
+    return shot
+
+
 def store_asset_file(root: Path, digest: str, content: bytes) -> str:
-    relative = Path("assets") / digest[:2] / digest
+    relative = storage_relative_path(digest)
     target = root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists():
-        temporary = target.with_name(f"{target.name}.{uuid4().hex}.partial")
-        try:
-            temporary.write_bytes(content)
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-    return relative.as_posix()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            temporary = target.with_name(f"{target.name}.{uuid4().hex}.partial")
+            try:
+                temporary.write_bytes(content)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+    except OSError as exc:
+        if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
+            raise HTTPException(status_code=507, detail="Local storage is full") from exc
+        raise HTTPException(status_code=500, detail="Unable to store the uploaded asset") from exc
+    return relative
 
 
 def update_style_draft(db: Session, project: Project, style: StyleBible) -> None:
     project.style_draft = style.model_dump(mode="json")
-    add_audit(db, "user", "STYLE_DRAFT_UPDATED", "project", project.id)
+    add_audit(db, "user", "STYLE_DRAFT_UPDATED", "project", project.id, project_id=project.id)
 
 
-def freeze_style(db: Session, project: Project) -> StyleVersion:
+def _style_hash(snapshot: dict[str, Any]) -> str:
+    return sha256_bytes(canonical_json(snapshot).encode("utf-8"))
+
+
+def freeze_style(db: Session, project: Project, *, approval_note: str = "") -> tuple[StyleVersion, dict[str, Any]]:
     if not project.style_draft:
         raise HTTPException(status_code=409, detail="Save all seven style dimensions before freezing")
     snapshot = StyleBible.model_validate(project.style_draft).model_dump(mode="json")
-    digest = sha256_bytes(canonical_json(snapshot).encode("utf-8"))
+    digest = _style_hash(snapshot)
+    previous_id = project.frozen_style_version_id
+    previous = db.get(StyleVersion, previous_id) if previous_id else None
+    if previous and previous.sha256 == digest:
+        raise HTTPException(status_code=409, detail="The style draft is identical to the current frozen version")
     version_number = max((row.version for row in project.style_versions), default=0) + 1
     frozen = StyleVersion(
         project_id=project.id,
@@ -100,19 +162,196 @@ def freeze_style(db: Session, project: Project) -> StyleVersion:
         snapshot=snapshot,
         sha256=digest,
         approved_by="user",
+        approval_note=approval_note,
     )
     db.add(frozen)
     db.flush()
     project.frozen_style_version_id = frozen.id
-    add_audit(db, "user", "STYLE_FROZEN", "style_version", frozen.id, {"sha256": digest})
-    return frozen
+    add_audit(
+        db,
+        "user",
+        "STYLE_FROZEN",
+        "style_version",
+        frozen.id,
+        {"sha256": digest, "version": version_number, "previous_version_id": previous_id},
+        project_id=project.id,
+    )
+    impact = analyze_style_impact(db, project, previous_id=previous_id, new_version_id=frozen.id)
+    return frozen, impact
 
 
-def validate_shot_style(db: Session, project_id: str, spec: ShotSpec) -> StyleVersion:
+def analyze_style_impact(
+    db: Session, project: Project, *, previous_id: str | None, new_version_id: str
+) -> dict[str, Any]:
+    affected_shots = [
+        shot
+        for shot in db.scalars(select(Shot).where(Shot.project_id == project.id)).all()
+        if (shot.spec.get("style_version_id") or "") != new_version_id
+    ]
+    if previous_id is None:
+        return {"previous_style_version_id": None, "affected_shot_ids": [], "invalidated_job_ids": []}
+    invalidated: list[str] = []
+    for job in db.scalars(select(Job).where(Job.project_id == project.id)).all():
+        if job.style_version_id != previous_id:
+            continue
+        if job.status in {"PASSED", "FAILED", "NEEDS_REVIEW"}:
+            continue
+        job.stale = True
+        job.failure_code = "STYLE_VERSION_SUPERSEDED"
+        if try_transition(job, "NEEDS_REVIEW"):
+            invalidated.append(job.id)
+            add_audit(
+                db,
+                "orchestrator",
+                "JOB_STYLE_SUPERSEDED",
+                "job",
+                job.id,
+                {"previous_version_id": previous_id, "new_version_id": new_version_id},
+                project_id=project.id,
+            )
+    if affected_shots:
+        add_audit(
+            db,
+            "orchestrator",
+            "STYLE_IMPACT_ANALYZED",
+            "project",
+            project.id,
+            {
+                "affected_shot_count": len(affected_shots),
+                "invalidated_job_count": len(invalidated),
+            },
+            project_id=project.id,
+        )
+    return {
+        "previous_style_version_id": previous_id,
+        "affected_shot_ids": sorted(shot.id for shot in affected_shots),
+        "invalidated_job_ids": sorted(invalidated),
+    }
+
+
+def validate_shot_style(
+    db: Session,
+    project_id: str,
+    spec: ShotSpec,
+    *,
+    existing_style_version_id: str | None = None,
+    require_current: bool = False,
+) -> StyleVersion:
+    if not spec.style_version_id:
+        raise HTTPException(status_code=422, detail="A shot must reference a frozen style version")
     style = db.get(StyleVersion, spec.style_version_id)
     if not style or style.project_id != project_id:
         raise HTTPException(status_code=422, detail="Shot must reference a frozen style version in this project")
+    project = require_project(db, project_id)
+    if require_current and style.id != project.frozen_style_version_id and style.id != existing_style_version_id:
+        raise HTTPException(
+            status_code=422,
+            detail="New shots must use the project's current frozen Style Bible; revise the shot to adopt it",
+        )
     return style
+
+
+def _use_as_for_kind(kind: str) -> str:
+    return {"image": "picture", "video": "video", "audio": "audio"}[kind]
+
+
+def _expected_kind(use_as: str) -> str:
+    return "image" if use_as in {"subject", "picture"} else use_as
+
+
+def _validate_binding_inputs(
+    db: Session, project: Project, bindings: list[ShotBindingInput]
+) -> dict[str, Asset]:
+    if len(bindings) > MAX_TOTAL_REFERENCES:
+        raise HTTPException(status_code=422, detail="A shot may bind at most 12 reference files")
+    asset_ids = [binding.asset_id for binding in bindings]
+    if len(set(asset_ids)) != len(asset_ids):
+        raise HTTPException(status_code=422, detail="Each asset may appear only once in a shot's bindings")
+    assets = (
+        {
+            asset.id: asset
+            for asset in db.scalars(
+                select(Asset).where(Asset.project_id == project.id, Asset.id.in_(asset_ids))
+            ).all()
+        }
+        if asset_ids
+        else {}
+    )
+    if len(assets) != len(asset_ids):
+        raise HTTPException(status_code=422, detail="Every bound asset must belong to this project")
+    counts = {kind: 0 for kind in MAX_REFERENCE_COUNTS}
+    for binding in bindings:
+        asset = assets[binding.asset_id]
+        if not asset.approved or not asset.locked:
+            raise HTTPException(status_code=409, detail="Shot bindings must use user-approved and locked assets")
+        if asset.kind != _expected_kind(binding.use_as.value):
+            raise HTTPException(status_code=422, detail=f"Binding {binding.asset_id} has an incompatible media type")
+        if binding.frame_role and binding.use_as.value != "picture":
+            raise HTTPException(status_code=422, detail="Only picture references can carry a frame role")
+        counts[asset.kind] += 1
+        if counts[asset.kind] > MAX_REFERENCE_COUNTS[asset.kind]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"H3 input limit exceeded for {asset.kind} references (max {MAX_REFERENCE_COUNTS[asset.kind]})",
+            )
+    return assets
+
+
+def set_shot_bindings(
+    db: Session, project: Project, shot: Shot, bindings: list[ShotBindingInput], *, actor: str = "user"
+) -> list[ShotAssetBinding]:
+    assets = _validate_binding_inputs(db, project, bindings)
+    required = set(ShotSpec.model_validate(shot.spec).required_asset_ids)
+    if not required.issubset(set(assets)):
+        raise HTTPException(status_code=422, detail="Bindings are missing assets required by the shot")
+    for existing in list(shot.bindings):
+        db.delete(existing)
+    db.flush()
+    rows: list[ShotAssetBinding] = []
+    for index, binding in enumerate(sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))):
+        row = ShotAssetBinding(
+            shot_id=shot.id,
+            asset_id=binding.asset_id,
+            use_as=binding.use_as.value,
+            role=binding.role,
+            frame_role=binding.frame_role.value if binding.frame_role else None,
+            ordinal=index,
+        )
+        db.add(row)
+        rows.append(row)
+    add_audit(
+        db,
+        actor,
+        "SHOT_BINDINGS_UPDATED",
+        "shot",
+        shot.id,
+        {"binding_count": len(rows), "asset_ids": sorted(assets)},
+        project_id=project.id,
+    )
+    return rows
+
+
+def binding_inputs_for_asset_ids(db: Session, project: Project, asset_ids: list[str]) -> list[ShotBindingInput]:
+    if not asset_ids:
+        return []
+    assets = {
+        asset.id: asset
+        for asset in db.scalars(select(Asset).where(Asset.project_id == project.id, Asset.id.in_(asset_ids))).all()
+    }
+    if len(assets) != len(set(asset_ids)):
+        raise HTTPException(status_code=422, detail="Every required asset must belong to this project")
+    return [
+        ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse(_use_as_for_kind(assets[asset_id].kind)))
+        for asset_id in asset_ids
+    ]
+
+
+def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
+    return list(
+        db.scalars(
+            select(ShotAssetBinding).where(ShotAssetBinding.shot_id == shot.id).order_by(ShotAssetBinding.ordinal)
+        ).all()
+    )
 
 
 def make_render_request(
@@ -120,80 +359,139 @@ def make_render_request(
     project: Project,
     shot: Shot,
     body: CreateJob,
-) -> tuple[RenderRequest, list[Asset]]:
+) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
     spec = ShotSpec.model_validate(shot.spec)
-    style = validate_shot_style(db, project.id, spec)
-    if len({ref.asset_id for ref in body.references}) != len(body.references):
-        raise HTTPException(status_code=422, detail="Each asset may appear only once in a reference manifest")
+    style = validate_shot_style(db, project.id, spec, require_current=True)
+    if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id:
+        raise HTTPException(status_code=409, detail="ComfyUI renders require a registered workflow profile")
 
-    assets = (
-        {
-            asset.id: asset
-            for asset in db.scalars(
-                select(Asset).where(
-                    Asset.project_id == project.id,
-                    Asset.id.in_([r.asset_id for r in body.references]),
+    stored = _binding_rows(db, shot)
+    requested = body.references
+    if requested is not None:
+        requested_inputs = [
+            ShotBindingInput(
+                asset_id=ref.asset_id,
+                use_as=ref.use_as,
+                role=ref.role,
+                frame_role=ref.frame_role,
+                ordinal=index,
+            )
+            for index, ref in enumerate(requested)
+        ]
+        if stored:
+            stored_set = {(row.asset_id, row.use_as) for row in stored}
+            requested_set = {(row.asset_id, row.use_as.value) for row in requested_inputs}
+            if stored_set != requested_set:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Job references must match this shot's saved bindings to prevent cross-shot asset drift",
                 )
-            ).all()
-        }
-        if body.references
-        else {}
-    )
-    if len(assets) != len(body.references):
-        raise HTTPException(status_code=422, detail="Every render reference must belong to this project")
+        bindings = requested_inputs
+    else:
+        bindings = [
+            ShotBindingInput(
+                asset_id=row.asset_id,
+                use_as=row.use_as,
+                role=row.role,
+                frame_role=row.frame_role,
+                ordinal=row.ordinal,
+            )
+            for row in stored
+        ]
+    assets = _validate_binding_inputs(db, project, bindings)
     if not set(spec.required_asset_ids).issubset(assets):
         raise HTTPException(status_code=422, detail="Render references are missing assets required by the shot")
 
-    counts = {kind: 0 for kind in MAX_REFERENCE_COUNTS}
+    ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     label_counts = {"subject": 0, "picture": 0, "video": 0, "audio": 0}
     manifest: list[ReferenceManifestItem] = []
-    for ref in body.references:
-        asset = assets[ref.asset_id]
-        if not asset.approved or not asset.locked:
-            raise HTTPException(status_code=409, detail="Render references must be user-approved and locked")
-        expected_kind = "image" if ref.use_as.value in {"subject", "picture"} else ref.use_as.value
-        if asset.kind != expected_kind:
-            raise HTTPException(status_code=422, detail=f"Reference {ref.asset_id} has an incompatible media type")
-        counts[asset.kind] += 1
-        label_counts[ref.use_as.value] += 1
-        limit = MAX_REFERENCE_COUNTS[asset.kind]
-        if counts[asset.kind] > limit:
-            raise HTTPException(status_code=422, detail=f"H3 input limit exceeded for {asset.kind} references")
+    for binding in ordered:
+        asset = assets[binding.asset_id]
         label_name = {
             "subject": "Subject",
             "picture": "Picture",
             "video": "Video",
             "audio": "Audio",
-        }[ref.use_as.value]
+        }[binding.use_as.value]
+        label_counts[binding.use_as.value] += 1
         manifest.append(
             ReferenceManifestItem(
-                label=f"<{label_name} {label_counts[ref.use_as.value]}>",
+                label=f"<{label_name} {label_counts[binding.use_as.value]}>",
                 asset_id=asset.id,
                 sha256=asset.sha256,
                 storage_key=asset.storage_path,
                 content_type=asset.content_type,
-                use_as=ref.use_as,
+                use_as=binding.use_as,
+                role=binding.role,
+                frame_role=binding.frame_role,
+                ordinal=binding.ordinal,
+                duration_s=asset.duration_s,
+                entity_id=asset.entity_id,
             )
         )
 
-    idempotency_key = uuid4().hex
+    compiler = H3PromptCompiler()
+    try:
+        compiled: CompiledPrompt = compiler.compile(
+            spec=spec,
+            style=StyleBible.model_validate(style.snapshot),
+            manifest=manifest,
+            project_language=project.language,
+            mode_hint=body.generation_mode,
+        )
+    except PromptCompilationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc), "details": exc.details},
+        ) from exc
+
+    workflow_hash = None
+    if body.workflow_profile_id:
+        from shine.models import WorkflowProfile
+
+        profile = db.get(WorkflowProfile, body.workflow_profile_id)
+        if not profile or (profile.project_id and profile.project_id != project.id):
+            raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
+        if profile.mode.lower() != compiled.mode.value.lower():
+            raise HTTPException(status_code=422, detail="Workflow profile does not support the compiled H3 mode")
+        workflow_hash = profile.graph_sha256
+
     render_request = RenderRequest(
-        idempotency_key=idempotency_key,
+        idempotency_key=uuid4().hex,
         shot_id=shot.id,
         shot_revision=shot.revision,
         style_version_id=style.id,
         style_hash=style.sha256,
+        provider=body.provider.value,
+        generation_mode=compiled.mode,
         reference_manifest=manifest,
         shot_spec=spec,
         style_snapshot=StyleBible.model_validate(style.snapshot),
+        compiled_prompt=compiled.prompt,
+        compiled_prompt_sections=compiled.sections,
+        prompt_sha256=compiled.prompt_sha256,
+        prompt_skill_hash=compiled.skill_sha256,
+        compiler_version=compiled.compiler_version,
+        rule_version=compiled.rule_version,
+        workflow_profile_hash=workflow_hash,
         expected_duration_s=spec.duration_target_s,
     )
-    return render_request, list(assets.values())
+    if not stored and bindings:
+        set_shot_bindings(db, project, shot, bindings)
+    compiler_meta = {
+        "mode": compiled.mode.value,
+        "warnings": compiled.warnings,
+        "labels": compiled.labels,
+        "rule_version": compiled.rule_version,
+    }
+    return render_request, list(assets.values()), compiler_meta
 
 
-def dependencies_for_new_job(db: Session, project_id: str, dependency_ids: list[str]) -> tuple[list[Job], str]:
+def dependencies_for_new_job(
+    db: Session, project_id: str, dependency_ids: list[str], *, kinds: dict[str, str] | None = None
+) -> tuple[list[Job], str]:
     if len(set(dependency_ids)) != len(dependency_ids):
         raise HTTPException(status_code=422, detail="Job dependencies must be unique")
     parents = list(db.scalars(select(Job).where(Job.id.in_(dependency_ids))).all()) if dependency_ids else []
@@ -205,13 +503,15 @@ def dependencies_for_new_job(db: Session, project_id: str, dependency_ids: list[
     return parents, status
 
 
-def mark_stale_descendants(db: Session, starting_job_ids: list[str]) -> set[str]:
+def mark_stale_descendants(db: Session, starting_job_ids: list[str], *, project_id: str | None = None) -> set[str]:
     """Mark only jobs that consume revised upstream work; independent shots remain untouched."""
     affected: set[str] = set()
     frontier = list(starting_job_ids)
     while frontier:
         parent_id = frontier.pop()
-        child_ids = db.scalars(select(JobDependency.child_job_id).where(JobDependency.parent_job_id == parent_id)).all()
+        child_ids = db.scalars(
+            select(JobDependency.child_job_id).where(JobDependency.parent_job_id == parent_id)
+        ).all()
         for child_id in child_ids:
             if child_id in affected:
                 continue
@@ -223,10 +523,143 @@ def mark_stale_descendants(db: Session, starting_job_ids: list[str]) -> set[str]
             continue
         job.stale = True
         job.failure_code = "DEPENDENCY_INVALIDATED"
-        if job.status in {"PLANNED", "READY", "QUEUED", "PASSED", "REPAIR_PENDING"}:
-            job.status = "NEEDS_REVIEW"
-        add_audit(db, "orchestrator", "JOB_DEPENDENCY_INVALIDATED", "job", job.id)
+        if job.status in {"PLANNED", "READY", "QUEUED", "PASSED", "REPAIR_PENDING", "WAITING_ASSET"}:
+            try_transition(job, "NEEDS_REVIEW")
+        add_audit(
+            db,
+            "orchestrator",
+            "JOB_DEPENDENCY_INVALIDATED",
+            "job",
+            job.id,
+            project_id=project_id or job.project_id,
+        )
     return affected
+
+
+def validate_reference_durations(manifest: list[ReferenceManifestItem]) -> None:
+    totals = {"video": 0.0, "audio": 0.0}
+    for item in manifest:
+        if item.use_as.value not in totals:
+            continue
+        duration = item.duration_s
+        if duration is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Reference {item.label} has unknown duration; probe the media before production",
+            )
+        if duration < 2 or duration > MAX_REFERENCE_DURATION_S:
+            raise HTTPException(status_code=422, detail=f"Reference {item.label} must be between 2 and 15 seconds")
+        totals[item.use_as.value] += duration
+    for kind, total in totals.items():
+        if total > MAX_REFERENCE_DURATION_S:
+            raise HTTPException(status_code=422, detail=f"Total {kind} reference duration exceeds 15 seconds")
+
+
+def create_shot_record(
+    db: Session,
+    project: Project,
+    *,
+    name: str,
+    spec: ShotSpec,
+    bindings: list[ShotBindingInput] | None = None,
+    actor: str = "user",
+) -> Shot:
+    if not project.frozen_style_version_id:
+        raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating production shots")
+    if not spec.style_version_id:
+        spec = spec.model_copy(update={"style_version_id": project.frozen_style_version_id})
+    validate_shot_style(db, project.id, spec, require_current=True)
+    binding_inputs = list(bindings or [])
+    if not binding_inputs and spec.required_asset_ids:
+        binding_inputs = binding_inputs_for_asset_ids(db, project, spec.required_asset_ids)
+    if spec.required_asset_ids:
+        required = list(
+            db.scalars(
+                select(Asset).where(
+                    Asset.project_id == project.id,
+                    Asset.id.in_(spec.required_asset_ids),
+                    Asset.approved.is_(True),
+                    Asset.locked.is_(True),
+                )
+            ).all()
+        )
+        if len(required) != len(set(spec.required_asset_ids)):
+            raise HTTPException(status_code=409, detail="Shot requires user-approved, locked assets")
+    if binding_inputs:
+        bound = _validate_binding_inputs(db, project, binding_inputs)
+        if not set(spec.required_asset_ids).issubset(bound):
+            raise HTTPException(status_code=422, detail="Shot bindings are missing assets required by the shot")
+    shot = Shot(project_id=project.id, name=name, spec=spec.model_dump(mode="json"))
+    db.add(shot)
+    db.flush()
+    if binding_inputs:
+        set_shot_bindings(db, project, shot, binding_inputs, actor=actor)
+    add_audit(
+        db,
+        actor,
+        "SHOT_CREATED",
+        "shot",
+        shot.id,
+        {"revision": shot.revision, "binding_count": len(binding_inputs)},
+        project_id=project.id,
+    )
+    return shot
+
+
+def revise_shot_record(
+    db: Session,
+    project: Project,
+    shot: Shot,
+    *,
+    spec: ShotSpec,
+    bindings: list[ShotBindingInput] | None = None,
+    actor: str = "user",
+) -> dict[str, Any]:
+    previous_style_id = ShotSpec.model_validate(shot.spec).style_version_id
+    if not spec.style_version_id:
+        spec = spec.model_copy(update={"style_version_id": previous_style_id or project.frozen_style_version_id})
+    validate_shot_style(db, project.id, spec, existing_style_version_id=previous_style_id)
+    if spec.required_asset_ids:
+        approved_count = len(
+            db.scalars(
+                select(Asset.id).where(
+                    Asset.project_id == project.id,
+                    Asset.id.in_(spec.required_asset_ids),
+                    Asset.approved.is_(True),
+                    Asset.locked.is_(True),
+                )
+            ).all()
+        )
+        if approved_count != len(set(spec.required_asset_ids)):
+            raise HTTPException(status_code=409, detail="Shot requires user-approved, locked assets")
+    old_jobs = list(db.scalars(select(Job).where(Job.shot_id == shot.id)).all())
+    old_ids = [job.id for job in old_jobs]
+    shot.revision += 1
+    shot.spec = spec.model_dump(mode="json")
+    for job in old_jobs:
+        job.stale = True
+        job.failure_code = "SHOT_REVISION_REPLACED"
+        if job.status not in {"FAILED", "NEEDS_REVIEW"}:
+            try_transition(job, "NEEDS_REVIEW")
+    affected = mark_stale_descendants(db, old_ids, project_id=project.id)
+    if bindings is not None:
+        set_shot_bindings(db, project, shot, bindings, actor=actor)
+    add_audit(
+        db,
+        actor,
+        "SHOT_REVISED",
+        "shot",
+        shot.id,
+        {"revision": shot.revision, "invalidated_job_ids": sorted(affected)},
+        project_id=project.id,
+    )
+    return {
+        "id": shot.id,
+        "revision": shot.revision,
+        "invalidated_job_ids": sorted(affected),
+        "stale_source_job_ids": old_ids,
+        "spec": shot.spec,
+    }
 
 
 def job_fingerprint(request: dict[str, Any]) -> str:

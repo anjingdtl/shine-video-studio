@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import PurePosixPath
+from typing import Any
 
 from fastapi import HTTPException, UploadFile
+
+from shine.media.probe import MediaInfo, parse_bytes
 
 ALLOWED_EXTENSIONS = {
     "image": {".png", ".jpg", ".jpeg", ".webp"},
@@ -12,6 +15,13 @@ ALLOWED_EXTENSIONS = {
     "audio": {".wav", ".mp3", ".flac"},
 }
 MAX_REFERENCE_COUNTS = {"image": 9, "video": 3, "audio": 3}
+MAX_TOTAL_REFERENCES = 12
+MAX_REFERENCE_DURATION_S = 15.0
+ALLOWED_ASSET_ROLES = {"character", "costume", "scene", "prop", "voice", "style_reference", "generic"}
+
+_SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|secret|password|credential|authorization)", re.IGNORECASE)
+_SENSITIVE_VALUE = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,})")
+_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:\\[^\s\"']+|/(?:home|Users|mnt|private)/[^\s\"']+")
 
 
 def safe_filename(filename: str | None) -> str:
@@ -19,8 +29,10 @@ def safe_filename(filename: str | None) -> str:
     leaf = re.split(r"[\\/]", filename or "")[-1].strip().replace("\x00", "")
     if not leaf or leaf in {".", ".."}:
         raise HTTPException(status_code=400, detail="A valid filename is required")
-    if len(leaf) > 255:
+    if len(leaf) > 200:
         raise HTTPException(status_code=400, detail="Filename is too long")
+    if any(char in leaf for char in '<>:"|?*'):
+        raise HTTPException(status_code=400, detail="Filename contains characters that are invalid on Windows")
     return leaf
 
 
@@ -28,7 +40,12 @@ def verify_upload(kind: str, filename: str, content: bytes, max_bytes: int) -> s
     if kind not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=422, detail="Asset kind must be image, video, or audio")
     if len(content) > max_bytes:
-        raise HTTPException(status_code=413, detail="Asset exceeds the 25 MiB upload limit")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Asset exceeds the configured upload limit of {max_bytes // (1024 * 1024)} MiB",
+        )
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
     suffix = PurePosixPath(filename.replace("\\", "/")).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS[kind]:
         raise HTTPException(status_code=415, detail="File extension does not match asset kind")
@@ -62,5 +79,64 @@ async def read_verified_upload(upload: UploadFile, kind: str, max_bytes: int) ->
     return filename, content, content_type
 
 
+def probe_upload(kind: str, content: bytes, content_type: str) -> MediaInfo:
+    info = parse_bytes(content, content_type)
+    if kind == "video" and info.container == "unknown":
+        raise HTTPException(status_code=415, detail="Unsupported video container")
+    return info
+
+
+def validate_asset_role(role: str | None) -> str | None:
+    if role is None or role == "":
+        return None
+    if role not in ALLOWED_ASSET_ROLES:
+        raise HTTPException(status_code=422, detail="Unknown asset role")
+    return role
+
+
+def validate_tags(tags: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for tag in tags[:40]:
+        value = tag.strip()
+        if not value:
+            continue
+        if len(value) > 40:
+            raise HTTPException(status_code=422, detail="Asset tag is too long")
+        cleaned.append(value)
+    return cleaned
+
+
+def sanitize_payload(value: Any, *, depth: int = 0) -> Any:
+    """Remove credentials and absolute local paths before persistence or logging."""
+    if depth > 6:
+        return "[truncated]"
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if _SENSITIVE_KEY.search(text_key):
+                cleaned[text_key] = "[redacted]"
+            else:
+                cleaned[text_key] = sanitize_payload(item, depth=depth + 1)
+        return cleaned
+    if isinstance(value, list | tuple):
+        return [sanitize_payload(item, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        redacted = _SENSITIVE_VALUE.sub("[redacted]", value)
+        redacted = _ABSOLUTE_PATH.sub("[local-path]", redacted)
+        if len(redacted) > 4000:
+            return redacted[:4000] + "…"
+        return redacted
+    if isinstance(value, int | float | bool) or value is None:
+        return value
+    return str(value)[:500]
+
+
 def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def storage_relative_path(digest: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise HTTPException(status_code=500, detail="Invalid content digest")
+    return (PurePosixPath("assets") / digest[:2] / digest).as_posix()

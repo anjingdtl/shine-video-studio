@@ -1,49 +1,45 @@
 # Shine视频工作台 · Shine Video Studio
 
-> Local-first autonomous short-drama production workbench built around **MiniMax-H3**, with a configurable independent LLM Agent runtime.
+> Local-first short-drama production workbench built around **MiniMax-H3 via local ComfyUI**, with an independent, provider-configurable LLM Agent runtime.
 
-**Current status: M0/M1 local development foundation implemented.** The backend, SQLite migration, React workbench, asset/style gates, persistent mock scheduler, and independent mock worker run without a GPU. The mock path never creates or presents a video. Real ComfyUI/MiniMax-H3 rendering, an LLM gateway, semantic QC, and Windows GPU acceptance remain unimplemented or pending local validation.
+**Current status: M1 hardened; M2 and M3 offline foundations implemented and tested.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter, Fake ComfyUI server, technical QC, semantic QC protocol, and bounded repair engine run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation.
 
 ## Product boundaries
-- **Video model:** locally deployed MiniMax-H3 via ComfyUI; no silent substitution with online video services or other models.
-- **Deployment:** Windows local Web application; backend FastAPI, frontend React/TypeScript, persistent SQLite jobs and independent worker.
-- **LLM/VLM:** provider-configurable API routes; Codex is a development assistant only, not a required runtime.
-- **Assets:** user-supplied, user-approved master character/scene/prop/voice assets only.
-- **Style:** film-wide camera language, lighting/color, editing rhythm and sound rules are reviewed and frozen by the user **before** unattended production.
-- **Production:** shot planning, reference mapping, H3 prompt compilation, execution, technical/semantic QC, bounded per-shot repair and edit/delivery. All work auditable and recoverable.
+- **Video model:** only locally deployed MiniMax-H3 through ComfyUI. No silent substitution with another video model, online service, or H3 generation mode.
+- **Deployment:** Windows local Web application; FastAPI, React/TypeScript, SQLite WAL, and a separately restartable worker. API/Vite bind to `127.0.0.1`.
+- **LLM/VLM:** independent runtime with configurable provider profiles and role routes. Codex is a development tool, never a runtime dependency.
+- **Assets:** only user-supplied, user-approved master character/scene/prop/voice assets. The Agent cannot create, replace, approve, or mutate them.
+- **Style:** the user freezes a seven-dimension Style Bible before production. New shots bind to the current frozen version; historical shots keep their original version. A new version invalidates unstarted work that used the old style.
+- **Production:** structured ShotSpec → deterministic H3 prompt compilation → durable job/attempt state → ComfyUI or explicitly labelled Mock → technical/semantic QC → bounded repair or human review.
 
-## Authoritative project documents
-- [V1.0 项目建设方案](docs/Shine视频工作台_V1.0_项目建设方案.md)
-- [Codex 云端 Agent 首轮开发总提示词](docs/Codex云端Agent_建仓及首轮开发总提示词.md)
-- [AGENTS.md — 开发规范](AGENTS.md)
+## What is implemented
+- **M1 hardening:** strict style-version gates, frozen-style impact analysis, per-shot binding table and API, project-scoped audit pagination/filters, worker heartbeat table and `/system/status`, worker result-version guards, conditional leases, and crash reconciliation.
+- **M2 offline:** OpenAI-compatible/Anthropic/Ollama/Mock LLM adapters, DPAPI (or `0600` file) key storage, role routing, capability probes, script parsing (TXT/Markdown/JSON/DOCX/PDF), deterministic and LLM planners, official `h3-prompt-writing` compiler with pinned rule hashes, ComfyUI HTTP client/adapter, strict workflow profiles, Fake ComfyUI server, and continuity dependency contracts.
+- **M3 offline:** structural media probing, optional FFprobe/FFmpeg technical QC, pluggable VLM/ASR reviewer protocol with evidence, confidence-aware fusion, root-cause classification, bounded RepairPlan engine, and passed-job protection.
+- **Web workbench:** project status, asset approval/lock/metadata, independent shot bindings, Style Bible freeze/version history, Prompt preview, provider/role settings, ComfyUI test and workflow registration, worker/queue status, QC evidence, repair suggestions, and audit history.
 
-## How to start Codex Cloud development
-1. In Codex, select the existing GitHub repository `anjingdtl/shine-video-studio` and its `main` branch, or open an authorized feature branch.
-2. Ask Codex to read `AGENTS.md` and both documents in `docs/`.
-3. **Skip repository creation:** this private repo already exists. Start with upstream source/license audit and M0/M1 implementation.
-4. Commit tested code and report actual commit/PR URL, test results, and tasks awaiting real Windows + GPU + H3 acceptance.
-
-Suggested opening instruction:
-
-```text
-请在当前已连接的 anjingdtl/shine-video-studio 私有仓库中，先完整阅读 AGENTS.md 和 docs/ 下的两份 V1.0 建设文件。跳过建仓步骤；从上游源码与许可证审计开始，按方案实际开发并测试 M0 + M1。保持唯一状态库/任务调度器、人工资产锁定、Style Bible 冻结和本地 H3 唯一视频引擎等强约束；云端无 GPU 的环节只使用 Mock 测试并标注待本机验收。完成后提交代码，提供真实测试结果及下一阶段清单。
-```
+## Explicitly not claimed
+- Real MiniMax-H3 rendering, GPU performance, T2VA/Ref2VA visual acceptance, lip-sync, identity consistency, and full long-shot continuation are **PENDING_LOCAL_H3**.
+- No real H3 workflow JSON was available. The ComfyUI adapter validates a generic API workflow and requires a project-specific parameter mapping. Do not treat a mock/fake-server result as a real workflow mapping.
+- FFprobe/FFmpeg may be absent on the current machine. Technical QC then reports `unavailable`, never `pass`, for decode and silence checks.
+- No user authentication. Keep the API on loopback.
 
 ## Run locally
 
-Requirements: Python 3.12, Astral `uv`, Node.js 20 or newer, and npm. FFmpeg is optional for the current M0/M1 workflow and required by later media validation and delivery work. No API key, GPU, ComfyUI, or Codex runtime dependency is needed for the mock workflow.
+Requirements: Python 3.12, Astral `uv`, Node.js 20+ and npm. FFmpeg/FFprobe are optional but required for decode and silence QC. No API key, GPU, ComfyUI, or Codex runtime is needed for the Mock workflow.
 
-On Windows, open PowerShell in the repository and run:
+On Windows, open PowerShell in the repository:
 
 ```powershell
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ./scripts/check_environment.ps1
 ./scripts/start_shine.ps1 -Install
+./scripts/check_health.ps1
 ```
 
-The script installs frozen Python/npm dependencies, applies the Alembic migration, and opens separate backend, worker, and frontend windows. Open `http://127.0.0.1:5173`; the backend health endpoint is `http://127.0.0.1:8000/health`.
+`start_shine.ps1` performs the Alembic migration and opens separate API, worker, and Web windows. Use `-Provider comfyui` only after local H3 acceptance. Open `http://127.0.0.1:5173`; API health is `http://127.0.0.1:8000/health`, and system/worker status is `http://127.0.0.1:8000/api/v1/system/status`.
 
-For Linux/macOS development, run each command in its own terminal:
+Manual commands (Linux/macOS or separate terminals):
 
 ```bash
 uv sync --project backend --locked
@@ -54,20 +50,28 @@ uv run --project backend python -m shine.worker
 npm --prefix frontend run dev -- --host 127.0.0.1
 ```
 
-Create a project, upload your own authorized image/audio/video files, approve and lock each asset, fill all seven style fields, then approve and freeze a Style Bible. Create a shot and add a mock job. The worker updates its durable state and records mock QC; the UI labels this as simulated and reports that no video was created. A `fail` scenario can be retried at most twice; an `uncertain` submission moves to manual review.
+First workflow: create a project → upload your authorized assets with role/entity metadata → approve and lock each asset → fill and freeze all seven Style Bible dimensions → create a shot with independent bindings → preview the compiled H3 prompt → add a Mock job. The worker records durable attempts and mock QC. `PASSED` for a Mock job means only that scheduling and mock QC passed; `video_created=false` and `artifact_kind="none"` remain visible.
 
-`SHINE_DATA_DIR` controls the local database and asset directory; `SHINE_DATABASE_URL` optionally overrides the database URL. See [`config/environment.md`](config/environment.md).
+`SHINE_DATA_DIR` controls the database, assets, artifacts, and secret files. See [`config/environment.md`](config/environment.md).
 
-## Implemented and pending
+## Tests and checks
 
-- **Implemented:** FastAPI project/asset/style/shot/job APIs, SQLite WAL and Alembic migration, content-addressed media uploads, explicit human approval/lock, immutable style snapshots, typed ShotSpec/RenderRequest/QC/RepairPlan schemas, persistent dependencies/attempts/leases/audit events, a schema-bounded independent Agent boundary, mock worker recovery and bounded repair, React controls wired to the API, and CI checks.
-- **Mock verified:** style and asset gates, request-local reference numbering, ten independent jobs, dependency invalidation, pause/resume, worker recovery, no blind retry after uncertain submission, and two-retry budget.
-- **Not implemented:** Real ComfyUI HTTP adapter and reconciliation, official H3 Prompt Compiler, LLM/provider profiles, media decode/QC and delivery assembly, user authentication, and real Agent tools.
-- **Pending local validation:** Windows startup behavior, local checkpoint/node compatibility, GPU memory/performance, T2VA and Ref2VA outputs, and real ComfyUI crash reconciliation. Follow [`docs/local-h3-acceptance.md`](docs/local-h3-acceptance.md).
+```powershell
+uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
+uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
+npm --prefix frontend run build
+```
 
-Run backend tests and lint with `uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests` and `uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests`. Build the UI with `npm --prefix frontend run build`.
+The suite covers style-version gates, binding isolation, concurrent revision, two-worker claims, crash recovery, uncertain submission, project audit, worker health, LLM retry/schema/auth classification, Agent output rejection, H3 label/section validation, Fake ComfyUI lifecycle, continuity, technical QC fallback, semantic fusion, repair budgets, path traversal, disk-full handling, and Alembic fresh/M1 upgrades.
 
-See [`docs/upstream-audit.md`](docs/upstream-audit.md), [`docs/architecture.md`](docs/architecture.md), and [`docs/contracts.md`](docs/contracts.md) for source/license boundaries, state ownership, and API contracts.
+## Documentation
+- [V1.0 项目建设方案](docs/Shine视频工作台_V1.0_项目建设方案.md)
+- [AGENTS.md — 开发规范](AGENTS.md)
+- [architecture.md](docs/architecture.md)
+- [contracts.md](docs/contracts.md)
+- [upstream-audit.md](docs/upstream-audit.md)
+- [local-h3-acceptance.md](docs/local-h3-acceptance.md)
+- [LOCAL_AGENT_BUILD_REPORT.md](docs/LOCAL_AGENT_BUILD_REPORT.md)
 
 ## Security
-The repo must not store `.env` values, provider API keys, private assets, checkpoint weights, output videos, local SQLite databases, or logs. Keep third-party repository audits and licenses traceable.
+The repository must not contain `.env` values, provider keys, private assets, model weights, generated videos, local databases, or logs. Provider keys are stored outside SQLite through Windows DPAPI or a permission-restricted local file and never returned by the API. Remote semantic review requires explicit project consent. Third-party source/license audits and the GPL plugin boundary remain traceable.

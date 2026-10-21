@@ -11,6 +11,9 @@ dependencies = [
   "python-dotenv==1.2.4",
   "sqlalchemy==2.0.41",
   "uvicorn[standard]==0.35.0",
+  "httpx==0.28.1",
+  "jsonschema==4.23.0",
+  "pypdf==5.6.1",
 ]
 
 [dependency-groups]

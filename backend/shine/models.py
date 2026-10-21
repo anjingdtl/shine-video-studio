@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shine.db import Base
@@ -24,13 +24,33 @@ class Project(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    language: Mapped[str] = mapped_column(String(32), default="Chinese", nullable=False)
     style_draft: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     frozen_style_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    allow_remote_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    auto_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     assets: Mapped[list[Asset]] = relationship(back_populates="project", cascade="all, delete-orphan")
     style_versions: Mapped[list[StyleVersion]] = relationship(back_populates="project")
     shots: Mapped[list[Shot]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    documents: Mapped[list[ProjectDocument]] = relationship(back_populates="project", cascade="all, delete-orphan")
+
+
+class ProjectDocument(Base):
+    __tablename__ = "project_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    parsed: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="documents")
 
 
 class Asset(Base):
@@ -45,11 +65,23 @@ class Asset(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    derived_from_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="assets")
+    bindings: Mapped[list[ShotAssetBinding]] = relationship(back_populates="asset")
 
 
 class StyleVersion(Base):
@@ -62,6 +94,7 @@ class StyleVersion(Base):
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     approved_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="style_versions")
@@ -79,6 +112,26 @@ class Shot(Base):
 
     project: Mapped[Project] = relationship(back_populates="shots")
     jobs: Mapped[list[Job]] = relationship(back_populates="shot")
+    bindings: Mapped[list[ShotAssetBinding]] = relationship(
+        back_populates="shot", cascade="all, delete-orphan", order_by="ShotAssetBinding.ordinal"
+    )
+
+
+class ShotAssetBinding(Base):
+    __tablename__ = "shot_asset_bindings"
+    __table_args__ = (UniqueConstraint("shot_id", "asset_id", name="uq_shot_asset_binding"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    use_as: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    frame_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    shot: Mapped[Shot] = relationship(back_populates="bindings")
+    asset: Mapped[Asset] = relationship(back_populates="bindings")
 
 
 class Job(Base):
@@ -92,8 +145,14 @@ class Job(Base):
     request: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", index=True, nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     provider: Mapped[str] = mapped_column(String(24), default="mock", nullable=False)
     mock_scenario: Mapped[str] = mapped_column(String(24), default="success", nullable=False)
+    generation_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    workflow_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    compiled_prompt_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_qc_result: Mapped[str | None] = mapped_column(String(24), nullable=True)
     paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -123,6 +182,7 @@ class JobDependency(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     parent_job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     child_job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="explicit", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     child: Mapped[Job] = relationship(foreign_keys=[child_job_id], back_populates="dependencies")
@@ -144,6 +204,13 @@ class JobAttempt(Base):
     lease_owner: Mapped[str] = mapped_column(String(128), nullable=False)
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_units: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reconciliation_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     job: Mapped[Job] = relationship(back_populates="attempts")
@@ -155,16 +222,131 @@ class QCReport(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     attempt_id: Mapped[str] = mapped_column(ForeignKey("job_attempts.id", ondelete="CASCADE"), index=True)
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     result: Mapped[str] = mapped_column(String(24), nullable=False)
     is_mock: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(48), default="mock", nullable=False)
     report: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class MediaArtifact(Base):
+    __tablename__ = "media_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    artifact_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class RepairRecord(Base):
+    __tablename__ = "repair_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    root_cause: Mapped[str] = mapped_column(String(500), nullable=False)
+    changes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False)
+    cost_units: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ProviderProfile(Base):
+    __tablename__ = "provider_profiles"
+    __table_args__ = (UniqueConstraint("name", name="uq_provider_profile_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    model: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    api_key_ref: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    timeout_s: Mapped[float] = mapped_column(Float, default=60.0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    temperature: Mapped[float] = mapped_column(Float, default=0.2, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AgentRoute(Base):
+    __tablename__ = "agent_routes"
+    __table_args__ = (UniqueConstraint("role", name="uq_agent_route_role"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    role: Mapped[str] = mapped_column(String(48), nullable=False)
+    provider_profile_id: Mapped[str] = mapped_column(ForeignKey("provider_profiles.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class WorkflowProfile(Base):
+    __tablename__ = "workflow_profiles"
+    __table_args__ = (UniqueConstraint("name", name="uq_workflow_profile_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    graph: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    parameter_map: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    required_nodes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    checkpoint_id: Mapped[str] = mapped_column(String(160), default="MiniMax-H3-Base", nullable=False)
+    graph_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    validated_against: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ExternalJobReconciliation(Base):
+    __tablename__ = "external_job_reconciliations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    provider_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class WorkerInstance(Base):
+    __tablename__ = "worker_instances"
+
+    worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="starting", nullable=False)
+    current_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     actor: Mapped[str] = mapped_column(String(32), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(String(32), nullable=False)

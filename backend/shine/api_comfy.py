@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import select
+
+from shine.api_common import DBSession, app_settings
+from shine.comfy.client import ComfyError, ComfyUIClient
+from shine.comfy.workflow import graph_hash, validate_against_object_info, validate_graph
+from shine.config import Settings
+from shine.models import WorkflowProfile
+from shine.schemas import (
+    ComfyConnectionConfig,
+    ComfyTestResult,
+    WorkflowProfileCreate,
+    WorkflowProfilePublic,
+)
+from shine.services import add_audit, require_project
+
+router = APIRouter(prefix="/api/v1", tags=["comfyui"])
+SettingsDep = Annotated[Settings, Depends(app_settings)]
+
+
+def _profile_data(profile: WorkflowProfile, *, include_graph: bool = False) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": profile.id,
+        "project_id": profile.project_id,
+        "name": profile.name,
+        "mode": profile.mode,
+        "graph_sha256": profile.graph_sha256,
+        "parameter_map": profile.parameter_map,
+        "required_nodes": profile.required_nodes,
+        "checkpoint_id": profile.checkpoint_id,
+        "validated_against": profile.validated_against,
+        "created_at": profile.created_at,
+    }
+    if include_graph:
+        data["graph"] = profile.graph
+    return data
+
+
+@router.get("/comfy/config")
+def comfy_config(settings: SettingsDep, db: DBSession) -> dict[str, Any]:
+    profiles = db.scalars(select(WorkflowProfile).order_by(WorkflowProfile.created_at)).all()
+    return {
+        "base_url": settings.comfyui_base_url,
+        "render_mode": settings.render_provider,
+        "workflow_profile_count": len(profiles),
+        "h3_checkpoint_family": "MiniMax-H3-Base",
+        "real_gpu_validation": "pending_local_h3",
+    }
+
+
+@router.post("/comfy/test", response_model=ComfyTestResult)
+def test_comfy(body: ComfyConnectionConfig, db: DBSession) -> ComfyTestResult:
+    client = ComfyUIClient(body.base_url, timeout_s=body.timeout_s)
+    try:
+        stats = client.system_stats()
+        object_info = client.object_info()
+    except ComfyError as exc:
+        return ComfyTestResult(ok=False, message=str(exc))
+    h3_nodes = sorted(name for name in object_info if "h3" in name.lower() or "minimax" in name.lower())
+    add_audit(
+        db,
+        "user",
+        "COMFY_CONNECTION_TESTED",
+        "system",
+        "comfyui",
+        {"base_url": body.base_url, "node_count": len(object_info), "h3_node_count": len(h3_nodes)},
+    )
+    db.commit()
+    return ComfyTestResult(
+        ok=True,
+        message="ComfyUI responded",
+        system_stats=stats if isinstance(stats, dict) else {},
+        node_count=len(object_info),
+        h3_nodes=h3_nodes,
+    )
+
+
+@router.get("/comfy/capabilities")
+def comfy_capabilities(settings: SettingsDep, db: DBSession) -> dict[str, Any]:
+    client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+    try:
+        stats = client.system_stats()
+        object_info = client.object_info()
+    except ComfyError as exc:
+        return {"ok": False, "code": exc.code, "message": str(exc)}
+    validation = {}
+    profile = db.scalar(select(WorkflowProfile).order_by(WorkflowProfile.created_at))
+    if profile:
+        try:
+            validation = validate_against_object_info(profile.graph, profile.parameter_map, object_info)
+            profile.validated_against = validation
+            db.commit()
+        except ComfyError as exc:
+            validation = {"error": str(exc)}
+    return {
+        "ok": True,
+        "system_stats": stats,
+        "node_count": len(object_info),
+        "h3_nodes": sorted(name for name in object_info if "h3" in name.lower() or "minimax" in name.lower()),
+        "validation": validation,
+    }
+
+
+@router.get("/workflow-profiles", response_model=list[WorkflowProfilePublic])
+def list_workflow_profiles(db: DBSession, project_id: str | None = Query(default=None)) -> list[WorkflowProfilePublic]:
+    query = select(WorkflowProfile).order_by(WorkflowProfile.created_at)
+    if project_id:
+        require_project(db, project_id)
+        query = query.where(
+            (WorkflowProfile.project_id == project_id) | (WorkflowProfile.project_id.is_(None))
+        )
+    return [WorkflowProfilePublic.model_validate(_profile_data(row)) for row in db.scalars(query).all()]
+
+
+@router.post("/workflow-profiles", response_model=WorkflowProfilePublic, status_code=201)
+def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> WorkflowProfilePublic:
+    if body.project_id:
+        require_project(db, body.project_id)
+    if db.scalar(select(WorkflowProfile).where(WorkflowProfile.name == body.name)):
+        raise HTTPException(status_code=409, detail="A workflow profile with this name already exists")
+    try:
+        validate_graph(body.graph, required_nodes=body.required_nodes)
+    except ComfyError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+    if "positive_prompt" not in body.parameter_map:
+        raise HTTPException(
+            status_code=422,
+            detail="A workflow profile must map the compiled H3 prompt to a node input",
+        )
+    profile = WorkflowProfile(
+        project_id=body.project_id,
+        name=body.name,
+        mode=body.mode.value,
+        graph=body.graph,
+        parameter_map=body.parameter_map,
+        required_nodes=body.required_nodes,
+        checkpoint_id=body.checkpoint_id,
+        graph_sha256=graph_hash(body.graph),
+    )
+    db.add(profile)
+    db.flush()
+    add_audit(
+        db,
+        "user",
+        "WORKFLOW_PROFILE_REGISTERED",
+        "workflow_profile",
+        profile.id,
+        {
+            "mode": profile.mode,
+            "graph_sha256": profile.graph_sha256,
+            "required_nodes": profile.required_nodes,
+            "parameter_map": sorted(profile.parameter_map),
+        },
+        project_id=profile.project_id,
+    )
+    db.commit()
+    db.refresh(profile)
+    return WorkflowProfilePublic.model_validate(_profile_data(profile))
+
+
+@router.get("/workflow-profiles/{profile_id}")
+def get_workflow_profile(profile_id: str, db: DBSession) -> dict[str, Any]:
+    profile = db.get(WorkflowProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Workflow profile not found")
+    return _profile_data(profile, include_graph=True)
+
+
+@router.delete("/workflow-profiles/{profile_id}", status_code=204, response_class=Response)
+def delete_workflow_profile(profile_id: str, db: DBSession) -> Response:
+    profile = db.get(WorkflowProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Workflow profile not found")
+    add_audit(
+        db,
+        "user",
+        "WORKFLOW_PROFILE_DELETED",
+        "workflow_profile",
+        profile.id,
+        {"name": profile.name},
+        project_id=profile.project_id,
+    )
+    db.delete(profile)
+    db.commit()
+    return Response(status_code=204)
