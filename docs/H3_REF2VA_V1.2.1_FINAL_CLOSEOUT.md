@@ -1,14 +1,33 @@
 # H3 Ref2VA V1.2.1 收尾报告
 
-日期：2026-10-21（Asia/Shanghai）。本轮不新增 GPU 生成，不下载或切换模型。
+更新日期：2026-10-21（Asia/Shanghai）。本文包含先前工程修复与后续独立 ComfyUI 实测两个阶段；工程修复阶段不新增 GPU 生成，后续阶段按用户授权新增一次短片实测。未下载或切换模型。
 
-## 1. 基线与交付
+## 当前判断与剩余收尾（最新状态）
+
+- **整体状态：PARTIAL。工程修复已验证，新工作流的单段 PDD8＋1.5倍超分已真实跑通，且用户明确反馈“生成的影片效果不错，达到基本预期了”。这是该样本的人工基本画质认可，不是正式短剧全项验收。**
+- 原片1344×768，超分2016×1152，124帧、约5.17秒，总耗时401.239秒。完整解码通过，两版音频包与解码PCM哈希一致。证据见[本次实测报告](H3_REF2VA_V4_LOCAL_TEST_20261021.md)。
+- 旧三个480×864样本的画质不通过结论、历史审批与任务状态保留；用户对旧样本“声音正常、对白逐字准确、口型同步”的明确反馈保留。本次无对白样本不能充当新一轮对白/口型证据。
+- 新工作流目前仅在独立ComfyUI运行，尚未注册为工作台新Profile，未接通采样模式/超分/分辨率参数与项目审计。正式副本保留原有素材、7秒、种子与1344×768配置。
+- 本次只读复核：8188、8189均在线，队列均为空；8189中实测Prompt History为success。先前报告的“8188离线”是工程修复阶段的历史状态，不再是当前阻塞。
+- 当前未新增已确认的代码缺陷；余项主要为集成、真实生产流程验证、正式审片及交付收口。
+
+| 优先级 | 收尾项 | 当前状态与完成条件 |
+| --- | --- | --- |
+| P0 | 新工作流接入工作台 | PENDING：注册API Profile和显式parameter_map，接通4/8/20步、超分、分辨率，保存配置及图hash；不绕过Compiler、素材绑定和提交意图协议 |
+| P0 | 工作台端到端实测 | NOT RUN：从UI创建短镜头，经Worker提交、取回、QC、预览、人工验收；随后验证完整三段生成、缓存复用和最终拼接 |
+| P0 | 正式逐项审片 | PENDING：由管理员配置操作员授权，操作员本人对具体任务/Attempt/Artifact提交；聊天认可不自动改生产数据库 |
+| P0 | 主分支交付 | 用户已明确授权将既有V1.2.1修复和本轮文档提交、推送main；采用快进、普通push，交付后核对本地/远端SHA |
+| 能力验证 | PDD4、Native20实际出片 | NOT RUN：结构与调度合同通过，尚无GPU样本；PDD8＋超分作为已认可的画质参考配置 |
+| 能力验证 | 严格帧锚定与视频参考传输 | PENDING_H3_TEST：涉及这些能力的任务继续阻断；普通CUT镜头不借此声明严格接续 |
+| 可选增强 | 自动ASR | 未配置，不是已知声音故障；允许按既有权限协议进行人工对白验收 |
+
+## 1. 基线与交付（工程修复阶段）
 
 - 仓库：`anjingdtl/shine-video-studio`，private，默认分支 main。
 - 起始提交/已刷新远端 main：`32ebffb12006fdeefda4b0a2e15e4736e2f6564b`。
 - 开发分支：`fix/v1.2.1-ref2va-final-hardening`，开始时工作区干净。
-- main 不改写、不合并、不强推；实现提交 `ffc36e74d5a12e45ed5004e8229c448c05c644f2`；交付见下方 PR 与 CI 记录。
-- **整体结论：BLOCKED（正式画质/严格接续与生产审批尚未闭合），不能宣称正式短剧质量验收完成。**
+- 工程修复阶段未直接合并main；本轮用户已授权快进交付main，不强推。实现提交 `ffc36e74d5a12e45ed5004e8229c448c05c644f2`；交付见下方 PR 与 CI 记录。
+- 工程修复阶段的原结论为BLOCKED；后续样本画质已有用户认可，当前整体为PARTIAL，具体范围以上方最新状态为准。
 
 ## 2. CI 与工程修复
 
@@ -136,7 +155,7 @@ API 健康、Worker 在线、Mock PASSED、video_created=false、7 条审计；M
 一次 npm ci 遇到测试 Vite 占用 esbuild 的 EPERM；停止本轮记录的隔离进程后已重跑通过。
 远端三项 CI 的最终数量和结果见交付记录。
 
-## 9. 原三个真实样本复验
+## 9. 原三个真实样本复验（历史证据，状态不改写）
 
 `scripts/verify_existing_ref2va.py` 只读打开原库、重算哈希并运行 FFprobe/FFmpeg 全帧解码。
 原视频不重命名、不覆盖、不重新生成。
@@ -150,42 +169,53 @@ API 健康、Worker 在线、Mock PASSED、video_created=false、7 条审计；M
 对应 Prompt ID 仍为 A `799f6e84-df47-4a07-8255-cca6e025ddf5`、
 B `12bac085-726b-4d7c-b9f1-cb6e59b98bc1`、C `171bac3a-60a5-4991-8343-6dd7e9928c50`。
 三者均 480×864、约 5.166 秒，实际哈希=登记哈希=Attempt 输出哈希，大小匹配。
-本轮 ComfyUI 8188 拒绝连接，因此实时 History/节点重验证 BLOCKED；不能冒充重新完成生成验收。
+工程修复阶段当时ComfyUI 8188拒绝连接，因此该阶段的旧样本实时History/节点重验证为BLOCKED；最新在线状态见开头，旧样本不借用新短片History通过。
 
 用户本轮播放反馈：**声音正常；对白逐字准确；口型同步**。该明确人工反馈单独记录为
 VERIFIED_MANUAL（用户本轮自述播放结论），不把 Agent 观看或音轨存在当成试听证明。
 它没有自动写成新的授权逐项审片事件，也不能代替身份、风格、画质和连续性等其他门。
 A 原审批使用旧脚本，不能追认成新权限协议证据；历史不改写。
 
-## 10. 仍未闭合的验收边界
+## 10. 验收边界（已纳入后续实测与用户反馈）
 
 | 项目 | 状态 | 影响与下一步 |
 | --- | --- | --- |
-| 三个样本正式画质 | BLOCKED | 用户认为画质太差；480×864 是联调规格，不能认定电影质量通过 |
-| 更高分辨率真实对照 | PENDING_H3_TEST | 后续需用户另行批准；独立副本保持 INT8/Ref2VA/素材/seed/20步，仅比较分辨率 |
+| 原三个低分辨率样本正式画质 | BLOCKED | 用户认为画质太差；480×864 是联调规格，不能认定电影质量通过 |
+| 新工作流高分辨率短片 | VERIFIED_REAL_H3 / VERIFIED_MANUAL_BASIC_VISUAL | 独立副本PDD8：1344×768→2016×1152，用户认可基本画质；不是旧20步样本的单变量分辨率对照 |
 | 严格首尾帧锚定 | PENDING_H3_TEST | PENDING_HARD_CONTINUITY_TEST；现证据构图不连续 |
 | 视频参考真实传输 | PENDING_H3_TEST | SUPPORTED_NODE_UNVERIFIED_TRANSFER；不启用动态能力 |
-| ComfyUI 实时 History | BLOCKED | 8188 当前离线；本轮没有启动后端或清理队列来规避 |
-| 正式操作员逐项写回 | BLOCKED | 由本机管理员配置凭据，操作员本人按新界面提交；Agent 不代审批 |
-| 自动 ASR | BLOCKED | 未配置、未下载；用户明确人工对白反馈已经记录，不能继续称声音存在已知缺陷 |
+| ComfyUI 实时 History | VERIFIED（本次短片） | 8188/8189在线，8189实测History为success；不等于旧A/B/C的History均已重新复核 |
+| 正式操作员逐项写回 | PENDING | 由本机管理员配置凭据，操作员本人按新界面提交；Agent 不代审批 |
+| 自动 ASR | OPTIONAL_NOT_CONFIGURED | 未配置、未下载；用户明确人工对白反馈已经记录，不能继续称声音存在已知缺陷 |
 
 画质诊断：480×864 约 0.415MP；768×1344 约 1.032MP，为前者 2.49 倍像素。
-后者可作为后续独立对照规格，但本轮没有验证其 16GB 显存、速度或画质收益，不能预先保证。
+后者是先前建议的竖屏对照规格；后续实际验证的是1344×768横屏PDD8及2016×1152超分，不能混称已完成旧20步竖屏单变量对照。
 低分辨率是明确限制；人物细节还受采样、参考缩放、模型及压缩影响，不能仅凭观感归因。
 不通过放大原片、改报告或更改旧 Profile 来制造“修复画质”的证据。
 
 ## 11. 安全与交付记录
 
-仅修改 Shine 源码、配置元数据、测试和文档。无模型下载、无权重/原始素材/视频/密钥/数据库
+工程修复阶段仅修改 Shine 源码、配置元数据、测试和文档。无模型下载、无权重/原始素材/视频/密钥/数据库
 进入 Git；ComfyUI 原始工作流、缓存、队列和历史均未改；额外 GPU 提交数为 0。
-本地测试进程使用隔离库；未开启真实 Worker。没有自行合并 PR。
+工程修复阶段的本地测试进程使用隔离库，未开启真实Worker。后续ComfyUI实测新增一次GPU提交，原工作流和旧缓存未改；本轮用户已授权主分支交付，未授权代替操作员审批。
 
 - 主实现提交：`ffc36e74d5a12e45ed5004e8229c448c05c644f2`。
-- Pull Request：[PR #4](https://github.com/anjingdtl/shine-video-studio/pull/4)，未合并。
+- 工程修复PR：[PR #4](https://github.com/anjingdtl/shine-video-studio/pull/4)。先前记录为未合并；本次采用Git快进推送main包含其修复提交，不调用GitHub合并接口。GitHub API凭据曾返回401，PR最终状态以GitHub实际显示为准。
 - 主实现 CI：[run 39612420035](https://github.com/anjingdtl/shine-video-studio/actions/runs/39612420035)，Ubuntu backend / Windows backend / Frontend 均 TESTED（success）。
 - 同 SHA 的 PR 事件 CI：[run 39612982665](https://github.com/anjingdtl/shine-video-studio/actions/runs/39612982665)，三项也均 success。
 - 上述两轮后端均 243 passed；已读取 Ubuntu 与 Windows 日志，Windows 完整测试为 291.18 秒。
 - 最终补丁增加连续性输入类型防护，并保证无对白镜头的任一人工音频 FAIL 也不能放行；
   本机最终全量为 254 passed，审片/Ref2VA 专项 49 passed，Ruff 全绿。
 - 补丁和本报告所处最新提交及其最终 CI：以 [PR 最新 Checks](https://github.com/anjingdtl/shine-video-studio/pull/4/checks) 为准，交付前另核对具体 head SHA；报告不伪造自引用的提交 hash。
-- 整体艺术质量仍为 BLOCKED，三项软件 CI 成功不解除本报告第 10 节的验收边界。
+- 当前整体为PARTIAL：新短片基本画质已有用户认可，软件CI与该样本不能替代工作台端到端、完整三段及逐项正式审片。
+
+
+## 12. 本次主分支交付前复核
+
+- 本机完整后端回归重新运行通过（包含offline E2E与film crew）；保留1条既有Starlette/AnyIO弃用警告。
+- `backend/.venv/Scripts/python.exe -m pytest -c backend/pyproject.toml backend/tests -q`：exit 0。
+- `backend/.venv/Scripts/ruff.exe check backend/shine backend/alembic backend/tests`：All checks passed。
+- `npm --prefix frontend run build`：TypeScript及Vite 6.4.5构建通过。
+- `git diff --check`：通过。实测报告的本机副本与仓库副本逐字节一致。
+- 本次交付前已fetch，远端main为`32ebffb12006fdeefda4b0a2e15e4736e2f6564b`，修复分支领先2个提交、落后0；新增报告提交后将以快进方式包含两项修复。只使用普通push，不强推。
+- GitHub API凭据返回401，因此不把历史CI成功冒称为本次新提交的远端CI结果。Git协议fetch可用，推送后单独核对远端main与本地HEAD。
