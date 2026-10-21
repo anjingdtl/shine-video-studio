@@ -97,6 +97,7 @@ class FilmRunRequest(APIModel):
     input_revision_ids: list[str] = Field(default_factory=list, max_length=100)
     tool: Literal["propose", "style_proposal"] = "propose"
     offline_preview: bool = False
+    allow_remote_text: bool = False
     supersedes_artifact_id: str | None = None
 
 

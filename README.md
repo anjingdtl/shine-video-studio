@@ -86,6 +86,7 @@ Descriptions submitted under V1.1 rules must be English; dialogue remains in its
 ## Documentation
 - [V1.1 产品修订方案](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
 - [V1.1 contracts and API](docs/v1.1-contracts.md)
+- [V1.1 实现与离线验收报告](docs/V1.1_实现与离线验收报告.md)
 - [V1.0 项目建设方案](docs/Shine视频工作台_V1.0_项目建设方案.md)
 - [AGENTS.md — 开发规范](AGENTS.md)
 - [architecture.md](docs/architecture.md)

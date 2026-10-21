@@ -244,7 +244,7 @@ class FilmAgentDispatcher:
             ):
                 raise ValueError("INVALID_SUPERSESSION")
         profile = self.gateway.profile_for_role(db, role)
-        if profile.kind != "mock" and not is_loopback_url(profile.base_url) and not project.allow_remote_review:
+        if profile.kind != "mock" and not is_loopback_url(profile.base_url) and not body.allow_remote_text:
             raise ValueError("REMOTE_AGENT_CONSENT_REQUIRED")
         style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
         context = {
@@ -276,6 +276,7 @@ class FilmAgentDispatcher:
             trace={
                 "tool": body.tool,
                 "offline_preview": body.offline_preview,
+                "remote_text_consent": body.allow_remote_text,
                 "is_mock": profile.kind == "mock",
                 "input_revision_ids": body.input_revision_ids,
                 "schema": contract.__name__,

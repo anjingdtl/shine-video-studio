@@ -26,6 +26,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   const [facts, setFacts] = useState('');
   const [inputs, setInputs] = useState<string[]>([]);
   const [offline, setOffline] = useState(false);
+  const [remoteText, setRemoteText] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [query, setQuery] = useState('');
@@ -45,7 +46,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     setBusy(true); setMessage('');
     try { setResult(await action()); await reload(); await onRefresh(); setMessage('操作完成，请查看结果与门禁状态。'); }
     catch (e) { setMessage(String(e)); await reload().catch(() => undefined); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setRemoteText(false); }
   }
   const current = roles.find(r => r.role === role);
   const filteredRules = hub?.rules.filter(r => JSON.stringify(r).toLowerCase().includes(query.toLowerCase())) ?? [];
@@ -65,7 +66,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       <div className="settings-block">
         <h3>工种交接 / 风格预制建议</h3>
         <p>当前规范锁：{pin || '未冻结（先在下方规范中心选择版本）'}</p>
-        <label>执行工种<select value={role} onChange={e => { setRole(e.target.value); setTool('propose'); }}>
+        <label>执行工种<select value={role} onChange={e => { setRole(e.target.value); setTool('propose'); setRemoteText(false); }}>
           {roles.map(r => <option key={r.role} value={r.role}>{r.label}</option>)}</select></label>
         <label>任务类型<select value={tool} onChange={e => setTool(e.target.value)}>
           {(current?.tool_allowlist ?? ['propose']).map(t => <option key={t} value={t}>{t === 'style_proposal' ? '风格建议（仅草案）' : '专业计划'}</option>)}</select></label>
@@ -74,10 +75,12 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
         <label>用户锁定故事事实（每行一条，编剧必须原样保留）<textarea rows={2} value={facts} onChange={e => setFacts(e.target.value)} /></label>
         <label><input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)} />
           允许剪辑预览使用 mock / 部分技术验证镜头（不进入正式交付）</label>
+        <label><input type="checkbox" checked={remoteText} onChange={e => setRemoteText(e.target.checked)} />
+          允许本次工种向所选远端模型发送剧本、风格与资产元数据（不发送媒体字节）</label>
         <button disabled={busy || !pin || !current?.profile_id} onClick={() => act(() => api(
           `/projects/${projectId}/film-agents/${role}/run`, json('POST', {
             brief, locked_story_facts: facts.split('\n').filter(Boolean), input_revision_ids: inputs,
-            tool, offline_preview: offline,
+            tool, offline_preview: offline, allow_remote_text: remoteText,
           })))}>运行工种</button>
       </div>
       <h3>版本化产物 / 剪辑决策 EDL</h3>

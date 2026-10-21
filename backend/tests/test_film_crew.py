@@ -343,6 +343,12 @@ def test_profile_routing_remote_consent_errors_redaction_and_staleness(api):
         f"/api/v1/projects/{project_id}/film-agents/director/run", json={"input_revision_ids": [script["id"]]}
     )
     assert response.status_code == 422 and "CONSENT" in response.text
+    client.patch(f"/api/v1/projects/{project_id}/settings", json={"allow_remote_review": True})
+    # VLM consent alone must not authorize transmission of the script to a text model.
+    response = client.post(
+        f"/api/v1/projects/{project_id}/film-agents/director/run", json={"input_revision_ids": [script["id"]]}
+    )
+    assert response.status_code == 422 and "CONSENT" in response.text
     # Superseding a camera plan invalidates its descendants, preserving original payloads.
     call(client, project_id, "cinematographer", CAMERA, inputs=[direction["id"]], supersedes_artifact_id=camera["id"])
     artifacts = client.get(f"/api/v1/projects/{project_id}/film-artifacts").json()
