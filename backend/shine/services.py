@@ -353,22 +353,35 @@ def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
 
 
 def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str, Asset]) -> list[ReferenceManifestItem]:
-    """Build the deterministic, request-local H3 label manifest."""
+    """Build the deterministic, request-local H3 label manifest.
+
+    Official Ref2VA presentation numbers every reference image as ``<Picture i>``
+    in request order, so standalone picture labels use the shared image position
+    rather than a picture-only counter; subject labels keep their own sequence
+    and cite their picture slot inside the compiled prompt.
+    """
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
-    label_counts = {"subject": 0, "picture": 0, "video": 0, "audio": 0}
+    label_counts = {"subject": 0, "video": 0, "audio": 0}
+    image_position = 0
     manifest: list[ReferenceManifestItem] = []
     for binding in ordered:
         asset = assets[binding.asset_id]
-        label_name = {
-            "subject": "Subject",
-            "picture": "Picture",
-            "video": "Video",
-            "audio": "Audio",
-        }[binding.use_as.value]
-        label_counts[binding.use_as.value] += 1
+        use_as = binding.use_as.value
+        if use_as in {"subject", "picture"}:
+            image_position += 1
+        if use_as == "picture":
+            label = f"<Picture {image_position}>"
+        else:
+            label_counts[use_as] += 1
+            label_name = {
+                "subject": "Subject",
+                "video": "Video",
+                "audio": "Audio",
+            }[use_as]
+            label = f"<{label_name} {label_counts[use_as]}>"
         manifest.append(
             ReferenceManifestItem(
-                label=f"<{label_name} {label_counts[binding.use_as.value]}>",
+                label=label,
                 asset_id=asset.id,
                 sha256=asset.sha256,
                 storage_key=asset.storage_path,

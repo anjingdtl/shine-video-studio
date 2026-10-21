@@ -181,6 +181,41 @@ def test_ref2va_speaker_requires_a_matching_subject_reference():
     assert exc.value.code == "H3_SPEAKER_REFERENCE_MISSING"
 
 
+def test_ref2va_subject_definitions_cite_presentation_picture_slots():
+    """Official Ref2VA guidance: every reference image is presented to the text
+    encoder as ``<Picture i>`` in request order, and subject definitions bind
+    identity by citing that presentation slot ("<Subject 1> ... in <Picture 1>").
+    """
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character"),
+        item("<Subject 2>", ReferenceUse.SUBJECT, entity_id="CHAR_B", asset_id="asset-2", role="character"),
+        item("<Picture 3>", ReferenceUse.PICTURE, asset_id="asset-3", frame_role=FrameRole.KEYFRAME),
+        item("<Audio 1>", ReferenceUse.AUDIO, asset_id="asset-4", duration_s=4),
+    ]
+    shot = spec(characters=["CHAR_A"])
+    compiled = compile_prompt(manifest, shot=shot)
+    definitions = compiled.sections["subject_definitions"]
+    assert "<Subject 1> is the approved reference for character, shown in <Picture 1>," in definitions
+    assert "<Subject 2> is the approved reference for character, shown in <Picture 2>," in definitions
+    assert "<Picture 3> is the keyframe reference for [Shot 1]." in definitions
+    assert "<Audio 1> is an approved audio reference." in definitions
+
+
+def test_ref2va_presentation_indices_follow_manifest_order_not_family_order():
+    # Images enter presentation in manifest order: subject, picture, subject.
+    # Standalone picture labels must keep the shared image position (Picture 2),
+    # matching the tags the H3 text encoder actually splices in.
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A"),
+        item("<Picture 2>", ReferenceUse.PICTURE, asset_id="asset-2"),
+        item("<Subject 2>", ReferenceUse.SUBJECT, entity_id="CHAR_B", asset_id="asset-3"),
+    ]
+    compiled = compile_prompt(manifest)
+    definitions = compiled.sections["subject_definitions"]
+    assert "shown in <Picture 1>" in definitions.splitlines()[0]
+    assert "shown in <Picture 3>" in definitions.splitlines()[2]
+
+
 def test_dialogue_timing_and_overlap_are_blocked():
     shot = spec(
         characters=["A", "B"],

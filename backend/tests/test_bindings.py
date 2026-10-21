@@ -47,6 +47,42 @@ def test_each_shot_keeps_its_own_binding_and_job_manifest(studio):
     assert client.get(f"/api/v1/shots/{shot_a['id']}/bindings").json()[0]["asset_id"] == hero["id"]
 
 
+def test_mixed_image_bindings_share_presentation_picture_numbering(studio):
+    """Official Ref2VA labels every reference image <Picture i> in request order.
+
+    A shot bound as [subject, subject, picture] must number the standalone
+    picture by its shared image position (<Picture 3>), not a picture-only
+    counter, so the compiled prompt matches the tags the H3 text encoder
+    actually splices around the reference images.
+    """
+    client, _factory, _root, _settings = studio
+    project_id = create_project(client)
+    style = freeze_style(client, project_id)
+    hero = upload_asset(client, project_id, PNG + b"hero", "hero.png", role="character", entity_id="CHAR_A")
+    foil = upload_asset(client, project_id, PNG + b"foil", "foil.png", role="character", entity_id="CHAR_B")
+    scene = upload_asset(client, project_id, PNG + b"scene", "scene.png", role="scene", entity_id="SCENE_A")
+    for asset in (hero, foil, scene):
+        approve_lock(client, asset["id"])
+    shot = create_shot(
+        client,
+        project_id,
+        style["id"],
+        asset_ids=[hero["id"], foil["id"], scene["id"]],
+        bindings=[
+            {"asset_id": hero["id"], "use_as": "subject", "ordinal": 0},
+            {"asset_id": foil["id"], "use_as": "subject", "ordinal": 1},
+            {"asset_id": scene["id"], "use_as": "picture", "frame_role": "keyframe", "ordinal": 2},
+        ],
+    )
+    job = create_job(client, project_id, shot["id"])
+    labels = [entry["label"] for entry in job["request"]["reference_manifest"]]
+    assert labels == ["<Subject 1>", "<Subject 2>", "<Picture 3>"]
+    prompt = client.post(f"/api/v1/shots/{shot['id']}/compile").json()["compiled_prompt"]
+    assert "<Subject 1> is the approved reference for CHAR_A, shown in <Picture 1>," in prompt
+    assert "<Subject 2> is the approved reference for CHAR_B, shown in <Picture 2>," in prompt
+    assert "<Picture 3> is the keyframe reference for [Shot 1]." in prompt
+
+
 def test_job_references_must_match_saved_bindings(studio):
     client, _factory, _root, _settings = studio
     project_id = create_project(client)

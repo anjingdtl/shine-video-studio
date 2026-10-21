@@ -357,13 +357,30 @@ def _align_instruction(mode: GenerationMode, manifest: list[ReferenceManifestIte
     return ""
 
 
+def _image_positions(manifest: list[ReferenceManifestItem]) -> dict[int, int]:
+    """Presentation slot of every reference image, 1-based in manifest order.
+
+    The H3 text encoder presents all reference images to Qwen as ``<Picture i>``
+    in request order regardless of their Shine role, so subject definitions must
+    cite this shared index instead of a per-family counter.
+    """
+    positions: dict[int, int] = {}
+    index = 0
+    for item in manifest:
+        if item.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}:
+            index += 1
+            positions[id(item)] = index
+    return positions
+
+
 def _subject_definitions(ctx: _Context) -> str:
     lines: list[str] = []
+    positions = _image_positions(ctx.manifest)
     for item in ctx.manifest:
         if item.use_as == ReferenceUse.SUBJECT:
             role = item.role or item.entity_id or "approved subject"
             lines.append(
-                f"{item.label} is the approved reference for {role}, derived from the user's locked asset."
+                f"{item.label} is the approved reference for {role}, shown in <Picture {positions[id(item)]}>, derived from the user's locked asset."
             )
         elif item.use_as == ReferenceUse.PICTURE:
             frame = item.frame_role.value if item.frame_role else "composition"
@@ -471,6 +488,11 @@ class H3PromptCompiler:
             section_order = REF_SECTION_ORDER
 
         defined = {item.label for item in manifest}
+        # Every reference image is presented to the model as <Picture i> in
+        # request order, so subject definitions may cite presentation slots
+        # that have no standalone manifest label of their own.
+        image_count = len(_image_positions(manifest))
+        defined |= {f"<Picture {index}>" for index in range(1, image_count + 1)}
         unresolved = _used_labels(prompt) - defined
         if unresolved:
             raise PromptCompilationError(
