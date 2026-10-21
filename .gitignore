@@ -44,6 +44,7 @@ tmp/
 temp/
 .cache/
 /.local-data/
+/.local-data-*/
 *.tsbuildinfo
 
 # Model weights and generated media
