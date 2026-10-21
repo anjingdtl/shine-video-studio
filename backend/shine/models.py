@@ -393,3 +393,60 @@ class AuditEvent(Base):
     entity_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class RulePack(Base):
+    __tablename__ = "rule_packs"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ProjectRuleLock(Base):
+    __tablename__ = "project_rule_locks"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), primary_key=True)
+    rulepack_id: Mapped[str] = mapped_column(ForeignKey("rule_packs.id"), nullable=False)
+    rulepack_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AgentTaskRecord(Base):
+    __tablename__ = "agent_task_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    role_id: Mapped[str] = mapped_column(String(48), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    style_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    asset_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rulepack_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    rulepack_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_profile_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(16), default="1.1", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trace: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AgentArtifact(Base):
+    __tablename__ = "agent_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(16), default="1.1", nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    producer_role: Mapped[str] = mapped_column(String(48), nullable=False)
+    source_task_id: Mapped[str] = mapped_column(ForeignKey("agent_task_records.id"), nullable=False)
+    input_revision_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

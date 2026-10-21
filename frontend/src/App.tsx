@@ -15,6 +15,7 @@ import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
 import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
+import FilmCrewPanel from './components/FilmCrewPanel';
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -313,6 +314,8 @@ function App() {
         <button className="nav-item" onClick={() => document.getElementById('production')?.scrollIntoView({ behavior: 'smooth' })}><Activity size={17} />生产与质检</button>
         <button className="nav-item" onClick={() => document.getElementById('settings')?.scrollIntoView({ behavior: 'smooth' })}><Sparkles size={17} />模型与系统</button>
         <button className="nav-item" onClick={() => document.getElementById('audit')?.scrollIntoView({ behavior: 'smooth' })}><ShieldCheck size={17} />审计追踪</button>
+        <button className="nav-item" onClick={() => document.getElementById('film-crew')?.scrollIntoView({ behavior: 'smooth' })}><Clapperboard size={17} />影视制片团队</button>
+        <button className="nav-item" onClick={() => document.getElementById('h3-rulebook')?.scrollIntoView({ behavior: 'smooth' })}><ShieldCheck size={17} />H3 官方规范中心</button>
         <div className="sidebar-spacer" />
         <div className="privacy-card"><ShieldCheck size={17} /><div><b>本地优先</b><span>素材与密钥不离开本机</span></div><Check size={15} /></div>
         <div className="profile"><div className="avatar">S</div><div><b>本地工作区</b><span>{apiOnline ? 'API 已连接' : 'API 离线'}</span></div><ChevronDown size={16} /></div>
@@ -434,7 +437,9 @@ function App() {
               onMore={() => loadAudit(projectId, audit?.items.length ?? 0).catch((error: Error) => report(error.message, 'error'))}
             />
 
-            <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> V1.0 DEVELOPMENT</span><span><ShieldCheck size={12} /> 本地状态库 · 用户可控素材</span></footer>
+            <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
+
+            <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> V1.1 DEVELOPMENT</span><span><ShieldCheck size={12} /> 本地状态库 · 用户可控素材</span></footer>
           </>}
         </div>
       </main>

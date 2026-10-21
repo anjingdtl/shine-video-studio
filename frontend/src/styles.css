@@ -126,3 +126,15 @@
 .audit-entity{font:7px var(--mono);color:#a3a49b;margin-left:auto}
 .load-more{margin-top:8px;height:27px!important;font-size:9px}
 @media(max-width:1050px){.settings-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr}.json-grid{grid-template-columns:1fr}.status-cluster{display:none}}
+/* Professional crew panels share the workbench's existing visual system. */
+.crew-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+#film-crew, #h3-rulebook { margin-top: 24px; padding: 24px; overflow-wrap: anywhere; }
+#film-crew label, #h3-rulebook label { display: block; margin: 12px 0; }
+#film-crew select, #film-crew textarea, #h3-rulebook textarea { display: block; width: 100%; margin-top: 6px; }
+#film-crew pre, #h3-rulebook pre { white-space: pre-wrap; max-height: 420px; overflow: auto; }
+#film-crew button, #h3-rulebook button { margin: 6px 8px 6px 0; }
+#film-crew, #h3-rulebook { background: var(--paper); border: 1px solid var(--line); border-radius: 9px; }
+#film-crew .panel-header, #h3-rulebook .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+#film-crew button, #h3-rulebook button { border: 1px solid var(--line); background: var(--mint); color: var(--olive-dark); border-radius: 6px; padding: 8px 12px; font-size: 12px; }
+#film-crew h2, #h3-rulebook h2 { margin: 0; font-size: 20px; }
+#film-crew p, #h3-rulebook p { line-height: 1.65; }

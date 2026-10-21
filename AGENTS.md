@@ -4,7 +4,8 @@
 Before editing code, read in order:
 1. [V1.0 产品与工程基线](docs/Shine视频工作台_V1.0_项目建设方案.md)
 2. [Codex Cloud 首轮开发任务](docs/Codex云端Agent_建仓及首轮开发总提示词.md)
-3. Existing source, tests, docs, and current Git history.
+3. [V1.1 影视专业 Agent 与 H3 官方规范中心](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
+4. Existing source, tests, docs, and current Git history.
 
 **Repository already exists:** `anjingdtl/shine-video-studio`, private, default branch `main`. Do not attempt to create another repository or overwrite existing work. Codex is used for development only; it must **not** become a runtime dependency.
 
@@ -41,6 +42,13 @@ Deliver actual **M0 + M1**, not design-only outputs. Prioritize working FastAPI 
 - The offline production loop is covered by `backend/tests/test_offline_e2e.py`; run it after any change to the worker, the gates or the repair engine.
 
 ## Working method
+
+V1.1 keeps professional Agent outputs as typed, versioned proposals on the existing Gateway
+and database. Only user actions may apply style/camera suggestions. Rule-pack locks are
+immutable per project; unsupported source/rule changes require code review and tests.
+Never bundle official full-text guides without redistribution permission. Run
+`backend/tests/test_film_crew.py` alongside the offline E2E after crew/rulebook changes.
+
 1. Inspect current repo and upstream implementations/commit IDs before reuse; write `docs/upstream-audit.md`.
 2. Keep feature changes small, testable and recoverable. Do not alter locked product decisions without user confirmation.
 3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.

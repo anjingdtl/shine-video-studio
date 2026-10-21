@@ -1,0 +1,140 @@
+import { useEffect, useState } from 'react';
+import { api, json, type ProviderProfile, type Shot } from '../api';
+
+type Role = { role: string; label: string; model: string | null; profile_id: string | null;
+  output_kind: string; required_inputs: string[]; permissions: string; tool_allowlist: string[] };
+type Artifact = { id: string; kind: string; payload_json: Record<string, unknown>; sha256: string;
+  producer_role: string; stale: boolean; approved_by: string | null };
+type Run = { id: string; role_id: string; status: string; model_id: string; error_code: string | null;
+  rulepack_id: string; trace: Record<string, unknown> };
+type RuleHub = { packs: Array<{ id: string; sha256: string; approved_at: string | null; manifest: Record<string, unknown> }>;
+  sources: Array<{ path: string; sha256: string; url: string; local_cache_status: string }>;
+  rules: Array<{ id: string; origin: string; summary: string; source_path: string; locator: string }>;
+  local_workflow_capabilities: Array<{ name: string; mode: string; status: string }> };
+
+export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }: {
+  projectId: string; profiles: ProviderProfile[]; shots: Shot[]; onRefresh: () => Promise<void>;
+}) {
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [hub, setHub] = useState<RuleHub | null>(null);
+  const [pin, setPin] = useState('');
+  const [role, setRole] = useState('scriptwriter');
+  const [tool, setTool] = useState('propose');
+  const [brief, setBrief] = useState('');
+  const [facts, setFacts] = useState('');
+  const [inputs, setInputs] = useState<string[]>([]);
+  const [offline, setOffline] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [query, setQuery] = useState('');
+  const [candidate, setCandidate] = useState('');
+  const [result, setResult] = useState<unknown>(null);
+
+  async function reload() {
+    const [rs, ars, ts, h, lock] = await Promise.all([
+      api<Role[]>('/film-agents'), api<Artifact[]>(`/projects/${projectId}/film-artifacts`),
+      api<Run[]>(`/projects/${projectId}/film-runs`), api<RuleHub>('/h3-rulebook'),
+      api<{ rulepack_id: string | null }>(`/projects/${projectId}/rulepack`),
+    ]);
+    setRoles(rs); setArtifacts(ars); setRuns(ts); setHub(h); setPin(lock.rulepack_id ?? '');
+  }
+  useEffect(() => { setInputs([]); reload().catch(e => setMessage(String(e))); }, [projectId]);
+  async function act(action: () => Promise<unknown>) {
+    setBusy(true); setMessage('');
+    try { setResult(await action()); await reload(); await onRefresh(); setMessage('操作完成，请查看结果与门禁状态。'); }
+    catch (e) { setMessage(String(e)); await reload().catch(() => undefined); }
+    finally { setBusy(false); }
+  }
+  const current = roles.find(r => r.role === role);
+  const filteredRules = hub?.rules.filter(r => JSON.stringify(r).toLowerCase().includes(query.toLowerCase())) ?? [];
+  return <>
+    <section className="panel" id="film-crew">
+      <div className="panel-header"><h2>影视制片团队 <small>V1.1</small></h2>
+        <button disabled={busy} onClick={() => act(reload)}>刷新运行记录</button></div>
+      <p>编剧 → 导演 → 摄影 → 场记 → 规则预检 → 唯一 Worker → QC → 剪辑。所有工种仅产出建议，审批由你操作。</p>
+      <div className="crew-grid">{roles.map(r => <article className="settings-block" key={r.role}>
+        <h3>{r.label}</h3><p>{r.output_kind}</p><p>{r.permissions}</p>
+        <label>角色模型（可共用同一配置）<select disabled={busy} value={r.profile_id ?? ''}
+          onChange={e => act(() => api('/agent-routes', json('PUT', { role: r.role, provider_profile_id: e.target.value })))}>
+          <option value="" disabled>请配置模型路由</option>
+          {profiles.map(p => <option value={p.id} key={p.id}>{p.name} · {p.model}</option>)}
+        </select></label><small>{r.model ?? '未配置，不会静默降级'} · 最近：{runs.find(t => t.role_id === r.role)?.status ?? '未运行'}</small>
+      </article>)}</div>
+      <div className="settings-block">
+        <h3>工种交接 / 风格预制建议</h3>
+        <p>当前规范锁：{pin || '未冻结（先在下方规范中心选择版本）'}</p>
+        <label>执行工种<select value={role} onChange={e => { setRole(e.target.value); setTool('propose'); }}>
+          {roles.map(r => <option key={r.role} value={r.role}>{r.label}</option>)}</select></label>
+        <label>任务类型<select value={tool} onChange={e => setTool(e.target.value)}>
+          {(current?.tool_allowlist ?? ['propose']).map(t => <option key={t} value={t}>{t === 'style_proposal' ? '风格建议（仅草案）' : '专业计划'}</option>)}</select></label>
+        <p>所需上游产物：{current?.required_inputs.join('、') || '无'}。在下方勾选准确的版本。</p>
+        <label>剧本 / 工作简报<textarea rows={5} value={brief} onChange={e => setBrief(e.target.value)} /></label>
+        <label>用户锁定故事事实（每行一条，编剧必须原样保留）<textarea rows={2} value={facts} onChange={e => setFacts(e.target.value)} /></label>
+        <label><input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)} />
+          允许剪辑预览使用 mock / 部分技术验证镜头（不进入正式交付）</label>
+        <button disabled={busy || !pin || !current?.profile_id} onClick={() => act(() => api(
+          `/projects/${projectId}/film-agents/${role}/run`, json('POST', {
+            brief, locked_story_facts: facts.split('\n').filter(Boolean), input_revision_ids: inputs,
+            tool, offline_preview: offline,
+          })))}>运行工种</button>
+      </div>
+      <h3>版本化产物 / 剪辑决策 EDL</h3>
+      {!artifacts.length && <p>尚无产物。先配置模型并执行编剧任务；Mock 配置需注入结构化测试响应，不会伪造专业产物。</p>}
+      {artifacts.map(a => <details key={a.id} className="settings-block">
+        <summary><input type="checkbox" aria-label={`选择 ${a.kind} ${a.id}`} disabled={a.stale} checked={inputs.includes(a.id)}
+          onChange={e => setInputs(v => e.target.checked ? [...v, a.id] : v.filter(id => id !== a.id))} />
+          {a.kind} · {a.id.slice(0, 8)} · {a.stale ? '依赖已失效' : a.approved_by ? '用户已应用' : '待用户审查'}</summary>
+        <pre>{JSON.stringify(a.payload_json, null, 2)}</pre><small>SHA-256 {a.sha256}</small>
+        {a.kind === 'StyleProposal' && <button disabled={busy || a.stale} onClick={() => act(() => api(
+          `/projects/${projectId}/film-artifacts/${a.id}/style-draft`, { method: 'POST' }))}>应用为风格草案（仍需人工冻结）</button>}
+        {a.kind === 'CameraPlan' && <button disabled={busy || a.stale} onClick={() => act(() => api(
+          `/projects/${projectId}/film-artifacts/${a.id}/apply-camera`, json('POST', {
+            continuity_artifact_id: artifacts.find(r => inputs.includes(r.id) && r.kind === 'ContinuityReport')?.id ?? '',
+          })))}>人工应用摄影方案（需勾选对应场记报告）</button>}
+      </details>)}
+      <h3>Agent 运行记录</h3>
+      {runs.map(r => <details key={r.id}><summary>{r.role_id} · {r.model_id} · {r.status} {r.error_code}</summary>
+        <pre>{JSON.stringify(r, null, 2)}</pre></details>)}
+    </section>
+    <section className="panel" id="h3-rulebook">
+      <div className="panel-header"><h2>H3 官方规范中心</h2><button disabled={busy} onClick={() => act(
+        () => api('/h3-rulebook/recheck', { method: 'POST' }))}>重新校验来源文件</button></div>
+      <p>五种模式：T2VA / I2VA / FL2VA / L2VA / Ref2VA。本机工作流能力仍为 PENDING_LOCAL_H3。</p>
+      <p>可执行规则由 Shine 自编并固定版本；官方原文未缓存时显示 SOURCE_UNAVAILABLE，许可未确认前不提供原文分发。</p>
+      {hub?.packs.map(p => <article className="settings-block" key={p.id}>
+        <b>{p.id}</b><p>SHA-256 {p.sha256}</p><p>{p.approved_at ? '规则包已批准' : '候选版本待人工批准'}</p>
+        <button disabled={busy || !!pin || !p.approved_at} onClick={() => act(() => api(
+          `/projects/${projectId}/rulepack/freeze`, json('POST', { rulepack_id: p.id })))}>冻结到本项目</button>
+        {!p.approved_at && <button disabled={busy} onClick={() => act(() => api(
+          `/h3-rulebook/packs/${p.id}/approve`, { method: 'POST' }))}>人工批准此规则包</button>}
+        <details><summary>版本与来源元数据</summary><pre>{JSON.stringify(p.manifest, null, 2)}</pre></details>
+      </article>)}
+      <h3>官方来源 / 本机缓存</h3>
+      {hub?.sources.map(s => <article key={s.path} className="settings-block">
+        <a href={s.url} target="_blank" rel="noreferrer">{s.path}</a><p>{s.local_cache_status} · {s.sha256}</p>
+        <label>导入你已合法获取的原始文件（仅本机缓存）<input type="file" disabled={busy} onChange={e => {
+          const file = e.target.files?.[0]; if (!file) return;
+          const data = new FormData(); data.append('file', file);
+          act(() => api(`/h3-rulebook/cache?source_path=${encodeURIComponent(s.path)}`, { method: 'POST', body: data }));
+          e.target.value = '';
+        }} /></label></article>)}
+      <label>检索机器规则<input value={query} onChange={e => setQuery(e.target.value)} placeholder="标签、字段名或规则 ID" /></label>
+      {filteredRules.map(r => <p key={r.id}><b>{r.origin} · {r.id}</b> — {r.summary}<br /><small>{r.source_path} · {r.locator}</small></p>)}
+      <h3>确定性镜头预检</h3>
+      {shots.map(s => <button key={s.id} disabled={busy || !pin} onClick={() => act(() => api(
+        `/shots/${s.id}/compile`, { method: 'POST' }))}>{s.name}：校验并编译</button>)}
+      <h3>本机 Workflow 能力</h3>
+      {hub?.local_workflow_capabilities.map(w => <p key={w.name}>{w.name} · {w.mode} · {w.status}</p>)}
+      <details><summary>提交候选规则包 / 差异审查</summary>
+        <p>仅支持经过当前代码校验的固定官方版本；上游版本或机器规则变化需要开发、测试后才能批准。</p>
+        <textarea rows={5} value={candidate} onChange={e => setCandidate(e.target.value)} placeholder="候选 manifest JSON" />
+        <button disabled={busy || !candidate} onClick={() => act(() => api('/h3-rulebook/candidates', json('POST', {
+          manifest: JSON.parse(candidate),
+        })))}>生成差异并提交候选</button></details>
+    </section>
+    {message && <p role="status">{message}</p>}
+    {result !== null && <details open><summary>最近操作结果</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}
+  </>;
+}

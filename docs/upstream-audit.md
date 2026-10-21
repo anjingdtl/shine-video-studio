@@ -1,5 +1,22 @@
 # Upstream source and license audit
 
+## V1.1 recheck (2026-10-21)
+
+Re-read the official SKILL.md, base-en.txt and ref-en.txt through the GitHub connector at the
+same exact `d21241f0a4b3acbb34c97dae47fa417b7065e438` revision. Independently fetched those
+fixed public URLs into memory and recomputed SHA-256: all three matched the digests below.
+Also re-read the pinned README and recorded Git blob SHA
+`bdfd2473d24434599913d8d9edb9b96a6dc13603` and SHA-256
+`7964f3044d3c7efaa054bb823644ad98cf9ea43389f994c51e08977822f16bac`.
+Capability limits cite its System Overview / Model Variants tables as OFFICIAL_H3,
+separately from Shine policy and local workflow evidence.
+Git blob SHAs are now recorded in `shine/h3/rulebook.py`; source section locators accompany
+the independently authored rules. No official guide text, upstream implementation, GPL
+plugin, model weight or example workflow was copied into this V1.1 distribution. The raw
+documentation redistribution license is still unconfirmed. Import of legally acquired
+bytes is local-only, user-initiated and hash-checked. No upstream code is reused in V1.1.
+Actual workflow/node/checkpoint compatibility and all H3 inference remain PENDING_LOCAL_H3.
+
 Read-only source review on 2026-10-20. Each revision below is the exact shallow-clone `HEAD` inspected. No upstream code, model weights, generated media, prompts, example workflows, or user data were copied into Shine.
 
 ## `qiukaihui/comfyui-auto-drama`

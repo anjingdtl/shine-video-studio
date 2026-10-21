@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from shine.api_agent import router as agent_router
 from shine.api_comfy import router as comfy_router
+from shine.api_film import router as film_router
 from shine.api_llm import router as llm_router
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
@@ -327,6 +328,7 @@ def create_app(
     app.include_router(llm_router)
     app.include_router(agent_router)
     app.include_router(comfy_router)
+    app.include_router(film_router)
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:

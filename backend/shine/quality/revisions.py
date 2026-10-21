@@ -127,6 +127,14 @@ def revision_for_prompt(
     revised_spec = _apply_directive(spec, root_cause=root_cause, attempt_no=attempt_no)
     if revised_spec is None:
         return None
+    if request.get("rulepack_id"):
+        # V1.1 official descriptive-language gate also applies to repairs.
+        camera = dict(revised_spec.camera)
+        camera["repair_directive"] = (
+            "Preserve the approved identity, costume, dialogue and frozen style. "
+            f"Keep composition stable and clarify the visible action; repair iteration {attempt_no}."
+        )
+        revised_spec = revised_spec.model_copy(update={"camera": camera})
     compiler = H3PromptCompiler()
     try:
         compiled: CompiledPrompt = compiler.compile(

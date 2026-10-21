@@ -261,9 +261,7 @@ def _expected_kind(use_as: str) -> str:
     return "image" if use_as in {"subject", "picture"} else use_as
 
 
-def _validate_binding_inputs(
-    db: Session, project: Project, bindings: list[ShotBindingInput]
-) -> dict[str, Asset]:
+def _validate_binding_inputs(db: Session, project: Project, bindings: list[ShotBindingInput]) -> dict[str, Asset]:
     if len(bindings) > MAX_TOTAL_REFERENCES:
         raise HTTPException(status_code=422, detail="A shot may bind at most 12 reference files")
     asset_ids = [binding.asset_id for binding in bindings]
@@ -272,9 +270,7 @@ def _validate_binding_inputs(
     assets = (
         {
             asset.id: asset
-            for asset in db.scalars(
-                select(Asset).where(Asset.project_id == project.id, Asset.id.in_(asset_ids))
-            ).all()
+            for asset in db.scalars(select(Asset).where(Asset.project_id == project.id, Asset.id.in_(asset_ids))).all()
         }
         if asset_ids
         else {}
@@ -356,9 +352,7 @@ def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
     )
 
 
-def build_reference_manifest(
-    bindings: list[ShotBindingInput], assets: dict[str, Asset]
-) -> list[ReferenceManifestItem]:
+def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str, Asset]) -> list[ReferenceManifestItem]:
     """Build the deterministic, request-local H3 label manifest."""
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     label_counts = {"subject": 0, "picture": 0, "video": 0, "audio": 0}
@@ -396,10 +390,7 @@ def manifest_from_shot_bindings(db: Session, shot: Shot) -> list[ReferenceManife
     if not rows:
         return []
     assets = {
-        asset.id: asset
-        for asset in db.scalars(
-            select(Asset).where(Asset.id.in_([row.asset_id for row in rows]))
-        ).all()
+        asset.id: asset for asset in db.scalars(select(Asset).where(Asset.id.in_([row.asset_id for row in rows]))).all()
     }
     bindings = [
         ShotBindingInput(
@@ -467,6 +458,14 @@ def make_render_request(
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     manifest = build_reference_manifest(ordered, assets)
 
+    from shine.h3.rulebook import H3RulebookRegistry
+
+    registry = H3RulebookRegistry()
+    try:
+        pack = registry.for_project(db, project.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     compiler = H3PromptCompiler()
     try:
         compiled: CompiledPrompt = compiler.compile(
@@ -477,6 +476,10 @@ def make_render_request(
             mode_hint=body.generation_mode,
         )
     except PromptCompilationError as exc:
+        if pack:
+            raise HTTPException(
+                status_code=422, detail=registry.compilation_failure(pack, exc).model_dump(mode="json")
+            ) from exc
         raise HTTPException(
             status_code=422,
             detail={"code": exc.code, "message": str(exc), "details": exc.details},
@@ -494,6 +497,7 @@ def make_render_request(
         workflow_hash = profile.graph_sha256
 
     render_request = RenderRequest(
+        project_language=project.language,
         idempotency_key=uuid4().hex,
         shot_id=shot.id,
         shot_revision=shot.revision,
@@ -513,6 +517,13 @@ def make_render_request(
         workflow_profile_hash=workflow_hash,
         expected_duration_s=spec.duration_target_s,
     )
+    # V1.1 projects explicitly freeze their rule pack. Legacy jobs retain the
+    # original pinned compiler and are never silently enrolled in a new policy.
+    if pack:
+        render_request = render_request.model_copy(update={"rulepack_id": pack.id, "rulepack_hash": pack.sha256})
+        report = registry.validate(render_request, pack)
+        if not report.passed:
+            raise HTTPException(status_code=422, detail=report.model_dump(mode="json"))
     if not stored and bindings:
         set_shot_bindings(db, project, shot, bindings)
     compiler_meta = {
@@ -544,9 +555,7 @@ def mark_stale_descendants(db: Session, starting_job_ids: list[str], *, project_
     frontier = list(starting_job_ids)
     while frontier:
         parent_id = frontier.pop()
-        child_ids = db.scalars(
-            select(JobDependency.child_job_id).where(JobDependency.parent_job_id == parent_id)
-        ).all()
+        child_ids = db.scalars(select(JobDependency.child_job_id).where(JobDependency.parent_job_id == parent_id)).all()
         for child_id in child_ids:
             if child_id in affected:
                 continue

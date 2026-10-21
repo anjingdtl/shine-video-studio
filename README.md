@@ -75,9 +75,17 @@ npm --prefix frontend run build
 
 The suite covers style-version gates, binding isolation, concurrent revision, two-worker claims, crash recovery, uncertain submission, project audit, worker health, LLM retry/schema/auth classification, Agent output rejection, H3 label/section validation, Fake ComfyUI lifecycle, continuity, technical QC fallback, semantic fusion, repair budgets, path traversal, disk-full handling, and Alembic fresh/M1 upgrades.
 
-The current offline suite is **173 tests, all passing**. On top of the earlier coverage it adds the reference-media transfer rules, the five quality gates, the submission reconciliation matrix, the request-revision repair rules, the automatic recovery of finished external tasks, the migration round trip, the Windows platform review, and the Offline Production E2E. `imageio-ffmpeg` is a development-only dependency so the synthetic test media is a real, decodable MP4 even on a machine without a system FFmpeg.
+The V1.1 offline suite has **200 tests** (174 existing + 26 film-crew/rulebook cases). It includes the Fake ComfyUI crew collaboration/repair/EDL loop. `imageio-ffmpeg` is a development-only dependency for synthetic test media, never real H3 generation. See the V1.1 implementation report for exact validation results and scope.
+
+## V1.1 professional film crew
+
+After migrating, open **影视制片团队** and **H3 官方规范中心**. Configure each role against an existing provider profile (all roles may share one), then explicitly freeze the project rule pack. Request a style suggestion or freeze your Style Bible, run the scriptwriter, select its artifact for the director, then select the director artifact for the cinematographer. The continuity supervisor reviews both plans. A user may then apply the camera plan, which performs deterministic preflight and creates shots in the existing production system. Editor EDL proposals only use eligible current artifacts; mock/unverified sources require an explicitly labelled offline preview.
+
+Descriptions submitted under V1.1 rules must be English; dialogue remains in its original language. Chinese style/camera descriptions are reported as blockers, never silently translated. Official source files are not redistributed: import legally acquired, fixed-revision files through the local cache controls if desired. Missing originals and real-H3 capability status remain visible. No real LLM or H3 GPU acceptance is implied by the offline suite.
 
 ## Documentation
+- [V1.1 产品修订方案](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
+- [V1.1 contracts and API](docs/v1.1-contracts.md)
 - [V1.0 项目建设方案](docs/Shine视频工作台_V1.0_项目建设方案.md)
 - [AGENTS.md — 开发规范](AGENTS.md)
 - [architecture.md](docs/architecture.md)

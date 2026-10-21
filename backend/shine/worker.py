@@ -586,6 +586,34 @@ def run_one(
             )
             if not candidate:
                 return None
+            # Recheck immutable rules at the last boundary, including requests
+            # rebuilt by the existing repair engine. A failed rule never submits.
+            from shine.models import ProjectRuleLock
+
+            if (candidate.request or {}).get("rulepack_id") or db.get(ProjectRuleLock, candidate.project_id):
+                from shine.h3.rulebook import H3RulebookRegistry
+
+                registry = H3RulebookRegistry(settings.data_dir / "h3-source-cache" if settings else None)
+                try:
+                    if settings and any(s["local_cache_status"] == "TAMPERED" for s in registry.cache_status()):
+                        raise ValueError("OFFICIAL_CACHE_TAMPERED")
+                    pack = registry.for_project(db, candidate.project_id)
+                    request = RenderRequest.model_validate(candidate.request)
+                    if not pack or not registry.validate(request, pack).passed:
+                        raise ValueError("RULE_PREFLIGHT_FAILED")
+                except ValueError:
+                    candidate.status = "NEEDS_REVIEW"
+                    candidate.state_version += 1
+                    candidate.failure_code = "RULE_PREFLIGHT_FAILED"
+                    add_audit(
+                        db,
+                        "orchestrator",
+                        "RULE_PREFLIGHT_FAILED",
+                        "job",
+                        candidate.id,
+                        project_id=candidate.project_id,
+                    )
+                    return candidate.id
             now = utcnow()
             lease_seconds = (settings.worker_lease_seconds if settings else 30)
             result = db.execute(
@@ -879,6 +907,8 @@ def _finalize_comfy_attempt(
         remote_consent = bool(project and project.allow_remote_review)
         project_id = job.project_id
         existing = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        if existing and existing.attempt_id != attempt_id:
+            existing = None
         artifact_path: Path | None = None
         if existing:
             candidate = settings.data_dir / existing.storage_path
@@ -1011,7 +1041,7 @@ def _finalize_comfy_attempt(
         job, attempt = guarded
         job.provider_job_id = job.provider_job_id or prompt_id
         artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
-        if artifact is None:
+        if artifact is None or artifact.attempt_id != attempt.id:
             artifact = MediaArtifact(
                 project_id=job.project_id,
                 job_id=job.id,

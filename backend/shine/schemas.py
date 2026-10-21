@@ -252,6 +252,9 @@ class CompiledPrompt(APIModel):
 
 
 class RenderRequest(APIModel):
+    project_language: str = "Chinese"
+    rulepack_id: str | None = None
+    rulepack_hash: str | None = None
     idempotency_key: str
     shot_id: str
     shot_revision: int
@@ -421,6 +424,13 @@ class ProviderTestResult(APIModel):
 
 
 class AgentRole(StrEnum):
+    SCRIPTWRITER = "scriptwriter"
+    DIRECTOR = "director"
+    CINEMATOGRAPHER = "cinematographer"
+    EDITOR = "editor"
+    CONTINUITY_SUPERVISOR = "continuity_supervisor"
+    SOUND_DIRECTOR = "sound_director"
+    PRODUCER = "producer"
     SCRIPT_PLANNER = "script_planner"
     SHOT_PLANNER = "shot_planner"
     REPAIR_PLANNER = "repair_planner"

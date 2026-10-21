@@ -87,7 +87,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
         }.issubset(asset_columns)
         audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_events)")}
         assert "project_id" in audit_columns
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "c3d81f6a2b45"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "e8f1a2b3c4d5"
     finally:
         connection.close()
 
