@@ -121,7 +121,7 @@ def test_health_and_production_gate_requires_explicit_style_freeze(studio):
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "shine-api",
-        "render_provider": "mock-only",
+        "render_provider": "mock",
         "h3_connected": False,
     }
     project_id = create_project(client)

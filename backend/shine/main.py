@@ -335,9 +335,24 @@ def create_app(
         return {
             "status": "ok",
             "service": "shine-api",
-            "render_provider": "mock-only",
+            "render_provider": settings.render_provider,
+            # Cheap configured-state flag; the live connection check lives in
+            # /api/v1/system/status so health stays answerable without I/O.
             "h3_connected": False,
         }
+
+    def _h3_connected() -> bool:
+        """True only when the configured real renderer answers right now."""
+        if settings.render_provider != "comfyui":
+            return False
+        try:
+            from shine.comfy.client import ComfyUIClient
+
+            client = ComfyUIClient(settings.comfyui_base_url, timeout_s=2.0)
+            client.system_stats()
+            return True
+        except Exception:
+            return False
 
     @app.get("/api/v1/system/status", response_model=SystemStatus)
     def system_status(db: DBSession) -> SystemStatus:
@@ -359,7 +374,7 @@ def create_app(
         return SystemStatus(
             worker_online=any(worker.online for worker in workers),
             mock_provider_available=True,
-            h3_connected=False,
+            h3_connected=_h3_connected(),
             render_mode=settings.render_provider,
             pending_jobs=pending or 0,
             running_jobs=running or 0,
