@@ -3,8 +3,8 @@
 - 日期：2026-10-21
 - 分支：`feat/m1-hardening-m2-offline`
 - 基线：`main` / `65e0fb590f85f036add495009f36f5519d2e2924`（M0+M1）
-- 实现提交：`__IMPLEMENTATION_SHA__`
-- 报告补丁提交：`__REPORT_SHA__`（仅补充本 SHA 与最终命令结果，不改变实现）
+- 实现提交：`9d0a09f327a21d4995e68a97d9e50f0bf85e1022`
+- 报告补丁提交：见 `git log`（本报告随文档补丁提交）
 
 状态标签：
 
@@ -227,7 +227,7 @@ npm --prefix frontend run build
 
 ## 13. 实际 Git Commit SHA
 
-- 实现提交：`__IMPLEMENTATION_SHA__`
-- 报告 SHA 补丁提交：`__REPORT_SHA__`
+- 实现提交：`9d0a09f327a21d4995e68a97d9e50f0bf85e1022`
+- 报告 SHA 补丁提交：本报告所在的文档补丁提交（`git log` 可见）
 
 未强推、未合并 `main`。远端推送/PR 按仓库现有授权策略执行；如无授权，保留本地提交并在此报告。
