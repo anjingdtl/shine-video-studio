@@ -289,7 +289,10 @@ def parse_bytes(data: bytes, content_type: str = "") -> MediaInfo:
 
 
 def _ffprobe_json(path: Path, ffprobe_path: str, timeout_s: float = 30) -> dict[str, Any] | None:
-    executable = shutil.which(ffprobe_path) or shutil.which("ffprobe")
+    # The configured executable is authoritative. There is no hidden fallback to
+    # a different binary, so "the tool is not installed" can be simulated and
+    # honoured exactly as configured.
+    executable = shutil.which(ffprobe_path)
     if not executable:
         return None
     command = [
@@ -315,8 +318,10 @@ def _ffprobe_json(path: Path, ffprobe_path: str, timeout_s: float = 30) -> dict[
 
 
 _DURATION_PATTERN = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}\.\d+)")
+# The resolution is a "WIDTHxHEIGHT" pair. At least two digits on each side
+# keeps the pattern away from hexadecimal literals such as "0x31637661".
 _VIDEO_PATTERN = re.compile(
-    r"Stream #\d+:\d+.*?:\s*Video:\s*(?P<codec>[A-Za-z0-9_]+).*?(?P<width>\d+)x(?P<height>\d+)",
+    r"Stream #\d+:\d+.*?:\s*Video:\s*(?P<codec>[A-Za-z0-9_]+).*?(?P<width>\d{2,5})x(?P<height>\d{2,5})(?![0-9])",
     re.DOTALL,
 )
 _FPS_PATTERN = re.compile(r"(?P<fps>\d+(?:\.\d+)?)\s*fps")
@@ -329,7 +334,7 @@ def _ffmpeg_metadata(path: Path, ffmpeg_path: str, timeout_s: float = 30) -> dic
     FFmpeg prints the same container facts to stderr. This keeps the technical
     QC honest on installations that ship only ``ffmpeg``.
     """
-    executable = shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+    executable = shutil.which(ffmpeg_path)
     if not executable:
         return None
     command = [executable, "-hide_banner", "-i", str(path)]

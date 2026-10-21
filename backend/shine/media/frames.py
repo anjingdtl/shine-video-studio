@@ -11,8 +11,13 @@ import subprocess
 from pathlib import Path
 
 
-def ffmpeg_executable(ffmpeg_path: str) -> str | None:
-    return shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+def ffmpeg_executable(ffmpeg_path: str = "ffmpeg") -> str | None:
+    """Resolve the configured FFmpeg binary.
+
+    The configured name is authoritative: there is no hidden fallback to a
+    different binary, so "FFmpeg is not installed" is honoured exactly.
+    """
+    return shutil.which(ffmpeg_path)
 
 
 def extract_frames(

@@ -26,7 +26,7 @@ def _check(name: str, status: str, detail: str = "", measured=None) -> Technical
 
 
 def _silence_check(path: Path, ffmpeg_path: str) -> TechnicalCheck:
-    executable = shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+    executable = shutil.which(ffmpeg_path)
     if not executable:
         return _check("audio_silence", "unavailable", "FFmpeg is not installed; silence detection was not run")
     command = [
@@ -63,7 +63,7 @@ def _full_decode_check(path: Path, ffmpeg_path: str) -> TechnicalCheck:
     frames are decodable. This check is the only one that may claim a full
     decode, and it is honestly ``unavailable`` when FFmpeg is not installed.
     """
-    executable = shutil.which(ffmpeg_path) or shutil.which("ffmpeg")
+    executable = shutil.which(ffmpeg_path)
     if not executable:
         return _check(
             "decode",
@@ -133,7 +133,7 @@ class TechnicalQC:
                 _check(
                     "stream_metadata",
                     "pass",
-                    "FFprobe parsed the container metadata and the stream list",
+                    f"{info.tool} parsed the container metadata and the stream list",
                 )
             )
         else:

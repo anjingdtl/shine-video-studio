@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from shine.media.probe import make_mp4_fixture, parse_bytes, probe_file
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
 
@@ -11,7 +13,7 @@ def offline_qc() -> TechnicalQC:
 def test_container_probe_extracts_duration_resolution_fps_and_audio(tmp_path):
     path = tmp_path / "shot.mp4"
     path.write_bytes(make_mp4_fixture(duration_s=6, width=768, height=1344, fps=24, audio=True))
-    info = probe_file(path, ffprobe_path="definitely-missing")
+    info = probe_file(path, ffprobe_path="definitely-missing", ffmpeg_path="definitely-missing")
     assert info.tool == "python-fallback"
     assert info.decoded is False
     assert abs((info.duration_s or 0) - 6.0) < 0.05
@@ -83,3 +85,24 @@ def test_probe_fallback_handles_wav():
     info = parse_bytes(wav, "audio/wav")
     assert info.container == "wav" and info.has_audio is True
     assert abs((info.duration_s or 0) - 1.0) < 0.01
+
+
+def test_real_ffmpeg_proves_a_full_decode(tmp_path):
+    """The other half of the contract: with the tools present the check really decodes."""
+    from tests.conftest import ffmpeg_executable, make_test_video_bytes
+
+    executable = ffmpeg_executable()
+    if not executable:
+        pytest.skip("no FFmpeg binary is available on this host")
+    path = tmp_path / "real.mp4"
+    path.write_bytes(make_test_video_bytes(duration_s=2, width=320, height=240, fps=24))
+    result = TechnicalQC(ffprobe_path="definitely-missing-ffprobe", ffmpeg_path=executable).check(
+        path,
+        expectations=TechnicalExpectations(duration_s=2.0, expect_audio=True),
+    )
+    checks = {check.name: check for check in result.checks}
+    assert checks["decode"].status == "pass"
+    # Without FFprobe the stream metadata comes from the FFmpeg fallback.
+    assert checks["stream_metadata"].status == "pass"
+    assert checks["duration"].status == "pass"
+    assert result.result == "passed"

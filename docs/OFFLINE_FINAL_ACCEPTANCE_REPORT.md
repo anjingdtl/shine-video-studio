@@ -194,14 +194,15 @@ npm --prefix frontend run build
 | `backend/tests/test_offline_e2e.py` | 2 | Offline production E2E |
 | `backend/tests/test_final_review.py` | 10 | §6 global review |
 | `backend/tests/test_migrations_windows.py` | 3 | Migration fresh/upgrade/round trip |
-| **New total** | **68** | |
+| `backend/tests/test_technical_qc.py` (added) | 1 | The real full-decode branch with an actual FFmpeg binary |
+| **New total** | **69** | |
 
 ## 6. Test results
 
 | Run | Result |
 | --- | --- |
 | Baseline before this round (`main` @ `f22a1b0`) | 105 passed, 0 failed, 0 skipped |
-| After this round | **173 passed, 0 failed, 0 skipped** |
+| After this round | **174 passed, 0 failed, 0 skipped** |
 | `ruff check backend/shine backend/alembic backend/tests` | All checks passed |
 | `npm --prefix frontend run build` | `tsc -b` + `vite build` succeeded |
 | `alembic upgrade head` on a fresh database | head = `c3d81f6a2b45` |
@@ -211,6 +212,14 @@ npm --prefix frontend run build
 No test is skipped or xfailed. FFmpeg is provided by the `imageio-ffmpeg`
 development dependency when the host has no system FFmpeg, so the synthetic
 media used by the E2E is a real, decodable MP4 rather than a container stub.
+
+The first Windows CI run found a **host-dependent test defect**: the media
+tool lookup had a hardcoded `shutil.which("ffprobe")` fallback that ignored
+the configured executable, so a test that asked for a missing tool silently got
+the real one. The configured executable is now authoritative everywhere, the
+affected tests name their tools explicitly, and a new test covers the
+"tools present" branch with a real full decode. The suite now behaves the
+same on a host with and without FFmpeg.
 
 ## 7. Offline E2E result
 
