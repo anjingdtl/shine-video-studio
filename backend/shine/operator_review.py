@@ -294,7 +294,9 @@ def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, cl
         outcome("semantic", ["identity", "costume", "scene_props", "camera_action", "continuity", "other"]),
         outcome("style", ["style"]),
     ]
-    if request.shot_spec.dialogue:
+    if request.shot_spec.dialogue or any(
+        decision.items[name].status == "FAIL" for name in ("dialogue", "voice", "lip_sync")
+    ):
         audio = outcome("audio", ["dialogue", "voice", "lip_sync"], listening=True)
         if not decision.watched and audio.status == "passed":
             audio = replace(audio, status="needs_review", coverage="not_covered")

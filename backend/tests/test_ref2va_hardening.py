@@ -8,6 +8,7 @@ from threading import Barrier
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from alembic import command
 from shine.comfy.capabilities import HARD, SOFT, VIDEO, profile_metadata
@@ -58,6 +59,14 @@ def test_legacy_continuity_request_keeps_its_original_json():
     old = request.model_dump(mode="json")
     old["shot_spec"]["continuity"]["mode"] = "last_frame"
     assert RenderRequest.model_validate(old).model_dump(mode="json") == old
+
+
+def test_continuity_names_normalize_and_malformed_json_is_validation_error():
+    assert ContinuitySettings(mode=SOFT).mode.value == "last_frame"
+    assert ContinuitySettings(mode=HARD).mode.value == "hard_frame_anchor"
+    assert ContinuitySettings(mode=VIDEO).mode.value == "video_reference"
+    with pytest.raises(ValidationError):
+        ContinuitySettings.model_validate({"mode": {"forged": "identity"}})
 
 
 def test_film_runs_with_identical_windows_clock_ticks_show_newest_insertion(api):

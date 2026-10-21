@@ -96,6 +96,8 @@ class ContinuitySettings(APIModel):
     @field_validator("mode", mode="before")
     @classmethod
     def normalize_continuity_requirement(cls, value):
+        if not isinstance(value, str):
+            return value
         return {
             "SOFT_REFERENCE_CONTINUITY": "last_frame",
             "HARD_FRAME_ANCHOR_CONTINUITY": "hard_frame_anchor",

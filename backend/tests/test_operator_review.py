@@ -267,6 +267,17 @@ def test_reused_request_id_after_failed_review_is_refused(reviewable):
         assert exc.value.status_code == 409
 
 
+@pytest.mark.parametrize("item", ITEMS)
+def test_any_failed_item_blocks_even_on_a_shot_without_scripted_dialogue(reviewable, item):
+    _, factory, settings, job_id, fake, _ = reviewable
+    with factory() as db:
+        body = decision(db, settings, job_id)
+        body.items[item].status = "FAIL"
+        result = submit_review(db, settings, job_id, "test-human", body, client=fake)
+        assert result["status"] == "NEEDS_REVIEW"
+        assert result["result"] == "failed"
+
+
 def test_policy_change_during_external_checks_invalidates_decision(reviewable):
     _, factory, settings, job_id, fake, _ = reviewable
     original = fake.history

@@ -7,7 +7,7 @@
 - 仓库：`anjingdtl/shine-video-studio`，private，默认分支 main。
 - 起始提交/已刷新远端 main：`32ebffb12006fdeefda4b0a2e15e4736e2f6564b`。
 - 开发分支：`fix/v1.2.1-ref2va-final-hardening`，开始时工作区干净。
-- main 不改写、不合并、不强推；正式提交、PR 与 CI 记录在交付记录中补齐。
+- main 不改写、不合并、不强推；实现提交 `ffc36e74d5a12e45ed5004e8229c448c05c644f2`；交付见下方 PR 与 CI 记录。
 - **整体结论：BLOCKED（正式画质/严格接续与生产审批尚未闭合），不能宣称正式短剧质量验收完成。**
 
 ## 2. CI 与工程修复
@@ -42,7 +42,7 @@ SQLite 查询增加 rowid 次序，质量门也按相同原则稳定排序；不
 
 身份、服装、场景道具、动作运镜、风格、对白、音色、口型、连续性、其他异常逐项记录。
 有对白时，明确人工观看+试听及逐项证据可补齐 audio；音轨存在、能量或泛泛备注不能补齐。
-FAIL 或未审项保持 NEEDS_REVIEW。维护脚本复用 API，已移除数据库直写和 attempts[0]。
+任一分项 FAIL 均保持 NEEDS_REVIEW（包括无剧本对白镜头中的音频项失败）；必需未审项也保持 NEEDS_REVIEW。维护脚本复用 API，已移除数据库直写和 attempts[0]。
 
 ## 4. 连续性边界（IMPLEMENTED / TESTED）
 
@@ -130,8 +130,8 @@ npm audit --prefix frontend
 Worker 重启、提交不明不重投、请求修订返工预算和冻结风格保护。
 Windows PowerShell `verify_local_stack.ps1 -ApiPort 8127 -KeepData` 在全新临时目录运行通过：
 API 健康、Worker 在线、Mock PASSED、video_created=false、7 条审计；MOCK_VERIFIED。
-本机最新完整回归：242 passed，1 条既有 Starlette/AnyIO DeprecationWarning（68.11s）；
-另增加同时间戳排序合同反例后，Ref2VA 专项 14 passed。Ruff 全绿。
+本机最终完整回归：254 passed，1 条既有 Starlette/AnyIO DeprecationWarning（83.80s）；
+相较基线净增 49 项，同时间戳排序合同反例、非字符串连续性输入及十项 FAIL 不误放行反例均通过。Ruff 全绿。
 `npm ci`、TypeScript/Vite 6.4.5 build 全绿；`npm audit` 0 vulnerabilities。
 一次 npm ci 遇到测试 Vite 占用 esbuild 的 EPERM；停止本轮记录的隔离进程后已重跑通过。
 远端三项 CI 的最终数量和结果见交付记录。
@@ -180,4 +180,12 @@ A 原审批使用旧脚本，不能追认成新权限协议证据；历史不改
 进入 Git；ComfyUI 原始工作流、缓存、队列和历史均未改；额外 GPU 提交数为 0。
 本地测试进程使用隔离库；未开启真实 Worker。没有自行合并 PR。
 
-交付提交、PR、GitHub Actions Ubuntu/Windows/Frontend 最新结果：待实际推送后记录。
+- 主实现提交：`ffc36e74d5a12e45ed5004e8229c448c05c644f2`。
+- Pull Request：[PR #4](https://github.com/anjingdtl/shine-video-studio/pull/4)，未合并。
+- 主实现 CI：[run 39612420035](https://github.com/anjingdtl/shine-video-studio/actions/runs/39612420035)，Ubuntu backend / Windows backend / Frontend 均 TESTED（success）。
+- 同 SHA 的 PR 事件 CI：[run 39612982665](https://github.com/anjingdtl/shine-video-studio/actions/runs/39612982665)，三项也均 success。
+- 上述两轮后端均 243 passed；已读取 Ubuntu 与 Windows 日志，Windows 完整测试为 291.18 秒。
+- 最终补丁增加连续性输入类型防护，并保证无对白镜头的任一人工音频 FAIL 也不能放行；
+  本机最终全量为 254 passed，审片/Ref2VA 专项 49 passed，Ruff 全绿。
+- 补丁和本报告所处最新提交及其最终 CI：以 [PR 最新 Checks](https://github.com/anjingdtl/shine-video-studio/pull/4/checks) 为准，交付前另核对具体 head SHA；报告不伪造自引用的提交 hash。
+- 整体艺术质量仍为 BLOCKED，三项软件 CI 成功不解除本报告第 10 节的验收边界。
