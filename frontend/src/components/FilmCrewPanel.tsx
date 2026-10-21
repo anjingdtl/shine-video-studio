@@ -138,6 +138,6 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
         })))}>生成差异并提交候选</button></details>
     </section>
     {message && <p role="status">{message}</p>}
-    {result !== null && <details open><summary>最近操作结果</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}
+    {result !== null && <details open className="film-operation-result"><summary>最近操作结果</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}
   </>;
 }

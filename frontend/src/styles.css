@@ -138,3 +138,5 @@
 #film-crew button, #h3-rulebook button { border: 1px solid var(--line); background: var(--mint); color: var(--olive-dark); border-radius: 6px; padding: 8px 12px; font-size: 12px; }
 #film-crew h2, #h3-rulebook h2 { margin: 0; font-size: 20px; }
 #film-crew p, #h3-rulebook p { line-height: 1.65; }
+.film-operation-result { min-width: 0; overflow: hidden; }
+.film-operation-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
