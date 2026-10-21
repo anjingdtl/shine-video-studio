@@ -20,8 +20,11 @@
 | Baseline commit (start of round) | `f22a1b0b45ba6e2cc0ac73430a913defa466715d` (docs) |
 | Previous implementation commit | `9d0a09f327a21d4995e68a97d9e50f0bf85e1022` |
 | Development branch | `feat/m123-final-hardening` |
-| Final commit SHA | `6b49a0c7fd3190367ccca8ddd5fab9b6cb1217d6` |
+| Implementation commit SHA | `6b49a0c7fd3190367ccca8ddd5fab9b6cb1217d6` |
 | Working tree at start | clean, `main` up to date with `origin/main` |
+
+The implementation commit is `6b49a0c`. One documentation-only commit follows it
+on the same branch; it only records this SHA in the report.
 
 No destructive git operation was used. No `git reset --hard`, no force push, and
 no user data directory was reset or deleted.
@@ -370,6 +373,6 @@ No unexplained high-priority software defect remains in the offline scope.
 ## 16. Delivery
 
 * Branch: `feat/m123-final-hardening`
-* Commit SHA: `6b49a0c7fd3190367ccca8ddd5fab9b6cb1217d6`
+* Implementation commit SHA: `6b49a0c7fd3190367ccca8ddd5fab9b6cb1217d6`
 * The branch is pushed and a pull request is opened for review. It is **not**
   merged into `main`; merging requires the user's authorisation.
