@@ -133,6 +133,56 @@ def test_workflow_parameter_mapping_is_strict():
         apply_parameters(GRAPH, {"bad": "1.inputs.missing"}, {"bad": 1})
 
 
+def test_autogrow_dotted_parameter_paths_map_and_validate():
+    """Real H3 nodes expose autogrow inputs as dotted keys (values.a,
+    ref_images.ref_image_0); parameter paths and live object_info checks must
+    accept them while still rejecting unknown groups."""
+    from shine.comfy.workflow import validate_against_object_info
+
+    graph = {
+        "30": {
+            "class_type": "ComfyMathExpression",
+            "inputs": {"expression": "round(a * 24)", "values.a": 5.17},
+        },
+        "31": {
+            "class_type": "MiniMaxH3ReferenceToVideo",
+            "inputs": {
+                "clip": ["20", 0],
+                "prompt": "",
+                "width": 480,
+                "height": 864,
+                "length": ["30", 1],
+                "ref_images.ref_image_0": ["40", 0],
+            },
+        },
+    }
+    parameter_map = {
+        "positive_prompt": "31.inputs.prompt",
+        "duration": "30.inputs.values.a",
+    }
+    object_info = {
+        "ComfyMathExpression": {"input": {"required": {"expression": ["STRING"], "values": ["COMFY_AUTOGROW_V3"]}}},
+        "MiniMaxH3ReferenceToVideo": {
+            "input": {
+                "required": {"clip": ["CLIP"], "prompt": ["STRING"], "width": ["INT"], "height": ["INT"], "length": ["INT"]},
+                "optional": {"ref_images": ["COMFY_AUTOGROW_V3"]},
+            }
+        },
+    }
+    result = validate_against_object_info(graph, parameter_map, object_info)
+    assert result["missing_nodes"] == []
+    assert result["missing_inputs"] == []
+    prompt = apply_parameters(graph, parameter_map, {"positive_prompt": "p", "duration": 6.5})
+    assert prompt["30"]["inputs"]["values.a"] == 6.5
+    assert prompt["31"]["inputs"]["prompt"] == "p"
+    without_autogrow = {
+        "ComfyMathExpression": {"input": {"required": {"expression": ["STRING"]}}},
+        "MiniMaxH3ReferenceToVideo": {"input": {"required": {"clip": ["CLIP"]}}},
+    }
+    unknown_group = validate_against_object_info(graph, parameter_map, without_autogrow)
+    assert unknown_group["missing_inputs"]
+
+
 def test_comfy_disconnect_is_reported_without_resubmission(fake_comfy):
     client = ComfyUIClient(fake_comfy.base_url, timeout_s=0.2, max_retries=0)
     service = ComfyUIRenderService(client, asset_root=__import__("pathlib").Path("."))

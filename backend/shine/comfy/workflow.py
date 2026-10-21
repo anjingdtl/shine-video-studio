@@ -8,7 +8,21 @@ from typing import Any
 
 from shine.comfy.client import ComfyWorkflowError
 
-PATH_PATTERN = re.compile(r"^(\d+)\.inputs\.([A-Za-z0-9_]+)$")
+PATH_PATTERN = re.compile(r"^(\d+)\.inputs\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$")
+
+
+def _object_info_known_keys(input_spec: dict[str, Any]) -> set[str]:
+    """Input names a live ComfyUI server knows, including autogrow groups.
+
+    Autogrow inputs (``COMFY_AUTOGROW_V3``) appear in API workflows under
+    dotted keys such as ``values.a`` or ``ref_images.ref_image_0`` while
+    ``object_info`` only lists the group (``values`` / ``ref_images``), so both
+    the exact key and its leading group segment count as known.
+    """
+    known = set((input_spec.get("required") or {}).keys()) | set((input_spec.get("optional") or {}).keys())
+    for group in tuple(known):
+        known.add(group.split(".", 1)[0])
+    return known
 
 
 def canonical_graph(graph: dict[str, Any]) -> str:
@@ -51,9 +65,9 @@ def validate_against_object_info(
             continue
         definition = object_info.get(class_type) or {}
         input_spec = definition.get("input") or {}
-        known = set((input_spec.get("required") or {}).keys()) | set((input_spec.get("optional") or {}).keys())
+        known = _object_info_known_keys(input_spec)
         for key in (node.get("inputs") or {}):
-            if known and key not in known:
+            if known and key not in known and key.split(".", 1)[0] not in known:
                 missing_inputs.append({"node_id": node_id, "class_type": class_type, "input": key})
     for logical, path in parameter_map.items():
         match = PATH_PATTERN.match(path)
