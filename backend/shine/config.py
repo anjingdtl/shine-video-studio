@@ -43,6 +43,8 @@ class Settings:
     secret_store_dir: Path | None = None
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
+    operator_id: str = ""
+    operator_token_sha256: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -76,4 +78,6 @@ class Settings:
             secret_store_dir=data_dir / "secrets",
             ffprobe_path=os.getenv("SHINE_FFPROBE", "ffprobe"),
             ffmpeg_path=os.getenv("SHINE_FFMPEG", "ffmpeg"),
+            operator_id=os.getenv("SHINE_OPERATOR_ID", ""),
+            operator_token_sha256=os.getenv("SHINE_OPERATOR_TOKEN_SHA256", ""),
         )

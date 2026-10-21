@@ -1,7 +1,7 @@
 {
   "name": "local-h3-ref2va-2img",
   "mode": "Ref2VA",
-  "checkpoint_id": "MiniMax-H3-Base",
+  "checkpoint_id": "Minimax-H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
   "description": "Real local MiniMax-H3 Ref2VA pipeline (int8 diffusion + nvfp4 Qwen3-VL CLIP + fp16 video VAE + fp32 audio VAE), vanilla euler/simple 20-step sampling as proven by the machine's 2026-10-17 reconnect-fixed workflow. Supports exactly one subject image + one picture image; duration in seconds is snapped to the H3 17k+5 frame grid at 24 fps by the ComfyMathExpression node.",
   "required_nodes": [
     "MiniMaxH3ReferenceToVideo",

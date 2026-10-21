@@ -123,6 +123,7 @@ def test_health_and_production_gate_requires_explicit_style_freeze(studio):
         "service": "shine-api",
         "render_provider": "mock",
         "h3_connected": False,
+        "connection_probe": "not_run_use_system_status",
     }
     project_id = create_project(client)
     response = client.post(f"/api/v1/projects/{project_id}/style/freeze")

@@ -66,3 +66,18 @@ Read-only source review on 2026-10-20. Each revision below is the exact shallow-
 ## Shine license decision
 
 The initial Shine repository contained only project-authored planning documents and no source license. M0 adds an MIT license for the original Shine code because this implementation copies no upstream code. The separate MiniMax H3 model terms and the GPL-only plugin boundary remain applicable to their own components; this choice does not grant rights to those components.
+
+
+## V1.2.1 local read-only integration check (2026-10-21)
+
+Inspected the installed ComfyUI checkout at commit
+`b0b743566f65daafc423b4fea8a2fbda94b3384a`; the inspected file
+`comfy_extras/nodes_minimax_h3.py` is clean relative to that checkout and has SHA-256
+`5999ed8c22b13c8251084c0629fd82137d2fb52b55106abfc73bf5cafc73841d`.
+Read only the ReferenceToVideo autogrow schema/bounds and AddGuide schema/conditioning
+behavior. No upstream source or full-text guide was copied. No ComfyUI file, model,
+workflow or cache was modified. AddGuide's existence is not HARD_FRAME_ANCHOR acceptance.
+Static validation checks the actual 9 image / 3 video / 3 audio bounds. Dynamic graph
+expansion stays disabled; video transfer and hard continuity stay pending real testing.
+The previous V1.1 acceptance claims above remain historical and are superseded for current
+local Ref2VA scope by H3_REF2VA_V1.2.1_FINAL_CLOSEOUT.md. No license conclusion was expanded.

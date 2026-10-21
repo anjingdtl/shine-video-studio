@@ -343,6 +343,7 @@ class WorkflowProfile(Base):
     required_nodes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     checkpoint_id: Mapped[str] = mapped_column(String(160), default="MiniMax-H3-Base", nullable=False)
     graph_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_identity: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     validated_against: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 

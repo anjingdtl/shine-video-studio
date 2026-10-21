@@ -508,8 +508,18 @@ def make_render_request(
         if profile.mode.lower() != compiled.mode.value.lower():
             raise HTTPException(status_code=422, detail="Workflow profile does not support the compiled H3 mode")
         workflow_hash = profile.graph_sha256
+        from shine.comfy.capabilities import HARD, VIDEO, continuity_capability, profile_metadata
+
+        capability = continuity_capability(spec.continuity.mode.value)
+        capabilities = profile_metadata(profile.graph, profile.mode, profile.parameter_map, profile.media_transfers)
+        if capability and capability not in capabilities["continuity_modes"]:
+            code = "PENDING_HARD_CONTINUITY_TEST" if capability == HARD else "PENDING_WORKFLOW_MAPPING"
+            if capability == VIDEO:
+                code = "SUPPORTED_NODE_UNVERIFIED_TRANSFER"
+            raise HTTPException(status_code=422, detail={"code": code, "requested_continuity": capability})
 
     render_request = RenderRequest(
+        model_checkpoint_id=profile.checkpoint_id if body.workflow_profile_id else "MiniMax-H3-Base",
         project_language=project.language,
         idempotency_key=uuid4().hex,
         shot_id=shot.id,

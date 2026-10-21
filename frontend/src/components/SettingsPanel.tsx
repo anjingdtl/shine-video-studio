@@ -141,7 +141,7 @@ export default function SettingsPanel({
             {comfyResult.ok ? <Check size={13} /> : <X size={13} />}
             <span>{comfyResult.message}{comfyResult.node_count ? ` · ${comfyResult.node_count} 节点` : ''}</span>
           </div>}
-          <div className="guardrail-note"><Cpu size={13} /><span>真实 MiniMax-H3 必须通过本机 ComfyUI；当前未进行 GPU 真机验收。</span></div>
+          <div className="guardrail-note"><Cpu size={13} /><span>仅本机 MiniMax-H3 Ref2VA；节点验证、真实提交和人工电影质量审批分别记录。</span></div>
         </div>
 
         <div className="settings-block">
@@ -178,6 +178,10 @@ export default function SettingsPanel({
           {workflowProfiles.map((profile) => (
             <div className="workflow-row" key={profile.id}>
               <div><b>{profile.name}</b><span>{profile.mode} · SHA {profile.graph_sha256.slice(0, 10)}… · {profile.required_nodes.join(', ')}</span></div>
+              <details><summary>模型、容量、连续性与验证来源</summary>
+                <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify({ identity: profile.model_identity, parameter_map: profile.parameter_map, validation: profile.validated_against }, null, 2)}</pre>
+                <p>超出 reference_slots 容量将阻断：PENDING_WORKFLOW_MAPPING。动态槽位关闭；视频传输未验收；硬接续待测试。</p>
+              </details>
               <button className="icon-button tiny" onClick={() => onDeleteWorkflow(profile.id)}><Trash2 size={12} /></button>
             </div>
           ))}

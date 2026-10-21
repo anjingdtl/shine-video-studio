@@ -86,7 +86,7 @@ def test_m2_database_upgrades_to_the_final_schema_without_losing_rows(tmp_path, 
         assert connection.execute("SELECT status FROM jobs WHERE id = 'j2'").fetchone()[0] == "PASSED"
         assert connection.execute("SELECT state_version FROM jobs WHERE id = 'j2'").fetchone()[0] == 3
         assert connection.execute("SELECT request_revision FROM jobs WHERE id = 'j2'").fetchone()[0] == 1
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "e8f1a2b3c4d5"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f121a0010001"
         job_columns = {row[1] for row in connection.execute("PRAGMA table_info(job_attempts)")}
         assert "prompt_graph_sha256" in job_columns
         assert "request_snapshot" in job_columns
@@ -109,6 +109,6 @@ def test_migration_can_be_downgraded_and_upgraded_again(tmp_path, monkeypatch):
     command.upgrade(config, "head")
     connection = sqlite3.connect(db_path)
     try:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "e8f1a2b3c4d5"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f121a0010001"
     finally:
         connection.close()

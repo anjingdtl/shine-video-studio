@@ -164,7 +164,9 @@ def test_autogrow_dotted_parameter_paths_map_and_validate():
         "ComfyMathExpression": {"input": {"required": {"expression": ["STRING"], "values": ["COMFY_AUTOGROW_V3"]}}},
         "MiniMaxH3ReferenceToVideo": {
             "input": {
-                "required": {"clip": ["CLIP"], "prompt": ["STRING"], "width": ["INT"], "height": ["INT"], "length": ["INT"]},
+                "required": {
+                    "clip": ["CLIP"], "prompt": ["STRING"], "width": ["INT"], "height": ["INT"], "length": ["INT"],
+                },
                 "optional": {"ref_images": ["COMFY_AUTOGROW_V3"]},
             }
         },

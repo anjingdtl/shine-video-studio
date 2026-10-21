@@ -8,13 +8,14 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.orm import Session
 
 from shine.api_agent import router as agent_router
 from shine.api_comfy import router as comfy_router
 from shine.api_film import router as film_router
 from shine.api_llm import router as llm_router
+from shine.api_operator import router as operator_router
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
@@ -329,6 +330,7 @@ def create_app(
     app.include_router(agent_router)
     app.include_router(comfy_router)
     app.include_router(film_router)
+    app.include_router(operator_router)
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:
@@ -339,6 +341,7 @@ def create_app(
             # Cheap configured-state flag; the live connection check lives in
             # /api/v1/system/status so health stays answerable without I/O.
             "h3_connected": False,
+            "connection_probe": "not_run_use_system_status",
         }
 
     def _h3_connected() -> bool:
@@ -1068,7 +1071,8 @@ def create_app(
         if not db.get(Job, job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         rows = db.scalars(
-            select(QualityGate).where(QualityGate.job_id == job_id).order_by(QualityGate.created_at)
+            select(QualityGate).where(QualityGate.job_id == job_id)
+            .order_by(QualityGate.created_at, literal_column("quality_gates.rowid"))
         ).all()
         return jsonable_encoder(
             [

@@ -1,7 +1,7 @@
 {
   "name": "local-h3-ref2va-2img-1aud",
   "mode": "Ref2VA",
-  "checkpoint_id": "MiniMax-H3-Base",
+  "checkpoint_id": "Minimax-H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
   "description": "Real local MiniMax-H3 Ref2VA pipeline, same sampling stack as ref2va-2img, plus one standalone audio (voice-timbre) reference loaded through VHS_LoadAudioUpload into ref_audio_0. Supports exactly one subject image + one picture image + one audio reference.",
   "required_nodes": [
     "MiniMaxH3ReferenceToVideo",

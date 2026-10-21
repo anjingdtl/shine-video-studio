@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 
 from shine.api_common import DBSession, app_settings
+from shine.comfy.capabilities import profile_metadata
 from shine.comfy.client import ComfyError, ComfyUIClient
 from shine.comfy.workflow import graph_hash, validate_against_object_info, validate_graph
 from shine.config import Settings
@@ -34,6 +36,7 @@ def _profile_data(profile: WorkflowProfile, *, include_graph: bool = False) -> d
         "media_transfers": profile.media_transfers,
         "required_nodes": profile.required_nodes,
         "checkpoint_id": profile.checkpoint_id,
+        "model_identity": profile_metadata(profile.graph, profile.mode, profile.parameter_map, profile.media_transfers),
         "validated_against": profile.validated_against,
         "created_at": profile.created_at,
     }
@@ -49,7 +52,7 @@ def comfy_config(settings: SettingsDep, db: DBSession) -> dict[str, Any]:
         "base_url": settings.comfyui_base_url,
         "render_mode": settings.render_provider,
         "workflow_profile_count": len(profiles),
-        "h3_checkpoint_family": "MiniMax-H3-Base",
+        "h3_checkpoint_family": "MiniMax-H3",
         "real_gpu_validation": "pending_local_h3",
     }
 
@@ -156,6 +159,13 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
                 status_code=422,
                 detail=f"The media transfer for {family} needs an absolute upload_path",
             )
+    identity = profile_metadata(body.graph, body.mode.value, body.parameter_map, body.media_transfers)
+    checkpoint_id = body.checkpoint_id
+    if identity["variant"] == "Ref2VA INT8 ConvRot":
+        actual_weight = identity["weight_files"][0]
+        if checkpoint_id not in {"MiniMax-H3-Base", actual_weight}:
+            raise HTTPException(422, "Checkpoint metadata does not match the registered UNETLoader weight")
+        checkpoint_id = actual_weight
     profile = WorkflowProfile(
         project_id=body.project_id,
         name=body.name,
@@ -164,8 +174,9 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
         parameter_map=body.parameter_map,
         media_transfers=body.media_transfers,
         required_nodes=body.required_nodes,
-        checkpoint_id=body.checkpoint_id,
+        checkpoint_id=checkpoint_id,
         graph_sha256=graph_hash(body.graph),
+        model_identity=identity,
     )
     db.add(profile)
     db.flush()
@@ -201,7 +212,10 @@ def validate_workflow_profile(profile_id: str, settings: SettingsDep, db: DBSess
     except ComfyError as exc:
         raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from exc
     validation = validate_against_object_info(profile.graph or {}, profile.parameter_map, object_info)
-    profile.validated_against = validation
+    profile.validated_against = {
+        **validation, "validated_at": datetime.now(UTC).isoformat(),
+        "source": "live_object_info", "generation_verified": False,
+    }
     add_audit(
         db,
         "user",

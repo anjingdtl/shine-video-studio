@@ -77,17 +77,30 @@ class DialogueLine(APIModel):
 class ContinuityMode(StrEnum):
     CUT = "cut"
     LAST_FRAME = "last_frame"
+    HARD_FRAME_ANCHOR = "hard_frame_anchor"
     VIDEO_REFERENCE = "video_reference"
     AUDIO_REFERENCE = "audio_reference"
 
 
 class ContinuitySettings(APIModel):
-    mode: ContinuityMode = ContinuityMode.CUT
+    mode: ContinuityMode = Field(
+        default=ContinuityMode.CUT,
+        description="last_frame is SOFT_REFERENCE_CONTINUITY, never a guaranteed first-frame anchor",
+    )
     previous_shot_id: str | None = None
     previous_job_id: str | None = None
     reference_start_s: float | None = Field(default=None, ge=0)
     reference_end_s: float | None = Field(default=None, gt=0)
     notes: str = Field(default="", max_length=500)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_continuity_requirement(cls, value):
+        return {
+            "SOFT_REFERENCE_CONTINUITY": "last_frame",
+            "HARD_FRAME_ANCHOR_CONTINUITY": "hard_frame_anchor",
+            "VIDEO_REFERENCE_CONTINUITY": "video_reference",
+        }.get(value, value)
 
     @model_validator(mode="after")
     def ordered_reference(self) -> ContinuitySettings:
@@ -260,7 +273,7 @@ class RenderRequest(APIModel):
     shot_revision: int
     style_version_id: str
     style_hash: str
-    model_checkpoint_id: Literal["MiniMax-H3-Base"] = "MiniMax-H3-Base"
+    model_checkpoint_id: str = Field(default="MiniMax-H3-Base", max_length=160)
     provider: Literal["mock", "comfyui"] = "mock"
     generation_mode: GenerationMode = GenerationMode.T2VA
     reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list, max_length=12)
@@ -545,6 +558,7 @@ class WorkflowProfilePublic(APIModel):
     media_transfers: dict[str, Any] | None = None
     required_nodes: list[str]
     checkpoint_id: str
+    model_identity: dict[str, Any] = Field(default_factory=dict)
     validated_against: dict[str, Any] | None
     created_at: datetime
 

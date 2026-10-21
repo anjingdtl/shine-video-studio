@@ -4,6 +4,21 @@
 
 **Current status: M1 hardened; M2/M3 offline foundations implemented and tested; the offline production loop is closed and reproducible.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter with strict reference-media transfer, Fake ComfyUI server, five named quality gates, request-revision repair engine, automatic recovery of finished external tasks, and the Offline Production E2E all run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation. See [`docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md`](docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md).
 
+## V1.2.1 Ref2VA hardening
+
+Two local Ref2VA INT8 ConvRot workflow profiles are registered; three existing real-H3
+480×864 artifacts were rechecked for hashes and full decoding. Their low-resolution visual
+quality is **not accepted for production**. The user confirmed normal voice, verbatim dialogue
+and lip-sync; this feedback is separate from the authenticated per-item approval ledger.
+Last-frame image reference is **SOFT_REFERENCE_CONTINUITY**. Hard anchoring and real video
+reference transfer remain pending and fail closed. No new GPU render was run.
+
+V1.2.1 adds authenticated loopback operator review, current Attempt/Artifact/hash snapshots,
+concurrency and replay protection, graph-derived model identity, conservative continuity gates,
+and Web video preview/review. See [the closeout report](docs/H3_REF2VA_V1.2.1_FINAL_CLOSEOUT.md)
+and [operator setup](docs/operator-review.md). Original data and successful sampling graphs
+are preserved. This is not a declaration of final film-quality acceptance.
+
 ## Product boundaries
 - **Video model:** only locally deployed MiniMax-H3 through ComfyUI. No silent substitution with another video model, online service, or H3 generation mode.
 - **Deployment:** Windows local Web application; FastAPI, React/TypeScript, SQLite WAL, and a separately restartable worker. API/Vite bind to `127.0.0.1`.
@@ -20,12 +35,12 @@
 - **Web workbench:** project status, asset approval/lock/metadata, independent shot bindings, Style Bible freeze/version history, Prompt preview, provider/role settings, ComfyUI test and workflow registration, worker/queue status, QC evidence, per-gate quality ledger, repair suggestions, and audit history.
 
 ## Explicitly not claimed
-- Real MiniMax-H3 rendering, GPU performance, T2VA/Ref2VA visual acceptance, lip-sync, identity consistency, and full long-shot continuation are **PENDING_LOCAL_H3**.
-- No real H3 workflow JSON was available. The ComfyUI adapter validates a generic API workflow and requires a project-specific parameter mapping. Do not treat a mock/fake-server result as a real workflow mapping.
+- Three local Ref2VA renders exist. Production visual quality is blocked; other generation modes and hard continuity have no acceptance. User playback feedback and authenticated database approvals are distinct evidence sources.
+- Two real Ref2VA workflow JSONs are in `config/workflows`, with two image slots and optional one audio slot. No dynamic slot expansion or verified video-reference transfer is claimed. Mock/Fake HTTP results remain software-only evidence.
 - Video and audio references have **no default transport**. A workflow profile must declare how those families reach the H3 nodes, otherwise the render is blocked with `PENDING_WORKFLOW_MAPPING` instead of silently dropping the file.
 - FFprobe/FFmpeg may be absent on the current machine. Technical QC then reports `unavailable`, never `pass`, for the decode, stream-metadata and silence checks.
 - A job that passed every gate with a mock reviewer or a mock ASR is labelled `mock_verified`; it is not a video-quality claim.
-- No user authentication. Keep the API on loopback. The ComfyUI renderer URL must point at this machine unless `SHINE_ALLOW_REMOTE_COMFYUI=1` is set explicitly, because reference bytes are uploaded to it.
+- General API authentication is not implemented; operator review has separate server-validated local credentials. Keep the API on loopback. The ComfyUI renderer URL must point at this machine unless `SHINE_ALLOW_REMOTE_COMFYUI=1` is set explicitly, because reference bytes are uploaded to it.
 
 ## Run locally
 

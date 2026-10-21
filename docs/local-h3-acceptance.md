@@ -78,3 +78,19 @@ Do not include API keys, absolute source-media paths that disclose personal info
 - Do not claim the full short drama can run unattended.
 - Do not claim the generic workflow template is the user's real H3 graph.
 - Do not download or replace model weights, modify the user's ComfyUI workflow files, or run GPU inference as part of an offline build task.
+
+
+## V1.2.1 operator/continuity amendment
+
+See [V1.2.1 closeout](H3_REF2VA_V1.2.1_FINAL_CLOSEOUT.md) and
+[operator review](operator-review.md). `last_frame` means SOFT_REFERENCE_CONTINUITY;
+`hard_frame_anchor` means HARD_FRAME_ANCHOR_CONTINUITY and is blocked until tested;
+`video_reference` is VIDEO_REFERENCE_CONTINUITY, with real transfer still unverified.
+The API also accepts those full requirement names and normalizes the legacy field values.
+No historical request is rewritten. Workflow identity separates family/mode/variant/precision/
+weight files from the immutable graph hash. Alembic head is `f121a0010001`.
+Human approval requires a server-authorized local operator and the current complete snapshot;
+it appends independent per-item evidence and cannot borrow passed gates from an older Attempt.
+Process health and renderer probing are separate. Low-resolution 480×864 H3 results prove
+integration/technical delivery, not accepted film quality. The user's explicit voice/dialogue/
+lip-sync confirmation is recorded separately from formal per-gate approval events.

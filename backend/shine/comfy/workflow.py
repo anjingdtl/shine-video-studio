@@ -66,8 +66,27 @@ def validate_against_object_info(
         definition = object_info.get(class_type) or {}
         input_spec = definition.get("input") or {}
         known = _object_info_known_keys(input_spec)
-        for key in (node.get("inputs") or {}):
-            if known and key not in known and key.split(".", 1)[0] not in known:
+        definitions = {**(input_spec.get("required") or {}), **(input_spec.get("optional") or {})}
+        for key in node.get("inputs") or {}:
+            group = key.split(".", 1)[0]
+            declared = definitions.get(group) or []
+            autogrow = bool(declared and declared[0] == "COMFY_AUTOGROW_V3")
+            known_input = key in known or ("." in key and group in known and autogrow)
+            # Pinned local Ref2VA TemplatePrefix bounds. This validates a
+            # supplied static graph; it never expands that graph automatically.
+            if class_type == "MiniMaxH3ReferenceToVideo" and "." in key:
+                limits = {
+                    "ref_images": ("ref_image_", 9),
+                    "ref_videos": ("ref_video_", 3),
+                    "ref_video_audios": ("ref_video_audio_", 3),
+                    "ref_audios": ("ref_audio_", 3),
+                }
+                if group in limits:
+                    prefix, limit = limits[group]
+                    member = key.split(".", 1)[1]
+                    index = member.removeprefix(prefix)
+                    known_input = known_input and member.startswith(prefix) and index.isdigit() and int(index) < limit
+            if known and not known_input:
                 missing_inputs.append({"node_id": node_id, "class_type": class_type, "input": key})
     for logical, path in parameter_map.items():
         match = PATH_PATTERN.match(path)

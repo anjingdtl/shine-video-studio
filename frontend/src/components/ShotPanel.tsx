@@ -162,6 +162,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
               <div className="shot-content">
                 <b>{shot.name}</b>
                 <span>{String(shot.spec.story_beat ?? '')}</span>
+                <small>连续性：{({ last_frame: 'SOFT_REFERENCE_CONTINUITY', hard_frame_anchor: 'HARD_FRAME_ANCHOR_CONTINUITY · 待测试', video_reference: 'VIDEO_REFERENCE_CONTINUITY · 传输未验收' } as Record<string, string>)[String(shot.spec.continuity?.mode)] ?? String(shot.spec.continuity?.mode ?? 'cut')}</small>
                 <div className="binding-chips">
                   {shot.bindings.length === 0 ? <span className="empty-chip">无引用</span> : shot.bindings.map((binding) => (
                     <span className="binding-chip" key={binding.id}>{binding.use_as} · {binding.filename || binding.asset_id.slice(0, 6)}</span>

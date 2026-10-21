@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 
 from shine.agents.film import FilmAgentDispatcher, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleProposal
@@ -131,7 +131,7 @@ def runs(project_id: str, db: DBSession):
         for r in db.scalars(
             select(AgentTaskRecord)
             .where(AgentTaskRecord.project_id == project_id)
-            .order_by(AgentTaskRecord.created_at.desc())
+            .order_by(AgentTaskRecord.created_at.desc(), literal_column("agent_task_records.rowid").desc())
             .limit(200)
         )
     ]
@@ -145,7 +145,7 @@ def artifacts(project_id: str, db: DBSession):
         for a in db.scalars(
             select(AgentArtifact)
             .where(AgentArtifact.project_id == project_id)
-            .order_by(AgentArtifact.created_at.desc())
+            .order_by(AgentArtifact.created_at.desc(), literal_column("agent_artifacts.rowid").desc())
             .limit(200)
         )
     ]

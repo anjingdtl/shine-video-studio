@@ -140,3 +140,10 @@
 #film-crew p, #h3-rulebook p { line-height: 1.65; }
 .film-operation-result { min-width: 0; overflow: hidden; }
 .film-operation-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+.production-layout > * { min-width: 0; }
+.monitor-card, .job-detail, .operator-review { min-width: 0; overflow-wrap: anywhere; }
+.operator-review label { display: block; margin: 8px 0; }
+.operator-review input[type=password], .operator-review select, .operator-review textarea { width: 100%; min-width: 0; }
+.operator-review textarea { min-height: 58px; }
+.operator-review pre { max-height: 340px; overflow: auto; }
+.operator-review video { display: block; }

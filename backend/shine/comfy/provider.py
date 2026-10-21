@@ -318,6 +318,17 @@ class ComfyUIRenderService:
     ) -> PreparedSubmission:
         """Upload the references and build the exact prompt graph to submit."""
         graph = self._profile_graph(profile)
+        from shine.comfy.capabilities import continuity_capability, profile_metadata
+
+        capability = continuity_capability(request.shot_spec.continuity.mode.value)
+        capabilities = profile_metadata(
+            graph, request.generation_mode.value, profile.parameter_map, self._profile_transfers(profile)
+        )
+        if capability and capability not in capabilities["continuity_modes"]:
+            raise ComfyPendingWorkflowMapping(
+                "Continuity capability is not verified for this workflow",
+                details={"requested_continuity": capability},
+            )
         self._check_profile_compatibility(profile)
         class_types = graph_class_types(graph)
         validate_required_parameters(profile.parameter_map, needs_seed=seed is not None)

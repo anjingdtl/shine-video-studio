@@ -143,6 +143,7 @@ export type WorkflowProfile = {
   id: string; project_id: string | null; name: string; mode: string; graph_sha256: string;
   parameter_map: Record<string, string>; required_nodes: string[]; checkpoint_id: string;
   validated_against: Record<string, unknown> | null; created_at: string;
+  model_identity?: Record<string, unknown>;
 };
 
 export type AuditItem = {

@@ -380,7 +380,8 @@ def _subject_definitions(ctx: _Context) -> str:
         if item.use_as == ReferenceUse.SUBJECT:
             role = item.role or item.entity_id or "approved subject"
             lines.append(
-                f"{item.label} is the approved reference for {role}, shown in <Picture {positions[id(item)]}>, derived from the user's locked asset."
+                f"{item.label} is the approved reference for {role}, "
+                f"shown in <Picture {positions[id(item)]}>, derived from the user's locked asset."
             )
         elif item.use_as == ReferenceUse.PICTURE:
             frame = item.frame_role.value if item.frame_role else "composition"

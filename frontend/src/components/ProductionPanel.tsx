@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
-import type { Job, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
+import type { Job, JobAttempt, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
 import { statusLabels } from '../constants';
+import OperatorReview from './OperatorReview';
 
 type Props = {
   jobs: Job[];
@@ -42,8 +43,11 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
   }
 
   const selectedJob = jobs.find((job) => job.id === selected);
+  const currentAttempt = selectedJob?.attempts.reduce<JobAttempt | null>((latest, attempt) =>
+    !latest || attempt.attempt_no > latest.attempt_no ? attempt : latest, null);
+  const currentGates = gates.filter(gate => gate.attempt_id === currentAttempt?.id && gate.artifact_id === selectedJob?.artifact_id);
   const latestGates = gateOrder
-    .map((name) => [...gates].reverse().find((gate) => gate.gate_name === name))
+    .map((name) => [...currentGates].reverse().find((gate) => gate.gate_name === name))
     .filter((gate): gate is QualityGate => Boolean(gate));
   return (
     <div className="card section-card monitor-card">
@@ -59,11 +63,12 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         {system?.render_mode === 'comfyui' ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
           {system?.render_mode === 'comfyui'
-            ? 'ComfyUI 模式 · 真实 H3 尚未连接或未验收，失败会停在人工复核，不会静默换模型。'
+            ? `ComfyUI 模式 · 当前连接${system.h3_connected ? '在线' : '离线'}；连接成功不代表电影质量通过。`
             : 'Mock 演示模式：只模拟调度、租约与 QC，不会生成或冒充视频。'}
         </span>
       </div>
       <div className="status-strip">
+        <span>API {system?.api_online ? '在线' : '离线'} · Provider {system?.render_mode ?? '未知'} · MiniMax-H3</span>
         <span><b>{system?.pending_jobs ?? 0}</b> 待处理</span>
         <span><b>{system?.running_jobs ?? 0}</b> 执行中</span>
         <span><b>{system?.blocked_jobs ?? 0}</b> 需复核</span>
@@ -101,6 +106,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         ))}
       </div>
       {selectedJob && <div className="job-detail">
+        {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}
         <div className="detail-head">
           <div><b>{selectedJob.shot_name}</b><span>{selectedJob.id.slice(0, 12)}… · state v{selectedJob.state_version}</span></div>
           <div className="detail-actions">
@@ -137,7 +143,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
                 <small>覆盖：{gate.coverage}{gate.error_code ? ` · ${gate.error_code}` : ''}{gate.model ? ` · ${gate.model}` : ''}</small>
               </div>
             ))}
-            {selectedJob.quality_verification && <small>验证级别：{selectedJob.quality_verification}</small>}
+            {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification} · 最终结论见 final 门禁</small>}
             <span className="detail-label"><Activity size={11} /> QC 证据</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
             {!detailBusy && qc.length === 0 && <div className="empty-inline">尚无 QC 报告。</div>}
