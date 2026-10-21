@@ -308,7 +308,7 @@ technical check passed but whose required semantic review never ran is
 | Local stack (API + worker + mock production) | `scripts/verify_local_stack.ps1` | **pass** — API healthy on `127.0.0.1`, a mock job reached `PASSED` with `simulated=true` and `video_created=false`, 7 audit events written, 2 workers reported |
 | Fresh migration | `alembic upgrade head` on a throwaway data directory | head = `c3d81f6a2b45` |
 | Migration from the M2 schema | `alembic upgrade head` from `9f2c4d7a10b3` | project/job rows preserved |
-| Backend tests on Windows | `pytest backend/tests` | 173 passed |
+| Backend tests on Windows | `pytest backend/tests` | 174 passed locally, and 174 passed in the Windows CI job |
 | Frontend build on Windows | `npm --prefix frontend run build` | succeeded |
 
 The verification script uses a throwaway data directory and never touches an
@@ -326,9 +326,17 @@ existing project database.
   `/api/v1/system/status` answer. This job is the Windows non-GPU baseline.
 * `frontend` (ubuntu): `npm ci` and `npm run build`.
 
-**CI has not been executed yet at the time of writing** — the branch is pushed
-for review and the CI result must be read from the pull request. The local
-Windows run in §11 is the executed evidence.
+**Executed result — CI run `39541238457` on commit `d228ee5`, all three jobs
+green:**
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `backend` (ubuntu) | ✅ success | `174 passed, 1 warning in 74.47s`; ruff clean; `alembic upgrade head` succeeded |
+| `backend-windows` (windows-latest) | ✅ success | `174 passed, 1 warning in 138.05s`; ruff clean; fresh migration succeeded; the local workbench answered `health: {"status":"ok","service":"shine-api","render_provider":"mock-only","h3_connected":false}` and `status: mock api_online=True` |
+| `frontend` (ubuntu) | ✅ success | `npm ci` + `npm run build` succeeded |
+
+The first Windows run failed and exposed a host-dependent test defect, which
+is now fixed (see §6). The green run above is the executed evidence.
 
 ## 13. Security check results
 
@@ -383,5 +391,8 @@ No unexplained high-priority software defect remains in the offline scope.
 
 * Branch: `feat/m123-final-hardening`
 * Implementation commit SHA: `6b49a0c7fd3190367ccca8ddd5fab9b6cb1217d6`
-* The branch is pushed and a pull request is opened for review. It is **not**
-  merged into `main`; merging requires the user's authorisation.
+* Follow-up commits: the host-independence fix (`d228ee5`) and the report
+  updates. The head of the branch is what CI run `39541238457` verified.
+* Pull request: <https://github.com/anjingdtl/shine-video-studio/pull/1>
+* The branch is **not** merged into `main`; merging requires the user's
+  authorisation.
