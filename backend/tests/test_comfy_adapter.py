@@ -165,7 +165,11 @@ def test_autogrow_dotted_parameter_paths_map_and_validate():
         "MiniMaxH3ReferenceToVideo": {
             "input": {
                 "required": {
-                    "clip": ["CLIP"], "prompt": ["STRING"], "width": ["INT"], "height": ["INT"], "length": ["INT"],
+                    "clip": ["CLIP"],
+                    "prompt": ["STRING"],
+                    "width": ["INT"],
+                    "height": ["INT"],
+                    "length": ["INT"],
                 },
                 "optional": {"ref_images": ["COMFY_AUTOGROW_V3"]},
             }
@@ -272,10 +276,30 @@ def test_comfy_worker_never_reports_a_real_video_as_passed_without_decode(api, f
     assert len(artifacts) == 1 and artifacts[0]["is_mock"] is False
     qc = client.get(f"/api/v1/jobs/{job['id']}/qc").json()
     assert len(qc) == 1 and qc[0]["is_mock"] is False
-    checks = {
-        check["name"]: check["status"]
-        for check in qc[0]["report"]["technical"]["checks"]
-    }
+    checks = {check["name"]: check["status"] for check in qc[0]["report"]["technical"]["checks"]}
     assert checks["decode"] == "unavailable"
     assert checks["duration"] == "pass"
     assert qc[0]["report"]["result"] == "needs_review"
+
+
+def test_unload_ack_is_not_release_proof_without_observed_memory(monkeypatch):
+    import httpx
+    import pytest
+
+    from shine.comfy.client import ComfyUIClient, ComfyUIError
+
+    monkeypatch.setattr("shine.comfy.client.time.sleep", lambda _: None)
+    allocation = [1024]
+
+    def handle(request):
+        if request.url.path == "/queue":
+            return httpx.Response(200, json={"queue_running": [], "queue_pending": []})
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"devices": [{"torch_vram_total": allocation[0], "torch_vram_free": 0}]})
+        return httpx.Response(200, json={})
+
+    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0)
+    with pytest.raises(ComfyUIError, match="MODEL_RELEASE_UNCONFIRMED"):
+        client.free_models()
+    allocation[0] = 0
+    client.free_models()

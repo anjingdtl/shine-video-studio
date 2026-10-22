@@ -143,11 +143,14 @@ class ComfyModelLifecycle:
         self.http = client or httpx.Client(timeout=10, follow_redirects=False)
 
     def release_models(self):
-        response = self.http.get(self.base_url + "/queue")
-        response.raise_for_status()
-        queue = response.json()
-        if queue.get("queue_running") or queue.get("queue_pending"):
-            raise ValueError("INSTANCE_BUSY_CANNOT_UNLOAD")
-        response = self.http.post(self.base_url + "/free", json={"unload_models": True, "free_memory": True})
-        response.raise_for_status()
-        return {"status": "RELEASE_REQUESTED", "measurement": "PENDING_LOCAL_GPU", "process_killed": False}
+        from shine.comfy.client import ComfyError, ComfyUIClient
+
+        client = ComfyUIClient(self.base_url, max_retries=0)
+        from contextlib import nullcontext
+
+        client._client = lambda: nullcontext(self.http)
+        try:
+            client.free_models()
+        except ComfyError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"status": "RELEASE_CONFIRMED", "measurement": "LOCAL_PROCESS_TORCH_ALLOCATION", "process_killed": False}

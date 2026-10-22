@@ -89,7 +89,7 @@ class TrackedProvider:
                         AgentTaskRecord.project_id == self.project_id,
                         AgentTaskRecord.role_id == role,
                         AgentTaskRecord.input_hash == fingerprint,
-                        AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW"]),
+                        AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW", "RECONCILING"]),
                     )
                 )
                 if uncertain:

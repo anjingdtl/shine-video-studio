@@ -179,7 +179,13 @@ class FakeComfyServer(_BaseServer):
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
                 if parsed.path == "/system_stats":
-                    self._json(200, {"system": {"comfyui_version": "fake"}, "devices": [{"name": "fake-gpu"}]})
+                    self._json(
+                        200,
+                        {
+                            "system": {"comfyui_version": "fake"},
+                            "devices": [{"name": "fake-gpu", "torch_vram_total": 0, "torch_vram_free": 0}],
+                        },
+                    )
                     return
                 if parsed.path == "/object_info":
                     self._json(

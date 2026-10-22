@@ -47,6 +47,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   const [backupJson, setBackupJson] = useState('{"instance_id":"","root":""}');
   const [callRecords, setCallRecords] = useState<Row[]>([]);
   const [attemptRecords, setAttemptRecords] = useState<Row[]>([]);
+  const [resourceJson, setResourceJson] = useState('{"id":"","owner":""}');
   const [relativePath, setRelativePath] = useState('');
   const [templateId, setTemplateId] = useState('fake-image-v1');
   const [preview, setPreview] = useState(false);
@@ -121,7 +122,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         const updated = await post<{ configuration_hash: string }>('/comfyops/scope', { ...context, grant_id: grant.grant_id, snapshot: grant.snapshot }, true);
         setScopeHash(updated.configuration_hash); return updated;
       })}>操作员保存受限扫描范围</button>
-      <label>隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE）
+      <label>隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE / ROLLBACK）
         <textarea value={instanceJson} onChange={e => setInstanceJson(e.target.value)} /></label>
       <button disabled={busy || (!offline && !confirmed)} onClick={() => act(() => post('/comfyops/instance-plans', {
         ...JSON.parse(instanceJson), project_id: projectId, mode, risk_confirmed: confirmed || offline,
@@ -135,8 +136,15 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy || !instanceId} onClick={() => act(async () => { const records = await api<Row[]>(`/comfyops/instances/${instanceId}/attempts`, { headers: headers() }); setAttemptRecords(records); return records; })}>实例操作 / 快照 / 失败对账记录</button>
     </>}
     {view === 0 && <>
+      <label>资源释放对账 JSON（id / owner）<textarea value={resourceJson} onChange={e => setResourceJson(e.target.value)} /></label>
+      <button disabled={busy || !evidence} onClick={() => act(async () => {
+        const resource = JSON.parse(resourceJson);
+        const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', { action: 'resource_reconcile', target_id: resource.id }, true);
+        return post(`/comfyops/resource-reservations/${resource.id}/release`, { owner: resource.owner, reconciled: true,
+          proof_decision: { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence } }, true);
+      })}>核验实际卸载并对账释放（失联模型须先单独对账）</button>
       <button disabled={busy} onClick={() => act(async () => { const records = await api<Row[]>(`/projects/${projectId}/preparation/model-calls`, { headers: headers() }); setCallRecords(records); return records; })}>读取模型调用与失联记录</button>
-      {callRecords.filter(r => ['RUNNING', 'NEEDS_REVIEW'].includes(r.status)).map(r => <article key={r.id}>
+      {callRecords.filter(r => ['RUNNING', 'NEEDS_REVIEW', 'RECONCILING'].includes(r.status)).map(r => <article key={r.id}>
         <p>模型调用 {r.id} · {r.status}</p>
         <button disabled={busy || !evidence} onClick={() => act(() => approve(r, 'model_reconcile', `/preparation/model-calls/${r.id}/abandon`))}>核验队列与释放后放弃丢失结果（不重投）</button>
       </article>)}
@@ -284,6 +292,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         <button disabled={busy || !confirmed || offline} onClick={() => act(() => post(`/comfyops/${row.payload.kind === 'INSTANCE_BACKUP' ? 'backup-plans' : 'instance-plans'}/${row.id}/execute`, { plan_hash: row.sha256 }, true))}>执行已批准的本地实例计划（须服务器显式启用）</button>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'LOCAL_ISOLATED' && !['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) &&
         <button disabled={busy || !confirmed || offline} onClick={() => act(() => post(`/comfyops/install-plans/${row.id}/execute`, { plan_hash: row.sha256, executor: 'local' }, true))}>执行已批准的本地包安装（服务器须显式启用）</button>}
+      {view === 2 && ['PRODUCTION_APPROVED', 'FAKE_EXECUTED', 'REAL_TESTED'].includes(row.status) && <button disabled={busy} onClick={() => act(() => approve(row, 'workflow_deprecate', `/workflow-capabilities/${row.id}/deprecate`))}>操作员弃用此版本（保留历史）</button>}
       {view === 2 && !offline && ['DRAFT', 'STATIC_VALIDATED'].includes(row.status) && <>
         <label>工作流验证实例 ID<input value={instanceId} onChange={e => setInstanceId(e.target.value)} /></label>
         <button disabled={busy || !instanceId} onClick={() => act(() => post(`/workflow-capabilities/${row.id}/validate-local`, { instance_id: instanceId }, true))}>读取本地节点契约验证</button>

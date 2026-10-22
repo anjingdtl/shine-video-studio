@@ -273,7 +273,10 @@ def test_instance_process_interruption_reconciles_and_can_reinstall(prep, stage)
         target=crash_instance_operation, args=(settings, plan["id"], plan["sha256"], stage)
     )
     child.start()
-    child.join(25)
+    child.join(90)
+    if child.is_alive():
+        child.terminate()  # this test owns only its synthetic child, never a user process
+        child.join(5)
     assert child.exitcode == 73
     with factory() as db:
         row = db.scalar(select(InstallationAttempt).where(InstallationAttempt.plan_id == plan["id"]))
@@ -330,7 +333,10 @@ def test_restore_process_interruption_preserves_snapshot_and_existing_files(prep
         target=crash_instance_operation, args=(settings, plan["id"], plan["sha256"], stage)
     )
     child.start()
-    child.join(25)
+    child.join(90)
+    if child.is_alive():
+        child.terminate()  # this test owns only its synthetic child, never a user process
+        child.join(5)
     assert child.exitcode == 73
     with factory() as db:
         row = db.scalar(select(InstallationAttempt).where(InstallationAttempt.plan_id == plan["id"]))

@@ -270,7 +270,7 @@ def exercise(api_base, ui_base, screenshot, temporary):
             if snapshot_id:
                 operation["snapshot_id"] = snapshot_id
             prep.get_by_label(
-                "隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE）"
+                "隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE / ROLLBACK）"
             ).fill(json.dumps(operation))
             prep.get_by_role(
                 "button",

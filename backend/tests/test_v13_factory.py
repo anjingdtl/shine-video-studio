@@ -400,7 +400,7 @@ def test_unknown_asr_identity_requires_human_listening_without_invented_confiden
     result = post(
         client,
         f"/voice-profiles/{voice['id']}/dialogue",
-        {"character": "Lin", "text": "今晚见。", "voice_hash": voice["sha256"]},
+        {"character": "Lin", "text": "今晚我们在街角再见。", "voice_hash": voice["sha256"]},
     )
     assert result["status"] == "PENDING_HUMAN_REVIEW"
     row = next(
@@ -426,3 +426,53 @@ def test_unknown_asr_identity_requires_human_listening_without_invented_confiden
     )
     promoted = approve(client, row, "promote", f"/candidate-assets/{row['id']}/promote", listened=True)
     assert promoted["status"] == "PROMOTED" and promoted["payload"]["human_dialogue_review"]["listened"]
+
+
+def test_release_failure_and_invalid_reconciliation_grant_never_free_gpu(prep):
+    from shine.comfyops.model_calls import TrackedProvider
+    from shine.comfyops.models import ResourceLease
+    from tests.test_v13_preparation import HEADERS
+
+    client, factory, _ = prep
+    project = create_project(client)
+
+    class UncertainProvider:
+        is_mock = False
+        releases = 0
+
+        def design(self, *args):
+            raise TimeoutError("synthetic provider loss")
+
+        def release_models(self):
+            self.releases += 1
+            raise OSError("synthetic release failure")
+
+    raw = UncertainProvider()
+    client.app.state.voice_provider = raw
+    with pytest.raises(OSError):
+        TrackedProvider(raw, factory, project).design("lost")
+    rows = client.get(f"/api/v1/projects/{project}/preparation/model-calls", headers=HEADERS).json()
+    row = rows[0]
+    before = raw.releases
+    post(
+        client,
+        f"/preparation/model-calls/{row['id']}/abandon",
+        {"grant_id": "forged", "snapshot": "forged", "evidence": "Must not call provider without valid grant"},
+        operator=True,
+        expected=409,
+    )
+    assert raw.releases == before
+    resource_id = row["trace"]["resource_id"]
+    with factory() as db:
+        lease = db.get(ResourceLease, resource_id)
+        owner = lease.owner
+        assert lease.status == "RECONCILE_REQUIRED"
+    post(
+        client,
+        f"/comfyops/resource-reservations/{resource_id}/release",
+        {"owner": owner, "reconciled": True},
+        operator=True,
+        expected=409,
+    )
+    with factory() as db:
+        assert db.get(ResourceLease, resource_id).status == "RECONCILE_REQUIRED"

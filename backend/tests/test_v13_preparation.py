@@ -619,6 +619,8 @@ def test_model_unload_requires_idle_queue_and_never_kills_process():
         calls.append(request)
         if request.url.path == "/queue":
             return httpx.Response(200, json={"queue_running": ["busy"] if busy else [], "queue_pending": []})
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"devices": [{"torch_vram_total": 0, "torch_vram_free": 0}]})
         assert json.loads(request.content) == {"unload_models": True, "free_memory": True}
         return httpx.Response(200)
 

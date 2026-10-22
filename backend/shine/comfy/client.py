@@ -122,6 +122,26 @@ class ComfyUIClient:
             response = client.post(f"{self.base_url}/free", json={"unload_models": True, "free_memory": True})
             if response.status_code != 200:
                 raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
+        # /free acknowledges a queued unload flag, not completed unloading.
+        # Confirm this process has no live CUDA tensor allocation before releasing
+        # the shared lease. Cached-but-free allocator memory is allowed.
+        for _ in range(30):
+            queue = self.queue()
+            devices = self.system_stats().get("devices", [])
+            if (
+                devices
+                and not queue.get("queue_running")
+                and not queue.get("queue_pending")
+                and all(
+                    isinstance(d.get("torch_vram_total"), int | float)
+                    and isinstance(d.get("torch_vram_free"), int | float)
+                    and 0 <= d["torch_vram_total"] <= d["torch_vram_free"]
+                    for d in devices
+                )
+            ):
+                return
+            time.sleep(0.1)
+        raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
 
     def upload_file(
         self,

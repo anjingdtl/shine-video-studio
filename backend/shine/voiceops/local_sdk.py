@@ -93,6 +93,10 @@ class QwenLocalVoiceProvider:
                     raise ValueError("SDK_VERSION_NOT_PINNED_OR_CHANGED")
                 if p.get("resource_mb") is None or p["resource_mb"] > self.resource_mb:
                     raise ValueError("VOICE_RESOURCE_PROFILE_MISSING_OR_EXCEEDED")
+                import torch
+
+                if not torch.cuda.is_available() or torch.cuda.mem_get_info()[0] < p["resource_mb"] * 1024**2:
+                    raise ValueError("VOICE_PHYSICAL_GPU_BUDGET_UNAVAILABLE")
             root = self.settings.data_dir / "comfyops" / "isolated-packages" / p["name"]
             for entry in p["files"]:
                 if not ControlledDownloader.valid(
@@ -173,5 +177,7 @@ class QwenLocalVoiceProvider:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+                if torch.cuda.memory_allocated() != 0:
+                    raise ValueError("MODEL_RELEASE_UNCONFIRMED")
         if self.models:
             raise ValueError("MODEL_RELEASE_UNCONFIRMED")

@@ -1714,16 +1714,22 @@ def abandon_model_call(
         raise HTTPException(409, "MODEL_CALL_STILL_RUNNING")
     if pid and pid != os.getpid() and process_identity(pid) == birth:
         raise HTTPException(409, "MODEL_CALL_OWNER_STILL_ALIVE")
-    if row.status not in {"RUNNING", "NEEDS_REVIEW"}:
+    reconcile_owner = row.trace.get("reconciliation_owner")
+    if row.status == "RECONCILING" and (
+        not reconcile_owner or process_identity(reconcile_owner["pid"]) == reconcile_owner["birth"]
+    ):
+        raise HTTPException(409, "MODEL_RECONCILIATION_OWNER_ALIVE_OR_UNVERIFIABLE")
+    if row.status not in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}:
         raise HTTPException(409, "MODEL_CALL_NOT_UNCERTAIN")
     db.rollback()
     locked(db)
     row = get(db, AgentTaskRecord, identity)
-    if row.status not in {"RUNNING", "NEEDS_REVIEW"}:
+    if row.status not in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}:
         raise HTTPException(409, "MODEL_CALL_NOT_UNCERTAIN")
     approval.consume(db, actor, "model_reconcile", row, body.grant_id, body.snapshot)
     trace = dict(row.trace)
     row.status = "RECONCILING"
+    row.trace = {**row.trace, "reconciliation_owner": {"pid": os.getpid(), "birth": process_identity(os.getpid())}}
     db.commit()  # authorize before any provider side effect; never replay a lost reconciliation
     try:
         if not trace.get("is_mock"):
