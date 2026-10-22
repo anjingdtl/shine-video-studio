@@ -199,7 +199,7 @@ backend/tests/
 - 已存在相同摘要模型优先链接/共享路径或复用，严禁为“全版本”不经预算直接下载大量权重。
 - 自定义节点 Python 安装脚本属于**可执行第三方代码**，即便来自节点管理器也先审计/展示变更，优先在新的隔离 ComfyUI 实例试装；避免污染已有能跑的 H3/ComfyUI 与 Python 环境。
 - ComfyUI-Manager 快照/恢复可作为辅助工具，但它不保证完整恢复所有外部自定义节点、环境或模型；Shine 须另行记录自身的变更清单、可恢复目录与 hash，不能声称零风险回滚。
-- 禁止 LLM 输出原始 Shell 命令让后端执行；只允许固定安装器适配器的参数化命令构造。云端只提供 `DryRunInstaller` 和 FakeExecutor，**不得执行真实下载、pip、git clone、节点安装、系统进程启停**。
+- 禁止 LLM 输出原始 Shell 命令让后端执行；只允许固定安装器适配器的参数化命令构造。**云端须实现可在未来本地执行的生产级受控 Windows LocalExecutor、可恢复 HttpDownloader、ComfyCLI/Manager Adapter、沙箱/临时目录晋升、启动/停止/快照回滚驱动及其可注入 CommandRunner/HTTPTransport 接口**；每条实际命令需 argv 参数化（禁用任意 shell 字符串）、白名单、路径保护、最小权限和审批哈希校验。**仅禁止云端实际执行**下载、pip、git clone、节点安装和系统进程启停；在云端通过 DryRun/FakeExecutor、伪命令执行器、假 HTTP 和失败注入来测试真实适配实现，不能只交付抽象接口或 TODO。
 - 手工导入模型/节点 ZIP、离线权重与本地工作流也须走来源/许可/hash/风险校验。
 
 ### 5.2 操作分级
@@ -439,7 +439,7 @@ GET    /comfyops/resource-status
 
 **C1 — 目录与环境 Mock**：完成 Inventory/Instance/Model/Node/Hardware 的类型/持久化/服务/API/UI；Fake ComfyUI、Fake Win Host、Fake GPU、零副作用 Discovery；license/provenance 校验和缺口分析。
 
-**C2 — 安装规划与隔离执行契约**：实现模型/节点来源目录、依赖求解/版本 pin、大小/磁盘/网络预算、hash 批准、审计/状态机、DryRunExecutor、FakeInstaller、重试/回滚对账。只构建本地受控执行器的**协议和安全校验**，不要尝试在云端安装真实 ComfyUI/模型/节点。
+**C2 — 安装规划与隔离执行契约**：实现模型/节点来源目录、依赖求解/版本 pin、大小/磁盘/网络预算、hash 批准、审计/状态机、DryRunExecutor、FakeInstaller、重试/回滚对账，**以及真正可供未来 Windows 本机调用的受控安装/下载/ComfyUI CLI 执行器代码**（固定 argv 命令模板、路径/权限检查、暂存、哈希、恢复、回滚、状态探测与完整错误处理）；以注入的假执行器和 Fake HTTP 测试这些真实执行路径。云端不可真实安装 ComfyUI/模型/节点，但不能因此仅交付协议、占位实现或 Mock。
 
 **C3 — Workflow Registry/Factory**：分类、Schema/graph/parameter_map/media_transfers 校验、版本与能力匹配/评分、兼容检查、发布与废弃、H3 能力/软硬连续性门禁、对接旧 WorkflowProfile 和 Fake ComfyUI。
 
