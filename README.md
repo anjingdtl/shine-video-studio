@@ -98,6 +98,13 @@ After migrating, open **影视制片团队** and **H3 官方规范中心**. Conf
 
 Descriptions submitted under V1.1 rules must be English; dialogue remains in its original language. Chinese style/camera descriptions are reported as blockers, never silently translated. Official source files are not redistributed: import legally acquired, fixed-revision files through the local cache controls if desired. Missing originals and real-H3 capability status remain visible. No real LLM or H3 GPU acceptance is implied by the offline suite.
 
+## V1.3 planned: ComfyOps + multi-modal pre-production
+
+V1.3 is an **approved architecture and implementation plan, not implemented functionality**. It adds a controlled ComfyOps environment/model/node/workflow management Agent, candidate visual/audio asset production and user imports, VoiceOps voice design/TTS/ASR, human promotion of formal assets, and a pre-production readiness DAG. Real ComfyUI/model installation and GPU acceptance remain local-only. The current V1.2.1 master-asset policy remains enforced until the V1.3 candidate/promotion boundary is implemented and tested.
+
+- [V1.3 product and technical blueprint](docs/Shine视频工作台_V1.3_ComfyOps与全资产预制作系统建设方案.md)
+- [V1.3 cloud Codex full implementation brief](docs/V1.3_云端Codex实施总提示词.md)
+
 ## Documentation
 - [V1.1 产品修订方案](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
 - [V1.1 contracts and API](docs/v1.1-contracts.md)
