@@ -84,6 +84,12 @@ jobs:
             Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Windows API and Worker mock smoke
+        shell: pwsh
+        run: |
+          $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-worker-smoke'
+          ./scripts/verify_local_stack.ps1 -ApiPort 8127
+
   frontend:
     runs-on: ubuntu-latest
     steps:

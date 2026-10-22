@@ -12,17 +12,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 
 from shine.api_common import DBSession, app_settings
-from shine.api_operator import Operator
+from shine.api_operator import Operator, operator
 from shine.comfy.workflow import graph_hash
 from shine.comfyops import approval, preproduction
 from shine.comfyops.assets import (
     candidate_qc,
     create_candidate,
-    fake_image,
     promote,
     require_rights,
     verify_candidate,
 )
+from shine.comfyops.images import FakeImageProvider, LocalImageHTTPProvider
 from shine.comfyops.installer import PackageSpec, check_url, safe_target
 from shine.comfyops.inventory import FakeWindowsHostProbe
 from shine.comfyops.models import (
@@ -212,7 +212,16 @@ def install_plan(identity: str, db: DBSession):
 
 
 class GrantRequest(Strict):
-    action: Literal["install", "promote", "voice_freeze", "manifest_freeze", "workflow_publish", "rights_approve"]
+    action: Literal[
+        "install",
+        "promote",
+        "voice_freeze",
+        "manifest_freeze",
+        "workflow_publish",
+        "rights_approve",
+        "workflow_validate",
+        "workflow_preview",
+    ]
     target_id: str
 
 
@@ -223,6 +232,8 @@ TARGETS = {
     "manifest_freeze": PreProductionPlan,
     "workflow_publish": WorkflowRevision,
     "rights_approve": RightsRecord,
+    "workflow_validate": WorkflowRevision,
+    "workflow_preview": WorkflowRevision,
 }
 
 
@@ -482,6 +493,7 @@ class Generate(Strict):
     seed: int = 1
     workflow_id: str
     parent_id: str | None = None
+    preview_decision: Decision | None = None
 
 
 @router.post("/projects/{project_id}/candidate-assets/generate")
@@ -489,7 +501,16 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
     project = require_project(db, project_id)
     require_rights(db, project_id, body.rights_id)
     wf = get(db, WorkflowRevision, body.workflow_id)
-    if wf.status != "FAKE_EXECUTED":
+    provider = getattr(request.app.state, "image_provider", None)
+    if provider is None:
+        provider = LocalImageHTTPProvider(settings.local_image_url) if settings.local_image_url else FakeImageProvider()
+    if not provider.is_mock and wf.status == "STATIC_VALIDATED" and body.preview_decision:
+        actor = operator(request, settings, request.headers.get("authorization", ""))
+        decision = body.preview_decision
+        approval.consume(db, actor, "workflow_preview", wf, decision.grant_id, decision.snapshot)
+        audit(db, actor, "WORKFLOW_LOCAL_PREVIEW_AUTHORIZED", wf)
+        db.commit()
+    elif wf.status != ("FAKE_EXECUTED" if provider.is_mock else "PRODUCTION_APPROVED"):
         raise HTTPException(409, "CAPABILITY_MISSING")
     expected = {
         "character": {"IMAGE_GENERATION", "CHARACTER_SHEET"},
@@ -501,9 +522,22 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
     }
     if body.family not in expected or wf.payload["category"] not in expected[body.family]:
         raise HTTPException(409, "IMPORT_ONLY_OR_CAPABILITY_MISSING")
-    with preparation_task(db, project, "asset_factory", body.model_dump(), "fake-image-v1") as task:
-        with resource_slot(request.app.state.session_factory, "IMAGE", 12000):
-            content = fake_image(f"{body.seed}:{body.entity_id}:{body.family}:{body.prompt}")
+    references = []
+    if body.parent_id:
+        parent = get(db, CandidateAsset, body.parent_id)
+        if parent.project_id != project_id:
+            raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
+        references.append(verify_candidate(settings, parent))
+    with preparation_task(
+        db, project, "asset_factory", body.model_dump(), "fake-image-v1" if provider.is_mock else "local-image-service"
+    ) as task:
+        with resource_slot(
+            request.app.state.session_factory, "IMAGE", 12000, release_models=getattr(provider, "release_models", None)
+        ):
+            result = provider.generate(
+                f"{body.family}:{body.entity_id}:{body.prompt}", body.seed, wf.payload, references
+            )
+            content = result["content"]
         row = create_candidate(
             db,
             settings,
@@ -511,11 +545,11 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
             body.family,
             body.entity_id,
             content,
-            "fake.png",
+            result["filename"],
             body.rights_id,
             {
-                "is_mock": True,
-                "provider": "FakeImageProvider",
+                "is_mock": provider.is_mock or result.get("is_mock", False),
+                "provider": provider.name,
                 "workflow_id": wf.id,
                 "workflow_hash": wf.sha256,
                 "seed": body.seed,
@@ -646,7 +680,9 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
             body.model_dump(),
             "fake-voice-v1" if provider.is_mock else "local-voice-service",
         ):
-            with resource_slot(request.app.state.session_factory, "TTS", 4000):
+            with resource_slot(
+                request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
+            ):
                 result = provider.design(body.description, body.text, body.character)
     candidate = create_candidate(
         db,
@@ -727,7 +763,9 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
     with preparation_task(
         db, project, "voice_dialogue", body.model_dump(), "fake-voice-v1" if provider.is_mock else "local-voice-service"
     ):
-        with resource_slot(request.app.state.session_factory, "TTS", 4000):
+        with resource_slot(
+            request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
+        ):
             result = provider.synthesize(
                 body.text, body.character, row.payload["conditioning_hash"], body.emotion, body.speed, body.pause
             )
@@ -905,3 +943,138 @@ def import_voice(project_id: str, body: VoiceDesign, request: Request, settings:
 def voice_renders(project_id: str, db: DBSession):
     require_project(db, project_id)
     return [public(r) for r in db.scalars(select(VoiceRender).where(VoiceRender.project_id == project_id))]
+
+
+class LocalEvidence(Decision):
+    job_id: str | None = None
+    candidate_id: str | None = None
+    graph_sha256: str
+
+
+@router.post("/workflow-capabilities/{identity}/local-evidence")
+def local_evidence(identity: str, body: LocalEvidence, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Only current, manually reviewed real H3 evidence can unlock production publication.
+
+    Other local capability types remain pending independent provider acceptance;
+    a Fake execution or a user-supplied boolean cannot upgrade the verification level.
+    """
+    import hashlib
+
+    from shine.media.artifacts import safe_asset_path
+    from shine.models import Job, JobAttempt, MediaArtifact, QualityGate, Shot
+
+    locked(db)
+    row = get(db, WorkflowRevision, identity)
+    approval.consume(db, actor, "workflow_validate", row, body.grant_id, body.snapshot)
+    if body.candidate_id:
+        candidate = get(db, CandidateAsset, body.candidate_id)
+        proof = candidate.payload["provenance"]
+        if (
+            body.offline
+            or row.status != "STATIC_VALIDATED"
+            or candidate.status != "PROMOTED"
+            or proof.get("is_mock", True)
+            or proof.get("workflow_id") != row.id
+            or proof.get("workflow_hash") != row.sha256
+            or body.graph_sha256 != graph_hash(row.payload["graph"])
+        ):
+            raise HTTPException(409, "REAL_LOCAL_WORKFLOW_CANDIDATE_REQUIRED")
+        verify_candidate(settings, candidate)
+        row.status = "REAL_TESTED"
+        audit(
+            db,
+            actor,
+            "WORKFLOW_REAL_CANDIDATE_EVIDENCE_BOUND",
+            row,
+            {
+                "candidate_id": candidate.id,
+                "content_sha256": candidate.payload["content_sha256"],
+                "evidence": body.evidence,
+            },
+        )
+        db.commit()
+        return public(row)
+    job = get(db, Job, body.job_id)
+    attempt = db.scalar(
+        select(JobAttempt).where(JobAttempt.job_id == job.id).order_by(JobAttempt.attempt_no.desc()).limit(1)
+    )
+    artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+    profile = db.get(WorkflowProfile, job.workflow_profile_id) if job.workflow_profile_id else None
+    shot = db.get(Shot, job.shot_id)
+    expected_graph = graph_hash(row.payload["graph"])
+    if (
+        body.offline
+        or row.status not in {"STATIC_VALIDATED", "FAKE_EXECUTED"}
+        or job.status != "PASSED"
+        or job.stale
+        or job.provider != "comfyui"
+        or job.quality_verification != "manual_verified"
+        or not attempt
+        or not artifact
+        or artifact.is_mock
+        or artifact.attempt_id != attempt.id
+        or not profile
+        or not shot
+        or shot.revision != job.shot_revision
+        or not row.payload["category"].startswith("H3_")
+        or body.graph_sha256 != expected_graph
+        or profile.graph_sha256 != expected_graph
+        or profile.model_identity.get("family", "MiniMax-H3") != "MiniMax-H3"
+    ):
+        raise HTTPException(409, "CURRENT_REAL_MANUAL_H3_EVIDENCE_REQUIRED")
+    path = safe_asset_path(settings.data_dir, artifact.storage_path)
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != artifact.sha256:
+        raise HTTPException(409, "ARTIFACT_HASH_CHANGED")
+    gates = db.scalars(
+        select(QualityGate).where(QualityGate.attempt_id == attempt.id, QualityGate.artifact_id == artifact.id)
+    ).all()
+    for name in ("technical", "semantic", "audio", "style", "final"):
+        latest = [g for g in gates if g.gate_name == name]
+        latest.sort(key=lambda g: g.created_at)
+        if not latest or latest[-1].is_mock or latest[-1].status not in {"passed", "not_applicable"}:
+            raise HTTPException(409, "REAL_QUALITY_GATES_REQUIRED")
+    row.status = "REAL_TESTED"
+    audit(
+        db,
+        actor,
+        "WORKFLOW_REAL_EVIDENCE_BOUND",
+        row,
+        {
+            "job_id": job.id,
+            "attempt_id": attempt.id,
+            "artifact_sha256": artifact.sha256,
+            "graph_sha256": expected_graph,
+            "evidence": body.evidence,
+        },
+    )
+    db.commit()
+    return public(row)
+
+
+@router.get("/voice-renders/{identity}/subtitles")
+def export_subtitles(identity: str, db: DBSession, format: Literal["srt", "ass"] = "srt"):
+    from fastapi.responses import Response
+
+    row = get(db, VoiceRender, identity)
+    return Response(
+        row.payload["subtitles"][format],
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{row.id}.{format}"', "Cache-Control": "no-store"},
+    )
+
+
+@router.get("/projects/{project_id}/comfyops/gaps")
+def capability_gaps(project_id: str, settings: SettingsDep, db: DBSession):
+    report = preproduction.readiness(db, project_id, offline=True, data_dir=settings.data_dir)
+    model_rows = list(db.scalars(select(ModelPackage)))
+    node_rows = list(db.scalars(select(NodePackage)))
+    return {
+        "project_id": project_id,
+        "readiness": report["status"],
+        "asset_and_workflow_gaps": report["blockers"],
+        "model_gaps": [public(m) for m in model_rows if m.status not in {"MOCK_AVAILABLE", "AVAILABLE"}],
+        "node_gaps": [public(n) for n in node_rows if n.status not in {"MOCK_AVAILABLE", "AVAILABLE"}],
+        "strategies": ["REUSE_REGISTERED_HASH", "PLAN_ISOLATED_INSTALL", "IMPORT_AUTHORIZED_ASSET"],
+        "resource_measurement": "ESTIMATED_NOT_MEASURED",
+        "is_mock": True,
+    }

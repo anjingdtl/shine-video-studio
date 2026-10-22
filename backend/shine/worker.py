@@ -571,6 +571,7 @@ def run_one(
     semantic_reviewer=None,
     asr_reviewer=None,
 ):
+    from shine.comfy.client import ComfyUIClient
     from shine.comfyops.models import ResourceLease
     from shine.comfyops.scheduler import ResourceScheduler
 
@@ -624,7 +625,17 @@ def run_one(
                 ):
                     lease.status = "RECONCILE_REQUIRED"
                 else:
-                    scheduler.release(resource_db, resource_id, owner, reconciled=True)
+                    release_client = comfy_client or (comfy_service.client if comfy_service else None)
+                    if release_client is None and settings:
+                        release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+                    try:
+                        if release_client is None or not hasattr(release_client, "free_models"):
+                            raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
+                        release_client.free_models()
+                    except Exception:
+                        lease.status = "RECONCILE_REQUIRED"
+                    else:
+                        scheduler.release(resource_db, resource_id, owner, reconciled=True)
 
 
 def _run_one(

@@ -107,6 +107,12 @@ class LocalVoiceHTTPProvider:
 
     is_mock = False
 
+    def release_models(self):
+        response = self.client.post(self.base_url + "/free", json={"unload_models": True})
+        response.raise_for_status()
+        if response.json().get("released") is not True:
+            raise ValueError("MODEL_RELEASE_UNCONFIRMED")
+
     def __init__(self, base_url, client=None):
         self.base_url = require_loopback_url(base_url).rstrip("/")
         self.client = client or httpx.Client(timeout=120, follow_redirects=False)

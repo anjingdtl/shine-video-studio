@@ -87,7 +87,7 @@ from uuid import uuid4  # noqa: E402
 
 
 @contextmanager
-def resource_slot(factory, kind, budget_mb):
+def resource_slot(factory, kind, budget_mb, *, release_models=None):
     owner = kind.lower() + ":" + uuid4().hex
     scheduler = ResourceScheduler()
     with factory.begin() as db:
@@ -103,5 +103,13 @@ def resource_slot(factory, kind, budget_mb):
     try:
         yield identity
     finally:
-        with factory.begin() as db:
-            scheduler.release(db, identity, owner, reconciled=True)
+        try:
+            if release_models is not None:
+                release_models()
+        except Exception:
+            with factory.begin() as db:
+                db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
+            raise
+        else:
+            with factory.begin() as db:
+                scheduler.release(db, identity, owner, reconciled=True)

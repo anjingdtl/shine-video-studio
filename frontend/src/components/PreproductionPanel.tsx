@@ -21,6 +21,11 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   const [workflowId, setWorkflowId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [text, setText] = useState('你好，这是对白试听。');
+  const [voiceSource, setVoiceSource] = useState('ORIGINAL_DESIGN');
+  const [referenceId, setReferenceId] = useState('');
+  const [emotion, setEmotion] = useState('neutral');
+  const [speed, setSpeed] = useState(1);
+  const [pause, setPause] = useState(0);
   const [documentId, setDocumentId] = useState('');
   const [packageJson, setPackageJson] = useState('');
   const [draftJson, setDraftJson] = useState('');
@@ -96,12 +101,13 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       </div>
       <details><summary>登记权利与授权</summary>
         <label>授权范围<select value={rightsScope} onChange={e => setRightsScope(e.target.value)}>
-          <option value="asset">素材使用</option><option value="voice_design">原创音色</option>
+          <option value="asset">素材使用</option><option value="voice_design">原创音色</option><option value="voice_clone">参考声音克隆（绑定下方音频候选）</option>
         </select></label>
         <label>许可证 / 权利依据<input value={license} onChange={e => setLicense(e.target.value)} /></label>
         <button disabled={busy} onClick={() => act(async () => {
           const r = await post<Row>('/preparation/rights', { project_id: projectId, scope: rightsScope,
-            license_id: license, purpose: prompt, evidence });
+            license_id: license, purpose: prompt, evidence,
+            ...(rightsScope === 'voice_clone' ? { reference_candidate_id: referenceId } : {}) });
           return approve(r, 'rights_approve', `/preparation/rights/${r.id}/approve`);
         })}>登记并由操作员确认权利</button>
       </details>
@@ -122,11 +128,19 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       }} /></label>
     </>}
     {view === 4 && <>
+      <label>音色来源<select value={voiceSource} onChange={e => setVoiceSource(e.target.value)}>
+        <option value="ORIGINAL_DESIGN">原创设计</option><option value="AUTHORIZED_CLONE">已授权录音克隆</option>
+        <option value="USER_IMPORT">已有音频导入</option></select></label>
+      <label>参考音频候选 ID<input value={referenceId} onChange={e => setReferenceId(e.target.value)} /></label>
       <label>音色设计权利 ID<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>
+      <label>情绪<input value={emotion} onChange={e => setEmotion(e.target.value)} /></label>
+      <label>语速（0.5–2）<input type="number" min="0.5" max="2" step="0.1" value={speed} onChange={e => setSpeed(Number(e.target.value))} /></label>
+      <label>停顿秒数（0–3）<input type="number" min="0" max="3" step="0.1" value={pause} onChange={e => setPause(Number(e.target.value))} /></label>
       <label>普通话对白 / 试听文本<textarea value={text} onChange={e => setText(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/voice-profiles/design`, {
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/voice-profiles/${voiceSource === 'AUTHORIZED_CLONE' ? 'clone' : voiceSource === 'USER_IMPORT' ? 'import' : 'design'}`, {
         character: entity, description: prompt, text, rights_id: voiceRights, asset_rights_id: rightsId,
-      }))}>原创音色 Fake 试听（测试音调）</button>
+        source: voiceSource, reference_id: referenceId || null,
+      }, voiceSource === 'AUTHORIZED_CLONE'))}>制作候选试听（默认 Fake 测试音调）</button>
     </>}
     {view === 5 && <>
       <label>已导入剧本 Document ID<input value={documentId} onChange={e => setDocumentId(e.target.value)} /></label>
@@ -165,11 +179,14 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         {row.status === 'PREVIEW' && <button disabled={busy} onClick={() => act(() =>
           approve(row, 'voice_freeze', `/voice-profiles/${row.id}/approve-and-freeze`))}>操作员确认试听并冻结</button>}
         {row.status === 'FROZEN' && <button disabled={busy} onClick={() => act(() => post(`/voice-profiles/${row.id}/dialogue`, {
-          character: row.payload.character, text, voice_hash: row.sha256,
+          character: row.payload.character, text, voice_hash: row.sha256, emotion, speed, pause,
         }))}>生成对白 / ASR / 逐字对齐 / SRT / ASS</button>}
       </>}
       <details><summary>来源、风险、QC 与完整快照</summary><pre>{JSON.stringify(row.payload, null, 2)}</pre></details>
     </article>)}
+    {view === 4 && result !== null && typeof result === 'object' && 'voice_id' in result && 'id' in result &&
+      <p><a href={`${API}/voice-renders/${String(result.id)}/subtitles?format=srt`} download>下载 SRT</a>
+        {' · '}<a href={`${API}/voice-renders/${String(result.id)}/subtitles?format=ass`} download>下载 ASS</a></p>}
     {result !== null && <details open><summary>后端结果 / 阻滞原因</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}
   </section>;
 }

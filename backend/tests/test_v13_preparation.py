@@ -663,3 +663,50 @@ def test_workflow_static_negative_contracts(prep, kind):
         },
     )
     assert response.status_code == 422 if kind in {"cycle", "mapping"} else response.json()["errors"]
+
+
+def test_local_image_provider_contract_uses_fake_http_and_scoped_references():
+    import base64
+
+    from shine.comfyops.assets import fake_image
+    from shine.comfyops.images import LocalImageHTTPProvider
+
+    content = fake_image("test")
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        assert base64.b64decode(body["references"][0]) == b"authorized fixture"
+        return httpx.Response(
+            200,
+            json={
+                "content_base64": base64.b64encode(content).decode(),
+                "filename": "fixture.png",
+                "is_mock": True,
+                "model": "fake-image",
+            },
+        )
+
+    provider = LocalImageHTTPProvider("http://127.0.0.1:1234", httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.generate("test", 7, {"category": "IMAGE_EDIT"}, [b"authorized fixture"])
+    assert result["content"] == content and result["is_mock"]
+    assert len(seen) == 1
+    with pytest.raises(HTTPException):
+        LocalImageHTTPProvider("https://external.example")
+
+
+def test_failed_model_release_holds_gpu_for_reconciliation(prep):
+    from shine.comfyops.scheduler import resource_slot
+
+    _, factory, _ = prep
+
+    def fail_release():
+        raise OSError("fake release failure")
+
+    with pytest.raises(OSError):
+        with resource_slot(factory, "TTS", 4000, release_models=fail_release):
+            pass
+    with factory() as db:
+        lease = db.scalar(select(ResourceLease).where(ResourceLease.status == "RECONCILE_REQUIRED"))
+        assert lease

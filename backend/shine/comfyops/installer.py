@@ -36,6 +36,11 @@ class PackageSpec(BaseModel):
     revision: str = Field(min_length=1, max_length=128)
     license_id: str = Field(min_length=1)
     usage: str = Field(pattern=r"^(research|commercial)$")
+    family: str = "UNSPECIFIED"
+    capabilities: list[str] = Field(default_factory=list, max_length=30)
+    resource_measurement: str = Field(default="UNKNOWN", pattern=r"^(UNKNOWN|ESTIMATED|KNOWN)$")
+    ram_mb: int | None = Field(default=None, ge=0)
+    license_url: str = ""
     precision: str = "UNKNOWN"
     quantization: str = "UNKNOWN"
     resource_mb: int | None = Field(default=None, ge=0)

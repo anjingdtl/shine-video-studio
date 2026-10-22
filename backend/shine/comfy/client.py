@@ -114,6 +114,15 @@ class ComfyUIClient:
         path = "/history" if prompt_id is None else f"/history/{prompt_id}"
         return self._get(path).json()
 
+    def free_models(self):
+        queue = self.queue()
+        if queue.get("queue_running") or queue.get("queue_pending"):
+            raise ComfyUIError("INSTANCE_BUSY_CANNOT_UNLOAD")
+        with self._client() as client:
+            response = client.post(f"{self.base_url}/free", json={"unload_models": True, "free_memory": True})
+            if response.status_code != 200:
+                raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
+
     def upload_file(
         self,
         filename: str,
@@ -168,9 +177,7 @@ class ComfyUIClient:
                             details={"status": response.status_code},
                         ) from exc
                 if response.status_code >= 500:
-                    last = ComfyUnavailable(
-                        "ComfyUI upload server error", details={"status": response.status_code}
-                    )
+                    last = ComfyUnavailable("ComfyUI upload server error", details={"status": response.status_code})
                 else:
                     raise ComfyUIError(
                         "ComfyUI rejected the upload",

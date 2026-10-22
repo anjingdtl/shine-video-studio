@@ -231,6 +231,9 @@ class FakeComfyServer(_BaseServer):
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
+                if self.path == "/free":
+                    self._json(200, {})
+                    return
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
                 if parsed.path.startswith("/upload/"):
