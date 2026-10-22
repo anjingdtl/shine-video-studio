@@ -24,7 +24,7 @@ from shine.comfyops.assets import (
 )
 from shine.comfyops.images import FakeImageProvider, LocalImageHTTPProvider
 from shine.comfyops.installer import PackageSpec, check_url, safe_target
-from shine.comfyops.inventory import FakeWindowsHostProbe
+from shine.comfyops.inventory import FakeWindowsHostProbe, WindowsHostProbe
 from shine.comfyops.models import (
     CandidateAsset,
     ComfyInstance,
@@ -97,11 +97,27 @@ def locked(db):
     db.execute(text("BEGIN IMMEDIATE"))
 
 
+class RefreshInventory(Strict):
+    mode: Literal["fake", "local"] = "fake"
+
+
 @router.post("/comfyops/instances/discover")
 @router.post("/comfyops/inventory/refresh")
-def refresh(db: DBSession):
-    payload = FakeWindowsHostProbe().scan()
-    row = save(db, EnvironmentSnapshot, payload, "MOCK_VERIFIED")
+def refresh(body: RefreshInventory, settings: SettingsDep, db: DBSession):
+    if body.mode == "local":
+        from pathlib import Path
+
+        if not settings.comfy_probe_roots or not settings.comfy_probe_ports:
+            raise HTTPException(409, "LOCAL_PROBE_SCOPE_NOT_CONFIGURED")
+        try:
+            payload = WindowsHostProbe(
+                [Path(p) for p in settings.comfy_probe_roots], list(settings.comfy_probe_ports)
+            ).scan()
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    else:
+        payload = FakeWindowsHostProbe().scan()
+    row = save(db, EnvironmentSnapshot, payload, "MOCK_VERIFIED" if payload["is_mock"] else "DISCOVERED")
     for instance in payload["instances"]:
         save(db, ComfyInstance, instance, instance["health"])
     audit(db, "comfyops", "INVENTORY_REFRESHED", row)
@@ -221,6 +237,7 @@ class GrantRequest(Strict):
         "rights_approve",
         "workflow_validate",
         "workflow_preview",
+        "subtitle_correct",
     ]
     target_id: str
 
@@ -234,6 +251,7 @@ TARGETS = {
     "rights_approve": RightsRecord,
     "workflow_validate": WorkflowRevision,
     "workflow_preview": WorkflowRevision,
+    "subtitle_correct": VoiceRender,
 }
 
 
@@ -550,6 +568,8 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
             {
                 "is_mock": provider.is_mock or result.get("is_mock", False),
                 "provider": provider.name,
+                "model": result.get("model", "UNVERIFIED_LOCAL_SERVICE"),
+                "model_ids": wf.payload["model_ids"],
                 "workflow_id": wf.id,
                 "workflow_hash": wf.sha256,
                 "seed": body.seed,
@@ -693,7 +713,12 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         result["audio"],
         "voice.wav",
         body.asset_rights_id,
-        {"is_mock": result["is_mock"], "source": body.source},
+        {
+            "is_mock": result["is_mock"],
+            "source": body.source,
+            "model": result.get("model", "USER_IMPORT"),
+            "provider": type(provider).__name__,
+        },
     )
     payload = {
         **body.model_dump(),
@@ -766,6 +791,11 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         with resource_slot(
             request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
         ):
+            if hasattr(provider, "prepare_conditioning"):
+                reference = get(db, CandidateAsset, row.payload["candidate_id"])
+                provider.prepare_conditioning(
+                    verify_candidate(settings, reference), row.payload["conditioning_hash"], row.payload["text"]
+                )
             result = provider.synthesize(
                 body.text, body.character, row.payload["conditioning_hash"], body.emotion, body.speed, body.pause
             )
@@ -1078,3 +1108,47 @@ def capability_gaps(project_id: str, settings: SettingsDep, db: DBSession):
         "resource_measurement": "ESTIMATED_NOT_MEASURED",
         "is_mock": True,
     }
+
+
+class SubtitleWord(Strict):
+    text: str = Field(min_length=1, max_length=100)
+    start_s: float = Field(ge=0, allow_inf_nan=False)
+    end_s: float = Field(gt=0, allow_inf_nan=False)
+
+
+class SubtitleCorrection(Decision):
+    words: list[SubtitleWord] = Field(min_length=1, max_length=2000)
+
+
+@router.post("/voice-renders/{identity}/correct-subtitles")
+def correct_subtitles(identity: str, body: SubtitleCorrection, actor: Operator, db: DBSession):
+    locked(db)
+    row = get(db, VoiceRender, identity)
+    approval.consume(db, actor, "subtitle_correct", row, body.grant_id, body.snapshot)
+    words = [w.model_dump() for w in body.words]
+    last = 0
+    if "".join(w["text"] for w in words) != row.payload["text"]:
+        raise HTTPException(409, "LOCKED_DIALOGUE_TEXT_MISMATCH")
+    duration = max(w["end_s"] for w in row.payload["words"])
+    for word in words:
+        if not last <= word["start_s"] < word["end_s"] <= duration:
+            raise HTTPException(409, "ALIGNMENT_TIME_INVALID")
+        last = word["end_s"]
+    revision = save(
+        db,
+        VoiceRender,
+        {
+            **row.payload,
+            "parent_render_id": row.id,
+            "words": words,
+            "subtitles": subtitles(words),
+            "corrected_by": actor,
+            "evidence": body.evidence,
+        },
+        "MANUAL_SUBTITLE_CORRECTED",
+        project_id=row.project_id,
+        voice_id=row.voice_id,
+    )
+    audit(db, actor, "SUBTITLE_CORRECTION_RECORDED", revision)
+    db.commit()
+    return public(revision)

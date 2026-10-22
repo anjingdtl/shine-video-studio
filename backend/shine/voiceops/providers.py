@@ -117,6 +117,15 @@ class LocalVoiceHTTPProvider:
         self.base_url = require_loopback_url(base_url).rstrip("/")
         self.client = client or httpx.Client(timeout=120, follow_redirects=False)
 
+    def prepare_conditioning(self, audio, digest, reference_text):
+        response = self.client.post(
+            self.base_url + "/conditioning",
+            json={"audio_base64": base64.b64encode(audio).decode(), "sha256": digest, "reference_text": reference_text},
+        )
+        response.raise_for_status()
+        if response.json().get("sha256") != digest:
+            raise ValueError("VOICE_CONDITIONING_HASH_MISMATCH")
+
     def design(self, description, text, character):
         response = self.client.post(
             self.base_url + "/design", json={"description": description, "text": text, "character": character}

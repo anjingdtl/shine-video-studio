@@ -298,6 +298,18 @@ def test_voice_design_freeze_dialogue_asr_alignment_subtitles(prep):
     assert "".join(w["text"] for w in render["payload"]["words"]) == body["text"]
     assert "-->" in render["payload"]["subtitles"]["srt"]
     assert "[Events]" in render["payload"]["subtitles"]["ass"]
+    assert client.get(f"/api/v1/voice-renders/{render['id']}/subtitles?format=srt").status_code == 200
+    correction = approve(
+        client,
+        render,
+        "subtitle_correct",
+        f"/voice-renders/{render['id']}/correct-subtitles",
+        words=render["payload"]["words"],
+    )
+    assert correction["id"] != render["id"]
+    assert correction["payload"]["is_mock"] is True
+    assert correction["payload"]["parent_render_id"] == render["id"]
+
     post(client, f"/voice-profiles/{voice['id']}/dialogue", {**body, "character": "Other"}, expected=409)
     post(client, f"/voice-profiles/{voice['id']}/dialogue", {**body, "voice_hash": "old"}, expected=409)
     post(client, f"/preparation/rights/{voice_right['id']}/revoke", operator=True)

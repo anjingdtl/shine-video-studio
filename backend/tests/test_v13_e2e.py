@@ -2,18 +2,32 @@
 
 from dataclasses import replace
 
+import pytest
+
 from shine.comfy.client import ComfyUIClient
 from shine.schemas import SemanticFinding
+from shine.voiceops.providers import LocalVoiceHTTPProvider
 from shine.worker import run_one
 from tests.conftest import create_project, make_test_video_bytes, register_workflow_profile
 from tests.fake_http import FakeComfyServer
+from tests.fake_voice import FakeVoiceServer
 from tests.test_film_crew import CAMERA, CONTINUITY, ENGLISH_STYLE, call
 from tests.test_offline_e2e import E2E_GRAPH, E2E_PARAM_MAP, ScriptedASR, ScriptedSemanticReviewer
 from tests.test_v13_preparation import approve, candidate, package, post, prep, rights, workflow  # noqa: F401
 
 
-def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep):  # noqa: F811
+@pytest.fixture
+def fake_voice_server():
+    server = FakeVoiceServer().start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_server):  # noqa: F811
     client, factory, settings = prep
+    client.app.state.voice_provider = LocalVoiceHTTPProvider(fake_voice_server.base_url)
     project = create_project(client, "V1.3 simulated production")
     line = {"speaker_id": "Lin", "text": "你终于来了。", "start_s": 0.5, "end_s": 2}
     script_text = "场景：雨夜主街\n道具：账册\nLin：你终于来了。"
@@ -62,6 +76,7 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep):  # noqa: F8
         {"character": "Lin", "text": line["text"], "voice_hash": voice["sha256"]},
     )
     assert audio["payload"]["words"] and audio["payload"]["subtitles"]["srt"]
+    assert {"/design", "/tts", "/asr", "/align", "/free"} <= set(fake_voice_server.calls)
     assert client.put(f"/api/v1/projects/{project}/style/draft", json=ENGLISH_STYLE).status_code == 200
     post(client, f"/projects/{project}/style/freeze", expected=201)
     post(client, f"/projects/{project}/rulepack/freeze")

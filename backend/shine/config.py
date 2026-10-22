@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,8 @@ class Settings:
     offline_simulation: bool = False
     local_voice_url: str = ""
     local_image_url: str = ""
+    comfy_probe_roots: tuple[str, ...] = ()
+    comfy_probe_ports: tuple[int, ...] = ()
     operator_id: str = ""
     operator_token_sha256: str = ""
 
@@ -81,6 +84,8 @@ class Settings:
             secret_store_dir=data_dir / "secrets",
             ffprobe_path=os.getenv("SHINE_FFPROBE", "ffprobe"),
             ffmpeg_path=os.getenv("SHINE_FFMPEG", "ffmpeg"),
+            comfy_probe_roots=tuple(json.loads(os.getenv("SHINE_COMFY_PROBE_ROOTS", "[]"))),
+            comfy_probe_ports=tuple(json.loads(os.getenv("SHINE_COMFY_PROBE_PORTS", "[]"))),
             local_image_url=os.getenv("SHINE_LOCAL_IMAGE_URL", ""),
             local_voice_url=os.getenv("SHINE_LOCAL_VOICE_URL", ""),
             offline_simulation=os.getenv("SHINE_OFFLINE_SIMULATION", "") == "1",
