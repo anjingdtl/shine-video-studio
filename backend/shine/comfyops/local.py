@@ -38,8 +38,8 @@ def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
             or plan.payload.get("approved_by") != actor
         ):
             raise ValueError("INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
-        if plan.payload.get("kind") == "INSTANCE_LIFECYCLE":
-            raise ValueError("USE_INSTANCE_LIFECYCLE_EXECUTOR")
+        if plan.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
+            raise ValueError("USE_INSTANCE_LIFECYCLE_OR_BACKUP_EXECUTOR")
         if datetime.fromisoformat(plan.payload.get("execute_before", "2000-01-01")) <= utcnow():
             raise ValueError("INSTALL_APPROVAL_EXPIRED")
         if not plan.payload.get("isolated") or plan.payload.get("executor") != "LOCAL_ISOLATED":

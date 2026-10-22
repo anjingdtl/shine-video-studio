@@ -335,7 +335,7 @@ def execute_install(
 ):
     locked(db)
     row = get(db, InstallationPlan, identity)
-    if row.payload.get("kind") == "INSTANCE_LIFECYCLE":
+    if row.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
         raise HTTPException(409, "USE_INSTANCE_LIFECYCLE_EXECUTOR")
     if body.executor == "local":
         import os

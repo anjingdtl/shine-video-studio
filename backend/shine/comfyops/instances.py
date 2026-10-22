@@ -222,7 +222,7 @@ class ProcessRunner(CommandExecutor):
             kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
             kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
             kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-            handle = kernel.OpenProcess(0x1001, False, pid)
+            handle = kernel.OpenProcess(0x101001, False, pid)
             if not handle:
                 raise ValueError("OWNED_PROCESS_UNVERIFIABLE")
             try:

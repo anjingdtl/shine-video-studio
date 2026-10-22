@@ -409,3 +409,46 @@ def test_external_instance_backup_is_read_only_scoped_and_hash_bound(prep, tmp_p
         operator=True,
         expected=409,
     )
+
+
+def test_windows_owned_stop_uses_verified_handle_and_synchronize_right(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+
+    import shine.comfyops.instances as instances
+
+    calls = []
+
+    class Function:
+        def __init__(self, call):
+            self.call = call
+
+        def __call__(self, *args):
+            return self.call(*args)
+
+    def times(handle, created, *rest):
+        ctypes.cast(created, ctypes.POINTER(ctypes.c_ulonglong))[0] = 123
+        return 1
+
+    def open_process(access, inherit, pid):
+        assert access & 0x100000  # SYNCHRONIZE is required by WaitForSingleObject
+        assert pid == 42 and access & 1
+        return 99
+
+    kernel = SimpleNamespace(
+        OpenProcess=Function(open_process),
+        GetProcessTimes=Function(times),
+        TerminateProcess=Function(lambda handle, code: calls.append(("terminate", handle)) or 1),
+        WaitForSingleObject=Function(lambda handle, timeout: calls.append(("wait", handle)) or 0),
+        CloseHandle=Function(lambda handle: calls.append(("close", handle))),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(instances.os, "name", "nt")
+        patch.setattr(instances, "process_identity", lambda pid: "123")
+        patch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+        instances.ProcessRunner().stop({"pid": 42, "birth": "123"})
+        assert calls == [("terminate", 99), ("wait", 99), ("close", 99)]
+        calls.clear()
+        with pytest.raises(ValueError, match="OWNED_PROCESS_CHANGED"):
+            instances.ProcessRunner().stop({"pid": 42, "birth": "other"})
+        assert calls == [("close", 99)]
