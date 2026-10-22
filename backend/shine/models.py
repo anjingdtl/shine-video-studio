@@ -451,3 +451,6 @@ class AgentArtifact(Base):
     approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+# V1.3 extends this same metadata/SQLite ledger.
+from shine.comfyops import models as preparation_models  # noqa: E402,F401

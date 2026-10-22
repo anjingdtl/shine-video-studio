@@ -446,6 +446,7 @@ class AgentRole(StrEnum):
     CONTINUITY_SUPERVISOR = "continuity_supervisor"
     SOUND_DIRECTOR = "sound_director"
     PRODUCER = "producer"
+    COMFYOPS = "comfyops"
     SCRIPT_PLANNER = "script_planner"
     SHOT_PLANNER = "shot_planner"
     REPAIR_PLANNER = "repair_planner"

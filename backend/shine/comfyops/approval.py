@@ -1,0 +1,67 @@
+"""Short-lived, one-use, action and snapshot-bound human grants."""
+
+from datetime import timedelta
+from secrets import token_hex
+
+from fastapi import HTTPException
+from sqlalchemy import update
+
+from shine.comfy.workflow import graph_hash
+from shine.comfyops.models import ApprovalGrant
+from shine.models import utcnow
+from shine.services import add_audit
+
+
+def snapshot(row):
+    return graph_hash(
+        {
+            "id": row.id,
+            "project": getattr(row, "project_id", None),
+            "payload": row.payload,
+            "status": row.status,
+            "sha256": row.sha256,
+        }
+    )
+
+
+def issue(db, actor, action, row):
+    grant = ApprovalGrant(
+        id=token_hex(32),
+        actor=actor,
+        action=action,
+        target_id=row.id,
+        snapshot=snapshot(row),
+        expires_at=utcnow() + timedelta(minutes=5),
+    )
+    db.add(grant)
+    add_audit(
+        db,
+        actor,
+        "PREPARATION_GRANT_ISSUED",
+        row.__tablename__,
+        row.id,
+        {"action": action, "snapshot": grant.snapshot},
+        project_id=getattr(row, "project_id", None),
+    )
+    db.commit()
+    return {"grant_id": grant.id, "snapshot": grant.snapshot, "expires_at": grant.expires_at}
+
+
+def consume(db, actor, action, row, grant_id, expected):
+    if snapshot(row) != expected:
+        raise HTTPException(409, "PLAN_HASH_CHANGED")
+    result = db.execute(
+        update(ApprovalGrant)
+        .where(
+            ApprovalGrant.id == grant_id,
+            ApprovalGrant.actor == actor,
+            ApprovalGrant.action == action,
+            ApprovalGrant.target_id == row.id,
+            ApprovalGrant.snapshot == expected,
+            ApprovalGrant.used.is_(False),
+            ApprovalGrant.expires_at > utcnow(),
+        )
+        .values(used=True)
+    )
+    if result.rowcount != 1:
+        raise HTTPException(409, "APPROVAL_REQUIRED_OR_REPLAYED")

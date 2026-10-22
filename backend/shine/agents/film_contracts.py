@@ -101,10 +101,19 @@ class FilmRunRequest(APIModel):
     supersedes_artifact_id: str | None = None
 
 
+class ComfyOpsProposal(APIModel):
+    schema_version: Literal["1.3"] = "1.3"
+    operations: list[Literal["inspect_environment", "propose_install_plan", "search_capabilities",
+                             "build_workflow_draft", "assess_project_readiness"]] = Field(max_length=30)
+    capability_requests: list[str] = Field(default_factory=list, max_length=30)
+    rationale: str = Field(min_length=1, max_length=4000)
+
+
 class FilmAgentRegistry:
     """Closed capabilities. Extending a role requires a contract and reviewed code."""
 
     roles = {
+        "comfyops": ("环境与能力工程师", ComfyOpsProposal, (), ("limits",)),
         "scriptwriter": ("编剧", ScriptBreakdown, (), ("base", "dialogue")),
         "director": ("导演", DirectorialPlan, ("ScriptBreakdown",), ("base", "references")),
         "cinematographer": ("摄影指导", CameraPlan, ("DirectorialPlan",), ("base", "keyframes")),

@@ -331,6 +331,8 @@ def create_app(
     app.include_router(comfy_router)
     app.include_router(film_router)
     app.include_router(operator_router)
+    from shine.api_preparation import router as preparation_router
+    app.include_router(preparation_router)
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:
@@ -449,6 +451,10 @@ def create_app(
         project = require_project(db, project_id)
         filename, content, content_type = await read_verified_upload(file, asset_kind, settings.max_upload_bytes)
         digest = sha256_bytes(content)
+        from shine.comfyops.models import CandidateAsset
+        if any(c.payload.get("content_sha256") == digest for c in
+               db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id))):
+            raise HTTPException(409, "CANDIDATE_REQUIRES_AUTHENTICATED_PROMOTION")
         duplicate = db.scalar(select(Asset).where(Asset.project_id == project.id, Asset.sha256 == digest))
         if duplicate:
             return jsonable_encoder(_asset_data(duplicate))
@@ -504,6 +510,8 @@ def create_app(
         asset = db.get(Asset, asset_id)
         if not asset:
             raise HTTPException(status_code=404, detail="Asset not found")
+        if (asset.provenance or {}).get("candidate_id"):
+            raise HTTPException(409, "PROMOTED_ASSET_IMMUTABLE_CREATE_NEW_VERSION")
         updates = body.model_dump(exclude_unset=True)
         if "role" in updates:
             asset.role = validate_asset_role(updates["role"])
@@ -696,9 +704,19 @@ def create_app(
         }
 
     @app.post("/api/v1/projects/{project_id}/jobs", status_code=201)
-    def create_job(project_id: str, body: CreateJob, db: DBSession) -> dict[str, Any]:
+    def create_job(project_id: str, body: CreateJob, request: Request, db: DBSession) -> dict[str, Any]:
         project = require_project(db, project_id)
         shot = require_shot(db, project_id, body.shot_id)
+        from shine.comfyops.preproduction import enforce
+        enforce(
+            db, project_id,
+            offline=(body.provider.value == "mock" or request.app.state.settings.offline_simulation),
+            data_dir=settings.data_dir,
+        )
+        if body.provider.value == "comfyui" and not request.app.state.settings.offline_simulation:
+            for binding in shot.bindings:
+                if (binding.asset.provenance or {}).get("offline_only"):
+                    raise HTTPException(409, "MOCK_ASSET_NOT_PRODUCTION")
         spec = ShotSpec.model_validate(shot.spec)
         dependency_ids = list(body.depends_on)
         dependency_kinds = {dependency_id: "explicit" for dependency_id in dependency_ids}

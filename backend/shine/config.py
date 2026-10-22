@@ -43,6 +43,8 @@ class Settings:
     secret_store_dir: Path | None = None
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
+    offline_simulation: bool = False
+    local_voice_url: str = ""
     operator_id: str = ""
     operator_token_sha256: str = ""
 
@@ -78,6 +80,8 @@ class Settings:
             secret_store_dir=data_dir / "secrets",
             ffprobe_path=os.getenv("SHINE_FFPROBE", "ffprobe"),
             ffmpeg_path=os.getenv("SHINE_FFMPEG", "ffmpeg"),
+            local_voice_url=os.getenv("SHINE_LOCAL_VOICE_URL", ""),
+            offline_simulation=os.getenv("SHINE_OFFLINE_SIMULATION", "") == "1",
             operator_id=os.getenv("SHINE_OPERATOR_ID", ""),
             operator_token_sha256=os.getenv("SHINE_OPERATOR_TOKEN_SHA256", ""),
         )

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -124,6 +125,13 @@ def heartbeat(
             instance.status = status
             instance.current_job_id = current_job_id
             instance.current_phase = phase
+            if current_job_id:
+                from shine.comfyops.models import ResourceLease
+
+                resource = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + current_job_id))
+                if resource and resource.status == "ACTIVE":
+                    resource.heartbeat_at = utcnow()
+                    resource.expires_at = utcnow() + timedelta(seconds=60)
             instance.last_heartbeat_at = utcnow()
             instance.processed_count += processed_delta
             if error:
@@ -264,9 +272,7 @@ def _record_gates(
                 evidence=gate.evidence,
             )
         )
-    existing = db.scalar(
-        select(QCReport).where(QCReport.job_id == job.id, QCReport.attempt_id == attempt.id)
-    )
+    existing = db.scalar(select(QCReport).where(QCReport.job_id == job.id, QCReport.attempt_id == attempt.id))
     if existing is not None:
         # The attempt was already checked. Recovery must not duplicate the report.
         existing.result = fused.result
@@ -376,10 +382,7 @@ def _build_repair_revision(
         style = StyleBible.model_validate(request.get("style_snapshot", {}))
     except Exception:
         return None
-    manifest = [
-        ReferenceManifestItem.model_validate(item)
-        for item in request.get("reference_manifest", [])
-    ]
+    manifest = [ReferenceManifestItem.model_validate(item) for item in request.get("reference_manifest", [])]
     if action == RepairAction.ADJUST_PROMPT_STRATEGY:
         return revision_for_prompt(
             request=request,
@@ -559,6 +562,73 @@ def _mock_report(submission: MockSubmission) -> dict[str, Any]:
 
 def run_one(
     session_factory,
+    provider=None,
+    worker_id=None,
+    *,
+    settings=None,
+    comfy_service=None,
+    comfy_client=None,
+    semantic_reviewer=None,
+    asr_reviewer=None,
+):
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    worker_id = worker_id or f"worker-{uuid4().hex[:12]}"
+    heartbeat(session_factory, worker_id, phase="claiming")
+    scheduler = ResourceScheduler()
+    resource_id, owner = None, None
+    with session_factory.begin() as resource_db:
+        _promote_dependencies(resource_db)
+        resource_db.flush()
+        candidate = resource_db.scalar(
+            select(Job)
+            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
+            .order_by(Job.created_at, Job.id)
+            .limit(1)
+        )
+        if not candidate:
+            return None
+        selected_job_id = candidate.id
+        if candidate.provider == "comfyui":
+            owner = "h3:" + candidate.id
+            lease = scheduler.enqueue(resource_db, owner, 16384, True, 100)
+            if lease.status == "RELEASED":
+                lease.status = "WAITING"  # A bounded repair attempt may reserve the same logical owner again.
+            resource_db.commit()
+            resource_id = lease.id
+            job_id = candidate.id
+    if resource_id:
+        with session_factory() as resource_db:
+            if not scheduler.admit(resource_db, resource_id):
+                return None
+    try:
+        return _run_one(
+            session_factory,
+            provider,
+            worker_id,
+            settings=settings,
+            comfy_service=comfy_service,
+            comfy_client=comfy_client,
+            semantic_reviewer=semantic_reviewer,
+            asr_reviewer=asr_reviewer,
+            expected_job_id=selected_job_id,
+        )
+    finally:
+        if resource_id:
+            with session_factory.begin() as resource_db:
+                job = resource_db.get(Job, job_id)
+                lease = resource_db.get(ResourceLease, resource_id)
+                if job and (
+                    job.status in {"SUBMITTING", "RUNNING"} or job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+                ):
+                    lease.status = "RECONCILE_REQUIRED"
+                else:
+                    scheduler.release(resource_db, resource_id, owner, reconciled=True)
+
+
+def _run_one(
+    session_factory,
     provider: MockH3Provider | None = None,
     worker_id: str | None = None,
     *,
@@ -567,6 +637,7 @@ def run_one(
     comfy_client=None,
     semantic_reviewer=None,
     asr_reviewer=None,
+    expected_job_id=None,
 ) -> str | None:
     worker_id = worker_id or f"worker-{uuid4().hex[:12]}"
     if provider is None:
@@ -580,12 +651,35 @@ def run_one(
             db.flush()
             candidate = db.scalar(
                 select(Job)
-                .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
+                .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False), Job.id == expected_job_id)
                 .order_by(Job.created_at, Job.id)
                 .limit(1)
             )
             if not candidate:
                 return None
+            from shine.comfyops.preproduction import enforce
+
+            try:
+                enforce(
+                    db,
+                    candidate.project_id,
+                    offline=candidate.provider == "mock" or bool(settings and settings.offline_simulation),
+                    data_dir=settings.data_dir if settings else None,
+                )
+            except HTTPException as exc:
+                candidate.status = "NEEDS_REVIEW"
+                candidate.state_version += 1
+                candidate.failure_code = str(exc.detail)
+                add_audit(
+                    db,
+                    "orchestrator",
+                    "PREPRODUCTION_BLOCKED",
+                    "job",
+                    candidate.id,
+                    {"code": str(exc.detail)},
+                    project_id=candidate.project_id,
+                )
+                return candidate.id
             # Recheck immutable rules at the last boundary, including requests
             # rebuilt by the existing repair engine. A failed rule never submits.
             from shine.models import ProjectRuleLock
@@ -615,7 +709,7 @@ def run_one(
                     )
                     return candidate.id
             now = utcnow()
-            lease_seconds = (settings.worker_lease_seconds if settings else 30)
+            lease_seconds = settings.worker_lease_seconds if settings else 30
             result = db.execute(
                 update(Job)
                 .where(
@@ -638,8 +732,7 @@ def run_one(
             attempt_no = len(job.attempts) + 1
             repair_context = job.pending_repair_context or {}
             manifest = [
-                ReferenceManifestItem.model_validate(item)
-                for item in (job.request or {}).get("reference_manifest", [])
+                ReferenceManifestItem.model_validate(item) for item in (job.request or {}).get("reference_manifest", [])
             ]
             attempt = JobAttempt(
                 job_id=job.id,
@@ -1070,9 +1163,7 @@ def _finalize_comfy_attempt(
             transition(job, "QC_PENDING")
         job.lease_owner = None
         job.lease_expires_at = None
-        job.quality_verification = (
-            VERIFICATION_MOCK if any(gate.is_mock for gate in gates) else VERIFICATION_REAL
-        )
+        job.quality_verification = VERIFICATION_MOCK if any(gate.is_mock for gate in gates) else VERIFICATION_REAL
         if fused.result == STATUS_PASSED:
             transition(job, "PASSED")
         elif fused.result == STATUS_FAILED:
@@ -1513,10 +1604,7 @@ def recover_expired_jobs(
                         & Job.lease_expires_at.is_not(None)
                         & (Job.lease_expires_at < now)
                     )
-                    | (
-                        (Job.status == "NEEDS_REVIEW")
-                        & (Job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN")
-                    )
+                    | ((Job.status == "NEEDS_REVIEW") & (Job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"))
                 )
             ).all()
         )
@@ -1531,6 +1619,15 @@ def recover_expired_jobs(
             semantic_reviewer=semantic_reviewer,
             asr_reviewer=asr_reviewer,
         )
+    from shine.comfyops.models import ResourceLease
+
+    with session_factory.begin() as db:
+        for job_id in job_ids:
+            job = db.get(Job, job_id)
+            attempt = _latest_attempt(db, job_id) if job else None
+            lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+            if lease and attempt and attempt.status == "COMPLETED" and job.status not in ACTIVE_STATUSES:
+                lease.status = "RELEASED"
     return recovered
 
 
