@@ -2,6 +2,9 @@
 
 from contextlib import contextmanager
 
+from fastapi import HTTPException
+from sqlalchemy import select
+
 from shine.comfy.workflow import graph_hash
 from shine.models import AgentTaskRecord, ProjectRuleLock
 from shine.services import add_audit
@@ -9,6 +12,16 @@ from shine.services import add_audit
 
 @contextmanager
 def preparation_task(db, project, role, payload, model):
+    running = db.scalar(
+        select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project.id,
+            AgentTaskRecord.role_id == role,
+            AgentTaskRecord.input_hash == graph_hash(payload),
+            AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW"]),
+        )
+    )
+    if running:
+        raise HTTPException(409, "PREPARATION_RECONCILIATION_REQUIRED")
     lock = db.get(ProjectRuleLock, project.id)
     task = AgentTaskRecord(
         project_id=project.id,
@@ -31,7 +44,7 @@ def preparation_task(db, project, role, payload, model):
     except Exception as exc:
         db.rollback()
         task = db.get(AgentTaskRecord, task.id)
-        task.status = "FAILED"
+        task.status = "FAILED" if isinstance(exc, HTTPException) and exc.status_code < 500 else "NEEDS_REVIEW"
         task.error_code = type(exc).__name__
         add_audit(
             db,

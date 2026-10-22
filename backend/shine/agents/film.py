@@ -262,6 +262,48 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if role in {"comfyops", "director", "cinematographer", "sound_director", "producer"}:
+            from shine.comfyops.models import EnvironmentSnapshot, ModelPackage, WorkflowRevision
+
+            context["capabilities"] = [
+                {
+                    "id": w.id,
+                    "category": w.payload["category"],
+                    "status": w.status,
+                    "sha256": w.sha256,
+                    "parameter_names": sorted(w.payload["parameter_map"]),
+                    "reference_slots": w.payload["reference_slots"],
+                    "model_ids": w.payload["model_ids"],
+                }
+                for w in db.scalars(select(WorkflowRevision))
+                if w.status == "PRODUCTION_APPROVED" or (body.offline_preview and w.status == "FAKE_EXECUTED")
+            ]
+            if role == "comfyops":
+                snapshot = db.scalar(select(EnvironmentSnapshot).order_by(EnvironmentSnapshot.created_at.desc()))
+                context["environment"] = (
+                    {
+                        "id": snapshot.id,
+                        "sha256": snapshot.sha256,
+                        "status": snapshot.status,
+                        "source": snapshot.payload.get("source"),
+                        "is_mock": snapshot.payload.get("is_mock"),
+                        "gpu": snapshot.payload.get("gpu"),
+                        "coverage": snapshot.payload.get("coverage"),
+                    }
+                    if snapshot
+                    else {"status": "UNAVAILABLE"}
+                )
+                context["model_catalog"] = [
+                    {
+                        "id": m.id,
+                        "name": m.payload["name"],
+                        "revision": m.payload["revision"],
+                        "license_id": m.payload["license_id"],
+                        "status": m.status,
+                        "sha256": m.sha256,
+                    }
+                    for m in db.scalars(select(ModelPackage))
+                ]
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,

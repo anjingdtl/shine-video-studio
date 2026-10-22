@@ -152,6 +152,11 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <p>剧本按“角色：对白”“场景：名称”“道具：名称”提取需求；可通过 API 补充关键需求。</p>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId }))}>分析资产与任务依赖</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline: true }))}>运行开机预检</button>
+      <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
+      <label>已验证图像工作流 ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/run`, {
+        asset_rights_id: rightsId, workflow_id: workflowId,
+      }))}>按依赖自动制作缺失候选（等待人工晋升）</button>
       <button disabled={busy} onClick={() => act(async () => {
         const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId });
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);

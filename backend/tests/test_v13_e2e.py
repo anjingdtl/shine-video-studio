@@ -13,7 +13,7 @@ from tests.fake_http import FakeComfyServer
 from tests.fake_voice import FakeVoiceServer
 from tests.test_film_crew import CAMERA, CONTINUITY, ENGLISH_STYLE, call
 from tests.test_offline_e2e import E2E_GRAPH, E2E_PARAM_MAP, ScriptedASR, ScriptedSemanticReviewer
-from tests.test_v13_preparation import approve, candidate, package, post, prep, rights, workflow  # noqa: F401
+from tests.test_v13_preparation import approve, package, post, prep, rights, workflow  # noqa: F401
 
 
 @pytest.fixture
@@ -50,10 +50,17 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
         workflow(client, category, [model["id"]])
     asset_right = rights(client, project)
     formal = {}
-    for family, entity in [("character", "Lin"), ("costume", "Lin"), ("scene", "雨夜主街"), ("prop", "账册")]:
-        row = candidate(client, project, asset_right, image, family, entity)
-        row = approve(client, row, "promote", f"/candidate-assets/{row['id']}/promote")
-        formal[family] = row["formal_asset_id"]
+    batch_body = {"asset_rights_id": asset_right["id"], "workflow_id": image["id"]}
+    for _ in range(2):
+        batch = post(client, f"/projects/{project}/preproduction/run", batch_body)
+        assert batch["status"] == "PENDING_HUMAN_APPROVAL"
+        assert batch["generated"]
+        for task in batch["generated"]:
+            candidates = client.get(f"/api/v1/projects/{project}/candidate-assets").json()
+            row = next(c for c in candidates if c["id"] == task["candidate_id"])
+            row = approve(client, row, "promote", f"/candidate-assets/{row['id']}/promote")
+            formal[row["payload"]["family"]] = row["formal_asset_id"]
+    assert set(formal) == {"character", "costume", "scene", "prop"}
     voice_right = rights(client, project, "voice_design")
     voice = post(
         client,

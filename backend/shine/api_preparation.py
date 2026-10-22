@@ -902,6 +902,8 @@ def freeze_manifest(project_id: str, body: Decision, actor: Operator, settings: 
     row = preproduction.current_plan(db, project_id)
     if not row:
         raise HTTPException(409, "PREPRODUCTION_NOT_ANALYZED")
+    if row.status == "PREPARING":
+        raise HTTPException(409, "PREPARATION_RUNNING")
     approval.consume(db, actor, "manifest_freeze", row, body.grant_id, body.snapshot)
     report = preproduction.readiness(db, project_id, offline=body.offline, data_dir=settings.data_dir)
     if report["status"] != "SHOOT_READY":
@@ -1167,3 +1169,139 @@ def model_references():
     from pathlib import Path
 
     return json.loads((Path(__file__).parent / "comfyops" / "reference_catalog.json").read_text(encoding="utf-8"))
+
+
+class RunPreparation(Strict):
+    asset_rights_id: str
+    workflow_id: str
+    voice_rights_id: str | None = None
+    max_tasks: int = Field(default=20, ge=1, le=20)
+
+
+@router.post("/projects/{project_id}/preproduction/run")
+def run_preparation(project_id: str, body: RunPreparation, request: Request, settings: SettingsDep, db: DBSession):
+    """Run bounded candidate tasks in dependency order; always stop at human promotion."""
+    from sqlalchemy import update
+
+    require_project(db, project_id)
+    require_rights(db, project_id, body.asset_rights_id)
+    plan = preproduction.current_plan(db, project_id)
+    if not plan:
+        raise HTTPException(409, "PREPRODUCTION_NOT_ANALYZED")
+    claim = db.execute(
+        update(PreProductionPlan)
+        .where(PreProductionPlan.id == plan.id, PreProductionPlan.status == "ANALYZED")
+        .values(status="PREPARING")
+    )
+    if claim.rowcount != 1:
+        raise HTTPException(409, "PREPARATION_RUNNING_OR_FROZEN")
+    db.commit()
+    generated, blocked = [], []
+    try:
+        report = preproduction.readiness(db, project_id, data_dir=settings.data_dir)
+        requirements = report["requirements"]
+        satisfied = {r["id"] for r in requirements if r["status"] == "SATISFIED"}
+        pending = list(db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id)))
+        for req in requirements:
+            if not req["critical"] or req["status"] == "SATISFIED":
+                continue
+            if len(generated) >= body.max_tasks:
+                blocked.append({"requirement": req["id"], "code": "TASK_BATCH_LIMIT"})
+                continue
+            if not set(req["depends_on"]).issubset(satisfied):
+                blocked.append({"requirement": req["id"], "code": "DEPENDENCY_APPROVAL_PENDING"})
+                continue
+            if any(
+                c.payload["family"] == req["family"]
+                and c.payload["entity_id"] == req["entity_id"]
+                and c.status not in {"REJECTED", "QC_FAILED"}
+                for c in pending
+            ):
+                blocked.append({"requirement": req["id"], "code": "CANDIDATE_APPROVAL_PENDING"})
+                continue
+            failed_versions = sum(
+                c.payload["family"] == req["family"]
+                and c.payload["entity_id"] == req["entity_id"]
+                and c.status == "QC_FAILED"
+                for c in pending
+            )
+            if failed_versions >= 2:
+                blocked.append({"requirement": req["id"], "code": "CANDIDATE_RETRY_BUDGET_EXHAUSTED"})
+                continue
+            try:
+                if req["family"] in {"character", "costume", "scene", "prop", "storyboard", "keyframe"}:
+                    item = generate(
+                        project_id,
+                        Generate(
+                            family=req["family"],
+                            entity_id=req["entity_id"],
+                            rights_id=body.asset_rights_id,
+                            workflow_id=body.workflow_id,
+                            prompt=f"Prepare {req['family']} for {req['entity_id']} from the locked script.",
+                        ),
+                        request,
+                        settings,
+                        db,
+                    )
+                    item = qc(item["id"], settings, db)
+                    generated.append({"requirement": req["id"], "candidate_id": item["id"], "status": item["status"]})
+                elif req["family"] == "voice" and body.voice_rights_id:
+                    item = voice_design(
+                        project_id,
+                        VoiceDesign(
+                            character=req["entity_id"],
+                            description=f"Original Mandarin voice for {req['entity_id']}.",
+                            text="这是用于确认角色普通话音色的原创试听样音。",
+                            rights_id=body.voice_rights_id,
+                            asset_rights_id=body.asset_rights_id,
+                        ),
+                        request,
+                        settings,
+                        db,
+                    )
+                    candidate_id = item["payload"]["candidate_id"]
+                    qc(candidate_id, settings, db)
+                    generated.append(
+                        {
+                            "requirement": req["id"],
+                            "candidate_id": candidate_id,
+                            "voice_id": item["id"],
+                            "status": "PENDING_HUMAN_APPROVAL",
+                        }
+                    )
+                else:
+                    blocked.append({"requirement": req["id"], "code": "IMPORT_OR_RIGHTS_REQUIRED"})
+            except HTTPException as exc:
+                db.rollback()
+                blocked.append({"requirement": req["id"], "code": str(exc.detail)})
+            except Exception as exc:
+                db.rollback()
+                blocked.append(
+                    {
+                        "requirement": req["id"],
+                        "code": "PROVIDER_RECONCILIATION_REQUIRED",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+        add_audit(
+            db,
+            "producer",
+            "PREPRODUCTION_CANDIDATE_BATCH",
+            "preproduction_plan",
+            plan.id,
+            {"generated": generated, "blocked": blocked},
+            project_id=project_id,
+        )
+        db.commit()
+    finally:
+        db.rollback()
+        current = db.get(PreProductionPlan, plan.id)
+        if current and current.status == "PREPARING":
+            current.status = "ANALYZED"
+            db.commit()
+    return {
+        "generated": generated,
+        "blocked": blocked,
+        "status": "PENDING_HUMAN_APPROVAL",
+        "is_mock": not bool(settings.local_image_url or settings.local_voice_url),
+    }
