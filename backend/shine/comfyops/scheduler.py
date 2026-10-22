@@ -100,8 +100,26 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
         with factory.begin() as db:
             scheduler.release(db, identity, owner)
         raise HTTPException(409, "GPU_BUSY_RETRY_OR_QUEUE")
+    from threading import Event, Thread
+
+    stopped = Event()
+    heartbeat_errors = []
+
+    def pulse():
+        while not stopped.wait(15):
+            try:
+                with factory.begin() as db:
+                    scheduler.heartbeat(db, identity, owner)
+            except Exception as exc:
+                heartbeat_errors.append(type(exc).__name__)
+                stopped.set()
+
+    thread = Thread(target=pulse, name="shine-resource-heartbeat", daemon=True)
+    thread.start()
     try:
         yield identity
+        if heartbeat_errors:
+            raise HTTPException(409, "RESOURCE_LEASE_LOST_RECONCILE_REQUIRED")
     finally:
         try:
             if release_models is not None:
@@ -113,3 +131,6 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
         else:
             with factory.begin() as db:
                 scheduler.release(db, identity, owner, reconciled=True)
+        finally:
+            stopped.set()
+            thread.join(timeout=2)

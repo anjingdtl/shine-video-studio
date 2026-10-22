@@ -16,6 +16,7 @@ from shine.providers import MockH3Provider
 from shine.schemas import ShotSpec
 from shine.services import transition
 from shine.worker import recover_expired_jobs, run_one
+from tests.conftest import asset_decision
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
 
@@ -73,10 +74,9 @@ def upload_asset(client: TestClient, project_id: str, content: bytes = PNG, file
 
 
 def approve_lock(client: TestClient, asset_id: str) -> None:
-    approved = client.post(f"/api/v1/assets/{asset_id}/approve")
-    assert approved.status_code == 200, approved.text
-    locked = client.post(f"/api/v1/assets/{asset_id}/lock")
-    assert locked.status_code == 200, locked.text
+    from tests.conftest import approve_lock as controlled_approve_lock
+
+    controlled_approve_lock(client, asset_id)
 
 
 def shot_payload(style_id: str, *, title: str = "对话镜头", beat: str = "两人交换线索", asset_ids=None) -> dict:
@@ -141,10 +141,10 @@ def test_assets_require_user_approval_and_lock_before_shot_or_render(studio):
     asset = upload_asset(client, project_id)
     body = shot_payload(style["id"], asset_ids=[asset["id"]])
     assert client.post(f"/api/v1/projects/{project_id}/shots", json=body).status_code == 409
-    assert client.post(f"/api/v1/assets/{asset['id']}/lock").status_code == 409
-    assert client.post(f"/api/v1/assets/{asset['id']}/approve").status_code == 200
+    assert asset_decision(client, asset["id"], "lock").status_code == 409
+    assert asset_decision(client, asset["id"], "approve").status_code == 200
     assert client.post(f"/api/v1/projects/{project_id}/shots", json=body).status_code == 409
-    assert client.post(f"/api/v1/assets/{asset['id']}/lock").status_code == 200
+    assert asset_decision(client, asset["id"], "lock").status_code == 200
     shot = create_shot(client, project_id, style["id"], asset_ids=[asset["id"]])
     job = create_job(
         client,

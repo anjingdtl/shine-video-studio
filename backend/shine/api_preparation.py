@@ -44,7 +44,7 @@ from shine.comfyops.registry import CATEGORIES, WorkflowDraft, assemble_template
 from shine.comfyops.scheduler import ResourceScheduler, resource_slot
 from shine.comfyops.tasks import preparation_task
 from shine.config import Settings
-from shine.models import Project, ProjectDocument, WorkflowProfile, utcnow
+from shine.models import Asset, Project, ProjectDocument, WorkflowProfile, utcnow
 from shine.services import add_audit, require_project
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
 
@@ -119,8 +119,17 @@ def refresh(body: RefreshInventory, settings: SettingsDep, db: DBSession):
     else:
         payload = FakeWindowsHostProbe().scan()
     row = save(db, EnvironmentSnapshot, payload, "MOCK_VERIFIED" if payload["is_mock"] else "DISCOVERED")
+    from uuid import NAMESPACE_URL, uuid5
+
     for instance in payload["instances"]:
-        save(db, ComfyInstance, instance, instance["health"])
+        key = ("fake:" if payload.get("is_mock") else "local:") + instance["url"].rstrip("/")
+        identity = str(uuid5(NAMESPACE_URL, "shine-comfy-instance:" + key))
+        current = db.get(ComfyInstance, identity)
+        details = {**instance, "identity_key": key, "snapshot_id": row.id}
+        if current:
+            current.payload, current.sha256, current.status = details, graph_hash(details), instance["health"]
+        else:
+            save(db, ComfyInstance, details, instance["health"], id=identity)
     audit(db, "comfyops", "INVENTORY_REFRESHED", row)
     db.commit()
     return public(row)
@@ -230,8 +239,11 @@ def install_plan(identity: str, db: DBSession):
 
 class GrantRequest(Strict):
     action: Literal[
+        "asset_approve",
+        "asset_lock",
         "install",
         "promote",
+        "voice_execute",
         "voice_freeze",
         "manifest_freeze",
         "workflow_publish",
@@ -242,12 +254,16 @@ class GrantRequest(Strict):
         "style_freeze",
     ]
     target_id: str
+    context: dict | None = None
 
 
 TARGETS = {
+    "asset_approve": Asset,
+    "asset_lock": Asset,
     "install": InstallationPlan,
     "promote": CandidateAsset,
     "voice_freeze": VoiceProfile,
+    "voice_execute": RightsRecord,
     "manifest_freeze": PreProductionPlan,
     "workflow_publish": WorkflowRevision,
     "rights_approve": RightsRecord,
@@ -260,7 +276,9 @@ TARGETS = {
 
 @router.post("/preparation/approval-grants")
 def grant(body: GrantRequest, actor: Operator, db: DBSession):
-    return approval.issue(db, actor, body.action, get(db, TARGETS[body.action], body.target_id))
+    if (body.action == "voice_execute") != (body.context is not None):
+        raise HTTPException(422, "EXECUTION_CONTEXT_REQUIRED_ONLY_FOR_VOICE")
+    return approval.issue(db, actor, body.action, get(db, TARGETS[body.action], body.target_id), context=body.context)
 
 
 @router.post("/comfyops/install-plans/{identity}/approve")
@@ -471,6 +489,7 @@ class Rights(Strict):
     evidence: str = Field(min_length=5, max_length=2000)
     purpose: str = Field(min_length=1, max_length=500)
     reference_candidate_id: str | None = None
+    expires_at: datetime | None = None
 
 
 @router.post("/preparation/rights")
@@ -480,7 +499,7 @@ def rights(body: Rights, db: DBSession):
         ref = get(db, CandidateAsset, body.reference_candidate_id)
         if ref.project_id != body.project_id:
             raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
-    row = save(db, RightsRecord, body.model_dump(), "PENDING", project_id=body.project_id)
+    row = save(db, RightsRecord, body.model_dump(mode="json"), "PENDING", project_id=body.project_id)
     db.commit()
     return public(row)
 
@@ -646,8 +665,7 @@ def candidate_media(identity: str, settings: SettingsDep, db: DBSession):
 def promote_candidate(identity: str, body: Decision, actor: Operator, settings: SettingsDep, db: DBSession):
     locked(db)
     row = get(db, CandidateAsset, identity)
-    approval.consume(db, actor, "promote", row, body.grant_id, body.snapshot)
-    promote(db, settings, row, actor, offline=body.offline)
+    promote(db, settings, row, actor, body, offline=body.offline)
     db.commit()
     return public(row)
 
@@ -661,6 +679,7 @@ class VoiceDesign(Strict):
     source: Literal["ORIGINAL_DESIGN", "AUTHORIZED_CLONE", "USER_IMPORT"] = "ORIGINAL_DESIGN"
     reference_id: str | None = None
     supersedes_voice_id: str | None = None
+    execution_decision: Decision | None = None
 
 
 def voice_provider(request):
@@ -687,33 +706,43 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         if previous.project_id != project_id or previous.payload["character"] != body.character:
             raise HTTPException(409, "CROSS_PROJECT_OR_CHARACTER_REFERENCE")
         version = previous.payload["version"] + 1
-    scope = "voice_clone" if body.source == "AUTHORIZED_CLONE" else "voice_design"
-    rights = require_rights(db, project_id, body.rights_id, scope)
+    from shine.voiceops.authorization import authorize
+
+    actor = (
+        operator(request, settings, request.headers.get("authorization", ""))
+        if body.source == "AUTHORIZED_CLONE"
+        else None
+    )
+    reference = authorize(db, project_id, body, actor, settings)
     provider = voice_provider(request)
-    if body.source != "ORIGINAL_DESIGN":
-        reference = get(db, CandidateAsset, body.reference_id)
-        if reference.project_id != project_id or reference.payload["kind"] != "audio":
-            raise HTTPException(409, "CROSS_PROJECT_OR_NON_AUDIO_REFERENCE")
-        if scope == "voice_clone" and rights.payload.get("reference_candidate_id") != reference.id:
-            raise HTTPException(409, "VOICE_CONSENT_REQUIRED")
-        audio = verify_candidate(settings, reference)
-        result = (
-            provider.clone(audio, body.text, body.character)
-            if scope == "voice_clone"
-            else {"audio": audio, "is_mock": reference.payload["provenance"].get("is_mock", False)}
-        )
+    if body.source == "USER_IMPORT":
+        result = {
+            "audio": verify_candidate(settings, reference),
+            "is_mock": reference.payload["provenance"].get("is_mock", False),
+        }
     else:
         with preparation_task(
             db,
             project,
-            "voice_design",
-            body.model_dump(),
+            "voice_" + body.source.lower(),
+            body.model_dump(exclude={"execution_decision"}),
             "fake-voice-v1" if provider.is_mock else "local-voice-service",
         ):
             with resource_slot(
                 request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
             ):
-                result = provider.design(body.description, body.text, body.character)
+                # Recheck consent immediately before model execution, after scheduling.
+                require_rights(
+                    db,
+                    project_id,
+                    body.rights_id,
+                    "voice_clone" if body.source == "AUTHORIZED_CLONE" else "voice_design",
+                )
+                result = (
+                    provider.clone(verify_candidate(settings, reference), body.text, body.character)
+                    if reference
+                    else provider.design(body.description, body.text, body.character)
+                )
     candidate = create_candidate(
         db,
         settings,
@@ -731,7 +760,7 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         },
     )
     payload = {
-        **body.model_dump(),
+        **body.model_dump(exclude={"execution_decision"}),
         "candidate_id": candidate.id,
         "conditioning_hash": candidate.payload["content_sha256"],
         "is_mock": result["is_mock"],
@@ -782,6 +811,7 @@ class Dialogue(Strict):
     speed: float = Field(default=1, ge=0.5, le=2, allow_inf_nan=False)
     pause: float = Field(default=0, ge=0, le=3, allow_inf_nan=False)
     audio_mode: Literal["H3_NATIVE", "VOICE_REFERENCE", "POST_DUB"] = "VOICE_REFERENCE"
+    execution_decision: Decision | None = None
 
 
 @router.post("/voice-profiles/{identity}/dialogue")
@@ -795,10 +825,29 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         row.payload["rights_id"],
         "voice_clone" if row.payload["source"] == "AUTHORIZED_CLONE" else "voice_design",
     )
+    if row.payload["source"] == "AUTHORIZED_CLONE":
+        actor = operator(request, settings, request.headers.get("authorization", ""))
+        if not body.execution_decision:
+            raise HTTPException(409, "VOICE_EXECUTION_GRANT_REQUIRED")
+        consent = get(db, RightsRecord, row.payload["rights_id"])
+        decision = body.execution_decision
+        approval.consume(
+            db,
+            actor,
+            "voice_execute",
+            consent,
+            decision.grant_id,
+            decision.snapshot,
+            context={"voice_id": row.id, **body.model_dump(exclude={"execution_decision"})},
+        )
     provider = voice_provider(request)
     project = require_project(db, row.project_id)
     with preparation_task(
-        db, project, "voice_dialogue", body.model_dump(), "fake-voice-v1" if provider.is_mock else "local-voice-service"
+        db,
+        project,
+        "voice_dialogue",
+        body.model_dump(exclude={"execution_decision"}),
+        "fake-voice-v1" if provider.is_mock else "local-voice-service",
     ):
         with resource_slot(
             request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
@@ -840,7 +889,7 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         db,
         VoiceRender,
         {
-            **body.model_dump(),
+            **body.model_dump(exclude={"execution_decision"}),
             "candidate_id": candidate.id,
             "transcript": transcript,
             "words": words,

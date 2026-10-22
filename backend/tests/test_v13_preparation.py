@@ -262,6 +262,7 @@ def test_cross_project_generation_and_clone_consent(prep):
             "asset_rights_id": right["id"],
             "source": "AUTHORIZED_CLONE",
         },
+        operator=True,
         expected=409,
     )
 

@@ -192,11 +192,35 @@ def upload_asset(
     return response.json()
 
 
+def asset_decision(client, asset_id, action):
+    import hashlib
+    from dataclasses import replace
+
+    token = "isolated-legacy-asset-test-operator-credential"
+    client.app.state.settings = replace(
+        client.app.state.settings,
+        operator_id="isolated-asset-test-operator",
+        operator_token_sha256=hashlib.sha256(token.encode()).hexdigest(),
+    )
+    headers = {"Authorization": "Bearer " + token}
+    grant = client.post(
+        "/api/v1/preparation/approval-grants",
+        headers=headers,
+        json={"action": "asset_" + action, "target_id": asset_id},
+    )
+    assert grant.status_code == 200, grant.text
+    return client.post(
+        f"/api/v1/assets/{asset_id}/{action}",
+        headers=headers,
+        json={k: grant.json()[k] for k in ("grant_id", "snapshot")}
+        | {"offline": True, "evidence": "Explicit isolated legacy test operator"},
+    )
+
+
 def approve_lock(client: TestClient, asset_id: str) -> None:
-    approved = client.post(f"/api/v1/assets/{asset_id}/approve")
-    assert approved.status_code == 200, approved.text
-    locked = client.post(f"/api/v1/assets/{asset_id}/lock")
-    assert locked.status_code == 200, locked.text
+    for action in ("approve", "lock"):
+        result = asset_decision(client, asset_id, action)
+        assert result.status_code == 200, result.text
 
 
 def shot_payload(

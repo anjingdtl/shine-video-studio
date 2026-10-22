@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.assets import FAMILIES
+from shine.comfyops.assets import FAMILIES, require_rights
 from shine.comfyops.models import (
     AssetRequirement,
     CandidateAsset,
@@ -219,7 +219,7 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     }
 
 
-def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None):
+def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None, render_request=None):
     plan = current_plan(db, project_id)
     if not plan:
         return  # Legacy projects preserve their original contract.
@@ -242,4 +242,66 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
         ]
         if not matched:
             raise HTTPException(409, "PREPRODUCTION_WORKFLOW_NOT_FROZEN")
+    if render_request is not None:
+        enforce_references(db, project_id, render_request, data_dir=data_dir)
     return report["manifest_hash"]
+
+
+def enforce_references(db, project_id, render_request, *, data_dir=None):
+    from shine.models import Shot, ShotAssetBinding
+    from shine.schemas import RenderRequest
+
+    plan = current_plan(db, project_id)
+    if not plan:
+        return
+    request = RenderRequest.model_validate(render_request)
+    if plan.status != "FROZEN":
+        raise HTTPException(409, "PREPRODUCTION_NOT_READY")
+    allowed = {}
+    for link in plan.payload["manifest"]["links"]:
+        asset = db.get(Asset, link["id"])
+        voice = db.get(VoiceProfile, link["id"])
+        if voice:
+            if voice.project_id != project_id or voice.status != "FROZEN" or voice.sha256 != link["hash"]:
+                raise HTTPException(409, "PREPRODUCTION_VOICE_OUTDATED")
+            require_rights(
+                db,
+                project_id,
+                voice.payload["rights_id"],
+                "voice_clone" if voice.payload["source"] == "AUTHORIZED_CLONE" else "voice_design",
+            )
+            candidate = db.get(CandidateAsset, voice.payload["candidate_id"])
+            asset = db.get(Asset, candidate.formal_asset_id) if candidate else None
+            if not asset or asset.sha256 != voice.payload["conditioning_hash"]:
+                raise HTTPException(409, "PREPRODUCTION_VOICE_OUTDATED")
+            allowed[asset.id] = asset.sha256
+        elif asset:
+            allowed[asset.id] = link["hash"]
+    shot = db.get(Shot, request.shot_id)
+    if not shot or shot.project_id != project_id or shot.revision != request.shot_revision:
+        raise HTTPException(409, "PREPRODUCTION_SHOT_OUTDATED")
+    bound = {b.asset_id for b in db.scalars(select(ShotAssetBinding).where(ShotAssetBinding.shot_id == shot.id))}
+    actual = {r.asset_id for r in request.reference_manifest}
+    if bound != actual or not set(request.shot_spec.required_asset_ids) <= actual:
+        raise HTTPException(409, "PREPRODUCTION_BINDINGS_CHANGED")
+    for ref in request.reference_manifest:
+        asset = db.get(Asset, ref.asset_id)
+        if ref.asset_id not in allowed or allowed[ref.asset_id] != ref.sha256:
+            raise HTTPException(409, "PREPRODUCTION_REFERENCE_NOT_FROZEN")
+        if (
+            not asset
+            or asset.project_id != project_id
+            or not asset.approved
+            or not asset.locked
+            or asset.sha256 != ref.sha256
+        ):
+            raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")
+        rights_id = (asset.provenance or {}).get("rights_id")
+        if rights_id:
+            require_rights(db, project_id, rights_id)
+        if data_dir:
+            from shine.media.artifacts import safe_asset_path
+
+            path = safe_asset_path(data_dir, asset.storage_path)
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != ref.sha256:
+                raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")

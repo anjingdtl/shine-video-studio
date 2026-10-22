@@ -7,6 +7,7 @@ production algorithms against bytes and fake commands, without model downloads.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -207,25 +208,117 @@ def extract_zip(archive: Path, target: Path, *, max_bytes=1024**3):
                     shutil.copyfileobj(source, output)
 
 
+def durable_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    sync_directory(path.parent)
+
+
+def sync_directory(path):
+    if os.name != "nt":
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def process_identity(pid):
+    """PID plus OS process birth identity; uncertainty is never interpreted as death."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            if ctypes.get_last_error() == 87:
+                return None
+            raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")
+        try:
+            values = [ctypes.c_ulonglong() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(v) for v in values)):
+                raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")
+            return str(values[0].value)
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        # comm may contain spaces/parentheses; field 22 follows its closing parenthesis.
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if stat[0] == "Z":
+            return None
+        return stat[19]
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN") from exc
+
+
 @contextmanager
 def exclusive_file_lock(path):
-    handle = path.open("x")
-    try:
-        yield
-    finally:
-        handle.close()  # Windows forbids unlinking an open file.
-        path.unlink(missing_ok=True)
+    """Stable OS guard serializes owner inspection, install and recovery across processes.
+
+    The guard inode is never unlinked. A dead owner's marker is removed only while
+    holding this guard and after comparing the OS birth identity (PID reuse safe).
+    """
+    guard = path.with_suffix(path.suffix + ".guard")
+    with guard.open("a+b") as handle:
+        if guard.stat().st_size == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ValueError("INSTALL_OWNER_ACTIVE") from exc
+        try:
+            if path.exists():
+                try:
+                    owner = json.loads(path.read_text())
+                    birth = process_identity(owner["pid"])
+                    if birth is not None and birth == owner["birth"]:
+                        raise ValueError("INSTALL_OWNER_ACTIVE")
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("LOCK_OWNER_UNVERIFIABLE") from exc
+            durable_json(path, {"pid": os.getpid(), "birth": process_identity(os.getpid())})
+            try:
+                yield
+            finally:
+                path.unlink(missing_ok=True)
+                sync_directory(path.parent)
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class LocalInstaller:
-    """Atomic isolated package directory replacement with rollback journal.
+    """Durable isolated package swap; every crash window has an exclusive recovery path."""
 
-    Does not run node setup.py/pip hooks; third-party dependency execution is a
-    separate, higher-risk operation. Never mutates an existing production instance.
-    """
-
-    def __init__(self, root: Path, downloader: ControlledDownloader):
+    def __init__(self, root: Path, downloader: ControlledDownloader, checkpoint=None):
         self.root, self.downloader = root.resolve(), downloader
+        self.checkpoint = checkpoint or (lambda phase: None)
 
     def install(self, spec: PackageSpec):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -237,51 +330,89 @@ class LocalInstaller:
         with exclusive_file_lock(lock):
             if journal.exists() or stage.exists() or backup.exists():
                 raise ValueError("INSTALL_RECOVERY_REQUIRED")
+            state = {"schema": 1, "had_destination": destination.exists(), "spec": spec.model_dump()}
+
+            def record(phase):
+                state["phase"] = phase
+                durable_json(journal, state)
+                self.checkpoint(phase)
+
             try:
+                record("DOWNLOADING")
                 stage.mkdir()
                 for file in spec.files:
                     source = self.downloader.download(file, self.root / ".cache")
                     target = safe_target(stage, file.relative_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
-                journal.write_text("STAGED", encoding="utf-8")
+                    with target.open("rb") as stream:
+                        os.fsync(stream.fileno())
+                record("STAGED")
+                record("BACKUP_INTENT")
                 if destination.exists():
                     os.replace(destination, backup)
+                    sync_directory(self.root)
+                record("BACKED_UP")
+                record("SWAP_INTENT")
                 os.replace(stage, destination)
-                journal.write_text("INSTALLED", encoding="utf-8")
+                sync_directory(self.root)
+                record("INSTALLED")
                 for file in spec.files:
                     if not self.downloader.valid(safe_target(destination, file.relative_path), file):
                         raise ValueError("INSTALL_VERIFY_FAILED")
-                journal.unlink()
+                record("VERIFIED")
+                # VERIFIED is the durable commit point; cleanup can resume after any crash.
                 if backup.exists():
                     shutil.rmtree(backup)
+                record("CLEANED")
+                journal.unlink()
+                sync_directory(self.root)
                 return {"status": "AVAILABLE", "files": [f.model_dump() for f in spec.files]}
             except Exception:
-                if journal.exists():
-                    if backup.exists():
-                        if destination.exists():
-                            shutil.rmtree(destination)
-                        os.replace(backup, destination)
-                    elif not stage.exists() and destination.exists():
-                        shutil.rmtree(destination)
-                    journal.unlink()
-                if stage.exists():
-                    shutil.rmtree(stage)
+                self._recover(spec.name)
                 raise
 
-    def recover(self, name: str):
+    def _recover(self, name):
         destination = safe_target(self.root, name)
         journal = safe_target(self.root, name + ".journal")
         backup = safe_target(self.root, name + ".rollback")
+        stage = safe_target(self.root, name + ".staging")
+        status = "ROLLED_BACK"
         if journal.exists():
-            if backup.exists():
+            try:
+                state = json.loads(journal.read_text())
+            except json.JSONDecodeError as exc:
+                # Compatibility recovery for the old writer, only with its known phases.
+                legacy = journal.read_text()
+                if legacy not in {"STAGED", "INSTALLED"}:
+                    raise ValueError("INSTALL_JOURNAL_UNVERIFIABLE") from exc
+                state = {"phase": legacy, "had_destination": backup.exists()}
+            if state["phase"] in {"VERIFIED", "CLEANED"}:
+                spec = PackageSpec.model_validate(state["spec"])
+                if not all(
+                    ControlledDownloader.valid(safe_target(destination, f.relative_path), f) for f in spec.files
+                ):
+                    raise ValueError("INSTALL_COMMITTED_FILES_CHANGED")
+                status = "AVAILABLE"
+                if backup.exists():
+                    shutil.rmtree(backup)
+            elif backup.exists():
                 if destination.exists():
                     shutil.rmtree(destination)
                 os.replace(backup, destination)
-            elif journal.read_text() == "INSTALLED" and destination.exists():
+            elif not state["had_destination"] and destination.exists():
                 shutil.rmtree(destination)
+            elif state["had_destination"] and not destination.exists():
+                raise ValueError("INSTALL_BACKUP_MISSING")
+            if stage.exists():
+                shutil.rmtree(stage)
             journal.unlink()
-        stage = safe_target(self.root, name + ".staging")
-        if stage.exists():
-            shutil.rmtree(stage)
-        return {"status": "ROLLED_BACK"}
+            sync_directory(self.root)
+        elif stage.exists() or backup.exists():
+            raise ValueError("INSTALL_JOURNAL_MISSING")
+        return {"status": status}
+
+    def recover(self, name: str):
+        self.root.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(safe_target(self.root, name + ".lock")):
+            return self._recover(name)

@@ -163,8 +163,9 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     # 4. Human approval and lock. Uploading never approves.
     for asset in assets.values():
         assert asset["approved"] is False
-        assert client.post(f"/api/v1/assets/{asset['id']}/approve").status_code == 200
-        assert client.post(f"/api/v1/assets/{asset['id']}/lock").status_code == 200
+        from tests.conftest import approve_lock
+
+        approve_lock(client, asset["id"])
     locked = client.get(f"/api/v1/projects/{project_id}/assets").json()
     assert all(item["approved"] and item["locked"] for item in locked)
 
@@ -317,15 +318,14 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
 
     # 10-13. The first job renders, the fake ComfyUI produces media, the
     #        technical QC runs and the mock semantic review finds a style drift.
-    fake_comfy.output_bytes = make_test_video_bytes(
-        duration_s=float(first["spec"]["duration_target_s"])
-    )
+    fake_comfy.output_bytes = make_test_video_bytes(duration_s=float(first["spec"]["duration_target_s"]))
     assert (
         run_one(
             factory,
             settings=offline,
             worker_id="worker-e2e",
-            semantic_reviewer=reviewer, asr_reviewer=asr,
+            semantic_reviewer=reviewer,
+            asr_reviewer=asr,
             **client_kwargs,
         )
         == job_first["id"]
@@ -346,7 +346,8 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
             factory,
             settings=offline,
             worker_id="worker-e2e",
-            semantic_reviewer=reviewer, asr_reviewer=asr,
+            semantic_reviewer=reviewer,
+            asr_reviewer=asr,
             **client_kwargs,
         )
         == job_first["id"]
@@ -363,9 +364,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     assert fake_comfy.prompt_count == 2
 
     gates = client.get(f"/api/v1/jobs/{job_first['id']}/quality-gates").json()
-    assert {"technical", "semantic", "audio", "style", "final"}.issubset(
-        {gate["gate_name"] for gate in gates}
-    )
+    assert {"technical", "semantic", "audio", "style", "final"}.issubset({gate["gate_name"] for gate in gates})
     # The ledger keeps one row per gate and attempt. The first attempt failed
     # the semantic gate, the repaired attempt passed every gate.
     finals = [gate for gate in gates if gate["gate_name"] == "final"]
@@ -395,15 +394,14 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     job_second = job_second_retry.json()
     assert job_second["status"] == "QUEUED"
     fake_comfy.mode = "accept_then_drop"
-    fake_comfy.output_bytes = make_test_video_bytes(
-        duration_s=float(second["spec"]["duration_target_s"])
-    )
+    fake_comfy.output_bytes = make_test_video_bytes(duration_s=float(second["spec"]["duration_target_s"]))
     assert (
         run_one(
             factory,
             settings=offline,
             worker_id="worker-e2e",
-            semantic_reviewer=reviewer, asr_reviewer=asr,
+            semantic_reviewer=reviewer,
+            asr_reviewer=asr,
             **client_kwargs,
         )
         == job_second["id"]
@@ -420,7 +418,8 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
         factory,
         "worker-e2e-restarted",
         settings=offline,
-        semantic_reviewer=reviewer, asr_reviewer=asr,
+        semantic_reviewer=reviewer,
+        asr_reviewer=asr,
         **client_kwargs,
     )
     assert recovered == 1
@@ -518,9 +517,7 @@ def test_offline_e2e_survives_a_worker_crash_without_duplicating_the_render(api,
                 "shot_priority": "B",
                 "style_version_id": style["id"],
                 "characters": ["林岚"],
-                "dialogue": [
-                    {"speaker_id": "林岚", "text": "东西在里面", "start_s": 0.0, "end_s": 2.0}
-                ],
+                "dialogue": [{"speaker_id": "林岚", "text": "东西在里面", "start_s": 0.0, "end_s": 2.0}],
             },
         },
     )

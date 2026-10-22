@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import struct
 import zlib
+from datetime import UTC
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -52,6 +53,12 @@ def require_rights(db, project_id, rights_id, scope="asset"):
         or rights.payload.get("scope") != scope
     ):
         raise HTTPException(409, "VOICE_CONSENT_REQUIRED" if scope == "voice_clone" else "LICENSE_NOT_APPROVED")
+    expiry = rights.payload.get("expires_at")
+    if expiry:
+        from datetime import datetime
+
+        if datetime.fromisoformat(expiry).replace(tzinfo=UTC) <= datetime.now(UTC):
+            raise HTTPException(409, "CONSENT_EXPIRED")
     return rights
 
 
@@ -157,7 +164,10 @@ def candidate_qc(settings, row):
     return qc
 
 
-def promote(db, settings, row, actor, *, offline):
+def promote(db, settings, row, actor, decision, *, offline):
+    from shine.comfyops import approval
+
+    approval.consume(db, actor, "promote", row, decision.grant_id, decision.snapshot)
     if row.status != "READY_FOR_REVIEW":
         raise HTTPException(409, "CANDIDATE_NOT_APPROVED")
     require_rights(db, row.project_id, row.payload["rights_id"])
@@ -214,3 +224,34 @@ def promote(db, settings, row, actor, *, offline):
         project_id=row.project_id,
     )
     return asset
+
+
+def approve_master(db, settings, asset, actor, decision, *, locking=False, asset_root=None):
+    """Authenticated API passes a server identity; grants bind all mutable asset fields."""
+    from shine.comfyops import approval
+
+    approval.consume(
+        db, actor, "asset_lock" if locking else "asset_approve", asset, decision.grant_id, decision.snapshot
+    )
+    path = safe_asset_path(asset_root or settings.data_dir, asset.storage_path)
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != asset.sha256:
+        raise HTTPException(409, "ASSET_HASH_CHANGED")
+    if (asset.provenance or {}).get("candidate_id"):
+        raise HTTPException(409, "CANDIDATE_APPROVAL_PATH_REQUIRED")
+    if locking and not asset.approved:
+        raise HTTPException(409, "ASSET_APPROVAL_REQUIRED")
+    if asset.locked or (asset.approved and not locking):
+        raise HTTPException(409, "ASSET_ALREADY_APPROVED_OR_LOCKED")
+    if locking:
+        asset.locked, asset.locked_at = True, utcnow()
+    else:
+        asset.approved, asset.approved_at, asset.approved_by = True, utcnow(), actor
+    add_audit(
+        db,
+        actor,
+        "ASSET_LOCKED" if locking else "ASSET_APPROVED",
+        "asset",
+        asset.id,
+        {"sha256": asset.sha256, "snapshot": decision.snapshot, "evidence": decision.evidence},
+        project_id=asset.project_id,
+    )

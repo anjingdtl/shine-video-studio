@@ -15,7 +15,9 @@ from shine.api_agent import router as agent_router
 from shine.api_comfy import router as comfy_router
 from shine.api_film import router as film_router
 from shine.api_llm import router as llm_router
+from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
+from shine.api_preparation import Decision
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
@@ -539,50 +541,25 @@ def create_app(
         db.refresh(asset)
         return jsonable_encoder(_asset_data(asset))
 
-    @app.post("/api/v1/assets/{asset_id}/approve")
-    def approve_asset(asset_id: str, db: DBSession) -> dict[str, Any]:
+    def decide_asset(asset_id, body, actor, db, *, locking=False):
+        from shine.api_preparation import locked
+        from shine.comfyops.assets import approve_master
+
+        locked(db)
         asset = db.get(Asset, asset_id)
         if not asset:
-            raise HTTPException(status_code=404, detail="Asset not found")
-        if not asset.approved:
-            asset.approved = True
-            asset.approved_by = "user"
-            asset.approved_at = utcnow()
-            add_audit(
-                db,
-                "user",
-                "ASSET_APPROVED",
-                "asset",
-                asset.id,
-                {"sha256": asset.sha256},
-                project_id=asset.project_id,
-            )
+            raise HTTPException(404, "Asset not found")
+        approve_master(db, app.state.settings, asset, actor, body, locking=locking, asset_root=actual_asset_root)
         db.commit()
-        db.refresh(asset)
         return jsonable_encoder(_asset_data(asset))
 
+    @app.post("/api/v1/assets/{asset_id}/approve")
+    def approve_asset(asset_id: str, body: Decision, actor: Operator, db: DBSession) -> dict[str, Any]:
+        return decide_asset(asset_id, body, actor, db)
+
     @app.post("/api/v1/assets/{asset_id}/lock")
-    def lock_asset(asset_id: str, db: DBSession) -> dict[str, Any]:
-        asset = db.get(Asset, asset_id)
-        if not asset:
-            raise HTTPException(status_code=404, detail="Asset not found")
-        if not asset.approved:
-            raise HTTPException(status_code=409, detail="A user must approve an asset before locking it")
-        if not asset.locked:
-            asset.locked = True
-            asset.locked_at = utcnow()
-            add_audit(
-                db,
-                "user",
-                "ASSET_LOCKED",
-                "asset",
-                asset.id,
-                {"sha256": asset.sha256},
-                project_id=asset.project_id,
-            )
-        db.commit()
-        db.refresh(asset)
-        return jsonable_encoder(_asset_data(asset))
+    def lock_asset(asset_id: str, body: Decision, actor: Operator, db: DBSession) -> dict[str, Any]:
+        return decide_asset(asset_id, body, actor, db, locking=True)
 
     @app.put("/api/v1/projects/{project_id}/style/draft")
     def save_style_draft(project_id: str, body: StyleBible, db: DBSession) -> dict[str, Any]:
@@ -727,6 +704,9 @@ def create_app(
 
     @app.post("/api/v1/projects/{project_id}/jobs", status_code=201)
     def create_job(project_id: str, body: CreateJob, request: Request, db: DBSession) -> dict[str, Any]:
+        from shine.api_preparation import locked
+
+        locked(db)
         project = require_project(db, project_id)
         shot = require_shot(db, project_id, body.shot_id)
         from shine.comfyops.preproduction import enforce
@@ -769,6 +749,9 @@ def create_app(
                 dependency_ids.append(previous_job_id)
             dependency_kinds[previous_job_id] = f"continuity:{continuity.mode.value}"
         request_data, _assets, compiler_meta = make_render_request(db, project, shot, body)
+        from shine.comfyops.preproduction import enforce_references
+
+        enforce_references(db, project_id, request_data, data_dir=settings.data_dir)
         parents, initial_status = dependencies_for_new_job(db, project_id, dependency_ids)
         job = Job(
             project_id=project_id,

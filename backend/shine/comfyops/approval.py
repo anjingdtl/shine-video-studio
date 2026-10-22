@@ -17,6 +17,8 @@ def snapshot(row):
         return graph_hash(
             {"id": row.id, "style_draft": row.style_draft, "frozen_style_version_id": row.frozen_style_version_id}
         )
+    if row.__tablename__ == "assets":
+        return graph_hash({c.name: str(getattr(row, c.name)) for c in row.__table__.columns})
     return graph_hash(
         {
             "id": row.id,
@@ -28,13 +30,13 @@ def snapshot(row):
     )
 
 
-def issue(db, actor, action, row):
+def issue(db, actor, action, row, *, context=None):
     grant = ApprovalGrant(
         id=token_hex(32),
         actor=actor,
         action=action,
         target_id=row.id,
-        snapshot=snapshot(row),
+        snapshot=graph_hash({"target": snapshot(row), "context": context}) if context is not None else snapshot(row),
         expires_at=utcnow() + timedelta(minutes=5),
     )
     db.add(grant)
@@ -51,8 +53,9 @@ def issue(db, actor, action, row):
     return {"grant_id": grant.id, "snapshot": grant.snapshot, "expires_at": grant.expires_at}
 
 
-def consume(db, actor, action, row, grant_id, expected):
-    if snapshot(row) != expected:
+def consume(db, actor, action, row, grant_id, expected, *, context=None):
+    current = graph_hash({"target": snapshot(row), "context": context}) if context is not None else snapshot(row)
+    if current != expected:
         raise HTTPException(409, "PLAN_HASH_CHANGED")
     result = db.execute(
         update(ApprovalGrant)

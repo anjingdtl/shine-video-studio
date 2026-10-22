@@ -1,0 +1,121 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+_____________ test_a01_new_bytes_legacy_approval_requires_operator _____________
+
+prep = (<starlette.testclient.TestClient object at 0x7f348e677200>, sessionmaker(class_='Session', bind=Engine(sqlite:////tmp...ator_id='v13-test-operator', operator_token_sha256='497d4afe43bf1708b940b151d6180c219fb5c1191fdfe215a0777ee36ebd5be4'))
+
+    def test_a01_new_bytes_legacy_approval_requires_operator(prep):
+        client, _, _ = prep
+        project = create_project(client)
+        asset = upload_asset(client, project, fake_image("independent-new-bytes"))
+        for action in ("approve", "lock"):
+            response = client.post(f"/api/v1/assets/{asset['id']}/{action}")
+>           assert response.status_code == 403, response.text
+E           AssertionError: {"id":"80b8d4d7-ffca-4911-a61b-33b2ca6eb8f6","project_id":"430fdc9a-94cc-4065-95f7-74164292584b","filename":"角色.png","kind":"image","content_type":"image/png","sha256":"f53354b085b9b41928deaf5aa78fea1198b97ee993031c52a30049558ace1e29","byte_size":99,"role":null,"entity_id":null,"tags":[],"duration_s":null,"width":32,"height":32,"derived_from_asset_id":null,"provenance":null,"approved":true,"locked":false,"approved_at":"2026-10-22T15:16:31.253596","locked_at":null,"created_at":"2026-10-22T15:16:31.240038"}
+E           assert 200 == 403
+E            +  where 200 = <Response [200 OK]>.status_code
+
+/tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py:42: AssertionError
+______________ test_a02_design_clone_requires_execution_identity _______________
+
+prep = (<starlette.testclient.TestClient object at 0x7f348e521c70>, sessionmaker(class_='Session', bind=Engine(sqlite:////tmp...ator_id='v13-test-operator', operator_token_sha256='497d4afe43bf1708b940b151d6180c219fb5c1191fdfe215a0777ee36ebd5be4'))
+
+    def test_a02_design_clone_requires_execution_identity(prep):
+        client, _, _ = prep
+        project = create_project(client)
+        body = clone_request(client, project)
+        response = client.post(f"/api/v1/projects/{project}/voice-profiles/design", json=body)
+>       assert response.status_code == 403, response.text
+E       AssertionError: {"project_id":"85c49a07-87d3-4d89-a502-a669c631a518","id":"dff3a962-906a-4225-857c-69f46fa8e392","payload":{"character":"Lin","description":"test","text":"声音参考","rights_id":"dc0c55c5-b73e-4d52-8300-7734faba54d3","asset_rights_id":"f5ac5a8c-8103-4a13-9b95-cbe8dcc1b621","source":"AUTHORIZED_CLONE","reference_id":"585d2820-7d34-42d1-997c-1e24f174c73b","supersedes_voice_id":null,"candidate_id":"749e84f7-2b38-4071-8c60-25320e77b41c","conditioning_hash":"1188f42c5fbe21cce70e72fec842c56e5f8ca73389d19e6381d2ac37475ff755","is_mock":true,"language":"zh-CN","version":1,"style_id":null},"sha256":"280650945afb45b5edbfe46495f251337d21a375af8d484a3cf5590e593754f7","status":"PREVIEW","created_at":"2026-10-22T15:16:31.841376"}
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+/tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py:50: AssertionError
+__________________ test_a04_clone_respects_h3_exclusive_lease __________________
+
+prep = (<starlette.testclient.TestClient object at 0x7f348d18eb40>, sessionmaker(class_='Session', bind=Engine(sqlite:////tmp...ator_id='v13-test-operator', operator_token_sha256='497d4afe43bf1708b940b151d6180c219fb5c1191fdfe215a0777ee36ebd5be4'))
+
+    def test_a04_clone_respects_h3_exclusive_lease(prep):
+        client, factory, _ = prep
+        project = create_project(client)
+        body = clone_request(client, project)
+        with factory.begin() as db:
+            lease = ResourceScheduler().enqueue(db, "independent-h3", 16384, True, 100)
+            identity = lease.id
+        with factory() as db:
+            assert ResourceScheduler().admit(db, identity)
+        response = client.post(f"/api/v1/projects/{project}/voice-profiles/clone", json=body, headers=HEADERS)
+>       assert response.status_code == 409, response.text
+E       AssertionError: {"project_id":"ad5ee2d9-9202-4786-b6e6-72f4a61c6acf","id":"8df08d42-d192-451e-a743-423a410420fb","payload":{"character":"Lin","description":"test","text":"声音参考","rights_id":"96f75c05-402c-4efe-8d9a-0c452aa34b70","asset_rights_id":"8143a40a-080c-4cbe-8899-165a6d90bc22","source":"AUTHORIZED_CLONE","reference_id":"0c9db138-4ea0-4184-8abf-e41061355ee8","supersedes_voice_id":null,"candidate_id":"94336218-55c8-47d4-b2bd-936e3024b484","conditioning_hash":"1188f42c5fbe21cce70e72fec842c56e5f8ca73389d19e6381d2ac37475ff755","is_mock":true,"language":"zh-CN","version":1,"style_id":null},"sha256":"0aaaa8e8b6430bcddde05ed0566e4da12833dbc27fee36dd9230f7fa03139d46","status":"PREVIEW","created_at":"2026-10-22T15:16:32.479868"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+/tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py:63: AssertionError
+_________ test_a03_extra_revoked_reference_cannot_use_frozen_manifest __________
+
+prep = (<starlette.testclient.TestClient object at 0x7f348e6b1070>, sessionmaker(class_='Session', bind=Engine(sqlite:////tmp...ator_id='v13-test-operator', operator_token_sha256='497d4afe43bf1708b940b151d6180c219fb5c1191fdfe215a0777ee36ebd5be4'))
+
+    def test_a03_extra_revoked_reference_cannot_use_frozen_manifest(prep):
+        client, _, _ = prep
+        project = create_project(client)
+        from tests.test_film_crew import ENGLISH_STYLE
+    
+        client.put(f"/api/v1/projects/{project}/style/draft", json=ENGLISH_STYLE)
+        style = post(client, f"/projects/{project}/style/freeze", expected=201)
+        doc = client.post(f"/api/v1/projects/{project}/documents", files={"file": ("s.txt", b"A rainy street.")}).json()
+        plan = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"], "h3_category": "H3_T2VA"})
+        for category in ("H3_T2VA", "VLM_REVIEW", "ASR"):
+            workflow(client, category)
+        post(client, f"/projects/{project}/rulepack/freeze")
+        approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+        right = rights(client, project)
+        row = candidate(client, project, right, workflow(client), entity="extra")
+        row = approve(client, row, "promote", f"/candidate-assets/{row['id']}/promote")
+        post(client, f"/preparation/rights/{right['id']}/revoke", operator=True)
+        shot = create_shot(client, project, style["id"], beat="Rain falls on an empty street.", bindings=[{"asset_id": row["formal_asset_id"], "use_as": "picture", "ordinal": 0}])
+        response = client.post(f"/api/v1/projects/{project}/jobs", json={"shot_id": shot["id"]})
+>       assert response.status_code == 409, response.text
+E       AssertionError: {"id":"b5860423-ac34-4b82-b466-1b85223a257f","project_id":"5cdeb76a-41bd-48b5-9da7-56b7d2d88742","shot_id":"0c4e358a-d613-4f51-b94e-ff5c9b26ae4a","shot_name":"对话镜头","shot_revision":1,"status":"QUEUED","state_version":0,"preproduction_manifest_hash":"2e1ed1abef61bed1c0c114c2f6f6131f09976fa9c436aec768eeec53c3cecd03","provider":"mock","simulated":true,"video_created":false,"paused":false,"stale":false,"failure_code":null,"provider_job_id":null,"semantic_retries":0,"max_semantic_retries":2,"request_revision":1,"quality_verification":null,"style_version_id":"d1aa176e-534c-4630-9f8f-c070ef1583e8","generation_mode":"I2VA","workflow_profile_id":null,"compiled_prompt_sha256":"e255c278ed41526aa1f5b559f255e4a389a559b7c1e4560cef1ec9ec7ad763f3","artifact_id":null,"last_qc_result":null,"last_repair_plan":null,"request":{"idempotency_key":"b2aeba8edb614566bc250fdf75061d96","shot_id":"0c4e358a-d613-4f51-b94e-ff5c9b26ae4a","shot_revision":1,"style_version_id":"d1aa176e-534c-4630-9f8f-c070ef1583e8","style_hash":"4cc080662243308079b4fd1b79e962c13397eef3e9d4e7102f2ac84a4b8df610","generation_mode":"I2VA","provider":"mock","reference_manifest":[{"label":"<Picture 1>","asset_id":"daf42ae0-6b42-482c-b67d-a3a557e218b3","sha256":"12cfebf49282df0c920553db528a11e3ff8faaa3f57a67dca5e25a27255c8254","storage_key":"assets/12/12cfebf49282df0c920553db528a11e3ff8faaa3f57a67dca5e25a27255c8254","content_type":"image/png","use_as":"picture","role":null,"frame_role":null,"ordinal":0,"duration_s":null,"entity_id":"extra"}],"compiled_prompt_sha256":"e255c278ed41526aa1f5b559f255e4a389a559b7c1e4560cef1ec9ec7ad763f3","compiler_version":"shine-h3-compiler/1.0.0","rule_version":"h3-prompt-writing@d21241f0a4b3"},"attempts":[],"repairs":[],"created_at":"2026-10-22T15:16:34.643330","updated_at":"2026-10-22T15:16:34.643343"}
+E       assert 201 == 409
+E        +  where 201 = <Response [201 Created]>.status_code
+
+/tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py:85: AssertionError
+_______________ test_a05_recover_dead_installer_allows_reinstall _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-agent/pytest-4/test_a05_recover_dead_installe0')
+
+    def test_a05_recover_dead_installer_allows_reinstall(tmp_path):
+        # A real child process dies inside a Fake downloader; no network or third-party execution.
+        script = '''
+    import os, sys
+    from pathlib import Path
+    from shine.comfyops.installer import LocalInstaller, PackageSpec
+    class FakeDownloader:
+        def download(self, *args):
+            os._exit(23)
+    spec = PackageSpec(name="crashed", kind="model", revision="v1", license_id="TEST", usage="research", files=[dict(url="https://example.com/f", relative_path="f", size=1, sha256="a"*64)])
+    LocalInstaller(Path(sys.argv[1]), FakeDownloader()).install(spec)
+    '''
+        result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], check=False, env=os.environ.copy())
+        assert result.returncode == 23
+        assert (tmp_path / "crashed.lock").exists()
+        LocalInstaller(tmp_path, None).recover("crashed")
+>       assert not (tmp_path / "crashed.lock").exists()
+E       AssertionError: assert not True
+E        +  where True = exists()
+E        +    where exists = (PosixPath('/tmp/pytest-of-agent/pytest-4/test_a05_recover_dead_installe0') / 'crashed.lock').exists
+
+/tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py:104: AssertionError
+=============================== warnings summary ===============================
+backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:51
+  /workspace/shine-video-studio/backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:51: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py::test_a01_new_bytes_legacy_approval_requires_operator
+FAILED ../../tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py::test_a02_design_clone_requires_execution_identity
+FAILED ../../tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py::test_a04_clone_respects_h3_exclusive_lease
+FAILED ../../tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py::test_a03_extra_revoked_reference_cannot_use_frozen_manifest
+FAILED ../../tmp/shine-v13-baseline/backend/tests/test_v13_adversarial.py::test_a05_recover_dead_installer_allows_reinstall
+5 failed, 1 warning in 4.80s

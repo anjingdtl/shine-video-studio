@@ -226,6 +226,17 @@ def _guard_claimed_job(
     if not _shot_is_current(db, job):
         _discard_stale_result(db, job, attempt, reason="SHOT_REVISION_SUPERSEDED", worker_id=worker_id)
         return None
+    from shine.comfyops.preproduction import enforce_references
+
+    try:
+        enforce_references(db, job.project_id, job.request)
+    except HTTPException as exc:
+        job.failure_code = str(exc.detail)
+        job.lease_owner = None
+        job.lease_expires_at = None
+        attempt.status = "NEEDS_REVIEW"
+        transition(job, "NEEDS_REVIEW")
+        return None
     return job, attempt
 
 
@@ -677,6 +688,7 @@ def _run_one(
                     offline=candidate.provider == "mock" or bool(settings and settings.offline_simulation),
                     data_dir=settings.data_dir if settings else None,
                     workflow_profile_id=candidate.workflow_profile_id if candidate.provider == "comfyui" else None,
+                    render_request=candidate.request,
                 )
                 if candidate.preproduction_manifest_hash != current_preproduction_hash:
                     raise HTTPException(409, "PREPRODUCTION_OUTDATED")
@@ -1354,7 +1366,42 @@ def _run_comfy_job(
         )
 
     try:
-        submission: ComfySubmission = service.submit_prepared(prepared, request)
+        with session_factory() as submit_db:
+            from sqlalchemy import text
+
+            from shine.comfyops.preproduction import enforce
+
+            submit_db.execute(text("BEGIN IMMEDIATE"))
+            current = submit_db.get(Job, job_id)
+            try:
+                pin = enforce(
+                    submit_db,
+                    project_id,
+                    offline=settings.offline_simulation,
+                    data_dir=settings.data_dir,
+                    workflow_profile_id=current.workflow_profile_id,
+                    render_request=current.request,
+                )
+                if pin != current.preproduction_manifest_hash:
+                    raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+                if not _guard_claimed_job(
+                    submit_db,
+                    job_id=job_id,
+                    expected_state_version=expected_version,
+                    worker_id=worker_id,
+                    attempt_id=attempt_id,
+                ):
+                    return job_id
+            except HTTPException as exc:
+                current.failure_code = str(exc.detail)
+                current.lease_owner = None
+                current.lease_expires_at = None
+                submit_db.get(JobAttempt, attempt_id).status = "FAILED"
+                transition(current, "NEEDS_REVIEW")
+                submit_db.commit()
+                return job_id
+            submission: ComfySubmission = service.submit_prepared(prepared, request)
+            submit_db.commit()
     except ComfySubmissionUncertain as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(

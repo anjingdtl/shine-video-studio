@@ -97,6 +97,7 @@ def context(db, settings, job_id: str):
         offline=bool(settings.offline_simulation),
         data_dir=settings.data_dir,
         workflow_profile_id=job.workflow_profile_id if job.provider == "comfyui" else None,
+        render_request=job.request,
     )
     if job.preproduction_manifest_hash != current_preproduction_hash:
         raise HTTPException(409, "PREPRODUCTION_OUTDATED")
