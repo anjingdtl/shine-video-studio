@@ -345,7 +345,7 @@ class LocalInstaller:
                     target = safe_target(stage, file.relative_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
-                    with target.open("rb") as stream:
+                    with target.open("r+b") as stream:
                         os.fsync(stream.fileno())
                 record("STAGED")
                 record("BACKUP_INTENT")
