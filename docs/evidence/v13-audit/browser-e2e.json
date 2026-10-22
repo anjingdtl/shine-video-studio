@@ -1,0 +1,1 @@
+{"status": "MOCK_VERIFIED", "project_id": "f6e9b88e-d478-4abc-a525-68290a7c057b", "flows": ["authenticated style freeze", "legacy asset approval and lock grants", "mode selection preserves Fake provenance", "candidate promotion", "explicit voice listening and freeze", "TTS/ASR/alignment", "SRT download", "no browser credential persistence"], "api_errors": []}
