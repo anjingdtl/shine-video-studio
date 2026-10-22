@@ -314,6 +314,7 @@ class FilmAgentDispatcher:
             rulepack_hash=pack.sha256,
             model_profile_id=profile.id,
             model_id=profile.model,
+            schema_version=contract.model_fields["schema_version"].default,
             status="RUNNING",
             trace={
                 "tool": body.tool,
@@ -363,6 +364,7 @@ class FilmAgentDispatcher:
             artifact = AgentArtifact(
                 project_id=project_id,
                 kind=contract.__name__,
+                schema_version=proposal.schema_version,
                 payload_json=payload,
                 sha256=digest(payload),
                 producer_role=role,

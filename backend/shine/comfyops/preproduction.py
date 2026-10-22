@@ -20,7 +20,7 @@ from shine.comfyops.models import (
 from shine.models import Asset, Project, ProjectDocument, ProjectRuleLock, StyleVersion, WorkflowProfile
 
 
-def analyze(db, project, document, extras):
+def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
     if document.project_id != project.id:
         raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
     # Conservative deterministic extraction. Explicit script annotations cover non-dialogue entities.
@@ -44,6 +44,7 @@ def analyze(db, project, document, extras):
             raise HTTPException(422, "UNKNOWN_ASSET_FAMILY")
     payload = {
         "document_id": document.id,
+        "h3_category": h3_category,
         "script_hash": document.sha256,
         "requirements": list(unique.values()),
         "manifest": None,
@@ -144,6 +145,7 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
                     "id": match.id,
                     "hash": match.sha256,
                     "rights": rights.sha256 if rights else "LEGACY_USER_APPROVED",
+                    "provenance_hash": graph_hash(match.provenance or {}) if isinstance(match, Asset) else match.sha256,
                 }
             )
         else:
@@ -164,12 +166,36 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         blockers.append({"code": "STYLE_NOT_FROZEN"})
     if not lock:
         blockers.append({"code": "RULEPACK_NOT_FROZEN"})
-    workflows = db.scalars(select(WorkflowRevision)).all()
-    usable = [w for w in workflows if w.status == ("FAKE_EXECUTED" if offline else "PRODUCTION_APPROVED")]
-    for category in ("H3_REF2VA", "VLM_REVIEW", "ASR"):
-        if not any(w.payload["category"] == category for w in usable):
+    workflows = db.scalars(select(WorkflowRevision).order_by(WorkflowRevision.created_at, WorkflowRevision.id)).all()
+    state = "FAKE_EXECUTED" if offline else "PRODUCTION_APPROVED"
+    usable = []
+    frozen_ids = {w["id"] for w in (plan.payload.get("manifest") or {}).get("workflows", [])}
+    for category in (plan.payload.get("h3_category", "H3_REF2VA"), "VLM_REVIEW", "ASR"):
+        choices = [
+            w
+            for w in workflows
+            if w.payload["category"] == category and w.status == state and (not frozen_ids or w.id in frozen_ids)
+        ]
+        if not choices:
             blockers.append({"code": "CAPABILITY_MISSING", "category": category})
-    models = db.scalars(select(ModelPackage).where(ModelPackage.status.in_(["MOCK_AVAILABLE", "AVAILABLE"]))).all()
+        else:
+            usable.append(choices[0])
+    models = []
+    selected_models = {identity for w in usable for identity in w.payload["model_ids"]}
+    for workflow in usable:
+        if not offline and not workflow.payload["model_ids"]:
+            blockers.append({"code": "MODEL_DECLARATION_REQUIRED", "workflow": workflow.id})
+    for identity in sorted(selected_models):
+        model = db.get(ModelPackage, identity)
+        allowed = {"MOCK_AVAILABLE"} if offline else {"AVAILABLE", "FILES_VERIFIED_PENDING_RUNTIME"}
+        if not model or model.status not in allowed:
+            blockers.append({"code": "MODEL_NOT_VERIFIED", "model": identity})
+        elif model.payload["license_id"].lower() in {"unknown", "unverified"} or (
+            model.payload["usage"] == "commercial" and "research" in model.payload["license_id"].lower()
+        ):
+            blockers.append({"code": "LICENSE_NOT_APPROVED", "model": identity})
+        else:
+            models.append(model)
     doc = db.get(ProjectDocument, plan.payload["document_id"])
     if not doc or doc.sha256 != plan.payload["script_hash"]:
         blockers.append({"code": "SCRIPT_CHANGED"})

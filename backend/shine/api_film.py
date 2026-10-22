@@ -54,6 +54,7 @@ def _artifact(row: AgentArtifact):
     return {
         "id": row.id,
         "kind": row.kind,
+        "schema_version": row.schema_version,
         "payload_json": row.payload_json,
         "sha256": row.sha256,
         "producer_role": row.producer_role,
@@ -75,7 +76,7 @@ def film_agents(db: DBSession):
             {
                 "role": role,
                 "label": label,
-                "version": "1.1",
+                "version": "1.3" if role == "comfyops" else "1.1",
                 "output_kind": contract.__name__,
                 "output_schema": contract.model_json_schema(),
                 "required_inputs": required,

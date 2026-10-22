@@ -99,6 +99,10 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     assert ready["status"] == "SHOOT_READY", ready
     frozen = approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
     assert frozen["payload"]["manifest"]["offline"]
+    # Registering an unrelated capability must not invalidate this selected production set.
+    workflow(client, "IMAGE_EDIT")
+    assert post(client, f"/projects/{project}/preproduction/readiness")["manifest_hash"] == ready["manifest_hash"]
+
     assert post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})["status"] == "BLOCKED"
 
     profile = post(client, "/provider-profiles", {"name": "crew-v13", "kind": "mock", "model": "fake"}, expected=201)
@@ -117,7 +121,7 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
             "rationale": "Use the frozen offline registry.",
         },
     )
-    assert ops["kind"] == "ComfyOpsProposal"
+    assert ops["kind"] == "ComfyOpsProposal" and ops["schema_version"] == "1.3"
     # The crew's shared test helper uses this brief, so keep its Chinese dialogue verbatim.
     from tests.test_film_crew import FACTS, LINE
 

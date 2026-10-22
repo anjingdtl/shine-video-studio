@@ -737,3 +737,28 @@ def test_failed_model_release_holds_gpu_for_reconciliation(prep):
     with factory() as db:
         lease = db.scalar(select(ResourceLease).where(ResourceLease.status == "RECONCILE_REQUIRED"))
         assert lease
+
+
+def test_fake_inventory_cannot_publish_real_capability(prep):
+    client, _, _ = prep
+    snapshot = post(client, "/comfyops/inventory/refresh")
+    assert snapshot["payload"]["is_mock"]
+    instances = client.get("/api/v1/comfyops/instances").json()
+    row = workflow(client, "ASR")
+    grant = post(
+        client, "/preparation/approval-grants", {"action": "workflow_validate", "target_id": row["id"]}, operator=True
+    )
+    post(
+        client,
+        f"/workflow-capabilities/{row['id']}/local-execution-evidence",
+        {k: grant[k] for k in ("grant_id", "snapshot")}
+        | {
+            "instance_id": instances[0]["id"],
+            "prompt_id": "test-only",
+            "output_sha256": "a" * 64,
+            "offline": False,
+            "evidence": "Fake evidence must never become real",
+        },
+        operator=True,
+        expected=409,
+    )

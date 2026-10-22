@@ -429,9 +429,16 @@ def fake_workflow(identity: str, request: Request, db: DBSession):
 
 @router.post("/workflow-capabilities/{identity}/publish")
 def publish(identity: str, body: Decision, actor: Operator, db: DBSession):
+    locked(db)
     row = get(db, WorkflowRevision, identity)
     if row.status != "REAL_TESTED":
         raise HTTPException(409, "MODEL_NOT_VERIFIED_PENDING_LOCAL_GPU")
+    for identity in row.payload["model_ids"]:
+        package = db.get(ModelPackage, identity)
+        if not package or package.status not in {"AVAILABLE", "FILES_VERIFIED_PENDING_RUNTIME"}:
+            raise HTTPException(409, "MODEL_NOT_VERIFIED")
+        if package.payload["license_id"].lower() in {"unknown", "unverified"}:
+            raise HTTPException(409, "LICENSE_NOT_APPROVED")
     approval.consume(db, actor, "workflow_publish", row, body.grant_id, body.snapshot)
     row.status = "PRODUCTION_APPROVED"
     audit(db, actor, "WORKFLOW_PUBLISHED", row)
@@ -867,6 +874,7 @@ class Analyze(Strict):
     document_id: str
     requirements: list[RequirementInput] = Field(default_factory=list, max_length=300)
     create_revision: bool = False
+    h3_category: Literal["H3_REF2VA", "H3_T2VA", "H3_I2VA", "H3_L2VA", "H3_FL2VA"] = "H3_REF2VA"
 
 
 @router.post("/projects/{project_id}/preproduction/analyze")
@@ -880,9 +888,10 @@ def analyze(project_id: str, body: Analyze, db: DBSession):
         and existing.payload["script_hash"] == document.sha256
         and not body.requirements
         and not body.create_revision
+        and existing.payload.get("h3_category", "H3_REF2VA") == body.h3_category
     ):
         return public(existing)
-    row = preproduction.analyze(db, project, document, [r.model_dump() for r in body.requirements])
+    row = preproduction.analyze(db, project, document, [r.model_dump() for r in body.requirements], body.h3_category)
     audit(db, "producer", "PREPRODUCTION_ANALYZED", row)
     db.commit()
     return public(row)
@@ -1313,3 +1322,85 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
         "status": "PENDING_HUMAN_APPROVAL",
         "is_mock": not bool(settings.local_image_url or settings.local_voice_url),
     }
+
+
+class LocalExecutionEvidence(Decision):
+    instance_id: str
+    prompt_id: str = Field(min_length=1, max_length=128)
+    output_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+@router.post("/workflow-capabilities/{identity}/local-execution-evidence")
+def local_execution_evidence(
+    identity: str, body: LocalExecutionEvidence, actor: Operator, settings: SettingsDep, db: DBSession
+):
+    """Read an actual allowlisted ComfyUI history; never submit or infer on this route.
+
+    Non-video capability execution evidence is separate from H3 film acceptance.
+    H3 and voice cloning retain their stronger dedicated review/consent paths.
+    """
+    from shine.comfy.client import ComfyError, ComfyUIClient
+    from shine.comfy.workflow import PATH_PATTERN, apply_parameters
+    from shine.security import require_loopback_url
+
+    row = get(db, WorkflowRevision, identity)
+    instance = get(db, ComfyInstance, body.instance_id)
+    if (
+        body.offline
+        or row.status not in {"STATIC_VALIDATED", "FAKE_EXECUTED"}
+        or instance.status != "ONLINE"
+        or instance.payload.get("is_mock", False)
+        or row.payload["category"].startswith("H3_")
+        or row.payload["category"] == "VOICE_CLONE"
+    ):
+        raise HTTPException(409, "REAL_NON_VIDEO_INSTANCE_EVIDENCE_REQUIRED")
+    url = require_loopback_url(instance.payload["url"])
+    try:
+        client = ComfyUIClient(url, max_retries=0)
+        stats = client.system_stats()
+        import json
+
+        if any(x in json.dumps(stats).lower() for x in ("fake", "mock")):
+            raise HTTPException(409, "FAKE_INSTANCE_CANNOT_SUPPLY_REAL_EVIDENCE")
+        history = client.history(body.prompt_id).get(body.prompt_id, {})
+        if not history.get("status", {}).get("completed") or history.get("status", {}).get("status_str") != "success":
+            raise HTTPException(409, "LOCAL_WORKFLOW_NOT_COMPLETED")
+        if history["prompt"][1] != body.prompt_id or not history.get("outputs"):
+            raise HTTPException(409, "LOCAL_WORKFLOW_OUTPUT_EVIDENCE_REQUIRED")
+        actual = history["prompt"][2]
+        values = {}
+        for logical, path in row.payload["parameter_map"].items():
+            match = PATH_PATTERN.fullmatch(path)
+            if not match:
+                raise ValueError("PARAMETER_MAP_INVALID")
+            values[logical] = actual[match.group(1)]["inputs"][match.group(2)]
+        expected = apply_parameters(row.payload["graph"], row.payload["parameter_map"], values)
+        if graph_hash(expected) != graph_hash(actual) or graph_hash(history.get("outputs", {})) != body.output_sha256:
+            raise HTTPException(409, "LOCAL_WORKFLOW_EVIDENCE_HASH_MISMATCH")
+        errors = validate_workflow(
+            WorkflowDraft.model_validate(row.payload), client.object_info(), instance.payload.get("node_versions", {})
+        )
+        if errors:
+            raise HTTPException(409, {"code": "LOCAL_WORKFLOW_VALIDATION_FAILED", "errors": errors})
+    except (ComfyError, KeyError, ValueError, IndexError) as exc:
+        raise HTTPException(409, "LOCAL_EXECUTION_EVIDENCE_UNAVAILABLE") from exc
+    db.rollback()  # Finish external read checks before taking the SQLite writer lock.
+    locked(db)
+    row = get(db, WorkflowRevision, identity)
+    approval.consume(db, actor, "workflow_validate", row, body.grant_id, body.snapshot)
+    row.status = "REAL_TESTED"
+    audit(
+        db,
+        actor,
+        "WORKFLOW_LOCAL_EXECUTION_EVIDENCE_BOUND",
+        row,
+        {
+            "instance_id": instance.id,
+            "prompt_id": body.prompt_id,
+            "output_sha256": body.output_sha256,
+            "graph_sha256": graph_hash(actual),
+            "evidence": body.evidence,
+        },
+    )
+    db.commit()
+    return public(row)

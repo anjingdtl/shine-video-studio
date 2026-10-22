@@ -26,6 +26,8 @@ CATEGORIES = (
     "MUSIC",
     "VLM_REVIEW",
     "H3_REF2VA",
+    "H3_I2VA",
+    "H3_L2VA",
     "H3_FL2VA",
     "H3_T2VA",
     "VIDEO_UPSCALE",
