@@ -1,3 +1,4 @@
+import { PreproductionPanel } from './components/PreproductionPanel';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowDownToLine, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
@@ -453,6 +454,8 @@ function App() {
               onLoad={() => loadAudit(projectId, 0).catch((error: Error) => report(error.message, 'error'))}
               onMore={() => loadAudit(projectId, audit?.items.length ?? 0).catch((error: Error) => report(error.message, 'error'))}
             />
+
+            <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
 
             <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
 
