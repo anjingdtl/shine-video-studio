@@ -129,7 +129,9 @@ jobs:
         run: |
           uv run --project backend ruff check scripts/verify_v13_web.py
           uv run --project backend --with playwright==1.62.0 python scripts/verify_v13_web.py --screenshot "${{ runner.temp }}/shine-v13-web-qa.png"
-      - uses: actions/upload-artifact@v4
+      - name: Upload optional browser screenshot
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         if: always()
         with:
           name: v13-browser-evidence
