@@ -52,6 +52,21 @@ def exercise(api_base, ui_base, screenshot):
         )
 
     p = post("/projects", {"title": "V1.3 Browser QA fixture"})["id"]
+    from shine.comfyops.assets import fake_image
+
+    imported = c.post(
+        base + f"/projects/{p}/assets",
+        data={"asset_kind": "image"},
+        files={
+            "file": (
+                "isolated-browser-upload.png",
+                fake_image("browser-legacy-approval"),
+                "image/png",
+            ),
+        },
+    )
+    imported.raise_for_status()
+    legacy_asset_id = imported.json()["id"]
     fields = [
         "photography_language",
         "shot_blocking",
@@ -152,6 +167,18 @@ def exercise(api_base, ui_base, screenshot):
             "button", name="批准并冻结", exact=True
         ).click()
         expect(page.locator("#style")).to_contain_text("已冻结 V1", timeout=15000)
+        masters = page.locator("#assets")
+        masters.get_by_label("主资产审批凭据").fill(TEST_CREDENTIAL)
+        masters.get_by_label("主资产核验依据").fill(
+            "Explicit isolated browser master review"
+        )
+        master = masters.locator(".asset-row").filter(
+            has_text="isolated-browser-upload.png"
+        )
+        master.get_by_role("button", name="批准", exact=True).click()
+        expect(master).to_contain_text("已批准", timeout=15000)
+        master.get_by_role("button", name="锁定", exact=True).click()
+        expect(master).to_contain_text("已锁定", timeout=15000)
         prep = page.locator("#preproduction")
         prep.get_by_role("button", name="全资产工厂", exact=True).click()
         prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
@@ -160,7 +187,13 @@ def exercise(api_base, ui_base, screenshot):
         )
         card = prep.locator("article").filter(has_text="BrowserCharacter")
         expect(card).to_contain_text("READY_FOR_REVIEW")
-        card.get_by_role("button", name="人工晋升（仅离线清单）", exact=True).click()
+        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
+        expect(card).to_contain_text("READY_FOR_REVIEW")
+        # Merely selecting local mode cannot relabel the existing Fake candidate.
+        assert asset["payload"]["provenance"]["is_mock"]
+        prep.get_by_label("操作模式").select_option("fake")
+        card.get_by_role("button", name="按选定模式人工晋升", exact=True).click()
         expect(card).to_contain_text("PROMOTED", timeout=15000)
         prep.get_by_role("button", name="Voice Studio", exact=True).click()
         vcard = prep.locator("article").filter(has_text="BrowserVoice")
@@ -188,6 +221,7 @@ def exercise(api_base, ui_base, screenshot):
         a["entity_id"] == "BrowserCharacter" and a["approved"] and a["locked"]
         for a in assets
     )
+    assert next(a for a in assets if a["id"] == legacy_asset_id)["locked"]
     assert voices[0]["status"] == "FROZEN" and voices[0]["payload"]["is_mock"]
     print(
         json.dumps(
@@ -196,6 +230,8 @@ def exercise(api_base, ui_base, screenshot):
                 "project_id": p,
                 "flows": [
                     "authenticated style freeze",
+                    "legacy asset approval and lock grants",
+                    "mode selection preserves Fake provenance",
                     "candidate promotion",
                     "explicit voice listening and freeze",
                     "TTS/ASR/alignment",

@@ -7,6 +7,11 @@ const views = ['环境中心', '模型与节点', '工作流能力', '全资产�
 
 export function PreproductionPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
   const [view, setView] = useState(0);
+  const [mode, setMode] = useState('fake');
+  const [confirmed, setConfirmed] = useState(false);
+  const [diskBudget, setDiskBudget] = useState('');
+  const [localEvidence, setLocalEvidence] = useState('{}');
+  const offline = mode === 'fake';
   const [token, setToken] = useState('');
   const [rows, setRows] = useState<Row[]>([]);
   const [rowView, setRowView] = useState(-1);
@@ -67,13 +72,14 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
     finally { setBusy(false); }
   }
   async function approve(row: Row, action: string, path: string) {
+    if (!offline && !confirmed) throw new Error('请确认本地权限和操作风险。');
     if (!evidence.trim()) throw new Error('请填写核验、权利和试听证据。');
     const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
       { action, target_id: row.id }, true);
-    return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline: true, listened: action === 'voice_freeze', evidence }, true);
+    return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline, listened: action === 'voice_freeze', evidence }, true);
   }
   return <section className="card" id="preproduction">
-    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>MOCK / 离线验证，真实 GPU 待本地验收</strong></div>
+    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>请求模式：{offline ? '模拟' : '本地'} · 实际执行器与验证级别见后端结果</strong></div>
     <nav className="button-row">{views.map((name, i) => <button key={name} onClick={() => setView(i)}
       disabled={busy} aria-pressed={view === i}>{name}</button>)}</nav>
     <p>候选晋升、音色冻结与安装审批使用服务器验证的操作员身份；凭据仅保留在当前页面内存。</p>
@@ -81,11 +87,16 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <label>操作员凭据<input type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} /></label>
       <label>人工核验 / 试听 / 权利证据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>
     </div>
+    <label>操作模式<select value={mode} onChange={e => { setMode(e.target.value); setConfirmed(false); }}>
+      <option value="fake">模拟 / 离线</option><option value="local">本地 / 生产证据</option></select></label>
+    {!offline && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />
+      我已核对服务器配置的范围、来源、许可和具体操作风险</label>}
+    <p>切换请求模式不会更改已有结果来源。模拟输出不能晋升为真实验证。</p>
     <button disabled={busy} onClick={() => act(load)}>刷新后端状态</button>
     {error && <p role="alert" className="error-text">{error}</p>}
     {view === 0 && <>
-      <p>当前扫描器为 FakeWindowsHostProbe。模拟 16GB GPU / 32GB RAM，不代表已扫描本机。</p>
-      <button disabled={busy} onClick={() => act(() => post('/comfyops/inventory/refresh', {}))}>模拟只读环境检测</button>
+      <p>模拟使用 FakeWindowsHostProbe；本地仅扫描管理员在服务器配置的路径与端口白名单。</p>
+      <button disabled={busy} onClick={() => act(() => post('/comfyops/inventory/refresh', { mode }))}>运行选定模式的只读检测</button>
       <button disabled={busy} onClick={() => act(() => api('/comfyops/resource-status'))}>资源与租约</button>
     </>}
     {view === 1 && <>
@@ -93,9 +104,11 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         placeholder="包含固定 revision、文件 URL / size / SHA256、license_id、usage、dependencies" /></label>
       <button disabled={busy} onClick={() => act(() => post('/comfyops/packages', JSON.parse(packageJson)))}>登记来源与版本</button>
       <label>Package ID<input value={packageId} onChange={e => setPackageId(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => act(() => post('/comfyops/install-plans', {
-        project_id: projectId, package_ids: [packageId], disk_free: 200 * 1024 ** 3, isolated: true,
-      }))}>生成隔离 Dry Run 计划（磁盘预算为模拟值）</button>
+      <label>安装磁盘预算（字节，须核对空间）<input type="number" min="0" value={diskBudget}
+        onChange={e => setDiskBudget(e.target.value)} /></label>
+      <button disabled={busy || !diskBudget || (!offline && !confirmed)} onClick={() => act(() => post('/comfyops/install-plans', {
+        project_id: projectId, package_ids: [packageId], disk_free: Number(diskBudget), isolated: true, executor: mode,
+      }))}>生成选定执行器的隔离计划</button>
     </>}
     {view === 2 && <>
       <p>分类：{registry?.categories.join(' · ')}</p>
@@ -104,6 +117,8 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy} onClick={() => act(() => post('/workflow-capabilities/assemble', {
         name: 'Fake 图像模板', template: 'fake-image-v1',
       }))}>组装白名单 Fake 图像模板</button>
+      <label>本地执行证据 JSON（instance_id、prompt_id、output_sha256）<textarea value={localEvidence}
+        onChange={e => setLocalEvidence(e.target.value)} /></label>
       <details><summary>兼容的旧 H3 Profiles（不更改原图）</summary><pre>{JSON.stringify(registry?.legacy_profiles, null, 2)}</pre></details>
     </>}
     {(view === 3 || view === 4) && <>
@@ -150,10 +165,19 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <label>语速（0.5–2）<input type="number" min="0.5" max="2" step="0.1" value={speed} onChange={e => setSpeed(Number(e.target.value))} /></label>
       <label>停顿秒数（0–3）<input type="number" min="0" max="3" step="0.1" value={pause} onChange={e => setPause(Number(e.target.value))} /></label>
       <label>普通话对白 / 试听文本<textarea value={text} onChange={e => setText(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/voice-profiles/${voiceSource === 'AUTHORIZED_CLONE' ? 'clone' : voiceSource === 'USER_IMPORT' ? 'import' : 'design'}`, {
-        character: entity, description: prompt, text, rights_id: voiceRights, asset_rights_id: rightsId,
-        source: voiceSource, reference_id: referenceId || null,
-      }, voiceSource === 'AUTHORIZED_CLONE'))}>制作候选试听（默认 Fake 测试音调）</button>
+      <button disabled={busy} onClick={() => act(async () => {
+        const body = { character: entity, description: prompt, text, rights_id: voiceRights, asset_rights_id: rightsId,
+          source: voiceSource, reference_id: referenceId || null, supersedes_voice_id: null };
+        let execution_decision;
+        if (voiceSource === 'AUTHORIZED_CLONE') {
+          const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
+            action: 'voice_execute', target_id: voiceRights, context: body,
+          }, true);
+          execution_decision = { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence };
+        }
+        return post(`/projects/${projectId}/voice-profiles/${voiceSource === 'AUTHORIZED_CLONE' ? 'clone' : voiceSource === 'USER_IMPORT' ? 'import' : 'design'}`,
+          { ...body, ...(execution_decision ? { execution_decision } : {}) }, voiceSource === 'AUTHORIZED_CLONE');
+      })}>制作候选试听（默认 Fake 测试音调）</button>
     </>}
     {view === 5 && <>
       <label>已导入剧本 Document ID<input value={documentId} onChange={e => setDocumentId(e.target.value)} /></label>
@@ -167,7 +191,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, {
         document_id: documentId, create_revision: true,
       }))}>建立新的预检版本（保留历史冻结清单）</button>
-      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline: true }))}>运行开机预检</button>
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline }))}>运行开机预检</button>
       <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
       <label>原创音色权利 ID（可选）<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>
       <label>已验证图像工作流 ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
@@ -178,23 +202,34 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy} onClick={() => act(async () => {
         const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId });
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);
-      })}>操作员冻结离线清单</button>
+      })}>操作员冻结选定模式清单</button>
     </>}
     {rowView === view && rows.map(row => <article className="card" key={row.id}>
       <strong>{String(row.payload.family ?? row.payload.character ?? row.payload.name ?? row.payload.source ?? row.id)} · {row.status}</strong>
       <p>ID {row.id} · SHA256 {row.sha256}</p>
       {view === 1 && row.status === 'AWAITING_APPROVAL' && <button disabled={busy}
         onClick={() => act(() => approve(row, 'install', `/comfyops/install-plans/${row.id}/approve`))}>批准此哈希计划</button>}
-      {view === 1 && row.status === 'APPROVED' && <button disabled={busy} onClick={() => act(() =>
+      {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'FAKE_ONLY' && <button disabled={busy} onClick={() => act(() =>
         post(`/comfyops/install-plans/${row.id}/execute`, { executor: 'fake', plan_hash: row.sha256 }, true))}>模拟执行（无系统变更）</button>}
       {view === 2 && row.status === 'DRAFT' && <button disabled={busy} onClick={() => act(() =>
         post(`/workflow-capabilities/${row.id}/validate`, { object_info: { ShineFake: { input: { required: { prompt: ['STRING'] } } } } }))}>使用 Fake 节点目录验证</button>}
       {view === 2 && row.status === 'STATIC_VALIDATED' && <button disabled={busy} onClick={() => act(() =>
         post(`/workflow-capabilities/${row.id}/fake-execute`, {}))}>Fake HTTP 执行契约</button>}
-      {view === 3 && row.status !== 'PROMOTED' && <>
+      {view === 2 && !offline && <>
+        <button disabled={busy || !confirmed} onClick={() => act(async () => {
+          const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+            { action: 'workflow_validate', target_id: row.id }, true);
+          return post(`/workflow-capabilities/${row.id}/local-execution-evidence`, {
+            ...JSON.parse(localEvidence), grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence,
+          }, true);
+        })}>提交并核验本地 History 证据</button>
+        {row.status === 'REAL_TESTED' && <button disabled={busy || !confirmed} onClick={() => act(() =>
+          approve(row, 'workflow_publish', `/workflow-capabilities/${row.id}/publish`))}>操作员发布此版本</button>}
+      </>}
+      {view === 3 && row.status !== 'PROMOTED'  && <>
         <button disabled={busy} onClick={() => act(() => post(`/candidate-assets/${row.id}/qc`, {}))}>候选 QC</button>
         <button disabled={busy || row.status !== 'READY_FOR_REVIEW'} onClick={() => act(() =>
-          approve(row, 'promote', `/candidate-assets/${row.id}/promote`))}>人工晋升（仅离线清单）</button>
+          approve(row, 'promote', `/candidate-assets/${row.id}/promote`))}>按选定模式人工晋升</button>
       </>}
       {view === 4 && <>
         <audio controls src={`${API}/candidate-assets/${String(row.payload.candidate_id)}/media`} />

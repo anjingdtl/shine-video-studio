@@ -167,9 +167,16 @@ function App() {
     });
   }
 
-  async function updateAsset(assetId: string, action: 'approve' | 'lock') {
+  async function updateAsset(assetId: string, action: 'approve' | 'lock', token: string, evidence: string) {
     await withBusy(async () => {
-      await api(`/assets/${assetId}/${action}`, { method: 'POST' });
+      if (!token || evidence.trim().length < 5) throw new Error('请填写操作员凭据和核验依据（至少5字）。');
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+      const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
+        ...json('POST', { action: `asset_${action}`, target_id: assetId }), headers,
+      });
+      await api(`/assets/${assetId}/${action}`, {
+        ...json('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence }), headers,
+      });
       await loadProject(projectId);
       report(action === 'approve' ? '素材已由当前用户批准。' : '素材已锁定，可供镜头引用。');
     });
@@ -394,8 +401,8 @@ function App() {
               assets={assets}
               busy={busy}
               onUpload={uploadAsset}
-              onApprove={(assetId) => updateAsset(assetId, 'approve')}
-              onLock={(assetId) => updateAsset(assetId, 'lock')}
+              onApprove={(assetId, token, evidence) => updateAsset(assetId, 'approve', token, evidence)}
+              onLock={(assetId, token, evidence) => updateAsset(assetId, 'lock', token, evidence)}
               onPatchMetadata={patchAssetMetadata}
             />
 

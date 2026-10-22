@@ -7,12 +7,14 @@ type Props = {
   assets: Asset[];
   busy: boolean;
   onUpload: (file: File, meta: { kind: string; role: string; entityId: string; tags: string }) => void;
-  onApprove: (assetId: string) => void;
-  onLock: (assetId: string) => void;
+  onApprove: (assetId: string, token: string, evidence: string) => void;
+  onLock: (assetId: string, token: string, evidence: string) => void;
   onPatchMetadata: (assetId: string, patch: { role?: string | null; entity_id?: string; tags?: string[] }) => void;
 };
 
 export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, onPatchMetadata }: Props) {
+  const [operatorToken, setOperatorToken] = useState('');
+  const [evidence, setEvidence] = useState('');
   const [kind, setKind] = useState('image');
   const [role, setRole] = useState('character');
   const [entityId, setEntityId] = useState('');
@@ -47,6 +49,11 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
           <p>只有人工批准并锁定的素材才能被镜头引用；Agent 没有创建或审批权限。</p>
         </div>
         <div className="section-icon"><Film size={17} /></div>
+      </div>
+      <div className="form-grid">
+        <label>主资产审批凭据<input type="password" autoComplete="off" value={operatorToken}
+          onChange={e => setOperatorToken(e.target.value)} /></label>
+        <label>主资产核验依据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>
       </div>
       <div className="upload-stack">
         <div className="upload-row">
@@ -111,8 +118,8 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
                 : asset.approved ? <span className="pill approved"><Check size={12} />已批准</span>
                   : <span className="pill pending"><Clock3 size={12} />待人工审批</span>}
             </div>
-            {!asset.approved && <button className="text-button" onClick={() => onApprove(asset.id)}>批准</button>}
-            {asset.approved && !asset.locked && <button className="text-button" onClick={() => onLock(asset.id)}>锁定</button>}
+            {!asset.approved && <button className="text-button" onClick={() => onApprove(asset.id, operatorToken, evidence)}>批准</button>}
+            {asset.approved && !asset.locked && <button className="text-button" onClick={() => onLock(asset.id, operatorToken, evidence)}>锁定</button>}
             <button className="icon-button tiny" title="编辑元数据" onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
           </div>
         ))}
