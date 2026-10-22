@@ -1641,7 +1641,15 @@ def recover_expired_jobs(
             attempt = _latest_attempt(db, job_id) if job else None
             lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
             if lease and attempt and attempt.status == "COMPLETED" and job.status not in ACTIVE_STATUSES:
-                lease.status = "RELEASED"
+                from shine.comfy.client import ComfyUIClient
+
+                release_client = comfy_client or ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+                try:
+                    release_client.free_models()
+                except Exception:
+                    lease.status = "RECONCILE_REQUIRED"
+                else:
+                    lease.status = "RELEASED"
     return recovered
 
 
