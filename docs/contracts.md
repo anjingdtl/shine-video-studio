@@ -227,8 +227,8 @@ lip-sync confirmation is recorded separately from formal per-gate approval event
 ## V1.3 amendment
 
 The detailed additive endpoints and request schema names are in
-[V1.3 API reference](V1.3_API_REFERENCE.md). Earlier unauthenticated asset endpoints remain
-for legacy uploads; they do not authorize V1.3 candidate promotion. Candidate-byte re-import
+[V1.3 API reference](V1.3_API_REFERENCE.md). Legacy upload remains available, while every new master approve/lock requires a server-verified
+operator and an asset_approve/asset_lock grant bound to the complete current asset snapshot. Candidate-byte re-import
 and mutation of promoted masters are rejected. New high-risk operations require the existing
 loopback operator credential and same-origin check, plus an action/target/snapshot-bound
 grant. Grants expire after five minutes and can be consumed once. Install execution approvals
@@ -260,3 +260,17 @@ For an analyzed V1.3 project, Style freeze requires the authenticated operator p
 only the specified decision fields, never the grant response's expiry field. Known Fake
 content hashes retain Mock provenance after candidate import and cannot use a legacy
 cross-project upload to escape the promotion boundary.
+
+
+## Adversarial closeout amendment
+
+Master approve/lock now take Decision with grant_id, snapshot, evidence and the operator
+Authorization header. Grants are one-use and action/target/snapshot scoped; old no-body calls
+cannot approve. Clone requests on every route require execution_decision and a voice_execute
+grant targeting the consent record. Supply context as the complete VoiceDesign request with
+schema defaults, excluding execution_decision. Cloned-voice dialogue uses context containing
+voice_id and the complete Dialogue request excluding execution_decision. Consent may carry
+expires_at and never substitutes for execution authority. Actual render references are checked
+against the frozen set at Job creation, final Worker submission and human review.
+
+Complete software acceptance remains partial; see V1.3_ADVERSARIAL_REVIEW.md.

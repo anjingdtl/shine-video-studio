@@ -139,3 +139,14 @@ table is rebuilt. An old-head upgrade/downgrade test compares every legacy table
 services. Their HTTP protocol is documented in the local checklist; it is not an official
 Qwen service API. Defaults are explicitly Fake. Environment detection defaults to Fake;
 local mode requires Windows and administrator-configured root/port allowlists.
+
+
+## Adversarial closeout authority
+
+See [ADR 0004](adr/0004-adversarial-authority-and-recovery.md). Legacy master approval no
+longer has lower privileges. Voice source policy is shared across routes. The Worker checks
+actual request references after preparation and serializes the external submission boundary
+with revocation using the existing SQLite writer. Installer recovery shares an OS guard and
+verifiable owner identity with installation; immutable scan snapshots update stable current
+instance identities. A06/A07 and the remaining A03/A04/A08 software gaps are explicitly
+listed in [the adversarial review](V1.3_ADVERSARIAL_REVIEW.md), not assigned to local GPU work.

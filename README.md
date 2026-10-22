@@ -1,5 +1,8 @@
 # Shine视频工作台 · Shine Video Studio
 
+> V1.3 对抗复查后仍为 **PARTIAL / MOCK_VERIFIED**。审批、克隆、实际引用及安装恢复已有修复；
+> 完整云端收尾尚未完成，见 [逐项实现与软件缺口](docs/V1.3_ADVERSARIAL_REVIEW.md)。
+
 > Local-first short-drama production workbench built around **MiniMax-H3 via local ComfyUI**, with an independent, provider-configurable LLM Agent runtime.
 
 **Current status: M1 hardened; M2/M3 offline foundations implemented and tested; the offline production loop is closed and reproducible.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter with strict reference-media transfer, Fake ComfyUI server, five named quality gates, request-revision repair engine, automatic recovery of finished external tasks, and the Offline Production E2E all run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation. See [`docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md`](docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md).
