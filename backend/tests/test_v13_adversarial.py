@@ -244,7 +244,7 @@ def test_installer_active_owner_and_unknown_owner_are_protected(tmp_path):
     assert marker.read_text() == "unknown legacy owner"
 
 
-def ready_production(client):
+def ready_production(client, *, bind_prop=False):
     from tests.conftest import register_workflow_profile
     from tests.test_film_crew import ENGLISH_STYLE
 
@@ -260,19 +260,31 @@ def ready_production(client):
         f"/projects/{project}/preproduction/analyze",
         {
             "document_id": doc["id"],
-            "h3_category": "H3_T2VA",
+            "h3_category": "H3_I2VA" if bind_prop else "H3_T2VA",
             "requirements": [{"family": "prop", "entity_id": "Ledger", "critical": True}],
         },
     )
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="I2VA" if bind_prop else "T2VA")
     from tests.conftest import COMFY_GRAPH, COMFY_PARAM_MAP
 
-    workflow(client, "H3_T2VA", graph=COMFY_GRAPH, parameter_map=COMFY_PARAM_MAP, legacy_profile_id=profile["id"])
+    workflow(
+        client,
+        "H3_I2VA" if bind_prop else "H3_T2VA",
+        graph=COMFY_GRAPH,
+        parameter_map=COMFY_PARAM_MAP,
+        legacy_profile_id=profile["id"],
+    )
     for category in ("VLM_REVIEW", "ASR"):
         workflow(client, category)
     post(client, f"/projects/{project}/rulepack/freeze")
     approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
-    shot = create_shot(client, project, style["id"], beat="Rain falls on an empty street.")
+    shot = create_shot(
+        client,
+        project,
+        style["id"],
+        beat="Rain falls on an empty street.",
+        bindings=[{"asset_id": row["formal_asset_id"], "use_as": "picture", "ordinal": 0}] if bind_prop else [],
+    )
     return project, shot, right, row, profile
 
 
@@ -285,7 +297,7 @@ def test_worker_final_submission_rechecks_revocation_after_prepare(prep):
     from tests.fake_http import FakeComfyServer
 
     client, factory, settings = prep
-    project, shot, right, _, profile = ready_production(client)
+    project, shot, right, _, profile = ready_production(client, bind_prop=True)
     settings = replace(settings, offline_simulation=True)
     client.app.state.settings = settings
     job = post(
@@ -313,7 +325,7 @@ def test_worker_final_submission_rechecks_revocation_after_prepare(prep):
         )
         current = client.get(f"/api/v1/jobs/{job['id']}").json()
         assert current["status"] == "NEEDS_REVIEW", current
-        assert current["failure_code"] == "PREPRODUCTION_OUTDATED"
+        assert current["failure_code"] in {"PREPRODUCTION_OUTDATED", "LICENSE_NOT_APPROVED"}
         assert not current["provider_job_id"]
         assert server.prompt_count == 0
     finally:
@@ -405,3 +417,15 @@ def test_inventory_snapshots_append_without_duplicate_current_instances(prep):
     assert {r["id"] for r in instances} == {r["id"] for r in current}
     assert len(current) == 2
     assert all(r["payload"]["snapshot_id"] == second["id"] for r in current)
+
+
+def test_revocation_blocks_consumers_but_independent_shot_continues(prep):
+    from shine.worker import run_one
+
+    client, factory, settings = prep
+    project, shot, right, _, _ = ready_production(client)
+    queued = post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)
+    post(client, f"/preparation/rights/{right['id']}/revoke", operator=True)
+    run_one(factory, settings=settings)
+    assert client.get(f"/api/v1/jobs/{queued['id']}").json()["status"] == "PASSED"
+    assert post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)

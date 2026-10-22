@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from shine.api_agent import router as agent_router
 from shine.api_comfy import router as comfy_router
 from shine.api_film import router as film_router
+from shine.api_instances import router as instances_router
 from shine.api_llm import router as llm_router
 from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
@@ -335,6 +336,7 @@ def create_app(
     app.include_router(comfy_router)
     app.include_router(film_router)
     app.include_router(operator_router)
+    app.include_router(instances_router)
     from shine.api_preparation import router as preparation_router
 
     app.include_router(preparation_router)
@@ -711,13 +713,6 @@ def create_app(
         shot = require_shot(db, project_id, body.shot_id)
         from shine.comfyops.preproduction import enforce
 
-        preproduction_hash = enforce(
-            db,
-            project_id,
-            offline=(body.provider.value == "mock" or request.app.state.settings.offline_simulation),
-            data_dir=settings.data_dir,
-            workflow_profile_id=body.workflow_profile_id if body.provider.value == "comfyui" else None,
-        )
         if body.provider.value == "comfyui" and not request.app.state.settings.offline_simulation:
             for binding in shot.bindings:
                 if (binding.asset.provenance or {}).get("offline_only"):
@@ -749,9 +744,14 @@ def create_app(
                 dependency_ids.append(previous_job_id)
             dependency_kinds[previous_job_id] = f"continuity:{continuity.mode.value}"
         request_data, _assets, compiler_meta = make_render_request(db, project, shot, body)
-        from shine.comfyops.preproduction import enforce_references
-
-        enforce_references(db, project_id, request_data, data_dir=settings.data_dir)
+        preproduction_hash = enforce(
+            db,
+            project_id,
+            render_request=request_data,
+            offline=(body.provider.value == "mock" or request.app.state.settings.offline_simulation),
+            data_dir=settings.data_dir,
+            workflow_profile_id=body.workflow_profile_id if body.provider.value == "comfyui" else None,
+        )
         parents, initial_status = dependencies_for_new_job(db, project_id, dependency_ids)
         job = Job(
             project_id=project_id,

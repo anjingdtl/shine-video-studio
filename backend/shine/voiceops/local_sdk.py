@@ -1,0 +1,177 @@
+"""In-process local Qwen SDK bridge, no unprotected clone HTTP endpoint.
+
+SDK imports are lazy and local_files_only. Exact package/runtime/file hashes must
+be registered and installed. Tests inject the same upstream-shaped SDK methods.
+"""
+
+from __future__ import annotations
+
+import gc
+import hashlib
+import importlib.metadata
+import io
+import struct
+import wave
+
+from shine.comfyops.installer import ControlledDownloader, PackageFile, safe_target
+from shine.comfyops.models import ModelPackage
+
+CAPABILITIES = {"design": "VOICE_DESIGN", "base": "VOICE_CLONE", "asr": "ASR", "align": "FORCED_ALIGNMENT"}
+
+
+def encode_wav(samples, rate):
+    if hasattr(samples, "tolist"):
+        samples = samples.tolist()
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(rate)
+        stream.writeframes(
+            b"".join(struct.pack("<h", max(-32768, min(32767, round(float(x) * 32767)))) for x in samples)
+        )
+    return output.getvalue(), len(samples) / rate
+
+
+def decode_wav(audio, *, numpy=False):
+    with wave.open(io.BytesIO(audio), "rb") as stream:
+        if stream.getnchannels() != 1 or stream.getsampwidth() != 2:
+            raise ValueError("VOICE_REFERENCE_WAV_PCM_MONO_REQUIRED")
+        values = [x[0] / 32768 for x in struct.iter_unpack("<h", stream.readframes(stream.getnframes()))]
+        rate = stream.getframerate()
+    if numpy:
+        import numpy as np
+
+        values = np.asarray(values, dtype=np.float32)
+    return values, rate
+
+
+class QwenLoader:
+    is_mock = False
+
+    def __call__(self, role, path):
+        if role in {"design", "base"}:
+            from qwen_tts import Qwen3TTSModel
+
+            return Qwen3TTSModel.from_pretrained(str(path), device_map="cuda:0", local_files_only=True)
+        if role == "asr":
+            from qwen_asr import Qwen3ASRModel
+
+            return Qwen3ASRModel.from_pretrained(str(path), device_map="cuda:0", local_files_only=True)
+        from qwen_asr import Qwen3ForcedAligner
+
+        return Qwen3ForcedAligner.from_pretrained(str(path), device_map="cuda:0", local_files_only=True)
+
+
+class QwenLocalVoiceProvider:
+    name = "QwenLocalVoiceSDK"
+
+    def __init__(self, factory, settings, packages, loader=None):
+        self.factory, self.settings, self.packages = factory, settings, packages
+        self.loader = loader or QwenLoader()
+        self.is_mock = self.loader.is_mock
+        self.models, self.references = {}, {}
+        self.resource_mb = 4000
+
+    def _load(self, role):
+        if role in self.models:
+            return self.models[role]
+        if self.models:
+            self.release_models()  # Only one checkpoint may reside inside the admitted budget.
+        identity = self.packages.get(role)
+        with self.factory() as db:
+            package = db.get(ModelPackage, identity) if identity else None
+            if not package or package.status != "FILES_VERIFIED_PENDING_RUNTIME":
+                raise ValueError("LOCAL_MODEL_PACKAGE_NOT_VERIFIED")
+            p = package.payload
+            if CAPABILITIES[role] not in p["capabilities"] or p["license_id"].lower() in {"unknown", "unverified"}:
+                raise ValueError("LOCAL_MODEL_CAPABILITY_OR_LICENSE_MISSING")
+            if not self.is_mock:
+                versions = p.get("runtime_versions", {})
+                required = "qwen-tts" if role in {"base", "design"} else "qwen-asr"
+                if required not in versions or any(importlib.metadata.version(k) != v for k, v in versions.items()):
+                    raise ValueError("SDK_VERSION_NOT_PINNED_OR_CHANGED")
+                if p.get("resource_mb") is None or p["resource_mb"] > self.resource_mb:
+                    raise ValueError("VOICE_RESOURCE_PROFILE_MISSING_OR_EXCEEDED")
+            root = self.settings.data_dir / "comfyops" / "isolated-packages" / p["name"]
+            for entry in p["files"]:
+                if not ControlledDownloader.valid(
+                    safe_target(root, entry["relative_path"]), PackageFile.model_validate(entry)
+                ):
+                    raise ValueError("LOCAL_MODEL_HASH_CHANGED")
+        self.models[role] = self.loader(role, root)
+        return self.models[role]
+
+    def _result(self, waves, rate, character, role):
+        if len(waves) != 1:
+            raise ValueError("VOICE_BATCH_CONTRACT_INVALID")
+        audio, duration = encode_wav(waves[0], rate)
+        return {
+            "audio": audio,
+            "duration_s": duration,
+            "speaker": character,
+            "language": "zh-CN",
+            "model": self.packages[role],
+            "is_mock": self.is_mock,
+            "speaker_verification": "PENDING_HUMAN_REVIEW",
+        }
+
+    def design(self, description, text, character):
+        waves, rate = self._load("design").generate_voice_design(text=text, language="Chinese", instruct=description)
+        return self._result(waves, rate, character, "design")
+
+    def clone(self, reference, reference_text, character):
+        waves, rate = self._load("base").generate_voice_clone(
+            text=reference_text,
+            language="Chinese",
+            ref_audio=decode_wav(reference, numpy=not self.is_mock),
+            ref_text=reference_text,
+        )
+        return self._result(waves, rate, character, "base")
+
+    def prepare_conditioning(self, audio, digest, reference_text):
+        if hashlib.sha256(audio).hexdigest() != digest:
+            raise ValueError("VOICE_CONDITIONING_HASH_MISMATCH")
+        decode_wav(audio)
+        self.references[digest] = (audio, reference_text)
+
+    def synthesize(self, text, character, conditioning, emotion, speed, pause):
+        if emotion != "neutral" or speed != 1 or pause != 0:
+            raise ValueError("CAPABILITY_UNSUPPORTED_EXPRESSIVE_PARAMETERS")
+        if conditioning not in self.references:
+            raise ValueError("APPROVED_CONDITIONING_REQUIRED")
+        audio, ref_text = self.references[conditioning]
+        waves, rate = self._load("base").generate_voice_clone(
+            text=text, language="Chinese", ref_audio=decode_wav(audio, numpy=not self.is_mock), ref_text=ref_text
+        )
+        return self._result(waves, rate, character, "base")
+
+    def transcribe(self, audio):
+        result = self._load("asr").transcribe(audio=decode_wav(audio, numpy=not self.is_mock), language="Chinese")[0]
+        # Upstream ASR does not establish voice identity or calibrated confidence.
+        return {
+            "text": result.text,
+            "speaker": getattr(result, "speaker", "UNKNOWN"),
+            "language": "zh-CN" if result.language == "Chinese" else result.language,
+            "confidence": getattr(result, "confidence", 0),
+            "is_mock": self.is_mock,
+            "model": self.packages["asr"],
+        }
+
+    def align(self, audio, text):
+        words = self._load("align").align(
+            audio=decode_wav(audio, numpy=not self.is_mock), text=text, language="Chinese"
+        )[0]
+        return [{"text": word.text, "start_s": word.start_time, "end_s": word.end_time} for word in words]
+
+    def release_models(self):
+        self.models.clear()
+        gc.collect()
+        if not self.is_mock:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        if self.models:
+            raise ValueError("MODEL_RELEASE_UNCONFIRMED")

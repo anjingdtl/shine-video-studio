@@ -134,7 +134,7 @@ def verify_candidate(settings, row):
     return content
 
 
-def candidate_qc(settings, row):
+def candidate_qc(settings, row, reviewer=None):
     if row.status == "PROMOTED":
         raise HTTPException(409, "CANDIDATE_VERSION_FROZEN")
     content = verify_candidate(settings, row)
@@ -158,9 +158,30 @@ def candidate_qc(settings, row):
         "content_sha256": p["content_sha256"],
         "limitations": "No real semantic quality, identity, voice or lip-sync acceptance.",
     }
+    semantic_failed = False
+    if reviewer is not None:
+        from shine.comfyops.candidate_quality import CandidateAssessment
+
+        assessment = CandidateAssessment.model_validate(reviewer.review(content, p))
+        assessment.is_mock = assessment.is_mock or reviewer.is_mock or is_mock
+        qc["semantic_evidence"] = assessment.model_dump()
+        semantic_failed = any(f.result == "FAIL" for f in assessment.findings)
+        uncertain = any(f.result == "UNCERTAIN" or f.confidence < 0.9 for f in assessment.findings)
+        qc["semantic"] = (
+            "FAILED"
+            if semantic_failed
+            else "PENDING_HUMAN_REVIEW"
+            if uncertain
+            else ("MOCK_VERIFIED" if assessment.is_mock else "REVIEWED_PENDING_HUMAN_APPROVAL")
+        )
+        qc["is_mock"] = qc["is_mock"] or assessment.is_mock
     row.payload = {**p, "qc": qc}
     row.sha256 = graph_hash(row.payload)
-    row.status = "READY_FOR_REVIEW" if decode["status"] == "pass" and not p.get("dialogue_errors") else "QC_FAILED"
+    row.status = (
+        "READY_FOR_REVIEW"
+        if decode["status"] == "pass" and not p.get("dialogue_errors") and not semantic_failed
+        else "QC_FAILED"
+    )
     return qc
 
 
@@ -173,6 +194,20 @@ def promote(db, settings, row, actor, decision, *, offline):
     require_rights(db, row.project_id, row.payload["rights_id"])
     verify_candidate(settings, row)
     p = row.payload
+    if p.get("dialogue_review_errors"):
+        if not decision.listened:
+            raise HTTPException(409, "DIALOGUE_HUMAN_LISTENING_REQUIRED")
+        row.payload = {
+            **p,
+            "human_dialogue_review": {
+                "actor": actor,
+                "evidence": decision.evidence,
+                "listened": True,
+                "reviewed_findings": p["dialogue_review_errors"],
+            },
+        }
+        row.sha256 = graph_hash(row.payload)
+        p = row.payload
     mock = p["provenance"].get("is_mock", False)
     if mock and not offline:
         raise HTTPException(409, "MOCK_REQUIRES_OFFLINE_APPROVAL")

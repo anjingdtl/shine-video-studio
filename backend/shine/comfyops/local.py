@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import platform
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +38,8 @@ def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
             or plan.payload.get("approved_by") != actor
         ):
             raise ValueError("INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
+        if plan.payload.get("kind") == "INSTANCE_LIFECYCLE":
+            raise ValueError("USE_INSTANCE_LIFECYCLE_EXECUTOR")
         if datetime.fromisoformat(plan.payload.get("execute_before", "2000-01-01")) <= utcnow():
             raise ValueError("INSTALL_APPROVAL_EXPIRED")
         if not plan.payload.get("isolated") or plan.payload.get("executor") != "LOCAL_ISOLATED":
@@ -46,6 +49,8 @@ def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
             row = db.get(cls, package["id"])
             if not row or row.sha256 != package["hash"]:
                 raise ValueError("PLAN_HASH_CHANGED")
+        if shutil.disk_usage(settings.data_dir).free < plan.payload.get("disk_required", 0):
+            raise ValueError("INSUFFICIENT_DISK")
         plan.status = "INSTALLING"
         attempt = InstallationAttempt(
             plan_id=plan.id,

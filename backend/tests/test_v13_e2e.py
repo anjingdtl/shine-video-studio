@@ -45,6 +45,20 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     )
     install = approve(client, install, "install", f"/comfyops/install-plans/{install['id']}/approve")
     post(client, f"/comfyops/install-plans/{install['id']}/execute", {"plan_hash": install["sha256"]}, operator=True)
+    # The same production adapters create/configure an isolated instance with
+    # exact offline bytes. Fake commands never execute third-party code in cloud.
+    from shine.comfyops.candidate_quality import FakeCandidateReviewer
+    from tests.test_v13_instances import install_fixture, operate
+
+    source = install_fixture(
+        prep, "e2e-comfy-source", {"main.py": b"# synthetic entrypoint", "requirements.txt": b"# no dependencies"}
+    )
+    operate(client, project, "CREATE", source_package_id=source["id"])
+    operate(client, project, "START")
+    operate(client, project, "STOP")
+    _, instance_snapshot = operate(client, project, "SNAPSHOT")
+    operate(client, project, "RESTORE", snapshot_id=instance_snapshot["id"])
+    client.app.state.candidate_reviewer = FakeCandidateReviewer("PASS", 0.98)
     image = workflow(client, model_ids=[model["id"]])
     wf = register_workflow_profile(
         client,
@@ -76,7 +90,7 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     for _ in range(2):
         batch = post(client, f"/projects/{project}/preproduction/run", batch_body)
         assert batch["status"] == "PENDING_HUMAN_APPROVAL"
-        assert batch["generated"]
+        assert batch["generated"], batch
         for task in batch["generated"]:
             candidates = client.get(f"/api/v1/projects/{project}/candidate-assets").json()
             row = next(c for c in candidates if c["id"] == task["candidate_id"])
@@ -242,7 +256,14 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
         server.stop()
     events = client.get(f"/api/v1/projects/{project}/events?limit=500").json()["items"]
     types = {e["event_type"] for e in events}
-    assert {"CANDIDATE_PROMOTED", "VOICE_FROZEN", "PREPRODUCTION_FROZEN", "SUBMIT_INTENT"} <= types
+    assert {
+        "CANDIDATE_PROMOTED",
+        "VOICE_FROZEN",
+        "PREPRODUCTION_FROZEN",
+        "SUBMIT_INTENT",
+        "INSTANCE_OPERATION_COMPLETED",
+        "MODEL_CALL_COMPLETED",
+    } <= types
     # A later human-frozen manifest must never authorize an older queued request.
     queued = post(client, f"/projects/{project}/jobs", {"shot_id": shot, "provider": "mock"}, expected=201)
     assert queued["preproduction_manifest_hash"]

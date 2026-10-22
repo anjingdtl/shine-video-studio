@@ -25,6 +25,7 @@ from shine.comfyops.assets import (
 from shine.comfyops.images import FakeImageProvider, LocalImageHTTPProvider
 from shine.comfyops.installer import PackageSpec, check_url, safe_target
 from shine.comfyops.inventory import FakeWindowsHostProbe, WindowsHostProbe
+from shine.comfyops.model_calls import TrackedProvider
 from shine.comfyops.models import (
     CandidateAsset,
     ComfyInstance,
@@ -44,7 +45,7 @@ from shine.comfyops.registry import CATEGORIES, WorkflowDraft, assemble_template
 from shine.comfyops.scheduler import ResourceScheduler, resource_slot
 from shine.comfyops.tasks import preparation_task
 from shine.config import Settings
-from shine.models import Asset, Project, ProjectDocument, WorkflowProfile, utcnow
+from shine.models import AgentTaskRecord, Asset, Project, ProjectDocument, WorkflowProfile, utcnow
 from shine.services import add_audit, require_project
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
 
@@ -106,6 +107,9 @@ class RefreshInventory(Strict):
 @router.post("/comfyops/inventory/refresh")
 def refresh(body: RefreshInventory, settings: SettingsDep, db: DBSession):
     if body.mode == "local":
+        from shine.comfyops.scope import scoped_settings
+
+        settings = scoped_settings(db, settings)
         from pathlib import Path
 
         if not settings.comfy_probe_roots or not settings.comfy_probe_ports:
@@ -127,7 +131,11 @@ def refresh(body: RefreshInventory, settings: SettingsDep, db: DBSession):
         current = db.get(ComfyInstance, identity)
         details = {**instance, "identity_key": key, "snapshot_id": row.id}
         if current:
-            current.payload, current.sha256, current.status = details, graph_hash(details), instance["health"]
+            if current.payload.get("managed"):
+                merged = {**current.payload, "scan_evidence": instance, "snapshot_id": row.id}
+                current.payload, current.sha256 = merged, graph_hash(merged)
+            else:
+                current.payload, current.sha256, current.status = details, graph_hash(details), instance["health"]
         else:
             save(db, ComfyInstance, details, instance["health"], id=identity)
     audit(db, "comfyops", "INVENTORY_REFRESHED", row)
@@ -244,9 +252,14 @@ class GrantRequest(Strict):
         "install",
         "promote",
         "voice_execute",
+        "scope_configure",
+        "model_reconcile",
+        "instance_reconcile",
+        "resource_reconcile",
         "voice_freeze",
         "manifest_freeze",
         "workflow_publish",
+        "workflow_deprecate",
         "rights_approve",
         "workflow_validate",
         "workflow_preview",
@@ -264,8 +277,13 @@ TARGETS = {
     "promote": CandidateAsset,
     "voice_freeze": VoiceProfile,
     "voice_execute": RightsRecord,
+    "scope_configure": Project,
+    "model_reconcile": AgentTaskRecord,
+    "instance_reconcile": InstallationAttempt,
+    "resource_reconcile": ResourceLease,
     "manifest_freeze": PreProductionPlan,
     "workflow_publish": WorkflowRevision,
+    "workflow_deprecate": WorkflowRevision,
     "rights_approve": RightsRecord,
     "workflow_validate": WorkflowRevision,
     "workflow_preview": WorkflowRevision,
@@ -276,7 +294,7 @@ TARGETS = {
 
 @router.post("/preparation/approval-grants")
 def grant(body: GrantRequest, actor: Operator, db: DBSession):
-    if (body.action == "voice_execute") != (body.context is not None):
+    if (body.action in {"voice_execute", "scope_configure"}) != (body.context is not None):
         raise HTTPException(422, "EXECUTION_CONTEXT_REQUIRED_ONLY_FOR_VOICE")
     return approval.issue(db, actor, body.action, get(db, TARGETS[body.action], body.target_id), context=body.context)
 
@@ -312,11 +330,33 @@ class Execute(Strict):
 
 
 @router.post("/comfyops/install-plans/{identity}/execute")
-def execute_install(identity: str, body: Execute, actor: Operator, db: DBSession):
+def execute_install(
+    identity: str, body: Execute, actor: Operator, request: Request, settings: SettingsDep, db: DBSession
+):
     locked(db)
     row = get(db, InstallationPlan, identity)
-    if body.executor != "fake":
-        raise HTTPException(409, "LOCAL_EXECUTOR_UNAVAILABLE")
+    if row.payload.get("kind") == "INSTANCE_LIFECYCLE":
+        raise HTTPException(409, "USE_INSTANCE_LIFECYCLE_EXECUTOR")
+    if body.executor == "local":
+        import os
+
+        from shine.comfyops.installer import ControlledDownloader, HTTPTransport, LocalInstaller
+        from shine.comfyops.local import execute_approved
+
+        if os.name != "nt" or os.getenv("SHINE_ENABLE_LOCAL_EXECUTION") != "1":
+            raise HTTPException(409, "LOCAL_EXECUTOR_UNAVAILABLE")
+        db.rollback()
+        installer = LocalInstaller(
+            settings.data_dir / "comfyops" / "isolated-packages",
+            ControlledDownloader({"huggingface.co", "raw.githubusercontent.com", "github.com"}, HTTPTransport()),
+        )
+        try:
+            attempt_id = execute_approved(
+                request.app.state.session_factory, settings, identity, body.plan_hash, actor, installer
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return public(get(db, InstallationAttempt, attempt_id))
     if row.status != "APPROVED" or row.sha256 != body.plan_hash or graph_hash(row.payload) != row.sha256:
         raise HTTPException(409, "INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
     if row.payload.get("executor") != "FAKE_ONLY":
@@ -374,6 +414,15 @@ def workflows(db: DBSession):
 def workflow_draft(body: WorkflowDraft, db: DBSession):
     if body.category not in CATEGORIES:
         raise HTTPException(422, "UNKNOWN_CAPABILITY")
+    dependencies = {}
+    for identity in body.model_ids + body.node_package_ids:
+        package = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
+        if not package:
+            raise HTTPException(409, "DEPENDENCY_NOT_REGISTERED")
+        dependencies[identity] = package.sha256
+    if body.package_hashes and body.package_hashes != dependencies:
+        raise HTTPException(409, "DEPENDENCY_SNAPSHOT_CHANGED")
+    body = body.model_copy(update={"package_hashes": dependencies})
     row = save(db, WorkflowRevision, body.model_dump(), "DRAFT")
     audit(db, "comfyops", "WORKFLOW_DRAFT_CREATED", row)
     db.commit()
@@ -401,6 +450,10 @@ def validate(identity: str, body: Validation, db: DBSession):
     if row.status not in {"DRAFT", "STATIC_VALIDATED"}:
         raise HTTPException(409, "WORKFLOW_REVISION_FROZEN")
     errors = validate_workflow(WorkflowDraft.model_validate(row.payload), body.object_info, body.node_versions)
+    for identity in row.payload["model_ids"] + row.payload.get("node_package_ids", []):
+        package = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
+        if not package or package.sha256 != row.payload.get("package_hashes", {}).get(identity):
+            errors.append({"code": "DEPENDENCY_SNAPSHOT_CHANGED", "package": identity})
     if not errors:
         row.status = "STATIC_VALIDATED"
     audit(db, "comfyops", "WORKFLOW_STATIC_CHECKED", row, {"errors": errors, "source": "SUPPLIED_OBJECT_INFO"})
@@ -413,8 +466,13 @@ def fake_workflow(identity: str, request: Request, db: DBSession):
     row = get(db, WorkflowRevision, identity)
     if row.status != "STATIC_VALIDATED":
         raise HTTPException(409, "WORKFLOW_NOT_VALIDATED")
-    for identity in row.payload["model_ids"]:
-        if get(db, ModelPackage, identity).status != "MOCK_AVAILABLE":
+    for identity in row.payload["model_ids"] + row.payload.get("node_package_ids", []):
+        package = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
+        if (
+            not package
+            or package.sha256 != row.payload.get("package_hashes", {}).get(identity)
+            or package.status != "MOCK_AVAILABLE"
+        ):
             raise HTTPException(409, "CAPABILITY_MISSING")
     from shine.comfyops.fake import FakeComfyExecution
 
@@ -453,8 +511,10 @@ def publish(identity: str, body: Decision, actor: Operator, db: DBSession):
     row = get(db, WorkflowRevision, identity)
     if row.status != "REAL_TESTED":
         raise HTTPException(409, "MODEL_NOT_VERIFIED_PENDING_LOCAL_GPU")
-    for identity in row.payload["model_ids"]:
-        package = db.get(ModelPackage, identity)
+    for identity in row.payload["model_ids"] + row.payload.get("node_package_ids", []):
+        package = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
+        if not package or package.sha256 != row.payload.get("package_hashes", {}).get(identity):
+            raise HTTPException(409, "DEPENDENCY_SNAPSHOT_CHANGED")
         if not package or package.status not in {"AVAILABLE", "FILES_VERIFIED_PENDING_RUNTIME"}:
             raise HTTPException(409, "MODEL_NOT_VERIFIED")
         if package.payload["license_id"].lower() in {"unknown", "unverified"}:
@@ -469,17 +529,53 @@ def publish(identity: str, body: Decision, actor: Operator, db: DBSession):
 class Match(Strict):
     category: str
     offline: bool = True
+    generation_mode: str | None = None
+    duration_s: float | None = Field(default=None, gt=0)
+    aspect_ratio: str | None = None
+    instance_id: str | None = None
+    references: dict[str, int] = Field(default_factory=dict)
+    package_revisions: dict[str, str] = Field(default_factory=dict)
+    budget_mb: int | None = Field(default=None, gt=0)
+    usage: Literal["research", "commercial"] = "research"
+    continuity: str = "cut"
 
 
 @router.post("/workflow-capabilities/match")
 def match(body: Match, db: DBSession):
+    from shine.comfyops.registry import match_constraints
+
     state = "FAKE_EXECUTED" if body.offline else "PRODUCTION_APPROVED"
-    rows = [
-        public(r)
-        for r in db.scalars(select(WorkflowRevision).where(WorkflowRevision.status == state))
-        if r.payload["category"] == body.category
-    ]
-    return {"matches": rows, "blockers": [] if rows else ["CAPABILITY_MISSING"], "is_mock": body.offline}
+    matches, rejected = [], []
+    for row in db.scalars(select(WorkflowRevision).where(WorkflowRevision.status == state)):
+        if row.payload["category"] != body.category:
+            continue
+        errors = match_constraints(row, body.model_dump(), db)
+        if errors:
+            rejected.append({"id": row.id, "reasons": errors})
+        else:
+            matches.append(public(row))
+    return {
+        "matches": matches,
+        "rejected": rejected,
+        "blockers": [] if matches else ["CAPABILITY_MISSING"],
+        "is_mock": body.offline,
+    }
+
+
+@router.get("/workflow-capabilities/{identity}")
+def workflow_version(identity: str, db: DBSession):
+    return public(get(db, WorkflowRevision, identity))
+
+
+@router.post("/workflow-capabilities/{identity}/deprecate")
+def deprecate_workflow(identity: str, body: Decision, actor: Operator, db: DBSession):
+    locked(db)
+    row = get(db, WorkflowRevision, identity)
+    approval.consume(db, actor, "workflow_deprecate", row, body.grant_id, body.snapshot)
+    row.status = "DEPRECATED"
+    audit(db, actor, "WORKFLOW_DEPRECATED", row, {"evidence": body.evidence})
+    db.commit()
+    return public(row)
 
 
 class Rights(Strict):
@@ -541,6 +637,7 @@ class Generate(Strict):
     workflow_id: str
     parent_id: str | None = None
     preview_decision: Decision | None = None
+    execution_mode: Literal["fake", "local"] | None = None
 
 
 @router.post("/projects/{project_id}/candidate-assets/generate")
@@ -550,7 +647,21 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
     wf = get(db, WorkflowRevision, body.workflow_id)
     provider = getattr(request.app.state, "image_provider", None)
     if provider is None:
-        provider = LocalImageHTTPProvider(settings.local_image_url) if settings.local_image_url else FakeImageProvider()
+        import os
+
+        comfy_image = os.getenv("SHINE_IMAGE_COMFY_URL")
+        if comfy_image:
+            from shine.comfy.client import ComfyUIClient
+            from shine.comfyops.images import ComfyImageProvider
+            from shine.security import require_loopback_url
+
+            provider = ComfyImageProvider(ComfyUIClient(require_loopback_url(comfy_image), max_retries=0))
+        else:
+            provider = (
+                LocalImageHTTPProvider(settings.local_image_url) if settings.local_image_url else FakeImageProvider()
+            )
+    request.app.state.image_provider = provider
+    check_provider_mode(provider, body.execution_mode)
     if not provider.is_mock and wf.status == "STATIC_VALIDATED" and body.preview_decision:
         actor = operator(request, settings, request.headers.get("authorization", ""))
         decision = body.preview_decision
@@ -569,6 +680,7 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
     }
     if body.family not in expected or wf.payload["category"] not in expected[body.family]:
         raise HTTPException(409, "IMPORT_ONLY_OR_CAPABILITY_MISSING")
+    provider = TrackedProvider(provider, request.app.state.session_factory, project_id)
     references = []
     if body.parent_id:
         parent = get(db, CandidateAsset, body.parent_id)
@@ -640,9 +752,12 @@ async def import_candidate(
 
 
 @router.post("/candidate-assets/{identity}/qc")
-def qc(identity: str, settings: SettingsDep, db: DBSession):
+def qc(identity: str, request: Request, settings: SettingsDep, db: DBSession):
     row = get(db, CandidateAsset, identity)
-    result = candidate_qc(settings, row)
+    reviewer = getattr(request.app.state, "candidate_reviewer", None)
+    if reviewer:
+        reviewer = TrackedProvider(reviewer, request.app.state.session_factory, row.project_id)
+    result = candidate_qc(settings, row, reviewer=reviewer)
     audit(db, "candidate_qc", "CANDIDATE_QC_RECORDED", row, result)
     db.commit()
     return public(row)
@@ -680,10 +795,27 @@ class VoiceDesign(Strict):
     reference_id: str | None = None
     supersedes_voice_id: str | None = None
     execution_decision: Decision | None = None
+    execution_mode: Literal["fake", "local"] | None = None
+
+
+def check_provider_mode(provider, mode):
+    if mode is not None and provider.is_mock != (mode == "fake"):
+        raise HTTPException(409, "REQUESTED_MODE_EXECUTOR_MISMATCH")
 
 
 def voice_provider(request):
     if not hasattr(request.app.state, "voice_provider"):
+        import json
+        import os
+
+        from shine.voiceops.local_sdk import QwenLocalVoiceProvider
+
+        configured = os.getenv("SHINE_VOICE_SDK_PACKAGES")
+        if configured:
+            request.app.state.voice_provider = QwenLocalVoiceProvider(
+                request.app.state.session_factory, request.app.state.settings, json.loads(configured)
+            )
+            return request.app.state.voice_provider
         request.app.state.voice_provider = (
             LocalVoiceHTTPProvider(request.app.state.settings.local_voice_url)
             if request.app.state.settings.local_voice_url
@@ -714,7 +846,9 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         else None
     )
     reference = authorize(db, project_id, body, actor, settings)
-    provider = voice_provider(request)
+    provider = TrackedProvider(voice_provider(request), request.app.state.session_factory, project_id)
+    if body.source != "USER_IMPORT":
+        check_provider_mode(provider, body.execution_mode)
     if body.source == "USER_IMPORT":
         result = {
             "audio": verify_candidate(settings, reference),
@@ -812,6 +946,7 @@ class Dialogue(Strict):
     pause: float = Field(default=0, ge=0, le=3, allow_inf_nan=False)
     audio_mode: Literal["H3_NATIVE", "VOICE_REFERENCE", "POST_DUB"] = "VOICE_REFERENCE"
     execution_decision: Decision | None = None
+    execution_mode: Literal["fake", "local"] | None = None
 
 
 @router.post("/voice-profiles/{identity}/dialogue")
@@ -840,7 +975,8 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
             decision.snapshot,
             context={"voice_id": row.id, **body.model_dump(exclude={"execution_decision"})},
         )
-    provider = voice_provider(request)
+    provider = TrackedProvider(voice_provider(request), request.app.state.session_factory, row.project_id)
+    check_provider_mode(provider, body.execution_mode)
     project = require_project(db, row.project_id)
     with preparation_task(
         db,
@@ -880,10 +1016,14 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         errors = sorted(set(errors + ["DIALOGUE_DURATION_MISMATCH"]))
     elif any(w["end_s"] > measured_duration + 0.001 for w in words):
         errors = sorted(set(errors + ["ALIGNMENT_TIME_INVALID"]))
+    review_errors = [e for e in errors if e in {"ASR_REVIEW_REQUIRED", "VOICE_REVIEW_REQUIRED"}]
+    hard_errors = [e for e in errors if e not in review_errors]
+    if review_errors:
+        candidate.payload = {**candidate.payload, "dialogue_review_errors": review_errors, "asr_evidence": transcript}
     candidate_qc(settings, candidate)
-    if errors:
+    if hard_errors:
         candidate.status = "QC_FAILED"
-        candidate.payload = {**candidate.payload, "dialogue_errors": errors}
+        candidate.payload = {**candidate.payload, "dialogue_errors": hard_errors}
         candidate.sha256 = graph_hash(candidate.payload)
     render = save(
         db,
@@ -898,7 +1038,13 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
             "is_mock": result["is_mock"],
             "lip_sync": "PENDING_LOCAL_GPU",
         },
-        "QC_FAILED" if errors else "MOCK_VERIFIED" if result["is_mock"] else "PENDING_HUMAN_REVIEW",
+        "QC_FAILED"
+        if hard_errors
+        else "PENDING_HUMAN_REVIEW"
+        if review_errors
+        else "MOCK_VERIFIED"
+        if result["is_mock"]
+        else "PENDING_HUMAN_REVIEW",
         project_id=row.project_id,
         voice_id=row.id,
     )
@@ -1021,6 +1167,7 @@ def reserve(body: ResourceRequest, actor: Operator, db: DBSession):
 class LeaseAction(Strict):
     owner: str
     reconciled: bool = False
+    proof_decision: Decision | None = None
 
 
 @router.post("/comfyops/resource-reservations/{identity}/heartbeat")
@@ -1031,8 +1178,44 @@ def resource_heartbeat(identity: str, body: LeaseAction, actor: Operator, db: DB
 
 
 @router.post("/comfyops/resource-reservations/{identity}/release")
-def resource_release(identity: str, body: LeaseAction, actor: Operator, db: DBSession):
-    ResourceScheduler().release(db, identity, body.owner, reconciled=body.reconciled)
+def resource_release(
+    identity: str, body: LeaseAction, actor: Operator, request: Request, settings: SettingsDep, db: DBSession
+):
+    locked(db)
+    row = get(db, ResourceLease, identity)
+    if row.owner != body.owner:
+        raise HTTPException(403, "RESOURCE_OWNER_MISMATCH")
+    tasks = db.scalars(
+        select(AgentTaskRecord).where(AgentTaskRecord.trace["resource_id"].as_string() == identity)
+    ).all()
+    from shine.models import Job
+
+    job = db.get(Job, row.owner.removeprefix("h3:")) if row.owner.startswith("h3:") else None
+    attached = bool(tasks or job)
+    if attached and row.status != "RELEASED":
+        if any(t.status in {"RUNNING", "NEEDS_REVIEW"} for t in tasks):
+            raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
+        if not body.proof_decision:
+            raise HTTPException(409, "MODEL_RELEASE_PROOF_REQUIRED")
+        decision = body.proof_decision
+        approval.consume(db, actor, "resource_reconcile", row, decision.grant_id, decision.snapshot)
+        if job:
+            from shine.comfy.client import ComfyUIClient
+
+            ComfyUIClient(settings.comfyui_base_url, max_retries=0).free_models()
+        elif any(not t.trace.get("is_mock") for t in tasks):
+            raise HTTPException(409, "USE_MODEL_CALL_RECONCILIATION_WITH_PROVIDER_PROOF")
+        ResourceScheduler().release(db, identity, body.owner, reconciled=True)
+        add_audit(
+            db,
+            actor,
+            "RESOURCE_RELEASE_RECONCILED",
+            "resource_lease",
+            identity,
+            {"evidence": decision.evidence, "physical_release_confirmed": bool(job), "is_mock": not bool(job)},
+        )
+    else:
+        ResourceScheduler().release(db, identity, body.owner, reconciled=body.reconciled)
     db.commit()
     return public(get(db, ResourceLease, identity))
 
@@ -1321,7 +1504,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                         settings,
                         db,
                     )
-                    item = qc(item["id"], settings, db)
+                    item = qc(item["id"], request, settings, db)
                     generated.append({"requirement": req["id"], "candidate_id": item["id"], "status": item["status"]})
                 elif req["family"] == "voice" and body.voice_rights_id:
                     item = voice_design(
@@ -1338,7 +1521,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                         db,
                     )
                     candidate_id = item["payload"]["candidate_id"]
-                    qc(candidate_id, settings, db)
+                    qc(candidate_id, request, settings, db)
                     generated.append(
                         {
                             "requirement": req["id"],
@@ -1463,5 +1646,126 @@ def local_execution_evidence(
             "evidence": body.evidence,
         },
     )
+    db.commit()
+    return public(row)
+
+
+class LocalValidation(Strict):
+    instance_id: str
+
+
+@router.post("/workflow-capabilities/{identity}/validate-local")
+def validate_local_workflow(
+    identity: str, body: LocalValidation, actor: Operator, settings: SettingsDep, db: DBSession
+):
+    from shine.comfy.client import ComfyUIClient
+    from shine.security import require_loopback_url
+
+    row = get(db, WorkflowRevision, identity)
+    instance = get(db, ComfyInstance, body.instance_id)
+    if instance.payload.get("is_mock") or instance.status not in {"ONLINE", "RUNNING", "STOPPED"}:
+        raise HTTPException(409, "REAL_INSTANCE_REQUIRED")
+    url = require_loopback_url(instance.payload["url"])
+    if not instance.payload.get("managed"):
+        from urllib.parse import urlparse
+
+        if urlparse(url).port not in settings.comfy_probe_ports:
+            raise HTTPException(403, "INSTANCE_OUTSIDE_APPROVED_SCOPE")
+    info = ComfyUIClient(url, max_retries=0).object_info()
+    versions = instance.payload.get("node_versions", {})
+    result = validate(identity, Validation(object_info=info, node_versions=versions), db)
+    audit(db, actor, "WORKFLOW_LOCAL_CONTRACT_CHECKED", row, {"instance": body.instance_id, "errors": result["errors"]})
+    db.commit()
+    return {**result, "source": "LOCAL_OBJECT_INFO", "instance_id": body.instance_id, "is_mock": False}
+
+
+@router.get("/projects/{project_id}/preparation/model-calls")
+def model_call_records(project_id: str, actor: Operator, db: DBSession):
+    require_project(db, project_id)
+    return [
+        public(row)
+        for row in db.scalars(
+            select(AgentTaskRecord).where(
+                AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id.like("model_call:%")
+            )
+        )
+    ]
+
+
+@router.post("/preparation/model-calls/{identity}/abandon")
+def abandon_model_call(
+    identity: str, body: Decision, actor: Operator, request: Request, settings: SettingsDep, db: DBSession
+):
+    """Explicit reconciliation of a lost result, never a fake successful result or automatic retry."""
+    import os
+
+    from shine.comfyops.installer import process_identity
+    from shine.comfyops.model_calls import IN_FLIGHT, IN_FLIGHT_LOCK
+
+    row = get(db, AgentTaskRecord, identity)
+    with IN_FLIGHT_LOCK:
+        if identity in IN_FLIGHT:
+            raise HTTPException(409, "MODEL_CALL_STILL_RUNNING")
+    pid = row.trace.get("owner_pid")
+    birth = row.trace.get("owner_birth")
+    if not pid or not birth:
+        raise HTTPException(409, "MODEL_CALL_OWNER_UNVERIFIABLE")
+    if pid == os.getpid() and row.status == "RUNNING":
+        raise HTTPException(409, "MODEL_CALL_STILL_RUNNING")
+    if pid and pid != os.getpid() and process_identity(pid) == birth:
+        raise HTTPException(409, "MODEL_CALL_OWNER_STILL_ALIVE")
+    if row.status not in {"RUNNING", "NEEDS_REVIEW"}:
+        raise HTTPException(409, "MODEL_CALL_NOT_UNCERTAIN")
+    db.rollback()
+    locked(db)
+    row = get(db, AgentTaskRecord, identity)
+    if row.status not in {"RUNNING", "NEEDS_REVIEW"}:
+        raise HTTPException(409, "MODEL_CALL_NOT_UNCERTAIN")
+    approval.consume(db, actor, "model_reconcile", row, body.grant_id, body.snapshot)
+    trace = dict(row.trace)
+    row.status = "RECONCILING"
+    db.commit()  # authorize before any provider side effect; never replay a lost reconciliation
+    try:
+        if not trace.get("is_mock"):
+            provider = (
+                voice_provider(request)
+                if trace.get("kind") in {"TTS", "ASR", "ALIGNMENT"}
+                else getattr(request.app.state, "image_provider", None)
+                if trace.get("kind") == "IMAGE"
+                else getattr(request.app.state, "candidate_reviewer", None)
+            )
+            if provider is None or not hasattr(provider, "release_models"):
+                raise HTTPException(409, "MODEL_RELEASE_PROOF_UNAVAILABLE")
+            # ComfyUI unload does not cancel a queued prompt. Require an idle queue first.
+            if hasattr(provider, "client") and trace.get("external_id"):
+                queue = provider.client.queue()
+                if queue.get("queue_running") or queue.get("queue_pending"):
+                    raise HTTPException(409, "MODEL_EXTERNAL_QUEUE_NOT_IDLE")
+            provider.release_models()
+    except Exception:
+        row = get(db, AgentTaskRecord, identity)
+        row.status = "NEEDS_REVIEW"
+        db.commit()
+        raise
+    locked(db)
+    row = get(db, AgentTaskRecord, identity)
+    row.status = "ABANDONED"
+    row.trace = {
+        **row.trace,
+        "reconciled_by": actor,
+        "lost_result_evidence": body.evidence,
+        "outcome": "LOST_RESULT_NOT_APPROVED",
+        "automatic_replay": False,
+    }
+    resource_id = trace.get("resource_id")
+    if resource_id:
+        lease = db.get(ResourceLease, resource_id)
+        if lease:
+            ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    parent = db.get(AgentTaskRecord, trace.get("parent_task_id")) if trace.get("parent_task_id") else None
+    if parent and parent.status in {"RUNNING", "NEEDS_REVIEW"}:
+        parent.status = "ABANDONED"
+    audit_payload = {"outcome": "LOST_RESULT_NOT_APPROVED", "evidence": body.evidence}
+    add_audit(db, actor, "MODEL_CALL_RECONCILED", "agent_task", row.id, audit_payload, project_id=row.project_id)
     db.commit()
     return public(row)

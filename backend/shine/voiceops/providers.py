@@ -183,7 +183,11 @@ def verify_dialogue(result, transcript, words, text, character):
     errors = []
     if transcript.get("text") != text:
         errors.append("DIALOGUE_TEXT_MISMATCH")
-    if transcript.get("speaker") != character or result.get("speaker") != character:
+    if result.get("speaker") != character:
+        errors.append("VOICE_CHARACTER_MISMATCH")
+    if transcript.get("speaker") in {None, "UNKNOWN"}:
+        errors.append("VOICE_REVIEW_REQUIRED")
+    elif transcript.get("speaker") != character:
         errors.append("VOICE_CHARACTER_MISMATCH")
     if transcript.get("language") != "zh-CN" or transcript.get("confidence", 0) < 0.9:
         errors.append("ASR_REVIEW_REQUIRED")

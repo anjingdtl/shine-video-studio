@@ -17,7 +17,7 @@ def snapshot(row):
         return graph_hash(
             {"id": row.id, "style_draft": row.style_draft, "frozen_style_version_id": row.frozen_style_version_id}
         )
-    if row.__tablename__ == "assets":
+    if row.__tablename__ in {"assets", "agent_task_records", "resource_leases"}:
         return graph_hash({c.name: str(getattr(row, c.name)) for c in row.__table__.columns})
     return graph_hash(
         {

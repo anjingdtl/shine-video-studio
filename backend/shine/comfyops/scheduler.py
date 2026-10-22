@@ -1,5 +1,6 @@
 """Single SQLite GPU admission ledger. Expiry requires reconciliation, never blind reuse."""
 
+from contextvars import ContextVar
 from datetime import timedelta
 
 from fastapi import HTTPException
@@ -7,6 +8,8 @@ from sqlalchemy import select, text
 
 from shine.comfyops.models import ResourceLease
 from shine.models import utcnow
+
+CURRENT_RESOURCE = ContextVar("shine_resource_lease", default=None)
 
 
 class ResourceScheduler:
@@ -116,6 +119,7 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
 
     thread = Thread(target=pulse, name="shine-resource-heartbeat", daemon=True)
     thread.start()
+    resource_token = CURRENT_RESOURCE.set(identity)
     try:
         yield identity
         if heartbeat_errors:
@@ -132,5 +136,6 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
             with factory.begin() as db:
                 scheduler.release(db, identity, owner, reconciled=True)
         finally:
+            CURRENT_RESOURCE.reset(resource_token)
             stopped.set()
             thread.join(timeout=2)

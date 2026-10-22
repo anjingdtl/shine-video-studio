@@ -214,6 +214,7 @@ def _guard_claimed_job(
     worker_id: str,
     attempt_id: str,
     allowed_status: tuple[str, ...] = ("SUBMITTING",),
+    settings: Settings | None = None,
 ) -> tuple[Job, JobAttempt] | None:
     job = db.get(Job, job_id)
     attempt = db.get(JobAttempt, attempt_id)
@@ -226,10 +227,10 @@ def _guard_claimed_job(
     if not _shot_is_current(db, job):
         _discard_stale_result(db, job, attempt, reason="SHOT_REVISION_SUPERSEDED", worker_id=worker_id)
         return None
-    from shine.comfyops.preproduction import enforce_references
+    from shine.comfyops.preproduction import enforce_job
 
     try:
-        enforce_references(db, job.project_id, job.request)
+        enforce_job(db, job, settings)
     except HTTPException as exc:
         job.failure_code = str(exc.detail)
         job.lease_owner = None
@@ -614,6 +615,9 @@ def run_one(
         with session_factory() as resource_db:
             if not scheduler.admit(resource_db, resource_id):
                 return None
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+
+    resource_token = CURRENT_RESOURCE.set(resource_id)
     try:
         return _run_one(
             session_factory,
@@ -627,6 +631,7 @@ def run_one(
             expected_job_id=selected_job_id,
         )
     finally:
+        CURRENT_RESOURCE.reset(resource_token)
         if resource_id:
             with session_factory.begin() as resource_db:
                 job = resource_db.get(Job, job_id)
@@ -834,6 +839,7 @@ def _run_one(
             expected_version=expected_version,
             scenario=scenario,
             worker_id=worker_id,
+            settings=settings,
         )
     except Exception as exc:
         logger.exception("job_execution_failed job_id=%s", job_id)
@@ -875,6 +881,7 @@ def _run_mock_job(
     expected_version: int,
     scenario: str,
     worker_id: str,
+    settings: Settings | None = None,
 ) -> str:
     heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting")
     try:
@@ -882,7 +889,12 @@ def _run_mock_job(
     except SubmissionUncertain as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -907,7 +919,12 @@ def _run_mock_job(
     except ProviderFailure as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -949,7 +966,12 @@ def _run_mock_job(
 
     with session_factory.begin() as db:
         guarded = _guard_claimed_job(
-            db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+            db,
+            job_id=job_id,
+            expected_state_version=expected_version,
+            worker_id=worker_id,
+            attempt_id=attempt_id,
+            settings=settings,
         )
         if guarded is None:
             return job_id
@@ -1049,6 +1071,7 @@ def _finalize_comfy_attempt(
                     worker_id=worker_id,
                     attempt_id=attempt_id,
                     allowed_status=("RUNNING", "QC_PENDING", "SUBMITTING"),
+                    settings=settings,
                 )
                 if guarded is None:
                     return job_id
@@ -1107,6 +1130,33 @@ def _finalize_comfy_attempt(
         byte_size = int(existing.byte_size)  # type: ignore[union-attr]
         content_type = str(existing.content_type)  # type: ignore[union-attr]
 
+    if semantic_reviewer or asr_reviewer:
+        from shine.comfyops.model_calls import TrackedProvider
+        from shine.comfyops.models import ResourceLease
+        from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
+
+        # A finished render is not proof that its weights were unloaded. Confirm
+        # release before admitting another model, including during crash recovery.
+        try:
+            service.client.free_models()
+        except Exception:
+            with session_factory.begin() as release_db:
+                current_job = release_db.get(Job, job_id)
+                current_job.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
+                current_job.lease_owner = None
+                current_job.lease_expires_at = None
+                try_transition(current_job, "NEEDS_REVIEW")
+            return job_id
+        with session_factory.begin() as release_db:
+            lease = release_db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+            if lease:
+                ResourceScheduler().release(release_db, lease.id, lease.owner, reconciled=True)
+        CURRENT_RESOURCE.set(None)
+        if semantic_reviewer:
+            semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id, reviewer_kind="VLM")
+        if asr_reviewer:
+            asr_reviewer = TrackedProvider(asr_reviewer, session_factory, project_id, reviewer_kind="ASR")
+
     technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
         artifact_path,
         expectations=TechnicalExpectations(
@@ -1154,6 +1204,7 @@ def _finalize_comfy_attempt(
             worker_id=worker_id,
             attempt_id=attempt_id,
             allowed_status=("RUNNING", "QC_PENDING", "SUBMITTING"),
+            settings=settings,
         )
         if guarded is None:
             return job_id
@@ -1295,7 +1346,12 @@ def _run_comfy_job(
     except ComfyPendingWorkflowMapping as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -1319,7 +1375,12 @@ def _run_comfy_job(
     except ComfyError as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -1390,6 +1451,7 @@ def _run_comfy_job(
                     expected_state_version=expected_version,
                     worker_id=worker_id,
                     attempt_id=attempt_id,
+                    settings=settings,
                 ):
                     return job_id
             except HTTPException as exc:
@@ -1405,7 +1467,12 @@ def _run_comfy_job(
     except ComfySubmissionUncertain as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -1439,7 +1506,12 @@ def _run_comfy_job(
     except ComfyError as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
-                db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+                db,
+                job_id=job_id,
+                expected_state_version=expected_version,
+                worker_id=worker_id,
+                attempt_id=attempt_id,
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -1464,7 +1536,12 @@ def _run_comfy_job(
 
     with session_factory.begin() as db:
         guarded = _guard_claimed_job(
-            db, job_id=job_id, expected_state_version=expected_version, worker_id=worker_id, attempt_id=attempt_id
+            db,
+            job_id=job_id,
+            expected_state_version=expected_version,
+            worker_id=worker_id,
+            attempt_id=attempt_id,
+            settings=settings,
         )
         if guarded is None:
             return job_id
@@ -1532,6 +1609,7 @@ def _run_comfy_job(
                 worker_id=worker_id,
                 attempt_id=attempt_id,
                 allowed_status=("RUNNING", "QC_PENDING"),
+                settings=settings,
             )
             if guarded is None:
                 return job_id
@@ -1716,6 +1794,19 @@ def _recover_one_job(
         if job is None:
             return 0
         attempt = _latest_attempt(db, job.id)
+        from shine.comfyops.preproduction import enforce_job
+
+        try:
+            enforce_job(db, job, settings)
+        except HTTPException as exc:
+            if job.status != "NEEDS_REVIEW":
+                try_transition(job, "NEEDS_REVIEW")
+            job.failure_code = str(exc.detail)
+            job.lease_owner = None
+            job.lease_expires_at = None
+            if attempt:
+                attempt.status = "NEEDS_REVIEW"
+            return 1
         if not _shot_is_current(db, job):
             _discard_stale_result(db, job, attempt, reason="SHOT_REVISION_SUPERSEDED", worker_id=worker_id)
             return 1

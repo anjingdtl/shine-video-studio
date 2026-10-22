@@ -37,13 +37,27 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
             requirements.append({"family": family, "entity_id": entity.strip(), "critical": True})
     for family in ("storyboard", "keyframe", "action", "dialogue", "sfx", "music", "subtitle"):
         requirements.append({"family": family, "entity_id": "project", "critical": False})
+    structured = None
+    if document.parsed and any(k in document.parsed for k in ("scenes", "shots", "beats")):
+        from shine.comfyops.requirements import extract_structured
+
+        requirements, structured = extract_structured(document.parsed)
     requirements += extras
-    unique = {(r["family"], r["entity_id"]): r for r in requirements}
+    unique = {}
+    for requirement in requirements:
+        key = (requirement["family"], requirement["entity_id"])
+        previous = unique.get(key, {})
+        unique[key] = {
+            **previous,
+            **requirement,
+            "critical": previous.get("critical", False) or requirement["critical"],
+        }
     for r in unique.values():
         if r["family"] not in FAMILIES:
             raise HTTPException(422, "UNKNOWN_ASSET_FAMILY")
     payload = {
         "document_id": document.id,
+        "structured_script": structured,
         "h3_category": h3_category,
         "script_hash": document.sha256,
         "requirements": list(unique.values()),
@@ -64,8 +78,9 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
     for row in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
         r = row.payload
         deps = []
-        if r["family"] == "costume" and ("character", r["entity_id"]) in ids:
-            deps = [ids[("character", r["entity_id"])]]
+        character = r.get("character_id", r["entity_id"])
+        if r["family"] == "costume" and ("character", character) in ids:
+            deps = [ids[("character", character)]]
         if r["family"] == "dialogue":
             deps = [value for (family, _), value in ids.items() if family == "voice"]
         if r["family"] in {"storyboard", "keyframe"}:
@@ -100,6 +115,17 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     links, blockers, requirements = [], [], []
     for req in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
         r = req.payload
+        if r.get("satisfaction") == "LOCKED_SCRIPT":
+            links.append(
+                {
+                    "requirement": req.id,
+                    "id": plan.payload["document_id"],
+                    "hash": r["line_hash"],
+                    "rights": "PROJECT_LOCKED_SCRIPT",
+                }
+            )
+            requirements.append({"id": req.id, **r, "status": "SATISFIED", "reason": None})
+            continue
         candidates = db.scalars(
             select(CandidateAsset).where(CandidateAsset.project_id == project_id, CandidateAsset.status == "PROMOTED")
         ).all()
@@ -146,6 +172,7 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
                     "hash": match.sha256,
                     "rights": rights.sha256 if rights else "LEGACY_USER_APPROVED",
                     "provenance_hash": graph_hash(match.provenance or {}) if isinstance(match, Asset) else match.sha256,
+                    "asset_metadata_hash": asset_metadata_hash(match) if isinstance(match, Asset) else None,
                 }
             )
         else:
@@ -181,13 +208,23 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         else:
             usable.append(choices[0])
     models = []
-    selected_models = {identity for w in usable for identity in w.payload["model_ids"]}
+    selected_models = {
+        identity for w in usable for identity in w.payload["model_ids"] + w.payload.get("node_package_ids", [])
+    }
     for workflow in usable:
         if not offline and not workflow.payload["model_ids"]:
             blockers.append({"code": "MODEL_DECLARATION_REQUIRED", "workflow": workflow.id})
     for identity in sorted(selected_models):
-        model = db.get(ModelPackage, identity)
+        from shine.comfyops.models import NodePackage
+
+        model = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
         allowed = {"MOCK_AVAILABLE"} if offline else {"AVAILABLE", "FILES_VERIFIED_PENDING_RUNTIME"}
+        if model and any(
+            w.payload.get("package_hashes", {}).get(identity) != model.sha256
+            for w in usable
+            if identity in w.payload["model_ids"] + w.payload.get("node_package_ids", [])
+        ):
+            blockers.append({"code": "DEPENDENCY_SNAPSHOT_CHANGED", "model": identity})
         if not model or model.status not in allowed:
             blockers.append({"code": "MODEL_NOT_VERIFIED", "model": identity})
         elif model.payload["license_id"].lower() in {"unknown", "unverified"} or (
@@ -226,7 +263,15 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
     if plan.status != "FROZEN":
         raise HTTPException(409, "PREPRODUCTION_NOT_READY")
     report = readiness(db, project_id, offline=offline, data_dir=data_dir)
-    if report["status"] != "SHOOT_READY" or graph_hash(plan.payload["manifest"]) != report["manifest_hash"]:
+    frozen = plan.payload["manifest"]
+    if render_request is None:
+        valid = report["status"] == "SHOOT_READY" and graph_hash(frozen) == report["manifest_hash"]
+    else:
+        # Production uses the exact frozen identities, not whichever newer master now
+        # satisfies a project-wide requirement. Revocation blocks only its consumers.
+        global_blockers = [b for b in report["blockers"] if "requirement" not in b]
+        valid = not global_blockers and all(frozen.get(k) == v for k, v in report["manifest"].items() if k != "links")
+    if not valid:
         raise HTTPException(409, "PREPRODUCTION_OUTDATED")
     if workflow_profile_id:
         profile = db.get(WorkflowProfile, workflow_profile_id)
@@ -244,10 +289,10 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
             raise HTTPException(409, "PREPRODUCTION_WORKFLOW_NOT_FROZEN")
     if render_request is not None:
         enforce_references(db, project_id, render_request, data_dir=data_dir)
-    return report["manifest_hash"]
+    return graph_hash(frozen)
 
 
-def enforce_references(db, project_id, render_request, *, data_dir=None):
+def enforce_references(db, project_id, render_request, *, data_dir=None, expected_manifest_hash=None):
     from shine.models import Shot, ShotAssetBinding
     from shine.schemas import RenderRequest
 
@@ -257,11 +302,17 @@ def enforce_references(db, project_id, render_request, *, data_dir=None):
     request = RenderRequest.model_validate(render_request)
     if plan.status != "FROZEN":
         raise HTTPException(409, "PREPRODUCTION_NOT_READY")
+    if expected_manifest_hash and graph_hash(plan.payload["manifest"]) != expected_manifest_hash:
+        raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+    actual = {r.asset_id for r in request.reference_manifest}
     allowed = {}
     for link in plan.payload["manifest"]["links"]:
         asset = db.get(Asset, link["id"])
         voice = db.get(VoiceProfile, link["id"])
         if voice:
+            candidate = db.get(CandidateAsset, voice.payload["candidate_id"])
+            if not candidate or candidate.formal_asset_id not in actual:
+                continue
             if voice.project_id != project_id or voice.status != "FROZEN" or voice.sha256 != link["hash"]:
                 raise HTTPException(409, "PREPRODUCTION_VOICE_OUTDATED")
             require_rights(
@@ -276,13 +327,31 @@ def enforce_references(db, project_id, render_request, *, data_dir=None):
                 raise HTTPException(409, "PREPRODUCTION_VOICE_OUTDATED")
             allowed[asset.id] = asset.sha256
         elif asset:
+            if asset.id in actual and link.get("asset_metadata_hash") != asset_metadata_hash(asset):
+                raise HTTPException(409, "PREPRODUCTION_ASSET_METADATA_OUTDATED")
             allowed[asset.id] = link["hash"]
+        else:
+            candidate = db.get(CandidateAsset, link["id"])
+            if candidate and candidate.formal_asset_id in actual:
+                if (
+                    candidate.project_id != project_id
+                    or candidate.sha256 != link["hash"]
+                    or candidate.status != "PROMOTED"
+                ):
+                    raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")
+                allowed[candidate.formal_asset_id] = candidate.payload["content_sha256"]
     shot = db.get(Shot, request.shot_id)
     if not shot or shot.project_id != project_id or shot.revision != request.shot_revision:
         raise HTTPException(409, "PREPRODUCTION_SHOT_OUTDATED")
-    bound = {b.asset_id for b in db.scalars(select(ShotAssetBinding).where(ShotAssetBinding.shot_id == shot.id))}
-    actual = {r.asset_id for r in request.reference_manifest}
-    if bound != actual or not set(request.shot_spec.required_asset_ids) <= actual:
+
+    def binding_key(row):
+        return (row.asset_id, str(row.use_as), row.role, str(row.frame_role) if row.frame_role else None, row.ordinal)
+
+    bound = {binding_key(b) for b in db.scalars(select(ShotAssetBinding).where(ShotAssetBinding.shot_id == shot.id))}
+    if (
+        bound != {binding_key(r) for r in request.reference_manifest}
+        or not set(request.shot_spec.required_asset_ids) <= actual
+    ):
         raise HTTPException(409, "PREPRODUCTION_BINDINGS_CHANGED")
     for ref in request.reference_manifest:
         asset = db.get(Asset, ref.asset_id)
@@ -305,3 +374,34 @@ def enforce_references(db, project_id, render_request, *, data_dir=None):
             path = safe_asset_path(data_dir, asset.storage_path)
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != ref.sha256:
                 raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")
+
+
+def enforce_job(db, job, settings=None):
+    plan = current_plan(db, job.project_id)
+    offline = job.provider == "mock" or (
+        settings.offline_simulation if settings else bool(plan and plan.payload.get("offline"))
+    )
+    pin = enforce(
+        db,
+        job.project_id,
+        offline=offline,
+        data_dir=settings.data_dir if settings else None,
+        workflow_profile_id=job.workflow_profile_id if job.provider == "comfyui" else None,
+        render_request=job.request,
+    )
+    if pin != job.preproduction_manifest_hash:
+        raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+    return pin
+
+
+def asset_metadata_hash(asset):
+    return graph_hash(
+        {
+            "role": asset.role,
+            "entity_id": asset.entity_id,
+            "kind": asset.kind,
+            "content_type": asset.content_type,
+            "duration_s": asset.duration_s,
+            "storage_path": asset.storage_path,
+        }
+    )

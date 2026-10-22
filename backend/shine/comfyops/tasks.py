@@ -1,6 +1,7 @@
 """Media preparation uses the existing AgentTaskRecord ledger, not another queue."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -8,6 +9,8 @@ from sqlalchemy import select
 from shine.comfy.workflow import graph_hash
 from shine.models import AgentTaskRecord, ProjectRuleLock
 from shine.services import add_audit
+
+CURRENT_PREPARATION = ContextVar("shine_preparation_task", default=None)
 
 
 @contextmanager
@@ -39,6 +42,7 @@ def preparation_task(db, project, role, payload, model):
     )
     db.add(task)
     db.commit()  # Durable intent before any provider call.
+    parent_token = CURRENT_PREPARATION.set(task.id)
     try:
         yield task
     except Exception as exc:
@@ -60,3 +64,6 @@ def preparation_task(db, project, role, payload, model):
     else:
         task.status = "COMPLETED"
         add_audit(db, role, "PREPARATION_TASK_COMPLETED", "agent_task", task.id, project_id=project.id)
+
+    finally:
+        CURRENT_PREPARATION.reset(parent_token)

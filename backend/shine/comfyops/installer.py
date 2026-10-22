@@ -47,6 +47,7 @@ class PackageSpec(BaseModel):
     resource_mb: int | None = Field(default=None, ge=0)
     files: list[PackageFile] = Field(min_length=1, max_length=100)
     dependencies: dict[str, str] = Field(default_factory=dict)
+    runtime_versions: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def pinned(self):
