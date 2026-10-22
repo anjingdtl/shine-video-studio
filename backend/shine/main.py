@@ -149,10 +149,11 @@ def _style_data(style: StyleVersion) -> dict[str, Any]:
 def _shot_data(db: Session, shot: Shot) -> dict[str, Any]:
     bindings = []
     asset_ids = {row.asset_id for row in shot.bindings}
-    assets = {
-        asset.id: asset
-        for asset in db.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
-    } if asset_ids else {}
+    assets = (
+        {asset.id: asset for asset in db.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()}
+        if asset_ids
+        else {}
+    )
     for row in shot.bindings:
         asset = assets.get(row.asset_id)
         bindings.append(
@@ -193,6 +194,7 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
         "shot_revision": job.shot_revision,
         "status": job.status,
         "state_version": job.state_version,
+        "preproduction_manifest_hash": job.preproduction_manifest_hash,
         "provider": job.provider,
         "simulated": job.provider == "mock",
         "video_created": bool(job.artifact_id),
@@ -332,6 +334,7 @@ def create_app(
     app.include_router(film_router)
     app.include_router(operator_router)
     from shine.api_preparation import router as preparation_router
+
     app.include_router(preparation_router)
 
     @app.get("/health")
@@ -370,9 +373,7 @@ def create_app(
         pending = db.scalar(
             select(func.count(Job.id)).where(Job.status.in_(["PLANNED", "WAITING_ASSET", "READY", "QUEUED"]))
         )
-        running = db.scalar(
-            select(func.count(Job.id)).where(Job.status.in_(["SUBMITTING", "RUNNING", "QC_PENDING"]))
-        )
+        running = db.scalar(select(func.count(Job.id)).where(Job.status.in_(["SUBMITTING", "RUNNING", "QC_PENDING"])))
         failed = db.scalar(select(func.count(Job.id)).where(Job.status == "FAILED"))
         blocked = db.scalar(select(func.count(Job.id)).where(Job.status == "NEEDS_REVIEW"))
         last_error = next((worker.last_error for worker in reversed(workers) if worker.last_error), None)
@@ -452,8 +453,11 @@ def create_app(
         filename, content, content_type = await read_verified_upload(file, asset_kind, settings.max_upload_bytes)
         digest = sha256_bytes(content)
         from shine.comfyops.models import CandidateAsset
-        if any(c.payload.get("content_sha256") == digest for c in
-               db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id))):
+
+        if any(
+            c.payload.get("content_sha256") == digest
+            for c in db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id))
+        ):
             raise HTTPException(409, "CANDIDATE_REQUIRES_AUTHENTICATED_PROMOTION")
         duplicate = db.scalar(select(Asset).where(Asset.project_id == project.id, Asset.sha256 == digest))
         if duplicate:
@@ -591,9 +595,7 @@ def create_app(
         body: StyleFreezeRequest | None = None,
     ) -> dict[str, Any]:
         project = require_project(db, project_id)
-        style, impact = freeze_style(
-            db, project, approval_note=(body.approval_note if body else "")
-        )
+        style, impact = freeze_style(db, project, approval_note=(body.approval_note if body else ""))
         db.commit()
         db.refresh(style)
         data = jsonable_encoder(_style_data(style))
@@ -708,10 +710,13 @@ def create_app(
         project = require_project(db, project_id)
         shot = require_shot(db, project_id, body.shot_id)
         from shine.comfyops.preproduction import enforce
-        enforce(
-            db, project_id,
+
+        preproduction_hash = enforce(
+            db,
+            project_id,
             offline=(body.provider.value == "mock" or request.app.state.settings.offline_simulation),
             data_dir=settings.data_dir,
+            workflow_profile_id=body.workflow_profile_id if body.provider.value == "comfyui" else None,
         )
         if body.provider.value == "comfyui" and not request.app.state.settings.offline_simulation:
             for binding in shot.bindings:
@@ -750,6 +755,7 @@ def create_app(
             shot_id=shot.id,
             shot_revision=shot.revision,
             style_version_id=request_data.style_version_id,
+            preproduction_manifest_hash=preproduction_hash,
             request=request_data.model_dump(mode="json"),
             idempotency_key=request_data.idempotency_key,
             status=initial_status,
@@ -779,6 +785,7 @@ def create_app(
                 "provider": body.provider.value,
                 "mode": request_data.generation_mode.value,
                 "dependency_count": len(parents),
+                "preproduction_manifest_hash": preproduction_hash,
                 "style_hash": request_data.style_hash,
                 "prompt_sha256": request_data.prompt_sha256,
                 "warnings": compiler_meta.get("warnings", []),
@@ -902,9 +909,7 @@ def create_app(
         job = db.get(Job, job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        report = db.scalar(
-            select(QCReport).where(QCReport.job_id == job.id).order_by(QCReport.created_at.desc())
-        )
+        report = db.scalar(select(QCReport).where(QCReport.job_id == job.id).order_by(QCReport.created_at.desc()))
         hard_failures: list[HardFailure] = []
         result = "needs_review"
         confidence = 0.5
@@ -1006,9 +1011,7 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
         spec = ShotSpec.model_validate(job.request.get("shot_spec", {}))
-        result = TechnicalQC(
-            ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path
-        ).check(
+        result = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
             path,
             expectations=TechnicalExpectations(
                 duration_s=request_duration(job),
@@ -1049,9 +1052,7 @@ def create_app(
         }
 
     @app.put("/api/v1/projects/{project_id}/quality-policy")
-    def update_quality_policy(
-        project_id: str, body: QualityPolicyUpdate, db: DBSession
-    ) -> dict[str, Any]:
+    def update_quality_policy(project_id: str, body: QualityPolicyUpdate, db: DBSession) -> dict[str, Any]:
         project = require_project(db, project_id)
         payload = body.model_dump()
         if not payload.get("priority_thresholds"):
@@ -1089,7 +1090,8 @@ def create_app(
         if not db.get(Job, job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         rows = db.scalars(
-            select(QualityGate).where(QualityGate.job_id == job_id)
+            select(QualityGate)
+            .where(QualityGate.job_id == job_id)
             .order_by(QualityGate.created_at, literal_column("quality_gates.rowid"))
         ).all()
         return jsonable_encoder(

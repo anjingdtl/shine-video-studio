@@ -671,12 +671,15 @@ def _run_one(
             from shine.comfyops.preproduction import enforce
 
             try:
-                enforce(
+                current_preproduction_hash = enforce(
                     db,
                     candidate.project_id,
                     offline=candidate.provider == "mock" or bool(settings and settings.offline_simulation),
                     data_dir=settings.data_dir if settings else None,
+                    workflow_profile_id=candidate.workflow_profile_id if candidate.provider == "comfyui" else None,
                 )
+                if candidate.preproduction_manifest_hash != current_preproduction_hash:
+                    raise HTTPException(409, "PREPRODUCTION_OUTDATED")
             except HTTPException as exc:
                 candidate.status = "NEEDS_REVIEW"
                 candidate.state_version += 1

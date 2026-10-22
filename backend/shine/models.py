@@ -144,6 +144,7 @@ class Job(Base):
     shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
     shot_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     style_version_id: Mapped[str] = mapped_column(ForeignKey("style_versions.id"), nullable=False)
+    preproduction_manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", index=True, nullable=False)

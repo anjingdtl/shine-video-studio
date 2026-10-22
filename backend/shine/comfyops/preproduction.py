@@ -17,7 +17,7 @@ from shine.comfyops.models import (
     VoiceProfile,
     WorkflowRevision,
 )
-from shine.models import Asset, Project, ProjectDocument, ProjectRuleLock, StyleVersion
+from shine.models import Asset, Project, ProjectDocument, ProjectRuleLock, StyleVersion, WorkflowProfile
 
 
 def analyze(db, project, document, extras):
@@ -193,7 +193,7 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     }
 
 
-def enforce(db, project_id, *, offline=False, data_dir=None):
+def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None):
     plan = current_plan(db, project_id)
     if not plan:
         return  # Legacy projects preserve their original contract.
@@ -202,3 +202,18 @@ def enforce(db, project_id, *, offline=False, data_dir=None):
     report = readiness(db, project_id, offline=offline, data_dir=data_dir)
     if report["status"] != "SHOOT_READY" or graph_hash(plan.payload["manifest"]) != report["manifest_hash"]:
         raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+    if workflow_profile_id:
+        profile = db.get(WorkflowProfile, workflow_profile_id)
+        frozen_ids = {w["id"] for w in plan.payload["manifest"]["workflows"]}
+        matched = [
+            w
+            for w in db.scalars(select(WorkflowRevision))
+            if w.id in frozen_ids
+            and w.payload.get("legacy_profile_id") == workflow_profile_id
+            and profile
+            and graph_hash(w.payload["graph"]) == profile.graph_sha256
+            and w.payload["category"] == "H3_" + profile.mode.upper()
+        ]
+        if not matched:
+            raise HTTPException(409, "PREPRODUCTION_WORKFLOW_NOT_FROZEN")
+    return report["manifest_hash"]

@@ -866,6 +866,7 @@ class RequirementInput(Strict):
 class Analyze(Strict):
     document_id: str
     requirements: list[RequirementInput] = Field(default_factory=list, max_length=300)
+    create_revision: bool = False
 
 
 @router.post("/projects/{project_id}/preproduction/analyze")
@@ -874,7 +875,12 @@ def analyze(project_id: str, body: Analyze, db: DBSession):
     project = require_project(db, project_id)
     document = get(db, ProjectDocument, body.document_id)
     existing = preproduction.current_plan(db, project_id)
-    if existing and existing.payload["script_hash"] == document.sha256 and not body.requirements:
+    if (
+        existing
+        and existing.payload["script_hash"] == document.sha256
+        and not body.requirements
+        and not body.create_revision
+    ):
         return public(existing)
     row = preproduction.analyze(db, project, document, [r.model_dump() for r in body.requirements])
     audit(db, "producer", "PREPRODUCTION_ANALYZED", row)
@@ -904,6 +910,8 @@ def freeze_manifest(project_id: str, body: Decision, actor: Operator, settings: 
         raise HTTPException(409, "PREPRODUCTION_NOT_ANALYZED")
     if row.status == "PREPARING":
         raise HTTPException(409, "PREPARATION_RUNNING")
+    if row.status == "FROZEN":
+        raise HTTPException(409, "MANIFEST_ALREADY_FROZEN_CREATE_REVISION")
     approval.consume(db, actor, "manifest_freeze", row, body.grant_id, body.snapshot)
     report = preproduction.readiness(db, project_id, offline=body.offline, data_dir=settings.data_dir)
     if report["status"] != "SHOOT_READY":

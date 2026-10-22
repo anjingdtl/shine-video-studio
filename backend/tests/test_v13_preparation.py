@@ -83,7 +83,7 @@ def rights(client, project, scope="asset", **extra):
     return approve(client, r, "rights_approve", f"/preparation/rights/{r['id']}/approve")
 
 
-def workflow(client, category="IMAGE_GENERATION", model_ids=None):
+def workflow(client, category="IMAGE_GENERATION", model_ids=None, **overrides):
     body = {
         "name": "test " + category,
         "category": category,
@@ -92,11 +92,15 @@ def workflow(client, category="IMAGE_GENERATION", model_ids=None):
         "model_ids": model_ids or [],
         "model_family": "MiniMax-H3" if category.startswith("H3_") else "",
     }
+    body.update(overrides)
     row = post(client, "/workflow-capabilities/drafts", body)
+    object_info = {
+        n["class_type"]: {"input": {"required": {k: ["STRING"] for k in n["inputs"]}}} for n in body["graph"].values()
+    }
     check = post(
         client,
         f"/workflow-capabilities/{row['id']}/validate",
-        {"object_info": {"ShineFake": {"input": {"required": {"prompt": ["STRING"]}}}}},
+        {"object_info": object_info},
     )
     assert not check["errors"]
     return post(client, f"/workflow-capabilities/{row['id']}/fake-execute")

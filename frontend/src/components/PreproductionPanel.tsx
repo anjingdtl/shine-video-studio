@@ -151,6 +151,9 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       }} /></label>
       <p>剧本按“角色：对白”“场景：名称”“道具：名称”提取需求；可通过 API 补充关键需求。</p>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId }))}>分析资产与任务依赖</button>
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, {
+        document_id: documentId, create_revision: true,
+      }))}>建立新的预检版本（保留历史冻结清单）</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline: true }))}>运行开机预检</button>
       <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
       <label>原创音色权利 ID（可选）<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>

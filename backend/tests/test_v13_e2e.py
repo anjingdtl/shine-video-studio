@@ -46,7 +46,24 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     install = approve(client, install, "install", f"/comfyops/install-plans/{install['id']}/approve")
     post(client, f"/comfyops/install-plans/{install['id']}/execute", {"plan_hash": install["sha256"]}, operator=True)
     image = workflow(client, model_ids=[model["id"]])
-    for category in ("H3_REF2VA", "VLM_REVIEW", "ASR"):
+    wf = register_workflow_profile(
+        client,
+        name="v13-fake-ref2va",
+        mode="Ref2VA",
+        graph=E2E_GRAPH,
+        parameter_map=E2E_PARAM_MAP,
+        media_transfers={"audio": {"upload_path": "/upload/image", "field_name": "image", "subfolder": "shine"}},
+    )
+    workflow(
+        client,
+        "H3_REF2VA",
+        [model["id"]],
+        graph=E2E_GRAPH,
+        parameter_map=E2E_PARAM_MAP,
+        legacy_profile_id=wf["id"],
+        media_transfers={"audio": {"upload_path": "/upload/image"}},
+    )
+    for category in ("VLM_REVIEW", "ASR"):
         workflow(client, category, [model["id"]])
     asset_right = rights(client, project)
     formal = {}
@@ -151,14 +168,6 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
         ).status_code
         == 200
     )
-    wf = register_workflow_profile(
-        client,
-        name="v13-fake-ref2va",
-        mode="Ref2VA",
-        graph=E2E_GRAPH,
-        parameter_map=E2E_PARAM_MAP,
-        media_transfers={"audio": {"upload_path": "/upload/image", "field_name": "image", "subfolder": "shine"}},
-    )
     assert (
         client.put(
             f"/api/v1/projects/{project}/quality-policy",
@@ -169,6 +178,16 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     assert client.patch(f"/api/v1/projects/{project}/settings", json={"auto_repair_enabled": True}).status_code == 200
     settings = replace(settings, offline_simulation=True, ffprobe_path="missing-ffprobe", ffmpeg_path="missing-ffmpeg")
     client.app.state.settings = settings
+    wrong_profile = register_workflow_profile(
+        client, name="unfrozen-ref2va", mode="Ref2VA", graph=E2E_GRAPH, parameter_map=E2E_PARAM_MAP
+    )
+    rejected = post(
+        client,
+        f"/projects/{project}/jobs",
+        {"shot_id": shot, "provider": "comfyui", "workflow_profile_id": wrong_profile["id"]},
+        expected=409,
+    )
+    assert rejected["detail"] == "PREPRODUCTION_WORKFLOW_NOT_FROZEN"
     job = post(
         client,
         f"/projects/{project}/jobs",
@@ -210,6 +229,21 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     events = client.get(f"/api/v1/projects/{project}/events?limit=500").json()["items"]
     types = {e["event_type"] for e in events}
     assert {"CANDIDATE_PROMOTED", "VOICE_FROZEN", "PREPRODUCTION_FROZEN", "SUBMIT_INTENT"} <= types
+    # A later human-frozen manifest must never authorize an older queued request.
+    queued = post(client, f"/projects/{project}/jobs", {"shot_id": shot, "provider": "mock"}, expected=201)
+    assert queued["preproduction_manifest_hash"]
+    revised = post(
+        client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"], "create_revision": True}
+    )
+    approve(client, revised, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+    run_one(factory, settings=settings)
+    outdated = client.get(f"/api/v1/jobs/{queued['id']}").json()
+    assert outdated["status"] == "NEEDS_REVIEW" and outdated["failure_code"] == "PREPRODUCTION_OUTDATED"
+    assert outdated["attempts"] == []
+    assert client.get(f"/api/v1/jobs/{job['id']}").json()["status"] == "PASSED"
+    newer = post(client, f"/projects/{project}/jobs", {"shot_id": shot, "provider": "mock"}, expected=201)
+    assert newer["preproduction_manifest_hash"] != queued["preproduction_manifest_hash"]
+
     # Rights withdrawal invalidates the frozen snapshot at both API and worker boundaries.
     post(client, f"/preparation/rights/{asset_right['id']}/revoke", operator=True)
     post(client, f"/projects/{project}/jobs", {"shot_id": shot, "provider": "mock"}, expected=409)

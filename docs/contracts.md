@@ -245,7 +245,7 @@ Publishing requires `REAL_TESTED` and a separate operator grant. Unsupported har
 and unverified video-reference transfer keep the existing fail-closed H3 rules.
 
 Pre-production requirement input is typed and project-scoped. A project with an analyzed plan
-cannot create a Job until a ready manifest is frozen. Both API and Worker compare current
+cannot create a Job until a ready manifest is frozen. API, Worker and operator review compare the pinned manifest and exact workflow profile with current
 state; stale manifests raise `PREPRODUCTION_OUTDATED`. `SHINE_OFFLINE_SIMULATION=1` is only
 for isolated Fake-ComfyUI testing, never an authorization for real production.
 

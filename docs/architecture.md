@@ -127,12 +127,12 @@ V1.3 masters cannot be mutated by the legacy metadata route, and the legacy uplo
 rejects candidate-byte re-import as an approval bypass. Fake masters retain `offline_only`.
 Voice versions freeze conditioning/sample hashes and cannot change in place.
 
-Analyzed projects require a human-frozen PreProductionManifest at both Job creation and
-Worker submission. The manifest binds script, selected asset/voice and rights hashes,
+Analyzed projects require a human-frozen PreProductionManifest at Job creation,
+Worker submission and operator review. The manifest binds script, selected asset/voice and rights hashes,
 Style/RulePack and available workflow/model versions. Missing critical requirements or
 revoked rights block affected production. Legacy projects preserve their prior behavior.
 
-Migration head `f130a0010001` only adds preparation tables and indexes. No legacy parent
+Migration head `f130a0020001` adds preparation tables/indexes and a nullable Job manifest pin. No legacy parent
 table is rebuilt. An old-head upgrade/downgrade test compares every legacy table row.
 
 `SHINE_LOCAL_IMAGE_URL` and `SHINE_LOCAL_VOICE_URL` select optional loopback Shine adapter

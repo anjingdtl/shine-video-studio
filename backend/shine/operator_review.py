@@ -89,6 +89,17 @@ def context(db, settings, job_id: str):
     shot = db.get(Shot, job.shot_id)
     style = db.get(StyleVersion, job.style_version_id)
     project = db.get(Project, job.project_id)
+    from shine.comfyops.preproduction import enforce
+
+    current_preproduction_hash = enforce(
+        db,
+        job.project_id,
+        offline=bool(settings.offline_simulation),
+        data_dir=settings.data_dir,
+        workflow_profile_id=job.workflow_profile_id if job.provider == "comfyui" else None,
+    )
+    if job.preproduction_manifest_hash != current_preproduction_hash:
+        raise HTTPException(409, "PREPRODUCTION_OUTDATED")
     request = RenderRequest.model_validate(job.request)
     lock = db.get(ProjectRuleLock, job.project_id)
     pack = db.get(RulePack, request.rulepack_id) if request.rulepack_id else None
@@ -165,6 +176,7 @@ def context(db, settings, job_id: str):
     binding = {
         "job_id": job.id,
         "state_version": job.state_version,
+        "preproduction_manifest_hash": job.preproduction_manifest_hash,
         "request": job.request,
         "request_revision": job.request_revision,
         "attempt_id": attempt.id,
