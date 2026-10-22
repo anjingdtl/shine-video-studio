@@ -57,7 +57,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
     if (!evidence.trim()) throw new Error('请填写核验、权利和试听证据。');
     const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
       { action, target_id: row.id }, true);
-    return post(path, { ...grant, offline: true, evidence }, true);
+    return post(path, { ...grant, offline: true, listened: action === 'voice_freeze', evidence }, true);
   }
   return <section className="card" id="preproduction">
     <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>MOCK / 离线验证，真实 GPU 待本地验收</strong></div>

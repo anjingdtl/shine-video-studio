@@ -223,3 +223,33 @@ it appends independent per-item evidence and cannot borrow passed gates from an 
 Process health and renderer probing are separate. Low-resolution 480×864 H3 results prove
 integration/technical delivery, not accepted film quality. The user's explicit voice/dialogue/
 lip-sync confirmation is recorded separately from formal per-gate approval events.
+
+## V1.3 amendment
+
+The detailed additive endpoints and request schema names are in
+[V1.3 API reference](V1.3_API_REFERENCE.md). Earlier unauthenticated asset endpoints remain
+for legacy uploads; they do not authorize V1.3 candidate promotion. Candidate-byte re-import
+and mutation of promoted masters are rejected. New high-risk operations require the existing
+loopback operator credential and same-origin check, plus an action/target/snapshot-bound
+grant. Grants expire after five minutes and can be consumed once. Install execution approvals
+expire after thirty minutes; changed hashes or replayed execution are rejected.
+
+`POST /preparation/approval-grants` returns `{grant_id,snapshot,expires_at}`. Human decisions
+include `{grant_id,snapshot,offline,evidence}`; the server supplies actor identity. Fake
+promotion requires `offline=true`. Local install plans use `executor=local`; the HTTP execute
+route always rejects them. Explicit human execution uses the Windows CLI in the local checklist.
+
+Workflow states never promote Fake execution to real testing. A real-evidence request binds
+an authenticated local preview candidate or current manually verified H3 attempt/artifact.
+Publishing requires `REAL_TESTED` and a separate operator grant. Unsupported hard continuity
+and unverified video-reference transfer keep the existing fail-closed H3 rules.
+
+Pre-production requirement input is typed and project-scoped. A project with an analyzed plan
+cannot create a Job until a ready manifest is frozen. Both API and Worker compare current
+state; stale manifests raise `PREPRODUCTION_OUTDATED`. `SHINE_OFFLINE_SIMULATION=1` is only
+for isolated Fake-ComfyUI testing, never an authorization for real production.
+
+Voice dialogue requests bind exact frozen voice hashes and character IDs. ASR text/speaker,
+language/confidence and aligned word times are checked independently. SRT/ASS exports are
+available per render; authenticated subtitle corrections append a revision and preserve the
+original recognition evidence and Mock flag. Corrected text cannot rewrite locked dialogue.

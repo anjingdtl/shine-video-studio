@@ -60,6 +60,7 @@ def approve(client, row, action, path, **extra):
             "snapshot": grant["snapshot"],
             "offline": True,
             "evidence": "Explicit isolated test operator decision",
+            "listened": action == "voice_freeze",
             **extra,
         },
         operator=True,
@@ -312,6 +313,16 @@ def test_voice_design_freeze_dialogue_asr_alignment_subtitles(prep):
 
     post(client, f"/voice-profiles/{voice['id']}/dialogue", {**body, "character": "Other"}, expected=409)
     post(client, f"/voice-profiles/{voice['id']}/dialogue", {**body, "voice_hash": "old"}, expected=409)
+
+    class BadVoice(FakeVoiceProvider):
+        def transcribe(self, audio):
+            return {**super().transcribe(audio), "text": "错误"}
+
+    client.app.state.voice_provider = BadVoice()
+    failed = post(client, f"/voice-profiles/{voice['id']}/dialogue", body)
+    assert failed["status"] == "QC_FAILED"
+    failed_candidate = post(client, f"/candidate-assets/{failed['payload']['candidate_id']}/qc")
+    assert failed_candidate["status"] == "QC_FAILED"
     post(client, f"/preparation/rights/{voice_right['id']}/revoke", operator=True)
     post(client, f"/voice-profiles/{voice['id']}/dialogue", body, expected=409)
 

@@ -23,7 +23,7 @@ are preserved. This is not a declaration of final film-quality acceptance.
 - **Video model:** only locally deployed MiniMax-H3 through ComfyUI. No silent substitution with another video model, online service, or H3 generation mode.
 - **Deployment:** Windows local Web application; FastAPI, React/TypeScript, SQLite WAL, and a separately restartable worker. API/Vite bind to `127.0.0.1`.
 - **LLM/VLM:** independent runtime with configurable provider profiles and role routes. Codex is a development tool, never a runtime dependency.
-- **Assets:** only user-supplied, user-approved master character/scene/prop/voice assets. The Agent cannot create, replace, approve, or mutate them.
+- **Assets:** Agents may create candidates. Masters require authenticated human promotion and locking; Agents cannot approve, replace or mutate them. Fake candidates stay offline-only.
 - **Style:** the user freezes a seven-dimension Style Bible before production. New shots bind to the current frozen version; historical shots keep their original version. A new version invalidates unstarted work that used the old style.
 - **Production:** structured ShotSpec → deterministic H3 prompt compilation → durable job/attempt state → ComfyUI or explicitly labelled Mock → technical/semantic QC → bounded repair or human review.
 
@@ -98,9 +98,9 @@ After migrating, open **影视制片团队** and **H3 官方规范中心**. Conf
 
 Descriptions submitted under V1.1 rules must be English; dialogue remains in its original language. Chinese style/camera descriptions are reported as blockers, never silently translated. Official source files are not redistributed: import legally acquired, fixed-revision files through the local cache controls if desired. Missing originals and real-H3 capability status remain visible. No real LLM or H3 GPU acceptance is implied by the offline suite.
 
-## V1.3 planned: ComfyOps + multi-modal pre-production
+## V1.3: controlled ComfyOps + multi-modal pre-production
 
-V1.3 is an **approved architecture and implementation plan, not implemented functionality**. It adds a controlled ComfyOps environment/model/node/workflow management Agent, candidate visual/audio asset production and user imports, VoiceOps voice design/TTS/ASR, human promotion of formal assets, and a pre-production readiness DAG. Real ComfyUI/model installation and GPU acceptance remain local-only. The current V1.2.1 master-asset policy remains enforced until the V1.3 candidate/promotion boundary is implemented and tested.
+V1.3 adds six API-backed preparation workspaces, an eighth controlled ComfyOps proposal role, scoped Windows probes, package/dependency plans, authenticated one-use human grants, a tested local downloader/atomic installer, workflow capabilities, candidate import/generation/QC/promotion, frozen Voice Profiles/TTS/ASR/alignment/subtitles, pre-production manifests and shared GPU leases. The cloud end-to-end path uses explicitly Fake image/voice/ComfyUI/GPU capabilities. Real model inference, Windows host integration and audiovisual quality remain local acceptance items. Historical H3 workflows and review contracts are preserved. See the [cloud implementation report](docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md) and [local checklist](docs/V1.3_LOCAL_INTEGRATION_CHECKLIST.md) for exact evidence and limitations.
 
 - [V1.3 product and technical blueprint](docs/Shine视频工作台_V1.3_ComfyOps与全资产预制作系统建设方案.md)
 - [V1.3 cloud Codex full implementation brief](docs/V1.3_云端Codex实施总提示词.md)

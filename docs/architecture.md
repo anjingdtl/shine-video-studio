@@ -108,3 +108,34 @@ it appends independent per-item evidence and cannot borrow passed gates from an 
 Process health and renderer probing are separate. Low-resolution 480×864 H3 results prove
 integration/technical delivery, not accepted film quality. The user's explicit voice/dialogue/
 lip-sync confirmation is recorded separately from formal per-gate approval events.
+
+## V1.3 controlled preparation extension
+
+See [ADR 0003](adr/0003-controlled-preproduction.md),
+[implementation evidence](V1.3_CLOUD_IMPLEMENTATION_REPORT.md), and
+[API reference](V1.3_API_REFERENCE.md).
+
+`shine.comfyops` implements scoped Windows inventory, immutable package manifests,
+controlled download/staging/atomic replacement, dependency plans, approval grants,
+workflow contracts, pre-production snapshots and resource leases. `shine.voiceops`
+implements voice/image service ports, Fake synthesis, ASR/alignment checks and subtitles.
+All persist in the same SQLite database. `AgentTaskRecord` records media-call intent;
+existing `AuditEvent` records both machine and human events.
+
+Candidates are distinct from existing `Asset`. Promotion is authenticated and transactional;
+V1.3 masters cannot be mutated by the legacy metadata route, and the legacy upload route
+rejects candidate-byte re-import as an approval bypass. Fake masters retain `offline_only`.
+Voice versions freeze conditioning/sample hashes and cannot change in place.
+
+Analyzed projects require a human-frozen PreProductionManifest at both Job creation and
+Worker submission. The manifest binds script, selected asset/voice and rights hashes,
+Style/RulePack and available workflow/model versions. Missing critical requirements or
+revoked rights block affected production. Legacy projects preserve their prior behavior.
+
+Migration head `f130a0010001` only adds preparation tables and indexes. No legacy parent
+table is rebuilt. An old-head upgrade/downgrade test compares every legacy table row.
+
+`SHINE_LOCAL_IMAGE_URL` and `SHINE_LOCAL_VOICE_URL` select optional loopback Shine adapter
+services. Their HTTP protocol is documented in the local checklist; it is not an official
+Qwen service API. Defaults are explicitly Fake. Environment detection defaults to Fake;
+local mode requires Windows and administrator-configured root/port allowlists.

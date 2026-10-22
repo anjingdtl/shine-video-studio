@@ -148,7 +148,7 @@ def candidate_qc(settings, row):
     }
     row.payload = {**p, "qc": qc}
     row.sha256 = graph_hash(row.payload)
-    row.status = "READY_FOR_REVIEW" if decode["status"] == "pass" else "QC_FAILED"
+    row.status = "READY_FOR_REVIEW" if decode["status"] == "pass" and not p.get("dialogue_errors") else "QC_FAILED"
     return qc
 
 

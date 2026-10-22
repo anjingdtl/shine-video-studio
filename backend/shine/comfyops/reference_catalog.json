@@ -1,0 +1,141 @@
+[
+  {
+    "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    "capabilities": [
+      "VOICE_DESIGN"
+    ],
+    "source_repo": "QwenLM/Qwen3-TTS",
+    "source_commit": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+    "readme_sha256": "51f4497e70e9ae024b10ee4bbcb470366f10592edeab56c58d2194ba2dadb745",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Text plus voice description; supports Chinese. Not the Base cloning checkpoint.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "capabilities": [
+      "VOICE_CLONE",
+      "TTS_DIALOGUE"
+    ],
+    "source_repo": "QwenLM/Qwen3-TTS",
+    "source_commit": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+    "readme_sha256": "51f4497e70e9ae024b10ee4bbcb470366f10592edeab56c58d2194ba2dadb745",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Reference audio plus transcript, or a prepared voice-clone prompt. 3-second rapid clone is an upstream claim, not a Shine quality acceptance.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    "capabilities": [
+      "VOICE_CLONE",
+      "TTS_DIALOGUE"
+    ],
+    "source_repo": "QwenLM/Qwen3-TTS",
+    "source_commit": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+    "readme_sha256": "51f4497e70e9ae024b10ee4bbcb470366f10592edeab56c58d2194ba2dadb745",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Base checkpoint; independent quality/hardware acceptance required.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "capabilities": [
+      "TTS_DIALOGUE"
+    ],
+    "source_repo": "QwenLM/Qwen3-TTS",
+    "source_commit": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+    "readme_sha256": "51f4497e70e9ae024b10ee4bbcb470366f10592edeab56c58d2194ba2dadb745",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Predefined speakers; not interchangeable with arbitrary approved original Voice Profiles.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-ASR-0.6B",
+    "capabilities": [
+      "ASR"
+    ],
+    "source_repo": "QwenLM/Qwen3-ASR",
+    "source_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+    "readme_sha256": "27b5d6e31c3dc10c9b4b86e226f215baacca57bede504994779ad334a67275a0",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Chinese supported; ASR transcript requires verification.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-ASR-1.7B",
+    "capabilities": [
+      "ASR"
+    ],
+    "source_repo": "QwenLM/Qwen3-ASR",
+    "source_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+    "readme_sha256": "27b5d6e31c3dc10c9b4b86e226f215baacca57bede504994779ad334a67275a0",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Chinese supported; no automatic correctness or VRAM guarantee.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen/Qwen3-ForcedAligner-0.6B",
+    "capabilities": [
+      "FORCED_ALIGNMENT"
+    ],
+    "source_repo": "QwenLM/Qwen3-ASR",
+    "source_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+    "readme_sha256": "27b5d6e31c3dc10c9b4b86e226f215baacca57bede504994779ad334a67275a0",
+    "code_license": "Apache-2.0",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Upstream supports word/character alignment, up to 5 minutes, 11 languages including Chinese.",
+    "installable": false
+  },
+  {
+    "model_id": "Qwen-Image-2.1",
+    "capabilities": [
+      "IMAGE_GENERATION",
+      "IMAGE_EDIT"
+    ],
+    "source_repo": "QwenLM/Qwen-Image-2.1",
+    "source_commit": "ab96caa944157ca28a4f36b695c3047549f48f98",
+    "readme_sha256": "2e6c584006dff79402808446182e6fe15ce5f279e46c321e07ac90257ed2c07c",
+    "code_license": "Qwen Research License",
+    "weight_license_status": "REQUIRES_EXACT_MODEL_CARD_REVIEW",
+    "weight_revision": null,
+    "weight_files_sha256": null,
+    "resource_measurement": "UNKNOWN",
+    "status": "REFERENCE_ONLY_PENDING_LOCAL_ENV",
+    "input_notes": "Research license: non-commercial only without a separate commercial license.",
+    "installable": false
+  }
+]

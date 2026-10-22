@@ -68,7 +68,8 @@ class Asset(Base):
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     entity_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Historical additive migration permits NULL; preserve that DB contract.
+    tags: Mapped[list[str] | None] = mapped_column(JSON, default=list, nullable=True)
     duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)

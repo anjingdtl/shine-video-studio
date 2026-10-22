@@ -60,6 +60,7 @@ class Decision(Strict):
     grant_id: str
     snapshot: str
     offline: bool = True
+    listened: bool = False
     evidence: str = Field(min_length=5, max_length=2000)
 
 
@@ -742,6 +743,8 @@ def freeze_voice(identity: str, body: Decision, actor: Operator, settings: Setti
     approval.consume(db, actor, "voice_freeze", row, body.grant_id, body.snapshot)
     if row.status != "PREVIEW":
         raise HTTPException(409, "VOICE_VERSION_FROZEN")
+    if not body.listened:
+        raise HTTPException(409, "VOICE_LISTENING_CONFIRMATION_REQUIRED")
     candidate = get(db, CandidateAsset, row.payload["candidate_id"])
     verify_candidate(settings, candidate)
     if candidate.status != "PROMOTED":
@@ -815,6 +818,10 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         {"is_mock": result["is_mock"], "voice_id": row.id, "voice_hash": row.sha256},
     )
     candidate_qc(settings, candidate)
+    if errors:
+        candidate.status = "QC_FAILED"
+        candidate.payload = {**candidate.payload, "dialogue_errors": errors}
+        candidate.sha256 = graph_hash(candidate.payload)
     render = save(
         db,
         VoiceRender,
@@ -1152,3 +1159,11 @@ def correct_subtitles(identity: str, body: SubtitleCorrection, actor: Operator, 
     audit(db, actor, "SUBTITLE_CORRECTION_RECORDED", revision)
     db.commit()
     return public(revision)
+
+
+@router.get("/comfyops/model-references")
+def model_references():
+    import json
+    from pathlib import Path
+
+    return json.loads((Path(__file__).parent / "comfyops" / "reference_catalog.json").read_text(encoding="utf-8"))

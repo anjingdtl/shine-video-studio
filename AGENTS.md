@@ -54,3 +54,17 @@ Never bundle official full-text guides without redistribution permission. Run
 3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.
 4. Use feature branches/PRs for substantial changes where available; do not destroy history or silently force-push.
 5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
+
+## V1.3 amendment (supersedes V1.0's source-only restriction)
+
+- AI may generate `CandidateAsset` rows. Only authenticated human grants may promote new
+  `Asset` masters or freeze Voice Profiles. Do not use legacy approve/lock to promote candidates.
+- Retain `offline_only` on Fake masters. Never turn Fake workflow/model/voice/QC evidence into
+  real verification. `SHINE_OFFLINE_SIMULATION` is for isolated test data only.
+- An analyzed project must pass `comfyops.preproduction.enforce` at both Job creation and Worker
+  submission. Never disable it to make a test pass. Existing H3/Style/Rule/continuity gates remain.
+- Preparation and GPU leases use the same SQLite database. Expired resources remain blocked
+  until reconciled; a clock timeout does not prove models were unloaded.
+- Run `test_v13_preparation.py`, `test_v13_migrations.py`, `test_v13_e2e.py`, the old offline E2E,
+  film crew, complete backend suite, Ruff, Alembic and TypeScript/Vite. Preserve Windows CI.
+- See `docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md` for evidence and explicit local boundaries.
