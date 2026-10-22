@@ -253,3 +253,10 @@ Voice dialogue requests bind exact frozen voice hashes and character IDs. ASR te
 language/confidence and aligned word times are checked independently. SRT/ASS exports are
 available per render; authenticated subtitle corrections append a revision and preserve the
 original recognition evidence and Mock flag. Corrected text cannot rewrite locked dialogue.
+
+For an analyzed V1.3 project, Style freeze requires the authenticated operator plus a
+`style_freeze` grant targeting the Project's current draft/frozen-version snapshot.
+`StyleFreezeRequest` accepts `grant_id`, `snapshot` and `approval_note`. The browser sends
+only the specified decision fields, never the grant response's expiry field. Known Fake
+content hashes retain Mock provenance after candidate import and cannot use a legacy
+cross-project upload to escape the promotion boundary.

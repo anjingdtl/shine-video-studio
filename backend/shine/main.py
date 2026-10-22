@@ -454,9 +454,12 @@ def create_app(
         digest = sha256_bytes(content)
         from shine.comfyops.models import CandidateAsset
 
+        known_candidates = db.scalars(
+            select(CandidateAsset).where(CandidateAsset.payload["content_sha256"].as_string() == digest)
+        ).all()
         if any(
-            c.payload.get("content_sha256") == digest
-            for c in db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id))
+            c.project_id == project_id or c.payload.get("provenance", {}).get("is_mock", False)
+            for c in known_candidates
         ):
             raise HTTPException(409, "CANDIDATE_REQUIRES_AUTHENTICATED_PROMOTION")
         duplicate = db.scalar(select(Asset).where(Asset.project_id == project.id, Asset.sha256 == digest))
@@ -591,11 +594,28 @@ def create_app(
     @app.post("/api/v1/projects/{project_id}/style/freeze", status_code=201)
     def freeze_project_style(
         project_id: str,
+        request: Request,
         db: DBSession,
         body: StyleFreezeRequest | None = None,
     ) -> dict[str, Any]:
+        from sqlalchemy import text
+
+        from shine.api_operator import operator
+        from shine.comfyops import approval
+        from shine.comfyops.preproduction import current_plan
+
+        require_project(db, project_id)
+        protected = bool(current_plan(db, project_id)) or bool(body and body.grant_id)
+        actor = "user"
+        if protected:
+            actor = operator(request, request.app.state.settings, request.headers.get("authorization", ""))
+            if not body or not body.grant_id or not body.snapshot:
+                raise HTTPException(409, "STYLE_APPROVAL_GRANT_REQUIRED")
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+            approval.consume(db, actor, "style_freeze", require_project(db, project_id), body.grant_id, body.snapshot)
         project = require_project(db, project_id)
-        style, impact = freeze_style(db, project, approval_note=(body.approval_note if body else ""))
+        style, impact = freeze_style(db, project, approval_note=(body.approval_note if body else ""), actor=actor)
         db.commit()
         db.refresh(style)
         data = jsonable_encoder(_style_data(style))

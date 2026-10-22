@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, json, API } from '../api';
 
 type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; formal_asset_id?: string };
@@ -9,6 +9,9 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   const [view, setView] = useState(0);
   const [token, setToken] = useState('');
   const [rows, setRows] = useState<Row[]>([]);
+  const [rowView, setRowView] = useState(-1);
+  const activeView = useRef(view);
+  activeView.current = view;
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState('');
@@ -37,15 +40,25 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
     ...json('POST', body), headers: { 'Content-Type': 'application/json', ...(privileged ? headers() : {}) },
   });
   async function load() {
-    if (view === 0) setRows(await api<Row[]>('/comfyops/inventory'));
+    const requestedView = view;
+    let nextRows: Row[] = [];
+    let nextResult: unknown = undefined;
+    let nextRegistry: Registry | null = null;
+    if (view === 0) nextRows = await api<Row[]>('/comfyops/inventory');
     if (view === 1) {
-      setRows(await api<Row[]>('/comfyops/install-plans'));
-      setResult({ models: await api('/comfyops/models'), nodes: await api('/comfyops/nodes') });
+      const [plans, models, nodes] = await Promise.all([
+        api<Row[]>('/comfyops/install-plans'), api('/comfyops/models'), api('/comfyops/nodes'),
+      ]);
+      nextRows = plans; nextResult = { models, nodes };
     }
-    if (view === 2) { const r = await api<Registry>('/workflow-capabilities'); setRegistry(r); setRows(r.revisions); }
-    if (view === 3) setRows(await api<Row[]>(`/projects/${projectId}/candidate-assets`));
-    if (view === 4) setRows(await api<Row[]>(`/projects/${projectId}/voice-profiles`));
-    if (view === 5) { setRows([]); setResult(await api(`/projects/${projectId}/preproduction/requirements`)); }
+    if (view === 2) { nextRegistry = await api<Registry>('/workflow-capabilities'); nextRows = nextRegistry.revisions; }
+    if (view === 3) nextRows = await api<Row[]>(`/projects/${projectId}/candidate-assets`);
+    if (view === 4) nextRows = await api<Row[]>(`/projects/${projectId}/voice-profiles`);
+    if (view === 5) nextResult = await api(`/projects/${projectId}/preproduction/requirements`);
+    if (activeView.current !== requestedView) return;
+    setRows(nextRows); setRowView(requestedView);
+    if (nextRegistry) setRegistry(nextRegistry);
+    if (nextResult !== undefined) setResult(nextResult);
   }
   useEffect(() => { setResult(null); setError(''); load().catch(e => setError(e.message)); }, [view, projectId]);
   async function act(fn: () => Promise<unknown>) {
@@ -57,7 +70,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
     if (!evidence.trim()) throw new Error('请填写核验、权利和试听证据。');
     const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
       { action, target_id: row.id }, true);
-    return post(path, { ...grant, offline: true, listened: action === 'voice_freeze', evidence }, true);
+    return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline: true, listened: action === 'voice_freeze', evidence }, true);
   }
   return <section className="card" id="preproduction">
     <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>MOCK / 离线验证，真实 GPU 待本地验收</strong></div>
@@ -167,7 +180,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);
       })}>操作员冻结离线清单</button>
     </>}
-    {rows.map(row => <article className="card" key={row.id}>
+    {rowView === view && rows.map(row => <article className="card" key={row.id}>
       <strong>{String(row.payload.family ?? row.payload.character ?? row.payload.name ?? row.payload.source ?? row.id)} · {row.status}</strong>
       <p>ID {row.id} · SHA256 {row.sha256}</p>
       {view === 1 && row.status === 'AWAITING_APPROVAL' && <button disabled={busy}

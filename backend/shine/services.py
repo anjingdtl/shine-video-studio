@@ -148,7 +148,9 @@ def _style_hash(snapshot: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json(snapshot).encode("utf-8"))
 
 
-def freeze_style(db: Session, project: Project, *, approval_note: str = "") -> tuple[StyleVersion, dict[str, Any]]:
+def freeze_style(
+    db: Session, project: Project, *, approval_note: str = "", actor: str = "user"
+) -> tuple[StyleVersion, dict[str, Any]]:
     if not project.style_draft:
         raise HTTPException(status_code=409, detail="Save all seven style dimensions before freezing")
     snapshot = StyleBible.model_validate(project.style_draft).model_dump(mode="json")
@@ -163,7 +165,7 @@ def freeze_style(db: Session, project: Project, *, approval_note: str = "") -> t
         version=version_number,
         snapshot=snapshot,
         sha256=digest,
-        approved_by="user",
+        approved_by=actor,
         approval_note=approval_note,
     )
     db.add(frozen)
@@ -171,7 +173,7 @@ def freeze_style(db: Session, project: Project, *, approval_note: str = "") -> t
     project.frozen_style_version_id = frozen.id
     add_audit(
         db,
-        "user",
+        actor,
         "STYLE_FROZEN",
         "style_version",
         frozen.id,

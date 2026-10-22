@@ -48,6 +48,8 @@ class AssetMetadataUpdate(APIModel):
 
 
 class StyleFreezeRequest(APIModel):
+    grant_id: str | None = None
+    snapshot: str | None = None
     approval_note: str = Field(default="", max_length=1000)
 
 

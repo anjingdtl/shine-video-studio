@@ -643,6 +643,12 @@ def test_candidate_legacy_upload_bypass_and_corrupt_decode_rejected(prep):
     )
     assert response.status_code == 409
     right = rights(client, project)
+    reimport = client.post(
+        f"/api/v1/projects/{project}/candidate-assets/import",
+        data={"family": "character", "entity_id": "Copy", "rights_id": right["id"]},
+        files={"file": ("copy.png", media, "image/png")},
+    ).json()
+    assert reimport["payload"]["provenance"]["is_mock"] is True
     response = client.post(
         f"/api/v1/projects/{project}/candidate-assets/import",
         data={"family": "character", "entity_id": "Bad", "rights_id": right["id"]},
@@ -762,3 +768,30 @@ def test_fake_inventory_cannot_publish_real_capability(prep):
         operator=True,
         expected=409,
     )
+
+
+def test_v13_style_freeze_requires_human_grant_for_current_draft(prep):
+    from tests.conftest import style_payload
+
+    client, _, _ = prep
+    project = create_project(client)
+    doc = client.post(
+        f"/api/v1/projects/{project}/documents", files={"file": ("script.txt", "Lin：你好。".encode(), "text/plain")}
+    ).json()
+    post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    client.put(f"/api/v1/projects/{project}/style/draft", json=style_payload()).raise_for_status()
+    post(client, f"/projects/{project}/style/freeze", expected=403)
+    grant = post(
+        client, "/preparation/approval-grants", {"action": "style_freeze", "target_id": project}, operator=True
+    )
+    changed = style_payload() | {"lens_texture": "Changed after the review snapshot"}
+    client.put(f"/api/v1/projects/{project}/style/draft", json=changed).raise_for_status()
+    decision = {k: grant[k] for k in ("grant_id", "snapshot")}
+    post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=409)
+    grant = post(
+        client, "/preparation/approval-grants", {"action": "style_freeze", "target_id": project}, operator=True
+    )
+    decision = {k: grant[k] for k in ("grant_id", "snapshot")}
+    frozen = post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=201)
+    assert frozen["approved_by"] == "v13-test-operator"
+    post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=409)

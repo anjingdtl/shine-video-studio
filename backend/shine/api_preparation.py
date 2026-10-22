@@ -44,7 +44,7 @@ from shine.comfyops.registry import CATEGORIES, WorkflowDraft, assemble_template
 from shine.comfyops.scheduler import ResourceScheduler, resource_slot
 from shine.comfyops.tasks import preparation_task
 from shine.config import Settings
-from shine.models import ProjectDocument, WorkflowProfile, utcnow
+from shine.models import Project, ProjectDocument, WorkflowProfile, utcnow
 from shine.services import add_audit, require_project
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
 
@@ -239,6 +239,7 @@ class GrantRequest(Strict):
         "workflow_validate",
         "workflow_preview",
         "subtitle_correct",
+        "style_freeze",
     ]
     target_id: str
 
@@ -253,6 +254,7 @@ TARGETS = {
     "workflow_validate": WorkflowRevision,
     "workflow_preview": WorkflowRevision,
     "subtitle_correct": VoiceRender,
+    "style_freeze": Project,
 }
 
 
@@ -824,6 +826,11 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         get(db, CandidateAsset, row.payload["candidate_id"]).payload["rights_id"],
         {"is_mock": result["is_mock"], "voice_id": row.id, "voice_hash": row.sha256},
     )
+    measured_duration = (candidate.payload.get("media") or {}).get("duration_s")
+    if measured_duration is None or abs(measured_duration - result["duration_s"]) > 0.1:
+        errors = sorted(set(errors + ["DIALOGUE_DURATION_MISMATCH"]))
+    elif any(w["end_s"] > measured_duration + 0.001 for w in words):
+        errors = sorted(set(errors + ["ALIGNMENT_TIME_INVALID"]))
     candidate_qc(settings, candidate)
     if errors:
         candidate.status = "QC_FAILED"
@@ -882,6 +889,8 @@ def analyze(project_id: str, body: Analyze, db: DBSession):
     locked(db)
     project = require_project(db, project_id)
     document = get(db, ProjectDocument, body.document_id)
+    if document.project_id != project_id:
+        raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
     existing = preproduction.current_plan(db, project_id)
     if (
         existing
@@ -1155,7 +1164,10 @@ def correct_subtitles(identity: str, body: SubtitleCorrection, actor: Operator, 
     last = 0
     if "".join(w["text"] for w in words) != row.payload["text"]:
         raise HTTPException(409, "LOCKED_DIALOGUE_TEXT_MISMATCH")
-    duration = max(w["end_s"] for w in row.payload["words"])
+    source = get(db, CandidateAsset, row.payload["candidate_id"])
+    duration = (source.payload.get("media") or {}).get("duration_s")
+    if duration is None:
+        raise HTTPException(409, "AUDIO_TIMEBASE_UNAVAILABLE")
     for word in words:
         if not last <= word["start_s"] < word["end_s"] <= duration:
             raise HTTPException(409, "ALIGNMENT_TIME_INVALID")

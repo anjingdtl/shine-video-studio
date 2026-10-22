@@ -93,7 +93,17 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     assert audio["payload"]["words"] and audio["payload"]["subtitles"]["srt"]
     assert {"/design", "/tts", "/asr", "/align", "/free"} <= set(fake_voice_server.calls)
     assert client.put(f"/api/v1/projects/{project}/style/draft", json=ENGLISH_STYLE).status_code == 200
-    post(client, f"/projects/{project}/style/freeze", expected=201)
+    post(client, f"/projects/{project}/style/freeze", expected=403)
+    style_grant = post(
+        client, "/preparation/approval-grants", {"action": "style_freeze", "target_id": project}, operator=True
+    )
+    post(
+        client,
+        f"/projects/{project}/style/freeze",
+        {k: style_grant[k] for k in ("grant_id", "snapshot")},
+        operator=True,
+        expected=201,
+    )
     post(client, f"/projects/{project}/rulepack/freeze")
     ready = post(client, f"/projects/{project}/preproduction/readiness")
     assert ready["status"] == "SHOOT_READY", ready

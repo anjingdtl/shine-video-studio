@@ -137,10 +137,16 @@ function App() {
     });
   }
 
-  async function freezeStyle() {
+  async function freezeStyle(operatorToken = '') {
     if (!projectId) return;
     await withBusy(async () => {
-      const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, json('POST', { approval_note: '' }));
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${operatorToken}` };
+      const grant = operatorToken ? await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
+        ...json('POST', { action: 'style_freeze', target_id: projectId }), headers,
+      }) : { grant_id: undefined, snapshot: undefined };
+      const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, {
+        ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot }), ...(operatorToken ? { headers } : {}),
+      });
       await loadProject(projectId);
       report(`Style Bible V${frozen.version} 已冻结；${frozen.impact?.affected_shot_ids.length ?? 0} 个历史镜头引用旧版本。`);
     });

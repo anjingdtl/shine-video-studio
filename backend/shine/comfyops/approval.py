@@ -13,6 +13,10 @@ from shine.services import add_audit
 
 
 def snapshot(row):
+    if row.__tablename__ == "projects":
+        return graph_hash(
+            {"id": row.id, "style_draft": row.style_draft, "frozen_style_version_id": row.frozen_style_version_id}
+        )
     return graph_hash(
         {
             "id": row.id,
@@ -41,7 +45,7 @@ def issue(db, actor, action, row):
         row.__tablename__,
         row.id,
         {"action": action, "snapshot": grant.snapshot},
-        project_id=getattr(row, "project_id", None),
+        project_id=getattr(row, "project_id", row.id if row.__tablename__ == "projects" else None),
     )
     db.commit()
     return {"grant_id": grant.id, "snapshot": grant.snapshot, "expires_at": grant.expires_at}

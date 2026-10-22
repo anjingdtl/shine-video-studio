@@ -80,6 +80,11 @@ def create_candidate(db, settings, project, family, entity, content, filename, r
         content_type = verify_upload(kind, filename, content, settings.max_upload_bytes)
         info = probe_upload(kind, content, content_type).__dict__
     digest = hashlib.sha256(content).hexdigest()
+    known = db.scalars(
+        select(CandidateAsset).where(CandidateAsset.payload["content_sha256"].as_string() == digest)
+    ).all()
+    if any(c.payload.get("provenance", {}).get("is_mock", False) for c in known):
+        provenance = {**provenance, "is_mock": True, "mock_source": "KNOWN_MOCK_CONTENT_HASH"}
     payload = {
         "family": family,
         "entity_id": entity,
