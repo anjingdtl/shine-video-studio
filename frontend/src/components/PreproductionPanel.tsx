@@ -153,9 +153,11 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId }))}>分析资产与任务依赖</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline: true }))}>运行开机预检</button>
       <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
+      <label>原创音色权利 ID（可选）<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>
       <label>已验证图像工作流 ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/run`, {
         asset_rights_id: rightsId, workflow_id: workflowId,
+        ...(voiceRights ? { voice_rights_id: voiceRights } : {}),
       }))}>按依赖自动制作缺失候选（等待人工晋升）</button>
       <button disabled={busy} onClick={() => act(async () => {
         const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId });

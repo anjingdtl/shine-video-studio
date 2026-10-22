@@ -50,7 +50,12 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
         workflow(client, category, [model["id"]])
     asset_right = rights(client, project)
     formal = {}
-    batch_body = {"asset_rights_id": asset_right["id"], "workflow_id": image["id"]}
+    voice_right = rights(client, project, "voice_design")
+    batch_body = {
+        "asset_rights_id": asset_right["id"],
+        "workflow_id": image["id"],
+        "voice_rights_id": voice_right["id"],
+    }
     for _ in range(2):
         batch = post(client, f"/projects/{project}/preproduction/run", batch_body)
         assert batch["status"] == "PENDING_HUMAN_APPROVAL"
@@ -60,22 +65,8 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
             row = next(c for c in candidates if c["id"] == task["candidate_id"])
             row = approve(client, row, "promote", f"/candidate-assets/{row['id']}/promote")
             formal[row["payload"]["family"]] = row["formal_asset_id"]
-    assert set(formal) == {"character", "costume", "scene", "prop"}
-    voice_right = rights(client, project, "voice_design")
-    voice = post(
-        client,
-        f"/projects/{project}/voice-profiles/design",
-        {
-            "character": "Lin",
-            "description": "Original warm Mandarin voice",
-            "text": "这是专门用于离线软件验证的原创声音样本。",
-            "rights_id": voice_right["id"],
-            "asset_rights_id": asset_right["id"],
-        },
-    )
-    preview = post(client, f"/candidate-assets/{voice['payload']['candidate_id']}/qc")
-    preview = approve(client, preview, "promote", f"/candidate-assets/{preview['id']}/promote")
-    formal["voice"] = preview["formal_asset_id"]
+    assert set(formal) == {"character", "costume", "scene", "prop", "voice"}
+    voice = client.get(f"/api/v1/projects/{project}/voice-profiles").json()[0]
     voice = approve(client, voice, "voice_freeze", f"/voice-profiles/{voice['id']}/approve-and-freeze")
     audio = post(
         client,
