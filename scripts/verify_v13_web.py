@@ -25,7 +25,7 @@ from playwright.sync_api import expect, sync_playwright
 TEST_CREDENTIAL = "isolated-v13-test-operator-credential-12345"
 
 
-def exercise(api_base, ui_base, screenshot):
+def exercise(api_base, ui_base, screenshot, temporary):
     base = api_base + "/api/v1"
     headers = {"Authorization": "Bearer " + TEST_CREDENTIAL}
     c = httpx.Client(timeout=20)
@@ -52,6 +52,76 @@ def exercise(api_base, ui_base, screenshot):
         )
 
     p = post("/projects", {"title": "V1.3 Browser QA fixture"})["id"]
+    # Only tiny synthetic source bytes are copied. The exact production file installer
+    # runs with a cache-only transport; no third-party install or inference is executed.
+    source_bytes = b"# isolated Fake lifecycle source - never execute\n"
+    source = post(
+        "/comfyops/packages",
+        {
+            "name": "browser-instance-source",
+            "kind": "node",
+            "revision": "a" * 40,
+            "license_id": "TEST-ONLY",
+            "usage": "research",
+            "files": [
+                {
+                    "url": "https://raw.githubusercontent.com/fixture/main.py",
+                    "relative_path": "main.py",
+                    "size": len(source_bytes),
+                    "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                }
+            ],
+        },
+    )
+    imported_source = c.post(
+        base + f"/comfyops/packages/{source['id']}/offline-files",
+        headers=headers,
+        data={"relative_path": "main.py"},
+        files={"file": ("main.py", source_bytes)},
+    )
+    imported_source.raise_for_status()
+    file_plan = post(
+        "/comfyops/install-plans",
+        {
+            "project_id": p,
+            "package_ids": [source["id"]],
+            "disk_free": 1000,
+            "executor": "local",
+        },
+    )
+    file_plan = approve(
+        file_plan, "install", f"/comfyops/install-plans/{file_plan['id']}/approve"
+    )
+    from shine.comfyops.local import execute_approved
+    from shine.comfyops.installer import LocalInstaller, ControlledDownloader
+    from shine.config import Settings
+    from shine.db import make_engine, make_session_factory
+
+    class NoNetwork:
+        def stream(self, *args):
+            raise AssertionError(
+                "Browser QA installer must only use the uploaded cache"
+            )
+
+    qa_settings = Settings(
+        data_dir=Path(temporary),
+        database_url="sqlite:///" + (Path(temporary) / "qa.db").as_posix(),
+    )
+    qa_engine = make_engine(qa_settings.database_url)
+    qa_factory = make_session_factory(qa_engine)
+    execute_approved(
+        qa_factory,
+        qa_settings,
+        file_plan["id"],
+        file_plan["sha256"],
+        "v13-browser-test-operator",
+        LocalInstaller(
+            Path(temporary) / "comfyops" / "isolated-packages",
+            ControlledDownloader({"raw.githubusercontent.com"}, NoNetwork()),
+        ),
+    )
+    qa_engine.dispose()
+
     from shine.comfyops.assets import fake_image
 
     imported = c.post(
@@ -180,6 +250,60 @@ def exercise(api_base, ui_base, screenshot):
         master.get_by_role("button", name="锁定", exact=True).click()
         expect(master).to_contain_text("已锁定", timeout=15000)
         prep = page.locator("#preproduction")
+        prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
+        prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
+            "Explicit isolated browser lifecycle approval"
+        )
+        prep.get_by_role("button", name="读取执行器与授权扫描范围", exact=True).click()
+        expect(
+            prep.get_by_label("选择扫描范围 JSON（仅可缩小管理员白名单）")
+        ).to_have_value('{\n  "roots": [],\n  "ports": []\n}')
+
+        def result_json():
+            return json.loads(prep.locator("details[open] pre").last.inner_text())
+
+        def lifecycle(action, snapshot_id=None):
+            prep.get_by_role("button", name="环境中心", exact=True).click()
+            operation = {"name": "browser-studio", "action": action, "port": 8190}
+            if action == "CREATE":
+                operation["source_package_id"] = source["id"]
+            if snapshot_id:
+                operation["snapshot_id"] = snapshot_id
+            prep.get_by_label(
+                "隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE）"
+            ).fill(json.dumps(operation))
+            prep.get_by_role(
+                "button",
+                name="生成实例操作计划（到模型与节点中心审批执行）",
+                exact=True,
+            ).click()
+            page.wait_for_function(
+                "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('AWAITING_APPROVAL')"
+            )
+            plan_id = result_json()["id"]
+            prep.get_by_role("button", name="模型与节点", exact=True).click()
+            card = prep.locator("article").filter(has_text=plan_id)
+            card.get_by_role("button", name="批准此哈希计划", exact=True).click()
+            expect(card).to_contain_text("APPROVED", timeout=15000)
+            card.get_by_role(
+                "button", name="模拟执行（无系统变更）", exact=True
+            ).click()
+            expect(card).to_contain_text("MOCK_VERIFIED", timeout=15000)
+            return result_json()
+
+        created_instance = lifecycle("CREATE")
+        managed_id = created_instance["payload"]["instance_id"]
+        lifecycle("START")
+        lifecycle("STOP")
+        saved = lifecycle("SNAPSHOT")
+        lifecycle("RESTORE", saved["id"])
+        prep.get_by_role("button", name="环境中心", exact=True).click()
+        prep.get_by_label("受管实例 ID", exact=True).fill(managed_id)
+        prep.get_by_role("button", name="核验实例健康与队列", exact=True).click()
+        page.wait_for_function(
+            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('ONLINE')"
+        )
+        assert result_json()["is_mock"] is True
         prep.get_by_role("button", name="全资产工厂", exact=True).click()
         prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
         prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
@@ -230,6 +354,9 @@ def exercise(api_base, ui_base, screenshot):
                 "project_id": p,
                 "flows": [
                     "authenticated style freeze",
+                    "offline package cache and real file installer",
+                    "scope configuration inspection",
+                    "instance create/start/stop/snapshot/restore/health via UI",
                     "legacy asset approval and lock grants",
                     "mode selection preserves Fake provenance",
                     "candidate promotion",
@@ -350,7 +477,7 @@ def main():
             wait_http(ui_base)
             if args.screenshot:
                 args.screenshot.parent.mkdir(parents=True, exist_ok=True)
-            exercise(api_base, ui_base, args.screenshot)
+            exercise(api_base, ui_base, args.screenshot, temporary)
         finally:
             for child in reversed(children):
                 if child.poll() is None:
