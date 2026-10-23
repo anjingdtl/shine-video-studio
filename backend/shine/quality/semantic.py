@@ -150,7 +150,7 @@ class OpenAICompatibleVisionReviewer:
         body = response.json()
         text = body["choices"][0]["message"]["content"]
         parsed = json.loads(text)
-        parsed["is_mock"] = False
+        parsed["is_mock"] = bool(parsed.get("is_mock", False))
         parsed["input_sha256"] = context.artifact_sha256
         return SemanticReviewResult.model_validate(parsed)
 
@@ -191,7 +191,12 @@ class OpenAICompatibleASRReviewer:
             )
             for item in body.get("segments") or []
         ]
-        return Transcript(text=str(body.get("text", "")), segments=segments, is_mock=False, model=self.config.model)
+        return Transcript(
+            text=str(body.get("text", "")),
+            segments=segments,
+            is_mock=bool(body.get("is_mock", False)),
+            model=self.config.model,
+        )
 
 
 def _normalize(text: str) -> str:

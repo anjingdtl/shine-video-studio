@@ -519,3 +519,22 @@ def test_structured_document_analysis_preserves_critical_requirements_at_api(pre
     ready = post(client, f"/projects/{project}/preproduction/readiness")
     assert ready["status"] == "BLOCKED"
     assert any(r["entity_id"] == "coat" and r["depends_on"] for r in ready["requirements"])
+
+
+def test_model_ledger_keeps_provider_and_result_provenance_separate(prep):
+    from shine.comfyops.model_calls import TrackedProvider
+
+    client, factory, _ = prep
+    project = create_project(client)
+
+    class SyntheticWireProvider:
+        is_mock = False
+
+        def design(self, text):
+            return {"is_mock": True, "model": "synthetic-wire-response"}
+
+    assert TrackedProvider(SyntheticWireProvider(), factory, project).design("fixture")["is_mock"]
+    with factory() as db:
+        row = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project))
+        assert row.trace["provider_is_mock"] is False
+        assert row.trace["result_is_mock"] is True and row.trace["is_mock"] is True

@@ -140,3 +140,42 @@ def test_technical_failure_overrides_semantic_mock_pass(tmp_path):
     fused = fuse(technical=failed, semantic_results=[MockSemanticReviewer([]).review(context(tmp_path))])
     assert fused.result == "failed"
     assert fused.hard_failures
+
+
+def test_http_reviewers_preserve_explicit_fake_provenance(tmp_path, monkeypatch):
+    import json
+
+    import httpx
+
+    from shine.quality.semantic import OpenAICompatibleASRReviewer
+
+    cfg = ProviderConfig(
+        profile_id="fixture",
+        name="fixture",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:1",
+        model="fixture-only",
+        api_key=None,
+    )
+    vision_response = {
+        "reviewer": "fake-wire-reviewer",
+        "is_mock": True,
+        "input_sha256": "a" * 64,
+        "findings": [],
+        "overall_confidence": 1,
+        "raw_summary": "Synthetic HTTP response",
+        "model": "fixture-only",
+    }
+
+    def respond(request):
+        if request.url.path.endswith("transcriptions"):
+            return httpx.Response(200, json={"text": "fixture", "is_mock": True})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(vision_response)}}]})
+
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        "shine.quality.semantic.httpx.Client",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    assert OpenAICompatibleVisionReviewer(cfg).review(context(tmp_path, consent=True)).is_mock
+    assert OpenAICompatibleASRReviewer(cfg).transcribe(tmp_path / "clip.mp4").is_mock

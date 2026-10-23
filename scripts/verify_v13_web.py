@@ -291,6 +291,24 @@ def exercise(api_base, ui_base, screenshot, temporary):
             expect(card).to_contain_text("MOCK_VERIFIED", timeout=15000)
             return result_json()
 
+        prep.get_by_role("button", name="操作员保存受限扫描范围", exact=True).click()
+        page.wait_for_function(
+            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('configuration_hash')"
+        )
+        assert result_json()["roots"] == [] and result_json()["ports"] == []
+        prep.get_by_role("button", name="模型与节点", exact=True).click()
+        prep.get_by_label("Package ID", exact=True).fill(source["id"])
+        prep.get_by_label("离线文件在固定清单中的相对路径", exact=True).fill("main.py")
+        prep.get_by_label(
+            "导入固定摘要的离线模型 / 节点 / wheel", exact=True
+        ).set_input_files(
+            {"name": "main.py", "mimeType": "text/x-python", "buffer": source_bytes}
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('USER_OFFLINE_IMPORT')"
+        )
+        assert result_json()["sha256"] == hashlib.sha256(source_bytes).hexdigest()
+
         created_instance = lifecycle("CREATE")
         managed_id = created_instance["payload"]["instance_id"]
         lifecycle("START")
@@ -355,7 +373,8 @@ def exercise(api_base, ui_base, screenshot, temporary):
                 "flows": [
                     "authenticated style freeze",
                     "offline package cache and real file installer",
-                    "scope configuration inspection",
+                    "scope configuration inspection and grant-authorized save",
+                    "offline file import through browser control",
                     "instance create/start/stop/snapshot/restore/health via UI",
                     "legacy asset approval and lock grants",
                     "mode selection preserves Fake provenance",

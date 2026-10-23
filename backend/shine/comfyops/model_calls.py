@@ -115,6 +115,7 @@ class TrackedProvider:
                         "method": name,
                         "kind": kind,
                         "is_mock": bool(self.provider.is_mock),
+                        "provider_is_mock": bool(self.provider.is_mock),
                         "resource_id": CURRENT_RESOURCE.get(),
                         "replay": "NEVER_AUTOMATIC",
                         "parent_task_id": CURRENT_PREPARATION.get(),
@@ -161,14 +162,21 @@ class TrackedProvider:
             with self.factory.begin() as db:
                 row = db.get(AgentTaskRecord, identity)
                 row.status = "COMPLETED"
-                row.trace = {**row.trace, "result_sha256": graph_hash(digest_input(result))}
+                result_mock = result.get("is_mock") if isinstance(result, dict) else getattr(result, "is_mock", None)
+                effective_mock = bool(self.provider.is_mock) or bool(result_mock)
+                row.trace = {
+                    **row.trace,
+                    "result_sha256": graph_hash(digest_input(result)),
+                    "result_is_mock": result_mock,
+                    "is_mock": effective_mock,
+                }
                 add_audit(
                     db,
                     "model-tool",
                     "MODEL_CALL_COMPLETED",
                     "agent_task",
                     identity,
-                    {"kind": kind, "is_mock": bool(self.provider.is_mock)},
+                    {"kind": kind, "is_mock": effective_mock, "result_is_mock": result_mock},
                     project_id=self.project_id,
                 )
             return result
