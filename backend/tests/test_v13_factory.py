@@ -476,3 +476,46 @@ def test_release_failure_and_invalid_reconciliation_grant_never_free_gpu(prep):
     )
     with factory() as db:
         assert db.get(ResourceLease, resource_id).status == "RECONCILE_REQUIRED"
+
+
+def test_structured_document_analysis_preserves_critical_requirements_at_api(prep):
+    import json
+
+    client, _, _ = prep
+    project = create_project(client)
+    script = {
+        "scenes": [
+            {
+                "id": "s1",
+                "location": "Street",
+                "shots": [
+                    {
+                        "id": "shot1",
+                        "characters": [{"id": "Lin", "outfit_id": "coat"}],
+                        "props": ["Ledger"],
+                        "dialogue": [{"speaker_id": "Lin", "text": "你终于来了。"}],
+                    }
+                ],
+            }
+        ]
+    }
+    uploaded = client.post(
+        f"/api/v1/projects/{project}/documents",
+        files={"file": ("script.json", json.dumps(script, ensure_ascii=False).encode(), "application/json")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    plan = post(
+        client,
+        f"/projects/{project}/preproduction/analyze",
+        {
+            "document_id": uploaded.json()["id"],
+            "requirements": [{"family": "prop", "entity_id": "Ledger", "critical": False}],
+        },
+    )
+    assert plan["payload"]["structured_script"]["dialogue"][0]["text"] == "你终于来了。"
+    requirements = plan["payload"]["requirements"]
+    assert all(r["critical"] for r in requirements)
+    assert next(r for r in requirements if r["family"] == "prop")["shot_ids"] == ["shot1"]
+    ready = post(client, f"/projects/{project}/preproduction/readiness")
+    assert ready["status"] == "BLOCKED"
+    assert any(r["entity_id"] == "coat" and r["depends_on"] for r in ready["requirements"])

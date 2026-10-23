@@ -229,6 +229,17 @@ def _guard_claimed_job(
         return None
     from shine.comfyops.preproduction import enforce_job
 
+    if job.provider == "comfyui" and job.status == "SUBMITTING":
+        from shine.comfyops.models import ResourceLease
+
+        resource = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job.id))
+        if not resource or resource.status != "ACTIVE" or resource.expires_at <= utcnow():
+            job.failure_code = "GPU_RESOURCE_LEASE_LOST"
+            job.lease_owner = None
+            job.lease_expires_at = None
+            attempt.status = "NEEDS_REVIEW"
+            transition(job, "NEEDS_REVIEW")
+            return None
     try:
         enforce_job(db, job, settings)
     except HTTPException as exc:
@@ -1453,6 +1464,7 @@ def _run_comfy_job(
                     attempt_id=attempt_id,
                     settings=settings,
                 ):
+                    submit_db.commit()  # persist a guard's rejection before ending this writer transaction
                     return job_id
             except HTTPException as exc:
                 current.failure_code = str(exc.detail)

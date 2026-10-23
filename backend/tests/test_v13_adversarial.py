@@ -429,3 +429,106 @@ def test_revocation_blocks_consumers_but_independent_shot_continues(prep):
     run_one(factory, settings=settings)
     assert client.get(f"/api/v1/jobs/{queued['id']}").json()["status"] == "PASSED"
     assert post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)
+
+
+@pytest.mark.parametrize("boundary", ["worker_recovery", "human_review"])
+def test_revoked_frozen_reference_is_rechecked_at_recovery_and_review(prep, boundary):
+    from dataclasses import replace
+
+    from shine.worker import _recover_one_job
+
+    client, factory, settings = prep
+    project, shot, right, _, profile = ready_production(client, bind_prop=True)
+    settings = replace(settings, offline_simulation=True)
+    client.app.state.settings = settings
+    job = post(
+        client,
+        f"/projects/{project}/jobs",
+        {"shot_id": shot["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+        expected=201,
+    )
+    post(client, f"/preparation/rights/{right['id']}/revoke", operator=True)
+    if boundary == "worker_recovery":
+
+        class NoExternalCall:
+            def __getattr__(self, name):
+                raise AssertionError("Revoked request must stop before recovery reads/submits external work")
+
+        assert (
+            _recover_one_job(factory, "isolated-recovery", job["id"], settings=settings, comfy_client=NoExternalCall())
+            == 1
+        )
+        result = client.get(f"/api/v1/jobs/{job['id']}").json()
+        assert result["status"] == "NEEDS_REVIEW" and result["failure_code"] == "LICENSE_NOT_APPROVED"
+        assert not result["attempts"] and not result["provider_job_id"]
+    else:
+        response = client.get(f"/api/v1/operator/jobs/{job['id']}", headers=HEADERS)
+        assert response.status_code == 409 and response.json()["detail"] == "LICENSE_NOT_APPROVED"
+        response = client.post(
+            f"/api/v1/operator/jobs/{job['id']}/review",
+            headers=HEADERS,
+            json={
+                "snapshot": "old",
+                "request_id": "isolated-review-0001",
+                "items": {},
+                "watched": True,
+                "listened": True,
+            },
+        )
+        assert response.status_code == 409 and response.json()["detail"] == "LICENSE_NOT_APPROVED"
+        assert client.get(f"/api/v1/jobs/{job['id']}").json()["status"] == "QUEUED"
+
+
+def test_h3_live_worker_cannot_release_lease_and_expired_final_lease_blocks_prompt(prep):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from shine.comfy.client import ComfyUIClient
+    from shine.comfy.provider import ComfyUIRenderService
+    from shine.comfyops.models import ResourceLease
+    from shine.models import utcnow
+    from shine.worker import run_one
+    from tests.fake_http import FakeComfyServer
+
+    client, factory, settings = prep
+    project, shot, _, _, profile = ready_production(client, bind_prop=True)
+    settings = replace(settings, offline_simulation=True)
+    client.app.state.settings = settings
+    job = post(
+        client,
+        f"/projects/{project}/jobs",
+        {"shot_id": shot["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+        expected=201,
+    )
+    server = FakeComfyServer().start()
+    try:
+        comfy = ComfyUIClient(server.base_url, max_retries=0)
+
+        class ExpireAfterPrepare(ComfyUIRenderService):
+            def prepare(self, *args, **kwargs):
+                prepared = super().prepare(*args, **kwargs)
+                with factory() as db:
+                    lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job["id"]))
+                    lease_id, owner = lease.id, lease.owner
+                response = client.post(
+                    f"/api/v1/comfyops/resource-reservations/{lease_id}/release",
+                    headers=HEADERS,
+                    json={"owner": owner, "reconciled": True},
+                )
+                assert response.status_code == 409
+                assert response.json()["detail"] == "H3_WORKER_MUST_RECONCILE_BEFORE_RESOURCE_RELEASE"
+                # Explicit failure injection into the resource ledger, never approval fields.
+                with factory.begin() as db:
+                    db.get(ResourceLease, lease_id).expires_at = utcnow() - timedelta(seconds=1)
+                return prepared
+
+        run_one(
+            factory, settings=settings, comfy_service=ExpireAfterPrepare(comfy, settings.data_dir), comfy_client=comfy
+        )
+        current = client.get(f"/api/v1/jobs/{job['id']}").json()
+        assert current["status"] == "NEEDS_REVIEW" and current["failure_code"] == "GPU_RESOURCE_LEASE_LOST"
+        assert server.prompt_count == 0
+    finally:
+        server.stop()

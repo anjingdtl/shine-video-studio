@@ -1192,8 +1192,14 @@ def resource_release(
 
     job = db.get(Job, row.owner.removeprefix("h3:")) if row.owner.startswith("h3:") else None
     attached = bool(tasks or job)
+    if (
+        job
+        and row.status != "RELEASED"
+        and (job.lease_owner or job.lease_expires_at or job.status not in {"PASSED", "FAILED", "NEEDS_REVIEW"})
+    ):
+        raise HTTPException(409, "H3_WORKER_MUST_RECONCILE_BEFORE_RESOURCE_RELEASE")
     if attached and row.status != "RELEASED":
-        if any(t.status in {"RUNNING", "NEEDS_REVIEW"} for t in tasks):
+        if any(t.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"} for t in tasks):
             raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
         if not body.proof_decision:
             raise HTTPException(409, "MODEL_RELEASE_PROOF_REQUIRED")
