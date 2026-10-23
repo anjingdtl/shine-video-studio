@@ -1,0 +1,31 @@
+{
+  "commit_sha": "dc0ba13becba383efb3297fc40581a9449ff8223",
+  "run_id": 39929671984,
+  "url": "https://github.com/anjingdtl/shine-video-studio/actions/runs/39929671984",
+  "conclusion": "success",
+  "note": "Intermediate Windows-fix commit; final delivery must separately pass at final PR head.",
+  "jobs": [
+    {
+      "name": "backend",
+      "id": 120334538960,
+      "conclusion": "success",
+      "tests_passed": 369
+    },
+    {
+      "name": "backend-windows",
+      "id": 120334538817,
+      "conclusion": "success",
+      "tests_passed": 369
+    },
+    {
+      "name": "frontend",
+      "id": 120334538922,
+      "conclusion": "success"
+    },
+    {
+      "name": "web-e2e",
+      "id": 120334538727,
+      "conclusion": "success"
+    }
+  ]
+}

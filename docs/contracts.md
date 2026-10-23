@@ -273,4 +273,36 @@ voice_id and the complete Dialogue request excluding execution_decision. Consent
 expires_at and never substitutes for execution authority. Actual render references are checked
 against the frozen set at Job creation, final Worker submission and human review.
 
-Complete software acceptance remains partial; see V1.3_ADVERSARIAL_REVIEW.md.
+Detailed acceptance evidence and actual hardware boundaries are recorded in V1.3_ADVERSARIAL_REVIEW.md.
+
+WorkflowDraft binds model_ids, node_package_ids and server-captured package_hashes;
+mutated dependency snapshots block validation/publication/readiness. generation_modes,
+duration_range, aspect_ratios, instance_ids, references/media_transfers, resource_mb and
+license constraints participate in matching. Revisions freeze after execution/publication;
+deprecation needs a separate human grant and preserves historical payloads.
+
+Generate/VoiceDesign/Dialogue.execution_mode selects fake/local and must match the actual
+provider. It cannot relabel results. Candidate semantic findings carry model, result,
+confidence and evidence; low confidence stays human-reviewed, hard failures block promotion.
+Dialogue unknown ASR speaker/confidence requires listened=true and explicit human evidence
+at promotion while preserving the original findings. It cannot waive text/timing errors.
+
+InstanceOperation plans enumerate exact action/root/packages/Python/argv/current tree,
+L2/L3 risk and expiring human authority. POST /comfyops/instance-plans/{id}/execute uses
+only that approved hash. POST /comfyops/backup-plans copies a scoped existing instance read-only.
+POST /comfyops/instance-attempts/{id}/reconcile verifies dead owner and records outcome;
+rollback is a separate approved operation. /comfyops/execution-context and /comfyops/scope
+expose/save a grant-bound subset of administrator limits.
+
+GET /projects/{id}/preparation/model-calls returns the existing task ledger. Explicit
+POST /preparation/model-calls/{id}/abandon requires model_reconcile authority, owner/queue/
+release proof and records ABANDONED, not success. Reconciliation itself is durably owned.
+Resource release cannot treat reconciled=true or expired time as proof of unload.
+
+
+Mock provenance is monotonic across provider boundaries. An HTTP reviewer reporting
+is_mock=true remains Mock even when reached through a non-Mock HTTP adapter. Model task
+trace distinguishes provider_is_mock and result_is_mock; effective is_mock is their OR.
+The UI cannot relabel an existing result by switching mode. Live H3 leases cannot be
+manually released; Worker recovery must settle its owner/state first, and final /prompt
+rechecks an ACTIVE, unexpired lease and persists any rejection before returning.

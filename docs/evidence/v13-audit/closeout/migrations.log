@@ -1,0 +1,12 @@
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 70afa9c775ab, initial local production ledger
+INFO  [alembic.runtime.migration] Running upgrade 70afa9c775ab -> 9f2c4d7a10b3, M1 hardening and offline M2/M3 capabilities
+INFO  [alembic.runtime.migration] Running upgrade 9f2c4d7a10b3 -> c3d81f6a2b45, M1/M2/M3 offline final hardening
+INFO  [alembic.runtime.migration] Running upgrade c3d81f6a2b45 -> e8f1a2b3c4d5, Add immutable film crew proposals and per-project rule locks; preserve existing rows.
+INFO  [alembic.runtime.migration] Running upgrade e8f1a2b3c4d5 -> f121a0010001, Add graph-derived workflow identity without touching historical requests or media.
+INFO  [alembic.runtime.migration] Running upgrade f121a0010001 -> f130a0010001, V1.3 preparation ledger, additive; legacy production rows are untouched.
+INFO  [alembic.runtime.migration] Running upgrade f130a0010001 -> f130a0020001, Bind queued jobs to the exact human-frozen pre-production manifest.
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+No new upgrade operations detected.

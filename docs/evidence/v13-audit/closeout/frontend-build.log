@@ -1,0 +1,13 @@
+
+> shine-video-studio-web@0.1.0 build
+> tsc -b && vite build
+
+vite v6.4.5 building for production...
+transforming...
+✓ 1590 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:  0.32 kB
+dist/assets/index-BCfODFoZ.css   26.62 kB │ gzip:  6.34 kB
+dist/assets/index-DVA6zgt_.js   289.69 kB │ gzip: 89.26 kB
+✓ built in 21.52s

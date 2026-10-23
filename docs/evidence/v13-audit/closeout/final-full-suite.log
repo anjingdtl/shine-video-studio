@@ -1,0 +1,16 @@
+Source commit: 94abd3c16a1a0b0adf2769e23ad6a2f94e44f45a
+Command: uv run --project backend pytest backend/tests -q -o addopts=
+........................................................................ [ 19%]
+........................................................................ [ 38%]
+........................................................................ [ 57%]
+........................................................................ [ 77%]
+........................................................................ [ 96%]
+.............                                                            [100%]
+=============================== warnings summary ===============================
+backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:51
+  /workspace/shine-video-studio/backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:51: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+373 passed, 1 warning in 382.83s (0:06:22)
+Exit code: 0

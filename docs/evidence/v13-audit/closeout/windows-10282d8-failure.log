@@ -1,0 +1,27 @@
+Commit: 10282d8ecbc2f632d455ff066183e6828a85b506
+Run: 39816311920; Windows job: 119955656357
+Read through connected GitHub job logs; filtered failure evidence follows.
+2026-10-22T16:50:56.2159602Z >               raise HTTPException(409, "AUDITED_TEMPLATE_HASH_CHANGED")
+2026-10-22T16:50:56.2160464Z E               fastapi.exceptions.HTTPException: 409: AUDITED_TEMPLATE_HASH_CHANGED
+2026-10-22T16:50:56.2213983Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2267083Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2316180Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2454067Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2636841Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2677906Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2721109Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2766193Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2813647Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2850737Z E       AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2859661Z FAILED backend\tests\test_v13_factory.py::test_audited_h3_templates_preserve_graph_and_unverified_status - fastapi.exceptions.HTTPException: 409: AUDITED_TEMPLATE_HASH_CHANGED
+2026-10-22T16:50:56.2861534Z FAILED backend\tests\test_v13_instances.py::test_instance_process_interruption_reconciles_and_can_reinstall[INTENT] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2864199Z FAILED backend\tests\test_v13_instances.py::test_instance_process_interruption_reconciles_and_can_reinstall[SOURCE_COPIED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2866970Z FAILED backend\tests\test_v13_instances.py::test_instance_process_interruption_reconciles_and_can_reinstall[COMMAND_COMPLETED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2870334Z FAILED backend\tests\test_v13_instances.py::test_instance_process_interruption_reconciles_and_can_reinstall[FILES_COMPLETE] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2873006Z FAILED backend\tests\test_v13_instances.py::test_instance_process_interruption_reconciles_and_can_reinstall[BEFORE_COMMIT] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:56.2875820Z FAILED backend\tests\test_v13_instances.py::test_restore_process_interruption_preserves_snapshot_and_existing_files[BACKUP_VERIFIED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:57.5866431Z FAILED backend\tests\test_v13_instances.py::test_restore_process_interruption_preserves_snapshot_and_existing_files[STAGED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:57.5871624Z FAILED backend\tests\test_v13_instances.py::test_restore_process_interruption_preserves_snapshot_and_existing_files[OLD_RENAMED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:57.5876256Z FAILED backend\tests\test_v13_instances.py::test_restore_process_interruption_preserves_snapshot_and_existing_files[NEW_RENAMED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:57.5881205Z FAILED backend\tests\test_v13_instances.py::test_restore_process_interruption_preserves_snapshot_and_existing_files[CLEANED] - AssertionError: {"detail":"INSTANCE_OWNER_ALIVE_OR_UNVERIFIABLE"}
+2026-10-22T16:50:57.5884199Z 11 failed, 355 passed, 1 warning in 403.50s (0:06:43)

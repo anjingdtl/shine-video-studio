@@ -148,5 +148,15 @@ longer has lower privileges. Voice source policy is shared across routes. The Wo
 actual request references after preparation and serializes the external submission boundary
 with revocation using the existing SQLite writer. Installer recovery shares an OS guard and
 verifiable owner identity with installation; immutable scan snapshots update stable current
-instance identities. A06/A07 and the remaining A03/A04/A08 software gaps are explicitly
-listed in [the adversarial review](V1.3_ADVERSARIAL_REVIEW.md), not assigned to local GPU work.
+instance identities. [ADR 0005](adr/0005-controlled-lifecycle-and-model-subcalls.md) specifies
+the delivered lifecycle, per-model task intents, SDK/image bridges and scoped production checks.
+Final software evidence and hardware boundaries are listed in [the adversarial review](V1.3_ADVERSARIAL_REVIEW.md).
+
+
+Lifecycle/backup operations reuse InstallationPlan/InstallationAttempt and immutable package
+manifests. External instances remain read-only; managed process stop verifies PID and birth.
+AppSetting stores only a selected subset of administrator scan scope. Model subcalls persist
+AgentTaskRecord before shared GPU admission; external acknowledgement is committed before
+polling, and uncertain results/reconciliation never cause automatic resubmission.
+SHINE_VOICE_SDK_PACKAGES selects the in-process local-only Qwen SDK bridge;
+SHINE_IMAGE_COMFY_URL selects the existing ComfyUI protocol image adapter.

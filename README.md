@@ -1,7 +1,7 @@
 # Shine视频工作台 · Shine Video Studio
 
-> V1.3 对抗复查后仍为 **PARTIAL / MOCK_VERIFIED**。审批、克隆、实际引用及安装恢复已有修复；
-> 完整云端收尾尚未完成，见 [逐项实现与软件缺口](docs/V1.3_ADVERSARIAL_REVIEW.md)。
+> V1.3 对抗审查的软件修复与收尾实现已补齐，按 **TESTED_OFFLINE / MOCK_VERIFIED** 验收；
+> 最终提交 CI、逐项证据及真机边界见 [对抗审查与重验](docs/V1.3_ADVERSARIAL_REVIEW.md)。真实 GPU/视听质量不由 Fake 结果代替。
 
 > Local-first short-drama production workbench built around **MiniMax-H3 via local ComfyUI**, with an independent, provider-configurable LLM Agent runtime.
 
@@ -103,7 +103,7 @@ Descriptions submitted under V1.1 rules must be English; dialogue remains in its
 
 ## V1.3: controlled ComfyOps + multi-modal pre-production
 
-V1.3 adds six API-backed preparation workspaces, an eighth controlled ComfyOps proposal role, scoped Windows probes, package/dependency plans, authenticated one-use human grants, a tested local downloader/atomic installer, workflow capabilities, candidate import/generation/QC/promotion, frozen Voice Profiles/TTS/ASR/alignment/subtitles, pre-production manifests and shared GPU leases. The cloud end-to-end path uses explicitly Fake image/voice/ComfyUI/GPU capabilities. Real model inference, Windows host integration and audiovisual quality remain local acceptance items. Historical H3 workflows and review contracts are preserved. See the [cloud implementation report](docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md) and [local checklist](docs/V1.3_LOCAL_INTEGRATION_CHECKLIST.md) for exact evidence and limitations.
+V1.3 adds isolated instance lifecycle and read-only external backup, pinned offline wheel/node/model installation, in-process Qwen voice and direct Comfy image adapters, structured critical requirements and typed semantic review, per-subcall persistent model tasks and confirmed resource release, six API-backed preparation workspaces, an eighth controlled ComfyOps proposal role, scoped Windows probes, package/dependency plans, authenticated one-use human grants, a tested local downloader/atomic installer, workflow capabilities, candidate import/generation/QC/promotion, frozen Voice Profiles/TTS/ASR/alignment/subtitles, pre-production manifests and shared GPU leases. The cloud end-to-end path uses explicitly Fake image/voice/ComfyUI/GPU capabilities. Real model inference, Windows host integration and audiovisual quality remain local acceptance items. Historical H3 workflows and review contracts are preserved. See the [cloud implementation report](docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md) and [local checklist](docs/V1.3_LOCAL_INTEGRATION_CHECKLIST.md) for exact evidence and limitations.
 
 - [V1.3 product and technical blueprint](docs/Shine视频工作台_V1.3_ComfyOps与全资产预制作系统建设方案.md)
 - [V1.3 cloud Codex full implementation brief](docs/V1.3_云端Codex实施总提示词.md)
