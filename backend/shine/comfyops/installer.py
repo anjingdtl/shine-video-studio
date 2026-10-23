@@ -239,12 +239,20 @@ def process_identity(pid):
         kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x1000, False, pid)
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        handle = kernel.OpenProcess(0x101000, False, pid)
         if not handle:
             if ctypes.get_last_error() == 87:
                 return None
             raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")
         try:
+            # An exited Windows process remains queryable while another process
+            # retains a handle. Birth time alone therefore does not prove liveness.
+            state = kernel.WaitForSingleObject(handle, 0)
+            if state == 0:  # signaled: terminated, even if the PID object still exists
+                return None
+            if state != 258:  # WAIT_TIMEOUT is the only verified live state
+                raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")
             values = [ctypes.c_ulonglong() for _ in range(4)]
             if not kernel.GetProcessTimes(handle, *(ctypes.byref(v) for v in values)):
                 raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")

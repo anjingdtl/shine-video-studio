@@ -373,7 +373,7 @@ def reconcile_crash(client, attempt):
 def test_external_instance_backup_is_read_only_scoped_and_hash_bound(prep, tmp_path):
     from dataclasses import replace
 
-    client, _, settings = prep
+    client, factory, settings = prep
     root = tmp_path / "existing-production"
     root.mkdir()
     (root / "main.py").write_bytes(b"# never executed")
@@ -393,6 +393,15 @@ def test_external_instance_backup_is_read_only_scoped_and_hash_bound(prep, tmp_p
     post(client, "/comfyops/backup-plans", {**body, "root": str(tmp_path)}, operator=True, expected=403)
     plan = post(client, "/comfyops/backup-plans", body, operator=True)
     plan = approve(client, plan, "install", f"/comfyops/install-plans/{plan['id']}/approve")
+    post(
+        client,
+        f"/comfyops/install-plans/{plan['id']}/execute",
+        {"executor": "fake", "plan_hash": plan["sha256"]},
+        operator=True,
+        expected=409,
+    )
+    with pytest.raises(ValueError, match="USE_INSTANCE_LIFECYCLE_OR_BACKUP_EXECUTOR"):
+        execute_approved(factory, client.app.state.settings, plan["id"], plan["sha256"], "v13-test-operator", None)
     result = post(client, f"/comfyops/backup-plans/{plan['id']}/execute", {"plan_hash": plan["sha256"]}, operator=True)
     assert result["status"] == "SNAPSHOT" and result["payload"]["source_unchanged"]
     backup = Path(result["payload"]["snapshot_path"])
@@ -452,3 +461,47 @@ def test_windows_owned_stop_uses_verified_handle_and_synchronize_right(monkeypat
         with pytest.raises(ValueError, match="OWNED_PROCESS_CHANGED"):
             instances.ProcessRunner().stop({"pid": 42, "birth": "other"})
         assert calls == [("close", 99)]
+
+
+@pytest.mark.parametrize("state, expected", [(0, None), (258, "123"), (0xFFFFFFFF, "UNKNOWN")])
+def test_windows_owner_identity_requires_live_process_not_just_creation_time(monkeypatch, state, expected):
+    import ctypes
+    from types import SimpleNamespace
+
+    import shine.comfyops.installer as installer
+
+    calls = []
+
+    class Function:
+        def __init__(self, fn):
+            self.fn = fn
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    def times(handle, created, *rest):
+        ctypes.cast(created, ctypes.POINTER(ctypes.c_ulonglong))[0] = 123
+        calls.append("birth")
+        return 1
+
+    def opened(access, inherit, pid):
+        assert access & 0x100000
+        return 99
+
+    kernel = SimpleNamespace(
+        OpenProcess=Function(opened),
+        WaitForSingleObject=Function(lambda *args: state),
+        GetProcessTimes=Function(times),
+        CloseHandle=Function(lambda handle: calls.append("closed")),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(installer.os, "name", "nt")
+        patch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+        if expected == "UNKNOWN":
+            with pytest.raises(ValueError, match="LOCK_OWNER_LIVENESS_UNKNOWN"):
+                installer.process_identity(42)
+        else:
+            assert installer.process_identity(42) == expected
+    assert calls[-1] == "closed"
+    if state != 258:
+        assert "birth" not in calls

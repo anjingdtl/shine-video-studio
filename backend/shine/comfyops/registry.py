@@ -116,7 +116,9 @@ def assemble_template(template: str, name: str):
         from shine.comfy.workflow import graph_hash
 
         filename = "ref2va-2img" + ("-1aud" if template.endswith("-1aud") else "") + ".json"
-        source = json.loads((Path(__file__).resolve().parents[3] / "config" / "workflows" / filename).read_text())
+        source = json.loads(
+            (Path(__file__).resolve().parents[3] / "config" / "workflows" / filename).read_text(encoding="utf-8")
+        )
         pinned = (
             "7d86f7b6d994b0b38cc379a4fe0268f68776c4a43e80fb0f7651a3005f57dcd6"
             if template.endswith("-1aud")
