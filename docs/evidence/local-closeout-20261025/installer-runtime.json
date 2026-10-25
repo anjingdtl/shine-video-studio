@@ -1,0 +1,141 @@
+{
+  "at": "2026-10-25T15:35:47.025385+00:00",
+  "source_base": "68af13db2de873a40ed31dd3833ef647ef8bcd7e",
+  "backend": {
+    "tests": "455",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "195.504"
+  },
+  "targeted": {
+    "tests": "68",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "5.251"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "uv_no_config_lock_check_pypi": "PASS",
+    "diff_check": "PASS",
+    "human_helper": "PARSED_AND_PREVIEWED_ONLY",
+    "new_commit_remote_ci": "NOT_YET_SUBMITTED",
+    "typescript_vite": "PASS",
+    "alembic": "PASS fresh isolated installer-migration database"
+  },
+  "previous_sha_ci": {
+    "sha": "68af13db2de873a40ed31dd3833ef647ef8bcd7e",
+    "run_id": 40205385770,
+    "backend": "SUCCESS",
+    "backend-windows": "SUCCESS",
+    "frontend": "SUCCESS",
+    "web-e2e": "SUCCESS"
+  },
+  "observed_weight_redirects": [
+    {
+      "package": "Qwen3-ASR-0.6B-5eb14417",
+      "file": "model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    },
+    {
+      "package": "Qwen3-ForcedAligner-0.6B-c7cbfc20",
+      "file": "model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    },
+    {
+      "package": "Qwen3-TTS-12Hz-0.6B-Base-5d839924",
+      "file": "model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    },
+    {
+      "package": "Qwen3-TTS-12Hz-0.6B-Base-5d839924",
+      "file": "speech_tokenizer/model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    },
+    {
+      "package": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673",
+      "file": "model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    },
+    {
+      "package": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673",
+      "file": "speech_tokenizer/model.safetensors",
+      "status": 302,
+      "redirect_host": "us.aws.cdn.hf.co"
+    }
+  ],
+  "real_metadata_probe": {
+    "at": "2026-10-25T15:32:49.116863+00:00",
+    "scope": "ONE_SMALL_METADATA_FILE_ONLY",
+    "package": "Qwen3-ASR-0.6B-5eb14417-cdn1",
+    "file": "generation_config.json",
+    "bytes": 142,
+    "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c",
+    "weights_downloaded": false,
+    "status": "PASS",
+    "verified_bytes": 142
+  },
+  "new_plan": {
+    "id": "90638956-4d4a-4e37-86de-1f53739562d2",
+    "sha256": "454c91b3575c631d85dda822ae34cabe5ec221f9ac7a5b255c13fba34e6ac73f",
+    "status": "AWAITING_APPROVAL",
+    "packages": [
+      {
+        "id": "e868abd3-f4f5-4ee4-bfa4-bf2cb8721569",
+        "sha256": "876ce7ff31ab797a5ada086453e01b04b5d989c97cdd5df62cfd310d2aa1de96",
+        "name": "Qwen3-ASR-0.6B-5eb14417-cdn1",
+        "files": 9,
+        "bytes": 1880618159
+      },
+      {
+        "id": "af6076f4-6482-452d-91ec-a41f8390855f",
+        "sha256": "bde6734b0af51fa0960d24187855db0b96946dcb717a7608a3b67a20ee2e6947",
+        "name": "Qwen3-ForcedAligner-0.6B-c7cbfc20-cdn1",
+        "files": 9,
+        "bytes": 1840070940
+      },
+      {
+        "id": "58de1b8e-696a-4d52-a5ac-b9c29dc7ff81",
+        "sha256": "b00414726019a791ea470abe4f707ca83bd938a10eaf08d8b276fd1268b47128",
+        "name": "Qwen3-TTS-12Hz-0.6B-Base-5d839924-cdn1",
+        "files": 12,
+        "bytes": 2516104532
+      },
+      {
+        "id": "fc45e8dc-05d2-4363-a345-b5bae6dc1f2d",
+        "sha256": "ffddefa8aa5d8a8ce62ce9c9bb3c82e65adffaa314357b8100d21d7441f7c7af",
+        "name": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1",
+        "files": 12,
+        "bytes": 4520162313
+      }
+    ],
+    "download_bytes": 10756955944,
+    "disk_required": 21513911888,
+    "supersedes_unapproved_plan": "986fba4e-04c2-4555-8a37-aa109b1ea97d",
+    "approved_or_executed": false,
+    "weights_downloaded": false
+  },
+  "commands": [
+    "backend/.venv/Scripts/python.exe -m pytest -c backend/pyproject.toml backend/tests/test_installer_redirects.py backend/tests/test_v13_preparation.py -q",
+    "backend/.venv/Scripts/python.exe -m pytest -c backend/pyproject.toml backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-installer-redirects.xml",
+    "backend/.venv/Scripts/ruff.exe check backend/shine backend/alembic backend/tests",
+    "uv --no-config lock --project backend --check --default-index https://pypi.org/simple",
+    "npm --prefix frontend run build",
+    "backend/.venv/Scripts/alembic.exe -c backend/alembic.ini upgrade head (explicit isolated database)"
+  ],
+  "earlier_failures": [
+    "uv --locked rejected global mirror configuration; explicit no-config PyPI lock check passed without lockfile edit",
+    "new test imported graph_hash from incorrect module; corrected and reran targeted and complete suites"
+  ],
+  "boundaries": {
+    "model_inference": "NOT_RUN",
+    "voice_or_master_approvals": "NONE",
+    "full_product": "PARTIAL"
+  }
+}

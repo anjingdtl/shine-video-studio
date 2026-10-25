@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-25T15:04:03.170402+00:00",
+  "collected_at": "2026-10-25T15:35:47.025385+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "437",
+    "tests": "455",
     "errors": "0",
     "failures": "0",
     "skipped": "0",
-    "time": "194.603"
+    "time": "195.504"
   },
   "checks": {
     "ruff": "PASS incl local_review_server.py",
@@ -17,7 +17,7 @@
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
     "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]; 12 existing browser flow families",
-    "remote_ci": "PENDING_AT_COMMIT; exact current SHA checks on PR #7 are authoritative"
+    "remote_ci": "68af13d four jobs SUCCESS, run 40205385770; later installer change not yet submitted"
   },
   "real_text_roles": {
     "scriptwriter": {
@@ -359,9 +359,36 @@
       "idle_after_restart_allocated_bytes": 0,
       "ledger_release": "NOT_RELEASED; authenticated human model_reconcile grant required",
       "provider_release_proposal": "PINNED_NOT_EXECUTED",
-      "cublas_cleanup_after_inference_retest": "NOT_RUN"
+      "cublas_cleanup_after_inference_retest": "NOT_RUN",
+      "status_scope": "HISTORICAL_FAILURE_BEFORE_HUMAN_RECONCILIATION"
     },
-    "qc_report_history_note": "First experimental recheck used legacy overwrite path: failure gate rows and captured JSON retained, original QCReport body updated. Subsequent implementation appends changed reports and has immutable-history regression."
+    "qc_report_history_note": "First experimental recheck used legacy overwrite path: failure gate rows and captured JSON retained, original QCReport body updated. Subsequent implementation appends changed reports and has immutable-history regression.",
+    "subsequent_human_reconciliation": {
+      "at": "2026-10-25T15:14:50.4136457Z",
+      "human_operator": "shine-owner",
+      "status": "ABANDONED",
+      "id": "8cc24300-09f5-49ce-a530-e43edf2e8c87",
+      "lease_status_verified_readonly_db": "RELEASED"
+    },
+    "subsequent_real_release_retest": {
+      "status": "PASS",
+      "at": "2026-10-25T15:18:09.535504+00:00",
+      "model_call_id": "7d844244-45bb-44e8-981b-771e4824cd44",
+      "lease_status_verified_readonly_db": "RELEASED",
+      "health_after": {
+        "status": "ok",
+        "model": "local-qwen3-vl-4b",
+        "is_mock": false,
+        "loaded": false,
+        "asr_loaded": false,
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "manifest_sha256": "e4a3146dfe795160def6f517684f0ac618d765ee813bd9ea3c2b25d6721a3a4f"
+      },
+      "h3_submissions": 0,
+      "artifact_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+      "runtime_release_pass": true
+    }
   },
   "serial_backend_before_sdk_isolation": {
     "tests": "427",
@@ -370,5 +397,13 @@
     "skipped": "0",
     "time": "186.253"
   },
-  "sdk_runtime_evidence": "docs/evidence/local-closeout-20261025/sdk-runtime.json"
+  "sdk_runtime_evidence": "docs/evidence/local-closeout-20261025/sdk-runtime.json",
+  "backend_before_installer_redirects": {
+    "tests": "437",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "194.603"
+  },
+  "installer_runtime_evidence": "docs/evidence/local-closeout-20261025/installer-runtime.json"
 }

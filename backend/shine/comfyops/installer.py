@@ -16,10 +16,11 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from urllib.parse import urlsplit
+from typing import Literal
+from urllib.parse import urljoin, urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 
 class PackageFile(BaseModel):
@@ -28,6 +29,23 @@ class PackageFile(BaseModel):
     relative_path: str
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     size: int = Field(gt=0)
+    redirect_hosts: list[Literal["huggingface.co", "us.aws.cdn.hf.co"]] = Field(default_factory=list, max_length=2)
+
+    @model_validator(mode="after")
+    def redirect_policy(self):
+        if self.redirect_hosts:
+            check_url(self.url, {"huggingface.co"})
+            if len(set(self.redirect_hosts)) != len(self.redirect_hosts):
+                raise ValueError("DUPLICATE_REDIRECT_HOST")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        # Preserve the serialized bytes/hash contract of existing no-redirect plans.
+        if not self.redirect_hosts:
+            result.pop("redirect_hosts", None)
+        return result
 
 
 class PackageSpec(BaseModel):
@@ -83,7 +101,7 @@ def safe_target(root: Path, relative: str) -> Path:
     return target
 
 
-def check_url(url: str, hosts: set[str]):
+def check_url(url: str, hosts: set[str], *, signed_query=False):
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -92,7 +110,7 @@ def check_url(url: str, hosts: set[str]):
         or parsed.password
         or parsed.port not in {None, 443}
         or parsed.fragment
-        or parsed.query
+        or (parsed.query and not signed_query)
     ):
         raise ValueError("UNTRUSTED_DOWNLOAD_URL")
 
@@ -103,6 +121,28 @@ class HTTPTransport:
         return httpx.stream(
             "GET", url, headers={"Range": f"bytes={offset}-"} if offset else {}, follow_redirects=False, timeout=30
         )
+
+    @contextmanager
+    def stream_approved(self, spec: PackageFile, offset):
+        """Follow only the per-file policy included in the human-approved plan.
+
+        HF CDN signatures are transient: never persist their query strings or
+        forward business credentials. Every hop uses only the original Range.
+        """
+        url = spec.url
+        for hop in range(6):
+            with self.stream(url, offset) as response:
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    yield response
+                    return
+                if hop == 5:
+                    raise ValueError("DOWNLOAD_REDIRECT_LIMIT")
+                location = response.headers.get("location")
+                if not location:
+                    raise ValueError("DOWNLOAD_REDIRECT_LOCATION_MISSING")
+                target = urljoin(url, location)
+                check_url(target, set(spec.redirect_hosts), signed_query=True)
+                url = target
 
 
 @dataclass
@@ -124,7 +164,14 @@ class ControlledDownloader:
         if offset > spec.size:
             partial.unlink()
             offset = 0
-        with self.transport.stream(spec.url, offset) as response:
+        if spec.redirect_hosts:
+            approved_stream = getattr(self.transport, "stream_approved", None)
+            if approved_stream is None:
+                raise ValueError("TRANSPORT_REDIRECT_POLICY_UNSUPPORTED")
+            stream = approved_stream(spec, offset)
+        else:
+            stream = self.transport.stream(spec.url, offset)
+        with stream as response:
             if response.status_code not in {200, 206}:
                 raise ValueError("DOWNLOAD_HTTP_REJECTED")
             if response.status_code == 206:

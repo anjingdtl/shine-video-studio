@@ -219,3 +219,49 @@ TTS/4.57.3、ASR/4.57.6 各在独立进程退出，导入阶段 CUDA 分配均�
 
 具体发行包哈希、四个权重 revision、导入结果和最终回归命令见
 [SDK 执行证据](evidence/local-closeout-20261025/sdk-runtime.json)。
+
+### 7.6 真人对账完成与真实卸载复验
+
+第 7.3 节记录的是当时的失败状态，以下为后续新证据，不删除失败历史。
+本机操作员 `shine-owner` 于 2026-10-25 23:14:50（北京时间）通过交互脚本签署指定
+丢失调用的对账；调用 `8cc24300-09f5-49ce-a530-e43edf2e8c87` 已变为 ABANDONED。
+该操作仅放弃丢失审片结果，没有批准影片或重投 H3。
+
+23:18:09 的新真实 VLM 调用 `7d844244-45bb-44e8-981b-771e4824cd44` 完成，
+沿用同一成片 SHA-256，没有新增 H3 提交；审片后模型 loaded=false，CUDA allocated/reserved
+均为 **0 字节**。因此 cuBLAS 清理后的“真实推理 → 卸载”这一限定闭环现为 PASS。
+这不替代人的美学/声音验收，也不关闭双人 60 秒、其他生成模式或主资产权利等缺项。
+
+提交 `68af13db2de873a40ed31dd3833ef647ef8bcd7e` 的远端 PR CI
+[run 40205385770](https://github.com/anjingdtl/shine-video-studio/actions/runs/40205385770)
+已核实四项 SUCCESS：backend、backend-windows、frontend、web-e2e。该结论只属于此 SHA。
+
+### 7.7 固定模型安装的下载通道修复
+
+安装前 HEAD 检查确认六个 Qwen 权重 resolve 地址均返回 302，目标主机为
+`us.aws.cdn.hf.co`。旧下载器拒绝所有跳转，因此旧计划即使批准也无法完成下载。
+
+新增逐文件 `redirect_hosts`，仅支持明确列出的官方 Hugging Face 主机；策略包含在
+包/计划哈希及人的审批快照中，不能扩大旧审批。旧文件清单的空策略不改变序列化内容与哈希，
+仍拒绝所有跳转。每一跳独立验证 HTTPS、主机、端口、用户信息和 fragment，上限五次跳转；
+签名 query 仅在获准跳转目标使用，不写入清单。继续执行断点 Range、精确大小、SHA-256 和原子落盘校验。
+
+四包新计划 `90638956-4d4a-4e37-86de-1f53739562d2`、原始哈希
+`454c91b3575c631d85dda822ae34cabe5ec221f9ac7a5b255c13fba34e6ac73f`
+仍为 AWAITING_APPROVAL；旧计划保留且不执行。下载总量仍为 10,756,955,944 字节。
+本轮真实通道仅下载校验了固定版本的 142 字节 generation_config.json，没有下载权重。
+
+已准备本机真人交互安装脚本 `confirm_voice_model_install.ps1`，仅作语法检查和只读预览。
+执行需要本人确认固定计划与许可证声明、输入操作员凭据（也可现场生成内存临时凭据），
+再通过正式一次性 install grant 批准。安装时停止该验收副本 Worker，串行下载到隔离目录；
+成功只记 FILES_VERIFIED，模型推理、资源测量及 Voice/主资产审批仍分别待验。
+失败保留 InstallationAttempt 对账，禁止盲重试。AI 没有代签或执行此真人步骤。
+
+定向回归 **68 passed**；覆盖默认拒绝跳转、获准同域/CDN、恶意跳转、循环、断点、大小/校验失败及旧哈希兼容。
+曾有一次新增测试导入路径错误，修正后通过；首次 uv --locked 被本机全局镜像配置影响，
+显式 `uv --no-config lock --project backend --check --default-index https://pypi.org/simple` 通过，未改锁文件。
+全量结果见 [安装通道验证记录](evidence/local-closeout-20261025/installer-runtime.json)。
+
+本阶段最终完整后端 **455 passed、0 skipped / errors / failures（195.504 秒）**，
+包含 V1.3 三套、offline E2E 和 film crew。Ruff、锁文件核验、TypeScript/Vite、隔离新库 Alembic
+迁移通过；仅存既有 Starlette/AnyIO 弃用警告。后续提交的 CI 须按其新 SHA 独立确认。

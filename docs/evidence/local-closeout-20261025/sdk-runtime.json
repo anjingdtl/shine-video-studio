@@ -170,12 +170,79 @@
     "task_status": "NEEDS_REVIEW",
     "lease": "6ee935c4-1860-45a0-acf4-f9640187456d",
     "lease_status": "RECONCILE_REQUIRED",
-    "changed_by_this_stage": false
+    "changed_by_this_stage": false,
+    "status_scope": "HISTORICAL_STATUS_AT_SDK_STAGE_COLLECTION"
   },
   "boundaries": {
     "sdk_role_inference": "NOT_RUN pending package approval/files/resource profile",
     "voice_master_approvals": "NONE",
     "human_grants_forged": false,
     "full_product": "PARTIAL"
+  },
+  "subsequent_human_reconciliation": {
+    "at": "2026-10-25T15:14:50.4136457Z",
+    "human_operator": "shine-owner",
+    "status": "ABANDONED",
+    "id": "8cc24300-09f5-49ce-a530-e43edf2e8c87",
+    "lease_status_verified_readonly_db": "RELEASED"
+  },
+  "subsequent_real_release_retest": {
+    "status": "PASS",
+    "at": "2026-10-25T15:18:09.535504+00:00",
+    "model_call_id": "7d844244-45bb-44e8-981b-771e4824cd44",
+    "lease_status_verified_readonly_db": "RELEASED",
+    "health_after": {
+      "status": "ok",
+      "model": "local-qwen3-vl-4b",
+      "is_mock": false,
+      "loaded": false,
+      "asr_loaded": false,
+      "allocated_bytes": 0,
+      "reserved_bytes": 0,
+      "manifest_sha256": "e4a3146dfe795160def6f517684f0ac618d765ee813bd9ea3c2b25d6721a3a4f"
+    },
+    "h3_submissions": 0,
+    "artifact_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+    "runtime_release_pass": true
+  },
+  "subsequent_install_plan": {
+    "id": "90638956-4d4a-4e37-86de-1f53739562d2",
+    "sha256": "454c91b3575c631d85dda822ae34cabe5ec221f9ac7a5b255c13fba34e6ac73f",
+    "status": "AWAITING_APPROVAL",
+    "packages": [
+      {
+        "id": "e868abd3-f4f5-4ee4-bfa4-bf2cb8721569",
+        "sha256": "876ce7ff31ab797a5ada086453e01b04b5d989c97cdd5df62cfd310d2aa1de96",
+        "name": "Qwen3-ASR-0.6B-5eb14417-cdn1",
+        "files": 9,
+        "bytes": 1880618159
+      },
+      {
+        "id": "af6076f4-6482-452d-91ec-a41f8390855f",
+        "sha256": "bde6734b0af51fa0960d24187855db0b96946dcb717a7608a3b67a20ee2e6947",
+        "name": "Qwen3-ForcedAligner-0.6B-c7cbfc20-cdn1",
+        "files": 9,
+        "bytes": 1840070940
+      },
+      {
+        "id": "58de1b8e-696a-4d52-a5ac-b9c29dc7ff81",
+        "sha256": "b00414726019a791ea470abe4f707ca83bd938a10eaf08d8b276fd1268b47128",
+        "name": "Qwen3-TTS-12Hz-0.6B-Base-5d839924-cdn1",
+        "files": 12,
+        "bytes": 2516104532
+      },
+      {
+        "id": "fc45e8dc-05d2-4363-a345-b5bae6dc1f2d",
+        "sha256": "ffddefa8aa5d8a8ce62ce9c9bb3c82e65adffaa314357b8100d21d7441f7c7af",
+        "name": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1",
+        "files": 12,
+        "bytes": 4520162313
+      }
+    ],
+    "download_bytes": 10756955944,
+    "disk_required": 21513911888,
+    "supersedes_unapproved_plan": "986fba4e-04c2-4555-8a37-aa109b1ea97d",
+    "approved_or_executed": false,
+    "weights_downloaded": false
   }
 }
