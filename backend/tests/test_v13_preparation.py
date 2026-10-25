@@ -609,6 +609,109 @@ def test_local_install_business_service_runs_production_code_with_fake_http(prep
         execute_approved(factory, settings, plan["id"], plan["sha256"], "v13-test-operator", installer)
 
 
+def failed_package_install(prep):
+    from shine.comfyops.local import execute_approved
+    from shine.comfyops.models import InstallationAttempt
+
+    client, factory, settings = prep
+    project = create_project(client)
+    model = package(client, files=[file_spec().model_dump()])
+    plan = post(client, "/comfyops/install-plans", {
+        "project_id": project, "package_ids": [model["id"]], "disk_free": 100, "executor": "local",
+    })
+    plan = approve(client, plan, "install", f"/comfyops/install-plans/{plan['id']}/approve")
+    root = settings.data_dir / "comfyops" / "isolated-packages"
+    with pytest.raises(OSError):
+        execute_approved(factory, settings, plan["id"], plan["sha256"], "v13-test-operator",
+                         LocalInstaller(root, ControlledDownloader({"huggingface.co"}, BytesTransport(fail=True))))
+    with factory() as db:
+        attempt = db.scalar(select(InstallationAttempt).where(InstallationAttempt.plan_id == plan["id"]))
+        identity = attempt.id
+    grant = post(client, "/preparation/approval-grants", {
+        "action": "install_reconcile", "target_id": identity,
+    }, operator=True)
+    decision = {k: grant[k] for k in ("grant_id", "snapshot")} | {
+        "evidence": "Explicit test-only failure reconciliation",
+    }
+    return client, factory, settings, root, model, plan, identity, decision
+
+
+def test_failed_install_reconciliation_requires_grant_and_never_retries(prep):
+    from shine.comfyops.local import execute_approved
+    from shine.comfyops.models import InstallationPlan
+
+    client, factory, settings, root, model, plan, identity, decision = failed_package_install(prep)
+    path = f"/comfyops/install-attempts/{identity}/reconcile"
+    post(client, path, decision, expected=403)
+    missing = {**decision, "grant_id": "not-a-grant"}
+    post(client, path, missing, operator=True, expected=409)
+    result = post(client, path, decision, operator=True)
+    assert result["status"] == "RECONCILED_NO_RETRY"
+    assert result["payload"]["error_type"] == "OSError"
+    proof = result["payload"]["reconciliation"]
+    assert proof["packages"][0]["files"] == "ABSENT"
+    assert not proof["files_modified"] and not proof["resubmitted"] and not proof["runtime_verified"]
+    assert not (root / model["payload"]["name"]).exists()
+    post(client, path, decision, operator=True, expected=409)
+    with factory() as db:
+        assert db.get(InstallationPlan, plan["id"]).status == "RECONCILED_NO_RETRY"
+    with pytest.raises(ValueError, match="INSTALL_APPROVAL_REQUIRED"):
+        execute_approved(factory, settings, plan["id"], plan["sha256"], "v13-test-operator",
+                         LocalInstaller(root, ControlledDownloader({"huggingface.co"}, BytesTransport())))
+
+
+@pytest.mark.parametrize("condition", ["journal", "staging", "changed", "extra", "owner", "active-attempt"])
+def test_install_reconcile_uncertainty_does_not_consume_grant_or_mutate_files(prep, condition):
+    from shine.comfyops.installer import exclusive_file_lock
+    from shine.comfyops.models import InstallationAttempt
+
+    client, factory, _, root, model, plan, identity, decision = failed_package_install(prep)
+    name = model["payload"]["name"]
+    destination = root / name
+    marker = None
+    if condition in {"journal", "staging"}:
+        marker = root / (name + "." + condition)
+        marker.write_text("uncertain bytes")
+    if condition in {"changed", "extra"}:
+        (destination / "中文").mkdir(parents=True)
+        (destination / "中文/test.bin").write_bytes(b"evil" if condition == "changed" else b"data")
+        if condition == "extra":
+            (destination / "unexpected").write_text("preserve")
+    if condition == "active-attempt":
+        with factory.begin() as db:
+            db.add(InstallationAttempt(plan_id=plan["id"], payload={}, sha256="0" * 64, status="SUBMIT_INTENT"))
+
+    def reject():
+        post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True, expected=409)
+        with factory() as db:
+            assert not db.get(ApprovalGrant, decision["grant_id"]).used
+            assert db.get(InstallationAttempt, identity).status == "FAILED_RECONCILE_REQUIRED"
+
+    if condition == "owner":
+        with exclusive_file_lock(root / (name + ".lock")):
+            reject()
+    else:
+        reject()
+    if marker:
+        assert marker.read_text() == "uncertain bytes"
+    if condition == "changed":
+        assert (destination / "中文/test.bin").read_bytes() == b"evil"
+
+
+def test_install_reconcile_verified_files_does_not_promote_runtime(prep):
+    from shine.comfyops.models import ModelPackage
+
+    client, factory, _, root, model, _, identity, decision = failed_package_install(prep)
+    destination = root / model["payload"]["name"]
+    (destination / "中文").mkdir(parents=True)
+    (destination / "中文/test.bin").write_bytes(b"data")
+    result = post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True)
+    assert result["payload"]["reconciliation"]["packages"][0]["files"] == "MATCHES_PINNED_FILES"
+    with factory() as db:
+        assert db.get(ModelPackage, model["id"]).status == "UNVERIFIED_ORIGIN"
+    assert (destination / "中文/test.bin").read_bytes() == b"data"
+
+
 def test_model_unload_requires_idle_queue_and_never_kills_process():
     from shine.comfyops.inventory import ComfyModelLifecycle
 

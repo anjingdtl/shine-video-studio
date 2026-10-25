@@ -115,3 +115,73 @@ def test_redirect_keeps_checksum_and_size_enforcement(monkeypatch, tmp_path, bod
     with pytest.raises(ValueError, match=error):
         ControlledDownloader({"huggingface.co"}, http).download(file, tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def test_connect_only_retry_is_bounded_and_keeps_range(monkeypatch, tmp_path):
+    file = spec()
+    (tmp_path / (file.sha256 + ".part")).write_bytes(b"da")
+    calls = []
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        calls.append(kwargs["headers"])
+        if len(calls) < 3:
+            raise httpx.ConnectError("TLS failed https://cdn.invalid/?Signature=secret")
+        yield httpx.Response(206, content=b"ta", headers={"content-range": "bytes 2-3/4"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    assert ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(file, tmp_path).read_bytes() == b"data"
+    assert calls == [{"Range": "bytes=2-"}] * 3
+
+
+def test_exhausted_connection_does_not_expose_signed_url(monkeypatch, tmp_path):
+    calls = []
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        calls.append(args)
+        raise httpx.ConnectTimeout("https://cdn.invalid/?Signature=secret")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="^DOWNLOAD_CONNECTION_FAILED:ConnectTimeout$"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(spec(), tmp_path)
+    assert len(calls) == 3
+    assert not list(tmp_path.iterdir())
+
+
+def test_partial_response_is_not_replayed(monkeypatch, tmp_path):
+    file = spec()
+    calls = []
+
+    class InterruptedBody(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"da"
+            raise httpx.ReadError("https://cdn.invalid/?Signature=secret")
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        calls.append(args)
+        yield httpx.Response(200, stream=InterruptedBody())
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="^DOWNLOAD_STREAM_FAILED:ReadError$"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(file, tmp_path)
+    assert len(calls) == 1
+    assert (tmp_path / (file.sha256 + ".part")).read_bytes() == b"da"
+    assert not (tmp_path / file.sha256).exists()
+
+
+def test_protocol_failure_before_headers_is_sanitized_without_retry(monkeypatch, tmp_path):
+    calls = []
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        calls.append(args)
+        raise httpx.RemoteProtocolError("https://cdn.invalid/?Signature=secret")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="^DOWNLOAD_REQUEST_FAILED:RemoteProtocolError$"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(spec(), tmp_path)
+    assert len(calls) == 1

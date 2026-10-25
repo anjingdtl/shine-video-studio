@@ -212,16 +212,16 @@ function App() {
   }
 
   async function queueShot(shot: Shot) {
+    const profile = queueProvider === 'comfyui' ? workflowProfiles.find(p => p.id === queueProfile) : undefined;
     if (queueProvider === 'comfyui') {
-      const profile = workflowProfiles.find(p => p.id === queueProfile && p.mode === 'Ref2VA');
-      if (!profile) { report('请先选择已注册的 Ref2VA Profile。', 'error'); return; }
-      if (!window.confirm(`提交真实 Ref2VA 生成？\n镜头：${shot.name}\nProfile：${profile.name}\n此操作会进入 GPU 队列。`)) return;
+      if (!profile) { report('请先选择已注册的 H3 工作流 Profile。', 'error'); return; }
+      if (!window.confirm(`提交真实 ${profile.mode} 生成？\n镜头：${shot.name}\nProfile：${profile.name}\n此操作会进入 GPU 队列。`)) return;
     }
     await withBusy(async () => {
       await api(`/projects/${projectId}/jobs`, json('POST', {
         shot_id: shot.id, mock_scenario: mockScenario, provider: queueProvider,
-        workflow_profile_id: queueProvider === 'comfyui' ? queueProfile : null,
-        generation_mode: queueProvider === 'comfyui' ? 'Ref2VA' : null,
+        workflow_profile_id: profile?.id ?? null,
+        generation_mode: profile?.mode ?? null,
       }));
       await loadProject(projectId); report('任务已进入本地队列；请保持独立 Worker 运行。');
     });
@@ -419,10 +419,10 @@ function App() {
 
               <div className="card">
                 <label>提交方式<select value={queueProvider} onChange={e => setQueueProvider(e.target.value)}>
-                  <option value="mock">Mock 软件演示（默认）</option><option value="comfyui">真实 Ref2VA（逐次确认）</option>
+                  <option value="mock">Mock 软件演示（默认）</option><option value="comfyui">真实 H3（逐次确认）</option>
                 </select></label>
                 {queueProvider === 'comfyui' && <label>真实工作流 Profile<select value={queueProfile} onChange={e => setQueueProfile(e.target.value)}>
-                  <option value="">请选择</option>{workflowProfiles.filter(p => p.mode === 'Ref2VA').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  <option value="">请选择</option>{workflowProfiles.map(p => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
                 </select></label>}
               </div>
             <section className="production-layout" id="production">

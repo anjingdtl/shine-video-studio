@@ -351,6 +351,49 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         assert TEST_CREDENTIAL not in page.evaluate(
             "JSON.stringify(localStorage) + JSON.stringify(sessionStorage)"
         )
+        # UI-only modes: intercept every POST before it reaches the API. These
+        # profiles are deliberately not registered or presented as real evidence.
+        styles = c.get(base + f"/projects/{p}/styles").json()
+        post(f"/projects/{p}/shots", {
+            "name": "Mode routing UI fixture",
+            "spec": {"story_beat": "Synthetic UI routing only", "duration_target_s": 5,
+                     "style_version_id": styles[0]["id"], "camera": {"shot_size": "medium"}},
+        })
+        profiles = [
+            {"id": f"ui-only-{mode}", "name": f"UI fixture NO SUBMISSION {mode}", "mode": mode,
+             "parameter_map": {}, "required_nodes": [], "checkpoint_id": "UI_ONLY",
+             "graph_sha256": "0" * 64, "validated_against": None, "created_at": "2026-10-25"}
+            for mode in ("T2VA", "Ref2VA")
+        ]
+        page.route("**/api/v1/workflow-profiles?*", lambda route: route.fulfill(json=profiles))
+        submissions = []
+
+        def capture_submission(route):
+            if route.request.method == "POST":
+                submissions.append(route.request.post_data_json)
+                route.fulfill(status=201, json={"test_only": "NOT_SUBMITTED"})
+            else:
+                route.continue_()
+
+        page.route(f"**/api/v1/projects/{p}/jobs", capture_submission)
+        page.reload(wait_until="networkidle")
+        page.locator("select").first.select_option(p)
+        page.get_by_label("提交方式").select_option("comfyui")
+        queue = page.get_by_role("button", name="加入队列", exact=True).first
+        messages = []
+        for mode in ("T2VA", "Ref2VA"):
+            page.get_by_label("真实工作流 Profile").select_option(f"ui-only-{mode}")
+            page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
+            queue.click()
+            assert f"提交真实 {mode} 生成" in messages[-1]
+            assert len(submissions) == (0 if mode == "T2VA" else 1), submissions
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/projects/{p}/jobs")):
+                queue.click()
+            assert submissions[-1]["generation_mode"] == mode
+            assert submissions[-1]["workflow_profile_id"] == f"ui-only-{mode}"
+        assert c.get(base + f"/projects/{p}/jobs").json() == [], "UI routing probe must create no backend jobs"
+        page.get_by_label("提交方式").select_option("mock")
         if screenshot:
             page.screenshot(path=str(screenshot), full_page=True)
         browser.close()
@@ -383,6 +426,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "TTS/ASR/alignment",
                     "SRT download",
                     "no browser credential persistence",
+                    "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
                 ],
                 "api_errors": failures,
             }

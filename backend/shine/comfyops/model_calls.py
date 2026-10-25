@@ -132,7 +132,7 @@ class TrackedProvider:
                 lock = db.get(ProjectRuleLock, self.project_id)
                 config = getattr(self.provider, "config", None)
                 review_binding = None
-                if config and self.reviewer_kind in {"VLM", "ASR"}:
+                if config and kind in {"VLM", "ASR"}:
                     review_binding = {
                         "profile_id": config.profile_id,
                         "kind": config.kind,
@@ -209,16 +209,24 @@ class TrackedProvider:
                         with IN_FLIGHT_LOCK:
                             IN_FLIGHT.discard(identity)
             except Exception as exc:
+                from shine.quality.semantic import ReceivedReviewError
+
                 with self.factory.begin() as db:
                     row = db.get(AgentTaskRecord, identity)
                     row.status = (
                         "FAILED"
                         if (
                             not row.trace.get("submitted") or (isinstance(exc, HTTPException) and exc.status_code < 500)
+                            or isinstance(exc, ReceivedReviewError)
                         )
                         else "NEEDS_REVIEW"
                     )
                     row.error_code = type(exc).__name__
+                    if isinstance(exc, ReceivedReviewError):
+                        row.trace = {**row.trace, "received_response": {
+                            "sha256": exc.response_sha256, "finish_reason": exc.finish_reason,
+                            "error_code": str(exc), "retryable": False,
+                        }}
                 raise
             with self.factory.begin() as db:
                 row = db.get(AgentTaskRecord, identity)

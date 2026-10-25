@@ -38,6 +38,13 @@ def verify_model_manifest(manifest):
     return root
 
 
+def review_token_limit(body):
+    limit = body.get("max_tokens", 2048)
+    if type(limit) is not int or not 128 <= limit <= 4096:
+        raise ValueError("REVIEW_OUTPUT_BUDGET_INVALID")
+    return limit
+
+
 def build_app(manifest):
     from fastapi import FastAPI, HTTPException
     from PIL import Image
@@ -170,6 +177,10 @@ def build_app(manifest):
     def complete(body: dict):
         if body.get("model") != manifest["model_id"]:
             raise HTTPException(404, "EXACT_MODEL_ID_REQUIRED")
+        try:
+            token_limit = review_token_limit(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         messages, count = [], 0
         for message in body.get("messages", []):
             content = message.get("content", [])
@@ -230,7 +241,7 @@ def build_app(manifest):
             )
             with torch.inference_mode():
                 output = state["model"].generate(
-                    **inputs, max_new_tokens=1024, do_sample=False
+                    **inputs, max_new_tokens=token_limit, do_sample=False
                 )
             generated = output[:, inputs["input_ids"].shape[1] :]
             answer = state["processor"].batch_decode(
@@ -239,7 +250,9 @@ def build_app(manifest):
             return {
                 "model": manifest["model_id"],
                 "is_mock": False,
-                "choices": [{"message": {"role": "assistant", "content": answer}}],
+                "choices": [{"message": {"role": "assistant", "content": answer},
+                             "finish_reason": "length" if generated.shape[1] >= token_limit else "stop"}],
+                "usage": {"prompt_tokens": inputs["input_ids"].shape[1], "completion_tokens": generated.shape[1]},
             }
 
     @app.post("/free")

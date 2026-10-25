@@ -244,5 +244,63 @@
     "supersedes_unapproved_plan": "986fba4e-04c2-4555-8a37-aa109b1ea97d",
     "approved_or_executed": false,
     "weights_downloaded": false
-  }
+  },
+  "subsequent_failed_install_attempt": {
+    "id": "b993f2d6-8906-4163-9479-22b03885be6c",
+    "status": "FAILED_RECONCILE_REQUIRED",
+    "payload": {
+      "plan_hash": "68b920059e13c67db7add60ac1a53d049b6beb53617590159346e98b32829059",
+      "started_at": "2026-10-25 15:38:49.409789",
+      "system_scope": "NEW_ISOLATED_PACKAGES_ONLY",
+      "completed_packages": 0,
+      "error_type": "ConnectError"
+    },
+    "observed_traceback": "SSL UNEXPECTED_EOF_WHILE_READING during CDN connection",
+    "traceback_scope": "Observed before restart; original api.err.log was subsequently replaced by startup",
+    "completed_model_packages": 0,
+    "weight_files_downloaded": 0,
+    "metadata_cache": [
+      {
+        "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c",
+        "bytes": 142
+      },
+      {
+        "sha256": "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50",
+        "bytes": 57456
+      },
+      {
+        "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
+        "bytes": 1161
+      },
+      {
+        "sha256": "76d3ae4601ce939830b2517f4a6cadb86cc51316c3900af6b020b051c21a478c",
+        "bytes": 6193
+      },
+      {
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "bytes": 1671853
+      }
+    ],
+    "no_blind_retry": true
+  },
+  "current_runtime_install_proposal": {
+    "id": "95826b02-8a75-4937-95ba-083085958822",
+    "sha256": "63abb7fd71249996e06144d04673979f53848f0281d9c699571c4f6245acdbbe",
+    "status": "AWAITING_APPROVAL",
+    "download_bytes": 10756955944,
+    "resource_budget": {
+      "per_serial_stage_mib": 12000,
+      "measurement": "ESTIMATED_NOT_MEASURED",
+      "reason": "Conservative admission cap for first local run; actual physical free VRAM checked before load"
+    },
+    "routing": {
+      "asr": "6a625aea-d494-4b39-9f4e-1b0ba5393d59",
+      "align": "5af5f7b9-8b4c-49ef-abae-2157d47a38b6",
+      "base": "33b75f7b-ee83-43d3-8d5a-d90eb5d031e9",
+      "design": "90f9fa5e-864b-4b16-ab4a-e31bcc4cfb00"
+    },
+    "same_fixed_files_paths_and_network": true,
+    "approved_or_executed": false
+  },
+  "post_response_fix_negative_review": "NOT_RUN; see recovery-and-review.json for rejected prior output"
 }

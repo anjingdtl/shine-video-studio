@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -19,6 +20,19 @@ from shine.schemas import (
     StyleBible,
 )
 from shine.security import require_loopback_url
+
+
+class ReceivedReviewError(ValueError):
+    """A complete HTTP response was received, but it is not usable QC evidence.
+
+    This is a definitive response failure, never permission to retry inference.
+    Only its digest and classification enter the model-call ledger.
+    """
+
+    def __init__(self, code, response_sha256, finish_reason=None):
+        super().__init__(code)
+        self.response_sha256 = response_sha256
+        self.finish_reason = finish_reason
 
 
 @dataclass(frozen=True)
@@ -136,6 +150,9 @@ class OpenAICompatibleVisionReviewer:
                     "findings contains ONLY violations or unresolved uncertainties, never positive matches. "
                     "Use findings=[] if there are no issues; describe successful checks in raw_summary. "
                     "Do not infer identity from descriptive text alone; disclose missing identity evidence. "
+                    "Keep findings concise and group repeated observations. "
+                    "raw_summary must be at most 300 characters. "
+                    "Do not omit distinct violations or uncertainties to fit the output budget. "
                     f"ShotSpec: {context.shot_spec.model_dump_json()}\n"
                     f"Style: {context.style.model_dump_json()}\n"
                     f"JSON Schema: {json.dumps(schema, ensure_ascii=False)}"
@@ -153,20 +170,30 @@ class OpenAICompatibleVisionReviewer:
             "model": self.config.model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.0,
+            "max_tokens": 2048,
             "response_format": {"type": "json_object"},
         }
         with httpx.Client(timeout=self.config.timeout_s) as client:
             response = client.post(self._endpoint(), headers=headers, json=payload)
         if response.status_code >= 400:
             raise RuntimeError(f"VLM request failed with status {response.status_code}")
-        body = response.json()
-        text = body["choices"][0]["message"]["content"]
-        parsed = json.loads(text)
-        parsed["is_mock"] = bool(parsed.get("is_mock", False))
-        parsed["input_sha256"] = context.artifact_sha256
-        parsed["model"] = self.config.model
-        parsed["reviewer"] = self.name
-        return SemanticReviewResult.model_validate(parsed)
+        response_hash = hashlib.sha256(response.content).hexdigest()
+        try:
+            body = response.json()
+            choice = body["choices"][0]
+            finish = choice.get("finish_reason")
+            if finish not in {None, "stop"}:
+                raise ReceivedReviewError("VLM_RESPONSE_INCOMPLETE", response_hash, finish)
+            parsed = json.loads(choice["message"]["content"])
+            parsed["is_mock"] = bool(parsed.get("is_mock", False))
+            parsed["input_sha256"] = context.artifact_sha256
+            parsed["model"] = self.config.model
+            parsed["reviewer"] = self.name
+            return SemanticReviewResult.model_validate(parsed)
+        except ReceivedReviewError:
+            raise
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", response_hash) from exc
 
     def release_models(self):
         # This provider runs outside this host's GPU ledger.

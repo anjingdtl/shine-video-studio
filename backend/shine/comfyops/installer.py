@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -116,11 +116,28 @@ def check_url(url: str, hosts: set[str], *, signed_query=False):
 
 
 class HTTPTransport:
+    @contextmanager
     def stream(self, url, offset):
-        # No redirects, including same-host redirects: each target needs its own approved manifest.
-        return httpx.stream(
-            "GET", url, headers={"Range": f"bytes={offset}-"} if offset else {}, follow_redirects=False, timeout=30
-        )
+        # Retry only connection establishment for this immutable GET, before any
+        # response bytes. Never replay an installation attempt or a partial body.
+        with ExitStack() as stack:
+            for attempt in range(3):
+                try:
+                    response = stack.enter_context(httpx.stream(
+                        "GET", url, headers={"Range": f"bytes={offset}-"} if offset else {},
+                        follow_redirects=False, timeout=30,
+                    ))
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    if attempt == 2:
+                        raise ValueError(f"DOWNLOAD_CONNECTION_FAILED:{type(exc).__name__}") from None
+                except httpx.HTTPError as exc:
+                    raise ValueError(f"DOWNLOAD_REQUEST_FAILED:{type(exc).__name__}") from None
+            try:
+                yield response
+            except httpx.HTTPError as exc:
+                # Keep transient signed URLs out of API responses and logs.
+                raise ValueError(f"DOWNLOAD_STREAM_FAILED:{type(exc).__name__}") from None
 
     @contextmanager
     def stream_approved(self, spec: PackageFile, offset):

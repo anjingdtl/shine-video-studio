@@ -250,6 +250,7 @@ class GrantRequest(Strict):
         "asset_approve",
         "asset_lock",
         "install",
+        "install_reconcile",
         "promote",
         "voice_execute",
         "scope_configure",
@@ -274,6 +275,7 @@ TARGETS = {
     "asset_approve": Asset,
     "asset_lock": Asset,
     "install": InstallationPlan,
+    "install_reconcile": InstallationAttempt,
     "promote": CandidateAsset,
     "voice_freeze": VoiceProfile,
     "voice_execute": RightsRecord,
@@ -390,6 +392,18 @@ def execute_install(
 @router.get("/comfyops/install-attempts/{identity}")
 def attempt(identity: str, db: DBSession):
     return public(get(db, InstallationAttempt, identity))
+
+
+@router.post("/comfyops/install-attempts/{identity}/reconcile")
+def reconcile_install_attempt(identity: str, body: Decision, actor: Operator, settings: SettingsDep, db: DBSession):
+    from shine.comfyops.local import reconcile_failed_install
+
+    locked(db)
+    try:
+        row = reconcile_failed_install(db, settings, get(db, InstallationAttempt, identity), actor, body)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return public(row)
 
 
 @router.get("/workflow-capabilities")

@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-25T15:35:47.025385+00:00",
+  "collected_at": "2026-10-25T23:30:15.775683+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "455",
     "errors": "0",
     "failures": "0",
     "skipped": "0",
-    "time": "195.504"
+    "tests": "473",
+    "time": "202.547"
   },
   "checks": {
     "ruff": "PASS incl local_review_server.py",
@@ -17,7 +17,7 @@
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
     "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]; 12 existing browser flow families",
-    "remote_ci": "68af13d four jobs SUCCESS, run 40205385770; later installer change not yet submitted"
+    "remote_ci": "dfbc54c four jobs SUCCESS, run 40207758692; later changes not yet submitted"
   },
   "real_text_roles": {
     "scriptwriter": {
@@ -405,5 +405,13 @@
     "skipped": "0",
     "time": "194.603"
   },
-  "installer_runtime_evidence": "docs/evidence/local-closeout-20261025/installer-runtime.json"
+  "installer_runtime_evidence": "docs/evidence/local-closeout-20261025/installer-runtime.json",
+  "backend_before_recovery_response_fix": {
+    "tests": "455",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "195.504"
+  },
+  "recovery_and_review_evidence": "docs/evidence/local-closeout-20261025/recovery-and-review.json"
 }

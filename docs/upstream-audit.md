@@ -122,3 +122,21 @@ declared card license, not an asset/voice-cloning permission grant:
 LFS hashes/sizes came from pinned Hugging Face metadata; small metadata files were read from the
 same official revision and checked against Git blob identities before calculating SHA-256.
 These are pending installation proposals. SDK import success is not checkpoint execution or voice acceptance.
+
+## 2026-10-26 T2VA source preparation (no model execution)
+
+Inspected Comfy-Org/workflow_templates commit `67984637eefcd4825dcf5c134e39034785be1682`,
+`templates/video_minimax_h3_t2v.json` blob `b99a270eadd74c371c3c4facd9322da6a99ca4db`.
+The repository LICENSE blob `ec6ae8a4821329f417a3e74e6dd108f499d08290` declares MIT.
+The original template and LICENSE are in ignored local evidence, not bundled guides or third-party runtime source.
+The API draft follows its native false branch, 20 steps, Base FL2VA INT8 ConvRot, no Turbo LoRA or first/last frames.
+Native 1344x768 and five seconds are explicit draft choices; structure checks do not verify an actual render.
+
+Comfy-Org/MiniMax-H3 revision `e5eb578a89295337b8ff433a035929ce0279e0b6` identifies the missing
+`diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors`, 20,970,379,616 bytes,
+SHA-256 `e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a`.
+Its card declares the custom MiniMax H3 Community License, not MIT/Apache-2.0.
+The linked MiniMaxAI/MiniMax-H3 LICENSE was independently pinned at revision
+`42ed227ee7df40d41602854ae760620d6eb651fe`, Git blob `c389b45855337ccec8ddeb389f4fe902abcd0b19`,
+SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`.
+No acceptance of those terms, download approval, model execution or modification of original ComfyUI is inferred.

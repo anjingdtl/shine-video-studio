@@ -265,3 +265,92 @@ TTS/4.57.3、ASR/4.57.6 各在独立进程退出，导入阶段 CUDA 分配均�
 本阶段最终完整后端 **455 passed、0 skipped / errors / failures（195.504 秒）**，
 包含 V1.3 三套、offline E2E 和 film crew。Ruff、锁文件核验、TypeScript/Vite、隔离新库 Alembic
 迁移通过；仅存既有 Starlette/AnyIO 弃用警告。后续提交的 CI 须按其新 SHA 独立确认。
+
+### 7.8 安装 TLS 失败后的正式对账与连接容错（10-26 续）
+
+`dfbc54c14a5fd97f63298b761388510a4cf61127` 的四项远端 CI 已全部 SUCCESS，
+[run 40207758692](https://github.com/anjingdtl/shine-video-studio/actions/runs/40207758692)。
+随后真人运行安装脚本，原计划取得正式一次性批准并开始执行。安装尝试
+`b993f2d6-8906-4163-9479-22b03885be6c` 在首包 ASR 的权重连接处遇到
+`SSL UNEXPECTED_EOF_WHILE_READING`。已缓存五份固定元数据，但没有已完成模型包或权重文件；
+原尝试保留 FAILED_RECONCILE_REQUIRED，原计划 NEEDS_REVIEW。没有自动重试。
+
+只读复查同一固定权重 URL：源站 HEAD 返回 302、获准 CDN HEAD 返回 200。
+这表明复查时连通，不能冒充大权重 GET 成功。下载器现对**响应建立前**的 ConnectError/
+ConnectTimeout 最多尝试三次；响应体错误不自动重放。保留已知 partial 供另行受控恢复，
+错误只返回固定错误码与异常类型，避免把临时签名 URL 带入 API 错误或日志。
+
+新增正式失败安装对账 API，要求操作员鉴权和一次性 `install_reconcile` grant。
+在 SQLite 事务及各包 OS 文件锁下检查：原计划/注册包/嵌入清单哈希一致，无活动安装尝试，
+无 journal/staging/rollback；目标目录只能缺失或与全部固定文件完全匹配，额外文件和篡改均阻断。
+成功只记 RECONCILED_NO_RETRY，保留原始错误和观察结果，不改文件，不升级模型可用状态，不重试旧计划。
+未知状态拒绝时不消耗批准令牌。新执行必须创建并另行批准新计划。
+
+当前新安装提案 `95826b02-8a75-4937-95ba-083085958822`、原始哈希
+`63abb7fd71249996e06144d04673979f53848f0281d9c699571c4f6245acdbbe`：
+仍为同样 42 个文件、路径、版本、大小和跳转主机，增加每个串行模型阶段 **12000 MiB 的 ESTIMATED
+准入预算**，用于首次本机运行前的显式资源配置。这不是实测消耗或资源验收；真实加载前仍检查物理空闲显存。
+原 UNKNOWN 包及早先未批准提案均保留，未篡改其资源状态。
+
+真人恢复脚本 `confirm_voice_model_recovery.ps1` 已准备并只读预览：先正式对账旧失败，
+再批准并执行此新计划；不复用旧 grant，不扩展模型文件范围。尚未代签、对账或执行此步骤。
+
+### 7.9 T2VA 页面入口与官方草稿准备
+
+Web 原先将真实任务硬编码为 Ref2VA，并隐藏其他模式档案。现按用户明确选择的已注册 Profile
+确定 mode，并在确认框和选项中显示该模式；没有选择或选项已失效时阻断，不自动换档案或删除引用。
+隔离浏览器验证 T2VA/Ref2VA 的取消和确认参数，拦截全部提交后核对后台任务仍为空。
+浏览器 13 类流程 MOCK_VERIFIED，api_errors=[]；不以该 UI 证据声称真实 T2VA 已运行。
+
+已读取 Comfy-Org/workflow_templates 固定提交 `67984637eefcd4825dcf5c134e39034785be1682`
+的 `templates/video_minimax_h3_t2v.json`，模板仓库为 MIT。源文件与许可证仅保留在被忽略的本机证据目录。
+整理出 16 节点原生 20 步 T2VA API **草稿**：保留 INT8 ConvRot Base FL2VA 路径、原始帧数表达式，
+显式使用 1344×768、5 秒，不使用 Turbo LoRA，不绑定首尾图。Prompt 输入保留编译器占位，未自由填写后提交。
+当前 ComfyUI 节点、输入名及连接输出下标结构核对通过；这不等于 `/prompt` 接受或模型运行。
+
+当前只缺 Base 权重 `minimax_h3_fl2va_pruned_int8_convrot.safetensors`。
+Comfy-Org/MiniMax-H3 固定 revision `e5eb578a89295337b8ff433a035929ce0279e0b6` 中该文件
+大小 20,970,379,616 字节，SHA-256
+`e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a`。
+模型使用 [MiniMax H3 Community License 固定版本](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE)，
+不能将模板 MIT 或 Qwen Apache-2.0 误用为该权重许可证。缺失权重及固定 LICENSE 的隔离安装提案
+`006f5586-797e-442f-80a1-beb57ec29444` 保持 AWAITING_APPROVAL；没有下载权重、注册真实 Profile 或提交 H3。
+原 Ref2VA 工作流和生产 ComfyUI 配置保持原状。
+
+### 7.10 真实 VLM 反例发现截断输出；未将其算作通过
+
+续轮服务监听均消失，旧 ComfyUI/验收服务 owner 已退出。逐个核对旧 PID/birth 后归档失效清单，
+未终止复用 PID 的新 owner；按历史实际 argv 恢复原 8188 ComfyUI，`/system_stats` 核对
+`--disable-async-offload --disable-pinned-memory` 仍在。验收 API/Web 已恢复，Worker 暂不启动。
+首次反例准备在 ComfyUI 离线预检处停止，模型调用数为零，记 NOT RUN；没有重放模型请求。
+
+恢复后进行一次新、明确的测试意图：沿用已校验视频和真实参考缩略图，仅在内存构造一条
+“白色摄影棚正午的红色卡通恐龙，不能出现人、街道、夜景”的矛盾剧情。没有修改数据库中的生产 Shot、
+Style、Asset、Artifact、Attempt 或门禁，未提交 H3。真实 VLM 输出被 1024-token 上限截断，
+客户端 JSON 解析失败，因此该反例的语义结果**没有通过验收**。卸载复验仍为 loaded=false、
+allocated/reserved=0；临时审片进程按持有句柄结束。调用
+`ff6d7832-52ed-442d-af75-4d03ee8f5d1b` 保留 NEEDS_REVIEW，资源租约已 RELEASED。
+
+本次测试封装漏传 reviewer_kind，导致该旧调用没有绑定释放档案。已通过现有正式提案接口固定原
+`local-qwen3-vl-4b` 档案供真人对账；没有代签 ABANDON。今后 TrackedProvider 按实际 VLM/ASR
+类型自动固定 Provider，封装是否显式传 reviewer_kind 不再决定该关键证据是否存在。
+
+修复输出链：客户端明确请求 2048 tokens 并要求精炼、合并重复观察，但不得为篇幅遗漏独立问题；
+本地服务接受 128–4096 的明确预算，返回 stop/length 和 token 使用量。长度截断、损坏 JSON 或不合 schema
+全部拒绝作为 QC 证据，不补造闭合 JSON、不删除发现项或制造 pass。
+
+新增“已完整收到 HTTP 响应但结果不合契约”的有类型错误，持久化响应 SHA-256、原因和不自动重试标记。
+只有实际收到回复且卸载确认的这种确定失败记 FAILED；超时、未知提交及卸载失败仍保持 NEEDS_REVIEW /
+RECONCILE_REQUIRED。既有不确定记录不会被此补丁追溯改成 FAILED，也不会自动重跑。
+6 个新增软件回归覆盖这一区别、隐式 Provider 固定及预算边界，连同 semantic/runtime/serial/offline E2E
+共 30 项通过。**此输出修复后的真实反例复验仍待旧调用的本人对账，不声称已运行。**
+
+已将指定截断结果的对账并入同一个真人恢复脚本预览，再接安装失败对账和新固定计划批准。
+三个动作分别走各自一次性 grant，不批准影片、音色或主资产；仅准备，尚未执行。
+
+本续轮最终完整后端 **473 passed、0 skipped / errors / failures（202.547 秒）**，包含新增安装恢复、
+响应分类和全部既有 V1.3/offline/film crew 测试。安装恢复定向 80 项、审片响应及旧 E2E 定向 30 项通过；
+Ruff（含两个本地脚本）、TypeScript/Vite、显式 PyPI 锁文件核验通过。
+浏览器曾因 label 的完整可访问名称匹配方式超时，修正定位后全部 13 类流程通过，未改弱业务断言。
+具体命令、旧失败、当前新计划、真实反例的未通过结果与服务恢复见
+[续轮验证记录](evidence/local-closeout-20261025/recovery-and-review.json)。当前全产品仍为 PARTIAL。

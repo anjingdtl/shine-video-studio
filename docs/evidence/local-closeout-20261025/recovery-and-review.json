@@ -1,0 +1,380 @@
+{
+  "collected_at": "2026-10-25T23:30:15.775683+00:00",
+  "source_base": "dfbc54c14a5fd97f63298b761388510a4cf61127",
+  "backend": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "473",
+    "time": "202.547"
+  },
+  "backend_before_response_fix": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "467",
+    "time": "205.679"
+  },
+  "installer_targeted": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "80",
+    "time": "8.134"
+  },
+  "review_targeted": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "30",
+    "time": "6.997"
+  },
+  "checks": {
+    "ruff": "PASS backend, tests, verify_v13_web.py and local_review_server.py",
+    "typescript_vite": "PASS",
+    "diff_check": "PASS",
+    "previous_sha_ci": {
+      "sha": "dfbc54c14a5fd97f63298b761388510a4cf61127",
+      "run": 40207758692,
+      "jobs": {
+        "backend": "SUCCESS",
+        "backend-windows": "SUCCESS",
+        "frontend": "SUCCESS",
+        "web-e2e": "SUCCESS"
+      }
+    },
+    "new_code_ci": "NOT_YET_SUBMITTED"
+  },
+  "browser": {
+    "status": "MOCK_VERIFIED",
+    "flows": 13,
+    "api_errors": [],
+    "new_scope": "T2VA/Ref2VA explicit selection, cancel and confirmed payload; intercepted before API POST",
+    "backend_jobs_created": 0,
+    "terminal_session": 83299,
+    "screenshot_sha256": "9e97a07a2f8fc7887ab9ca22d726480e7d5b524e87d6575dbc893624e6b4a5bc"
+  },
+  "failed_install": {
+    "id": "b993f2d6-8906-4163-9479-22b03885be6c",
+    "status": "FAILED_RECONCILE_REQUIRED",
+    "payload": {
+      "plan_hash": "68b920059e13c67db7add60ac1a53d049b6beb53617590159346e98b32829059",
+      "started_at": "2026-10-25 15:38:49.409789",
+      "system_scope": "NEW_ISOLATED_PACKAGES_ONLY",
+      "completed_packages": 0,
+      "error_type": "ConnectError"
+    },
+    "observed_traceback": "SSL UNEXPECTED_EOF_WHILE_READING during CDN connection",
+    "traceback_scope": "Observed before restart; original api.err.log was subsequently replaced by startup",
+    "completed_model_packages": 0,
+    "weight_files_downloaded": 0,
+    "metadata_cache": [
+      {
+        "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c",
+        "bytes": 142
+      },
+      {
+        "sha256": "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50",
+        "bytes": 57456
+      },
+      {
+        "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
+        "bytes": 1161
+      },
+      {
+        "sha256": "76d3ae4601ce939830b2517f4a6cadb86cc51316c3900af6b020b051c21a478c",
+        "bytes": 6193
+      },
+      {
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "bytes": 1671853
+      }
+    ],
+    "no_blind_retry": true
+  },
+  "cdn_head_recheck": [
+    {
+      "hop": 0,
+      "status": 302,
+      "host": "huggingface.co"
+    },
+    {
+      "hop": 1,
+      "status": 200,
+      "host": "us.aws.cdn.hf.co"
+    }
+  ],
+  "current_install_proposal": {
+    "id": "95826b02-8a75-4937-95ba-083085958822",
+    "sha256": "63abb7fd71249996e06144d04673979f53848f0281d9c699571c4f6245acdbbe",
+    "status": "AWAITING_APPROVAL",
+    "download_bytes": 10756955944,
+    "resource_budget": {
+      "per_serial_stage_mib": 12000,
+      "measurement": "ESTIMATED_NOT_MEASURED",
+      "reason": "Conservative admission cap for first local run; actual physical free VRAM checked before load"
+    },
+    "routing": {
+      "asr": "6a625aea-d494-4b39-9f4e-1b0ba5393d59",
+      "align": "5af5f7b9-8b4c-49ef-abae-2157d47a38b6",
+      "base": "33b75f7b-ee83-43d3-8d5a-d90eb5d031e9",
+      "design": "90f9fa5e-864b-4b16-ab4a-e31bcc4cfb00"
+    },
+    "same_fixed_files_paths_and_network": true,
+    "approved_or_executed": false
+  },
+  "human_helper": {
+    "file": "confirm_voice_model_recovery.ps1",
+    "sha256": "ca692b9272854c14f0b4c86f007716b8b9345c7196a6f20ebe850bdfd18ca502",
+    "verification": "PARSED_AND_READONLY_PREVIEW_ONLY; no Execute or human grant by agent",
+    "actions": [
+      "specified truncated model result ABANDON after release proof",
+      "terminal install failure reconciliation without package-content changes",
+      "new hash-approved serial install of fixed packages; Worker stopped during download"
+    ]
+  },
+  "t2va_draft": {
+    "at": "2026-10-25T15:39:05.615206+00:00",
+    "status": "DRAFT_BLOCKED_MISSING_MODELS",
+    "source": {
+      "repo": "Comfy-Org/workflow_templates",
+      "commit": "67984637eefcd4825dcf5c134e39034785be1682",
+      "path": "templates/video_minimax_h3_t2v.json",
+      "git_blob": "b99a270eadd74c371c3c4facd9322da6a99ca4db",
+      "local_sha256": "3fe2449c8f4a106808a90d1aa4d911d2035fee104f3bb093576c5fb09d298670",
+      "license": "MIT",
+      "license_git_blob": "ec6ae8a4821329f417a3e74e6dd108f499d08290"
+    },
+    "graph_sha256": "343846752d823d3f4cabf75986eece85ada752617660aae1d2a7466f9789be33",
+    "mode": "T2VA",
+    "parameter_map": {
+      "positive_prompt": "131.inputs.prompt",
+      "duration": "133.inputs.value",
+      "seed": "129.inputs.noise_seed"
+    },
+    "mapping_policy": "positive_prompt accepts H3PromptCompiler output only; no free-form submission",
+    "explicit_changes": [
+      "flatten native false branch, steps=20, remove unused Turbo LoRA/switch nodes",
+      "native 1344x768 overrides root 0.4 resolution selector",
+      "duration=5s through original 17k+5 frame expression (124 frames)",
+      "no first/last frame input; preserve Base FL2VA INT8 ConvRot checkpoint identity",
+      "compiler placeholder replaces upstream sample prompt; no inference performed"
+    ],
+    "live_node_input_validation": {
+      "missing_nodes": [],
+      "missing_inputs": []
+    },
+    "model_bindings": [
+      {
+        "node": 119,
+        "field": "vae_name",
+        "source_basename": "minimax_h3_video_vae_int8_convrot.safetensors",
+        "local_name": "MiniMax-H3(1)\\minimax_h3_video_vae_int8_convrot.safetensors",
+        "available_in_live_enum": true
+      },
+      {
+        "node": 120,
+        "field": "vae_name",
+        "source_basename": "minimax_h3_audio_vae_fp32.safetensors",
+        "local_name": "MiniMax-H3(1)\\minimax_h3_audio_vae_fp32.safetensors",
+        "available_in_live_enum": true
+      },
+      {
+        "node": 127,
+        "field": "unet_name",
+        "source_basename": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "local_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "available_in_live_enum": false
+      },
+      {
+        "node": 128,
+        "field": "clip_name",
+        "source_basename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "local_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "available_in_live_enum": true
+      }
+    ],
+    "missing_models": [
+      "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    ],
+    "evidence_scope": "CPU_STRUCTURE_ONLY; not Comfy prompt acceptance, model execution or visual acceptance",
+    "profile_registered": false,
+    "h3_submissions": 0,
+    "models_downloaded": false
+  },
+  "t2va_model_proposal": {
+    "id": "006f5586-797e-442f-80a1-beb57ec29444",
+    "status": "AWAITING_APPROVAL",
+    "model_metadata": {
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "license_card": "other",
+      "files": [
+        {
+          "rfilename": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "blobId": "552dd33920a833fa613c73f0ca2335bb6ff0e4d1",
+          "size": 20970379616,
+          "lfs": {
+            "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+            "size": 20970379616,
+            "pointerSize": 136
+          }
+        }
+      ]
+    },
+    "license_evidence": {
+      "repo": "MiniMaxAI/MiniMax-H3",
+      "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+      "license_git_blob": "c389b45855337ccec8ddeb389f4fe902abcd0b19",
+      "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
+      "bytes": 17604
+    },
+    "weights_downloaded": false,
+    "profile_registered": false,
+    "h3_submissions": 0
+  },
+  "real_negative_review": {
+    "status": "NEEDS_REVIEW",
+    "at": "2026-10-25T23:20:48.116639+00:00",
+    "error": "SEMANTIC_REVIEW_INVALID_JSON: Unterminated string starting at: line 7 column 18 (char 202)",
+    "interpretation": "No valid semantic conclusion; truncated JSON rejected",
+    "runtime_release_pass": true,
+    "health_after": {
+      "status": "ok",
+      "model": "local-qwen3-vl-4b",
+      "is_mock": false,
+      "loaded": false,
+      "asr_loaded": false,
+      "allocated_bytes": 0,
+      "reserved_bytes": 0,
+      "manifest_sha256": "e4a3146dfe795160def6f517684f0ac618d765ee813bd9ea3c2b25d6721a3a4f"
+    },
+    "model_call": {
+      "id": "ff6d7832-52ed-442d-af75-4d03ee8f5d1b",
+      "status": "NEEDS_REVIEW",
+      "lease_status": "RELEASED",
+      "provider_release_proposal": {
+        "profile_id": "e3e0dbd4-f964-4038-80be-713d52379ef7",
+        "kind": "openai_compatible",
+        "model": "local-qwen3-vl-4b",
+        "base_url_sha256": "bccbf917bf2a52a842b617ce285f9b6ad511a0e75624235b08e600ab48831311",
+        "legacy_proposal_only": true
+      }
+    },
+    "production_before": {
+      "job_status": "PASSED",
+      "state_version": 9,
+      "attempts": 9,
+      "gates": 70,
+      "artifacts": 14
+    },
+    "production_after": {
+      "job_status": "PASSED",
+      "state_version": 9,
+      "attempts": 9,
+      "gates": 70,
+      "artifacts": 14
+    },
+    "production_unchanged": true,
+    "h3_submissions": 0,
+    "post_output_fix_actual_retest": "NOT_RUN; prior uncertain call requires human reconciliation first"
+  },
+  "service_restoration": {
+    "old_processes": {
+      "at": "2026-10-25T23:20:16.089864+00:00",
+      "checks": [
+        {
+          "pid": 38948,
+          "old_birth": "134374163245901733",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        },
+        {
+          "pid": 17076,
+          "old_birth": "134374163246215898",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        },
+        {
+          "pid": 31052,
+          "old_birth": "134374163245924985",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        },
+        {
+          "pid": 27788,
+          "old_birth": "134374163245955110",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        },
+        {
+          "pid": 29976,
+          "old_birth": "134374163246020018",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        },
+        {
+          "pid": 35016,
+          "old_birth": "134374163248146440",
+          "current_birth": null,
+          "old_owner_verified_exited": true,
+          "new_owner_not_stopped": true
+        }
+      ],
+      "files_archived": [
+        "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\processes-dead-20261026.json"
+      ],
+      "processes_stopped": 0
+    },
+    "comfy": {
+      "at": "2026-10-25T23:20:18.138357+00:00",
+      "status": "STARTED",
+      "previous_pid": 10184,
+      "argv": [
+        "-X",
+        "utf8",
+        "-s",
+        "F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base\\ComfyUI\\main.py",
+        "--windows-standalone-build",
+        "--listen",
+        "127.0.0.1",
+        "--port",
+        "8188",
+        "--disable-async-offload",
+        "--disable-pinned-memory",
+        "--reserve-vram",
+        "1",
+        "--cache-ram",
+        "6",
+        "10",
+        "--fast",
+        "fp16_accumulation"
+      ],
+      "h3_submissions": 0,
+      "pid": 15736,
+      "birth": "134374440181426929"
+    },
+    "system_stats_argv_verified": true,
+    "api_online": true,
+    "h3_connected": true,
+    "worker_online": false,
+    "operator_credentials": "Not provisioned by agent after prior processes exited"
+  },
+  "boundaries": {
+    "voice_checkpoint_inference": "NOT_RUN",
+    "T2VA_execution": "NOT_RUN",
+    "post_output_fix_negative_review": "NOT_RUN",
+    "full_product": "PARTIAL"
+  },
+  "commands": [
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-closeout-response-final.xml",
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests/test_review_responses.py backend/tests/test_semantic_qc.py backend/tests/test_runtime_reviewers.py backend/tests/test_serial_stages.py backend/tests/test_offline_e2e.py -q",
+    "uv --no-config run --project backend --frozen --with playwright==1.62.0 python scripts/verify_v13_web.py --browser-path <existing Chromium> --screenshot <ignored PNG>",
+    "npm --prefix frontend run build"
+  ]
+}
