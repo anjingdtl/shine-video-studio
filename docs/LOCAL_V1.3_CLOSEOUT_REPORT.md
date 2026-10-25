@@ -56,7 +56,7 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 | 真机缺陷修复 | `backend/shine/worker.py`（+124）、`backend/shine/comfy/client.py`（+73） |
 | 工作流档案 | `scripts/build_h3_workflow_profiles.py`（449 行）、`config/workflows/ref2va-pdd8-2img.json`、`ref2va-pdd8-2img-1aud.json`、`ref2va-pdd8-upscale-2img.json` |
 | 进程管理 | `scripts/start_shine.ps1`（+84）、`scripts/stop_shine.py`（新增 124 行） |
-| 收尾审片阶段 | `scripts/start_shine.ps1`（拒绝占用端口 + 记录真实监听者 `listener_pid`）、`scripts/stop_shine.py`（结束监听者 + 端口仍被占用告警） |
+| 收尾审片阶段 | `backend/shine/llm/gateway.py`（把 JSON 契约下发模型，提交 `2df8aff`）、`scripts/start_shine.ps1`（拒绝占用端口 + 记录真实监听者 `listener_pid`）、`scripts/stop_shine.py`（结束监听者 + 端口仍被占用告警） |
 | 回归测试 | `backend/tests/test_comfy_completion_window.py`（2）、`test_gpu_release_confirmation.py`（6）、`test_delivery_assembly.py`（6）、`backend/tests/fake_http.py`（+26/−） |
 | 其他 | `backend/shine/main.py`（挂载交付路由）、`scripts/register_ref2va_profiles.py`（+3）、`.gitignore`（+1，排除本地验收目录） |
 
@@ -265,7 +265,7 @@ npm --prefix frontend audit
 
 ### 7.2 收尾审片阶段新发现并修复的缺陷
 
-2026-10-25 11:30（UTC）的人工审片阶段定位并修复了下面三项。第 3 项与 7.1 表格里的
+2026-10-25 11:30（UTC）的人工审片阶段定位并修复了下面三项。第 3 项与本节表格里的
 "陈旧租约清扫"是**同一处修复**，此处只记录收尾轮在两个重渲染 job 上的复验结果。
 
 | # | 缺陷 | 现象 | 根因 | 修复 | 验证 |
