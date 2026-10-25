@@ -354,6 +354,18 @@ torch_vram_free`。在 ComfyUI 0.39 上，这两个数分别是 torch 分配器�
 保留 / 49,017,344 未分配（差值 17.25 MiB），同时 `nvidia-smi` 显示 16,303 MiB 中已用
 1,489 MiB。
 
+写文档时又取了一次实时 `/system_stats`（实例未被改动），读数与上面一致：
+
+```
+device: cuda:0 NVIDIA GeForce RTX 5080 : cudaMallocAsync
+        vram_total= 17066360832  vram_free= 15560602112
+        torch_vram_total= 67108864  torch_vram_free= 49017344
+```
+
+即空闲部分（49,017,344）比总量（67,108,864）**小** 18,091,520 字节（17.25 MiB）——
+旧的 `total <= free` 判定在此永远为假，而修复后的"差值 < 512 MiB"判定通过。这正是该
+缺陷在本机上的活证据。
+
 **回归**：`backend/tests/test_gpu_release_confirmation.py`（6 项）。
 
 ### 8.3 陈旧的独占租约可以锁死队列

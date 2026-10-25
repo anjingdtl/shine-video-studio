@@ -25,7 +25,7 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 | B 工作流能力中心 | 档案、draft、live `object_info` 校验、fake-execute 全部可用；`publish` 需操作员 | `VERIFIED_LOCAL_ENV` |
 | C 授权与候选资产 | 权利记录可创建；候选导入因 `LICENSE_NOT_APPROVED` 被契约拒绝（409），提升需操作员 | `VERIFIED_LOCAL_ENV` |
 | D 声音工作台 | 档案列表为空；导入因 `LICENSE_NOT_APPROVED` 拒绝；冻结需操作员 | `VERIFIED_LOCAL_ENV` |
-| E 专业剧组 | 目录与规则包读取正常；四个角色的真实调用被 `LLM_FORMAT` 拒绝（422），三个角色因上游未产出而未触达 | `BLOCKED / PENDING` |
+| E 专业剧组 | 目录与规则包读取正常；四个角色的真实调用被 `LLM_FORMAT` 拒绝（422），三个角色因上游未产出而未触达 —— 该根因随后被定位并修复（见 5.1），修复后 `scriptwriter` 成功产出 `ScriptBreakdown`，其余角色的复验仍未做 | `BLOCKED / PENDING` |
 | F 预制作分析与冻结 | 分析、需求、readiness、gaps 全部可用并正确判定 `BLOCKED`；冻结需操作员 | `VERIFIED_LOCAL_ENV` |
 | 真实 H3 生成 | 三个镜头真实渲染通过技术门 | `VERIFIED_REAL_H3` |
 | 交付装配 | 真实 EDL → 成片 | `VERIFIED_REAL_H3` |
@@ -139,8 +139,8 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 | cinematographer | — | failed | 未触达：缺 `DirectorialPlan` |
 | continuity_supervisor | — | failed | 未触达：缺 `DirectorialPlan` + `CameraPlan` |
 | sound_director | — | failed | 未触达：缺 `ScriptBreakdown` |
-| film-runs `GET /api/v1/projects/{id}/film-runs` | 200 | ok | 5 条 Agent 任务记录 |
-| film-artifacts `GET /api/v1/projects/{id}/film-artifacts` | 200 | ok | `[]` |
+| film-runs `GET /api/v1/projects/{id}/film-runs` | 200 | ok | 5 条 Agent 任务记录（修复后增加到 8 条） |
+| film-artifacts `GET /api/v1/projects/{id}/film-artifacts` | 200 | ok | 修复前 `[]`；修复后 1 条 `ScriptBreakdown` |
 
 说明：四个角色确实触达了远端（`remote_text_consent: true`、`is_mock: false`、记录的
 `model_profile_id` 为本轮创建的 MiniMax 档案、`model_id` 为 `MiniMax-M3.1-flash`），但
@@ -148,9 +148,40 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 `REJECTED`。三个下游角色没有发出请求，因为它们的必需上游交接物不存在 —— 交接链是
 硬约束，不会用猜出来的内容补齐。
 
-**这不是"剧组不可用"的结论**，而是"当前模型在本轮没有一次产出满足这些 schema"。后续
-方向是提示词/契约或模型的选择问题，不是流程缺失。库中 `agent_artifacts` 为 0 行、
-`film-artifacts` 为 `[]`，说明没有任何半成品被当成产物落库。
+### 5.1 `LLM_FORMAT` 的根因与修复（本轮后续提交）
+
+上表是 2026-10-25 17:51:40 那次能力面验证的实测结果。随后定位到根因并修复：
+
+**根因**：剧组的指令写的是"只返回所给的 JSON 契约"，但**契约从未被交给模型**。
+`LLMGateway.complete_for_role` 只把 schema 交给服务商做校验，模型只拿到上下文，必须
+自己猜答案的形状。Mock 服务商用罐头响应作答，把这个问题掩盖了；真实服务商按上下文
+作答，于是过不了 schema 校验，报 `LLM_FORMAT`。
+
+**修复**：提交 `2df8aff9f62209b6202bbd839fd914989499d5b2`（2026-10-25 18:01:13，
+`backend/shine/llm/gateway.py`）把 schema 追加到请求里，并放在最后，使不可信上下文
+无法把它挤掉。
+
+**修复后的实测**（验收 API 已于 17:53:50 以新代码重启，PID 11652）：
+
+| 项 | 值 |
+| --- | --- |
+| 角色 | `scriptwriter` |
+| HTTP | **201 Created** |
+| 任务状态 | `SUCCEEDED`（`error_code: null`），任务 ID `765bd9be-2c24-4705-b9bb-97eaa724c440` |
+| 产物 | `6b30cb08-6d9d-4204-b7d1-53f3ffe5d80c`，kind `ScriptBreakdown`，schema `1.1` |
+| 产物 SHA-256 | `7cf12ee8445b514df3f0b8194a5e800848923c0ca40bd9a46d550e1d2978ac3e` |
+| 审计 | `FILM_PROPOSAL_CREATED`，2026-10-25 18:02:33 |
+| 人工批准 | `approved_by: null` —— **尚未**经人工批准 |
+
+产物内容是一份真实的 `ScriptBreakdown`：含 `locked_story_facts`，beat 里引用了本项目
+已锁定的场景资产 `4b8364f9-…`、风格参考 `663d7728-…` 与人物资产 `ad0ec279-…`。
+
+**边界**：修复后我只观察到 `scriptwriter` 一次成功调用。`editor`、`producer`、
+`comfyops` 在修复后**未**被重新运行；`director`、`cinematographer`、
+`continuity_supervisor`、`sound_director` 仍未触达（它们需要上游交接物）。因此上表的
+46 项能力面统计仍是修复**前**的状态，剧组整链在修复后的完整复验仍是
+`BLOCKED / PENDING`。产物 `approved_by` 为空，说明 Agent 提案没有自动变成人工批准
+的成果。
 
 ## 6. F 面：预制作分析与冻结
 
@@ -235,9 +266,24 @@ npm --prefix frontend audit
 
 - 操作员身份来自 API 进程环境的 `SHINE_OPERATOR_ID` 与 `SHINE_OPERATOR_TOKEN_SHA256`；
   缺失这两个变量时 API 直接拒绝。
-- 本轮已实测：审片端点在**无凭据**时返回 HTTP 403，用**错误凭据**时同样返回
-  HTTP 403。Agent 身份不被接受（`Local operator credential required; Agent identities
-  are not accepted`）。
+- 本轮实测（对真实镜头 `ca3754cc-…` 的审片端点）：
+
+```powershell
+$u='http://127.0.0.1:8100/api/v1/operator/jobs/ca3754cc-099e-41ce-bb5a-5aac121b7793'
+Invoke-WebRequest $u -UseBasicParsing                                    # 无凭据
+Invoke-WebRequest $u -Headers @{Authorization='Bearer wrong-credential-000000'} -UseBasicParsing
+Invoke-WebRequest -Method Post "$u/review" -ContentType 'application/json' -Body '…'
+```
+
+实测输出（三次都是 403）：
+
+```
+HTTP 403 : {"detail": "Local operator credential required; Agent identities are not accepted"}
+HTTP 403 : {"detail": "Local operator credential required; Agent identities are not accepted"}
+HTTP 403 : {"detail": "Local operator credential required; Agent identities are not accepted"}
+```
+
+  即：无凭据被拒、错误凭据同样被拒、Agent 身份不被接受。
 - 本轮真实镜头复用的资产审批与 Style Bible 冻结，是**人工在 2026-10-21 做出的**，
   原样复用，本轮未重新签署。
 - **本轮没有执行任何下面第 8.2 节的待办。**
@@ -262,10 +308,11 @@ npm --prefix frontend audit
 10 与前三项镜头互不依赖，但需先完成观看与试听。
 
 `items` 的十个分项固定为：`identity`、`costume`、`scene_props`、`camera_action`、
-`style`、`dialogue`、`voice`、`lip_sync`、`continuity`、`other`。每项填
-`PASS` / `FAIL` / `NOT_REVIEWED` / `NOT_APPLICABLE` 与具体证据。已审项与不适用项必须
-写明画面、时间点、实际听到的台词或不适用理由；不适用不能替代必需检查。任一分项
-`FAIL` 或必需项未审，镜头保持 `NEEDS_REVIEW`。
+`style`、`dialogue`、`voice`、`lip_sync`、`continuity`、`other`，一个不多一个不少；每项
+是 `{"status": "PASS|FAIL|NOT_REVIEWED|NOT_APPLICABLE", "evidence": "具体证据"}`。
+已审项与不适用项必须写明画面、时间点、实际听到的台词或不适用理由；不适用不能替代必需
+检查。任一分项 `FAIL` 或必需项未审，镜头保持 `NEEDS_REVIEW`。`request_id` 必须是
+16–64 位的字母数字或连字符且每次审片唯一。
 
 审片前可先取快照与视频：
 
@@ -331,7 +378,7 @@ uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DAT
 | 交付装配能力、来源再校验、`review_state` 语义 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 隐藏进程启停与 `processes.json` 清单、`stop_shine.py` 的范围限定 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 后端全量测试、Ruff、前端构建、`npm audit` | `TESTED_OFFLINE` |
-| 剧组四个角色的真实调用因 `LLM_FORMAT` 被拒；三个角色因上游未产出而未触达 | `BLOCKED / PENDING` |
+| 剧组四个角色的真实调用因 `LLM_FORMAT` 被拒；根因为 schema 未下发给模型，已在 `2df8aff` 修复，修复后 `scriptwriter` 成功产出 `ScriptBreakdown` | `BLOCKED / PENDING`（其余角色未复验） |
 | 语义 / 音频 / 风格 / 终审门未覆盖、未签署 | `BLOCKED / PENDING` |
 | 正式逐项人工审片 | `BLOCKED / PENDING` |
 | 候选提升、音色冻结、预制作冻结、工作流发布 | `BLOCKED / PENDING` |

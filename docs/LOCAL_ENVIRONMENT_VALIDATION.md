@@ -191,14 +191,14 @@ dist/assets/index-DVA6zgt_.js   289.69 kB │ gzip: 89.26 kB
 本轮**没有**升级、修补、清理或停止该安装的任何内容；只按操作员已验证的参数另起了一个
 实例。
 
-启动参数（`comfyui-process.json` 的 `argv`）：
+启动参数（`comfyui-process.json` 的 `argv`，Python 内嵌解释器 + ComfyUI 入口）：
 
-```powershell
-F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe `
-  -X utf8 -s F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI\main.py `
-  --windows-standalone-build `
-  --listen 127.0.0.1 --port 8188 `
-  --disable-async-offload --disable-pinned-memory `
+```
+F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe
+  -X utf8 -s F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI\main.py
+  --windows-standalone-build
+  --listen 127.0.0.1 --port 8188
+  --disable-async-offload --disable-pinned-memory
   --reserve-vram 1 --cache-ram 6 10 --fast fp16_accumulation
 ```
 
@@ -236,6 +236,34 @@ Invoke-WebRequest 'http://127.0.0.1:8188/object_info' -UseBasicParsing
 
 实测：**3091** 个节点类型，快照存于
 `.local-acceptance/evidence/comfyui-object_info-full.json`（7.4 MB）。
+
+写文档时又用 Python 直接取了一次实时接口（未改动实例）：
+
+```python
+import json, urllib.request
+oi = json.load(urllib.request.urlopen('http://127.0.0.1:8188/object_info', timeout=120))
+print(len(oi))                     # 3091
+ss = json.load(urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=60))
+print(ss['system']['comfyui_version'], ss['system']['python_version'], ss['system']['pytorch_version'])
+```
+
+```
+object_info node classes: 3091
+comfyui_version: 0.39.0
+python: 3.13.11 (tags/v3.13.11:6278944, Dec  5 2025, 16:26:58) [MSC v.1944 64 bit (AMD64)]
+pytorch: 2.10.0+cu130
+device: cuda:0 NVIDIA GeForce RTX 5080 : cudaMallocAsync vram_total= 17066360832 vram_free= 15560602112 torch_vram_total= 67108864 torch_vram_free= 49017344
+queue running: 0 pending: 0
+```
+
+### 4.5 0.39 的显存口径（与第 8.2 节的缺陷直接相关）
+
+上面这行实时读数就是活证据：`torch_vram_total = 67,108,864`、
+`torch_vram_free = 49,017,344`，**空闲部分比总量小**，差值
+18,091,520 字节（17.25 MiB）。这说明 0.39 报的是"分配器已保留池"与"已保留但未分配的
+部分"，两者不可能满足原先的 `total <= free` 判定。这条读数同时也是 GPU 释放确认修复
+（`MAX_LIVE_TENSOR_BYTES = 512 MiB`）在本机的实测依据：差值远低于阈值，说明渲染端
+当前确实没有驻留模型。
 
 ## 5. 模型文件
 
@@ -292,10 +320,28 @@ uv run --project backend python scripts/build_h3_workflow_profiles.py
 uv run --project backend python scripts/build_h3_workflow_profiles.py --validate http://127.0.0.1:8188
 ```
 
-PDD8 档案的固定参数：模型原生 **1344x768**、24 fps、Euler、CFG 1、sigma shift 12/3、
-写实 LoRA 0.65、SolAttn、恰好一个 subject 图槽与一个 picture 图槽。
-`local-h3-ref2va-pdd8-upscale-2img` 在其上追加 3D 潜空间 1.5 倍超分与 denoise 0.25 的
-PDD 尾部细化。
+PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固定参数，逐节点实测：
+
+| 节点 | 关键输入 |
+| --- | --- |
+| `MiniMaxH3ReferenceToVideo` | `width: 1344`、`height: 768`（模型原生） |
+| `LoraLoaderModelOnly` | `h3-realism-people-t2v-i2v-r2v.safetensors`，`strength_model: 0.65` |
+| `MiniMaxH3SigmaShift` | `shift_video: 12.0`、`shift_audio: 3.0` |
+| `SolAttnPatch` | `tau 1.5`、`start_percent 0.2`、`end_percent 0.9` |
+| `BasicScheduler` | `scheduler: simple`、`steps: 20` |
+| `ShineH3SamplingMode` | `mode: "PDD 8 steps"` |
+| `MiniMaxH3PDDAccApply` | `pdd_file: MiniMax-H3-Ref2VA-Acc-8Step.safetensors`、`lora_strength 1.0`、`head_strength 1.0` |
+| `ComfyMathExpression` | `max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17`（H3 的 17k+5 帧格点） |
+| `KSamplerSelect` | `sampler_name: euler` |
+| `RandomNoise` | `noise_seed: 77` |
+| `CreateVideo` | `fps: 24.0`、`codec: h264` |
+| `LoadImage` × 2 | `shine-subject.png`、`shine-picture.png` —— 恰好一个 subject 槽与一个 picture 槽 |
+
+采样步数由 `ShineH3SamplingMode` 把枚举转成 PDD 的 nfe/enabled，PDD 权重是
+`MiniMax-H3-Ref2VA-Acc-8Step.safetensors`；基础调度器仍出 20 步 sigma，PDD 节点据此
+分组成 8 步。超分档案 `ref2va-pdd8-upscale-2img.json`（29 个节点）在其上追加
+`MinimaxH3LatentUpscaler3DRefineHandoff`（`scale: 1.5`、`cfg: 1.0`）与
+`MiniMaxH3PDDAccScheduler`（`nfe: "8"`、`denoise: 0.25`）。
 
 每个档案都声明了 `parameter_map`（`positive_prompt`/`duration`/`seed`/
 `reference_subject_1`/`reference_picture_1`/`reference_audio_1`）与 `media_transfers`
@@ -383,7 +429,7 @@ PDD 尾部细化。
 | 本机硬件、磁盘、工具链满足本地 H3 Ref2VA 推理条件，实测值如第 2 节所列 | `VERIFIED_LOCAL_ENV` |
 | ComfyUI 0.39.0 实例在 `127.0.0.1:8188` 上以操作员既有 INT8 ConvRot 参数启动，安装未被改动 | `VERIFIED_LOCAL_ENV` |
 | 实时 `object_info` 含 3091 个节点类型，快照已留档 | `VERIFIED_LOCAL_ENV` |
-| 四个实际加载的 H3 模型文件 SHA-256 与字节数已留档 | `VERIFIED_LOCAL_ENV` |
+| 实际加载的 4 个 H3 模型文件，以及另外 2 个未使用的 INT8 变体，SHA-256 与字节数均已留档（PDD 加速文件未留档，见第 5 节） | `VERIFIED_LOCAL_ENV` |
 | 五个工作流档案全部用实时 `object_info` 校验通过（无缺失节点/输入） | `VERIFIED_LOCAL_ENV` |
 | `uv lock --check` 失败源于本机全局 uv 镜像配置，覆盖索引后 exit 0；锁文件本身有效 | `VERIFIED_LOCAL_ENV` |
 | 后端全量测试、Ruff、前端构建、`npm audit` 在交付提交上通过 | `TESTED_OFFLINE` |
