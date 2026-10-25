@@ -185,3 +185,37 @@ Ruff、TypeScript/Vite、uv lock 检查、Windows 启停复验通过；浏览器
 测试夹具的入队顺序不确定，现用显式优先级指定夹具顺序，互斥与阻断断言保留。
 中间失败与最终结果都列在 [机器可读验证记录](evidence/local-closeout-20261025/verification.json)。
 提交时远端 CI 为待触发；后续以 PR #7 当前 SHA 的四项 Checks 为准。
+
+### 7.5 Qwen SDK 依赖隔离与模型进程退出
+
+继续检查发现官方发行包存在确定的依赖冲突：`qwen-tts==0.1.1` 要求
+`transformers==4.57.3`，`qwen-asr==0.0.6` 要求 `transformers==4.57.6`。
+将四个角色放在同一个 API Python 环境不能同时满足这两个固定版本。
+
+新增 `SHINE_VOICE_ROLE_RUNTIMES`：design/base 与 asr/align 可分别配置固定解释器 SHA-256、
+依赖目录、精确版本、辅助二进制哈希与显式显存预算。现有 Voice Studio 的授权/文件校验/质量规则不变。
+SDK 在私有 stdin 驱动的一次性进程执行，不开放克隆 HTTP 服务；父进程不导入这些 ML 框架。
+子进程在接收推理输入前握手并固定实际 PID/birth，记录模型包/适配器/解释器哈希；
+Windows venv redirector 被拒绝，须指定直接 Python 解释器。父进程等待退出后才确认释放，
+超时只结束自己持有句柄的进程并等待结束；不重放丢失调用。对账也会拒绝仍存活或身份不明的模型子进程。
+
+各角色预算在 API 外层租约、TrackedProvider 子步骤和包资源检查之间一致；
+不再固定按 4GB 申请后在内部使用更大声明。预算是准入上限，不是实测资源合格证；缺少包资源档案仍阻断。
+SDK 不继承业务凭据环境变量，不接收远端引用 URL，子进程重验本地模型文件哈希，并强制离线加载。
+显式 Fake SDK 结果保留 Mock 来源；真实 ASR 的声音身份和校准置信度仍 UNKNOWN/0，不冒充声音验收。
+
+本机已将两套依赖安装在被忽略的隔离目录，未覆盖 ComfyUI 原环境包。官方 SDK 类导入均成功：
+TTS/4.57.3、ASR/4.57.6 各在独立进程退出，导入阶段 CUDA 分配均为 0。
+这仅是 **SDK_IMPORT_ONLY_PASS**，没有加载 Qwen 检查点，没有生成或批准新的声音/主资产。
+9 个初始边界加角色预算回归共 10 项使用明确 Fake SDK 的真实 CPU 子进程，均通过；
+覆盖版本冲突、篡改、正常 API 接入、超时、拒绝重放、子进程存活对账阻断及来源保留。
+最终全量 **437 passed、0 skipped / errors / failures**，Ruff 和 TypeScript/Vite 通过。
+
+另已读取官方固定文件清单并创建四个 Qwen 模型的安装提案
+`986fba4e-04c2-4555-8a37-aa109b1ea97d`：42 个文件，总下载大小 **10,756,955,944 字节**。
+四包及计划保持 UNVERIFIED_ORIGIN / AWAITING_APPROVAL；未下载计划中的 Qwen 权重，资源测量和推理仍未验证。
+真实模型检查不得通过伪造 FILES_VERIFIED 状态、修改 Fake 来源或代签安装/资产/音色/预制作审批关闭。
+本节不解除第 7.3 节既有 NEEDS_REVIEW / RECONCILE_REQUIRED 记录。
+
+具体发行包哈希、四个权重 revision、导入结果和最终回归命令见
+[SDK 执行证据](evidence/local-closeout-20261025/sdk-runtime.json)。

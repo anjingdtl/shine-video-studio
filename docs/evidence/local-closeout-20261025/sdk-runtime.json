@@ -1,0 +1,181 @@
+{
+  "at": "2026-10-25T15:04:03.170402+00:00",
+  "source_base": "24f2a3e22701c45974a5f905adf422022ae81565",
+  "architecture": "tracked private stdin -> one role SDK process -> verified process exit -> next serial stage",
+  "backend": {
+    "tests": "437",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "194.603"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "typescript_vite": "PASS",
+    "role_subprocess_regressions": "10 passed; actual CPU processes with explicit Fake SDKs",
+    "current_head_remote_ci": "PENDING_AT_COMMIT; exact current PR #7 Checks authoritative"
+  },
+  "commands": [
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-role-runtimes-final-r2.xml",
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests/test_sdk_role_process.py -q",
+    "backend/.venv/Scripts/ruff.exe check backend/shine backend/alembic backend/tests",
+    "npm --prefix frontend run build"
+  ],
+  "official_distribution_metadata": {
+    "qwen-tts": {
+      "version": "0.1.1",
+      "source": "https://pypi.org/pypi/qwen-tts/0.1.1/json",
+      "wheels": [
+        {
+          "name": "qwen_tts-0.1.1-py3-none-any.whl",
+          "sha256": "11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d",
+          "bytes": 113529
+        }
+      ]
+    },
+    "qwen-asr": {
+      "version": "0.0.6",
+      "source": "https://pypi.org/pypi/qwen-asr/0.0.6/json",
+      "wheels": [
+        {
+          "name": "qwen_asr-0.0.6-py3-none-any.whl",
+          "sha256": "b9c55a38413298f3a990a4475467399daec6e8f4172363053fc42e2166c2dfd3",
+          "bytes": 141603
+        }
+      ]
+    }
+  },
+  "sdk_import_probes": [
+    {
+      "sdk": "qwen-tts",
+      "roles": [
+        "design",
+        "base"
+      ],
+      "versions": {
+        "qwen-tts": "0.1.1",
+        "transformers": "4.57.3",
+        "torch": "2.10.0+cu130",
+        "tokenizers": "0.22.2",
+        "accelerate": "1.12.0",
+        "numpy": "2.3.5"
+      },
+      "returncode": 0,
+      "allocated_bytes": 0,
+      "scope": "SDK_IMPORT_ONLY; no checkpoint loaded"
+    },
+    {
+      "sdk": "qwen-asr",
+      "roles": [
+        "asr",
+        "align"
+      ],
+      "versions": {
+        "qwen-asr": "0.0.6",
+        "transformers": "4.57.6",
+        "torch": "2.10.0+cu130",
+        "tokenizers": "0.22.2",
+        "accelerate": "1.12.0",
+        "numpy": "2.3.5",
+        "nagisa": "0.2.11",
+        "DyNet38": "2.2",
+        "soynlp": "0.0.493",
+        "qwen-omni-utils": "0.0.9"
+      },
+      "returncode": 0,
+      "allocated_bytes": 0,
+      "scope": "SDK_IMPORT_ONLY; no checkpoint loaded"
+    }
+  ],
+  "runtime_integrity": {
+    "python_sha256": "29d6486dc5fa86c9d19db9d390fdbb62c4830e2b305761723c0b42e6f3596954",
+    "auxiliary_binary_sha256": [
+      "e0e3cdc4bcdfbb5b91ac8f53b024964d092f89ba90130ba74b223a1df11b5439"
+    ],
+    "sdk_child_source_sha256": "3d1d032f42fb58e0221595238aeeb8f6dd7ee44292007353cdb1a30f8d8e11f5"
+  },
+  "model_package_proposals": [
+    {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+      "package_id": "222d40ee-fdfc-484e-9a47-e17fea50f88c",
+      "package_sha256": "bed01589b4e6d4d5028645a6ed01b6fbadc93a01fda164ba1db30b1d6972d60c",
+      "file_count": 12,
+      "download_bytes": 4520162313,
+      "status": "UNVERIFIED_ORIGIN",
+      "license": "MODEL_CARD_DECLARES_APACHE_2_0",
+      "runtime_sdk_reference": {
+        "qwen-tts": "0.1.1"
+      },
+      "runtime_compatibility": "NOT_VERIFIED",
+      "resource_profile": "UNKNOWN; runtime blocked until actual measurement"
+    },
+    {
+      "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      "revision": "5d83992436eae1d760afd27aff78a71d676296fc",
+      "package_id": "a0ee7cba-bc3f-45bc-92d5-8c7b49405009",
+      "package_sha256": "465f827f15b4c56c4a80d40e01615d1a7f6c5c7877d75d1f8ea18b93f1b67620",
+      "file_count": 12,
+      "download_bytes": 2516104532,
+      "status": "UNVERIFIED_ORIGIN",
+      "license": "MODEL_CARD_DECLARES_APACHE_2_0",
+      "runtime_sdk_reference": {
+        "qwen-tts": "0.1.1"
+      },
+      "runtime_compatibility": "NOT_VERIFIED",
+      "resource_profile": "UNKNOWN; runtime blocked until actual measurement"
+    },
+    {
+      "repo": "Qwen/Qwen3-ASR-0.6B",
+      "revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+      "package_id": "f47918f0-4862-473a-b321-75fbafcfb2ff",
+      "package_sha256": "3a6f35acc07c6e566e920548d1622b41161a8f991e56365328694071b68c6ff0",
+      "file_count": 9,
+      "download_bytes": 1880618159,
+      "status": "UNVERIFIED_ORIGIN",
+      "license": "MODEL_CARD_DECLARES_APACHE_2_0",
+      "runtime_sdk_reference": {
+        "qwen-asr": "0.0.6"
+      },
+      "runtime_compatibility": "NOT_VERIFIED",
+      "resource_profile": "UNKNOWN; runtime blocked until actual measurement"
+    },
+    {
+      "repo": "Qwen/Qwen3-ForcedAligner-0.6B",
+      "revision": "c7cbfc2048c462b0d63a45797104fc9db3ad62b7",
+      "package_id": "d04f9597-69bd-4f40-8167-76192c4c1ff8",
+      "package_sha256": "bac1308ee64796e8960917be224bc4396b05ab4a0d49be831261beaaab620f77",
+      "file_count": 9,
+      "download_bytes": 1840070940,
+      "status": "UNVERIFIED_ORIGIN",
+      "license": "MODEL_CARD_DECLARES_APACHE_2_0",
+      "runtime_sdk_reference": {
+        "qwen-asr": "0.0.6"
+      },
+      "runtime_compatibility": "NOT_VERIFIED",
+      "resource_profile": "UNKNOWN; runtime blocked until actual measurement"
+    }
+  ],
+  "model_installation_plan": {
+    "id": "986fba4e-04c2-4555-8a37-aa109b1ea97d",
+    "sha256": "7877e2bfaffbb7479f727ce943757a828f6619d21011dabf8b091710b3601034",
+    "status": "AWAITING_APPROVAL",
+    "files": 42,
+    "download_bytes": 10756955944,
+    "weights_downloaded": false,
+    "approved_or_executed": false
+  },
+  "legacy_release_reconciliation": {
+    "task": "8cc24300-09f5-49ce-a530-e43edf2e8c87",
+    "task_status": "NEEDS_REVIEW",
+    "lease": "6ee935c4-1860-45a0-acf4-f9640187456d",
+    "lease_status": "RECONCILE_REQUIRED",
+    "changed_by_this_stage": false
+  },
+  "boundaries": {
+    "sdk_role_inference": "NOT_RUN pending package approval/files/resource profile",
+    "voice_master_approvals": "NONE",
+    "human_grants_forged": false,
+    "full_product": "PARTIAL"
+  }
+}

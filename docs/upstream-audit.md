@@ -97,3 +97,28 @@ local Ref2VA scope by H3_REF2VA_V1.2.1_FINAL_CLOSEOUT.md. No license conclusion 
   Shine adapter code using library APIs; no upstream implementation or full-text guide was copied.
 - These source/license facts are an audit, not a human grant for asset rights, voice cloning,
   master promotion, production workflow publication or complete audiovisual acceptance.
+
+## 2026-10-25 Qwen SDK role separation
+
+Read official distribution metadata for [qwen-tts 0.1.1](https://pypi.org/project/qwen-tts/0.1.1/)
+and [qwen-asr 0.0.6](https://pypi.org/project/qwen-asr/0.0.6/): they pin Transformers 4.57.3 and
+4.57.6 respectively. The exact wheel SHA-256 digests are
+`11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d` and
+`b9c55a38413298f3a990a4475467399daec6e8f4172363053fc42e2166c2dfd3`.
+Both were installed from PyPI only into separate ignored dependency directories, sharing the existing
+unmodified Torch runtime. Original Shine stdin adapters use their public SDK APIs; no upstream source
+or guide was copied into the repository. No package install status or human approval was fabricated.
+
+Official model-card metadata was inspected at these exact model revisions; Apache-2.0 is the
+declared card license, not an asset/voice-cloning permission grant:
+
+| Model | Revision | Planned bytes |
+| --- | --- | ---: |
+| Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign | `5ecdb67327fd37bb2e042aab12ff7391903235d3` | 4,520,162,313 |
+| Qwen/Qwen3-TTS-12Hz-0.6B-Base | `5d83992436eae1d760afd27aff78a71d676296fc` | 2,516,104,532 |
+| Qwen/Qwen3-ASR-0.6B | `5eb144179a02acc5e5ba31e748d22b0cf3e303b0` | 1,880,618,159 |
+| Qwen/Qwen3-ForcedAligner-0.6B | `c7cbfc2048c462b0d63a45797104fc9db3ad62b7` | 1,840,070,940 |
+
+LFS hashes/sizes came from pinned Hugging Face metadata; small metadata files were read from the
+same official revision and checked against Git blob identities before calculating SHA-256.
+These are pending installation proposals. SDK import success is not checkpoint execution or voice acceptance.

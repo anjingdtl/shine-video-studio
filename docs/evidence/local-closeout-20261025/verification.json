@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-25T14:16:24.449865+00:00",
+  "collected_at": "2026-10-25T15:04:03.170402+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "427",
+    "tests": "437",
     "errors": "0",
     "failures": "0",
     "skipped": "0",
-    "time": "186.253"
+    "time": "194.603"
   },
   "checks": {
     "ruff": "PASS incl local_review_server.py",
@@ -362,5 +362,13 @@
       "cublas_cleanup_after_inference_retest": "NOT_RUN"
     },
     "qc_report_history_note": "First experimental recheck used legacy overwrite path: failure gate rows and captured JSON retained, original QCReport body updated. Subsequent implementation appends changed reports and has immutable-history regression."
-  }
+  },
+  "serial_backend_before_sdk_isolation": {
+    "tests": "427",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "186.253"
+  },
+  "sdk_runtime_evidence": "docs/evidence/local-closeout-20261025/sdk-runtime.json"
 }

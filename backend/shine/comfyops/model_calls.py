@@ -107,6 +107,11 @@ class TrackedProvider:
 
         def call(*args, **kwargs):
             kind, budget = MODEL_METHODS[name]
+            budget_for = getattr(self.provider, "resource_budget_mb", None)
+            if callable(budget_for):
+                budget = budget_for(name)
+                if type(budget) is not int or not 0 < budget <= 16384:
+                    raise HTTPException(409, "MODEL_RESOURCE_BUDGET_INVALID")
             if self.reviewer_kind:
                 kind = self.reviewer_kind
             role = "model_call:" + kind + ":" + name

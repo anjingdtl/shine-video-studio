@@ -69,9 +69,32 @@ class QwenLocalVoiceProvider:
     def __init__(self, factory, settings, packages, loader=None):
         self.factory, self.settings, self.packages = factory, settings, packages
         self.loader = loader or QwenLoader()
-        self.is_mock = self.loader.is_mock
+        if getattr(self.loader, "is_external", False):
+            self.name = "QwenRoleProcessSDK"
         self.models, self.references = {}, {}
         self.resource_mb = 4000
+
+    @property
+    def is_mock(self):
+        return self.loader.is_mock or bool(getattr(self.loader, "result_is_mock", False))
+
+    def _numpy_input(self):
+        return not self.loader.is_mock and not getattr(self.loader, "is_external", False)
+
+    def resource_budget_mb(self, method):
+        if getattr(self.loader, "is_external", False):
+            if method == "prepare_conditioning":
+                return 1  # Pinning PCM reference bytes performs no inference.
+            role = {
+                "design": "design",
+                "clone": "base",
+                "synthesize": "base",
+                "transcribe": "asr",
+                "align": "align",
+            }.get(method)
+            if role:
+                return self.loader.resource_budget_mb(role)
+        return self.resource_mb
 
     def _load(self, role):
         if role in self.models:
@@ -86,17 +109,24 @@ class QwenLocalVoiceProvider:
             p = package.payload
             if CAPABILITIES[role] not in p["capabilities"] or p["license_id"].lower() in {"unknown", "unverified"}:
                 raise ValueError("LOCAL_MODEL_CAPABILITY_OR_LICENSE_MISSING")
-            if not self.is_mock:
+            if not self.loader.is_mock:
                 versions = p.get("runtime_versions", {})
                 required = "qwen-tts" if role in {"base", "design"} else "qwen-asr"
-                if required not in versions or any(importlib.metadata.version(k) != v for k, v in versions.items()):
+                external = getattr(self.loader, "is_external", False)
+                if required not in versions:
                     raise ValueError("SDK_VERSION_NOT_PINNED_OR_CHANGED")
-                if p.get("resource_mb") is None or p["resource_mb"] > self.resource_mb:
+                if external:
+                    self.loader.validate_package(role, p)
+                elif any(importlib.metadata.version(k) != v for k, v in versions.items()):
+                    raise ValueError("SDK_VERSION_NOT_PINNED_OR_CHANGED")
+                budget = self.loader.resource_budget_mb(role) if external else self.resource_mb
+                if p.get("resource_mb") is None or p["resource_mb"] > budget:
                     raise ValueError("VOICE_RESOURCE_PROFILE_MISSING_OR_EXCEEDED")
-                import torch
+                if not external:
+                    import torch
 
-                if not torch.cuda.is_available() or torch.cuda.mem_get_info()[0] < p["resource_mb"] * 1024**2:
-                    raise ValueError("VOICE_PHYSICAL_GPU_BUDGET_UNAVAILABLE")
+                    if not torch.cuda.is_available() or torch.cuda.mem_get_info()[0] < p["resource_mb"] * 1024**2:
+                        raise ValueError("VOICE_PHYSICAL_GPU_BUDGET_UNAVAILABLE")
             root = self.settings.data_dir / "comfyops" / "isolated-packages" / p["name"]
             for entry in p["files"]:
                 if not ControlledDownloader.valid(
@@ -128,7 +158,7 @@ class QwenLocalVoiceProvider:
         waves, rate = self._load("base").generate_voice_clone(
             text=reference_text,
             language="Chinese",
-            ref_audio=decode_wav(reference, numpy=not self.is_mock),
+            ref_audio=decode_wav(reference, numpy=self._numpy_input()),
             ref_text=reference_text,
         )
         return self._result(waves, rate, character, "base")
@@ -146,12 +176,12 @@ class QwenLocalVoiceProvider:
             raise ValueError("APPROVED_CONDITIONING_REQUIRED")
         audio, ref_text = self.references[conditioning]
         waves, rate = self._load("base").generate_voice_clone(
-            text=text, language="Chinese", ref_audio=decode_wav(audio, numpy=not self.is_mock), ref_text=ref_text
+            text=text, language="Chinese", ref_audio=decode_wav(audio, numpy=self._numpy_input()), ref_text=ref_text
         )
         return self._result(waves, rate, character, "base")
 
     def transcribe(self, audio):
-        result = self._load("asr").transcribe(audio=decode_wav(audio, numpy=not self.is_mock), language="Chinese")[0]
+        result = self._load("asr").transcribe(audio=decode_wav(audio, numpy=self._numpy_input()), language="Chinese")[0]
         # Upstream ASR does not establish voice identity or calibrated confidence.
         return {
             "text": result.text,
@@ -164,13 +194,15 @@ class QwenLocalVoiceProvider:
 
     def align(self, audio, text):
         words = self._load("align").align(
-            audio=decode_wav(audio, numpy=not self.is_mock), text=text, language="Chinese"
+            audio=decode_wav(audio, numpy=self._numpy_input()), text=text, language="Chinese"
         )[0]
         return [{"text": word.text, "start_s": word.start_time, "end_s": word.end_time} for word in words]
 
     def release_models(self):
         self.models.clear()
         gc.collect()
+        if getattr(self.loader, "is_external", False):
+            return self.loader.release_models()
         if not self.is_mock:
             import torch
 

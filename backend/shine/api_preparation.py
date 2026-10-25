@@ -811,9 +811,17 @@ def voice_provider(request):
         from shine.voiceops.local_sdk import QwenLocalVoiceProvider
 
         configured = os.getenv("SHINE_VOICE_SDK_PACKAGES")
+        role_runtimes = os.getenv("SHINE_VOICE_ROLE_RUNTIMES")
+        if role_runtimes and not configured:
+            raise ValueError("VOICE_ROLE_RUNTIME_PACKAGES_REQUIRED")
         if configured:
+            from shine.voiceops.sdk_runtime import SDKProcessLoader
+
             request.app.state.voice_provider = QwenLocalVoiceProvider(
-                request.app.state.session_factory, request.app.state.settings, json.loads(configured)
+                request.app.state.session_factory,
+                request.app.state.settings,
+                json.loads(configured),
+                SDKProcessLoader(json.loads(role_runtimes)) if role_runtimes else None,
             )
             return request.app.state.voice_provider
         request.app.state.voice_provider = (
@@ -822,6 +830,14 @@ def voice_provider(request):
             else FakeVoiceProvider()
         )
     return request.app.state.voice_provider
+
+
+def voice_budget(provider, *methods):
+    configured = getattr(provider, "resource_budget_mb", None)
+    amounts = [configured(method) for method in methods] if callable(configured) else [4000]
+    if any(type(amount) is not int or not 0 < amount <= 16384 for amount in amounts):
+        raise HTTPException(409, "MODEL_RESOURCE_BUDGET_INVALID")
+    return max(amounts)
 
 
 @router.get("/projects/{project_id}/voice-profiles")
@@ -863,7 +879,10 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
             "fake-voice-v1" if provider.is_mock else "local-voice-service",
         ):
             with resource_slot(
-                request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
+                request.app.state.session_factory,
+                "TTS",
+                voice_budget(provider, "clone" if reference else "design"),
+                release_models=getattr(provider, "release_models", None),
             ):
                 # Recheck consent immediately before model execution, after scheduling.
                 require_rights(
@@ -986,7 +1005,10 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         "fake-voice-v1" if provider.is_mock else "local-voice-service",
     ):
         with resource_slot(
-            request.app.state.session_factory, "TTS", 4000, release_models=getattr(provider, "release_models", None)
+            request.app.state.session_factory,
+            "TTS",
+            voice_budget(provider, "prepare_conditioning", "synthesize", "transcribe", "align"),
+            release_models=getattr(provider, "release_models", None),
         ):
             if hasattr(provider, "prepare_conditioning"):
                 reference = get(db, CandidateAsset, row.payload["candidate_id"])
@@ -1765,6 +1787,9 @@ def abandon_model_call(
         raise HTTPException(409, "MODEL_CALL_STILL_RUNNING")
     if pid and pid != os.getpid() and process_identity(pid) == birth:
         raise HTTPException(409, "MODEL_CALL_OWNER_STILL_ALIVE")
+    child_pid, child_birth = row.trace.get("model_child_pid"), row.trace.get("model_child_birth")
+    if child_pid and (not child_birth or process_identity(child_pid) == child_birth):
+        raise HTTPException(409, "MODEL_CHILD_STILL_ALIVE_OR_UNVERIFIABLE")
     reconcile_owner = row.trace.get("reconciliation_owner")
     if row.status == "RECONCILING" and (
         not reconcile_owner or process_identity(reconcile_owner["pid"]) == reconcile_owner["birth"]

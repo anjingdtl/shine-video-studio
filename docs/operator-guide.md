@@ -573,3 +573,20 @@ review 通过哈希校验与健康检查后才启动 Worker；它与 API/Web 一
 先填写实际历史 Provider ID，生成固定目标提案并核对 model / profile / URL 哈希。随后由操作员输入本机凭据和
 具体核验依据，执行“核验队列与释放后放弃丢失结果（不重投）”。服务会重查 owner 已退出、Provider 未改变及真实释放。
 失败继续保留阻断；成功只记录丢失结果被放弃，不自动重投、不批准镜头，也不替代资产/音色/工作流的人工批准。
+
+### 10.1 Qwen SDK 按角色隔离
+
+Qwen TTS 0.1.1 固定 Transformers 4.57.3，ASR 0.0.6 固定 4.57.6；分别使用独立依赖目录。
+管理员在 API 启动环境设置 `SHINE_VOICE_ROLE_RUNTIMES` JSON，按 `design`、`base`、`asr`、`align`
+映射对象。每个对象包含 `python`（绝对路径的直接解释器，不使用 Windows venv redirector）、
+`python_sha256`、`packages_dir`（绝对路径）、`versions`（至少对应 SDK / transformers / torch 的精确版本）、
+可选 `binaries`（绝对二进制路径到 SHA-256，例如 SoX）、`timeout_s`（1–900）和 `budget_mb`（1–16384）。
+解释器/辅助二进制、SDK 版本与模型文件变化均会阻断执行；不安装未知版本或自动回退。
+
+`SHINE_VOICE_SDK_PACKAGES` 仍须映射到已验证文件的 ModelPackage ID；配置目录本身不批准模型包或替代显存测量。
+未登记资源需求的包继续阻断。API 会为一次对白的合成/识别/对齐持有覆盖各角色的串行租约，
+每一步使用独立进程并等待退出。父 API 不载入 TTS/ASR SDK，因此它们的固定依赖不会互相覆盖。
+语音正文与参考样本通过私有 stdin 传递，不出现在命令行；没有新克隆 HTTP 入口。
+
+本机隔离验收目录已有 `voice-role-runtimes.json` 配置草案及 `voice-role-runtime-probe.json` 导入记录。
+这些文件未自动启用，也不证明 Voice Profile/字幕/音色/口型通过；必须先完成对应安装、权利、主档和音色审批。

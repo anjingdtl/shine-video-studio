@@ -172,7 +172,7 @@ def execution_context(actor: Operator, settings: SettingsDep, db: DBSession):
             else "LocalImageHTTPProvider"
             if settings.local_image_url
             else "FakeImageProvider",
-            "voice": "QwenLocalVoiceSDK"
+            "voice": ("QwenRoleProcessSDK" if os.getenv("SHINE_VOICE_ROLE_RUNTIMES") else "QwenLocalVoiceSDK")
             if os.getenv("SHINE_VOICE_SDK_PACKAGES")
             else "LocalVoiceHTTPProvider"
             if settings.local_voice_url

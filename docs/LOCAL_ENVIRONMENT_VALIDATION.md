@@ -6,6 +6,9 @@ cuBLAS 清理后的真实闭环尚未复验。当前全产品状态仍为 PARTIA
 本阶段最终工程复验为后端 427 项通过、Ruff/TypeScript/Vite/锁文件/Windows 启停通过；
 浏览器回归仅为 MOCK_VERIFIED。命令、历次失败和最新统计见
 [验证记录](evidence/local-closeout-20261025/verification.json)。
+后续 SDK 隔离轮更新为后端 **437 项通过**；两个官方 Qwen SDK 在不同依赖目录导入成功，
+仅验证导入和进程退出，没有加载语音模型。四个模型的固定文件安装提案已创建但未批准。
+当前详细边界见 [SDK 轮记录](LOCAL_FINAL_CLOSEOUT_20261025.md#75-qwen-sdk-依赖隔离与模型进程退出)。
 
 日期：2026-10-25（Asia/Shanghai）。范围：本机 Windows 11 工作站在本轮 V1.3 本地
 H3 集成工作中被实际检查过的硬件、运行时、ComfyUI 实例、模型文件、工作流档案、
