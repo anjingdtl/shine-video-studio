@@ -81,3 +81,19 @@ Static validation checks the actual 9 image / 3 video / 3 audio bounds. Dynamic 
 expansion stays disabled; video transfer and hard continuity stay pending real testing.
 The previous V1.1 acceptance claims above remain historical and are superseded for current
 local Ref2VA scope by H3_REF2VA_V1.2.1_FINAL_CLOSEOUT.md. No license conclusion was expanded.
+
+## 2026-10-25 local review models
+
+- [unsloth/Qwen3-VL-4B-Instruct-unsloth-bnb-4bit](https://huggingface.co/unsloth/Qwen3-VL-4B-Instruct-unsloth-bnb-4bit),
+  source revision `24b9da6f9f8fddac102e2240fa0d073f98c65b75`; model card declares Apache-2.0.
+  Existing local safetensors SHA-256 `69c94bb8382216e327c6a08064497609042d69baeeea6540348a8770f43c417c`,
+  4,298,914,465 bytes, matches upstream LFS metadata. No weights downloaded or copied into Git.
+- [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny), revision
+  `169d4a4341b33bc18d8881c4b69c2e104e1cc0af`; model card declares Apache-2.0.
+  Existing safetensors SHA-256 `7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395`;
+  matching tokenizer/configuration files fetched at that revision into an ignored acceptance directory.
+- A separately installed Transformers 4.57.6 / tokenizers 0.22.2 overlay supports the existing Qwen3-VL
+  model without replacing the installed ComfyUI runtime packages. `local_review_server.py` is original
+  Shine adapter code using library APIs; no upstream implementation or full-text guide was copied.
+- These source/license facts are an audit, not a human grant for asset rights, voice cloning,
+  master promotion, production workflow publication or complete audiovisual acceptance.

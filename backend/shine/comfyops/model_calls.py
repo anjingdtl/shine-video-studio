@@ -6,10 +6,13 @@ interfaces while the existing AgentTaskRecord/ResourceLease ledgers remain autho
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from threading import Lock
 
 from fastapi import HTTPException
@@ -57,6 +60,13 @@ MODEL_METHODS = {
 
 
 def digest_input(value):
+    if is_dataclass(value) and not isinstance(value, type):
+        return digest_input(asdict(value))
+    if isinstance(value, Path):
+        if value.is_file():
+            with value.open("rb") as stream:
+                return {"file_sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+        return {"missing_path_sha256": hashlib.sha256(str(value).encode()).hexdigest()}
     if isinstance(value, bytes):
         return {"bytes_sha256": hashlib.sha256(value).hexdigest()}
     if isinstance(value, list | tuple):
@@ -64,6 +74,25 @@ def digest_input(value):
     if isinstance(value, dict):
         return {str(k): digest_input(v) for k, v in value.items()}
     return hashlib.sha256(str(value).encode()).hexdigest()
+
+
+@contextmanager
+def model_step(provider, factory, identity):
+    release = getattr(provider, "release_models", None)
+    try:
+        if release:
+            release()
+        gc.collect()
+        yield
+    finally:
+        try:
+            if release:
+                release()
+            gc.collect()
+        except Exception:
+            with factory.begin() as db:
+                db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
+            raise
 
 
 class TrackedProvider:
@@ -96,6 +125,15 @@ class TrackedProvider:
                     raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
                 project = db.get(Project, self.project_id)
                 lock = db.get(ProjectRuleLock, self.project_id)
+                config = getattr(self.provider, "config", None)
+                review_binding = None
+                if config and self.reviewer_kind in {"VLM", "ASR"}:
+                    review_binding = {
+                        "profile_id": config.profile_id,
+                        "kind": config.kind,
+                        "model": config.model,
+                        "base_url_sha256": hashlib.sha256(config.base_url.encode()).hexdigest(),
+                    }
                 from shine.comfyops.installer import process_identity
                 from shine.comfyops.tasks import CURRENT_PREPARATION
 
@@ -121,6 +159,7 @@ class TrackedProvider:
                         "parent_task_id": CURRENT_PREPARATION.get(),
                         "owner_pid": os.getpid(),
                         "owner_birth": process_identity(os.getpid()),
+                        "review_provider": review_binding,
                     },
                 )
                 db.add(task)
@@ -133,10 +172,23 @@ class TrackedProvider:
                         lease = db.get(ResourceLease, current)
                         if not lease or lease.status != "ACTIVE" or lease.budget_mb < budget:
                             raise HTTPException(409, "RESOURCE_LEASE_LOST_OR_BUDGET_EXCEEDED")
-                    context = nullcontext()
+                    context = model_step(self.provider, self.factory, current)
                 else:
+
+                    def bind_resource(resource_id):
+                        # Persist before preflight unload: even a cleanup failure
+                        # must retain the lease identity for reconciliation.
+                        with self.factory.begin() as db:
+                            row = db.get(AgentTaskRecord, identity)
+                            row.trace = {**row.trace, "resource_id": resource_id}
+
                     context = resource_slot(
-                        self.factory, kind, budget, release_models=getattr(self.provider, "release_models", None)
+                        self.factory,
+                        kind,
+                        budget,
+                        release_models=getattr(self.provider, "release_models", None),
+                        on_acquired=bind_resource,
+                        wait_seconds=0 if self.provider.is_mock else 300,
                     )
                 with context:
                     with self.factory.begin() as db:
@@ -155,7 +207,11 @@ class TrackedProvider:
                 with self.factory.begin() as db:
                     row = db.get(AgentTaskRecord, identity)
                     row.status = (
-                        "FAILED" if isinstance(exc, HTTPException) and exc.status_code < 500 else "NEEDS_REVIEW"
+                        "FAILED"
+                        if (
+                            not row.trace.get("submitted") or (isinstance(exc, HTTPException) and exc.status_code < 500)
+                        )
+                        else "NEEDS_REVIEW"
                     )
                     row.error_code = type(exc).__name__
                 raise

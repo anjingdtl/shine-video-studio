@@ -18,6 +18,92 @@ from tests.test_v13_instances import install_fixture
 from tests.test_v13_preparation import approve, candidate, post, prep, rights, workflow  # noqa: F401
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_legacy_reviewer_release_target_needs_human_grant_and_exact_profile(prep, monkeypatch, changed):
+    from shine.comfyops.models import ResourceLease
+    from shine.models import ProviderProfile
+    from tests.test_v13_preparation import HEADERS
+
+    client, factory, _ = prep
+    project = create_project(client)
+    profile = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "name": "local-review-release",
+            "kind": "openai_compatible",
+            "model": "pinned-vlm",
+            "base_url": "http://127.0.0.1:19001/v1",
+        },
+    ).json()
+    with factory.begin() as db:
+        from shine.models import utcnow
+
+        lease = ResourceLease(
+            owner="vlm:legacy",
+            status="RECONCILE_REQUIRED",
+            budget_mb=8000,
+            exclusive=True,
+            priority=10,
+            expires_at=utcnow(),
+        )
+        db.add(lease)
+        db.flush()
+        task = AgentTaskRecord(
+            project_id=project,
+            role_id="model_call:VLM:review",
+            input_hash="a" * 64,
+            asset_manifest_hash="b" * 64,
+            rulepack_id="test",
+            rulepack_hash="c" * 64,
+            model_profile_id="legacy",
+            model_id="LocalVisionReviewer",
+            status="NEEDS_REVIEW",
+            trace={
+                "kind": "VLM",
+                "is_mock": False,
+                "owner_pid": 999999999,
+                "owner_birth": "dead-test-owner",
+                "resource_id": lease.id,
+            },
+        )
+        db.add(task)
+        db.flush()
+        task_id, lease_id = task.id, lease.id
+    releases = []
+    monkeypatch.setattr(
+        "shine.quality.semantic.LocalVisionReviewer.release_models", lambda self: releases.append(self.config.model)
+    )
+    proposed = post(
+        client, f"/preparation/model-calls/{task_id}/release-provider-proposal", {"provider_profile_id": profile["id"]}
+    )
+    assert proposed["trace"]["review_provider"]["legacy_proposal_only"] is True
+    assert not releases
+    denied = client.post(
+        f"/api/v1/preparation/model-calls/{task_id}/abandon",
+        json={"grant_id": "forged", "snapshot": "forged", "evidence": "No synthetic operator grant yet"},
+        headers=HEADERS,
+    )
+    assert denied.status_code == 409 and not releases
+    grant = post(
+        client, "/preparation/approval-grants", {"action": "model_reconcile", "target_id": task_id}, operator=True
+    )
+    if changed:
+        with factory.begin() as db:
+            db.get(ProviderProfile, profile["id"]).model = "substituted-model"
+    response = client.post(
+        f"/api/v1/preparation/model-calls/{task_id}/abandon",
+        json={
+            **{k: grant[k] for k in ["grant_id", "snapshot"]},
+            "evidence": "Explicit synthetic test operator reconciliation",
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == (409 if changed else 200), response.text
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == ("RECONCILE_REQUIRED" if changed else "RELEASED")
+    assert releases == ([] if changed else ["pinned-vlm"])
+
+
 def test_audited_h3_templates_preserve_graph_and_unverified_status():
     from shine.comfy.workflow import graph_hash
 

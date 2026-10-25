@@ -73,6 +73,9 @@ class FakeOpenAIServer(_BaseServer):
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
+                if self.path == "/free":
+                    self._json(200, {"released": True, "allocated_bytes": 0, "is_mock": True})
+                    return
                 outer.requests.append(json.loads(raw or b"{}"))
                 outer.auth_headers.append(self.headers.get("Authorization"))
                 if self.path != "/v1/chat/completions":

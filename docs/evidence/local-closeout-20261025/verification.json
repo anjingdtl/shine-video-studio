@@ -1,23 +1,23 @@
 {
-  "collected_at": "2026-10-25T12:05:26.553523+00:00",
+  "collected_at": "2026-10-25T14:16:24.449865+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "405",
+    "tests": "427",
     "errors": "0",
     "failures": "0",
     "skipped": "0",
-    "time": "177.808"
+    "time": "186.253"
   },
   "checks": {
-    "ruff": "PASS",
+    "ruff": "PASS incl local_review_server.py",
     "typescript_vite": "PASS",
     "npm_audit": "0 vulnerabilities",
     "uv_lock_check": "PASS",
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
-    "windows_stack_operations": "PASS NoWorker/custom proxy/duplicate refusal/Worker restart/verified stop",
-    "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]",
-    "remote_ci": "PENDING_AT_COMMIT"
+    "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
+    "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]; 12 existing browser flow families",
+    "remote_ci": "PENDING_AT_COMMIT; exact current SHA checks on PR #7 are authoritative"
   },
   "real_text_roles": {
     "scriptwriter": {
@@ -156,11 +156,211 @@
     "full_decode_exit_code": 0
   },
   "boundaries": {
-    "new_h3_generation": "NOT_RUN reused previously human-reviewed real clips",
+    "new_h3_generation": "ONE real PDD8 upscale shot; limited machine sample PASSED",
     "new_human_approval": "NONE",
     "new_reel_human_quality_review": "PENDING",
     "media_uploaded_to_remote_review": false,
-    "full_product_acceptance": "PARTIAL"
+    "full_product_acceptance": "PARTIAL; unresolved release reconciliation and production human gates remain"
   },
-  "local_evidence_directory": ".local-acceptance/closeout-20261025"
+  "local_evidence_directory": ".local-acceptance/closeout-20261025",
+  "previous_backend": {
+    "tests": "405",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "177.808"
+  },
+  "source_base": "105403b5b0802d806ae228e916d88fac02947dee",
+  "commands_serial": [
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-serial-final-r7.xml",
+    "backend/.venv/Scripts/ruff.exe check backend/shine backend/alembic backend/tests scripts/local_review_server.py",
+    "npm --prefix frontend run build",
+    "scripts/verify_stack_operations.ps1",
+    "uv --no-config lock --project backend --check --default-index https://pypi.org/simple",
+    "uv --no-config run --project backend --frozen --with playwright==1.62.0 --default-index https://pypi.org/simple python scripts/verify_v13_web.py --browser-path C:/Users/Administrator/AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe --screenshot .local-acceptance/closeout-20261025/browser-serial-v13.png"
+  ],
+  "serial_full_suite_history": [
+    {
+      "file": "backend-serial-final.xml",
+      "tests": "423",
+      "errors": "0",
+      "failures": "1",
+      "skipped": "0",
+      "time": "185.943",
+      "failing_cases": [
+        "test_release_failure_and_invalid_reconciliation_grant_never_free_gpu"
+      ]
+    },
+    {
+      "file": "backend-serial-final-r2.xml",
+      "tests": "423",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "187.963",
+      "failing_cases": []
+    },
+    {
+      "file": "backend-serial-final-r3.xml",
+      "tests": "424",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "187.851",
+      "failing_cases": []
+    },
+    {
+      "file": "backend-serial-final-r4.xml",
+      "tests": "426",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "188.511",
+      "failing_cases": []
+    },
+    {
+      "file": "backend-serial-final-r5.xml",
+      "tests": "427",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "189.002",
+      "failing_cases": []
+    },
+    {
+      "file": "backend-serial-final-r6.xml",
+      "tests": "427",
+      "errors": "0",
+      "failures": "1",
+      "skipped": "0",
+      "time": "188.283",
+      "failing_cases": [
+        "test_even_small_legacy_nonexclusive_leases_cannot_overlap"
+      ]
+    },
+    {
+      "file": "backend-serial-final-r7.xml",
+      "tests": "427",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "186.253",
+      "failing_cases": []
+    }
+  ],
+  "real_new_h3_machine_sample": {
+    "job_id": "7a526327-cc07-4d2d-afc0-141870662c74",
+    "status": "PASSED",
+    "attempt_count": 1,
+    "attempt_id": "55d11a0f-5397-4c65-bc4e-3fcd8d2b6ed7",
+    "artifact_id": "6e8a7093-6004-4772-b485-189be4cf953b",
+    "provider_job_id": "bdd2d229-565b-4360-a3a9-37e84a6f6d71",
+    "artifact_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+    "human_acceptance": "NOT_SIGNED; machine sample only",
+    "dimensions": [
+      2016,
+      1152
+    ],
+    "duration_s": 4.458,
+    "generation_mode": "Ref2VA PDD8 + upscale",
+    "review_first_run": "CUDA_OOM_NEEDS_REVIEW",
+    "review_recheck": "PASSED same render; audio not applicable",
+    "new_render_submissions": 1,
+    "gate_history": [
+      {
+        "gate_name": "technical",
+        "status": "passed",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:38:11.476224"
+      },
+      {
+        "gate_name": "semantic",
+        "status": "unavailable",
+        "is_mock": 0,
+        "error_code": "SEMANTIC_REVIEW_FAILED: RuntimeError",
+        "created_at": "2026-10-25 12:38:11.476224"
+      },
+      {
+        "gate_name": "audio",
+        "status": "not_applicable",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:38:11.476224"
+      },
+      {
+        "gate_name": "style",
+        "status": "not_run",
+        "is_mock": 0,
+        "error_code": "STYLE_REVIEW_NOT_COVERED",
+        "created_at": "2026-10-25 12:38:11.476224"
+      },
+      {
+        "gate_name": "final",
+        "status": "needs_review",
+        "is_mock": 0,
+        "error_code": "SEMANTIC_REVIEW_FAILED: RuntimeError",
+        "created_at": "2026-10-25 12:38:11.476224"
+      },
+      {
+        "gate_name": "technical",
+        "status": "passed",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:50:29.419881"
+      },
+      {
+        "gate_name": "semantic",
+        "status": "passed",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:50:29.419881"
+      },
+      {
+        "gate_name": "audio",
+        "status": "not_applicable",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:50:29.419881"
+      },
+      {
+        "gate_name": "style",
+        "status": "passed",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:50:29.419881"
+      },
+      {
+        "gate_name": "final",
+        "status": "passed",
+        "is_mock": 0,
+        "error_code": null,
+        "created_at": "2026-10-25 12:50:29.419881"
+      }
+    ],
+    "release_proof_at_sample_collection": {
+      "released": true,
+      "allocated_bytes": 0,
+      "is_mock": false
+    }
+  },
+  "serial_runtime": {
+    "policy": "one model stage at a time; preflight and postflight cleanup; uncertain release blocks next stage",
+    "local_review_routes": [
+      "vlm_reviewer",
+      "asr_reviewer"
+    ],
+    "strict_release_retest": {
+      "status": "NEEDS_REVIEW",
+      "residual_cuda_bytes": 9568256,
+      "model_call_id": "8cc24300-09f5-49ce-a530-e43edf2e8c87",
+      "lease_id": "6ee935c4-1860-45a0-acf4-f9640187456d",
+      "owner_executor_stopped_by_verified_identity": true,
+      "idle_after_restart_allocated_bytes": 0,
+      "ledger_release": "NOT_RELEASED; authenticated human model_reconcile grant required",
+      "provider_release_proposal": "PINNED_NOT_EXECUTED",
+      "cublas_cleanup_after_inference_retest": "NOT_RUN"
+    },
+    "qc_report_history_note": "First experimental recheck used legacy overwrite path: failure gate rows and captured JSON retained, original QCReport body updated. Subsequent implementation appends changed reports and has immutable-history regression."
+  }
 }

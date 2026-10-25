@@ -3,8 +3,8 @@
 基线：`7a81aa3`；功能分支：`codex/local-final-closeout`。本报告补充此前
 [本机收尾报告](LOCAL_V1.3_CLOSEOUT_REPORT.md)，不改写其历史测试结果。
 
-**结论：工程修复与「真实文本剧组 → 已签署真实 H3 镜头 → 剪辑提案 → Web 装配/播放/下载」闭环通过。完整产品验收仍为 PARTIAL。**
-本轮没有重渲染 H3，也没有新增人类审批；使用既有三镜头及原先逐项签署的审片证据。
+**当前结论：既有交付链路、一次新 PDD8 超分渲染及本地机器 QC 恢复通过；完整产品验收仍为 PARTIAL，后续释放异常仍待对账（第 7 节）。**
+前半阶段没有重渲染 H3，也没有新增人类审批；使用既有三镜头及原先逐项签署的审片证据。
 新成片的 `all_passed` 只表示来源镜头审查齐全，不代表新成片已经获得人的最终试听/美学批准。
 
 ## 1. 开始前核对与隔离
@@ -116,3 +116,72 @@ TTS/ASR/对齐、SRT 下载及凭据不持久化。它不连接既有 ComfyUI，
 后续真人操作按 [操作员指南](operator-guide.md) 与
 [V1.3 本机清单](V1.3_LOCAL_INTEGRATION_CHECKLIST.md) 执行。缺项保持显式 BLOCKED/PENDING，
 不可通过补数据库、代签、切换 Fake 来源、绕过许可/审批或重放不确定 GPU 提交来关闭。
+
+## 7. 继续推进：真实本地审片与严格串行
+
+第 1–6 节保留前半阶段的历史结果。本阶段继续以全 PASS 为目标，没有把工程通过扩大为全产品验收。
+
+### 7.1 正常 Worker 的缺口与修复
+
+- 发现正常 `serve` / `--once` 未从 Gateway 路由注入媒体 Reviewer，测试注入成功并不代表正常启动路径已覆盖。
+  新增独立 `vlm_reviewer` / `asr_reviewer` 路由，恢复路径与正常路径共同使用；不回退到文本 `qc_reviewer`。
+- 本地 VLM 接收清单哈希校验后的派生参考缩略图及均匀抽帧；远程 VLM 不接收本地主资产参考图。
+  远程 ASR 在打开/上传文件前检查项目许可。所有现存 `allow_remote_review=false` 保留。
+- 参考与生成证据最大边 768 像素，避免把 2016×1152 全尺寸帧堆进 16GB GPU；这只是抽样语义审片，
+  不证明逐帧画质、口型、声音身份或完整影片的艺术质量。
+- Agent 文本工种、H3、图像、TTS、ASR、对齐和 VLM 共用同一 SQLite 串行资源准入。
+  即使预算可共存也不并发；每阶段前后执行卸载、GC 与实际计数检查。清理失败保持 `RECONCILE_REQUIRED`。
+  H3 开始前卸载失败也会明确阻断 Job，且不会创建 Attempt 或提交外部任务。
+- 新增有界 `POST /jobs/{id}/review/recheck` 与 Web“仅重跑审片（保留视频）”：检查状态版本、
+  当前不可变 Attempt/Artifact/清单/技术门、请求去重与两次预算；硬失败不能用此入口清除。
+  只核对原 Comfy history，不调用 `/prompt`。新机器审片意图进入指纹；不重放失联调用。
+- 发现旧 `_record_gates` 会更新同 Attempt 的 QCReport；现改为新结果追加、完全相同结果幂等。
+  本阶段第一次实测重审发生在修复前，原失败门禁及采集 JSON 保留，但旧 QCReport 正文曾被更新，
+  不宣称那份正文仍完整留存在原行。新回归明确检查旧正文不可变。
+- 本地可选执行器 `scripts/local_review_server.py` 使用独立 ML 运行时、逐文件 SHA-256 校验、loopback，
+  不下载权重。统一启动器可管理 review/API/Worker/Web 的已核验进程树，统一关闭；未修改既有 ComfyUI 环境。
+
+### 7.2 真实本地证据
+
+使用已有 Qwen3-VL-4B 4bit 和 Whisper tiny 权重，固定来源 revision / 哈希见
+[上游审计补充](upstream-audit.md#2026-10-25-local-review-models)。Whisper 仅补齐固定版本的 tokenizer/配置。
+Transformers 4.57.6 / tokenizers 0.22.2 装在忽略目录的独立 overlay，不升级 ComfyUI 原嵌入环境。
+
+| 项 | 实测结果 |
+| --- | --- |
+| 本地参考图 VLM 样本 A | 25.203 秒；真实模型；无 findings；置信度 0.98；清理后无驻留模型 |
+| 本地 ASR 样本 B | 正确得到“这里人太多跟我来”；UNKNOWN 声音身份，不能替代音色/口型人工试听 |
+| 新 H3 Job | `7a526327-cc07-4d2d-afc0-141870662c74`，PDD8 + 超分，4.458 秒、2016×1152、约 24fps |
+| 外部 prompt / Attempt | `bdd2d229-565b-4360-a3a9-37e84a6f6d71` / `55d11a0f-5397-4c65-bc4e-3fcd8d2b6ed7`，始终一次渲染 |
+| Artifact / SHA-256 | `6e8a7093-6004-4772-b485-189be4cf953b` / `16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc` |
+| 首次审片 | 全尺寸输入触发真实 CUDA OOM；NEEDS_REVIEW，失败门禁保留 |
+| 仅重跑审片 | 同一视频、同一 Attempt；H3 卸载 → ASR → 卸载 → VLM → 卸载；technical / semantic / style / final 通过，audio 可选不适用 |
+| 采集时释放证明 | `allocated_bytes=0`、模型未加载、无活动租约；见 `real-serial-qc-recheck.json` |
+
+### 7.3 后续释放失败仍然阻断
+
+再一次独立模型复验中，严格零分配检查观测到模型删除后仍残留 **9,568,256 字节** CUDA 分配。
+调用 `8cc24300-09f5-49ce-a530-e43edf2e8c87` 与资源
+`6ee935c4-1860-45a0-acf4-f9640187456d` 保持 NEEDS_REVIEW / RECONCILE_REQUIRED。
+已核验身份并停止该执行器，重启后 `/health` 报 allocated/reserved 均为 0；没有清除数据库阻断。
+新增 cuBLAS workspace 清理，但**此补丁后的真实推理/卸载闭环尚未复验**，不以重启时为 0 冒充卸载通过。
+
+旧调用没有固定 cleanup provider，已生成只读可审查的释放目标提案，绑定原 `local-qwen3-vl-4b` 档案与 URL 哈希。
+提案不执行卸载、不放弃结果、不签署批准。实际 `/abandon` 仍要求操作员的一次性 `model_reconcile` grant、
+已退出 owner、固定 Provider 未改变、真实 release proof；成功只记 ABANDONED，不记电影通过。
+新调用从 submit intent 起固定 cleanup provider，避免事后猜测。
+
+因此，真实串行样本通过与后续释放异常同时保留。当前不能宣布“全 PASS”。第 6 节的真人权利/资产/
+Voice/Workflow/预制作冻结、双人多场景 60 秒、硬连续性及其他模式的真实验收仍未关闭。
+
+### 7.4 最终工程复验
+
+本阶段最终工作树全量 **427 passed，0 skipped / failures / errors**；包含 V1.3 preparation、migrations、
+e2e、旧 offline E2E、film crew 与新增的串行/卸载/重审/固定 Provider 对账边界。
+Ruff、TypeScript/Vite、uv lock 检查、Windows 启停复验通过；浏览器 12 类既有流程
+`MOCK_VERIFIED`、api_errors=[]。没有把 Mock 浏览器或 CPU 测试作为 CUDA 清理补丁的真实复验。
+
+中间一次全量发现 preflight 清理失败未持久化租约 ID，已修复；另两次运行遇到 Windows 同时间戳下
+测试夹具的入队顺序不确定，现用显式优先级指定夹具顺序，互斥与阻断断言保留。
+中间失败与最终结果都列在 [机器可读验证记录](evidence/local-closeout-20261025/verification.json)。
+提交时远端 CI 为待触发；后续以 PR #7 当前 SHA 的四项 Checks 为准。

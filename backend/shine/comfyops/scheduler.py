@@ -1,5 +1,7 @@
 """Single SQLite GPU admission ledger. Expiry requires reconciliation, never blind reuse."""
 
+import gc
+import time
 from contextvars import ContextVar
 from datetime import timedelta
 
@@ -25,7 +27,7 @@ class ResourceScheduler:
         lease = ResourceLease(
             owner=owner,
             budget_mb=budget_mb,
-            exclusive=exclusive,
+            exclusive=True,
             priority=priority,
             status="WAITING",
             expires_at=utcnow() + timedelta(seconds=60),
@@ -50,11 +52,9 @@ class ResourceScheduler:
         if not candidate or candidate.status != "WAITING" or not waiting or waiting[0].id != lease_id:
             db.commit()
             return False
-        if active and (
-            candidate.exclusive
-            or any(x.exclusive for x in active)
-            or sum(x.budget_mb for x in active) + candidate.budget_mb > self.capacity_mb
-        ):
+        # Model stages are serial even when their estimated budgets would fit.
+        # This also protects old non-exclusive leases created before this policy.
+        if active:
             db.commit()
             return False
         candidate.status = "ACTIVE"
@@ -90,14 +90,22 @@ from uuid import uuid4  # noqa: E402
 
 
 @contextmanager
-def resource_slot(factory, kind, budget_mb, *, release_models=None):
+def resource_slot(factory, kind, budget_mb, *, release_models=None, wait_seconds=0, on_acquired=None):
     owner = kind.lower() + ":" + uuid4().hex
     scheduler = ResourceScheduler()
     with factory.begin() as db:
-        row = scheduler.enqueue(db, owner, budget_mb, False, 10)
+        row = scheduler.enqueue(db, owner, budget_mb, True, 10)
         identity = row.id
     with factory() as db:
         admitted = scheduler.admit(db, identity)
+    deadline = time.monotonic() + wait_seconds
+    while not admitted and time.monotonic() < deadline:
+        with factory() as db:
+            if db.scalar(select(ResourceLease.id).where(ResourceLease.status == "RECONCILE_REQUIRED").limit(1)):
+                break  # Unknown release needs reconciliation, not a timed blind retry.
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        with factory() as db:
+            admitted = scheduler.admit(db, identity)
     if not admitted:
         # Synchronous API callers may retry a fresh intent; do not leave an orphaned waiting entry.
         with factory.begin() as db:
@@ -121,6 +129,11 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
     thread.start()
     resource_token = CURRENT_RESOURCE.set(identity)
     try:
+        if on_acquired:
+            on_acquired(identity)
+        if release_models is not None:
+            release_models()
+        gc.collect()
         yield identity
         if heartbeat_errors:
             raise HTTPException(409, "RESOURCE_LEASE_LOST_RECONCILE_REQUIRED")
@@ -128,13 +141,17 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None):
         try:
             if release_models is not None:
                 release_models()
+            gc.collect()
         except Exception:
             with factory.begin() as db:
                 db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
             raise
         else:
             with factory.begin() as db:
-                scheduler.release(db, identity, owner, reconciled=True)
+                lease = db.get(ResourceLease, identity)
+                if lease.status == "RECONCILE_REQUIRED":
+                    raise HTTPException(409, "MODEL_RELEASE_RECONCILIATION_REQUIRED")
+                scheduler.release(db, identity, owner)
         finally:
             CURRENT_RESOURCE.reset(resource_token)
             stopped.set()

@@ -20,6 +20,7 @@ from shine.api_llm import router as llm_router
 from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
 from shine.api_preparation import Decision
+from shine.api_review import router as review_router
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
@@ -336,6 +337,7 @@ def create_app(
     app.include_router(agent_router)
     app.include_router(comfy_router)
     app.include_router(film_router)
+    app.include_router(review_router)
     app.include_router(delivery_router)
     app.include_router(operator_router)
     app.include_router(instances_router)

@@ -4,13 +4,27 @@ param(
     [ValidateRange(1,65535)][int]$ApiPort = 8000,
     [ValidateRange(1,65535)][int]$WebPort = 5173,
     [string]$DataDir = '',
-    [switch]$NoWorker
+    [switch]$NoWorker,
+    [string]$ReviewPython = '',
+    [string]$ReviewManifest = '',
+    [string]$ReviewRuntimePackages = '',
+    [ValidateRange(1,65535)][int]$ReviewPort = 8116
 )
 
 $ErrorActionPreference = 'Stop'
 $explicitDataDir = [bool]$DataDir
 if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$startReview = [bool]($ReviewPython -or $ReviewManifest -or $ReviewRuntimePackages)
+if ($startReview) {
+    if (-not ($ReviewPython -and $ReviewManifest -and $ReviewRuntimePackages)) {
+        throw 'Local review requires ReviewPython, ReviewManifest and ReviewRuntimePackages together.'
+    }
+    if ($ReviewPort -in @($ApiPort, $WebPort)) { throw 'Review, API and Web require distinct ports.' }
+    $ReviewPython = (Resolve-Path -LiteralPath $ReviewPython).Path
+    $ReviewManifest = (Resolve-Path -LiteralPath $ReviewManifest).Path
+    $ReviewRuntimePackages = (Resolve-Path -LiteralPath $ReviewRuntimePackages).Path
+}
 
 if (-not $DataDir) {
     $DataDir = if ($env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR } else { Join-Path $repoRoot '.local-data' }
@@ -72,7 +86,9 @@ function Get-PortOwner([int]$Port) {
 # A port that is already in use makes the new API die with a bind error while the
 # old server keeps serving, which looks like the new configuration being ignored.
 $busy = @()
-foreach ($port in @($ApiPort, $WebPort)) {
+$requestedPorts = @($ApiPort, $WebPort)
+if ($startReview) { $requestedPorts += $ReviewPort }
+foreach ($port in $requestedPorts) {
     $owner = Get-PortOwner $port
     if ($owner) { $busy += "  port $port is already in use by pid $owner" }
 }
@@ -106,6 +122,23 @@ function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Argumen
 
 try {
 Start-ShineProcess 'api' $venvPython $uvicornArgs $repoRoot
+if ($startReview) {
+    Start-ShineProcess 'review' $ReviewPython @(
+        (Join-Path $repoRoot 'scripts/local_review_server.py'),
+        '--manifest', $ReviewManifest, '--runtime-packages', $ReviewRuntimePackages, '--port', "$ReviewPort"
+    ) $repoRoot
+    $reviewReady = $false
+    for ($i = 0; $i -lt 120; $i++) {
+        try {
+            $reviewHealth = Invoke-RestMethod "http://127.0.0.1:$ReviewPort/health" -TimeoutSec 2
+            if ($reviewHealth.status -eq 'ok') { $reviewReady = $true; break }
+        } catch { }
+        $reviewEntry = $started | Where-Object name -EQ 'review'
+        if (-not (Get-Process -Id $reviewEntry.pid -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $reviewReady) { throw "Hash-verified local reviewer did not start on port $ReviewPort" }
+}
 if (-not $NoWorker) {
     Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
 }
@@ -157,6 +190,7 @@ $manifestPath = Join-Path $runDir 'processes.json'
     render_provider = $Provider
     api_port = $ApiPort
     web_port = $WebPort
+    review_port = if ($startReview) { $ReviewPort } else { $null }
     processes = $started
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
 } catch {

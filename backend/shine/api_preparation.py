@@ -1698,6 +1698,51 @@ def model_call_records(project_id: str, actor: Operator, db: DBSession):
     ]
 
 
+class ReleaseProviderProposal(Strict):
+    provider_profile_id: str
+
+
+@router.post("/preparation/model-calls/{identity}/release-provider-proposal")
+def release_provider_proposal(identity: str, body: ReleaseProviderProposal, db: DBSession):
+    """Pin a legacy reviewer's cleanup target for subsequent human approval only."""
+    import hashlib
+
+    from shine.models import ProviderProfile
+    from shine.security import require_loopback_url
+
+    locked(db)
+    row = get(db, AgentTaskRecord, identity)
+    if row.status != "NEEDS_REVIEW" or row.trace.get("kind") not in {"VLM", "ASR"}:
+        raise HTTPException(409, "REVIEW_RELEASE_PROPOSAL_NOT_APPLICABLE")
+    if row.trace.get("review_provider"):
+        raise HTTPException(409, "REVIEW_RELEASE_PROVIDER_ALREADY_PINNED")
+    profile = get(db, ProviderProfile, body.provider_profile_id)
+    require_loopback_url(profile.base_url)
+    if profile.kind not in {"openai_compatible", "ollama"}:
+        raise HTTPException(409, "REVIEW_RELEASE_PROVIDER_KIND_UNSUPPORTED")
+    row.trace = {
+        **row.trace,
+        "review_provider": {
+            "profile_id": profile.id,
+            "kind": profile.kind,
+            "model": profile.model,
+            "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
+            "legacy_proposal_only": True,
+        },
+    }
+    add_audit(
+        db,
+        "model-tool",
+        "REVIEW_RELEASE_PROVIDER_PROPOSED",
+        "agent_task",
+        row.id,
+        {"provider_profile_id": profile.id, "execution": False, "requires_human_grant": True},
+        project_id=row.project_id,
+    )
+    db.commit()
+    return public(row)
+
+
 @router.post("/preparation/model-calls/{identity}/abandon")
 def abandon_model_call(
     identity: str, body: Decision, actor: Operator, request: Request, settings: SettingsDep, db: DBSession
@@ -1739,13 +1784,47 @@ def abandon_model_call(
     db.commit()  # authorize before any provider side effect; never replay a lost reconciliation
     try:
         if not trace.get("is_mock"):
-            provider = (
-                voice_provider(request)
-                if trace.get("kind") in {"TTS", "ASR", "ALIGNMENT"}
-                else getattr(request.app.state, "image_provider", None)
-                if trace.get("kind") == "IMAGE"
-                else getattr(request.app.state, "candidate_reviewer", None)
-            )
+            binding = trace.get("review_provider")
+            if binding:
+                import hashlib
+
+                from shine.llm.gateway import LLMGateway
+                from shine.llm.secrets import SecretStore
+                from shine.models import ProviderProfile
+                from shine.quality.semantic import (
+                    LocalASRReviewer,
+                    LocalVisionReviewer,
+                    OpenAICompatibleASRReviewer,
+                    OpenAICompatibleVisionReviewer,
+                )
+                from shine.security import is_loopback_url
+
+                profile = get(db, ProviderProfile, binding["profile_id"])
+                if (
+                    profile.kind != binding["kind"]
+                    or profile.model != binding["model"]
+                    or hashlib.sha256(profile.base_url.encode()).hexdigest() != binding["base_url_sha256"]
+                ):
+                    raise HTTPException(409, "REVIEW_RELEASE_PROVIDER_CHANGED")
+                config = LLMGateway(SecretStore(settings.secret_store_dir or settings.data_dir / "secrets")).config_for(
+                    profile
+                )
+                if is_loopback_url(config.base_url):
+                    provider = (LocalASRReviewer if trace.get("kind") == "ASR" else LocalVisionReviewer)(config)
+                else:
+                    # Remote review cannot hold a model on this host. This
+                    # reconciliation sends no evidence or new inference call.
+                    provider = (
+                        OpenAICompatibleASRReviewer if trace.get("kind") == "ASR" else OpenAICompatibleVisionReviewer
+                    )(config)
+            else:
+                provider = (
+                    voice_provider(request)
+                    if trace.get("kind") in {"TTS", "ASR", "ALIGNMENT"}
+                    else getattr(request.app.state, "image_provider", None)
+                    if trace.get("kind") == "IMAGE"
+                    else getattr(request.app.state, "candidate_reviewer", None)
+                )
             if provider is None or not hasattr(provider, "release_models"):
                 raise HTTPException(409, "MODEL_RELEASE_PROOF_UNAVAILABLE")
             # ComfyUI unload does not cancel a queued prompt. Require an idle queue first.

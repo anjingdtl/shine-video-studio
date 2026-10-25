@@ -551,3 +551,25 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
 另外，若要给 ComfyOps 配置本机探测范围，需要设置 `SHINE_COMFY_PROBE_ROOTS` 与
 `SHINE_COMFY_PROBE_PORTS`；不配置时相关端点返回 `LOCAL_PROBE_SCOPE_NOT_CONFIGURED`，
 属配置项待办。
+
+## 10. 串行模型阶段与本地机器审片
+
+所有工种与模型共用串行准入。上一步结束后先实际卸载，再执行下一步；显存预算够用也不并行。
+未知、失联或卸载失败的资源保留阻断。不要手工删除 ResourceLease 或重放不确定调用。
+
+在“模型与系统”将明确的本地 OpenAI-compatible Provider 分别路由到“画面审片”和“语音核对”。
+本地服务须提供可核验的 `/free`，只回 accepted/released 而没有分配计数不够。
+文本 `qc_reviewer` 路由不会代替图像或音频评审；远程派生媒体仍须项目明确许可。
+
+`start_shine.ps1` 可额外接收 `-ReviewPython`、`-ReviewManifest`、`-ReviewRuntimePackages`（三项一起指定）
+及可选 `-ReviewPort 8116`。解释器/模型清单/依赖目录必须已经存在，启动器不下载或安装模型。
+review 通过哈希校验与健康检查后才启动 Worker；它与 API/Web 一起进入同一进程身份清单，由 `stop_shine.py` 统一关闭。
+
+真实渲染已完成而机器审片暂时不可用时，可在该 Job 详情使用“仅重跑审片（保留视频）”。
+入口最多两次，保留原 Attempt/Artifact，追加新的质检结果；硬失败、旧版本、文件变化和重复请求会被拒绝。
+这不是人工批准入口，也不重新提交 H3。
+
+失联调用的对账在“制片准备 → 环境中心 → 读取模型调用与失联记录”。旧审片记录没有 cleanup Provider 时，
+先填写实际历史 Provider ID，生成固定目标提案并核对 model / profile / URL 哈希。随后由操作员输入本机凭据和
+具体核验依据，执行“核验队列与释放后放弃丢失结果（不重投）”。服务会重查 owner 已退出、Provider 未改变及真实释放。
+失败继续保留阻断；成功只记录丢失结果被放弃，不自动重投、不批准镜头，也不替代资产/音色/工作流的人工批准。

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, json, API } from '../api';
 
-type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; formal_asset_id?: string };
+type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; formal_asset_id?: string; trace?: Record<string, unknown> };
 type Registry = { categories: string[]; revisions: Row[]; legacy_profiles: unknown[] };
 const views = ['环境中心', '模型与节点', '工作流能力', '全资产工厂', 'Voice Studio', '开机前预检'];
 
@@ -46,6 +46,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   const [instanceId, setInstanceId] = useState('');
   const [backupJson, setBackupJson] = useState('{"instance_id":"","root":""}');
   const [callRecords, setCallRecords] = useState<Row[]>([]);
+  const [releaseProfile, setReleaseProfile] = useState('');
   const [attemptRecords, setAttemptRecords] = useState<Row[]>([]);
   const [resourceJson, setResourceJson] = useState('{"id":"","owner":""}');
   const [relativePath, setRelativePath] = useState('');
@@ -144,8 +145,14 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
           proof_decision: { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence } }, true);
       })}>核验实际卸载并对账释放（失联模型须先单独对账）</button>
       <button disabled={busy} onClick={() => act(async () => { const records = await api<Row[]>(`/projects/${projectId}/preparation/model-calls`, { headers: headers() }); setCallRecords(records); return records; })}>读取模型调用与失联记录</button>
+      <label>旧审片调用的释放 Provider ID（只生成提案，仍需人工对账）<input aria-label="旧审片释放 Provider ID" value={releaseProfile} onChange={e => setReleaseProfile(e.target.value)} /></label>
       {callRecords.filter(r => ['RUNNING', 'NEEDS_REVIEW', 'RECONCILING'].includes(r.status)).map(r => <article key={r.id}>
         <p>模型调用 {r.id} · {r.status}</p>
+        {Boolean(r.trace?.review_provider) && <pre>{JSON.stringify(r.trace?.review_provider, null, 2)}</pre>}
+        {!r.trace?.review_provider && ['VLM', 'ASR'].includes(String(r.trace?.kind)) && <button disabled={busy || !releaseProfile} onClick={() => act(async () => {
+          const proposed = await post<Row>(`/preparation/model-calls/${r.id}/release-provider-proposal`, { provider_profile_id: releaseProfile });
+          setCallRecords(previous => previous.map(row => row.id === r.id ? proposed : row)); return proposed;
+        })}>固定旧审片释放目标（不执行）</button>}
         <button disabled={busy || !evidence} onClick={() => act(() => approve(r, 'model_reconcile', `/preparation/model-calls/${r.id}/abandon`))}>核验队列与释放后放弃丢失结果（不重投）</button>
       </article>)}
       {attemptRecords.filter(r => r.status === 'SUBMIT_INTENT').map(r => <article key={r.id}>

@@ -120,6 +120,8 @@ export default function SettingsPanel({
                 <button className="text-button" onClick={() => onTestProfile(profile.id)}>测试</button>
                 <button className="text-button" onClick={() => onRoute('shot_planner', profile.id)}>镜头规划</button>
                 <button className="text-button" onClick={() => onRoute('script_planner', profile.id)}>剧本规划</button>
+                <button className="text-button" onClick={() => onRoute('vlm_reviewer', profile.id)}>画面审片</button>
+                <button className="text-button" onClick={() => onRoute('asr_reviewer', profile.id)}>语音核对</button>
                 <button className="icon-button tiny" onClick={() => onDeleteProfile(profile.id)}><Trash2 size={12} /></button>
               </div>
             </div>

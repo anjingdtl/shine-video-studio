@@ -6,9 +6,50 @@ to a remote reviewer.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
+
+from shine.media.artifacts import safe_asset_path
+
+
+def reference_thumbnails(root, manifest, output_dir, *, ffmpeg_path="ffmpeg"):
+    """Local-only derived references pinned to the request manifest, never masters."""
+    executable = ffmpeg_executable(ffmpeg_path)
+    if not executable:
+        raise ValueError("REFERENCE_EVIDENCE_TOOL_UNAVAILABLE")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+    for entry in manifest:
+        if not entry.content_type.startswith("image/"):
+            continue
+        source = safe_asset_path(root, entry.storage_key)
+        with source.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != entry.sha256:
+                raise ValueError("REFERENCE_EVIDENCE_HASH_CHANGED")
+        target = output_dir / f"{entry.sha256}.jpg"
+        subprocess.run(
+            [
+                executable,
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=768:768:force_original_aspect_ratio=decrease",
+                str(target),
+            ],
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        frames.append((f"{entry.label} / {entry.entity_id or entry.role or 'reference'}", target))
+    return tuple(frames)
 
 
 def ffmpeg_executable(ffmpeg_path: str = "ffmpeg") -> str | None:
@@ -27,6 +68,7 @@ def extract_frames(
     count: int = 4,
     ffmpeg_path: str = "ffmpeg",
     timeout_s: float = 60,
+    duration_s: float | None = None,
 ) -> list[Path]:
     """Extract up to ``count`` evenly spaced JPEG frames.
 
@@ -40,9 +82,11 @@ def extract_frames(
         out_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return []
+    if count <= 0:
+        return []
     frames: list[Path] = []
     for index in range(count):
-        offset = 0.5 + index
+        offset = (index + 0.5) * duration_s / count if duration_s and duration_s > 0 else 0.5 + index
         target = out_dir / f"frame_{index:02d}.jpg"
         command = [
             executable,
@@ -53,6 +97,8 @@ def extract_frames(
             f"{offset}",
             "-i",
             str(path),
+            "-vf",
+            "scale=768:768:force_original_aspect_ratio=decrease",
             "-frames:v",
             "1",
             "-q:v",

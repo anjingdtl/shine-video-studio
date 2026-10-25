@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from sqlalchemy import select
@@ -107,11 +108,27 @@ class LLMGateway:
                 "this JSON schema:\n"
                 f"{json.dumps(schema, ensure_ascii=False, indent=1)}"
             )
-        return provider.complete(
-            [ChatMessage("system", system), ChatMessage("user", user)],
-            schema=schema,
-            json_mode=True,
-        )
+        from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
+        from shine.db import make_session_factory
+        from shine.llm.lifecycle import release_text_model
+
+        # All roles share the same stage admission as H3/VLM/ASR. A textual
+        # provider never silently runs beside a local GPU model.
+        if CURRENT_RESOURCE.get() is not None:
+            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
+        config = self.config_for(profile)
+        with resource_slot(
+            make_session_factory(db.get_bind()),
+            "AGENT",
+            1,
+            release_models=partial(release_text_model, config),
+            wait_seconds=0 if profile.kind == "mock" else 300,
+        ):
+            return provider.complete(
+                [ChatMessage("system", system), ChatMessage("user", user)],
+                schema=schema,
+                json_mode=True,
+            )
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:
         provider = self.provider_for(profile, api_key_override=api_key)

@@ -453,6 +453,8 @@ class AgentRole(StrEnum):
     SHOT_PLANNER = "shot_planner"
     REPAIR_PLANNER = "repair_planner"
     QC_REVIEWER = "qc_reviewer"
+    VLM_REVIEWER = "vlm_reviewer"
+    ASR_REVIEWER = "asr_reviewer"
 
 
 class AgentRouteUpdate(APIModel):

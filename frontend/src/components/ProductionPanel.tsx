@@ -15,11 +15,12 @@ type Props = {
   onLoadGates: (jobId: string) => Promise<QualityGate[]>;
   onSuggest: (jobId: string) => Promise<RepairSuggestion>;
   onRepair: (jobId: string, plan: Record<string, unknown>) => void;
+  onRecheck: (job: Job) => void;
 };
 
 const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
 
-export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair }: Props) {
+export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck }: Props) {
   const [selected, setSelected] = useState('');
   const [qc, setQc] = useState<QCReport[]>([]);
   const [gates, setGates] = useState<QualityGate[]>([]);
@@ -110,6 +111,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <div className="detail-head">
           <div><b>{selectedJob.shot_name}</b><span>{selectedJob.id.slice(0, 12)}… · state v{selectedJob.state_version}</span></div>
           <div className="detail-actions">
+            {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="secondary-button" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>仅重跑审片（保留视频）</button>}
             <button className="subtle-button" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 修复建议</button>
           </div>
         </div>

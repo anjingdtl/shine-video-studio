@@ -94,7 +94,7 @@ EXTERNAL_MISSING_GRACE_SECONDS = 30
 
 # Failure codes that mean "the external outcome is not known". Such a job may
 # still be reconcilable against ComfyUI history and must never be resubmitted.
-RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND",)
+RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND", "QC_RECHECK_REQUESTED")
 
 
 def _register_worker(db: Session, worker_id: str) -> None:
@@ -289,6 +289,11 @@ def _record_gates(
     gates: list[GateOutcome],
     fused: FusedQCResult,
 ) -> None:
+    payload = fused.model_dump(mode="json")
+    existing = db.scalars(select(QCReport).where(QCReport.job_id == job.id, QCReport.attempt_id == attempt.id)).all()
+    if any(row.report == payload and row.artifact_id == (artifact.id if artifact else None) for row in existing):
+        # Idempotent crash recovery; changed reviews are new immutable reports.
+        return
     for gate in gates:
         db.add(
             QualityGate(
@@ -306,14 +311,6 @@ def _record_gates(
                 evidence=gate.evidence,
             )
         )
-    existing = db.scalar(select(QCReport).where(QCReport.job_id == job.id, QCReport.attempt_id == attempt.id))
-    if existing is not None:
-        # The attempt was already checked. Recovery must not duplicate the report.
-        existing.result = fused.result
-        existing.artifact_id = artifact.id if artifact else existing.artifact_id
-        existing.is_mock = fused.is_mock
-        existing.report = fused.model_dump(mode="json")
-        return
     db.add(
         QCReport(
             job_id=job.id,
@@ -322,7 +319,7 @@ def _record_gates(
             result=fused.result,
             is_mock=fused.is_mock,
             reviewer="quality-gates",
-            report=fused.model_dump(mode="json"),
+            report=payload,
         )
     )
 
@@ -339,16 +336,32 @@ def _semantic_review(
     remote_consent: bool,
     project_id: str,
     transcript: Transcript | None,
+    local_reference_frames=(),
+    reference_manifest=(),
+    review_revision=None,
 ) -> tuple[list[Any], str | None]:
     """Run the semantic reviewer, classifying every failure mode separately."""
     if reviewer is None:
         return [], None
+    if getattr(reviewer, "accepts_local_references", False) and reference_manifest:
+        from shine.media.frames import reference_thumbnails
+
+        try:
+            local_reference_frames = reference_thumbnails(
+                settings.data_dir,
+                reference_manifest,
+                settings.data_dir / "evidence" / project_id / job_id / "references",
+                ffmpeg_path=settings.ffmpeg_path,
+            )
+        except Exception as exc:
+            return [], f"SEMANTIC_REFERENCE_EVIDENCE_FAILED: {type(exc).__name__}"
     frames: list[Path] = []
     if getattr(reviewer, "is_mock", False) is False:
         frames = extract_frames(
             artifact_path,
             settings.data_dir / "evidence" / project_id / job_id,
             ffmpeg_path=settings.ffmpeg_path,
+            duration_s=spec.duration_target_s,
         )
     context = ReviewContext(
         job_id=job_id,
@@ -359,6 +372,8 @@ def _semantic_review(
         frame_paths=tuple(frames),
         transcript=transcript,
         remote_consent=remote_consent,
+        local_reference_frames=local_reference_frames,
+        review_revision=review_revision,
     )
     try:
         result = reviewer.review(context)
@@ -380,9 +395,12 @@ def _transcript_review(
     asr,
     artifact_path: Path,
     spec: ShotSpec,
+    remote_consent: bool = False,
 ) -> tuple[Transcript | None, list[Any] | None, str | None]:
     if asr is None:
         return None, None, None
+    if getattr(asr, "requires_remote_consent", False) and not remote_consent:
+        return None, None, "ASR_REMOTE_CONSENT_REQUIRED"
     try:
         transcript = asr.transcribe(artifact_path)
     except TimeoutError as exc:
@@ -637,6 +655,30 @@ def run_one(
         with session_factory() as resource_db:
             if not scheduler.admit(resource_db, resource_id):
                 return None
+        release_client = comfy_client or (comfy_service.client if comfy_service else None)
+        if release_client is None and settings:
+            release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+        try:
+            if release_client is None or not hasattr(release_client, "free_models"):
+                raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
+            release_client.free_models()
+        except Exception:
+            with session_factory.begin() as resource_db:
+                resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
+                blocked = resource_db.get(Job, job_id)
+                if blocked and blocked.status == "QUEUED":
+                    try_transition(blocked, "NEEDS_REVIEW")
+                    blocked.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
+                    add_audit(
+                        resource_db,
+                        "orchestrator",
+                        "H3_PREFLIGHT_RELEASE_UNCONFIRMED",
+                        "job",
+                        job_id,
+                        {"submitted": False, "resource_id": resource_id},
+                        project_id=blocked.project_id,
+                    )
+            return job_id
     from shine.comfyops.scheduler import CURRENT_RESOURCE
 
     resource_token = CURRENT_RESOURCE.set(resource_id)
@@ -1070,6 +1112,10 @@ def _finalize_comfy_attempt(
         remote_consent = bool(project and project.allow_remote_review)
         project_id = job.project_id
         existing = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        from shine.models import AppSetting
+
+        recheck = db.get(AppSetting, "qc-recheck:" + job.id)
+        review_revision = recheck.value.get("request_id") if recheck else None
         if existing and existing.attempt_id != attempt_id:
             existing = None
         artifact_path: Path | None = None
@@ -1190,6 +1236,7 @@ def _finalize_comfy_attempt(
         asr=asr_reviewer,
         artifact_path=artifact_path,
         spec=request.shot_spec,
+        remote_consent=remote_consent,
     )
     semantic_results, semantic_error = _semantic_review(
         reviewer=semantic_reviewer,
@@ -1202,6 +1249,8 @@ def _finalize_comfy_attempt(
         remote_consent=remote_consent,
         project_id=project_id,
         transcript=transcript,
+        reference_manifest=request.reference_manifest,
+        review_revision=review_revision,
     )
     gates, fused = evaluate_gates(
         policy=policy,
@@ -1264,6 +1313,7 @@ def _finalize_comfy_attempt(
         job.lease_expires_at = None
         job.quality_verification = VERIFICATION_MOCK if any(gate.is_mock for gate in gates) else VERIFICATION_REAL
         if fused.result == STATUS_PASSED:
+            job.failure_code = None
             transition(job, "PASSED")
         elif fused.result == STATUS_FAILED:
             transition(job, "REPAIR_PENDING")
@@ -1826,6 +1876,23 @@ def recover_expired_jobs(
         )
     recovered = 0
     for job_id in job_ids:
+        from shine.comfyops.models import ResourceLease
+
+        with session_factory() as check_db:
+            candidate = check_db.get(Job, job_id)
+            if (
+                candidate
+                and candidate.failure_code == "QC_RECHECK_REQUESTED"
+                and check_db.scalar(
+                    select(ResourceLease.id)
+                    .where(
+                        ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"]),
+                        ResourceLease.owner != "h3:" + job_id,
+                    )
+                    .limit(1)
+                )
+            ):
+                continue
         recovered += _recover_one_job(
             session_factory,
             worker_id,
@@ -1844,11 +1911,7 @@ def recover_expired_jobs(
         # further recovery, otherwise one stale lease deadlocks the queue.
         release_client = comfy_client or ComfyUIClient(settings.comfyui_base_url, max_retries=0)
         leases = list(
-            db.scalars(
-                select(ResourceLease).where(
-                    ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])
-                )
-            )
+            db.scalars(select(ResourceLease).where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])))
         )
         for lease in leases:
             owner_job_id = lease.owner.removeprefix("h3:")
@@ -2155,6 +2218,31 @@ def _recover_comfy_job(
     return True, None
 
 
+def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
+    from shine.quality.runtime import configured_reviewers
+
+    semantic, asr = configured_reviewers(session_factory, settings)
+    recovered = recover_expired_jobs(
+        session_factory,
+        worker_id,
+        settings=settings,
+        comfy_client=comfy_client,
+        semantic_reviewer=semantic,
+        asr_reviewer=asr,
+    )
+    if recovered:
+        return "reconciled"
+    return run_one(
+        session_factory,
+        provider,
+        worker_id,
+        settings=settings,
+        comfy_client=comfy_client,
+        semantic_reviewer=semantic,
+        asr_reviewer=asr,
+    )
+
+
 def serve(poll_seconds: float = 0.5) -> None:
     settings = Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -2168,10 +2256,9 @@ def serve(poll_seconds: float = 0.5) -> None:
 
         comfy_client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
-    recover_expired_jobs(session_factory, worker_id, settings=settings, comfy_client=comfy_client)
     try:
         while True:
-            claimed = run_one(
+            claimed = run_configured_once(
                 session_factory,
                 provider,
                 worker_id,
@@ -2202,9 +2289,8 @@ def main() -> None:
 
         comfy_client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
-    recover_expired_jobs(session_factory, worker_id, settings=settings, comfy_client=comfy_client)
     if args.once:
-        run_one(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
+        run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
         heartbeat(session_factory, worker_id, status="stopped", phase="stopped")
     else:
         serve()

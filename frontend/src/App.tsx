@@ -253,6 +253,13 @@ function App() {
     });
   }
 
+  async function recheckReview(job: Job) {
+    await withBusy(async () => {
+      await api(`/jobs/${job.id}/review/recheck`, json('POST', { state_version: job.state_version, request_id: crypto.randomUUID() }));
+      await loadProject(projectId); report('已排队重跑机器审片，保留原视频与历史质检记录。');
+    });
+  }
+
   async function updateProjectSettings(patch: Record<string, unknown>) {
     await withBusy(async () => {
       await api(`/projects/${projectId}/settings`, json('PATCH', patch));
@@ -442,6 +449,7 @@ function App() {
                 onLoadGates={loadJobGates}
                 onSuggest={suggestRepair}
                 onRepair={applyRepair}
+                onRecheck={recheckReview}
               />
             </section>
 

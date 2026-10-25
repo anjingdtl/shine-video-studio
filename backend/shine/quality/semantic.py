@@ -18,6 +18,7 @@ from shine.schemas import (
     ShotSpec,
     StyleBible,
 )
+from shine.security import require_loopback_url
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class ReviewContext:
     frame_paths: tuple[Path, ...] = ()
     transcript: str | None = None
     remote_consent: bool = False
+    local_reference_frames: tuple[tuple[str, Path], ...] = ()
+    review_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,7 @@ class OpenAICompatibleVisionReviewer:
 
     is_mock = False
     name = "openai-compatible-vlm"
+    requires_remote_consent = True
 
     def __init__(self, config: ProviderConfig):
         self.config = config
@@ -112,8 +116,12 @@ class OpenAICompatibleVisionReviewer:
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
 
+    def _reference_content(self, context):
+        # Remote review never transmits master/reference bytes.
+        return []
+
     def review(self, context: ReviewContext) -> SemanticReviewResult:
-        if not context.remote_consent:
+        if self.requires_remote_consent and not context.remote_consent:
             raise PermissionError("Remote semantic review requires explicit user consent in the project settings")
         if not context.frame_paths:
             raise ValueError("Remote semantic review requires derived evidence frames")
@@ -125,12 +133,16 @@ class OpenAICompatibleVisionReviewer:
                     "Review the supplied derived evidence frames for identity, costume, scene, style, and "
                     "continuity. Return JSON with reviewer, is_mock=false, input_sha256, findings, "
                     "overall_confidence, raw_summary. "
+                    "findings contains ONLY violations or unresolved uncertainties, never positive matches. "
+                    "Use findings=[] if there are no issues; describe successful checks in raw_summary. "
+                    "Do not infer identity from descriptive text alone; disclose missing identity evidence. "
                     f"ShotSpec: {context.shot_spec.model_dump_json()}\n"
                     f"Style: {context.style.model_dump_json()}\n"
                     f"JSON Schema: {json.dumps(schema, ensure_ascii=False)}"
                 ),
             }
         ]
+        content.extend(self._reference_content(context))
         for frame in context.frame_paths[:6]:
             encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
@@ -152,12 +164,60 @@ class OpenAICompatibleVisionReviewer:
         parsed = json.loads(text)
         parsed["is_mock"] = bool(parsed.get("is_mock", False))
         parsed["input_sha256"] = context.artifact_sha256
+        parsed["model"] = self.config.model
+        parsed["reviewer"] = self.name
         return SemanticReviewResult.model_validate(parsed)
+
+    def release_models(self):
+        # This provider runs outside this host's GPU ledger.
+        return None
+
+
+class LocalReviewRelease:
+    """Local endpoints must explicitly confirm actual model release."""
+
+    requires_remote_consent = False
+
+    def release_models(self):
+        endpoint = require_loopback_url(self.config.base_url).rstrip("/")
+        if endpoint.endswith("/v1"):
+            endpoint = endpoint[:-3]
+        headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+        with httpx.Client(timeout=self.config.timeout_s, follow_redirects=False) as client:
+            response = client.post(endpoint + "/free", headers=headers, json={"unload_models": True})
+        response.raise_for_status()
+        proof = response.json()
+        allocated = proof.get("allocated_bytes")
+        if proof.get("released") is not True or type(allocated) is not int or allocated != 0:
+            raise ValueError("MODEL_RELEASE_UNCONFIRMED")
+
+
+class LocalVisionReviewer(LocalReviewRelease, OpenAICompatibleVisionReviewer):
+    name = "local-openai-compatible-vlm"
+    accepts_local_references = True
+
+    def __init__(self, config):
+        require_loopback_url(config.base_url)
+        super().__init__(config)
+
+    def _reference_content(self, context):
+        content = []
+        for label, path in context.local_reference_frames:
+            content.append(
+                {"type": "text", "text": f"Approved reference {label}; compare later evidence frames to it."}
+            )
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
+        content.append(
+            {"type": "text", "text": "The following images are chronological generated-shot evidence frames."}
+        )
+        return content
 
 
 class OpenAICompatibleASRReviewer:
     is_mock = False
     name = "openai-compatible-asr"
+    requires_remote_consent = True
 
     def __init__(self, config: ProviderConfig):
         self.config = config
@@ -197,6 +257,17 @@ class OpenAICompatibleASRReviewer:
             is_mock=bool(body.get("is_mock", False)),
             model=self.config.model,
         )
+
+    def release_models(self):
+        return None
+
+
+class LocalASRReviewer(LocalReviewRelease, OpenAICompatibleASRReviewer):
+    name = "local-openai-compatible-asr"
+
+    def __init__(self, config):
+        require_loopback_url(config.base_url)
+        super().__init__(config)
 
 
 def _normalize(text: str) -> str:
