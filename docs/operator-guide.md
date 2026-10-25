@@ -165,6 +165,12 @@ script_planner、shot_planner、repair_planner、qc_reviewer）都指向该档�
 - 剧组的角色如果返回 `LLM_FORMAT`，说明模型输出没满足该角色的结构化契约（HTTP 422）。
   这不是环境坏了；先看返回内容与 schema 的差异。
 
+  > 2026-10-25 18:01:13 的提交 `2df8aff` 修掉了这一类失败的一个根因：以前 schema 只交给
+  > 服务商做校验、**没有**下发给模型，而指令却让模型"只返回所给的 JSON 契约"。现在
+  > schema 会作为最后一段附在请求里。修复后 `scriptwriter` 已实测成功产出
+  > `ScriptBreakdown`（HTTP 201）。如果你的 API 进程是在该提交之前启动的，先重启 API
+  > 再试。详见 [V1.3 收尾报告 5.1](LOCAL_V1.3_CLOSEOUT_REPORT.md#51-llm_format-的根因与修复本轮后续提交)。
+
 ---
 
 ## 4. 导入资产并冻结风格

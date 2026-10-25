@@ -81,8 +81,8 @@ ComfyUI 只用自己的 `python_embeded`。
 | --- | --- |
 | 仓库 | `anjingdtl/shine-video-studio`（private） |
 | 本轮基线 | `63929f49c98e205776da5e2287cfe368cf87de75`（与 `origin/main` 同一 SHA） |
-| 本轮提交 | `fc75693d9aabb44cee92ca40eb97838e1ebd674c`，分支 `feature/v13-local-h3-integration` |
-| 提交时间 | 2026-10-25 17:49:36 +08:00 |
+| 本轮提交 | `fc75693d9aabb44cee92ca40eb97838e1ebd674c`，分支 `feature/v13-local-h3-integration`，2026-10-25 17:49:36 +08:00 |
+| 后续提交 | `2df8aff9f62209b6202bbd839fd914989499d5b2`（2026-10-25 18:01:13）：`backend/shine/llm/gateway.py` 修复 `LLM_FORMAT` 根因，并加入本轮四份文档 |
 | 工作区 | 提交前后均干净 |
 
 ```powershell
@@ -90,6 +90,10 @@ git log --oneline -3
 git branch -vv
 git status --short
 ```
+
+`2df8aff` 改的是 LLM 网关：以前只把 schema 交给服务商做校验、没下发给模型，而剧组
+指令要求模型"只返回所给的 JSON 契约"——契约却从未被提供。修复把 schema 追加到请求
+末尾。详见 [V1.3 收尾报告 5.1](LOCAL_V1.3_CLOSEOUT_REPORT.md#51-llm_format-的根因与修复本轮后续提交)。
 
 本轮改动相对基线共 17 个文件、+3004/−40 行：
 
@@ -105,13 +109,13 @@ git status --short
 `git fetch` 在本轮因网络连接重置失败，远端状态无法刷新。写文档时用只读的
 `git ls-remote` 重新核对过：远端 `refs/heads/main` 仍是
 `63929f49c98e205776da5e2287cfe368cf87de75`，与本地 `origin/main` 同一 SHA，远端 main
-没有移动；本轮提交 `fc75693` 在本地分支 `feature/v13-local-h3-integration` 上，尚未推送。
-因此本轮不对远端 CI 结果做任何断言。
+没有移动；本轮提交 `fc75693` 与后续的 `2df8aff` 都在本地分支
+`feature/v13-local-h3-integration` 上，尚未推送。因此本轮不对远端 CI 结果做任何断言。
 
 ```powershell
 git ls-remote origin refs/heads/main   # 63929f49…（只读，不改本地引用）
 git rev-parse origin/main               # 63929f49…
-git rev-parse HEAD                      # fc75693…
+git rev-parse HEAD                      # 2df8aff…
 ```
 
 ### 2.4 依赖锁文件（本轮实测纠正了先前的归因）
