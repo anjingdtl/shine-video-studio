@@ -58,6 +58,7 @@ def _seed_passed_job(session_factory, settings, project_id, shot_id, style_id, *
             request={},
             idempotency_key=uuid4().hex,
             status="PASSED",
+            quality_verification="real",
             provider="comfyui",
             generation_mode="Ref2VA",
         )
@@ -90,6 +91,17 @@ def _seed_passed_job(session_factory, settings, project_id, shot_id, style_id, *
         session.add(artifact)
         session.flush()
         job.artifact_id = artifact.id
+        for name in ("semantic", "audio", "style", "final"):
+            session.add(
+                QualityGate(
+                    job_id=job.id,
+                    attempt_id=attempt.id,
+                    artifact_id=artifact.id,
+                    gate_name=name,
+                    status="passed",
+                    is_mock=False,
+                )
+            )
         session.add(
             QualityGate(
                 job_id=job.id,
@@ -338,3 +350,95 @@ def test_delivery_keeps_a_single_audio_track_across_clips(studio):
     kinds = [stream["codec_type"] for stream in probe.get("streams", [])]
     assert kinds.count("video") == 1
     assert kinds.count("audio") == 1
+
+
+@pytest.mark.parametrize(
+    "case,detail",
+    [
+        ("mock", "DELIVERY_SOURCE_NOT_REAL_VIDEO"),
+        ("revision", "DELIVERY_SOURCE_REVISION_IS_NOT_CURRENT"),
+        ("latest_failure", "DELIVERY_SOURCE_TECHNICAL_GATE_NOT_PASSED"),
+    ],
+)
+def test_delivery_rejects_mock_stale_revision_and_newer_failure(studio, case, detail):
+    from datetime import timedelta
+
+    from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
+    from shine.models import Shot, utcnow
+
+    client, factory, _, settings = studio
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job, attempt, artifact, _, _ = _seed_passed_job(factory, settings, project, shot["id"], style["id"])
+    with factory.begin() as db:
+        if case == "mock":
+            db.get(MediaArtifact, artifact).is_mock = True
+        elif case == "revision":
+            db.get(Shot, shot["id"]).revision += 1
+        else:
+            db.add(
+                QualityGate(
+                    job_id=job,
+                    attempt_id=attempt,
+                    artifact_id=artifact,
+                    gate_name="technical",
+                    status="failed",
+                    is_mock=False,
+                    created_at=utcnow() + timedelta(seconds=1),
+                )
+            )
+    with factory() as db:
+        assembler = DeliveryAssembler(asset_root=settings.data_dir)
+        with pytest.raises(DeliveryError) as caught:
+            assembler._resolve(db, project, DeliveryClip(job, attempt, artifact, 0, 1))
+        assert caught.value.detail == detail
+
+
+@pytest.mark.parametrize("case", ["missing", "mock", "failed"])
+def test_delivery_review_complete_requires_all_five_real_gates(studio, case):
+    from shine.media.assembly import DeliveryAssembler, DeliveryClip
+
+    client, factory, _, settings = studio
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job, attempt, artifact, _, _ = _seed_passed_job(factory, settings, project, shot["id"], style["id"])
+    assembler = DeliveryAssembler(asset_root=settings.data_dir)
+    clip = DeliveryClip(job, attempt, artifact, 0, 1)
+    with factory.begin() as db:
+        assert assembler._review_complete(db, clip)
+        gate = db.query(QualityGate).filter_by(attempt_id=attempt, gate_name="final").one()
+        if case == "missing":
+            db.delete(gate)
+        elif case == "mock":
+            gate.is_mock = True
+        else:
+            gate.status = "failed"
+    with factory() as db:
+        assert not assembler._review_complete(db, clip)
+
+
+def test_delivery_media_refuses_tampered_file(studio):
+    client, factory, _, settings = studio
+    project = create_project(client)
+    relative = f"artifacts/{project}/delivery/tampered.mp4"
+    path = settings.data_dir / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"tampered")
+    with factory.begin() as db:
+        row = MediaArtifact(
+            project_id=project,
+            artifact_kind="delivery",
+            storage_path=relative,
+            sha256="0" * 64,
+            byte_size=8,
+            content_type="video/mp4",
+            is_mock=False,
+        )
+        db.add(row)
+        db.flush()
+        artifact_id = row.id
+    response = client.get(f"/api/v1/deliveries/{artifact_id}/media")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "DELIVERY_FILE_HASH_MISMATCH"

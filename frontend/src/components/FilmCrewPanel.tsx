@@ -104,7 +104,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     <section className="panel" id="h3-rulebook">
       <div className="panel-header"><h2>H3 官方规范中心</h2><button disabled={busy} onClick={() => act(
         () => api('/h3-rulebook/recheck', { method: 'POST' }))}>重新校验来源文件</button></div>
-      <p>五种模式：T2VA / I2VA / FL2VA / L2VA / Ref2VA。本机工作流能力仍为 PENDING_LOCAL_H3。</p>
+      <p>五种模式：T2VA / I2VA / FL2VA / L2VA / Ref2VA。本机支持情况以各工作流档案与实测证据为准。</p>
       <p>可执行规则由 Shine 自编并固定版本；官方原文未缓存时显示 SOURCE_UNAVAILABLE，许可未确认前不提供原文分发。</p>
       {hub?.packs.map(p => <article className="settings-block" key={p.id}>
         <b>{p.id}</b><p>SHA-256 {p.sha256}</p><p>{p.approved_at ? '规则包已批准' : '候选版本待人工批准'}</p>

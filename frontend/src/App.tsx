@@ -17,6 +17,7 @@ import ProductionPanel from './components/ProductionPanel';
 import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
+import DeliveryPanel from './components/DeliveryPanel';
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -335,6 +336,7 @@ function App() {
         <button className="nav-item active"><FolderKanban size={17} />项目工作台 <span className="nav-dot" /></button>
         <button className="nav-item" onClick={() => document.getElementById('assets')?.scrollIntoView({ behavior: 'smooth' })}><Film size={17} />素材与风格</button>
         <button className="nav-item" onClick={() => document.getElementById('production')?.scrollIntoView({ behavior: 'smooth' })}><Activity size={17} />生产与质检</button>
+        <button className="nav-item" onClick={() => document.getElementById('delivery')?.scrollIntoView({ behavior: 'smooth' })}><ArrowDownToLine size={17} />成片与导出</button>
         <button className="nav-item" onClick={() => document.getElementById('settings')?.scrollIntoView({ behavior: 'smooth' })}><Sparkles size={17} />模型与系统</button>
         <button className="nav-item" onClick={() => document.getElementById('audit')?.scrollIntoView({ behavior: 'smooth' })}><ShieldCheck size={17} />审计追踪</button>
         <button className="nav-item" onClick={() => document.getElementById('film-crew')?.scrollIntoView({ behavior: 'smooth' })}><Clapperboard size={17} />影视制片团队</button>
@@ -471,6 +473,7 @@ function App() {
             <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
 
             <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
+            <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} />
 
             <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> V1.1 DEVELOPMENT</span><span><ShieldCheck size={12} /> 本地状态库 · 用户可控素材</span></footer>
           </>}

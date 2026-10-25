@@ -1,16 +1,16 @@
 param(
     [switch]$Install,
     [ValidateSet('mock', 'comfyui')][string]$Provider = 'mock',
-    [int]$ApiPort = 8000,
-    [int]$WebPort = 5173,
+    [ValidateRange(1,65535)][int]$ApiPort = 8000,
+    [ValidateRange(1,65535)][int]$WebPort = 5173,
     [string]$DataDir = '',
     [switch]$NoWorker
 )
 
 $ErrorActionPreference = 'Stop'
+$explicitDataDir = [bool]$DataDir
+if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-
-& (Join-Path $PSScriptRoot 'check_environment.ps1')
 
 if (-not $DataDir) {
     $DataDir = if ($env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR } else { Join-Path $repoRoot '.local-data' }
@@ -18,7 +18,11 @@ if (-not $DataDir) {
 $env:SHINE_DATA_DIR = (Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue)?.Path
 if (-not $env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR = [System.IO.Path]::GetFullPath($DataDir) }
 New-Item -ItemType Directory -Force -Path $env:SHINE_DATA_DIR | Out-Null
+if (Test-Path (Join-Path $env:SHINE_DATA_DIR 'run/processes.json')) {
+    throw 'This data directory already has a process manifest. Stop or reconcile that stack before restarting.'
+}
 $env:SHINE_RENDER_PROVIDER = $Provider
+$env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
 
 if ($Install -or -not (Test-Path (Join-Path $repoRoot 'backend/.venv'))) {
     & uv sync --project (Join-Path $repoRoot 'backend') --locked
@@ -36,13 +40,14 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # The database that is actually migrated and used. It is derived from the
 # resolved data directory, so a copy database never points back at production
 # media while still sharing the production database file.
-$databaseUrl = if ($env:SHINE_DATABASE_URL) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
+$databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
 $env:SHINE_DATABASE_URL = $databaseUrl
+& (Join-Path $PSScriptRoot 'check_environment.ps1')
 
 Write-Host "Data directory: $env:SHINE_DATA_DIR"
 Write-Host "Database:       $databaseUrl"
 
-& uv run --project (Join-Path $repoRoot 'backend') alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head
+& (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head
 if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
 
 $venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
@@ -52,7 +57,7 @@ $uvicornArgs = @(
 )
 $viteArgs = @(
     (Join-Path $repoRoot 'frontend/node_modules/vite/bin/vite.js'),
-    '--host', '127.0.0.1', '--port', "$WebPort"
+    '--host', '127.0.0.1', '--port', "$WebPort", '--strictPort'
 )
 
 $started = @()
@@ -83,13 +88,14 @@ function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Argumen
     $stdout = Join-Path $logDir "$Name.out.log"
     $stderr = Join-Path $logDir "$Name.err.log"
     $process = Start-Process -PassThru -WindowStyle Hidden -FilePath $FilePath `
-        -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
+        -ArgumentList ($Arguments | ForEach-Object { '"' + $_ + '"' }) -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $info = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
     $script:started += [ordered]@{
         name = $Name
         pid = $process.Id
         start_time = if ($info) { $info.StartTime.ToString('o') } else { $null }
+        birth = if ($info) { $info.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } else { $null }
         working_dir = $WorkingDirectory
         stdout_log = $stdout
         stderr_log = $stderr
@@ -98,6 +104,7 @@ function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Argumen
     Write-Host "Started $Name (pid $($process.Id))"
 }
 
+try {
 Start-ShineProcess 'api' $venvPython $uvicornArgs $repoRoot
 if (-not $NoWorker) {
     Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
@@ -117,13 +124,29 @@ for ($i = 0; $i -lt 60; $i++) {
 if (-not $listenerPid) {
     Write-Host "The API did not start listening on port $ApiPort." -ForegroundColor Red
     Get-Content $started[0].stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
-    exit 1
+    throw "API startup failed on port $ApiPort"
 }
 $started[0].listener_pid = $listenerPid
 Write-Host "API is listening on port $ApiPort (pid $listenerPid)"
 
-$webListener = Get-PortOwner $WebPort
-if ($webListener) { $started[2].listener_pid = $webListener }
+$webEntry = $started | Where-Object name -EQ 'web'
+$webListener = $null
+for ($i = 0; $i -lt 60; $i++) {
+    $webListener = Get-PortOwner $WebPort
+    if ($webListener) { break }
+    if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $webListener) { throw "Web startup failed on port $WebPort" }
+$webEntry.listener_pid = $webListener
+
+# Capture verified birth identities for launchers and all descendants, including
+# the worker's re-executed interpreter (which has no listening socket).
+foreach ($entry in $started) {
+    $identities = & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $entry.pid $entry.birth
+    if ($LASTEXITCODE -ne 0) { throw "Cannot identify $($entry.name) process tree" }
+    $entry.owners = @($identities | ConvertFrom-Json)
+}
 
 $manifestPath = Join-Path $runDir 'processes.json'
 [ordered]@{
@@ -136,6 +159,16 @@ $manifestPath = Join-Path $runDir 'processes.json'
     web_port = $WebPort
     processes = $started
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
+} catch {
+    # Roll back only still-owned launcher trees created during this invocation.
+    foreach ($entry in $started) {
+        $process = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
+        if ($process -and $process.StartTime.ToString('o') -eq $entry.start_time) {
+            & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $entry.pid $entry.birth --stop
+        }
+    }
+    throw
+}
 
 Write-Host ''
 Write-Host "Shine API:      http://127.0.0.1:$ApiPort/health"

@@ -15,7 +15,7 @@ from shine.agents.film_contracts import FilmAgentRegistry
 from shine.comfy.client import ComfyUIClient
 from shine.h3.rulebook import PACK_ID, SOURCES, H3RulebookRegistry, builtin_manifest
 from shine.llm.base import LLMTimeout
-from shine.models import AgentArtifact, AgentTaskRecord, Job, MediaArtifact, Project, RulePack
+from shine.models import AgentArtifact, AgentTaskRecord, Job, MediaArtifact, Project, QualityGate, RulePack
 from shine.schemas import RenderRequest, SemanticFinding
 from shine.worker import run_one
 from tests.conftest import (
@@ -79,6 +79,35 @@ CAMERA = {
     ]
 }
 CONTINUITY = {"issues": [], "recommendation": "proceed_to_preflight"}
+
+
+@pytest.mark.parametrize("verification", ["real", "manual_verified", "mock_verified", "unverified"])
+def test_editor_uses_human_reviewed_sources_without_relaxing_real_gates(studio, verification):
+    from tests.conftest import freeze_style
+    from tests.test_delivery_assembly import _seed_passed_job
+
+    client, factory, _, settings = studio
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job_id, attempt_id, artifact_id, _, _ = _seed_passed_job(factory, settings, project, shot["id"], style["id"])
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.quality_verification = verification
+        job.request = {"expected_duration_s": 2.0}
+    accepted = verification in {"real", "manual_verified"}
+    with factory() as db:
+        edits = eligible_edits(db, project, offline=False, artifact_root=settings.data_dir)
+        assert bool(edits) is accepted
+        if accepted:
+            assert edits[0]["verification"] == verification
+            assert edits[0]["shot_id"] == shot["id"]
+            assert edits[0]["shot_name"] == shot["name"]
+    with factory.begin() as db:
+        gate = db.query(QualityGate).filter_by(job_id=job_id, gate_name="final").one()
+        gate.is_mock = True
+    with factory() as db:
+        assert not eligible_edits(db, project, offline=False, artifact_root=settings.data_dir)
 
 
 def prepare(client, *, freeze=True):

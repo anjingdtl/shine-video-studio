@@ -1,0 +1,166 @@
+{
+  "collected_at": "2026-10-25T12:05:26.553523+00:00",
+  "baseline": "7a81aa3",
+  "branch": "codex/local-final-closeout",
+  "backend": {
+    "tests": "405",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "177.808"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "typescript_vite": "PASS",
+    "npm_audit": "0 vulnerabilities",
+    "uv_lock_check": "PASS",
+    "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
+    "windows_stack_operations": "PASS NoWorker/custom proxy/duplicate refusal/Worker restart/verified stop",
+    "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]",
+    "remote_ci": "PENDING_AT_COMMIT"
+  },
+  "real_text_roles": {
+    "scriptwriter": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:51:47.320642+00:00",
+      "http": 201,
+      "artifact_id": "77481880-0ba1-4270-aeb6-d3d61c7fc394",
+      "kind": "ScriptBreakdown",
+      "sha256": "940a8db9b72ed72c0787c620656fa90be5fe0c5d770c4b015a78d6494d66a6d9"
+    },
+    "director": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:53:11.773679+00:00",
+      "http": 201,
+      "artifact_id": "6008d792-dbb7-4974-8137-634a103a7875",
+      "kind": "DirectorialPlan",
+      "sha256": "0d9a07ec7f00fe37b1f855fbfc74a596813174431f071cd122ce49f08cd2ecff"
+    },
+    "cinematographer": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:55:29.485662+00:00",
+      "http": 201,
+      "artifact_id": "5fbd68e7-0a40-4628-b0de-a54f14f822aa",
+      "kind": "CameraPlan",
+      "sha256": "dde49ec64cf61ead28923e7e3c4bdf6726da73eb10937fa5d47835702edb33b2"
+    },
+    "continuity_supervisor": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:56:09.560464+00:00",
+      "http": 201,
+      "artifact_id": "06ca71c7-8266-47ab-847c-052c5c233824",
+      "kind": "ContinuityReport",
+      "sha256": "79e49d667800f3a3b9739df27ee6d836746d8414cb90300e12e767931866d26b"
+    },
+    "sound_director": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:56:40.346337+00:00",
+      "http": 201,
+      "artifact_id": "e12ea356-2447-43a1-b24e-0bbd80e2af3b",
+      "kind": "SoundPlan",
+      "sha256": "aff63d0429fa4b550003ebc52902b74ff89adc2e81a5e3c04228ccff7ee2ca29"
+    },
+    "producer": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:56:51.603957+00:00",
+      "http": 201,
+      "artifact_id": "332439ac-ffd4-4f83-9d1f-91a6836c8360",
+      "kind": "ProductionPlan",
+      "sha256": "4a7f9fe2e46851aef5eb858efb14df4b28225ad3883486da8778adabf5b05521"
+    },
+    "comfyops": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:57:12.527052+00:00",
+      "http": 201,
+      "artifact_id": "9e563350-13da-47c0-8ff5-9137a2d30750",
+      "kind": "ComfyOpsProposal",
+      "sha256": "be26847848cce7ea5d74eff7d9e4aad05d9a769e00d60a8e06c79d336d753b18"
+    },
+    "editor": {
+      "status": "SUCCEEDED",
+      "at": "2026-10-25T11:58:14.228000+00:00",
+      "http": 201,
+      "artifact_id": "eb26a6bd-4fe6-4075-940d-5a809ce1ea9f",
+      "kind": "EditDecisionList",
+      "sha256": "141261b3cf36576e1fd2f312c5abf3f2c95f56bca1e857c88765413829dde26e"
+    }
+  },
+  "editor_revision": {
+    "http": 201,
+    "artifact_id": "bfce7def-a80b-4ac9-aa9e-11ddbcbc0c0c",
+    "sha256": "a5250cb20438b651834956594a5b0fa15ebe46bae0616d599d253010fcf0cc2b",
+    "order": [
+      "A-PDD8-7s",
+      "B-PDD8-7s",
+      "C-PDD8-7s"
+    ]
+  },
+  "delivery": {
+    "artifact_id": "747c595e-2ca4-451e-a2bb-c2af486d67b4",
+    "sha256": "6732f7b6b57b0196b95eada31988911fbb9712b3ece44edb6aab384d1e74a375",
+    "byte_size": 10480085,
+    "review_state": "all_passed",
+    "clips": [
+      {
+        "job_id": "ba4bb63d-475a-4802-a469-0c4ce166fc97",
+        "attempt_id": "109bd481-4489-4caa-8f54-87d84e45da70",
+        "artifact_id": "75173459-798f-452c-821b-f839c3c3330f",
+        "artifact_sha256": "b097421032d6093b0abf922e1aa1026e7c70e72b9fda59d196ceabe7a470d8b2",
+        "in_s": 0.0,
+        "out_s": 7.0,
+        "duration_s": 7.0,
+        "source_job_status": "PASSED",
+        "source_artifact_sha256": "b097421032d6093b0abf922e1aa1026e7c70e72b9fda59d196ceabe7a470d8b2"
+      },
+      {
+        "job_id": "a2718d14-4a81-4046-8416-e16ce2b8598f",
+        "attempt_id": "40049d83-4c3e-424a-acb3-cf143a64406c",
+        "artifact_id": "1b278511-fb66-46c5-8dbd-0c869913fc06",
+        "artifact_sha256": "4c6d8afeccb0fe1783e8749f195c68fa4b406c15fc8012c4b4caa4cc3dce10aa",
+        "in_s": 0.0,
+        "out_s": 7.0,
+        "duration_s": 7.0,
+        "source_job_status": "PASSED",
+        "source_artifact_sha256": "4c6d8afeccb0fe1783e8749f195c68fa4b406c15fc8012c4b4caa4cc3dce10aa"
+      },
+      {
+        "job_id": "ffffe1d8-86e7-4593-acaa-91ff453b6b31",
+        "attempt_id": "dd4eda10-f800-4cc6-a341-115dd8adfbe6",
+        "artifact_id": "c2946fa4-9913-4cf5-a295-41a864217782",
+        "artifact_sha256": "675c7822a15cc6366410816f1b6c3af7d1f321eccb28b0749ddc7f1674f7edaf",
+        "in_s": 0.0,
+        "out_s": 7.0,
+        "duration_s": 7.0,
+        "source_job_status": "PASSED",
+        "source_artifact_sha256": "675c7822a15cc6366410816f1b6c3af7d1f321eccb28b0749ddc7f1674f7edaf"
+      }
+    ],
+    "duration_s": 21.021333,
+    "streams": [
+      {
+        "codec_type": "video",
+        "codec_name": "h264",
+        "width": 1344,
+        "height": 768,
+        "r_frame_rate": "24/1"
+      },
+      {
+        "codec_type": "audio",
+        "codec_name": "aac",
+        "width": null,
+        "height": null,
+        "r_frame_rate": "0/0"
+      }
+    ],
+    "download_hash_verified": true,
+    "full_decode_exit_code": 0
+  },
+  "boundaries": {
+    "new_h3_generation": "NOT_RUN reused previously human-reviewed real clips",
+    "new_human_approval": "NONE",
+    "new_reel_human_quality_review": "PENDING",
+    "media_uploaded_to_remote_review": false,
+    "full_product_acceptance": "PARTIAL"
+  },
+  "local_evidence_directory": ".local-acceptance/closeout-20261025"
+}

@@ -59,7 +59,7 @@ def asset_context(db: Session, project_id: str) -> list[dict]:
 def eligible_edits(db: Session, project_id: str, *, offline: bool, artifact_root: Path | None = None) -> list[dict]:
     result = []
     for job in db.scalars(select(Job).where(Job.project_id == project_id, Job.status == "PASSED")):
-        if job.stale or not job.artifact_id or not job.attempts:
+        if job.stale or not job.artifact_id or not job.attempts or job.shot.revision != job.shot_revision:
             continue
         attempt = max(job.attempts, key=lambda a: a.attempt_no)
         artifact = db.get(MediaArtifact, job.artifact_id)
@@ -83,12 +83,17 @@ def eligible_edits(db: Session, project_id: str, *, offline: bool, artifact_root
         ):
             continue
         if not offline and (
-            artifact.is_mock or job.quality_verification != "real" or any(g.is_mock for g in by_name.values())
+            artifact.is_mock
+            or job.quality_verification not in {"real", "manual_verified"}
+            or any(g.is_mock for g in by_name.values())
         ):
             continue
         result.append(
             {
                 "job_id": job.id,
+                "shot_id": job.shot_id,
+                "shot_name": job.shot.name,
+                "story_beat": job.shot.spec.get("story_beat", ""),
                 "attempt_id": attempt.id,
                 "artifact_id": artifact.id,
                 "duration_s": job.request["expected_duration_s"],

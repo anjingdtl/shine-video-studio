@@ -25,7 +25,7 @@ from playwright.sync_api import expect, sync_playwright
 TEST_CREDENTIAL = "isolated-v13-test-operator-credential-12345"
 
 
-def exercise(api_base, ui_base, screenshot, temporary):
+def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
     base = api_base + "/api/v1"
     headers = {"Authorization": "Bearer " + TEST_CREDENTIAL}
     c = httpx.Client(timeout=20)
@@ -216,7 +216,7 @@ def exercise(api_base, ui_base, screenshot, temporary):
     approve(vc, "promote", f"/candidate-assets/{vc['id']}/promote")
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
-            executable_path=shutil.which("chromium") or None,
+            executable_path=str(browser_path) if browser_path else shutil.which("chromium") or None,
             headless=True,
             args=["--no-sandbox", "--disable-gpu"],
         )
@@ -410,6 +410,7 @@ def wait_http(url):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshot", type=Path)
+    parser.add_argument("--browser-path", type=Path, help="Use an already installed Chromium executable")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     uv = shutil.which("uv")
@@ -444,7 +445,7 @@ def main():
                 "SHINE_VITE_API_TARGET": api_base,
             }
         )
-        backend = [uv, "run", "--project", str(repo / "backend")]
+        backend = [uv, "run", "--project", str(repo / "backend"), "--frozen"]
         subprocess.run(
             backend
             + ["alembic", "-c", str(repo / "backend/alembic.ini"), "upgrade", "head"],
@@ -496,7 +497,7 @@ def main():
             wait_http(ui_base)
             if args.screenshot:
                 args.screenshot.parent.mkdir(parents=True, exist_ok=True)
-            exercise(api_base, ui_base, args.screenshot, temporary)
+            exercise(api_base, ui_base, args.screenshot, temporary, args.browser_path)
         finally:
             for child in reversed(children):
                 if child.poll() is None:

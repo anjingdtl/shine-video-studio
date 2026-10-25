@@ -1,13 +1,7 @@
-"""Stop only the Shine processes started by ``scripts/start_shine.ps1``.
+"""Stop the exact process identities recorded by start_shine.ps1.
 
-The start script records the PID, start time and working directory of every
-process it owns in ``<data_dir>/run/processes.json``. This script refuses to
-touch any process that is not in that manifest, so it can never stop an
-unrelated ComfyUI, editor or browser process.
-
-Usage::
-
-    uv run --project backend python scripts/stop_shine.py [--data-dir PATH]
+Legacy manifests without OS birth identities require manual reconciliation.
+A reused PID never grants authority to stop its new owner.
 """
 
 from __future__ import annotations
@@ -15,162 +9,99 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import signal
-import subprocess
-import sys
+import sqlite3
 import time
 from pathlib import Path
+
+from shine.comfyops.installer import process_identity
+from shine.comfyops.instances import ProcessRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / ".local-data"
 
 
-def _alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return code.value == STILL_ACTIVE
-            return False
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _terminate(pid: int) -> None:
-    if os.name == "nt":
-        import subprocess
-
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            check=False,
-            capture_output=True,
-        )
-    else:
-        os.kill(pid, signal.SIGTERM)
-
-
-def _checkpoint(database: Path) -> None:
-    """Checkpoint the WAL so a terminated worker cannot leave torn pages behind."""
-    import sqlite3
-
-    if not database.is_file():
-        return
-    try:
-        connection = sqlite3.connect(database)
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        connection.close()
-    except Exception as exc:  # pragma: no cover - best effort only
-        print(f"[warn] could not checkpoint {database}: {exc}")
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default=os.environ.get("SHINE_DATA_DIR", str(DEFAULT_DATA_DIR)))
-    parser.add_argument("--grace-seconds", type=float, default=10.0)
-    args = parser.parse_args()
-
-    data_dir = Path(args.data_dir)
-    manifest_path = data_dir / "run" / "processes.json"
-    if not manifest_path.is_file():
-        print(f"No process manifest at {manifest_path}; nothing owned by start_shine.ps1 is running.")
-        return 0
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entries = manifest.get("processes", [])
-
-    # Checkpoint SQLite before terminating anything. A force-killed process can
-    # still have dirty pages mapped to the database file, and the OS may write
-    # them back after the checkpoint.
-    _checkpoint(data_dir / "shine.db")
-
-    stopped: list[str] = []
-    skipped: list[str] = []
-    for entry in entries:
-        pid = int(entry.get("pid", 0))
-        name = entry.get("name", "?")
-        if not _alive(pid):
-            skipped.append(f"{name} (pid {pid}) already exited")
+def stop_manifest(manifest_path: Path, *, runner=None, identity=None) -> int:
+    runner = runner or ProcessRunner()
+    identity = identity or process_identity
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    unresolved = []
+    for entry in reversed(manifest.get("processes", [])):
+        owners = entry.get("owners", [])
+        if not owners:
+            print(
+                f"[refused] {entry.get('name')}: no birth identities; reconcile legacy manifest manually"
+            )
+            unresolved.append(entry)
             continue
-        _terminate(pid)
-        stopped.append(f"{name} (pid {pid})")
-
-    # The launcher and the process that owns the socket are not the same pid
-    # (a uv managed virtual environment re-executes the base interpreter as a
-    # child). The recorded listener has to be stopped as well, otherwise the
-    # next start fails with a bind error while the old server keeps serving.
-    for entry in entries:
-        listener = entry.get("listener_pid")
-        if not listener:
-            continue
-        listener = int(listener)
-        if listener in {int(entry.get("pid", 0)) for entry in entries}:
-            continue
-        if _alive(listener):
-            _terminate(listener)
-            stopped.append(f"{entry.get('name', '?')} listener (pid {listener})")
-        else:
-            skipped.append(f"{entry.get('name', '?')} listener (pid {listener}) already exited")
-
-    deadline = time.time() + args.grace_seconds
-    while time.time() < deadline and any(_alive(int(e.get("pid", 0))) for e in entries):
-        time.sleep(0.25)
-
-    for line in stopped:
-        print(f"[stopped] {line}")
-    for line in skipped:
-        print(f"[skipped] {line}")
-
-    # Report anything still holding the ports, so a stale server is never
-    # mistaken for the new one.
-    for port in (manifest.get("api_port"), manifest.get("web_port")):
-        if not port:
-            continue
-        owner = _port_owner(int(port))
-        if owner:
-            print(f"[warning] port {port} is still held by pid {owner}")
-
-    manifest_path.unlink(missing_ok=True)
-    print("Shine processes stopped. ComfyUI and unrelated processes were not touched.")
+        remaining = []
+        # Snapshots list parents before children. Stop descendants first; all
+        # identities are independently verified, with no recursive PID-only kill.
+        for owner in reversed(owners):
+            pid, birth = owner["pid"], owner.get("birth")
+            try:
+                current = identity(pid)
+            except ValueError:
+                print(f"[refused] pid {pid}: liveness unavailable")
+                remaining.append(owner)
+                continue
+            if current is None:
+                continue
+            if not birth or current != birth:
+                print(f"[refused] pid {pid}: identity changed or unavailable")
+                remaining.append(owner)
+                continue
+            try:
+                runner.stop(
+                    owner
+                )  # Verifies birth again on the same OS handle used to stop.
+                print(f"[stopped] {entry.get('name')} pid {pid}")
+            except (OSError, ValueError) as exc:
+                # A launcher may exit its child between inspection and the OS
+                # termination call. Confirm death instead of treating an already
+                # exited Windows process object as a failed shutdown.
+                try:
+                    deadline = time.monotonic() + 5
+                    observed = identity(pid)
+                    while observed is not None and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                        observed = identity(pid)
+                    if observed is None:
+                        print(f"[exited] {entry.get('name')} pid {pid}")
+                        continue
+                except ValueError:
+                    pass
+                print(f"[refused] pid {pid}: {exc}")
+                remaining.append(owner)
+        if remaining:
+            unresolved.append({**entry, "owners": remaining})
+    if unresolved:
+        manifest["processes"] = list(reversed(unresolved))
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print("Unresolved process identities retained for reconciliation.")
+        return 1
+    manifest_path.unlink()
     return 0
 
 
-def _port_owner(port: int) -> int | None:
-    """The pid that owns a listening TCP port on this machine."""
-    try:
-        output = subprocess.run(
-            ["netstat", "-ano", "-p", "TCP"],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
-    except OSError:
-        return None
-    for line in output.splitlines():
-        if f":{port} " not in line and f":{port}\t" not in line:
-            continue
-        if "LISTENING" not in line.upper():
-            continue
-        parts = line.split()
-        if len(parts) >= 5:
-            try:
-                return int(parts[-1])
-            except ValueError:
-                continue
-    return None
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--data-dir", default=os.environ.get("SHINE_DATA_DIR", str(DEFAULT_DATA_DIR))
+    )
+    args = parser.parse_args()
+    data_dir = Path(args.data_dir)
+    manifest = data_dir / "run" / "processes.json"
+    if not manifest.is_file():
+        print(f"No process manifest at {manifest}; nothing to stop.")
+        return 0
+    result = stop_manifest(manifest)
+    # WAL is durable on its own. A checkpoint after shutdown avoids racing active
+    # writers; it is housekeeping, not a claim that force termination is graceful.
+    database = data_dir / "shine.db"
+    if not result and database.is_file():
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return result
 
 
 if __name__ == "__main__":

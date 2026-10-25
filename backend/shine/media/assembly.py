@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from shine.media.artifacts import safe_asset_path
 from shine.media.probe import probe_file
-from shine.models import Job, JobAttempt, MediaArtifact, QualityGate
+from shine.models import Job, JobAttempt, MediaArtifact, QualityGate, Shot
 from shine.security import sha256_bytes
 
 
@@ -84,19 +84,42 @@ class DeliveryAssembler:
         technical gate itself is recorded per gate in ``quality_gates``.
         """
         gate = db.scalar(
-            select(QualityGate).where(
+            select(QualityGate)
+            .where(
                 QualityGate.attempt_id == attempt_id,
                 QualityGate.gate_name == "technical",
-                QualityGate.status == "passed",
-                QualityGate.is_mock.is_(False),
             )
+            .order_by(QualityGate.created_at.desc())
         )
-        return gate is not None
+        return gate is not None and gate.status == "passed" and not gate.is_mock
+
+    def _review_complete(self, db: Session, clip: DeliveryClip) -> bool:
+        job = db.get(Job, clip.job_id)
+        if job.status != "PASSED" or job.quality_verification not in {"real", "manual_verified"}:
+            return False
+        gates = db.scalars(
+            select(QualityGate)
+            .where(
+                QualityGate.job_id == clip.job_id,
+                QualityGate.attempt_id == clip.attempt_id,
+            )
+            .order_by(QualityGate.created_at)
+        ).all()
+        latest = {gate.gate_name: gate for gate in gates}
+        return all(
+            name in latest
+            and latest[name].artifact_id == clip.artifact_id
+            and not latest[name].is_mock
+            and latest[name].status in {"passed", "not_applicable"}
+            for name in ("technical", "semantic", "audio", "style", "final")
+        )
 
     def _resolve(self, db: Session, project_id: str, clip: DeliveryClip) -> tuple[MediaArtifact, str, float]:
         artifact = db.get(MediaArtifact, clip.artifact_id)
         if not artifact or artifact.project_id != project_id:
             raise DeliveryError(404, "DELIVERY_SOURCE_ARTIFACT_NOT_FOUND")
+        if artifact.is_mock or artifact.artifact_kind != "video":
+            raise DeliveryError(409, "DELIVERY_SOURCE_NOT_REAL_VIDEO")
         if artifact.job_id != clip.job_id or artifact.attempt_id != clip.attempt_id:
             raise DeliveryError(409, "DELIVERY_SOURCE_IDENTITY_MISMATCH")
         job = db.get(Job, clip.job_id)
@@ -104,6 +127,9 @@ class DeliveryAssembler:
             raise DeliveryError(404, "DELIVERY_SOURCE_JOB_NOT_FOUND")
         if job.stale:
             raise DeliveryError(409, "DELIVERY_SOURCE_JOB_IS_STALE")
+        shot = db.get(Shot, job.shot_id)
+        if not shot or shot.revision != job.shot_revision or job.artifact_id != artifact.id:
+            raise DeliveryError(409, "DELIVERY_SOURCE_REVISION_IS_NOT_CURRENT")
         attempt = db.get(JobAttempt, clip.attempt_id)
         if not attempt or attempt.job_id != job.id:
             raise DeliveryError(409, "DELIVERY_SOURCE_ATTEMPT_MISMATCH")
@@ -219,9 +245,7 @@ class DeliveryAssembler:
             segments: list[Path] = []
             for index, (clip, artifact, _status, _duration) in enumerate(resolved):
                 source = safe_asset_path(self.asset_root, artifact.storage_path)
-                info = probe_file(
-                    source, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path
-                )
+                info = probe_file(source, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
                 target = work / f"segment{index:03d}.mp4"
                 self._normalise_clip(
                     source,
@@ -291,7 +315,7 @@ class DeliveryAssembler:
             }
             for clip, artifact, status, _duration in resolved
         ]
-        review_state = "all_passed" if all(status == "PASSED" for _c, _a, status, _d in resolved) else "pending_review"
+        review_state = "all_passed" if all(self._review_complete(db, clip) for clip in clips) else "pending_review"
 
         artifact_row = MediaArtifact(
             project_id=project_id,

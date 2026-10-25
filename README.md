@@ -109,6 +109,7 @@ V1.3 adds isolated instance lifecycle and read-only external backup, pinned offl
 - [V1.3 cloud Codex full implementation brief](docs/V1.3_云端Codex实施总提示词.md)
 
 ## Documentation
+- [2026-10-25 本机最终收尾补充报告（含仍未关闭的产品验收）](docs/LOCAL_FINAL_CLOSEOUT_20261025.md)
 - [V1.1 产品修订方案](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
 - [V1.1 contracts and API](docs/v1.1-contracts.md)
 - [V1.1 实现与离线验收报告](docs/V1.1_实现与离线验收报告.md)

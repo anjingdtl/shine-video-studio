@@ -13,6 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import Field
 
 from shine.agents.film_contracts import EditDecisionList
 from shine.api_common import DBSession, app_settings
@@ -20,6 +21,7 @@ from shine.config import Settings
 from shine.media.artifacts import safe_asset_path
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
 from shine.models import MediaArtifact
+from shine.security import sha256_bytes
 from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["delivery"])
@@ -30,10 +32,10 @@ SettingsDep = Annotated[Settings, Depends(app_settings)]
 class DeliveryRequest(EditDecisionList):
     """The editor's proposal plus the assembly parameters."""
 
-    fps: float = 24.0
-    width: int | None = None
-    height: int | None = None
-    crf: int = 18
+    fps: float = Field(default=24.0, gt=0, le=120, allow_inf_nan=False)
+    width: int | None = Field(default=None, ge=2, le=8192, multiple_of=2)
+    height: int | None = Field(default=None, ge=2, le=8192, multiple_of=2)
+    crf: int = Field(default=18, ge=0, le=51)
 
 
 @router.post("/projects/{project_id}/deliveries", status_code=201)
@@ -152,4 +154,6 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
     path: Path = safe_asset_path(request.app.state.asset_root, artifact.storage_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Delivery file is missing on disk")
+    if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
+        raise HTTPException(status_code=409, detail="DELIVERY_FILE_HASH_MISMATCH")
     return FileResponse(path, media_type=artifact.content_type, filename=path.name)
