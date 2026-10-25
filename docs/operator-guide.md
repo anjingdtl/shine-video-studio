@@ -9,8 +9,9 @@
 [V1.3 收尾报告](LOCAL_V1.3_CLOSEOUT_REPORT.md)。
 
 > 本轮尚未完成的操作员动作集中在 [V1.3 收尾报告第 8.2 节](LOCAL_V1.3_CLOSEOUT_REPORT.md#82-剩余操作项按建议顺序)。
-> 本轮三个真实镜头的**正式逐项审片仍是 PENDING**：语义、音频、风格、终审四道门既没有
-> 模型覆盖，也没有人工签署。
+> 本轮三个真实镜头的**正式逐项审片已于 2026-10-25 完成**：操作员 `shine-owner` 通过真实
+> 操作员 API 逐项审阅并签署，语义 / 风格 / 终审门与 B 的音频门是**人工**关闭的，不是
+> 模型覆盖。
 
 ---
 
@@ -34,6 +35,9 @@ Remove-Variable operatorCredential
 - 原文只放在你的密码管理器里；只把 SHA-256 摘要交给 API。
 - 摘要不要写进 `.env`、数据库、Git、日志、URL 或浏览器 localStorage。
 - 改操作员或凭据摘要需要本机管理员改 API 进程环境并重启 API。
+- 一次性完成"停栈 → 重启 → 审片 → 重装样片"的现成脚本见
+  [第 6.4 节](#64-正式逐项审片)。脚本里凭据只活在进程内存中，API 只保存它的
+  SHA-256 摘要。
 
 ### 1.2 启动
 
@@ -65,14 +69,25 @@ Process record: <data_dir>/run/processes.json
 
 API 与前端只监听 `127.0.0.1`。在没有完整用户认证之前不要暴露到局域网或互联网。
 
+**端口被占用时脚本会拒绝启动**，并打印占用者 pid 与停止命令。这不是坏事：硬启动
+会让新进程带着绑定错误死掉，而**旧的服务继续在同一个端口上按旧的凭据应答** ——
+看起来就像"新配置没生效"。先停掉旧栈（或换一个 `-ApiPort`）再启动。
+
+清单里的 `pid` 是启动器 pid，`listener_pid` 才是**真正占用端口的那个进程**：uv 管理的
+虚拟环境会把基础解释器作为子进程重新执行，两者不是一个 pid。停止脚本按 `listener_pid`
+收尾，所以别拿 `pid` 去判断服务是否还活着。
+
 ### 1.3 停止
 
 ```powershell
 uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DATA_DIR"
 ```
 
-它只停止 `processes.json` 里记录的进程：先对 SQLite 做 WAL 检查点，再终止进程，
-**从不**碰 ComfyUI 或任何无关进程。ComfyUI 实例由你自己管理，本脚本不负责。
+它只停止 `processes.json` 里记录的进程：先对 SQLite 做 WAL 检查点，再终止进程
+（包括记录在案的 `listener_pid`），**从不**碰 ComfyUI 或任何无关进程。ComfyUI 实例
+由你自己管理，本脚本不负责。停止后如果端口仍被占用，它会打印
+`[warning] port <n> is still held by pid <n>` —— 看到这行就说明还有一个服务活着，
+先处理它再重启，否则下一次启动会撞端口。
 
 ### 1.4 日志位置
 
@@ -337,6 +352,10 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/jobs/$jobId/quality-gates"
 `SEMANTIC_REVIEW_NOT_CONFIGURED`，`style` 是 `not_run` + `STYLE_REVIEW_NOT_COVERED`，
 带对白的镜头 `audio` 是 `required` + `not_run` + `ASR_NOT_CONFIGURED`。
 
+这时这些门只能由**人工逐项审阅**关闭：操作员在审片端点签署后，系统会**追加**一组
+新的门禁记录（worker 原来那组原样保留）。人工签署只代表人的判断 —— 报告与对外结论
+里要写清"由人工关闭"，不能写成模型评审。
+
 ### 6.3 返工
 
 - 自动返工**必须**产出不同的请求修订（重新编译的提示词、重建的清单或改了参数）。
@@ -346,6 +365,36 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/jobs/$jobId/quality-gates"
 - 不需要无人值守跑完整部剧，也不要用离线测试声称 H3 验收通过。
 
 ### 6.4 正式逐项审片
+
+#### 6.4.1 一条命令完成审片（本轮验证过的流程）
+
+```powershell
+.\.local-acceptance\scripts\finish_operator_review.ps1
+```
+
+脚本按顺序做这些事：
+
+1. **停掉当前这套 Shine 栈** —— 只停它自己启动的进程，不碰 ComfyUI。
+2. **问你要操作员标识与凭据** —— 两项都可以直接回车：标识默认 `shine-owner`；凭据
+   留空就自动生成一个 32 字节随机值。
+3. **在空闲端口上以真实模式重启整栈**（API + worker + 前端）。端口被旧进程占着时
+   它换端口，而不是硬撞。
+4. **自检** —— 确认 API 确实接受这份凭据，并且回答请求的就是本次启动的那个进程。
+5. **记录三个当前镜头的逐项人工审片** —— 十项分项，理由取自 API 返回的实时绑定
+   （资产、风格版本、提示词、产物哈希），不是写死的文本。
+6. **重新装配交付样片** —— 让它反映审片后的状态。
+7. **打印最终门禁状态**。
+
+凭据与身份的处理边界：
+
+- 凭据原文**只存在于这次进程的内存里**，脚本结束时清掉，不写进任何文件。
+- API 只保存它的 **SHA-256 摘要**（`SHINE_OPERATOR_TOKEN_SHA256`），不保存原文。
+- 脚本会把自动生成的凭据打印**一次**，请把它保存到密码管理器：下次审片要用同一份
+  凭据，否则 API 会拒绝新的凭据。
+- 脚本按**镜头名**找当前的 job（每个镜头名最新创建的那个），不写死 job id —— 镜头
+  重渲染之后旧 job 就不再具备审片资格，写死的 id 会失效。
+
+#### 6.4.2 手动提交审片
 
 ```powershell
 # 取快照
@@ -392,7 +441,14 @@ Invoke-RestMethod -Method Post -Headers @{ Authorization = "Bearer $credential" 
 - 任一分项 `FAIL` 或必需项未审，镜头保持 `NEEDS_REVIEW`。
 - 每次人工审片会追加独立的 QC 报告、五门记录与 `OPERATOR_REVIEW_RECORDED` 审计，
   **不会覆盖** worker 的原始报告。
+- 人工关闭的是**语义 / 风格 / 终审**这三道门，以及对白镜头的**音频**门 —— 它们是
+  人的判断，不是 VLM 或 ASR 的结论。不要把人工签署说成模型评审。
 - Mock 作业没有真实媒体，不接受这种真人媒体质量审批。
+
+本轮的实际结果（2026-10-25 11:30 UTC）：三个镜头全部 `PASSED`、
+`quality_verification = manual_verified`，A 与 C 的对白三项记为 `NOT_APPLICABLE`
+（它们的 shot spec 没有对白），B 的 `watched` 与 `listened` 都为 true。详见
+[真实 H3 验收报告第 6 节](LOCAL_REAL_H3_ACCEPTANCE.md#6-五道质量门)。
 
 ---
 
@@ -426,6 +482,18 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
 `review_state` 只有在全部来源 job 都是 `PASSED` 时才是 `all_passed`，否则是
 `pending_review` —— 未评审的片子不会被当成已验收。
 
+审片之后要重新装配一次，样片才会反映审片后的状态（先前的成片仍以 `pending_review`
+留在盘上，因为交付是内容寻址的）。本轮的结果：
+
+| 项 | 值 |
+| --- | --- |
+| Artifact ID | `e6b264aa-bd7a-465c-9e43-4092b69b8266` |
+| SHA-256 | `4ce496542626c0036e44227cae9c5e28d44c734a3b89bb0e6fe76e925d7fb98e` |
+| 时长 / 帧数 | 21.895996 s / 525 帧，1344x768，24 fps |
+| 音视频流 | 恰好一条 h264 视频流 + 一条 aac 48 kHz 立体声音频流 |
+| `review_state` | **`all_passed`**（三个来源 job 全部 `PASSED`） |
+| 导出副本 | `.local-acceptance/media/delivery-sample.mp4`（本机路径，不进 Git） |
+
 导出到 Git 之外：媒体文件不要提交到仓库（`.gitignore` 已排除本地验收目录与 `*.mp4`）。
 
 ---
@@ -442,6 +510,8 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
 | 提交被拒 `CJK found outside dialogue or quoted visible text` | Style Bible 的维度是中文，改成英文后重新冻结一个新版本 |
 | 连续性被拒 | 档案声明 `hard_continuity: PENDING_HARD_CONTINUITY_TEST`、`video_reference: SUPPORTED_NODE_UNVERIFIED_TRANSFER`；这两项不能绕过 |
 | 审片端点 403 | 没配 `SHINE_OPERATOR_ID` / `SHINE_OPERATOR_TOKEN_SHA256`，或凭据错，或用的是 Agent 身份 |
+| 审片端点 403，但凭据明明是对的 | 端口上跑的是**旧**服务，它还在用旧凭据。按 `processes.json` 里的 `listener_pid` 找到那个进程结束它，再重启 |
+| 启动时报"端口已被占用" | 旧栈还活着。先 `stop_shine.py`，再看它有没有打印 `[warning] port <n> is still held by pid <n>` |
 | 候选资产导入 409 `LICENSE_NOT_APPROVED` | 先由操作员批准对应的权利记录 |
 | 预制造成本一直 `BLOCKED` | `GET /api/v1/projects/{id}/preproduction/requirements` 看具体缺口码（常见 `ASSET_OR_VOICE_MISSING`） |
 | 组团角色 422 `LLM_FORMAT` | 模型输出没满足该角色的结构化契约；不是环境故障 |
@@ -469,12 +539,14 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
 3. 导入音色档案 → 试听 → 人工批准并冻结。
 4. 冻结预制作清单（先让 readiness 不再是 `BLOCKED`）。
 5. 发布工作流能力草案。
-6. **对本轮三个真实镜头做正式逐项审片**：
-   `ca3754cc-099e-41ce-bb5a-5aac121b7793`（A）、
-   `dee0263c-737d-4dc3-9687-73dbe2768bf2`（B）、
-   `ffffe1d8-86e7-4593-acaa-91ff453b6b31`（C）。
-   B 镜头必须 `watched` 与 `listened` 都为真。
-7. 可选：自己重新撰写 Style Bible（当前 v2 已是英文版）。
+6. 可选：自己重新撰写 Style Bible（当前 v2 已是英文版）。
+
+**已完成**：对本轮三个真实镜头的正式逐项审片（2026-10-25 11:30 UTC），
+`ba4bb63d-475a-4802-a469-0c4ce166fc97`（A）、
+`a2718d14-4a81-4046-8416-e16ce2b8598f`（B）、
+`ffffe1d8-86e7-4593-acaa-91ff453b6b31`（C），三个都是 `PASSED` /
+`manual_verified`。A 与 B 的**第一版**（`ca3754cc…` / `dee0263c…`）已被重渲染取代，
+不再具备审片资格。流程见 [第 6.4 节](#64-正式逐项审片)。
 
 另外，若要给 ComfyOps 配置本机探测范围，需要设置 `SHINE_COMFY_PROBE_ROOTS` 与
 `SHINE_COMFY_PROBE_PORTS`；不配置时相关端点返回 `LOCAL_PROBE_SCOPE_NOT_CONFIGURED`，

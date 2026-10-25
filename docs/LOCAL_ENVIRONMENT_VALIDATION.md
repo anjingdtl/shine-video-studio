@@ -18,13 +18,15 @@ LLM 网关与落盘产物。本报告只写实际执行过的检查及其真实�
 ## 1. 结论摘要
 
 - 本机是一台满足本地 H3 Ref2VA 推理条件的 Windows 11 + RTX 5080 工作站，本轮在其中
-  完成了三次真实 ComfyUI 渲染、一次真实交付样片装配，并修复了三个在真机路径上才暴露
-  的缺陷。
+  完成了五次真实 ComfyUI 渲染（A、B 各两版，C 一版）、一次真实交付样片装配，并修复了
+  三个在真机路径上才暴露的缺陷；收尾审片阶段又修复了三个缺陷（见
+  [V1.3 收尾报告 7.2](LOCAL_V1.3_CLOSEOUT_REPORT.md#72-收尾审片阶段新发现并修复的缺陷)）。
 - 工程回归、静态检查、前端构建在交付提交上全部通过。
 - 唯一被本轮证伪的环境级结论是 `uv lock --check` 的失败原因：它与 `UV_DEFAULT_INDEX`
   导出与否无关，真正原因是本机全局 uv 配置指向阿里云镜像（详见 2.4）。
-- 语义、音频、风格、终审四道门在本轮**没有**模型覆盖、**也没有**人工签署；三个真实
-  镜头的最终状态是 `NEEDS_REVIEW`。
+- 语义、风格、终审三道门与 B 的音频门在本轮**没有**模型覆盖，但由操作员
+  2026-10-25 11:30（UTC）的逐项人工审阅关闭；三个真实镜头的最终状态是 `PASSED`、
+  `quality_verification = manual_verified`。
 
 ## 2. 硬件与运行时
 
@@ -83,6 +85,7 @@ ComfyUI 只用自己的 `python_embeded`。
 | 本轮基线 | `63929f49c98e205776da5e2287cfe368cf87de75`（与 `origin/main` 同一 SHA） |
 | 本轮提交 | `fc75693d9aabb44cee92ca40eb97838e1ebd674c`，分支 `feature/v13-local-h3-integration`，2026-10-25 17:49:36 +08:00 |
 | 后续提交 | `2df8aff9f62209b6202bbd839fd914989499d5b2`（2026-10-25 18:01:13）：`backend/shine/llm/gateway.py` 修复 `LLM_FORMAT` 根因，并加入本轮四份文档 |
+| 收尾审片轮证据快照 | `8bf956fc527c9865fdbf779409d8c1d683064f64`（`.local-acceptance/evidence/acceptance-evidence.json` 记录的 HEAD，采集于 2026-10-25 11:31:09 UTC） |
 | 工作区 | 提交前后均干净 |
 
 ```powershell
@@ -104,6 +107,7 @@ git status --short
 | 工作流档案生成器 | `scripts/build_h3_workflow_profiles.py`、`config/workflows/ref2va-pdd8-*.json`（3 个） |
 | 进程管理 | `scripts/start_shine.ps1`、`scripts/stop_shine.py` |
 | 回归测试 | `backend/tests/test_comfy_completion_window.py`、`test_gpu_release_confirmation.py`、`test_delivery_assembly.py`、`backend/tests/fake_http.py` |
+| 收尾审片阶段 | `backend/shine/llm/gateway.py`（把 JSON 契约下发模型，提交 `2df8aff`）、`scripts/start_shine.ps1`（拒绝占用端口 + 记录 `listener_pid`）、`scripts/stop_shine.py`（结束监听者 + 端口仍被占用告警） |
 | 其他 | `backend/shine/main.py`（路由挂载）、`scripts/register_ref2va_profiles.py`、`.gitignore` |
 
 `git fetch` 在本轮因网络连接重置失败，远端状态无法刷新。写文档时用只读的
@@ -385,6 +389,13 @@ PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固�
 它没有进入 SQLite、没有进入 Git、没有进入日志、没有进入前端响应。本文档不包含、
 不引用、不复述任何密钥内容。
 
+**JSON 契约下发**：剧组的角色指令要求模型"只返回所给的 JSON 契约"。提交 `2df8aff`
+之后，`LLMGateway.complete_for_role` 会把该角色的 schema 作为请求的**最后一段**
+追加给模型 —— 服务商收到的请求里因此确实带着这份契约。对授权的 MiniMax 端点实跑，
+`scriptwriter` 返回 HTTP **201** 并产出有效的 `ScriptBreakdown`。修复前的失败是
+`LLM_FORMAT`（HTTP 422），根因见
+[V1.3 收尾报告 5.1](LOCAL_V1.3_CLOSEOUT_REPORT.md#51-llm_format-的根因与修复本轮后续提交)。
+
 ## 8. 数据目录与数据库备份
 
 本轮使用隔离的验收数据目录 `.local-acceptance/h3run/`，原 `.local-data-v12` 只读。
@@ -400,7 +411,7 @@ PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固�
 
 ## 9. 落盘产物校验
 
-验收库中全部 8 个媒体产物的落盘文件 SHA-256 与登记值逐一相等（`hash_matches: true`），
+验收库中全部 12 个媒体产物的落盘文件 SHA-256 与登记值逐一相等（`hash_matches: true`），
 字节数也相符：
 
 | 产物 | 字节 | SHA-256 与登记值一致 |
@@ -408,18 +419,26 @@ PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固�
 | V1.2 A（480x864） | 2,540,146 | 是 |
 | V1.2 B（480x864） | 1,228,496 | 是 |
 | V1.2 C（480x864） | 1,899,829 | 是 |
-| 本轮 Shot A（1344x768） | 6,660,241 | 是 |
-| 本轮 Shot B（1344x768） | 4,589,710 | 是 |
+| 本轮 Shot A 第一版（1344x768） | 6,660,241 | 是 |
+| 本轮 Shot B 第一版（1344x768） | 4,589,710 | 是 |
 | 本轮 Shot C（1344x768） | 4,414,119 | 是 |
+| 本轮 Shot A 当前版（1344x768） | 4,249,108 | 是 |
+| 本轮 Shot B 当前版（1344x768） | 3,390,919 | 是 |
 | 交付样片（错误顺序版） | 14,085,974 | 是 |
-| 交付样片（A→B→C 正确顺序） | 14,085,974 | 是 |
+| 交付样片（A→B→C，第一版来源） | 14,085,974 | 是 |
+| 交付样片（A→B→C，重渲染来源，`pending_review`） | 10,893,258 | 是 |
+| 交付样片（最终，`all_passed`） | 10,893,258 | 是 |
+
+最后两条登记的是**同一个内容寻址文件**（SHA-256 `4ce49654…`），区别只在来源 job 的
+状态：第一条装配时三个来源 job 尚未被审片签署，第二条是审片之后重装的。已通过版本
+的镜头产物与先前的成片都没有被覆盖。
 
 ## 10. 本轮未覆盖或受限的环境项
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 语义 / 音频 / 风格 / 终审门 | `BLOCKED / PENDING` | 没有模型覆盖，没有人工签署；`allow_remote_review = 0`，没有任何图像/音频/视频离开本机 |
-| 自动 ASR | `BLOCKED / PENDING` | 未配置；音频流存在并可解码，但中文台词未逐字机器核验 |
+| 语义 / 风格 / 终审门的**模型**覆盖 | `BLOCKED / PENDING` | 没有模型覆盖；这三道门由操作员的人工逐项审阅关闭；`allow_remote_review = 0`，没有任何图像/音频/视频离开本机 |
+| 自动 ASR | `BLOCKED / PENDING` | 未配置；音频流存在并可解码，中文台词未逐字**机器**核验（由人工试听逐字核对） |
 | 严格首尾帧锚定 | `PENDING_HARD_CONTINUITY_TEST` | 未实现为可放行的连续性 |
 | 视频参考真实传输 | `SUPPORTED_NODE_UNVERIFIED_TRANSFER` | 节点存在，传输未验证 |
 | 多模型 GPU 争用 | 未覆盖 | 本轮只跑了一个本地模型家族 |
@@ -440,6 +459,6 @@ PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固�
 | 交付装配能力、三个真机缺陷修复、进程清单启停脚本 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 本轮三个真实镜头为真实 ComfyUI 产物 | `VERIFIED_REAL_H3` |
 | 交付样片为真实 FFmpeg 装配产物，可完整解码 | `VERIFIED_REAL_H3` |
-| 语义 / 音频 / 风格 / 终审门未覆盖、未签署，镜头停在 `NEEDS_REVIEW` | `BLOCKED / PENDING` |
-| 正式逐项人工审片 | `BLOCKED / PENDING` |
+| 操作员 `shine-owner` 逐项审阅并签署三个镜头，语义 / 风格 / 终审门与 B 的音频门由**人工**关闭 | `VERIFIED_MANUAL` |
+| 语义 / 风格 / 终审门与音频门**没有模型覆盖**，只由人工关闭 | `BLOCKED / PENDING` |
 | 严格连续性、视频参考传输、多模型 GPU 争用 | `BLOCKED / PENDING` |

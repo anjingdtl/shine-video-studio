@@ -2,12 +2,15 @@
 
 日期：2026-10-25（Asia/Shanghai）。范围：本轮在操作员机器上用真实本地 ComfyUI +
 本地 MiniMax-H3 Ref2VA（INT8 ConvRot + PDD 8 步）跑出的三个镜头，以及由这三个真实
-镜头装配出的交付样片。
+镜头装配出的交付样片。同日 11:30（UTC）操作员 `shine-owner` 通过真实操作员 API 完成了
+这三个镜头的正式逐项人工审片，交付样片随之重装为 `all_passed`。
 
 关联文档：[本地环境验证报告](LOCAL_ENVIRONMENT_VALIDATION.md)、
 [V1.3 收尾报告](LOCAL_V1.3_CLOSEOUT_REPORT.md)、[操作员指南](operator-guide.md)。
 证据：`.local-acceptance/evidence/acceptance-evidence.json`、
 `.local-acceptance/logs/comfyui-stderr.log`、`.local-acceptance/h3run/`。
+本文的最终门禁状态由 `.local-acceptance/evidence/_verify_final_review.py` 与
+`.local-acceptance/evidence/_verify_gates.py`（只读查询）复核。
 
 ---
 
@@ -16,11 +19,18 @@
 - 本轮产出 **3 个真实 H3 镜头**（A / B / C，均 1344x768、24 fps、175 帧、7.291 秒）和
   **1 个可播放的交付样片**（21.896 秒、525 帧）。
 - 三个镜头的**技术门全部真实通过**（`model: ffprobe`，`is_mock: 0`）。
-- 三个镜头的**语义门、风格门、终审门都没有模型覆盖，也都没有人工签署**；有对白的
-  B 镜头的**音频门是必需但未运行**（`ASR_NOT_CONFIGURED`）。因此三个镜头全部停在
-  `NEEDS_REVIEW`，没有任何一个被标记为 `PASSED`。
-- 交付样片的 `review_state` 是 `pending_review`，不是 `all_passed`。
-- 本轮暴露并修复了三个只有真实 ComfyUI 才会遇到的缺陷（第 8 节）。
+- 2026-10-25 11:30（UTC），操作员 `shine-owner` 通过真实操作员 API
+  （`POST /api/v1/operator/jobs/{id}/review`）逐项审阅并签署了这三个镜头。语义门、
+  风格门、终审门，以及 B 镜头的音频门，**是由人工评审关闭的，不是由 VLM 或 ASR
+  关闭的**——这三个镜头从未被任何模型评审过。三个镜头的最终状态是 `PASSED`，
+  `quality_verification = manual_verified`。
+- 交付样片的 `review_state` 是 `all_passed`（artifact `e6b264aa…`）。先前的几条样片
+  仍以 `pending_review` 原样留在盘上 —— 交付是内容寻址的（第 9 节）。
+- A、B 两个镜头的**第一版**是在项目冻结 H3 规则包与 Style Bible v2 **之前**渲染的，
+  工作台正确拒绝为它们签署；两镜在当前配置下重渲染之后才被评审与签署（第 2、3、7 节）。
+- 本轮暴露并修复了三个只有真实 ComfyUI 才会遇到的缺陷（第 8.1 – 8.3 节）；收尾审片
+  阶段又定位并修复了两个新缺陷（8.4 – 8.5 节），并复验了陈旧租约清扫（8.6 节，与
+  8.3 是同一处修复）。
 
 ## 1. 验收项目与资产继承
 
@@ -53,6 +63,72 @@
 重映射成请求内的标签 `<Subject 1>` / `<Picture 2>` / `<Audio 1>`。
 
 ## 2. Shot A — `A-PDD8-7s`
+
+被评审并签署的当前版本：
+
+| 项 | 值 |
+| --- | --- |
+| Shot ID | `b938c504-…`（revision 1，10:44:59 UTC 创建） |
+| Job ID | `ba4bb63d-475a-4802-a469-0c4ce166fc97` |
+| Attempt ID | `109bd481-4489-4caa-8f54-87d84e45da70`（attempt_no 1） |
+| ComfyUI prompt id | `83108e1f-9806-4097-8fff-a9cc27138e39` |
+| 工作流档案 | `18e2f8d3-ca1d-4f0d-83ae-0bffc1b4b5f2`（`local-h3-ref2va-pdd8-2img`） |
+| 图 SHA-256 | `86a7624e6eaeccd3a3c54cf5024317698cac64cbe083ed10dd158bcaa1e6eaa0` |
+| 编译提示词 SHA-256 | `ac4c364155e9950d307e9f05480414d45fc226d15a0b8e4a13e21fbde24ba04c` |
+| 提示词图 SHA-256 | `1167f0c8d0f467ef10da0d31b538afd299372f900e0e8c5f378b22cf74fbe5ad` |
+| 冻结风格 | **Style Bible v2**，`5380cca5-efb1-4071-bf89-0f9604d41cf9`，sha `1909e253…22f636a8` |
+| 状态 | `PASSED`，`quality_verification: manual_verified`，`failure_code: null` |
+| `reconciliation_state` | `collected` |
+| 提交意图 / 提交回执 | 10:44:59.999 / 10:45:00.115（UTC） |
+
+产物：
+
+| 项 | 值 |
+| --- | --- |
+| Artifact ID | `75173459-798f-452c-821b-f839c3c3330f` |
+| SHA-256 | `b097421032d6093b0abf922e1aa1026e7c70e72b9fda59d196ceabe7a470d8b2` |
+| 字节 | 4,249,108 |
+| 存储路径 | `artifacts/1f743836-a00c-4787-8343-4f1a24ed9135/ba4bb63d-475a-4802-a469-0c4ce166fc97/b0974210…70d8b2.mp4` |
+
+ComfyUI 运行日志：
+
+```
+[INFO] MiniMaxH3PDDAccApply: partition check ok: ref2va file on ref2va model (fl2va 0.0504, ref2va 0.0017)
+[INFO] MiniMaxH3PDDAccApply: MiniMax-H3-Ref2VA-Acc-8Step.safetensors (original) steps=8 blocks=4,4,4,4,4,4,4,4, 258 lora modules, heads fused
+[INFO] Prompt executed in 230.15 seconds
+```
+
+本轮对该文件独立做的 FFprobe / FFmpeg 检查（不依赖系统自带的 QC）：
+
+```powershell
+ffprobe -v error -show_entries 'stream=codec_type,codec_name,width,height,r_frame_rate,nb_frames,sample_rate,channels' `
+        -show_entries 'format=duration,size' -of default=noprint_wrappers=1 `
+        '.local-acceptance\h3run\artifacts\1f743836-a00c-4787-8343-4f1a24ed9135\ba4bb63d-475a-4802-a469-0c4ce166fc97\b097421032d6093b0abf922e1aa1026e7c70e72b9fda59d196ceabe7a470d8b2.mp4'
+ffmpeg -v error -i <同一文件> -f null -
+```
+
+实测输出：
+
+```
+codec_name=h264
+codec_type=video
+width=1344
+height=768
+r_frame_rate=24/1
+nb_frames=175
+codec_name=aac
+codec_type=audio
+sample_rate=32000
+channels=2
+duration=7.291000
+size=4249108
+ffmpeg exit=0
+```
+
+即：h264 / 1344x768 / 24 fps / 175 帧 / aac 32 kHz 立体声 / 7.291 秒，**全片解码
+exit 0**。技术门以 `model: ffprobe` 真实通过（`is_mock: 0`）。
+
+### 2.1 Shot A 的第一版（已被取代，原样保留）
 
 | 项 | 值 |
 | --- | --- |
@@ -119,7 +195,68 @@ ffmpeg exit=0
 即：h264 / 1344x768 / 24 fps / 175 帧 / aac 32 kHz 立体声 / 7.291 秒，**全片解码
 exit 0**。
 
+这一版在 09:14 渲染，**早于**规则包冻结（09:38:09）与 Style Bible v2（09:39:17），
+因此工作台拒绝为它签署：请求早于当前规则包锁、风格也不再是项目的冻结风格。它连同
+产物原样保留为历史产物，没有被覆盖或删除。8.1 节记录的 ComfyUI 完成窗口缺陷也是在
+这一版上暴露的（`reconciliation_state = collected`、`quality_verification = real`，
+库中留下 `poll_after_ack / not_found` 与 `recover_history / completed` 两条对账记录）。
+
 ## 3. Shot B — `B-PDD8-7s`
+
+被评审并签署的当前版本：
+
+| 项 | 值 |
+| --- | --- |
+| Shot ID | `b89a0118-…`（revision 1，10:48:54 UTC 创建） |
+| Job ID | `a2718d14-4a81-4046-8416-e16ce2b8598f` |
+| Attempt ID | `40049d83-4c3e-424a-acb3-cf143a64406c`（attempt_no 1） |
+| ComfyUI prompt id | `66484dc1-a4fe-4b61-ba5b-2e4e2298eb3d` |
+| 工作流档案 | `01510286-83e7-4bde-ac2b-09332aeb1435`（`local-h3-ref2va-pdd8-2img-1aud`） |
+| 图 SHA-256 | `ea979fba2d3ad02493ee28d7126a624ca8afde06b1895a0e81a6bd50a193ca64` |
+| 编译提示词 SHA-256 | `dcd54635c677529acb0490cd8c5835a8090f6e4c56d49e2be9d3a709e70d786e` |
+| 提示词图 SHA-256 | `58f51878de094c249cd2d05d021c6bfdc0407b3c51eb1196466b207fa6e2301a` |
+| 冻结风格 | **Style Bible v2**，`5380cca5-efb1-4071-bf89-0f9604d41cf9`，sha `1909e253…22f636a8` |
+| 状态 | `PASSED`，`quality_verification: manual_verified`，`failure_code: null` |
+| `reconciliation_state` | `collected` |
+| 提交意图 / 提交回执 | 10:48:54.810 / 10:48:54.938（UTC） |
+
+产物：
+
+| 项 | 值 |
+| --- | --- |
+| Artifact ID | `1b278511-fb66-46c5-8dbd-0c869913fc06` |
+| SHA-256 | `4c6d8afeccb0fe1783e8749f195c68fa4b406c15fc8012c4b4caa4cc3dce10aa` |
+| 字节 | 3,390,919 |
+| 存储路径 | `artifacts/1f743836-a00c-4787-8343-4f1a24ed9135/a2718d14-4a81-4046-8416-e16ce2b8598f/4c6d8afe…3dce10aa.mp4` |
+
+ComfyUI：`Prompt executed in 228.64 seconds`（8 步采样 `8/8 [03:06<00:00, 23.34s/it]`）。
+
+独立 FFprobe / 解码实测：
+
+```
+codec_name=h264 / width=1344 / height=768 / r_frame_rate=24/1 / nb_frames=175
+codec_name=aac   / sample_rate=32000 / channels=2
+duration=7.291000
+size=3390919
+ffmpeg exit=0
+```
+
+音色参考与台词（与第一版一致，绑定未变）：
+
+- 音色资产 `VOICE_LIANG`（`不用上班.wav`，3.587 s）以 `<Audio 1>` 标签进入引用清单，
+  由 `VHS_LoadAudioUpload` 载入（档案的 `media_transfers.audio` 明确声明该节点类）。
+- 中文台词「这里人太多，跟我来。」由**唯一批准的 H3 编译器**编进提示词的 `<d>` 对白块，
+  时间轴 0.8 s → 3.0 s：
+
+```
+[Shot 1] ... At 00:00.800, <Subject 1> (S1) says: <d>[Chinese] 这里人太多，跟我来。</d>
+```
+
+- 音频门：`required = 1`。这一版由 worker 记录为 `not_run` + `ASR_NOT_CONFIGURED`
+  （没有配置自动 ASR），随后由**操作员的人工逐项审阅**关闭为 `passed`（`listened = true`，
+  台词逐字与口型由人工核对）。机器侧的 ASR 复核仍然没有配置。
+
+### 3.1 Shot B 的第一版（已被取代，原样保留）
 
 | 项 | 值 |
 | --- | --- |
@@ -170,6 +307,10 @@ ffmpeg exit=0
   配置自动 ASR，所以这句台词**没有**被机器逐字核验；音轨存在且能解码，但措辞与口型
   仍需人工判断。
 
+这一版同样在 09:24 渲染，**早于**规则包冻结与 Style Bible v2，因此工作台拒绝为它
+签署。job `dee0263c-737d-4dc3-9687-73dbe2768bf2` 与产物 `707dbc5e-…`（SHA-256
+`40affe5911530104…`，4,589,710 字节）原样保留为历史产物。
+
 ## 4. Shot C — `C-PDD8-7s`（依赖镜头）
 
 | 项 | 值 |
@@ -182,8 +323,8 @@ ffmpeg exit=0
 | 图 SHA-256 | `86a7624e6eaeccd3a3c54cf5024317698cac64cbe083ed10dd158bcaa1e6eaa0` |
 | 编译提示词 SHA-256 | `e3acf6238bc022950253b8bd5cbc767586f0c9a975f77baf2570fe48e4698e1b` |
 | 冻结风格 | **Style Bible v2**，`5380cca5-efb1-4071-bf89-0f9604d41cf9`，sha `1909e253…22f636a8` |
-| 状态 | `NEEDS_REVIEW`，`failure_code: QC_NEEDS_REVIEW` |
-| `quality_verification` | `real` |
+| 状态 | `PASSED`，`failure_code: null` |
+| `quality_verification` | `manual_verified`（人工逐项审阅签署；技术门为真实 ffprobe 实测） |
 | `reconciliation_state` | `collected` |
 
 产物：
@@ -205,6 +346,10 @@ duration=7.291000
 size=4414119
 ffmpeg exit=0
 ```
+
+C 是三个镜头里**唯一没有重渲染**的一个：它在 09:39 创建，既晚于规则包冻结（09:38:09），
+也晚于 Style Bible v2 冻结（09:39:17），因此从一开始就在当前配置下成立，也就没有
+被"早于规则包锁或风格已变"这条闸门挡下。
 
 连续性处理：
 
@@ -229,27 +374,34 @@ The opening composition continues seamlessly from the approved final frame of sh
 
 | | Shot A | Shot B | Shot C |
 | --- | --- | --- | --- |
-| Job | `ca3754cc…` | `dee0263c…` | `ffffe1d8…` |
-| ComfyUI prompt | `82af3688…` | `8d2c3387…` | `5deab8ed…` |
+| Job | `ba4bb63d…` | `a2718d14…` | `ffffe1d8…` |
+| ComfyUI prompt | `83108e1f…` | `66484dc1…` | `5deab8ed…` |
 | 档案 | pdd8-2img | pdd8-2img-1aud | pdd8-2img |
-| ComfyUI 耗时 | 246.06 s | 236.28 s | 220.59 s |
+| ComfyUI 耗时 | 230.15 s | 228.64 s | 220.59 s |
 | 采样 | PDD 8 步 | PDD 8 步 | PDD 8 步 |
-| Artifact | `3c9e8d66…` | `707dbc5e…` | `c2946fa4…` |
-| SHA-256 | `64a65e36…` | `40affe59…` | `675c7822…` |
-| 字节 | 6,660,241 | 4,589,710 | 4,414,119 |
+| Artifact | `75173459…` | `1b278511…` | `c2946fa4…` |
+| SHA-256 | `b0974210…` | `4c6d8afe…` | `675c7822…` |
+| 字节 | 4,249,108 | 3,390,919 | 4,414,119 |
 | 分辨率 / 帧率 | 1344x768 / 24 | 1344x768 / 24 | 1344x768 / 24 |
 | 帧数 | 175 | 175 | 175 |
 | 时长 | 7.291 s | 7.291 s | 7.291 s |
 | 音轨 | aac 32 kHz 立体声 | aac 32 kHz 立体声 | aac 32 kHz 立体声 |
 | 全片解码 | exit 0 | exit 0 | exit 0 |
-| 风格版本 | v1 | v1 | v2 |
-| 状态 | `NEEDS_REVIEW` | `NEEDS_REVIEW` | `NEEDS_REVIEW` |
+| 风格版本 | v2 | v2 | v2 |
+| 状态 | `PASSED` | `PASSED` | `PASSED` |
+| `quality_verification` | `manual_verified` | `manual_verified` | `manual_verified` |
 
 目标时长是 7.00 秒、容差 0.75 秒，实测 7.291 秒，在容差内。
 
+A、B 的**第一版**（job `ca3754cc…` / `dee0263c…`，产物 `3c9e8d66…` / `707dbc5e…`，
+风格 v1）见 2.1 与 3.1 节，它们原样保留为历史产物，未被覆盖或删除。
+
 ## 6. 五道质量门
 
-三个镜头的门禁记录（`quality_gates`，全部 `is_mock = 0`）：
+每个镜头有**两组**门禁记录（`quality_gates`，全部 `is_mock = 0`）：worker 在渲染后写
+第一组，操作员人工审阅后**追加**第二组。worker 的原始行没有被覆盖。
+
+第一组（worker，机器门禁）：
 
 | 门 | Shot A | Shot B | Shot C | 说明 |
 | --- | --- | --- | --- | --- |
@@ -259,14 +411,40 @@ The opening composition continues seamlessly from the approved final frame of sh
 | `style` | not_run | not_run | not_run | `STYLE_REVIEW_NOT_COVERED` |
 | `final` | needs_review | needs_review | needs_review | `verification: real` |
 
-**明确说明**：语义、音频、风格、终审这四道门在本轮**没有**任何模型覆盖，也**没有**
-人工签署。缺失的评审被记为"缺失"，绝没有被记为通过。三个镜头因此都是
-`NEEDS_REVIEW`，QC 报告 `result = needs_review`、`reviewer = quality-gates`（机器门禁
-记录，不是人工评审记录）。
+第二组（操作员人工审阅，2026-10-25 11:30 UTC 追加）：
 
-对照：V1.2 的上游 job `b9670cca-8b08-40c3-8dd5-ea33ca50eaca` 在历史人工评审中拿到了
-`semantic`、`style` 与 `final` 的 passed（其 `OPERATOR_REVIEW_RECORDED` 事件时间为
-2026-10-21），状态为 `PASSED`。本轮三个新镜头**没有**对应的人工评审事件。
+| 门 | Shot A | Shot B | Shot C | 说明 |
+| --- | --- | --- | --- | --- |
+| `technical` | **passed** | **passed** | **passed** | 与第一组同源：真实 FFprobe / FFmpeg 实测 |
+| `semantic` | **passed** | **passed** | **passed** | 由**人工**逐项审阅关闭，**不是** VLM 评审 |
+| `audio` | not_applicable | **passed** | not_applicable | A/C 的 shot spec 无对白，音频门非必需；B 由人工试听与逐字核对关闭 |
+| `style` | **passed** | **passed** | **passed** | 由**人工**对照冻结的 Style Bible v2 关闭 |
+| `final` | **passed** | **passed** | **passed** | 操作员签署全部必需分项后才置为 passed |
+
+**明确说明**：语义、风格、终审这三道门，以及 B 的音频门，**从来没有任何模型评审过**
+—— 本轮没有配置远程 VLM，也没有配置 ASR；它们是由操作员的人工逐项审阅关闭的。
+`final` 为 `passed`，是因为操作员把该镜头**全部必需分项**都签了；`technical` 为
+`passed`，来自真实 FFprobe / FFmpeg 实测（`model: ffprobe`，`is_mock: 0`）。
+
+对应的人工评审记录（`OPERATOR_REVIEW_RECORDED`，actor `shine-owner`）：
+
+| Shot | request_id | watched | listened | 分项 |
+| --- | --- | --- | --- | --- |
+| A | `op-review-20261025-A` | true | false | 7 项 PASS（identity / costume / scene_props / camera_action / style / continuity / other），dialogue / voice / lip_sync 为 `NOT_APPLICABLE` |
+| B | `op-review-20261025-B` | true | true | 10 项全部 PASS |
+| C | `op-review-20261025-C` | true | false | 7 项 PASS，dialogue / voice / lip_sync 为 `NOT_APPLICABLE` |
+
+A 与 C 的对白三项标 `NOT_APPLICABLE`，原因是这两个镜头的 shot spec 里没有对白，
+系统内的 audio 门对它们本就是 `not_applicable` 且非必需 —— 不是没看，而是没有这项
+可看。B 是唯一有对白的镜头，因此它的 `listened` 为 true，台词「这里人太多，跟我来。」
+由人工逐字核对并判定口型同步。
+
+审片接口返回 HTTP 200（`{"status":"PASSED","result":"passed","source":"manual"}`），
+同时追加一条 `reviewer = operator-manual` 的 QC 报告（`result = passed`）；worker 的
+`reviewer = quality-gates` / `result = needs_review` 报告原样保留。
+
+对照：V1.2 的上游 job `b9670cca-8b08-40c3-8dd5-ea33ca50eaca` 在 2026-10-21 的人工
+评审中同样拿到了 `semantic`、`style` 与 `final` 的 passed。
 
 ## 7. Style Bible 与冻结规则包的一次真实交互
 
@@ -285,28 +463,35 @@ The opening composition continues seamlessly from the approved final frame of sh
    根因：冻结的 Style Bible v1（sha `5204402dccbae251…`，人工于 2026-10-21 批准）用
    **中文**书写七个视觉维度，而编译器会原样把它们嵌进提示词的 `detailed_description`。
 
-3. Shot A 和 Shot B 是在规则包冻结**之前**创建的，因此不受影响。Shot C 在冻结**之后**
-   创建，被正确拒绝 —— 这正是设计中的行为：规则被执行，没有静默重写，响应里点名了
-   违规规则、定位位置和补救方式。
+3. Shot A 和 Shot B 是在规则包冻结**之前**创建的，因此**编译**时不受影响。Shot C 在冻结
+   **之后**创建，被正确拒绝 —— 这正是设计中的行为：规则被执行，没有静默重写，响应里
+   点名了违规规则、定位位置和补救方式。
 
 4. 按补救建议，冻结了 **Style Bible v2**（`5380cca5-efb1-4071-bf89-0f9604d41cf9`，sha
    `1909e2534f4f0e0c1e09a61c11ccb37803614acf6b69e69c23a1c59222f636a8`），同样七个维度
-   改用英文表达。v1 **未被改动**，仍然是 Shot A / Shot B 所引用的版本。
+   改用英文表达。v1 **未被改动**。
 
    | 版本 | 维度表达 | 引用它的镜头 |
    | --- | --- | --- |
-   | v1 | 中文 | A、B |
-   | v2 | 英文 | C |
+   | v1 | 中文 | A（第一版）、B（第一版） |
+   | v2 | 英文 | C、A（当前版）、B（当前版） |
 
 5. 风格影响报告：`affected_shot_count = 9`，`invalidated_job_count = 0`。已有的通过版本
    与产物没有被覆盖。
 
 6. Shot C 随后针对 v2 编译并渲染成功。
 
+7. **审片阶段的连锁后果**：工作台不会为"请求早于当前规则包锁"、或"风格不再是项目
+   冻结风格"的 job 签署。A 与 B 的第一版正好落在这两条之外（09:14 与 09:24 创建，
+   规则包 09:38 冻结，Style Bible v2 09:39 冻结），因此它们**不能**被签署，在当前
+   配置下重渲染之后（10:44 与 10:48）才成为被评审与签署的版本。第一版的 job 与产物
+   原样保留为历史产物，没有被覆盖，也没有被删除。C 因为两个变更之后才创建，从头
+   就成立，不需要重渲染。
+
 留给操作员的可选项：如果更希望自己重新撰写 Style Bible，这被列为一项待办
 （见 [V1.3 收尾报告](LOCAL_V1.3_CLOSEOUT_REPORT.md) 第 8 节）。
 
-## 8. 本轮发现并修复的三个缺陷
+## 8. 本轮发现并修复的缺陷
 
 ### 8.1 ComfyUI 完成窗口丢弃了一次成功的渲染
 
@@ -387,6 +572,53 @@ device: cuda:0 NVIDIA GeForce RTX 5080 : cudaMallocAsync
 | `950ac8cc-fdc6-4cb9-b7dc-3cf817f970ef` | `h3:dee0263c…` | RELEASED |
 | `b79a898f-7a65-4329-84e7-0ce58608b066` | `h3:ffffe1d8…` | RELEASED |
 
+### 8.4 LLM 网关从未把 JSON 契约交给模型
+
+**现象**：剧组的四个角色（`scriptwriter` / `editor` / `producer` / `comfyops`）的真实调用
+被以 `LLM_FORMAT` 拒绝（HTTP 422）。指令要求模型"只返回所给的 JSON 契约"，而**契约
+从未被交给模型**。
+
+**根因**：`LLMGateway.complete_for_role` 只把 schema 交给服务商做校验，模型只拿到上下文，
+必须自己猜答案的形状。Mock 服务商用罐头响应作答，把这个问题掩盖了；真实服务商按上下文
+作答，于是过不了 schema 校验。
+
+**修复**：把 schema 追加到请求末尾，使不可信上下文无法把它挤掉。
+
+**实测**：对授权的 MiniMax 端点实跑，`scriptwriter` 返回 HTTP **201**，产出有效的
+`ScriptBreakdown`。根因、修复与边界详见
+[V1.3 收尾报告 5.1](LOCAL_V1.3_CLOSEOUT_REPORT.md#51-llm_format-的根因与修复本轮后续提交)。
+
+### 8.5 启动脚本记的是启动器 pid，而不是占用端口的那个 pid
+
+**现象**：停止之后重启，下一次启动在绑定端口时以 `Errno 10048` 失败，而旧的服务仍在
+端口上按**旧的操作员凭据**应答。表现出来的症状是：凭据本身是对的，操作员审片却被
+HTTP 403 拒绝。
+
+**根因**：uv 管理的虚拟环境会把基础解释器作为**子进程**重新执行，启动器记下的 pid 与
+真正监听端口的 pid 不是同一个。停止时只结束了启动器，真正的服务活了下来。
+
+**修复**：
+
+- `scripts/start_shine.ps1` 在启动前检查端口是否被占用；被占用就**拒绝启动**并给出
+  停止命令，不再让新进程带着绑定错误死掉；
+- 启动脚本把**真实监听者**的 pid（`listener_pid`）写进 `processes.json`；
+- `scripts/stop_shine.py` 结束该监听进程，并在端口仍被占用时打印告警。
+
+### 8.6 收尾审片阶段对租约清扫的复验
+
+收尾审片阶段再次确认了 8.3 描述的那一处清扫修复：**每一个** `ACTIVE` /
+`RECONCILE_REQUIRED` 租约都会被扫到，当租约的 job 不再是活动状态、且它的 attempt 已
+`COMPLETED` 时，按渲染器的真实内存状态释放。两个重渲染 job 的租约最终同样为
+`RELEASED`：
+
+| 租约 ID | 归属 job | 状态 |
+| --- | --- | --- |
+| `89899faf-49e9-491a-bc0b-ec2055fed9ed` | `h3:ba4bb63d…` | RELEASED |
+| `3630aaec-01ce-429b-a501-d84908797eea` | `h3:a2718d14…` | RELEASED |
+
+这与 8.3 是**同一处修复**，不是另一处缺陷；此处只记录收尾轮的复验结果。库里五条
+H3 租约最终全部为 `RELEASED`。
+
 ## 9. 交付样片（EDL → 可播放成片）
 
 本轮新增了把编辑决策清单变成真实文件的能力：`backend/shine/media/assembly.py` 与
@@ -401,16 +633,17 @@ device: cuda:0 NVIDIA GeForce RTX 5080 : cudaMallocAsync
   `PASSED` 时 `review_state` 才是 `all_passed`。
 - `GET /api/v1/deliveries/{artifact_id}/media` 输出成片。
 
-本轮实际装配结果：
+本轮实际装配结果（最终成片，2026-10-25 11:30 审片后重装）：
 
 | 项 | 值 |
 | --- | --- |
-| Artifact ID | `110f47e9-34e1-48d8-a562-defc5f43bf1b` |
-| SHA-256 | `db8e65e8db564f9ef7d7ec4b9d06862af62d20f65abbbf8a2e9e4c80c57d41e4` |
-| 字节 | 14,085,974 |
-| 存储路径 | `artifacts/1f743836-a00c-4787-8343-4f1a24ed9135/delivery/db8e65e8…c57d41e4.mp4` |
+| Artifact ID | `e6b264aa-bd7a-465c-9e43-4092b69b8266` |
+| SHA-256 | `4ce496542626c0036e44227cae9c5e28d44c734a3b89bb0e6fe76e925d7fb98e` |
+| 字节 | 10,893,258 |
+| 存储路径 | `artifacts/1f743836-a00c-4787-8343-4f1a24ed9135/delivery/4ce49654…d7fb98e.mp4` |
 | 段序 | **A → B → C**，每段 `in_s 0.0 → out_s 7.29` |
-| `review_state` | `pending_review` |
+| 来源 job | `ba4bb63d…` / `a2718d14…` / `ffffe1d8…`，全部 `PASSED` |
+| `review_state` | **`all_passed`** |
 
 独立 FFprobe / 解码实测：
 
@@ -418,24 +651,34 @@ device: cuda:0 NVIDIA GeForce RTX 5080 : cudaMallocAsync
 codec_name=h264 / width=1344 / height=768 / r_frame_rate=24/1 / nb_frames=525
 codec_name=aac   / sample_rate=48000 / channels=2
 duration=21.895996
-size=14085974
+size=10893258
 ffmpeg exit=0
 ```
 
 即 **21.896 秒、525 帧（3 x 175）**、1344x768、24 fps，**恰好一条** h264 视频流与
-**一条** aac 音频流（48 kHz 立体声）。成片内含来源 job id、attempt id、artifact id、
-artifact sha256 与来源 job 状态，因此每一段都可追溯。
+**一条** aac 音频流（48 kHz 立体声），**全片解码 exit 0**。成片内含来源 job id、
+attempt id、artifact id、artifact sha256 与来源 job 状态，因此每一段都可追溯。
+`review_state` 是 `all_passed`，是因为三个来源 job 都已经是 `PASSED` —— 它不是被
+单独置上的标记。
 
-另一次装配用了**错误的段序**（C → B → A），得到不同的成片
-`eeeabdb8d8e5d223cc5d28a66199a0d6d6099e7bb82a5919074cf08a73809bac`（同为 14,085,974
-字节）。两个成片都保留 —— 交付路径是内容寻址的，先前的成片没有被覆盖。
+先前的几条成片仍在原处，未被覆盖（交付是内容寻址的）：
+
+| Artifact ID | SHA-256 | 字节 | 段序 | `review_state` |
+| --- | --- | --- | --- | --- |
+| `e820bff2-…` | `eeeabdb8…09bac` | 14,085,974 | C → B → A | `pending_review` |
+| `110f47e9-…` | `db8e65e8…d41e4` | 14,085,974 | A → B → C | `pending_review` |
+| `d67733d1-…` | `4ce49654…d7fb98e` | 10,893,258 | A → B → C | `pending_review` |
+
+前两条用的是 A、B 的**第一版**产物；第三条用的是重渲染后的 A、B，但装配时三个来源
+job 还没有被审片签署，因此同样是 `pending_review`。最终成片与第三条的**内容哈希完全
+相同**（`4ce49654…`），差别只在来源状态：交付按内容寻址，成片文件没有变。
 
 导出的样片副本：`.local-acceptance/media/delivery-sample.mp4`，实测 SHA-256 与登记的
 artifact hash 相等：
 
 ```powershell
 (Get-FileHash -Algorithm SHA256 '.local-acceptance\media\delivery-sample.mp4').Hash.ToLower()
-# db8e65e8db564f9ef7d7ec4b9d06862af62d20f65abbbf8a2e9e4c80c57d41e4
+# 4ce496542626c0036e44227cae9c5e28d44c734a3b89bb0e6fe76e925d7fb98e
 ```
 
 该文件**刻意不进入 Git**（`.gitignore` 含 `/.local-acceptance/` 与 `*.mp4`）。
@@ -448,9 +691,8 @@ artifact hash 相等：
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 语义 / 音频 / 风格 / 终审门 | `BLOCKED / PENDING` | 无模型覆盖，无人工签署 |
-| 正式逐项人工审片 | `BLOCKED / PENDING` | 三个新镜头没有 `OPERATOR_REVIEW_RECORDED` |
-| 台词逐字准确性、口型同步 | `BLOCKED / PENDING` | 未配置 ASR；需人工完整观看+试听 |
+| 语义 / 风格 / 终审门的**模型**覆盖 | `BLOCKED / PENDING` | 仍然没有 VLM 评审；这三道门是由操作员的人工逐项审阅关闭的，不是模型覆盖 |
+| 音频门的**机器**复核 | `BLOCKED / PENDING` | 仍未配置 ASR；B 的台词与口型由人工试听、逐字核对 |
 | 远程媒体评审 | 未启用 | `allow_remote_review = 0`，没有任何媒体离开本机；只有剧组的文本提示词在授权下发往 MiniMax 端点 |
 | 严格首尾帧锚定 | `PENDING_HARD_CONTINUITY_TEST` | Shot C 只是软参考 |
 | 视频参考传输 | `SUPPORTED_NODE_UNVERIFIED_TRANSFER` | 未验证 |
@@ -466,12 +708,16 @@ artifact hash 相等：
 | Shot A / B / C 为真实本地 ComfyUI + 本地 MiniMax-H3 产物，产物哈希与落盘一致 | `VERIFIED_REAL_H3` |
 | 三个镜头的 technical 门以 ffprobe 真实通过（1344x768 / 24 fps / 175 帧 / 7.291 s） | `VERIFIED_REAL_H3` |
 | 独立 `ffmpeg -f null -` 全片解码 exit 0（三个镜头与成片） | `VERIFIED_LOCAL_ENV` |
-| 交付样片为真实 FFmpeg 装配产物：21.896 s / 525 帧 / 单视频流 + 单音频流 / `pending_review` | `VERIFIED_REAL_H3` |
+| 交付样片为真实 FFmpeg 装配产物：21.896 s / 525 帧 / 单视频流 + 单音频流 / `all_passed` | `VERIFIED_REAL_H3` |
 | 规则包冻结后 `H3_ENGLISH` 以 HTTP 422 拒绝中文 Style Bible，未发生静默重写 | `VERIFIED_REAL_H3` |
 | Style Bible v1 未被改动，v2 以英文冻结，风格影响 9 个镜头 / 0 个 job 失效 | `VERIFIED_REAL_H3` |
+| A、B 在规则包冻结与 Style Bible v2 之后重渲染并被签署，第一版 job 与产物原样保留 | `VERIFIED_REAL_H3` |
 | Shot C 作为依赖镜头带显式 `continuity:last_frame` 依赖边，仅软参考连续性 | `VERIFIED_REAL_H3` |
+| 操作员 `shine-owner` 通过真实操作员 API 逐项审阅并签署三个镜头（`OPERATOR_REVIEW_RECORDED` × 3，`watched` 全为 true，B 另有 `listened = true`） | `VERIFIED_MANUAL` |
+| 三个镜头的 semantic / style / final 门与 B 的 audio 门由**人工**关闭；`final = passed` 因为全部必需分项被签署，`technical = passed` 来自真实 ffprobe/ffmpeg | `VERIFIED_MANUAL` |
+| 交付样片 `review_state = all_passed`，三个来源 job 全部 `PASSED` | `VERIFIED_MANUAL` |
 | ComfyUI 完成窗口、GPU 释放确认、陈旧租约三个缺陷已定位、修复并有回归测试 | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| LLM 网关未下发 JSON 契约、启动脚本记错监听 pid 两个缺陷已定位、修复并有实测 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 交付装配能力（EDL → 成片）与来源再校验 | `IMPLEMENTED` / `TESTED_OFFLINE` |
-| 语义 / 音频 / 风格 / 终审门未覆盖、未签署，镜头停在 `NEEDS_REVIEW` | `BLOCKED / PENDING` |
-| 正式逐项人工审片 | `BLOCKED / PENDING` |
+| 语义 / 风格 / 终审门与音频门**没有模型覆盖**，只由人工关闭 | `BLOCKED / PENDING` |
 | 严格连续性、视频参考传输、多模型 GPU 争用 | `BLOCKED / PENDING` |

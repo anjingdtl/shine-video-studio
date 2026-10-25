@@ -4,7 +4,10 @@
 `63929f49c98e205776da5e2287cfe368cf87de75`（= `origin/main`）。本轮提交
 `fc75693d9aabb44cee92ca40eb97838e1ebd674c`（2026-10-25 17:49:36），随后提交
 `2df8aff9f62209b6202bbd839fd914989499d5b2`（2026-10-25 18:01:13）修复 `LLM_FORMAT`
-的根因（见 5.1）。
+的根因（见 5.1）。同日 11:30（UTC）操作员 `shine-owner` 完成了三个真实镜头的正式
+逐项人工审片（见 7.2 与 8.1）；验收证据快照
+`.local-acceptance/evidence/acceptance-evidence.json` 于 11:31:09 UTC 采集，其记录的
+HEAD 为 `8bf956fc527c9865fdbf779409d8c1d683064f64`。
 
 关联文档：[本地环境验证报告](LOCAL_ENVIRONMENT_VALIDATION.md)、
 [真实 H3 验收报告](LOCAL_REAL_H3_ACCEPTANCE.md)、[操作员指南](operator-guide.md)。
@@ -29,10 +32,10 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 | D 声音工作台 | 档案列表为空；导入因 `LICENSE_NOT_APPROVED` 拒绝；冻结需操作员 | `VERIFIED_LOCAL_ENV` |
 | E 专业剧组 | 目录与规则包读取正常；四个角色的真实调用被 `LLM_FORMAT` 拒绝（422），三个角色因上游未产出而未触达 —— 该根因随后被定位并修复（见 5.1），修复后 `scriptwriter` 成功产出 `ScriptBreakdown`，其余角色的复验仍未做 | `BLOCKED / PENDING` |
 | F 预制作分析与冻结 | 分析、需求、readiness、gaps 全部可用并正确判定 `BLOCKED`；冻结需操作员 | `VERIFIED_LOCAL_ENV` |
-| 真实 H3 生成 | 三个镜头真实渲染通过技术门 | `VERIFIED_REAL_H3` |
-| 交付装配 | 真实 EDL → 成片 | `VERIFIED_REAL_H3` |
-| 恢复与 GPU 调度 | 三个真机缺陷已修复并有回归 | `IMPLEMENTED` / `TESTED_OFFLINE` |
-| 正式逐项人工审片 | 未执行 | `BLOCKED / PENDING` |
+| 真实 H3 生成 | 三个镜头真实渲染通过技术门；A、B 在规则包与 Style Bible v2 之后重渲染 | `VERIFIED_REAL_H3` |
+| 交付装配 | 真实 EDL → 成片，`review_state = all_passed` | `VERIFIED_REAL_H3` |
+| 恢复与 GPU 调度 | 真机缺陷与收尾审片阶段的缺陷已修复并有回归 | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| 正式逐项人工审片 | 2026-10-25 11:30（UTC）由操作员 `shine-owner` 通过真实操作员 API 完成并签署；语义 / 风格 / 终审门与 B 的音频门由**人工**关闭，不是模型覆盖 | `VERIFIED_MANUAL` |
 
 能力面验证脚本共 **46** 项检查，结果分布：
 
@@ -53,6 +56,7 @@ V1.3 云端收尾报告（[V1.3_CLOUD_IMPLEMENTATION_REPORT.md](V1.3_CLOUD_IMPLE
 | 真机缺陷修复 | `backend/shine/worker.py`（+124）、`backend/shine/comfy/client.py`（+73） |
 | 工作流档案 | `scripts/build_h3_workflow_profiles.py`（449 行）、`config/workflows/ref2va-pdd8-2img.json`、`ref2va-pdd8-2img-1aud.json`、`ref2va-pdd8-upscale-2img.json` |
 | 进程管理 | `scripts/start_shine.ps1`（+84）、`scripts/stop_shine.py`（新增 124 行） |
+| 收尾审片阶段 | `scripts/start_shine.ps1`（拒绝占用端口 + 记录真实监听者 `listener_pid`）、`scripts/stop_shine.py`（结束监听者 + 端口仍被占用告警） |
 | 回归测试 | `backend/tests/test_comfy_completion_window.py`（2）、`test_gpu_release_confirmation.py`（6）、`test_delivery_assembly.py`（6）、`backend/tests/fake_http.py`（+26/−） |
 | 其他 | `backend/shine/main.py`（挂载交付路由）、`scripts/register_ref2va_profiles.py`（+3）、`.gitignore`（+1，排除本地验收目录） |
 
@@ -216,7 +220,7 @@ scene/prop，dialogue 依赖 voice），并带 `critical` 标记。缺口码是
 ## 7. 恢复、GPU 调度与工程回归
 
 三个只有真实 ComfyUI 才会暴露的缺陷已修复，根因、修复与影响详见
-[真实 H3 验收报告第 8 节](LOCAL_REAL_H3_ACCEPTANCE.md#8-本轮发现并修复的三个缺陷)。
+[真实 H3 验收报告第 8 节](LOCAL_REAL_H3_ACCEPTANCE.md#8-本轮发现并修复的缺陷)。
 这里只列工程侧证据：
 
 | 修复 | 常量 / 行为 | 回归文件 |
@@ -259,6 +263,22 @@ npm --prefix frontend audit
 > 备注：基线在改动前为 375 项（brief 记录），本轮新增 14 项回归后为 **389** 项，
 > 375 + 14 = 389，增量与新增测试文件数量一致。
 
+### 7.2 收尾审片阶段新发现并修复的缺陷
+
+2026-10-25 11:30（UTC）的人工审片阶段定位并修复了下面三项。第 3 项与 7.1 表格里的
+"陈旧租约清扫"是**同一处修复**，此处只记录收尾轮在两个重渲染 job 上的复验结果。
+
+| # | 缺陷 | 现象 | 根因 | 修复 | 验证 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | LLM 网关从未把 JSON 契约交给模型 | 剧组四个角色的真实调用被 `LLM_FORMAT` 拒绝（422）；指令要求模型"只返回所给的 JSON 契约"，而契约从未下发 | `LLMGateway.complete_for_role` 只把 schema 交给服务商做校验，模型只拿到上下文，必须自己猜答案的形状；Mock 服务商用罐头响应作答，把问题掩盖了 | 把 schema 追加到请求末尾，使不可信上下文无法把它挤掉（`backend/shine/llm/gateway.py`，提交 `2df8aff`） | 对授权的 MiniMax 端点实跑：`scriptwriter` 返回 **HTTP 201**，产出有效 `ScriptBreakdown`（详见 5.1） |
+| 2 | 启动脚本记的是启动器 pid，而不是占用端口的那个 pid | 停止后重启，绑定端口以 `Errno 10048` 失败，而旧服务仍按**旧的操作员凭据**在端口上应答；症状是凭据本身正确，审片却被 HTTP **403** 拒绝 | uv 管理的虚拟环境把基础解释器作为**子进程**重新执行，启动器 pid 与真实监听者 pid 不是同一个；停止时只结束了启动器 | `scripts/start_shine.ps1`：端口被占用时**拒绝启动**并给出停止命令；记录真实监听者 pid（`listener_pid`）到 `processes.json`。`scripts/stop_shine.py`：结束该监听进程，并在端口仍被占用时打印告警 | 重启后自检确认"回答请求的进程"就是本次启动的进程；`Errno 10048` 与"旧凭据 403"不再出现 |
+| 3 | 陈旧的独占 GPU 租约可以锁死队列 | 租约清扫只回看"正在被恢复的那些 job"的租约；job 已经结束、租约还在的记录永远不会被回看 | 清扫的查询条件与待恢复 job 的范围耦合 | 清扫遍历**所有** `ACTIVE` / `RECONCILE_REQUIRED` 租约；租约的 job 不再是活动状态且其 attempt 已 `COMPLETED` 时，按渲染器的真实内存状态释放 | 库里五条 H3 租约最终全部为 `RELEASED`，含两个重渲染 job 的 `89899faf…` 与 `3630aaec…` |
+
+第 1 项的完整根因分析、修复与边界见 5.1。第 3 项与上表"陈旧租约清扫"那一行、以及
+[真实 H3 验收报告 8.3](LOCAL_REAL_H3_ACCEPTANCE.md#83-陈旧的独占租约可以锁死队列)
+是**同一处修复**，不是另一处缺陷；此处列出是为了记录收尾轮在两个重渲染 job 上的
+复验结果。
+
 ## 8. 操作员边界与剩余操作项
 
 ### 8.1 边界机制
@@ -268,7 +288,8 @@ npm --prefix frontend audit
 
 - 操作员身份来自 API 进程环境的 `SHINE_OPERATOR_ID` 与 `SHINE_OPERATOR_TOKEN_SHA256`；
   缺失这两个变量时 API 直接拒绝。
-- 本轮实测（对真实镜头 `ca3754cc-…` 的审片端点）：
+- 本轮实测（对当时唯一的真实镜头 job `ca3754cc-…` 的审片端点；该 job 之后已被重渲染
+  取代）：
 
 ```powershell
 $u='http://127.0.0.1:8100/api/v1/operator/jobs/ca3754cc-099e-41ce-bb5a-5aac121b7793'
@@ -286,9 +307,15 @@ HTTP 403 : {"detail": "Local operator credential required; Agent identities are 
 ```
 
   即：无凭据被拒、错误凭据同样被拒、Agent 身份不被接受。
+- **审片已执行**（2026-10-25 11:30 UTC）：API 以 `SHINE_OPERATOR_ID = shine-owner` 与
+  `SHINE_OPERATOR_TOKEN_SHA256` 配置，操作员用同一份凭据通过
+  `POST /api/v1/operator/jobs/{id}/review` 提交了三个镜头的逐项审阅，三次都返回
+  HTTP 200（`{"status":"PASSED","result":"passed","source":"manual"}`）。**原始凭据只
+  存在于操作员进程内存中**，没有进入仓库、数据库或任何日志；API 侧只保存 SHA-256
+  摘要。
 - 本轮真实镜头复用的资产审批与 Style Bible 冻结，是**人工在 2026-10-21 做出的**，
   原样复用，本轮未重新签署。
-- **本轮没有执行任何下面第 8.2 节的待办。**
+- 除第 8.2 节第 10 项（正式逐项审片）外，本轮没有执行下面第 8.2 节的其它待办。
 
 ### 8.2 剩余操作项（按建议顺序）
 
@@ -303,7 +330,7 @@ HTTP 403 : {"detail": "Local operator credential required; Agent identities are 
 | 7 | 音色批准并冻结 | `POST /api/v1/voice-profiles/{id}/approve-and-freeze` | 步骤 6 的音色 ID | 人工授权；冻结前必须试听 |
 | 8 | 冻结预制作清单 | `POST /api/v1/projects/{id}/preproduction/freeze` | 项目 `72c59b42-4a48-46d5-b510-dfbfb2db1823`（或重新建的项目） | 分析与 readiness 必须先不是 `BLOCKED` |
 | 9 | 发布工作流能力 | `POST /api/v1/workflow-capabilities/{id}/publish` | draft `429fd489-111e-40f5-ad8b-5a30c3e62b40` | 人工授权 |
-| 10 | 正式逐项审片（本轮三个镜头） | `POST /api/v1/operator/jobs/{id}/review` | `ca3754cc-099e-41ce-bb5a-5aac121b7793`、`dee0263c-737d-4dc3-9687-73dbe2768bf2`、`ffffe1d8-86e7-4593-acaa-91ff453b6b31` | `snapshot`、`request_id`、`items`（十项分项）、`watched`、`listened`；B 镜头必须 `watched` 且 `listened` |
+| 10 | **已完成**：正式逐项审片（三个镜头） | `POST /api/v1/operator/jobs/{id}/review` | `ba4bb63d-475a-4802-a469-0c4ce166fc97`（A）、`a2718d14-4a81-4046-8416-e16ce2b8598f`（B）、`ffffe1d8-86e7-4593-acaa-91ff453b6b31`（C） | `snapshot`、`request_id`、`items`（十项分项）、`watched`、`listened`；B 镜头必须 `watched` 且 `listened`。A、B 的**第一版**（`ca3754cc…` / `dee0263c…`）不在此列：它们早于规则包冻结与 Style Bible v2，工作台拒绝为它们签署 |
 | 11 | 可选：重新撰写 Style Bible | `PUT /api/v1/projects/{id}/style/draft` → `POST /api/v1/projects/{id}/style/freeze` | 项目 `1f743836-…` | v2 已是英文版；只有操作员更希望自己定稿时才需要 |
 
 顺序约束：1 → 2 必须先于 3 / 6；3 → 4 → 5；6 → 7；8 必须在 5 与 7 之后；
@@ -323,6 +350,34 @@ GET /api/v1/operator/jobs/{id}          # 绑定快照与快照摘要
 GET /api/v1/operator/jobs/{id}/media    # 重新校验归属与哈希后返回视频
 ```
 
+### 8.3 本轮已完成的正式逐项人工审片
+
+2026-10-25 11:30（UTC），操作员 `shine-owner` 通过**真实操作员 API** 逐项审阅了三个
+当前镜头并签署。三次 `POST /api/v1/operator/jobs/{id}/review` 全部返回 HTTP 200。
+
+| Shot | Job | Artifact | 状态 | `quality_verification` |
+| --- | --- | --- | --- | --- |
+| A-PDD8-7s | `ba4bb63d-475a-4802-a469-0c4ce166fc97` | `75173459-798f-452c-821b-f839c3c3330f` | `PASSED` | `manual_verified` |
+| B-PDD8-7s | `a2718d14-4a81-4046-8416-e16ce2b8598f` | `1b278511-fb66-46c5-8dbd-0c869913fc06` | `PASSED` | `manual_verified` |
+| C-PDD8-7s | `ffffe1d8-86e7-4593-acaa-91ff453b6b31` | `c2946fa4-9913-4cf5-a295-41a864217782` | `PASSED` | `manual_verified` |
+
+三条 `OPERATOR_REVIEW_RECORDED` 审计事件：`request_id` 分别为 `op-review-20261025-A`、
+`-B`、`-C`；三个镜头的 `watched` 均为 true，`listened` 只有对白镜头 B 为 true ——
+A 与 C 的 shot spec 没有对白，它们的 `dialogue` / `voice` / `lip_sync` 记为
+`NOT_APPLICABLE`（不是"没看"，而是"没有这项可看"）。
+
+**门禁是追加而不是覆盖**：审片在 worker 写下的第一组 `quality_gates` 之外**追加**了
+第二组（语义 / 风格 / 终审，以及 B 的音频门），worker 的原始行原样保留。`final` 为
+`passed` 的依据是操作员签了全部必需分项；`technical` 为 `passed` 来自真实的
+FFprobe / FFmpeg 实测（`model: ffprobe`，`is_mock: 0`）。这些门**从未**被 VLM 或 ASR
+评审过 —— 语义、风格、终审（以及 B 的音频）都是**人工**关闭的。
+
+审片后重新装配了交付样片：artifact `e6b264aa-…`，sha256 `4ce49654…d7fb98e`，
+21.895996 s / 525 帧 / 1344x768 / 24 fps，`review_state = all_passed`（三个来源 job
+全部 `PASSED`）。先前的成片仍以 `pending_review` 原样留在盘上 —— 交付是内容寻址的。
+
+操作员的完整工作流程见 [操作员指南](operator-guide.md) 第 6.4 节。
+
 ## 9. 进程与启动脚本
 
 `scripts/start_shine.ps1` 不再打开三个带 `-NoExit` 的可见 PowerShell 窗口。它把 API、
@@ -334,6 +389,14 @@ worker 与 Vite 服务器作为**隐藏进程**启动，各自写独立日志，
   -DataDir 'F:\ClaudeWorkSpace\projects\shine-video-studio\.local-acceptance\h3run'
 ```
 
+收尾审片阶段给这两个脚本补了两处（根因见 7.2 第 2 项）：
+
+- **端口被占用就拒绝启动**。脚本在启动前检查 API 与前端端口是否已被占用；占用时打印
+  占用者 pid、给出停止命令并以非零码退出，不再让新进程带着绑定错误（`Errno 10048`）
+  死掉、而旧服务继续按旧凭据在端口上应答。
+- **记录真正的监听者**。uv 管理的虚拟环境会把基础解释器作为子进程重新执行，启动器
+  pid 与占用端口的 pid 不是同一个。脚本因此额外等待并记录 `listener_pid`（前端同理）。
+
 本轮验收实例的清单实测（`.local-acceptance/h3run/run/processes.json`）：
 
 | 名称 | PID | 命令 |
@@ -342,8 +405,13 @@ worker 与 Vite 服务器作为**隐藏进程**启动，各自写独立日志，
 | worker | 17620 | `python.exe -m shine.worker` |
 | web | 25804 | `node.exe .../vite/bin/vite.js --host 127.0.0.1 --port 5175` |
 
+上表是修复前采集的清单。收尾审片阶段之后，清单里还会多一个 `listener_pid` 字段，
+记录真正占用端口的那个进程。
+
 `scripts/stop_shine.py` 只停止该清单里的进程：先对 SQLite 做 WAL 检查点，再终止
-进程，**从不**触碰 ComfyUI 或任何无关进程。
+进程，**从不**触碰 ComfyUI 或任何无关进程。它还会终止清单里记录的 `listener_pid`
+（当它与启动器 pid 不同时），并在端口仍被占用时打印
+`[warning] port <n> is still held by pid <n>`，以免把旧服务误认成新服务。
 
 ```powershell
 uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DATA_DIR"
@@ -353,10 +421,9 @@ uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DAT
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 语义 / 音频 / 风格 / 终审门 | `BLOCKED / PENDING` | 无模型覆盖、无人工签署；三个镜头停在 `NEEDS_REVIEW` |
-| 正式逐项人工审片 | `BLOCKED / PENDING` | 第 8.2 节第 10 项 |
+| 语义 / 风格 / 终审门的**模型**覆盖 | `BLOCKED / PENDING` | 仍然没有 VLM 评审；这三道门由操作员的人工逐项审阅关闭 |
+| 音频门的**机器**复核 | `BLOCKED / PENDING` | 未配置自动 ASR；B 的台词与口型由人工试听、逐字核对 |
 | 远程媒体评审 | 未启用 | `allow_remote_review = 0`；没有任何图像/音频/视频离开本机；只有剧组的文本提示词在授权下发往 MiniMax 端点 |
-| 自动 ASR | `BLOCKED / PENDING` | 未配置，中文台词未逐字机器核验 |
 | 严格首尾帧锚定 | `PENDING_HARD_CONTINUITY_TEST` | Shot C 只是软参考连续性 |
 | 视频参考真实传输 | `SUPPORTED_NODE_UNVERIFIED_TRANSFER` | 节点存在，传输未验证 |
 | ComfyOps 本机清单纳管 | 未做 | 本轮使用操作员自有安装，未纳管、未改动 |
@@ -376,12 +443,16 @@ uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DAT
 | 权利记录、候选资产、音色档案的人工闸门按设计拒绝未授权提升 | `VERIFIED_LOCAL_ENV` |
 | 预制造成本分析产出 12 条类型化需求并正确判定 `BLOCKED`（不静默放行） | `VERIFIED_LOCAL_ENV` |
 | 三个真实 H3 镜头与交付样片 | `VERIFIED_REAL_H3` |
+| A、B 在规则包冻结与 Style Bible v2 之后重渲染并被签署，第一版 job 与产物原样保留 | `VERIFIED_REAL_H3` |
 | 三个真机缺陷（完成窗口、GPU 释放确认、陈旧租约）的修复与 14 项回归 | `IMPLEMENTED` / `TESTED_OFFLINE` |
+| 收尾审片阶段的缺陷修复：LLM 网关下发 JSON 契约、启动脚本拒绝占用端口并记录真实监听者、租约清扫复验 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 交付装配能力、来源再校验、`review_state` 语义 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 隐藏进程启停与 `processes.json` 清单、`stop_shine.py` 的范围限定 | `IMPLEMENTED` / `TESTED_OFFLINE` |
 | 后端全量测试、Ruff、前端构建、`npm audit` | `TESTED_OFFLINE` |
 | 剧组四个角色的真实调用因 `LLM_FORMAT` 被拒；根因为 schema 未下发给模型，已在 `2df8aff` 修复，修复后 `scriptwriter` 成功产出 `ScriptBreakdown` | `BLOCKED / PENDING`（其余角色未复验） |
-| 语义 / 音频 / 风格 / 终审门未覆盖、未签署 | `BLOCKED / PENDING` |
-| 正式逐项人工审片 | `BLOCKED / PENDING` |
+| 操作员 `shine-owner` 通过真实操作员 API 逐项审阅并签署三个镜头（`OPERATOR_REVIEW_RECORDED` × 3） | `VERIFIED_MANUAL` |
+| 三个镜头的 semantic / style / final 门与 B 的 audio 门由**人工**关闭，`final = passed` 因为全部必需分项被签署 | `VERIFIED_MANUAL` |
+| 交付样片 `review_state = all_passed`，三个来源 job 全部 `PASSED` | `VERIFIED_MANUAL` |
+| 语义 / 风格 / 终审门与音频门**没有模型覆盖**，只由人工关闭 | `BLOCKED / PENDING` |
 | 候选提升、音色冻结、预制作冻结、工作流发布 | `BLOCKED / PENDING` |
 | 严格连续性、视频参考传输、多模型 GPU 争用、远端 CI | `BLOCKED / PENDING` |
