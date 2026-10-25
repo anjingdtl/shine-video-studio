@@ -57,6 +57,28 @@ $viteArgs = @(
 
 $started = @()
 
+function Get-PortOwner([int]$Port) {
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($listener) { return $listener.OwningProcess }
+    return $null
+}
+
+# A port that is already in use makes the new API die with a bind error while the
+# old server keeps serving, which looks like the new configuration being ignored.
+$busy = @()
+foreach ($port in @($ApiPort, $WebPort)) {
+    $owner = Get-PortOwner $port
+    if ($owner) { $busy += "  port $port is already in use by pid $owner" }
+}
+if ($busy) {
+    Write-Host 'Cannot start: the requested ports are not free.' -ForegroundColor Red
+    $busy | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    Write-Host 'Stop the previous stack first, for example:' -ForegroundColor Yellow
+    Write-Host "  uv run --project backend python scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`"" -ForegroundColor Yellow
+    exit 1
+}
+
 function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
     $stdout = Join-Path $logDir "$Name.out.log"
     $stderr = Join-Path $logDir "$Name.err.log"
@@ -81,6 +103,27 @@ if (-not $NoWorker) {
     Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
 }
 Start-ShineProcess 'web' (Get-Command node).Source $viteArgs (Join-Path $repoRoot 'frontend')
+
+# The launcher and the process that actually owns the socket are not the same
+# pid: a uv managed virtual environment re-executes the base interpreter as a
+# child. Record the real listener so the stop command can end it.
+$listenerPid = $null
+for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Milliseconds 500
+    $listenerPid = Get-PortOwner $ApiPort
+    if ($listenerPid) { break }
+    if (-not (Get-Process -Id $started[0].pid -ErrorAction SilentlyContinue)) { break }
+}
+if (-not $listenerPid) {
+    Write-Host "The API did not start listening on port $ApiPort." -ForegroundColor Red
+    Get-Content $started[0].stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
+$started[0].listener_pid = $listenerPid
+Write-Host "API is listening on port $ApiPort (pid $listenerPid)"
+
+$webListener = Get-PortOwner $WebPort
+if ($webListener) { $started[2].listener_pid = $webListener }
 
 $manifestPath = Join-Path $runDir 'processes.json'
 [ordered]@{

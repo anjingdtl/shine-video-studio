@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -107,6 +108,23 @@ def main() -> int:
         _terminate(pid)
         stopped.append(f"{name} (pid {pid})")
 
+    # The launcher and the process that owns the socket are not the same pid
+    # (a uv managed virtual environment re-executes the base interpreter as a
+    # child). The recorded listener has to be stopped as well, otherwise the
+    # next start fails with a bind error while the old server keeps serving.
+    for entry in entries:
+        listener = entry.get("listener_pid")
+        if not listener:
+            continue
+        listener = int(listener)
+        if listener in {int(entry.get("pid", 0)) for entry in entries}:
+            continue
+        if _alive(listener):
+            _terminate(listener)
+            stopped.append(f"{entry.get('name', '?')} listener (pid {listener})")
+        else:
+            skipped.append(f"{entry.get('name', '?')} listener (pid {listener}) already exited")
+
     deadline = time.time() + args.grace_seconds
     while time.time() < deadline and any(_alive(int(e.get("pid", 0))) for e in entries):
         time.sleep(0.25)
@@ -115,9 +133,44 @@ def main() -> int:
         print(f"[stopped] {line}")
     for line in skipped:
         print(f"[skipped] {line}")
+
+    # Report anything still holding the ports, so a stale server is never
+    # mistaken for the new one.
+    for port in (manifest.get("api_port"), manifest.get("web_port")):
+        if not port:
+            continue
+        owner = _port_owner(int(port))
+        if owner:
+            print(f"[warning] port {port} is still held by pid {owner}")
+
     manifest_path.unlink(missing_ok=True)
     print("Shine processes stopped. ComfyUI and unrelated processes were not touched.")
     return 0
+
+
+def _port_owner(port: int) -> int | None:
+    """The pid that owns a listening TCP port on this machine."""
+    try:
+        output = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+    except OSError:
+        return None
+    for line in output.splitlines():
+        if f":{port} " not in line and f":{port}\t" not in line:
+            continue
+        if "LISTENING" not in line.upper():
+            continue
+        parts = line.split()
+        if len(parts) >= 5:
+            try:
+                return int(parts[-1])
+            except ValueError:
+                continue
+    return None
 
 
 if __name__ == "__main__":
