@@ -354,3 +354,16 @@ Ruff（含两个本地脚本）、TypeScript/Vite、显式 PyPI 锁文件核验�
 浏览器曾因 label 的完整可访问名称匹配方式超时，修正定位后全部 13 类流程通过，未改弱业务断言。
 具体命令、旧失败、当前新计划、真实反例的未通过结果与服务恢复见
 [续轮验证记录](evidence/local-closeout-20261025/recovery-and-review.json)。当前全产品仍为 PARTIAL。
+
+### 7.11 当前提交的远端 CI 账户阻断
+
+工程修复及本节前的证据已推送 `0a3589127428bb1b48b3476771c8f67ccfb02d71`。
+其 PR CI [run 40245130085](https://github.com/anjingdtl/shine-video-studio/actions/runs/40245130085)
+四个 Job 均返回 failure，步骤记录为空、作业日志不存在。已逐项读取 backend、backend-windows、
+frontend 和 web-e2e 的 Check annotations，四者均明确指出：账户近期付款失败或消费额度需要提高，
+Job 因此没有启动，需要核对账户 Billing & plans。
+
+这轮远端代码测试**没有运行**，不得将本机 473 项或旧 SHA 的绿色 CI 移作当前提交通过证据。
+账户状态需仓库所属账户操作员处理，未修改账单、未移除 CI 门禁、未反复重跑未启动作业。
+账户恢复后须对届时 PR 当前 head 重新执行四项检查；当前仍为 PARTIAL。
+完整检查 ID、原始 annotations 和范围见 [CI 账户阻断证据](evidence/local-closeout-20261025/ci-account-block.json)。

@@ -43,7 +43,7 @@
         "web-e2e": "SUCCESS"
       }
     },
-    "new_code_ci": "NOT_YET_SUBMITTED"
+    "new_code_ci": "BLOCKED_ACCOUNT_BILLING; source 0a35891; four jobs NOT_STARTED, run 40245130085"
   },
   "browser": {
     "status": "MOCK_VERIFIED",

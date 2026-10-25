@@ -17,7 +17,7 @@
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
     "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]; 12 existing browser flow families",
-    "remote_ci": "dfbc54c four jobs SUCCESS, run 40207758692; later changes not yet submitted"
+    "remote_ci": "BLOCKED_ACCOUNT_BILLING; source 0a35891 run 40245130085, all four jobs NOT_STARTED; see ci-account-block.json"
   },
   "real_text_roles": {
     "scriptwriter": {
@@ -413,5 +413,6 @@
     "skipped": "0",
     "time": "195.504"
   },
-  "recovery_and_review_evidence": "docs/evidence/local-closeout-20261025/recovery-and-review.json"
+  "recovery_and_review_evidence": "docs/evidence/local-closeout-20261025/recovery-and-review.json",
+  "ci_account_block_evidence": "docs/evidence/local-closeout-20261025/ci-account-block.json"
 }

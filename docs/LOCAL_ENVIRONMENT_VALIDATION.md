@@ -28,6 +28,9 @@ T2VA 官方原生 20 步 API 草稿结构核对通过，但缺失 INT8 Base 权�
 本续轮最终完整后端 **473 passed，0 skipped / failures / errors**；安装恢复定向 80 项、
 审片响应与旧 E2E 定向 30 项通过，Ruff/前端构建/锁文件核验通过。
 命令和当前真实边界见 [续轮验证记录](evidence/local-closeout-20261025/recovery-and-review.json)。
+`0a35891` 的当前远端 CI 四项均因 GitHub 账户付款/额度问题未启动，已逐一读取 Check annotations
+确认；不是当前代码的测试通过证据。本机 473 项与旧提交 CI 通过分别保留，
+见 [账户阻断记录](evidence/local-closeout-20261025/ci-account-block.json)。
 
 日期：2026-10-25（Asia/Shanghai）。范围：本机 Windows 11 工作站在本轮 V1.3 本地
 H3 集成工作中被实际检查过的硬件、运行时、ComfyUI 实例、模型文件、工作流档案、

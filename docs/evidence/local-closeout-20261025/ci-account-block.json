@@ -1,0 +1,147 @@
+{
+  "head_sha": "0a3589127428bb1b48b3476771c8f67ccfb02d71",
+  "run_id": 40245130085,
+  "run_conclusion": "failure",
+  "classification": "BLOCKED_ACCOUNT_BILLING",
+  "code_tests_started": false,
+  "jobs": [
+    {
+      "check": {
+        "id": 121324976440,
+        "name": "backend",
+        "head_sha": "0a3589127428bb1b48b3476771c8f67ccfb02d71",
+        "status": "completed",
+        "conclusion": "failure",
+        "details_url": "https://github.com/anjingdtl/shine-video-studio/actions/runs/40245130085/job/121324976440",
+        "output": {
+          "title": null,
+          "summary": null,
+          "text": null,
+          "annotations_count": 2
+        }
+      },
+      "annotations": [
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "failure",
+          "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings",
+          "title": "",
+          "raw_details": ""
+        },
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "notice",
+          "message": "\"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026. For more information, see https://github.com/actions/runner-images/issues/14748\"",
+          "title": "",
+          "raw_details": ""
+        }
+      ]
+    },
+    {
+      "check": {
+        "id": 121324976331,
+        "name": "backend-windows",
+        "head_sha": "0a3589127428bb1b48b3476771c8f67ccfb02d71",
+        "status": "completed",
+        "conclusion": "failure",
+        "details_url": "https://github.com/anjingdtl/shine-video-studio/actions/runs/40245130085/job/121324976331",
+        "output": {
+          "title": null,
+          "summary": null,
+          "text": null,
+          "annotations_count": 1
+        }
+      },
+      "annotations": [
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "failure",
+          "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings",
+          "title": "",
+          "raw_details": ""
+        }
+      ]
+    },
+    {
+      "check": {
+        "id": 121324976363,
+        "name": "frontend",
+        "head_sha": "0a3589127428bb1b48b3476771c8f67ccfb02d71",
+        "status": "completed",
+        "conclusion": "failure",
+        "details_url": "https://github.com/anjingdtl/shine-video-studio/actions/runs/40245130085/job/121324976363",
+        "output": {
+          "title": null,
+          "summary": null,
+          "text": null,
+          "annotations_count": 2
+        }
+      },
+      "annotations": [
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "failure",
+          "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings",
+          "title": "",
+          "raw_details": ""
+        },
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "notice",
+          "message": "\"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026. For more information, see https://github.com/actions/runner-images/issues/14748\"",
+          "title": "",
+          "raw_details": ""
+        }
+      ]
+    },
+    {
+      "check": {
+        "id": 121324976167,
+        "name": "web-e2e",
+        "head_sha": "0a3589127428bb1b48b3476771c8f67ccfb02d71",
+        "status": "completed",
+        "conclusion": "failure",
+        "details_url": "https://github.com/anjingdtl/shine-video-studio/actions/runs/40245130085/job/121324976167",
+        "output": {
+          "title": null,
+          "summary": null,
+          "text": null,
+          "annotations_count": 2
+        }
+      },
+      "annotations": [
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "failure",
+          "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings",
+          "title": "",
+          "raw_details": ""
+        },
+        {
+          "path": ".github",
+          "start_line": 1,
+          "end_line": 1,
+          "annotation_level": "notice",
+          "message": "\"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026. For more information, see https://github.com/actions/runner-images/issues/14748\"",
+          "title": "",
+          "raw_details": ""
+        }
+      ]
+    }
+  ],
+  "job_logs": "404 BlobNotFound; no job steps",
+  "required_external_action": "Repository account owner must resolve Billing & plans before CI can run; no rerun until restored",
+  "local_backend": "473 passed; does not substitute for remote CI"
+}
