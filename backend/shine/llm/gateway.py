@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -92,6 +93,20 @@ class LLMGateway:
     ) -> LLMResponse:
         profile = self.profile_for_role(db, role)
         provider = self.provider_for(profile)
+        if schema is not None:
+            # The provider validates the answer against this schema, so the model
+            # has to be told the contract it must satisfy. The schema is used
+            # for validation only otherwise, and an instruction such as "return
+            # only the supplied JSON contract" then names a contract that was
+            # never supplied. A mock provider answers from a canned payload and
+            # hides the problem; a real provider answers from the context and
+            # fails the schema check instead.
+            user = (
+                f"{user}\n\n"
+                "Return one JSON object and nothing else. It must validate against "
+                "this JSON schema:\n"
+                f"{json.dumps(schema, ensure_ascii=False, indent=1)}"
+            )
         return provider.complete(
             [ChatMessage("system", system), ChatMessage("user", user)],
             schema=schema,

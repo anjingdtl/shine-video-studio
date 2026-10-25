@@ -1,0 +1,475 @@
+# 操作员指南
+
+面向在本机运行 Shine 视频工作台的操作员。覆盖：启停、真实模式与 Mock 的区分、
+配置 LLM、导入资产并冻结风格、提交一个 H3 镜头、查看视频与 QC、返工与正式审片、
+导出样片，以及出问题时先看哪里。
+
+关联文档：[本地环境验证报告](LOCAL_ENVIRONMENT_VALIDATION.md)、
+[真实 H3 验收报告](LOCAL_REAL_H3_ACCEPTANCE.md)、
+[V1.3 收尾报告](LOCAL_V1.3_CLOSEOUT_REPORT.md)。
+
+> 本轮尚未完成的操作员动作集中在 [V1.3 收尾报告第 8.2 节](LOCAL_V1.3_CLOSEOUT_REPORT.md#82-剩余操作项按建议顺序)。
+> 本轮三个真实镜头的**正式逐项审片仍是 PENDING**：语义、音频、风格、终审四道门既没有
+> 模型覆盖，也没有人工签署。
+
+---
+
+## 1. 启动与停止
+
+### 1.1 准备操作员凭据（只要用到审片/冻结/发布就必须配）
+
+API 进程环境里没有下面两个变量时，所有需要人工授权的端点一律拒绝：
+
+```powershell
+$env:SHINE_OPERATOR_ID = Read-Host '授权操作员标识'
+$operatorCredential = Read-Host '操作员随机凭据（至少32字符）' -MaskInput
+if ($operatorCredential.Length -lt 32) { throw '凭据过短' }
+$env:SHINE_OPERATOR_TOKEN_SHA256 = [Convert]::ToHexString(
+  [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($operatorCredential))
+).ToLower()
+Remove-Variable operatorCredential
+```
+
+- 身份由服务端配置决定，客户端不接受 username。
+- 原文只放在你的密码管理器里；只把 SHA-256 摘要交给 API。
+- 摘要不要写进 `.env`、数据库、Git、日志、URL 或浏览器 localStorage。
+- 改操作员或凭据摘要需要本机管理员改 API 进程环境并重启 API。
+
+### 1.2 启动
+
+```powershell
+.\scripts\start_shine.ps1 -Provider comfyui -ApiPort 8100 -WebPort 5175 `
+  -DataDir 'F:\ClaudeWorkSpace\projects\shine-video-studio\.local-acceptance\h3run'
+```
+
+| 参数 | 含义 |
+| --- | --- |
+| `-Provider mock` | Mock 模式：只模拟调度与 QC，**永远不会**产生视频（默认） |
+| `-Provider comfyui` | 真实模式：提交到本机 ComfyUI |
+| `-ApiPort` / `-WebPort` | API 与前端端口，默认 8000 / 5173 |
+| `-DataDir` | 数据目录；数据库、媒体、日志都在这里 |
+| `-Install` | 强制重装依赖 |
+| `-NoWorker` | 不启动 worker（只跑 API 与前端） |
+
+脚本会：检查环境 → 迁移数据库（`alembic upgrade head`）→ 以隐藏进程启动 API、worker、
+前端 → 把每个进程的 PID、启动时间、工作目录、命令行写进
+`<data_dir>/run/processes.json` → 打印日志目录与停止命令。
+
+```
+Shine API:      http://127.0.0.1:8100/health
+Shine Web:      http://127.0.0.1:5175
+Worker mode:    comfyui
+Logs:           <data_dir>/run/logs
+Process record: <data_dir>/run/processes.json
+```
+
+API 与前端只监听 `127.0.0.1`。在没有完整用户认证之前不要暴露到局域网或互联网。
+
+### 1.3 停止
+
+```powershell
+uv run --project backend python scripts/stop_shine.py --data-dir "$env:SHINE_DATA_DIR"
+```
+
+它只停止 `processes.json` 里记录的进程：先对 SQLite 做 WAL 检查点，再终止进程，
+**从不**碰 ComfyUI 或任何无关进程。ComfyUI 实例由你自己管理，本脚本不负责。
+
+### 1.4 日志位置
+
+| 日志 | 路径 |
+| --- | --- |
+| API | `<data_dir>/run/logs/api.out.log` / `api.err.log` |
+| worker | `<data_dir>/run/logs/worker.out.log` / `worker.err.log` |
+| 前端 | `<data_dir>/run/logs/web.out.log` / `web.err.log` |
+| ComfyUI | 自己启动时指定的 stderr 文件 |
+
+---
+
+## 2. 真实模式还是 Mock
+
+唯一权威依据是 `GET /api/v1/system/status`：
+
+```powershell
+Invoke-WebRequest 'http://127.0.0.1:8100/api/v1/system/status' -UseBasicParsing | Select-Object -ExpandProperty Content
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `render_mode` | `comfyui` = 真实渲染；`mock` = 模拟 |
+| `h3_connected` | 渲染端可达。**不等于**模型可用或画质通过 |
+| `mock_provider_available` | Mock 适配器存在，不代表当前在用 |
+| `worker_online` | 有 worker 在心跳 |
+| `pending_jobs` / `running_jobs` / `failed_jobs` / `blocked_jobs` | 队列概况；`blocked_jobs` 是被规则/连续性/映射挡住，不是崩溃 |
+
+本轮真实运行时的实测值：
+
+```json
+{"api_online":true,"worker_online":true,"mock_provider_available":true,"h3_connected":true,
+ "render_mode":"comfyui","pending_jobs":0,"running_jobs":0,"failed_jobs":0,"blocked_jobs":5}
+```
+
+其它判断依据：
+
+- job 的 `quality_verification` 字段写的是证据来源（`real` / `mock`）。
+- 产物的 `is_mock` 字段同理。
+- **最终结果只能看 `final` 门**。`technical` 通过、`final` 仍是 `needs_review`，就说明
+  这条片子还没验收。
+
+另外三条硬规则：
+
+1. ComfyUI 地址必须是回环。因为参考素材的字节会传给渲染端，远程渲染需要显式设置
+   `SHINE_ALLOW_REMOTE_COMFYUI=1`。
+2. 不要为了"让测试通过"而关掉预制造成本闸门（`comfyops.preproduction.enforce`）。
+3. `SHINE_OFFLINE_SIMULATION` 只用于隔离的测试数据，不能把 Fake 证据说成真实验证。
+
+---
+
+## 3. 配置 LLM
+
+### 3.1 建立服务商档案
+
+```powershell
+$body = @{
+  name     = 'minimax-openai-compatible'
+  kind     = 'openai_compatible'
+  base_url = 'https://api.minimax.cn/v1'
+  model    = 'MiniMax-M3.1-flash'
+  api_key  = '<操作员授权的本地测试密钥>'
+  enabled  = $true
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8100/api/v1/provider-profiles' `
+  -ContentType 'application/json' -Body $body
+```
+
+或单独更新密钥：`PUT /api/v1/provider-profiles/{profile_id}/key`，体为 `{"api_key": "..."}`。
+
+**密钥边界**：密钥写入 Windows DPAPI 秘密存储（`secret_storage: dpapi`），API 从不返回它，
+它不会进入 SQLite、Git、日志或前端响应。不要把密钥写进 `.env`、提交到仓库或贴进工单。
+
+### 3.2 连通性测试与角色路由
+
+```powershell
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8100/api/v1/provider-profiles/{id}/test'
+# {"ok": true, "message": "Connection succeeded"}
+```
+
+角色路由通过 `agent_routes` 表管理，12 个角色（scriptwriter、director、
+cinematographer、editor、continuity_supervisor、sound_director、producer、comfyops、
+script_planner、shot_planner、repair_planner、qc_reviewer）都指向该档案。路由是显式的，
+不会静默回落到另一个服务商。
+
+### 3.3 两个已知现象
+
+- 能力探测会提示 `model_listed: false`：配置里写的是小写 `MiniMax-M3.1-flash`，服务商
+  返回的模型表里是 `MiniMax-M3.1-Flash`。连接本身是成功的。
+- 剧组的角色如果返回 `LLM_FORMAT`，说明模型输出没满足该角色的结构化契约（HTTP 422）。
+  这不是环境坏了；先看返回内容与 schema 的差异。
+
+---
+
+## 4. 导入资产并冻结风格
+
+### 4.1 导入
+
+```powershell
+# 上传到项目（multipart）
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/assets" -Form @{
+  file = Get-Item 'D:\素材\靓靓战术001.png'
+}
+```
+
+导入后设置角色/实体/标签（`PATCH /api/v1/assets/{asset_id}/metadata`），再由人工批准
+（`POST /api/v1/assets/{asset_id}/approve`）与锁定（`POST /api/v1/assets/{asset_id}/lock`）。
+两个端点的请求体都是 `Decision`：
+
+```json
+{ "grant_id": "<授权凭据>", "snapshot": "<当前快照>", "evidence": "<人工判据>" }
+```
+
+只导入**你自己拥有或已获授权**的素材。AI 可以生成候选资产行，但**只有经认证的人工
+授权**才能把候选提升为 `Asset` 主档或冻结音色档案。
+
+### 4.2 冻结 Style Bible
+
+Style Bible 有七个维度，全部必填：
+
+```powershell
+$style = @{
+  photography_language = '...'
+  shot_blocking        = '...'
+  color_palette        = '...'
+  lighting_tone        = '...'
+  lens_texture         = '...'
+  editing_rhythm       = '...'
+  sound_performance    = '...'
+} | ConvertTo-Json
+Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/style/draft" `
+  -ContentType 'application/json' -Body $style
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/style/freeze" `
+  -ContentType 'application/json' -Body '{"grant_id":"...","snapshot":"...","approval_note":"..."}'
+```
+
+冻结后**每个新镜头都会引用当前的冻结版本**。已冻结的版本不会被改写；改风格就是新冻结
+一个版本。
+
+> **重要**：官方 H3 规则 `H3_ENGLISH` 要求视觉描述用英文。Style Bible 里的七个维度会被
+> 编译器**原样**嵌进提示词的 `detailed_description`，所以用中文写维度会直接被规则以
+> HTTP 422 拒绝：`CJK found outside dialogue or quoted visible text`。补救办法就是把这
+> 七项改成英文（对白和画面可见文字保持原语言）。本轮就是这么处理的：v1 是中文，被拒；
+> 冻结了英文的 v2 之后镜头 C 才编过。
+
+改风格前后可以先看影响面：`GET /api/v1/projects/{id}/style/impact`。
+
+---
+
+## 5. 提交一个 H3 镜头
+
+### 5.1 先确认档案
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8100/api/v1/workflow-profiles' |
+  Select-Object id, name, mode, graph_sha256
+```
+
+本轮登记的五个档案（都通过了实时 `object_info` 校验）：
+
+| 名称 | 用途 |
+| --- | --- |
+| `local-h3-ref2va-2img` | 历史档案，原生 20 步，480x864 |
+| `local-h3-ref2va-2img-1aud` | 历史档案 + 一条音频参考 |
+| `local-h3-ref2va-pdd8-2img` | **推荐**：PDD 8 步，模型原生 1344x768 |
+| `local-h3-ref2va-pdd8-2img-1aud` | 同上 + 一条音频参考 |
+| `local-h3-ref2va-pdd8-upscale-2img` | 同上 + 3D 潜空间 1.5 倍超分与 PDD 尾部细化 |
+
+参考槽位（`parameter_map`）固定是 `reference_subject_1`（人物）、`reference_picture_1`
+（画面/关键帧）、`reference_audio_1`（音色，带对白时用）。**没有映射的槽位会以
+`PENDING_WORKFLOW_MAPPING` 阻断渲染**，不会被静默丢掉。
+
+### 5.2 建镜头
+
+```powershell
+$shot = @{
+  name = 'A-PDD8-7s'
+  spec = @{
+    story_beat     = '[Shot 1] <Subject 1> 在雨夜霓虹大道上向镜头走来……'
+    duration_target_s = 7.0
+    shot_priority  = 'A'
+    camera         = @{ shot_size = 'medium_shot'; movement = 'slow_dolly_in' }
+    characters     = @('CHAR_LIANG')
+    dialogue       = @()
+    sound          = @{ environment = 'steady night rain'; ambience = 'low city neon buzz'; music_policy = 'low_or_none' }
+  }
+} | ConvertTo-Json -Depth 8
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/shots" `
+  -ContentType 'application/json' -Body $shot
+```
+
+绑定素材：`PUT /api/v1/shots/{shot_id}/bindings`，体为 `{"bindings":[...]}`。绑定是权威的
+—— job 不允许换用另一套素材。
+
+预览编译结果（不提交渲染）：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/shots/$shotId/compile"
+```
+
+编译器会把全局资产 ID 重映射成请求内的标签 `<Subject 1>` / `<Picture 2>` / `<Audio 1>`。
+标签编号只在当前请求内有效。
+
+### 5.3 建 job
+
+```powershell
+$job = @{
+  shot_id            = $shotId
+  provider           = 'comfyui'
+  generation_mode    = 'Ref2VA'
+  workflow_profile_id= '18e2f8d3-ca1d-4f0d-83ae-0bffc1b4b5f2'
+  references         = @(
+    @{ asset_id='ad0ec279-a9f1-4a57-9f0a-08cc093aeca9'; use_as='subject' }
+  )
+} | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/jobs" `
+  -ContentType 'application/json' -Body $job
+```
+
+依赖镜头加 `depends_on = @('<上游 job id>')`，并把末帧参考资产的 `use_as` 设为
+`picture`、`frame_role` 设为 `last_frame`。
+
+提交前请确认：
+
+- `provider` 是 `comfyui`（不是 `mock`）；
+- `workflow_profile_id` 是你真正要用的那个档案；
+- 素材都已批准并锁定；
+- 项目已冻结规则包与 Style Bible。
+
+---
+
+## 6. 看视频、QC、返工与正式审片
+
+### 6.1 看状态
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/jobs"
+Invoke-RestMethod "http://127.0.0.1:8100/api/v1/jobs/$jobId/quality-gates"
+```
+
+### 6.2 五道门怎么看
+
+| 门 | 谁在判 | 未通过时 |
+| --- | --- | --- |
+| `technical` | 机器（ffprobe/ffmpeg），确定性 | 硬错，绝不自动放行 |
+| `semantic` | VLM，需要授权的远程评审档案 | 需要评审 |
+| `audio` | ASR + 人工试听 | 需要评审 |
+| `style` | 与冻结 Style Bible 比对 | 需要评审 |
+| `final` | 汇总 | `needs_review` |
+
+**缺失就是缺失，不会被记成通过。** 只有全部必需门都通过，镜头才会走合法路径到
+`PASSED`（并标记 `manual_verified`）。
+
+没有配置远程评审档案时，`semantic` 是 `not_run` +
+`SEMANTIC_REVIEW_NOT_CONFIGURED`，`style` 是 `not_run` + `STYLE_REVIEW_NOT_COVERED`，
+带对白的镜头 `audio` 是 `required` + `not_run` + `ASR_NOT_CONFIGURED`。
+
+### 6.3 返工
+
+- 自动返工**必须**产出不同的请求修订（重新编译的提示词、重建的清单或改了参数）。
+- 返工是**有类型、有边界**的，并且必须保护已通过的版本。
+- 上游重渲染会让下游依赖失效，下游有效性会被重新计算；**已通过的镜头版本和它们的
+  产物不会被覆盖**。
+- 不需要无人值守跑完整部剧，也不要用离线测试声称 H3 验收通过。
+
+### 6.4 正式逐项审片
+
+```powershell
+# 取快照
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $credential" } `
+  -Uri "http://127.0.0.1:8100/api/v1/operator/jobs/$jobId"
+
+# 取视频（会重新校验归属与文件哈希）
+Invoke-WebRequest -Headers @{ Authorization = "Bearer $credential" } `
+  -Uri "http://127.0.0.1:8100/api/v1/operator/jobs/$jobId/media" -OutFile "$env:TEMP\shot.mp4"
+
+# 提交审片
+Invoke-RestMethod -Method Post -Headers @{ Authorization = "Bearer $credential" } `
+  -Uri "http://127.0.0.1:8100/api/v1/operator/jobs/$jobId/review" -ContentType 'application/json' -Body (@{
+    snapshot   = '<上一步拿到的 snapshot>'
+    request_id = '<唯一 id>'
+    watched    = $true
+    listened   = $true
+    items      = @{
+      identity     = @{ status='PASS'; evidence='...' }
+      costume      = @{ status='PASS'; evidence='...' }
+      scene_props  = @{ status='PASS'; evidence='...' }
+      camera_action= @{ status='PASS'; evidence='...' }
+      style        = @{ status='PASS'; evidence='...' }
+      dialogue     = @{ status='PASS'; evidence='...' }
+      voice        = @{ status='PASS'; evidence='...' }
+      lip_sync     = @{ status='PASS'; evidence='...' }
+      continuity   = @{ status='NOT_APPLICABLE'; evidence='...' }
+      other        = @{ status='NOT_APPLICABLE'; evidence='...' }
+    }
+  } | ConvertTo-Json -Depth 8)
+```
+
+规则：
+
+- 十个分项一个都不能少（`identity`、`costume`、`scene_props`、`camera_action`、
+  `style`、`dialogue`、`voice`、`lip_sync`、`continuity`、`other`），多一个少一个都会被
+  拒绝；每项填 `status`（`PASS` / `FAIL` / `NOT_REVIEWED` / `NOT_APPLICABLE`）与
+  `evidence`。
+- `request_id` 必须是 16–64 位的字母数字或连字符，且每次审片唯一；重复提交会被拒绝。
+- 已审项与不适用项都要写明画面、时间点、实际听到的台词或不适用理由。**不适用不能
+  代替必需检查。**
+- 带对白的镜头必须**完整观看并试听**才能补齐 audio 门；音轨存在、能量正常或一句泛泛
+  的备注都不算数。
+- 任一分项 `FAIL` 或必需项未审，镜头保持 `NEEDS_REVIEW`。
+- 每次人工审片会追加独立的 QC 报告、五门记录与 `OPERATOR_REVIEW_RECORDED` 审计，
+  **不会覆盖** worker 的原始报告。
+- Mock 作业没有真实媒体，不接受这种真人媒体质量审批。
+
+---
+
+## 7. 导出样片
+
+```powershell
+# 由编辑 Agent 的 EDL 装配（每个片段都要带 reason）
+$edl = @{
+  schema_version = '1.1'
+  fps = 24.0
+  clips = @(
+    @{ job_id='...'; attempt_id='...'; artifact_id='...'; in_s=0.0; out_s=7.29; transition='CUT'; reason='A full segment' }
+  )
+} | ConvertTo-Json -Depth 6
+$delivery = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries" `
+  -ContentType 'application/json' -Body $edl
+
+# 下载成片
+Invoke-WebRequest "http://127.0.0.1:8100/api/v1/deliveries/$($delivery.artifact_id)/media" -OutFile "$env:TEMP\reel.mp4"
+
+# 列出本项目全部交付
+Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
+```
+
+装配前系统会对每个来源重新校验：同一项目、非 stale job 的**当前** attempt、**已通过
+的真实 technical 门**、落盘文件 SHA-256 仍匹配、in/out 落在实测时长内。任何一条不满足
+就整体拒绝。
+
+成片按内容寻址存放在 `artifacts/<project>/delivery/`，因此**不会覆盖**已通过的镜头
+产物；每段都记录来源 job id、attempt id、artifact id、artifact sha256 和来源 job 状态。
+`review_state` 只有在全部来源 job 都是 `PASSED` 时才是 `all_passed`，否则是
+`pending_review` —— 未评审的片子不会被当成已验收。
+
+导出到 Git 之外：媒体文件不要提交到仓库（`.gitignore` 已排除本地验收目录与 `*.mp4`）。
+
+---
+
+## 8. 出问题时先看哪里
+
+| 现象 | 先查 |
+| --- | --- |
+| job 一直不动 | `GET /api/v1/system/status` 看 `blocked_jobs` / `worker_online`；再看 worker 日志 |
+| job 失败，`COMFY_JOB_NOT_FOUND` | 正常情况由 worker 在 30 秒宽限后按 history 对账恢复；确认 worker 在跑 |
+| 队列卡住，后续 job 全被挡 | `GET /api/v1/comfyops/resource-status` 看租约状态（`ACTIVE` / `RECONCILE_REQUIRED` / `RELEASED`） |
+| 渲染端没连上 | `h3_connected` 与 ComfyUI 的 `/system_stats`；ComfyUI 必须监听回环 |
+| 提交被拒 `PENDING_WORKFLOW_MAPPING` | 档案的 `parameter_map` 缺这个参考槽位，或 `media_transfers` 没声明对应族 |
+| 提交被拒 `CJK found outside dialogue or quoted visible text` | Style Bible 的维度是中文，改成英文后重新冻结一个新版本 |
+| 连续性被拒 | 档案声明 `hard_continuity: PENDING_HARD_CONTINUITY_TEST`、`video_reference: SUPPORTED_NODE_UNVERIFIED_TRANSFER`；这两项不能绕过 |
+| 审片端点 403 | 没配 `SHINE_OPERATOR_ID` / `SHINE_OPERATOR_TOKEN_SHA256`，或凭据错，或用的是 Agent 身份 |
+| 候选资产导入 409 `LICENSE_NOT_APPROVED` | 先由操作员批准对应的权利记录 |
+| 预制造成本一直 `BLOCKED` | `GET /api/v1/projects/{id}/preproduction/requirements` 看具体缺口码（常见 `ASSET_OR_VOICE_MISSING`） |
+| 组团角色 422 `LLM_FORMAT` | 模型输出没满足该角色的结构化契约；不是环境故障 |
+| 交付装配被拒 | 错误码会指明原因：`DELIVERY_SOURCE_TECHNICAL_GATE_NOT_PASSED`、`DELIVERY_SOURCE_FILE_HASH_MISMATCH`、`DELIVERY_CLIP_OUTSIDE_SOURCE_DURATION`、`DELIVERY_SOURCE_IDENTITY_MISMATCH` 等 |
+
+排查时的通用做法：
+
+1. 用 `GET /api/v1/jobs/{id}` 和 `GET /api/v1/jobs/{id}/quality-gates` 看当前 attempt 与
+   门禁记录；不要从旧 attempt 借用通过状态。
+2. 看审计：`OPERATOR_REVIEW_RECORDED`、`COMFY_RECONCILED_HISTORY`、
+   `COMFY_OUTPUT_RECONCILIATION_REQUIRED`、`DELIVERY_ASSEMBLED` 等事件记录了每一次
+   状态迁移。
+3. 看日志：`<data_dir>/run/logs/` 下的 api / worker 日志，ComfyUI 的 stderr。
+4. 不要用改数据库、改报告或绕过闸门的方式"修好"一个失败的检查。
+
+---
+
+## 9. 本轮遗留的操作员待办
+
+以下动作**本轮没有执行**，需要操作员本人完成。按建议顺序与精确端点见
+[V1.3 收尾报告第 8.2 节](LOCAL_V1.3_CLOSEOUT_REPORT.md#82-剩余操作项按建议顺序)。
+
+1. 批准两条权利记录（asset / voice_design）。
+2. 重新导入候选资产 → QC → 人工提升为主档。
+3. 导入音色档案 → 试听 → 人工批准并冻结。
+4. 冻结预制作清单（先让 readiness 不再是 `BLOCKED`）。
+5. 发布工作流能力草案。
+6. **对本轮三个真实镜头做正式逐项审片**：
+   `ca3754cc-099e-41ce-bb5a-5aac121b7793`（A）、
+   `dee0263c-737d-4dc3-9687-73dbe2768bf2`（B）、
+   `ffffe1d8-86e7-4593-acaa-91ff453b6b31`（C）。
+   B 镜头必须 `watched` 与 `listened` 都为真。
+7. 可选：自己重新撰写 Style Bible（当前 v2 已是英文版）。
+
+另外，若要给 ComfyOps 配置本机探测范围，需要设置 `SHINE_COMFY_PROBE_ROOTS` 与
+`SHINE_COMFY_PROBE_PORTS`；不配置时相关端点返回 `LOCAL_PROBE_SCOPE_NOT_CONFIGURED`，
+属配置项待办。
