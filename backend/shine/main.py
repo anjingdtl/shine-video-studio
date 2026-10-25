@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from shine.api_agent import router as agent_router
 from shine.api_comfy import router as comfy_router
+from shine.api_delivery import router as delivery_router
 from shine.api_film import router as film_router
 from shine.api_instances import router as instances_router
 from shine.api_llm import router as llm_router
@@ -335,6 +336,7 @@ def create_app(
     app.include_router(agent_router)
     app.include_router(comfy_router)
     app.include_router(film_router)
+    app.include_router(delivery_router)
     app.include_router(operator_router)
     app.include_router(instances_router)
     from shine.api_preparation import router as preparation_router

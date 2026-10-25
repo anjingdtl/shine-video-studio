@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from shine.comfy.client import ComfyError, ComfySubmissionUncertain
+from shine.comfy.client import ComfyError, ComfySubmissionUncertain, ComfyUIClient, ComfyUIError
 from shine.comfy.media import ComfyPendingWorkflowMapping
 from shine.comfy.provider import ComfyResult, ComfySubmission, ComfyUIRenderService
 from shine.config import Settings
@@ -84,6 +84,17 @@ WORKER_VERSION = "shine-worker/3.0"
 logger = logging.getLogger("shine.worker")
 
 ACTIVE_STATUSES = ("SUBMITTING", "RUNNING", "QC_PENDING")
+
+# ComfyUI removes a prompt from its queue before the matching history record is
+# readable. A worker that samples exactly in that window sees neither the
+# queue entry nor the history entry and would otherwise discard a render that
+# actually succeeded. The worker therefore treats a missing external record as
+# provisional for this long before it declares the submission lost.
+EXTERNAL_MISSING_GRACE_SECONDS = 30
+
+# Failure codes that mean "the external outcome is not known". Such a job may
+# still be reconcilable against ComfyUI history and must never be resubmitted.
+RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND",)
 
 
 def _register_worker(db: Session, worker_id: str) -> None:
@@ -1582,10 +1593,22 @@ def _run_comfy_job(
         )
     heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering")
     deadline = time.monotonic() + 600
+    missing_since: float | None = None
     while True:
         result = service.poll(submission.prompt_id)
-        if result.status not in {"running", "pending"}:
+        if result.status == "not_found":
+            # ComfyUI removes a finished prompt from the queue before its history
+            # record becomes readable, so a single observation of "no record"
+            # is not proof that the external task is gone. Keep reconciling for a
+            # short grace window before declaring the submission lost.
+            if missing_since is None:
+                missing_since = time.monotonic()
+            elif time.monotonic() - missing_since >= EXTERNAL_MISSING_GRACE_SECONDS:
+                break
+        elif result.status not in {"running", "pending"}:
             break
+        else:
+            missing_since = None
         heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering")
         if time.monotonic() >= deadline:
             result = ComfyResult(status="timeout", error_code="COMFY_TIMEOUT")
@@ -1734,6 +1757,43 @@ def _claim_uncertain_job(db: Session, job: Job, worker_id: str, settings: Settin
     return job.state_version
 
 
+def _claim_stranded_job(db: Session, job: Job, worker_id: str, settings: Settings) -> int | None:
+    """Claim a job whose external outcome became unknown after the worker stopped.
+
+    A job can reach ``NEEDS_REVIEW`` with ``COMFY_JOB_NOT_FOUND`` while its
+    ComfyUI task actually completed: the worker observed the queue/history gap
+    that ComfyUI opens between finishing a prompt and publishing its history
+    record. Such a job must be reconciled against the external history rather
+    than discarded or resubmitted. The compare-and-set keeps this exclusive to
+    one worker.
+    """
+    now = utcnow()
+    expires = now + timedelta(seconds=settings.worker_lease_seconds)
+    result = db.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == "NEEDS_REVIEW",
+            Job.failure_code.in_(list(RECONCILABLE_FAILURE_CODES)),
+            Job.provider_job_id.is_not(None),
+        )
+        .values(
+            lease_owner=worker_id,
+            lease_expires_at=expires,
+            heartbeat_at=now,
+            state_version=job.state_version + 1,
+        ),
+        execution_options={"synchronize_session": False},
+    )
+    if result.rowcount != 1:
+        return None
+    job.lease_owner = worker_id
+    job.lease_expires_at = expires
+    job.heartbeat_at = now
+    job.state_version = job.state_version + 1
+    return job.state_version
+
+
 def recover_expired_jobs(
     session_factory,
     worker_id: str,
@@ -1756,6 +1816,11 @@ def recover_expired_jobs(
                         & (Job.lease_expires_at < now)
                     )
                     | ((Job.status == "NEEDS_REVIEW") & (Job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"))
+                    | (
+                        (Job.status == "NEEDS_REVIEW")
+                        & (Job.failure_code.in_(list(RECONCILABLE_FAILURE_CODES)))
+                        & Job.provider_job_id.is_not(None)
+                    )
                 )
             ).all()
         )
@@ -1773,20 +1838,38 @@ def recover_expired_jobs(
     from shine.comfyops.models import ResourceLease
 
     with session_factory.begin() as db:
-        for job_id in job_ids:
-            job = db.get(Job, job_id)
-            attempt = _latest_attempt(db, job_id) if job else None
-            lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
-            if lease and attempt and attempt.status == "COMPLETED" and job.status not in ACTIVE_STATUSES:
-                from shine.comfy.client import ComfyUIClient
-
-                release_client = comfy_client or ComfyUIClient(settings.comfyui_base_url, max_retries=0)
-                try:
-                    release_client.free_models()
-                except Exception:
-                    lease.status = "RECONCILE_REQUIRED"
-                else:
-                    lease.status = "RELEASED"
+        # An exclusive GPU lease blocks every later job until it is released.
+        # A lease whose job already finished must be reconciled against the
+        # renderer's real memory state, even when the job itself needs no
+        # further recovery, otherwise one stale lease deadlocks the queue.
+        release_client = comfy_client or ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+        leases = list(
+            db.scalars(
+                select(ResourceLease).where(
+                    ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])
+                )
+            )
+        )
+        for lease in leases:
+            owner_job_id = lease.owner.removeprefix("h3:")
+            job = db.get(Job, owner_job_id)
+            if job is not None and job.status in ACTIVE_STATUSES:
+                continue
+            attempt = _latest_attempt(db, owner_job_id) if job is not None else None
+            if attempt is None or attempt.status != "COMPLETED":
+                continue
+            try:
+                release_client.free_models()
+            except ComfyUIError as exc:
+                if "INSTANCE_BUSY" in str(getattr(exc, "detail", "") or ""):
+                    # The renderer is busy with another task; keep the lease
+                    # and try again later instead of declaring a release.
+                    continue
+                lease.status = "RECONCILE_REQUIRED"
+            except Exception:
+                lease.status = "RECONCILE_REQUIRED"
+            else:
+                lease.status = "RELEASED"
     return recovered
 
 
@@ -1960,7 +2043,14 @@ def _recover_comfy_job(
             try_transition(job, "NEEDS_REVIEW")
             return True, None
         if not uncertain:
-            if _take_recovery_lease(db, job, worker_id, settings) is None:
+            if job.status == "NEEDS_REVIEW" and job.failure_code in RECONCILABLE_FAILURE_CODES:
+                # The job was stranded by the queue/history completion window.
+                # Re-open it so the collected media can flow into QC.
+                if _claim_stranded_job(db, job, worker_id, settings) is None:
+                    return False, None
+                if job.status == "NEEDS_REVIEW":
+                    transition(job, "RUNNING")
+            elif _take_recovery_lease(db, job, worker_id, settings) is None:
                 return False, None
         attempt.provider_job_id = found_id
         attempt.reconciliation_state = "history_found"

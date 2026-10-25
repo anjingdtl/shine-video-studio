@@ -6,6 +6,23 @@ from typing import Any
 import httpx
 
 
+def _modern_memory_accounting(version: str) -> bool:
+    """True when the server reports the 0.39-style torch memory accounting.
+
+    An unparsable version is treated as the older accounting, which is the
+    stricter rule: it keeps the block rather than assuming a release.
+    """
+    parts: list[int] = []
+    for part in str(version).split("."):
+        digits = "".join(character for character in part if character.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    if len(parts) < 2:
+        return False
+    return (parts[0], parts[1]) >= (0, 39)
+
+
 class ComfyError(RuntimeError):
     code = "COMFY_ERROR"
     retryable = False
@@ -58,6 +75,11 @@ class ComfyPromptRejected(ComfyUIError):
 
 
 class ComfyUIClient:
+    # A renderer is considered to hold no live model once the difference between
+    # its reported reserved and free pools has fallen back to framework noise.
+    # A resident MiniMax-H3 checkpoint moves this value by more than ten
+    # gigabytes, so the threshold has a very wide margin on both sides.
+    MAX_LIVE_TENSOR_BYTES = 512 * 1024 * 1024
     def __init__(
         self,
         base_url: str,
@@ -127,21 +149,46 @@ class ComfyUIClient:
         # the shared lease. Cached-but-free allocator memory is allowed.
         for _ in range(30):
             queue = self.queue()
-            devices = self.system_stats().get("devices", [])
-            if (
-                devices
-                and not queue.get("queue_running")
-                and not queue.get("queue_pending")
-                and all(
-                    isinstance(d.get("torch_vram_total"), int | float)
-                    and isinstance(d.get("torch_vram_free"), int | float)
-                    and 0 <= d["torch_vram_total"] <= d["torch_vram_free"]
-                    for d in devices
-                )
-            ):
-                return
+            stats = self.system_stats()
+            if not queue.get("queue_running") and not queue.get("queue_pending"):
+                if self._release_confirmed(stats):
+                    return
             time.sleep(0.1)
         raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
+
+    @staticmethod
+    def _release_confirmed(stats: dict[str, Any]) -> bool:
+        """Decide from the renderer's own memory report that no model is resident.
+
+        ComfyUI changed what the two torch numbers mean. Up to 0.38 they were
+        the pool torch reserved for itself and the free part of that pool, so
+        any reservation at all means a model may still be resident. From 0.39
+        on they are the torch allocator's reserved pool and the reserved but
+        unallocated part of it, so their difference is the live tensor bytes
+        and the framework keeps a small permanent allocation.
+
+        Comparing the two values directly cannot work on either build: the free
+        part is never larger than the total, so a release could never be
+        confirmed and the shared exclusive GPU lease would never be released.
+        An unknown or unreadable report keeps the block instead of assuming a
+        release that was never proven.
+        """
+        devices = stats.get("devices") or []
+        if not devices:
+            return False
+        version = str((stats.get("system") or {}).get("comfyui_version", ""))
+        modern = _modern_memory_accounting(version)
+        for device in devices:
+            total = device.get("torch_vram_total")
+            free = device.get("torch_vram_free")
+            if not isinstance(total, int | float) or not isinstance(free, int | float):
+                return False
+            if modern:
+                if abs(float(total) - float(free)) > ComfyUIClient.MAX_LIVE_TENSOR_BYTES:
+                    return False
+            elif float(total) != 0:
+                return False
+        return True
 
     def upload_file(
         self,

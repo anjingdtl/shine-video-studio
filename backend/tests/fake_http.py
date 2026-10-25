@@ -130,11 +130,26 @@ class FakeComfyServer(_BaseServer):
         self.timeout_sleep_s = 0.6
         self.submitted_prompts: list[dict[str, Any]] = []
         self.upload_paths: list[str] = []
+        # Number of history reads that must behave as if the prompt had no
+        # record yet. ComfyUI removes a finished prompt from the queue before
+        # its history entry becomes readable, so a worker can legitimately
+        # observe neither the queue entry nor the history record for a moment.
+        self.hide_history_for = 0
+        # Reported torch allocator numbers. A resident model makes the
+        # difference between them large; a released renderer leaves only
+        # framework noise.
+        self.torch_vram_total = 0
+        self.torch_vram_free = 0
+        self.vram_free = 0
+        self.comfyui_version = "fake"
         super().__init__()
 
     def _history_record(self, prompt_id: str) -> dict[str, Any] | None:
         record = self.prompts.get(prompt_id)
         if record is None:
+            return None
+        if self.hide_history_for > 0:
+            self.hide_history_for -= 1
             return None
         status = "success" if self.mode != "error" else "error"
         outputs = (
@@ -182,8 +197,15 @@ class FakeComfyServer(_BaseServer):
                     self._json(
                         200,
                         {
-                            "system": {"comfyui_version": "fake"},
-                            "devices": [{"name": "fake-gpu", "torch_vram_total": 0, "torch_vram_free": 0}],
+                            "system": {"comfyui_version": outer.comfyui_version},
+                            "devices": [
+                                {
+                                    "name": "fake-gpu",
+                                    "torch_vram_total": outer.torch_vram_total,
+                                    "torch_vram_free": outer.torch_vram_free,
+                                    "vram_free": outer.vram_free,
+                                }
+                            ],
                         },
                     )
                     return
