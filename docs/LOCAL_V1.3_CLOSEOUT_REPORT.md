@@ -1,8 +1,10 @@
 # V1.3 本地集成收尾报告
 
-日期：2026-10-25（Asia/Shanghai）。分支 `feature/v13-local-h3-integration`，交付提交
-`fc75693d9aabb44cee92ca40eb97838e1ebd674c`，基线 `63929f49c98e205776da5e2287cfe368cf87de75`
-（= `origin/main`）。
+日期：2026-10-25（Asia/Shanghai）。分支 `feature/v13-local-h3-integration`，基线
+`63929f49c98e205776da5e2287cfe368cf87de75`（= `origin/main`）。本轮提交
+`fc75693d9aabb44cee92ca40eb97838e1ebd674c`（2026-10-25 17:49:36），随后提交
+`2df8aff9f62209b6202bbd839fd914989499d5b2`（2026-10-25 18:01:13）修复 `LLM_FORMAT`
+的根因（见 5.1）。
 
 关联文档：[本地环境验证报告](LOCAL_ENVIRONMENT_VALIDATION.md)、
 [真实 H3 验收报告](LOCAL_REAL_H3_ACCEPTANCE.md)、[操作员指南](operator-guide.md)。
