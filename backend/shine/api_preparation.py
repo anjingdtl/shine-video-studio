@@ -236,13 +236,24 @@ def plan_install(body: InstallRequest, db: DBSession):
 
 
 @router.get("/comfyops/install-plans")
-def plans(db: DBSession):
-    return [public(r) for r in db.scalars(select(InstallationPlan))]
+def plans(db: DBSession, project_id: str | None = None):
+    query = select(InstallationPlan)
+    if project_id is not None:
+        require_project(db, project_id)
+        query = query.where(InstallationPlan.project_id == project_id)
+    return [public(r) for r in db.scalars(query.order_by(InstallationPlan.created_at, InstallationPlan.id))]
 
 
 @router.get("/comfyops/install-plans/{identity}")
 def install_plan(identity: str, db: DBSession):
     return public(get(db, InstallationPlan, identity))
+
+
+@router.get("/comfyops/install-plans/{identity}/attempts")
+def install_plan_attempts(identity: str, db: DBSession):
+    get(db, InstallationPlan, identity)
+    query = select(InstallationAttempt).where(InstallationAttempt.plan_id == identity)
+    return [public(r) for r in db.scalars(query.order_by(InstallationAttempt.created_at, InstallationAttempt.id))]
 
 
 class GrantRequest(Strict):

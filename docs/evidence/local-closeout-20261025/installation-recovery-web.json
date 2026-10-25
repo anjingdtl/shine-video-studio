@@ -1,0 +1,105 @@
+{
+  "at": "2026-10-25T23:49:50.216156+00:00",
+  "source_base": "1903ae025540f186b05d361c740962e1a4f6df0b",
+  "backend": {
+    "tests": "474",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "204.130"
+  },
+  "targeted": {
+    "tests": "59",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "9.006"
+  },
+  "browser": {
+    "status": "MOCK_VERIFIED",
+    "flows": 15,
+    "api_errors": [],
+    "install_recovery": "Normal production installer with Fake NoNetwork transport -> FAILED_RECONCILE_REQUIRED; browser grant -> RECONCILED_NO_RETRY; new AWAITING_APPROVAL plan; no retry or installed package",
+    "project_switch_before_fix": {
+      "scope": "ISOLATED_BROWSER_COUNTEREXAMPLE",
+      "session": 39228,
+      "exit_code": 1,
+      "old_project_asset_rows_rendered_after_switch": 3,
+      "expected_rows": 0,
+      "app_sha256_before_fix": "67ae45f05a66cd329715b53a9de3aa7fc41ee916f42a9f82f653b2580879f803",
+      "production_database_or_media_changed": false
+    },
+    "project_switch_after_fix": {
+      "status": "PASS",
+      "terminal_session": 11058,
+      "delayed_old_asset_response_applied_to_new_project": false,
+      "new_project_asset_rows": 0,
+      "old_project_shot_visible": false
+    },
+    "screenshot_sha256": "c15f21b4149a2f85555d3e181cd3feaf94ad94517811a5e5dd38bd8d571c8efb"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "typescript_vite": "PASS",
+    "diff_check": "PASS",
+    "config_example": "JSON syntax/role keys/version separation checked; placeholders inert; local copy ignored",
+    "current_head_ci": "NOT_YET_SUBMITTED; prior 0a35891 blocked by GitHub billing"
+  },
+  "read_only_live_api_probe": {
+    "filtered_project_plans": 5,
+    "old_attempt_status": "FAILED_RECONCILE_REQUIRED",
+    "api_online": true,
+    "worker_online": false,
+    "h3_connected": true
+  },
+  "live_project_approval_counts": {
+    "candidate_assets": [],
+    "rights_records": [
+      [
+        "PENDING",
+        4
+      ]
+    ],
+    "voice_profiles": [],
+    "preproduction_plans": [],
+    "workflow_revisions": [
+      [
+        "DRAFT",
+        1
+      ],
+      [
+        "FAKE_EXECUTED",
+        2
+      ]
+    ]
+  },
+  "requirement_audit": "docs/LOCAL_ALL_PASS_REQUIREMENTS_20261026.md",
+  "commands": [
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-install-recovery-web-final.xml",
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests/test_v13_preparation.py -q",
+    "uv --no-config run --project backend --frozen --with playwright==1.62.0 python scripts/verify_v13_web.py --browser-path <existing Chromium> --screenshot <ignored PNG>",
+    "npm --prefix frontend run build"
+  ],
+  "boundaries": {
+    "real_install_recovery": "NOT_EXECUTED pending human grant",
+    "post_output_fix_real_negative_review": "NOT_RUN pending old call reconciliation",
+    "T2VA_and_voice_checkpoint_execution": "NOT_RUN",
+    "full_product": "PARTIAL"
+  },
+  "m4_source_audit": {
+    "current_acceptance_project_document_count": 0,
+    "other_validation_documents": [
+      {
+        "id": "affcf5ea-d7f9-41f0-bb78-7db66b9153c4",
+        "project_id": "14de31eb-eadd-48ae-b2bd-02d7ce465ae8",
+        "text_characters": 28
+      },
+      {
+        "id": "afd53ee6-5aab-4b33-9faf-d27011f63e52",
+        "project_id": "72c59b42-4a48-46d5-b510-dfbfb2db1823",
+        "text_characters": 28
+      }
+    ],
+    "meets_human_60s_two_person_input_requirement": false
+  }
+}

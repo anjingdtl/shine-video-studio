@@ -1,0 +1,50 @@
+{
+  "design": {
+    "python": "C:/replace-with-reviewed-runtime/python.exe",
+    "python_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "packages_dir": "F:/replace-with-tts-overlay",
+    "versions": {
+      "qwen-tts": "0.1.1",
+      "transformers": "4.57.3",
+      "torch": "REPLACE_WITH_VERIFIED_INSTALLED_VERSION"
+    },
+    "timeout_s": 300,
+    "budget_mb": 12000
+  },
+  "base": {
+    "python": "C:/replace-with-reviewed-runtime/python.exe",
+    "python_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "packages_dir": "F:/replace-with-tts-overlay",
+    "versions": {
+      "qwen-tts": "0.1.1",
+      "transformers": "4.57.3",
+      "torch": "REPLACE_WITH_VERIFIED_INSTALLED_VERSION"
+    },
+    "timeout_s": 300,
+    "budget_mb": 12000
+  },
+  "asr": {
+    "python": "C:/replace-with-reviewed-runtime/python.exe",
+    "python_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "packages_dir": "F:/replace-with-asr-overlay",
+    "versions": {
+      "qwen-asr": "0.0.6",
+      "transformers": "4.57.6",
+      "torch": "REPLACE_WITH_VERIFIED_INSTALLED_VERSION"
+    },
+    "timeout_s": 300,
+    "budget_mb": 12000
+  },
+  "align": {
+    "python": "C:/replace-with-reviewed-runtime/python.exe",
+    "python_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "packages_dir": "F:/replace-with-asr-overlay",
+    "versions": {
+      "qwen-asr": "0.0.6",
+      "transformers": "4.57.6",
+      "torch": "REPLACE_WITH_VERIFIED_INSTALLED_VERSION"
+    },
+    "timeout_s": 300,
+    "budget_mb": 12000
+  }
+}

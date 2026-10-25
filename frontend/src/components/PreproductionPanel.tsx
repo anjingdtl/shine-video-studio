@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, json, API } from '../api';
 
-type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; formal_asset_id?: string; trace?: Record<string, unknown> };
+type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; project_id?: string; formal_asset_id?: string; trace?: Record<string, unknown> };
 type Registry = { categories: string[]; revisions: Row[]; legacy_profiles: unknown[] };
 const views = ['环境中心', '模型与节点', '工作流能力', '全资产工厂', 'Voice Studio', '开机前预检'];
 
@@ -17,6 +17,9 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   const [rowView, setRowView] = useState(-1);
   const activeView = useRef(view);
   activeView.current = view;
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
+  const [installAttempts, setInstallAttempts] = useState<Record<string, Row[]>>({});
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState('');
@@ -60,13 +63,14 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
   });
   async function load() {
     const requestedView = view;
+    const requestedProject = projectId;
     let nextRows: Row[] = [];
     let nextResult: unknown = undefined;
     let nextRegistry: Registry | null = null;
     if (view === 0) nextRows = await api<Row[]>('/comfyops/inventory');
     if (view === 1) {
       const [plans, models, nodes] = await Promise.all([
-        api<Row[]>('/comfyops/install-plans'), api('/comfyops/models'), api('/comfyops/nodes'),
+        api<Row[]>(`/comfyops/install-plans?project_id=${projectId}`), api('/comfyops/models'), api('/comfyops/nodes'),
       ]);
       nextRows = plans; nextResult = { models, nodes };
     }
@@ -74,7 +78,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
     if (view === 3) nextRows = await api<Row[]>(`/projects/${projectId}/candidate-assets`);
     if (view === 4) nextRows = await api<Row[]>(`/projects/${projectId}/voice-profiles`);
     if (view === 5) nextResult = await api(`/projects/${projectId}/preproduction/requirements`);
-    if (activeView.current !== requestedView) return;
+    if (activeView.current !== requestedView || activeProject.current !== requestedProject) return;
     setRows(nextRows); setRowView(requestedView);
     if (nextRegistry) setRegistry(nextRegistry);
     if (nextResult !== undefined) setResult(nextResult);
@@ -288,11 +292,37 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);
       })}>操作员冻结选定模式清单</button>
     </>}
-    {rowView === view && rows.map(row => <article className="card" key={row.id}>
+    {rowView === view && rows.filter(row => view !== 1 || row.project_id === projectId).map(row => <article className="card" key={row.id}>
       <strong>{String(row.payload.family ?? row.payload.character ?? row.payload.name ?? row.payload.source ?? row.id)} · {row.status}</strong>
       <p>ID {row.id} · SHA256 {row.sha256}</p>
       {view === 1 && row.status === 'AWAITING_APPROVAL' && <button disabled={busy}
         onClick={() => act(() => approve(row, 'install', `/comfyops/install-plans/${row.id}/approve`))}>批准此哈希计划</button>}
+      {view === 1 && row.payload.executor === 'LOCAL_ISOLATED' && !row.payload.kind && <>
+        <button disabled={busy} onClick={() => act(async () => {
+          const attempts = await api<Row[]>(`/comfyops/install-plans/${row.id}/attempts`);
+          setInstallAttempts(previous => ({ ...previous, [row.id]: attempts }));
+          return attempts;
+        })}>查看安装尝试</button>
+        {installAttempts[row.id]?.length === 0 && <p>此计划尚未开始安装。</p>}
+        {installAttempts[row.id]?.map(attempt => <div key={attempt.id}>
+          <p>安装尝试 {attempt.id} · {attempt.status}{attempt.payload.error_type ? ` · ${String(attempt.payload.error_type)}` : ''}</p>
+          {attempt.status === 'FAILED_RECONCILE_REQUIRED' && <button disabled={busy || offline || !confirmed}
+            onClick={() => act(async () => {
+              const reconciled = await approve(attempt, 'install_reconcile', `/comfyops/install-attempts/${attempt.id}/reconcile`);
+              const attempts = await api<Row[]>(`/comfyops/install-plans/${row.id}/attempts`);
+              setInstallAttempts(previous => ({ ...previous, [row.id]: attempts }));
+              return reconciled;
+            })}>核对安装失败（不重试）</button>}
+        </div>)}
+        {row.status === 'RECONCILED_NO_RETRY' && <>
+          <p>旧尝试已结束。继续安装须新建并批准计划。</p>
+          <button disabled={busy || offline || !confirmed || !diskBudget} onClick={() => act(() => post('/comfyops/install-plans', {
+            project_id: projectId,
+            package_ids: (row.payload.packages as { id: string }[]).map(p => p.id),
+            disk_free: Number(diskBudget), isolated: true, executor: 'local',
+          }))}>从原清单新建待批准计划</button>
+        </>}
+      </>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'FAKE_ONLY' && <button disabled={busy} onClick={() => act(() =>
         post(row.payload.kind === 'INSTANCE_BACKUP' ? `/comfyops/backup-plans/${row.id}/execute` : row.payload.kind === 'INSTANCE_LIFECYCLE' ? `/comfyops/instance-plans/${row.id}/execute` : `/comfyops/install-plans/${row.id}/execute`, ['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) ? { plan_hash: row.sha256 } : { executor: 'fake', plan_hash: row.sha256 }, true))}>模拟执行（无系统变更）</button>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'LOCAL_ISOLATED' && ['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) &&

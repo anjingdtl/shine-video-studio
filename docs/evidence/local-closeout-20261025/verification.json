@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-25T23:30:15.775683+00:00",
+  "collected_at": "2026-10-25T23:49:50.216156+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
+    "tests": "474",
     "errors": "0",
     "failures": "0",
     "skipped": "0",
-    "tests": "473",
-    "time": "202.547"
+    "time": "204.130"
   },
   "checks": {
     "ruff": "PASS incl local_review_server.py",
@@ -414,5 +414,13 @@
     "time": "195.504"
   },
   "recovery_and_review_evidence": "docs/evidence/local-closeout-20261025/recovery-and-review.json",
-  "ci_account_block_evidence": "docs/evidence/local-closeout-20261025/ci-account-block.json"
+  "ci_account_block_evidence": "docs/evidence/local-closeout-20261025/ci-account-block.json",
+  "backend_before_installation_recovery_web": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "473",
+    "time": "202.547"
+  },
+  "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json"
 }

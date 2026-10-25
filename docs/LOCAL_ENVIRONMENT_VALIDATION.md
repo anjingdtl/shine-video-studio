@@ -1,5 +1,11 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
+10-26 最新续轮：完整后端 **474 passed，零 skipped/failures/errors**；隔离浏览器 **15 类
+MOCK_VERIFIED，api_errors=[]**。安装恢复页面、项目过滤和跨项目迟到响应反例通过。
+当前全产品仍 PARTIAL，真人恢复/模型安装、真实反例复验、M2/M4 等尚未完成；
+见 [逐项需求核对](LOCAL_ALL_PASS_REQUIREMENTS_20261026.md) 和
+[最新页面证据](evidence/local-closeout-20261025/installation-recovery-web.json)。下文保留历轮结果。
+
 最新串行执行与本地审片补充见 [10-25 继续收尾第 7 节](LOCAL_FINAL_CLOSEOUT_20261025.md#7-继续推进真实本地审片与严格串行)。
 历史真机轮结果保留。新 PDD8 超分样本及仅重跑机器 QC 通过；后续卸载异常已由真人完成指定调用对账，
 cuBLAS 清理后的新真实 VLM 推理/卸载闭环通过，模型退出后 allocated/reserved 均为 0。

@@ -120,6 +120,27 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             ControlledDownloader({"raw.githubusercontent.com"}, NoNetwork()),
         ),
     )
+    # A normal failed production-installer path, using a transport that forbids
+    # network. The browser must reconcile it without silently executing again.
+    failed_package = post("/comfyops/packages", {
+        "name": "browser-failed-package", "kind": "model", "revision": "fixture-v1",
+        "license_id": "TEST-ONLY", "usage": "research",
+        "files": [{"url": "https://huggingface.co/fixture/data", "relative_path": "data.bin",
+                   "size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}],
+    })
+    failed_plan = post("/comfyops/install-plans", {
+        "project_id": p, "package_ids": [failed_package["id"]], "disk_free": 100, "executor": "local",
+    })
+    failed_plan = approve(failed_plan, "install", f"/comfyops/install-plans/{failed_plan['id']}/approve")
+    try:
+        execute_approved(qa_factory, qa_settings, failed_plan["id"], failed_plan["sha256"],
+                         "v13-browser-test-operator", LocalInstaller(
+                             Path(temporary) / "comfyops" / "isolated-packages",
+                             ControlledDownloader({"huggingface.co"}, NoNetwork())))
+    except AssertionError as exc:
+        assert "must only use the uploaded cache" in str(exc)
+    else:
+        raise AssertionError("Failed-install fixture unexpectedly completed")
     qa_engine.dispose()
 
     from shine.comfyops.assets import fake_image
@@ -348,6 +369,27 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(prep.get_by_role("link", name="下载 SRT")).to_be_visible(timeout=15000)
         href = prep.get_by_role("link", name="下载 SRT").get_attribute("href")
         assert "-->" in c.get(api_base + href).text
+        prep.get_by_role("button", name="模型与节点", exact=True).click()
+        failed_card = prep.locator("article").filter(has_text=failed_plan["id"])
+        failed_card.get_by_role("button", name="查看安装尝试", exact=True).click()
+        expect(failed_card).to_contain_text("FAILED_RECONCILE_REQUIRED")
+        # Fake request mode cannot authorize real filesystem reconciliation.
+        expect(failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True)).to_be_disabled()
+        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
+        failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True).click()
+        expect(failed_card).to_contain_text("RECONCILED_NO_RETRY", timeout=15000)
+        expect(failed_card).to_contain_text("继续安装须新建并批准计划")
+        prep.get_by_label("安装磁盘预算（字节，须核对空间）").fill("100")
+        with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/comfyops/install-plans")) as fresh_response:
+            failed_card.get_by_role("button", name="从原清单新建待批准计划", exact=True).click()
+        fresh_plan = fresh_response.value.json()
+        assert fresh_plan["status"] == "AWAITING_APPROVAL"
+        assert fresh_plan["payload"]["packages"] == failed_plan["payload"]["packages"]
+        attempts = c.get(base + f"/comfyops/install-plans/{failed_plan['id']}/attempts").json()
+        assert len(attempts) == 1 and attempts[0]["status"] == "RECONCILED_NO_RETRY"
+        assert c.get(base + f"/comfyops/install-plans/{fresh_plan['id']}/attempts").json() == []
+        assert not (Path(temporary) / "comfyops/isolated-packages/browser-failed-package").exists()
         assert TEST_CREDENTIAL not in page.evaluate(
             "JSON.stringify(localStorage) + JSON.stringify(sessionStorage)"
         )
@@ -394,6 +436,30 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             assert submissions[-1]["workflow_profile_id"] == f"ui-only-{mode}"
         assert c.get(base + f"/projects/{p}/jobs").json() == [], "UI routing probe must create no backend jobs"
         page.get_by_label("提交方式").select_option("mock")
+        # Hold an old project's asset response until a different project has
+        # finished loading. A late callback must not replace the new selection.
+        other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
+        page.unroute("**/api/v1/workflow-profiles?*")
+        page.reload(wait_until="networkidle")
+        selector = page.locator("select").first
+        selector.select_option(other)
+        page.wait_for_load_state("networkidle")
+        expect(page.locator("#assets .asset-row")).to_have_count(0)
+        delayed = []
+        old_assets_url = f"**/api/v1/projects/{p}/assets"
+        page.route(old_assets_url, lambda route: delayed.append(route))
+        with page.expect_request(lambda request: request.url.endswith(f"/projects/{p}/assets")):
+            selector.select_option(p)
+        with page.expect_response(lambda response: response.url.endswith(f"/projects/{other}/jobs")):
+            selector.select_option(other)
+        assert delayed, "Old project request was not held"
+        for route in delayed:
+            route.fulfill(json=c.get(base + f"/projects/{p}/assets").json())
+        page.wait_for_load_state("networkidle")
+        expect(selector).to_have_value(other)
+        expect(page.locator("#assets .asset-row")).to_have_count(0)
+        expect(page.get_by_text("Mode routing UI fixture", exact=True)).to_have_count(0)
+        page.unroute(old_assets_url)
         if screenshot:
             page.screenshot(path=str(screenshot), full_page=True)
         browser.close()
@@ -427,6 +493,8 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "SRT download",
                     "no browser credential persistence",
                     "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
+                    "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
+                    "late old-project responses cannot overwrite selected-project assets/shots",
                 ],
                 "api_errors": failures,
             }

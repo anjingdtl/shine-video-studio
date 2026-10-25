@@ -1,6 +1,9 @@
 # Contracts — M1 hardened + M2/M3 offline
 
-The API is served under `/api/v1`. OpenAPI is available at `/docs` during local development. All endpoints are loopback-only and unauthenticated; do not expose them to a LAN.
+The API is served under `/api/v1`. OpenAPI is available at `/docs` during local development.
+Bind the API to loopback: ordinary CRUD has no account login, while protected review,
+approval, installation and reconciliation actions require a configured local human
+operator, same-origin validation and the action-specific grants described below.
 
 ## Project, script, asset, and style APIs
 
@@ -298,6 +301,16 @@ GET /projects/{id}/preparation/model-calls returns the existing task ledger. Exp
 POST /preparation/model-calls/{id}/abandon requires model_reconcile authority, owner/queue/
 release proof and records ABANDONED, not success. Reconciliation itself is durably owned.
 Resource release cannot treat reconciled=true or expired time as proof of unload.
+
+GET /comfyops/install-plans accepts an optional project_id filter. GET
+/comfyops/install-plans/{id}/attempts returns only that plan's ordered attempt history.
+POST /comfyops/install-attempts/{id}/reconcile requires an install_reconcile grant on
+the terminal FAILED_RECONCILE_REQUIRED attempt. Under package OS locks it verifies
+the approved plan and registered/embedded manifests, no active install or unfinished
+swap, and absent or exactly matching destination files. It records
+RECONCILED_NO_RETRY without package-content changes, runtime promotion or execution.
+Continuing requires a fresh plan and separate approval; neither old grants nor failed
+attempts are replayed. The Web history/reconciliation controls use these same APIs.
 
 
 Mock provenance is monotonic across provider boundaries. An HTTP reviewer reporting

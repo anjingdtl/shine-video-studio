@@ -712,6 +712,25 @@ def test_install_reconcile_verified_files_does_not_promote_runtime(prep):
     assert (destination / "中文/test.bin").read_bytes() == b"data"
 
 
+def test_install_history_is_plan_scoped_and_plan_list_can_filter_project(prep):
+    client, _, _, _, model, plan, identity, decision = failed_package_install(prep)
+    other_project = create_project(client)
+    other = post(client, "/comfyops/install-plans", {
+        "project_id": other_project, "package_ids": [model["id"]], "disk_free": 100, "executor": "local",
+    })
+    rows = client.get(f"/api/v1/comfyops/install-plans/{plan['id']}/attempts").json()
+    assert [r["id"] for r in rows] == [identity]
+    assert rows[0]["plan_id"] == plan["id"] and rows[0]["status"] == "FAILED_RECONCILE_REQUIRED"
+    assert client.get(f"/api/v1/comfyops/install-plans/{other['id']}/attempts").json() == []
+    filtered = client.get(f"/api/v1/comfyops/install-plans?project_id={plan['project_id']}").json()
+    assert [r["id"] for r in filtered] == [plan["id"]]
+    assert {r["id"] for r in client.get("/api/v1/comfyops/install-plans").json()} == {plan["id"], other["id"]}
+    assert client.get("/api/v1/comfyops/install-plans/missing/attempts").status_code == 404
+    post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True)
+    history = client.get(f"/api/v1/comfyops/install-plans/{plan['id']}/attempts").json()
+    assert history[0]["status"] == "RECONCILED_NO_RETRY"
+
+
 def test_model_unload_requires_idle_queue_and_never_kills_process():
     from shine.comfyops.inventory import ComfyModelLifecycle
 

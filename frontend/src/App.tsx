@@ -1,5 +1,5 @@
 import { PreproductionPanel } from './components/PreproductionPanel';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
   Film, FolderKanban, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, X,
@@ -22,6 +22,8 @@ import DeliveryPanel from './components/DeliveryPanel';
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
+  const activeProjectId = useRef(projectId);
+  activeProjectId.current = projectId;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [styles, setStyles] = useState<StyleVersion[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
@@ -62,6 +64,7 @@ function App() {
 
   const loadAudit = useCallback(async (id: string, offset = 0) => {
     const page = await api<AuditPage>(`/projects/${id}/events?limit=30&offset=${offset}`);
+    if (activeProjectId.current !== id) return;
     setAudit((current) => offset === 0 || !current
       ? page
       : { ...page, items: [...current.items, ...page.items] });
@@ -73,11 +76,13 @@ function App() {
       api<AgentRoute[]>('/agent-routes'),
       api<WorkflowProfile[]>(`/workflow-profiles?project_id=${id}`),
     ]);
+    if (activeProjectId.current !== id) return;
     setProfiles(profileRows); setRoutes(routeRows); setWorkflowProfiles(workflowRows);
   }, []);
 
   const loadProject = useCallback(async (id: string) => {
     const selected = await api<Project>(`/projects/${id}`);
+    if (activeProjectId.current !== id) return;
     setProjects((rows) => rows.map((row) => row.id === id ? selected : row));
     const [assetRows, styleRows, shotRows, jobRows] = await Promise.all([
       api<Asset[]>(`/projects/${id}/assets`),
@@ -85,6 +90,7 @@ function App() {
       api<Shot[]>(`/projects/${id}/shots`),
       api<Job[]>(`/projects/${id}/jobs`),
     ]);
+    if (activeProjectId.current !== id) return;
     setAssets(assetRows); setStyles(styleRows); setShots(shotRows); setJobs(jobRows);
     setStyle(selected.style_draft ?? styleRows.at(-1)?.snapshot ?? emptyStyle);
     await loadSettings(id);
@@ -104,6 +110,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setAssets([]); setStyles([]); setShots([]); setJobs([]); setAudit(null);
+    setWorkflowProfiles([]); setQueueProfile(''); setPreview(null); setStyle(emptyStyle);
     if (projectId) loadProject(projectId).catch((error: Error) => report(error.message, 'error'));
   }, [projectId, loadProject]);
 
@@ -115,7 +123,10 @@ function App() {
       Promise.all([
         api<Job[]>(`/projects/${projectId}/jobs`),
         api<Shot[]>(`/projects/${projectId}/shots`),
-      ]).then(([jobRows, shotRows]) => { setJobs(jobRows); setShots(shotRows); }).catch(() => undefined);
+      ]).then(([jobRows, shotRows]) => {
+        if (activeProjectId.current !== projectId) return;
+        setJobs(jobRows); setShots(shotRows);
+      }).catch(() => undefined);
       loadSystem();
     }, 3000);
     return () => window.clearInterval(timer);
