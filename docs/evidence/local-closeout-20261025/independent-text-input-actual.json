@@ -43,5 +43,13 @@
   ],
   "no_replay_performed": true,
   "vlm_production_qualified": false,
-  "asr_qualification": "UNCHANGED_PRODUCTION_APPROVED"
+  "asr_qualification": "UNCHANGED_PRODUCTION_APPROVED",
+  "subsequent_remote_response_abandonment": {
+    "task_id": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+    "current_status": "ABANDONED",
+    "external_outcome": "UNKNOWN",
+    "automatic_replay": false,
+    "evidence": "agent-remote-reconciliation.json",
+    "historical_task_observations_modified": false
+  }
 }

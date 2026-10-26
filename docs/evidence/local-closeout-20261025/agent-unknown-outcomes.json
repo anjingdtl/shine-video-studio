@@ -1,5 +1,5 @@
 {
-  "stage": "SOFTWARE_VERIFIED_AUTHENTICATED_REMOTE_ABANDON_PENDING",
+  "stage": "SOFTWARE_VERIFIED_LEGACY_REMOTE_TIMEOUT_ABANDONED_NO_INFERENCE",
   "backend": {
     "name": "pytest",
     "errors": "0",
@@ -38,8 +38,10 @@
     "new_flow": "remote text abandonment cancel/confirm, JSON/auth headers, grant identity, credential clearing; intercepted, no inference"
   },
   "real_model_replayed": false,
-  "technical_reconciliation_pending_task": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+  "technical_reconciliation_pending_task": null,
   "vlm_production_qualified": false,
   "human_present_or_quality_approval": false,
-  "h3_submissions": 0
+  "h3_submissions": 0,
+  "technical_reconciliation_completed_task": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+  "actual_evidence": "agent-remote-reconciliation.json"
 }

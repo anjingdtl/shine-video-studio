@@ -1,0 +1,55 @@
+{
+  "status": "REMOTE_RESPONSE_ABANDONED_NO_INFERENCE_OR_QUALITY_APPROVAL",
+  "actor": "user-delegated-codex",
+  "human_present": false,
+  "human_quality_or_rights_approval": false,
+  "scope": "REMOTE_TEXT_RESPONSE_ABANDONMENT_ONLY_NO_LOCAL_UNLOAD_CLAIM",
+  "target_task_id": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+  "prior_stored_status": "REJECTED",
+  "prior_error_code": "LLM_TIMEOUT",
+  "external_outcome": "UNKNOWN",
+  "inference_calls": 0,
+  "h3_submissions": 0,
+  "automatic_replay": false,
+  "source_head": "e94930e9c7423073ca8df70314ae4f5250d9eb2b",
+  "actions": [
+    {
+      "action": "authenticated_remote_response_abandon",
+      "result": {
+        "id": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+        "status": "ABANDONED",
+        "external_outcome": "UNKNOWN",
+        "automatic_replay": false
+      }
+    }
+  ],
+  "original_request_guard": "BLOCKED_READ_ONLY_DOMAIN_CHECK_NO_ROLE_INVOCATION",
+  "unusable_input_requests_blocked": [
+    "41f20ac6-6d8b-4912-8f8b-60095c709410",
+    "7a526327-cc07-4d2d-afc0-141870662c74"
+  ],
+  "asr_status": "PRODUCTION_APPROVED",
+  "protected_tables_unchanged": true,
+  "local_release": {
+    "local_review_loaded": false,
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "comfy_queue_idle": true
+  },
+  "new_agent_tasks": 0,
+  "private_receipt_sha256": "918cb7902c62046cbebd4917d384189363b651c3a6560f6d57b41984faaada73",
+  "calibration_source_media": [
+    {
+      "job_id": "7a526327-cc07-4d2d-afc0-141870662c74",
+      "sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+      "file_unchanged": true
+    },
+    {
+      "job_id": "41f20ac6-6d8b-4912-8f8b-60095c709410",
+      "sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "file_unchanged": true
+    }
+  ],
+  "real_text_comparator_qualified": false,
+  "vlm_production_qualified": false
+}
