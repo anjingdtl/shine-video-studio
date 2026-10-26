@@ -323,7 +323,8 @@ attempts are replayed. The Web history/reconciliation controls use these same AP
 
 Fixed inbound model GETs may continue from a partial cache. Production HTTP downloads
 use at most 64 MiB per range for large files, revalidating each approved redirect and
-the exact `Content-Range` and received length. At most three interrupted streams are
+the exact `Content-Range` and received length. Interrupted requests finish the
+same fixed file block; the end byte never advances along with a partial offset. At most three interrupted streams are
 allowed before a complete range; the interruption counter resets only after a fully
 validated range advances the file. This bounds requests by `3 * (ceil(file_size / segment_bytes) + 1)`. Invalid ranges, excess bytes and digest failures are not retried.
 A server ignoring Range must supply the entire file from byte zero. Final promotion

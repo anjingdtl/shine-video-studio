@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-26T04:30:48.078046+00:00",
+  "collected_at": "2026-10-26T04:45:16.542235+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "508",
+    "tests": "509",
     "failures": "0",
     "errors": "0",
     "skipped": "0",
-    "time": "203.346"
+    "time": "209.775"
   },
   "checks": {
     "ruff": "PASS backend and local_review_server.py",
@@ -17,7 +17,7 @@
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
     "isolated_browser_e2e": "MOCK_VERIFIED; prior ac398cf 15 flows, api_errors=[]; frontend unchanged in range recovery stage",
-    "remote_ci": "BLOCKED_ACCOUNT_BILLING; source 0a35891 run 40245130085, all four jobs NOT_STARTED; see ci-account-block.json"
+    "remote_ci": "BLOCKED_ACCOUNT_BILLING; source 0aa25a4 run 40269621800, all four jobs NOT_STARTED; annotations read individually"
   },
   "real_text_roles": {
     "scriptwriter": {
@@ -424,5 +424,6 @@
   },
   "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json",
   "latest_delegated_recovery": "delegated-recovery-and-range.json",
-  "latest_qc_and_download": "qc-verdict-and-bounded-ranges.json"
+  "latest_qc_and_download": "qc-verdict-and-bounded-ranges.json",
+  "latest_fixed_block_download": "fixed-block-download.json"
 }

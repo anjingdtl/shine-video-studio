@@ -1,0 +1,75 @@
+{
+  "at": "2026-10-26T04:45:16.542235+00:00",
+  "source_base": "0aa25a432d7364bc4bc444fc3dde91e6dc604e2a",
+  "defect": "After a partial response, extending end to offset+segment_size moves the target; repeated short streams exhaust the budget without ever completing the intended block.",
+  "red_command": "backend/.venv/Scripts/python.exe -m pytest backend/tests/test_installer_redirects.py -q -k original_block",
+  "before_fix": "FAIL DownloadStreamInterrupted after ranges (0,2),(1,3),(2,4)",
+  "after_fix": "PASS same counterexample; fixed boundaries (0,2),(1,2),(2,2),(3,5),(4,5),(5,5),(6,7),(7,7)",
+  "backend": {
+    "tests": "509",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "209.775"
+  },
+  "targeted": {
+    "tests": "103",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "8.549"
+  },
+  "limits_unchanged": {
+    "block_bytes_max": 67108864,
+    "stream_attempts_before_completed_block": 3,
+    "final_whole_file_sha256": true,
+    "exact_range_and_received_length": true,
+    "max_requests_formula": "3 * (ceil(file_size / segment_bytes) + 1)"
+  },
+  "inflight_install_not_restarted": true,
+  "fixed_boundary_patch_applies_on_next_owned_service_start": true,
+  "live_fixed_install_plan": "9a844b71-c4e1-48f8-9e1a-41ddb3bbf635",
+  "real_voice_sdk": "NOT_RUN",
+  "real_t2va": "NOT_RUN",
+  "remote_ci": {
+    "head": "0aa25a432d7364bc4bc444fc3dde91e6dc604e2a",
+    "run": 40269621800,
+    "status": "BLOCKED_ACCOUNT_ACTIONS_QUOTA",
+    "checks": [
+      {
+        "id": 121399396202,
+        "name": "frontend",
+        "started": false,
+        "annotations": [
+          "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+        ]
+      },
+      {
+        "id": 121399396359,
+        "name": "backend-windows",
+        "started": false,
+        "annotations": [
+          "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+        ]
+      },
+      {
+        "id": 121399396451,
+        "name": "backend",
+        "started": false,
+        "annotations": [
+          "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+        ]
+      },
+      {
+        "id": 121399396468,
+        "name": "web-e2e",
+        "started": false,
+        "annotations": [
+          "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+        ]
+      }
+    ],
+    "payment_or_spending_settings_changed": false
+  },
+  "product_acceptance": "PARTIAL"
+}

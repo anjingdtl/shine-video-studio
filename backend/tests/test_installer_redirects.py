@@ -308,7 +308,7 @@ def test_bounded_ranges_preserve_offsets_and_verify_whole_object(monkeypatch, tm
     else:
         assert downloader.download(file, tmp_path).read_bytes() == data
         ranges = [(a, b) for _, a, b in requests[::2]]
-        assert ranges == ([(0, 2)] if mode == "ignored" else [(2, 4), (5, 7)]
+        assert ranges == ([(0, 2)] if mode == "ignored" else [(2, 2), (3, 5), (6, 7)]
                           if mode == "resume" else [(0, 2), (3, 5), (6, 7)])
         assert all(requests[i][1:] == requests[i+1][1:] for i in range(0, len(requests), 2))
 
@@ -340,7 +340,7 @@ def test_bounded_range_interruption_continues_from_actual_written_byte(monkeypat
     monkeypatch.setattr(httpx, "stream", stream)
     result = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
     assert result.read_bytes() == data
-    assert ranges == [(0, 2), (2, 4), (5, 7)]
+    assert ranges == [(0, 2), (2, 2), (3, 5), (6, 7)]
 
 
 def test_resume_budget_resets_only_after_a_complete_verified_range(monkeypatch, tmp_path):
@@ -367,4 +367,32 @@ def test_resume_budget_resets_only_after_a_complete_verified_range(monkeypatch, 
     monkeypatch.setattr(httpx, "stream", stream)
     path = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
     assert path.read_bytes() == data
-    assert ranges == [(0, 2), (1, 3), (4, 6), (5, 7), (8, 10), (9, 11), (12, 14), (13, 15)]
+    assert ranges == [(0, 2), (1, 2), (3, 5), (4, 5), (6, 8), (7, 8),
+                      (9, 11), (10, 11), (12, 14), (13, 14), (15, 15)]
+
+
+def test_interrupted_ranges_finish_the_original_block_instead_of_extending_its_end(monkeypatch, tmp_path):
+    data = b"abcdefgh"
+    file = spec().model_copy(update={"size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    ranges = []
+
+    class Interrupted(httpx.SyncByteStream):
+        def __init__(self, prefix):
+            self.prefix = prefix
+
+        def __iter__(self):
+            yield self.prefix
+            raise httpx.ReadError("interrupted before end of range")
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        start, end = map(int, kwargs["headers"]["Range"][6:].split("-"))
+        ranges.append((start, end))
+        headers = {"content-range": f"bytes {start}-{end}/{len(data)}"}
+        yield (httpx.Response(206, stream=Interrupted(data[start:start+1]), headers=headers)
+               if start < end else httpx.Response(206, content=data[start:end+1], headers=headers))
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    path = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
+    assert path.read_bytes() == data
+    assert ranges == [(0, 2), (1, 2), (2, 2), (3, 5), (4, 5), (5, 5), (6, 7), (7, 7)]

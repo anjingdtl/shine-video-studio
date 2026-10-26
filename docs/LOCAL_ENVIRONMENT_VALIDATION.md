@@ -1,6 +1,6 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
-10-26 授权续轮：完整后端 **508 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
+10-26 授权续轮：完整后端 **509 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
 真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
 每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
 新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。

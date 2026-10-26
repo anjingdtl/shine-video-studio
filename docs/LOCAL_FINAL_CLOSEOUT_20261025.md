@@ -1,6 +1,6 @@
 # 本轮本机收尾补充报告（2026-10-25）
 
-10-26 授权续轮：完整后端 **508 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
+10-26 授权续轮：完整后端 **509 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
 真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
 每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
 新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。
@@ -448,3 +448,16 @@ QC/正常 Worker/旧 offline E2E 定向 **49 passed**，Ruff、TypeScript/Vite �
 前端未修改，此前 15 类隔离浏览器仍单列为 MOCK_VERIFIED。当前远端 `6a72298` 四项 CI 未启动，
 已逐一读取 annotations；账户包含额度耗尽，未变更付款/付费预算。工程通过不能替代当前远端 CI 或真实成片验收。
 机器记录见 [正反例与分段下载](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。
+
+
+## 7.15 续传固定块边界反例
+
+进一步构造“每个连接仅交付短前缀就断开”的反例，发现按 `offset + segment_bytes` 重算终点会让目标不断后移，
+即使累计前进也无法完成原块，提前耗尽预算。保留失败用例后，终点改为固定文件块的边界；重试只取该块剩余字节。
+原先的 Range/长度/预算/整文件 SHA-256 检查均保留，没有通过扩大次数掩盖问题。
+
+同一反例转绿，下载/准备定向 **103 passed**；完整后端 **509 passed，零 skipped/failures/errors**。
+正在执行的模型安装未被中途重启，仍由其启动时的模块完成；固定边界补丁在下一次受控启动生效。
+最后一个语音包仍在传输，尚不计为四包安装或语音质量通过。
+`0aa25a4` 的四项远端 CI 均未启动，已再逐项读取 annotations；账户额度阻断未改变。
+记录见 [固定块证据](evidence/local-closeout-20261025/fixed-block-download.json)。

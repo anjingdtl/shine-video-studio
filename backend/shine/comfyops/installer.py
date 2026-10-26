@@ -213,8 +213,8 @@ class ControlledDownloader:
                     raise
             else:
                 # Reset only after a complete, range/length-checked segment.
-                # Each success advances at least segment_bytes (except the last),
-                # bounding requests by 3 * (ceil(file_size / segment_bytes) + 1).
+                # Each success completes the next fixed block, bounding requests
+                # by 3 * (ceil(file_size / segment_bytes) + 1).
                 interruptions = 0
         if not self.valid(partial, spec):
             partial.unlink(missing_ok=True)
@@ -229,7 +229,7 @@ class ControlledDownloader:
             offset = 0
         range_stream = getattr(self.transport, "stream_range", None)
         end = (
-            min(offset + self.segment_bytes, spec.size) - 1
+            min((offset // self.segment_bytes + 1) * self.segment_bytes, spec.size) - 1
             if range_stream and spec.size > self.segment_bytes else None
         )
         if end is not None:
