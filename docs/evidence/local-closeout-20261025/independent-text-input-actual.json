@@ -1,0 +1,47 @@
+{
+  "status": "ACTUAL_TEXT_PATH_NOT_QUALIFIED",
+  "source_head": "60e5e8f0e387d1c02bc04eb53e9f6fdb50acbd87",
+  "logical_role_invocations": 2,
+  "media_bytes_transmitted": 0,
+  "h3_submissions": 0,
+  "human_present_or_quality_approval": false,
+  "usable_assessments_created": 0,
+  "tasks": [
+    {
+      "id": "f8c995dc-d833-4ee3-9156-9924f76cc4cb",
+      "stored_status": "REJECTED",
+      "error_code": "CONTRACT_OR_POLICY_REJECTED",
+      "role": "qc_reviewer",
+      "schema": "StyleInputAssessment"
+    },
+    {
+      "id": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+      "stored_status": "REJECTED",
+      "error_code": "LLM_TIMEOUT",
+      "role": "qc_reviewer",
+      "schema": "StyleInputAssessment"
+    }
+  ],
+  "positive_observation": "returned role contract/policy rejection; precise safe rejection reason was not retained",
+  "walking_observation": "request timed out with no response capture; external inference outcome remains unknown",
+  "walking_request_calls_observed": 1,
+  "all_local_leases_released": true,
+  "review_model_loaded": false,
+  "review_allocated_bytes": 0,
+  "review_reserved_bytes": 0,
+  "comfy_queue_idle": true,
+  "protected_tables_unchanged": true,
+  "receipts_sha256": {
+    "real-independent-text-input-20261027.json": "88000866d378dfe78652922dcd721962f11178aaa8a4d4eb2b38bedb3bd58d1e",
+    "real-independent-text-walking-capture-20261027.json": "318fec56187048cc898a23163fb1672cc2243d60990db5cc2c7b57aec438b0fe"
+  },
+  "known_remaining_engineering": [
+    "retain sanitized exact contract rejection reason",
+    "classify non-Mock timeout as unknown outcome rather than a definitive rejected completion",
+    "block un-reconciled or abandoned identical automatic replays and stale-positive fallback after an unresolved newer call",
+    "explicit technical remote-response abandonment with no inference or quality approval"
+  ],
+  "no_replay_performed": true,
+  "vlm_production_qualified": false,
+  "asr_qualification": "UNCHANGED_PRODUCTION_APPROVED"
+}
