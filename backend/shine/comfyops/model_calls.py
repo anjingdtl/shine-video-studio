@@ -235,6 +235,7 @@ class TrackedProvider:
                 effective_mock = bool(self.provider.is_mock) or bool(result_mock)
                 row.trace = {
                     **row.trace,
+                    "executor_identity": getattr(self.provider, "last_executor_identity", None),
                     "result_sha256": graph_hash(digest_input(result)),
                     "result_is_mock": result_mock,
                     "is_mock": effective_mock,

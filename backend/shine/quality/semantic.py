@@ -199,10 +199,13 @@ class OpenAICompatibleVisionReviewer:
                 raise ValueError("VLM_DECISION_MISSING")
             if parsed["verdict"] not in {"passed", "failed", "needs_review"}:
                 raise ValueError("VLM_VERDICT_INVALID")
-            parsed["is_mock"] = bool(parsed.get("is_mock", False))
+            parsed["is_mock"] = bool(parsed.get("is_mock", False)) or bool(body.get("is_mock", False))
             parsed["input_sha256"] = context.artifact_sha256
             parsed["model"] = self.config.model
             parsed["reviewer"] = self.name
+            recorder = getattr(self, "record_executor_identity", None)
+            if recorder:
+                recorder(body, response_hash)
             return SemanticReviewResult.model_validate(parsed)
         except ReceivedReviewError:
             raise
@@ -218,6 +221,25 @@ class LocalReviewRelease:
     """Local endpoints must explicitly confirm actual model release."""
 
     requires_remote_consent = False
+    last_executor_identity = None
+
+    def record_executor_identity(self, body, response_hash):
+        # Optional extension: ordinary compatible endpoints remain usable but
+        # cannot supply native capability evidence without this fingerprint.
+        self.last_executor_identity = None
+        identity = body.get("executor_identity")
+        if identity is None:
+            return
+        from shine.quality.identity import ExecutorIdentity
+
+        try:
+            proof = ExecutorIdentity.model_validate(identity)
+            if (proof.model_id != self.config.model or body.get("model") != self.config.model
+                    or body.get("is_mock") is not False):
+                raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
+        except ValueError as exc:
+            raise ReceivedReviewError("EXECUTOR_IDENTITY_INVALID", response_hash) from exc
+        self.last_executor_identity = proof.model_dump()
 
     def release_models(self):
         endpoint = require_loopback_url(self.config.base_url).rstrip("/")
@@ -284,6 +306,9 @@ class OpenAICompatibleASRReviewer:
         if response.status_code >= 400:
             raise RuntimeError(f"ASR request failed with status {response.status_code}")
         body = response.json()
+        recorder = getattr(self, "record_executor_identity", None)
+        if recorder:
+            recorder(body, hashlib.sha256(response.content).hexdigest())
         segments = [
             TranscriptSegment(
                 start_s=float(item.get("start", 0)),

@@ -20,22 +20,50 @@ from threading import Lock
 from fastapi import File, Form, UploadFile
 
 
-def verify_model_manifest(manifest):
+def _verified_model_files(manifest):
     root = Path(manifest["model_root"]).resolve()
     declared = {entry["path"] for entry in manifest["files"]}
     if not {"config.json", "model.safetensors", "tokenizer.json"}.issubset(declared):
         raise ValueError("INCOMPLETE_MODEL_HASH_MANIFEST")
     if len(declared) != len(manifest["files"]):
         raise ValueError("DUPLICATE_MODEL_FILE")
+    resolved, verified = set(), []
     for entry in manifest["files"]:
         path = (root / entry["path"]).resolve()
         if not path.is_relative_to(root) or not path.is_file():
             raise ValueError("MODEL_FILE_OUTSIDE_ROOT_OR_MISSING")
+        if path in resolved:
+            raise ValueError("DUPLICATE_MODEL_FILE")
+        resolved.add(path)
+        size = path.stat().st_size
+        if "bytes" in entry and (type(entry["bytes"]) is not int or entry["bytes"] != size):
+            raise ValueError("MODEL_SIZE_CHANGED")
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         if digest != entry["sha256"]:
             raise ValueError("MODEL_HASH_CHANGED")
-    return root
+        verified.append({"path": path.relative_to(root).as_posix(), "sha256": digest, "bytes": size})
+    return root, sorted(verified, key=lambda entry: entry["path"])
+
+
+def verify_model_manifest(manifest):
+    return _verified_model_files(manifest)[0]
+
+
+def verified_model_identity(manifest):
+    """Fingerprint checked bytes, not the operator-supplied manifest label.
+
+    No absolute paths or credentials belong in the public executor identity.
+    This is a startup identity, not proof of inference or quality acceptance.
+    """
+    _, files = _verified_model_files(manifest)
+    canonical = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "model_id": manifest["model_id"],
+        "files_sha256": hashlib.sha256(canonical).hexdigest(),
+        "file_count": len(files),
+        "bytes": sum(entry["bytes"] for entry in files),
+    }
 
 
 def review_token_limit(body):
@@ -49,12 +77,30 @@ def build_app(manifest):
     from fastapi import FastAPI, HTTPException
     from PIL import Image
 
-    root = verify_model_manifest(manifest)
+    identity = verified_model_identity(manifest)
+    root = Path(manifest["model_root"]).resolve()
+    verified_models = {manifest["model_id"]: identity}
     asr_manifest = manifest.get("asr")
     if asr_manifest:
-        asr_root = verify_model_manifest(asr_manifest)
+        if asr_manifest["model_id"] in verified_models:
+            raise ValueError("DUPLICATE_EXECUTOR_MODEL_ID")
+        verified_models[asr_manifest["model_id"]] = verified_model_identity(asr_manifest)
+        asr_root = Path(asr_manifest["model_root"]).resolve()
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
     import torch
+
+    import importlib.metadata
+
+    runtime = {
+        "python": sys.version,
+        "packages": {name: importlib.metadata.version(name) for name in ("torch", "transformers")},
+        "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+    runtime_sha256 = hashlib.sha256(
+        json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    def executor_identity(model_id):
+        return {"schema_version": "1", "runtime_sha256": runtime_sha256, **verified_models[model_id]}
 
     guard = Lock()
     state = {"model": None, "processor": None}
@@ -72,6 +118,8 @@ def build_app(manifest):
             "allocated_bytes": torch.cuda.memory_allocated(),
             "reserved_bytes": torch.cuda.memory_reserved(),
             "manifest_sha256": manifest["sha256"],
+            "verified_models": verified_models,
+            "runtime_sha256": runtime_sha256,
         }
 
     @app.get("/v1/models")
@@ -141,6 +189,7 @@ def build_app(manifest):
 
         with guard:
             if state["asr"] is None:
+                verify_model_manifest(asr_manifest)
                 state["asr"] = pipeline(
                     "automatic-speech-recognition",
                     model=str(asr_root),
@@ -169,6 +218,7 @@ def build_app(manifest):
                 "segments": segments,
                 "is_mock": False,
                 "model": model,
+                "executor_identity": executor_identity(model),
                 "speaker": "UNKNOWN",
                 "confidence": None,
             }
@@ -217,6 +267,7 @@ def build_app(manifest):
             raise HTTPException(422, "EVIDENCE_FRAMES_REQUIRED")
         with guard:
             if state["model"] is None:
+                verify_model_manifest(manifest)
                 if torch.cuda.mem_get_info()[0] < 6000 * 1024**2:
                     raise HTTPException(409, "PHYSICAL_GPU_BUDGET_UNAVAILABLE")
                 state["processor"] = AutoProcessor.from_pretrained(
@@ -250,6 +301,7 @@ def build_app(manifest):
             return {
                 "model": manifest["model_id"],
                 "is_mock": False,
+                "executor_identity": executor_identity(manifest["model_id"]),
                 "choices": [{"message": {"role": "assistant", "content": answer},
                              "finish_reason": "length" if generated.shape[1] >= token_limit else "stop"}],
                 "usage": {"prompt_tokens": inputs["input_ids"].shape[1], "completion_tokens": generated.shape[1]},

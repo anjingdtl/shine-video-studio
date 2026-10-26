@@ -345,3 +345,25 @@ match exactly. It never changes start/end times or inserts a missing spoken char
 retain the raw alignment tokens in optional alignment_evidence. Zero/reversed/out-of-range spans remain hard
 errors. Standard user identity variables needed by torch/getpass are allowed in private child environments;
 operator/provider secret variables remain excluded. Human listening/identity acceptance remains independent.
+
+
+### Local review executor file identity
+
+The optional `executor_identity` on local VLM/ASR responses contains schema version `1`,
+model ID, canonical verified-file SHA-256, file count/bytes, and runtime SHA-256. The latter
+pins the adapter source, Python version and Torch/Transformers distribution versions.
+`/health` exposes the verified model descriptors and runtime digest, without absolute
+model paths or credentials. The old `manifest_sha256` remains an operator-supplied label;
+it is not the canonical verified-file digest.
+
+Startup and every cold model load verify manifest file sizes (where declared) and SHA-256;
+path aliases to the same file are rejected. A matching typed identity is copied from each
+actual response into the completed model-call trace. A malformed identity, different
+response model, or Mock envelope claiming a real identity is a definitive response failure;
+there is no automatic inference retry. An ordinary compatible endpoint without this
+extension remains usable but has no native capability identity evidence. Prior calls are
+not backfilled. Outer VLM Mock provenance is monotonic even when inner JSON says false.
+
+This records execution identity only. Native workflow registration/publication and frozen
+preproduction provider bindings still need their dedicated implementation and acceptance;
+these fields alone do not upgrade a capability, asset or film.

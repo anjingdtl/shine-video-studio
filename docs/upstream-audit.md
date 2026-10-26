@@ -153,3 +153,16 @@ passed real text/timing checks; no model timestamp was fabricated and no human v
 See `docs/evidence/local-closeout-20261025/real-qwen-sdk-and-alignment.json` for exact scope and limits.
 The fixed T2VA model/license proposal is being downloaded under explicit delegated operator authority for
 local research only; neither Apache/MIT licensing nor real T2VA render acceptance is inferred.
+
+
+## 2026-10-26 native review file identity preparation
+
+Re-read the fixed Hugging Face repository trees for the two local review revisions above.
+All 13 declared upstream Qwen3-VL files and 12 declared upstream Whisper files matched
+existing local sizes and upstream LFS SHA-256 or Git blob SHA-1. The local VLM
+`configuration.json` and Whisper `source-audit.json` are not files in those fixed trees;
+they are excluded from the proposed pinned install scopes, without editing the originals.
+The ignored proposals have not yet been registered or installed as native capability
+packages. Canonical executor file identities additionally include checked relative names,
+SHA-256 and actual byte sizes; they are independent of the old supplied manifest label.
+No model source, license conclusion, master-asset grant or human acceptance was expanded.
