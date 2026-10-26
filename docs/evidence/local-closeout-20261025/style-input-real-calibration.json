@@ -1,0 +1,82 @@
+{
+  "status": "ACTUAL_CONTROL_SUITE_FAILED_VLM_NOT_PUBLISHED",
+  "source_head": "2b13d773c694923d4dd43aa353d2e042a6c8bcd9",
+  "contract": "seven-field-v1",
+  "vlm_production_qualified": false,
+  "human_present_or_quality_approval": false,
+  "h3_submissions": 0,
+  "protected_tables_unchanged": true,
+  "stages": [
+    {
+      "name": "checklist-positive",
+      "call_id": "00503bed-c875-4956-83a8-97ca4cfe8f3e",
+      "call_status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "contract_met": true,
+      "verdict": "passed",
+      "finding_codes": [],
+      "physical_release": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY"
+    },
+    {
+      "name": "checklist-negative",
+      "call_id": "21db902f-9609-4f4f-8ab5-0f16c02b50c8",
+      "call_status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "contract_met": true,
+      "verdict": "failed",
+      "finding_codes": [
+        "IDENTITY_MASK_VIOLATION",
+        "COSTUME_MASK_VIOLATION"
+      ],
+      "physical_release": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY"
+    },
+    {
+      "name": "checklist-frozen-style-conflict",
+      "call_id": "1660a723-39c5-412d-b682-9d7d9d9aaf07",
+      "call_status": "FAILED",
+      "lease_status": "RELEASED",
+      "contract_met": false,
+      "received_response": {
+        "sha256": "c1f0f3328c6b00ea7b95d8297d5dbd5cdd8c390f0be85392f94f9a02953f8e6b",
+        "finish_reason": null,
+        "error_code": "VLM_RESPONSE_CONTRACT_INVALID",
+        "retryable": false
+      },
+      "physical_release": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "cleanup_script_observation": "first cleanup stopped on missing failed-response executor_identity; independently completed using exact process owner after verifying FAILED call and RELEASED lease"
+    },
+    {
+      "name": "checklist-followup-walking-style-conflict",
+      "call_id": "8b2ab2ac-880c-40fb-86a5-2242f6348b16",
+      "call_status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "contract_met": false,
+      "verdict": "passed",
+      "finding_codes": [],
+      "physical_release": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY"
+    }
+  ],
+  "original_receipts_modified": false,
+  "receipts_sha256": {
+    "real-vlm8b-style-checklist-calibration-20261026.json": "c49bc47b4b05b9b63fe350bad912e70a8d4ebc441bbeb34ac3a61a65fdb8072c",
+    "real-vlm8b-checklist-walking-followup-20261026.json": "bd2637351f62cd218c7251e21b9b849e6b8b43b28bef73ad983b9cf1769d66fa",
+    "checklist-failed-call-resource-release-20261026.json": "995e0c3697e38e1d293a50085418bab8eb54f0c0848d76cbe8f9a3e1be5b026e"
+  },
+  "comfy_restored": "RESTORED_IDLE_NO_RENDER_REPLAY",
+  "asr_qualification": "UNCHANGED_PRODUCTION_APPROVED",
+  "input_snapshot_rechecked": {
+    "style_version_id": "5380cca5-efb1-4071-bf89-0f9604d41cf9",
+    "frozen_posture": "sits centre-left",
+    "walking_request": "walks steadily toward the camera",
+    "snapshot_substitution": false
+  },
+  "next_investigation": "Separate text input consistency from pixel review; the 8B checklist explanation still compares visual appearance instead of the two text inputs. No silent text-provider fallback or cloud media transfer.",
+  "walking_false_pass": {
+    "model_verdict": "passed",
+    "finding_codes": [],
+    "input_check_claim": "shot_blocking consistent",
+    "model_detail": "Character is centered, gaze directed into depth of frame as she walks toward camera.",
+    "local_response_sha256": "3166bc1fec146db432c9f072be524f3d2711f3d50ecaf2ad342e76791961917b",
+    "private_full_response_committed": false
+  }
+}

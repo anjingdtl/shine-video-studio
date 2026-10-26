@@ -1,5 +1,5 @@
 {
-  "stage": "SOFTWARE_VERIFIED_REAL_CHECKLIST_CALIBRATION_PENDING",
+  "stage": "SOFTWARE_VERIFIED_REAL_SUITE_FAILED_VLM_WITHHELD",
   "backend": {
     "name": "pytest",
     "errors": "0",
@@ -35,7 +35,7 @@
   "production_manifest": "OLD_VLM_PROOF_WITHOUT_CONTRACT_MARKER_REJECTED",
   "ruff": "PASS",
   "typescript_vite": "PASS",
-  "real_vlm_retested": false,
+  "real_vlm_retested": true,
   "vlm_production_qualified": false,
   "h3_submissions": 0,
   "human_present_or_quality_approval": false,
@@ -43,5 +43,6 @@
     "run_id": 40332145147,
     "four_checks": "FAILED_TO_START",
     "checked_backend_annotation": "recent account payments have failed or spending limit needs to be increased"
-  }
+  },
+  "actual_evidence": "style-input-real-calibration.json"
 }
