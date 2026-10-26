@@ -459,5 +459,16 @@
     "ruff": "passed",
     "frontend": "UNCHANGED_PREVIOUS_TYPESCRIPT_VITE_AND_17_MOCK_BROWSER_CHECKS",
     "real_media_quality": "NOT_PASSED"
+  },
+  "calibration_design_audit": {
+    "at": "2026-10-26T12:39:09.612865+00:00",
+    "source_job": "7a526327-cc07-4d2d-afc0-141870662c74",
+    "shot_requires": "walking, medium shot, slow dolly in",
+    "unchanged_frozen_style_requires": "sitting centre-left, medium close shot, slight handheld breathing",
+    "valid_as_unambiguous_frozen_style_positive": false,
+    "old_vlm_response_preserved": true,
+    "old_vlm_capability_remains_deprecated": true,
+    "new_calibration_design": "Use the style-compatible fictional T2VA candidate for positive evaluation, a memory-only full-face mask costume counterfactual as negative, and both legacy walking/empty-street requests as frozen-style-conflict observations. No database ShotSpec or frozen Style mutation. A positive candidate failure may be genuine render failure, not automatically a VLM defect.",
+    "human_quality_approval": false
   }
 }
