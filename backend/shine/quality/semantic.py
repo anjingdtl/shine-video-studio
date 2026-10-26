@@ -145,6 +145,11 @@ class OpenAICompatibleVisionReviewer:
         schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict"})
         schema["properties"]["findings"].pop("default", None)
         schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
+        review_spec = context.shot_spec.model_dump(mode="json")
+        if context.shot_spec.continuity.mode == "cut":
+            # The enum is orchestration metadata. Express its meaning for a
+            # single-shot reviewer without implying a cut inside the artifact.
+            review_spec["continuity"]["mode"] = "independent shot; no previous-shot frame constraint"
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -163,11 +168,12 @@ class OpenAICompatibleVisionReviewer:
                     "A single uninterrupted take does not violate cut mode; never require an internal cut from it. "
                     "last_frame is soft reference continuity to a previous shot, "
                     "not a guarantee of hard frame anchoring. "
-                    "Do not infer identity from descriptive text alone; disclose missing identity evidence. "
+                    "Do not infer identity from descriptive text alone; disclose missing required identity evidence. "
+                    "Empty character and asset bindings do not themselves constitute an identity or costume violation. "
                     "Keep findings concise and group repeated observations. "
                     "raw_summary must be at most 300 characters. "
                     "Do not omit distinct violations or uncertainties to fit the output budget. "
-                    f"ShotSpec: {context.shot_spec.model_dump_json()}\n"
+                    f"ShotSpec: {json.dumps(review_spec, ensure_ascii=False)}\n"
                     f"Style: {context.style.model_dump_json()}\n"
                     f"JSON Schema: {json.dumps(schema, ensure_ascii=False)}"
                 ),
