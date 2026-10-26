@@ -1,5 +1,5 @@
 {
-  "stage": "FIXED_OFFICIAL_CANDIDATE_PREPARED_NOT_INSTALLED_OR_QUALIFIED",
+  "stage": "CONTROLLED_INSTALL_RUNNING_NOT_RUNTIME_OR_QUALITY_ACCEPTED",
   "source_revision": "9cdc6310a8cb770ce18efaf4e9935334512aee45",
   "source_repository": "Qwen/Qwen3-VL-8B-Instruct-FP8",
   "license_card": "Apache-2.0",
@@ -154,5 +154,36 @@
   "h3_resubmissions": 0,
   "production_qualified": false,
   "human_present_or_quality_approval": false,
-  "github_ci": "FREE_QUOTA_EXHAUSTED_ZERO_BUDGET_NO_ACCOUNT_CHANGES"
+  "github_ci": "FREE_QUOTA_EXHAUSTED_ZERO_BUDGET_NO_ACCOUNT_CHANGES",
+  "registered_packages": [
+    {
+      "id": "4a05e8f9-a870-48ad-aa86-9f84747964f9",
+      "sha256": "462c324dcae609d19f7a7e391b2b360e9d32966468404fec24dbe40db7053f6d",
+      "name": "Qwen3-VL-8B-Instruct-FP8-9cdc6310"
+    }
+  ],
+  "installation_plan": {
+    "id": "1b2b9d23-d884-4d4d-bbdd-3450a1585ca8",
+    "sha256": "60d388df296eda4f1fbce4b3c5533528cf0cd06f31d852047cb81c54c7a1733c"
+  },
+  "installation_attempt_id": "2663f819-f427-41b5-b7a0-6ccf470a7e2b",
+  "installation_attempt_status": "SUBMIT_INTENT",
+  "backend_after_native_budget_fix": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "611",
+    "time": "231.083",
+    "timestamp": "2026-10-26T20:03:06.769069+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "old_asr_binding": "OLD_RUNTIME_RECORD_RETAINED_RECALIBRATION_REQUIRED",
+  "source_files_sha256": {
+    "backend/shine/api_preparation.py": "ed9557fa250578d9ad2749cbd7c10026bd952b2d2e9b244a8d54f3447dac4688",
+    "backend/shine/comfyops/native.py": "37d65a521e0ad98101de8ff497ce8687c96f6a5d2c5420db3b6cce674ed0da51",
+    "backend/shine/quality/runtime.py": "48dfeb58cd38f91581a61666958fb1ae63cfdb312075f9294fba7569149f6514",
+    "backend/shine/quality/semantic.py": "4cc85948a87088336936b0d24f153c37e1f49a6e0b77c8002570531a39c91084",
+    "scripts/local_review_server.py": "658a70eb1c3513e6bb3ca27f9f4fa4b2769927b6fc1063826677f79bd7157aed"
+  }
 }

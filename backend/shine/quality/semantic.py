@@ -243,6 +243,9 @@ class LocalReviewRelease:
     requires_remote_consent = False
     last_executor_identity = None
 
+    def resource_budget_mb(self, method):
+        return self._resource_mb
+
     def record_executor_identity(self, body, response_hash):
         # Optional extension: ordinary compatible endpoints remain usable but
         # cannot supply native capability evidence without this fingerprint.
@@ -279,8 +282,11 @@ class LocalVisionReviewer(LocalReviewRelease, OpenAICompatibleVisionReviewer):
     name = "local-openai-compatible-vlm"
     accepts_local_references = True
 
-    def __init__(self, config):
+    def __init__(self, config, *, resource_mb=8000):
         require_loopback_url(config.base_url)
+        if type(resource_mb) is not int or not 8000 <= resource_mb <= 16384:
+            raise ValueError("MODEL_RESOURCE_BUDGET_INVALID")
+        self._resource_mb = resource_mb
         super().__init__(config)
 
     def _reference_content(self, context):
@@ -351,8 +357,11 @@ class OpenAICompatibleASRReviewer:
 class LocalASRReviewer(LocalReviewRelease, OpenAICompatibleASRReviewer):
     name = "local-openai-compatible-asr"
 
-    def __init__(self, config):
+    def __init__(self, config, *, resource_mb=4000):
         require_loopback_url(config.base_url)
+        if type(resource_mb) is not int or not 4000 <= resource_mb <= 16384:
+            raise ValueError("MODEL_RESOURCE_BUDGET_INVALID")
+        self._resource_mb = resource_mb
         super().__init__(config)
 
 

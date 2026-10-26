@@ -385,6 +385,7 @@ def test_native_budget_cannot_understate_actual_shared_model_admission(native):
         "during-package",
         "during-workflow-payload",
         "during-model-payload",
+        "during-resource-budget",
     ],
 )
 def test_production_review_checks_frozen_binding_before_and_after_actual_call(native, tmp_path, change):
@@ -443,6 +444,15 @@ def test_production_review_checks_frozen_binding_before_and_after_actual_call(na
                 plan.payload = {**plan.payload, "offline": True}
 
         n["response_hook"][0] = mutate_plan
+    elif change == "during-resource-budget":
+
+        def understate_active_budget():
+            from shine.comfyops.scheduler import CURRENT_RESOURCE
+
+            with n["factory"].begin() as db:
+                db.get(ResourceLease, CURRENT_RESOURCE.get()).budget_mb = 1
+
+        n["response_hook"][0] = understate_active_budget
     elif change in {"during-package", "during-workflow-payload", "during-model-payload"}:
 
         def mutate_dependency():
@@ -485,3 +495,56 @@ def test_production_review_checks_frozen_binding_before_and_after_actual_call(na
         else:
             assert not call.trace.get("submitted")
         assert db.get(ResourceLease, call.trace["resource_id"]).status == "RELEASED"
+
+
+def larger_native_draft(n):
+    from shine.comfy.workflow import graph_hash
+
+    package_id = n['row']['payload']['model_ids'][0]
+    with n['factory'].begin() as db:
+        pkg = db.get(ModelPackage, package_id)
+        pkg.payload = {**pkg.payload, 'resource_mb': 14000}
+        pkg.sha256 = graph_hash(pkg.payload)
+    body = {**n['row']['payload'], 'name': 'larger isolated fixture',
+            'resource_mb': 14000, 'package_hashes': {}}
+    draft = post(n['client'], '/workflow-capabilities/drafts', body)
+    result = post(n['client'], f"/workflow-capabilities/{draft['id']}/validate-native", operator=True)
+    assert not result['errors']
+    return result['revision']
+
+
+def test_larger_native_budget_is_used_by_the_actual_configured_reviewer(native, tmp_path):
+    from shine.quality.runtime import configured_reviewers
+
+    n = native
+    larger_native_draft(n)
+    reviewer = configured_reviewers(n['factory'], n['settings'])[1 if n['category'] == 'ASR' else 0]
+    method = 'transcribe' if n['category'] == 'ASR' else 'review'
+    assert reviewer.resource_budget_mb(method) == 14000
+    wrapped = TrackedProvider(reviewer, n['factory'], n['project'])
+    if method == 'review':
+        wrapped.review(context(tmp_path))
+    else:
+        audio = tmp_path / 'larger-fixture.wav'
+        audio.write_bytes(b'fixture transport only')
+        wrapped.transcribe(audio)
+    with n['factory']() as db:
+        task = db.scalars(select(AgentTaskRecord).where(AgentTaskRecord.role_id.like('model_call:%'))
+                          .order_by(AgentTaskRecord.created_at.desc())).first()
+        lease = db.get(ResourceLease, task.trace['resource_id'])
+        assert task.status == 'COMPLETED'
+        assert lease.status == 'RELEASED' and lease.budget_mb == 14000
+
+
+def test_old_smaller_lease_cannot_qualify_a_larger_native_workflow(native):
+    n = native
+    draft = larger_native_draft(n)
+    grant = post(n['client'], '/preparation/approval-grants',
+                 {'action': 'workflow_validate', 'target_id': draft['id']}, operator=True)
+    response = n['client'].post(
+        f"/api/v1/workflow-capabilities/{draft['id']}/native-execution-evidence",
+        json={'grant_id': grant['grant_id'], 'snapshot': grant['snapshot'], 'offline': False,
+              'evidence': 'isolated smaller-lease counterexample', 'project_id': n['project'],
+              'samples': n['samples']}, headers=HEADERS)
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'COMPLETED_REAL_NATIVE_CALL_REQUIRED'

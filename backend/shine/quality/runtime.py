@@ -17,6 +17,24 @@ from shine.quality.semantic import (
 from shine.security import is_loopback_url
 
 
+def _native_budget(db, config, category, minimum):
+    """Use checked native declarations for admission, never as production approval."""
+    from shine.comfyops.models import WorkflowRevision
+    from shine.comfyops.native import native_errors
+
+    budgets = [minimum]
+    rows = db.scalars(select(WorkflowRevision).where(
+        WorkflowRevision.status.in_(["STATIC_VALIDATED", "REAL_TESTED", "PRODUCTION_APPROVED"])
+    ))
+    for row in rows:
+        binding = row.payload.get("native_provider") or {}
+        if (row.payload.get("category") == category and binding.get("profile_id") == config.profile_id
+                and binding.get("model") == config.model
+                and not native_errors(db, row.payload, workflow_hash=row.sha256)):
+            budgets.append(row.payload["resource_mb"])
+    return max(budgets)
+
+
 def configured_reviewers(factory, settings):
     """No default provider and no fallback to the textual qc_reviewer role.
 
@@ -36,5 +54,9 @@ def configured_reviewers(factory, settings):
             config = gateway.config_for(gateway.profile_for_role(db, role))
             if config.kind not in {"openai_compatible", "ollama"}:
                 raise LLMNotConfigured(f"{role} requires an explicitly routed OpenAI-compatible media endpoint")
-            reviewers.append((local if is_loopback_url(config.base_url) else remote)(config))
+            if is_loopback_url(config.base_url):
+                category, minimum = ("VLM_REVIEW", 8000) if role == "vlm_reviewer" else ("ASR", 4000)
+                reviewers.append(local(config, resource_mb=_native_budget(db, config, category, minimum)))
+            else:
+                reviewers.append(remote(config))
     return tuple(reviewers)

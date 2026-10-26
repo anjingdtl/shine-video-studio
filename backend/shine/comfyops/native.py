@@ -35,8 +35,15 @@ class NativeProviderBinding(BaseModel):
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
             raise ValueError("DUPLICATE_RUNTIME_FILE")
-        if not {"config.json", "model.safetensors", "tokenizer.json"} <= set(self.runtime_files):
+        files = set(self.runtime_files)
+        if not {"config.json", "tokenizer.json"} <= files or not (
+            "model.safetensors" in files or "model.safetensors.index.json" in files
+        ):
             raise ValueError("INCOMPLETE_MODEL_HASH_MANIFEST")
+        if "model.safetensors.index.json" in files and (
+            "model.safetensors" in files or not any(name.endswith(".safetensors") for name in files)
+        ):
+            raise ValueError("MODEL_SHARD_INDEX_INVALID")
         return self
 
     def provider_snapshot(self):
@@ -110,12 +117,12 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
         from shine.comfyops.model_calls import MODEL_METHODS
 
         method = "review" if category == "VLM_REVIEW" else "transcribe"
-        budget = MODEL_METHODS[method][1]
+        minimum = MODEL_METHODS[method][1]
+        budget = package.payload.get("resource_mb") if package else None
         if (
-            payload.get("resource_mb") != budget
-            or not package
-            or package.payload.get("resource_mb", 0) is None
-            or package.payload.get("resource_mb", 0) < budget
+            type(budget) is not int
+            or not minimum <= budget <= 16384
+            or payload.get("resource_mb") != budget
             or package.payload.get("resource_measurement") not in {"KNOWN", "ESTIMATED"}
         ):
             errors.append("NATIVE_RESOURCE_BUDGET_MISMATCH")
@@ -151,7 +158,7 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
             for sample in proof["samples"]:
                 call = db.get(AgentTaskRecord, sample["call_id"])
                 if (
-                    not valid_call(db, call, category, binding, proof["project_id"])
+                    not valid_call(db, call, category, binding, proof["project_id"], budget_mb=payload["resource_mb"])
                     or call.input_hash != sample["input_hash"]
                     or call.trace.get("result_sha256") != sample["result_sha256"]
                 ):
@@ -159,7 +166,7 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
     return errors
 
 
-def valid_call(db, call, category, binding, project_id):
+def valid_call(db, call, category, binding, project_id, *, budget_mb):
     role = {"VLM_REVIEW": "model_call:VLM:review", "ASR": "model_call:ASR:transcribe"}.get(category)
     if (
         not call
@@ -175,7 +182,7 @@ def valid_call(db, call, category, binding, project_id):
         return False
     resource_id = call.trace.get("resource_id")
     lease = db.get(ResourceLease, resource_id) if resource_id else None
-    return bool(lease and lease.status == "RELEASED")
+    return bool(lease and lease.status == "RELEASED" and lease.budget_mb >= budget_mb)
 
 
 def production_review_binding(db, project_id, job_id, kind, provider, *, live):
@@ -231,4 +238,10 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live):
     )
     if actual != binding.provider_snapshot() or provider.is_mock:
         raise HTTPException(409, "PRODUCTION_REVIEW_PROVIDER_OUTDATED")
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+
+    lease_id = CURRENT_RESOURCE.get()
+    lease = db.get(ResourceLease, lease_id) if lease_id else None
+    if not lease or lease.status != "ACTIVE" or lease.budget_mb < row.payload["resource_mb"]:
+        raise HTTPException(409, "PRODUCTION_REVIEW_RESOURCE_BUDGET_MISMATCH")
     return binding.executor_identity.model_dump()

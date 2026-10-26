@@ -1793,7 +1793,7 @@ def native_execution_evidence(identity: str, body: NativeExecutionEvidence, acto
     proof = []
     for sample in body.samples:
         call = db.get(AgentTaskRecord, sample.call_id)
-        if not valid_call(db, call, category, binding, body.project_id):
+        if not valid_call(db, call, category, binding, body.project_id, budget_mb=row.payload["resource_mb"]):
             raise HTTPException(409, "COMPLETED_REAL_NATIVE_CALL_REQUIRED")
         try:
             if category == "VLM_REVIEW":

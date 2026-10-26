@@ -376,8 +376,18 @@ only. It pins the configured role's profile ID/kind/model/URL hash, executor ide
 one registered model package and its exact runtime file set. Such a revision has empty
 `graph`/`parameter_map`; it cannot masquerade as H3 or acquire Fake ComfyUI execution evidence.
 Absent native fields are omitted when serializing old drafts, preserving their payload hashes.
-The package and workflow must declare at least the actual shared admission budget
-(VLM 8000 MiB / ASR 4000 MiB); these declarations remain estimates unless measured.
+The package and workflow must declare the same admission budget, at least the local
+baseline (VLM 8000 MiB / ASR 4000 MiB) and at most 16384 MiB. Larger checked packages
+can declare a larger budget. Configured local reviewers reserve the largest valid,
+static-validated native declaration for that exact route; this enables calibration without
+conferring production approval. Tampered or deprecated declarations are excluded.
+These declarations remain estimates unless measured. A calibration call's released lease
+must cover the declared workflow budget, and a production subcall's active lease is
+rechecked against its frozen workflow budget both before and after the actual response.
+
+Native file bindings accept monolithic weights or a checked safetensors index plus shards.
+The executor hashes the index and every shard and rejects unlisted/missing/extra shards
+or a mixed monolithic/indexed layout before loading; identity fields cannot omit a shard.
 
 `POST /workflow-capabilities/{id}/validate-native` is authenticated and performs no inference.
 It checks the current role binding and the loopback executor's `GET /identity`, which

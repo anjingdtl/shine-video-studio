@@ -257,3 +257,16 @@ def test_monolithic_and_sharded_weights_cannot_be_mixed(executor, tmp_path):
     spec = sharded_manifest(tmp_path, extras=('model.safetensors',))
     with pytest.raises(ValueError, match='MODEL_SHARD_INDEX_INVALID'):
         executor.verified_model_identity(spec)
+
+
+def test_native_binding_accepts_a_complete_sharded_runtime_without_monolithic_weights():
+    from shine.comfyops.native import NativeProviderBinding
+
+    binding = NativeProviderBinding(
+        profile_id='fixture-only', kind='openai_compatible', model='fixture-only',
+        base_url_sha256='a' * 64, model_package_id='fixture-only',
+        executor_identity={'schema_version': '1', 'model_id': 'fixture-only', 'runtime_sha256': 'b' * 64,
+                           'files_sha256': 'c' * 64, 'file_count': 5, 'bytes': 200},
+        runtime_files=['config.json', 'tokenizer.json', 'model.safetensors.index.json',
+                       'model-00001-of-00002.safetensors', 'model-00002-of-00002.safetensors'])
+    assert 'model.safetensors.index.json' in binding.runtime_files
