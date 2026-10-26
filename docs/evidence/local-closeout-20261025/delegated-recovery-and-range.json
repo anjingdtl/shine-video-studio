@@ -1,0 +1,57 @@
+{
+  "at": "2026-10-26T00:47:31.286843+00:00",
+  "authorization": "User explicitly delegated autonomous continuation while away. Audited actor user-delegated-codex; no physical human presence or listening attested.",
+  "backend": {
+    "tests": "484",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "201.177"
+  },
+  "commands": [
+    "backend/.venv/Scripts/python.exe -m pytest backend/tests -q --junitxml=.local-acceptance/closeout-20261025/backend-resumable-download-final.xml",
+    "backend/.venv/Scripts/ruff.exe check backend scripts/local_review_server.py"
+  ],
+  "ruff": "PASS",
+  "download_contract": {
+    "per_file_stream_attempts": 3,
+    "read_timeout_seconds": 120,
+    "connection_timeout_seconds": 30,
+    "resumes_only_fixed_get": true,
+    "exact_size_and_sha256_required": true,
+    "approval_plan_scope_changed": false,
+    "automatic_install_or_model_attempt_replay": false
+  },
+  "review_reconciled": {
+    "id": "ff6d7832-52ed-442d-af75-4d03ee8f5d1b",
+    "status": "ABANDONED"
+  },
+  "installation_attempts": [
+    {
+      "id": "4451037c-127e-48cc-bb01-2238cf2f74d9",
+      "plan_id": "95826b02-8a75-4937-95ba-083085958822",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "50017349-3e7c-4a29-a5e8-3b48a610f719",
+      "plan_id": "068c0628-dbad-43b2-8d9e-91e8344052e6",
+      "status": "SUBMIT_INTENT"
+    },
+    {
+      "id": "9018c6a1-24b3-4549-8a2d-3ad9b7a4a667",
+      "plan_id": "c47823bc-24cc-4aa4-afd6-9a1fbb7de0f0",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "b993f2d6-8906-4163-9479-22b03885be6c",
+      "plan_id": "90638956-4d4a-4e37-86de-1f53739562d2",
+      "status": "RECONCILED_NO_RETRY"
+    }
+  ],
+  "current_plan": "068c0628-dbad-43b2-8d9e-91e8344052e6",
+  "browser": "Unchanged frontend; prior 15 MOCK_VERIFIED flow families remain separately scoped to ac398cf.",
+  "remote_ci": "BLOCKED_ACCOUNT_INCLUDED_ACTIONS_QUOTA_EXHAUSTED; no spending or payment settings changed",
+  "real_voice_inference": "NOT_RUN",
+  "post_fix_real_vlm_negative": "NOT_RUN",
+  "product_acceptance": "PARTIAL"
+}

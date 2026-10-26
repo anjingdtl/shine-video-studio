@@ -1,5 +1,11 @@
 # 本轮本机收尾补充报告（2026-10-25）
 
+10-26 授权续轮：用户已明确授权离机期间自主推进，操作以 `user-delegated-codex` 审计，未冒充本人到场/试听。
+旧截断审片已 ABANDONED，旧失败安装已正式对账；实际 ASR/对齐包落盘，后续固定四包计划正在受控续传。
+下载增加最多 3 次同文件 Range 续传及 120 秒读取等待，完整后端 **484 passed、零 skipped/failures/errors**，Ruff 通过。
+实际语音推理和补丁后 VLM 反例尚未运行；全产品仍 **PARTIAL**。
+见 [授权与续传记录](evidence/local-closeout-20261025/delegated-recovery-and-range.json)。下文保留历轮状态。
+
 10-26 最新续轮：完整后端 **474 passed**，隔离浏览器 **15 类 MOCK_VERIFIED**。
 真实模型安装与指定失败对账仍待本人批准，输出补丁后的真实反例尚未复验，远端 CI 受账户付款/额度阻断。
 **全产品仍为 PARTIAL**；逐项完成条件见 [全 PASS 核对表](LOCAL_ALL_PASS_REQUIREMENTS_20261026.md)。

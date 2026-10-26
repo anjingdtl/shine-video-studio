@@ -27,7 +27,10 @@ def transport(monkeypatch, responses):
     @contextmanager
     def stream(method, url, **kwargs):
         requests.append((method, url, kwargs))
-        assert kwargs == {"headers": kwargs["headers"], "follow_redirects": False, "timeout": 30}
+        assert kwargs == {
+            "headers": kwargs["headers"], "follow_redirects": False,
+            "timeout": httpx.Timeout(30, read=120),
+        }
         yield responses[len(requests) - 1]
 
     monkeypatch.setattr(httpx, "stream", stream)
@@ -166,7 +169,7 @@ def test_partial_response_is_not_replayed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(httpx, "stream", stream)
     with pytest.raises(ValueError, match="^DOWNLOAD_STREAM_FAILED:ReadError$"):
-        ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(file, tmp_path)
+        ControlledDownloader({"huggingface.co"}, HTTPTransport(), max_stream_attempts=1).download(file, tmp_path)
     assert len(calls) == 1
     assert (tmp_path / (file.sha256 + ".part")).read_bytes() == b"da"
     assert not (tmp_path / file.sha256).exists()
@@ -185,3 +188,79 @@ def test_protocol_failure_before_headers_is_sanitized_without_retry(monkeypatch,
     with pytest.raises(ValueError, match="^DOWNLOAD_REQUEST_FAILED:RemoteProtocolError$"):
         ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(spec(), tmp_path)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["resume", "ignore-range", "budget", "complete", "bad-range", "changed-object"])
+def test_fixed_file_stream_continuation_is_bounded_and_hash_verified(monkeypatch, tmp_path, mode):
+    file = spec()
+    headers_seen = []
+
+    class Interrupted(httpx.SyncByteStream):
+        def __init__(self, prefix):
+            self.prefix = prefix
+
+        def __iter__(self):
+            yield self.prefix
+            raise httpx.ReadTimeout("Transient connection stalled")
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        headers_seen.append(kwargs["headers"])
+        offset = int(kwargs["headers"].get("Range", "bytes=0-")[6:-1])
+        if len(headers_seen) == 1 or mode == "budget":
+            prefix = b"data" if mode == "complete" else b"data"[offset:offset+1] if mode == "budget" else b"da"
+            yield httpx.Response(206 if offset else 200, stream=Interrupted(prefix),
+                                 headers={"content-range": f"bytes {offset}-3/4"} if offset else {})
+        elif mode == "ignore-range":
+            yield httpx.Response(200, content=b"data")
+        else:
+            yield httpx.Response(206, content=b"xx" if mode == "changed-object" else b"ta",
+                                 headers={"content-range": "bytes 1-3/4" if mode == "bad-range" else "bytes 2-3/4"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    downloader = ControlledDownloader({"huggingface.co"}, HTTPTransport())
+    errors = {"budget": "DOWNLOAD_STREAM_FAILED:ReadTimeout", "bad-range": "INVALID_RESUME_RANGE",
+              "changed-object": "FILE_CHECKSUM_FAILED"}
+    if mode in errors:
+        with pytest.raises(ValueError, match=errors[mode]):
+            downloader.download(file, tmp_path)
+        assert not (tmp_path / file.sha256).exists()
+    else:
+        assert downloader.download(file, tmp_path).read_bytes() == b"data"
+    assert len(headers_seen) == (3 if mode == "budget" else 1 if mode == "complete" else 2)
+    if mode == "budget":
+        assert headers_seen == [{}, {"Range": "bytes=1-"}, {"Range": "bytes=2-"}]
+        assert (tmp_path / (file.sha256 + ".part")).read_bytes() == b"dat"
+    elif mode != "complete":
+        assert headers_seen == [{}, {"Range": "bytes=2-"}]
+
+
+def test_resume_resolves_and_revalidates_cdn_again(monkeypatch, tmp_path):
+    file = spec(["us.aws.cdn.hf.co"])
+    requests = []
+
+    class Interrupted(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"da"
+            raise httpx.ReadError("Disconnected")
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        requests.append((url, kwargs["headers"]))
+        if len(requests) in {1, 3}:
+            yield httpx.Response(302, headers={"location": f"https://us.aws.cdn.hf.co/file?Signature={len(requests)}"})
+        elif len(requests) == 2:
+            yield httpx.Response(200, stream=Interrupted())
+        else:
+            yield httpx.Response(206, content=b"ta", headers={"content-range": "bytes 2-3/4"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    assert ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(file, tmp_path).read_bytes() == b"data"
+    assert requests[0] == (file.url, {}) and requests[2] == (file.url, {"Range": "bytes=2-"})
+    assert requests[3][1] == {"Range": "bytes=2-"}
+
+
+@pytest.mark.parametrize("budget", [0, True, 4])
+def test_resume_budget_cannot_be_unbounded(tmp_path, budget):
+    with pytest.raises(ValueError, match="DOWNLOAD_RESUME_BUDGET_INVALID"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport(), max_stream_attempts=budget).download(spec(), tmp_path)

@@ -1,22 +1,22 @@
 {
-  "collected_at": "2026-10-25T23:49:50.216156+00:00",
+  "collected_at": "2026-10-26T00:47:31.286843+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "474",
-    "errors": "0",
+    "tests": "484",
     "failures": "0",
+    "errors": "0",
     "skipped": "0",
-    "time": "204.130"
+    "time": "201.177"
   },
   "checks": {
-    "ruff": "PASS incl local_review_server.py",
+    "ruff": "PASS backend and local_review_server.py",
     "typescript_vite": "PASS",
     "npm_audit": "0 vulnerabilities",
     "uv_lock_check": "PASS",
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
-    "isolated_browser_e2e": "MOCK_VERIFIED; api_errors=[]; 12 existing browser flow families",
+    "isolated_browser_e2e": "MOCK_VERIFIED; prior ac398cf 15 flows, api_errors=[]; frontend unchanged in range recovery stage",
     "remote_ci": "BLOCKED_ACCOUNT_BILLING; source 0a35891 run 40245130085, all four jobs NOT_STARTED; see ci-account-block.json"
   },
   "real_text_roles": {
@@ -422,5 +422,6 @@
     "tests": "473",
     "time": "202.547"
   },
-  "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json"
+  "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json",
+  "latest_delegated_recovery": "delegated-recovery-and-range.json"
 }

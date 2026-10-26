@@ -115,6 +115,10 @@ def check_url(url: str, hosts: set[str], *, signed_query=False):
         raise ValueError("UNTRUSTED_DOWNLOAD_URL")
 
 
+class DownloadStreamInterrupted(ValueError):
+    """A fixed inbound GET stopped; only verified byte-range continuation is safe."""
+
+
 class HTTPTransport:
     @contextmanager
     def stream(self, url, offset):
@@ -125,7 +129,7 @@ class HTTPTransport:
                 try:
                     response = stack.enter_context(httpx.stream(
                         "GET", url, headers={"Range": f"bytes={offset}-"} if offset else {},
-                        follow_redirects=False, timeout=30,
+                        follow_redirects=False, timeout=httpx.Timeout(30, read=120),
                     ))
                     break
                 except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -135,6 +139,8 @@ class HTTPTransport:
                     raise ValueError(f"DOWNLOAD_REQUEST_FAILED:{type(exc).__name__}") from None
             try:
                 yield response
+            except (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                raise DownloadStreamInterrupted(f"DOWNLOAD_STREAM_FAILED:{type(exc).__name__}") from None
             except httpx.HTTPError as exc:
                 # Keep transient signed URLs out of API responses and logs.
                 raise ValueError(f"DOWNLOAD_STREAM_FAILED:{type(exc).__name__}") from None
@@ -167,18 +173,41 @@ class ControlledDownloader:
     hosts: set[str]
     transport: object
     max_bytes: int = 100 * 1024**3
+    max_stream_attempts: int = 3
 
     def download(self, spec: PackageFile, cache: Path):
         check_url(spec.url, self.hosts)
         if spec.size > self.max_bytes:
             raise ValueError("DOWNLOAD_BUDGET_EXCEEDED")
+        if type(self.max_stream_attempts) is not int or not 1 <= self.max_stream_attempts <= 3:
+            raise ValueError("DOWNLOAD_RESUME_BUDGET_INVALID")
         cache.mkdir(parents=True, exist_ok=True)
         final = cache / spec.sha256
         if final.exists() and self.valid(final, spec):
             return final
         partial = cache / (spec.sha256 + ".part")
+        for attempt in range(self.max_stream_attempts):
+            # A disconnected response may already have supplied the complete
+            # immutable object. Only exact size AND digest can establish that.
+            if partial.exists() and self.valid(partial, spec):
+                break
+            try:
+                self._transfer(spec, partial)
+                break
+            except DownloadStreamInterrupted:
+                if attempt == self.max_stream_attempts - 1:
+                    if partial.exists() and self.valid(partial, spec):
+                        break
+                    raise
+        if not self.valid(partial, spec):
+            partial.unlink(missing_ok=True)
+            raise ValueError("FILE_CHECKSUM_FAILED")
+        os.replace(partial, final)
+        return final
+
+    def _transfer(self, spec: PackageFile, partial: Path):
         offset = partial.stat().st_size if partial.exists() else 0
-        if offset > spec.size:
+        if offset >= spec.size:
             partial.unlink()
             offset = 0
         if spec.redirect_hosts:
@@ -208,11 +237,6 @@ class ControlledDownloader:
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
-        if not self.valid(partial, spec):
-            partial.unlink(missing_ok=True)
-            raise ValueError("FILE_CHECKSUM_FAILED")
-        os.replace(partial, final)
-        return final
 
     @staticmethod
     def valid(path, spec):
