@@ -170,6 +170,11 @@ class OpenAICompatibleVisionReviewer:
                     "not a guarantee of hard frame anchoring. "
                     "Do not infer identity from descriptive text alone; disclose missing required identity evidence. "
                     "Empty character and asset bindings do not themselves constitute an identity or costume violation. "
+                    "Anonymous fictional means no named real-person or approved-master identity claim; "
+                    "it does not prohibit a visible face, distinctive facial features, or ordinary clothing. "
+                    "Only report identity or costume mismatch against an actual specified target or requirement. "
+                    "Evaluate the frozen Style independently of ShotSpec. If they contradict, report the "
+                    "input conflict as needs_review; never silently choose ShotSpec and declare Style matched. "
                     "Keep findings concise and group repeated observations. "
                     "raw_summary must be at most 300 characters. "
                     "Do not omit distinct violations or uncertainties to fit the output budget. "
@@ -186,9 +191,14 @@ class OpenAICompatibleVisionReviewer:
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
+        instructions, evidence_spec = content[0]["text"].split("ShotSpec: ", 1)
+        content[0]["text"] = "ShotSpec: " + evidence_spec
         payload = {
             "model": self.config.model,
-            "messages": [{"role": "user", "content": content}],
+            "messages": [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": content},
+            ],
             "temperature": 0.0,
             "max_tokens": 2048,
             "response_format": {"type": "json_object"},

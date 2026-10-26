@@ -1,7 +1,7 @@
 {
   "at": "2026-10-26T09:07:00.341283+00:00",
   "source_head": "4eba47f55c24f7a9a178ab71c1bf21a4d77157f6",
-  "status": "REAL_NATIVE_CALIBRATION_AND_CAPABILITY_PUBLICATION_PASS",
+  "status": "REAL_EXECUTION_PASS_VLM_RELIABILITY_FAIL_PRODUCTION_QUALIFICATION_WITHDRAWN",
   "actor": "user-delegated-codex",
   "human_present_or_quality_approval": false,
   "installed_packages": [
@@ -143,7 +143,7 @@
   "workflows": [
     {
       "id": "5c49f760-5132-4cf9-8fbb-1f9e243bb4ff",
-      "status": "PRODUCTION_APPROVED",
+      "status": "DEPRECATED",
       "sha256": "74ef8f7a021d09f15e3d3ad09313e12bc63f987f77c8e2b15c070736e07a0aff",
       "category": "VLM_REVIEW",
       "model_ids": [
@@ -181,5 +181,283 @@
     "failure_preserved": true,
     "human_approved": false
   },
-  "full_product": "PARTIAL"
+  "full_product": "PARTIAL",
+  "subsequent_adversarial_acceptance": {
+    "at": "2026-10-26T09:51:47.449061+00:00",
+    "human_present_or_quality_approval": false,
+    "source_files_sha256": {
+      "backend\\shine\\quality\\semantic.py": "786b14356feeff9462b6c21755933ec337fce6bef4019ff3b7707afecc4d4456",
+      "backend\\shine\\quality\\gates.py": "358b4d2a49136a956f551cff18c9aa70967ee99e180283dd19eff422d058c228"
+    },
+    "review_controls": [
+      {
+        "receipt": "real-t2va-failed-sample-cut-recheck-20261026.json",
+        "sha256": "0a5f02c46c1e335ed13114c181751d9140c4601247cd5298504f9eac2d12b35a",
+        "status": "FAILED_SAMPLE_QC_RECHECK_COMPLETED_OLD_GATES_UNCHANGED",
+        "production_unchanged": true,
+        "stages": [
+          {
+            "name": "failed-t2va-cut-recheck",
+            "verdict": "failed",
+            "finding_codes": [
+              "CONTINUITY_CUT_VIOLATION",
+              "IDENTITY_MISSING",
+              "COSTUME_MISSING",
+              "SCENE_VIOLATION",
+              "STYLE_VIOLATION"
+            ],
+            "call_status": "COMPLETED",
+            "expected_verdict_met": null
+          }
+        ],
+        "physical_model_calls": [
+          {
+            "id": "5a5946a0-f26e-4860-afa0-bfa07f062fee",
+            "status": "COMPLETED",
+            "released": null,
+            "result_sha256": "c8b347ab89ad8d851cfa70bcb182620c931f1dfaef30f616ac3c47b8cafeaec4"
+          }
+        ],
+        "harness_expectation_failure_does_not_mean_unknown_submission": true
+      },
+      {
+        "receipt": "real-t2va-failed-sample-cut-projection-recheck-20261026.json",
+        "sha256": "5fc24fd23901768b10d8b6305b212f161af610b05952e1d4cc71407b9dea6b38",
+        "status": "NEEDS_INSPECTION_NO_AUTOMATIC_REPLAY",
+        "production_unchanged": true,
+        "stages": [
+          {
+            "name": "failed-t2va-cut-recheck",
+            "verdict": "passed",
+            "finding_codes": [],
+            "call_status": null,
+            "expected_verdict_met": null
+          }
+        ],
+        "physical_model_calls": [
+          {
+            "id": "05ca48d4-adff-4bff-b156-9cef4d16e52d",
+            "status": "COMPLETED",
+            "released": null,
+            "result_sha256": "9468d90039dc0a7e9744d832492959f42eef4195e48225ab0d92ee5453303056"
+          }
+        ],
+        "harness_expectation_failure_does_not_mean_unknown_submission": true
+      },
+      {
+        "receipt": "real-t2va-review-scope-controls-20261026.json",
+        "sha256": "013e94d3e10b74394117d1546c82d4864beb795b394df2e6244348b0293890be",
+        "status": "REVIEW_SCOPE_CONTROLS_COLLECTED_NOT_FILM_APPROVAL",
+        "production_unchanged": true,
+        "stages": [
+          {
+            "name": "conflicting-style",
+            "verdict": "failed",
+            "finding_codes": [
+              "SHOT_SIZE_MISMATCH",
+              "CAMERA_MOVEMENT_MISMATCH",
+              "STYLE_CONFLICT",
+              "CONTINUITY_VIOLATION"
+            ],
+            "call_status": "COMPLETED",
+            "expected_verdict_met": false
+          },
+          {
+            "name": "anonymous-fictional",
+            "verdict": "failed",
+            "finding_codes": [
+              "IDENTITY_MISMATCH",
+              "COSTUME_MISMATCH",
+              "CONTINUITY_VIOLATION"
+            ],
+            "call_status": "COMPLETED",
+            "expected_verdict_met": false
+          }
+        ],
+        "physical_model_calls": [
+          {
+            "id": "d248bdb4-1d5f-4bbd-bc31-45dc0c9b9718",
+            "status": "COMPLETED",
+            "released": null,
+            "result_sha256": "45739aecca1131003e50bb5cd9c13de82c858c3dd3adaf12a0a1e59e70a16ee1"
+          },
+          {
+            "id": "b847a050-864c-4889-8ea6-e442504ac762",
+            "status": "COMPLETED",
+            "released": null,
+            "result_sha256": "b70f0aca025847ff9ed86966932d0c322a46347d07d8efa48dc3a1c4ee269bf0"
+          }
+        ],
+        "harness_expectation_failure_does_not_mean_unknown_submission": true
+      }
+    ],
+    "second_t2va": {
+      "job": {
+        "id": "41f20ac6-6d8b-4912-8f8b-60095c709410",
+        "status": "REPAIR_PENDING",
+        "failure_code": "QC_FAILED",
+        "provider_job_id": "2e0667f9-965f-4f4f-887d-d638911147b1",
+        "artifact_id": "01a4e002-8693-4265-8d30-2628142192ce",
+        "state_version": 4
+      },
+      "gates": [
+        {
+          "kind": "technical",
+          "status": "passed"
+        },
+        {
+          "kind": "semantic",
+          "status": "failed"
+        },
+        {
+          "kind": "audio",
+          "status": "passed"
+        },
+        {
+          "kind": "style",
+          "status": "needs_review"
+        },
+        {
+          "kind": "final",
+          "status": "failed"
+        }
+      ],
+      "protected_unchanged": true,
+      "artifact_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "bytes": 1554281,
+      "comfy_wall_s": 478.61,
+      "scope": "independent technical style control, no approved character identity claim",
+      "technical": {
+        "tool": "ffprobe",
+        "artifact_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+        "byte_size": 1554281,
+        "duration_s": 5.167,
+        "width": 1344,
+        "height": 768,
+        "fps": 24.0,
+        "has_audio": true,
+        "checks": [
+          {
+            "name": "file_exists",
+            "status": "pass",
+            "detail": "Artifact exists",
+            "measured": 1554281
+          },
+          {
+            "name": "file_nonempty",
+            "status": "pass",
+            "detail": "Artifact byte size",
+            "measured": 1554281
+          },
+          {
+            "name": "container",
+            "status": "pass",
+            "detail": "Detected container: mov,mp4,m4a,3gp,3g2,mj2",
+            "measured": "mov,mp4,m4a,3gp,3g2,mj2"
+          },
+          {
+            "name": "stream_metadata",
+            "status": "pass",
+            "detail": "ffprobe parsed the container metadata and the stream list",
+            "measured": null
+          },
+          {
+            "name": "duration",
+            "status": "pass",
+            "detail": "Measured 5.17s, expected 5.00s ±0.75s",
+            "measured": 5.167
+          },
+          {
+            "name": "resolution",
+            "status": "pass",
+            "detail": "1344x768",
+            "measured": "1344x768"
+          },
+          {
+            "name": "frame_rate",
+            "status": "pass",
+            "detail": "Measured 24.00 fps, expected 24.00",
+            "measured": 24.0
+          },
+          {
+            "name": "audio_track",
+            "status": "pass",
+            "detail": "Audio is not required for this shot",
+            "measured": null
+          },
+          {
+            "name": "audio_silence",
+            "status": "pass",
+            "detail": "No silent span longer than 2 seconds was detected",
+            "measured": null
+          },
+          {
+            "name": "decode",
+            "status": "pass",
+            "detail": "Every frame was decoded without error",
+            "measured": null
+          }
+        ],
+        "unavailable_checks": []
+      }
+    },
+    "active_leases": [],
+    "health_after": {
+      "status": "ok",
+      "model": "local-qwen3-vl-4b",
+      "is_mock": false,
+      "loaded": false,
+      "asr_loaded": false,
+      "allocated_bytes": 0,
+      "reserved_bytes": 0,
+      "manifest_sha256": "9721a03ba03e8ea7620c0da6e6a97e7c04de4cef821067ac613e45524c5544bc",
+      "verified_models": {
+        "local-qwen3-vl-4b": {
+          "model_id": "local-qwen3-vl-4b",
+          "files_sha256": "f8d46751aa3f3228b489e4d10fea6995585492fd4ed9cda6ef7ecb0ce0265d9c",
+          "file_count": 13,
+          "bytes": 4314817224
+        },
+        "local-whisper-tiny": {
+          "model_id": "local-whisper-tiny",
+          "files_sha256": "d2e6974771803dc3527d938d47b5126947b497d450411f9c6574192e8c25198e",
+          "file_count": 12,
+          "bytes": 155454211
+        }
+      },
+      "runtime_sha256": "0f00fd66649bd4ffc4400cdeaefee1a02d1f79826d83f431844566f2cf926f9c"
+    },
+    "comfy_queue_after": {
+      "queue_running": [],
+      "queue_pending": []
+    },
+    "vlm_qualification": "DEPRECATED_AFTER_REAL_FALSE_POSITIVE_AND_FALSE_NEGATIVE_COUNTEREXAMPLES",
+    "ci": {
+      "head": "516d0ce2f19c0fa2bb6bc6808aef70c3ff0ec807",
+      "run": 40301045252,
+      "all_four_jobs": "NOT_STARTED_ACCOUNT_PAYMENTS_OR_SPENDING_LIMIT",
+      "annotation_checks": [
+        121498723377,
+        121498723229,
+        121498723186,
+        121498723059
+      ]
+    }
+  },
+  "final_software_verification": {
+    "backend": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "595",
+      "time": "231.840",
+      "timestamp": "2026-10-26T17:51:05.479104+08:00",
+      "hostname": "HSH-HOME"
+    },
+    "junit_sha256": "8d1dd0ceb7b9c9d9a2b28d14479d719643a8e395480a9eb637813e7a546e74b1",
+    "ruff": "passed",
+    "frontend": "UNCHANGED_PREVIOUS_TYPESCRIPT_VITE_AND_17_MOCK_BROWSER_CHECKS",
+    "real_media_quality": "NOT_PASSED"
+  }
 }
