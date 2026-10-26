@@ -200,7 +200,7 @@ def test_newer_unresolved_text_task_cannot_fall_back_to_older_usable_artifact(pr
     client, factory, _ = prep
     project, frozen, spec, response = setup_inputs(client)
     spec["story_beat"] = "The character sits centre-left."
-    response["checks"][1].update(status="consistent", shot_text=spec["story_beat"])
+    response["checks"][1].update(status="consistent", shot_path="/story_beat")
     response["recommendation"] = "proceed_to_preflight"
     remote = client.post("/api/v1/provider-profiles", json={
         "name": "synthetic-real-route", "kind": "openai_compatible",

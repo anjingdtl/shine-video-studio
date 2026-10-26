@@ -93,7 +93,8 @@ class ProductionPlan(APIModel):
 
 class StyleInputComparison(StyleInputCheck):
     style_text: str = Field(min_length=1, max_length=2000)
-    shot_text: str | None = Field(default=None, min_length=1, max_length=4000)
+    shot_text: str | None = Field(default=None, min_length=1, max_length=8000)
+    shot_path: str | None = Field(default=None, max_length=256, pattern="^/")
     confidence: float = Field(ge=0, le=1)
 
 
@@ -102,6 +103,34 @@ class StyleInputAssessment(APIModel):
 
     schema_version: Literal["1.1"] = "1.1"
     checks: list[StyleInputComparison] = Field(min_length=7, max_length=7)
+    recommendation: Literal["proceed_to_preflight", "needs_review"]
+
+    @model_validator(mode="after")
+    def complete_and_consistent(self):
+        if {check.field for check in self.checks} != set(StyleBible.model_fields):
+            raise ValueError("STYLE_INPUT_FIELD_COVERAGE")
+        if self.recommendation == "proceed_to_preflight" and any(
+            check.status != "consistent" or check.confidence < 0.7 for check in self.checks
+        ):
+            raise ValueError("STYLE_INPUT_RECOMMENDATION_CONTRADICTION")
+        return self
+
+
+class StyleInputJudgment(StyleInputCheck):
+    shot_path: str | None = Field(
+        default=None, max_length=256, pattern="^/",
+        description="JSON Pointer to one existing nonempty ShotSpec string, e.g. /story_beat, "
+                    "/camera/shot_size or /dialogue/0/text. Never select an object, array or number. "
+                    "Use null if the corresponding detail is not specified.",
+    )
+    confidence: float = Field(ge=0, le=1)
+
+
+class StyleInputWire(APIModel):
+    """The model owns judgments, not immutable source quotation values."""
+
+    protocol: Literal["independent-text-v2"]
+    checks: list[StyleInputJudgment] = Field(min_length=7, max_length=7)
     recommendation: Literal["proceed_to_preflight", "needs_review"]
 
     @model_validator(mode="after")

@@ -19,10 +19,10 @@ def setup_inputs(client):
     }).status_code == 200
     spec = {"story_beat": "The character walks toward the camera.", "duration_target_s": 6,
             "style_version_id": frozen["id"]}
-    checks = [dict(field=name, style_text=text, shot_text=None, status="consistent", confidence=1,
-                   detail="No explicit constraint in this synthetic ShotSpec") for name, text in style.items()]
-    checks[1].update(shot_text=spec["story_beat"], status="conflict", detail="Sitting conflicts with walking")
-    return project, frozen, spec, dict(checks=checks, recommendation="needs_review")
+    checks = [dict(field=name, shot_path=None, status="consistent", confidence=1,
+                   detail="No explicit constraint in this synthetic ShotSpec") for name in style]
+    checks[1].update(shot_path="/story_beat", status="conflict", detail="Sitting conflicts with walking")
+    return project, frozen, spec, dict(protocol="independent-text-v2", checks=checks, recommendation="needs_review")
 
 
 @pytest.mark.parametrize("damage", [None, "style-quote", "shot-quote", "missing", "duplicate", "false-proceed"])
@@ -54,8 +54,8 @@ def test_independent_input_review_is_pinned_text_only_and_has_no_approval_author
             task = db.query(AgentTaskRecord).filter_by(project_id=project, role_id="qc_reviewer").one()
             assert task.trace["received_result_sha256"] == digest(response)
             assert task.trace["rejection_reason_code"] == {
-                "style-quote": "STYLE_INPUT_FROZEN_QUOTE_CHANGED",
-                "shot-quote": "STYLE_INPUT_SHOT_QUOTE_INVENTED",
+                "style-quote": "SCHEMA_VALIDATION_FAILED",
+                "shot-quote": "SCHEMA_VALIDATION_FAILED",
                 "missing": "SCHEMA_VALIDATION_FAILED",
                 "duplicate": "STYLE_INPUT_FIELD_COVERAGE",
                 "false-proceed": "STYLE_INPUT_RECOMMENDATION_CONTRADICTION",
@@ -127,7 +127,7 @@ def test_production_binding_rechecks_exact_text_evidence_including_worker_entry(
     client, factory, _ = api
     project, frozen, spec, response = setup_inputs(client)
     spec["story_beat"] = "The character sits centre-left."
-    response["checks"][1].update(status="consistent", shot_text=spec["story_beat"], detail="Same posture")
+    response["checks"][1].update(status="consistent", shot_path="/story_beat", detail="Same posture")
     response["recommendation"] = "proceed_to_preflight"
     client.app.state.mock_llm_responder = lambda *_: copy.deepcopy(response)
     artifact = client.post(f"/api/v1/projects/{project}/film-agents/qc_reviewer/run", json={"shot_spec": spec}).json()

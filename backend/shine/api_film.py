@@ -7,7 +7,7 @@ from pydantic import Field
 from sqlalchemy import literal_column, select
 
 from shine.agents.film import FilmAgentDispatcher, load_inputs
-from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleProposal
+from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
@@ -98,6 +98,8 @@ def film_agents(db: DBSession):
                 "version": "1.3" if role == "comfyops" else "1.1",
                 "output_kind": contract.__name__,
                 "output_schema": contract.model_json_schema(),
+                **({"model_response_protocol": "independent-text-v2",
+                    "model_response_schema": StyleInputWire.model_json_schema()} if role == "qc_reviewer" else {}),
                 "required_inputs": required,
                 "required_rule_sections": sections,
                 "tool_allowlist": ["propose"]

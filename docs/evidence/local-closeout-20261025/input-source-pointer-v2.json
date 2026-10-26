@@ -1,0 +1,29 @@
+{
+  "protocol": "independent-text-v2",
+  "backend": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "690",
+    "time": "262.118",
+    "timestamp": "2026-10-27T02:10:24.183302+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": "19 Mock flows from unchanged UI; not real model acceptance",
+  "source_files_sha256": {
+    "backend/shine/agents/film_contracts.py": "5349445e4e2a885c58db8826994fb2a26f1f201b2fd0b3e169fba659fe35abc5",
+    "backend/shine/agents/film.py": "378b279b15431a5a4a9dd980c0f173d652409892be841c49d911b1ecdd38714b",
+    "backend/shine/agents/execution.py": "add6aef79940e42081cb0fcf0433a967894eb2a7b229589d08deb2dc23d81162",
+    "backend/shine/api_film.py": "0aadbf810c9f965ee39633f3c538045da165021cd0d0f0b89ff01483e7e496d2",
+    "backend/tests/test_style_input_assessment.py": "aa1de6887466a88d64576eae405deb89eaf09811b40cbbf245ed91f5e1c52ab5",
+    "backend/tests/test_film_unknown_outcomes.py": "72e9a5f021cd05d9cb15a19b0f932a58682c13d13560d3f79fdd28015cea6bc0",
+    "backend/tests/test_input_source_pointers.py": "ddce60de2caa2aabc266e4e919017b7b4a7cdb9c98d205dcea76d9736c21ad27"
+  },
+  "source_binding": "Model returns judgments and source JSON pointers; server binds immutable Style and ShotSpec strings. Model supplied source overrides are rejected.",
+  "real_model_status": "NOT_YET_RUN_FOR_V2",
+  "historical_v1": "Rejected positive and abandoned unknown walking retained; no original request replay",
+  "human_approval": false
+}

@@ -85,3 +85,6 @@ Latest actual continuation: 8B installation is complete (13 checked files, 10,60
 校准设计复核确认旧 A 行走/镜头要求与冻结坐姿/镜头文案存在未消解差异，不能作为严格冻结风格的无争议正例。旧结果保留，8B 校准改用一致输入并区分真实生成失败和模型误判，不靠更改风格或预设通过关闭验收。
 
 加载闭包反例修复后全量 625 项通过；已减少重复 CI 触发，未改四项 job/权限、未恢复账户额度。8B 两片缓存已校验，但隔离安装终态、真实推理和完整质量校准仍须另证，不据接收字节数关闭验收。
+
+Independent text protocol v2 (2026-10-27): **690 backend tests passed**, zero failures/errors/skips (262.118s); Ruff and fresh TypeScript/Vite passed. The model now supplies seven typed judgments and JSON pointers; the server binds the unchanged frozen Style and exact ShotSpec strings. Invalid/non-text paths, source overrides, missing/duplicate fields and contradictory proceed recommendations fail closed. Stored assessments remain backward-readable. This changes quotation responsibility, not semantic findings or the frozen Style. The earlier rejection cause is unknown; both old failed controls and the abandoned unknown outcome are preserved. Real v2 controls are **not yet run**; VLM and full-product acceptance remain **PARTIAL**. See [source-bound protocol evidence](evidence/local-closeout-20261025/input-source-pointer-v2.json).
+

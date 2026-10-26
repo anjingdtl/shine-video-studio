@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from shine.agents.film_contracts import FilmAgentRegistry, StyleInputAssessment
+from shine.agents.film_contracts import FilmAgentRegistry, StyleInputWire
 from shine.comfyops import approval
 from shine.comfyops.models import ResourceLease
 from shine.h3.rulebook import digest
@@ -19,6 +19,7 @@ SAFE_REJECTIONS = {
     "STYLE_INPUT_FIELD_COVERAGE", "STYLE_INPUT_RECOMMENDATION_CONTRADICTION",
     "STYLE_INPUT_FROZEN_QUOTE_CHANGED", "STYLE_INPUT_SHOT_QUOTE_INVENTED",
     "INPUT_CONTEXT_CHANGED_DURING_CALL",
+    "STYLE_INPUT_SHOT_PATH_INVALID",
 }
 
 
@@ -81,7 +82,7 @@ def abandon_remote_response(db, row, actor, grant_id, snapshot, evidence):
                  "local_model_unload_claimed": False, "reconciled_by": actor,
                  "remote_response_abandon_evidence": evidence}
     if row.role_id == "qc_reviewer" and not row.trace.get("review_contract_sha256"):
-        row.trace = {**row.trace, "review_contract_sha256": digest(StyleInputAssessment.model_json_schema())}
+        row.trace = {**row.trace, "review_contract_sha256": digest(StyleInputWire.model_json_schema())}
     add_audit(db, actor, "REMOTE_AGENT_RESPONSE_ABANDONED", "agent_task", row.id,
               {"prior_status": previous, "external_outcome": "UNKNOWN", "inference_calls": 0,
                "local_model_unload_claimed": False, "quality_approval": False}, project_id=row.project_id)

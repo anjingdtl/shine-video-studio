@@ -19,6 +19,7 @@ from shine.agents.film_contracts import (
     ScriptBreakdown,
     SoundPlan,
     StyleInputAssessment,
+    StyleInputWire,
 )
 from shine.h3.rulebook import H3RulebookRegistry, digest
 from shine.llm.base import LLMError
@@ -176,6 +177,35 @@ def invalidate_artifact(db: Session, project_id: str, artifact_id: str):
                     )
 
 
+def input_text_at(spec: dict, pointer: str | None) -> str | None:
+    if pointer is None:
+        return None
+    try:
+        value = spec
+        for raw in pointer[1:].split("/"):
+            if "~" in raw.replace("~0", "").replace("~1", ""):
+                raise ValueError("invalid pointer escape")
+            key = raw.replace("~1", "/").replace("~0", "~")
+            if isinstance(value, dict):
+                value = value[key]
+            elif isinstance(value, list) and key.isdigit() and (key == "0" or not key.startswith("0")):
+                value = value[int(key)]
+            else:
+                raise ValueError("not a source path")
+        if not isinstance(value, str) or not value:
+            raise ValueError("not source text")
+        return value
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ValueError("STYLE_INPUT_SHOT_PATH_INVALID") from exc
+
+
+def bind_input_judgments(data, context):
+    wire = StyleInputWire.model_validate(data)
+    checks = [{**check.model_dump(), "style_text": context["style"][check.field],
+               "shot_text": input_text_at(context["shot_spec"], check.shot_path)} for check in wire.checks]
+    return StyleInputAssessment(checks=checks, recommendation=wire.recommendation)
+
+
 def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[AgentArtifact], context: dict):
     if isinstance(proposal, StyleInputAssessment):
         def text_values(value):
@@ -193,6 +223,8 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
             if check.style_text != context["style"][check.field]:
                 raise ValueError("STYLE_INPUT_FROZEN_QUOTE_CHANGED")
             if check.shot_text is not None and not any(check.shot_text in text for text in supplied):
+                raise ValueError("STYLE_INPUT_SHOT_QUOTE_INVENTED")
+            if check.shot_path is not None and input_text_at(context["shot_spec"], check.shot_path) != check.shot_text:
                 raise ValueError("STYLE_INPUT_SHOT_QUOTE_INVENTED")
     elif isinstance(proposal, ScriptBreakdown):
         if proposal.locked_story_facts != body.locked_story_facts:
@@ -343,7 +375,8 @@ class FilmAgentDispatcher:
         )
         from shine.agents.execution import guard_request
 
-        contract_hash = digest(contract.model_json_schema())
+        wire_contract = StyleInputWire if role == "qc_reviewer" else contract
+        contract_hash = digest(wire_contract.model_json_schema())
         # Claim the request while holding SQLite's writer lock, then release it
         # with the durable intent before any network call. Concurrent identical
         # requests cannot both pass the guard.
@@ -372,6 +405,7 @@ class FilmAgentDispatcher:
                 "input_revision_ids": body.input_revision_ids,
                 "schema": contract.__name__,
                 "review_contract_sha256": contract_hash,
+                **({"wire_protocol": "independent-text-v2"} if role == "qc_reviewer" else {}),
                 "review_provider": {"profile_id": profile.id, "kind": profile.kind, "model": profile.model,
                                     "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest()},
                 "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]} for s in cache_state],
@@ -397,9 +431,11 @@ class FilmAgentDispatcher:
                     "Keep dialogue verbatim in its original language. "
                     "Use only listed asset IDs. No video model substitution. You have no execution tools."
                     + (" Compare ONLY the two text inputs, frozen Style and ShotSpec. No images or audio are "
-                       "available and you cannot judge their conformance. For each frozen field, copy its entire "
-                       "value verbatim into style_text; quote relevant ShotSpec text exactly in shot_text, or "
-                       "use null if no corresponding detail is specified. Assess whether these requirements "
+                       "available and you cannot judge their conformance. For each frozen field, return your "
+                       "judgment and a JSON pointer in shot_path to relevant ShotSpec text (e.g. /story_beat "
+                       "or /camera/movement), or null if no corresponding detail is specified. "
+                       "Do not return style_text or shot_text: the server binds immutable quotations from "
+                       "the supplied inputs. Assess whether these requirements "
                        "conflict, including posture, action, placement, camera movement and internal editing. "
                        "An unspecified ShotSpec detail never overrides Style. Keep separate constraints "
                        "independent: a static camera does not imply an edit. Return all seven fields once. "
@@ -408,14 +444,16 @@ class FilmAgentDispatcher:
                        if role == "qc_reviewer" else "")
                 ),
                 user=json.dumps(model_context, ensure_ascii=False),
-                schema=contract.model_json_schema(),
+                schema=wire_contract.model_json_schema(),
             )
             task.trace = {**task.trace, "received_result_sha256": digest(response.parsed),
+                          "response_latency_ms": response.latency_ms,
                           "response_model_sha256": hashlib.sha256((response.model or "").encode()).hexdigest(),
                           "is_mock": bool(task.trace.get("is_mock") or response.raw_meta.get("is_mock")
                                           or response.raw_meta.get("mock"))}
             db.commit()  # A returned response is durable evidence even if the contract rejects it.
-            proposal = contract.model_validate(response.parsed)
+            proposal = (bind_input_judgments(response.parsed, context) if role == "qc_reviewer"
+                        else contract.model_validate(response.parsed))
             validate_output(role, proposal, body, inputs, context)
             # Re-read context after a potentially long external call.
             db.expire_all()
