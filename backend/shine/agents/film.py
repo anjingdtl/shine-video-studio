@@ -438,6 +438,10 @@ class FilmAgentDispatcher:
                        "conflict, including posture, action, placement, camera movement and internal editing. "
                        "An unspecified ShotSpec detail never overrides Style. Keep separate constraints "
                        "independent: a static camera does not imply an edit. Return all seven fields once. "
+                       "ShotSpec.continuity describes the relationship to a PRECEDING shot, not editing "
+                       "inside the current shot. In particular continuity.mode=cut starts an independent "
+                       "shot; it does not contradict an uninterrupted long take or no internal cuts. "
+                       "Judge internal editing from explicit current-shot requirements, not this boundary mode. "
                        "Conflicts, uncertainty or low confidence require needs_review. A proceed recommendation "
                        "only permits consideration at preflight; it never approves a render or asset."
                        if role == "qc_reviewer" else "")

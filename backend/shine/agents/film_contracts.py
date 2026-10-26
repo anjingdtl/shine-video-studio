@@ -121,7 +121,8 @@ class StyleInputJudgment(StyleInputCheck):
         default=None, max_length=256, pattern="^/",
         description="JSON Pointer to one existing nonempty ShotSpec string, e.g. /story_beat, "
                     "/camera/shot_size or /dialogue/0/text. Never select an object, array or number. "
-                    "Use null if the corresponding detail is not specified.",
+                    "Use null if the corresponding detail is not specified. /continuity describes the "
+                    "boundary to a preceding shot; its cut mode is never evidence of internal cuts.",
     )
     confidence: float = Field(ge=0, le=1)
 

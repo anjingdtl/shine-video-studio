@@ -1,0 +1,158 @@
+{
+  "source_revision": "84a6066dcd9ee24bd2e87bd364e90476be5a039d",
+  "stage": "BASIC_TEXT_CONTROLS_PASS_POSTURE_DETECTED_EXTRA_FALSE_EDITING_CONFLICT",
+  "generation_options": {
+    "max_completion_tokens": 8192,
+    "reasoning_effort": "low"
+  },
+  "controls": [
+    {
+      "name": "proposed_spoken_matching_text",
+      "task_id": "0a24b692-f0e8-45de-9d46-8f5ed2933ce5",
+      "artifact_id": "15c1f2df-aa1f-4b8b-a7b7-2ddc61362262",
+      "recommendation": "proceed_to_preflight",
+      "latency_ms": 3199,
+      "physical_requests": 1,
+      "usage": {
+        "total_tokens": 2061,
+        "total_characters": 0,
+        "prompt_tokens": 1651,
+        "completion_tokens": 410,
+        "completion_tokens_details": {
+          "reasoning_tokens": 71
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 128
+        }
+      },
+      "finish_reason": "stop",
+      "production_input_binding": "PASS_READ_ONLY_NEW_TEXT_PROPOSAL",
+      "preflight_rejection": null
+    },
+    {
+      "name": "new_explicit_multifield_conflict",
+      "task_id": "d0ee58d7-bffc-472c-85a4-1eed9be9c168",
+      "artifact_id": "706a1a3e-5436-45d3-aa14-07ac41b292b9",
+      "recommendation": "needs_review",
+      "latency_ms": 23326,
+      "physical_requests": 1,
+      "usage": {
+        "total_tokens": 2133,
+        "total_characters": 0,
+        "prompt_tokens": 1561,
+        "completion_tokens": 572,
+        "completion_tokens_details": {
+          "reasoning_tokens": 152
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finish_reason": "stop",
+      "production_input_binding": null,
+      "preflight_rejection": "STYLE_INPUT_CONFLICT_NEEDS_REVIEW"
+    }
+  ],
+  "posture_ablation": {
+    "task_id": "6c97c69c-fb89-4ebb-95d0-6cdf78e73286",
+    "artifact_id": "2cbb60e1-417f-47f0-8138-92d1176766fb",
+    "latency_ms": 4573,
+    "physical_requests": 1,
+    "posture_conflict_detected": true,
+    "extra_false_positive": {
+      "field": "editing_rhythm",
+      "status": "conflict",
+      "detail": "The Style and ShotSpec story beat require one uninterrupted take with no internal cut, but the ShotSpec continuity mode is labeled \"cut.\" This creates an internal editing-mode contradiction.",
+      "style_text": "A single long take, no cut",
+      "shot_text": "cut",
+      "shot_path": "/continuity/mode",
+      "confidence": 0.96
+    },
+    "unfiltered_checks": [
+      {
+        "field": "photography_language",
+        "status": "consistent",
+        "detail": "The ShotSpec matches the medium close framing, neon-lit night rain setting, and slight handheld breathing movement described by the Style.",
+        "style_text": "Medium close shot under neon in the night rain, with a slight handheld breathing movement",
+        "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+        "shot_path": "/story_beat",
+        "confidence": 0.99
+      },
+      {
+        "field": "shot_blocking",
+        "status": "conflict",
+        "detail": "The Style says the character sits centre-left, while the ShotSpec says she walks steadily at centre-left. Centre-left placement and the gaze direction align, but posture and action conflict.",
+        "style_text": "The character sits centre-left, gaze directed into the depth of the frame",
+        "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+        "shot_path": "/story_beat",
+        "confidence": 0.99
+      },
+      {
+        "field": "color_palette",
+        "status": "consistent",
+        "detail": "The ShotSpec explicitly specifies cool cyan-blue neon, warm amber street lamps, and natural skin tones, matching the Style palette.",
+        "style_text": "Cool cyan-blue neon against warm amber street lamps, natural skin tones",
+        "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+        "shot_path": "/story_beat",
+        "confidence": 0.99
+      },
+      {
+        "field": "lighting_tone",
+        "status": "consistent",
+        "detail": "Neon backlight, wet-road reflections, and controlled or preserved highlight detail are consistent across both inputs.",
+        "style_text": "Neon backlight with wet-road reflections, preserving highlight detail",
+        "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+        "shot_path": "/story_beat",
+        "confidence": 0.98
+      },
+      {
+        "field": "lens_texture",
+        "status": "consistent",
+        "detail": "The ShotSpec specifies 35mm documentary grain and shallow depth of field, matching the Style.",
+        "style_text": "35mm documentary grain, shallow depth of field",
+        "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+        "shot_path": "/story_beat",
+        "confidence": 0.99
+      },
+      {
+        "field": "editing_rhythm",
+        "status": "conflict",
+        "detail": "The Style and ShotSpec story beat require one uninterrupted take with no internal cut, but the ShotSpec continuity mode is labeled \"cut.\" This creates an internal editing-mode contradiction.",
+        "style_text": "A single long take, no cut",
+        "shot_text": "cut",
+        "shot_path": "/continuity/mode",
+        "confidence": 0.96
+      },
+      {
+        "field": "sound_performance",
+        "status": "consistent",
+        "detail": "The ShotSpec specifies natural night-rain ambience and clear, restrained dialogue, matching the Style sound requirements.",
+        "style_text": "Natural night-rain ambience, clear and restrained dialogue",
+        "shot_text": "natural night-rain ambience",
+        "shot_path": "/sound/ambience",
+        "confidence": 0.99
+      }
+    ],
+    "strict_seven_field_acceptance": "FAIL_BEFORE_BOUNDARY_CLARIFICATION",
+    "earlier_helper_status": "POSTURE_ABLATION_PASS_NOT_MEDIA_QUALIFICATION checked only detection/blocking; not sufficient for strict field correctness"
+  },
+  "additive_migration_existing_profile_fields_preserved": true,
+  "historical_v1_v2_guards_with_new_budget": [
+    "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+    "16b47934-2ce1-4610-83af-7d8e7e504657"
+  ],
+  "protected_tables_unchanged": true,
+  "local_release": {
+    "all_leases_released": true,
+    "review_weights_unloaded": true,
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "comfy_idle": true
+  },
+  "h3_submissions": 0,
+  "media_bytes_transmitted": 0,
+  "human_approval": false,
+  "vlm_qualification": "WITHHELD",
+  "old_historical_walking_outcomes": "UNKNOWN_ABANDONED_PRESERVED_NOT_REPLAYED",
+  "scope": "Text-only proposals; no existing silent video approval or M4 completion"
+}

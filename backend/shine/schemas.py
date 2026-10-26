@@ -87,7 +87,8 @@ class ContinuityMode(StrEnum):
 class ContinuitySettings(APIModel):
     mode: ContinuityMode = Field(
         default=ContinuityMode.CUT,
-        description="last_frame is SOFT_REFERENCE_CONTINUITY, never a guaranteed first-frame anchor",
+        description="Relation to the preceding shot. CUT starts an independent shot, not an internal edit. "
+                    "last_frame is SOFT_REFERENCE_CONTINUITY, never a guaranteed first-frame anchor",
     )
     previous_shot_id: str | None = None
     previous_job_id: str | None = None
