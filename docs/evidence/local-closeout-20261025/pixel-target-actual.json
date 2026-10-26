@@ -1,0 +1,73 @@
+{
+  "source_revision": "fb942a8914f38dc40d490142f73be82102551272",
+  "status": "REAL_PIXEL_CONTROL_FAILED_CONTRACT_THREE_NOT_RUN",
+  "predeclared_controls": [
+    {
+      "name": "pixel-positive",
+      "source_job": "41f20ac6-6d8b-4912-8f8b-60095c709410",
+      "expected": "passed"
+    },
+    {
+      "name": "pixel-mask-negative",
+      "source_job": "41f20ac6-6d8b-4912-8f8b-60095c709410",
+      "expected": "failed"
+    },
+    {
+      "name": "pixel-empty-negative",
+      "source_job": "90370ed1-595c-499f-ab3c-02f2fa8b430a",
+      "expected": "failed"
+    },
+    {
+      "name": "pixel-walking-negative",
+      "source_job": "7a526327-cc07-4d2d-afc0-141870662c74",
+      "expected": "failed"
+    }
+  ],
+  "attempted_stages": 1,
+  "stages_not_run": 3,
+  "call_id": "2afcb546-3440-4fcf-a727-038b9cda4883",
+  "call_status": "FAILED",
+  "received_response": {
+    "sha256": "237f94d98655ae1862da3451b8c592e47e5c487aaf75c68e64389b8e66dab37d",
+    "finish_reason": null,
+    "error_code": "VLM_RESPONSE_CONTRACT_INVALID",
+    "retryable": false
+  },
+  "precise_original_validation_reason": "NOT_RETAINED_NOT_RECONSTRUCTED",
+  "target_spec_sha256": "8d27dbe8fb76cd5d02bba8bcb75163c87c381bd477c397577fdeaa095e0aaad7",
+  "positive_input_proof_id": "15c1f2df-aa1f-4b8b-a7b7-2ddc61362262",
+  "mask_input_proof_id": "5b60fd38-fbbe-456a-b97e-02ecbcdd5df9",
+  "source_video_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+  "audio_transcript_supplied": false,
+  "physical_release": {
+    "receipt": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\review-pixel-positive-physical-release-20261027.json",
+    "sha256": "ad71b650ed0b7c53767db41476a5a6a41686e2f8ac81f0017e0b80773fdc22f7",
+    "status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+    "old_processes_dead": true,
+    "memory_before_stop": {
+      "working_set_bytes": 2196938752,
+      "lifetime_peak_working_set_bytes": 6401101824,
+      "private_commit_bytes": 5496127488,
+      "lifetime_peak_private_commit_bytes": 24126918656,
+      "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+    },
+    "memory_fresh_baseline": {
+      "working_set_bytes": 810975232,
+      "lifetime_peak_working_set_bytes": 810975232,
+      "private_commit_bytes": 2187894784,
+      "lifetime_peak_private_commit_bytes": 2187894784,
+      "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+    }
+  },
+  "lease_status": "RELEASED",
+  "lease_budget_mb": 14000,
+  "comfy_restored_idle": true,
+  "comfy_restoration_receipt_sha256": "635d81784ac2a2d62c9447aeb0d73a8961d0a394b2a472b3ea98a10790d11f6f",
+  "protected_tables_unchanged": true,
+  "h3_submissions": 0,
+  "media_cloud_upload_bytes": 0,
+  "human_approval": false,
+  "vlm_publication": "WITHHELD",
+  "asr_qualification": "UNCHANGED_ADAPTER_RUNTIME",
+  "scope": "New pixel targets; original job/QC records never changed; no source audio quality or final film approval"
+}

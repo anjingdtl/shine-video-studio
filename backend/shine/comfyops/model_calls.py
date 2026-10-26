@@ -259,6 +259,7 @@ class TrackedProvider:
                         row.trace = {**row.trace, "received_response": {
                             "sha256": exc.response_sha256, "finish_reason": exc.finish_reason,
                             "error_code": str(exc), "retryable": False,
+                            **({"validation": exc.validation} if exc.validation is not None else {}),
                         }}
                 raise
             with self.factory.begin() as db:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from shine.llm.base import ProviderConfig
 from shine.schemas import (
@@ -18,6 +19,7 @@ from shine.schemas import (
     SemanticReviewResult,
     ShotSpec,
     StyleBible,
+    StyleInputCheck,
 )
 from shine.security import require_loopback_url
 
@@ -29,10 +31,34 @@ class ReceivedReviewError(ValueError):
     Only its digest and classification enter the model-call ledger.
     """
 
-    def __init__(self, code, response_sha256, finish_reason=None):
+    def __init__(self, code, response_sha256, finish_reason=None, validation=None):
         super().__init__(code)
         self.response_sha256 = response_sha256
         self.finish_reason = finish_reason
+        self.validation = validation
+
+
+def review_validation_failure(exc):
+    """Only schema-owned paths/types; never provider values, unknown keys or messages."""
+    if isinstance(exc, ValidationError):
+        allowed = set(SemanticReviewResult.model_fields) | set(StyleInputCheck.model_fields)
+        allowed |= set(SemanticFinding.model_fields)
+        types = {"missing", "extra_forbidden", "literal_error", "string_too_long", "string_too_short",
+                 "list_type", "dict_type", "string_type", "float_parsing", "float_type",
+                 "greater_than_equal", "less_than_equal", "bool_parsing", "bool_type", "value_error"}
+        return {"code": "SCHEMA_VALIDATION_FAILED", "issues": [
+            {"type": error["type"] if error["type"] in types else "validation_error",
+             "path": ["*" if isinstance(part, int) else part if part in allowed else "?"
+                      for part in error["loc"]]}
+            for error in exc.errors(include_input=False, include_url=False)[:4]
+        ]}
+    if isinstance(exc, json.JSONDecodeError):
+        return {"code": "JSON_DECODE_FAILED"}
+    code = str(exc)
+    return {"code": code if code in {
+        "STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
+        "VLM_DECISION_MISSING", "VLM_VERDICT_INVALID",
+    } else "RESPONSE_SHAPE_INVALID"}
 
 
 def require_style_input_checks(result: SemanticReviewResult):
@@ -276,7 +302,8 @@ class OpenAICompatibleVisionReviewer:
         except ReceivedReviewError:
             raise
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
-            raise ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", response_hash) from exc
+            raise ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", response_hash,
+                                      validation=review_validation_failure(exc)) from exc
 
     def release_models(self):
         # This provider runs outside this host's GPU ledger.

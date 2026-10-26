@@ -14,7 +14,7 @@ from tests.test_semantic_qc import context
 
 @pytest.mark.parametrize("case", ["missing", "incomplete", "duplicate", "conflict-passed",
                                  "uncertain-passed", "conflict-no-finding", "unknown-field",
-                                 "consistent", "conflict-recorded"])
+                                 "consistent", "conflict-recorded", "long-detail-secret", "unexpected-secret-key"])
 def test_wire_requires_complete_style_input_comparison(tmp_path, monkeypatch, case):
     data = dict(reviewer="fixture", is_mock=False, input_sha256="a" * 64,
                 findings=[], verdict="passed", overall_confidence=1,
@@ -27,6 +27,10 @@ def test_wire_requires_complete_style_input_comparison(tmp_path, monkeypatch, ca
         data["style_input_checks"][1] = data["style_input_checks"][0]
     elif case == "unknown-field":
         data["style_input_checks"][1]["field"] = "unfrozen_override"
+    elif case == "long-detail-secret":
+        data["style_input_checks"][1]["detail"] = "sk-private-provider-value" * 30
+    elif case == "unexpected-secret-key":
+        data["sk-private-provider-key"] = "sk-private-provider-value"
     elif case.startswith(("conflict", "uncertain")):
         data["style_input_checks"][1].update(
             status="uncertain" if case.startswith("uncertain") else "conflict",
@@ -59,6 +63,19 @@ def test_wire_requires_complete_style_input_comparison(tmp_path, monkeypatch, ca
         with pytest.raises(ReceivedReviewError, match="VLM_RESPONSE_CONTRACT_INVALID") as error:
             LocalVisionReviewer(cfg).review(context(tmp_path))
         assert error.value.response_sha256 == hashlib.sha256(response.content).hexdigest()
+        diagnostic = error.value.validation
+        assert diagnostic and "sk-private" not in json.dumps(diagnostic)
+        if case in {"missing", "incomplete", "duplicate"}:
+            assert diagnostic["code"] == "STYLE_INPUT_COVERAGE_MISSING"
+        elif case.startswith(("conflict", "uncertain")):
+            assert diagnostic["code"] == "STYLE_INPUT_DECISION_CONTRADICTION"
+        else:
+            assert diagnostic["code"] == "SCHEMA_VALIDATION_FAILED"
+            expected_type = {"unknown-field": "literal_error", "long-detail-secret": "string_too_long",
+                             "unexpected-secret-key": "extra_forbidden"}[case]
+            assert diagnostic["issues"][0]["type"] == expected_type
+            if case == "unexpected-secret-key":
+                assert diagnostic["issues"][0]["path"] == ["?"]
     assert len(requests) == 1  # A received contract failure never resubmits inference.
 
 
@@ -100,3 +117,4 @@ def test_missing_style_coverage_is_failed_received_call_not_unknown_or_passed(ap
         assert db.get(ResourceLease, task.trace["resource_id"]).status == "RELEASED"
         assert task.trace["received_response"]["sha256"] == hashlib.sha256(response.content).hexdigest()
         assert task.trace["received_response"]["retryable"] is False
+        assert task.trace["received_response"]["validation"] == {"code": "STYLE_INPUT_COVERAGE_MISSING"}

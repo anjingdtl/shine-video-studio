@@ -1,0 +1,22 @@
+{
+  "backend": {
+    "tests": "710",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "269.186"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS for unchanged UI",
+  "browser": "Existing20Mockflows; unchanged UI",
+  "source_files_sha256": {
+    "backend/shine/quality/semantic.py": "0409d2142309453ac058f6c3b8f544e55f95c2eee1a00e9c4bc3ecb7021b1821",
+    "backend/shine/comfyops/model_calls.py": "a074c99a4e858c69a2b10ac605eab6dc6e8c057b97000f384f70bf4f6abd0b2c",
+    "backend/tests/test_style_review_contract.py": "66cdf0302e3e1fa6349153d6e95ff1599f50bc706bab31274f3c0a5c4e0038f7",
+    "backend/tests/test_review_responses.py": "8c6858df3322701b9c254a216b65509c1c1bca3b04a5f4a728b04b3f8326d6c7"
+  },
+  "diagnostic": "New received contract failures store safe schema-owned paths and whitelisted error types, JSON/coverage/decision classifications. Unknown keys and all provider values/messages are excluded. No retry/acceptance behavior weakened.",
+  "historical_failure": "Original2afcb546 validation cause was not retained; not guessed or backfilled",
+  "new_model_calls_after_diagnostic_fix": 0,
+  "product": "PARTIAL"
+}
