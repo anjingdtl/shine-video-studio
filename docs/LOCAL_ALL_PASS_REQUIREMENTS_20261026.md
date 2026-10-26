@@ -1,5 +1,7 @@
 # 全 PASS 收尾核对表（2026-10-26）
 
+Latest actual continuation: 8B installation is complete (13 checked files, 10,605,572,552 bytes). Five serial calibration calls completed and released resources. Current-runtime ASR is PRODUCTION_APPROVED from actual CER=0 evidence; 8B VLM is withheld after a walking-versus-sitting style-conflict false pass. The application correctly rejects the separate empty-street style control; the private observer capitalization error is documented separately. ComfyUI is restored idle with no render replay. Full-product status remains PARTIAL. See [pinned calibration evidence](evidence/local-closeout-20261025/vlm8b-actual-calibration.json).
+
 **当前未达全 PASS。** 该表按原建设方案核对完成条件，不以新增回归数量缩小验收范围。
 工程、Mock、真实模型和人的最终验收分别记录；完整回复失败、资源归零或 HTTP 200 均不等同于影片通过。
 最新本机完整后端为 625 项通过；浏览器 17 类流程为 MOCK_VERIFIED，详见

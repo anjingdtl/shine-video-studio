@@ -1,5 +1,5 @@
 {
-  "stage": "CONTROLLED_INSTALL_RUNNING_NOT_RUNTIME_OR_QUALITY_ACCEPTED",
+  "stage": "FILES_VERIFIED_ACTUAL_CALIBRATION_PARTIAL_VLM_NOT_PUBLISHED",
   "source_revision": "9cdc6310a8cb770ce18efaf4e9935334512aee45",
   "source_repository": "Qwen/Qwen3-VL-8B-Instruct-FP8",
   "license_card": "Apache-2.0",
@@ -167,7 +167,7 @@
     "sha256": "60d388df296eda4f1fbce4b3c5533528cf0cd06f31d852047cb81c54c7a1733c"
   },
   "installation_attempt_id": "2663f819-f427-41b5-b7a0-6ccf470a7e2b",
-  "installation_attempt_status": "SUBMIT_INTENT",
+  "installation_attempt_status": "FILES_VERIFIED",
   "backend_after_native_budget_fix": {
     "name": "pytest",
     "errors": "0",
@@ -178,7 +178,7 @@
     "timestamp": "2026-10-26T20:03:06.769069+08:00",
     "hostname": "HSH-HOME"
   },
-  "old_asr_binding": "OLD_RUNTIME_RECORD_RETAINED_RECALIBRATION_REQUIRED",
+  "old_asr_binding": "DEPRECATED_REPLACED_BY_NEW_RUNTIME_CALIBRATED_ASR",
   "source_files_sha256": {
     "backend/shine/api_preparation.py": "ed9557fa250578d9ad2749cbd7c10026bd952b2d2e9b244a8d54f3447dac4688",
     "backend/shine/comfyops/native.py": "37d65a521e0ad98101de8ff497ce8687c96f6a5d2c5420db3b6cce674ed0da51",
@@ -208,5 +208,7 @@
     "main": "PUSH",
     "same_pr_obsolete_runs": "CANCEL_IN_PROGRESS",
     "four_job_bodies_and_read_permissions": "UNCHANGED_PARSED_AND_COMPARED"
-  }
+  },
+  "current_asr_revision": "86702102-652d-4b03-ade2-6a6408617c91",
+  "actual_calibration_evidence": "vlm8b-actual-calibration.json"
 }

@@ -1,5 +1,17 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
+Current continuation (2026-10-26, actual completed execution): **PARTIAL**.
+
+- Eight fixed model packages / 82 files / 46,803,197,151 bytes are now file-verified. The 8B FP8 package installation completed; it is no longer running.
+- Five actual local calibration calls completed serially. Every lease was released, and the owned review process exited and was replaced between stages. No H3 job was resubmitted and production rows/gates were preserved.
+- 8B positive and masked-face negative controls behaved correctly. The empty-street control fails the actual application style gate through `STYLE_*` codes; the private observer's case-sensitive category check was a false negative. The original receipt remains unchanged.
+- The walking/sitting frozen-style conflict still falsely passed. One rejected sample also incorrectly treated a static camera as evidence against an uninterrupted take. These failures remain visible; **8B VLM is not published or production-qualified**.
+- ASR actual fixed-line CER=0 qualified the current runtime. Revision `86702102-652d-4b03-ade2-6a6408617c91` is now `PRODUCTION_APPROVED`; this is technical recognition evidence, not voice identity or human listening acceptance.
+- The owned ComfyUI was restored with its original launch arguments and unchanged overlay, verified idle (`RESTORED_IDLE_NO_RENDER_REPLAY`). API/Web remain available; no resident Worker was started.
+- Software evidence remains 625 backend tests with zero failures/errors/skips; no application source changed in this continuation. Product-wide acceptance remains PARTIAL due VLM reliability, formal preproduction/human rights/voice/final viewing, and remote Actions billing/quota.
+
+See [actual 8B calibration](evidence/local-closeout-20261025/vlm8b-actual-calibration.json). Earlier sections below are historical evidence, not the current qualification state.
+
 10-26 最新实机续轮：完整后端 **625 项、零跳过/失败/错误**；Ruff 通过。前端沿用当前代码 TypeScript/Vite 与 17 类隔离 Mock 浏览器证据。
 七个固定模型包 69 文件、36,197,624,599 字节已校验；真实原生 VLM 正反例、ASR 校准和认证发布完成。
 后续更强的真实对抗性复核暴露 4B VLM 错误终审：曾漏报风格冲突，又误把匿名虚构人物解读为禁止可见五官/服装。

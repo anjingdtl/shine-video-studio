@@ -1,0 +1,101 @@
+{
+  "status": "PARTIAL_VLM_WITHHELD_ASR_PRODUCTION_APPROVED",
+  "source_head": "7272a10fa4afbba10921fe7190315ffc1c9d0e9d",
+  "calibration_receipt_sha256": "fffb45198ea58dafe08644c11928f8ababdc283d58ae42cb0506933ac8f7b5cf",
+  "protected_tables_unchanged": true,
+  "production_unchanged": true,
+  "stages": [
+    {
+      "name": "positive",
+      "status": "COMPLETED",
+      "contract_met": true,
+      "estimated_lease_budget_mb": 14000,
+      "call_id": "c3e0ddcd-e973-4842-9f45-6ed686cae462",
+      "call_status": "COMPLETED",
+      "release_status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "verdict": "passed",
+      "finding_codes": []
+    },
+    {
+      "name": "negative",
+      "status": "COMPLETED",
+      "contract_met": true,
+      "estimated_lease_budget_mb": 14000,
+      "call_id": "4e4b7788-68f2-4981-b75f-e2095c680d21",
+      "call_status": "COMPLETED",
+      "release_status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "verdict": "failed",
+      "finding_codes": [
+        "face_mask_violation",
+        "identity_violation"
+      ]
+    },
+    {
+      "name": "frozen-style-conflict",
+      "status": "COMPLETED",
+      "contract_met": false,
+      "estimated_lease_budget_mb": 14000,
+      "call_id": "c006e4aa-d0ca-454b-a07a-9d3faca2dc84",
+      "call_status": "COMPLETED",
+      "release_status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "verdict": "failed",
+      "finding_codes": [
+        "STYLE_CAMERA_MISMATCH",
+        "STYLE_SHOT_BLOCKING_MISMATCH",
+        "STYLE_EDITING_RHYTHM_MISMATCH",
+        "STYLE_COLOR_PALETTE_MISMATCH"
+      ]
+    },
+    {
+      "name": "walking-style-conflict",
+      "status": "COMPLETED",
+      "contract_met": false,
+      "estimated_lease_budget_mb": 14000,
+      "call_id": "da01b747-28a7-44bf-b0a1-df7db34b4520",
+      "call_status": "COMPLETED",
+      "release_status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "verdict": "passed",
+      "finding_codes": []
+    },
+    {
+      "name": "asr",
+      "status": "COMPLETED",
+      "contract_met": true,
+      "estimated_lease_budget_mb": 4000,
+      "call_id": "e4ce19a0-e2e5-427c-950c-3cba81c4b876",
+      "call_status": "COMPLETED",
+      "release_status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "cer": 0,
+      "scope": "one fixed eight-character Chinese line; not voice identity or human listening"
+    }
+  ],
+  "application_style_gate_evaluation": {
+    "original_receipt_sha256": "fffb45198ea58dafe08644c11928f8ababdc283d58ae42cb0506933ac8f7b5cf",
+    "original_receipt_modified": false,
+    "application_style_gate": "failed",
+    "finding_codes": [
+      "STYLE_CAMERA_MISMATCH",
+      "STYLE_COLOR_PALETTE_MISMATCH",
+      "STYLE_EDITING_RHYTHM_MISMATCH",
+      "STYLE_SHOT_BLOCKING_MISMATCH"
+    ],
+    "observer_false_negative_reason": "private calibration observer category equality was case-sensitive; application also recognizes STYLE-prefixed codes",
+    "walking_style_conflict": "UNRESOLVED_ACTUAL_FALSE_PASS",
+    "invalid_editing_explanation": "PRESERVED_NOT_FILTERED; static camera does not establish an internal cut",
+    "vlm_production_qualified": false,
+    "new_inference_calls": 0,
+    "database_writes": 0
+  },
+  "asr_publication": [
+    {
+      "action": "publish",
+      "id": "86702102-652d-4b03-ade2-6a6408617c91",
+      "category": "ASR",
+      "sha256": "51935be6a95eabb6534c2b40ff7cd462265d8c3ea2187a5eb51f91dd4ab4854d"
+    }
+  ],
+  "comfy_restored": "RESTORED_IDLE_NO_RENDER_REPLAY",
+  "h3_submissions": 0,
+  "human_quality_approval": false,
+  "budget_measurement": "VRAM/RAM declarations remain estimates; no GPU peak measurement"
+}
