@@ -419,3 +419,5 @@ stronger H3 `job_id` evidence route, and preserve the ordinary ComfyUI history r
 other capabilities. Native cards do not offer Fake node/execution controls. The current
 project supplies native calibration scope; a conflicting project ID is rejected before
 issuing a grant. JSON evidence remains readable in a full-width editor.
+
+The local full-model executor also rejects unlisted root-level loader inputs (including alternate weights, tokenizer/template/generation JSON and case-insensitive vocabulary names). It does not support PEFT base-model redirects; declaring an adapter_config.json does not authorize an external base. Known local audit notes are not loader inputs. Cold loads and identity probes recheck this boundary before model construction.

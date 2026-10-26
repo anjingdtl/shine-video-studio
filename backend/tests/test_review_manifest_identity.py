@@ -154,7 +154,10 @@ def test_optional_identity_never_reuses_previous_response_proof():
 
 
 @pytest.mark.parametrize('role', ['VLM', 'ASR'])
-def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(executor, tmp_path, monkeypatch, role):
+@pytest.mark.parametrize('mutation', ['changed-weight', 'undeclared-tokenizer'])
+def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(
+    executor, tmp_path, monkeypatch, role, mutation
+):
     import importlib.metadata
     import sys
     from types import SimpleNamespace
@@ -188,7 +191,10 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(executo
     client = TestClient(app)
     assert client.get("/identity").status_code == 200
     changed = tmp_path if role == 'VLM' else asr
-    (changed / 'model.safetensors').write_bytes(b'changed-after-startup')
+    if mutation=='changed-weight':
+        (changed / 'model.safetensors').write_bytes(b'changed-after-startup')
+    else:
+        (changed / 'added_tokens.json').write_text('{}',encoding='utf8')
     assert client.get("/identity").status_code == 409
     if role == 'VLM':
         import base64
@@ -207,7 +213,8 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(executo
         def action():
             return client.post('/v1/audio/transcriptions', data={'model': 'asr-fixture'},
                                files={'file': ('fixture.wav', b'fake mocked audio', 'audio/wav')})
-    with pytest.raises(ValueError, match='MODEL_(SIZE|HASH)_CHANGED'):
+    error='MODEL_(SIZE|HASH)_CHANGED' if mutation=='changed-weight' else 'UNDECLARED_MODEL_RUNTIME_FILE'
+    with pytest.raises(ValueError, match=error):
         action()
     assert not loads
 
@@ -270,3 +277,39 @@ def test_native_binding_accepts_a_complete_sharded_runtime_without_monolithic_we
         runtime_files=['config.json', 'tokenizer.json', 'model.safetensors.index.json',
                        'model-00001-of-00002.safetensors', 'model-00002-of-00002.safetensors'])
     assert 'model.safetensors.index.json' in binding.runtime_files
+
+
+@pytest.mark.parametrize('extra', ['model.safetensors', 'pytorch_model.bin', 'adapter_config.json',
+                                   'added_tokens.json', 'chat_template.jinja', 'generation_config.json', 'VOCAB.TXT'])
+def test_unlisted_root_file_cannot_override_checked_shards_or_processor(executor, tmp_path, extra):
+    spec = sharded_manifest(tmp_path)
+    (tmp_path / extra).write_bytes(b'unlisted loader input')
+    with pytest.raises(ValueError, match='UNDECLARED_MODEL_RUNTIME_FILE'):
+        executor.verified_model_identity(spec)
+
+
+@pytest.mark.parametrize('extra', ['adapter_config.json', 'added_tokens.json', 'generation_config.json'])
+def test_unlisted_runtime_configuration_also_blocks_monolithic_models(executor, tmp_path, extra):
+    spec = manifest(tmp_path)
+    (tmp_path / extra).write_bytes(b'unlisted loader input')
+    with pytest.raises(ValueError, match='UNDECLARED_MODEL_RUNTIME_FILE'):
+        executor.verified_model_identity(spec)
+
+
+def test_local_audit_metadata_remains_outside_runtime_identity(executor, tmp_path):
+    spec = manifest(tmp_path)
+    before = executor.verified_model_identity(spec)
+    (tmp_path / 'source-audit.json').write_text('{"scope":"local note, not loader configuration"}', encoding='utf8')
+    assert executor.verified_model_identity(spec) == before
+
+
+def test_declared_peft_redirect_cannot_escape_the_verified_full_model_scope(executor, tmp_path):
+    import json
+
+    spec = manifest(tmp_path)
+    data = json.dumps({'base_model_name_or_path': '../unscoped-model'}).encode()
+    (tmp_path / 'adapter_config.json').write_bytes(data)
+    spec['files'].append({'path': 'adapter_config.json', 'sha256': hashlib.sha256(data).hexdigest(),
+                          'bytes': len(data)})
+    with pytest.raises(ValueError, match='UNSUPPORTED_MODEL_ADAPTER_LAYOUT'):
+        executor.verified_model_identity(spec)

@@ -45,6 +45,22 @@ def _verified_model_files(manifest):
         if digest != entry["sha256"]:
             raise ValueError("MODEL_HASH_CHANGED")
         verified.append({"path": path.relative_to(root).as_posix(), "sha256": digest, "bytes": size})
+    # Local loaders can prefer an alternative weight file, adapter, tokenizer
+    # or generation configuration over the declared files. Hashing only listed
+    # bytes must not authorize these unlisted loader inputs.
+    audit_notes = {"source-audit.json", "configuration.json"}
+    runtime_suffixes = {".safetensors", ".bin", ".json", ".model", ".jinja", ".py", ".tiktoken", ".bpe"}
+    root_files = [path for path in root.iterdir() if path.is_file()]
+    for candidate in root_files:
+        if (candidate.is_file() and candidate.name not in declared
+                and candidate.name.casefold() not in audit_notes
+                and (candidate.suffix.lower() in runtime_suffixes
+                     or candidate.name.casefold() in {"merges.txt", "vocab.txt"})):
+            raise ValueError("UNDECLARED_MODEL_RUNTIME_FILE")
+    # PEFT may redirect from this folder to another base model before loading.
+    # This adapter supports complete model packages, not unverified external bases.
+    if any(path.name.casefold() == "adapter_config.json" for path in root_files):
+        raise ValueError("UNSUPPORTED_MODEL_ADAPTER_LAYOUT")
     if "model.safetensors.index.json" in declared:
         # Transformers follows this index during loading. Every referenced shard
         # must belong to the same verified manifest, with no alternative weights.

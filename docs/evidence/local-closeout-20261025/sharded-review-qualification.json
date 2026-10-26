@@ -184,6 +184,29 @@
     "backend/shine/comfyops/native.py": "37d65a521e0ad98101de8ff497ce8687c96f6a5d2c5420db3b6cce674ed0da51",
     "backend/shine/quality/runtime.py": "48dfeb58cd38f91581a61666958fb1ae63cfdb312075f9294fba7569149f6514",
     "backend/shine/quality/semantic.py": "4cc85948a87088336936b0d24f153c37e1f49a6e0b77c8002570531a39c91084",
-    "scripts/local_review_server.py": "658a70eb1c3513e6bb3ca27f9f4fa4b2769927b6fc1063826677f79bd7157aed"
+    "scripts/local_review_server.py": "bc3d23182771a9179718f3190abd00f5bda5cfdeeae97ca5bc7dc00326ef3a74"
+  },
+  "backend_after_runtime_scope_fence": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "625",
+    "time": "225.059",
+    "timestamp": "2026-10-26T21:11:41.348143+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "runtime_scope_guard": {
+    "undeclared_root_loader_files": "REJECTED",
+    "case_insensitive_vocab_names": "REJECTED_WHEN_UNDECLARED",
+    "peft_external_base_redirect_layout": "UNSUPPORTED_REJECTED",
+    "local_audit_note": "IGNORED_AS_NON_LOADER_METADATA",
+    "inference_to_test_guard": false
+  },
+  "ci_trigger_validation": {
+    "feature_branches": "PULL_REQUEST_ONLY",
+    "main": "PUSH",
+    "same_pr_obsolete_runs": "CANCEL_IN_PROGRESS",
+    "four_job_bodies_and_read_permissions": "UNCHANGED_PARSED_AND_COMPARED"
   }
 }
