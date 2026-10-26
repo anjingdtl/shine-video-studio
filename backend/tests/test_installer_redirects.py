@@ -264,3 +264,107 @@ def test_resume_resolves_and_revalidates_cdn_again(monkeypatch, tmp_path):
 def test_resume_budget_cannot_be_unbounded(tmp_path, budget):
     with pytest.raises(ValueError, match="DOWNLOAD_RESUME_BUDGET_INVALID"):
         ControlledDownloader({"huggingface.co"}, HTTPTransport(), max_stream_attempts=budget).download(spec(), tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["fresh", "resume", "ignored", "wrong-range", "short", "overflow"])
+def test_bounded_ranges_preserve_offsets_and_verify_whole_object(monkeypatch, tmp_path, mode):
+    data = b"abcdefgh"
+    file = spec(["us.aws.cdn.hf.co"]).model_copy(update={
+        "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+    })
+    if mode == "resume":
+        (tmp_path / (file.sha256 + ".part")).write_bytes(data[:2])
+    requests = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        headers = kwargs["headers"]
+        assert headers["Accept-Encoding"] == "identity"
+        start, end = map(int, headers["Range"][6:].split("-"))
+        requests.append((url, start, end))
+        if len(requests) % 2:
+            yield httpx.Response(302, headers={"location": "https://us.aws.cdn.hf.co/file?Signature=transient"})
+        elif mode == "ignored":
+            yield httpx.Response(200, content=data)
+        else:
+            content = data[start:end+1]
+            if mode == "short":
+                content = content[:-1]
+            if mode == "overflow":
+                content += b"x"
+            actual_end = end + 1 if mode == "wrong-range" else end
+            yield httpx.Response(206, content=content, headers={
+                "content-range": f"bytes {start}-{actual_end}/{len(data)}",
+            })
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    downloader = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3)
+    errors = {"wrong-range": "INVALID_RESUME_RANGE", "short": "DOWNLOAD_SEGMENT_SIZE_MISMATCH",
+              "overflow": "DOWNLOAD_SIZE_EXCEEDED"}
+    if mode in errors:
+        with pytest.raises(ValueError, match=errors[mode]):
+            downloader.download(file, tmp_path)
+        assert len(requests) == 2 and not (tmp_path / file.sha256).exists()
+    else:
+        assert downloader.download(file, tmp_path).read_bytes() == data
+        ranges = [(a, b) for _, a, b in requests[::2]]
+        assert ranges == ([(0, 2)] if mode == "ignored" else [(2, 4), (5, 7)]
+                          if mode == "resume" else [(0, 2), (3, 5), (6, 7)])
+        assert all(requests[i][1:] == requests[i+1][1:] for i in range(0, len(requests), 2))
+
+
+@pytest.mark.parametrize("size", [0, True, 64 * 1024**2 + 1])
+def test_bounded_range_size_has_a_fixed_upper_limit(tmp_path, size):
+    with pytest.raises(ValueError, match="DOWNLOAD_SEGMENT_BUDGET_INVALID"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=size).download(spec(), tmp_path)
+
+
+def test_bounded_range_interruption_continues_from_actual_written_byte(monkeypatch, tmp_path):
+    data = b"abcdefgh"
+    file = spec().model_copy(update={"size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    ranges = []
+
+    class Interrupted(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"ab"
+            raise httpx.ReadError("stream interrupted")
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        start, end = map(int, kwargs["headers"]["Range"][6:].split("-"))
+        ranges.append((start, end))
+        headers = {"content-range": f"bytes {start}-{end}/{len(data)}"}
+        yield (httpx.Response(206, stream=Interrupted(), headers=headers) if len(ranges) == 1
+               else httpx.Response(206, content=data[start:end+1], headers=headers))
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    result = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
+    assert result.read_bytes() == data
+    assert ranges == [(0, 2), (2, 4), (5, 7)]
+
+
+def test_resume_budget_resets_only_after_a_complete_verified_range(monkeypatch, tmp_path):
+    data = b"abcdefghijklmnop"
+    file = spec().model_copy(update={"size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    ranges = []
+
+    class Interrupted(httpx.SyncByteStream):
+        def __init__(self, prefix):
+            self.prefix = prefix
+
+        def __iter__(self):
+            yield self.prefix
+            raise httpx.ReadTimeout("stream stalled")
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        start, end = map(int, kwargs["headers"]["Range"][6:].split("-"))
+        ranges.append((start, end))
+        headers = {"content-range": f"bytes {start}-{end}/{len(data)}"}
+        yield (httpx.Response(206, stream=Interrupted(data[start:start+1]), headers=headers)
+               if len(ranges) % 2 else httpx.Response(206, content=data[start:end+1], headers=headers))
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    path = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
+    assert path.read_bytes() == data
+    assert ranges == [(0, 2), (1, 3), (4, 6), (5, 7), (8, 10), (9, 11), (12, 14), (13, 15)]

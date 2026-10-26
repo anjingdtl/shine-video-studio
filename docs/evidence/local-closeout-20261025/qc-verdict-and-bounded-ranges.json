@@ -1,0 +1,284 @@
+{
+  "at": "2026-10-26T04:30:48.078046+00:00",
+  "source_base": "6a72298dc3df465efa4f58c43af2ad96b1481ffa",
+  "scope": "Explicit QC verdict contract and finite per-range transfer recovery; not whole-product acceptance",
+  "backend": {
+    "tests": "508",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "203.346"
+  },
+  "targeted_qc": {
+    "tests": "49",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "5.523"
+  },
+  "targeted_download_preparation": {
+    "tests": "102",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "9.802"
+  },
+  "checks": {
+    "ruff": "PASS backend and scripts/local_review_server.py",
+    "typescript_vite": "PASS npm run build in frontend",
+    "browser": "prior ac398cf 15 MOCK_VERIFIED flows; frontend unchanged",
+    "remote_ci": "6a72298 run 40251142654: four jobs NOT_STARTED; exact check annotations independently read; account included Actions quota exhausted; no payment/spending changes"
+  },
+  "counterexamples": [
+    {
+      "stage": "before low-confidence guard",
+      "real_response_overall_confidence": 0.0,
+      "findings": [],
+      "fused_result_before_fix": "passed",
+      "same_received_response_after_fix": "needs_review",
+      "red_tests": 4
+    },
+    {
+      "stage": "after confidence guard, before explicit verdict",
+      "real_response_overall_confidence": 1.0,
+      "findings": [],
+      "fused_result_before_verdict_contract": "passed",
+      "resolution": "New wire responses require explicit verdict, with negative verdicts blocking even absent findings; no prose-to-finding inference"
+    }
+  ],
+  "real_vlm": {
+    "positive": {
+      "at": "2026-10-26T04:18:17.776740+00:00",
+      "status": "PASS",
+      "artifact_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+      "reviews": [
+        {
+          "reviewer": "local-openai-compatible-vlm",
+          "model": "local-qwen3-vl-4b",
+          "is_mock": false,
+          "input_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+          "verdict": "passed",
+          "findings": [],
+          "overall_confidence": 0.95,
+          "raw_summary": "All evidence frames match reference identity (CHAR_LIANG), costume (fitted black tactical outfit), scene (rain-slicked neon boulevard), style (neon backlight, 35mm grain, handheld breathing), and continuity (slow dolly-in, no cuts). No violations or uncertainties found. Shot composition and lighting tone align with approved style and story beat."
+        }
+      ],
+      "named_gates": {
+        "technical": "passed",
+        "semantic": "passed",
+        "audio": "not_applicable",
+        "style": "passed",
+        "final": "passed"
+      },
+      "fused_result": "passed",
+      "runtime_release_pass": true,
+      "release": {
+        "loaded": false,
+        "asr_loaded": false,
+        "allocated_bytes": 0,
+        "reserved_bytes": 0
+      },
+      "h3_submissions": 0,
+      "production_before": {
+        "job_status": "PASSED",
+        "state_version": 9,
+        "attempts": 9,
+        "gates": 70,
+        "artifacts": 14
+      },
+      "production_after": {
+        "job_status": "PASSED",
+        "state_version": 9,
+        "attempts": 9,
+        "gates": 70,
+        "artifacts": 14
+      },
+      "calls": [
+        {
+          "id": "bfd8d2ad-5769-4039-b5c5-1804f5a9677a",
+          "status": "COMPLETED",
+          "resource_id": "0c788808-f7fc-4c22-a1c6-077c29489df9",
+          "review_provider": {
+            "profile_id": "e3e0dbd4-f964-4038-80be-713d52379ef7",
+            "kind": "openai_compatible",
+            "model": "local-qwen3-vl-4b",
+            "base_url_sha256": "bccbf917bf2a52a842b617ce285f9b6ad511a0e75624235b08e600ab48831311"
+          }
+        }
+      ]
+    },
+    "negative": {
+      "at": "2026-10-26T04:13:54.771319+00:00",
+      "status": "PASS",
+      "artifact_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+      "reviews": [
+        {
+          "reviewer": "local-openai-compatible-vlm",
+          "model": "local-qwen3-vl-4b",
+          "is_mock": false,
+          "input_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+          "verdict": "failed",
+          "findings": [
+            {
+              "code": "IDENTITY_MISMATCH",
+              "category": "identity",
+              "severity": "hard",
+              "confidence": 1.0,
+              "message": "Shot depicts a human woman in a black leather outfit, violating the story beat requirement of a bright red cartoon dinosaur.",
+              "evidence_time_s": 0.0,
+              "subject": "CHAR_LIANG"
+            },
+            {
+              "code": "SCENE_MISMATCH",
+              "category": "scene",
+              "severity": "hard",
+              "confidence": 1.0,
+              "message": "Scene is a wet city street at night with traffic and neon lights, violating the story beat requirement of a pure white studio at noon.",
+              "evidence_time_s": 0.0,
+              "subject": "SCENE_NEON"
+            },
+            {
+              "code": "STYLE_MISMATCH",
+              "category": "style",
+              "severity": "hard",
+              "confidence": 1.0,
+              "message": "Style includes neon lighting, night rain, and handheld movement, contradicting the studio, noon, and cartoon dinosaur requirements.",
+              "evidence_time_s": 0.0,
+              "subject": "STYLE"
+            }
+          ],
+          "overall_confidence": 1.0,
+          "raw_summary": "All evidence frames show a human woman in a wet city street at night, contradicting the story beat's requirement of a bright red cartoon dinosaur in a pure white studio at noon. Style elements like neon lighting and night rain are present, violating the specified environment and character requirements."
+        }
+      ],
+      "named_gates": {
+        "technical": "passed",
+        "semantic": "failed",
+        "audio": "not_applicable",
+        "style": "failed",
+        "final": "failed"
+      },
+      "fused_result": "failed",
+      "runtime_release_pass": true,
+      "release": {
+        "loaded": false,
+        "asr_loaded": false,
+        "allocated_bytes": 0,
+        "reserved_bytes": 0
+      },
+      "h3_submissions": 0,
+      "production_before": {
+        "job_status": "PASSED",
+        "state_version": 9,
+        "attempts": 9,
+        "gates": 70,
+        "artifacts": 14
+      },
+      "production_after": {
+        "job_status": "PASSED",
+        "state_version": 9,
+        "attempts": 9,
+        "gates": 70,
+        "artifacts": 14
+      },
+      "calls": [
+        {
+          "id": "063b10f2-97b4-4fd8-86c4-977831c0b68c",
+          "status": "COMPLETED",
+          "resource_id": "5f6c553c-d37f-40e0-9521-9c9df67abfc2",
+          "review_provider": {
+            "profile_id": "e3e0dbd4-f964-4038-80be-713d52379ef7",
+            "kind": "openai_compatible",
+            "model": "local-qwen3-vl-4b",
+            "base_url_sha256": "bccbf917bf2a52a842b617ce285f9b6ad511a0e75624235b08e600ab48831311"
+          }
+        }
+      ]
+    }
+  },
+  "range_diagnostics": [
+    {
+      "scope": "Read-only diagnostic of same approved fixed file; no cache writes",
+      "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+      "requested_range": "bytes=591338726-591339749",
+      "hops": [
+        {
+          "host": "huggingface.co",
+          "status": 302
+        },
+        {
+          "host": "us.aws.cdn.hf.co",
+          "status": 206
+        }
+      ],
+      "content_range": "bytes 591338726-591339749/682293092",
+      "content_length": "1024",
+      "sample_bytes_read": 1024,
+      "elapsed_s": 2.454
+    },
+    {
+      "scope": "Read-only bounded diagnostic; fixed approved file, no cache writes",
+      "requested_range": "bytes=591338726-658447589",
+      "hops": [
+        {
+          "host": "huggingface.co",
+          "status": 302
+        },
+        {
+          "host": "us.aws.cdn.hf.co",
+          "status": 206
+        }
+      ],
+      "content_range": "bytes 591338726-658447589/682293092",
+      "content_length": "67108864",
+      "bytes_read": 67108864,
+      "elapsed_s": 4.047
+    }
+  ],
+  "transfer_contract": {
+    "range_bytes_max": 67108864,
+    "stream_attempts_before_a_complete_range": 3,
+    "reset_only_after_complete_range_and_length_validation": true,
+    "max_requests_formula": "3 * (ceil(file_size / segment_bytes) + 1)",
+    "whole_file_size_and_sha256_required": true,
+    "no_install_attempt_or_model_submission_replay": true,
+    "redirect_scopes_unchanged": true
+  },
+  "latest_install_plan": "9a844b71-c4e1-48f8-9e1a-41ddb3bbf635",
+  "installation_attempts": [
+    {
+      "id": "50017349-3e7c-4a29-a5e8-3b48a610f719",
+      "plan_id": "068c0628-dbad-43b2-8d9e-91e8344052e6",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "b993f2d6-8906-4163-9479-22b03885be6c",
+      "plan_id": "90638956-4d4a-4e37-86de-1f53739562d2",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "4451037c-127e-48cc-bb01-2238cf2f74d9",
+      "plan_id": "95826b02-8a75-4937-95ba-083085958822",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "faacf044-87e5-4fa5-a7a6-81e15279f872",
+      "plan_id": "9a844b71-c4e1-48f8-9e1a-41ddb3bbf635",
+      "status": "SUBMIT_INTENT"
+    },
+    {
+      "id": "9018c6a1-24b3-4549-8a2d-3ad9b7a4a667",
+      "plan_id": "c47823bc-24cc-4aa4-afd6-9a1fbb7de0f0",
+      "status": "RECONCILED_NO_RETRY"
+    },
+    {
+      "id": "f3739d93-91a5-4167-a031-dc587894790d",
+      "plan_id": "ef88b45b-35f9-407a-858e-c4bd21aadbe1",
+      "status": "RECONCILED_NO_RETRY"
+    }
+  ],
+  "real_voice_inference": "NOT_RUN",
+  "t2va": "NOT_RUN; fixed plan remains awaiting execution",
+  "human_listening_or_aesthetic_approval": "NOT_RUN",
+  "product_acceptance": "PARTIAL"
+}

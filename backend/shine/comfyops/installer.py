@@ -121,14 +121,17 @@ class DownloadStreamInterrupted(ValueError):
 
 class HTTPTransport:
     @contextmanager
-    def stream(self, url, offset):
+    def stream(self, url, offset, *, end=None):
         # Retry only connection establishment for this immutable GET, before any
         # response bytes. Never replay an installation attempt or a partial body.
+        headers = {"Range": f"bytes={offset}-{end if end is not None else ''}"} if offset or end is not None else {}
+        if end is not None:
+            headers["Accept-Encoding"] = "identity"
         with ExitStack() as stack:
             for attempt in range(3):
                 try:
                     response = stack.enter_context(httpx.stream(
-                        "GET", url, headers={"Range": f"bytes={offset}-"} if offset else {},
+                        "GET", url, headers=headers,
                         follow_redirects=False, timeout=httpx.Timeout(30, read=120),
                     ))
                     break
@@ -146,7 +149,7 @@ class HTTPTransport:
                 raise ValueError(f"DOWNLOAD_STREAM_FAILED:{type(exc).__name__}") from None
 
     @contextmanager
-    def stream_approved(self, spec: PackageFile, offset):
+    def stream_approved(self, spec: PackageFile, offset, *, end=None):
         """Follow only the per-file policy included in the human-approved plan.
 
         HF CDN signatures are transient: never persist their query strings or
@@ -154,7 +157,7 @@ class HTTPTransport:
         """
         url = spec.url
         for hop in range(6):
-            with self.stream(url, offset) as response:
+            with self.stream(url, offset, end=end) as response:
                 if response.status_code not in {301, 302, 303, 307, 308}:
                     yield response
                     return
@@ -167,6 +170,11 @@ class HTTPTransport:
                 check_url(target, set(spec.redirect_hosts), signed_query=True)
                 url = target
 
+    def stream_range(self, spec: PackageFile, offset, end):
+        if spec.redirect_hosts:
+            return self.stream_approved(spec, offset, end=end)
+        return self.stream(spec.url, offset, end=end)
+
 
 @dataclass
 class ControlledDownloader:
@@ -174,6 +182,7 @@ class ControlledDownloader:
     transport: object
     max_bytes: int = 100 * 1024**3
     max_stream_attempts: int = 3
+    segment_bytes: int = 64 * 1024**2
 
     def download(self, spec: PackageFile, cache: Path):
         check_url(spec.url, self.hosts)
@@ -181,24 +190,32 @@ class ControlledDownloader:
             raise ValueError("DOWNLOAD_BUDGET_EXCEEDED")
         if type(self.max_stream_attempts) is not int or not 1 <= self.max_stream_attempts <= 3:
             raise ValueError("DOWNLOAD_RESUME_BUDGET_INVALID")
+        if type(self.segment_bytes) is not int or not 0 < self.segment_bytes <= 64 * 1024**2:
+            raise ValueError("DOWNLOAD_SEGMENT_BUDGET_INVALID")
         cache.mkdir(parents=True, exist_ok=True)
         final = cache / spec.sha256
         if final.exists() and self.valid(final, spec):
             return final
         partial = cache / (spec.sha256 + ".part")
-        for attempt in range(self.max_stream_attempts):
-            # A disconnected response may already have supplied the complete
-            # immutable object. Only exact size AND digest can establish that.
-            if partial.exists() and self.valid(partial, spec):
-                break
+        if partial.exists() and partial.stat().st_size >= spec.size and not self.valid(partial, spec):
+            partial.unlink()
+        interruptions = 0
+        while not partial.exists() or partial.stat().st_size < spec.size:
             try:
                 self._transfer(spec, partial)
-                break
             except DownloadStreamInterrupted:
-                if attempt == self.max_stream_attempts - 1:
+                interruptions += 1
+                if interruptions >= self.max_stream_attempts:
+                    # A disconnected response may already contain the entire
+                    # immutable file; only exact size AND hash can establish it.
                     if partial.exists() and self.valid(partial, spec):
                         break
                     raise
+            else:
+                # Reset only after a complete, range/length-checked segment.
+                # Each success advances at least segment_bytes (except the last),
+                # bounding requests by 3 * (ceil(file_size / segment_bytes) + 1).
+                interruptions = 0
         if not self.valid(partial, spec):
             partial.unlink(missing_ok=True)
             raise ValueError("FILE_CHECKSUM_FAILED")
@@ -210,7 +227,14 @@ class ControlledDownloader:
         if offset >= spec.size:
             partial.unlink()
             offset = 0
-        if spec.redirect_hosts:
+        range_stream = getattr(self.transport, "stream_range", None)
+        end = (
+            min(offset + self.segment_bytes, spec.size) - 1
+            if range_stream and spec.size > self.segment_bytes else None
+        )
+        if end is not None:
+            stream = range_stream(spec, offset, end)
+        elif spec.redirect_hosts:
             approved_stream = getattr(self.transport, "stream_approved", None)
             if approved_stream is None:
                 raise ValueError("TRANSPORT_REDIRECT_POLICY_UNSUPPORTED")
@@ -221,22 +245,27 @@ class ControlledDownloader:
             if response.status_code not in {200, 206}:
                 raise ValueError("DOWNLOAD_HTTP_REJECTED")
             if response.status_code == 206:
-                expected = f"bytes {offset}-{spec.size - 1}/{spec.size}"
+                expected = f"bytes {offset}-{end if end is not None else spec.size - 1}/{spec.size}"
                 if response.headers.get("content-range") != expected:
                     raise ValueError("INVALID_RESUME_RANGE")
             else:
                 offset = 0  # Server ignored Range; safely restart rather than append.
+                end = None
+            expected_size = spec.size if end is None else end + 1
             with partial.open("ab" if offset else "wb") as output:
                 size = offset
                 for chunk in response.iter_bytes():
                     size += len(chunk)
-                    if size > spec.size:
+                    if size > expected_size:
                         output.close()
                         partial.unlink(missing_ok=True)
                         raise ValueError("DOWNLOAD_SIZE_EXCEEDED")
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
+            if size != expected_size:
+                partial.unlink(missing_ok=True)
+                raise ValueError("DOWNLOAD_SEGMENT_SIZE_MISMATCH" if end is not None else "FILE_CHECKSUM_FAILED")
 
     @staticmethod
     def valid(path, spec):

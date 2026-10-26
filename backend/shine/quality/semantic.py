@@ -140,15 +140,25 @@ class OpenAICompatibleVisionReviewer:
         if not context.frame_paths:
             raise ValueError("Remote semantic review requires derived evidence frames")
         schema = SemanticReviewResult.model_json_schema()
+        # Historical stored reviews retain their optional default; new wire
+        # responses must explicitly distinguish an empty list from no review.
+        schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict"})
+        schema["properties"]["findings"].pop("default", None)
+        schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
                     "Review the supplied derived evidence frames for identity, costume, scene, style, and "
-                    "continuity. Return JSON with reviewer, is_mock=false, input_sha256, findings, "
+                    "continuity. Return JSON with reviewer, is_mock=false, input_sha256, verdict, findings, "
                     "overall_confidence, raw_summary. "
+                    "verdict must be failed for observed violations, needs_review for unresolved uncertainties, "
+                    "or passed only when the required checks establish conformance. "
                     "findings contains ONLY violations or unresolved uncertainties, never positive matches. "
                     "Use findings=[] if there are no issues; describe successful checks in raw_summary. "
+                    "Every violation or uncertainty described in raw_summary must also appear in findings. "
+                    "overall_confidence measures confidence in the completeness of this review, not how well "
+                    "the shot complies. A clearly observed mismatch can have high confidence. "
                     "Do not infer identity from descriptive text alone; disclose missing identity evidence. "
                     "Keep findings concise and group repeated observations. "
                     "raw_summary must be at most 300 characters. "
@@ -185,6 +195,10 @@ class OpenAICompatibleVisionReviewer:
             if finish not in {None, "stop"}:
                 raise ReceivedReviewError("VLM_RESPONSE_INCOMPLETE", response_hash, finish)
             parsed = json.loads(choice["message"]["content"])
+            if not isinstance(parsed, dict) or not {"findings", "verdict"} <= parsed.keys():
+                raise ValueError("VLM_DECISION_MISSING")
+            if parsed["verdict"] not in {"passed", "failed", "needs_review"}:
+                raise ValueError("VLM_VERDICT_INVALID")
             parsed["is_mock"] = bool(parsed.get("is_mock", False))
             parsed["input_sha256"] = context.artifact_sha256
             parsed["model"] = self.config.model
@@ -357,6 +371,8 @@ def fuse(
     all_findings = list(transcript_findings)
     for result in semantic_results:
         confidence_values.append(result.overall_confidence)
+        if result.overall_confidence < 0.7 or result.verdict in {"failed", "needs_review"}:
+            needs_review = True
         all_findings.extend(result.findings)
 
     for finding in all_findings:

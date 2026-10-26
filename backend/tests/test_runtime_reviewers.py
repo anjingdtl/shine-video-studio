@@ -90,7 +90,7 @@ def test_local_vlm_needs_no_cloud_consent_and_preserves_fake_result(tmp_path, mo
                                     "reviewer": "fixture",
                                     "is_mock": True,
                                     "input_sha256": "a" * 64,
-                                    "findings": [],
+                                    "findings": [], "verdict": "passed",
                                     "overall_confidence": 1,
                                     "raw_summary": "Fixture only",
                                 }
@@ -167,7 +167,7 @@ def test_remote_reviewer_never_receives_local_reference_images(tmp_path, monkeyp
                                     "model": "claimed",
                                     "is_mock": False,
                                     "input_sha256": "a" * 64,
-                                    "findings": [],
+                                    "findings": [], "verdict": "passed",
                                     "overall_confidence": 0.9,
                                     "raw_summary": "test",
                                 }
@@ -264,3 +264,36 @@ def test_semantic_frames_include_late_shot_evidence(tmp_path, monkeypatch):
     assert len(extract_frames(source, tmp_path / "frames", count=4, duration_s=7)) == 4
     assert offsets[0] < 1 and offsets[-1] > 6
     assert all(0 <= value < 7 for value in offsets)
+
+
+@pytest.mark.parametrize("missing", ["findings", "verdict", None])
+def test_wire_review_requires_explicit_findings_without_rewriting_stored_schema(
+    tmp_path, monkeypatch, missing,
+):
+    import hashlib
+    import json
+
+    from shine.quality.semantic import ReceivedReviewError
+
+    data = {"is_mock": False, "overall_confidence": 1 if missing == "verdict" else 0,
+            "raw_summary": "Observed story violations" if missing == "verdict" else "Uncertain review"}
+    data.update(findings=[], verdict="needs_review")
+    if missing:
+        data.pop(missing)
+    response = httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+        "content": json.dumps(data),
+    }}]})
+    original = httpx.Client
+    monkeypatch.setattr(
+        "shine.quality.semantic.httpx.Client",
+        lambda **kw: original(transport=httpx.MockTransport(lambda _: response), **kw),
+    )
+    cfg = ProviderConfig(profile_id="p", name="p", kind="openai_compatible",
+                         base_url="http://127.0.0.1:19001/v1", model="p", api_key=None)
+    if missing is None:
+        review = LocalVisionReviewer(cfg).review(context(tmp_path))
+        assert review.findings == [] and review.overall_confidence == 0
+    else:
+        with pytest.raises(ReceivedReviewError, match="VLM_RESPONSE_CONTRACT_INVALID") as error:
+            LocalVisionReviewer(cfg).review(context(tmp_path))
+        assert error.value.response_sha256 == hashlib.sha256(response.content).hexdigest()

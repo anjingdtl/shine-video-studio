@@ -128,6 +128,41 @@ def test_all_required_gates_pass_yields_a_final_pass():
     assert fused.coverage["semantic"] == "mock_covered"
 
 
+@pytest.mark.parametrize("confidence", [0, 0.69])
+def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confidence):
+    gates, fused = evaluate_gates(
+        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
+        semantic_results=[semantic(is_mock=False, confidence=confidence)], reference_count=1,
+    )
+    for name in (GATE_SEMANTIC, GATE_STYLE, GATE_FINAL):
+        assert gate(gates, name).status == STATUS_NEEDS_REVIEW
+    assert gate(gates, GATE_SEMANTIC).error_code == "SEMANTIC_REVIEW_LOW_CONFIDENCE"
+    assert gate(gates, GATE_STYLE).error_code == "STYLE_REVIEW_LOW_CONFIDENCE"
+    assert fused.result == STATUS_NEEDS_REVIEW and fused.human_review_required
+
+
+def test_low_overall_confidence_never_relaxes_a_hard_failure():
+    gates, fused = evaluate_gates(
+        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
+        semantic_results=[semantic(finding("IDENTITY_MISMATCH"), is_mock=False, confidence=0)],
+        reference_count=1,
+    )
+    assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
+    assert gate(gates, GATE_FINAL).status == STATUS_FAILED and fused.result == STATUS_FAILED
+
+
+@pytest.mark.parametrize("verdict", ["failed", "needs_review"])
+def test_explicit_nonpass_verdict_blocks_all_required_gates_even_with_high_confidence(verdict):
+    review = semantic(is_mock=False, confidence=1).model_copy(update={"verdict": verdict})
+    gates, fused = evaluate_gates(
+        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
+        semantic_results=[review], reference_count=1,
+    )
+    for name in (GATE_SEMANTIC, GATE_STYLE, GATE_FINAL):
+        assert gate(gates, name).status == STATUS_NEEDS_REVIEW
+    assert fused.result == STATUS_NEEDS_REVIEW and fused.human_review_required
+
+
 def test_dialogue_without_asr_records_missing_audio_coverage():
     policy = QualityPolicy()
     gates, fused = evaluate_gates(

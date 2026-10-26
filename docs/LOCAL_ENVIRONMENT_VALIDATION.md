@@ -1,12 +1,15 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
-10-26 授权续轮：用户已明确授权离机期间自主推进，操作以 `user-delegated-codex` 审计，未冒充本人到场/试听。
-旧截断审片已 ABANDONED，旧失败安装已正式对账；实际 ASR/对齐包落盘，后续固定四包计划正在受控续传。
-下载增加最多 3 次同文件 Range 续传及 120 秒读取等待，完整后端 **484 passed、零 skipped/failures/errors**，Ruff 通过。
-实际语音推理和补丁后 VLM 反例尚未运行；全产品仍 **PARTIAL**。
-见 [授权与续传记录](evidence/local-closeout-20261025/delegated-recovery-and-range.json)。下文保留历轮状态。
+10-26 授权续轮：完整后端 **508 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
+真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
+每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
+新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。
+固定语音包的前三包已完整落盘，第四包在新的有界 Range 计划中继续下载；尚未运行真实 Qwen 语音推理。
+用户离机期间按明确授权以 `user-delegated-codex` 操作；未虚构本人到场、试听、权属或美学批准。
+全产品仍 **PARTIAL**，远端 CI 仍受账户额度阻断。见
+[本轮机器记录](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。下文保留历轮状态。
 
-10-26 最新续轮：完整后端 **474 passed，零 skipped/failures/errors**；隔离浏览器 **15 类
+前一续轮记录：完整后端 **474 passed，零 skipped/failures/errors**；隔离浏览器 **15 类
 MOCK_VERIFIED，api_errors=[]**。安装恢复页面、项目过滤和跨项目迟到响应反例通过。
 当前全产品仍 PARTIAL，真人恢复/模型安装、真实反例复验、M2/M4 等尚未完成；
 见 [逐项需求核对](LOCAL_ALL_PASS_REQUIREMENTS_20261026.md) 和

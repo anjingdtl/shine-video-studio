@@ -147,6 +147,15 @@ render stops before anything is submitted.
 
 `SemanticFinding` carries code, category, severity (`hard|soft|uncertain`), confidence, message, optional evidence time/subject. `SemanticReviewResult` records reviewer/model/mock flag/input hash.
 
+New VLM responses must explicitly include both `findings` and a `verdict`
+(`passed|failed|needs_review`). Missing/null verdicts are unusable received responses,
+not a default pass. Historical stored records retain an optional verdict for reading
+without rewriting their evidence. A non-pass verdict cannot pass fusion or required
+semantic/style/final gates even if findings are empty and confidence is high.
+Low overall confidence also requires review; this measures completeness of the
+review, separately from confidence in an individual finding. Hard failures remain
+failures. Free-text summaries are never parsed into fabricated findings or passes.
+
 ### Quality gates
 
 Five gates are evaluated per attempt and persisted in `quality_gates`:
@@ -311,6 +320,15 @@ swap, and absent or exactly matching destination files. It records
 RECONCILED_NO_RETRY without package-content changes, runtime promotion or execution.
 Continuing requires a fresh plan and separate approval; neither old grants nor failed
 attempts are replayed. The Web history/reconciliation controls use these same APIs.
+
+Fixed inbound model GETs may continue from a partial cache. Production HTTP downloads
+use at most 64 MiB per range for large files, revalidating each approved redirect and
+the exact `Content-Range` and received length. At most three interrupted streams are
+allowed before a complete range; the interruption counter resets only after a fully
+validated range advances the file. This bounds requests by `3 * (ceil(file_size / segment_bytes) + 1)`. Invalid ranges, excess bytes and digest failures are not retried.
+A server ignoring Range must supply the entire file from byte zero. Final promotion
+always requires the pinned whole-file size and SHA-256. This is not permission to
+replay an installation attempt or any inference/submission.
 
 
 Mock provenance is monotonic across provider boundaries. An HTTP reviewer reporting

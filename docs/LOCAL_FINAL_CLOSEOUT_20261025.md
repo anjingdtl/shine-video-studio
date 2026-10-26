@@ -1,12 +1,15 @@
 # 本轮本机收尾补充报告（2026-10-25）
 
-10-26 授权续轮：用户已明确授权离机期间自主推进，操作以 `user-delegated-codex` 审计，未冒充本人到场/试听。
-旧截断审片已 ABANDONED，旧失败安装已正式对账；实际 ASR/对齐包落盘，后续固定四包计划正在受控续传。
-下载增加最多 3 次同文件 Range 续传及 120 秒读取等待，完整后端 **484 passed、零 skipped/failures/errors**，Ruff 通过。
-实际语音推理和补丁后 VLM 反例尚未运行；全产品仍 **PARTIAL**。
-见 [授权与续传记录](evidence/local-closeout-20261025/delegated-recovery-and-range.json)。下文保留历轮状态。
+10-26 授权续轮：完整后端 **508 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
+真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
+每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
+新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。
+固定语音包的前三包已完整落盘，第四包在新的有界 Range 计划中继续下载；尚未运行真实 Qwen 语音推理。
+用户离机期间按明确授权以 `user-delegated-codex` 操作；未虚构本人到场、试听、权属或美学批准。
+全产品仍 **PARTIAL**，远端 CI 仍受账户额度阻断。见
+[本轮机器记录](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。下文保留历轮状态。
 
-10-26 最新续轮：完整后端 **474 passed**，隔离浏览器 **15 类 MOCK_VERIFIED**。
+前一续轮记录：完整后端 **474 passed**，隔离浏览器 **15 类 MOCK_VERIFIED**。
 真实模型安装与指定失败对账仍待本人批准，输出补丁后的真实反例尚未复验，远端 CI 受账户付款/额度阻断。
 **全产品仍为 PARTIAL**；逐项完成条件见 [全 PASS 核对表](LOCAL_ALL_PASS_REQUIREMENTS_20261026.md)。
 
@@ -405,3 +408,43 @@ H3 已连接，Worker 保持未启动，未触发生产任务。
 样例路径/零摘要/Torch 版本占位均需替换，12000 MiB 是示例准入预算，不自动启用、不批准模型或代替测量。
 逐项需求、当前真实数据库批准缺口和后续顺序见 [全 PASS 核对表](LOCAL_ALL_PASS_REQUIREMENTS_20261026.md)，
 精确证据见 [页面恢复验证记录](evidence/local-closeout-20261025/installation-recovery-web.json)。
+
+
+## 7.13 明确授权后的真实审片反例与显式结论合同
+
+用户明确授权离机期间自主推进。恢复与安装以 `user-delegated-codex` 审计，并记录授权来源及
+`human_physically_present=false`；没有冒充原操作员、声称本人试听或自动晋升主资产。
+旧截断调用 `ff6d7832-52ed-442d-af75-4d03ee8f5d1b` 已正式 ABANDONED，释放租约保留为 RELEASED。
+
+补丁后对既有真实视频做错误故事探针（内存中要求红色卡通恐龙/白色午间影棚），先后得到两个反例：
+模型摘要正确描述违规，却给出空 findings；第一次整体置信度为 0，融合逻辑仍通过；补整体置信度门后，
+第二次置信度升为 1，仍以空 findings 掩盖明确违规。这两次实际回复与失败证据均保留，没有弱化探针。
+先构造 4 个失败回归，再补低整体置信度阻断。随后增加新的 VLM wire 必填 `verdict` 和 `findings`，
+去掉提示 Schema 中的空列表默认值；`failed/needs_review` 即使没有结构化 findings 也阻断放行。
+缺失/null verdict 是已收到但不可用的回复，记录响应哈希、不得默认通过。历史 JSON 保留可读，不重写旧门禁。
+整体置信度表示审查完整性，与单个问题的置信度分别处理；硬失败仍优先。没有用摘要关键词虚构 findings。
+
+新合同下，真实错误故事探针返回 `verdict=failed`，列出身份、场景、风格三项硬问题；
+原镜头故事的真实正常对照返回 `verdict=passed`、空 findings。用正常 named-gate evaluator 复核同一实际回复：
+负例 technical passed、semantic/style/final failed；正例 technical/semantic/style/final passed；两者 audio 均不适用。
+每次 allocated/reserved 归零，调用 COMPLETED、资源已释放；生产 job 状态/version、9 个尝试、70 道门、14 个 artifact
+保持不变，H3 提交数为零。仅关闭这一受控正反例与误放行漏洞，不代表所有语义/声音/美学要求全通过。
+
+## 7.14 大模型固定下载分段与本机回归
+
+固定四包原范围仍为 42 文件、10,756,955,944 字节。旧 TLS/ReadTimeout/协议断开尝试逐个在 OS 锁下核验、
+正式对账后才建立新批准计划；旧尝试没有重放。ASR、ForcedAligner、TTS Base 文件集已落盘，
+VoiceDesign 仍在计划 `9a844b71-c4e1-48f8-9e1a-41ddb3bbf635` 下载中，尚无真实 Qwen 语音推理证据。
+
+同一固定配套权重的只读诊断验证了 1024 字节和 64MiB 精确 Range：HF→指定 CDN 返回 206、区间/长度正确；
+64MiB 完整读取消耗 4.047 秒。这些诊断不写安装缓存、不代表完整模型校验。
+生产下载改为大文件最多 64MiB 一段，逐跳重验已批准主机，固定 identity encoding，核对精确区间与收取长度。
+每段完成前最多 3 次流中断；仅在整段验证且文件推进后重置计数，请求数有固定文件大小决定的有限上界。
+服务器忽略 Range 时必须从零提供完整对象；非法区间、超量、短段和 SHA 错误不自动重试。
+最终仍须整个文件长度和固定 SHA-256 同时吻合才原子提升；没有放宽安装/模型调用的对账要求。
+
+完整后端 **508 passed，0 skipped/failures/errors（203.346 秒）**；下载/准备定向 **102 passed**，
+QC/正常 Worker/旧 offline E2E 定向 **49 passed**，Ruff、TypeScript/Vite 通过。
+前端未修改，此前 15 类隔离浏览器仍单列为 MOCK_VERIFIED。当前远端 `6a72298` 四项 CI 未启动，
+已逐一读取 annotations；账户包含额度耗尽，未变更付款/付费预算。工程通过不能替代当前远端 CI 或真实成片验收。
+机器记录见 [正反例与分段下载](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。

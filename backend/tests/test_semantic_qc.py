@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from shine.llm.base import ProviderConfig
 from shine.media.probe import make_mp4_fixture
 from shine.quality.semantic import (
@@ -14,7 +16,7 @@ from shine.quality.semantic import (
     fuse,
 )
 from shine.quality.technical import TechnicalQC
-from shine.schemas import SemanticFinding, ShotSpec, StyleBible, TechnicalCheck, TechnicalQCResult
+from shine.schemas import SemanticFinding, SemanticReviewResult, ShotSpec, StyleBible, TechnicalCheck, TechnicalQCResult
 
 STYLE = StyleBible(
     photography_language="平视",
@@ -83,6 +85,10 @@ def test_soft_high_confidence_finding_requires_review(tmp_path):
     low = MockSemanticReviewer(
         [SemanticFinding(code="STYLE_DRIFT", category="style", severity="soft", confidence=0.2)]
     ).review(context(tmp_path))
+    # Isolate confidence in this finding from completeness of the whole review.
+    # Low overall confidence must block even when a soft finding alone would not.
+    assert fuse(technical=technical, semantic_results=[low]).result == "needs_review"
+    low = low.model_copy(update={"overall_confidence": 1.0})
     assert fuse(technical=technical, semantic_results=[low]).result == "passed"
 
 
@@ -91,6 +97,30 @@ def test_no_semantic_reviewer_limits_coverage_and_cannot_claim_semantic_quality(
     assert fused.coverage["semantic"] == "not_run"
     assert fused.is_mock is False
     assert fused.result == "passed"
+
+
+@pytest.mark.parametrize("confidence,expected", [(0, "needs_review"), (0.69, "needs_review"), (0.7, "passed")])
+def test_empty_findings_do_not_mask_low_overall_review_confidence(tmp_path, confidence, expected):
+    # Real local VLM counterexample: the summary reported violations but emitted
+    # no structured findings and overall_confidence=0. Never parse prose into a pass.
+    result = SemanticReviewResult(
+        reviewer="real-response-counterexample", is_mock=False, input_sha256="a" * 64,
+        findings=[], overall_confidence=confidence,
+        raw_summary="All evidence frames violate ShotSpec: no red cartoon dinosaur; human in neon rain scene.",
+    )
+    fused = fuse(technical=passed_technical(tmp_path), semantic_results=[result])
+    assert fused.result == expected
+    assert fused.human_review_required == (expected == "needs_review")
+
+
+@pytest.mark.parametrize("verdict", ["failed", "needs_review"])
+def test_explicit_nonpass_verdict_cannot_be_hidden_by_empty_findings(tmp_path, verdict):
+    review = SemanticReviewResult(
+        reviewer="counterexample", is_mock=False, input_sha256="a" * 64,
+        verdict=verdict, findings=[], overall_confidence=1,
+    )
+    result = fuse(technical=passed_technical(tmp_path), semantic_results=[review])
+    assert result.result == "needs_review" and result.human_review_required
 
 
 def test_dialogue_transcript_mismatch_is_uncertain_not_an_automatic_pass(tmp_path):
@@ -161,7 +191,7 @@ def test_http_reviewers_preserve_explicit_fake_provenance(tmp_path, monkeypatch)
         "reviewer": "fake-wire-reviewer",
         "is_mock": True,
         "input_sha256": "a" * 64,
-        "findings": [],
+        "findings": [], "verdict": "passed",
         "overall_confidence": 1,
         "raw_summary": "Synthetic HTTP response",
         "model": "fixture-only",

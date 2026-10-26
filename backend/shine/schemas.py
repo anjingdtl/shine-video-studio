@@ -619,6 +619,9 @@ class SemanticReviewResult(APIModel):
     model: str | None = None
     is_mock: bool
     input_sha256: str
+    # Optional only for immutable historical records and injected fixtures.
+    # Current VLM wire responses must explicitly declare this field.
+    verdict: Literal["passed", "failed", "needs_review"] | None = None
     findings: list[SemanticFinding] = Field(default_factory=list)
     overall_confidence: float = Field(ge=0, le=1)
     raw_summary: str = Field(default="", max_length=2000)

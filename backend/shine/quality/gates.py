@@ -312,6 +312,12 @@ def _semantic_gate(
         findings, threshold=threshold, hard_rules=policy.hard_rules
     )
     confidence = min((result.overall_confidence for result in semantic_results), default=1.0)
+    if confidence < threshold and status != STATUS_FAILED:
+        status = STATUS_NEEDS_REVIEW
+        error_code = error_code or "SEMANTIC_REVIEW_LOW_CONFIDENCE"
+    if any(result.verdict in {"failed", "needs_review"} for result in semantic_results) and status != STATUS_FAILED:
+        status = STATUS_NEEDS_REVIEW
+        error_code = error_code or "SEMANTIC_REVIEW_NONPASS_VERDICT"
     coverage = COVERAGE_MOCK if is_mock else COVERAGE_COVERED
     evidence = {
         "reviewers": [
@@ -320,6 +326,7 @@ def _semantic_gate(
                 "model": result.model,
                 "is_mock": result.is_mock,
                 "overall_confidence": result.overall_confidence,
+                "verdict": result.verdict,
                 "input_sha256": result.input_sha256,
                 "finding_codes": sorted({finding.code for finding in result.findings}),
                 "raw_summary": result.raw_summary,
@@ -479,6 +486,13 @@ def _style_gate(
     if not style_findings:
         status = STATUS_PASSED
         error_code = None
+    confidence = min(result.overall_confidence for result in semantic_results)
+    if confidence < policy.threshold_for(None) and status != STATUS_FAILED:
+        status = STATUS_NEEDS_REVIEW
+        error_code = error_code or "STYLE_REVIEW_LOW_CONFIDENCE"
+    if any(result.verdict in {"failed", "needs_review"} for result in semantic_results) and status != STATUS_FAILED:
+        status = STATUS_NEEDS_REVIEW
+        error_code = error_code or "STYLE_REVIEW_NONPASS_VERDICT"
     return GateOutcome(
         gate_name=GATE_STYLE,
         status=status,
@@ -486,7 +500,7 @@ def _style_gate(
         is_mock=is_mock,
         coverage=COVERAGE_MOCK if is_mock else COVERAGE_COVERED,
         model=next((result.model for result in semantic_results if result.model), None),
-        confidence=min((result.overall_confidence for result in semantic_results), default=1.0),
+        confidence=confidence,
         error_code=error_code,
         evidence={
             "style_version_id": style_version_id,

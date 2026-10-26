@@ -1,17 +1,17 @@
 {
-  "collected_at": "2026-10-26T00:47:31.286843+00:00",
+  "collected_at": "2026-10-26T04:30:48.078046+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "484",
+    "tests": "508",
     "failures": "0",
     "errors": "0",
     "skipped": "0",
-    "time": "201.177"
+    "time": "203.346"
   },
   "checks": {
     "ruff": "PASS backend and local_review_server.py",
-    "typescript_vite": "PASS",
+    "typescript_vite": "PASS current build after explicit QC verdict/range changes",
     "npm_audit": "0 vulnerabilities",
     "uv_lock_check": "PASS",
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
@@ -423,5 +423,6 @@
     "time": "202.547"
   },
   "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json",
-  "latest_delegated_recovery": "delegated-recovery-and-range.json"
+  "latest_delegated_recovery": "delegated-recovery-and-range.json",
+  "latest_qc_and_download": "qc-verdict-and-bounded-ranges.json"
 }
