@@ -1,0 +1,27 @@
+{
+  "backend": {
+    "tests": "708",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "263.149"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": "Existing 20 Mock flows; UI unchanged in this change",
+  "source_files_sha256": {
+    "backend/shine/quality/semantic.py": "baf0ef93999e2bbaaff40ed3544f1e27c0bed55cd4e1ea4853153423786f7aab",
+    "backend/shine/worker.py": "e2b8e03cc6fa0669b22e45969a68c829f4c8b6c219159b715cd9f2e6bccb2721",
+    "backend/shine/comfyops/model_calls.py": "c533b1456e1e84bc6d7194f9c161a3de4c7392dce9c7d43745415ab79f3e7ddc",
+    "backend/shine/quality/runtime.py": "48dfeb58cd38f91581a61666958fb1ae63cfdb312075f9294fba7569149f6514",
+    "backend/tests/test_semantic_qc.py": "7709afd99d36f135e38c0c15630fb16585ad1568369521c8122be1108d40c392",
+    "backend/tests/test_quality_gates.py": "effd4bf05b06ff060442b418126ad7130ce94069be0f144746280e5b3574367e"
+  },
+  "reproduced_before_fix": "Four transport cases failed because transcript evidence was never sent",
+  "fix": "Carry typed ASR text with is_mock source; legacy strings remain unverified; absent transcript remains null. Only derived text/user evidence, never system instructions. Frames do not establish audible properties; technical and audio gates retain coverage.",
+  "audio_gate_regression": "Dialogue without ASR remains required/not_run, final needs_review; included in complete suite",
+  "actual_pixel_controls": "NOT_RUN_YET",
+  "all_pass": "PARTIAL",
+  "vlm_publication": "WITHHELD",
+  "adapter_runtime_unchanged": true
+}
