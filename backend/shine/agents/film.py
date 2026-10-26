@@ -22,7 +22,7 @@ from shine.agents.film_contracts import (
     StyleInputWire,
 )
 from shine.h3.rulebook import H3RulebookRegistry, digest
-from shine.llm.base import LLMError
+from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
 from shine.media.artifacts import safe_asset_path
 from shine.models import (
@@ -406,8 +406,7 @@ class FilmAgentDispatcher:
                 "schema": contract.__name__,
                 "review_contract_sha256": contract_hash,
                 **({"wire_protocol": "independent-text-v2"} if role == "qc_reviewer" else {}),
-                "review_provider": {"profile_id": profile.id, "kind": profile.kind, "model": profile.model,
-                                    "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest()},
+                "review_provider": text_provider_snapshot(profile),
                 "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]} for s in cache_state],
                 **({"scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
                     "shot_spec_snapshot": context["shot_spec"],

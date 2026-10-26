@@ -382,6 +382,11 @@ class ProviderKind(StrEnum):
     MOCK = "mock"
 
 
+class TextGenerationOptions(APIModel):
+    max_completion_tokens: int | None = Field(default=None, ge=1, le=524288, strict=True)
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class ProviderProfileCreate(APIModel):
     name: str = Field(min_length=1, max_length=80)
     kind: ProviderKind
@@ -392,9 +397,12 @@ class ProviderProfileCreate(APIModel):
     max_retries: int = Field(default=2, ge=0, le=5)
     temperature: float = Field(default=0.2, ge=0, le=2)
     enabled: bool = True
+    generation_options: TextGenerationOptions = Field(default_factory=TextGenerationOptions)
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> ProviderProfileCreate:
+        if self.generation_options.model_dump(exclude_none=True) and self.kind != ProviderKind.OPENAI_COMPATIBLE:
+            raise ValueError("Generation options currently require an OpenAI-compatible provider")
         if self.kind in {ProviderKind.OPENAI_COMPATIBLE, ProviderKind.ANTHROPIC, ProviderKind.OLLAMA}:
             if not self.base_url.startswith(("http://", "https://")):
                 raise ValueError("base_url must start with http:// or https://")
@@ -416,6 +424,7 @@ class ProviderProfileUpdate(APIModel):
     max_retries: int | None = Field(default=None, ge=0, le=5)
     temperature: float | None = Field(default=None, ge=0, le=2)
     enabled: bool | None = None
+    generation_options: TextGenerationOptions | None = None
 
 
 class ProviderProfilePublic(APIModel):
@@ -426,6 +435,7 @@ class ProviderProfilePublic(APIModel):
     model: str
     has_api_key: bool
     capabilities: dict[str, Any]
+    generation_options: TextGenerationOptions = Field(default_factory=TextGenerationOptions)
     timeout_s: float
     max_retries: int
     temperature: float

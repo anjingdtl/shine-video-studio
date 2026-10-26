@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -74,6 +75,18 @@ class ProviderConfig:
     timeout_s: float = 60.0
     max_retries: int = 2
     temperature: float = 0.2
+    generation_options: dict[str, Any] = field(default_factory=dict)
+
+
+def text_provider_snapshot(profile) -> dict:
+    options = getattr(profile, "generation_options", None) or {}
+    return {
+        "profile_id": profile.id, "kind": profile.kind, "model": profile.model,
+        "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
+        **({"generation_options_sha256": hashlib.sha256(
+            json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()} if options else {}),
+    }
 
 
 @dataclass

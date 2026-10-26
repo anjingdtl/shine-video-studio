@@ -602,3 +602,7 @@ Qwen TTS 0.1.1 固定 Transformers 4.57.3，ASR 0.0.6 固定 4.57.6；分别使�
 需要继续安装时，填写已核对的磁盘预算，再点击“从原清单新建待批准计划”；新计划为 `AWAITING_APPROVAL`，
 须重新核对并批准其哈希后执行。页面不会重放旧尝试、沿用旧批准或自动批准新计划。
 该入口只处理包安装；实例生命周期和丢失模型调用仍使用各自的对账入口。
+
+### 文本输出预算（2026-10-27）
+
+OpenAI-compatible 配置可选填最大输出 token 和思考深度；留空沿用服务商默认值。MiniMax M3.1 的 token 上限包含思考和回答，不能据此保证响应时间或质量。新 QC 预算验证拟使用 8192 / low，其他角色配置不变；截断会拒绝，不能通过提高预算自动重发未知请求。参数来源：[MiniMax 官方 OpenAPI](https://platform.minimax.cn/docs/api-reference/text/api/openapi-chat-openai.json)、[模型调用说明](https://platform.minimax.io/docs/guides/text-generation)。

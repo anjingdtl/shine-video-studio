@@ -10,6 +10,7 @@ from shine.agents.film_contracts import FilmAgentRegistry, StyleInputWire
 from shine.comfyops import approval
 from shine.comfyops.models import ResourceLease
 from shine.h3.rulebook import digest
+from shine.llm.base import text_provider_snapshot
 from shine.models import AgentTaskRecord, ProviderProfile
 from shine.security import is_loopback_url
 from shine.services import add_audit
@@ -69,8 +70,7 @@ def abandon_remote_response(db, row, actor, grant_id, snapshot, evidence):
     if (not profile or profile.kind == "mock" or is_loopback_url(profile.base_url)
             or row.trace.get("is_mock") is True):
         raise HTTPException(409, "LOCAL_AGENT_RELEASE_REQUIRES_SEPARATE_RECONCILIATION")
-    if binding != {"profile_id": profile.id, "kind": profile.kind, "model": profile.model,
-                   "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest()}:
+    if binding != text_provider_snapshot(profile):
         raise HTTPException(409, "REMOTE_AGENT_PROVIDER_CHANGED")
     if db.scalar(select(ResourceLease.id).where(ResourceLease.status != "RELEASED")):
         raise HTTPException(409, "ACTIVE_RESOURCE_PREVENTS_RECONCILIATION")

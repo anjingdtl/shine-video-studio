@@ -1,0 +1,52 @@
+{
+  "backend": {
+    "tests": "704",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "266.420"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": {
+    "flows": 20,
+    "provenance": "MOCK_VERIFIED",
+    "api_errors": []
+  },
+  "source_files_sha256": {
+    "backend/shine/models.py": "1b758b30a1923f3a9af54d93c61e32132fdfe3ade1d5f75425ed61fe5ac71ab4",
+    "backend/shine/schemas.py": "38efc18a50981a3f4c5f816e6917137da4e6bd8b9a42a1e758825d80cf1381ed",
+    "backend/shine/api_common.py": "993c6f972c13a3cb2896a18e8386032e0a2e41bca148f74cc70f39d6a0b84195",
+    "backend/shine/api_llm.py": "c822b0d25b557cd7735358fec047ae0b4d91fa755873c9f4dd7709a472ccd123",
+    "backend/shine/llm/base.py": "0aae31b4a074a2093763ae695fa59e5455ae637741556e1bf28dcc145b2eec11",
+    "backend/shine/llm/gateway.py": "63979977691fb6726535ef02059a5f1129b300ec5c386f3795cab99bb590457b",
+    "backend/shine/llm/openai_compatible.py": "28165c6a7a8595f4ac389fbc207f33058dfb8363434b4dc8e0f7fcca1188e3b9",
+    "backend/shine/agents/film.py": "786d6f57a8276effa9fad8e8b47f67340e0992e4d0571bafc8dbaef9b8668f1f",
+    "backend/shine/agents/execution.py": "d7fab8b628b2ef43520fd137ebf8e7ec74f7fad171be28482c097ad1347c5a3c",
+    "backend/shine/quality/input_assessment.py": "55b2783af281e1c3b46906ca2f4c0badcc326dd3d835fa549ddb873d5303c958",
+    "backend/alembic/versions/f130a0030001_text_generation_options.py": "00310d6c122ead37e27ab896eba51aa1b8b32430924c84a10ea9d60c8b9181bf",
+    "backend/tests/test_text_generation_options.py": "e527aa12b5b9464fb5657fbed8e03c33bd468fb08082205c07aca2354b9237cc",
+    "backend/tests/test_film_unknown_outcomes.py": "1c3b8e3f280cd9fa0ac444a3cf08cefe4343fec31b535d1a352969e9ebbfbdb9",
+    "backend/tests/test_style_input_assessment.py": "5be7df3db4fef2626ad3f1606f387397b141ff54a3bfb85e242df92dc8f23f71",
+    "backend/tests/test_alembic.py": "a462572b97e1623d8cb06530dd91444d92864262ac388080d2aa3aad186d0fb5",
+    "backend/tests/test_migrations_windows.py": "754bcb0c82680bd55b3df08bf9e1e2025f06ebd1d3f0d7e08e6f59c46bee48d5",
+    "backend/tests/test_v13_migrations.py": "7819d0e1a3a7ace508e08279263f6c3cd42bcd46632cffd9e450c9636094bd70",
+    "frontend/src/api.ts": "cb13bad647835ed34a3d94f41a7e60aa85196b7d4cf9d2118a529e196a365179",
+    "frontend/src/components/SettingsPanel.tsx": "0cd6e60ccfbbe4d89c285b510f293505b8e477eb425046b1c7f6774959970e40",
+    "scripts/verify_v13_web.py": "9a522c0040585a16fff763ba42c741b85129271624d718bd11b2d3f7122631f3"
+  },
+  "official_sources": [
+    "https://platform.minimax.cn/docs/api-reference/text/api/openapi-chat-openai.json",
+    "https://platform.minimax.io/docs/guides/text-generation"
+  ],
+  "change": "Explicit optional max_completion_tokens/reasoning_effort persisted per profile; unset options preserve historical request and identity. Truncated/filtered completions cannot pass even if JSON is valid. Changed options invalidate exact input evidence but never bypass abandoned-request replay guards.",
+  "migration": "f130a0030001 additive generation_options JSON column, historical default {}; upgrade/downgrade preservation tested",
+  "initial_full_run": {
+    "tests": 703,
+    "failures": 4,
+    "reason": "Only old head revision assertions; updated exact expected revision and added column-presence check. Original failing XML preserved."
+  },
+  "real_bounded_calls": "NOT_RUN_YET",
+  "vlm": "WITHHELD",
+  "human_approval": false
+}

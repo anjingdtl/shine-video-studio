@@ -578,6 +578,22 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             page.unroute(path)
         for path in [roles_url, lock_url, critic_url]:
             page.unroute(path)
+        settings = page.locator("#settings")
+        settings.get_by_placeholder("配置名称", exact=True).fill("UI bounded text fixture")
+        settings.locator(".provider-form select").first.select_option("openai_compatible")
+        settings.get_by_placeholder("Base URL", exact=True).fill("http://127.0.0.1:9999/v1")
+        settings.get_by_placeholder("Model ID", exact=True).fill("UI_ONLY_NO_MODEL_CALL")
+        settings.get_by_label("最大输出 token", exact=True).fill("8192")
+        settings.get_by_label("思考深度", exact=True).select_option("low")
+        with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/provider-profiles")) as bounded_response:
+            settings.get_by_role("button", name="添加", exact=True).click()
+        assert bounded_response.value.status == 201
+        assert bounded_response.value.json()["generation_options"] == {"max_completion_tokens": 8192, "reasoning_effort": "low"}
+        bounded_card = settings.locator(".profile-row").filter(has_text="UI bounded text fixture")
+        expect(bounded_card).to_contain_text("输出上限 8192 token")
+        expect(bounded_card).to_contain_text("思考深度 low")
+        settings.locator(".provider-form select").first.select_option("anthropic")
+        expect(settings.get_by_label("最大输出 token", exact=True)).to_have_count(0)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
         page.reload(wait_until="networkidle")
@@ -639,6 +655,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "late old-project responses cannot overwrite selected-project assets/shots",
                     "independent text critic requires selected shot, routes exact spec and resets per-call consent (intercepted)",
                     "remote text response abandonment cancel/confirm, exact authenticated grant and credential clearing (intercepted; no model call)",
+                    "explicit text output budget and reasoning depth persist from UI without a model call",
                 ],
                 "api_errors": failures,
             }

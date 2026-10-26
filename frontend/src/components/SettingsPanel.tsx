@@ -35,6 +35,8 @@ export default function SettingsPanel({
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:11434/v1');
   const [model, setModel] = useState('qwen2.5:7b');
   const [apiKey, setApiKey] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188');
   const [comfyResult, setComfyResult] = useState<SystemHealth | null>(null);
@@ -46,7 +48,12 @@ export default function SettingsPanel({
   const [advanced, setAdvanced] = useState(false);
 
   function createProfile() {
-    onCreateProfile({ name, kind, base_url: baseUrl, model, api_key: apiKey || null, timeout_s: 60, max_retries: 2 });
+    onCreateProfile({ name, kind, base_url: baseUrl, model, api_key: apiKey || null, timeout_s: 60, max_retries: 2,
+      generation_options: kind === 'openai_compatible' ? {
+        ...(maxTokens ? { max_completion_tokens: Number(maxTokens) } : {}),
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      } : {},
+    });
     setApiKey('');
   }
 
@@ -104,11 +111,21 @@ export default function SettingsPanel({
             <input value={baseUrl} placeholder="Base URL" onChange={(event) => setBaseUrl(event.target.value)} />
             <input value={model} placeholder="Model ID" onChange={(event) => setModel(event.target.value)} />
             <input value={apiKey} type="password" placeholder="API Key（不会回显）" onChange={(event) => setApiKey(event.target.value)} />
+            {kind === 'openai_compatible' && <>
+              <input aria-label="最大输出 token" type="number" min="1" max="524288" step="1" value={maxTokens} placeholder="输出上限（含思考，留空沿用服务商默认）" onChange={event => setMaxTokens(event.target.value)} />
+              <select aria-label="思考深度" value={reasoningEffort} onChange={event => setReasoningEffort(event.target.value)}>
+                <option value="">服务商默认思考深度</option>
+                {['low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </>}
             <button className="primary-button" disabled={busy} onClick={createProfile}><Plus size={13} /> 添加</button>
           </div>
           {profiles.map((profile) => (
             <div className="profile-row" key={profile.id}>
-              <div><b>{profile.name}</b><span>{profile.kind} · {profile.model || '未设置模型'} · {profile.has_api_key ? '已存密钥' : '无密钥'}</span></div>
+              <div><b>{profile.name}</b><span>{profile.kind} · {profile.model || '未设置模型'} · {profile.has_api_key ? '已存密钥' : '无密钥'}</span>
+                {profile.generation_options?.max_completion_tokens && <span>输出上限 {profile.generation_options.max_completion_tokens} token（含思考）</span>}
+                {profile.generation_options?.reasoning_effort && <span>思考深度 {profile.generation_options.reasoning_effort}</span>}
+              </div>
               <div className="profile-actions">
                 <input
                   value={keyDrafts[profile.id] ?? ''}

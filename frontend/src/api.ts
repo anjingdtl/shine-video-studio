@@ -135,6 +135,7 @@ export type ProviderProfile = {
   id: string; name: string; kind: string; base_url: string; model: string;
   has_api_key: boolean; capabilities: Record<string, unknown>; timeout_s: number;
   max_retries: number; temperature: number; enabled: boolean; created_at: string; updated_at: string;
+  generation_options?: { max_completion_tokens?: number | null; reasoning_effort?: string | null };
 };
 
 export type AgentRoute = { role: string; provider_profile_id: string; profile_name: string };

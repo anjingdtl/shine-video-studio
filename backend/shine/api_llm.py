@@ -52,6 +52,7 @@ def create_profile(
         temperature=body.temperature,
         enabled=body.enabled,
         capabilities={},
+        generation_options=body.generation_options.model_dump(exclude_none=True),
     )
     db.add(profile)
     db.flush()
@@ -84,6 +85,11 @@ def update_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
     updates = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "generation_options" in updates:
+        updates["generation_options"] = body.generation_options.model_dump(exclude_none=True)
+    if (updates.get("generation_options", profile.generation_options)
+            and updates.get("kind", profile.kind) != "openai_compatible"):
+        raise HTTPException(422, "Generation options currently require an OpenAI-compatible provider")
     if "kind" in updates:
         updates["kind"] = str(updates["kind"])
     if "base_url" in updates:

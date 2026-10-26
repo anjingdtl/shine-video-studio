@@ -46,6 +46,7 @@ def public_profile(profile: ProviderProfile) -> ProviderProfilePublic:
         model=profile.model,
         has_api_key=bool(profile.api_key_ref),
         capabilities=profile.capabilities or {},
+        generation_options=profile.generation_options or {},
         timeout_s=profile.timeout_s,
         max_retries=profile.max_retries,
         temperature=profile.temperature,

@@ -52,7 +52,8 @@ def test_nonmock_timeout_is_unknown_and_same_request_does_not_call_again(prep, m
 
 
 @pytest.mark.parametrize("damage", [None, "legacy-timeout", "local", "active-lease", "wrong-project", "no-auth",
-                                  "expired-grant", "changed-snapshot", "changed-provider", "media-call-role"])
+                                  "expired-grant", "changed-snapshot", "changed-provider", "changed-options",
+                                  "media-call-role"])
 def test_explicit_remote_abandon_is_authenticated_bounded_and_never_infers(prep, monkeypatch, damage):  # noqa: F811
     from shine.comfyops.models import ApprovalGrant, ResourceLease
     from tests.conftest import create_project
@@ -75,6 +76,10 @@ def test_explicit_remote_abandon_is_authenticated_bounded_and_never_infers(prep,
             from shine.models import ProviderProfile
 
             db.get(ProviderProfile, task.model_profile_id).model = "another-checkpoint"
+        elif damage == "changed-options":
+            from shine.models import ProviderProfile
+
+            db.get(ProviderProfile, task.model_profile_id).generation_options = {"reasoning_effort": "low"}
         elif damage == "media-call-role":
             task.role_id = "model_call:VLM:review"
     if damage == "active-lease":
@@ -105,6 +110,7 @@ def test_explicit_remote_abandon_is_authenticated_bounded_and_never_infers(prep,
         alias = client.post("/api/v1/provider-profiles", json={
             "name": "same-wire-new-profile-id", "kind": "openai_compatible", "model": "fixture-only",
             "base_url": "https://text.example/v1",
+            "generation_options": {"max_completion_tokens": 8192, "reasoning_effort": "low"},
         }).json()
         client.put("/api/v1/agent-routes", json={"role": "qc_reviewer", "provider_profile_id": alias["id"]})
         assert client.post(path, json=body).json()["detail"] == "AGENT_REQUEST_REPLAY_BLOCKED"

@@ -313,6 +313,7 @@ class ProviderProfile(Base):
     model: Mapped[str] = mapped_column(String(160), default="", nullable=False)
     api_key_ref: Mapped[str | None] = mapped_column(String(160), nullable=True)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    generation_options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     timeout_s: Mapped[float] = mapped_column(Float, default=60.0, nullable=False)
     max_retries: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     temperature: Mapped[float] = mapped_column(Float, default=0.2, nullable=False)

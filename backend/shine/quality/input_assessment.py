@@ -1,13 +1,12 @@
 """Bind independent text proposals to exact production inputs; never approve media."""
 
-import hashlib
-
 from fastapi import HTTPException
 from sqlalchemy import literal_column, select
 
 from shine.agents.film import load_inputs, validate_output
 from shine.agents.film_contracts import FilmRunRequest, StyleInputAssessment
 from shine.h3.rulebook import digest
+from shine.llm.base import text_provider_snapshot
 from shine.models import AgentArtifact, AgentRoute, AgentTaskRecord, ProviderProfile, StyleVersion
 from shine.schemas import RenderRequest
 from shine.security import is_loopback_url
@@ -65,10 +64,7 @@ def assessment_for_request(db, project_id, request, *, offline=False, required=F
         route = db.scalar(select(AgentRoute).where(AgentRoute.role == "qc_reviewer"))
         profile = db.get(ProviderProfile, route.provider_profile_id) if route else None
         if (not profile or not profile.enabled or task.model_profile_id != profile.id or task.model_id != profile.model
-                or task.trace.get("review_provider") != {
-                    "profile_id": profile.id, "kind": profile.kind, "model": profile.model,
-                    "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
-                }):
+                or task.trace.get("review_provider") != text_provider_snapshot(profile)):
             raise ValueError("assessment route changed")
         if not offline and (task.trace.get("is_mock") is not False or task.trace.get("offline_preview")):
             raise ValueError("offline assessment is not real evidence")

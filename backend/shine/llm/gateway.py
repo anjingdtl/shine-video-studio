@@ -53,6 +53,10 @@ class LLMGateway:
         )
 
     def config_for(self, profile: ProviderProfile, *, api_key_override: str | None = None) -> ProviderConfig:
+        from shine.schemas import TextGenerationOptions
+        options = TextGenerationOptions.model_validate(profile.generation_options or {}).model_dump(exclude_none=True)
+        if options and profile.kind != "openai_compatible":
+            raise LLMNotConfigured("Generation options require an OpenAI-compatible provider")
         if not profile.enabled:
             raise LLMNotConfigured("Provider profile is disabled")
         key = api_key_override
@@ -68,6 +72,7 @@ class LLMGateway:
             timeout_s=profile.timeout_s,
             max_retries=profile.max_retries,
             temperature=profile.temperature,
+            generation_options=options,
         )
 
     def provider_for(self, profile: ProviderProfile, *, api_key_override: str | None = None) -> Any:

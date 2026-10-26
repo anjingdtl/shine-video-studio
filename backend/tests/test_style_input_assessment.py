@@ -115,7 +115,8 @@ def test_text_input_critic_requires_exact_current_frozen_input(api, damage):
 
 
 @pytest.mark.parametrize("damage", [None, "mock-as-real", "stale", "changed-shot", "changed-style-snapshot",
-                                 "changed-result", "changed-snapshot", "changed-route", "newer-nonpass"])
+                                 "changed-result", "changed-snapshot", "changed-route", "changed-budget",
+                                 "newer-nonpass"])
 def test_production_binding_rechecks_exact_text_evidence_including_worker_entry(api, damage):
     from fastapi import HTTPException
 
@@ -147,6 +148,8 @@ def test_production_binding_rechecks_exact_text_evidence_including_worker_entry(
             task.trace = {**task.trace, "shot_spec_snapshot": {"story_beat": "Different text"}}
         elif damage == "changed-route":
             db.get(ProviderProfile, task.model_profile_id).model = "different-model"
+        elif damage == "changed-budget":
+            db.get(ProviderProfile, task.model_profile_id).generation_options = {"max_completion_tokens": 8192}
     if damage == "changed-shot":
         render.shot_spec.story_beat = "The character runs away."
     elif damage == "changed-style-snapshot":

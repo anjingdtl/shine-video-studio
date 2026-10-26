@@ -102,6 +102,7 @@ class OpenAICompatibleProvider:
             "model": self.config.model,
             "messages": [{"role": message.role, "content": message.content} for message in messages],
             "temperature": self.config.temperature,
+            **self.config.generation_options,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -121,6 +122,8 @@ class OpenAICompatibleProvider:
         choices = body.get("choices") or []
         if not choices:
             raise LLMFormatError("Provider returned no completions")
+        if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:
+            raise LLMFormatError("Provider completion is truncated or filtered")
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
