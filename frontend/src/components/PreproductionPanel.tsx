@@ -194,7 +194,8 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       <button disabled={busy} onClick={() => act(() => post('/workflow-capabilities/assemble', {
         name: templateId + ' draft', template: templateId,
       }))}>组装受审计草案（不自动发布）</button>
-      <label>本地执行证据 JSON（instance_id、prompt_id、output_sha256）<textarea value={localEvidence}
+      <p>独立审片 / ASR 使用已完成调用的 samples；H3 使用 job_id 与 graph_sha256；其它 ComfyUI 能力使用 instance_id、prompt_id、output_sha256。</p>
+      <label>本地执行证据 JSON<textarea aria-label="本地执行证据 JSON" value={localEvidence}
         onChange={e => setLocalEvidence(e.target.value)} /></label>
       <details><summary>兼容的旧 H3 Profiles（不更改原图）</summary><pre>{JSON.stringify(registry?.legacy_profiles, null, 2)}</pre></details>
     </>}
@@ -330,22 +331,30 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'LOCAL_ISOLATED' && !['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) &&
         <button disabled={busy || !confirmed || offline} onClick={() => act(() => post(`/comfyops/install-plans/${row.id}/execute`, { plan_hash: row.sha256, executor: 'local' }, true))}>执行已批准的本地包安装（服务器须显式启用）</button>}
       {view === 2 && ['PRODUCTION_APPROVED', 'FAKE_EXECUTED', 'REAL_TESTED'].includes(row.status) && <button disabled={busy} onClick={() => act(() => approve(row, 'workflow_deprecate', `/workflow-capabilities/${row.id}/deprecate`))}>操作员弃用此版本（保留历史）</button>}
-      {view === 2 && !offline && ['DRAFT', 'STATIC_VALIDATED'].includes(row.status) && <>
-        <label>工作流验证实例 ID<input value={instanceId} onChange={e => setInstanceId(e.target.value)} /></label>
-        <button disabled={busy || !instanceId} onClick={() => act(() => post(`/workflow-capabilities/${row.id}/validate-local`, { instance_id: instanceId }, true))}>读取本地节点契约验证</button>
-      </>}
-      {view === 2 && row.status === 'DRAFT'  && <button disabled={busy} onClick={() => act(() =>
+      {view === 2 && !offline && ['DRAFT', 'STATIC_VALIDATED'].includes(row.status) && (row.payload.native_provider ?
+        <button disabled={busy} onClick={() => act(() => post(`/workflow-capabilities/${row.id}/validate-native`, {}, true))}>读取独立审片 / ASR 执行器验证</button> : <>
+          <label>工作流验证实例 ID<input value={instanceId} onChange={e => setInstanceId(e.target.value)} /></label>
+          <button disabled={busy || !instanceId} onClick={() => act(() => post(`/workflow-capabilities/${row.id}/validate-local`, { instance_id: instanceId }, true))}>读取本地节点契约验证</button>
+        </>)}
+      {view === 2 && !row.payload.native_provider && row.status === 'DRAFT'  && <button disabled={busy} onClick={() => act(() =>
         post(`/workflow-capabilities/${row.id}/validate`, { object_info: { ShineFake: { input: { required: { prompt: ['STRING'] } } } } }))}>使用 Fake 节点目录验证</button>}
-      {view === 2 && row.status === 'STATIC_VALIDATED' && <button disabled={busy} onClick={() => act(() =>
+      {view === 2 && !row.payload.native_provider && row.status === 'STATIC_VALIDATED' && <button disabled={busy} onClick={() => act(() =>
         post(`/workflow-capabilities/${row.id}/fake-execute`, {}))}>Fake HTTP 执行契约</button>}
       {view === 2 && !offline && <>
-        <button disabled={busy || !confirmed} onClick={() => act(async () => {
+        <button disabled={busy || !confirmed || (Boolean(row.payload.native_provider) && row.status !== 'STATIC_VALIDATED')} onClick={() => act(async () => {
+          const payload = JSON.parse(localEvidence);
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('执行证据必须是 JSON 对象');
+          const native = Boolean(row.payload.native_provider);
+          if (native && payload.project_id && payload.project_id !== projectId) throw new Error('校准记录必须属于当前项目');
+          const endpoint = native ? 'native-execution-evidence' :
+            ('candidate_id' in payload || 'job_id' in payload) ? 'local-evidence' : 'local-execution-evidence';
           const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
             { action: 'workflow_validate', target_id: row.id }, true);
-          return post(`/workflow-capabilities/${row.id}/${'candidate_id' in JSON.parse(localEvidence) ? 'local-evidence' : 'local-execution-evidence'}`, {
-            ...JSON.parse(localEvidence), grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence,
+          return post(`/workflow-capabilities/${row.id}/${endpoint}`, {
+            ...payload, ...(native ? { project_id: projectId } : {}),
+            grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence,
           }, true);
-        })}>提交并核验本地 History 证据</button>
+        })}>{row.payload.native_provider ? '核验已完成的审片 / ASR 校准记录' : '提交并核验本地执行证据'}</button>
         {row.status === 'REAL_TESTED' && <button disabled={busy || !confirmed} onClick={() => act(() =>
           approve(row, 'workflow_publish', `/workflow-capabilities/${row.id}/publish`))}>操作员发布此版本</button>}
       </>}

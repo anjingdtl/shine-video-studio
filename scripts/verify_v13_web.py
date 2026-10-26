@@ -438,6 +438,67 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         page.get_by_label("提交方式").select_option("mock")
         # Hold an old project's asset response until a different project has
         # finished loading. A late callback must not replace the new selection.
+        # Protocol-only UI fixtures. These requests never become real capabilities or jobs.
+        workflow_fixtures = [
+            {"id": "ui-native-draft", "status": "DRAFT", "sha256": "a" * 64,
+             "payload": {"name": "Mock native draft", "category": "VLM_REVIEW", "native_provider": {"fixture": True}}},
+            {"id": "ui-native-evidence", "status": "STATIC_VALIDATED", "sha256": "b" * 64,
+             "payload": {"name": "Mock native calibration", "category": "ASR", "native_provider": {"fixture": True}}},
+            {"id": "ui-h3-evidence", "status": "STATIC_VALIDATED", "sha256": "c" * 64,
+             "payload": {"name": "Mock H3 job evidence", "category": "H3_T2VA"}},
+        ]
+        registry_url = "**/api/v1/workflow-capabilities"
+        page.route(registry_url, lambda route: route.fulfill(json={
+            "categories": ["VLM_REVIEW", "ASR", "H3_T2VA"], "revisions": workflow_fixtures, "legacy_profiles": []}))
+        grants_url = "**/api/v1/preparation/approval-grants"
+        page.route(grants_url, lambda route: route.fulfill(json={"grant_id": "ui-only-grant", "snapshot": "a" * 64}))
+        workflow_checks = []
+
+        def workflow_request(route):
+            data = route.request.post_data_json
+            workflow_checks.append({"path": route.request.url.split("/api/v1")[-1], "body": data})
+            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            route.fulfill(json={"status": "MOCK_VERIFIED", "is_mock": True, "no_backend_execution": True})
+
+        workflow_paths = [
+            "**/api/v1/workflow-capabilities/ui-native-draft/validate-native",
+            "**/api/v1/workflow-capabilities/ui-native-evidence/native-execution-evidence",
+            "**/api/v1/workflow-capabilities/ui-h3-evidence/local-evidence",
+        ]
+        for path in workflow_paths:
+            page.route(path, workflow_request)
+        prep.get_by_role("button", name="工作流能力", exact=True).click()
+        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
+        prep.get_by_label("人工核验 / 试听 / 权利证据").fill("Mock UI protocol check only; no real acceptance")
+        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
+        native_draft = prep.locator("article").filter(has_text="ui-native-draft")
+        native_evidence = prep.locator("article").filter(has_text="ui-native-evidence")
+        h3_evidence = prep.locator("article").filter(has_text="ui-h3-evidence")
+        expect(native_draft.get_by_role("button", name="使用 Fake 节点目录验证", exact=True)).to_have_count(0)
+        expect(native_evidence.get_by_role("button", name="Fake HTTP 执行契约", exact=True)).to_have_count(0)
+        expect(native_draft.get_by_label("工作流验证实例 ID")).to_have_count(0)
+        with page.expect_response(lambda response: response.url.endswith("/ui-native-draft/validate-native")):
+            native_draft.get_by_role("button", name="读取独立审片 / ASR 执行器验证", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        prep.get_by_label("本地执行证据 JSON", exact=True).fill(json.dumps({"samples": [{"call_id": "ui-only", "result": {"is_mock": True}}]}))
+        with page.expect_response(lambda response: response.url.endswith("/ui-native-evidence/native-execution-evidence")):
+            native_evidence.get_by_role("button", name="核验已完成的审片 / ASR 校准记录", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        prep.get_by_label("本地执行证据 JSON", exact=True).fill(json.dumps({"job_id": "ui-only-h3", "graph_sha256": "d" * 64}))
+        with page.expect_response(lambda response: response.url.endswith("/ui-h3-evidence/local-evidence")):
+            h3_evidence.get_by_role("button", name="提交并核验本地执行证据", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        assert len(workflow_checks) == 3
+        assert workflow_checks[0]["body"] == {}
+        assert workflow_checks[1]["body"]["project_id"] == p
+        assert workflow_checks[1]["body"]["samples"][0]["result"]["is_mock"] is True
+        assert workflow_checks[2]["body"]["job_id"] == "ui-only-h3"
+        assert all(check["body"].get("offline") is False for check in workflow_checks[1:])
+        if screenshot:
+            prep.screenshot(path=str(screenshot.with_name(screenshot.stem + "-native.png")))
+        for path in workflow_paths + [grants_url, registry_url]:
+            page.unroute(path)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
         page.reload(wait_until="networkidle")
@@ -481,6 +542,8 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                 "project_id": p,
                 "flows": [
                     "authenticated style freeze",
+                    "native reviewer validation/calibration routing, no Fake node controls (intercepted)",
+                    "H3 job_id evidence uses the stronger local-evidence route (intercepted)",
                     "offline package cache and real file installer",
                     "scope configuration inspection and grant-authorized save",
                     "offline file import through browser control",

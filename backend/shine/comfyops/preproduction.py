@@ -206,7 +206,19 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         if not choices:
             blockers.append({"code": "CAPABILITY_MISSING", "category": category})
         else:
-            usable.append(choices[0])
+            selected = choices[0]
+            if not offline and category in {"VLM_REVIEW", "ASR"} and not selected.payload.get("native_provider"):
+                blockers.append({"code": "PRODUCTION_REVIEW_PROVIDER_BINDING_REQUIRED", "category": category,
+                                 "workflow": selected.id})
+            if not offline:
+                from shine.comfyops.native import native_errors
+
+                blockers.extend(
+                    {"code": error, "category": category, "workflow": selected.id}
+                    for error in native_errors(db, selected.payload, live=True, require_evidence=True,
+                                               workflow_hash=selected.sha256)
+                )
+            usable.append(selected)
     models = []
     selected_models = {
         identity for w in usable for identity in w.payload["model_ids"] + w.payload.get("node_package_ids", [])

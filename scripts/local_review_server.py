@@ -122,6 +122,21 @@ def build_app(manifest):
             "runtime_sha256": runtime_sha256,
         }
 
+    @app.get("/identity")
+    def identity_probe():
+        # Preparation reads fresh file identity without loading any ML model.
+        with guard:
+            try:
+                current = {manifest["model_id"]: verified_model_identity(manifest)}
+                if asr_manifest:
+                    current[asr_manifest["model_id"]] = verified_model_identity(asr_manifest)
+            except (ValueError, OSError, KeyError) as exc:
+                raise HTTPException(409, "EXECUTOR_MODEL_FILES_CHANGED") from exc
+            if current != verified_models:
+                raise HTTPException(409, "EXECUTOR_MODEL_IDENTITY_CHANGED")
+            return {"status": "ok", "is_mock": False, "verified_models": current,
+                    "runtime_sha256": runtime_sha256}
+
     @app.get("/v1/models")
     def models():
         ids = [manifest["model_id"]] + (

@@ -1,0 +1,88 @@
+{
+  "at": "2026-10-26T07:37:42.955152+00:00",
+  "source_base": "cab7c65b5a8f8f00e17ed3aeb4d38dd6bafad594",
+  "source_files_sha256": {
+    "backend/shine/api_preparation.py": "30544a2170fbd1bd5f6a3645b3fa9c222a57a1190de32cfe3c69c840d677c579",
+    "backend/shine/comfyops/native.py": "d724bbc7cf7525241a65651d66b917ba9b79b13c104265b4269a10e781bdb763",
+    "backend/shine/comfyops/registry.py": "feb2de31e8699441b9f57c0e40a5e401065bb6b00fe932b9aa5fb10f83db5ab6",
+    "backend/shine/comfyops/preproduction.py": "e9c7486fae2d378ee2989860328a3db5660168690e1666d86df97d25d3fdeee2",
+    "backend/shine/comfyops/model_calls.py": "c533b1456e1e84bc6d7194f9c161a3de4c7392dce9c7d43745415ab79f3e7ddc",
+    "backend/shine/worker.py": "e2b8e03cc6fa0669b22e45969a68c829f4c8b6c219159b715cd9f2e6bccb2721",
+    "scripts/local_review_server.py": "21687a9e27650453c35a6bedd9fb772471a45b05d4525b63fb797a842f201a73",
+    "frontend/src/components/PreproductionPanel.tsx": "876432cf77d7742d90bf1439b20b3e454dbc7add795d00a1cdc288e83340f176",
+    "frontend/src/styles.css": "7619a85082bd0e149ecbf6cef85651477ea0c2fd87fd45103532c50deed2db2d",
+    "scripts/verify_v13_web.py": "d1e50fbc8638aa94876856ace8a3b28d0fe3587e3fdb281acfa4778be0e137d4"
+  },
+  "backend": {
+    "tests": "589",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "222.990"
+  },
+  "targeted": {
+    "tests": "161",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "44.823"
+  },
+  "browser": {
+    "status": "MOCK_VERIFIED",
+    "project_id": "ba37b35b-080c-4cfa-9833-0fb19e0668e8",
+    "flows": [
+      "authenticated style freeze",
+      "native reviewer validation/calibration routing, no Fake node controls (intercepted)",
+      "H3 job_id evidence uses the stronger local-evidence route (intercepted)",
+      "offline package cache and real file installer",
+      "scope configuration inspection and grant-authorized save",
+      "offline file import through browser control",
+      "instance create/start/stop/snapshot/restore/health via UI",
+      "legacy asset approval and lock grants",
+      "mode selection preserves Fake provenance",
+      "candidate promotion",
+      "explicit voice listening and freeze",
+      "TTS/ASR/alignment",
+      "SRT download",
+      "no browser credential persistence",
+      "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
+      "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
+      "late old-project responses cannot overwrite selected-project assets/shots"
+    ],
+    "api_errors": []
+  },
+  "frontend": "TypeScript/Vite PASS; scoped evidence textarea inspected in isolated screenshot",
+  "ruff": "PASS backend/local_review_server.py/verify_v13_web.py",
+  "native_capability_contract": {
+    "categories": [
+      "VLM_REVIEW",
+      "ASR"
+    ],
+    "no_comfy_graph_fabricated": true,
+    "fixed_provider_package_file_and_runtime_binding": true,
+    "vlm_distinct_positive_negative_calls_required": true,
+    "asr_expected_text_cer_zero_required": true,
+    "completed_nonmock_calls_and_released_resources_required": true,
+    "returned_result_digest_checked": true,
+    "authenticated_snapshot_grants_for_adoption_and_publication": true,
+    "fresh_identity_probe_before_preproduction": true,
+    "actual_qc_response_identity_checked_before_and_after_call": true,
+    "revoked_package_and_mutated_payload_during_call_rejected": true,
+    "six_dependency_mutation_counterexamples_reproduced_then_fixed": true,
+    "received_digest_preserved_when_postcall_pin_changes": true,
+    "legacy_graph_without_actual_review_binding_blocks_real_preproduction": true,
+    "offline_and_unanalyzed_legacy_boundaries_preserved": true
+  },
+  "live_status": {
+    "deployed": false,
+    "new_native_packages_installed": false,
+    "new_fingerprinted_calibration_run": false,
+    "new_native_workflow_published": false,
+    "frozen_preproduction_plan": false,
+    "historical_uncertain_call_remaining": "e6d718c1-ad78-43a1-9d48-b048332f4cdd",
+    "t2va": "fixed install still running; no T2VA generation"
+  },
+  "human_present_or_quality_approval": false,
+  "asset_or_voice_promoted": false,
+  "full_product": "PARTIAL"
+}

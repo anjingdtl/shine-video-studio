@@ -448,6 +448,11 @@ def workflow_draft(body: WorkflowDraft, db: DBSession):
     if body.package_hashes and body.package_hashes != dependencies:
         raise HTTPException(409, "DEPENDENCY_SNAPSHOT_CHANGED")
     body = body.model_copy(update={"package_hashes": dependencies})
+    from shine.comfyops.native import native_errors
+
+    errors = native_errors(db, body.model_dump())
+    if errors:
+        raise HTTPException(409, {"code": "NATIVE_PROVIDER_INVALID", "errors": errors})
     row = save(db, WorkflowRevision, body.model_dump(), "DRAFT")
     audit(db, "comfyops", "WORKFLOW_DRAFT_CREATED", row)
     db.commit()
@@ -489,6 +494,8 @@ def validate(identity: str, body: Validation, db: DBSession):
 @router.post("/workflow-capabilities/{identity}/fake-execute")
 def fake_workflow(identity: str, request: Request, db: DBSession):
     row = get(db, WorkflowRevision, identity)
+    if row.payload.get("native_provider"):
+        raise HTTPException(409, "NATIVE_PROVIDER_EVIDENCE_REQUIRED")
     if row.status != "STATIC_VALIDATED":
         raise HTTPException(409, "WORKFLOW_NOT_VALIDATED")
     for identity in row.payload["model_ids"] + row.payload.get("node_package_ids", []):
@@ -536,6 +543,11 @@ def publish(identity: str, body: Decision, actor: Operator, db: DBSession):
     row = get(db, WorkflowRevision, identity)
     if row.status != "REAL_TESTED":
         raise HTTPException(409, "MODEL_NOT_VERIFIED_PENDING_LOCAL_GPU")
+    from shine.comfyops.native import native_errors
+
+    errors = native_errors(db, row.payload, live=True, require_evidence=True, workflow_hash=row.sha256)
+    if errors:
+        raise HTTPException(409, {"code": "NATIVE_PROVIDER_INVALID", "errors": errors})
     for identity in row.payload["model_ids"] + row.payload.get("node_package_ids", []):
         package = db.get(ModelPackage, identity) or db.get(NodePackage, identity)
         if not package or package.sha256 != row.payload.get("package_hashes", {}).get(identity):
@@ -1317,6 +1329,8 @@ def local_evidence(identity: str, body: LocalEvidence, actor: Operator, settings
 
     locked(db)
     row = get(db, WorkflowRevision, identity)
+    if row.payload.get("native_provider"):
+        raise HTTPException(409, "NATIVE_PROVIDER_EVIDENCE_REQUIRED")
     approval.consume(db, actor, "workflow_validate", row, body.grant_id, body.snapshot)
     if body.candidate_id:
         candidate = get(db, CandidateAsset, body.candidate_id)
@@ -1643,6 +1657,8 @@ def local_execution_evidence(
     from shine.security import require_loopback_url
 
     row = get(db, WorkflowRevision, identity)
+    if row.payload.get("native_provider"):
+        raise HTTPException(409, "NATIVE_PROVIDER_EVIDENCE_REQUIRED")
     instance = get(db, ComfyInstance, body.instance_id)
     if (
         body.offline
@@ -1705,6 +1721,119 @@ def local_execution_evidence(
     return public(row)
 
 
+@router.post("/workflow-capabilities/{identity}/validate-native")
+def validate_native_workflow(identity: str, actor: Operator, db: DBSession):
+    from shine.comfyops.native import native_errors
+
+    row = get(db, WorkflowRevision, identity)
+    if not row.payload.get("native_provider") or row.status not in {"DRAFT", "STATIC_VALIDATED"}:
+        raise HTTPException(409, "NATIVE_DRAFT_REQUIRED")
+    expected_hash = row.sha256
+    errors = validate_workflow(WorkflowDraft.model_validate(row.payload), {}, {})
+    errors += native_errors(db, row.payload, live=True, workflow_hash=row.sha256)
+    db.rollback()
+    locked(db)
+    row = get(db, WorkflowRevision, identity)
+    if row.sha256 != expected_hash or row.status not in {"DRAFT", "STATIC_VALIDATED"}:
+        raise HTTPException(409, "WORKFLOW_REVISION_CHANGED")
+    errors += native_errors(db, row.payload, workflow_hash=row.sha256)
+    if not errors:
+        row.status = "STATIC_VALIDATED"
+    audit(db, actor, "NATIVE_PROVIDER_IDENTITY_CHECKED", row, {"errors": errors, "inference": False})
+    db.commit()
+    return {"revision": public(row), "errors": errors, "source": "LIVE_NATIVE_EXECUTOR"}
+
+
+class NativeCallSample(Strict):
+    call_id: str
+    result: dict
+    expected_verdict: Literal["passed", "failed"] | None = None
+    expected_text: str | None = Field(default=None, min_length=1, max_length=20000)
+
+
+class NativeExecutionEvidence(Decision):
+    project_id: str
+    samples: list[NativeCallSample] = Field(min_length=1, max_length=2)
+
+
+@router.post("/workflow-capabilities/{identity}/native-execution-evidence")
+def native_execution_evidence(identity: str, body: NativeExecutionEvidence, actor: Operator, db: DBSession):
+    """Adopt completed calibration calls, never invoke a model or accept film quality."""
+    import hashlib
+
+    from shine.comfyops.model_calls import digest_input
+    from shine.comfyops.native import NativeProviderBinding, native_errors, valid_call
+    from shine.quality.semantic import Transcript, TranscriptSegment, _normalize
+    from shine.schemas import SemanticReviewResult
+
+    row = get(db, WorkflowRevision, identity)
+    require_project(db, body.project_id)
+    if body.offline or row.status != "STATIC_VALIDATED" or not row.payload.get("native_provider"):
+        raise HTTPException(409, "REAL_NATIVE_EXECUTION_EVIDENCE_REQUIRED")
+    errors = native_errors(db, row.payload, live=True, workflow_hash=row.sha256)
+    if errors:
+        raise HTTPException(409, {"code": "NATIVE_PROVIDER_INVALID", "errors": errors})
+    db.rollback()
+    locked(db)
+    row = get(db, WorkflowRevision, identity)
+    if row.status != "STATIC_VALIDATED":
+        raise HTTPException(409, "WORKFLOW_REVISION_CHANGED")
+    errors = native_errors(db, row.payload, workflow_hash=row.sha256)
+    if errors:
+        raise HTTPException(409, {"code": "NATIVE_PROVIDER_INVALID", "errors": errors})
+    binding = NativeProviderBinding.model_validate(row.payload["native_provider"])
+    category = row.payload["category"]
+    if len({s.call_id for s in body.samples}) != len(body.samples):
+        raise HTTPException(409, "DISTINCT_NATIVE_CALLS_REQUIRED")
+    if category == "VLM_REVIEW":
+        if len(body.samples) != 2 or {s.expected_verdict for s in body.samples} != {"passed", "failed"}:
+            raise HTTPException(409, "VLM_POSITIVE_NEGATIVE_CALIBRATION_REQUIRED")
+    elif len(body.samples) != 1:
+        raise HTTPException(409, "ONE_ASR_CALIBRATION_REQUIRED")
+    proof = []
+    for sample in body.samples:
+        call = db.get(AgentTaskRecord, sample.call_id)
+        if not valid_call(db, call, category, binding, body.project_id):
+            raise HTTPException(409, "COMPLETED_REAL_NATIVE_CALL_REQUIRED")
+        try:
+            if category == "VLM_REVIEW":
+                result = SemanticReviewResult.model_validate(sample.result)
+                if (result.is_mock or result.model != binding.model or result.overall_confidence < 0.7
+                        or result.verdict != sample.expected_verdict
+                        or (result.verdict == "passed" and result.findings)
+                        or (result.verdict == "failed" and not any(
+                            f.severity == "hard" and f.confidence >= 0.7 for f in result.findings))):
+                    raise ValueError("VLM_CALIBRATION_RESULT_INVALID")
+                summary = {"expected_verdict": sample.expected_verdict}
+            else:
+                data = dict(sample.result)
+                data["segments"] = [TranscriptSegment(**item) for item in data.get("segments", [])]
+                result = Transcript(**data)
+                if (result.is_mock or result.model != binding.model or not sample.expected_text
+                        or not _normalize(sample.expected_text)
+                        or _normalize(result.text) != _normalize(sample.expected_text)):
+                    raise ValueError("ASR_CALIBRATION_TEXT_MISMATCH")
+                summary = {"expected_text_sha256": hashlib.sha256(sample.expected_text.encode()).hexdigest(), "cer": 0}
+            if graph_hash(digest_input(result)) != call.trace.get("result_sha256"):
+                raise ValueError("NATIVE_RESULT_HASH_MISMATCH")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, "NATIVE_CALIBRATION_RESULT_INVALID") from exc
+        proof.append({"call_id": call.id, "input_hash": call.input_hash,
+                      "result_sha256": call.trace["result_sha256"], **summary})
+    if len({sample["input_hash"] for sample in proof}) != len(proof):
+        raise HTTPException(409, "DISTINCT_NATIVE_INPUTS_REQUIRED")
+    approval.consume(db, actor, "workflow_validate", row, body.grant_id, body.snapshot)
+    row.payload = {**row.payload, "template_audit": {**row.payload.get("template_audit", {}),
+                   "native_provider_evidence": {"schema_version": "1", "project_id": body.project_id,
+                                                "samples": proof, "scope": "CALIBRATION_ONLY_NOT_FILM_ACCEPTANCE"}}}
+    row.sha256 = graph_hash(row.payload)
+    row.status = "REAL_TESTED"
+    audit(db, actor, "NATIVE_PROVIDER_EXECUTION_EVIDENCE_BOUND", row,
+          {"project_id": body.project_id, "samples": proof, "evidence": body.evidence, "inference": False})
+    db.commit()
+    return public(row)
+
+
 class LocalValidation(Strict):
     instance_id: str
 
@@ -1717,6 +1846,8 @@ def validate_local_workflow(
     from shine.security import require_loopback_url
 
     row = get(db, WorkflowRevision, identity)
+    if row.payload.get("native_provider"):
+        raise HTTPException(409, "NATIVE_PROVIDER_EVIDENCE_REQUIRED")
     instance = get(db, ComfyInstance, body.instance_id)
     if instance.payload.get("is_mock") or instance.status not in {"ONLINE", "RUNNING", "STOPPED"}:
         raise HTTPException(409, "REAL_INSTANCE_REQUIRED")

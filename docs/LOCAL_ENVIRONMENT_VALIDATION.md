@@ -1,6 +1,8 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
-10-26 授权续轮：完整后端 **541 passed、零 skipped/failures/errors**；Ruff 通过，前端未改且构建已通过。
+10-26 授权续轮：完整后端 **589 passed、零 skipped/failures/errors**；Ruff 与当前前端 TypeScript/Vite 构建通过。
+独立审片/ASR 原生能力登记、固定角色/模型包/运行时绑定及 Worker 实际审片前后核对已补齐；隔离浏览器 17 类流程通过。
+真实新包登记/校准/发布与预制作冻结尚未执行；见 [原生能力机器记录](evidence/local-closeout-20261025/native-review-capabilities.json)。
 新增模型文件/运行时指纹随审片与 ASR 响应入账；错误模型身份拒绝，外层 Mock 标记不再丢失。
 当前尚未重启运行中的安装服务部署此补丁，不改写旧调用；见 [执行器身份记录](evidence/local-closeout-20261025/review-executor-identity.json)。
 四个固定 Qwen 包的 42 文件已全部校验；真实声音设计、克隆、新台词合成、识别与对齐均实际运行并释放。

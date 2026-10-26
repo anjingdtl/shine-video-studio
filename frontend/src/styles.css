@@ -158,3 +158,16 @@
 .delivery-panel article { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e9e8e2; }
 .delivery-panel small, .delivery-panel pre { overflow-wrap: anywhere; white-space: pre-wrap; }
 .delivery-panel video { display: block; border-radius: 6px; background: #161815; }
+/* Operator evidence must remain readable before a snapshot-bound decision. */
+#preproduction textarea {
+  display: block;
+  width: 100%;
+  min-height: 8rem;
+  padding: .75rem;
+  margin: .35rem 0 .65rem;
+  border: 1px solid #dedfd4;
+  border-radius: 6px;
+  background: #fdfdfb;
+  font: 12px/1.5 var(--mono);
+  resize: vertical;
+}

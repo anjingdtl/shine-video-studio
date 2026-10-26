@@ -364,6 +364,48 @@ there is no automatic inference retry. An ordinary compatible endpoint without t
 extension remains usable but has no native capability identity evidence. Prior calls are
 not backfilled. Outer VLM Mock provenance is monotonic even when inner JSON says false.
 
-This records execution identity only. Native workflow registration/publication and frozen
-preproduction provider bindings still need their dedicated implementation and acceptance;
-these fields alone do not upgrade a capability, asset or film.
+This records execution identity only. Native workflow registration and frozen provider
+bindings use the separate evidence/grant contract below; identity fields alone do not
+upgrade a capability, asset or film.
+
+
+### Native VLM/ASR workflow capabilities
+
+`WorkflowDraft.native_provider` is an optional typed binding for `VLM_REVIEW` and `ASR`
+only. It pins the configured role's profile ID/kind/model/URL hash, executor identity,
+one registered model package and its exact runtime file set. Such a revision has empty
+`graph`/`parameter_map`; it cannot masquerade as H3 or acquire Fake ComfyUI execution evidence.
+Absent native fields are omitted when serializing old drafts, preserving their payload hashes.
+The package and workflow must declare at least the actual shared admission budget
+(VLM 8000 MiB / ASR 4000 MiB); these declarations remain estimates unless measured.
+
+`POST /workflow-capabilities/{id}/validate-native` is authenticated and performs no inference.
+It checks the current role binding and the loopback executor's `GET /identity`, which
+re-hashes actual files under the executor guard. The cheap `/health` startup identity is
+insufficient for this preparation check. Changed/missing files or an unavailable/mismatched
+executor block validation and real readiness.
+
+`POST /workflow-capabilities/{id}/native-execution-evidence` consumes a `workflow_validate`
+grant and accepts `project_id` plus `samples`. Each sample references a completed, non-Mock
+model call with a released lease, matching provider/executor identity and exact returned-result
+digest. VLM requires distinct positive and negative input/call IDs, explicit matching verdicts,
+confidence >= 0.7, no positive findings and a confident hard negative finding. ASR requires
+one actual transcript matching a nonempty `expected_text` after the existing normalization.
+This proves bounded calibration only, not general accuracy, identity, voice quality or film
+acceptance. The revision hash includes the bound sample IDs/digests; publication needs a fresh
+`workflow_publish` grant and rechecks live identity and dependencies. Old records are not backfilled.
+
+Real preproduction accepts VLM/ASR revisions bound to the providers the normal Worker uses;
+an unrelated approved ComfyUI review graph cannot satisfy that requirement. Freezing pins
+these revisions. The Worker also checks its job's frozen provider/executor before and after
+each actual QC subcall, including after a long H3 render. A changed route, plan, response
+identity, revoked package, mutated workflow/package payload or Mock result fails adoption; a received result digest remains in the ledger even
+when a post-call pin fails. Cleanup failure still retains its separate reconciliation state.
+Unanalyzed legacy projects and explicitly matching frozen simulations keep their existing
+contracts; simulations cannot be relabelled as real by changing only request mode.
+
+Web workflow cards select native validation/calibration for these revisions, retain the
+stronger H3 `job_id` evidence route, and preserve the ordinary ComfyUI history route for
+other capabilities. Native cards do not offer Fake node/execution controls. The current
+project supplies native calibration scope; a conflicting project ID is rejected before
+issuing a grant. JSON evidence remains readable in a full-width editor.

@@ -96,9 +96,10 @@ def model_step(provider, factory, identity):
 
 
 class TrackedProvider:
-    def __init__(self, provider, factory, project_id, *, reviewer_kind=None):
+    def __init__(self, provider, factory, project_id, *, reviewer_kind=None, production_job_id=None):
         self.provider, self.factory, self.project_id = provider, factory, project_id
         self.reviewer_kind = reviewer_kind
+        self.production_job_id = production_job_id
 
     def __getattr__(self, name):
         method = getattr(self.provider, name)
@@ -196,14 +197,46 @@ class TrackedProvider:
                         wait_seconds=0 if self.provider.is_mock else 300,
                     )
                 with context:
+                    expected_executor = None
+                    if self.production_job_id and kind in {"VLM", "ASR"}:
+                        from shine.comfyops.native import production_review_binding
+
+                        with self.factory() as db:
+                            expected_executor = production_review_binding(
+                                db, self.project_id, self.production_job_id, kind, self.provider, live=True
+                            )
                     with self.factory.begin() as db:
                         row = db.get(AgentTaskRecord, identity)
-                        row.trace = {**row.trace, "resource_id": CURRENT_RESOURCE.get(), "submitted": True}
+                        row.trace = {
+                            **row.trace, "resource_id": CURRENT_RESOURCE.get(), "submitted": True,
+                            **({"production_review": {"job_id": self.production_job_id,
+                                                      "expected_executor": expected_executor}}
+                               if self.production_job_id else {}),
+                        }
                     with IN_FLIGHT_LOCK:
                         IN_FLIGHT.add(identity)
                     token = CURRENT_MODEL_CALL.set((self.factory, identity))
                     try:
                         result = method(*args, **kwargs)
+                        if expected_executor is not None:
+                            # A long render or inference may span a provider restart.
+                            # Keep the received digest even if the post-call pin fails.
+                            result_mock = (result.get("is_mock") if isinstance(result, dict)
+                                           else getattr(result, "is_mock", None))
+                            with self.factory.begin() as db:
+                                row = db.get(AgentTaskRecord, identity)
+                                row.trace = {**row.trace,
+                                             "received_result_sha256": graph_hash(digest_input(result)),
+                                             "received_executor_identity": getattr(
+                                                 self.provider, "last_executor_identity", None),
+                                             "result_is_mock": result_mock}
+                            with self.factory() as db:
+                                current_executor = production_review_binding(
+                                    db, self.project_id, self.production_job_id, kind, self.provider, live=False
+                                )
+                            if (current_executor != expected_executor or result_mock is not False
+                                    or getattr(self.provider, "last_executor_identity", None) != expected_executor):
+                                raise HTTPException(409, "PRODUCTION_REVIEW_RESPONSE_IDENTITY_MISMATCH")
                     finally:
                         CURRENT_MODEL_CALL.reset(token)
                         with IN_FLIGHT_LOCK:

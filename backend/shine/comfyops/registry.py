@@ -4,10 +4,11 @@ from typing import Literal
 
 from fastapi import HTTPException
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from shine.comfy.client import ComfyWorkflowError
 from shine.comfy.workflow import apply_parameters, validate_against_object_info, validate_graph
+from shine.comfyops.native import ROLES, NativeProviderBinding
 
 CATEGORIES = (
     "IMAGE_GENERATION",
@@ -59,6 +60,25 @@ class WorkflowDraft(BaseModel):
     package_hashes: dict[str, str] = Field(default_factory=dict)
     resource_mb: int | None = Field(default=None, gt=0)
     template_audit: dict = Field(default_factory=dict)
+    native_provider: NativeProviderBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        if self.native_provider is None:
+            result.pop("native_provider", None)
+        return result
+
+    @model_validator(mode="after")
+    def native_contract(self):
+        if self.native_provider is not None and (
+            self.category not in ROLES or self.graph or self.parameter_map or self.reference_slots
+            or self.media_transfers or self.instance_ids or self.node_package_ids or self.legacy_profile_id
+            or self.model_ids != [self.native_provider.model_package_id]
+            or self.generation_modes or self.model_family
+        ):
+            raise ValueError("NATIVE_PROVIDER_CONTRACT_INVALID")
+        return self
 
 
 def validate_workflow(body: WorkflowDraft, object_info: dict, installed_versions: dict):
@@ -69,6 +89,8 @@ def validate_workflow(body: WorkflowDraft, object_info: dict, installed_versions
     try:
         Draft202012Validator.check_schema(body.input_schema)
         Draft202012Validator.check_schema(body.output_schema)
+        if body.native_provider is not None:
+            return []
         validate_graph(body.graph)
         report = validate_against_object_info(body.graph, body.parameter_map, object_info)
         apply_parameters(body.graph, body.parameter_map, {})
@@ -201,4 +223,8 @@ def match_constraints(row, constraints, db):
             errors.append("DEPENDENCY_VERSION_MISMATCH:" + identity)
     if constraints.get("continuity", "cut") not in {"cut", "soft_reference"}:
         errors.append("PENDING_HARD_CONTINUITY_TEST")
+    if not constraints.get("offline", True):
+        from shine.comfyops.native import native_errors
+
+        errors += native_errors(db, p, require_evidence=True, workflow_hash=row.sha256)
     return errors

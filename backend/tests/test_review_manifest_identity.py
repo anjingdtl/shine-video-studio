@@ -186,8 +186,10 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(executo
     monkeypatch.setattr(importlib.metadata, 'version', lambda name: 'fixture-only')
     app = executor.build_app(spec)
     client = TestClient(app)
+    assert client.get("/identity").status_code == 200
     changed = tmp_path if role == 'VLM' else asr
     (changed / 'model.safetensors').write_bytes(b'changed-after-startup')
+    assert client.get("/identity").status_code == 409
     if role == 'VLM':
         import base64
 

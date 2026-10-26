@@ -1,22 +1,22 @@
 {
-  "collected_at": "2026-10-26T06:03:05.665200+00:00",
+  "collected_at": "2026-10-26T07:37:42.955152+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "541",
+    "tests": "589",
     "failures": "0",
     "errors": "0",
     "skipped": "0",
-    "time": "212.407"
+    "time": "222.990"
   },
   "checks": {
-    "ruff": "PASS backend and local_review_server.py",
-    "typescript_vite": "PASS current build after explicit QC verdict/range changes",
+    "ruff": "PASS backend/local_review_server.py/verify_v13_web.py",
+    "typescript_vite": "PASS current native workflow Web/evidence textarea build",
     "npm_audit": "0 vulnerabilities",
     "uv_lock_check": "PASS",
     "alembic": "PASS fresh database and existing acceptance copy; migration tests in full suite",
     "windows_stack_operations": "PASS custom proxy/NoWorker/Worker restart/owned shutdown; managed real reviewer also started/stopped",
-    "isolated_browser_e2e": "MOCK_VERIFIED; prior ac398cf 15 flows, api_errors=[]; frontend unchanged in range recovery stage",
+    "isolated_browser_e2e": "MOCK_VERIFIED 17 flows, api_errors=[]; native/H3 protocol probes intercepted, no real capability/film acceptance",
     "remote_ci": "BLOCKED_ACCOUNT_BILLING; source 0aa25a4 run 40269621800, all four jobs NOT_STARTED; annotations read individually"
   },
   "real_text_roles": {
@@ -427,5 +427,6 @@
   "latest_qc_and_download": "qc-verdict-and-bounded-ranges.json",
   "latest_fixed_block_download": "fixed-block-download.json",
   "latest_real_qwen_sdk": "real-qwen-sdk-and-alignment.json",
-  "review_executor_identity": "review-executor-identity.json"
+  "review_executor_identity": "review-executor-identity.json",
+  "native_review_capabilities": "native-review-capabilities.json"
 }

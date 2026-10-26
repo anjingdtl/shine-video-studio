@@ -2,8 +2,8 @@
 
 **当前未达全 PASS。** 该表按原建设方案核对完成条件，不以新增回归数量缩小验收范围。
 工程、Mock、真实模型和人的最终验收分别记录；完整回复失败、资源归零或 HTTP 200 均不等同于影片通过。
-最新本机完整后端为 541 项通过；浏览器 15 类流程为 MOCK_VERIFIED，详见
-[当前机器记录](evidence/local-closeout-20261025/installation-recovery-web.json)。
+最新本机完整后端为 589 项通过；浏览器 17 类流程为 MOCK_VERIFIED，详见
+[当前机器记录](evidence/local-closeout-20261025/native-review-capabilities.json)。
 
 来源：[V1.0 第 11 节](Shine视频工作台_V1.0_项目建设方案.md#11-交付里程碑与验收)、
 [V1.3 C1–C7](Shine视频工作台_V1.3_ComfyOps与全资产预制作系统建设方案.md)、
@@ -25,10 +25,10 @@
 | --- | --- | --- |
 | C1 目录/环境盘点 | preparation/instances/adversarial 测试及隔离 Web 扫描/范围控制 | 既有设备/进程已实际核对；完整操作员限定范围、已有实例只读备份与实际运行验收仍按本机清单完成 |
 | C2 固定安装、许可、依赖、预算、批准、受控执行及恢复 | 真实下载/文件安装算法由 Fake HTTP 注入测试；实际固定小元数据下载成功；失败对账、OS 锁、篡改/未知状态阻断和页面恢复流程均已验证 | 旧 TLS/读取失败已按明确委托正式对账；四包 42 文件均已校验；真实 SDK 调用、退出及同句降速副本对齐完成；T2VA 仍在安装，音色/身份和完整声音质量待确认；不能以缓存元数据或 Mock 安装计通过 |
-| C3 Workflow Registry/Factory | factory/registry/reference/profile/弃用/权限测试通过；实际 Ref2VA 旧 Profile 保留 | 当前新工作流记录为 DRAFT/FAKE_EXECUTED，未有新的真实发布闭环；节点名通过不能冒充检查点运行、硬连续性或视频引用传输通过 |
+| C3 Workflow Registry/Factory | factory/registry/reference/profile/弃用/权限及原生审片/ASR 登记、发布和路由/结果篡改回归通过；实际 Ref2VA 旧 Profile 保留 | 当前新工作流记录为 DRAFT/FAKE_EXECUTED，未有新的真实发布闭环；节点名通过不能冒充检查点运行、硬连续性或视频引用传输通过 |
 | C4 候选资产与来源/QC/人工晋升 | fake image/voice 候选、权限和单调 Mock 来源、下载/解码/晋升拒绝路径通过 | 当前验收项目没有真实候选晋升记录，四条 RightsRecord 仍 PENDING；需要本人权利证据和逐项批准 |
 | C5 VoiceOps | 设计/克隆/合成/ASR/对齐/字幕软件接口与 Fake E2E；TTS/ASR 固定依赖隔离导入通过 | 当前项目 VoiceProfile 为空；已有真实设计/克隆/新对白、CER=0 与同句降速副本字词对齐；原始零长度时间仍拒绝，尚无真人试听冻结、声音身份/口型和完整字幕验收 |
-| C6 预制作 DAG/资源/开机前门禁 | 分析、依赖、并发排斥、释放故障/过期阻断、manifest pins 及权限测试通过 | 当前验收项目没有冻结 PreProductionPlan；真实就绪门禁不得通过 Fake、改状态或禁用 enforce 关闭 |
+| C6 预制作 DAG/资源/开机前门禁 | 分析、依赖、并发排斥、释放故障/过期阻断、manifest pins 及权限测试通过；真实准备检查与 Worker 审片前后均核对原生角色和执行器绑定 | 当前验收项目没有冻结 PreProductionPlan；真实就绪门禁不得通过 Fake、改状态或禁用 enforce 关闭 |
 | C7 Web、迁移、E2E、Windows CI 和报告 | 本机完整后端、Ruff、前端构建、迁移、隔离浏览器通过；安装恢复 UI 已接真实 API；文档契约与权限说明已更新 | 新代码远端 CI 待账户恢复后重新验证；真人操作与真实媒体验收仍各自待完成 |
 
 以上项目中，Mock 协议已实现不意味着所有可选音乐/SFX/未知模型都已受支持。
@@ -51,7 +51,7 @@
 6. GitHub Actions 账户包含额度已耗尽；未改付款方式、预算或产生新付费。
    额度可用后须对届时 head 验证 backend、backend-windows、frontend、web-e2e；旧 SHA 绿色和本机测试不替代。
 
-独立审片/ASR 的真实模型指纹已补入执行器响应和调用账本软件路径；实时部署与原生能力登记、预制作绑定仍待完成，不能用 ComfyUI 假图补足。
+独立审片/ASR 的指纹、原生登记/发布、准备检查及实际审片前后绑定软件路径已补齐；新增 48 项契约/对抗性用例在隔离替身上验证。真实部署、固定包安装、新校准和发布及当前项目预制作冻结仍待执行，不能用软件通过冒充硬件或人工验收。
 
 每个模型阶段开始前及结束后核验释放，任一未知调用或资源状态保留待对账；审片、生成和多个 Agent 不并行。
 完成结论必须以对应层的当前证据逐项关闭本表，不能仅凭本表存在或软件测试通过宣告完成。

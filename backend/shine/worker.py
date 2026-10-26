@@ -1221,9 +1221,11 @@ def _finalize_comfy_attempt(
                 ResourceScheduler().release(release_db, lease.id, lease.owner, reconciled=True)
         CURRENT_RESOURCE.set(None)
         if semantic_reviewer:
-            semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id, reviewer_kind="VLM")
+            semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id, reviewer_kind="VLM",
+                                                 production_job_id=job_id)
         if asr_reviewer:
-            asr_reviewer = TrackedProvider(asr_reviewer, session_factory, project_id, reviewer_kind="ASR")
+            asr_reviewer = TrackedProvider(asr_reviewer, session_factory, project_id, reviewer_kind="ASR",
+                                            production_job_id=job_id)
 
     technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
         artifact_path,
