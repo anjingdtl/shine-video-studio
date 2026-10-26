@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from shine.agents.film_contracts import (
@@ -341,6 +341,17 @@ class FilmAgentDispatcher:
             {key: context[key] for key in ("style", "style_version_id", "style_hash", "shot_spec")}
             if role == "qc_reviewer" else context
         )
+        from shine.agents.execution import guard_request
+
+        contract_hash = digest(contract.model_json_schema())
+        # Claim the request while holding SQLite's writer lock, then release it
+        # with the durable intent before any network call. Concurrent identical
+        # requests cannot both pass the guard.
+        db.commit()
+        db.execute(text("BEGIN IMMEDIATE"))
+        guard_request(db, project_id, role, digest(context), profile,
+                      text_hash=digest(model_context) if role == "qc_reviewer" else None,
+                      contract_hash=contract_hash)
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,
@@ -360,6 +371,9 @@ class FilmAgentDispatcher:
                 "is_mock": profile.kind == "mock",
                 "input_revision_ids": body.input_revision_ids,
                 "schema": contract.__name__,
+                "review_contract_sha256": contract_hash,
+                "review_provider": {"profile_id": profile.id, "kind": profile.kind, "model": profile.model,
+                                    "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest()},
                 "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]} for s in cache_state],
                 **({"scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
                     "shot_spec_snapshot": context["shot_spec"],
@@ -369,11 +383,6 @@ class FilmAgentDispatcher:
             },
         )
         db.add(task)
-        if role == "qc_reviewer":
-            task.trace = {**task.trace, "review_provider": {
-                "profile_id": profile.id, "kind": profile.kind, "model": profile.model,
-                "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
-            }}
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
         try:
             response = self.gateway.complete_for_role(
@@ -401,6 +410,11 @@ class FilmAgentDispatcher:
                 user=json.dumps(model_context, ensure_ascii=False),
                 schema=contract.model_json_schema(),
             )
+            task.trace = {**task.trace, "received_result_sha256": digest(response.parsed),
+                          "response_model_sha256": hashlib.sha256((response.model or "").encode()).hexdigest(),
+                          "is_mock": bool(task.trace.get("is_mock") or response.raw_meta.get("is_mock")
+                                          or response.raw_meta.get("mock"))}
+            db.commit()  # A returned response is durable evidence even if the contract rejects it.
             proposal = contract.model_validate(response.parsed)
             validate_output(role, proposal, body, inputs, context)
             # Re-read context after a potentially long external call.
@@ -453,17 +467,26 @@ class FilmAgentDispatcher:
             db.commit()
             return artifact
         except (ValueError, ValidationError, LLMError) as exc:
+            from shine.agents.execution import UNKNOWN_CODES, rejection_reason
+
             db.rollback()
             task = db.get(AgentTaskRecord, task.id)
-            task.status = "REJECTED"
+            uncertain = isinstance(exc, LLMError) and exc.code in UNKNOWN_CODES and not task.trace.get("is_mock")
+            task.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
             # Never persist provider text, prompts or exception strings that can contain secrets.
             task.error_code = exc.code if isinstance(exc, LLMError) else "CONTRACT_OR_POLICY_REJECTED"
+            task.trace = {**task.trace, "automatic_replay": False,
+                          **({"external_outcome": "UNKNOWN"} if uncertain else {}),
+                          "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
             raise ValueError(task.error_code) from None
         except Exception:
             db.rollback()
             task = db.get(AgentTaskRecord, task.id)
-            task.status = "FAILED"
+            unknown = not task.trace.get("is_mock") and not task.trace.get("received_result_sha256")
+            task.status = "NEEDS_REVIEW" if unknown else "FAILED"
             task.error_code = "AGENT_CALL_FAILED"
+            task.trace = {**task.trace, "automatic_replay": False,
+                          **({"external_outcome": "UNKNOWN"} if unknown else {})}
             db.commit()
             raise ValueError("AGENT_CALL_FAILED") from None

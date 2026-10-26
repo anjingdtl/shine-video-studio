@@ -9,6 +9,7 @@ from sqlalchemy import literal_column, select
 from shine.agents.film import FilmAgentDispatcher, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleProposal
 from shine.api_common import DBSession, llm_gateway
+from shine.api_operator import Operator
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
@@ -27,6 +28,24 @@ from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, 
 from shine.services import add_audit, create_shot_record, make_render_request, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["film-crew", "rulebook"])
+
+
+class AbandonRemoteResponse(APIModel):
+    grant_id: str
+    snapshot: str
+    evidence: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/projects/{project_id}/film-runs/{task_id}/abandon-remote-response")
+def abandon_remote(project_id: str, task_id: str, body: AbandonRemoteResponse, actor: Operator, db: DBSession):
+    from shine.agents.execution import abandon_remote_response
+    from shine.api_preparation import locked
+
+    locked(db)
+    row = db.get(AgentTaskRecord, task_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(404, "Agent task not found for project")
+    return abandon_remote_response(db, row, actor, body.grant_id, body.snapshot, body.evidence)
 
 
 def _registry(request: Request):

@@ -18,17 +18,25 @@ def assessment_for_request(db, project_id, request, *, offline=False, required=F
     if bool(request.style_input_assessment_id) != bool(request.style_input_assessment_sha256):
         raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_PIN_INCOMPLETE")
     row = db.get(AgentArtifact, request.style_input_assessment_id) if request.style_input_assessment_id else None
-    if not row and select_latest and not request.style_input_assessment_id:
-        candidates = db.scalars(select(AgentArtifact).where(
-            AgentArtifact.project_id == project_id, AgentArtifact.kind == "StyleInputAssessment",
-        ).order_by(AgentArtifact.created_at.desc(), literal_column("agent_artifacts.rowid").desc()))
-        for candidate in candidates:
-            task = db.get(AgentTaskRecord, candidate.source_task_id)
-            if task and (task.trace.get("shot_spec_sha256"), task.trace.get("style_hash")) == (
-                digest(request.shot_spec.model_dump(mode="json")), request.style_hash,
-            ):
-                row = candidate
-                break  # A newer non-pass must never fall back to an older positive.
+    tasks = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == "qc_reviewer",
+    ).order_by(AgentTaskRecord.created_at.desc(), literal_column("agent_task_records.rowid").desc()))
+    latest = next((task for task in tasks if (
+        task.trace.get("shot_spec_sha256"), task.trace.get("style_hash")
+    ) == (digest(request.shot_spec.model_dump(mode="json")), request.style_hash)), None)
+    if latest:
+        # A rejected/unknown newest call has no artifact. Looking only at artifacts
+        # would silently fall back to an older positive result.
+        if latest.status != "SUCCEEDED":
+            raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_NOT_READY")
+        if row and row.source_task_id != latest.id:
+            raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_OUTDATED")
+        if not row and select_latest and not request.style_input_assessment_id:
+            row = db.scalar(select(AgentArtifact).where(
+                AgentArtifact.source_task_id == latest.id, AgentArtifact.kind == "StyleInputAssessment",
+            ))
+            if not row:
+                raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_NOT_READY")
     if not row:
         if required or request.style_input_assessment_id:
             raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_REQUIRED")

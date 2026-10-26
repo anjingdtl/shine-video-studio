@@ -530,6 +530,52 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         assert critic_calls[0]["shot_spec"] == routing_shot["spec"]
         assert critic_calls[0]["input_revision_ids"] == [] and critic_calls[0]["allow_remote_text"] is True
         expect(consent).not_to_be_checked()
+        runs_url = f"**/api/v1/projects/{p}/film-runs"
+        abandon_url = f"**/api/v1/projects/{p}/film-runs/ui-unknown-text-task/abandon-remote-response"
+        page.route(runs_url, lambda route: route.fulfill(json=[{
+            "id": "ui-unknown-text-task", "role_id": "qc_reviewer", "status": "NEEDS_REVIEW",
+            "model_id": "UI_ONLY", "error_code": "LLM_TIMEOUT", "rulepack_id": "UI_ONLY", "trace": {},
+        }]))
+        abandonment_calls, abandonment_grants = [], []
+
+        def capture_text_grant(route):
+            abandonment_grants.append(route.request.post_data_json)
+            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            assert route.request.headers.get("content-type") == "application/json"
+            route.fulfill(json={"grant_id": "ui-text-only-grant", "snapshot": "a" * 64})
+
+        def capture_abandonment(route):
+            abandonment_calls.append(route.request.post_data_json)
+            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            assert route.request.headers.get("content-type") == "application/json"
+            route.fulfill(json={"status": "ABANDONED", "external_outcome": "UNKNOWN", "automatic_replay": False})
+
+        page.route(grants_url, capture_text_grant)
+        page.route(abandon_url, capture_abandonment)
+        page.reload(wait_until="networkidle")
+        crew.locator("details").filter(has_text="ui-unknown-text-task").locator("summary").click()
+        abandon_button = crew.get_by_role("button", name="放弃远端未知响应（不重试）", exact=True)
+        expect(abandon_button).to_be_disabled()
+        crew.get_by_label("远端响应对账凭据").fill(TEST_CREDENTIAL)
+        crew.get_by_label("远端响应对账说明").fill("Mock UI protocol only; no model invocation or quality approval")
+        page.once("dialog", lambda dialog: dialog.dismiss())
+        abandon_button.click()
+        assert not abandonment_calls and not abandonment_grants
+        expect(crew.get_by_label("远端响应对账凭据")).to_have_value("")
+        crew.get_by_label("远端响应对账凭据").fill(TEST_CREDENTIAL)
+        crew.get_by_label("远端响应对账说明").fill("Mock UI protocol only; no model invocation or quality approval")
+        page.once("dialog", lambda dialog: dialog.accept())
+        with page.expect_response(lambda response: response.url.endswith("/abandon-remote-response")):
+            abandon_button.click()
+        page.wait_for_load_state("networkidle")
+        assert len(abandonment_calls) == len(abandonment_grants) == 1
+        assert abandonment_grants[0] == {"action": "model_reconcile", "target_id": "ui-unknown-text-task"}
+        assert abandonment_calls[0]["grant_id"] == "ui-text-only-grant"
+        expect(crew.get_by_label("远端响应对账凭据")).to_have_value("")
+        expect(crew.get_by_label("远端响应对账说明")).to_have_value("")
+        assert TEST_CREDENTIAL not in page.evaluate("JSON.stringify(localStorage) + JSON.stringify(sessionStorage)")
+        for path in [runs_url, grants_url, abandon_url]:
+            page.unroute(path)
         for path in [roles_url, lock_url, critic_url]:
             page.unroute(path)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
@@ -592,6 +638,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
                     "late old-project responses cannot overwrite selected-project assets/shots",
                     "independent text critic requires selected shot, routes exact spec and resets per-call consent (intercepted)",
+                    "remote text response abandonment cancel/confirm, exact authenticated grant and credential clearing (intercepted; no model call)",
                 ],
                 "api_errors": failures,
             }

@@ -50,6 +50,16 @@ def test_independent_input_review_is_pinned_text_only_and_has_no_approval_author
     result = client.post(f"/api/v1/projects/{project}/film-agents/qc_reviewer/run", json={"shot_spec": spec})
     if damage:
         assert result.status_code == 422, result.text
+        with factory() as db:
+            task = db.query(AgentTaskRecord).filter_by(project_id=project, role_id="qc_reviewer").one()
+            assert task.trace["received_result_sha256"] == digest(response)
+            assert task.trace["rejection_reason_code"] == {
+                "style-quote": "STYLE_INPUT_FROZEN_QUOTE_CHANGED",
+                "shot-quote": "STYLE_INPUT_SHOT_QUOTE_INVENTED",
+                "missing": "SCHEMA_VALIDATION_FAILED",
+                "duplicate": "STYLE_INPUT_FIELD_COVERAGE",
+                "false-proceed": "STYLE_INPUT_RECOMMENDATION_CONTRADICTION",
+            }[damage]
         return
     assert result.status_code == 201, result.text
     artifact = result.json()

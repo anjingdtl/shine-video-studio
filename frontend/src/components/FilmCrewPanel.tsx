@@ -28,6 +28,8 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   const [offline, setOffline] = useState(false);
   const [remoteText, setRemoteText] = useState(false);
   const [reviewShotId, setReviewShotId] = useState('');
+  const [reconcileCredential, setReconcileCredential] = useState('');
+  const [reconcileEvidence, setReconcileEvidence] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [query, setQuery] = useState('');
@@ -44,6 +46,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   }
   useEffect(() => {
     setInputs([]); setReviewShotId(''); setRemoteText(false);
+    setReconcileCredential(''); setReconcileEvidence('');
     reload().catch(e => setMessage(String(e)));
   }, [projectId]);
   async function act(action: () => Promise<unknown>) {
@@ -51,6 +54,22 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     try { setResult(await action()); await reload(); await onRefresh(); setMessage('操作完成，请查看结果与门禁状态。'); }
     catch (e) { setMessage(String(e)); await reload().catch(() => undefined); }
     finally { setBusy(false); setRemoteText(false); }
+  }
+  async function abandonRemote(run: Run) {
+    if (!window.confirm('仅放弃这次远端未知响应；不重试、不批准质量，也不证明本机模型已卸载。继续？')) {
+      setReconcileCredential(''); setReconcileEvidence(''); return;
+    }
+    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${reconcileCredential}` };
+    try {
+      await act(async () => {
+        const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
+          ...json('POST', { action: 'model_reconcile', target_id: run.id }), headers,
+        });
+        return api(`/projects/${projectId}/film-runs/${run.id}/abandon-remote-response`, {
+          ...json('POST', { ...grant, evidence: reconcileEvidence }), headers,
+        });
+      });
+    } finally { setReconcileCredential(''); setReconcileEvidence(''); }
   }
   const current = roles.find(r => r.role === role);
   const reviewShot = shots.find(s => s.id === reviewShotId && s.project_id === projectId);
@@ -108,7 +127,17 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           })))}>人工应用摄影方案（需勾选对应场记报告）</button>}
       </details>)}
       <h3>Agent 运行记录</h3>
+      {runs.some(r => r.status === 'NEEDS_REVIEW' || (r.status === 'REJECTED' && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(r.error_code ?? ''))) &&
+        <div className="settings-block">
+          <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。</p>
+          <label>远端响应对账凭据<input type="password" autoComplete="off" value={reconcileCredential}
+            onChange={e => setReconcileCredential(e.target.value)} /></label>
+          <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
+        </div>}
       {runs.map(r => <details key={r.id}><summary>{r.role_id} · {r.model_id} · {r.status} {r.error_code}</summary>
+        {(r.status === 'NEEDS_REVIEW' || (r.status === 'REJECTED' && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(r.error_code ?? ''))) &&
+          <button disabled={busy || reconcileCredential.length < 32 || !reconcileEvidence.trim()}
+            onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}
         <pre>{JSON.stringify(r, null, 2)}</pre></details>)}
     </section>
     <section className="panel" id="h3-rulebook">

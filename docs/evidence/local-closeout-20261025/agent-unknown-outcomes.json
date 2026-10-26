@@ -1,0 +1,45 @@
+{
+  "stage": "SOFTWARE_VERIFIED_AUTHENTICATED_REMOTE_ABANDON_PENDING",
+  "backend": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "678",
+    "time": "264.589",
+    "timestamp": "2026-10-27T01:50:20.495600+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "source_files_sha256": {
+    "backend/shine/agents/execution.py": "b5a9e841c4018a62f7bc3022cfa2ed3732f404ca473063b67f5f26d58d6c0e26",
+    "backend/shine/agents/film.py": "09599ae830507476eac99cca38014a32408ad03609b0517230606382e1e34c1f",
+    "backend/shine/agents/film_contracts.py": "037f121459945a8c2461bb24cbfd66011339eec0587c7750bd3784cb619c599c",
+    "backend/shine/api_film.py": "fedf7b79adeb6eff692bb7e476cfd8691c8751a3b2126b0ffa1adf1e22521339",
+    "backend/shine/quality/input_assessment.py": "2b5b4a2ab876824cdff46f84226af62b4618074b31c267be5b9079496eac821c",
+    "frontend/src/components/FilmCrewPanel.tsx": "3cad9247a368df0586dc6a32d9dd33e8c768a49ef561e1f06c0a5e2f8f2ef5bb",
+    "scripts/verify_v13_web.py": "fa971efee2f6894bff123227b03674830e12a39e9eda6005ed492bf576ff1f2b"
+  },
+  "controls": [
+    "non-Mock timeout/connection/server failures remain unknown and NEEDS_REVIEW",
+    "unknown identical inputs blocked before gateway invocation",
+    "abandoned identical request remains blocked even through profile aliases",
+    "schema change cannot bypass unresolved outcome; new schema allowed only after explicit abandonment",
+    "SQLite writer lock and durable intent serialize duplicate requests",
+    "safe contract-rejection code plus response digest; no rejected provider text or raw model label persisted",
+    "newest matching failed/unknown task blocks older positive artifact, including pinned Worker requests",
+    "remote-only authenticated one-use snapshot grant; loopback/media-role/active expired lease/wrong-project/stale grant/config changes rejected"
+  ],
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": {
+    "status": "MOCK_VERIFIED",
+    "flows": 19,
+    "api_errors": [],
+    "new_flow": "remote text abandonment cancel/confirm, JSON/auth headers, grant identity, credential clearing; intercepted, no inference"
+  },
+  "real_model_replayed": false,
+  "technical_reconciliation_pending_task": "768a2df9-5090-48ed-8bcf-8374c1ca7c94",
+  "vlm_production_qualified": false,
+  "human_present_or_quality_approval": false,
+  "h3_submissions": 0
+}
