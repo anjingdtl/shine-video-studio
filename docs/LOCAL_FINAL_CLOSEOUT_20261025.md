@@ -1,5 +1,7 @@
 # 本轮本机收尾补充报告（2026-10-25）
 
+Current protocol hardening (2026-10-26): **639 backend tests passed**, zero failures/errors/skips; Ruff and a fresh TypeScript/Vite build passed. A red wire counterexample reproduced acceptance of a positive response with no explicit frozen-style input comparison. New VLM responses must cover all seven Style fields, and any declared input conflict/uncertainty must have a corresponding style finding and non-pass verdict. Missing/duplicate/inconsistent coverage is a received failure with a response digest and no automatic retry. Native qualification and production evidence check the same contract; immutable historical records remain readable. This is software verification only: the four unchanged real-media controls still require new serial calls, and VLM production qualification remains withheld. Current ASR qualification is unchanged. See [protocol evidence](evidence/local-closeout-20261025/style-input-contract.json).
+
 Current continuation (2026-10-26, actual completed execution): **PARTIAL**.
 
 - Eight fixed model packages / 82 files / 46,803,197,151 bytes are now file-verified. The 8B FP8 package installation completed; it is no longer running.

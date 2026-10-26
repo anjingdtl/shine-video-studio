@@ -156,6 +156,17 @@ Low overall confidence also requires review; this measures completeness of the
 review, separately from confidence in an individual finding. Hard failures remain
 failures. Free-text summaries are never parsed into fabricated findings or passes.
 
+New VLM wire responses also require `style_input_checks`: exactly one typed
+comparison for each of the seven frozen Style Bible fields. Each reports
+`consistent|conflict|uncertain` and a short explanation of the **text input**
+comparison against ShotSpec. This does not claim audio or pixel conformance.
+An input conflict/uncertainty requires a corresponding `STYLE_INPUT_<FIELD>`
+finding and a non-passing verdict. Missing, duplicate, incomplete or internally
+contradictory coverage is a received contract failure: retain the response digest,
+release resources and never automatically retry. Historical records remain
+readable without this field; new native capability adoption requires the current
+contract, and old VLM evidence cannot qualify a newly frozen production manifest.
+
 ### Quality gates
 
 Five gates are evaluated per attempt and persisted in `quality_gates`:

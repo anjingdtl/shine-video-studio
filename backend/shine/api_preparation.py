@@ -1798,13 +1798,16 @@ def native_execution_evidence(identity: str, body: NativeExecutionEvidence, acto
         try:
             if category == "VLM_REVIEW":
                 result = SemanticReviewResult.model_validate(sample.result)
+                from shine.quality.semantic import require_style_input_checks
+
+                require_style_input_checks(result)
                 if (result.is_mock or result.model != binding.model or result.overall_confidence < 0.7
                         or result.verdict != sample.expected_verdict
                         or (result.verdict == "passed" and result.findings)
                         or (result.verdict == "failed" and not any(
                             f.severity == "hard" and f.confidence >= 0.7 for f in result.findings))):
                     raise ValueError("VLM_CALIBRATION_RESULT_INVALID")
-                summary = {"expected_verdict": sample.expected_verdict}
+                summary = {"expected_verdict": sample.expected_verdict, "style_input_contract": "seven-field-v1"}
             else:
                 data = dict(sample.result)
                 data["segments"] = [TranscriptSegment(**item) for item in data.get("segments", [])]

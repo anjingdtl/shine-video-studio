@@ -10,6 +10,7 @@ from shine.llm.base import LLMNotConfigured, ProviderConfig
 from shine.quality.runtime import configured_reviewers
 from shine.quality.semantic import LocalASRReviewer, LocalVisionReviewer
 from shine.worker import _transcript_review, run_configured_once
+from tests.review_fixtures import fixture_style_input_checks
 from tests.test_semantic_qc import context
 
 
@@ -91,6 +92,7 @@ def test_local_vlm_needs_no_cloud_consent_and_preserves_fake_result(tmp_path, mo
                                     "is_mock": True,
                                     "input_sha256": "a" * 64,
                                     "findings": [], "verdict": "passed",
+                                    "style_input_checks": fixture_style_input_checks(),
                                     "overall_confidence": 1,
                                     "raw_summary": "Fixture only",
                                 }
@@ -168,6 +170,7 @@ def test_remote_reviewer_never_receives_local_reference_images(tmp_path, monkeyp
                                     "is_mock": False,
                                     "input_sha256": "a" * 64,
                                     "findings": [], "verdict": "passed",
+                                    "style_input_checks": fixture_style_input_checks(),
                                     "overall_confidence": 0.9,
                                     "raw_summary": "test",
                                 }
@@ -277,7 +280,7 @@ def test_wire_review_requires_explicit_findings_without_rewriting_stored_schema(
 
     data = {"is_mock": False, "overall_confidence": 1 if missing == "verdict" else 0,
             "raw_summary": "Observed story violations" if missing == "verdict" else "Uncertain review"}
-    data.update(findings=[], verdict="needs_review")
+    data.update(findings=[], verdict="needs_review", style_input_checks=fixture_style_input_checks())
     if missing:
         data.pop(missing)
     response = httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {

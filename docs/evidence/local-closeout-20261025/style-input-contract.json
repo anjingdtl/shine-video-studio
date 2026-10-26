@@ -1,0 +1,47 @@
+{
+  "stage": "SOFTWARE_VERIFIED_REAL_CHECKLIST_CALIBRATION_PENDING",
+  "backend": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "639",
+    "time": "245.424",
+    "timestamp": "2026-10-26T21:44:28.862845+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "source_files_sha256": {
+    "backend/shine/schemas.py": "dee32d93232fdfc0ce7804f42866a339c3f8ec62df60abb04648d25970751c27",
+    "backend/shine/quality/semantic.py": "ba6871ad7607a3c1eb62e7ac3437a782d3fdc31ea8d8602b29b2f7cc2410258c",
+    "backend/shine/api_preparation.py": "fe73b6210ef66f7b01efd115145cc6a0528cb6f58f5add9cf6a4ffd760f3b0e3",
+    "backend/shine/comfyops/native.py": "03a9c5dd2973b302c7c5a032999334400e11731da266bd57a637ac53f2ed3a41"
+  },
+  "red_counterexample": "old live wire accepted passed/empty findings without any frozen-style input comparisons",
+  "coverage_contract": "seven-field-v1",
+  "contract_controls": [
+    "missing",
+    "incomplete",
+    "duplicate",
+    "unknown-field",
+    "conflict-passed",
+    "uncertain-passed",
+    "conflict-no-finding",
+    "consistent",
+    "conflict-recorded"
+  ],
+  "ledger_received_failure": "FAILED_WITH_RESPONSE_DIGEST_RELEASED_LEASE_NO_RETRY",
+  "historical_records": "READABLE_NOT_REWRITTEN_NOT_NEW_QUALIFICATION",
+  "native_adoption": "CURRENT_CHECKLIST_REQUIRED_EVEN_WITH_PRIOR_MATCHING_CALL_DIGEST",
+  "production_manifest": "OLD_VLM_PROOF_WITHOUT_CONTRACT_MARKER_REJECTED",
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "real_vlm_retested": false,
+  "vlm_production_qualified": false,
+  "h3_submissions": 0,
+  "human_present_or_quality_approval": false,
+  "github_ci_at_3e975b9": {
+    "run_id": 40332145147,
+    "four_checks": "FAILED_TO_START",
+    "checked_backend_annotation": "recent account payments have failed or spending limit needs to be increased"
+  }
+}

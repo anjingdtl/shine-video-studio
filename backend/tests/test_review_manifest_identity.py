@@ -1,8 +1,11 @@
+
 import hashlib
 import importlib.util
 from pathlib import Path
 
 import pytest
+
+from tests.review_fixtures import fixture_style_input_checks
 
 
 @pytest.fixture
@@ -97,7 +100,8 @@ def test_local_executor_response_identity_is_bound_to_completed_call(api, tmp_pa
     if role == 'VLM':
         body['choices'] = [{'finish_reason': 'stop', 'message': {'content': json.dumps(
             dict(reviewer='fixture', is_mock=False, input_sha256='a'*64, findings=[],
-                 verdict='passed', overall_confidence=1, raw_summary='fixture only'))}}]
+                 verdict='passed', overall_confidence=1, raw_summary='fixture only',
+                 style_input_checks=fixture_style_input_checks()))}}]
     else:
         body.update(text='fixture transcript', segments=[])
     calls = []

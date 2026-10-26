@@ -156,6 +156,8 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
             errors.append("NATIVE_EXECUTION_EVIDENCE_MISSING")
         else:
             for sample in proof["samples"]:
+                if category == "VLM_REVIEW" and sample.get("style_input_contract") != "seven-field-v1":
+                    errors.append("NATIVE_STYLE_INPUT_EVIDENCE_OUTDATED")
                 call = db.get(AgentTaskRecord, sample["call_id"])
                 if (
                     not valid_call(db, call, category, binding, proof["project_id"], budget_mb=payload["resource_mb"])

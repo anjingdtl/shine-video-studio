@@ -35,6 +35,22 @@ class ReceivedReviewError(ValueError):
         self.finish_reason = finish_reason
 
 
+def require_style_input_checks(result: SemanticReviewResult):
+    """Current wire and new capability evidence share the same coverage contract."""
+    checks = result.style_input_checks
+    if (checks is None or len(checks) != len(StyleBible.model_fields)
+            or {check.field for check in checks} != set(StyleBible.model_fields)):
+        raise ValueError("STYLE_INPUT_COVERAGE_MISSING")
+    for check in checks:
+        if check.status != "consistent":
+            code = "STYLE_INPUT_" + check.field.upper()
+            if result.verdict == "passed" or not any(
+                finding.code == code and finding.category.casefold() in {"style", "style_drift"}
+                for finding in result.findings
+            ):
+                raise ValueError("STYLE_INPUT_DECISION_CONTRADICTION")
+
+
 @dataclass(frozen=True)
 class ReviewContext:
     job_id: str
@@ -142,9 +158,13 @@ class OpenAICompatibleVisionReviewer:
         schema = SemanticReviewResult.model_json_schema()
         # Historical stored reviews retain their optional default; new wire
         # responses must explicitly distinguish an empty list from no review.
-        schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict"})
+        schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict", "style_input_checks"})
         schema["properties"]["findings"].pop("default", None)
         schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
+        schema["properties"]["style_input_checks"] = {
+            "type": "array", "items": {"$ref": "#/$defs/StyleInputCheck"},
+            "minItems": len(StyleBible.model_fields), "maxItems": len(StyleBible.model_fields),
+        }
         review_spec = context.shot_spec.model_dump(mode="json")
         if context.shot_spec.continuity.mode == "cut":
             # The enum is orchestration metadata. Express its meaning for a
@@ -175,6 +195,17 @@ class OpenAICompatibleVisionReviewer:
                     "Only report identity or costume mismatch against an actual specified target or requirement. "
                     "Evaluate the frozen Style independently of ShotSpec. If they contradict, report the "
                     "input conflict as needs_review; never silently choose ShotSpec and declare Style matched. "
+                    "Before judging frames, compare ShotSpec against EACH of the seven frozen Style fields. "
+                    "Return style_input_checks with exactly one entry per Style field: field, "
+                    "status (consistent/conflict/uncertain), and detail (at most 240 characters). "
+                    "This checklist compares the two TEXT INPUTS, not audio or pixel conformance. "
+                    "consistent means no explicit input contradiction; an unspecified ShotSpec detail "
+                    "does not override Style. Compare actions and posture in story_beat and blocking too, "
+                    "not just camera labels. Opposing posture or action requirements are input conflicts "
+                    "even when camera, character and scene descriptions otherwise agree. "
+                    "For each conflict or uncertainty include a style finding with code "
+                    "STYLE_INPUT_<UPPERCASE_FIELD> and a non-passing overall verdict. "
+                    "Never infer an internal edit from a static camera; camera motion and cuts are independent. "
                     "Keep findings concise and group repeated observations. "
                     "raw_summary must be at most 300 characters. "
                     "Do not omit distinct violations or uncertainties to fit the output budget. "
@@ -226,7 +257,9 @@ class OpenAICompatibleVisionReviewer:
             recorder = getattr(self, "record_executor_identity", None)
             if recorder:
                 recorder(body, response_hash)
-            return SemanticReviewResult.model_validate(parsed)
+            result = SemanticReviewResult.model_validate(parsed)
+            require_style_input_checks(result)
+            return result
         except ReceivedReviewError:
             raise
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:

@@ -15,6 +15,7 @@ from shine.llm.base import ProviderConfig
 from shine.models import AgentTaskRecord, ProviderProfile
 from shine.quality.semantic import LocalASRReviewer, LocalVisionReviewer
 from tests.conftest import create_project
+from tests.review_fixtures import fixture_style_input_checks
 from tests.test_semantic_qc import context
 from tests.test_v13_preparation import HEADERS, approve, package, post, prep  # noqa: F401
 
@@ -104,6 +105,7 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
         negative = wire_count[0] > 1
         result = dict(
             reviewer="fixture-only",
+            style_input_checks=fixture_style_input_checks(),
             is_mock=False,
             input_sha256="a" * 64,
             verdict="failed" if negative else "passed",
@@ -205,6 +207,51 @@ def adopt(native, **extra):
         samples=n["samples"],
         **extra,
     )
+
+
+def test_old_vlm_input_coverage_cannot_qualify_a_new_capability(native):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.model_calls import digest_input
+    from shine.schemas import SemanticReviewResult
+
+    n = native
+    if n["category"] == "ASR":
+        assert adopt(n)["status"] == "REAL_TESTED"  # ASR has a separate contract.
+        return
+    sample = n["samples"][0]
+    sample["result"].pop("style_input_checks")
+    with n["factory"].begin() as db:
+        call = db.get(AgentTaskRecord, sample["call_id"])
+        # Simulate an immutable prior-version response with a matching digest;
+        # checking only its old completed status/hash must not qualify coverage.
+        old = SemanticReviewResult.model_validate(sample["result"])
+        call.trace = {**call.trace, "result_sha256": graph_hash(digest_input(old))}
+    grant = post(n["client"], "/preparation/approval-grants",
+                 {"action": "workflow_validate", "target_id": n["row"]["id"]}, operator=True)
+    response = n["client"].post(
+        f"/api/v1/workflow-capabilities/{n['row']['id']}/native-execution-evidence",
+        json=dict(grant_id=grant["grant_id"], snapshot=grant["snapshot"], offline=False,
+                  evidence="Prior-version synthetic response", project_id=n["project"], samples=n["samples"]),
+        headers=HEADERS,
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "NATIVE_CALIBRATION_RESULT_INVALID"
+    with n["factory"]() as db:
+        assert db.get(WorkflowRevision, n["row"]["id"]).status == "STATIC_VALIDATED"
+        assert not db.get(ApprovalGrant, grant["grant_id"]).used
+
+
+def test_preproduction_rejects_published_vlm_proof_without_current_style_contract(native):
+    from copy import deepcopy
+
+    n = native
+    row = adopt(n)
+    payload = deepcopy(row["payload"])
+    for sample in payload["template_audit"]["native_provider_evidence"]["samples"]:
+        sample.pop("style_input_contract", None)
+    with n["factory"]() as db:
+        errors = native_errors(db, payload, require_evidence=True)
+    assert ("NATIVE_STYLE_INPUT_EVIDENCE_OUTDATED" in errors) == (n["category"] == "VLM_REVIEW")
 
 
 def test_native_completed_calibration_can_publish_without_comfy_graph_or_new_inference(native):

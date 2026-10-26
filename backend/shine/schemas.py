@@ -614,6 +614,13 @@ class SemanticFinding(APIModel):
     subject: str | None = Field(default=None, max_length=80)
 
 
+class StyleInputCheck(APIModel):
+    field: Literal["photography_language", "shot_blocking", "color_palette", "lighting_tone",
+                   "lens_texture", "editing_rhythm", "sound_performance"]
+    status: Literal["consistent", "conflict", "uncertain"]
+    detail: str = Field(min_length=1, max_length=240)
+
+
 class SemanticReviewResult(APIModel):
     reviewer: str
     model: str | None = None
@@ -623,6 +630,9 @@ class SemanticReviewResult(APIModel):
     # Current VLM wire responses must explicitly declare this field.
     verdict: Literal["passed", "failed", "needs_review"] | None = None
     findings: list[SemanticFinding] = Field(default_factory=list)
+    # Historical records remain readable. New media-review responses must cover
+    # every frozen input criterion explicitly; the wire adapter enforces this.
+    style_input_checks: list[StyleInputCheck] | None = None
     overall_confidence: float = Field(ge=0, le=1)
     raw_summary: str = Field(default="", max_length=2000)
 

@@ -17,6 +17,7 @@ from shine.quality.semantic import (
 )
 from shine.quality.technical import TechnicalQC
 from shine.schemas import SemanticFinding, SemanticReviewResult, ShotSpec, StyleBible, TechnicalCheck, TechnicalQCResult
+from tests.review_fixtures import fixture_style_input_checks
 
 STYLE = StyleBible(
     photography_language="平视",
@@ -192,6 +193,7 @@ def test_http_reviewers_preserve_explicit_fake_provenance(tmp_path, monkeypatch)
         "is_mock": True,
         "input_sha256": "a" * 64,
         "findings": [], "verdict": "passed",
+                                    "style_input_checks": fixture_style_input_checks(),
         "overall_confidence": 1,
         "raw_summary": "Synthetic HTTP response",
         "model": "fixture-only",
