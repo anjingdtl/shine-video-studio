@@ -262,7 +262,7 @@ def _semantic_gate(
     semantic_results: list[SemanticReviewResult],
     semantic_error: str | None,
 ) -> tuple[GateOutcome, list[HardFailure]]:
-    if not required:
+    if not required and not semantic_results:
         return (
             GateOutcome(
                 gate_name=GATE_SEMANTIC,
@@ -280,7 +280,7 @@ def _semantic_gate(
             GateOutcome(
                 gate_name=GATE_SEMANTIC,
                 status=STATUS_UNAVAILABLE,
-                required=True,
+                required=required,
                 is_mock=False,
                 coverage=COVERAGE_FAILED,
                 error_code=semantic_error,
@@ -293,7 +293,7 @@ def _semantic_gate(
             GateOutcome(
                 gate_name=GATE_SEMANTIC,
                 status=STATUS_NOT_RUN,
-                required=True,
+                required=required,
                 is_mock=False,
                 coverage=COVERAGE_NOT_COVERED,
                 error_code="SEMANTIC_REVIEW_NOT_CONFIGURED",
@@ -347,7 +347,7 @@ def _semantic_gate(
         GateOutcome(
             gate_name=GATE_SEMANTIC,
             status=status,
-            required=True,
+            required=required,
             is_mock=is_mock,
             coverage=coverage,
             model=next((result.model for result in semantic_results if result.model), None),
@@ -369,7 +369,7 @@ def _audio_gate(
     transcript_model: str | None,
     transcript_is_mock: bool,
 ) -> tuple[GateOutcome, list[HardFailure]]:
-    if not required:
+    if not required and not transcript_findings and not transcript_model:
         return (
             GateOutcome(
                 gate_name=GATE_AUDIO,
@@ -386,7 +386,7 @@ def _audio_gate(
             GateOutcome(
                 gate_name=GATE_AUDIO,
                 status=STATUS_UNAVAILABLE,
-                required=True,
+                required=required,
                 is_mock=bool(transcript_is_mock),
                 coverage=COVERAGE_FAILED,
                 error_code=asr_error,
@@ -399,7 +399,7 @@ def _audio_gate(
             GateOutcome(
                 gate_name=GATE_AUDIO,
                 status=STATUS_NOT_RUN,
-                required=True,
+                required=required,
                 is_mock=bool(transcript_is_mock),
                 coverage=COVERAGE_NOT_COVERED,
                 error_code="ASR_NOT_CONFIGURED",
@@ -430,7 +430,7 @@ def _audio_gate(
         GateOutcome(
             gate_name=GATE_AUDIO,
             status=status,
-            required=True,
+            required=required,
             is_mock=bool(transcript_is_mock),
             coverage=COVERAGE_MOCK if transcript_is_mock else COVERAGE_COVERED,
             model=transcript_model,
@@ -513,13 +513,15 @@ def _style_gate(
 
 def _final_gate(gates: list[GateOutcome]) -> GateOutcome:
     required = [gate for gate in gates if gate.required]
-    failed = [gate for gate in required if gate.status == STATUS_FAILED]
+    failed = [gate for gate in gates if gate.status == STATUS_FAILED]
     incomplete = [
         gate
         for gate in required
         if gate.status in {STATUS_NEEDS_REVIEW, STATUS_NOT_RUN, STATUS_UNAVAILABLE}
     ]
-    any_mock = any(gate.is_mock for gate in required)
+    incomplete += [gate for gate in gates if not gate.required and gate.status == STATUS_NEEDS_REVIEW
+                   and (gate.evidence.get("reviewers") or gate.evidence.get("finding_codes"))]
+    any_mock = any(gate.is_mock for gate in gates)
     unresolved_optional = [
         gate
         for gate in gates
@@ -587,9 +589,8 @@ def evaluate_gates(
     """Evaluate every gate and return both the gate records and a fused result."""
     semantic_results = semantic_results or []
     threshold = policy.threshold_for(shot_spec.shot_priority)
-    semantic_required = policy.require_semantic_review and (
-        bool(shot_spec.characters) or reference_count > 0 or bool(shot_spec.dialogue)
-    )
+    # Scene/story conformance is meaningful even without characters or references.
+    semantic_required = policy.require_semantic_review
     audio_required = policy.require_audio_review and bool(shot_spec.dialogue)
     technical_required = not (
         policy.allow_unverified_technical

@@ -1,0 +1,185 @@
+{
+  "at": "2026-10-26T09:07:00.341283+00:00",
+  "source_head": "4eba47f55c24f7a9a178ab71c1bf21a4d77157f6",
+  "status": "REAL_NATIVE_CALIBRATION_AND_CAPABILITY_PUBLICATION_PASS",
+  "actor": "user-delegated-codex",
+  "human_present_or_quality_approval": false,
+  "installed_packages": [
+    {
+      "id": "6a625aea-d494-4b39-9f4e-1b0ba5393d59",
+      "name": "Qwen3-ASR-0.6B-5eb14417-cdn1",
+      "revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+      "sha256": "cde583f8322aa70f4362ca70346dd00b05ff73455bd8697376136a05be895443",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 9,
+      "bytes": 1880618159
+    },
+    {
+      "id": "5af5f7b9-8b4c-49ef-abae-2157d47a38b6",
+      "name": "Qwen3-ForcedAligner-0.6B-c7cbfc20-cdn1",
+      "revision": "c7cbfc2048c462b0d63a45797104fc9db3ad62b7",
+      "sha256": "3e733c82b563b1ff051d3116fac8e6c92356596fc96cc513c3beb72b5a8453a0",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 9,
+      "bytes": 1840070940
+    },
+    {
+      "id": "33b75f7b-ee83-43d3-8d5a-d90eb5d031e9",
+      "name": "Qwen3-TTS-12Hz-0.6B-Base-5d839924-cdn1",
+      "revision": "5d83992436eae1d760afd27aff78a71d676296fc",
+      "sha256": "8c41318b43661c7ee0ca108c4b0ad1dc4934b8fb1a39fc4c5cb2cfed4498bc60",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 12,
+      "bytes": 2516104532
+    },
+    {
+      "id": "90f9fa5e-864b-4b16-ab4a-e31bcc4cfb00",
+      "name": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1",
+      "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+      "sha256": "58923dc96a6eddbb961e79f0f27f7fb37f2a00b0e246474b3c022477b5f72776",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 12,
+      "bytes": 4520162313
+    },
+    {
+      "id": "8e852215-a45f-4369-913f-0e0f7e41c9a0",
+      "name": "MiniMax-H3-T2VA-INT8-e5eb578a",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "sha256": "b6595cf5acae8131f70251e88852fea5b4848818ffe03d05c26de7d28a069f84",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 2,
+      "bytes": 20970397220
+    },
+    {
+      "id": "12e90060-1e61-4dea-b854-3ac8d10a3030",
+      "name": "Qwen3-VL-4B-bnb4-24b9da6f",
+      "revision": "24b9da6f9f8fddac102e2240fa0d073f98c65b75",
+      "sha256": "80c2a24482c020fc45af75952a03a2b009a9565d52608c397e17fa6be1de397d",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 13,
+      "bytes": 4314817224
+    },
+    {
+      "id": "411105c2-49e6-46bd-89d1-1592b4a401d4",
+      "name": "Whisper-tiny-169d4a43",
+      "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+      "sha256": "e33814341d75429860bf523d5103a634c85fef677f48475301bb00360424fe33",
+      "status": "FILES_VERIFIED_PENDING_RUNTIME",
+      "files": 12,
+      "bytes": 155454211
+    }
+  ],
+  "installed_file_count": 69,
+  "installed_bytes": 36197624599,
+  "legacy_model_call": {
+    "id": "e6d718c1-ad78-43a1-9d48-b048332f4cdd",
+    "status": "ABANDONED",
+    "outcome": "LOST_RESULT_NOT_APPROVED"
+  },
+  "stages": [
+    {
+      "name": "positive",
+      "call_id": "80658e73-ba43-47fc-9d1c-a00a078d31d5",
+      "status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "executor_identity": {
+        "schema_version": "1",
+        "model_id": "local-qwen3-vl-4b",
+        "files_sha256": "f8d46751aa3f3228b489e4d10fea6995585492fd4ed9cda6ef7ecb0ce0265d9c",
+        "runtime_sha256": "0f00fd66649bd4ffc4400cdeaefee1a02d1f79826d83f431844566f2cf926f9c",
+        "file_count": 13,
+        "bytes": 4314817224
+      },
+      "result_sha256": "faff8c0e66980459f52f21f6b25f25746ed9d4e2861d3978e86d7fc5d210870b",
+      "released": true,
+      "verdict": "passed",
+      "confidence": 0.95,
+      "finding_codes": []
+    },
+    {
+      "name": "negative",
+      "call_id": "0ceaddf3-f118-4895-b90e-ac11b4cc22fe",
+      "status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "executor_identity": {
+        "schema_version": "1",
+        "model_id": "local-qwen3-vl-4b",
+        "files_sha256": "f8d46751aa3f3228b489e4d10fea6995585492fd4ed9cda6ef7ecb0ce0265d9c",
+        "runtime_sha256": "0f00fd66649bd4ffc4400cdeaefee1a02d1f79826d83f431844566f2cf926f9c",
+        "file_count": 13,
+        "bytes": 4314817224
+      },
+      "result_sha256": "9193d91ee454f11569011f6a55d7165f47599b06be65d6f76ec3f7e9087efa97",
+      "released": true,
+      "verdict": "failed",
+      "confidence": 1.0,
+      "finding_codes": [
+        "IDENTITY_MISMATCH",
+        "SCENE_MISMATCH",
+        "STYLE_MISMATCH"
+      ]
+    },
+    {
+      "name": "asr",
+      "call_id": "4ff4767a-f9ba-4e8b-8c69-1f1c5e651596",
+      "status": "COMPLETED",
+      "lease_status": "RELEASED",
+      "executor_identity": {
+        "schema_version": "1",
+        "model_id": "local-whisper-tiny",
+        "files_sha256": "d2e6974771803dc3527d938d47b5126947b497d450411f9c6574192e8c25198e",
+        "runtime_sha256": "0f00fd66649bd4ffc4400cdeaefee1a02d1f79826d83f431844566f2cf926f9c",
+        "file_count": 12,
+        "bytes": 155454211
+      },
+      "result_sha256": "9c3835c32d46dca7a6eea481c7c40760cf113a3052867e27a3b3dfa2dafb4656",
+      "released": true,
+      "normalized_cer": 0,
+      "locked_text_sha256": "fec4f5b423c9e40253616b1c294c93e9cf938b408fca1b3148abdbcb6d0bf429",
+      "speaker_identity": "NOT_REVIEWED",
+      "confidence_calibration": "NOT_MEASURED"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "5c49f760-5132-4cf9-8fbb-1f9e243bb4ff",
+      "status": "PRODUCTION_APPROVED",
+      "sha256": "74ef8f7a021d09f15e3d3ad09313e12bc63f987f77c8e2b15c070736e07a0aff",
+      "category": "VLM_REVIEW",
+      "model_ids": [
+        "12e90060-1e61-4dea-b854-3ac8d10a3030"
+      ]
+    },
+    {
+      "id": "31db7d50-3aec-48e3-94c0-68a1b3f2f1c1",
+      "status": "PRODUCTION_APPROVED",
+      "sha256": "95e3b112ffb9f79a3e0123a38e2d4d0c18cfb1789e01bcde29bbcb93dc4b165e",
+      "category": "ASR",
+      "model_ids": [
+        "411105c2-49e6-46bd-89d1-1592b4a401d4"
+      ]
+    }
+  ],
+  "calibration_production_unchanged": true,
+  "project_preproduction": "NOT_FROZEN",
+  "T2VA": {
+    "status": "REAL_RENDER_AND_FULL_DECODE_PASS_CONTENT_QC_FAILED",
+    "job_id": "90370ed1-595c-499f-ab3c-02f2fa8b430a",
+    "profile_id": "3fbbbd0b-8fe5-40d8-a782-b921c4c849af",
+    "prompt_id": "beda8d5a-f1a3-460d-8039-c6b4d122a903",
+    "h3_attempt_budget": 1,
+    "attempt_id": "cead5539-eb03-4d9c-aca9-48a6bbe08e1d",
+    "artifact_sha256": "bf6fa7643790008deea277331994ea533c1d7ef3d3696b8af73030814c1d021d",
+    "bytes": 3904601,
+    "duration_s": 5.167,
+    "width": 1344,
+    "height": 768,
+    "fps": 24,
+    "steps": 20,
+    "comfy_wall_s": 486.64,
+    "final_gate": "failed",
+    "failure_preserved": true,
+    "human_approved": false
+  },
+  "full_product": "PARTIAL"
+}

@@ -86,9 +86,7 @@ def shot(*, priority: str = "B", dialogue: bool = False, characters: bool = True
         shot_priority=priority,
         style_version_id="style-v1",
         characters=["林岚"] if characters else [],
-        dialogue=(
-            [DialogueLine(speaker_id="林岚", text="东西在���里", start_s=0.0, end_s=2.0)] if dialogue else []
-        ),
+        dialogue=([DialogueLine(speaker_id="林岚", text="东西在���里", start_s=0.0, end_s=2.0)] if dialogue else []),
     )
 
 
@@ -131,8 +129,11 @@ def test_all_required_gates_pass_yields_a_final_pass():
 @pytest.mark.parametrize("confidence", [0, 0.69])
 def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confidence):
     gates, fused = evaluate_gates(
-        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
-        semantic_results=[semantic(is_mock=False, confidence=confidence)], reference_count=1,
+        policy=QualityPolicy(),
+        shot_spec=shot(),
+        technical=technical(),
+        semantic_results=[semantic(is_mock=False, confidence=confidence)],
+        reference_count=1,
     )
     for name in (GATE_SEMANTIC, GATE_STYLE, GATE_FINAL):
         assert gate(gates, name).status == STATUS_NEEDS_REVIEW
@@ -143,7 +144,9 @@ def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confid
 
 def test_low_overall_confidence_never_relaxes_a_hard_failure():
     gates, fused = evaluate_gates(
-        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
+        policy=QualityPolicy(),
+        shot_spec=shot(),
+        technical=technical(),
         semantic_results=[semantic(finding("IDENTITY_MISMATCH"), is_mock=False, confidence=0)],
         reference_count=1,
     )
@@ -155,8 +158,11 @@ def test_low_overall_confidence_never_relaxes_a_hard_failure():
 def test_explicit_nonpass_verdict_blocks_all_required_gates_even_with_high_confidence(verdict):
     review = semantic(is_mock=False, confidence=1).model_copy(update={"verdict": verdict})
     gates, fused = evaluate_gates(
-        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
-        semantic_results=[review], reference_count=1,
+        policy=QualityPolicy(),
+        shot_spec=shot(),
+        technical=technical(),
+        semantic_results=[review],
+        reference_count=1,
     )
     for name in (GATE_SEMANTIC, GATE_STYLE, GATE_FINAL):
         assert gate(gates, name).status == STATUS_NEEDS_REVIEW
@@ -350,3 +356,70 @@ def test_technical_failure_always_fails_the_final_gate():
 def test_priority_thresholds_are_configurable_per_project(priority):
     policy = QualityPolicy(priority_thresholds={"A": 0.9, "B": 0.7, "C": 0.5})
     assert policy.threshold_for(priority) == {"A": 0.9, "B": 0.7, "C": 0.5}[priority]
+
+
+def test_scene_only_shot_still_requires_configured_semantic_review():
+    spec = ShotSpec(story_beat="An empty street in rain", duration_target_s=5)
+    gates, result = evaluate_gates(
+        policy=QualityPolicy(require_style_review=False), shot_spec=spec, technical=technical()
+    )
+    assert gate(gates, GATE_SEMANTIC).required
+    assert gate(gates, GATE_SEMANTIC).status == STATUS_NOT_RUN
+    assert result.result == STATUS_NEEDS_REVIEW
+
+
+def test_scene_only_observed_hard_failure_is_not_discarded():
+    spec = ShotSpec(story_beat="An empty street in rain", duration_target_s=5)
+    review = semantic(finding("SCENE_MISMATCH", category="scene"), is_mock=False)
+    gates, result = evaluate_gates(
+        policy=QualityPolicy(require_style_review=False),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[review],
+    )
+    assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
+    assert result.result == STATUS_FAILED
+    assert [f.code for f in result.hard_failures] == ["SCENE_MISMATCH"]
+
+
+@pytest.mark.parametrize(
+    "severity,confidence,expected", [("hard", 0.95, STATUS_FAILED), ("uncertain", 0.5, STATUS_NEEDS_REVIEW)]
+)
+def test_available_findings_cannot_be_hidden_by_optional_review_policy(severity, confidence, expected):
+    spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
+    review = semantic(finding("SCENE_MISMATCH", severity=severity, confidence=confidence), is_mock=False)
+    gates, result = evaluate_gates(
+        policy=QualityPolicy(require_semantic_review=False, require_style_review=False),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[review],
+    )
+    assert not gate(gates, GATE_SEMANTIC).required
+    assert result.result == expected
+    assert result.human_review_required
+
+
+def test_style_hard_failure_retains_a_diagnostic_for_bounded_repair():
+    spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
+    review = semantic(finding("STYLE_MISMATCH", category="style"), is_mock=False)
+    _, result = evaluate_gates(
+        policy=QualityPolicy(require_semantic_review=False),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[review],
+    )
+    assert result.result == STATUS_FAILED
+    assert "STYLE_MISMATCH" in [f.code for f in result.hard_failures]
+
+
+def test_optional_observed_mock_review_cannot_be_labelled_real():
+    spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
+    gates, result = evaluate_gates(
+        policy=QualityPolicy(require_semantic_review=False, require_style_review=False, accept_mock_review=True),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[semantic(is_mock=True, confidence=1)],
+    )
+    assert result.is_mock
+    assert gate(gates, GATE_FINAL).is_mock
+    assert gate(gates, GATE_FINAL).evidence["verification"] == VERIFICATION_MOCK
