@@ -149,6 +149,30 @@ def test_declared_role_budget_is_the_actual_serial_reservation(isolated_sdk):
         assert db.get(ResourceLease, row.trace["resource_id"]).budget_mb == 8000
 
 
+def test_child_keeps_user_identity_needed_by_torch_without_inheriting_secrets(isolated_sdk, monkeypatch):
+    _, loader, tracked, _, _ = isolated_sdk
+    for name in ("LOGNAME", "USER", "LNAME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("USERNAME", "synthetic-sdk-user")
+    monkeypatch.setenv("SHINE_LOCAL_TEST_SECRET", "explicit-fake-secret-must-not-reach-child")
+    site = loader.runtimes["design"].packages_dir / "qwen_tts.py"
+    site.write_text("import getpass\nassert getpass.getuser() == 'synthetic-sdk-user'\n" + SDK_FIXTURE, encoding="utf8")
+    result = tracked.design("synthetic user-context regression", "你好", "Lin")
+    assert result["is_mock"] and loader.release_models()["process_exit"]["returncode"] == 0
+
+
+def test_local_alignment_restores_unspoken_script_punctuation_without_changing_times(isolated_sdk):
+    from shine.voiceops.providers import fake_audio
+
+    provider, _, tracked, _, _ = isolated_sdk
+    audio, _ = fake_audio("你好", "Lin")
+    words = tracked.align(audio, "你好。")
+    assert "".join(w["text"] for w in words) == "你好。"
+    assert [(w["start_s"], w["end_s"]) for w in words] == [(0, 0.5), (0.5, 1)]
+    assert provider.last_alignment_evidence["timing_modified"] is False
+    assert "".join(w["text"] for w in provider.last_alignment_evidence["raw_words"]) == "你好"
+
+
 def test_runtime_version_drift_fails_before_sdk_inference(isolated_sdk):
     _, loader, tracked, factory, project = isolated_sdk
     info = loader.runtimes["design"].packages_dir / "transformers-4.57.3.dist-info/METADATA"

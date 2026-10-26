@@ -338,3 +338,10 @@ trace distinguishes provider_is_mock and result_is_mock; effective is_mock is th
 The UI cannot relabel an existing result by switching mode. Live H3 leases cannot be
 manually released; Worker recovery must settle its owner/state first, and final /prompt
 rechecks an ACTIVE, unexpired lease and persists any rejection before returning.
+
+
+Local SDK alignment may restore tokenizer-omitted script punctuation/spacing only when all other characters
+match exactly. It never changes start/end times or inserts a missing spoken character/symbol. Voice renders
+retain the raw alignment tokens in optional alignment_evidence. Zero/reversed/out-of-range spans remain hard
+errors. Standard user identity variables needed by torch/getpass are allowed in private child environments;
+operator/provider secret variables remain excluded. Human listening/identity acceptance remains independent.

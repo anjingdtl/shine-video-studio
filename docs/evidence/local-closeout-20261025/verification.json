@@ -1,13 +1,13 @@
 {
-  "collected_at": "2026-10-26T04:45:16.542235+00:00",
+  "collected_at": "2026-10-26T05:45:19.439729+00:00",
   "baseline": "7a81aa3",
   "branch": "codex/local-final-closeout",
   "backend": {
-    "tests": "509",
-    "failures": "0",
+    "tests": "520",
     "errors": "0",
+    "failures": "0",
     "skipped": "0",
-    "time": "209.775"
+    "time": "196.712"
   },
   "checks": {
     "ruff": "PASS backend and local_review_server.py",
@@ -425,5 +425,6 @@
   "installation_recovery_web_evidence": "docs/evidence/local-closeout-20261025/installation-recovery-web.json",
   "latest_delegated_recovery": "delegated-recovery-and-range.json",
   "latest_qc_and_download": "qc-verdict-and-bounded-ranges.json",
-  "latest_fixed_block_download": "fixed-block-download.json"
+  "latest_fixed_block_download": "fixed-block-download.json",
+  "latest_real_qwen_sdk": "real-qwen-sdk-and-alignment.json"
 }

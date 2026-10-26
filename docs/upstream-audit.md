@@ -140,3 +140,16 @@ The linked MiniMaxAI/MiniMax-H3 LICENSE was independently pinned at revision
 `42ed227ee7df40d41602854ae760620d6eb651fe`, Git blob `c389b45855337ccec8ddeb389f4fe902abcd0b19`,
 SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`.
 No acceptance of those terms, download approval, model execution or modification of original ComfyUI is inferred.
+
+
+## 2026-10-26 Qwen installation/runtime follow-up
+
+The four pinned Qwen packages above completed 42 exact file size/SHA-256 checks under plan
+`9a844b71-c4e1-48f8-9e1a-41ddb3bbf635`. Actual isolated SDK design, clone, new-utterance synthesis,
+ASR and alignment ran and exited; no original ComfyUI dependency was upgraded. Windows torch import
+required standard username environment variables; business secrets remain excluded. Model outputs
+include a preserved zero-duration alignment failure. A separately hashed same-utterance tempo derivative
+passed real text/timing checks; no model timestamp was fabricated and no human voice-quality approval is inferred.
+See `docs/evidence/local-closeout-20261025/real-qwen-sdk-and-alignment.json` for exact scope and limits.
+The fixed T2VA model/license proposal is being downloaded under explicit delegated operator authority for
+local research only; neither Apache/MIT licensing nor real T2VA render acceptance is inferred.

@@ -11,12 +11,43 @@ import hashlib
 import importlib.metadata
 import io
 import struct
+import unicodedata
 import wave
 
 from shine.comfyops.installer import ControlledDownloader, PackageFile, safe_target
 from shine.comfyops.models import ModelPackage
 
 CAPABILITIES = {"design": "VOICE_DESIGN", "base": "VOICE_CLONE", "asr": "ASR", "align": "FORCED_ALIGNMENT"}
+
+
+def restore_unspoken_text(words, text):
+    """Attach script punctuation/spacing to observed tokens; never change timing.
+
+    A spoken-character difference is left untouched for the strict dialogue QC
+    to reject. In particular this cannot repair a dropped word or a zero span.
+    """
+    original = [dict(word) for word in words]
+    if "".join(w["text"] for w in original) == text or not original:
+        return original
+
+    def unspoken(char):
+        return char.isspace() or unicodedata.category(char).startswith("P")
+
+    counts = [sum(not unspoken(c) for c in w["text"]) for w in original]
+    actual = "".join(c for w in original for c in w["text"] if not unspoken(c))
+    expected = "".join(c for c in text if not unspoken(c))
+    if actual != expected or not all(counts):
+        return original
+    cursor, result = 0, []
+    for word, count in zip(original, counts, strict=True):
+        start = cursor
+        while count:
+            count -= not unspoken(text[cursor])
+            cursor += 1
+        while cursor < len(text) and unspoken(text[cursor]):
+            cursor += 1
+        result.append({**word, "text": text[start:cursor]})
+    return result
 
 
 def encode_wav(samples, rate):
@@ -72,6 +103,7 @@ class QwenLocalVoiceProvider:
         if getattr(self.loader, "is_external", False):
             self.name = "QwenRoleProcessSDK"
         self.models, self.references = {}, {}
+        self.last_alignment_evidence = None
         self.resource_mb = 4000
 
     @property
@@ -196,7 +228,14 @@ class QwenLocalVoiceProvider:
         words = self._load("align").align(
             audio=decode_wav(audio, numpy=self._numpy_input()), text=text, language="Chinese"
         )[0]
-        return [{"text": word.text, "start_s": word.start_time, "end_s": word.end_time} for word in words]
+        raw = [{"text": word.text, "start_s": word.start_time, "end_s": word.end_time} for word in words]
+        restored = restore_unspoken_text(raw, text)
+        self.last_alignment_evidence = {
+            "raw_words": raw,
+            "unspoken_text_restored": restored != raw,
+            "timing_modified": False,
+        }
+        return restored
 
     def release_models(self):
         self.models.clear()

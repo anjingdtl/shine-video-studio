@@ -1045,6 +1045,7 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
             )
             transcript = provider.transcribe(result["audio"])
             words = provider.align(result["audio"], body.text)
+            alignment_evidence = getattr(provider, "last_alignment_evidence", None)
             errors = verify_dialogue(result, transcript, words, body.text, body.character)
     project = require_project(db, row.project_id)
     candidate = create_candidate(
@@ -1080,6 +1081,7 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
             "candidate_id": candidate.id,
             "transcript": transcript,
             "words": words,
+            **({"alignment_evidence": alignment_evidence} if alignment_evidence is not None else {}),
             "subtitles": subtitles(words),
             "errors": errors,
             "is_mock": result["is_mock"],

@@ -1,0 +1,433 @@
+{
+  "at": "2026-10-26T05:45:19.439729+00:00",
+  "source_base": "01fdaad28489dc92ffc6175fc2fbcea3f82ed126",
+  "backend": {
+    "tests": "520",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "196.712"
+  },
+  "targeted": {
+    "tests": "80",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "18.133"
+  },
+  "checks": {
+    "ruff": "PASS backend and local_review_server.py",
+    "frontend": "unchanged; previous TypeScript/Vite PASS",
+    "browser": "prior 15 MOCK_VERIFIED flows; not real voice/H3 acceptance",
+    "ci": "01fdaad run40270708843 four jobs NOT_STARTED due account quota; no payment changes"
+  },
+  "installation": {
+    "plan": "9a844b71-c4e1-48f8-9e1a-41ddb3bbf635",
+    "attempt": "faacf044-87e5-4fa5-a7a6-81e15279f872",
+    "status": "FILES_VERIFIED",
+    "files": 42,
+    "bytes": 10756955944,
+    "package_status": "FILES_VERIFIED_PENDING_RUNTIME"
+  },
+  "sdk_import_failure": {
+    "call": "1b682963-0952-430b-b152-8e816f213739",
+    "status": "ABANDONED",
+    "cause": "Filtered child environment omitted Windows username; torch import getpass.getuser failed before generation",
+    "cpu_before": "OSError: No username set in the environment",
+    "cpu_after": {
+      "scope": "CPU config/tokenizer only; no checkpoint load or inference",
+      "config": "Qwen3TTSConfig",
+      "processor": "Qwen3TTSProcessor",
+      "status": "PASS",
+      "allocated_bytes": 0
+    },
+    "fix": "Keep standard username variables; provider/operator secrets remain filtered",
+    "red_regression": "Actual isolated CPU SDK child fails without username, passes with username and secret exclusion"
+  },
+  "real_stages": [
+    {
+      "name": "design",
+      "status": "COMPLETED",
+      "inference": true,
+      "elapsed_s": 30.594,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 31204,
+          "birth": "134374648367769213",
+          "returncode": 0
+        }
+      },
+      "result": {
+        "duration_s": 4.8,
+        "speaker": "QA_ORIGINAL",
+        "language": "zh-CN",
+        "model": "90f9fa5e-864b-4b16-ab4a-e31bcc4cfb00",
+        "is_mock": false,
+        "speaker_verification": "PENDING_HUMAN_REVIEW"
+      },
+      "audio_sha256": "1352bfa2da5e431ac86d9693a8530bcf32a61e25fd3279080dbef6867b30d52e",
+      "local_file": "real-qwen-serial-after-user-context-fix-20261026-design.wav"
+    },
+    {
+      "name": "clone",
+      "status": "COMPLETED",
+      "inference": true,
+      "elapsed_s": 21.391,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 25872,
+          "birth": "134374648672019921",
+          "returncode": 0
+        }
+      },
+      "result": {
+        "duration_s": 5.12,
+        "speaker": "QA_ORIGINAL",
+        "language": "zh-CN",
+        "model": "33b75f7b-ee83-43d3-8d5a-d90eb5d031e9",
+        "is_mock": false,
+        "speaker_verification": "PENDING_HUMAN_REVIEW"
+      },
+      "audio_sha256": "fd6fefe2438c9273472fd23b849925db78a56d228e6f6667abc2a6a68a84b7f2",
+      "local_file": "real-qwen-serial-after-user-context-fix-20261026-clone.wav"
+    },
+    {
+      "name": "prepare_conditioning",
+      "status": "COMPLETED",
+      "inference": false,
+      "elapsed_s": 0.094,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 25872,
+          "birth": "134374648672019921",
+          "returncode": 0
+        }
+      },
+      "result": null,
+      "audio_sha256": null,
+      "local_file": null
+    },
+    {
+      "name": "synthesize",
+      "status": "COMPLETED",
+      "inference": true,
+      "elapsed_s": 14.969,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 15888,
+          "birth": "134374648891163140",
+          "returncode": 0
+        }
+      },
+      "result": {
+        "duration_s": 3.28,
+        "speaker": "QA_ORIGINAL",
+        "language": "zh-CN",
+        "model": "33b75f7b-ee83-43d3-8d5a-d90eb5d031e9",
+        "is_mock": false,
+        "speaker_verification": "PENDING_HUMAN_REVIEW"
+      },
+      "audio_sha256": "7bc02947591799d48bdee7584c2f6f3913dab0eba98cd54a3c4a5041165dcd4b",
+      "local_file": "real-qwen-serial-after-user-context-fix-20261026-synthesize.wav"
+    },
+    {
+      "name": "asr",
+      "status": "COMPLETED",
+      "inference": true,
+      "elapsed_s": 22.672,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 31220,
+          "birth": "134374649047009647",
+          "returncode": 0
+        }
+      },
+      "result": {
+        "text": "桥边的灯还亮着，我在这里等你。",
+        "speaker": "UNKNOWN",
+        "language": "zh-CN",
+        "confidence": 0,
+        "is_mock": false,
+        "model": "6a625aea-d494-4b39-9f4e-1b0ba5393d59"
+      },
+      "audio_sha256": null,
+      "local_file": null
+    },
+    {
+      "name": "align",
+      "status": "COMPLETED",
+      "inference": true,
+      "elapsed_s": 11.844,
+      "release": {
+        "released": true,
+        "allocated_bytes": 0,
+        "process_exit": {
+          "pid": 11428,
+          "birth": "134374649277626273",
+          "returncode": 0
+        }
+      },
+      "result": [
+        {
+          "text": "桥",
+          "start_s": 0.72,
+          "end_s": 0.96
+        },
+        {
+          "text": "边",
+          "start_s": 0.96,
+          "end_s": 1.12
+        },
+        {
+          "text": "的",
+          "start_s": 1.12,
+          "end_s": 1.12
+        },
+        {
+          "text": "灯",
+          "start_s": 1.12,
+          "end_s": 1.28
+        },
+        {
+          "text": "还",
+          "start_s": 1.28,
+          "end_s": 1.44
+        },
+        {
+          "text": "亮",
+          "start_s": 1.44,
+          "end_s": 1.68
+        },
+        {
+          "text": "着",
+          "start_s": 1.68,
+          "end_s": 1.84
+        },
+        {
+          "text": "我",
+          "start_s": 2.48,
+          "end_s": 2.56
+        },
+        {
+          "text": "在",
+          "start_s": 2.56,
+          "end_s": 2.64
+        },
+        {
+          "text": "这",
+          "start_s": 2.64,
+          "end_s": 2.8
+        },
+        {
+          "text": "里",
+          "start_s": 2.8,
+          "end_s": 2.88
+        },
+        {
+          "text": "等",
+          "start_s": 2.88,
+          "end_s": 3.12
+        },
+        {
+          "text": "你",
+          "start_s": 3.12,
+          "end_s": 3.2
+        }
+      ],
+      "audio_sha256": null,
+      "local_file": null
+    }
+  ],
+  "new_dialogue_recognition": {
+    "expected": "桥边的灯还亮着，我在这里等你。",
+    "transcribed": "桥边的灯还亮着，我在这里等你。",
+    "normalized_cer": 0.0,
+    "threshold": 0.1,
+    "passed": true
+  },
+  "original_alignment": "FAILED_QUALITY: one 1.12s->1.12s word. Original WAV and raw timestamps preserved and still rejected.",
+  "punctuation_bridge": {
+    "restores_only_matching_script_punctuation_or_whitespace": true,
+    "spoken_missing_characters_or_symbols_still_rejected": true,
+    "timing_modified": false,
+    "raw_word_evidence_saved_in_voice_render": true,
+    "red_regression": "SDK raw tokens omit final punctuation; strict locked text mismatch before adapter"
+  },
+  "controlled_repair": {
+    "status": "TECHNICAL_PASS_PENDING_HUMAN_QUALITY_REVIEW",
+    "source_audio_sha256": "7bc02947591799d48bdee7584c2f6f3913dab0eba98cd54a3c4a5041165dcd4b",
+    "derived_audio_sha256": "5522890b82717c37636d01b03f20d96c54463b559ad50040cc62f9b55baadd18",
+    "tempo": 0.75,
+    "duration_s": 4.346041666666666,
+    "ffmpeg_sha256": "d1e2a156261ecc675081943197a85f08f2868784a0af499171ede89353edad31",
+    "strict_timing_pass": true,
+    "locked_text_preserved": true,
+    "errors": [
+      "ASR_REVIEW_REQUIRED",
+      "VOICE_REVIEW_REQUIRED"
+    ],
+    "original_alignment_still_rejected": true,
+    "timestamp_values_edited": false,
+    "local_audio": "qwen-same-dialogue-tempo075-20261026.wav"
+  },
+  "audio_technical": {
+    "scope": "PCM structure, full FFmpeg decode and level measurements; not human sound-quality/identity acceptance",
+    "files": [
+      {
+        "local_file": "real-qwen-serial-after-user-context-fix-20261026-design.wav",
+        "duration_s": 4.8,
+        "rate_hz": 24000,
+        "channels": 1,
+        "full_decode": "PASS",
+        "peak": 0.644500732421875,
+        "rms": 0.10374868266123875,
+        "clipped_sample_fraction": 0.0
+      },
+      {
+        "local_file": "real-qwen-serial-after-user-context-fix-20261026-clone.wav",
+        "duration_s": 5.12,
+        "rate_hz": 24000,
+        "channels": 1,
+        "full_decode": "PASS",
+        "peak": 0.539031982421875,
+        "rms": 0.08753450023443725,
+        "clipped_sample_fraction": 0.0
+      },
+      {
+        "local_file": "real-qwen-serial-after-user-context-fix-20261026-synthesize.wav",
+        "duration_s": 3.28,
+        "rate_hz": 24000,
+        "channels": 1,
+        "full_decode": "PASS",
+        "peak": 0.648406982421875,
+        "rms": 0.08771223944747976,
+        "clipped_sample_fraction": 0.0
+      },
+      {
+        "local_file": "qwen-same-dialogue-tempo075-20261026.wav",
+        "duration_s": 4.346041666666666,
+        "rate_hz": 24000,
+        "channels": 1,
+        "full_decode": "PASS",
+        "peak": 0.637420654296875,
+        "rms": 0.08923509261429,
+        "clipped_sample_fraction": 0.0
+      }
+    ]
+  },
+  "model_calls": [
+    {
+      "id": "1520e044-df77-49be-94b1-45e1b0494548",
+      "status": "COMPLETED",
+      "resource_id": "703cbb2d-3f09-4d9d-becd-9a0c674b5b3b",
+      "child_exit": {
+        "pid": 31204,
+        "birth": "134374648367769213",
+        "returncode": 0
+      },
+      "role_runtime": "design",
+      "package_sha256": "58923dc96a6eddbb961e79f0f27f7fb37f2a00b0e246474b3c022477b5f72776"
+    },
+    {
+      "id": "068dc9c3-c72d-4eb2-851f-84189cbb1fdc",
+      "status": "COMPLETED",
+      "resource_id": "6eeb3c19-17d0-429e-befa-50d3e9772fbf",
+      "child_exit": {
+        "pid": 25872,
+        "birth": "134374648672019921",
+        "returncode": 0
+      },
+      "role_runtime": "base",
+      "package_sha256": "8c41318b43661c7ee0ca108c4b0ad1dc4934b8fb1a39fc4c5cb2cfed4498bc60"
+    },
+    {
+      "id": "80b80114-ae67-4665-b863-dd6d2e89297a",
+      "status": "COMPLETED",
+      "resource_id": "3dd375b4-5380-4aa3-a45b-4cd28367ccb4",
+      "child_exit": null,
+      "role_runtime": null,
+      "package_sha256": null
+    },
+    {
+      "id": "8ccda6a7-0ce1-4be3-bf33-787dec66b182",
+      "status": "COMPLETED",
+      "resource_id": "60cb0470-f373-4ce9-bc62-95c64acc99b8",
+      "child_exit": {
+        "pid": 15888,
+        "birth": "134374648891163140",
+        "returncode": 0
+      },
+      "role_runtime": "base",
+      "package_sha256": "8c41318b43661c7ee0ca108c4b0ad1dc4934b8fb1a39fc4c5cb2cfed4498bc60"
+    },
+    {
+      "id": "5840ca1d-f37f-48f7-a843-3007f40e42d8",
+      "status": "COMPLETED",
+      "resource_id": "c4f4bcec-bc51-402a-a705-8b57b5c432e0",
+      "child_exit": {
+        "pid": 31220,
+        "birth": "134374649047009647",
+        "returncode": 0
+      },
+      "role_runtime": "asr",
+      "package_sha256": "cde583f8322aa70f4362ca70346dd00b05ff73455bd8697376136a05be895443"
+    },
+    {
+      "id": "8cb54f80-a946-43ec-9234-a9351f590495",
+      "status": "COMPLETED",
+      "resource_id": "29ff35e0-3fb2-407b-b3cb-6a84adb824be",
+      "child_exit": {
+        "pid": 11428,
+        "birth": "134374649277626273",
+        "returncode": 0
+      },
+      "role_runtime": "align",
+      "package_sha256": "3e733c82b563b1ff051d3116fac8e6c92356596fc96cc513c3beb72b5a8453a0"
+    },
+    {
+      "id": "1b1a3c75-d328-4b85-9348-212d4af728d9",
+      "status": "COMPLETED",
+      "resource_id": "44a32725-b42b-4308-8359-ad9489ac9488",
+      "child_exit": {
+        "pid": 28324,
+        "birth": "134374655638174363",
+        "returncode": 0
+      },
+      "role_runtime": "asr",
+      "package_sha256": "cde583f8322aa70f4362ca70346dd00b05ff73455bd8697376136a05be895443"
+    },
+    {
+      "id": "611cc640-5406-4c20-ac5c-3d7f7f2441e2",
+      "status": "COMPLETED",
+      "resource_id": "8433d616-63a9-412f-a69d-af0652dfdc04",
+      "child_exit": {
+        "pid": 15940,
+        "birth": "134374655757728314",
+        "returncode": 0
+      },
+      "role_runtime": "align",
+      "package_sha256": "3e733c82b563b1ff051d3116fac8e6c92356596fc96cc513c3beb72b5a8453a0"
+    }
+  ],
+  "human_listened": false,
+  "human_approved": false,
+  "asset_or_voice_promotion": false,
+  "qwen_voice_quality": "PENDING_HUMAN_REVIEW; single synthetic technical sample only; native tempo/emotion controls remain unsupported",
+  "t2va": {
+    "original_attempt": "5239ed92-d05b-4036-ae60-4ab4b444e354",
+    "original_failure": "ConnectError after bounded connection attempts",
+    "fresh_plan": "bb6c1560-6f98-4cd8-b11e-fea7c603d43b",
+    "status": "DOWNLOADING; same pinned two-file scope; no H3 submission or original ComfyUI file change"
+  },
+  "product_acceptance": "PARTIAL"
+}

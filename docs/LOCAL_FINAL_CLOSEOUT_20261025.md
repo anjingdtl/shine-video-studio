@@ -1,13 +1,12 @@
 # 本轮本机收尾补充报告（2026-10-25）
 
-10-26 授权续轮：完整后端 **509 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
-真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
-每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
-新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。
-固定语音包的前三包已完整落盘，第四包在新的有界 Range 计划中继续下载；尚未运行真实 Qwen 语音推理。
-用户离机期间按明确授权以 `user-delegated-codex` 操作；未虚构本人到场、试听、权属或美学批准。
-全产品仍 **PARTIAL**，远端 CI 仍受账户额度阻断。见
-[本轮机器记录](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。下文保留历轮状态。
+10-26 授权续轮：完整后端 **520 passed、零 skipped/failures/errors**；Ruff 通过，前端未改且构建已通过。
+四个固定 Qwen 包的 42 文件已全部校验；真实声音设计、克隆、新台词合成、识别与对齐均实际运行并释放。
+新台词识别 CER=0，但原始对齐有一个零长度字，保留为真实质量失败；同句 0.75 倍速技术副本的真实复验
+满足完整原文和严格正长度时间段，未改写任何模型时间戳。说话人/ASR 置信度及真人试听仍待确认。
+真实 VLM 正反例及既有生产数据保持上轮边界；T2VA Base 安装在首次连接错误后已对账并进入新固定计划续传，
+尚未渲染。以 `user-delegated-codex` 记录授权，未冒充本人在场或批准资产/音色。全产品仍 **PARTIAL**。
+见 [真实 Qwen 与对齐记录](evidence/local-closeout-20261025/real-qwen-sdk-and-alignment.json)。下文保留历轮状态。
 
 前一续轮记录：完整后端 **474 passed**，隔离浏览器 **15 类 MOCK_VERIFIED**。
 真实模型安装与指定失败对账仍待本人批准，输出补丁后的真实反例尚未复验，远端 CI 受账户付款/额度阻断。
@@ -461,3 +460,31 @@ QC/正常 Worker/旧 offline E2E 定向 **49 passed**，Ruff、TypeScript/Vite �
 最后一个语音包仍在传输，尚不计为四包安装或语音质量通过。
 `0aa25a4` 的四项远端 CI 均未启动，已再逐项读取 annotations；账户额度阻断未改变。
 记录见 [固定块证据](evidence/local-closeout-20261025/fixed-block-download.json)。
+
+
+## 7.16 四包文件完成、真实 SDK 与字幕接口修复
+
+Qwen 固定计划 `9a844b71-c4e1-48f8-9e1a-41ddb3bbf635` 的尝试 `faacf044-87e5-4fa5-a7a6-81e15279f872`
+完成 42 文件、10,756,955,944 字节大小/SHA-256 校验。首个真实 SDK 调用随后暴露环境过滤遗漏：
+Torch 导入调用 Windows getpass，但子进程没有 USERNAME。CPU-only 配置/分词器预检复现相同 OSError，
+未加载检查点或生成声音。保留隔离进程失败用例，补标准用户名变量，密钥变量仍拒绝传入；真实 CPU 预检转绿。
+原失败调用 `1b682963-0952-430b-b152-8e816f213739` 在父子进程均退出后正式 ABANDONED，没有盲重放。
+
+修复后的新意图实际完成 design/clone/prepare_conditioning/synthesize/asr/align 六阶段，其中 prepare 仅登记 PCM，
+其余五次为实际模型推理。三个语音样本 4.8/5.12/3.28 秒、24kHz 单声道，完整 FFmpeg 解码通过，采样削波比例为 0。
+识别新台词 CER=0；但对齐“的”字给出 1.12→1.12 秒，原探针按严格约束失败。这不是全通过样本，原 WAV 与时间戳保留。
+
+又复现了官方对齐器省略标点、工作台要求锁定原文的接口差异。桥接仅在可听字符完全一致时恢复原文标点/空白，
+字词时间戳逐项不变，原始 token 保存在 VoiceRender.alignment_evidence；漏字、符号改变和零长度时间仍拒绝。
+没有删除反例、虚构时间戳或修改 ASR 原始转写。
+
+一次明确记录的 CPU 技术派生对同一合成 WAV 做 atempo=0.75，保留原文件/来源 SHA/FFmpeg SHA/参数和派生 SHA，
+不是新的主资产或隐式的原生语速功能。派生时长 4.3460416667 秒；再用真实 Qwen ASR/ForcedAligner 串行复验，
+完整原文保留、每段 start<end 且在实际时长内。原未降速时间戳仍被 verify_dialogue 拒绝。
+剩余 ASR_REVIEW_REQUIRED/VOICE_REVIEW_REQUIRED 明确保留：识别器不提供校准置信度或声音身份，用户未本人试听，
+未晋升候选、冻结音色或通过口型/美学验收；SDK 对非中性情绪及原生变速仍明确不支持。
+
+所有新子进程实际退出、资源租约已释放，GPU 回到约 1.5GiB 桌面/服务基线。
+完整后端 **520 passed，零 skipped/failures/errors（196.712 秒）**；SDK/字幕/准备定向 **80 passed**，Ruff 通过。
+T2VA 原尝试连接失败后按原清单核验，1024 字节精确 Range 再次成功；新固定范围计划继续下载，尚无新 H3 生成。
+当前仍 PARTIAL；见 [完整机器记录](evidence/local-closeout-20261025/real-qwen-sdk-and-alignment.json)。

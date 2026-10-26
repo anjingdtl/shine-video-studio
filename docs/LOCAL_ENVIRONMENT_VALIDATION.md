@@ -1,13 +1,12 @@
 # 本地环境验证报告（V1.3 真机集成轮）
 
-10-26 授权续轮：完整后端 **509 passed、零 skipped/failures/errors**；Ruff、TypeScript/Vite 通过。
-真实本地 VLM 的错误镜头要求反例和原要求正常对照均通过，语义/风格/最终门分别正确失败与通过，
-每次模型卸载后 allocated/reserved 均为 0；没有改生产镜头、原门禁或重投 H3。
-新 VLM 回复必须显式提供 verdict/findings，低置信度或非通过结论不能因空问题列表放行。
-固定语音包的前三包已完整落盘，第四包在新的有界 Range 计划中继续下载；尚未运行真实 Qwen 语音推理。
-用户离机期间按明确授权以 `user-delegated-codex` 操作；未虚构本人到场、试听、权属或美学批准。
-全产品仍 **PARTIAL**，远端 CI 仍受账户额度阻断。见
-[本轮机器记录](evidence/local-closeout-20261025/qc-verdict-and-bounded-ranges.json)。下文保留历轮状态。
+10-26 授权续轮：完整后端 **520 passed、零 skipped/failures/errors**；Ruff 通过，前端未改且构建已通过。
+四个固定 Qwen 包的 42 文件已全部校验；真实声音设计、克隆、新台词合成、识别与对齐均实际运行并释放。
+新台词识别 CER=0，但原始对齐有一个零长度字，保留为真实质量失败；同句 0.75 倍速技术副本的真实复验
+满足完整原文和严格正长度时间段，未改写任何模型时间戳。说话人/ASR 置信度及真人试听仍待确认。
+真实 VLM 正反例及既有生产数据保持上轮边界；T2VA Base 安装在首次连接错误后已对账并进入新固定计划续传，
+尚未渲染。以 `user-delegated-codex` 记录授权，未冒充本人在场或批准资产/音色。全产品仍 **PARTIAL**。
+见 [真实 Qwen 与对齐记录](evidence/local-closeout-20261025/real-qwen-sdk-and-alignment.json)。下文保留历轮状态。
 
 前一续轮记录：完整后端 **474 passed，零 skipped/failures/errors**；隔离浏览器 **15 类
 MOCK_VERIFIED，api_errors=[]**。安装恢复页面、项目过滤和跨项目迟到响应反例通过。
