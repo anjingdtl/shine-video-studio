@@ -1,0 +1,107 @@
+{
+  "status": "SAME_INPUT_STRICT_POSTURE_ABLATION_PASS_NOT_MEDIA_QUALIFICATION",
+  "source_revision": "9eac29e9b8713036e5f5fd878005f682f517235e",
+  "task_id": "7ed3a8fb-37db-4a61-ab3d-1d9d8ec9ebb2",
+  "artifact_id": "4a4f6df0-c730-4158-8654-3821c18f50d4",
+  "artifact_sha256": "ab325d4d667fb6a83e4569e1cf8f7ae880dfce3fd806ccf56b2f78ddb8c34de9",
+  "response_sha256": "d28b9c6d74daf221b99a52a23ea0e27f207436dfa8e62f00b46841b8de4ecf81",
+  "latency_ms": 3773,
+  "physical_requests": 1,
+  "same_shot_spec_sha256": "841f3b1f423ace610c12fec9d7576351409ebce81c412daa582589b625b31127",
+  "prior_false_finding_task_id": "6c97c69c-fb89-4ebb-95d0-6cdf78e73286",
+  "prior_false_finding_preserved": true,
+  "unfiltered_checks": [
+    {
+      "field": "photography_language",
+      "status": "consistent",
+      "detail": "Both specify a medium close shot under neon in night rain with slight handheld breathing movement.",
+      "style_text": "Medium close shot under neon in the night rain, with a slight handheld breathing movement",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "shot_blocking",
+      "status": "conflict",
+      "detail": "Style places the character seated centre-left, while ShotSpec requires the character to walk steadily at centre-left. Posture and action are incompatible.",
+      "style_text": "The character sits centre-left, gaze directed into the depth of the frame",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "color_palette",
+      "status": "consistent",
+      "detail": "Both specify cool cyan-blue neon, warm amber street lamps, and natural skin tones.",
+      "style_text": "Cool cyan-blue neon against warm amber street lamps, natural skin tones",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "lighting_tone",
+      "status": "consistent",
+      "detail": "Both specify neon backlight, wet-road reflections, and preservation of controlled highlights.",
+      "style_text": "Neon backlight with wet-road reflections, preserving highlight detail",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "lens_texture",
+      "status": "consistent",
+      "detail": "Both specify 35mm documentary grain and shallow depth of field.",
+      "style_text": "35mm documentary grain, shallow depth of field",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "editing_rhythm",
+      "status": "consistent",
+      "detail": "Both require one uninterrupted take with no internal cut; continuity mode cut only marks this shot's independent boundary.",
+      "style_text": "A single long take, no cut",
+      "shot_text": "A medium close shot of an anonymous fictional adult woman walking steadily at centre-left under neon in the night rain. She quietly gazes into the depth of the frame. Slight handheld breathing movement. Cool cyan-blue neon and warm amber street lamps preserve natural skin tones. Neon backlight and wet-road reflections with controlled highlights. 35mm documentary grain and shallow depth of field. One uninterrupted long take. Natural rain ambience; she speaks the supplied dialogue clearly and with restrained delivery. This is an independent text-only technical style control, without a claim to any approved character identity or cross-shot identity continuity.",
+      "shot_path": "/story_beat",
+      "confidence": 0.99
+    },
+    {
+      "field": "sound_performance",
+      "status": "consistent",
+      "detail": "Both specify natural night-rain ambience and clear, restrained dialogue.",
+      "style_text": "Natural night-rain ambience, clear and restrained dialogue",
+      "shot_text": "natural night-rain ambience",
+      "shot_path": "/sound/ambience",
+      "confidence": 0.99
+    }
+  ],
+  "recommendation": "needs_review",
+  "preflight_rejection": "STYLE_INPUT_CONFLICT_NEEDS_REVIEW",
+  "usage": {
+    "total_tokens": 2202,
+    "total_characters": 0,
+    "prompt_tokens": 1736,
+    "completion_tokens": 466,
+    "completion_tokens_details": {
+      "reasoning_tokens": 130
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 128
+    }
+  },
+  "finish_reason": "stop",
+  "protected_tables_unchanged": true,
+  "local_release": {
+    "all_leases_released": true,
+    "review_weights_unloaded": true,
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "comfy_idle": true
+  },
+  "historical_v1_v2_guards": "BLOCKED_READ_ONLY",
+  "h3_submissions": 0,
+  "media_bytes_transmitted": 0,
+  "human_approval": false,
+  "vlm_qualification": "WITHHELD",
+  "private_receipt_sha256": "449d9ff700c1ae844e885eeb54fbedd77e05c04c4296aa8fd32c42e1475eba86"
+}
