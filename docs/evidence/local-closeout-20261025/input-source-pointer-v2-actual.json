@@ -1,0 +1,92 @@
+{
+  "source_revision": "f59e825725276e9a962f5d2f41158e2df353d18b",
+  "stage": "REAL_V2_PARTIAL_POSITIVE_PASS_CONFLICT_UNKNOWN",
+  "scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
+  "controls": [
+    {
+      "name": "proposed_spoken_matching_text",
+      "expected": "proceed_to_preflight",
+      "request_count": 1,
+      "task_id": "14a26a2b-84ef-4448-9dc0-35013234920f",
+      "observed_status": "SUCCEEDED",
+      "error_code": null,
+      "recommendation": "proceed_to_preflight",
+      "artifact_id": "0ed5ff44-40d8-44f4-af96-df544ad8e604",
+      "response_sha256": "b00bddab5fed749fe3d08d0a24e8c73fdf1d70e5424aabaa3fd5c25573f185e7",
+      "response_latency_ms": 17657
+    },
+    {
+      "name": "unchanged_walking_conflict",
+      "expected": "needs_review",
+      "request_count": 1,
+      "task_id": "16b47934-2ce1-4610-83af-7d8e7e504657",
+      "observed_status": "NEEDS_REVIEW",
+      "error_code": "LLM_TIMEOUT",
+      "recommendation": null,
+      "artifact_id": null,
+      "response_sha256": null,
+      "response_latency_ms": null
+    }
+  ],
+  "positive_binding": "PASS_READ_ONLY_FOR_NEW_SPOKEN_TEXT_PROPOSAL_NOT_ORIGINAL_SILENT_VIDEO",
+  "walking_preflight": "BLOCKED_STYLE_INPUT_ASSESSMENT_NOT_READY",
+  "reconciliation": {
+    "status": "REMOTE_RESPONSE_ABANDONED_NO_REPLAY_NO_QUALITY_APPROVAL",
+    "target_task_id": "16b47934-2ce1-4610-83af-7d8e7e504657",
+    "actor": "user-delegated-codex",
+    "human_present": false,
+    "human_quality_or_rights_approval": false,
+    "inference_calls": 0,
+    "new_agent_tasks": 0,
+    "automatic_replay": false,
+    "external_outcome": "UNKNOWN",
+    "result": {
+      "id": "16b47934-2ce1-4610-83af-7d8e7e504657",
+      "status": "ABANDONED",
+      "external_outcome": "UNKNOWN",
+      "automatic_replay": false
+    },
+    "original_v2_guard": "BLOCKED_READ_ONLY",
+    "protected_tables_unchanged": true,
+    "all_leases_released": true,
+    "review_weights_unloaded": true,
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "comfy_idle": true
+  },
+  "remote_text_consent": true,
+  "media_bytes_transmitted": 0,
+  "h3_submissions": 0,
+  "qc_profile": {
+    "id": "d35f4916-f077-4a2e-9eb9-08bb199c377f",
+    "timeout_s": 300,
+    "max_retries": 0,
+    "same_existing_endpoint_model_secret_reference": true,
+    "only_qc_route_changed": true,
+    "original_shared_profile_timeout_s": 120
+  },
+  "protected_production_tables_unchanged": true,
+  "source_video_hashes_verified": 2,
+  "vlm_qualification": "WITHHELD",
+  "asr_qualification": "UNCHANGED",
+  "human_quality_approval": false,
+  "private_receipts_sha256": {
+    "real-input-pointer-v2-20261027.json": "3129d45a698056917e06f1fd1005f9ff5d71dae3c221c6863f80c544d7c1fef3",
+    "input-pointer-v2-timeout-reconciliation-20261027.json": "10a41c7b9b17b577206f164e1288a14d00a3e378667d5aa6b8f6281c74cb5b6c",
+    "review-pack/review-manifest-20261027.json": "9d41a12d53f57762a9eed21e1c3d8337473295564e7aca46121c9a3dc59969c2"
+  },
+  "review_package": {
+    "verified_media": 5,
+    "pending_rights": 4,
+    "new_masters": 0,
+    "frozen_voice_profiles": 0,
+    "scope": "local existing real outputs + unconfirmed 60s two-person draft; not M4 complete"
+  },
+  "hosted_ci": {
+    "head": "f59e825725276e9a962f5d2f41158e2df353d18b",
+    "run_id": 40377206129,
+    "windows_check_id": 121763406519,
+    "status": "JOB_NOT_STARTED_ACCOUNT_BILLING_OR_SPENDING_LIMIT",
+    "remote_pass_claimed": false
+  }
+}
