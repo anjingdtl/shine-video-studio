@@ -23,7 +23,9 @@ from fastapi import File, Form, UploadFile
 def _verified_model_files(manifest):
     root = Path(manifest["model_root"]).resolve()
     declared = {entry["path"] for entry in manifest["files"]}
-    if not {"config.json", "model.safetensors", "tokenizer.json"}.issubset(declared):
+    if not {"config.json", "tokenizer.json"}.issubset(declared) or not (
+        "model.safetensors" in declared or "model.safetensors.index.json" in declared
+    ):
         raise ValueError("INCOMPLETE_MODEL_HASH_MANIFEST")
     if len(declared) != len(manifest["files"]):
         raise ValueError("DUPLICATE_MODEL_FILE")
@@ -43,6 +45,23 @@ def _verified_model_files(manifest):
         if digest != entry["sha256"]:
             raise ValueError("MODEL_HASH_CHANGED")
         verified.append({"path": path.relative_to(root).as_posix(), "sha256": digest, "bytes": size})
+    if "model.safetensors.index.json" in declared:
+        # Transformers follows this index during loading. Every referenced shard
+        # must belong to the same verified manifest, with no alternative weights.
+        try:
+            index = json.loads((root / "model.safetensors.index.json").read_text(encoding="utf8"))
+            mapping = index["weight_map"]
+            if not isinstance(mapping, dict) or not mapping:
+                raise ValueError("empty or invalid weight map")
+            if not all(isinstance(key, str) and key and isinstance(value, str) for key, value in mapping.items()):
+                raise ValueError("invalid weight mapping")
+            shards = set(mapping.values())
+            weights = {name for name in declared if name.endswith(".safetensors")}
+            if ("model.safetensors" in declared or shards != weights
+                    or not all(name.endswith(".safetensors") for name in shards)):
+                raise ValueError("unverified or ambiguous shards")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError("MODEL_SHARD_INDEX_INVALID") from exc
     return root, sorted(verified, key=lambda entry: entry["path"])
 
 

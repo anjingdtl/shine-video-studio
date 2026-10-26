@@ -166,3 +166,32 @@ The ignored proposals have not yet been registered or installed as native capabi
 packages. Canonical executor file identities additionally include checked relative names,
 SHA-256 and actual byte sizes; they are independent of the old supplied manifest label.
 No model source, license conclusion, master-asset grant or human acceptance was expanded.
+
+
+## 2026-10-26 stronger local VLM candidate and sharded loading
+
+The existing pinned 4B bitsandbytes model was withdrawn from production capability matching
+following recorded real false-positive/false-negative style, identity and continuity controls.
+Do not reinterpret its old basic calibration as broader semantic acceptance.
+
+The official `Qwen/Qwen3-VL-8B-Instruct-FP8` candidate is pinned to
+`9cdc6310a8cb770ce18efaf4e9935334512aee45`; the fixed model card declares Apache-2.0.
+The complete upstream file tree lists 13 files totaling 10,605,572,552 bytes.
+Weight shards have upstream LFS SHA-256
+`e2dea2e85e643ef7045c31a485a426631a1e0a84e463f8b2c7e9c6682a06eafd` and
+`3dc64ec934af27a7007d265014e907aff9e16658d409e5cd4cf79869bf2bd8c1`.
+Metadata is checked against the fixed tree's Git blob IDs before deriving install SHA-256 values.
+Source: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/tree/9cdc6310a8cb770ce18efaf4e9935334512aee45
+
+RTX 5080 / 16,303 MiB and the existing isolated Transformers/Triton FP8 adapter were inspected.
+14,000 MiB is an ESTIMATED admission budget, not measured consumption or proof the model fits.
+No new dependency source is copied into this repository; model files stay in the isolated ignored directory.
+Model installation, actual execution, complete adversarial calibration and production publication remain
+separate gates. No production-role substitution, new asset, rights claim or human review is inferred.
+
+The owned local executor previously required a monolithic `model.safetensors` file. It now also accepts
+a hash-verified `model.safetensors.index.json` only when every declared shard exactly matches the
+index's weight map. Missing/unverified/extra shards and mixed monolithic/indexed weights are rejected.
+The index and all shard bytes enter the canonical executor identity and cold-load checks.
+Nine added structural counterexamples first failed; 44 targeted executor/runtime/offline tests pass after the fix.
+These use synthetic bytes, not model inference.

@@ -210,3 +210,50 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(executo
     with pytest.raises(ValueError, match='MODEL_(SIZE|HASH)_CHANGED'):
         action()
     assert not loads
+
+
+def sharded_manifest(tmp_path, *, weight_map=None, extras=()):
+    import json
+
+    mapping = weight_map if weight_map is not None else {
+        'layer.a': 'model-00001-of-00002.safetensors',
+        'layer.b': 'model-00002-of-00002.safetensors',
+    }
+    contents = {
+        'config.json': b'{}', 'tokenizer.json': b'{}',
+        'model-00001-of-00002.safetensors': b'synthetic first shard',
+        'model-00002-of-00002.safetensors': b'synthetic second shard',
+        'model.safetensors.index.json': json.dumps({'weight_map': mapping}).encode(),
+        **{name: b'synthetic extra weight' for name in extras},
+    }
+    files = []
+    for name, data in contents.items():
+        (tmp_path / name).write_bytes(data)
+        files.append({'path': name, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)})
+    return {'model_root': str(tmp_path), 'model_id': 'sharded-fixture-only', 'files': files}
+
+
+def test_sharded_model_identity_covers_index_and_every_actual_shard(executor, tmp_path):
+    spec = sharded_manifest(tmp_path)
+    proof = executor.verified_model_identity(spec)
+    assert proof['file_count'] == 5
+    (tmp_path / 'model-00002-of-00002.safetensors').write_bytes(b'changed')
+    with pytest.raises(ValueError, match='MODEL_(SIZE|HASH)_CHANGED'):
+        executor.verified_model_identity(spec)
+
+
+@pytest.mark.parametrize('weight_map', [
+    {}, {'layer': '../unchecked.safetensors'}, {'layer': 'missing.safetensors'},
+    {'layer': 'config.json'}, {'layer': 12}, ['not-a-map'],
+    {'layer': 'model-00001-of-00002.safetensors'},
+])
+def test_shard_index_cannot_load_unchecked_or_ambiguous_weight_files(executor, tmp_path, weight_map):
+    spec = sharded_manifest(tmp_path, weight_map=weight_map)
+    with pytest.raises(ValueError, match='MODEL_SHARD_INDEX_INVALID'):
+        executor.verified_model_identity(spec)
+
+
+def test_monolithic_and_sharded_weights_cannot_be_mixed(executor, tmp_path):
+    spec = sharded_manifest(tmp_path, extras=('model.safetensors',))
+    with pytest.raises(ValueError, match='MODEL_SHARD_INDEX_INVALID'):
+        executor.verified_model_identity(spec)

@@ -1,0 +1,158 @@
+{
+  "stage": "FIXED_OFFICIAL_CANDIDATE_PREPARED_NOT_INSTALLED_OR_QUALIFIED",
+  "source_revision": "9cdc6310a8cb770ce18efaf4e9935334512aee45",
+  "source_repository": "Qwen/Qwen3-VL-8B-Instruct-FP8",
+  "license_card": "Apache-2.0",
+  "files": 13,
+  "bytes": 10605572552,
+  "estimated_vram_mb": 14000,
+  "estimated_ram_mb": 22000,
+  "measurement": "ESTIMATED_NOT_OBSERVED",
+  "files_pin": [
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/.gitattributes",
+      "relative_path": ".gitattributes",
+      "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+      "size": 1519,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/README.md",
+      "relative_path": "README.md",
+      "sha256": "d2813c67aa5db818f160d9dd5fb23f4e1c93aedc48fa1a48e5d0dffb8a748b4c",
+      "size": 10439,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/chat_template.json",
+      "relative_path": "chat_template.json",
+      "sha256": "2c1437f11fc16ab501b984c000f6e291c599f0d28d2c9c6bf2c4533e65429b42",
+      "size": 5497,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/config.json",
+      "relative_path": "config.json",
+      "sha256": "8bbb7d41e722c000d4079c2520fd7d8438a5c13cf084c89784c0a2770cc9bf88",
+      "size": 12005,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/generation_config.json",
+      "relative_path": "generation_config.json",
+      "sha256": "a8aeb4072b54a2b54755557cad7f2dddc9f99ea858a6eccd704731180b788592",
+      "size": 241,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/model-00001-of-00002.safetensors",
+      "relative_path": "model-00001-of-00002.safetensors",
+      "sha256": "e2dea2e85e643ef7045c31a485a426631a1e0a84e463f8b2c7e9c6682a06eafd",
+      "size": 5363407552,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/model-00002-of-00002.safetensors",
+      "relative_path": "model-00002-of-00002.safetensors",
+      "sha256": "3dc64ec934af27a7007d265014e907aff9e16658d409e5cd4cf79869bf2bd8c1",
+      "size": 5226891960,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/model.safetensors.index.json",
+      "relative_path": "model.safetensors.index.json",
+      "sha256": "751e4b7c17b148d5cc8fb1296b281fe98a711c0182d88b8516f459186990f49d",
+      "size": 94475,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/preprocessor_config.json",
+      "relative_path": "preprocessor_config.json",
+      "sha256": "6a970fd06f30e6943b3e2c14d5d3b42d49b06cf99b99103d56689bef462d90f8",
+      "size": 336,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/tokenizer.json",
+      "relative_path": "tokenizer.json",
+      "sha256": "ba85e4e5222d9f53d4bd00b303ef7e9743c8ac3d07e3c23f8498dbe17baa9a2d",
+      "size": 10179867,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/tokenizer_config.json",
+      "relative_path": "tokenizer_config.json",
+      "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+      "size": 10868,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/video_preprocessor_config.json",
+      "relative_path": "video_preprocessor_config.json",
+      "sha256": "e203bc065dfcd75226838b8e937d624bec8f0eb6ef6630a397e9a675f2873ea6",
+      "size": 331,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8/resolve/9cdc6310a8cb770ce18efaf4e9935334512aee45/vocab.json",
+      "relative_path": "vocab.json",
+      "sha256": "7a0cfa95c65792d7510205839f80cfd8a3c8f6b1fdad5132d95cee481800374d",
+      "size": 4957462,
+      "redirect_hosts": [
+        "huggingface.co",
+        "us.aws.cdn.hf.co"
+      ]
+    }
+  ],
+  "metadata_verification": "11 fixed Git blobs; vocab reproduced byte-identically from existing vocabulary JSON (ensure_ascii=True, indent=2), accepted only after exact upstream blob-ID match; no semantic substitution",
+  "backend": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "604",
+    "time": "232.678",
+    "timestamp": "2026-10-26T19:47:18.808787+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "h3_resubmissions": 0,
+  "production_qualified": false,
+  "human_present_or_quality_approval": false,
+  "github_ci": "FREE_QUOTA_EXHAUSTED_ZERO_BUDGET_NO_ACCOUNT_CHANGES"
+}
