@@ -27,6 +27,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   const [inputs, setInputs] = useState<string[]>([]);
   const [offline, setOffline] = useState(false);
   const [remoteText, setRemoteText] = useState(false);
+  const [reviewShotId, setReviewShotId] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [query, setQuery] = useState('');
@@ -41,7 +42,10 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     ]);
     setRoles(rs); setArtifacts(ars); setRuns(ts); setHub(h); setPin(lock.rulepack_id ?? '');
   }
-  useEffect(() => { setInputs([]); reload().catch(e => setMessage(String(e))); }, [projectId]);
+  useEffect(() => {
+    setInputs([]); setReviewShotId(''); setRemoteText(false);
+    reload().catch(e => setMessage(String(e)));
+  }, [projectId]);
   async function act(action: () => Promise<unknown>) {
     setBusy(true); setMessage('');
     try { setResult(await action()); await reload(); await onRefresh(); setMessage('操作完成，请查看结果与门禁状态。'); }
@@ -49,6 +53,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     finally { setBusy(false); setRemoteText(false); }
   }
   const current = roles.find(r => r.role === role);
+  const reviewShot = shots.find(s => s.id === reviewShotId && s.project_id === projectId);
   const filteredRules = hub?.rules.filter(r => JSON.stringify(r).toLowerCase().includes(query.toLowerCase())) ?? [];
   return <>
     <section className="panel" id="film-crew">
@@ -71,16 +76,21 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
         <label>任务类型<select value={tool} onChange={e => setTool(e.target.value)}>
           {(current?.tool_allowlist ?? ['propose']).map(t => <option key={t} value={t}>{t === 'style_proposal' ? '风格建议（仅草案）' : '专业计划'}</option>)}</select></label>
         <p>所需上游产物：{current?.required_inputs.join('、') || '无'}。在下方勾选准确的版本。</p>
+        {role === 'qc_reviewer' && <label>检查镜头输入<select value={reviewShotId} onChange={e => setReviewShotId(e.target.value)}>
+          <option value="">选择本项目镜头</option>
+          {shots.filter(s => s.project_id === projectId).map(s => <option key={s.id} value={s.id}>{s.name} · 修订 {s.revision}</option>)}
+        </select><small>只比较镜头文本与冻结风格；不审查画面、声音或批准影片。</small></label>}
         <label>剧本 / 工作简报<textarea rows={5} value={brief} onChange={e => setBrief(e.target.value)} /></label>
         <label>用户锁定故事事实（每行一条，编剧必须原样保留）<textarea rows={2} value={facts} onChange={e => setFacts(e.target.value)} /></label>
         <label><input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)} />
           允许剪辑预览使用 mock / 部分技术验证镜头（不进入正式交付）</label>
         <label><input type="checkbox" checked={remoteText} onChange={e => setRemoteText(e.target.checked)} />
           允许本次工种向所选远端模型发送剧本、风格与资产元数据（不发送媒体字节）</label>
-        <button disabled={busy || !pin || !current?.profile_id} onClick={() => act(() => api(
+        <button disabled={busy || !pin || !current?.profile_id || (role === 'qc_reviewer' && !reviewShot)} onClick={() => act(() => api(
           `/projects/${projectId}/film-agents/${role}/run`, json('POST', {
-            brief, locked_story_facts: facts.split('\n').filter(Boolean), input_revision_ids: inputs,
+            brief, locked_story_facts: facts.split('\n').filter(Boolean), input_revision_ids: role === 'qc_reviewer' ? [] : inputs,
             tool, offline_preview: offline, allow_remote_text: remoteText,
+            ...(role === 'qc_reviewer' && reviewShot ? { shot_spec: reviewShot.spec } : {}),
           })))}>运行工种</button>
       </div>
       <h3>版本化产物 / 剪辑决策 EDL</h3>

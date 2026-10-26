@@ -432,3 +432,12 @@ project supplies native calibration scope; a conflicting project ID is rejected 
 issuing a grant. JSON evidence remains readable in a full-width editor.
 
 The local full-model executor also rejects unlisted root-level loader inputs (including alternate weights, tokenizer/template/generation JSON and case-insensitive vocabulary names). It does not support PEFT base-model redirects; declaring an adapter_config.json does not authorize an external base. Known local audit notes are not loader inputs. Cold loads and identity probes recheck this boundary before model construction.
+
+
+### Independent text-input consistency
+
+The film role `qc_reviewer` accepts a typed `FilmRunRequest.shot_spec` tied to the current frozen Style. Its `StyleInputAssessment` compares exactly seven fields with verbatim Style quotes and authentic ShotSpec excerpts. A conflict, uncertainty or confidence below 0.7 cannot recommend `proceed_to_preflight`. The model receives only the two text snapshots and their Style identity; asset metadata, prior artifacts and media are omitted. Remote calls require explicit `allow_remote_text` before execution. No master asset, frozen Style or film approval can be created by this role.
+
+New analyzed plans declare `independent-text-v1` in the frozen manifest. Real Job creation chooses the latest exact matching assessment (never an older positive behind a newer non-pass) and pins its ID/hash into `RenderRequest`. `preproduction.enforce`, shared by Job creation and Worker claim/submit, verifies exact input/style identity, immutable result hash, source task, active role/provider snapshot, consent, staleness and genuine versus Mock provenance. Missing/outdated/conflicting evidence blocks; a Mock assessment is usable only in an explicit offline path. Old frozen plans retain their original contract, but any request carrying an assessment is revalidated. A passing input assessment permits preflight consideration only; it supplies no pixel/audio/final quality coverage.
+
+Text provider envelopes retain their Mock marker in `LLMResponse.raw_meta`; film task provenance is the logical OR of configured Mock mode and transport Mock metadata. A compatible URL alone never converts a reported Mock result into real evidence.

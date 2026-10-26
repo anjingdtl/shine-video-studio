@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from shine.schemas import APIModel, DialogueLine, StyleBible
+from shine.schemas import APIModel, DialogueLine, ShotSpec, StyleBible, StyleInputCheck
 
 
 class SceneBeat(APIModel):
@@ -91,6 +91,30 @@ class ProductionPlan(APIModel):
     blockers: list[str] = Field(default_factory=list, max_length=100)
 
 
+class StyleInputComparison(StyleInputCheck):
+    style_text: str = Field(min_length=1, max_length=2000)
+    shot_text: str | None = Field(default=None, min_length=1, max_length=4000)
+    confidence: float = Field(ge=0, le=1)
+
+
+class StyleInputAssessment(APIModel):
+    """Text consistency proposal, never pixel/audio coverage or film approval."""
+
+    schema_version: Literal["1.1"] = "1.1"
+    checks: list[StyleInputComparison] = Field(min_length=7, max_length=7)
+    recommendation: Literal["proceed_to_preflight", "needs_review"]
+
+    @model_validator(mode="after")
+    def complete_and_consistent(self):
+        if {check.field for check in self.checks} != set(StyleBible.model_fields):
+            raise ValueError("STYLE_INPUT_FIELD_COVERAGE")
+        if self.recommendation == "proceed_to_preflight" and any(
+            check.status != "consistent" or check.confidence < 0.7 for check in self.checks
+        ):
+            raise ValueError("STYLE_INPUT_RECOMMENDATION_CONTRADICTION")
+        return self
+
+
 class FilmRunRequest(APIModel):
     brief: str = Field(default="", max_length=20000)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
@@ -99,6 +123,7 @@ class FilmRunRequest(APIModel):
     offline_preview: bool = False
     allow_remote_text: bool = False
     supersedes_artifact_id: str | None = None
+    shot_spec: ShotSpec | None = None
 
 
 class ComfyOpsProposal(APIModel):
@@ -113,6 +138,7 @@ class FilmAgentRegistry:
     """Closed capabilities. Extending a role requires a contract and reviewed code."""
 
     roles = {
+        "qc_reviewer": ("输入一致性审核", StyleInputAssessment, (), ("base",)),
         "comfyops": ("环境与能力工程师", ComfyOpsProposal, (), ("limits",)),
         "scriptwriter": ("编剧", ScriptBreakdown, (), ("base", "dialogue")),
         "director": ("导演", DirectorialPlan, ("ScriptBreakdown",), ("base", "references")),

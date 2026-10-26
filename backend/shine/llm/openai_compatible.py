@@ -143,7 +143,7 @@ class OpenAICompatibleProvider:
             model=body.get("model") or self.config.model,
             latency_ms=latency_ms,
             usage=body.get("usage") or {},
-            raw_meta={"id": body.get("id")},
+            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False))},
         )
 
     def detect_capabilities(self) -> dict[str, Any]:

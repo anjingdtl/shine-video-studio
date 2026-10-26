@@ -63,6 +63,7 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
         "requirements": list(unique.values()),
         "manifest": None,
         "offline": True,
+        "style_input_contract": "independent-text-v1",
     }
     plan = PreProductionPlan(project_id=project.id, payload=payload, sha256=graph_hash(payload), status="ANALYZED")
     db.add(plan)
@@ -257,6 +258,8 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         "workflows": sorted([{"id": w.id, "hash": w.sha256} for w in usable], key=lambda x: x["id"]),
         "models": sorted([{"id": m.id, "hash": m.sha256} for m in models], key=lambda x: x["id"]),
         "offline": offline,
+        **({"style_input_contract": plan.payload["style_input_contract"]}
+           if plan.payload.get("style_input_contract") else {}),
     }
     return {
         "status": "SHOOT_READY" if not blockers else "BLOCKED",
@@ -270,10 +273,20 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
 
 def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None, render_request=None):
     plan = current_plan(db, project_id)
+    if plan and plan.status != "FROZEN":
+        raise HTTPException(409, "PREPRODUCTION_NOT_READY")
+    if render_request is not None:
+        from shine.quality.input_assessment import assessment_for_request
+
+        # New analyzed real projects require independent input evidence. Pinned
+        # evidence is rechecked for legacy jobs too; historical data is not rewritten.
+        required = bool(plan and not offline and "independent-text-v1" in {
+            plan.payload.get("style_input_contract"),
+            (plan.payload.get("manifest") or {}).get("style_input_contract"),
+        })
+        assessment_for_request(db, project_id, render_request, offline=offline, required=required)
     if not plan:
         return  # Legacy projects preserve their original contract.
-    if plan.status != "FROZEN":
-        raise HTTPException(409, "PREPRODUCTION_NOT_READY")
     report = readiness(db, project_id, offline=offline, data_dir=data_dir)
     frozen = plan.payload["manifest"]
     if render_request is None:

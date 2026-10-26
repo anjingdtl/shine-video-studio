@@ -18,6 +18,7 @@ from shine.agents.film_contracts import (
     FilmRunRequest,
     ScriptBreakdown,
     SoundPlan,
+    StyleInputAssessment,
 )
 from shine.h3.rulebook import H3RulebookRegistry, digest
 from shine.llm.base import LLMError
@@ -176,7 +177,24 @@ def invalidate_artifact(db: Session, project_id: str, artifact_id: str):
 
 
 def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[AgentArtifact], context: dict):
-    if isinstance(proposal, ScriptBreakdown):
+    if isinstance(proposal, StyleInputAssessment):
+        def text_values(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for child in value.values():
+                    yield from text_values(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from text_values(child)
+
+        supplied = tuple(text_values(context["shot_spec"]))
+        for check in proposal.checks:
+            if check.style_text != context["style"][check.field]:
+                raise ValueError("STYLE_INPUT_FROZEN_QUOTE_CHANGED")
+            if check.shot_text is not None and not any(check.shot_text in text for text in supplied):
+                raise ValueError("STYLE_INPUT_SHOT_QUOTE_INVENTED")
+    elif isinstance(proposal, ScriptBreakdown):
         if proposal.locked_story_facts != body.locked_story_facts:
             raise ValueError("LOCKED_FACTS_CHANGED")
         if len({beat.id for beat in proposal.beats}) != len(proposal.beats):
@@ -252,6 +270,12 @@ class FilmAgentDispatcher:
         if profile.kind != "mock" and not is_loopback_url(profile.base_url) and not body.allow_remote_text:
             raise ValueError("REMOTE_AGENT_CONSENT_REQUIRED")
         style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
+        if role == "qc_reviewer":
+            if (body.shot_spec is None or not style or body.input_revision_ids
+                    or body.shot_spec.style_version_id != style.id):
+                raise ValueError("STYLE_INPUT_CURRENT_FROZEN_SNAPSHOT_REQUIRED")
+        elif body.shot_spec is not None:
+            raise ValueError("STYLE_INPUT_SPEC_ROLE_DENIED")
         context = {
             "brief": body.brief,
             "locked_story_facts": body.locked_story_facts,
@@ -267,6 +291,8 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if role == "qc_reviewer":
+            context["shot_spec"] = body.shot_spec.model_dump(mode="json")
         if role in {"comfyops", "director", "cinematographer", "sound_director", "producer"}:
             from shine.comfyops.models import EnvironmentSnapshot, ModelPackage, WorkflowRevision
 
@@ -309,6 +335,12 @@ class FilmAgentDispatcher:
                     }
                     for m in db.scalars(select(ModelPackage))
                 ]
+        # The independent input critic receives text only, without the media
+        # reviewer, asset manifest or prior role outputs biasing its comparison.
+        model_context = (
+            {key: context[key] for key in ("style", "style_version_id", "style_hash", "shot_spec")}
+            if role == "qc_reviewer" else context
+        )
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,
@@ -329,9 +361,19 @@ class FilmAgentDispatcher:
                 "input_revision_ids": body.input_revision_ids,
                 "schema": contract.__name__,
                 "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]} for s in cache_state],
+                **({"scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
+                    "shot_spec_snapshot": context["shot_spec"],
+                    "shot_spec_sha256": digest(context["shot_spec"]),
+                    "style_hash": context["style_hash"], "text_input_sha256": digest(model_context)}
+                   if role == "qc_reviewer" else {}),
             },
         )
         db.add(task)
+        if role == "qc_reviewer":
+            task.trace = {**task.trace, "review_provider": {
+                "profile_id": profile.id, "kind": profile.kind, "model": profile.model,
+                "base_url_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
+            }}
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
         try:
             response = self.gateway.complete_for_role(
@@ -345,8 +387,18 @@ class FilmAgentDispatcher:
                     "Write visual/camera/sound descriptions in English. "
                     "Keep dialogue verbatim in its original language. "
                     "Use only listed asset IDs. No video model substitution. You have no execution tools."
+                    + (" Compare ONLY the two text inputs, frozen Style and ShotSpec. No images or audio are "
+                       "available and you cannot judge their conformance. For each frozen field, copy its entire "
+                       "value verbatim into style_text; quote relevant ShotSpec text exactly in shot_text, or "
+                       "use null if no corresponding detail is specified. Assess whether these requirements "
+                       "conflict, including posture, action, placement, camera movement and internal editing. "
+                       "An unspecified ShotSpec detail never overrides Style. Keep separate constraints "
+                       "independent: a static camera does not imply an edit. Return all seven fields once. "
+                       "Conflicts, uncertainty or low confidence require needs_review. A proceed recommendation "
+                       "only permits consideration at preflight; it never approves a render or asset."
+                       if role == "qc_reviewer" else "")
                 ),
-                user=json.dumps(context, ensure_ascii=False),
+                user=json.dumps(model_context, ensure_ascii=False),
                 schema=contract.model_json_schema(),
             )
             proposal = contract.model_validate(response.parsed)
@@ -380,6 +432,8 @@ class FilmAgentDispatcher:
             task.status = "SUCCEEDED"
             task.trace = {
                 **task.trace,
+                "is_mock": bool(task.trace.get("is_mock") or response.raw_meta.get("is_mock")
+                                or response.raw_meta.get("mock")),
                 "latency_ms": response.latency_ms,
                 "usage": response.usage,
                 "output_hash": artifact.sha256,

@@ -396,7 +396,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # UI-only modes: intercept every POST before it reaches the API. These
         # profiles are deliberately not registered or presented as real evidence.
         styles = c.get(base + f"/projects/{p}/styles").json()
-        post(f"/projects/{p}/shots", {
+        routing_shot = post(f"/projects/{p}/shots", {
             "name": "Mode routing UI fixture",
             "spec": {"story_beat": "Synthetic UI routing only", "duration_target_s": 5,
                      "style_version_id": styles[0]["id"], "camera": {"shot_size": "medium"}},
@@ -499,6 +499,39 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             prep.screenshot(path=str(screenshot.with_name(screenshot.stem + "-native.png")))
         for path in workflow_paths + [grants_url, registry_url]:
             page.unroute(path)
+        # Text-only critic UI protocol. No remote model call or real proposal.
+        roles_url = "**/api/v1/film-agents"
+        lock_url = f"**/api/v1/projects/{p}/rulepack"
+        critic_url = f"**/api/v1/projects/{p}/film-agents/qc_reviewer/run"
+        page.route(roles_url, lambda route: route.fulfill(json=[{
+            "role": "qc_reviewer", "label": "Input critic UI fixture", "model": "UI_ONLY",
+            "profile_id": "ui-only-text", "output_kind": "StyleInputAssessment", "required_inputs": [],
+            "permissions": "Mock protocol fixture only", "tool_allowlist": ["propose"],
+        }]))
+        page.route(lock_url, lambda route: route.fulfill(json={"rulepack_id": "UI_ONLY"}))
+        critic_calls = []
+
+        def capture_critic(route):
+            critic_calls.append(route.request.post_data_json)
+            route.fulfill(status=201, json={"scope": "MOCK_UI_NO_MODEL_CALL"})
+
+        page.route(critic_url, capture_critic)
+        page.reload(wait_until="networkidle")
+        crew = page.locator("#film-crew")
+        crew.get_by_label("执行工种").select_option("qc_reviewer")
+        expect(crew.get_by_role("button", name="运行工种", exact=True)).to_be_disabled()
+        crew.get_by_label("检查镜头输入").select_option(routing_shot["id"])
+        consent = crew.get_by_label("允许本次工种向所选远端模型发送", exact=False)
+        consent.check()
+        with page.expect_response(lambda response: response.url.endswith("/film-agents/qc_reviewer/run")):
+            crew.get_by_role("button", name="运行工种", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        assert len(critic_calls) == 1
+        assert critic_calls[0]["shot_spec"] == routing_shot["spec"]
+        assert critic_calls[0]["input_revision_ids"] == [] and critic_calls[0]["allow_remote_text"] is True
+        expect(consent).not_to_be_checked()
+        for path in [roles_url, lock_url, critic_url]:
+            page.unroute(path)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
         page.reload(wait_until="networkidle")
@@ -558,6 +591,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
                     "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
                     "late old-project responses cannot overwrite selected-project assets/shots",
+                    "independent text critic requires selected shot, routes exact spec and resets per-call consent (intercepted)",
                 ],
                 "api_errors": failures,
             }

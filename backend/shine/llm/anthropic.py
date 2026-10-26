@@ -107,7 +107,7 @@ class AnthropicMessagesProvider:
             model=body.get("model") or self.config.model,
             latency_ms=int((time.perf_counter() - started) * 1000),
             usage=body.get("usage") or {},
-            raw_meta={"id": body.get("id")},
+            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False))},
         )
 
     def detect_capabilities(self) -> dict[str, Any]:

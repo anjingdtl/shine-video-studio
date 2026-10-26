@@ -270,6 +270,8 @@ class CompiledPrompt(APIModel):
 
 class RenderRequest(APIModel):
     project_language: str = "Chinese"
+    style_input_assessment_id: str | None = None
+    style_input_assessment_sha256: str | None = None
     rulepack_id: str | None = None
     rulepack_hash: str | None = None
     idempotency_key: str

@@ -1,0 +1,69 @@
+{
+  "stage": "SOFTWARE_VERIFIED_ACTUAL_TEXT_COMPARISONS_PENDING",
+  "backend": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "663",
+    "time": "255.391",
+    "timestamp": "2026-10-27T01:05:43.082433+08:00",
+    "hostname": "HSH-HOME"
+  },
+  "source_files_sha256": {
+    "backend/shine/agents/film.py": "abd3e80b2ac91c9c07c9689a33198185b8cbc1cc6302157a57b2c0b5e5382212",
+    "backend/shine/agents/film_contracts.py": "037f121459945a8c2461bb24cbfd66011339eec0587c7750bd3784cb619c599c",
+    "backend/shine/quality/input_assessment.py": "f77c2bbbb9a12f99e711c6093eeb9f80a8844e5a2cbc9124c1ee98c89d95db7c",
+    "backend/shine/comfyops/preproduction.py": "ed2ad27757677dbf159d7871f3883b5dc06cf4823e178bbcbf166de52fe9bbc9",
+    "backend/shine/main.py": "a38071e39fba78159cb09ac8a34ab7a8a3d8ae49a9c109fa9871930ade346ec3",
+    "backend/shine/schemas.py": "c91d271c6a063d8fa78d2870b20c45063321e3273f038b7968403b9caaba6d20",
+    "frontend/src/components/FilmCrewPanel.tsx": "c45000142b511c824c5dfba2fe6f5f12c8a3577931e5c18a8e1535aaae2c8935",
+    "scripts/verify_v13_web.py": "a74cb431b7ac683960a474e693010e2e166cf56aabf85bdd2d0ca0b9d708e137",
+    "backend/shine/llm/openai_compatible.py": "37723e37c235199ca508894327f6b818d49a746e1e13506ac3b90c4dbb49620b",
+    "backend/shine/llm/anthropic.py": "432f4f3da612d83d85c191edebf1882f814f7f87ba386beab59844cfba1fee26"
+  },
+  "contract": "independent-text-v1",
+  "role": "qc_reviewer",
+  "output_kind": "StyleInputAssessment",
+  "scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
+  "media_bytes_transmitted": 0,
+  "controls": [
+    "exact frozen quotes",
+    "shot quotes present in input",
+    "complete seven-field coverage",
+    "nonpass cannot recommend proceed",
+    "remote consent before call",
+    "input/version/route/result/stale evidence rechecked",
+    "Mock proof cannot qualify real execution",
+    "new analyzed real manifest requires proof at shared Worker gate",
+    "latest matching nonpass cannot fall back to older positive at Job creation",
+    "transport Mock marker retained even for a non-Mock configured endpoint"
+  ],
+  "production_binding": "exact ShotSpec/style hashes plus immutable artifact identity; shared preproduction enforce at claim and submit",
+  "historical_contracts": "preserved; no retroactive enrollment of old frozen manifests",
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": {
+    "status": "MOCK_VERIFIED",
+    "flows": 18,
+    "api_errors": [],
+    "playwright": "1.62.0",
+    "dependency_attempt": "uv download timed out before browser execution; reused verified same-version local cache; lockfiles unchanged",
+    "new_flow": "selected-shot snapshot, empty handoffs and per-call remote text consent reset; intercepted, no actual model call"
+  },
+  "real_text_model_tested": false,
+  "vlm_production_qualified": false,
+  "human_present_or_quality_approval": false,
+  "h3_submissions": 0,
+  "strict_lock": {
+    "bare_local_default": "FAIL_LOCAL_INDEX_MISMATCH",
+    "locked_index_command": "uv sync --project backend --locked --dry-run --default-index https://pypi.org/simple",
+    "locked_index_result": "PASS_NO_CHANGES",
+    "offline_lock_check": "PASS_WITH_EXPLICIT_LOCKED_INDEX",
+    "original_lock_restored_byte_identically": true,
+    "global_index_changed": false,
+    "dependency_versions_changed": false,
+    "initial_local_mirror": "mirrors.aliyun.com",
+    "locked_registry": "pypi.org"
+  }
+}

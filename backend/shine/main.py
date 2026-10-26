@@ -748,6 +748,18 @@ def create_app(
                 dependency_ids.append(previous_job_id)
             dependency_kinds[previous_job_id] = f"continuity:{continuity.mode.value}"
         request_data, _assets, compiler_meta = make_render_request(db, project, shot, body)
+        if body.provider.value == "comfyui":
+            from shine.quality.input_assessment import assessment_for_request
+
+            assessment = assessment_for_request(
+                db, project_id, request_data, select_latest=True,
+                offline=request.app.state.settings.offline_simulation,
+            )
+            if assessment:
+                request_data = request_data.model_copy(update={
+                    "style_input_assessment_id": assessment.id,
+                    "style_input_assessment_sha256": assessment.sha256,
+                })
         preproduction_hash = enforce(
             db,
             project_id,
