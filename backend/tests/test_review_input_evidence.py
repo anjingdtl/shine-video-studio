@@ -180,11 +180,35 @@ def test_unknown_guided_review_blocks_aliases_but_allows_independent_media(api, 
         assert next_provider.calls == next_provider.releases == 0
 
 
+def test_unknown_legacy_review_also_blocks_a_new_revision_of_same_inputs(api):
+    import httpx
+
+    _, factory, _ = api
+    project, _, context = prepared(api)
+    context = replace(context, independent_input=None)
+
+    class LostProvider:
+        is_mock = True
+
+        def release_models(self):
+            pass
+
+        def review(self, ctx):
+            raise httpx.ReadTimeout("Synthetic lost response")
+
+    tracked = TrackedProvider(LostProvider(), factory, project)
+    with pytest.raises(httpx.ReadTimeout):
+        tracked.review(context)
+    with pytest.raises(HTTPException, match="MODEL_CALL_RECONCILIATION_REQUIRED"):
+        tracked.review(replace(context, review_revision="different", job_id="different"))
+
+
 def test_legacy_review_fingerprint_preserves_uncertain_replay_guard(api):
     _, _, context = prepared(api)
     context = replace(context, independent_input=None)
     historical = asdict(context)
     historical.pop("independent_input")
+    historical.pop("identity_reference_labels")
     assert digest_input(context) == digest_input(historical)
 
 

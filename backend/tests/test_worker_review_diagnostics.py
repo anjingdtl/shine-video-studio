@@ -15,6 +15,8 @@ from tests.test_film_crew import ENGLISH_STYLE
      "SEMANTIC_REVIEW_CONTRACT_INVALID: STYLE_INPUT_DECISION_CONTRADICTION"),
     (ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", "a" * 64, validation={"code": "JSON_DECODE_FAILED"}),
      "SEMANTIC_REVIEW_INVALID_JSON: JSON_DECODE_FAILED"),
+    (ReceivedReviewError("VLM_RESPONSE_INCOMPLETE", "a" * 64, finish_reason="length"),
+     "SEMANTIC_REVIEW_INCOMPLETE: length"),
     (ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", "a" * 64, validation={"code": "private response text"}),
      "SEMANTIC_REVIEW_CONTRACT_INVALID: RESPONSE_REJECTED"),
     (httpx.ReadTimeout("private URL or response"), "SEMANTIC_REVIEW_TIMEOUT: response unavailable"),
@@ -137,3 +139,81 @@ def test_mock_transport_cannot_claim_a_real_local_executor_identity():
     envelope = {"model": "fixture", "is_mock": False, "mock": True, "executor_identity": identity}
     with pytest.raises(ReceivedReviewError, match="EXECUTOR_IDENTITY_INVALID"):
         LocalVisionReviewer(cfg).record_executor_identity(envelope, "c" * 64)
+
+
+@pytest.mark.parametrize("case", ["no-reference", "scene-only", "character-reference", "multi-bound", "multi-other",
+                                  "multi-unspecified", "long-detail", "short-detail"])
+def test_structured_review_requires_character_reference_and_bounded_detail(tmp_path, monkeypatch, case):
+    import json
+    from dataclasses import replace
+
+    from shine.llm.base import ProviderConfig
+    from shine.quality.semantic import LocalVisionReviewer, review_schema_hash, vision_review_schema
+    from tests.review_fixtures import fixture_style_input_checks
+    from tests.test_semantic_qc import context
+
+    identity_case = case not in {"long-detail", "short-detail"}
+    finding = {"code": "IDENTITY_MISMATCH" if identity_case
+               else "SCENE_MISMATCH", "category": "fixture", "severity": "hard", "confidence": 1,
+               "message": "x" * (241 if case == "long-detail" else 20)}
+    if case in {"multi-bound", "multi-other"}:
+        finding["subject"] = "CHAR_A" if case == "multi-bound" else "CHAR_B"
+    wire = {"reviewer": "fixture", "is_mock": True, "input_sha256": "a" * 64, "verdict": "failed",
+            "findings": [finding], "style_input_checks": fixture_style_input_checks(),
+            "overall_confidence": 1, "raw_summary": "synthetic"}
+    body = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(wire)}}],
+            "structured_output": {"protocol": "local-review-json-schema-v1", "decoder_sha256": "d" * 64,
+                                  "schema_sha256": review_schema_hash(vision_review_schema())}}
+    original = httpx.Client
+    monkeypatch.setattr("shine.quality.semantic.httpx.Client", lambda **kw: original(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body)), **kw))
+    cfg = ProviderConfig("fixture", "fixture", "openai_compatible", "http://127.0.0.1:1", "fixture", None)
+    reviewer = LocalVisionReviewer(cfg, response_protocol="local-review-json-schema-v1")
+    ctx = context(tmp_path)
+    if identity_case:
+        characters = ["CHAR_A", "CHAR_B"] if case.startswith("multi-") else ["CHAR_A"]
+        ctx = replace(ctx, shot_spec=ctx.shot_spec.model_copy(update={"characters": characters}))
+    if case in {"scene-only", "character-reference", "multi-bound", "multi-other", "multi-unspecified"}:
+        ref = tmp_path / "synthetic-reference.jpg"
+        ref.write_bytes(b"synthetic reference")
+        label = "scene / scene" if case == "scene-only" else "reference / CHAR_A"
+        ctx = replace(ctx, local_reference_frames=((label, ref),),
+                      identity_reference_labels=(label,) if case != "scene-only" else ())
+    if case in {"no-reference", "scene-only", "multi-other", "multi-unspecified", "long-detail"}:
+        with pytest.raises(ReceivedReviewError) as error:
+            reviewer.review(ctx)
+        assert error.value.validation["code"] == (
+            "VLM_FINDING_DETAIL_TOO_LONG" if case == "long-detail" else "VLM_IDENTITY_REFERENCE_MISSING")
+    else:
+        assert reviewer.review(ctx).verdict == "failed"
+
+
+def test_worker_marks_only_bound_character_image_as_identity_reference(api, tmp_path, monkeypatch):
+    from shine.schemas import ReferenceManifestItem
+
+    _, _, settings = api
+    spec = ShotSpec(story_beat="fixture", duration_target_s=6, style_version_id="fixture", characters=["CHAR_A"])
+    entries = [ReferenceManifestItem(label="scene", asset_id="scene", sha256="a" * 64,
+                                    storage_key="scene.png", content_type="image/png", use_as="subject",
+                                    role="scene", entity_id="CHAR_A"),
+               ReferenceManifestItem(label="person", asset_id="person", sha256="b" * 64,
+                                    storage_key="person.png", content_type="image/png", use_as="subject",
+                                    role="character", entity_id="CHAR_A")]
+    frames = (("scene / CHAR_A", tmp_path / "scene.jpg"), ("person / CHAR_A", tmp_path / "person.jpg"))
+    monkeypatch.setattr("shine.media.frames.reference_thumbnails", lambda *a, **kw: frames)
+    captured = []
+
+    class Reviewer:
+        is_mock = True
+        accepts_local_references = True
+
+        def review(self, ctx):
+            captured.append(ctx)
+            return SemanticReviewResult(reviewer="fixture", is_mock=True, input_sha256="a" * 64,
+                                        verdict="passed", findings=[], overall_confidence=1)
+
+    _, error = _semantic_review(reviewer=Reviewer(), job_id="synthetic", spec=spec,
+                                style=StyleBible.model_validate(ENGLISH_STYLE), artifact_path=tmp_path / "fixture",
+                                artifact_sha256="a" * 64, settings=settings, remote_consent=False,
+                                project_id="synthetic", transcript=None, reference_manifest=entries)
+    assert not error and captured[0].identity_reference_labels == ("person / CHAR_A",)

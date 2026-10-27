@@ -78,7 +78,7 @@ def review_validation_failure(exc):
     return {"code": code if code in {
         "STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
         "VLM_DECISION_MISSING", "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING",
-        "VLM_DIALOGUE_HARD_UNSUPPORTED",
+        "VLM_DIALOGUE_HARD_UNSUPPORTED", "VLM_IDENTITY_REFERENCE_MISSING", "VLM_FINDING_DETAIL_TOO_LONG",
     } else "RESPONSE_SHAPE_INVALID"}
 
 
@@ -111,6 +111,7 @@ class ReviewContext:
     local_reference_frames: tuple[tuple[str, Path], ...] = ()
     review_revision: str | None = None
     independent_input: dict | None = None
+    identity_reference_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +266,10 @@ class OpenAICompatibleVisionReviewer:
                     "If both written inputs request a seated person, that text check is consistent even "
                     "when the images show an empty street; report the empty street as a visual finding. "
                     "Never report missing or wrong dialogue from images or an absent or Mock transcript. "
+                    "A generic character label is not a reference identity; without an approved reference "
+                    "image, report visible appearance or action differences, not an identity mismatch. "
+                    "For an identity mismatch, identify the exact target character in subject and use its "
+                    "bound character reference; another character or a scene reference is not sufficient. "
                     "consistent means no explicit input contradiction; an unspecified ShotSpec detail "
                     "does not override Style. Compare actions and posture in story_beat and blocking too, "
                     "not just camera labels. Opposing posture or action requirements are input conflicts "
@@ -272,7 +277,7 @@ class OpenAICompatibleVisionReviewer:
                     "For each conflict or uncertainty include a style finding with code "
                     "STYLE_INPUT_<UPPERCASE_FIELD> and a non-passing overall verdict. "
                     "Never infer an internal edit from a static camera; camera motion and cuts are independent. "
-                    "Keep findings concise and group repeated observations. "
+                    "Keep each finding message at most 240 characters, and group repeated observations. "
                     "raw_summary must be at most 300 characters. "
                     "Do not omit distinct violations or uncertainties to fit the output budget. "
                     f"ShotSpec: {json.dumps(review_spec, ensure_ascii=False)}\n"
@@ -338,6 +343,19 @@ class OpenAICompatibleVisionReviewer:
                 recorder(body, response_hash)
             result = SemanticReviewResult.model_validate(parsed)
             require_style_input_checks(result)
+            if response_protocol and any(len(f.message) > 240 for f in result.findings):
+                raise ValueError("VLM_FINDING_DETAIL_TOO_LONG")
+            if response_protocol:
+                bound = {label.rsplit(" / ", 1)[-1] for label, _ in context.local_reference_frames
+                         if label in context.identity_reference_labels} if getattr(
+                             self, "accepts_local_references", False) else set()
+                for finding in result.findings:
+                    if finding.code.upper() == "IDENTITY_MISMATCH":
+                        subject = finding.subject
+                        if not subject and len(context.shot_spec.characters) == 1:
+                            subject = context.shot_spec.characters[0]
+                        if subject not in context.shot_spec.characters or subject not in bound:
+                            raise ValueError("VLM_IDENTITY_REFERENCE_MISSING")
             # Frames do not establish whether words were spoken. These known
             # dialogue claims require an actual non-Mock ASR transcript.
             dialogue_codes = {"MISSING_DIALOGUE", "DIALOGUE_MISSING", "WRONG_DIALOGUE", "DIALOGUE_MISMATCH"}

@@ -1,0 +1,164 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T04:59:54.032573+00:00",
+  "status": "ONE_MASK_CONTROL_MATCHED_WALKING_RESPONSE_INCOMPLETE",
+  "source_head": "fd504d6802469b032ee0984228e9de93ad68d12e",
+  "draft_id": "63a52262-730b-4030-aef2-90da6a2b92ff",
+  "draft_status_at_test": "STATIC_VALIDATED_UNPUBLISHED",
+  "stages": [
+    {
+      "name": "client-pinned-pixel-mask-negative",
+      "source_video_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "expected": "failed",
+      "call_id": "3327a0ba-11c8-4fb3-8421-cf32752a1eeb",
+      "call_status": "COMPLETED",
+      "expected_result_matched": true,
+      "input_checklist_consistent": true,
+      "response_sha256": "a435112c16f89da2d67c1d9d886e194ed41d888212fb3a6083131a1ea8da1e3d",
+      "response_finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 3911,
+        "completion_tokens": 1266
+      },
+      "received_response_diagnostic": null,
+      "client_review_sha256": "f775c486b299d6ff973c48e4427826578d5fe409731d8e2eadc0a70c2c62a1ff",
+      "input_evidence_protocol": "text-assessment-compact-v2",
+      "logical_review_hash": "e2cf6ee379f20fd4242a58269d12869c3e0a32d70e551f6b2469b8c19ebd506c",
+      "lease_status": "RELEASED",
+      "physical_release": {
+        "receipt": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\review-client-pinned-pixel-mask-negative-physical-release-20261027.json",
+        "sha256": "c3cbe5751d66252435ddc700606dc671aea5084a5ad7e849f53c00734e581ce0",
+        "status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+        "old_processes_dead": true,
+        "memory_before_stop": {
+          "working_set_bytes": 2398953472,
+          "lifetime_peak_working_set_bytes": 6402637824,
+          "private_commit_bytes": 5569937408,
+          "lifetime_peak_private_commit_bytes": 24128880640,
+          "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+        },
+        "memory_fresh_baseline": {
+          "working_set_bytes": 812883968,
+          "lifetime_peak_working_set_bytes": 812883968,
+          "private_commit_bytes": 2189316096,
+          "lifetime_peak_private_commit_bytes": 2189316096,
+          "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+        }
+      },
+      "content_json_valid": true,
+      "verdict": "failed",
+      "checks": [
+        {
+          "field": "photography_language",
+          "status": "consistent"
+        },
+        {
+          "field": "shot_blocking",
+          "status": "consistent"
+        },
+        {
+          "field": "color_palette",
+          "status": "consistent"
+        },
+        {
+          "field": "lighting_tone",
+          "status": "consistent"
+        },
+        {
+          "field": "lens_texture",
+          "status": "consistent"
+        },
+        {
+          "field": "editing_rhythm",
+          "status": "consistent"
+        },
+        {
+          "field": "sound_performance",
+          "status": "consistent"
+        }
+      ],
+      "findings": [
+        {
+          "code": "COSTUME_VIOLATION",
+          "category": "Costume",
+          "severity": "hard",
+          "confidence": 1.0
+        }
+      ],
+      "finding_mentions_mask": true,
+      "finding_mentions_face": true
+    },
+    {
+      "name": "client-pinned-pixel-walking-negative",
+      "source_video_sha256": "16fad107e42a8ab8d55fb681f2cc88a1c8d81bcec02ec8707f00dd0b6fa3d0fc",
+      "expected": "failed",
+      "call_id": "494130b9-b80d-48d2-9798-f2056fdc648d",
+      "call_status": "FAILED",
+      "expected_result_matched": null,
+      "input_checklist_consistent": null,
+      "response_sha256": "6e30f4af267231bcbc227fbf510448cbb0e248d781254e1eec12fb8070b96350",
+      "response_finish_reason": "length",
+      "usage": {
+        "prompt_tokens": 3839,
+        "completion_tokens": 2048
+      },
+      "received_response_diagnostic": {
+        "sha256": "6e30f4af267231bcbc227fbf510448cbb0e248d781254e1eec12fb8070b96350",
+        "finish_reason": "length",
+        "error_code": "VLM_RESPONSE_INCOMPLETE",
+        "retryable": false
+      },
+      "client_review_sha256": "f775c486b299d6ff973c48e4427826578d5fe409731d8e2eadc0a70c2c62a1ff",
+      "input_evidence_protocol": "text-assessment-compact-v2",
+      "logical_review_hash": "ff97134396731e745a54dd4bd1f0a89b2330df78257b98d60a1d647ac2ee5ec3",
+      "lease_status": "RELEASED",
+      "physical_release": {
+        "receipt": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\review-client-pinned-pixel-walking-negative-physical-release-20261027.json",
+        "sha256": "7ff0e3fd6153ef44b88b206499a22b75c6836f368b45889718acf1e87d150322",
+        "status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+        "old_processes_dead": true,
+        "memory_before_stop": {
+          "working_set_bytes": 2548121600,
+          "lifetime_peak_working_set_bytes": 6397419520,
+          "private_commit_bytes": 5568925696,
+          "lifetime_peak_private_commit_bytes": 24309157888,
+          "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+        },
+        "memory_fresh_baseline": {
+          "working_set_bytes": 811708416,
+          "lifetime_peak_working_set_bytes": 811708416,
+          "private_commit_bytes": 2187841536,
+          "lifetime_peak_private_commit_bytes": 2187841536,
+          "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+        }
+      },
+      "content_json_valid": false,
+      "partial_output_chars": 9687,
+      "partial_finding_code_count": 7,
+      "partial_field_count": 5
+    }
+  ],
+  "remaining_controls": "NOT_RUN",
+  "whole_gpu_point_snapshot": {
+    "at": "2026-10-27T04:46:37.819886+00:00",
+    "scope": "WHOLE_GPU_POINT_SNAPSHOT_NOT_MODEL_PEAK_OR_BUDGET_PROOF",
+    "columns": [
+      "total_mib",
+      "used_mib",
+      "free_mib",
+      "gpu_utilization_percent"
+    ],
+    "values": "16303, 15875, 103, 38",
+    "serial_control": "client-pinned-pixel-mask-negative",
+    "h3_submissions": 0
+  },
+  "protected_tables_unchanged": true,
+  "comfy_restored_idle": true,
+  "h3_submissions": 0,
+  "automatic_replays": 0,
+  "remote_text_calls": 0,
+  "media_cloud_upload_bytes": 0,
+  "human_quality_or_rights_approval": false,
+  "resource_budget_note": "14000 MiB is an estimate; whole-GPU point snapshot is not model-peak proof.",
+  "product_status": "PARTIAL"
+}

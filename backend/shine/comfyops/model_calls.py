@@ -74,6 +74,8 @@ def digest_input(value):
 
         if isinstance(value, ReviewContext) and payload.get("independent_input") is None:
             payload.pop("independent_input", None)  # Preserve historical replay guards.
+        if isinstance(value, ReviewContext) and not payload.get("identity_reference_labels"):
+            payload.pop("identity_reference_labels", None)
         return digest_input(payload)
     if isinstance(value, Path):
         if value.is_file():
@@ -152,6 +154,13 @@ class TrackedProvider:
                 elif input_required:
                     raise HTTPException(409, "STYLE_INPUT_REVIEW_CONTEXT_REQUIRED")
             if source_context is not None:
+                # Bind unknown outcomes to the logical media/text inputs,
+                # independent of client version, alias, transcript or revision.
+                logical_review_hash = graph_hash(digest_input({
+                    "artifact_sha256": source_context.artifact_sha256,
+                    "shot_spec": source_context.shot_spec.model_dump(mode="json"),
+                    "style": source_context.style.model_dump(mode="json"),
+                }))
                 input_required = input_required or source_context.independent_input is not None
                 if input_required and source_context.independent_input is None:
                     raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_REQUIRED")
@@ -162,13 +171,6 @@ class TrackedProvider:
                         input_evidence = evidence_for_review(
                             db, self.project_id, source_context, offline=bool(self.provider.is_mock))
                     client_review_sha256 = verified_review_client_identity()
-                    # Bind unknown outcomes to the logical media/text inputs,
-                    # not the client version, transport alias or review revision.
-                    logical_review_hash = graph_hash(digest_input({
-                        "artifact_sha256": source_context.artifact_sha256,
-                        "shot_spec": source_context.shot_spec.model_dump(mode="json"),
-                        "style": source_context.style.model_dump(mode="json"),
-                    }))
                     verified_context = replace(source_context, independent_input=input_evidence)
                     if args:
                         args = (verified_context, *args[1:])
@@ -237,11 +239,11 @@ class TrackedProvider:
                         "owner_birth": process_identity(os.getpid()),
                         "review_provider": review_binding,
                         **({"client_review_sha256": client_review_sha256} if client_review_sha256 else {}),
+                        **({"logical_review_hash": logical_review_hash} if logical_review_hash else {}),
                         **({"independent_input": {"artifact_id": input_evidence["artifact_id"],
                                                   "sha256": input_evidence["sha256"]},
                             "input_assessment_required": input_required,
-                            "input_evidence_protocol": input_evidence["protocol"],
-                            "logical_review_hash": logical_review_hash}
+                            "input_evidence_protocol": input_evidence["protocol"]}
                            if input_evidence is not None else {}),
                     },
                 )

@@ -69,6 +69,7 @@ from shine.schemas import (
     FusedQCResult,
     HardFailure,
     ReferenceManifestItem,
+    ReferenceUse,
     RenderRequest,
     RepairAction,
     ShotSpec,
@@ -367,6 +368,13 @@ def _semantic_review(
             ffmpeg_path=settings.ffmpeg_path,
             duration_s=spec.duration_target_s,
         )
+    identity_labels = {
+        f"{entry.label} / {entry.entity_id or entry.role or 'reference'}"
+        for entry in reference_manifest
+        if entry.content_type.startswith("image/") and entry.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}
+        and (entry.role or "").casefold() not in {"scene", "location", "prop", "costume", "voice"}
+        and (entry.entity_id in spec.characters or entry.role in spec.characters)
+    }
     context = ReviewContext(
         job_id=job_id,
         shot_spec=spec,
@@ -379,6 +387,7 @@ def _semantic_review(
         local_reference_frames=local_reference_frames,
         review_revision=review_revision,
         independent_input=independent_input,
+        identity_reference_labels=tuple(label for label, _ in local_reference_frames if label in identity_labels),
     )
     try:
         result = reviewer.review(context)
@@ -387,13 +396,16 @@ def _semantic_review(
     except (TimeoutError, httpx.TimeoutException):
         return [], "SEMANTIC_REVIEW_TIMEOUT: response unavailable"
     except ReceivedReviewError as exc:
+        if str(exc) == "VLM_RESPONSE_INCOMPLETE":
+            finish = exc.finish_reason if exc.finish_reason in {"length", "content_filter"} else "UNSPECIFIED"
+            return [], f"SEMANTIC_REVIEW_INCOMPLETE: {finish}"
         reason = (exc.validation or {}).get("code")
         if reason == "JSON_DECODE_FAILED":
             return [], "SEMANTIC_REVIEW_INVALID_JSON: JSON_DECODE_FAILED"
         allowed = {"STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
                    "SCHEMA_VALIDATION_FAILED", "HTTP_REQUEST_REJECTED", "VLM_DECISION_MISSING",
                    "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING", "VLM_DIALOGUE_HARD_UNSUPPORTED",
-                   "RESPONSE_SHAPE_INVALID"}
+                   "VLM_IDENTITY_REFERENCE_MISSING", "VLM_FINDING_DETAIL_TOO_LONG", "RESPONSE_SHAPE_INVALID"}
         return [], f"SEMANTIC_REVIEW_CONTRACT_INVALID: {reason if reason in allowed else 'RESPONSE_REJECTED'}"
     except ValueError as exc:
         return [], f"SEMANTIC_REVIEW_INVALID_JSON: {exc}"
