@@ -558,7 +558,10 @@ Invoke-RestMethod "http://127.0.0.1:8100/api/v1/projects/$projectId/deliveries"
 未知、失联或卸载失败的资源保留阻断。不要手工删除 ResourceLease 或重放不确定调用。
 
 在“模型与系统”将明确的本地 OpenAI-compatible Provider 分别路由到“画面审片”和“语音核对”。
-本地服务须提供可核验的 `/free`，只回 accepted/released 而没有分配计数不够。
+本地画面和语音审片服务须提供可核验的 `/free` 和 `/health`。卸载后，`/free` 必须确认已分配
+显存为零；`/health` 还须确认两个模型均未加载、已分配及保留显存均为零。缺失字段、服务失联
+或任一检查不通过时保留阻断，不能进入下一模型。自定义本地审片服务需要实现这些字段。
+这些检查不证明审片进程的宿主内存已全部归还；需要进程级释放时仍须使用受管的串行交接。
 文本 `qc_reviewer` 路由不会代替图像或音频评审；远程派生媒体仍须项目明确许可。
 
 `start_shine.ps1` 可额外接收 `-ReviewPython`、`-ReviewManifest`、`-ReviewRuntimePackages`（三项一起指定）

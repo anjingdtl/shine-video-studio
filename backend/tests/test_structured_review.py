@@ -177,6 +177,9 @@ def test_structured_response_proof_cannot_be_assumed_or_retried(api, tmp_path, m
         body["structured_output"] = proof
     posts = []
     def respond(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "loaded": False, "asr_loaded": False,
+                                            "allocated_bytes": 0, "reserved_bytes": 0})
         if request.url.path == "/free":
             return httpx.Response(200, json={"released": True, "allocated_bytes": 0})
         posts.append(json.loads(request.content))

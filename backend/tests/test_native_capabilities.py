@@ -87,6 +87,10 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
     health = {
         "status": "ok",
         "is_mock": False,
+        "loaded": False,
+        "asr_loaded": False,
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
         "runtime_sha256": identity["runtime_sha256"],
         "verified_models": {
             "fixture-only": {k: v for k, v in identity.items() if k not in {"schema_version", "runtime_sha256"}}

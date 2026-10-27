@@ -80,6 +80,9 @@ def test_local_vlm_needs_no_cloud_consent_and_preserves_fake_result(tmp_path, mo
         requests.append(request)
         if request.url.path == "/free":
             return httpx.Response(200, json={"released": True, "allocated_bytes": 0})
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "loaded": False, "asr_loaded": False,
+                                            "allocated_bytes": 0, "reserved_bytes": 0})
         return httpx.Response(
             200,
             json={
@@ -118,7 +121,7 @@ def test_local_vlm_needs_no_cloud_consent_and_preserves_fake_result(tmp_path, mo
     reviewer = LocalVisionReviewer(cfg)
     assert reviewer.review(context(tmp_path, consent=False)).is_mock
     reviewer.release_models()
-    assert [r.url.path for r in requests] == ["/v1/chat/completions", "/free"]
+    assert [r.url.path for r in requests] == ["/v1/chat/completions", "/free", "/health"]
     with pytest.raises(HTTPException) as rejected:
         LocalVisionReviewer(replace(cfg, base_url="https://cloud.example/v1"))
     assert rejected.value.status_code == 422

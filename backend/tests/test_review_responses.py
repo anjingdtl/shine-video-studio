@@ -18,7 +18,8 @@ from tests.conftest import create_project
 from tests.test_semantic_qc import context
 
 
-@pytest.mark.parametrize("failure", ["truncated-json", "length", "schema", "timeout", "release", "release-timeout"])
+@pytest.mark.parametrize("failure", ["truncated-json", "length", "schema", "timeout", "release", "release-timeout",
+                                     "reserved-after-release", "loaded-after-release"])
 def test_response_failure_ledger_keeps_unknown_outcomes_blocked(api, tmp_path, monkeypatch, failure):
     client, factory, _ = api
     project = create_project(client)
@@ -28,6 +29,12 @@ def test_response_failure_ledger_keeps_unknown_outcomes_blocked(api, tmp_path, m
     encoded = json.dumps(wire).encode()
 
     def respond(request):
+        if request.url.path == "/health":
+            retained = len(releases) == 2
+            return httpx.Response(200, json={"status": "ok",
+                "loaded": retained and failure == "loaded-after-release", "asr_loaded": False,
+                "allocated_bytes": 0,
+                "reserved_bytes": 1024 if retained and failure == "reserved-after-release" else 0})
         if request.url.path == "/free":
             releases.append(1)
             if failure == "release-timeout" and len(releases) == 2:
@@ -53,11 +60,11 @@ def test_response_failure_ledger_keeps_unknown_outcomes_blocked(api, tmp_path, m
         task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.role_id == "model_call:VLM:review"))
         lease = db.get(ResourceLease, task.trace["resource_id"])
         assert task.trace["review_provider"]["profile_id"] == "fixture-profile"
-        if failure in {"timeout", "release", "release-timeout"}:
+        if failure in {"timeout", "release", "release-timeout", "reserved-after-release", "loaded-after-release"}:
             assert task.status == "NEEDS_REVIEW"
-            assert lease.status == ("RECONCILE_REQUIRED" if failure in {"release", "release-timeout"} else "RELEASED")
+            assert lease.status == ("RECONCILE_REQUIRED" if failure != "timeout" else "RELEASED")
             assert not isinstance(caught.value, ReceivedReviewError)
-            if failure in {"release", "release-timeout"}:
+            if failure != "timeout":
                 assert task.trace["received_response"]["sha256"] == hashlib.sha256(encoded).hexdigest()
                 assert task.trace["received_response"]["retryable"] is False
         else:

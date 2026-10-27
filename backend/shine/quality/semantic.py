@@ -432,11 +432,21 @@ class LocalReviewRelease:
         # reconciliation; waiting another full inference timeout proves nothing.
         with httpx.Client(timeout=min(self.config.timeout_s, 30.0), follow_redirects=False) as client:
             response = client.post(endpoint + "/free", headers=headers, json={"unload_models": True})
-        response.raise_for_status()
-        proof = response.json()
-        allocated = proof.get("allocated_bytes")
-        if proof.get("released") is not True or type(allocated) is not int or allocated != 0:
-            raise ValueError("MODEL_RELEASE_UNCONFIRMED")
+            response.raise_for_status()
+            proof = response.json()
+            allocated = proof.get("allocated_bytes")
+            if proof.get("released") is not True or type(allocated) is not int or allocated != 0:
+                raise ValueError("MODEL_RELEASE_UNCONFIRMED")
+            # A zero allocated count alone does not prove that the allocator
+            # released its reserved pool or that both models are unloaded.
+            health = client.get(endpoint + "/health", headers=headers)
+            health.raise_for_status()
+            state = health.json()
+            if (state.get("status") != "ok" or state.get("loaded") is not False
+                    or state.get("asr_loaded") is not False
+                    or type(state.get("allocated_bytes")) is not int or state["allocated_bytes"] != 0
+                    or type(state.get("reserved_bytes")) is not int or state["reserved_bytes"] != 0):
+                raise ValueError("MODEL_RELEASE_UNCONFIRMED")
 
 
 class LocalVisionReviewer(LocalReviewRelease, OpenAICompatibleVisionReviewer):

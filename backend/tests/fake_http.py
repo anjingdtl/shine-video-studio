@@ -62,6 +62,10 @@ class FakeOpenAIServer(_BaseServer):
                 self.wfile.write(body)
 
             def do_GET(self) -> None:
+                if self.path == "/health":
+                    self._json(200, {"status": "ok", "loaded": False, "asr_loaded": False,
+                                     "allocated_bytes": 0, "reserved_bytes": 0, "is_mock": True})
+                    return
                 if self.path.startswith("/v1/models"):
                     if not self._authorized():
                         self._json(401, {"error": "unauthorized"})

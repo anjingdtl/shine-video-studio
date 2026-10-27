@@ -107,6 +107,9 @@ def test_local_executor_response_identity_is_bound_to_completed_call(api, tmp_pa
     calls = []
 
     def respond(request):
+        if request.url.path == '/health':
+            return httpx.Response(200, json={'status': 'ok', 'loaded': False, 'asr_loaded': False,
+                                            'allocated_bytes': 0, 'reserved_bytes': 0})
         if request.url.path == '/free':
             return httpx.Response(200, json={'released': True, 'allocated_bytes': 0})
         calls.append(request)

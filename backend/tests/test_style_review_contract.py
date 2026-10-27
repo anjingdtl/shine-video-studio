@@ -99,6 +99,9 @@ def test_missing_style_coverage_is_failed_received_call_not_unknown_or_passed(ap
     original, posts = httpx.Client, []
 
     def respond(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "loaded": False, "asr_loaded": False,
+                                            "allocated_bytes": 0, "reserved_bytes": 0})
         if request.url.path == "/free":
             return httpx.Response(200, json={"released": True, "allocated_bytes": 0})
         posts.append(request)
