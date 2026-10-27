@@ -1,0 +1,24 @@
+{
+  "scope": "registered isolated ASR technical calibration",
+  "status": "TECHNICALLY_PUBLISHED",
+  "profile_id": "a9a373ad-ede0-48fb-9bec-2a5ec4a03b9b",
+  "workflow_id": "f867c1a6-a224-47f7-afb0-d8a06f021929",
+  "workflow_sha256": "78fa8b45680b43b876330b32f176cf224653b24b76a417ecccb379e3e35f11cd",
+  "runtime_sha256": "d8c2ebde0f82e8478026b4b622d2e171f1174c8ebc3831152d4dc27d3449dea2",
+  "call_id": "007ea46e-5adc-4035-9a07-7fbfdd44e962",
+  "call_status": "COMPLETED",
+  "lease_status": "RELEASED",
+  "matched": true,
+  "child": {
+    "pid": 23468,
+    "exitcode": 0,
+    "joined": true
+  },
+  "h3_submissions": 0,
+  "human_present": false,
+  "service_status": "offline when checked after interruption; worker restart unverified",
+  "local_receipt_sha256": {
+    "registration": "7b2dac0de05fd6cf956b2920fe994477dd306c856c1985b83d33da61df7fef9f",
+    "control": "d276c8e1c91fec0f64c27c3175781fbc4b024552330d4f36ea67c76339b94fa9"
+  }
+}
