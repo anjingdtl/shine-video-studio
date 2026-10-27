@@ -1,0 +1,49 @@
+{
+  "scope": "READ_ONLY_FILE_SOURCE_COMPARISON_NOT_WORKFLOW_APPROVAL",
+  "status": "ALL_FIVE_UPSTREAM_HASHES_MATCH_NOT_PUBLICATION",
+  "comfy_org_revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+  "fal_revision": "039cc8579d7aa357a882d7f4111b25da4f72dccc",
+  "sources": [
+    "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/e5eb578a89295337b8ff433a035929ce0279e0b6",
+    "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA/tree/039cc8579d7aa357a882d7f4111b25da4f72dccc",
+    "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE"
+  ],
+  "files": [
+    {
+      "name": "ref2va",
+      "bytes": 20970379616,
+      "actual_sha256": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+      "matches_upstream": true
+    },
+    {
+      "name": "text_encoder",
+      "bytes": 15687142551,
+      "actual_sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "matches_upstream": true
+    },
+    {
+      "name": "video_vae",
+      "bytes": 5207808496,
+      "actual_sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "matches_upstream": true
+    },
+    {
+      "name": "audio_vae",
+      "bytes": 605254808,
+      "actual_sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "matches_upstream": true
+    },
+    {
+      "name": "realism_lora",
+      "bytes": 131229656,
+      "actual_sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+      "matches_upstream": true
+    }
+  ],
+  "notes": [
+    "Original files only read, not changed",
+    "Hashes and upstream license statements do not establish all terms of usage",
+    "Existing Fake workflow records not promoted",
+    "No new H3 generation"
+  ]
+}

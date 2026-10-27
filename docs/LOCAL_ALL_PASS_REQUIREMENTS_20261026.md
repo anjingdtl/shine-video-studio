@@ -204,3 +204,7 @@ Independent text protocol v2 (2026-10-27): **690 backend tests passed**, zero fa
 人物通过结果需包含实际观察说明，仅重复 passed/pass/ok 等状态不能作为通过证据；缺失与不确定继续阻断。相关定向测试通过，完整回归在固定源码下重新执行。
 
 最终安全合同固定源码完整后端测试 869 项、零失败/错误/跳过，Ruff 与 TypeScript/Vite 构建通过；证据见 basic-nonpass-contract.json。人物通过需有观察描述，严格类型错误不通过。真实基础人物能力仍未重新校准发布。
+
+真实基础人物校准：固定空街反例 7ee996a8-d176-43f7-86e7-5501dfb540c2 判 failed；固定人物正例 13c71976-7bd8-4071-ab5b-d0c87e5b82e1 判 passed，均符合预先声明目标，并分别确认模型租约释放及旧进程退出。新本地人物能力 660ecd23-de23-437a-8479-5cbff6da37a0 与 ASR 能力 4a5bc5b8-2bef-4883-9dae-1b2660479603 均已技术发布且当前 live 身份校验无错误；未重投 H3 或上传素材，ComfyUI、API、Worker 和 Web 已恢复。样本没有绑定人物参考图，只证明有限人物存在与视觉特征控制，不证明身份匹配、音质、人工影片验收或完整生产闭环；后者仍 PARTIAL。
+
+Ref2VA 源文件只读核验：现有 INT8 Ref2VA、NVFP4 文本编码器、FP16 视频 VAE、FP32 音频 VAE 与 Realism People LoRA 五文件的当前 SHA-256 和字节数均匹配上游固定版本；原文件未修改，未生成视频。来源与逐文件证据见 ref2va-upstream-source-hashes.json。该核验不等于已登记的隔离模型包、运行时路径绑定、工作流发布或许可条件的全面判断；原 FAKE_EXECUTED 工作流未升级。

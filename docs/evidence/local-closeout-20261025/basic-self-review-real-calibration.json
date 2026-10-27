@@ -1,0 +1,42 @@
+{
+  "at": "2026-10-27T12:29:53.962855+00:00",
+  "scope": "LOCAL_TECHNICAL_CALIBRATION_ONLY_NOT_FULL_FILM_OR_VOICE_ACCEPTANCE",
+  "source_head": "71fafff7c60aa157514789c563e8a071169bdc6b",
+  "runtime_sha256": "34a312265b78c84e8c897fa4992fb141f2226eedc4bad9b9a269d0e5b7414946",
+  "basic_vlm_capability_id": "660ecd23-de23-437a-8479-5cbff6da37a0",
+  "basic_vlm_status": "BASIC_CHARACTER_TECHNICALLY_QUALIFIED_NOT_FILM_ACCEPTANCE",
+  "asr_capability_id": "4a5bc5b8-2bef-4883-9dae-1b2660479603",
+  "asr_status": "BASIC_SCOPE_ASR_TECHNICALLY_QUALIFIED_VLM_WITHHELD",
+  "controls": [
+    {
+      "name": "basic-nonpass-empty-negative",
+      "expected": "not_passed",
+      "observed": "failed",
+      "call_id": "7ee996a8-d176-43f7-86e7-5501dfb540c2",
+      "artifact_sha256": "bf6fa7643790008deea277331994ea533c1d7ef3d3696b8af73030814c1d021d",
+      "free_gpu_mib_before": 15328,
+      "lease_status": "RELEASED",
+      "review_process_released": true
+    },
+    {
+      "name": "basic-nonpass-portrait-positive",
+      "expected": "passed",
+      "observed": "passed",
+      "call_id": "13c71976-7bd8-4071-ab5b-d0c87e5b82e1",
+      "artifact_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "free_gpu_mib_before": 15360,
+      "lease_status": "RELEASED",
+      "review_process_released": true
+    }
+  ],
+  "protected_tables_unchanged": true,
+  "comfy_restored_idle": true,
+  "worker_restored": true,
+  "h3_submissions": 0,
+  "remote_media_upload_bytes": 0,
+  "limits": [
+    "No bound character-reference identity comparison in these controls",
+    "Not human visual, listening, rights, asset or film acceptance",
+    "Basic production end-to-end not yet run"
+  ]
+}
