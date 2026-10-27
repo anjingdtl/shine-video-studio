@@ -242,6 +242,13 @@ def test_guided_call_cannot_qualify_an_unguarded_production_binding(native):
                       "independent_input": {"artifact_id": "fixture", "sha256": "a" * 64}}
         assert not valid_call(db, call, n["category"], binding, n["project"], budget_mb=budget)
         if n["structured"]:
+            from pydantic import ValidationError
+
+            with pytest.raises(ValidationError, match="NATIVE_INPUT_EVIDENCE_PROTOCOL_PIN_INCOMPLETE"):
+                NativeProviderBinding.model_validate({**binding.model_dump(), "input_assessment_required": True})
+            valid = NativeProviderBinding.model_validate({**binding.model_dump(), "input_assessment_required": True,
+                                                          "input_evidence_protocol": "text-assessment-compact-v2"})
+            assert not valid_call(db, call, n["category"], valid, n["project"], budget_mb=budget)
             guarded = binding.model_copy(update={"input_assessment_required": True})
             # A flag plus invented source IDs is not an actual text assessment.
             assert not valid_call(db, call, n["category"], guarded, n["project"], budget_mb=budget)

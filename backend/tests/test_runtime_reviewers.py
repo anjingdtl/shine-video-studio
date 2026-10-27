@@ -144,6 +144,26 @@ def test_local_release_does_not_treat_acknowledgement_as_release(monkeypatch):
         LocalASRReviewer(cfg).release_models()
 
 
+@pytest.mark.parametrize("configured,expected", [(300, 30), (10, 10)])
+def test_local_release_timeout_is_bounded_without_claiming_release(monkeypatch, configured, expected):
+    seen = []
+    original = httpx.Client
+
+    def respond(request):
+        raise httpx.ReadTimeout("No release proof")
+
+    def client(**kwargs):
+        seen.append(kwargs["timeout"])
+        return original(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr("shine.quality.semantic.httpx.Client", client)
+    cfg = ProviderConfig("p", "p", "openai_compatible", "http://127.0.0.1:19001/v1", "p", None,
+                         timeout_s=configured)
+    with pytest.raises(httpx.ReadTimeout):
+        LocalASRReviewer(cfg).release_models()
+    assert seen == [expected]
+
+
 def test_remote_reviewer_never_receives_local_reference_images(tmp_path, monkeypatch):
     import base64
     import json

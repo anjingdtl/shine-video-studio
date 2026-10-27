@@ -386,7 +386,9 @@ class LocalReviewRelease:
         if endpoint.endswith("/v1"):
             endpoint = endpoint[:-3]
         headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
-        with httpx.Client(timeout=self.config.timeout_s, follow_redirects=False) as client:
+        # An unavailable cleanup must promptly retain the resource lease for
+        # reconciliation; waiting another full inference timeout proves nothing.
+        with httpx.Client(timeout=min(self.config.timeout_s, 30.0), follow_redirects=False) as client:
             response = client.post(endpoint + "/free", headers=headers, json={"unload_models": True})
         response.raise_for_status()
         proof = response.json()

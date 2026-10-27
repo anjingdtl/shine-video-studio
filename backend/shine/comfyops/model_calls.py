@@ -206,7 +206,8 @@ class TrackedProvider:
                         "review_provider": review_binding,
                         **({"independent_input": {"artifact_id": input_evidence["artifact_id"],
                                                   "sha256": input_evidence["sha256"]},
-                            "input_assessment_required": input_required}
+                            "input_assessment_required": input_required,
+                            "input_evidence_protocol": input_evidence["protocol"]}
                            if input_evidence is not None else {}),
                     },
                 )
@@ -252,6 +253,7 @@ class TrackedProvider:
                             expected_executor = production_review_binding(
                                 db, self.project_id, self.production_job_id, kind, self.provider, live=True,
                                 input_assessment_required=input_required,
+                                input_evidence_protocol=input_evidence["protocol"] if input_evidence else None,
                             )
                     with self.factory.begin() as db:
                         row = db.get(AgentTaskRecord, identity)
@@ -265,7 +267,21 @@ class TrackedProvider:
                         IN_FLIGHT.add(identity)
                     token = CURRENT_MODEL_CALL.set((self.factory, identity))
                     try:
-                        result = method(*args, **kwargs)
+                        from shine.quality.semantic import ReceivedReviewError
+
+                        try:
+                            result = method(*args, **kwargs)
+                        except ReceivedReviewError as exc:
+                            # Preserve a definitive response even if subsequent
+                            # physical release times out and supersedes the exception.
+                            with self.factory.begin() as db:
+                                row = db.get(AgentTaskRecord, identity)
+                                row.trace = {**row.trace, "received_response": {
+                                    "sha256": exc.response_sha256, "finish_reason": exc.finish_reason,
+                                    "error_code": str(exc), "retryable": False,
+                                    **({"validation": exc.validation} if exc.validation is not None else {}),
+                                }}
+                            raise
                         if input_evidence is not None:
                             with self.factory.begin() as db:
                                 row = db.get(AgentTaskRecord, identity)
@@ -291,6 +307,7 @@ class TrackedProvider:
                                 current_executor = production_review_binding(
                                     db, self.project_id, self.production_job_id, kind, self.provider, live=False,
                                     input_assessment_required=input_required,
+                                    input_evidence_protocol=input_evidence["protocol"] if input_evidence else None,
                                 )
                             if (current_executor != expected_executor or result_mock is not False
                                     or getattr(self.provider, "last_executor_identity", None) != expected_executor):

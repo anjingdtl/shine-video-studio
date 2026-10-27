@@ -48,6 +48,9 @@ class Provider:
         self.calls += 1
         assert isinstance(context.independent_input, VerifiedInputEvidence)
         assert len(context.independent_input["checks"]) == 7
+        assert context.independent_input["protocol"] == "text-assessment-compact-v2"
+        assert all(set(check) == {"field", "shot_path", "status", "confidence", "detail"}
+                   for check in context.independent_input["checks"])
         self.hook()
         return {"is_mock": True, "verdict": "passed"}
 
@@ -93,6 +96,7 @@ def test_review_input_rejected_before_resource_admission(api, damage):
         with factory() as db:
             call = db.query(AgentTaskRecord).filter_by(role_id="model_call:VLM:review").one()
             assert call.status == "COMPLETED" and call.trace["input_assessment_required"] is True
+            assert call.trace["input_evidence_protocol"] == "text-assessment-compact-v2"
             assert call.trace["independent_input"] == context.independent_input
 
 

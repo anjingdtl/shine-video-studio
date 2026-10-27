@@ -1,6 +1,5 @@
 """Bind independent text proposals to exact production inputs; never approve media."""
 
-from copy import deepcopy
 from types import SimpleNamespace
 
 from fastapi import HTTPException
@@ -17,6 +16,9 @@ from shine.security import is_loopback_url
 
 class VerifiedInputEvidence(dict):
     """Internal transport marker; always rebuilt from database source pins."""
+
+
+INPUT_EVIDENCE_PROTOCOL = "text-assessment-compact-v2"
 
 
 def evidence_for_call(db, call):
@@ -50,7 +52,9 @@ def evidence_for_review(db, project_id, context, *, offline=False):
     row = assessment_for_request(db, project_id, request, offline=offline, required=True)
     return VerifiedInputEvidence(
         artifact_id=row.id, sha256=row.sha256, scope="TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
-        checks=deepcopy(row.payload_json["checks"]),
+        protocol=INPUT_EVIDENCE_PROTOCOL,
+        checks=[{key: check.get(key) for key in ("field", "shot_path", "status", "confidence", "detail")}
+                for check in row.payload_json["checks"]],
     )
 
 

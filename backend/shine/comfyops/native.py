@@ -32,6 +32,7 @@ class NativeProviderBinding(BaseModel):
     response_protocol: Literal["local-review-json-schema-v1"] | None = None
     decoder_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     input_assessment_required: bool = False
+    input_evidence_protocol: Literal["text-assessment-compact-v2"] | None = None
 
     @model_validator(mode="after")
     def exact_model(self):
@@ -39,6 +40,8 @@ class NativeProviderBinding(BaseModel):
             raise ValueError("NATIVE_REVIEW_PROTOCOL_PIN_INCOMPLETE")
         if self.input_assessment_required and not self.response_protocol:
             raise ValueError("NATIVE_INPUT_ASSESSMENT_REQUIRES_STRUCTURED_REVIEW")
+        if self.input_assessment_required != bool(self.input_evidence_protocol):
+            raise ValueError("NATIVE_INPUT_EVIDENCE_PROTOCOL_PIN_INCOMPLETE")
         if self.model != self.executor_identity.model_id:
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
@@ -211,6 +214,8 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
         return False
     if binding.input_assessment_required and not call.trace.get("independent_input"):
         return False
+    if call.trace.get("input_evidence_protocol") != binding.input_evidence_protocol:
+        return False
     if binding.input_assessment_required:
         from fastapi import HTTPException
 
@@ -230,7 +235,8 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
     return bool(lease and lease.status == "RELEASED" and lease.budget_mb >= budget_mb)
 
 
-def production_review_binding(db, project_id, job_id, kind, provider, *, live, input_assessment_required=False):
+def production_review_binding(db, project_id, job_id, kind, provider, *, live, input_assessment_required=False,
+                              input_evidence_protocol=None):
     """Bind the actual QC subcall to its job's frozen manifest, including after H3."""
     from fastapi import HTTPException
 
@@ -272,6 +278,8 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live, i
     binding = NativeProviderBinding.model_validate(row.payload["native_provider"])
     if binding.input_assessment_required != input_assessment_required:
         raise HTTPException(409, "PRODUCTION_REVIEW_INPUT_POLICY_MISMATCH")
+    if binding.input_evidence_protocol != input_evidence_protocol:
+        raise HTTPException(409, "PRODUCTION_REVIEW_INPUT_PROTOCOL_MISMATCH")
     config = getattr(provider, "config", None)
     actual = (
         {

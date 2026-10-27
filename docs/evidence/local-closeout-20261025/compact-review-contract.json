@@ -1,0 +1,140 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T04:15:49.450338+00:00",
+  "status": "COMPACT_SOFTWARE_VERIFIED_REAL_CONTROLS_NOT_RUN",
+  "backend": {
+    "tests": 794,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 300.064,
+    "junit_sha256": "3e25517ecb577738b80fe6501a58be0972122e36311e6814dbb3a87a164be461"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "Prior fresh PASS; UI unchanged",
+  "source_files_sha256": {
+    "backend/shine/comfyops/model_calls.py": "c0723c9b8d7ac01344ff439354c8280a6f15eeb72a1471daecb94ce96af42799",
+    "backend/shine/comfyops/native.py": "3f7b2ece64f72fcd0a15be73a6a0b57de52aea1c997e3a57a51cf07a2bc77648",
+    "backend/shine/quality/input_assessment.py": "bc39dee4522ebabbc3c58a1a9a28cb349fa9d19596d46bdaf7ada7b4d6b9f891",
+    "backend/shine/quality/semantic.py": "6eafcd5eae6ec6587471c9f9d4ccba86aa9d5a2bb1a711f860643c1d61c3db4b",
+    "backend/tests/test_native_capabilities.py": "f266d03842ada9f648a79814c0a86139f812eb1a5fd8eb70f0cb9c4127e9b95a",
+    "backend/tests/test_review_input_evidence.py": "0d3f5044a620f520b7e83a6860d3846793648595d3801ef93446f1c2931cf7b2",
+    "backend/tests/test_review_responses.py": "c5315a5aa1c35e221711ca23c97f595ab0ca677649bd73aec4d7f43020d7416e",
+    "backend/tests/test_runtime_reviewers.py": "5be4387edb6eb9e6f418d336a407fbeffb86817961aab5e1371749b2fc20e766",
+    "scripts/local_review_server.py": "3da7948d8992157cf2d97591012d682a07ee54f8f53810e5d376292429dd011d",
+    "config/review-decoder-lock.json": "fa4f4efdda00384cad39b49d574dc1584713fb7a3a1a27e509d533cae5094b70"
+  },
+  "input_protocol": "text-assessment-compact-v2",
+  "actual_source_bound_text_token_budget": {
+    "scope": "REAL_QWEN_TOKENIZER_CPU_ONLY_NO_GPU_OR_MODEL_INFERENCE",
+    "token_counts": {
+      "system": 646,
+      "user_full": 2737,
+      "user_compact_v2": 1771,
+      "assessment_full": 1479,
+      "assessment_compact_v2": 513
+    },
+    "text_user_token_reduction": 966,
+    "assessment_token_reduction": 966,
+    "visual_tokens_excluded": true,
+    "image_count": 4,
+    "frame_dimensions": [
+      [
+        768,
+        439
+      ],
+      [
+        768,
+        439
+      ],
+      [
+        768,
+        439
+      ],
+      [
+        768,
+        439
+      ]
+    ],
+    "input_artifact_sha256": "bb8f4c47195b790034519eba41c1c2467a7e76cf8e0afaf1ba18850caef8291d"
+  },
+  "decoder_synthetic_counterexample": {
+    "scope": "SYNTHETIC_SCHEMA_VALID_TOKENIZATION_COUNTEREXAMPLE_NOT_GPU_INFERENCE",
+    "decoder_identity": {
+      "protocol": "local-review-json-schema-v1",
+      "decoder_sha256": "918afe21418d439192cc9f18486b3a60abd7b725d41439d9f3d12fbeb916c2c4",
+      "schema_sha256": "29dc544ba3775c3203c3a971a2b64dfa14110fde9e0ecf26589e09fa08ba3759"
+    },
+    "schema_valid": true,
+    "synthetic_input_sha256": "40205bd8a833dd1b5fde1644503ae8b05f7b77907c0c4d8002c6f5773c81cf5c",
+    "rejected_token_id": 47891,
+    "alternative_token_ids": [
+      13,
+      2198
+    ],
+    "variants": {
+      "canonical": {
+        "token_count": 196,
+        "first_rejected": {
+          "index": 52,
+          "token_id": 47891
+        },
+        "grammar_accepts_and_ends": false,
+        "wall_s": 0.087
+      },
+      "split-punctuation": {
+        "token_count": 197,
+        "first_rejected": null,
+        "grammar_accepts_and_ends": true,
+        "wall_s": 0.322
+      }
+    },
+    "model_weights_loaded": false,
+    "cuda_initialized": false,
+    "inference_calls": 0,
+    "media_bytes": 0,
+    "interpretation": "A canonical tokenizer sequence is rejected; this alone does not prove all valid tokenizations of the same text are rejected."
+  },
+  "decoder_synthetic_cpu_context_benchmark": {
+    "scope": "SYNTHETIC_CPU_CALLBACK_ONLY_NOT_ACTUAL_GPU_INFERENCE",
+    "decoder_identity": {
+      "protocol": "local-review-json-schema-v1",
+      "decoder_sha256": "918afe21418d439192cc9f18486b3a60abd7b725d41439d9f3d12fbeb916c2c4",
+      "schema_sha256": "29dc544ba3775c3203c3a971a2b64dfa14110fde9e0ecf26589e09fa08ba3759"
+    },
+    "results": [
+      {
+        "synthetic_prefix_tokens": 8,
+        "generated_tokens": 172,
+        "callback_wall_s": 0.229,
+        "callback_process_cpu_s": 0.234
+      },
+      {
+        "synthetic_prefix_tokens": 3500,
+        "generated_tokens": 172,
+        "callback_wall_s": 0.247,
+        "callback_process_cpu_s": 0.25
+      },
+      {
+        "synthetic_prefix_tokens": 4500,
+        "generated_tokens": 172,
+        "callback_wall_s": 0.258,
+        "callback_process_cpu_s": 0.25
+      }
+    ],
+    "model_weights_loaded": false,
+    "cuda_initialized": false,
+    "inference_calls": 0,
+    "media_bytes": 0
+  },
+  "limitations": [
+    "Text token counts exclude all image tokens; no causal claim about GPU timeout or VRAM savings",
+    "Canonical valid JSON token sequence rejected; alternate segmentation accepted same text; no model output or QA passed from CPU test",
+    "Prior guarded revision remains historical STATIC_VALIDATED but fails current binding validation without v2 protocol; no VLM production qualification",
+    "Existing ASR qualification retained under unchanged executor runtime",
+    "14,000 MiB model budget remains an estimate; previous whole-GPU point snapshot was 15,639 MiB used and not model peak proof"
+  ],
+  "release": "Local release timeout min(provider timeout,30s); unconfirmed release blocks lease as RECONCILE_REQUIRED; received rejection digest recorded before cleanup",
+  "real_controls": "NOT_RUN",
+  "product_status": "PARTIAL"
+}
