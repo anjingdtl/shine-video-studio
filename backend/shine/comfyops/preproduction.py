@@ -199,11 +199,13 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     state = "FAKE_EXECUTED" if offline else "PRODUCTION_APPROVED"
     usable = []
     frozen_ids = {w["id"] for w in (plan.payload.get("manifest") or {}).get("workflows", [])}
+    has_frozen_manifest = plan.payload.get("manifest") is not None
     for category in (plan.payload.get("h3_category", "H3_REF2VA"), "VLM_REVIEW", "ASR"):
         choices = [
             w
             for w in workflows
-            if w.payload["category"] == category and w.status == state and (not frozen_ids or w.id in frozen_ids)
+            if w.payload["category"] == category and w.status == state
+            and (not has_frozen_manifest or w.id in frozen_ids)
             and (offline or category != "VLM_REVIEW"
                  or ((w.payload.get("native_provider") or {}).get("review_scope") == "basic_character")
                  == (plan.payload.get("review_scope", "full") == "basic"))
@@ -211,18 +213,29 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         if not choices:
             blockers.append({"code": "CAPABILITY_MISSING", "category": category})
         else:
-            selected = choices[0]
-            if not offline and category in {"VLM_REVIEW", "ASR"} and not selected.payload.get("native_provider"):
-                blockers.append({"code": "PRODUCTION_REVIEW_PROVIDER_BINDING_REQUIRED", "category": category,
-                                 "workflow": selected.id})
+            selected, selected_errors = choices[0], []
             if not offline:
                 from shine.comfyops.native import native_errors
 
-                blockers.extend(
-                    {"code": error, "category": category, "workflow": selected.id}
-                    for error in native_errors(db, selected.payload, live=True, require_evidence=True,
-                                               workflow_hash=selected.sha256)
-                )
+                def capability_errors(candidate, selected_category=category):
+                    errors = native_errors(db, candidate.payload, live=True, require_evidence=True,
+                                           workflow_hash=candidate.sha256)
+                    if selected_category in {"VLM_REVIEW", "ASR"} and not candidate.payload.get("native_provider"):
+                        errors = ["PRODUCTION_REVIEW_PROVIDER_BINDING_REQUIRED", *errors]
+                    return errors
+
+                # An unfrozen plan may choose another qualified revision when
+                # an older one is stale. A frozen plan can never silently
+                # substitute a different capability for its pinned revision.
+                selected_errors = capability_errors(selected)
+                if selected_errors and not has_frozen_manifest:
+                    for candidate in choices[1:]:
+                        errors = capability_errors(candidate)
+                        if not errors:
+                            selected, selected_errors = candidate, errors
+                            break
+                blockers.extend({"code": error, "category": category, "workflow": selected.id}
+                                for error in selected_errors)
             usable.append(selected)
     models = []
     selected_models = {

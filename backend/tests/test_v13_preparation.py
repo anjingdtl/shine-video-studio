@@ -377,6 +377,51 @@ def test_review_scope_creates_new_plan_and_selects_matching_native_capability(pr
     assert [p["id"] for p in report["manifest"]["workflows"]] == [basic["id"]]
 
 
+def test_readiness_skips_stale_native_revision_only_before_freeze(prep, monkeypatch):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import PreProductionPlan, WorkflowRevision
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    doc = client.post(f"/api/v1/projects/{project}/documents",
+                      files={"file": ("test.txt", b"A silent shot", "text/plain")}).json()
+    old = workflow(client, category="VLM_REVIEW")
+    new = workflow(client, category="VLM_REVIEW")
+    with factory.begin() as db:
+        for identity in (old["id"], new["id"]):
+            row = db.get(WorkflowRevision, identity)
+            row.status = "PRODUCTION_APPROVED"
+            row.payload = {**row.payload, "fixture_revision": identity,
+                           "native_provider": {"review_scope": "basic_character"}}
+            row.sha256 = graph_hash(row.payload)
+    monkeypatch.setattr("shine.comfyops.native.native_errors",
+                        lambda db, payload, **kwargs: ["NATIVE_REVIEW_CLIENT_CHANGED"]
+                        if payload.get("fixture_revision") == old["id"] else [])
+    with factory() as db:
+        old_payload = db.get(WorkflowRevision, old["id"]).payload
+    plan = post(client, f"/projects/{project}/preproduction/analyze",
+                {"document_id": doc["id"], "review_scope": "basic"})
+    report = post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})
+    assert [p["id"] for p in report["manifest"]["workflows"]] == [new["id"]]
+    assert not any(b["code"] == "NATIVE_REVIEW_CLIENT_CHANGED" for b in report["blockers"])
+    with factory.begin() as db:
+        row = db.get(PreProductionPlan, plan["id"])
+        pinned = dict(report["manifest"])
+        pinned["workflows"] = [{"id": old["id"], "hash": graph_hash(old_payload)}]
+        row.payload = {**row.payload, "manifest": pinned}
+        row.status = "FROZEN"
+    frozen = post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})
+    assert [p["id"] for p in frozen["manifest"]["workflows"]] == [old["id"]]
+    assert any(b["code"] == "NATIVE_REVIEW_CLIENT_CHANGED" for b in frozen["blockers"])
+    with factory.begin() as db:
+        row = db.get(PreProductionPlan, plan["id"])
+        row.payload = {**row.payload, "manifest": {**row.payload["manifest"], "workflows": []}}
+    empty_pin = post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})
+    assert empty_pin["manifest"]["workflows"] == []
+    assert any(b["code"] == "CAPABILITY_MISSING" and b.get("category") == "VLM_REVIEW"
+               for b in empty_pin["blockers"])
+
+
 @pytest.mark.parametrize(
     "path",
     [
