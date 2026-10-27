@@ -1,0 +1,54 @@
+{
+  "scope": "opt-in Windows process-isolated local review; real ASR control and mock launcher smoke",
+  "backend": {
+    "tests": "892",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "ruff": "passed backend and supervisor",
+  "frontend": "TypeScript and Vite build passed",
+  "windows_lifecycle_tests": "child exited before result; timeout killed owned child; supervisor crash killed owned child; unknown outcomes not replayed",
+  "launcher": {
+    "status": "PASSED_MOCK_ISOLATED_LAUNCHER_NO_INFERENCE",
+    "runtime_sha256": "4a7105c75dfb8ce87152833cbfa0cc5313a6164b78d979946e29e7c011a162eb",
+    "bootstrap_child": {
+      "pid": 22036,
+      "exitcode": 0,
+      "joined": true
+    },
+    "api": true,
+    "web": true,
+    "review_free": true,
+    "worker_started": false,
+    "h3_submissions": 0
+  },
+  "real_asr": {
+    "job_id": "f930aca3-f4c9-4535-b5e0-7bd94a49f609",
+    "artifact_sha256": "6086ac8dd6acffdfee204bd0f38708b4f1523c6e64024565ab9f39d1c1c7ee6f",
+    "call_id": "2b530e8c-9b1e-48d3-b83d-489bdb38a05e",
+    "call_status": "COMPLETED",
+    "lease_status": "RELEASED",
+    "audio_gate_status": "passed",
+    "script_matched": true,
+    "transcript_sha256": "c910833be90abd40f7a3087231d5fe5dab7bef45b8743c895d82ba5c11eb623c",
+    "child": {
+      "pid": 7132,
+      "exitcode": 0,
+      "joined": true
+    },
+    "runtime_sha256": "4a7105c75dfb8ce87152833cbfa0cc5313a6164b78d979946e29e7c011a162eb",
+    "gpu_free_mib_before": 14531,
+    "comfy_restored_idle": true,
+    "h3_submissions": 0,
+    "local_receipt_sha256": "c0caa46862a61222567a35237f596a8d7180041f6ea424f928c5c2981ad21ad5"
+  },
+  "source_sha256": {
+    "backend/shine/comfyops/isolated_stage.py": "fff579b63a5bf4597eca5de94985cc09426349a8263f49b7639bc4866631a18f",
+    "backend/tests/test_isolated_stage.py": "352ba6c47b0be60d79aa7a9ecaf81ca649c76082f1ffdd34a85d363076a3fe34",
+    "backend/tests/test_isolated_review_supervisor.py": "14118ae44ccd7c6a47c5f8d992f641bb36daf33f4be431993aaaec509ba0d9be",
+    "scripts/local_review_isolated_server.py": "f7723a73ee1225869d7cf90f7224c792680c82c44b876693065baa8eec324c01",
+    "scripts/start_shine.ps1": "2d34517419e04c26902a9852c00264e77a6ab9398f39da7b166a2e0eb08abb49"
+  },
+  "limitations": "ASR real, launcher smoke mock, not human listening or film approval; VLM not recalibrated for this runtime, no automated ComfyUI process handoff, original production service unchanged."
+}

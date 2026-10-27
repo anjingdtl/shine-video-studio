@@ -8,6 +8,7 @@ param(
     [string]$ReviewPython = '',
     [string]$ReviewManifest = '',
     [string]$ReviewRuntimePackages = '',
+    [switch]$IsolatedReviewProcess,
     [ValidateRange(1,65535)][int]$ReviewPort = 8116
 )
 
@@ -16,6 +17,7 @@ $explicitDataDir = [bool]$DataDir
 if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $startReview = [bool]($ReviewPython -or $ReviewManifest -or $ReviewRuntimePackages)
+if ($IsolatedReviewProcess -and -not $startReview) { throw 'Isolated review requires the local review configuration.' }
 if ($startReview) {
     if (-not ($ReviewPython -and $ReviewManifest -and $ReviewRuntimePackages)) {
         throw 'Local review requires ReviewPython, ReviewManifest and ReviewRuntimePackages together.'
@@ -123,8 +125,9 @@ function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Argumen
 try {
 Start-ShineProcess 'api' $venvPython $uvicornArgs $repoRoot
 if ($startReview) {
+    $reviewScript = if ($IsolatedReviewProcess) { 'scripts/local_review_isolated_server.py' } else { 'scripts/local_review_server.py' }
     Start-ShineProcess 'review' $ReviewPython @(
-        (Join-Path $repoRoot 'scripts/local_review_server.py'),
+        (Join-Path $repoRoot $reviewScript),
         '--manifest', $ReviewManifest, '--runtime-packages', $ReviewRuntimePackages, '--port', "$ReviewPort"
     ) $repoRoot
     $reviewReady = $false
