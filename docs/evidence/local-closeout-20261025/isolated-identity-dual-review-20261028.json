@@ -1,0 +1,28 @@
+{
+  "scope": "isolated executor live identity and independently managed second local review endpoint",
+  "backend": {
+    "tests": "893",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "ruff": "passed backend and supervisor",
+  "frontend": "TypeScript and Vite build passed",
+  "real_4b_identity_seconds": 2.313,
+  "dual_review_launcher": {
+    "status": "PASSED_TWO_IDLE_REVIEW_ENDPOINTS_MOCK_NO_INFERENCE",
+    "identity_seconds": 2.313,
+    "runtime_sha256": "d8c2ebde0f82e8478026b4b622d2e171f1174c8ebc3831152d4dc27d3449dea2",
+    "models": [
+      "local-qwen3-vl-8b-fp8",
+      "local-qwen3-vl-4b"
+    ],
+    "h3_submissions": 0
+  },
+  "source_sha256": {
+    "scripts/local_review_isolated_server.py": "6ec6423614e027a628d5f6b303ef0ac2143f8412532571a82bd3db2089d6c230",
+    "scripts/start_shine.ps1": "97b154413514047551bdb406f6fa950e3131c7fa0543748fe0178f7927eec92e",
+    "backend/tests/test_isolated_review_supervisor.py": "d8b5f803829f1ebea6b5d51af8c03f29da6b2275ddadf9ce0079e2d9758cb13f"
+  },
+  "limitations": "mock launcher only; no inference on this revised runtime yet; new VLM and ASR executor identity needs real evidence; ComfyUI automated process handoff not implemented"
+}

@@ -9,7 +9,9 @@ param(
     [string]$ReviewManifest = '',
     [string]$ReviewRuntimePackages = '',
     [switch]$IsolatedReviewProcess,
-    [ValidateRange(1,65535)][int]$ReviewPort = 8116
+    [ValidateRange(1,65535)][int]$ReviewPort = 8116,
+    [string]$AdditionalReviewManifest = '',
+    [ValidateRange(1,65535)][int]$AdditionalReviewPort = 8117
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +20,7 @@ if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $startReview = [bool]($ReviewPython -or $ReviewManifest -or $ReviewRuntimePackages)
 if ($IsolatedReviewProcess -and -not $startReview) { throw 'Isolated review requires the local review configuration.' }
+if ($AdditionalReviewManifest -and -not $startReview) { throw 'Additional review requires the primary review runtime configuration.' }
 if ($startReview) {
     if (-not ($ReviewPython -and $ReviewManifest -and $ReviewRuntimePackages)) {
         throw 'Local review requires ReviewPython, ReviewManifest and ReviewRuntimePackages together.'
@@ -26,6 +29,10 @@ if ($startReview) {
     $ReviewPython = (Resolve-Path -LiteralPath $ReviewPython).Path
     $ReviewManifest = (Resolve-Path -LiteralPath $ReviewManifest).Path
     $ReviewRuntimePackages = (Resolve-Path -LiteralPath $ReviewRuntimePackages).Path
+}
+if ($AdditionalReviewManifest) {
+    if ($AdditionalReviewPort -in @($ApiPort, $WebPort, $ReviewPort)) { throw 'All service ports must be distinct.' }
+    $AdditionalReviewManifest = (Resolve-Path -LiteralPath $AdditionalReviewManifest).Path
 }
 
 if (-not $DataDir) {
@@ -90,6 +97,7 @@ function Get-PortOwner([int]$Port) {
 $busy = @()
 $requestedPorts = @($ApiPort, $WebPort)
 if ($startReview) { $requestedPorts += $ReviewPort }
+if ($AdditionalReviewManifest) { $requestedPorts += $AdditionalReviewPort }
 foreach ($port in $requestedPorts) {
     $owner = Get-PortOwner $port
     if ($owner) { $busy += "  port $port is already in use by pid $owner" }
@@ -141,6 +149,24 @@ if ($startReview) {
         Start-Sleep -Milliseconds 500
     }
     if (-not $reviewReady) { throw "Hash-verified local reviewer did not start on port $ReviewPort" }
+}
+if ($AdditionalReviewManifest) {
+    Start-ShineProcess 'review-additional' $ReviewPython @(
+        (Join-Path $repoRoot 'scripts/local_review_isolated_server.py'),
+        '--manifest', $AdditionalReviewManifest, '--runtime-packages', $ReviewRuntimePackages,
+        '--port', "$AdditionalReviewPort"
+    ) $repoRoot
+    $additionalReady = $false
+    for ($i = 0; $i -lt 120; $i++) {
+        try {
+            $additionalHealth = Invoke-RestMethod "http://127.0.0.1:$AdditionalReviewPort/health" -TimeoutSec 2
+            if ($additionalHealth.status -eq 'ok') { $additionalReady = $true; break }
+        } catch { }
+        $additionalEntry = $started | Where-Object name -EQ 'review-additional'
+        if (-not (Get-Process -Id $additionalEntry.pid -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $additionalReady) { throw "Additional hash-verified local reviewer did not start on port $AdditionalReviewPort" }
 }
 if (-not $NoWorker) {
     Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
@@ -194,6 +220,7 @@ $manifestPath = Join-Path $runDir 'processes.json'
     api_port = $ApiPort
     web_port = $WebPort
     review_port = if ($startReview) { $ReviewPort } else { $null }
+    additional_review_port = if ($AdditionalReviewManifest) { $AdditionalReviewPort } else { $null }
     processes = $started
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
 } catch {

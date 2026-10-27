@@ -75,3 +75,26 @@ def test_supervisor_blocks_result_if_source_changes_during_stage(monkeypatch):
     client = TestClient(build_isolated_app({}, Path("."), runner=runner))
     assert client.post("/v1/chat/completions", json={}).status_code == 503
     assert client.post("/free", json={"unload_models": True}).status_code == 503
+
+
+def test_identity_rechecks_live_files_without_starting_a_model_process():
+    decoder = {"protocol": "local-review-json-schema-v1", "decoder_sha256": "d" * 64}
+    base = {"status": "ok", "is_mock": False, "loaded": False, "asr_loaded": False,
+            "allocated_bytes": 0, "reserved_bytes": 0, "runtime_sha256": "e" * 64,
+            "verified_models": {"model": {"model_id": "model"}}, "structured_output": decoder}
+    live = {k: base[k] for k in ("status", "is_mock", "runtime_sha256", "verified_models", "structured_output")}
+    calls = []
+
+    def runner(_target, args, *, timeout, return_evidence):
+        calls.append(args[3])
+        return ({"status": 200, "body": b"{}", "health": base, "identity": live},
+                {"pid": 123, "exitcode": 0, "joined": True})
+
+    client = TestClient(build_isolated_app({}, Path("."), runner=runner, identity_probe=lambda *_: live))
+    response = client.get("/identity")
+    assert response.status_code == 200 and response.json()["runtime_sha256"] != live["runtime_sha256"]
+    assert client.get("/v1/models").json()["data"] == [{"id": "model"}]
+    assert calls == ["/health"]
+    live["verified_models"] = {"other": {}}
+    assert client.get("/identity").status_code == 503
+    assert client.post("/free", json={"unload_models": True}).status_code == 503

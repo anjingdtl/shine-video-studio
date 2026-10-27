@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -55,7 +56,34 @@ def _supervised_runtime(inner):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def build_isolated_app(manifest, packages, *, runner=run_isolated):
+def _live_identity(manifest, packages):
+    """Rehash the executor inputs without importing or starting a model."""
+    for path in (str(packages), str(REPO / "scripts")):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    import local_review_server as inner
+
+    verified = {manifest["model_id"]: inner.verified_model_identity(manifest)}
+    if manifest.get("asr"):
+        asr = manifest["asr"]
+        if asr["model_id"] in verified:
+            raise ValueError("DUPLICATE_EXECUTOR_MODEL_ID")
+        verified[asr["model_id"]] = inner.verified_model_identity(asr)
+    decoder = inner.decoder_runtime_identity()
+    runtime = {
+        "python": sys.version,
+        "packages": {name: importlib.metadata.version(name) for name in (
+            "torch", "transformers", "pydantic", "packaging", "pyyaml",
+        )},
+        "adapter_sha256": hashlib.sha256(Path(inner.__file__).read_bytes()).hexdigest(),
+        "structured_output": decoder,
+    }
+    identity = hashlib.sha256(json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"status": "ok", "is_mock": False, "verified_models": verified,
+            "runtime_sha256": identity, "structured_output": decoder}
+
+
+def build_isolated_app(manifest, packages, *, runner=run_isolated, identity_probe=_live_identity):
     lock = Lock()
     last_stage = {}
     state = {"uncertain": False}
@@ -133,14 +161,36 @@ def build_isolated_app(manifest, packages, *, runner=run_isolated):
                 raise HTTPException(503, "ISOLATED_SUPERVISOR_SOURCE_CHANGED")
             return {"released": True, "allocated_bytes": 0, "is_mock": False}
 
+    def checked_identity():
+        with lock:
+            if state["uncertain"] or _supervised_runtime(baseline["runtime_sha256"]) != runtime:
+                raise ValueError("ISOLATED_SUPERVISOR_SOURCE_CHANGED")
+            identity = identity_probe(manifest, packages)
+            if (identity.get("status") != "ok" or identity.get("is_mock") is not False
+                    or identity.get("runtime_sha256") != baseline["runtime_sha256"]
+                    or identity.get("verified_models") != models
+                    or identity.get("structured_output") != baseline.get("structured_output")):
+                state["uncertain"] = True
+                raise ValueError("ISOLATED_EXECUTOR_IDENTITY_CHANGED")
+            return rewrite(identity)
+
     @app.get("/identity")
-    @app.get("/v1/models")
-    async def get_proxy(request: Request):
+    async def get_identity():
         try:
-            status, body = await run_in_threadpool(dispatch, "GET", request.url.path)
+            return await run_in_threadpool(checked_identity)
         except Exception:
             raise HTTPException(503, "ISOLATED_EXECUTOR_OUTCOME_UNKNOWN") from None
-        return Response(body, status_code=status, media_type="application/json")
+
+    @app.get("/v1/models")
+    async def get_models():
+        try:
+            identity = await run_in_threadpool(checked_identity)
+        except Exception:
+            raise HTTPException(503, "ISOLATED_EXECUTOR_OUTCOME_UNKNOWN") from None
+        decoder = identity["structured_output"]
+        return {"data": [{"id": value} for value in identity["verified_models"]], "is_mock": False,
+                "capabilities": {"review_response_protocol": decoder["protocol"],
+                                 "review_decoder_sha256": decoder["decoder_sha256"]}}
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/audio/transcriptions")
