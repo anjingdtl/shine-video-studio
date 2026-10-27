@@ -35,6 +35,19 @@ def executor():
     return module
 
 
+def test_current_wire_bounds_findings_and_summary_without_rewriting_historical_records():
+    from shine.schemas import SemanticFinding, SemanticReviewResult
+
+    schema = vision_review_schema()
+    assert schema["$defs"]["SemanticFinding"]["properties"]["message"]["maxLength"] == 240
+    assert schema["properties"]["raw_summary"]["maxLength"] == 300
+    # Historical database records retain their larger stored-model limits.
+    assert SemanticFinding(code="fixture", category="fixture", severity="soft", confidence=1,
+                           message="x" * 1000).message == "x" * 1000
+    assert SemanticReviewResult(reviewer="fixture", is_mock=True, input_sha256="a" * 64,
+                                overall_confidence=1, raw_summary="x" * 2000).raw_summary == "x" * 2000
+
+
 @pytest.mark.parametrize("damage", [None, "missing", "object-mode", "not-strict", "external", "oversized", "wrong-pin"])
 def test_schema_admission_rejects_unsupported_requests_before_loading(executor, damage):
     schema = vision_review_schema()

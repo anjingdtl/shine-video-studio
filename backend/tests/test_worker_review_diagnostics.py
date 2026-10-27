@@ -142,7 +142,7 @@ def test_mock_transport_cannot_claim_a_real_local_executor_identity():
 
 
 @pytest.mark.parametrize("case", ["no-reference", "scene-only", "character-reference", "multi-bound", "multi-other",
-                                  "multi-unspecified", "long-detail", "short-detail"])
+                                  "multi-unspecified", "long-detail", "short-detail", "long-summary"])
 def test_structured_review_requires_character_reference_and_bounded_detail(tmp_path, monkeypatch, case):
     import json
     from dataclasses import replace
@@ -152,7 +152,7 @@ def test_structured_review_requires_character_reference_and_bounded_detail(tmp_p
     from tests.review_fixtures import fixture_style_input_checks
     from tests.test_semantic_qc import context
 
-    identity_case = case not in {"long-detail", "short-detail"}
+    identity_case = case not in {"long-detail", "short-detail", "long-summary"}
     finding = {"code": "IDENTITY_MISMATCH" if identity_case
                else "SCENE_MISMATCH", "category": "fixture", "severity": "hard", "confidence": 1,
                "message": "x" * (241 if case == "long-detail" else 20)}
@@ -160,7 +160,7 @@ def test_structured_review_requires_character_reference_and_bounded_detail(tmp_p
         finding["subject"] = "CHAR_A" if case == "multi-bound" else "CHAR_B"
     wire = {"reviewer": "fixture", "is_mock": True, "input_sha256": "a" * 64, "verdict": "failed",
             "findings": [finding], "style_input_checks": fixture_style_input_checks(),
-            "overall_confidence": 1, "raw_summary": "synthetic"}
+            "overall_confidence": 1, "raw_summary": "x" * 301 if case == "long-summary" else "synthetic"}
     body = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(wire)}}],
             "structured_output": {"protocol": "local-review-json-schema-v1", "decoder_sha256": "d" * 64,
                                   "schema_sha256": review_schema_hash(vision_review_schema())}}
@@ -179,11 +179,12 @@ def test_structured_review_requires_character_reference_and_bounded_detail(tmp_p
         label = "scene / scene" if case == "scene-only" else "reference / CHAR_A"
         ctx = replace(ctx, local_reference_frames=((label, ref),),
                       identity_reference_labels=(label,) if case != "scene-only" else ())
-    if case in {"no-reference", "scene-only", "multi-other", "multi-unspecified", "long-detail"}:
+    if case in {"no-reference", "scene-only", "multi-other", "multi-unspecified", "long-detail", "long-summary"}:
         with pytest.raises(ReceivedReviewError) as error:
             reviewer.review(ctx)
-        assert error.value.validation["code"] == (
-            "VLM_FINDING_DETAIL_TOO_LONG" if case == "long-detail" else "VLM_IDENTITY_REFERENCE_MISSING")
+        expected = ("VLM_FINDING_DETAIL_TOO_LONG" if case == "long-detail" else
+                    "VLM_SUMMARY_TOO_LONG" if case == "long-summary" else "VLM_IDENTITY_REFERENCE_MISSING")
+        assert error.value.validation["code"] == expected
     else:
         assert reviewer.review(ctx).verdict == "failed"
 

@@ -51,6 +51,10 @@ def vision_review_schema():
         "type": "array", "items": {"$ref": "#/$defs/StyleInputCheck"},
         "minItems": len(StyleBible.model_fields), "maxItems": len(StyleBible.model_fields),
     }
+    # Tighten only the current wire contract; stored historical records retain
+    # their wider model limits and are never rewritten.
+    schema["$defs"]["SemanticFinding"]["properties"]["message"]["maxLength"] = 240
+    schema["properties"]["raw_summary"]["maxLength"] = 300
     return schema
 
 
@@ -79,6 +83,7 @@ def review_validation_failure(exc):
         "STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
         "VLM_DECISION_MISSING", "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING",
         "VLM_DIALOGUE_HARD_UNSUPPORTED", "VLM_IDENTITY_REFERENCE_MISSING", "VLM_FINDING_DETAIL_TOO_LONG",
+        "VLM_SUMMARY_TOO_LONG",
     } else "RESPONSE_SHAPE_INVALID"}
 
 
@@ -345,6 +350,8 @@ class OpenAICompatibleVisionReviewer:
             require_style_input_checks(result)
             if response_protocol and any(len(f.message) > 240 for f in result.findings):
                 raise ValueError("VLM_FINDING_DETAIL_TOO_LONG")
+            if response_protocol and len(result.raw_summary) > 300:
+                raise ValueError("VLM_SUMMARY_TOO_LONG")
             if response_protocol:
                 bound = {label.rsplit(" / ", 1)[-1] for label, _ in context.local_reference_frames
                          if label in context.identity_reference_labels} if getattr(

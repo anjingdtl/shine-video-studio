@@ -1,0 +1,101 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T05:22:20.587239+00:00",
+  "status": "BOUNDED_WIRE_SOFTWARE_VERIFIED_NEW_RUNTIME_NOT_ACTIVATED",
+  "backend": {
+    "tests": 832,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 306.161,
+    "junit_sha256": "96de372113964e324679a860cd9b55a699d901b7fa43c37441ec0225f773ee25"
+  },
+  "ruff": "PASS",
+  "frontend": "Prior fresh TypeScript/Vite PASS; UI unchanged",
+  "client_review_sha256": "8410a0d2ed6847df8acb25c568491c7e51de04448b4f0b16398eef0d839a321a",
+  "source_files_sha256": {
+    "backend/shine/quality/client_identity.py": "9e5283119ffa6f3a4b9420c044b7cb1a833921646ed9e2200f7925c55de223e5",
+    "backend/shine/quality/semantic.py": "c96e3b5270c9b29637de3b29b39d331dea35910042239f085e1aa70675e78c06",
+    "backend/shine/quality/input_assessment.py": "3b1d955fad0be7cc2ce1b4e1b60977a97e1aa06efe52542a4f608e047bb40101",
+    "backend/shine/quality/gates.py": "358b4d2a49136a956f551cff18c9aa70967ee99e180283dd19eff422d058c228",
+    "backend/shine/quality/runtime.py": "c28e6daa3c2b0a94130017e57dc73cf97503483cadbc0ce4c5ed82accbff90e4",
+    "backend/shine/quality/identity.py": "9b52c7ec0bb5432e9e52b8f483452d3e013ad97c539e9d1e756abd7f455c688d",
+    "backend/shine/media/frames.py": "02e1d22334bf0357f1ef3954546ec57cb8f8a3151bc678136031fbdb66877b5f",
+    "backend/shine/schemas.py": "9ed967fe86af81610ef7efe2b7e77bae43e4fe21871492328a030f1f902400a4",
+    "backend/shine/worker.py": "10026ad36eb1901bb7e257c04098d15a6835bd068f28ea8f9a3fea2f524b3975",
+    "backend/shine/comfyops/model_calls.py": "4e36c3af0b7d079f7c7a1531c1154e9563f1f2241ab58d6a16a4d29f34e67d5b",
+    "backend/shine/comfyops/native.py": "03c6a4ee6abca222feabfe938d320211195fdc17669c2b26f4c1319a83c614be",
+    "backend/shine/comfyops/preproduction.py": "f96a931e846f9a3abdaa13777133a2be6f2c4d4ce8ee8acae7276a5630c15d13",
+    "backend/tests/test_structured_review.py": "7b5f2f851d0e6d2eacf823cb5692785ccfa4d056044df9cda5a3c1ed75c52e32",
+    "backend/tests/test_worker_review_diagnostics.py": "9f2a1b45f62714325601c6177ff2e309ce9694f15203a9d81254ba341b939af2",
+    "scripts/local_review_server.py": "3da7948d8992157cf2d97591012d682a07ee54f8f53810e5d376292429dd011d",
+    "config/review-decoder-lock.json": "78c5c4482751ae2a2e96c98ff4e64b76075cae4784a446744a0e67d61d683f63"
+  },
+  "local_harness_sha256": {
+    "activate_bounded_wire_epoch_20261027.py": "e4f7e28f987c5c74ae74dd8f9a050a70f5e2b5889b944060f945e430e460ecec",
+    "suspend_restore_owned_comfy_bounded_asr_20261027.py": "0bcbdb2054cdfa86bd73853fe42f60d759955cd936f0a0eac84fd7d2e315cb2f",
+    "verify_bounded_wire_asr_20261027.py": "a22e60a5bc8aa58c63a57a3066542a8815f81ab24c8a1d7d1e86804538e73543",
+    "qualify_bounded_wire_asr_20261027.py": "edebf1e7a638305924c63a984bff3810eca17edd68080fbceaf7d1d14e9132b7",
+    "suspend_restore_owned_comfy_bounded_pixel_20261027.py": "0e8e4a6b23996a6fd3624c9824b69c802fd186a253a50b08fbed35b91a287cc1",
+    "verify_bounded_wire_native_controls_20261027.py": "c06a474985947ff843732dd9b1d4fad21362d334d16e2dc955784d4a9426de12",
+    "serial_pixel_target_match_20261027.py": "aaaa44a8b4d185341aa45e94888e5e0bbf4db0b06dc0ddad9f2635b7f4f7fca6",
+    "review_terminal_stage_lifecycle_20261027.py": "cf92bb64408acc7b58008594e7c1b8fb96532b91a9c24fd774b99231d71da267"
+  },
+  "cpu_grammar_evidence": {
+    "scope": "REAL_QWEN_TOKENIZER_AND_CHARACTER_GRAMMAR_CPU_ONLY_NOT_MODEL_ACCEPTANCE",
+    "decoder_identity": {
+      "protocol": "local-review-json-schema-v1",
+      "decoder_sha256": "17fc2ea6c9694291b05521ff30f0f4b389cbbfb9977bd7db290eaf30e32e6795",
+      "schema_sha256": "86c02ef0acfc61ff1f7a69af0e1c43e2e48f9e56cd35f7793f1223238b646bf9"
+    },
+    "cases": {
+      "message-240": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      },
+      "message-241": {
+        "character_grammar_accepts": false,
+        "rejected_at": 478
+      },
+      "summary-300": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      },
+      "summary-301": {
+        "character_grammar_accepts": false,
+        "rejected_at": 582
+      },
+      "unicode-240": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      },
+      "unicode-241": {
+        "character_grammar_accepts": false,
+        "rejected_at": 478
+      }
+    },
+    "numeric_range": "Application validation remains authoritative",
+    "canonical_token_segmentation_limitation": "Previously observed and not claimed fixed",
+    "model_weights_loaded": false,
+    "cuda_initialized": false,
+    "inference_calls": 0,
+    "media_bytes": 0
+  },
+  "current_wire_limits": {
+    "finding_message_characters": 240,
+    "raw_summary_characters": 300
+  },
+  "historical_storage_limits": "Unchanged; previous records remain readable",
+  "reproduced_counterexample": "Previous walking response stopped at 2048 tokens after seven verbose partial findings and only five partial input checks; remains FAILED",
+  "old_asr_id": "1b2a7ca8-03e3-4cc3-8638-ea1157ff0d28",
+  "old_asr_epoch": "STALE_FOR_NEW_DECODER_PENDING_TECHNICAL_DEPRECATION_AND_REAL_REQUALIFICATION",
+  "new_asr": "NOT_RUN",
+  "new_vlm": "NOT_RUN_UNPUBLISHED",
+  "limitations": [
+    "CPU character grammar checks are not actual GPU inference or quality acceptance",
+    "Canonical tokenization path limitation remains unresolved",
+    "Numeric bounds still require application validation",
+    "Whole-GPU point samples are not model peak; resource budget remains estimated"
+  ],
+  "product_status": "PARTIAL"
+}
