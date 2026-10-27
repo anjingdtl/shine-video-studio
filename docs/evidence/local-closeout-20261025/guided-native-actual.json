@@ -102,5 +102,13 @@
     "guided-review-timeout-reconciliation-20261027.json": "fd95ec1a7a3e2b6fcd1d5706335b7647b68a358c23a214b3f640459bf2b0a7ce"
   },
   "next_scope": "Investigate bounded prompt/visual-context resource cost and cleanup timeout; no replay of this unknown request. Complete all real adversarial controls before VLM publication. M4/rights/approved voices-assets/final human review and hosted CI remain open.",
-  "product_status": "PARTIAL"
+  "product_status": "PARTIAL",
+  "hosted_ci_refresh": {
+    "head": "c06f33acc7409470d3ab587815d6bafd13d4eaec",
+    "run_id": 40431681032,
+    "four_checks": "failure",
+    "windows_check_id": 121950609892,
+    "windows_annotation": "Job not started because account payments failed or spending limit must be increased",
+    "code_unchanged_by_following_evidence_commit": true
+  }
 }
