@@ -1,0 +1,43 @@
+{
+  "scope": "real local calibration and historical reference comparison; not new H3 generation or film acceptance",
+  "final_revision_id": "92bedd30-683e-4780-8a73-563e048dd14b",
+  "revision_hash": "1c465af9b4e535842401114e2b76b2ab1b2bd59310f6f1331c22641e8772b8ba",
+  "native_live_errors": [],
+  "source_head": "b0930513e786faf27b4dceb5e7b8e99a0b1ca8a9",
+  "controls": [
+    {
+      "call_id": "0fd93dd4-4207-4836-988a-a7624b4de31c",
+      "expected": "not_passed",
+      "observed": "failed",
+      "lease": "RELEASED",
+      "review_process_exited": true
+    },
+    {
+      "call_id": "76371641-a011-41b3-b9e3-b7945264ed4b",
+      "expected": "passed",
+      "observed": "passed",
+      "lease": "RELEASED",
+      "review_process_exited": true
+    }
+  ],
+  "historical_reference_job": "ffffe1d8-86e7-4593-acaa-91ff453b6b31",
+  "reference_call_id": "2147f3ae-386f-48bc-8c45-2d65784f7cd7",
+  "reference_verdict": "passed",
+  "reference_compared": true,
+  "observation_length": 164,
+  "observation": "A woman with shoulder-length dark hair and a black zippered jacket walks calmly through a rainy, neon-lit city street at night, matching the reference's appearance.",
+  "comfy_process_exited_before_review": true,
+  "gpu_free_before_review_mib": 14986,
+  "review_process_exited_after_review": true,
+  "review_lease_status": "RELEASED",
+  "new_plan_readiness_transaction": "SHOOT_READY, selected final revision, rolled back",
+  "worker_restored": true,
+  "h3_submissions": 0,
+  "human_present": false,
+  "limits": [
+    "probabilistic comparison is not an identity guarantee",
+    "no new production H3 render or full self-review end-to-end",
+    "dialogue end-to-end not run",
+    "worker automated physical RAM release between H3 and review is not demonstrated"
+  ]
+}
