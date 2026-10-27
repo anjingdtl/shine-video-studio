@@ -22,6 +22,7 @@ from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import ResourceLease
 from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
 from shine.models import AgentTaskRecord, Project, ProjectRuleLock
+from shine.quality.client_identity import review_client_identity
 from shine.services import add_audit
 
 CURRENT_MODEL_CALL = ContextVar("current_model_call", default=None)
@@ -57,6 +58,13 @@ MODEL_METHODS = {
     "align": ("ALIGNMENT", 4000),
     "review": ("VLM", 8000),
 }
+
+
+def verified_review_client_identity():
+    try:
+        return review_client_identity()
+    except ValueError as exc:
+        raise HTTPException(409, "REVIEW_CLIENT_SOURCE_CHANGED") from exc
 
 
 def digest_input(value):
@@ -125,6 +133,8 @@ class TrackedProvider:
             role = "model_call:" + kind + ":" + name
             source_context = None
             input_evidence = None
+            client_review_sha256 = None
+            logical_review_hash = None
             input_required = self.require_independent_input if name == "review" else False
             if name == "review" and self.production_job_id:
                 from shine.comfyops.native import frozen_input_policy
@@ -145,16 +155,29 @@ class TrackedProvider:
                 input_required = input_required or source_context.independent_input is not None
                 if input_required and source_context.independent_input is None:
                     raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_REQUIRED")
+                if getattr(self.provider, "response_protocol", None):
+                    client_review_sha256 = verified_review_client_identity()
                 if source_context.independent_input is not None:
                     with self.factory() as db:
                         input_evidence = evidence_for_review(
                             db, self.project_id, source_context, offline=bool(self.provider.is_mock))
+                    client_review_sha256 = verified_review_client_identity()
+                    # Bind unknown outcomes to the logical media/text inputs,
+                    # not the client version, transport alias or review revision.
+                    logical_review_hash = graph_hash(digest_input({
+                        "artifact_sha256": source_context.artifact_sha256,
+                        "shot_spec": source_context.shot_spec.model_dump(mode="json"),
+                        "style": source_context.style.model_dump(mode="json"),
+                    }))
                     verified_context = replace(source_context, independent_input=input_evidence)
                     if args:
                         args = (verified_context, *args[1:])
                     else:
                         kwargs = {**kwargs, "context": verified_context}
-            fingerprint = graph_hash(digest_input([args, kwargs]))
+            fingerprint_parts = [args, kwargs]
+            if input_evidence is not None:
+                fingerprint_parts.append({"client_review_sha256": client_review_sha256})
+            fingerprint = graph_hash(digest_input(fingerprint_parts))
             with self.factory.begin() as db:
                 db.execute(text("BEGIN IMMEDIATE"))
                 uncertain = db.scalar(
@@ -167,6 +190,15 @@ class TrackedProvider:
                 )
                 if uncertain:
                     raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
+                if logical_review_hash:
+                    pending = db.scalars(select(AgentTaskRecord).where(
+                        AgentTaskRecord.project_id == self.project_id,
+                        AgentTaskRecord.role_id == role,
+                        AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW", "RECONCILING"]),
+                    ))
+                    if any(not item.trace.get("logical_review_hash")
+                           or item.trace["logical_review_hash"] == logical_review_hash for item in pending):
+                        raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
                 project = db.get(Project, self.project_id)
                 lock = db.get(ProjectRuleLock, self.project_id)
                 config = getattr(self.provider, "config", None)
@@ -204,10 +236,12 @@ class TrackedProvider:
                         "owner_pid": os.getpid(),
                         "owner_birth": process_identity(os.getpid()),
                         "review_provider": review_binding,
+                        **({"client_review_sha256": client_review_sha256} if client_review_sha256 else {}),
                         **({"independent_input": {"artifact_id": input_evidence["artifact_id"],
                                                   "sha256": input_evidence["sha256"]},
                             "input_assessment_required": input_required,
-                            "input_evidence_protocol": input_evidence["protocol"]}
+                            "input_evidence_protocol": input_evidence["protocol"],
+                            "logical_review_hash": logical_review_hash}
                            if input_evidence is not None else {}),
                     },
                 )
@@ -240,6 +274,8 @@ class TrackedProvider:
                         wait_seconds=0 if self.provider.is_mock else 300,
                     )
                 with context:
+                    if client_review_sha256 and verified_review_client_identity() != client_review_sha256:
+                        raise HTTPException(409, "REVIEW_CLIENT_SOURCE_CHANGED")
                     if input_evidence is not None:
                         with self.factory() as db:
                             if evidence_for_review(db, self.project_id, source_context,
@@ -282,10 +318,13 @@ class TrackedProvider:
                                     **({"validation": exc.validation} if exc.validation is not None else {}),
                                 }}
                             raise
-                        if input_evidence is not None:
+                        if client_review_sha256:
                             with self.factory.begin() as db:
                                 row = db.get(AgentTaskRecord, identity)
                                 row.trace = {**row.trace, "received_result_sha256": graph_hash(digest_input(result))}
+                            if verified_review_client_identity() != client_review_sha256:
+                                raise HTTPException(409, "REVIEW_CLIENT_SOURCE_CHANGED")
+                        if input_evidence is not None:
                             with self.factory() as db:
                                 current_evidence = evidence_for_review(
                                     db, self.project_id, source_context, offline=bool(self.provider.is_mock))

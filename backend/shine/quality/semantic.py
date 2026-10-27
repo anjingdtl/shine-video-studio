@@ -12,6 +12,7 @@ import httpx
 from pydantic import ValidationError
 
 from shine.llm.base import ProviderConfig
+from shine.quality.client_identity import review_client_identity  # noqa: F401  # Capture at process startup.
 from shine.schemas import (
     FusedQCResult,
     HardFailure,
@@ -76,7 +77,8 @@ def review_validation_failure(exc):
     code = str(exc)
     return {"code": code if code in {
         "STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
-        "VLM_DECISION_MISSING", "VLM_VERDICT_INVALID",
+        "VLM_DECISION_MISSING", "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING",
+        "VLM_DIALOGUE_HARD_UNSUPPORTED",
     } else "RESPONSE_SHAPE_INVALID"}
 
 
@@ -260,6 +262,9 @@ class OpenAICompatibleVisionReviewer:
                     "a media approval. Compare the inputs yourself and retain your own seven judgments. "
                     "Missing transcript or frames cannot establish uncertainty about whether two written "
                     "requirements contradict; actual sound conformance belongs to the audio gate. "
+                    "If both written inputs request a seated person, that text check is consistent even "
+                    "when the images show an empty street; report the empty street as a visual finding. "
+                    "Never report missing or wrong dialogue from images or an absent or Mock transcript. "
                     "consistent means no explicit input contradiction; an unspecified ShotSpec detail "
                     "does not override Style. Compare actions and posture in story_beat and blocking too, "
                     "not just camera labels. Opposing posture or action requirements are input conflicts "
@@ -323,7 +328,8 @@ class OpenAICompatibleVisionReviewer:
                 raise ValueError("VLM_DECISION_MISSING")
             if parsed["verdict"] not in {"passed", "failed", "needs_review"}:
                 raise ValueError("VLM_VERDICT_INVALID")
-            parsed["is_mock"] = bool(parsed.get("is_mock", False)) or bool(body.get("is_mock", False))
+            parsed["is_mock"] = (bool(parsed.get("is_mock", False)) or bool(body.get("is_mock", False))
+                                 or bool(body.get("mock", False)))
             parsed["input_sha256"] = context.artifact_sha256
             parsed["model"] = self.config.model
             parsed["reviewer"] = self.name
@@ -332,6 +338,17 @@ class OpenAICompatibleVisionReviewer:
                 recorder(body, response_hash)
             result = SemanticReviewResult.model_validate(parsed)
             require_style_input_checks(result)
+            # Frames do not establish whether words were spoken. These known
+            # dialogue claims require an actual non-Mock ASR transcript.
+            dialogue_codes = {"MISSING_DIALOGUE", "DIALOGUE_MISSING", "WRONG_DIALOGUE", "DIALOGUE_MISMATCH"}
+            dialogue_claims = [f for f in result.findings if f.code.upper() in dialogue_codes]
+            if dialogue_claims and not (
+                isinstance(context.transcript, Transcript) and context.transcript.is_mock is False
+            ):
+                raise ValueError("VLM_DIALOGUE_EVIDENCE_MISSING")
+            # ASR omissions are probabilistic evidence, not deterministic proof.
+            if any(f.severity == "hard" for f in dialogue_claims):
+                raise ValueError("VLM_DIALOGUE_HARD_UNSUPPORTED")
             if response_protocol:
                 proof = body.get("structured_output")
                 if (not isinstance(proof, dict) or proof.get("protocol") != response_protocol
@@ -375,7 +392,7 @@ class LocalReviewRelease:
         try:
             proof = ExecutorIdentity.model_validate(identity)
             if (proof.model_id != self.config.model or body.get("model") != self.config.model
-                    or body.get("is_mock") is not False):
+                    or body.get("is_mock") is not False or bool(body.get("mock", False))):
                 raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         except ValueError as exc:
             raise ReceivedReviewError("EXECUTOR_IDENTITY_INVALID", response_hash) from exc
@@ -468,7 +485,7 @@ class OpenAICompatibleASRReviewer:
         return Transcript(
             text=str(body.get("text", "")),
             segments=segments,
-            is_mock=bool(body.get("is_mock", False)),
+            is_mock=bool(body.get("is_mock", False)) or bool(body.get("mock", False)),
             model=self.config.model,
         )
 

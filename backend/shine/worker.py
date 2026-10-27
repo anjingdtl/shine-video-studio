@@ -4,11 +4,13 @@ import argparse
 import logging
 import os
 import time
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -57,6 +59,7 @@ from shine.quality.revisions import (
     revision_for_references,
 )
 from shine.quality.semantic import (
+    ReceivedReviewError,
     ReviewContext,
     Transcript,
     dialogue_findings,
@@ -381,14 +384,25 @@ def _semantic_review(
         result = reviewer.review(context)
     except PermissionError as exc:
         return [], f"SEMANTIC_REVIEW_FAILED: {exc}"
-    except TimeoutError as exc:
-        return [], f"SEMANTIC_REVIEW_TIMEOUT: {exc}"
+    except (TimeoutError, httpx.TimeoutException):
+        return [], "SEMANTIC_REVIEW_TIMEOUT: response unavailable"
+    except ReceivedReviewError as exc:
+        reason = (exc.validation or {}).get("code")
+        if reason == "JSON_DECODE_FAILED":
+            return [], "SEMANTIC_REVIEW_INVALID_JSON: JSON_DECODE_FAILED"
+        allowed = {"STYLE_INPUT_COVERAGE_MISSING", "STYLE_INPUT_DECISION_CONTRADICTION",
+                   "SCHEMA_VALIDATION_FAILED", "HTTP_REQUEST_REJECTED", "VLM_DECISION_MISSING",
+                   "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING", "VLM_DIALOGUE_HARD_UNSUPPORTED",
+                   "RESPONSE_SHAPE_INVALID"}
+        return [], f"SEMANTIC_REVIEW_CONTRACT_INVALID: {reason if reason in allowed else 'RESPONSE_REJECTED'}"
     except ValueError as exc:
         return [], f"SEMANTIC_REVIEW_INVALID_JSON: {exc}"
     except Exception as exc:  # pragma: no cover - defensive
         return [], f"SEMANTIC_REVIEW_FAILED: {type(exc).__name__}"
     if result is None:
         return [], "SEMANTIC_REVIEW_INVALID_JSON: the reviewer returned no result"
+    if getattr(reviewer, "is_mock", False) and not result.is_mock:
+        result = result.model_copy(update={"is_mock": True})
     return [result], None
 
 
@@ -409,6 +423,8 @@ def _transcript_review(
         return None, None, f"ASR_FAILED: {exc}"
     except Exception as exc:  # pragma: no cover - defensive
         return None, None, f"ASR_FAILED: {type(exc).__name__}"
+    if getattr(asr, "is_mock", False) and not transcript.is_mock:
+        transcript = replace(transcript, is_mock=True)
     findings = dialogue_findings(spec, transcript)
     return transcript, findings, None
 

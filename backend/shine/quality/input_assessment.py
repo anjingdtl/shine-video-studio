@@ -10,6 +10,7 @@ from shine.agents.film_contracts import FilmRunRequest, StyleInputAssessment
 from shine.h3.rulebook import digest
 from shine.llm.base import text_provider_snapshot
 from shine.models import AgentArtifact, AgentRoute, AgentTaskRecord, Project, ProviderProfile, StyleVersion
+from shine.quality.client_identity import review_client_identity  # noqa: F401  # Capture at process startup.
 from shine.schemas import RenderRequest, ShotSpec, StyleBible
 from shine.security import is_loopback_url
 

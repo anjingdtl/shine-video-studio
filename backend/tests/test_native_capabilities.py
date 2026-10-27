@@ -74,7 +74,10 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
         runtime_files=[f["relative_path"] for f in files],
     )
     if structured:
-        binding.update(response_protocol="local-review-json-schema-v1", decoder_sha256="d" * 64)
+        from shine.quality.client_identity import review_client_identity
+
+        binding.update(response_protocol="local-review-json-schema-v1", decoder_sha256="d" * 64,
+                       client_review_sha256=review_client_identity())
         with factory.begin() as db:
             db.get(ProviderProfile, profile["id"]).capabilities = {
                 "review_response_protocol": binding["response_protocol"], "review_decoder_sha256": "d" * 64,
@@ -244,16 +247,64 @@ def test_guided_call_cannot_qualify_an_unguarded_production_binding(native):
         if n["structured"]:
             from pydantic import ValidationError
 
+            from shine.quality.client_identity import review_client_identity
+
             with pytest.raises(ValidationError, match="NATIVE_INPUT_EVIDENCE_PROTOCOL_PIN_INCOMPLETE"):
                 NativeProviderBinding.model_validate({**binding.model_dump(), "input_assessment_required": True})
+            with pytest.raises(ValidationError, match="NATIVE_REVIEW_CLIENT_PIN_INCOMPLETE"):
+                NativeProviderBinding.model_validate({**binding.model_dump(), "input_assessment_required": True,
+                                                      "input_evidence_protocol": "text-assessment-compact-v2",
+                                                      "client_review_sha256": None})
             valid = NativeProviderBinding.model_validate({**binding.model_dump(), "input_assessment_required": True,
-                                                          "input_evidence_protocol": "text-assessment-compact-v2"})
+                                                          "input_evidence_protocol": "text-assessment-compact-v2",
+                                                          "client_review_sha256": review_client_identity()})
             assert not valid_call(db, call, n["category"], valid, n["project"], budget_mb=budget)
             guarded = binding.model_copy(update={"input_assessment_required": True})
             # A flag plus invented source IDs is not an actual text assessment.
             assert not valid_call(db, call, n["category"], guarded, n["project"], budget_mb=budget)
             call.trace = {k: v for k, v in call.trace.items() if k != "independent_input"}
             assert not valid_call(db, call, n["category"], guarded, n["project"], budget_mb=budget)
+
+
+def test_guided_native_binding_rechecks_loaded_client_source(native):
+    import copy
+
+    from shine.quality.client_identity import review_client_identity
+
+    n = native
+    if not n["structured"]:
+        return
+    payload = copy.deepcopy(n["row"]["payload"])
+    payload["native_provider"].update(input_assessment_required=True,
+                                      input_evidence_protocol="text-assessment-compact-v2",
+                                      client_review_sha256=review_client_identity())
+    with n["factory"]() as db:
+        assert not native_errors(db, payload)
+        payload["native_provider"]["client_review_sha256"] = "0" * 64
+        assert "NATIVE_REVIEW_CLIENT_CHANGED" in native_errors(db, payload)
+
+
+def test_structured_review_rejects_client_drift_after_response_without_input_assessment(native, tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from shine.quality import client_identity
+
+    n = native
+    if not n["structured"]:
+        return
+    n["response_hook"][0] = lambda: monkeypatch.setattr(client_identity, "_LOADED_IDENTITY", "0" * 64)
+    profile = n["profile"]
+    cfg = ProviderConfig(profile_id=profile["id"], name="fixture", kind="openai_compatible",
+                         base_url=profile["base_url"], model=profile["model"], api_key=None)
+    reviewer = TrackedProvider(LocalVisionReviewer(cfg, response_protocol="local-review-json-schema-v1"),
+                               n["factory"], n["project"])
+    with pytest.raises(HTTPException, match="REVIEW_CLIENT_SOURCE_CHANGED"):
+        reviewer.review(replace(context(tmp_path), review_revision="client-drift-fixture"))
+    with n["factory"]() as db:
+        call = db.scalar(select(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == "model_call:VLM:review", AgentTaskRecord.status == "FAILED"))
+        assert call and len(call.trace["received_result_sha256"]) == 64
+        assert db.get(ResourceLease, call.trace["resource_id"]).status == "RELEASED"
 
 
 def test_old_vlm_input_coverage_cannot_qualify_a_new_capability(native):

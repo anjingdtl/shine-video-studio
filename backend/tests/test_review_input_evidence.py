@@ -97,6 +97,9 @@ def test_review_input_rejected_before_resource_admission(api, damage):
             call = db.query(AgentTaskRecord).filter_by(role_id="model_call:VLM:review").one()
             assert call.status == "COMPLETED" and call.trace["input_assessment_required"] is True
             assert call.trace["input_evidence_protocol"] == "text-assessment-compact-v2"
+            from shine.quality.client_identity import review_client_identity
+
+            assert call.trace["client_review_sha256"] == review_client_identity()
             assert call.trace["independent_input"] == context.independent_input
 
 
@@ -115,6 +118,66 @@ def test_review_rechecks_evidence_after_received_response(api):
         call = db.query(AgentTaskRecord).filter_by(role_id="model_call:VLM:review").one()
         assert call.status == "FAILED" and len(call.trace["received_result_sha256"]) == 64
     assert provider.calls == 1 and provider.releases == 2
+
+
+@pytest.mark.parametrize("change_at", ["before", "after"])
+def test_review_client_source_drift_is_blocked_and_received_digest_retained(api, monkeypatch, change_at):
+    from shine.quality import client_identity
+
+    _, factory, _ = api
+    project, _, context = prepared(api)
+
+    def drift():
+        monkeypatch.setattr(client_identity, "_LOADED_IDENTITY", "0" * 64)
+
+    provider = Provider(drift if change_at == "after" else lambda: None)
+    if change_at == "before":
+        drift()
+    with pytest.raises(HTTPException, match="REVIEW_CLIENT_SOURCE_CHANGED"):
+        TrackedProvider(provider, factory, project, require_independent_input=True).review(context)
+    with factory() as db:
+        call = db.query(AgentTaskRecord).filter_by(role_id="model_call:VLM:review").one_or_none()
+        if change_at == "before":
+            assert call is None and provider.calls == provider.releases == 0
+        else:
+            assert call.status == "FAILED" and len(call.trace["received_result_sha256"]) == 64
+            assert provider.calls == 1 and provider.releases == 2
+
+
+@pytest.mark.parametrize("variant", ["revision", "job-alias", "legacy", "new-transcript", "independent-media"])
+def test_unknown_guided_review_blocks_aliases_but_allows_independent_media(api, variant):
+    import httpx
+
+    _, factory, _ = api
+    project, _, context = prepared(api)
+
+    class LostProvider(Provider):
+        def review(self, context):
+            self.calls += 1
+            raise httpx.ReadTimeout("Synthetic lost response")
+
+    lost = LostProvider()
+    with pytest.raises(httpx.ReadTimeout):
+        TrackedProvider(lost, factory, project, require_independent_input=True).review(context)
+    with factory.begin() as db:
+        call = db.query(AgentTaskRecord).filter_by(role_id="model_call:VLM:review").one()
+        assert call.status == "NEEDS_REVIEW" and call.trace["logical_review_hash"]
+        if variant == "legacy":
+            call.trace = {k: v for k, v in call.trace.items() if k != "logical_review_hash"}
+    next_context = replace(context, review_revision="different-client-revision", job_id="different-job-alias")
+    if variant == "new-transcript":
+        next_context = replace(next_context, transcript="synthetic changed transcript")
+    if variant == "independent-media":
+        next_context = replace(next_context, artifact_sha256="b" * 64)
+    next_provider = Provider()
+    tracked = TrackedProvider(next_provider, factory, project, require_independent_input=True)
+    if variant == "independent-media":
+        assert tracked.review(next_context)["verdict"] == "passed"
+        assert next_provider.calls == 1
+    else:
+        with pytest.raises(HTTPException, match="MODEL_CALL_RECONCILIATION_REQUIRED"):
+            tracked.review(next_context)
+        assert next_provider.calls == next_provider.releases == 0
 
 
 def test_legacy_review_fingerprint_preserves_uncertain_replay_guard(api):

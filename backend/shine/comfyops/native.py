@@ -14,6 +14,7 @@ from sqlalchemy import select
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import ModelPackage, ResourceLease
 from shine.models import AgentRoute, AgentTaskRecord, ProviderProfile
+from shine.quality.client_identity import review_client_identity
 from shine.quality.identity import ExecutorIdentity
 from shine.security import is_loopback_url
 
@@ -33,6 +34,7 @@ class NativeProviderBinding(BaseModel):
     decoder_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     input_assessment_required: bool = False
     input_evidence_protocol: Literal["text-assessment-compact-v2"] | None = None
+    client_review_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_model(self):
@@ -42,6 +44,8 @@ class NativeProviderBinding(BaseModel):
             raise ValueError("NATIVE_INPUT_ASSESSMENT_REQUIRES_STRUCTURED_REVIEW")
         if self.input_assessment_required != bool(self.input_evidence_protocol):
             raise ValueError("NATIVE_INPUT_EVIDENCE_PROTOCOL_PIN_INCOMPLETE")
+        if bool(self.response_protocol) != bool(self.client_review_sha256):
+            raise ValueError("NATIVE_REVIEW_CLIENT_PIN_INCOMPLETE")
         if self.model != self.executor_identity.model_id:
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
@@ -75,6 +79,12 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
     category = payload["category"]
     if binding.response_protocol and category != "VLM_REVIEW":
         errors.append("NATIVE_REVIEW_PROTOCOL_CATEGORY_MISMATCH")
+    if binding.client_review_sha256:
+        try:
+            if review_client_identity() != binding.client_review_sha256:
+                errors.append("NATIVE_REVIEW_CLIENT_CHANGED")
+        except ValueError:
+            errors.append("NATIVE_REVIEW_CLIENT_CHANGED")
     profile = db.get(ProviderProfile, binding.profile_id)
     try:
         url = urlsplit(profile.base_url) if profile else None
@@ -212,9 +222,13 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
     resource_id = call.trace.get("resource_id")
     if bool(call.trace.get("input_assessment_required")) != binding.input_assessment_required:
         return False
-    if binding.input_assessment_required and not call.trace.get("independent_input"):
+    if binding.input_assessment_required and (
+        not call.trace.get("independent_input") or not call.trace.get("logical_review_hash")
+    ):
         return False
     if call.trace.get("input_evidence_protocol") != binding.input_evidence_protocol:
+        return False
+    if call.trace.get("client_review_sha256") != binding.client_review_sha256:
         return False
     if binding.input_assessment_required:
         from fastapi import HTTPException
