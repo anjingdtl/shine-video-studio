@@ -1,0 +1,106 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T01:17:01.952607+00:00",
+  "status": "GUIDED_PIXEL_TIMEOUT_RESULT_UNKNOWN_RECONCILED_NO_REPLAY",
+  "source_head": "210c9ddf579a19acee951c4572db5bb9604b77a4",
+  "backend_tests": 791,
+  "scope": "Actual source-bound local pixel control; no semantic or performance qualification from a timeout",
+  "guarded_static_vlm_id": "5e30c56b-8c9c-4eeb-a223-f32960297b7d",
+  "vlm_status": "STATIC_VALIDATED_UNPUBLISHED",
+  "runtime_sha256": "3232277f54da98e27620cd21132c14c83109f7d7c32cd0c7fbffcd1b8a2255b2",
+  "call": {
+    "id": "50a61ac9-c076-4ed1-beae-48557b64a3e4",
+    "before": "NEEDS_REVIEW",
+    "error_code": "ReadTimeout",
+    "response_received": false,
+    "received_response_sha256": null,
+    "after": "ABANDONED",
+    "external_outcome": "UNKNOWN",
+    "resource_id": "051d6f63-2fdc-4e19-a7ba-b7d2277e0243",
+    "lease_before": "RECONCILE_REQUIRED",
+    "lease_after": "RELEASED",
+    "input_assessment_required": true,
+    "independent_input": {
+      "artifact_id": "15c1f2df-aa1f-4b8b-a7b7-2ddc61362262",
+      "sha256": "3fedcaf1ad69bc59da80d751a67354668ec01c8ecdaefcb209bab6bfb4a16632"
+    },
+    "inference_timeout_s": 300,
+    "max_retries": 0
+  },
+  "controls": [
+    {
+      "name": "guided-pixel-positive",
+      "expected": "passed",
+      "actual": "UNKNOWN_TIMEOUT_NOT_PASS"
+    },
+    {
+      "name": "guided-pixel-mask-negative",
+      "expected": "failed",
+      "actual": "NOT_RUN"
+    },
+    {
+      "name": "guided-pixel-empty-negative",
+      "expected": "failed",
+      "actual": "NOT_RUN"
+    },
+    {
+      "name": "guided-pixel-walking-negative",
+      "expected": "failed",
+      "actual": "NOT_RUN"
+    }
+  ],
+  "physical_release": {
+    "old_owners": [
+      {
+        "pid": 33260,
+        "birth": "134375365774179851"
+      },
+      {
+        "pid": 16624,
+        "birth": "134375365774365919"
+      }
+    ],
+    "old_processes_dead": true,
+    "review_process_memory_before_stop": {
+      "working_set_bytes": 2264588288,
+      "lifetime_peak_working_set_bytes": 7078346752,
+      "private_commit_bytes": 5326524416,
+      "lifetime_peak_private_commit_bytes": 25294327808,
+      "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+    },
+    "whole_gpu_used_free_mib_after_stop": "979, 14999",
+    "cold_loaded": false,
+    "cold_asr_loaded": false,
+    "cold_allocated_bytes": 0,
+    "cold_reserved_bytes": 0,
+    "comfy_restored_idle": true
+  },
+  "gpu_point_snapshot_not_peak": {
+    "at": "2026-10-27T01:06:35.907684+00:00",
+    "scope": "WHOLE_GPU_POINT_SNAPSHOT_NOT_MODEL_PEAK_OR_BUDGET_PROOF",
+    "nvidia_smi_columns": [
+      "total_mib",
+      "used_mib",
+      "free_mib",
+      "gpu_utilization_percent"
+    ],
+    "nvidia_smi_values": "16303, 15639, 339, 93",
+    "serial_control": "guided-pixel-positive",
+    "h3_submissions": 0
+  },
+  "protected_tables_unchanged": true,
+  "asr_qualification_retained_id": "1b2a7ca8-03e3-4cc3-8638-ea1157ff0d28",
+  "h3_submissions": 0,
+  "inference_replays": 0,
+  "remote_text_calls": 0,
+  "media_cloud_upload_bytes": 0,
+  "human_present": false,
+  "human_quality_or_rights_approval": false,
+  "local_evidence_sha256": {
+    "guided-native-activation-20261027.json": "ac2e68fc34936bd1c851fad403483e96a076a01385c4bd2282a3f415086fcef6",
+    "real-guided-native-controls-20261027.json": "c57a8206f664c7343aa6c994a6247df784bf1cd87560fa87900fd8d83a93c565",
+    "guided-review-timeout-reconciliation-20261027.json": "fd95ec1a7a3e2b6fcd1d5706335b7647b68a358c23a214b3f640459bf2b0a7ce"
+  },
+  "next_scope": "Investigate bounded prompt/visual-context resource cost and cleanup timeout; no replay of this unknown request. Complete all real adversarial controls before VLM publication. M4/rights/approved voices-assets/final human review and hosted CI remain open.",
+  "product_status": "PARTIAL"
+}
