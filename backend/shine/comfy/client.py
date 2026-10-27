@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -181,12 +182,17 @@ class ComfyUIClient:
         for device in devices:
             total = device.get("torch_vram_total")
             free = device.get("torch_vram_free")
-            if not isinstance(total, int | float) or not isinstance(free, int | float):
+            if any(
+                type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value))
+                for value in (total, free)
+            ):
+                return False
+            if not 0 <= free <= total:
                 return False
             if modern:
-                if abs(float(total) - float(free)) > ComfyUIClient.MAX_LIVE_TENSOR_BYTES:
+                if total - free > ComfyUIClient.MAX_LIVE_TENSOR_BYTES:
                     return False
-            elif float(total) != 0:
+            elif total != 0:
                 return False
         return True
 

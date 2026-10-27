@@ -80,3 +80,13 @@ def test_release_is_refused_while_the_renderer_is_busy(fake_comfy):
     client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
     with pytest.raises(ComfyUIError):
         client.free_models()
+
+@pytest.mark.parametrize("total,free", [
+    (True, True), (-1, -1), (1024, 2048),
+    (float("nan"), 0), (float("inf"), float("inf")),
+])
+def test_release_refuses_invalid_renderer_memory_accounting(total, free):
+    stats = {"system": {"comfyui_version": "0.39.0"}, "devices": [
+        {"torch_vram_total": total, "torch_vram_free": free}
+    ]}
+    assert not ComfyUIClient._release_confirmed(stats)

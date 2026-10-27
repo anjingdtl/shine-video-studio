@@ -1,0 +1,28 @@
+{
+  "scope": "renderer invalid CUDA memory accounting fails closed",
+  "counterexamples": [
+    "boolean",
+    "negative",
+    "free greater than total",
+    "NaN",
+    "infinity"
+  ],
+  "counterexamples_before_fix": "5 failed",
+  "backend": {
+    "tests": "881",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "targeted_regression": "passed: renderer, resource ledger, offline production loop",
+  "ruff": "passed for changed Python files",
+  "live_idle_comfyui_039": "accepted valid idle reading without unloading or inference",
+  "stack": "RESTORED_IDLE",
+  "worker_online": true,
+  "h3_submissions": 0,
+  "source_sha256": {
+    "backend\\shine\\comfy\\client.py": "d6daf0a9ae0bb372bdbdaa39cbd2a0db53c27b6c58e96bfd21ca8868ee120371",
+    "backend\\tests\\test_gpu_release_confirmation.py": "768c65790c537f8e29509929bc9ec70ffa7e17abe4d4bc31c3c952d487254d63"
+  },
+  "limitations": "This validates renderer-reported allocation only; it does not prove physical process RAM release, automatic handoff, or new VLM qualification."
+}
