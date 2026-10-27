@@ -230,6 +230,8 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
             "compiled_prompt_sha256": job.request.get("prompt_sha256"),
             "compiler_version": job.request.get("compiler_version"),
             "rule_version": job.request.get("rule_version"),
+            "basic_review_resolution": job.request.get("basic_review_resolution"),
+            "self_review_scope": job.request.get("self_review_scope", "full"),
         },
         "attempts": [
             {

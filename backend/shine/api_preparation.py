@@ -1797,17 +1797,32 @@ def native_execution_evidence(identity: str, body: NativeExecutionEvidence, acto
             raise HTTPException(409, "COMPLETED_REAL_NATIVE_CALL_REQUIRED")
         try:
             if category == "VLM_REVIEW":
-                result = SemanticReviewResult.model_validate(sample.result)
-                from shine.quality.semantic import require_style_input_checks
+                if binding.review_scope == "basic_character":
+                    from shine.quality.basic_character_reviewer import CharacterReview
+                    from shine.quality.basic_review import CharacterReviewResponse
 
-                require_style_input_checks(result)
-                if (result.is_mock or result.model != binding.model or result.overall_confidence < 0.7
-                        or result.verdict != sample.expected_verdict
-                        or (result.verdict == "passed" and result.findings)
-                        or (result.verdict == "failed" and not any(
-                            f.severity == "hard" and f.confidence >= 0.7 for f in result.findings))):
-                    raise ValueError("VLM_CALIBRATION_RESULT_INVALID")
-                summary = {"expected_verdict": sample.expected_verdict, "style_input_contract": "seven-field-v1"}
+                    result = CharacterReview(**sample.result)
+                    response = CharacterReviewResponse.model_validate(result.response)
+                    statuses = [item.status for item in response.characters]
+                    verdict = ("failed" if "failed" in statuses else "passed"
+                               if statuses and all(s == "passed" for s in statuses) else "needs_review")
+                    if (result.is_mock is not False or result.model != binding.model
+                            or verdict != sample.expected_verdict):
+                        raise ValueError("CHARACTER_CALIBRATION_RESULT_INVALID")
+                    summary = {"expected_verdict": sample.expected_verdict,
+                               "character_input_contract": "basic-character-v1"}
+                else:
+                    result = SemanticReviewResult.model_validate(sample.result)
+                    from shine.quality.semantic import require_style_input_checks
+
+                    require_style_input_checks(result)
+                    if (result.is_mock or result.model != binding.model or result.overall_confidence < 0.7
+                            or result.verdict != sample.expected_verdict
+                            or (result.verdict == "passed" and result.findings)
+                            or (result.verdict == "failed" and not any(
+                                f.severity == "hard" and f.confidence >= 0.7 for f in result.findings))):
+                        raise ValueError("VLM_CALIBRATION_RESULT_INVALID")
+                    summary = {"expected_verdict": sample.expected_verdict, "style_input_contract": "seven-field-v1"}
             else:
                 data = dict(sample.result)
                 data["segments"] = [TranscriptSegment(**item) for item in data.get("segments", [])]

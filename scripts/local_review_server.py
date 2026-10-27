@@ -62,9 +62,19 @@ def decoder_runtime_identity(lock_path=None):
     if not isinstance(schema_hash, str) or not re.fullmatch("[a-f0-9]{64}", schema_hash):
         raise ValueError("REVIEW_DECODER_SCHEMA_PIN_MISSING")
     payload = {"protocol": STRUCTURED_PROTOCOL, "packages": verified, "schema_sha256": schema_hash}
-    return {"protocol": STRUCTURED_PROTOCOL, "decoder_sha256": hashlib.sha256(
+    additional = lock.get("additional_review_schema_sha256", [])
+    if (not isinstance(additional, list) or len(additional) > 8
+            or any(not isinstance(pin, str) or not re.fullmatch("[a-f0-9]{64}", pin) for pin in additional)
+            or len(set(additional)) != len(additional) or schema_hash in additional):
+        raise ValueError("REVIEW_DECODER_ADDITIONAL_SCHEMA_PINS_INVALID")
+    if additional:
+        payload["additional_schema_sha256"] = sorted(additional)
+    result = {"protocol": STRUCTURED_PROTOCOL, "decoder_sha256": hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest(), "schema_sha256": schema_hash}
+    if additional:
+        result["supported_schema_sha256"] = [schema_hash, *sorted(additional)]
+    return result
 
 
 def review_response_schema(body, expected_hash=None):
@@ -93,15 +103,26 @@ def review_response_schema(body, expected_hash=None):
                 check(child)
     check(schema)
     actual = hashlib.sha256(encoded).hexdigest()
-    if expected_hash is not None and actual != expected_hash:
+    pins = [expected_hash] if isinstance(expected_hash, str) else expected_hash
+    if pins is not None and actual not in pins:
         raise ValueError("REVIEW_JSON_SCHEMA_PIN_MISMATCH")
     return schema, actual
 
 
 def review_prefix_function(tokenizer, schema):
     from lmformatenforcer import JsonSchemaParser
-    from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
-    callback = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
+    from lmformatenforcer.characterlevelparser import CharacterLevelParserConfig
+    from lmformatenforcer.integrations.transformers import (
+        build_token_enforcer_tokenizer_data,
+        build_transformers_prefix_allowed_tokens_fn,
+    )
+
+    # JsonSchemaParser snapshots its alphabet in its constructor. Setting
+    # parser.config later (as TokenEnforcer does) does not update that cached
+    # value, and otherwise silently excludes Chinese characters from strings.
+    token_data = build_token_enforcer_tokenizer_data(tokenizer)
+    config = CharacterLevelParserConfig(alphabet=token_data.tokenizer_alphabet)
+    callback = build_transformers_prefix_allowed_tokens_fn(token_data, JsonSchemaParser(schema, config=config))
 
     class NoGeneratedPrefixLogs(logging.Filter):
         def filter(self, record):
@@ -401,7 +422,9 @@ def build_app(manifest):
             raise HTTPException(404, "EXACT_MODEL_ID_REQUIRED")
         try:
             token_limit = review_token_limit(body)
-            response_schema, schema_hash = review_response_schema(body, decoder_identity["schema_sha256"])
+            response_schema, schema_hash = review_response_schema(
+                body, decoder_identity.get("supported_schema_sha256", decoder_identity["schema_sha256"])
+            )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         messages, count = [], 0

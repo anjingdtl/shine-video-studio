@@ -541,6 +541,8 @@ def make_render_request(
         rule_version=compiled.rule_version,
         workflow_profile_hash=workflow_hash,
         expected_duration_s=spec.duration_target_s,
+        self_review_scope=body.self_review_scope,
+        basic_review_resolution=body.basic_review_resolution,
     )
     # V1.1 projects explicitly freeze their rule pack. Legacy jobs retain the
     # original pinned compiler and are never silently enrolled in a new policy.

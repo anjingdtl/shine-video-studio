@@ -223,5 +223,8 @@
     }
   ],
   "quality_claim": "NONE; runtime and semantic calibration still required",
-  "review_schema_sha256": "86c02ef0acfc61ff1f7a69af0e1c43e2e48f9e56cd35f7793f1223238b646bf9"
+  "review_schema_sha256": "86c02ef0acfc61ff1f7a69af0e1c43e2e48f9e56cd35f7793f1223238b646bf9",
+  "additional_review_schema_sha256": [
+    "13258daf5d33f0773c5c41bdeafe7c8418e2fe5bb8f8c93e0e818f0a69db6351"
+  ]
 }

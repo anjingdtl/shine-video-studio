@@ -1,0 +1,75 @@
+{
+  "created_at": "2026-10-27T09:51:53.378323+00:00",
+  "scope": "SOFTWARE_AND_CPU_GRAMMAR_ONLY_NOT_REAL_MODEL_QUALIFICATION_OR_FILM_ACCEPTANCE",
+  "backend": {
+    "tests": "859",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "frontend": "TypeScript and Vite build passed",
+  "ruff": "passed",
+  "cpu_grammar": {
+    "scope": "REAL_QWEN_TOKENIZER_CHARACTER_GRAMMAR_CPU_ONLY",
+    "schema_sha256": "13258daf5d33f0773c5c41bdeafe7c8418e2fe5bb8f8c93e0e818f0a69db6351",
+    "cases": {
+      "pass": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      },
+      "fail": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      },
+      "uncertain": {
+        "character_grammar_accepts": true,
+        "rejected_at": null
+      }
+    },
+    "token_checks": {
+      "pass": {
+        "canonical_tokens_accepted": true,
+        "rejected_token_index": null,
+        "tokens": 24
+      },
+      "fail": {
+        "canonical_tokens_accepted": true,
+        "rejected_token_index": null,
+        "tokens": 25
+      },
+      "uncertain": {
+        "canonical_tokens_accepted": true,
+        "rejected_token_index": null,
+        "tokens": 26
+      }
+    },
+    "model_weights_loaded": false,
+    "cuda_initialized": false,
+    "inference_calls": 0,
+    "media_bytes": 0
+  },
+  "source_files_sha256": {
+    "backend/shine/api_preparation.py": "f124204e16408407d5f8f8cd629dcf3073d65e008ca47fab7dcbdd193c4a2bd9",
+    "backend/shine/comfyops/native.py": "2219ec65c1c08d5a53fd077fbda5023984e6f6f2a1feabbba8fba02cacb91966",
+    "backend/shine/main.py": "32842551753bfaa11b61ca5ec9077670d8aa86e27d504cd0f02aeecff590c05b",
+    "backend/shine/quality/client_identity.py": "ee6cc7210127f281486f1088a9492a5231bd735e3fe56dbfbe14680be3000220",
+    "backend/shine/quality/basic_review.py": "359237fbf5344c685e1258c72e9e582319d6f53c453820ebacd946cb2ba06dba",
+    "backend/shine/quality/basic_character_reviewer.py": "59f9a5268a621964b735a9ff8faf75af6ffada5399833c8bb5c2ee6cb23c021b",
+    "backend/shine/schemas.py": "3ac598292195669fe6102eb7bb0248103f9e4152d4b69483d32d8a15ad241f61",
+    "backend/shine/services.py": "a9f6c249d9354ccedbacd1edc16f1266798fbed046eb273e3287ae4547448321",
+    "backend/shine/worker.py": "0291393d200e7479ac103a03351623d647479fd36657de745c81deb3f3afb0d2",
+    "backend/tests/test_basic_review.py": "059311f589216f171458ed134d768403cebbd22ed161ecb5c348b265d0d56b28",
+    "backend/tests/test_basic_character_reviewer.py": "a0d5fc6adb987e325c56e5bf2bd34e2dcd0c0df608389ddc5d23369c323bf7b2",
+    "backend/tests/test_basic_review_worker.py": "66e597ea9c3fdaeba0e841ef23135c032e22bd932084b0b7f5b61c75587dddb0",
+    "backend/tests/test_native_capabilities.py": "84024fc3c7a17e97696efb6d5ef6f0df4a96466d9023b1e8a57e4c116ca78e40",
+    "backend/tests/test_structured_review.py": "d9ddae1ee13a4fccc6b58679907758d0c7fc14973fd58073d69caa8748d1feaa",
+    "scripts/local_review_server.py": "57136a81b000b6d42d198ce6bc491a3bab86b4b97171a5c8ab692ecc06c3d09f",
+    "config/review-decoder-lock.json": "012f7772e4f62d93101666f86b353c2017fe9c1f58a852b30b56ec83ca449bcb",
+    "frontend/src/App.tsx": "3c4073823404f47c8beee241ca226e25d6e7537da843b5aa9a2304cc8dd214c6",
+    "frontend/src/api.ts": "5ae9783444cdaf1f17597aa2ffdc70151b66e1caed912dfda38e2a51f0574007",
+    "frontend/src/components/ProductionPanel.tsx": "2f2316115ad5ada5d617fbf8fe42087ea04d3f12acc4f86393f2951ccb5c96a8"
+  },
+  "runtime_activation": "NOT_RUN",
+  "asr_requalification": "NOT_RUN",
+  "basic_vlm_qualification": "NOT_RUN"
+}

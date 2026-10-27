@@ -43,6 +43,7 @@ from shine.quality.gates import (
     STATUS_FAILED,
     STATUS_PASSED,
     VERIFICATION_MOCK,
+    VERIFICATION_PARTIAL,
     VERIFICATION_REAL,
     GateOutcome,
     QualityPolicy,
@@ -1251,6 +1252,14 @@ def _finalize_comfy_attempt(
             if lease:
                 ResourceScheduler().release(release_db, lease.id, lease.owner, reconciled=True)
         CURRENT_RESOURCE.set(None)
+        if semantic_reviewer and request.self_review_scope == "basic":
+            from shine.quality.basic_character_reviewer import BasicCharacterReviewer
+            from shine.quality.semantic import LocalVisionReviewer
+
+            if isinstance(semantic_reviewer, LocalVisionReviewer):
+                semantic_reviewer = BasicCharacterReviewer(
+                    semantic_reviewer.config, resource_mb=semantic_reviewer.resource_budget_mb("review")
+                )
         if semantic_reviewer:
             semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id, reviewer_kind="VLM",
                                                  production_job_id=job_id)
@@ -1272,7 +1281,7 @@ def _finalize_comfy_attempt(
         remote_consent=remote_consent,
     )
     semantic_results, semantic_error = _semantic_review(
-        reviewer=semantic_reviewer,
+        reviewer=(semantic_reviewer if request.self_review_scope != "basic" or request.shot_spec.characters else None),
         job_id=job_id,
         spec=request.shot_spec,
         style=request.style_snapshot,
@@ -1288,20 +1297,59 @@ def _finalize_comfy_attempt(
                             "sha256": request.style_input_assessment_sha256}
                            if request.style_input_assessment_id else None),
     )
-    gates, fused = evaluate_gates(
-        policy=policy,
-        shot_spec=request.shot_spec,
-        technical=technical,
-        semantic_results=semantic_results,
-        semantic_error=semantic_error,
-        transcript_findings=transcript_findings,
-        asr_error=asr_error,
-        transcript_model=transcript.model if transcript else None,
-        transcript_is_mock=bool(transcript.is_mock) if transcript else False,
-        style_version_id=request.style_version_id,
-        style_hash=request.style_hash,
-        reference_count=len(manifest),
-    )
+    if request.self_review_scope == "basic":
+        from shine.quality.basic_character_reviewer import CharacterReview
+        from shine.quality.basic_review import (
+            CharacterReviewResponse,
+            character_evidence_from_response,
+            dialogue_evidence_from_transcript,
+            evaluate_basic_gates,
+        )
+
+        characters = ()
+        character_response = None
+        if not semantic_error and len(semantic_results) == 1 and isinstance(semantic_results[0], CharacterReview):
+            result = semantic_results[0]
+            character_response = result.response
+            bound = {item.entity_id or item.role for item in request.reference_manifest
+                     if item.content_type.startswith("image/")
+                     and item.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}
+                     and (item.role or "").casefold() not in {"scene", "location", "prop", "costume", "voice"}
+                     and (item.entity_id in request.shot_spec.characters or item.role in request.shot_spec.characters)}
+            try:
+                characters = character_evidence_from_response(
+                    CharacterReviewResponse.model_validate(result.response),
+                    expected_characters=request.shot_spec.characters, reference_characters=bound,
+                    artifact_sha256=result.input_sha256, reviewer=result.model, is_mock=result.is_mock,
+                )
+            except ValueError:
+                characters = ()
+                character_response = None
+                semantic_error = "BASIC_CHARACTER_RESPONSE_INVALID"
+        dialogue = (dialogue_evidence_from_transcript(request.shot_spec, transcript, digest)
+                    if transcript and not asr_error and request.shot_spec.dialogue else None)
+        size = request.basic_review_resolution
+        gates, fused = evaluate_basic_gates(
+            shot=request.shot_spec, technical=technical, expected_resolution=(size.width, size.height),
+            artifact_sha256=digest, characters=characters, dialogue=dialogue, character_response=character_response,
+            character_error=semantic_error, audio_error=asr_error,
+            offline_simulation=bool(settings.offline_simulation),
+        )
+    else:
+        gates, fused = evaluate_gates(
+            policy=policy,
+            shot_spec=request.shot_spec,
+            technical=technical,
+            semantic_results=semantic_results,
+            semantic_error=semantic_error,
+            transcript_findings=transcript_findings,
+            asr_error=asr_error,
+            transcript_model=transcript.model if transcript else None,
+            transcript_is_mock=bool(transcript.is_mock) if transcript else False,
+            style_version_id=request.style_version_id,
+            style_hash=request.style_hash,
+            reference_count=len(manifest),
+        )
 
     with session_factory.begin() as db:
         guarded = _guard_claimed_job(
@@ -1347,7 +1395,11 @@ def _finalize_comfy_attempt(
             transition(job, "QC_PENDING")
         job.lease_owner = None
         job.lease_expires_at = None
-        job.quality_verification = VERIFICATION_MOCK if any(gate.is_mock for gate in gates) else VERIFICATION_REAL
+        job.quality_verification = (
+            VERIFICATION_MOCK if any(gate.is_mock for gate in gates)
+            else VERIFICATION_PARTIAL if request.self_review_scope == "basic" and fused.result == "needs_review"
+            else VERIFICATION_REAL
+        )
         if fused.result == STATUS_PASSED:
             job.failure_code = None
             transition(job, "PASSED")

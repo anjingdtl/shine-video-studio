@@ -2,8 +2,9 @@
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
@@ -46,6 +47,43 @@ def test_current_wire_bounds_findings_and_summary_without_rewriting_historical_r
                            message="x" * 1000).message == "x" * 1000
     assert SemanticReviewResult(reviewer="fixture", is_mock=True, input_sha256="a" * 64,
                                 overall_confidence=1, raw_summary="x" * 2000).raw_summary == "x" * 2000
+
+
+def test_additional_schema_is_accepted_only_if_explicitly_pinned(executor):
+    from shine.quality.basic_review import CharacterReviewResponse
+
+    basic = CharacterReviewResponse.model_json_schema()
+    strict_pin = review_schema_hash(vision_review_schema())
+    basic_pin = review_schema_hash(basic)
+    body = {"response_format": {"type": "json_schema", "json_schema": {"strict": True, "schema": basic}}}
+    with pytest.raises(ValueError, match="REVIEW_JSON_SCHEMA_PIN_MISMATCH"):
+        executor.review_response_schema(body, [strict_pin])
+    assert executor.review_response_schema(body, [strict_pin, basic_pin]) == (basic, basic_pin)
+
+
+def test_prefix_parser_receives_tokenizer_alphabet_before_construction(executor, monkeypatch):
+    root = ModuleType("lmformatenforcer")
+    char = ModuleType("lmformatenforcer.characterlevelparser")
+    integrations = ModuleType("lmformatenforcer.integrations")
+    transformers = ModuleType("lmformatenforcer.integrations.transformers")
+    captured = {}
+
+    def parser(schema, *, config):
+        captured.update(schema=schema, alphabet=config.alphabet)
+        return object()
+
+    root.JsonSchemaParser = parser
+    char.CharacterLevelParserConfig = lambda *, alphabet: SimpleNamespace(alphabet=alphabet)
+    token_data = SimpleNamespace(tokenizer_alphabet="abc中文")
+    transformers.build_token_enforcer_tokenizer_data = lambda tokenizer: token_data
+    transformers.build_transformers_prefix_allowed_tokens_fn = lambda data, parser: lambda batch, tokens: [7]
+    for name, module in (("lmformatenforcer", root), ("lmformatenforcer.characterlevelparser", char),
+                         ("lmformatenforcer.integrations", integrations),
+                         ("lmformatenforcer.integrations.transformers", transformers)):
+        monkeypatch.setitem(sys.modules, name, module)
+    callback = executor.review_prefix_function(object(), {"type": "object"})
+    assert captured == {"schema": {"type": "object"}, "alphabet": "abc中文"}
+    assert callback(0, []) == [7]
 
 
 @pytest.mark.parametrize("damage", [None, "missing", "object-mode", "not-strict", "external", "oversized", "wrong-pin"])
@@ -107,6 +145,15 @@ def test_decoder_files_are_verified_before_import(executor, tmp_path, monkeypatc
         proof = executor.decoder_runtime_identity(source)
         assert proof["protocol"] == STRUCTURED_REVIEW_PROTOCOL and len(proof["decoder_sha256"]) == 64
         assert str(tmp_path) not in json.dumps(proof)
+        lock["additional_review_schema_sha256"] = ["b" * 64]
+        source.write_text(json.dumps(lock), encoding="utf8")
+        extended = executor.decoder_runtime_identity(source)
+        assert extended["supported_schema_sha256"] == ["a" * 64, "b" * 64]
+        assert extended["decoder_sha256"] != proof["decoder_sha256"]
+        lock["additional_review_schema_sha256"] = ["b" * 64, "b" * 64]
+        source.write_text(json.dumps(lock), encoding="utf8")
+        with pytest.raises(ValueError, match="ADDITIONAL_SCHEMA_PINS_INVALID"):
+            executor.decoder_runtime_identity(source)
 
 
 @pytest.mark.parametrize("damage", [None, "missing", "protocol", "schema", "decoder"])
@@ -179,9 +226,12 @@ def test_capability_probe_never_silently_substitutes_protocol(monkeypatch, mode)
 
 
 def test_committed_decoder_lock_pins_current_wire_schema():
+    from shine.quality.basic_review import CharacterReviewResponse
+
     path = Path(__file__).resolve().parents[2] / "config/review-decoder-lock.json"
     lock = json.loads(path.read_text(encoding="utf8"))
     assert lock["review_schema_sha256"] == review_schema_hash(vision_review_schema())
+    assert lock["additional_review_schema_sha256"] == [review_schema_hash(CharacterReviewResponse.model_json_schema())]
     assert {p["license"] for p in lock["packages"]} == {"MIT"}
 
 
@@ -190,7 +240,9 @@ def test_parser_failure_never_logs_generated_prefix_or_leaves_logger_changes(exe
     import sys
     from types import ModuleType
     parser_module = ModuleType("lmformatenforcer")
-    parser_module.JsonSchemaParser = lambda _: object()
+    parser_module.JsonSchemaParser = lambda _, config: object()
+    character_module = ModuleType("lmformatenforcer.characterlevelparser")
+    character_module.CharacterLevelParserConfig = lambda *, alphabet: SimpleNamespace(alphabet=alphabet)
     integration = ModuleType("lmformatenforcer.integrations.transformers")
     def unsafe(*_):
         logging.getLogger().handle(logging.LogRecord(
@@ -199,7 +251,9 @@ def test_parser_failure_never_logs_generated_prefix_or_leaves_logger_changes(exe
         ))
         raise ValueError("sk-private parser error")
     integration.build_transformers_prefix_allowed_tokens_fn = lambda *a: unsafe
+    integration.build_token_enforcer_tokenizer_data = lambda _: SimpleNamespace(tokenizer_alphabet="abc")
     monkeypatch.setitem(sys.modules, "lmformatenforcer", parser_module)
+    monkeypatch.setitem(sys.modules, "lmformatenforcer.characterlevelparser", character_module)
     monkeypatch.setitem(sys.modules, "lmformatenforcer.integrations", ModuleType("lmformatenforcer.integrations"))
     monkeypatch.setitem(sys.modules, "lmformatenforcer.integrations.transformers", integration)
     logger = logging.getLogger()

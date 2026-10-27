@@ -101,6 +101,7 @@ export type Job = {
   request: {
     reference_manifest: Array<{ label: string; asset_id: string; sha256: string; use_as: string }>;
     compiled_prompt_sha256?: string; compiler_version?: string; rule_version?: string;
+    self_review_scope?: 'basic' | 'full'; basic_review_resolution?: { width: number; height: number } | null;
   };
   attempts: JobAttempt[]; repairs: RepairRecord[];
   compiled_prompt?: string | null; compiled_prompt_sections?: Record<string, string>;

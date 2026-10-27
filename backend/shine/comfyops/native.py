@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
@@ -19,6 +19,16 @@ from shine.quality.identity import ExecutorIdentity
 from shine.security import is_loopback_url
 
 ROLES = {"VLM_REVIEW": "vlm_reviewer", "ASR": "asr_reviewer"}
+
+
+def review_schema_for_binding(binding):
+    if binding.review_scope == "basic_character":
+        from shine.quality.basic_review import CharacterReviewResponse
+
+        return CharacterReviewResponse.model_json_schema()
+    from shine.quality.semantic import vision_review_schema
+
+    return vision_review_schema()
 
 
 class NativeProviderBinding(BaseModel):
@@ -35,6 +45,14 @@ class NativeProviderBinding(BaseModel):
     input_assessment_required: bool = False
     input_evidence_protocol: Literal["text-assessment-compact-v2"] | None = None
     client_review_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    review_scope: Literal["basic_character"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        if self.review_scope is None:
+            result.pop("review_scope", None)
+        return result
 
     @model_validator(mode="after")
     def exact_model(self):
@@ -46,6 +64,8 @@ class NativeProviderBinding(BaseModel):
             raise ValueError("NATIVE_INPUT_EVIDENCE_PROTOCOL_PIN_INCOMPLETE")
         if bool(self.response_protocol) != bool(self.client_review_sha256):
             raise ValueError("NATIVE_REVIEW_CLIENT_PIN_INCOMPLETE")
+        if self.review_scope and not self.response_protocol:
+            raise ValueError("NATIVE_BASIC_REVIEW_REQUIRES_STRUCTURED_OUTPUT")
         if self.model != self.executor_identity.model_id:
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
@@ -79,6 +99,11 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
     category = payload["category"]
     if binding.response_protocol and category != "VLM_REVIEW":
         errors.append("NATIVE_REVIEW_PROTOCOL_CATEGORY_MISMATCH")
+    if binding.review_scope == "basic_character":
+        from shine.quality.basic_review import CharacterReviewResponse
+
+        if payload.get("output_schema") != CharacterReviewResponse.model_json_schema():
+            errors.append("NATIVE_BASIC_REVIEW_SCHEMA_CHANGED")
     if binding.client_review_sha256:
         try:
             if review_client_identity() != binding.client_review_sha256:
@@ -185,6 +210,13 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
                 or (health.get("structured_output") or {}).get("decoder_sha256") != binding.decoder_sha256
             ):
                 errors.append("NATIVE_REVIEW_DECODER_CHANGED")
+            if binding.review_scope == "basic_character":
+                from shine.quality.semantic import review_schema_hash
+
+                supported = (health.get("structured_output") or {}).get("supported_schema_sha256", [])
+                if (not isinstance(supported, list)
+                        or review_schema_hash(review_schema_for_binding(binding)) not in supported):
+                    errors.append("NATIVE_BASIC_REVIEW_SCHEMA_UNSUPPORTED")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             errors.append("NATIVE_EXECUTOR_IDENTITY_UNAVAILABLE")
     if require_evidence:
@@ -193,8 +225,12 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
             errors.append("NATIVE_EXECUTION_EVIDENCE_MISSING")
         else:
             for sample in proof["samples"]:
-                if category == "VLM_REVIEW" and sample.get("style_input_contract") != "seven-field-v1":
-                    errors.append("NATIVE_STYLE_INPUT_EVIDENCE_OUTDATED")
+                if category == "VLM_REVIEW":
+                    if binding.review_scope == "basic_character":
+                        if sample.get("character_input_contract") != "basic-character-v1":
+                            errors.append("NATIVE_CHARACTER_EVIDENCE_OUTDATED")
+                    elif sample.get("style_input_contract") != "seven-field-v1":
+                        errors.append("NATIVE_STYLE_INPUT_EVIDENCE_OUTDATED")
                 call = db.get(AgentTaskRecord, sample["call_id"])
                 if (
                     not valid_call(db, call, category, binding, proof["project_id"], budget_mb=payload["resource_mb"])
@@ -240,10 +276,10 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
         except (HTTPException, ValueError, KeyError, TypeError):
             return False
     if binding.response_protocol:
-        from shine.quality.semantic import review_schema_hash, vision_review_schema
+        from shine.quality.semantic import review_schema_hash
         proof = call.trace.get("structured_output") or {}
         if (proof.get("protocol") != binding.response_protocol or proof.get("decoder_sha256") != binding.decoder_sha256
-                or proof.get("schema_sha256") != review_schema_hash(vision_review_schema())):
+                or proof.get("schema_sha256") != review_schema_hash(review_schema_for_binding(binding))):
             return False
     lease = db.get(ResourceLease, resource_id) if resource_id else None
     return bool(lease and lease.status == "RELEASED" and lease.budget_mb >= budget_mb)
@@ -263,6 +299,8 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live, i
         raise HTTPException(409, "PRODUCTION_REVIEW_JOB_MISMATCH")
     plan = current_plan(db, project_id)
     if not plan and not job.preproduction_manifest_hash:
+        if getattr(provider, "review_scope", None) == "basic_character":
+            raise HTTPException(409, "BASIC_REVIEW_REQUIRES_FROZEN_NATIVE_CAPABILITY")
         return None  # Existing unanalyzed projects keep their legacy contract.
     if job.provider == "mock":
         return None  # Mock jobs never become real evidence.
@@ -309,11 +347,13 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live, i
         raise HTTPException(409, "PRODUCTION_REVIEW_PROVIDER_OUTDATED")
     if binding.response_protocol and getattr(provider, "response_protocol", None) != binding.response_protocol:
         raise HTTPException(409, "PRODUCTION_REVIEW_PROTOCOL_OUTDATED")
+    if getattr(provider, "review_scope", None) != binding.review_scope:
+        raise HTTPException(409, "PRODUCTION_REVIEW_SCOPE_OUTDATED")
     if binding.response_protocol and not live:
-        from shine.quality.semantic import review_schema_hash, vision_review_schema
+        from shine.quality.semantic import review_schema_hash
         proof = getattr(provider, "last_structured_output", None) or {}
         if (proof.get("protocol") != binding.response_protocol or proof.get("decoder_sha256") != binding.decoder_sha256
-                or proof.get("schema_sha256") != review_schema_hash(vision_review_schema())):
+                or proof.get("schema_sha256") != review_schema_hash(review_schema_for_binding(binding))):
             raise HTTPException(409, "PRODUCTION_REVIEW_STRUCTURED_PROOF_OUTDATED")
     from shine.comfyops.scheduler import CURRENT_RESOURCE
 

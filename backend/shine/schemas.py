@@ -198,6 +198,13 @@ class GenerationMode(StrEnum):
     REF2VA = "Ref2VA"
 
 
+class BasicReviewResolution(APIModel):
+    """Expected output size for self-review; does not change the workflow graph."""
+
+    width: int = Field(strict=True, ge=2, le=8192)
+    height: int = Field(strict=True, ge=2, le=8192)
+
+
 class CreateJob(APIModel):
     shot_id: str
     references: list[AssetReference] | None = Field(default=None, max_length=12)
@@ -206,6 +213,14 @@ class CreateJob(APIModel):
     provider: RenderProvider = RenderProvider.MOCK
     generation_mode: GenerationMode | None = None
     workflow_profile_id: str | None = None
+    self_review_scope: Literal["full", "basic"] = "full"
+    basic_review_resolution: BasicReviewResolution | None = None
+
+    @model_validator(mode="after")
+    def basic_scope_needs_resolution(self):
+        if self.self_review_scope == "basic" and self.basic_review_resolution is None:
+            raise ValueError("Basic self-review requires explicit expected output dimensions")
+        return self
 
 
 class HardFailure(APIModel):
@@ -295,6 +310,8 @@ class RenderRequest(APIModel):
     workflow_profile_hash: str | None = None
     seed: int | None = Field(default=None, ge=0)
     expected_duration_s: float = Field(ge=4, le=15)
+    self_review_scope: Literal["full", "basic"] = "full"
+    basic_review_resolution: BasicReviewResolution | None = None
 
     @field_validator("compiled_prompt")
     @classmethod
@@ -307,6 +324,8 @@ class RenderRequest(APIModel):
     def require_style(self) -> RenderRequest:
         if not self.style_version_id:
             raise ValueError("render requests require a frozen style version")
+        if self.self_review_scope == "basic" and self.basic_review_resolution is None:
+            raise ValueError("Basic self-review requires explicit expected output dimensions")
         return self
 
 

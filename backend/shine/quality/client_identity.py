@@ -7,6 +7,8 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[2]
 _FILES = (
     "shine/quality/client_identity.py",
+    "shine/quality/basic_character_reviewer.py",
+    "shine/quality/basic_review.py",
     "shine/quality/semantic.py",
     "shine/quality/input_assessment.py",
     "shine/quality/gates.py",
@@ -18,6 +20,7 @@ _FILES = (
     "shine/comfyops/model_calls.py",
     "shine/comfyops/native.py",
     "shine/comfyops/preproduction.py",
+    "shine/api_preparation.py",
 )
 
 

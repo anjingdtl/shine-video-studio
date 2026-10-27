@@ -95,6 +95,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
                 <b>{job.shot_name}</b>
                 <span className={`job-mode ${job.provider === 'comfyui' ? 'real' : ''}`}>{job.provider.toUpperCase()}</span>
                 {job.generation_mode && <span className="job-mode">{job.generation_mode}</span>}
+                {job.request.self_review_scope === 'basic' && <span className="job-mode">基础自审</span>}
                 {job.stale && <span className="job-stale">需复核</span>}
               </div>
               <span>{statusLabels[job.status] ?? job.status}{job.failure_code ? ` · ${job.failure_code}` : ''}</span>
@@ -146,6 +147,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
               </div>
             ))}
             {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification} · 最终结论见 final 门禁</small>}
+            {selectedJob.request.self_review_scope === 'basic' && <small>本任务仅自审分辨率、人物和对白，不代表人工影片验收。</small>}
             <span className="detail-label"><Activity size={11} /> QC 证据</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
             {!detailBusy && qc.length === 0 && <div className="empty-inline">尚无 QC 报告。</div>}

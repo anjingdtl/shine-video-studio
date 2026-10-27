@@ -352,6 +352,62 @@ def test_preproduction_rejects_published_vlm_proof_without_current_style_contrac
     assert ("NATIVE_STYLE_INPUT_EVIDENCE_OUTDATED" in errors) == (n["category"] == "VLM_REVIEW")
 
 
+def test_basic_scope_requires_own_schema_and_cannot_inherit_strict_evidence(native):
+    from copy import deepcopy
+
+    from shine.quality.basic_review import CharacterReviewResponse
+
+    n = native
+    if not n["structured"]:
+        return
+    row = adopt(n)
+    payload = deepcopy(row["payload"])
+    payload["native_provider"]["review_scope"] = "basic_character"
+    with n["factory"]() as db:
+        assert "NATIVE_BASIC_REVIEW_SCHEMA_CHANGED" in native_errors(db, payload)
+        payload["output_schema"] = CharacterReviewResponse.model_json_schema()
+        errors = native_errors(db, payload, require_evidence=True)
+        assert "NATIVE_BASIC_REVIEW_SCHEMA_CHANGED" not in errors
+        assert "NATIVE_CHARACTER_EVIDENCE_OUTDATED" in errors
+        assert "NATIVE_EXECUTION_EVIDENCE_CHANGED" in errors
+
+
+def test_basic_scope_calibration_requires_matching_real_call_and_positive_negative(native):
+    from copy import deepcopy
+
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.model_calls import digest_input
+    from shine.quality.basic_character_reviewer import CharacterReview
+    from shine.quality.basic_review import CharacterReviewResponse
+    from shine.quality.semantic import review_schema_hash
+
+    n = native
+    if not n["structured"]:
+        return
+    schema = CharacterReviewResponse.model_json_schema()
+    n["health"]["structured_output"]["supported_schema_sha256"] = [review_schema_hash(schema)]
+    with n["factory"].begin() as db:
+        row = db.get(WorkflowRevision, n["row"]["id"])
+        payload = deepcopy(row.payload)
+        payload["native_provider"]["review_scope"] = "basic_character"
+        payload["output_schema"] = schema
+        row.payload = payload
+        row.sha256 = graph_hash(payload)
+        for sample in n["samples"]:
+            observed = {"characters": [{"character": "A", "status": sample["expected_verdict"],
+                                       "observation": "synthetic", "reference_compared": False}]}
+            result = CharacterReview(response=observed, input_sha256="a" * 64, model="fixture-only", is_mock=False)
+            sample["result"] = asdict(result)
+            call = db.get(AgentTaskRecord, sample["call_id"])
+            call.trace = {**call.trace, "result_sha256": graph_hash(digest_input(result)),
+                          "structured_output": {**call.trace["structured_output"],
+                                                "schema_sha256": review_schema_hash(schema)}}
+    row = adopt(n)
+    assert row["status"] == "REAL_TESTED"
+    assert all(s["character_input_contract"] == "basic-character-v1"
+               for s in row["payload"]["template_audit"]["native_provider_evidence"]["samples"])
+
+
 def test_native_completed_calibration_can_publish_without_comfy_graph_or_new_inference(native):
     count = native["wire_count"][0]
     row = adopt(native)
