@@ -1,0 +1,98 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T05:13:24.753182+00:00",
+  "status": "IDENTITY_PINNED_WALKING_TIMEOUT_UNKNOWN_RECONCILED",
+  "source_head": "4600572c703ab6a5e2454a73972099562e7660c3",
+  "draft_id": "0ad9d513-4c0f-4dd3-8ecc-9c2129d2e383",
+  "draft_status": "STATIC_VALIDATED_UNPUBLISHED",
+  "call": {
+    "id": "cfafd401-47c8-4b36-8f78-a8f3a0cbe318",
+    "status_after": "ABANDONED",
+    "error_code": "ReadTimeout",
+    "actual_outcome": "UNKNOWN",
+    "response_received": false,
+    "received_response_sha256": null,
+    "input_evidence_protocol": "text-assessment-compact-v2",
+    "client_review_sha256": "5e1e5a4c3ee3051e397a0e6206c1851de033ad3668c2018c2adeab97372cfbbb",
+    "logical_review_hash": "ff97134396731e745a54dd4bd1f0a89b2330df78257b98d60a1d647ac2ee5ec3",
+    "resource_id": "5b0d440c-22d0-45e9-b311-6fc26e8a31be",
+    "lease_after": "RELEASED",
+    "inference_timeout_s": 300,
+    "release_timeout_s": 30,
+    "automatic_retries": 0
+  },
+  "controls": [
+    {
+      "name": "identity-pinned-pixel-walking-negative",
+      "expected": "failed",
+      "actual": "UNKNOWN_TIMEOUT_NOT_PASS"
+    },
+    {
+      "name": "identity-pinned-pixel-empty-negative",
+      "expected": "failed",
+      "actual": "NOT_RUN"
+    },
+    {
+      "name": "identity-pinned-pixel-mask-negative",
+      "expected": "failed",
+      "actual": "NOT_RUN"
+    },
+    {
+      "name": "identity-pinned-pixel-positive",
+      "expected": "passed",
+      "actual": "NOT_RUN"
+    }
+  ],
+  "physical_release": {
+    "owners_before": [
+      {
+        "pid": 7920,
+        "birth": "134375511285520458"
+      },
+      {
+        "pid": 34984,
+        "birth": "134375511285633543"
+      }
+    ],
+    "old_processes_dead": true,
+    "review_process_memory_before_stop": {
+      "working_set_bytes": 5368504320,
+      "lifetime_peak_working_set_bytes": 6396112896,
+      "private_commit_bytes": 24439640064,
+      "lifetime_peak_private_commit_bytes": 24439640064,
+      "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+    },
+    "whole_gpu_used_free_mib_after_stop": "502, 15476",
+    "cold_loaded": false,
+    "cold_asr_loaded": false,
+    "cold_allocated_bytes": 0,
+    "cold_reserved_bytes": 0,
+    "comfy_restored_idle": true
+  },
+  "whole_gpu_point_snapshot": {
+    "at": "2026-10-27T05:08:05.452702+00:00",
+    "scope": "WHOLE_GPU_POINT_SNAPSHOT_NOT_MODEL_PEAK_OR_BUDGET_PROOF",
+    "columns": [
+      "total_mib",
+      "used_mib",
+      "free_mib",
+      "gpu_utilization_percent"
+    ],
+    "values": "16303, 15874, 104, 38",
+    "serial_control": "identity-pinned-pixel-walking-negative",
+    "h3_submissions": 0
+  },
+  "protected_tables_unchanged": true,
+  "asr_qualification_retained_id": "1b2a7ca8-03e3-4cc3-8638-ea1157ff0d28",
+  "h3_submissions": 0,
+  "inference_replays": 0,
+  "remote_text_calls": 0,
+  "media_cloud_upload_bytes": 0,
+  "human_quality_or_rights_approval": false,
+  "local_evidence_sha256": {
+    "identity-pinned-native-activation-20261027.json": "888cd21ad42e1618a85c546df798abbfe785c6912a792eac22917e5c4d956191",
+    "real-identity-pinned-native-controls-20261027.json": "34e9b3e94dab9850e4390c4c8f411f8e1cf0a1c954cdaefc231f833d21bd3bbb",
+    "identity-review-timeout-reconciliation-20261027.json": "4a3e604f1e3993445f9d6544b9dc58bc79b3c546f75c036ed753a39411503b3d"
+  },
+  "product_status": "PARTIAL"
+}
