@@ -1,0 +1,59 @@
+{
+  "created_at": "2026-10-27T17:56:04.925150+00:00",
+  "scope": "one real isolated Ref2VA job, staged basic self-review with controlled process handoff",
+  "source_commit": "f71fd4d068f5af885f7ddc1893ef55ff27cab402",
+  "job_id": "f930aca3-f4c9-4535-b5e0-7bd94a49f609",
+  "attempt_id": "c7563b04-debf-4968-bb3d-13d493e4f8bf",
+  "comfy_prompt_id": "fe0b7f67-1d3d-495c-9a3d-41fbf88ad7d0",
+  "artifact_id": "2a36f3f5-3c89-4dd9-a1d0-2a9a0d59965b",
+  "artifact_sha256": "6086ac8dd6acffdfee204bd0f38708b4f1523c6e64024565ab9f39d1c1c7ee6f",
+  "artifact_bytes": 3519442,
+  "resolution": "1344x768",
+  "duration_s": 6.583,
+  "single_h3_submission": true,
+  "h3_resubmissions": 0,
+  "self_review_scope": "basic",
+  "gates": {
+    "technical": "passed",
+    "semantic": "passed",
+    "audio": "passed",
+    "style": "not_applicable",
+    "final": "passed"
+  },
+  "character_reference_compared": true,
+  "character_observation": "The character wears a black zippered jacket with similar shoulder paneling and has shoulder-length dark hair matching the reference.",
+  "asr_script_matched": true,
+  "model_calls": [
+    {
+      "id": "5cc30c36-e1ce-442f-bc39-b7487ef910bf",
+      "role": "model_call:ASR:transcribe",
+      "status": "COMPLETED",
+      "lease_status": "RELEASED"
+    },
+    {
+      "id": "0fbfc286-cd23-4da3-9218-853b720c0559",
+      "role": "model_call:VLM:review",
+      "status": "COMPLETED",
+      "lease_status": "RELEASED"
+    }
+  ],
+  "initial_qc": "needs_review until actual VLM and ASR completed",
+  "h3_process_exited_before_review": true,
+  "asr_and_vlm_processes_exited_after_each": true,
+  "comfy_history_archive_sha256": "0b7f278f248e3e1d75746c54301eb6d4514d7ba1e2b996b53f7c55e0abd30824",
+  "old_timeout_outcome": "UNKNOWN and original request replay blocked",
+  "text_assessment_model": "MiniMax-M2.7-highspeed",
+  "text_assessment_requests": 1,
+  "original_project_modified": false,
+  "media_cloud_upload_bytes": 0,
+  "human_present": false,
+  "main_review_capability": "7299c5a0-62d9-4913-b1b7-5cd7989acdc7",
+  "main_worker_restored": true,
+  "limits": [
+    "one sampled shot, not full drama",
+    "staged controlled handoff with a stopped-Comfy process witness, not fully automated stock-worker handoff",
+    "probabilistic character and ASR judgments; no human visual, voice quality or rights approval",
+    "ASR script match recorded but transcript is not persisted in gate evidence",
+    "remote CI was not executed due account billing or spending limits"
+  ]
+}
