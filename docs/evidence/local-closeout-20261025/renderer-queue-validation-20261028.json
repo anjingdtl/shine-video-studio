@@ -1,0 +1,23 @@
+{
+  "scope": "reject unknown renderer queue state before and after unload",
+  "counterexamples_before_fix": "4 failed: missing or invalid queue before unload, missing queue after unload",
+  "targeted_regression": "passed: renderer, resource ledger, offline production loop",
+  "backend": {
+    "tests": "885",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "ruff": "passed for changed Python files",
+  "live_comfy_queue": "valid, idle, no unload during format check",
+  "calibration_retry": "NOT RUN: physical VRAM admission below 14700 MiB; zero model calls",
+  "stack": "RESTORED_IDLE",
+  "worker_online": true,
+  "h3_submissions": 0,
+  "protected_tables_unchanged_on_calibration_attempt": true,
+  "source_sha256": {
+    "backend/shine/comfy/client.py": "479ab173a85adfe9f0e9be246c78444017f5ebc7fcba19b46e6fa0f121045892",
+    "backend/tests/test_gpu_release_confirmation.py": "96d0ada837be26b82e21bf3e4f9c3648076a5b0091c99b3ea1d7c08a7c2067df"
+  },
+  "limitations": "Queue polling cannot prove exclusive access from external users and does not prove process RAM release or automatic handoff."
+}

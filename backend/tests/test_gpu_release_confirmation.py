@@ -90,3 +90,42 @@ def test_release_refuses_invalid_renderer_memory_accounting(total, free):
         {"torch_vram_total": total, "torch_vram_free": free}
     ]}
     assert not ComfyUIClient._release_confirmed(stats)
+
+
+@pytest.mark.parametrize("queue", [{}, {"queue_running": [], "queue_pending": None},
+                                    {"queue_running": False, "queue_pending": []}])
+def test_unknown_queue_never_initiates_unload(queue):
+    import httpx
+
+    posts = []
+
+    def handle(request):
+        if request.method == "POST":
+            posts.append(request.url.path)
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json=queue)
+
+    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0)
+    with pytest.raises(ComfyUIError, match="QUEUE_STATE_UNCONFIRMED"):
+        client.free_models()
+    assert posts == []
+
+
+def test_unknown_queue_after_unload_never_confirms_release(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr("shine.comfy.client.time.sleep", lambda _: None)
+    reads = 0
+
+    def handle(request):
+        nonlocal reads
+        if request.url.path == "/queue":
+            reads += 1
+            return httpx.Response(200, json={"queue_running": [], "queue_pending": []} if reads == 1 else {})
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"devices": [{"torch_vram_total": 0, "torch_vram_free": 0}]})
+        return httpx.Response(200, json={})
+
+    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0)
+    with pytest.raises(ComfyUIError, match="MODEL_RELEASE_UNCONFIRMED"):
+        client.free_models()

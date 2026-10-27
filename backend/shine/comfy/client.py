@@ -139,6 +139,8 @@ class ComfyUIClient:
 
     def free_models(self):
         queue = self.queue()
+        if not self._queue_known(queue):
+            raise ComfyUIError("QUEUE_STATE_UNCONFIRMED")
         if queue.get("queue_running") or queue.get("queue_pending"):
             raise ComfyUIError("INSTANCE_BUSY_CANNOT_UNLOAD")
         with self._client() as client:
@@ -151,11 +153,16 @@ class ComfyUIClient:
         for _ in range(30):
             queue = self.queue()
             stats = self.system_stats()
-            if not queue.get("queue_running") and not queue.get("queue_pending"):
+            if self._queue_known(queue) and not queue["queue_running"] and not queue["queue_pending"]:
                 if self._release_confirmed(stats):
                     return
             time.sleep(0.1)
         raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
+
+    @staticmethod
+    def _queue_known(queue: Any) -> bool:
+        return (isinstance(queue, dict) and isinstance(queue.get("queue_running"), list)
+                and isinstance(queue.get("queue_pending"), list))
 
     @staticmethod
     def _release_confirmed(stats: dict[str, Any]) -> bool:
