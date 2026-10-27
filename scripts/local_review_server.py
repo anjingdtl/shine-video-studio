@@ -12,12 +12,119 @@ import gc
 import hashlib
 import io
 import json
+import logging
+import re
 import sys
 import subprocess
 import tempfile
 from pathlib import Path
 from threading import Lock
 from fastapi import File, Form, UploadFile
+
+STRUCTURED_PROTOCOL = "local-review-json-schema-v1"
+
+
+def decoder_runtime_identity(lock_path=None):
+    """Verify every installed decoder file before importing third-party code."""
+    import importlib.metadata
+    lock_path = lock_path or Path(__file__).resolve().parents[1] / "config/review-decoder-lock.json"
+    lock = json.loads(Path(lock_path).read_text(encoding="utf8"))
+    if lock.get("protocol") != STRUCTURED_PROTOCOL:
+        raise ValueError("REVIEW_DECODER_LOCK_INVALID")
+    if (len(lock.get("packages", [])) != 2 or {p.get("name") for p in lock["packages"]}
+            != {"lm-format-enforcer", "interegular"}):
+        raise ValueError("REVIEW_DECODER_PACKAGES_INVALID")
+    verified = []
+    for package in lock["packages"]:
+        distribution = importlib.metadata.distribution(package["name"])
+        if distribution.version != package["version"]:
+            raise ValueError("REVIEW_DECODER_VERSION_CHANGED")
+        base = Path(distribution.locate_file("")).resolve()
+        declared = {entry["path"] for entry in package["files"]}
+        if not declared or len(declared) != len(package["files"]) or not package.get("roots"):
+            raise ValueError("REVIEW_DECODER_FILE_MANIFEST_INVALID")
+        for entry in package["files"]:
+            path = Path(distribution.locate_file(entry["path"])).resolve()
+            if not path.is_relative_to(base) or not path.is_file():
+                raise ValueError("REVIEW_DECODER_FILE_MISSING_OR_OUTSIDE_ROOT")
+            if path.stat().st_size != entry["bytes"] or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+                raise ValueError("REVIEW_DECODER_FILE_CHANGED")
+        for name in package["roots"]:
+            folder = (base / name).resolve()
+            if not folder.is_relative_to(base):
+                raise ValueError("REVIEW_DECODER_ROOT_INVALID")
+            for candidate in folder.rglob("*"):
+                if candidate.is_file() and candidate.suffix in {".py", ".pyd", ".so"}:
+                    if candidate.relative_to(base).as_posix() not in declared:
+                        raise ValueError("REVIEW_DECODER_UNDECLARED_CODE")
+        verified.append({"name": package["name"], "version": distribution.version, "files": package["files"]})
+    schema_hash = lock.get("review_schema_sha256")
+    if not isinstance(schema_hash, str) or not re.fullmatch("[a-f0-9]{64}", schema_hash):
+        raise ValueError("REVIEW_DECODER_SCHEMA_PIN_MISSING")
+    payload = {"protocol": STRUCTURED_PROTOCOL, "packages": verified, "schema_sha256": schema_hash}
+    return {"protocol": STRUCTURED_PROTOCOL, "decoder_sha256": hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest(), "schema_sha256": schema_hash}
+
+
+def review_response_schema(body, expected_hash=None):
+    response = body.get("response_format")
+    if not isinstance(response, dict) or response.get("type") != "json_schema":
+        raise ValueError("REVIEW_JSON_SCHEMA_REQUIRED")
+    declaration = response.get("json_schema")
+    if not isinstance(declaration, dict) or declaration.get("strict") is not True:
+        raise ValueError("REVIEW_JSON_SCHEMA_STRICT_REQUIRED")
+    schema = declaration.get("schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise ValueError("REVIEW_JSON_SCHEMA_INVALID")
+    encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > 32768 or '"$ref":"http' in encoded.decode() or '"$ref":"file:' in encoded.decode():
+        raise ValueError("REVIEW_JSON_SCHEMA_TOO_LARGE_OR_EXTERNAL")
+    # The parser resolves local definitions only. Reject external references at
+    # any depth, including arrays, before loading a model or constructing it.
+    def check(value):
+        if isinstance(value, dict):
+            if "$ref" in value and (not isinstance(value["$ref"], str) or not value["$ref"].startswith("#/")):
+                raise ValueError("REVIEW_JSON_SCHEMA_EXTERNAL_REFERENCE")
+            for child in value.values():
+                check(child)
+        elif isinstance(value, list):
+            for child in value:
+                check(child)
+    check(schema)
+    actual = hashlib.sha256(encoded).hexdigest()
+    if expected_hash is not None and actual != expected_hash:
+        raise ValueError("REVIEW_JSON_SCHEMA_PIN_MISMATCH")
+    return schema, actual
+
+
+def review_prefix_function(tokenizer, schema):
+    from lmformatenforcer import JsonSchemaParser
+    from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
+    callback = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
+
+    class NoGeneratedPrefixLogs(logging.Filter):
+        def filter(self, record):
+            # Upstream's error logger includes generated prefixes. Keep those
+            # out of application logs; the caller gets a constant failure code.
+            return "lmformatenforcer" not in record.pathname.replace("\\", "/")
+
+    def guarded(batch_id, tokens):
+        logger = logging.getLogger()
+        redaction = NoGeneratedPrefixLogs()
+        placeholder = logging.NullHandler() if not logger.handlers else None
+        if placeholder:
+            logger.addHandler(placeholder)
+        logger.addFilter(redaction)
+        try:
+            return callback(batch_id, tokens)
+        except Exception:
+            raise ValueError("REVIEW_STRUCTURED_DECODING_FAILED") from None
+        finally:
+            logger.removeFilter(redaction)
+            if placeholder:
+                logger.removeHandler(placeholder)
+    return guarded
 
 
 def _verified_model_files(manifest):
@@ -126,10 +233,13 @@ def build_app(manifest):
 
     import importlib.metadata
 
+    decoder_identity = decoder_runtime_identity()
+
     runtime = {
         "python": sys.version,
         "packages": {name: importlib.metadata.version(name) for name in ("torch", "transformers")},
         "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "structured_output": decoder_identity,
     }
     runtime_sha256 = hashlib.sha256(
         json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()
@@ -155,12 +265,18 @@ def build_app(manifest):
             "manifest_sha256": manifest["sha256"],
             "verified_models": verified_models,
             "runtime_sha256": runtime_sha256,
+            "structured_output": decoder_identity,
         }
 
     @app.get("/identity")
     def identity_probe():
         # Preparation reads fresh file identity without loading any ML model.
         with guard:
+            try:
+                if decoder_runtime_identity() != decoder_identity:
+                    raise ValueError("REVIEW_DECODER_IDENTITY_CHANGED")
+            except (ValueError, OSError):
+                raise HTTPException(409, "EXECUTOR_DECODER_FILES_CHANGED") from None
             try:
                 current = {manifest["model_id"]: verified_model_identity(manifest)}
                 if asr_manifest:
@@ -170,14 +286,16 @@ def build_app(manifest):
             if current != verified_models:
                 raise HTTPException(409, "EXECUTOR_MODEL_IDENTITY_CHANGED")
             return {"status": "ok", "is_mock": False, "verified_models": current,
-                    "runtime_sha256": runtime_sha256}
+                    "runtime_sha256": runtime_sha256, "structured_output": decoder_identity}
 
     @app.get("/v1/models")
     def models():
         ids = [manifest["model_id"]] + (
             [asr_manifest["model_id"]] if asr_manifest else []
         )
-        return {"data": [{"id": value} for value in ids], "is_mock": False}
+        return {"data": [{"id": value} for value in ids], "is_mock": False,
+                "capabilities": {"review_response_protocol": decoder_identity["protocol"],
+                                 "review_decoder_sha256": decoder_identity["decoder_sha256"]}}
 
     @app.post("/v1/audio/transcriptions")
     def transcribe(
@@ -238,6 +356,8 @@ def build_app(manifest):
         from transformers import pipeline
 
         with guard:
+            if decoder_runtime_identity() != decoder_identity:
+                raise HTTPException(409, "EXECUTOR_DECODER_FILES_CHANGED")
             if state["asr"] is None:
                 verify_model_manifest(asr_manifest)
                 state["asr"] = pipeline(
@@ -279,6 +399,7 @@ def build_app(manifest):
             raise HTTPException(404, "EXACT_MODEL_ID_REQUIRED")
         try:
             token_limit = review_token_limit(body)
+            response_schema, schema_hash = review_response_schema(body, decoder_identity["schema_sha256"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         messages, count = [], 0
@@ -316,6 +437,8 @@ def build_app(manifest):
         if not count:
             raise HTTPException(422, "EVIDENCE_FRAMES_REQUIRED")
         with guard:
+            if decoder_runtime_identity() != decoder_identity:
+                raise HTTPException(409, "REVIEW_DECODER_IDENTITY_CHANGED")
             if state["model"] is None:
                 verify_model_manifest(manifest)
                 if torch.cuda.mem_get_info()[0] < 6000 * 1024**2:
@@ -340,10 +463,14 @@ def build_app(manifest):
                 )
                 .to("cuda:0")
             )
-            with torch.inference_mode():
-                output = state["model"].generate(
-                    **inputs, max_new_tokens=token_limit, do_sample=False
-                )
+            try:
+                prefix = review_prefix_function(state["processor"].tokenizer, response_schema)
+                with torch.inference_mode():
+                    output = state["model"].generate(
+                        **inputs, max_new_tokens=token_limit, do_sample=False, prefix_allowed_tokens_fn=prefix
+                    )
+            except Exception:
+                raise HTTPException(422, "REVIEW_STRUCTURED_DECODING_FAILED") from None
             generated = output[:, inputs["input_ids"].shape[1] :]
             answer = state["processor"].batch_decode(
                 generated, skip_special_tokens=True
@@ -352,6 +479,7 @@ def build_app(manifest):
                 "model": manifest["model_id"],
                 "is_mock": False,
                 "executor_identity": executor_identity(manifest["model_id"]),
+                "structured_output": {**decoder_identity, "schema_sha256": schema_hash},
                 "choices": [{"message": {"role": "assistant", "content": answer},
                              "finish_reason": "length" if generated.shape[1] >= token_limit else "stop"}],
                 "usage": {"prompt_tokens": inputs["input_ids"].shape[1], "completion_tokens": generated.shape[1]},

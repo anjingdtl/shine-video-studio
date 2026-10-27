@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -28,9 +29,13 @@ class NativeProviderBinding(BaseModel):
     executor_identity: ExecutorIdentity
     model_package_id: str = Field(min_length=1)
     runtime_files: list[str] = Field(min_length=3, max_length=100)
+    response_protocol: Literal["local-review-json-schema-v1"] | None = None
+    decoder_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_model(self):
+        if bool(self.response_protocol) != bool(self.decoder_sha256):
+            raise ValueError("NATIVE_REVIEW_PROTOCOL_PIN_INCOMPLETE")
         if self.model != self.executor_identity.model_id:
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
@@ -62,6 +67,8 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
         return ["NATIVE_PROVIDER_BINDING_INVALID"]
     errors = []
     category = payload["category"]
+    if binding.response_protocol and category != "VLM_REVIEW":
+        errors.append("NATIVE_REVIEW_PROTOCOL_CATEGORY_MISMATCH")
     profile = db.get(ProviderProfile, binding.profile_id)
     try:
         url = urlsplit(profile.base_url) if profile else None
@@ -71,6 +78,15 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
         url and url.scheme in {"http", "https"} and not (url.username or url.password or url.query or url.fragment)
     )
     route = db.scalar(select(AgentRoute).where(AgentRoute.role == ROLES.get(category, "unsupported")))
+    if category == "VLM_REVIEW" and profile:
+        declared_protocol = (profile.capabilities or {}).get("review_response_protocol")
+        if declared_protocol and binding.response_protocol != declared_protocol:
+            errors.append("NATIVE_REVIEW_PROTOCOL_UNPINNED")
+        if binding.response_protocol and (
+            declared_protocol != binding.response_protocol
+            or (profile.capabilities or {}).get("review_decoder_sha256") != binding.decoder_sha256
+        ):
+            errors.append("NATIVE_REVIEW_DECODER_CHANGED")
     if (
         category not in ROLES
         or not profile
@@ -148,6 +164,11 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
                 or ExecutorIdentity.model_validate(actual) != binding.executor_identity
             ):
                 errors.append("NATIVE_EXECUTOR_IDENTITY_CHANGED")
+            if binding.response_protocol and (
+                (health.get("structured_output") or {}).get("protocol") != binding.response_protocol
+                or (health.get("structured_output") or {}).get("decoder_sha256") != binding.decoder_sha256
+            ):
+                errors.append("NATIVE_REVIEW_DECODER_CHANGED")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             errors.append("NATIVE_EXECUTOR_IDENTITY_UNAVAILABLE")
     if require_evidence:
@@ -183,6 +204,12 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
     ):
         return False
     resource_id = call.trace.get("resource_id")
+    if binding.response_protocol:
+        from shine.quality.semantic import review_schema_hash, vision_review_schema
+        proof = call.trace.get("structured_output") or {}
+        if (proof.get("protocol") != binding.response_protocol or proof.get("decoder_sha256") != binding.decoder_sha256
+                or proof.get("schema_sha256") != review_schema_hash(vision_review_schema())):
+            return False
     lease = db.get(ResourceLease, resource_id) if resource_id else None
     return bool(lease and lease.status == "RELEASED" and lease.budget_mb >= budget_mb)
 
@@ -240,6 +267,14 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live):
     )
     if actual != binding.provider_snapshot() or provider.is_mock:
         raise HTTPException(409, "PRODUCTION_REVIEW_PROVIDER_OUTDATED")
+    if binding.response_protocol and getattr(provider, "response_protocol", None) != binding.response_protocol:
+        raise HTTPException(409, "PRODUCTION_REVIEW_PROTOCOL_OUTDATED")
+    if binding.response_protocol and not live:
+        from shine.quality.semantic import review_schema_hash, vision_review_schema
+        proof = getattr(provider, "last_structured_output", None) or {}
+        if (proof.get("protocol") != binding.response_protocol or proof.get("decoder_sha256") != binding.decoder_sha256
+                or proof.get("schema_sha256") != review_schema_hash(vision_review_schema())):
+            raise HTTPException(409, "PRODUCTION_REVIEW_STRUCTURED_PROOF_OUTDATED")
     from shine.comfyops.scheduler import CURRENT_RESOURCE
 
     lease_id = CURRENT_RESOURCE.get()

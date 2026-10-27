@@ -195,3 +195,7 @@ index's weight map. Missing/unverified/extra shards and mixed monolithic/indexed
 The index and all shard bytes enter the canonical executor identity and cold-load checks.
 Nine added structural counterexamples first failed; 44 targeted executor/runtime/offline tests pass after the fix.
 These use synthetic bytes, not model inference.
+
+## 2026-10-27: isolated structured review decoder
+
+`lm-format-enforcer`0.11.3 and `interegular`0.3.3: MIT, fixed wheel URLs/SHA-256 and all 37 installed file hashes pinned in `config/review-decoder-lock.json`. Dependencies pydantic/packaging/PyYAML already existed in the separate ML runtime; no third-party source copied into main project, no global environment/model weights changed. Primary sources: https://github.com/noamgat/lm-format-enforcer and versioned PyPI metadata. Qwen tokenizer CPU compatibility passed; numeric ranges are not fully grammar-enforced, so application QC validation remains mandatory. GPU quality/runtime acceptance is separate and pending.

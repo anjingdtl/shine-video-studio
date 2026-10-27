@@ -51,12 +51,15 @@ def configured_reviewers(factory, settings):
             if not db.scalar(select(AgentRoute).where(AgentRoute.role == role)):
                 reviewers.append(None)
                 continue
-            config = gateway.config_for(gateway.profile_for_role(db, role))
+            profile = gateway.profile_for_role(db, role)
+            config = gateway.config_for(profile)
             if config.kind not in {"openai_compatible", "ollama"}:
                 raise LLMNotConfigured(f"{role} requires an explicitly routed OpenAI-compatible media endpoint")
             if is_loopback_url(config.base_url):
                 category, minimum = ("VLM_REVIEW", 8000) if role == "vlm_reviewer" else ("ASR", 4000)
-                reviewers.append(local(config, resource_mb=_native_budget(db, config, category, minimum)))
+                options = ({"response_protocol": (profile.capabilities or {}).get("review_response_protocol")}
+                           if role == "vlm_reviewer" else {})
+                reviewers.append(local(config, resource_mb=_native_budget(db, config, category, minimum), **options))
             else:
                 reviewers.append(remote(config))
     return tuple(reviewers)

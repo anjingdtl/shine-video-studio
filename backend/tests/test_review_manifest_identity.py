@@ -191,6 +191,12 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(
     monkeypatch.setitem(sys.modules, 'torch', fake_torch)
     monkeypatch.setitem(sys.modules, 'transformers', fake_transformers)
     monkeypatch.setattr(importlib.metadata, 'version', lambda name: 'fixture-only')
+    from shine.quality.semantic import review_schema_hash, vision_review_schema
+    schema = vision_review_schema()
+    monkeypatch.setattr(executor, 'decoder_runtime_identity', lambda: {
+        'protocol': 'local-review-json-schema-v1', 'decoder_sha256': 'd'*64,
+        'schema_sha256': review_schema_hash(schema),
+    })
     app = executor.build_app(spec)
     client = TestClient(app)
     assert client.get("/identity").status_code == 200
@@ -204,7 +210,8 @@ def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(
         import base64
 
         # The decoder and model are mocked; this verifies file-integrity admission only.
-        payload = {'model': 'fixture-only', 'messages': [{'role': 'user', 'content': [
+        payload = {'model': 'fixture-only', 'response_format': {'type': 'json_schema',
+                   'json_schema': {'strict': True, 'schema': schema}}, 'messages': [{'role': 'user', 'content': [
             {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' +
                                               base64.b64encode(b'mocked image bytes').decode()}}
         ]}]}

@@ -1,0 +1,227 @@
+{
+  "schema_version": "1",
+  "protocol": "local-review-json-schema-v1",
+  "packages": [
+    {
+      "name": "lm-format-enforcer",
+      "version": "0.11.3",
+      "license": "MIT",
+      "wheel": {
+        "filename": "lm_format_enforcer-0.11.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/a0/ef/11292bb0b85cf4c93447cab5a29f64576ed14d3ab4280e35ddd23486594a/lm_format_enforcer-0.11.3-py3-none-any.whl",
+        "sha256": "cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f",
+        "bytes": 45418
+      },
+      "roots": [
+        "lm_format_enforcer-0.11.3.dist-info",
+        "lmformatenforcer"
+      ],
+      "files": [
+        {
+          "path": "lm_format_enforcer-0.11.3.dist-info/LICENSE",
+          "sha256": "d1c02373f9da54abb40fb9fa5ca6c19136d10da76a1054ff1ee2528221ae1bfe",
+          "bytes": 1065
+        },
+        {
+          "path": "lm_format_enforcer-0.11.3.dist-info/METADATA",
+          "sha256": "e1079fb57a9f23d3d4f3f8ea2385d7166e650d788203faf19d95c19f69a46a49",
+          "bytes": 17530
+        },
+        {
+          "path": "lm_format_enforcer-0.11.3.dist-info/RECORD",
+          "sha256": "da9d156fb1a93f03a0ed039907fd96ade1152fb763e7e9263e2f452e080836cb",
+          "bytes": 2317
+        },
+        {
+          "path": "lm_format_enforcer-0.11.3.dist-info/WHEEL",
+          "sha256": "6f82bf85e95ffa3950a170411137f09dfe01d38602ebb2ce7afd23a387d7e66f",
+          "bytes": 88
+        },
+        {
+          "path": "lmformatenforcer/__init__.py",
+          "sha256": "5509725f208ad470b86a7dfd84511d5fd85a7b9be8775c18f438c74d59c95023",
+          "bytes": 850
+        },
+        {
+          "path": "lmformatenforcer/analyzer.py",
+          "sha256": "ad0707bc3d4bd8187ab8e48c49fbd0a49ba06a2a5e71403e6d6c7933b7afcd95",
+          "bytes": 3908
+        },
+        {
+          "path": "lmformatenforcer/characterlevelparser.py",
+          "sha256": "3e8e1773a2ed3078e9ab44f3aacb438f9529e6fd03bee37684fc0c40a51cab0a",
+          "bytes": 8701
+        },
+        {
+          "path": "lmformatenforcer/consts.py",
+          "sha256": "a021a8369cb5fe2acfa38238b80fcbbde47b3ed7ed77c7680eb688c9d8f461b7",
+          "bytes": 1356
+        },
+        {
+          "path": "lmformatenforcer/exceptions.py",
+          "sha256": "a09b8485a1b069ac2d80650b85348bfa69d554d897b9a042fd436587a3047d7f",
+          "bytes": 104
+        },
+        {
+          "path": "lmformatenforcer/external/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "lmformatenforcer/external/jsonschemaobject.py",
+          "sha256": "5d3d42f93f0cb46cee766fa11b95358ac4687cb90f3e8039700d598ea62bedcb",
+          "bytes": 10716
+        },
+        {
+          "path": "lmformatenforcer/external/jsonschemaobjectutil.py",
+          "sha256": "dd6d0856b5034ba934c9da7e361775ca642b0e2e057b778ef27697fa8db4ce5d",
+          "bytes": 7044
+        },
+        {
+          "path": "lmformatenforcer/integrations/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "lmformatenforcer/integrations/exllamav2.py",
+          "sha256": "c77ec6ddf902fb5c5971c26f175cbb4de380fb492f84a5aa2c9cacea73fb5eb6",
+          "bytes": 2679
+        },
+        {
+          "path": "lmformatenforcer/integrations/haystackv1.py",
+          "sha256": "599e3789e6def076a0dc9de77403df4607f177e256c61155a1436f8c0e3ce5a8",
+          "bytes": 2820
+        },
+        {
+          "path": "lmformatenforcer/integrations/haystackv2.py",
+          "sha256": "60b92069d8252b877431fdbe8098785252620a1668b883e32b1936858a80abba",
+          "bytes": 3510
+        },
+        {
+          "path": "lmformatenforcer/integrations/llamacpp.py",
+          "sha256": "d9a13a2c1c026b9b92d5b57f6b7f05b4970af27906b173096c20ee578e33537f",
+          "bytes": 3639
+        },
+        {
+          "path": "lmformatenforcer/integrations/transformers.py",
+          "sha256": "07fa6f13d210d5c926216e467011cb110e08298bcaa2408464a389843a6d360e",
+          "bytes": 7189
+        },
+        {
+          "path": "lmformatenforcer/integrations/trtllm.py",
+          "sha256": "aa7e299380df4a77824a325bc109f86b98b34eaf9db5b80bd388717e01b7ce07",
+          "bytes": 3937
+        },
+        {
+          "path": "lmformatenforcer/integrations/vllm.py",
+          "sha256": "29037ba0d442e64ff9c3d468841e6fc49bb704b7700422a63275f4760de1a452",
+          "bytes": 3099
+        },
+        {
+          "path": "lmformatenforcer/jsonschemaparser.py",
+          "sha256": "6bc4a8a10621c6d38d70ebb5ae1dc21aaa98c0454a2e80be1896586f10dccf94",
+          "bytes": 35094
+        },
+        {
+          "path": "lmformatenforcer/regexparser.py",
+          "sha256": "6283d2a307259837ba33861b05a6dfde29b6c00c94ab3a4a9105c010c60c9c44",
+          "bytes": 3888
+        },
+        {
+          "path": "lmformatenforcer/tokenenforcer.py",
+          "sha256": "1ec82ff410cdafb89b5d9455cef15d6dc4c9741b439f35752f3f5ed289990d91",
+          "bytes": 11022
+        },
+        {
+          "path": "lmformatenforcer/tokenizerprefixtree.py",
+          "sha256": "7ac7275143ffc775902e2318cd5d16f94e672c16c541c62b380bee3f1975157e",
+          "bytes": 7303
+        },
+        {
+          "path": "lmformatenforcer/tokenlist.py",
+          "sha256": "2182268af0c2835fb581eba8ea8834cd7ab014fbac89a30feaa747ff658dc6f6",
+          "bytes": 1616
+        }
+      ]
+    },
+    {
+      "name": "interegular",
+      "version": "0.3.3",
+      "license": "MIT",
+      "wheel": {
+        "filename": "interegular-0.3.3-py37-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/c4/01/72d6472f80651673716d1deda2a5bbb633e563ecf94f4479da5519d69d25/interegular-0.3.3-py37-none-any.whl",
+        "sha256": "b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c",
+        "bytes": 23635
+      },
+      "roots": [
+        "interegular",
+        "interegular-0.3.3.dist-info"
+      ],
+      "files": [
+        {
+          "path": "interegular-0.3.3.dist-info/LICENSE.txt",
+          "sha256": "8a23189a107478fa292418a2e0b1b8bd2fe60617c1ce6325c2194f6d91f27b29",
+          "bytes": 1096
+        },
+        {
+          "path": "interegular-0.3.3.dist-info/METADATA",
+          "sha256": "c7598668f970b37c6d21612cc2abc9253156bf8b5c3905524793ed9af309acb3",
+          "bytes": 3049
+        },
+        {
+          "path": "interegular-0.3.3.dist-info/RECORD",
+          "sha256": "d3d6efc859a21234c3c06073a97e4cb3b3d751d9f3854bf71c2b0a298aa3207b",
+          "bytes": 979
+        },
+        {
+          "path": "interegular-0.3.3.dist-info/WHEEL",
+          "sha256": "f455185120ade62a35b5504e55afb74b4ce370ccc63b59ce230f7d896a339b7a",
+          "bytes": 93
+        },
+        {
+          "path": "interegular-0.3.3.dist-info/top_level.txt",
+          "sha256": "03df0b4394ce7cce19c44a2db8acb2b66c75ed8deefee8e5c63b0e6536be0214",
+          "bytes": 12
+        },
+        {
+          "path": "interegular/__init__.py",
+          "sha256": "4e69d230b8c29d2c702582fdc8d5beeb9a9a66e870b828dfad1db4797aeade94",
+          "bytes": 1128
+        },
+        {
+          "path": "interegular/comparator.py",
+          "sha256": "b579bb7fa9f818f6d9ae5ebdb2f011fe7f897b0c307b52678d9366d6daf51c7c",
+          "bytes": 7198
+        },
+        {
+          "path": "interegular/fsm.py",
+          "sha256": "083f9c66aea90777e909c7336c6e7eff8b146c8c9df9aeb6c6630acac80141ac",
+          "bytes": 39130
+        },
+        {
+          "path": "interegular/patterns.py",
+          "sha256": "bdfd7e6e48cd89c57d92d945ba3060f79acfa7de43032a450de5aa3de6a65d16",
+          "bytes": 25902
+        },
+        {
+          "path": "interegular/py.typed",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "interegular/utils/__init__.py",
+          "sha256": "728eb1727abb0a0599e922cfdf4e53a12b4bb24cabdd1dcdc5851f88eab7ede4",
+          "bytes": 451
+        },
+        {
+          "path": "interegular/utils/simple_parser.py",
+          "sha256": "1be091b0a2a67a437923d148f20dfb6e5d5abfd684485a3225398a08e207bb34",
+          "bytes": 5361
+        }
+      ]
+    }
+  ],
+  "quality_claim": "NONE; runtime and semantic calibration still required",
+  "review_schema_sha256": "29dc544ba3775c3203c3a971a2b64dfa14110fde9e0ecf26589e09fa08ba3759"
+}

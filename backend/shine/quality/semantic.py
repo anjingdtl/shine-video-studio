@@ -38,6 +38,25 @@ class ReceivedReviewError(ValueError):
         self.validation = validation
 
 
+STRUCTURED_REVIEW_PROTOCOL = "local-review-json-schema-v1"
+
+
+def vision_review_schema():
+    schema = SemanticReviewResult.model_json_schema()
+    schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict", "style_input_checks"})
+    schema["properties"]["findings"].pop("default", None)
+    schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
+    schema["properties"]["style_input_checks"] = {
+        "type": "array", "items": {"$ref": "#/$defs/StyleInputCheck"},
+        "minItems": len(StyleBible.model_fields), "maxItems": len(StyleBible.model_fields),
+    }
+    return schema
+
+
+def review_schema_hash(schema):
+    return hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def review_validation_failure(exc):
     """Only schema-owned paths/types; never provider values, unknown keys or messages."""
     if isinstance(exc, ValidationError):
@@ -181,16 +200,9 @@ class OpenAICompatibleVisionReviewer:
             raise PermissionError("Remote semantic review requires explicit user consent in the project settings")
         if not context.frame_paths:
             raise ValueError("Remote semantic review requires derived evidence frames")
-        schema = SemanticReviewResult.model_json_schema()
+        schema = vision_review_schema()
         # Historical stored reviews retain their optional default; new wire
         # responses must explicitly distinguish an empty list from no review.
-        schema["required"] = sorted(set(schema.get("required", [])) | {"findings", "verdict", "style_input_checks"})
-        schema["properties"]["findings"].pop("default", None)
-        schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
-        schema["properties"]["style_input_checks"] = {
-            "type": "array", "items": {"$ref": "#/$defs/StyleInputCheck"},
-            "minItems": len(StyleBible.model_fields), "maxItems": len(StyleBible.model_fields),
-        }
         review_spec = context.shot_spec.model_dump(mode="json")
         transcript_evidence = None
         if isinstance(context.transcript, Transcript):
@@ -273,9 +285,19 @@ class OpenAICompatibleVisionReviewer:
             "max_tokens": 2048,
             "response_format": {"type": "json_object"},
         }
+        response_protocol = getattr(self, "response_protocol", None)
+        self.last_structured_output = None
+        if response_protocol:
+            payload["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "shine_visual_review", "strict": True, "schema": schema,
+            }}
         with httpx.Client(timeout=self.config.timeout_s) as client:
             response = client.post(self._endpoint(), headers=headers, json=payload)
         if response.status_code >= 400:
+            if response_protocol and response.status_code < 500:
+                raise ReceivedReviewError("VLM_STRUCTURED_REQUEST_REJECTED",
+                                          hashlib.sha256(response.content).hexdigest(),
+                                          validation={"code": "HTTP_REQUEST_REJECTED", "status": response.status_code})
             raise RuntimeError(f"VLM request failed with status {response.status_code}")
         response_hash = hashlib.sha256(response.content).hexdigest()
         try:
@@ -298,6 +320,16 @@ class OpenAICompatibleVisionReviewer:
                 recorder(body, response_hash)
             result = SemanticReviewResult.model_validate(parsed)
             require_style_input_checks(result)
+            if response_protocol:
+                proof = body.get("structured_output")
+                if (not isinstance(proof, dict) or proof.get("protocol") != response_protocol
+                        or proof.get("schema_sha256") != review_schema_hash(schema)
+                        or not isinstance(proof.get("decoder_sha256"), str)
+                        or not re.fullmatch("[a-f0-9]{64}", proof["decoder_sha256"])):
+                    raise ReceivedReviewError("VLM_STRUCTURED_RESPONSE_PROOF_INVALID", response_hash)
+                self.last_structured_output = {key: proof[key] for key in (
+                    "protocol", "schema_sha256", "decoder_sha256",
+                )}
             return result
         except ReceivedReviewError:
             raise
@@ -355,11 +387,14 @@ class LocalVisionReviewer(LocalReviewRelease, OpenAICompatibleVisionReviewer):
     name = "local-openai-compatible-vlm"
     accepts_local_references = True
 
-    def __init__(self, config, *, resource_mb=8000):
+    def __init__(self, config, *, resource_mb=8000, response_protocol=None):
         require_loopback_url(config.base_url)
         if type(resource_mb) is not int or not 8000 <= resource_mb <= 16384:
             raise ValueError("MODEL_RESOURCE_BUDGET_INVALID")
         self._resource_mb = resource_mb
+        if response_protocol not in {None, STRUCTURED_REVIEW_PROTOCOL}:
+            raise ValueError("VLM_RESPONSE_PROTOCOL_UNSUPPORTED")
+        self.response_protocol = response_protocol
         super().__init__(config)
 
     def _reference_content(self, context):

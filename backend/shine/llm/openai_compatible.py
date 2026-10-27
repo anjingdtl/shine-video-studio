@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -11,6 +12,7 @@ from jsonschema import Draft202012Validator
 from shine.llm.base import (
     ChatMessage,
     LLMAuthError,
+    LLMCapabilityError,
     LLMConnectionError,
     LLMError,
     LLMFormatError,
@@ -159,6 +161,15 @@ class OpenAICompatibleProvider:
         for item in body.get("data") or []:
             if isinstance(item, dict) and item.get("id"):
                 models.append(str(item["id"]))
+        extra = body.get("capabilities") or {}
+        protocol = extra.get("review_response_protocol") if isinstance(extra, dict) else None
+        review = {}
+        if protocol is not None:
+            decoder = extra.get("review_decoder_sha256")
+            if (protocol != "local-review-json-schema-v1" or not isinstance(decoder, str)
+                    or not re.fullmatch("[a-f0-9]{64}", decoder)):
+                raise LLMCapabilityError("Review response protocol declaration is invalid")
+            review = {"review_response_protocol": protocol, "review_decoder_sha256": decoder}
         return {
             "available": True,
             "models": models[:200],
@@ -166,6 +177,7 @@ class OpenAICompatibleProvider:
             "json_mode": "assumed",
             "vision": None,
             "tools": None,
+            **review,
         }
 
 

@@ -1,0 +1,74 @@
+{
+  "backend": {
+    "tests": "767",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "285.920"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS",
+  "browser": "20 previous Mock flows; UI unchanged",
+  "source_files_sha256": {
+    "scripts/local_review_server.py": "e2bf4f0373231525ef94d30fff40d1506885a41bd24ef7672c17e60566629da8",
+    "config/review-decoder-lock.json": "fa4f4efdda00384cad39b49d574dc1584713fb7a3a1a27e509d533cae5094b70",
+    "backend/shine/quality/semantic.py": "4af37bd7f81b2d131b0c965f700d6fbf1c4e31ffedfe9f93d2bbb94d986a0685",
+    "backend/shine/quality/runtime.py": "c28e6daa3c2b0a94130017e57dc73cf97503483cadbc0ce4c5ed82accbff90e4",
+    "backend/shine/llm/openai_compatible.py": "50dda39d1e77ecaae0d94cd9331fc618c618a827d0850e6bb6a51256ec4951e9",
+    "backend/shine/comfyops/native.py": "d5239cb5e209c839d8691e0ec28a3d3a9b9495cfe6342a74ce647098072634d1",
+    "backend/shine/comfyops/model_calls.py": "1756e116ac7138efb163378f76e463e9a052894189f900d1569109866e5f695e",
+    "backend/tests/test_structured_review.py": "b5871e32add0524b41edf9d06058aefa37be5512682bcc83df44acfd0d10fc77",
+    "backend/tests/test_native_capabilities.py": "a7fae575b8e26c4368b7c741c2f4ecf80b61306fa354eea04aaa54222cb3b95f",
+    "backend/tests/test_review_manifest_identity.py": "4a615ffdb138287def5c1be7369ea7d999fdd86c2648d5765cadc42bc2408ac1"
+  },
+  "sdk": {
+    "lm-format-enforcer": "0.11.3",
+    "interegular": "0.3.3",
+    "license": "MIT",
+    "new_isolated_files": 37,
+    "new_model_weights": 0,
+    "global_python_changed": false
+  },
+  "cpu_probe": {
+    "status": "REAL_QWEN_TOKENIZER_CPU_COMPATIBLE_NOT_GPU_OR_MODEL_ACCEPTANCE",
+    "decoder_identity": {
+      "protocol": "local-review-json-schema-v1",
+      "decoder_sha256": "918afe21418d439192cc9f18486b3a60abd7b725d41439d9f3d12fbeb916c2c4",
+      "schema_sha256": "29dc544ba3775c3203c3a971a2b64dfa14110fde9e0ecf26589e09fa08ba3759"
+    },
+    "cases": {
+      "valid-unicode": {
+        "token_grammar_accepts": true,
+        "application_schema_accepts": true,
+        "tokens": 172
+      },
+      "invalid-status": {
+        "token_grammar_accepts": false,
+        "application_schema_accepts": false,
+        "tokens": 172
+      },
+      "overlong-detail": {
+        "token_grammar_accepts": false,
+        "application_schema_accepts": false,
+        "tokens": 200
+      },
+      "numeric-range": {
+        "token_grammar_accepts": true,
+        "application_schema_accepts": false,
+        "tokens": 172
+      }
+    },
+    "tokenizer_class": "Qwen2TokenizerFast",
+    "vocabulary": 151669,
+    "elapsed_s": 3.239,
+    "cuda_initialized": false,
+    "model_weights_loaded": false,
+    "inference_calls": 0,
+    "human_approval": false
+  },
+  "protocol": "Explicit opt-in local-review-json-schema-v1 request/response/schema/decoder pins; no silent downgrade. Legacy unstructured endpoints remain distinct. New native declarations cannot omit advertised protocol; calibration and production verify returned proof.",
+  "limits": "Numeric ranges and semantic judgments still require application validation; grammar is not quality acceptance.",
+  "runtime_status": "NOT_ACTIVATED_YET; adapter change requires new ASR/VLM runtime identity and fresh qualification",
+  "vlm_publication": "WITHHELD",
+  "human_approval": false
+}

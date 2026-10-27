@@ -20,10 +20,11 @@ from tests.test_semantic_qc import context
 from tests.test_v13_preparation import HEADERS, approve, package, post, prep  # noqa: F401
 
 
-@pytest.fixture(params=["ASR", "VLM_REVIEW"])
+@pytest.fixture(params=["ASR", "VLM_REVIEW", "STRUCTURED_VLM"])
 def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
     client, factory, settings = prep
-    category = request.param
+    structured = request.param == "STRUCTURED_VLM"
+    category = "VLM_REVIEW" if structured else request.param
     role = "asr_reviewer" if category == "ASR" else "vlm_reviewer"
     project = create_project(client)
     profile = client.post(
@@ -72,6 +73,12 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
         model_package_id=model["id"],
         runtime_files=[f["relative_path"] for f in files],
     )
+    if structured:
+        binding.update(response_protocol="local-review-json-schema-v1", decoder_sha256="d" * 64)
+        with factory.begin() as db:
+            db.get(ProviderProfile, profile["id"]).capabilities = {
+                "review_response_protocol": binding["response_protocol"], "review_decoder_sha256": "d" * 64,
+            }
     wire_count = [0]
     response_hook = [None]
     health = {
@@ -82,6 +89,8 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
             "fixture-only": {k: v for k, v in identity.items() if k not in {"schema_version", "runtime_sha256"}}
         },
     }
+    if structured:
+        health["structured_output"] = {"protocol": binding["response_protocol"], "decoder_sha256": "d" * 64}
 
     def respond(req):
         if req.url.path in {"/health", "/identity"}:
@@ -129,6 +138,13 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
                 "is_mock": False,
                 "executor_identity": identity,
                 "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(result)}}],
+                **({"structured_output": {
+                    "protocol": binding["response_protocol"], "decoder_sha256": "d" * 64,
+                    "schema_sha256": hashlib.sha256(json.dumps(
+                        json.loads(req.content)["response_format"]["json_schema"]["schema"],
+                        sort_keys=True, separators=(",", ":"),
+                    ).encode()).hexdigest(),
+                }} if structured else {}),
             },
         )
 
@@ -158,7 +174,10 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
         model="fixture-only",
         api_key=None,
     )
-    provider = TrackedProvider((LocalASRReviewer if category == "ASR" else LocalVisionReviewer)(cfg), factory, project)
+    actual = (LocalASRReviewer(cfg) if category == "ASR" else LocalVisionReviewer(
+        cfg, response_protocol=binding.get("response_protocol"),
+    ))
+    provider = TrackedProvider(actual, factory, project)
     samples = []
     if category == "ASR":
         audio = tmp_path / "synthetic.wav"
@@ -192,6 +211,7 @@ def native(prep, tmp_path, monkeypatch, request):  # noqa: F811
         wire_count=wire_count,
         wire_identity=identity,
         response_hook=response_hook,
+        structured=structured,
     )
 
 
@@ -476,7 +496,9 @@ def test_production_review_checks_frozen_binding_before_and_after_actual_call(na
         api_key=None,
     )
     kind = "ASR" if n["category"] == "ASR" else "VLM"
-    provider = (LocalASRReviewer if kind == "ASR" else LocalVisionReviewer)(cfg)
+    provider = (LocalASRReviewer(cfg) if kind == "ASR" else LocalVisionReviewer(
+        cfg, response_protocol="local-review-json-schema-v1" if n["structured"] else None,
+    ))
     wrapped = TrackedProvider(provider, n["factory"], n["project"], reviewer_kind=kind, production_job_id=job_id)
     previous = n["wire_count"][0]
     if change == "before":
@@ -595,3 +617,33 @@ def test_old_smaller_lease_cannot_qualify_a_larger_native_workflow(native):
               'samples': n['samples']}, headers=HEADERS)
     assert response.status_code == 409
     assert response.json()['detail'] == 'COMPLETED_REAL_NATIVE_CALL_REQUIRED'
+
+
+@pytest.mark.parametrize("native", ["STRUCTURED_VLM"], indirect=True)
+@pytest.mark.parametrize("damage", ["missing", "protocol", "decoder", "schema"])
+def test_structured_native_evidence_rejects_changed_or_missing_decode_proof(native, damage):
+    n = native
+    sample = n["samples"][0]
+    with n["factory"].begin() as db:
+        call = db.get(AgentTaskRecord, sample["call_id"])
+        proof = dict(call.trace["structured_output"])
+        if damage == "missing":
+            call.trace = {k: v for k, v in call.trace.items() if k != "structured_output"}
+        else:
+            key = {"protocol": "protocol", "decoder": "decoder_sha256", "schema": "schema_sha256"}[damage]
+            proof[key] = "unsupported" if damage == "protocol" else "e" * 64
+            call.trace = {**call.trace, "structured_output": proof}
+    grant = post(n["client"], "/preparation/approval-grants",
+                 {"action": "workflow_validate", "target_id": n["row"]["id"]}, operator=True)
+    previous = n["wire_count"][0]
+    response = n["client"].post(
+        f"/api/v1/workflow-capabilities/{n['row']['id']}/native-execution-evidence",
+        json={"grant_id": grant["grant_id"], "snapshot": grant["snapshot"], "offline": False,
+              "evidence": "Synthetic proof mutation only", "project_id": n["project"], "samples": n["samples"]},
+        headers=HEADERS,
+    )
+    assert response.status_code == 409 and response.json()["detail"] == "COMPLETED_REAL_NATIVE_CALL_REQUIRED"
+    assert n["wire_count"][0] == previous
+    with n["factory"]() as db:
+        assert db.get(WorkflowRevision, n["row"]["id"]).status == "STATIC_VALIDATED"
+        assert not db.get(ApprovalGrant, grant["grant_id"]).used
