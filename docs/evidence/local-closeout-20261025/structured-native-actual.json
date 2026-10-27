@@ -1,0 +1,132 @@
+{
+  "source_revision": "0b0d0ebe18d31eb294ff4de61eb92d3e27d40978",
+  "runtime_sha256": "3232277f54da98e27620cd21132c14c83109f7d7c32cd0c7fbffcd1b8a2255b2",
+  "decoder_identity": {
+    "protocol": "local-review-json-schema-v1",
+    "decoder_sha256": "918afe21418d439192cc9f18486b3a60abd7b725d41439d9f3d12fbeb916c2c4",
+    "schema_sha256": "29dc544ba3775c3203c3a971a2b64dfa14110fde9e0ecf26589e09fa08ba3759"
+  },
+  "epoch_status": "STRUCTURED_EPOCH_STATIC_READY_ASR_UNQUALIFIED_VLM_UNPUBLISHED",
+  "old_asr_deprecated": "86702102-652d-4b03-ade2-6a6408617c91",
+  "new_asr_production_approved": "1b2a7ca8-03e3-4cc3-8638-ea1157ff0d28",
+  "vlm_static_withheld": "88a97769-c763-4489-9901-092866d9d05b",
+  "asr": {
+    "call_id": "9878a61e-7d79-4565-b6f8-55e8a1c4143a",
+    "normalized_text_match": true,
+    "CER": 0,
+    "lease_status": "RELEASED",
+    "physical_release": {
+      "receipt": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\review-structured-asr-physical-release-20261027.json",
+      "sha256": "4d94947a40631fea0fb342573275b9859175b69a74d640273a870cc5e1b6e0b6",
+      "status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "old_processes_dead": true,
+      "memory_before_stop": {
+        "working_set_bytes": 1134813184,
+        "lifetime_peak_working_set_bytes": 1305882624,
+        "private_commit_bytes": 2770251776,
+        "lifetime_peak_private_commit_bytes": 2967478272,
+        "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+      },
+      "memory_fresh_baseline": {
+        "working_set_bytes": 812363776,
+        "lifetime_peak_working_set_bytes": 812363776,
+        "private_commit_bytes": 2189131776,
+        "lifetime_peak_private_commit_bytes": 2189131776,
+        "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+      }
+    },
+    "qualification_actions": [
+      {
+        "action": "ASR_REAL_TESTED",
+        "sha256": "6d55947d94b3db56ef0bbefb08a070c9b86b8c835094856914910af90d52ccf6"
+      },
+      {
+        "action": "ASR_PRODUCTION_APPROVED",
+        "sha256": "6d55947d94b3db56ef0bbefb08a070c9b86b8c835094856914910af90d52ccf6"
+      }
+    ],
+    "human_listening_or_voice_quality_claimed": false
+  },
+  "pixel": {
+    "status": "VALID_JSON_BUT_CROSS_FIELD_DECISION_CONTRADICTION",
+    "call_id": "1ae48bef-0602-40c1-a6ef-e4746e4c535e",
+    "call_status": "FAILED",
+    "received_response": {
+      "sha256": "9044d0b183c926e591d79b27a05b811091897b75569b64644092a8b451e6f434",
+      "finish_reason": null,
+      "error_code": "VLM_RESPONSE_CONTRACT_INVALID",
+      "retryable": false,
+      "validation": {
+        "code": "STYLE_INPUT_DECISION_CONTRADICTION"
+      }
+    },
+    "captured_proof_matches_epoch": true,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 3223,
+      "completion_tokens": 716
+    },
+    "verdict": "passed",
+    "findings_count": 0,
+    "check_statuses": [
+      {
+        "field": "photography_language",
+        "status": "consistent"
+      },
+      {
+        "field": "shot_blocking",
+        "status": "consistent"
+      },
+      {
+        "field": "color_palette",
+        "status": "consistent"
+      },
+      {
+        "field": "lighting_tone",
+        "status": "consistent"
+      },
+      {
+        "field": "lens_texture",
+        "status": "consistent"
+      },
+      {
+        "field": "editing_rhythm",
+        "status": "consistent"
+      },
+      {
+        "field": "sound_performance",
+        "status": "uncertain"
+      }
+    ],
+    "remaining_controls": "THREE_NOT_RUN",
+    "physical_release": {
+      "receipt": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\.local-acceptance\\closeout-20261025\\run\\review-structured-pixel-positive-physical-release-20261027.json",
+      "sha256": "9a6e00359a5e21b9b21340160be3bb3935aaf155bb3139bf1413d1c43d5e9001",
+      "status": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+      "old_processes_dead": true,
+      "memory_before_stop": {
+        "working_set_bytes": 2263289856,
+        "lifetime_peak_working_set_bytes": 6401093632,
+        "private_commit_bytes": 5562183680,
+        "lifetime_peak_private_commit_bytes": 24126418944,
+        "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+      },
+      "memory_fresh_baseline": {
+        "working_set_bytes": 811515904,
+        "lifetime_peak_working_set_bytes": 811515904,
+        "private_commit_bytes": 2187948032,
+        "lifetime_peak_private_commit_bytes": 2187948032,
+        "measurement": "WINDOWS_PROCESS_COUNTERS_NOT_GPU_PEAK"
+      }
+    },
+    "unfiltered_response_sha256": "9044d0b183c926e591d79b27a05b811091897b75569b64644092a8b451e6f434"
+  },
+  "protected_data_unchanged_during_calibration": true,
+  "comfy_restored_idle": true,
+  "current_comfy_receipt_sha256": "3038b8c763279407993a5b042cbc200e36d1a02a3517e8912449b89c0fc4cf00",
+  "h3_submissions": 0,
+  "media_cloud_upload_bytes": 0,
+  "human_approval": false,
+  "all_pass": "PARTIAL",
+  "next_gap": "Use source-pinned independent text assessment as evidence for pixel review while retaining seven model checks and native pre/post guards. No such integration implemented yet."
+}
