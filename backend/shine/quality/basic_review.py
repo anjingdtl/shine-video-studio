@@ -49,6 +49,12 @@ def validate_character_response(
         if (item.status == "passed"
                 and item.observation.strip().casefold() in {"passed", "pass", "ok", "yes", "通过", "合格"}):
             raise ValueError("CHARACTER_OBSERVATION_MISSING")
+        # Constrained decoding can force-close a string at the schema's exact
+        # maxLength, yielding valid JSON while cutting a sentence mid-token.
+        # Such an observation cannot support a pass, even if the model says
+        # it compared a reference. Keep failure/uncertainty conservative.
+        if item.status == "passed" and len(item.observation) == 240:
+            raise ValueError("CHARACTER_OBSERVATION_POSSIBLY_TRUNCATED")
         if item.reference_compared and not has_reference:
             raise ValueError("CHARACTER_REFERENCE_UNBOUND")
         if has_reference and item.status == "passed" and not item.reference_compared:

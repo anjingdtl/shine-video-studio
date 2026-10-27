@@ -150,6 +150,11 @@ def test_character_contract_requires_exact_coverage_and_bound_reference():
     with pytest.raises(ValueError, match="CHARACTER_REFERENCE_UNBOUND"):
         validate_character_response(compared, expected_characters=["A"], reference_characters=set())
     validate_character_response(compared, expected_characters=["A"], reference_characters={"A"})
+    truncated = CharacterReviewResponse(characters=[observation.model_copy(update={
+        "reference_compared": True, "observation": "A" * 240,
+    })])
+    with pytest.raises(ValueError, match="CHARACTER_OBSERVATION_POSSIBLY_TRUNCATED"):
+        validate_character_response(truncated, expected_characters=["A"], reference_characters={"A"})
     evidence = character_evidence_from_response(
         compared, expected_characters=["A"], reference_characters={"A"},
         artifact_sha256="a" * 64, reviewer="vlm", is_mock=False,
