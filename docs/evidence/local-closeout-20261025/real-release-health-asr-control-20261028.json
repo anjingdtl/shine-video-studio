@@ -1,0 +1,23 @@
+{
+  "scope": "independent real local ASR control of existing isolated H3 artifact under release-health client",
+  "job_id": "f930aca3-f4c9-4535-b5e0-7bd94a49f609",
+  "artifact_sha256": "6086ac8dd6acffdfee204bd0f38708b4f1523c6e64024565ab9f39d1c1c7ee6f",
+  "model_call_id": "c21f5df9-69cd-414d-a545-7cac59009343",
+  "model_call_status": "COMPLETED",
+  "lease_status": "RELEASED",
+  "audio_gate_status": "passed",
+  "script_matched": true,
+  "transcript_sha256": "c910833be90abd40f7a3087231d5fe5dab7bef45b8743c895d82ba5c11eb623c",
+  "transcript_truncated": false,
+  "real_not_mock": true,
+  "physical_release": "OLD_PROCESS_DEAD_FRESH_IDENTICAL_RUNTIME_READY",
+  "old_processes_dead": true,
+  "physical_free_gpu_mib_before": 14595,
+  "comfy_restored_idle": true,
+  "h3_submissions": 0,
+  "actor": "user-delegated-codex",
+  "human_present": false,
+  "human_audio_or_film_approval": false,
+  "scope_limit": "independent ASR machine control only, no historical QC overwrite, no H3 rerender, no claim of voice quality or automatic Worker handoff",
+  "local_receipt_sha256": "f64aee55fd3bf5f765ee97e35ef2f6df6d8912449d5db81818bd80c079eb0dff"
+}
