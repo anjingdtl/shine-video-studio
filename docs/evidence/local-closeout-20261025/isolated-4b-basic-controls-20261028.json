@@ -1,0 +1,61 @@
+{
+  "scope": "4B real isolated calibration controls for basic character review only; not production qualification",
+  "model": "local-qwen3-vl-4b",
+  "model_files_sha256": "f8d46751aa3f3228b489e4d10fea6995585492fd4ed9cda6ef7ecb0ce0265d9c",
+  "runtime_sha256": "4a7105c75dfb8ce87152833cbfa0cc5313a6164b78d979946e29e7c011a162eb",
+  "controls": [
+    {
+      "name": "isolated-4b-basic-empty-negative",
+      "expected": "not_passed",
+      "observed": "failed",
+      "call_id": "dcdc18a1-c64c-49f6-bbde-341f767c4009",
+      "lease_status": "RELEASED",
+      "artifact_sha256": "bf6fa7643790008deea277331994ea533c1d7ef3d3696b8af73030814c1d021d",
+      "physical_free_gpu_mib_before": 14536,
+      "child": {
+        "pid": 8512,
+        "exitcode": 0,
+        "joined": true
+      }
+    },
+    {
+      "name": "isolated-4b-basic-portrait-positive",
+      "expected": "passed",
+      "observed": "passed",
+      "call_id": "8e413fe5-ef00-4f0d-8451-73e34267d7a9",
+      "lease_status": "RELEASED",
+      "artifact_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "physical_free_gpu_mib_before": 14522,
+      "child": {
+        "pid": 4684,
+        "exitcode": 0,
+        "joined": true
+      }
+    }
+  ],
+  "approved_reference_control": {
+    "call_id": "c8be3d76-24bb-4c19-bebb-3afae16ebed1",
+    "status": "COMPLETED",
+    "lease_status": "RELEASED",
+    "source_job_id": "ffffe1d8-86e7-4593-acaa-91ff453b6b31",
+    "artifact_sha256": "675c7822a15cc6366410816f1b6c3af7d1f321eccb28b0749ddc7f1674f7edaf",
+    "observed": "passed",
+    "reference_compared": true,
+    "physical_free_gpu_mib_before": 14541,
+    "child": {
+      "pid": 16580,
+      "exitcode": 0,
+      "joined": true
+    }
+  },
+  "protected_tables_unchanged": true,
+  "comfy_restored_idle": true,
+  "h3_submissions": 0,
+  "human_present": false,
+  "human_approval": false,
+  "local_receipt_sha256": {
+    "controls": "8d17a1c365ef609d40ad3b48ff7fffafbd31779e4e181acb26dbe5e9ef49704b",
+    "reference": "3cb97a357021fbf19fe3a51338aa74650cf0577112a56abf437bb726bcb7da8f"
+  },
+  "limitations": "Control calls used a temporary calibration profile, not a registered production provider; no workflow capability was adopted or published, no production route changed. Old 4B full-scope deprecation remains. No full-drama, human film or voice-quality acceptance; ComfyUI process handoff remains manually orchestrated."
+}
