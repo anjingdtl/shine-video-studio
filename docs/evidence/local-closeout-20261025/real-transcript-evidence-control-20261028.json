@@ -1,0 +1,27 @@
+{
+  "scope": "separate actual ASR evidence control on existing generated video, no historical gate mutation",
+  "source_commit": "9e1cd1b2525a90db91d2bd49eb51e06a10807934",
+  "job_id": "f930aca3-f4c9-4535-b5e0-7bd94a49f609",
+  "artifact_sha256": "6086ac8dd6acffdfee204bd0f38708b4f1523c6e64024565ab9f39d1c1c7ee6f",
+  "asr_call_id": "60415fad-2fdd-4b1b-890f-34934714954b",
+  "asr_call_status": "COMPLETED",
+  "lease_status": "RELEASED",
+  "transcript_sha256": "c910833be90abd40f7a3087231d5fe5dab7bef45b8743c895d82ba5c11eb623c",
+  "transcript_length": 9,
+  "transcript_truncated": false,
+  "script_matched": true,
+  "computed_audio_gate": "passed",
+  "transcript_stored_in_local_receipt": true,
+  "historical_gate_modified": false,
+  "review_process_exited": true,
+  "comfy_restored_idle": true,
+  "main_vlm_capability": "0bacbb99-426a-45d0-8904-7f3b80535629",
+  "main_vlm_live_errors": [],
+  "h3_submissions": 0,
+  "human_present": false,
+  "limits": [
+    "one ASR result is probabilistic, not human listening or voice-quality approval",
+    "historical PASS evidence remains unchanged",
+    "fully automated inter-stage physical RAM handoff not demonstrated"
+  ]
+}
