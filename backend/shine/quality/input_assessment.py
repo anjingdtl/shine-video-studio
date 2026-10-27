@@ -1,5 +1,8 @@
 """Bind independent text proposals to exact production inputs; never approve media."""
 
+from copy import deepcopy
+from types import SimpleNamespace
+
 from fastapi import HTTPException
 from sqlalchemy import literal_column, select
 
@@ -7,9 +10,48 @@ from shine.agents.film import load_inputs, validate_output
 from shine.agents.film_contracts import FilmRunRequest, StyleInputAssessment
 from shine.h3.rulebook import digest
 from shine.llm.base import text_provider_snapshot
-from shine.models import AgentArtifact, AgentRoute, AgentTaskRecord, ProviderProfile, StyleVersion
-from shine.schemas import RenderRequest
+from shine.models import AgentArtifact, AgentRoute, AgentTaskRecord, Project, ProviderProfile, StyleVersion
+from shine.schemas import RenderRequest, ShotSpec, StyleBible
 from shine.security import is_loopback_url
+
+
+class VerifiedInputEvidence(dict):
+    """Internal transport marker; always rebuilt from database source pins."""
+
+
+def evidence_for_call(db, call):
+    """Recheck the persisted source pins before adopting calibration evidence."""
+    pin = call.trace.get("independent_input") or {}
+    row = db.get(AgentArtifact, pin.get("artifact_id")) if pin.get("artifact_id") else None
+    task = db.get(AgentTaskRecord, row.source_task_id) if row else None
+    style = db.get(StyleVersion, call.style_version_id)
+    if not task or not style or task.style_version_id != style.id:
+        raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_OUTDATED")
+    return evidence_for_review(db, call.project_id, SimpleNamespace(
+        job_id=call.id, shot_spec=ShotSpec.model_validate(task.trace["shot_spec_snapshot"]),
+        style=StyleBible.model_validate(style.snapshot), independent_input=pin,
+    ))
+
+
+def evidence_for_review(db, project_id, context, *, offline=False):
+    pin = context.independent_input
+    if not isinstance(pin, dict) or set(pin) != {"artifact_id", "sha256"}:
+        raise HTTPException(409, "STYLE_INPUT_EVIDENCE_PIN_INVALID")
+    style = db.get(StyleVersion, context.shot_spec.style_version_id)
+    project = db.get(Project, project_id)
+    if not style or style.project_id != project_id or not project or project.frozen_style_version_id != style.id:
+        raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_OUTDATED")
+    request = RenderRequest(
+        idempotency_key="review-input-proof", shot_id=context.job_id, shot_revision=1,
+        style_version_id=style.id, style_hash=style.sha256, style_snapshot=context.style,
+        shot_spec=context.shot_spec, expected_duration_s=context.shot_spec.duration_target_s,
+        style_input_assessment_id=pin["artifact_id"], style_input_assessment_sha256=pin["sha256"],
+    )
+    row = assessment_for_request(db, project_id, request, offline=offline, required=True)
+    return VerifiedInputEvidence(
+        artifact_id=row.id, sha256=row.sha256, scope="TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
+        checks=deepcopy(row.payload_json["checks"]),
+    )
 
 
 def assessment_for_request(db, project_id, request, *, offline=False, required=False, select_latest=False):

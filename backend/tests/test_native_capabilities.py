@@ -229,6 +229,26 @@ def adopt(native, **extra):
     )
 
 
+def test_guided_call_cannot_qualify_an_unguarded_production_binding(native):
+    from shine.comfyops.native import NativeProviderBinding, valid_call
+
+    n = native
+    with n["factory"].begin() as db:
+        call = db.get(AgentTaskRecord, n["samples"][0]["call_id"])
+        binding = NativeProviderBinding.model_validate(n["row"]["payload"]["native_provider"])
+        budget = n["row"]["payload"]["resource_mb"]
+        assert valid_call(db, call, n["category"], binding, n["project"], budget_mb=budget)
+        call.trace = {**call.trace, "input_assessment_required": True,
+                      "independent_input": {"artifact_id": "fixture", "sha256": "a" * 64}}
+        assert not valid_call(db, call, n["category"], binding, n["project"], budget_mb=budget)
+        if n["structured"]:
+            guarded = binding.model_copy(update={"input_assessment_required": True})
+            # A flag plus invented source IDs is not an actual text assessment.
+            assert not valid_call(db, call, n["category"], guarded, n["project"], budget_mb=budget)
+            call.trace = {k: v for k, v in call.trace.items() if k != "independent_input"}
+            assert not valid_call(db, call, n["category"], guarded, n["project"], budget_mb=budget)
+
+
 def test_old_vlm_input_coverage_cannot_qualify_a_new_capability(native):
     from shine.comfy.workflow import graph_hash
     from shine.comfyops.model_calls import digest_input

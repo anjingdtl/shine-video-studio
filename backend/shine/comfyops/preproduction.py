@@ -284,7 +284,13 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
             plan.payload.get("style_input_contract"),
             (plan.payload.get("manifest") or {}).get("style_input_contract"),
         })
-        assessment_for_request(db, project_id, render_request, offline=offline, required=required)
+        if plan and not offline:
+            from shine.comfyops.native import frozen_input_policy
+
+            required = required or frozen_input_policy(db, project_id)
+        assessment = assessment_for_request(db, project_id, render_request, offline=offline, required=required)
+        if plan and not offline and assessment is not None:
+            frozen_input_policy(db, project_id, evidence_present=True)
     if not plan:
         return  # Legacy projects preserve their original contract.
     report = readiness(db, project_id, offline=offline, data_dir=data_dir)

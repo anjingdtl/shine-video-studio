@@ -31,11 +31,14 @@ class NativeProviderBinding(BaseModel):
     runtime_files: list[str] = Field(min_length=3, max_length=100)
     response_protocol: Literal["local-review-json-schema-v1"] | None = None
     decoder_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    input_assessment_required: bool = False
 
     @model_validator(mode="after")
     def exact_model(self):
         if bool(self.response_protocol) != bool(self.decoder_sha256):
             raise ValueError("NATIVE_REVIEW_PROTOCOL_PIN_INCOMPLETE")
+        if self.input_assessment_required and not self.response_protocol:
+            raise ValueError("NATIVE_INPUT_ASSESSMENT_REQUIRES_STRUCTURED_REVIEW")
         if self.model != self.executor_identity.model_id:
             raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         if len(set(self.runtime_files)) != len(self.runtime_files):
@@ -204,6 +207,19 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
     ):
         return False
     resource_id = call.trace.get("resource_id")
+    if bool(call.trace.get("input_assessment_required")) != binding.input_assessment_required:
+        return False
+    if binding.input_assessment_required and not call.trace.get("independent_input"):
+        return False
+    if binding.input_assessment_required:
+        from fastapi import HTTPException
+
+        from shine.quality.input_assessment import evidence_for_call
+
+        try:
+            evidence_for_call(db, call)
+        except (HTTPException, ValueError, KeyError, TypeError):
+            return False
     if binding.response_protocol:
         from shine.quality.semantic import review_schema_hash, vision_review_schema
         proof = call.trace.get("structured_output") or {}
@@ -214,7 +230,7 @@ def valid_call(db, call, category, binding, project_id, *, budget_mb):
     return bool(lease and lease.status == "RELEASED" and lease.budget_mb >= budget_mb)
 
 
-def production_review_binding(db, project_id, job_id, kind, provider, *, live):
+def production_review_binding(db, project_id, job_id, kind, provider, *, live, input_assessment_required=False):
     """Bind the actual QC subcall to its job's frozen manifest, including after H3."""
     from fastapi import HTTPException
 
@@ -254,6 +270,8 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live):
     if errors:
         raise HTTPException(409, "PRODUCTION_REVIEW_PROVIDER_OUTDATED")
     binding = NativeProviderBinding.model_validate(row.payload["native_provider"])
+    if binding.input_assessment_required != input_assessment_required:
+        raise HTTPException(409, "PRODUCTION_REVIEW_INPUT_POLICY_MISMATCH")
     config = getattr(provider, "config", None)
     actual = (
         {
@@ -282,3 +300,39 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live):
     if not lease or lease.status != "ACTIVE" or lease.budget_mb < row.payload["resource_mb"]:
         raise HTTPException(409, "PRODUCTION_REVIEW_RESOURCE_BUDGET_MISMATCH")
     return binding.executor_identity.model_dump()
+
+
+def frozen_input_policy(db, project_id, *, job_id=None, evidence_present=False):
+    """Read only hash-pinned workflow policy; never infer it from a mutable route."""
+    from fastapi import HTTPException
+
+    from shine.comfyops.models import WorkflowRevision
+    from shine.comfyops.preproduction import current_plan
+    from shine.models import Job
+
+    plan = current_plan(db, project_id)
+    if not plan:
+        return False
+    manifest = plan.payload.get("manifest") or {}
+    if job_id:
+        job = db.get(Job, job_id)
+        if not job or job.project_id != project_id:
+            raise HTTPException(409, "PRODUCTION_REVIEW_JOB_MISMATCH")
+        if job.provider == "mock":
+            return False
+        if plan.status != "FROZEN" or graph_hash(manifest) != job.preproduction_manifest_hash:
+            raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+    if manifest.get("offline"):
+        return False
+    for pin in manifest.get("workflows", []):
+        row = db.get(WorkflowRevision, pin["id"])
+        if not row or row.sha256 != pin["hash"] or graph_hash(row.payload) != row.sha256:
+            raise HTTPException(409, "PREPRODUCTION_OUTDATED")
+        native = row.payload.get("native_provider")
+        if row.payload.get("category") == "VLM_REVIEW" and native:
+            required = native.get("input_assessment_required") is True
+            if evidence_present and not required:
+                raise HTTPException(409, "PRODUCTION_REVIEW_INPUT_POLICY_MISMATCH")
+            if required:
+                return True
+    return False

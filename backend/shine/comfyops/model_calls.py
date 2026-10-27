@@ -11,7 +11,7 @@ import hashlib
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from threading import Lock
 
@@ -61,7 +61,12 @@ MODEL_METHODS = {
 
 def digest_input(value):
     if is_dataclass(value) and not isinstance(value, type):
-        return digest_input(asdict(value))
+        payload = asdict(value)
+        from shine.quality.semantic import ReviewContext
+
+        if isinstance(value, ReviewContext) and payload.get("independent_input") is None:
+            payload.pop("independent_input", None)  # Preserve historical replay guards.
+        return digest_input(payload)
     if isinstance(value, Path):
         if value.is_file():
             with value.open("rb") as stream:
@@ -96,10 +101,12 @@ def model_step(provider, factory, identity):
 
 
 class TrackedProvider:
-    def __init__(self, provider, factory, project_id, *, reviewer_kind=None, production_job_id=None):
+    def __init__(self, provider, factory, project_id, *, reviewer_kind=None, production_job_id=None,
+                 require_independent_input=False):
         self.provider, self.factory, self.project_id = provider, factory, project_id
         self.reviewer_kind = reviewer_kind
         self.production_job_id = production_job_id
+        self.require_independent_input = require_independent_input
 
     def __getattr__(self, name):
         method = getattr(self.provider, name)
@@ -116,6 +123,37 @@ class TrackedProvider:
             if self.reviewer_kind:
                 kind = self.reviewer_kind
             role = "model_call:" + kind + ":" + name
+            source_context = None
+            input_evidence = None
+            input_required = self.require_independent_input if name == "review" else False
+            if name == "review" and self.production_job_id:
+                from shine.comfyops.native import frozen_input_policy
+
+                with self.factory() as db:
+                    input_required = input_required or frozen_input_policy(
+                        db, self.project_id, job_id=self.production_job_id)
+            if name == "review":
+                from shine.quality.input_assessment import evidence_for_review
+                from shine.quality.semantic import ReviewContext
+
+                candidate_context = args[0] if args else kwargs.get("context")
+                if isinstance(candidate_context, ReviewContext):
+                    source_context = candidate_context
+                elif input_required:
+                    raise HTTPException(409, "STYLE_INPUT_REVIEW_CONTEXT_REQUIRED")
+            if source_context is not None:
+                input_required = input_required or source_context.independent_input is not None
+                if input_required and source_context.independent_input is None:
+                    raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_REQUIRED")
+                if source_context.independent_input is not None:
+                    with self.factory() as db:
+                        input_evidence = evidence_for_review(
+                            db, self.project_id, source_context, offline=bool(self.provider.is_mock))
+                    verified_context = replace(source_context, independent_input=input_evidence)
+                    if args:
+                        args = (verified_context, *args[1:])
+                    else:
+                        kwargs = {**kwargs, "context": verified_context}
             fingerprint = graph_hash(digest_input([args, kwargs]))
             with self.factory.begin() as db:
                 db.execute(text("BEGIN IMMEDIATE"))
@@ -166,6 +204,10 @@ class TrackedProvider:
                         "owner_pid": os.getpid(),
                         "owner_birth": process_identity(os.getpid()),
                         "review_provider": review_binding,
+                        **({"independent_input": {"artifact_id": input_evidence["artifact_id"],
+                                                  "sha256": input_evidence["sha256"]},
+                            "input_assessment_required": input_required}
+                           if input_evidence is not None else {}),
                     },
                 )
                 db.add(task)
@@ -197,13 +239,19 @@ class TrackedProvider:
                         wait_seconds=0 if self.provider.is_mock else 300,
                     )
                 with context:
+                    if input_evidence is not None:
+                        with self.factory() as db:
+                            if evidence_for_review(db, self.project_id, source_context,
+                                                   offline=bool(self.provider.is_mock)) != input_evidence:
+                                raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_OUTDATED")
                     expected_executor = None
                     if self.production_job_id and kind in {"VLM", "ASR"}:
                         from shine.comfyops.native import production_review_binding
 
                         with self.factory() as db:
                             expected_executor = production_review_binding(
-                                db, self.project_id, self.production_job_id, kind, self.provider, live=True
+                                db, self.project_id, self.production_job_id, kind, self.provider, live=True,
+                                input_assessment_required=input_required,
                             )
                     with self.factory.begin() as db:
                         row = db.get(AgentTaskRecord, identity)
@@ -218,6 +266,15 @@ class TrackedProvider:
                     token = CURRENT_MODEL_CALL.set((self.factory, identity))
                     try:
                         result = method(*args, **kwargs)
+                        if input_evidence is not None:
+                            with self.factory.begin() as db:
+                                row = db.get(AgentTaskRecord, identity)
+                                row.trace = {**row.trace, "received_result_sha256": graph_hash(digest_input(result))}
+                            with self.factory() as db:
+                                current_evidence = evidence_for_review(
+                                    db, self.project_id, source_context, offline=bool(self.provider.is_mock))
+                            if current_evidence != input_evidence:
+                                raise HTTPException(409, "STYLE_INPUT_ASSESSMENT_OUTDATED")
                         if expected_executor is not None:
                             # A long render or inference may span a provider restart.
                             # Keep the received digest even if the post-call pin fails.
@@ -232,7 +289,8 @@ class TrackedProvider:
                                              "result_is_mock": result_mock}
                             with self.factory() as db:
                                 current_executor = production_review_binding(
-                                    db, self.project_id, self.production_job_id, kind, self.provider, live=False
+                                    db, self.project_id, self.production_job_id, kind, self.provider, live=False,
+                                    input_assessment_required=input_required,
                                 )
                             if (current_executor != expected_executor or result_mock is not False
                                     or getattr(self.provider, "last_executor_identity", None) != expected_executor):

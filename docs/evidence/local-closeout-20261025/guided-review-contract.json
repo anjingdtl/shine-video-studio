@@ -1,0 +1,52 @@
+{
+  "schema_version": "1",
+  "at": "2026-10-27T01:02:36.820817+00:00",
+  "status": "SOFTWARE_VERIFIED_REAL_GUIDED_CONTROLS_NOT_RUN",
+  "backend": {
+    "tests": 791,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 294.392,
+    "junit_sha256": "afa474e42bd86ce229fc77e5a0d9329b478a83d142b0c6a6902f802ad0b9bb35"
+  },
+  "ruff": "PASS",
+  "typescript_vite": "PASS fresh npm run build",
+  "browser": "20 previous isolated Mock flows retained; UI unchanged, not rerun this continuation",
+  "source_files_sha256": {
+    "backend/shine/comfyops/model_calls.py": "3b0cb47f688e1d6a27bf94a6659e60226bfce7371132ddc416a73044378d2cec",
+    "backend/shine/comfyops/native.py": "a491746b5f53316f0500fccc7d6ed567ab616e59182baa83722ddd61a01afcd2",
+    "backend/shine/comfyops/preproduction.py": "f96a931e846f9a3abdaa13777133a2be6f2c4d4ce8ee8acae7276a5630c15d13",
+    "backend/shine/quality/input_assessment.py": "4d8ba9868a659a42d47f4e7924ea45dddafaedba287b3eb6f2fe1b0425586c0f",
+    "backend/shine/quality/semantic.py": "6de5e30a8cc3bf5c3cff27479c5e7a720141f4f1e4b469c69741f506958e9cfa",
+    "backend/shine/worker.py": "2a38d9c5188d5a639ba1957b20fc121465707e90c23e3933f971ca66439e51b5",
+    "backend/tests/test_native_capabilities.py": "f1a6ae708160ff60343bf20d6eabc071abe69b57a614a9a492101aa3b43e7d60",
+    "backend/tests/test_review_input_evidence.py": "f991f4d7f7e6406868c6e2fc2fea11f069533dd219c4ee075bbf5005d06b3cc8",
+    "scripts/local_review_server.py": "3da7948d8992157cf2d97591012d682a07ee54f8f53810e5d376292429dd011d",
+    "config/review-decoder-lock.json": "fa4f4efdda00384cad39b49d574dc1584713fb7a3a1a27e509d533cae5094b70"
+  },
+  "scope": "Source-bound independent text evidence assists pixel reviewer; own seven checks and audio/final gates unchanged",
+  "guards": [
+    "Missing/injected/cross-project/stale/wrong-source/Mock-as-real evidence rejected before resource admission",
+    "Evidence rechecked immediately before submission and after received response; received digest retained on revocation",
+    "Legacy null-context fingerprint unchanged",
+    "Guided call cannot qualify unguarded native binding; source proof rechecked on adoption",
+    "Frozen required policy and policy mismatch block before H3; pre/post production pin checks retained",
+    "Candidate image-byte reviewer interface preserved separately from film ReviewContext"
+  ],
+  "intermediate_failures_retained": [
+    "Two transcript fixture parsing failures corrected by retaining Transcript evidence directly before JSON Schema",
+    "Three candidate-asset review regressions in stopped full run corrected by ReviewContext type admission; original assertions retained"
+  ],
+  "runtime_unchanged": "3232277f54da98e27620cd21132c14c83109f7d7c32cd0c7fbffcd1b8a2255b2",
+  "asr_retained_id": "1b2a7ca8-03e3-4cc3-8638-ea1157ff0d28",
+  "vlm_publication": "WITHHELD",
+  "real_guided_controls": "NOT_RUN",
+  "ci": {
+    "head": "ca99fb24fc487c84eff4ecb8d3fcfd9b9a647e89",
+    "run_id": 40427714732,
+    "four_checks": "failure",
+    "windows_annotation": "Job not started because account payments failed or spending limit must be increased"
+  },
+  "product_status": "PARTIAL; M4 rights, approved assets/voices and final human review plus real adversarial coverage and hosted CI remain open"
+}

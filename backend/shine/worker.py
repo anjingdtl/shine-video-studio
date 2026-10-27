@@ -339,6 +339,7 @@ def _semantic_review(
     local_reference_frames=(),
     reference_manifest=(),
     review_revision=None,
+    independent_input=None,
 ) -> tuple[list[Any], str | None]:
     """Run the semantic reviewer, classifying every failure mode separately."""
     if reviewer is None:
@@ -374,6 +375,7 @@ def _semantic_review(
         remote_consent=remote_consent,
         local_reference_frames=local_reference_frames,
         review_revision=review_revision,
+        independent_input=independent_input,
     )
     try:
         result = reviewer.review(context)
@@ -1253,6 +1255,9 @@ def _finalize_comfy_attempt(
         transcript=transcript,
         reference_manifest=request.reference_manifest,
         review_revision=review_revision,
+        independent_input=({"artifact_id": request.style_input_assessment_id,
+                            "sha256": request.style_input_assessment_sha256}
+                           if request.style_input_assessment_id else None),
     )
     gates, fused = evaluate_gates(
         policy=policy,
