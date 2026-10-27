@@ -1152,9 +1152,10 @@ def _finalize_comfy_attempt(
             existing = None
         artifact_path: Path | None = None
         if existing:
-            candidate = settings.data_dir / existing.storage_path
-            if candidate.is_file():
-                artifact_path = candidate
+            # Preserve the distinction between an absent stored artifact and
+            # a render that has not yet been collected. Never redownload an
+            # existing attempt's missing or changed artifact during recheck.
+            artifact_path = settings.data_dir / existing.storage_path
 
     relative: str
     digest: str
@@ -1229,6 +1230,29 @@ def _finalize_comfy_attempt(
         digest = str(existing.sha256)  # type: ignore[union-attr]
         byte_size = int(existing.byte_size)  # type: ignore[union-attr]
         content_type = str(existing.content_type)  # type: ignore[union-attr]
+        # A previously collected artifact may have changed since recheck was
+        # requested. Revalidate it before giving any bytes to a reviewer.
+        from shine.media.artifacts import safe_asset_path
+
+        try:
+            artifact_path = safe_asset_path(settings.data_dir, relative)
+            if artifact_path.stat().st_size != byte_size or _file_digest(artifact_path) != digest:
+                raise ValueError("artifact changed")
+        except (OSError, ValueError, HTTPException):
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db, job_id=job_id,
+                    expected_state_version=expected_state_version if expected_state_version is not None else -1,
+                    worker_id=worker_id, attempt_id=attempt_id,
+                    allowed_status=("RUNNING", "QC_PENDING", "SUBMITTING"), settings=settings,
+                )
+                if guarded:
+                    job, _attempt = guarded
+                    job.failure_code = "ARTIFACT_HASH_MISMATCH"
+                    job.lease_owner = None
+                    job.lease_expires_at = None
+                    try_transition(job, "NEEDS_REVIEW")
+            return job_id
 
     if semantic_reviewer or asr_reviewer:
         from shine.comfyops.model_calls import TrackedProvider
@@ -1448,7 +1472,8 @@ def _finalize_comfy_attempt(
 def _file_digest(path: Path) -> str:
     import hashlib
 
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as media:
+        return hashlib.file_digest(media, "sha256").hexdigest()
 
 
 def _run_comfy_job(
@@ -2056,7 +2081,38 @@ def _recover_one_job(
         if not _shot_is_current(db, job):
             _discard_stale_result(db, job, attempt, reason="SHOT_REVISION_SUPERSEDED", worker_id=worker_id)
             return 1
-        if job.provider == "comfyui" and (
+        if job.failure_code == "QC_RECHECK_REQUESTED":
+            # This is an explicitly requested review of a collected artifact,
+            # not reconciliation of an uncertain submission. ComfyUI history
+            # may have disappeared after an intentional process restart.
+            from shine.models import AppSetting
+            from shine.operator_review import context
+
+            pin = db.get(AppSetting, "qc-recheck:" + job.id)
+            try:
+                _, checked_attempt, artifact, _, _, _ = context(db, settings, job.id)
+                binding = pin.value if pin else {}
+                if (not binding.get("request_id") or binding.get("attempt_id") != checked_attempt.id
+                        or binding.get("artifact_id") != artifact.id
+                        or binding.get("artifact_sha256") != artifact.sha256):
+                    raise ValueError("recheck binding changed")
+            except (HTTPException, ValueError):
+                job.failure_code = "QC_RECHECK_INPUT_CHANGED"
+                add_audit(db, "orchestrator", "QC_RECHECK_INPUT_CHANGED", "job", job.id,
+                          {"render_resubmission": False}, project_id=job.project_id)
+                return 1
+            if _claim_stranded_job(db, job, worker_id, settings) is None:
+                return 0
+            transition(job, "RUNNING")
+            client = comfy_client or ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+            finalize = {
+                "job_id": job.id,
+                "attempt_id": checked_attempt.id,
+                "expected_state_version": job.state_version,
+                "prompt_id": job.provider_job_id,
+                "service": ComfyUIRenderService(client, settings.data_dir),
+            }
+        elif job.provider == "comfyui" and (
             job.provider_job_id
             or job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
             or (attempt is not None and attempt.prompt_graph_sha256)
