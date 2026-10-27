@@ -1,0 +1,36 @@
+{
+  "scope": "source and offline regression only, real model requalification pending",
+  "backend": {
+    "tests": "874",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "ruff": "passed",
+  "frontend": "TypeScript and Vite build passed",
+  "source_files_sha256": {
+    "backend/shine/api_preparation.py": "be20a8d5f090e49a7312c8a99ecd7cfbf8a411a54aa682e78ab4f8c0f5c0b8ee",
+    "backend/shine/comfyops/native.py": "2219ec65c1c08d5a53fd077fbda5023984e6f6f2a1feabbba8fba02cacb91966",
+    "backend/shine/comfyops/preproduction.py": "5697d9c49050a222c31205210c4b89e2153685332429ba4537703dd5daf5800a",
+    "backend/shine/main.py": "32842551753bfaa11b61ca5ec9077670d8aa86e27d504cd0f02aeecff590c05b",
+    "backend/shine/quality/basic_character_reviewer.py": "0143a4b881a2861fd5d006447eafb3485b3da49a3af0ebc985c7ee86cfbdf6b8",
+    "backend/shine/quality/basic_review.py": "75cfe12afeee55d479a8679e13032ad40f03cbb50c6fce5306782ea0f008abce",
+    "backend/shine/quality/client_identity.py": "ee6cc7210127f281486f1088a9492a5231bd735e3fe56dbfbe14680be3000220",
+    "backend/shine/schemas.py": "3ac598292195669fe6102eb7bb0248103f9e4152d4b69483d32d8a15ad241f61",
+    "backend/shine/services.py": "a9f6c249d9354ccedbacd1edc16f1266798fbed046eb273e3287ae4547448321",
+    "backend/shine/worker.py": "0bb67db867996fefa4e764cbfd23e64ad6150ac852fa8455adf4cd1167a07e5c",
+    "backend/tests/test_basic_character_reviewer.py": "3d4de65d32c7bf83d94a61c70e331c6414c11c145bacd7fd8964364238dd2628",
+    "backend/tests/test_basic_review.py": "e91f1642c4b0e6be9551584a4511f1a2489c834d005e19f2dd9703588d4937bc",
+    "backend/tests/test_basic_review_worker.py": "ca54ddb5301423b70ccb767c82e6018a472a0d3ba5b571dd06722004d71690b3",
+    "backend/tests/test_machine_recheck.py": "cd7d31498a6c8e63f6c34fec5cc38600a1b899709f8b2d52c496e3bb6b167991",
+    "backend/tests/test_native_capabilities.py": "425bd7a43c59dbf1cc3ccf3702c8a8aaf8a644d1e73e8613472a44d2f2e87272",
+    "backend/tests/test_structured_review.py": "d9ddae1ee13a4fccc6b58679907758d0c7fc14973fd58073d69caa8748d1feaa",
+    "backend/tests/test_v13_preparation.py": "ea7f521950b9544753925277acec076d931d1d8ede3f6c04cbcf3dcce9c6d9cb",
+    "config/review-decoder-lock.json": "012f7772e4f62d93101666f86b353c2017fe9c1f58a852b30b56ec83ca449bcb",
+    "frontend/src/App.tsx": "cd5e2570d656214e1857926ed977e825e6b873267042ca6272b6bc570e6f7fe8",
+    "frontend/src/api.ts": "5ae9783444cdaf1f17597aa2ffdc70151b66e1caed912dfda38e2a51f0574007",
+    "frontend/src/components/PreproductionPanel.tsx": "9d1abb4433f38e4b39f43524149d4a0ba87796a2b4fa4ea2393b3e5d36bbf787",
+    "frontend/src/components/ProductionPanel.tsx": "2f2316115ad5ada5d617fbf8fe42087ea04d3f12acc4f86393f2951ccb5c96a8",
+    "scripts/local_review_server.py": "57136a81b000b6d42d198ce6bc491a3bab86b4b97171a5c8ab692ecc06c3d09f"
+  }
+}

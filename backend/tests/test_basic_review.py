@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 
 from shine.models import Job
@@ -94,10 +96,23 @@ def test_dialogue_adapter_uses_actual_transcript_and_preserves_mock_origin():
     character = CharacterEvidence("A", "passed", "a" * 64, "vlm", False)
     good = dialogue_evidence_from_transcript(shot, Transcript(text="你好。", model="asr", is_mock=False), "a" * 64)
     assert review(shot, characters=(character,), dialogue=good).dialogue == "passed"
+    gates, _ = evaluate_basic_gates(shot=shot, technical=technical(), expected_resolution=(768, 1344),
+                                    artifact_sha256="a" * 64, characters=(character,), dialogue=good)
+    assert gates[2].evidence["transcript"] == "你好。"
+    assert gates[2].evidence["transcript_sha256"] == hashlib.sha256("你好。".encode()).hexdigest()
+    assert gates[2].evidence["transcript_truncated"] is False
     absent = dialogue_evidence_from_transcript(shot, Transcript(text="", model="asr", is_mock=False), "a" * 64)
     assert review(shot, characters=(character,), dialogue=absent).dialogue == "needs_review"
     mocked = dialogue_evidence_from_transcript(shot, Transcript(text="你好", model="asr", is_mock=True), "a" * 64)
     assert review(shot, characters=(character,), dialogue=mocked).dialogue == "needs_review"
+
+
+def test_dialogue_transcript_evidence_is_bounded_and_hashes_the_complete_result():
+    text = "你好" + "字" * 20000
+    evidence = dialogue_evidence_from_transcript(sample(characters=["A"], dialogue=True),
+                                                  Transcript(text=text, model="asr", is_mock=False), "a" * 64)
+    assert len(evidence.transcript_text) == 20000 and evidence.transcript_truncated
+    assert evidence.transcript_sha256 == hashlib.sha256(text.encode()).hexdigest()
 
 
 def test_dialogue_must_contain_all_lines_in_order_including_repetitions():

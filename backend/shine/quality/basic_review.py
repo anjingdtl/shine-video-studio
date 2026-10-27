@@ -5,6 +5,7 @@ results for the same artifact and preserve the underlying evidence. It is not
 yet connected to the worker or the production final gate.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -98,6 +99,9 @@ class DialogueEvidence:
     is_mock: bool
     matched_script: bool
     findings: tuple[SemanticFinding, ...] = ()
+    transcript_text: str | None = None
+    transcript_sha256: str | None = None
+    transcript_truncated: bool = False
 
 
 def dialogue_evidence_from_transcript(shot: ShotSpec, transcript, artifact_sha256: str) -> DialogueEvidence:
@@ -124,6 +128,9 @@ def dialogue_evidence_from_transcript(shot: ShotSpec, transcript, artifact_sha25
         is_mock=transcript.is_mock,
         matched_script=matched,
         findings=tuple(dialogue_findings(shot, transcript)),
+        transcript_text=transcript.text[:20000],
+        transcript_sha256=hashlib.sha256(transcript.text.encode("utf-8")).hexdigest(),
+        transcript_truncated=len(transcript.text) > 20000,
     )
 
 
@@ -239,6 +246,10 @@ def evaluate_basic_gates(
                       model=dialogue.model if dialogue else None,
                       evidence={"script_matched": dialogue.matched_script if dialogue else None,
                                 "finding_codes": [f.code for f in dialogue.findings] if dialogue else [],
+                                "artifact_sha256": dialogue.artifact_sha256 if dialogue else None,
+                                "transcript": dialogue.transcript_text if dialogue else None,
+                                "transcript_sha256": dialogue.transcript_sha256 if dialogue else None,
+                                "transcript_truncated": dialogue.transcript_truncated if dialogue else False,
                                 "error": audio_error})
     style_gate = gate("style", "not_applicable", False, evidence={"reason": "outside basic self-review"})
     final = _final_gate([technical_gate, character_gate, audio_gate, style_gate])
