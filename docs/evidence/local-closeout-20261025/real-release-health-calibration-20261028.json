@@ -1,0 +1,16 @@
+{
+  "source_head": "0d38d5bfc1916a0aabfd3df5f8273abab7b80245",
+  "static_draft_id": "dcb84c7b-4b4b-4dde-9b20-34035dbb31ec",
+  "draft_status": "STATIC_READY_NOT_QUALIFIED",
+  "real_character_calibration": "NOT RUN: free GPU memory below 14700 MiB after owned ComfyUI stopped",
+  "actual_model_calls": 0,
+  "h3_submissions": 0,
+  "protected_tables_unchanged": true,
+  "comfy_restored_idle": true,
+  "worker_restored": "RESTORED_IDLE",
+  "api_online": true,
+  "worker_online": true,
+  "human_present": false,
+  "human_approval": false,
+  "note": "New source requires VLM requalification; this does not change previous evidence or demonstrate automatic process-level RAM release."
+}
