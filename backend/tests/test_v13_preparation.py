@@ -347,6 +347,36 @@ def test_preproduction_missing_blocks_existing_job_endpoint(prep):
     post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=409)
 
 
+def test_review_scope_creates_new_plan_and_selects_matching_native_capability(prep, monkeypatch):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import WorkflowRevision
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    doc = client.post(f"/api/v1/projects/{project}/documents",
+                      files={"file": ("test.txt", b"A: hello", "text/plain")}).json()
+    full = workflow(client, category="VLM_REVIEW")
+    basic = workflow(client, category="VLM_REVIEW")
+    with factory.begin() as db:
+        for identity, scope in ((full["id"], None), (basic["id"], "basic_character")):
+            row = db.get(WorkflowRevision, identity)
+            row.status = "PRODUCTION_APPROVED"  # isolated fixture only
+            row.payload = {**row.payload, "native_provider": {"review_scope": scope}}
+            row.sha256 = graph_hash(row.payload)
+    monkeypatch.setattr("shine.comfyops.native.native_errors", lambda *args, **kwargs: [])
+    first = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    again = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    assert first["id"] == again["id"]
+    report = post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})
+    assert [p["id"] for p in report["manifest"]["workflows"]] == [full["id"]]
+    second = post(client, f"/projects/{project}/preproduction/analyze",
+                  {"document_id": doc["id"], "review_scope": "basic"})
+    assert second["id"] != first["id"] and second["payload"]["review_scope"] == "basic"
+    report = post(client, f"/projects/{project}/preproduction/readiness", {"offline": False})
+    assert report["manifest"]["review_scope"] == "basic"
+    assert [p["id"] for p in report["manifest"]["workflows"]] == [basic["id"]]
+
+
 @pytest.mark.parametrize(
     "path",
     [

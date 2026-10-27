@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from shine.schemas import APIModel, SemanticFinding, ShotSpec, TechnicalQCResult
 
@@ -19,6 +19,7 @@ Status = Literal["passed", "failed", "needs_review", "not_applicable"]
 class CharacterObservation(APIModel):
     """One visual observation; never a claim about dialogue or style."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
     character: str = Field(min_length=1, max_length=80)
     status: Literal["passed", "failed", "needs_review"]
     observation: str = Field(min_length=1, max_length=240)
@@ -26,6 +27,8 @@ class CharacterObservation(APIModel):
 
 
 class CharacterReviewResponse(APIModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     characters: list[CharacterObservation] = Field(max_length=20)
 
 
@@ -43,6 +46,9 @@ def validate_character_response(
         raise ValueError("CHARACTER_COVERAGE_INVALID")
     for item in response.characters:
         has_reference = item.character in reference_characters
+        if (item.status == "passed"
+                and item.observation.strip().casefold() in {"passed", "pass", "ok", "yes", "通过", "合格"}):
+            raise ValueError("CHARACTER_OBSERVATION_MISSING")
         if item.reference_compared and not has_reference:
             raise ValueError("CHARACTER_REFERENCE_UNBOUND")
         if has_reference and item.status == "passed" and not item.reference_compared:

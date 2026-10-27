@@ -20,7 +20,7 @@ from shine.comfyops.models import (
 from shine.models import Asset, Project, ProjectDocument, ProjectRuleLock, StyleVersion, WorkflowProfile
 
 
-def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
+def analyze(db, project, document, extras, h3_category="H3_REF2VA", review_scope="full"):
     if document.project_id != project.id:
         raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
     # Conservative deterministic extraction. Explicit script annotations cover non-dialogue entities.
@@ -64,6 +64,7 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA"):
         "manifest": None,
         "offline": True,
         "style_input_contract": "independent-text-v1",
+        **({"review_scope": "basic"} if review_scope == "basic" else {}),
     }
     plan = PreProductionPlan(project_id=project.id, payload=payload, sha256=graph_hash(payload), status="ANALYZED")
     db.add(plan)
@@ -203,6 +204,9 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
             w
             for w in workflows
             if w.payload["category"] == category and w.status == state and (not frozen_ids or w.id in frozen_ids)
+            and (offline or category != "VLM_REVIEW"
+                 or ((w.payload.get("native_provider") or {}).get("review_scope") == "basic_character")
+                 == (plan.payload.get("review_scope", "full") == "basic"))
         ]
         if not choices:
             blockers.append({"code": "CAPABILITY_MISSING", "category": category})
@@ -258,6 +262,7 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         "workflows": sorted([{"id": w.id, "hash": w.sha256} for w in usable], key=lambda x: x["id"]),
         "models": sorted([{"id": m.id, "hash": m.sha256} for m in models], key=lambda x: x["id"]),
         "offline": offline,
+        **({"review_scope": "basic"} if plan.payload.get("review_scope") == "basic" else {}),
         **({"style_input_contract": plan.payload["style_input_contract"]}
            if plan.payload.get("style_input_contract") else {}),
     }
@@ -277,6 +282,21 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
         raise HTTPException(409, "PREPRODUCTION_NOT_READY")
     if render_request is not None:
         from shine.quality.input_assessment import assessment_for_request
+        from shine.schemas import RenderRequest
+
+        request = RenderRequest.model_validate(render_request)
+        if plan and not offline and plan.payload.get("review_scope", "full") != request.self_review_scope:
+            raise HTTPException(409, "PREPRODUCTION_REVIEW_SCOPE_MISMATCH")
+        if not offline and request.self_review_scope == "basic" and request.shot_spec.characters:
+            # Block before an H3 submission if the frozen plan cannot perform
+            # the selected character review. Legacy projects cannot infer a
+            # qualified provider merely from a mutable route or a live server.
+            pins = (plan.payload.get("manifest") or {}).get("workflows", []) if plan else []
+            rows = [db.get(WorkflowRevision, pin.get("id")) for pin in pins]
+            reviewers = [row for row in rows if row and row.payload.get("category") == "VLM_REVIEW"]
+            if (len(reviewers) != 1 or reviewers[0].status != "PRODUCTION_APPROVED"
+                    or (reviewers[0].payload.get("native_provider") or {}).get("review_scope") != "basic_character"):
+                raise HTTPException(409, "BASIC_REVIEW_REQUIRES_FROZEN_NATIVE_CAPABILITY")
 
         # New analyzed real projects require independent input evidence. Pinned
         # evidence is rechecked for legacy jobs too; historical data is not rewritten.

@@ -5,7 +5,9 @@ type Row = { id: string; status: string; sha256: string; payload: Record<string,
 type Registry = { categories: string[]; revisions: Row[]; legacy_profiles: unknown[] };
 const views = ['环境中心', '模型与节点', '工作流能力', '全资产工厂', 'Voice Studio', '开机前预检'];
 
-export function PreproductionPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
+export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
+  projectId: string; onRefresh: () => Promise<void>; reviewScope: 'basic' | 'full';
+}) {
   const [view, setView] = useState(0);
   const [mode, setMode] = useState('fake');
   const [confirmed, setConfirmed] = useState(false);
@@ -276,9 +278,10 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
       }} /></label>
       <p>支持结构化 scenes / shots / beats、服装、道具、逐句对白与依赖；文本注释也可提取。关键需求保持阻断。</p>
       <label>补充关键需求 JSON<textarea value={requirementsJson} onChange={e => setRequirementsJson(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, requirements: JSON.parse(requirementsJson) }))}>分析资产与任务依赖</button>
+      <p>预检使用当前选择的{reviewScope === 'basic' ? '基础自审' : '完整质量门禁'}范围。</p>
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, requirements: JSON.parse(requirementsJson), review_scope: reviewScope }))}>分析资产与任务依赖</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, {
-        document_id: documentId, create_revision: true,
+        document_id: documentId, create_revision: true, review_scope: reviewScope,
       }))}>建立新的预检版本（保留历史冻结清单）</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline }))}>运行开机预检</button>
       <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
@@ -289,7 +292,7 @@ export function PreproductionPanel({ projectId, onRefresh }: { projectId: string
         ...(voiceRights ? { voice_rights_id: voiceRights } : {}),
       }))}>按依赖自动制作缺失候选（等待人工晋升）</button>
       <button disabled={busy} onClick={() => act(async () => {
-        const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId });
+        const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, review_scope: reviewScope });
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);
       })}>操作员冻结选定模式清单</button>
     </>}

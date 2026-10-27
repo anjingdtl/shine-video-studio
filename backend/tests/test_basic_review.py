@@ -141,6 +141,9 @@ def test_character_contract_requires_exact_coverage_and_bound_reference():
     observation = CharacterObservation(character="A", status="passed", observation="Visible", reference_compared=False)
     response = CharacterReviewResponse(characters=[observation])
     validate_character_response(response, expected_characters=["A"], reference_characters=set())
+    generic = CharacterReviewResponse(characters=[observation.model_copy(update={"observation": "passed"})])
+    with pytest.raises(ValueError, match="CHARACTER_OBSERVATION_MISSING"):
+        validate_character_response(generic, expected_characters=["A"], reference_characters=set())
     with pytest.raises(ValueError, match="CHARACTER_REFERENCE_NOT_COMPARED"):
         validate_character_response(response, expected_characters=["A"], reference_characters={"A"})
     compared = CharacterReviewResponse(characters=[observation.model_copy(update={"reference_compared": True})])

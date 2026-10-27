@@ -14,7 +14,8 @@ from tests.test_semantic_qc import context
 
 
 @pytest.mark.parametrize(
-    "damage", [None, "wrong_schema", "mock", "missing_character", "truncated", "no_identity", "server_error"]
+    "damage", [None, "wrong_schema", "mock", "missing_character", "truncated", "no_identity", "server_error",
+               "string_boolean"]
 )
 def test_basic_character_wire_requires_complete_pinned_local_evidence(tmp_path, monkeypatch, damage):
     ctx = context(tmp_path)
@@ -25,6 +26,8 @@ def test_basic_character_wire_requires_complete_pinned_local_evidence(tmp_path, 
     observed = {"character": "A", "status": "passed", "observation": "Visible", "reference_compared": False}
     if damage == "missing_character":
         observed["character"] = "B"
+    if damage == "string_boolean":
+        observed["reference_compared"] = "false"
     body = {
         "model": "model", "is_mock": damage == "mock", "choices": [{
             "finish_reason": "length" if damage == "truncated" else "stop",

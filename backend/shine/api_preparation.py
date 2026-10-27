@@ -1138,6 +1138,7 @@ class Analyze(Strict):
     requirements: list[RequirementInput] = Field(default_factory=list, max_length=300)
     create_revision: bool = False
     h3_category: Literal["H3_REF2VA", "H3_T2VA", "H3_I2VA", "H3_L2VA", "H3_FL2VA"] = "H3_REF2VA"
+    review_scope: Literal["full", "basic"] = "full"
 
 
 @router.post("/projects/{project_id}/preproduction/analyze")
@@ -1154,9 +1155,12 @@ def analyze(project_id: str, body: Analyze, db: DBSession):
         and not body.requirements
         and not body.create_revision
         and existing.payload.get("h3_category", "H3_REF2VA") == body.h3_category
+        and existing.payload.get("review_scope", "full") == body.review_scope
     ):
         return public(existing)
-    row = preproduction.analyze(db, project, document, [r.model_dump() for r in body.requirements], body.h3_category)
+    row = preproduction.analyze(
+        db, project, document, [r.model_dump() for r in body.requirements], body.h3_category, body.review_scope
+    )
     audit(db, "producer", "PREPRODUCTION_ANALYZED", row)
     db.commit()
     return public(row)
@@ -1747,7 +1751,7 @@ def validate_native_workflow(identity: str, actor: Operator, db: DBSession):
 class NativeCallSample(Strict):
     call_id: str
     result: dict
-    expected_verdict: Literal["passed", "failed"] | None = None
+    expected_verdict: Literal["passed", "failed", "not_passed"] | None = None
     expected_text: str | None = Field(default=None, min_length=1, max_length=20000)
 
 
@@ -1786,7 +1790,8 @@ def native_execution_evidence(identity: str, body: NativeExecutionEvidence, acto
     if len({s.call_id for s in body.samples}) != len(body.samples):
         raise HTTPException(409, "DISTINCT_NATIVE_CALLS_REQUIRED")
     if category == "VLM_REVIEW":
-        if len(body.samples) != 2 or {s.expected_verdict for s in body.samples} != {"passed", "failed"}:
+        expected = {"passed", "not_passed"} if binding.review_scope == "basic_character" else {"passed", "failed"}
+        if len(body.samples) != 2 or {s.expected_verdict for s in body.samples} != expected:
             raise HTTPException(409, "VLM_POSITIVE_NEGATIVE_CALIBRATION_REQUIRED")
     elif len(body.samples) != 1:
         raise HTTPException(409, "ONE_ASR_CALIBRATION_REQUIRED")
@@ -1806,10 +1811,12 @@ def native_execution_evidence(identity: str, body: NativeExecutionEvidence, acto
                     statuses = [item.status for item in response.characters]
                     verdict = ("failed" if "failed" in statuses else "passed"
                                if statuses and all(s == "passed" for s in statuses) else "needs_review")
-                    if (result.is_mock is not False or result.model != binding.model
-                            or verdict != sample.expected_verdict):
+                    matched = (verdict in {"failed", "needs_review"} if sample.expected_verdict == "not_passed"
+                               else verdict == sample.expected_verdict)
+                    if result.is_mock is not False or result.model != binding.model or not matched:
                         raise ValueError("CHARACTER_CALIBRATION_RESULT_INVALID")
                     summary = {"expected_verdict": sample.expected_verdict,
+                               "observed_verdict": verdict,
                                "character_input_contract": "basic-character-v1"}
                 else:
                     result = SemanticReviewResult.model_validate(sample.result)

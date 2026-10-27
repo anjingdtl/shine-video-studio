@@ -372,7 +372,8 @@ def test_basic_scope_requires_own_schema_and_cannot_inherit_strict_evidence(nati
         assert "NATIVE_EXECUTION_EVIDENCE_CHANGED" in errors
 
 
-def test_basic_scope_calibration_requires_matching_real_call_and_positive_negative(native):
+@pytest.mark.parametrize("negative_status", ["failed", "needs_review", "passed"])
+def test_basic_scope_calibration_requires_matching_real_call_and_positive_negative(native, negative_status):
     from copy import deepcopy
 
     from shine.comfy.workflow import graph_hash
@@ -394,7 +395,10 @@ def test_basic_scope_calibration_requires_matching_real_call_and_positive_negati
         row.payload = payload
         row.sha256 = graph_hash(payload)
         for sample in n["samples"]:
-            observed = {"characters": [{"character": "A", "status": sample["expected_verdict"],
+            status = sample["expected_verdict"] if sample["expected_verdict"] == "passed" else negative_status
+            if sample["expected_verdict"] == "failed":
+                sample["expected_verdict"] = "not_passed"
+            observed = {"characters": [{"character": "A", "status": status,
                                        "observation": "synthetic", "reference_compared": False}]}
             result = CharacterReview(response=observed, input_sha256="a" * 64, model="fixture-only", is_mock=False)
             sample["result"] = asdict(result)
@@ -402,6 +406,18 @@ def test_basic_scope_calibration_requires_matching_real_call_and_positive_negati
             call.trace = {**call.trace, "result_sha256": graph_hash(digest_input(result)),
                           "structured_output": {**call.trace["structured_output"],
                                                 "schema_sha256": review_schema_hash(schema)}}
+    if negative_status == "passed":
+        grant = post(n["client"], "/preparation/approval-grants",
+                     {"action": "workflow_validate", "target_id": n["row"]["id"]}, operator=True)
+        response = n["client"].post(
+            f"/api/v1/workflow-capabilities/{n['row']['id']}/native-execution-evidence",
+            json={"grant_id": grant["grant_id"], "snapshot": grant["snapshot"], "offline": False,
+                  "evidence": "synthetic false-positive control", "project_id": n["project"], "samples": n["samples"]},
+            headers=HEADERS,
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "NATIVE_CALIBRATION_RESULT_INVALID"
+        return
     row = adopt(n)
     assert row["status"] == "REAL_TESTED"
     assert all(s["character_input_contract"] == "basic-character-v1"
