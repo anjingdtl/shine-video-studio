@@ -1,0 +1,64 @@
+{
+  "scope": "isolated SQLite backup, silent basic review readiness only",
+  "status": "SHOOT_READY",
+  "blockers": [],
+  "critical_requirements": [
+    {
+      "family": "character",
+      "entity_id": "CHAR_LIANG",
+      "status": "SATISFIED",
+      "reason": null
+    },
+    {
+      "family": "scene",
+      "entity_id": "SCENE_NEON",
+      "status": "SATISFIED",
+      "reason": null
+    }
+  ],
+  "approved_asset_copies_hashed": [
+    {
+      "id": "ad0ec279-a9f1-4a57-9f0a-08cc093aeca9",
+      "sha256": "90b9f8b79da86f27375948166c9719afe31fe306259c1de33092cad9d2554c22"
+    },
+    {
+      "id": "4b8364f9-4b63-4dc2-b093-2de6f77ef5a3",
+      "sha256": "f47dd755139f32e0ba52c3ea2d67fab17f1797429da710cec5d3f3a8ce05877e"
+    },
+    {
+      "id": "828dde42-2fc1-491f-bc1b-d8a1808249a6",
+      "sha256": "a4e838ba9eb353af0e3f836e1391dd3a57275a17284eeb7dec57eafc024626be"
+    },
+    {
+      "id": "663d7728-a724-4ad2-b786-26d7ebde34e9",
+      "sha256": "73fdac83adb50c3b0101d4fcaec20bfe48f5dc91bb16ee4b7850acc9163158b9"
+    }
+  ],
+  "workflow_pins": [
+    {
+      "id": "4a5bc5b8-2bef-4883-9dae-1b2660479603",
+      "hash": "6cfd7742a19b29491e5dfa54bc4f8b33aa4425b846d800782c019e77089ecf3b"
+    },
+    {
+      "id": "660ecd23-de23-437a-8479-5cbff6da37a0",
+      "hash": "2272fbfa5bd97a9984a24c29eb402cf1e3c75736695994955f192d6d4fa22b64"
+    },
+    {
+      "id": "bb8a5033-2d6a-44f4-b1c5-6a5cdf94b70c",
+      "hash": "d0752e61e324d0d0957f60c3d301b96f18a50886b635f37cc14f875215761af9"
+    }
+  ],
+  "manifest_hash": "c58c6b61104e56fbf14c42e630cc87d5d147dbea0345339a139e497cffa67ea4",
+  "original_project_modified": false,
+  "h3_submissions": 0,
+  "dialogue": "not applicable to planned silent shot; no dialogue end-to-end test performed",
+  "prior_service_exit_cause": "unknown",
+  "recovery_status": "RESTORED_IDLE",
+  "recovery_no_queued_jobs_and_no_active_leases": true,
+  "review_unloaded_after_recovery": true,
+  "limits": [
+    "readiness is not a frozen manifest or a rendered video",
+    "physical process RAM release between H3 and local review has not been demonstrated by automated worker",
+    "no current end-to-end basic review or human film approval"
+  ]
+}

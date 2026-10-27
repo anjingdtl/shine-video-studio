@@ -1,0 +1,39 @@
+{
+  "scope": "REAL_REF2VA_IMAGE_REFERENCE_WORKFLOW_ONLY_NOT_FULL_FILM_ACCEPTANCE",
+  "packages": [
+    {
+      "id": "72a07f88-6401-415e-9b9a-5fbd6279e45a",
+      "sha256": "d45717477a896825a6378118b59a2e8bb617426566d4a9be1aca31c8e7eccfdd",
+      "name": "MiniMax-H3-Ref2VA-INT8-e5eb578a"
+    },
+    {
+      "id": "9824c175-7db8-4bb6-b9f1-19410bff8575",
+      "sha256": "30e02874ce5f672c1d4123dd1fdbe1f008e72407e2f61df1a24c8ead7af4b7b3",
+      "name": "MiniMax-H3-Realism-People-039cc857"
+    }
+  ],
+  "package_bytes": 42601850335,
+  "new_workflow_id": "bb8a5033-2d6a-44f4-b1c5-6a5cdf94b70c",
+  "workflow_graph_sha256": "86a7624e6eaeccd3a3c54cf5024317698cac64cbe083ed10dd158bcaa1e6eaa0",
+  "legacy_profile_id": "18e2f8d3-ca1d-4f0d-83ae-0bffc1b4b5f2",
+  "source_job_id": "ffffe1d8-86e7-4593-acaa-91ff453b6b31",
+  "source_attempt_id": "dd4eda10-f800-4cc6-a341-115dd8adfbe6",
+  "source_artifact_sha256": "675c7822a15cc6366410816f1b6c3af7d1f321eccb28b0749ddc7f1674f7edaf",
+  "existing_human_review_reused": true,
+  "new_human_review": false,
+  "old_fake_workflow_unchanged": "4cf11061-667c-47d8-997c-55c8fabe1fdb",
+  "isolated_loader_categories": [
+    "diffusion_models",
+    "text_encoders",
+    "vae",
+    "loras"
+  ],
+  "overlay_sha256": "3581d1efa5f24ac70df0270c4d2241563f5c03f7067b877830cfcd47e7b24cf6",
+  "h3_submissions": 0,
+  "limits": [
+    "Image-reference profile only",
+    "No audio-reference or hard-continuity qualification",
+    "Current path resolution verified separately from actual post-switch inference",
+    "Automatic monitoring of later model-file changes is not established"
+  ]
+}
