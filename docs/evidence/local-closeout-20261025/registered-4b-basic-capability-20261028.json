@@ -1,0 +1,54 @@
+{
+  "scope": "registered 4B basic-character technical capability; not film acceptance",
+  "source_head": "b12619482cd33082d7edd3472522b2276fc8e63d",
+  "profile_id": "b7a003ec-7917-470c-abaa-6e5cd602eec7",
+  "previous_vlm_profile_id": "1fbbc703-281b-4498-ad98-ade1e0d2088b",
+  "workflow_id": "8559fff5-873b-4943-80fd-a85a788d610e",
+  "workflow_status": "PRODUCTION_APPROVED",
+  "workflow_sha256": "089fdbac17f6b5776d5881945ca8d46614d1b9bff0ffe5b5afd7067ffd11b550",
+  "runtime_sha256": "d8c2ebde0f82e8478026b4b622d2e171f1174c8ebc3831152d4dc27d3449dea2",
+  "live_native_errors": [],
+  "controls": [
+    {
+      "name": "registered-4b-basic-empty-negative",
+      "expected": "not_passed",
+      "observed": "failed",
+      "call_id": "1bb79ceb-bc4e-4971-94f2-571c0d36bb9f",
+      "lease_status": "RELEASED",
+      "artifact_sha256": "bf6fa7643790008deea277331994ea533c1d7ef3d3696b8af73030814c1d021d",
+      "physical_free_gpu_mib_before": 14440,
+      "child": {
+        "pid": 11308,
+        "exitcode": 0,
+        "joined": true
+      }
+    },
+    {
+      "name": "registered-4b-basic-portrait-positive",
+      "expected": "passed",
+      "observed": "passed",
+      "call_id": "eee41b65-c153-4d0e-862f-4786cc902161",
+      "lease_status": "RELEASED",
+      "artifact_sha256": "a176267078f107bd8a39f4678a57f6445dc2ab5c12065bc0e4108d0fff48224a",
+      "physical_free_gpu_mib_before": 14397,
+      "child": {
+        "pid": 8412,
+        "exitcode": 0,
+        "joined": true
+      }
+    }
+  ],
+  "route": "vlm_reviewer explicitly switched to new 4B profile",
+  "asr_route": "unchanged, 8B service hosts existing ASR",
+  "comfy_restored_idle": true,
+  "worker_online": true,
+  "nonreleased_leases": 0,
+  "h3_submissions": 0,
+  "human_present": false,
+  "human_quality_or_rights_approval": false,
+  "receipt_sha256": {
+    "registration": "d9453b11ea2c3bd443176e74f27529071aa2dbb6d044f65c3f90dd580c5943f5",
+    "controls": "42a21843a2a9137f8324ca61953cf266c663e37030e6c171ef71f85a3d8662b2"
+  },
+  "limitations": "Basic character scope only; full review not qualified. Existing frozen plans are not changed and must remain pinned; ComfyUI process handoff was manually orchestrated, not automated by Worker. No film, rights or human voice-quality acceptance."
+}
