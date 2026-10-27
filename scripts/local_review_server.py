@@ -237,7 +237,9 @@ def build_app(manifest):
 
     runtime = {
         "python": sys.version,
-        "packages": {name: importlib.metadata.version(name) for name in ("torch", "transformers")},
+        "packages": {name: importlib.metadata.version(name) for name in (
+            "torch", "transformers", "pydantic", "packaging", "pyyaml",
+        )},
         "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "structured_output": decoder_identity,
     }

@@ -157,6 +157,31 @@ def test_optional_identity_never_reuses_previous_response_proof():
     assert provider.last_executor_identity is None
 
 
+@pytest.mark.parametrize('dependency', ['pydantic', 'packaging', 'pyyaml'])
+def test_decoder_dependency_versions_change_executor_runtime_identity(executor, tmp_path, monkeypatch, dependency):
+    import importlib.metadata
+    import sys
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setitem(sys.modules, 'PIL', SimpleNamespace(Image=object()))
+    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace())
+    monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(
+        AutoProcessor=object(), Qwen3VLForConditionalGeneration=object(),
+    ))
+    monkeypatch.setattr(executor, 'decoder_runtime_identity', lambda: {
+        'protocol': 'local-review-json-schema-v1', 'decoder_sha256': 'd'*64, 'schema_sha256': 'a'*64,
+    })
+    versions = {}
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name: versions.get(name, 'fixture'))
+    spec = manifest(tmp_path)
+    before = TestClient(executor.build_app(spec)).get('/identity').json()['runtime_sha256']
+    versions[dependency] = 'different-fixture'
+    after = TestClient(executor.build_app(spec)).get('/identity').json()['runtime_sha256']
+    assert before != after
+
+
 @pytest.mark.parametrize('role', ['VLM', 'ASR'])
 @pytest.mark.parametrize('mutation', ['changed-weight', 'undeclared-tokenizer'])
 def test_cold_load_rechecks_bytes_after_startup_before_loading_any_model(
