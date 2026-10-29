@@ -1049,6 +1049,14 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 - 本机 Git 凭据助手：用户级 `C:\Users\Administrator\.gitconfig` 的 `credential.helper` 指向已不存在的 PortableGit GCM 二进制，每次凭据操作都会报错；系统级 `C:\Program Files\Git\etc\gitconfig` 的 `manager` 仍可正常认证，fetch 因此可用。本轮**未改动**用户全局配置，修复方式为删除该失效条目或改回 `manager`。
 - 真实 H3→审片自动链路未跑通属于**未完成工作**，不是外部阻塞；剩余工作包括首次提交的真实 H3 渲染、真实视觉/ASR 审片串行交接、跨作业续期与工作台闭环。
 
+## 提交与推送
+
+- 本轮变更提交为 `05fd0a7dca320f45b6e88023bed8e90c42518c2b`（`Wire the first managed renderer startup into the normal worker`），在 `53a2a81` 之上，未改写历史。
+- 以普通 `git push origin main` 推送，输出 `f6b196a..05fd0a7 main -> main`，为快进推送，**没有使用 force**。
+- 推送后重新 `git fetch origin main`（exit 0）复核：本地 `main` 与 `origin/main` 均为 `05fd0a7dca320f45b6e88023bed8e90c42518c2b`，`git rev-list --left-right --count origin/main...main` 为 `0  0`，工作区干净。
+- 提交内容仅包含源码、测试、配置样例与两份报告；未包含数据库、模型权重、生成视频、个人素材或密钥。`.local-acceptance/` 由 `.gitignore` 排除，验收证据与数据库未进入提交。
+- 未认证的 GitHub API 对该私有仓库返回 404，属预期；远端 head 以上述带认证的 fetch 结果为准。
+
 ## 可复查证据路径
 
 - `.local-acceptance/closeout-20261025/full-suite-baseline-20261030.log`（变更前基线）
