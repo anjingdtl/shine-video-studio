@@ -18,6 +18,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
 
 if (-not $env:SHINE_DATA_DIR) {
     $env:SHINE_DATA_DIR = Join-Path $env:TEMP "shine-verify-$(Get-Random)"
@@ -117,8 +118,18 @@ try {
     Write-Host ''
     Write-Host 'Local stack verification passed. Mock mode simulates scheduling and QC only; it never created a video.'
 } finally {
-    if ($worker) { Stop-Process -Id $worker.Id -Force -ErrorAction SilentlyContinue }
-    if ($api) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }
+    # A launcher and the process that actually owns the socket are not the same
+    # pid: a uv managed environment re-executes the base interpreter as a child.
+    # Stopping only the launcher leaves the API and the Worker running, so the
+    # whole owned tree is ended by verified birth identity instead.
+    foreach ($entry in @(@{ name = 'worker'; process = $worker }, @{ name = 'api'; process = $api })) {
+        if (-not $entry.process) { continue }
+        $info = Get-Process -Id $entry.process.Id -ErrorAction SilentlyContinue
+        if (-not $info) { continue }
+        $birth = $info.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+        & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $entry.process.Id $birth --stop 2>&1 |
+            Out-Null
+    }
     if ($createdDataDir -and -not $KeepData) {
         Remove-Item -Recurse -Force $env:SHINE_DATA_DIR -ErrorAction SilentlyContinue
     }

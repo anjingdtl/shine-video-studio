@@ -940,6 +940,8 @@ Worker 与模型代理属于审片客户端身份指纹，因此旧 4B/ASR 登�
 
 其二（真实产品缺陷，非测试写法问题）：本机 `datetime.now()` 在一个时钟刻度内不前进（连续 19999 次返回同一时间戳），同一刻度内写入的 `PreProductionPlan` 因此共享 `created_at`，而 `current_plan` 用随机 UUID 作并列决胜，**选中哪个计划是掷硬币**。该函数决定 analyze 幂等命中、readiness 清单（review_scope 与原生审片能力）、生产准入门禁与冻结清单，选错会让基础自审按错误范围放行。修复为 `utcnow()` 严格单调递增（最多领先真实时钟 1 秒，系统时间回拨即重同步），并把计划、声音、工作流与审计事件的并列决胜改为仓库既有的 `literal_column(rowid)` 插入顺序。
 
+其三：`scripts/verify_local_stack.ps1` 只停掉 `uv run` 启动器，而 `uv` 管理的虚拟环境会把基础解释器再执行为子进程，API 与 Worker 的真实进程被留在后台（本轮复现时泄漏 4 组共 15 个进程并占用 8123/8124/8125/8127/8129）。修复后脚本按仓库既有做法核验出生标识，用 `shine_processes.py <pid> <birth> --stop` 先停子进程再停父进程；复跑 exit 0 且不再留下任何进程或监听端口，此前泄漏的进程也按身份核验逐个停掉。
+
 修复后：CI 原始命令全量回归 **1058 通过、1 跳过、0 失败**，exit 0，381.47 秒；web-e2e 浏览器作业 exit 0，20 条流程全部 MOCK_VERIFIED、`api_errors: []`；Windows 的 `verify_local_stack.ps1`、`verify_stack_operations.ps1`、`npm ci`、前端构建、Alembic 新库升级与 Ruff 全部 exit 0。新增 `backend/tests/test_timestamp_ordering.py`（7 项）锁定"最新行"合同，修复后同一探针 30 次复现 **0 次选错**。
 
 按本轮授权清理了失效与损坏条目（走可恢复回收站，非永久删除）：损坏的 `.local-acceptance/data/shine.db`（malformed schema）、空的 `.local-data/shine.db`（0 表）、以及两份指向已死进程的 `run/processes.json`。清理前已做全库 `quick_check` 体检，15 个库中仅 1 个损坏，无孤立 WAL/SHM；其余数据库、资产、产物、截图与证据全部保留。
