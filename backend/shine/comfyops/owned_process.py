@@ -68,6 +68,58 @@ def inspect_named_group(name, pid, birth):
         kernel.CloseHandle(job)
 
 
+def terminate_named_group(name, *, timeout=10):
+    """Stop a named owned group after its supervisor is gone.
+
+    Only a group whose name matches the owned pattern may be terminated, and the
+    kernel must confirm that no member survives. The caller is responsible for
+    proving that the recorded PID and birth identity still belong to this group.
+    """
+    if os.name != "nt" or not isinstance(name, str) or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name):
+        raise ValueError("NAMED_JOB_ID_INVALID")
+    if timeout <= 0:
+        raise ValueError("NAMED_JOB_ID_INVALID")
+    import ctypes
+    from ctypes import wintypes
+
+    class Accounting(ctypes.Structure):
+        _fields_ = (
+            [(name, ctypes.c_longlong) for name in (
+                "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodKernelTime")]
+            + [(name, wintypes.DWORD) for name in (
+                "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+        )
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.OpenJobObjectW.restype = wintypes.HANDLE
+    kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.INT, ctypes.c_void_p,
+                                                wintypes.DWORD, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = kernel.OpenJobObjectW(0x0008 | 0x0004, False, name)  # TERMINATE | QUERY
+    if not job:
+        error = ctypes.get_last_error()
+        if error == 2:
+            raise ValueError("NAMED_JOB_NOT_FOUND")
+        raise OSError(error, "NAMED_JOB_QUERY_UNAVAILABLE")
+    try:
+        if not kernel.TerminateJobObject(job, 0):
+            raise OSError(ctypes.get_last_error(), "TerminateJobObject")
+        deadline = time.monotonic() + timeout
+        while True:
+            info = Accounting()
+            if not kernel.QueryInformationJobObject(job, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+                raise OSError(ctypes.get_last_error(), "QueryInformationJobObject")
+            if info.ActiveProcesses == 0:
+                return {"job_name": name, "active_processes": 0, "total_processes": info.TotalProcesses}
+            if time.monotonic() >= deadline:
+                raise RuntimeError("NAMED_JOB_EXIT_UNCONFIRMED")
+            time.sleep(0.05)
+    finally:
+        kernel.CloseHandle(job)
+
+
 class OwnedProcessGroup:
     def __init__(self, job, process_handle, pid, recipe, pins, source_handles):
         self._job = job

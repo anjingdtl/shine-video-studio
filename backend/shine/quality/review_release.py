@@ -140,6 +140,60 @@ def verify_review_ready(*, base_url, runtime_sha256, supervisor, gpu_uuid, min_r
     return verified
 
 
+def create_cold_review_fence(*, base_url, runtime_sha256, supervisor, gpu_uuid,
+                             min_ram_mb, min_vram_mb, handoff_token, api_key=None, owner_group=None):
+    """Close an untouched review supervisor and bind its first reservation.
+
+    This is the first-close primitive. It is only valid while the supervisor has
+    never executed a review, so the sealed fence proves that the next review
+    starts from a pristine runtime with no model resident.
+    """
+    parsed = urlsplit(base_url)
+    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port
+            or parsed.path.rstrip("/") not in {"", "/v1"} or parsed.username or parsed.password
+            or parsed.query or parsed.fragment):
+        raise ValueError("REVIEW_SUPERVISOR_URL_INVALID")
+    if (not isinstance(runtime_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", runtime_sha256)
+            or not isinstance(handoff_token, str) or len(handoff_token) < 32
+            or not isinstance(supervisor, dict) or type(supervisor.get("pid")) is not int
+            or supervisor["pid"] <= 0 or not isinstance(supervisor.get("birth"), str)
+            or not supervisor["birth"].isdigit()):
+        raise ValueError("REVIEW_SUPERVISOR_IDENTITY_INVALID")
+
+    def check_owner():
+        if not isinstance(owner_group, OwnedProcessGroup) or not owner_group.owns(
+                supervisor["pid"], supervisor["birth"]):
+            raise ValueError("REVIEW_SUPERVISOR_OWNERSHIP_UNVERIFIED")
+        if (windows_loopback_listener_pid(parsed.port) != supervisor["pid"]
+                or process_identity(supervisor["pid"]) != supervisor["birth"]):
+            raise ValueError("REVIEW_SUPERVISOR_IDENTITY_CHANGED")
+
+    headers = {"X-Shine-Handoff-Token": handoff_token}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    endpoint = f"http://127.0.0.1:{parsed.port}"
+    check_owner()
+    with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
+        response = client.post(endpoint + "/handoff/cold-fence", headers=headers, json={})
+        if response.status_code != 200:
+            raise ValueError("REVIEW_COLD_FENCE_UNCONFIRMED")
+        body = response.json()
+        if (not isinstance(body, dict) or body.get("fenced") is not True
+                or not isinstance(body.get("fence_id"), str)
+                or body.get("runtime_sha256") != runtime_sha256
+                or not isinstance(body.get("initial_stage"), dict)):
+            raise ValueError("REVIEW_COLD_FENCE_UNCONFIRMED")
+        fence_id = body["fence_id"]
+    check_owner()
+    proof = verify_cold_review_fence(**{
+        "base_url": base_url, "fence_id": fence_id, "runtime_sha256": runtime_sha256,
+        "supervisor": supervisor, "gpu_uuid": gpu_uuid, "min_ram_mb": min_ram_mb,
+        "min_vram_mb": min_vram_mb, "handoff_token": handoff_token, "api_key": api_key,
+        "owner_group": owner_group,
+    })
+    return {"fence_id": fence_id, "initial_stage": body["initial_stage"], "memory": proof["memory"]}
+
+
 def verify_cold_review_fence(*, base_url, fence_id, runtime_sha256, supervisor, gpu_uuid,
                              min_ram_mb, min_vram_mb, handoff_token, api_key=None, owner_group=None):
     """Verify a live pristine fence and the startup child's physical exit.

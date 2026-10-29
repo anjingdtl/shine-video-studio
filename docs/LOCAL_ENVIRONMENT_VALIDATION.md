@@ -996,3 +996,65 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 - 已构造反例：推理子进程运行后返回非法 JSON 时，旧逻辑仍可能将服务当作从未运行；修复后调用一旦开始就不再视为初始状态，非法响应使服务保持不确定状态。客户端复核包含监督进程归属、启动子进程退出、封闭状态及内存/显存；跨作业边界还复核尚未使用的冷封闭服务和旧释放收据。
 - 定向测试 `test_isolated_review_supervisor.py`、`test_review_isolation_receipt.py`、`test_renderer_supervisor.py`、`test_handoff_lease_transfer.py`、`test_offline_e2e.py` 于本轮退出 0；Ruff 通过。此前完整后端 1031 项的结果不覆盖本次首次封闭变更：后续全量测试运行至 90% 后被用户中断，测试句柄已不存在，**最终结果未知，不计通过**。
 - 真实 H3、审片模型、首次受管启动及工作台自动链路 **NOT RUN**。测试中的模型执行、资源读数和部分进程归属为替身；首次启动的持久化意图、独占租约、意外中断对账、监督器创建和 Worker 接线仍需完成。新源码改变审片身份，旧 4B/ASR 真实登记不能替代当前源码重新校准。
+# 2026-10-30 首次受管启动接线、真实进程实测与全量回归
+
+## 本机与仓库状态复核（2026-10-30 01:36 起）
+
+- 系统启动时间为 2026-10-30 01:25:48。本机在本轮之前发生过重启，上一轮记录的全部 PID 与端口归属均已失效；本轮不按旧 PID 操作，也没有停止、卸载或接管任何外部或归属不明的 ComfyUI。
+- `Get-NetTCPConnection -State Listen`：8188/8189/8116/8117/8000/8001 无监听；`Get-CimInstance Win32_Process` 未发现 python/comfy/node 相关进程。
+- `nvidia-smi --query-gpu=index,uuid,memory.total,memory.free`：`0, GPU-f3fda412-dabc-0f4a-c8e0-9fd69902205b, NVIDIA GeForce RTX 5080, 16303 MiB, 14789 MiB`。这是时点容量快照，不是模型峰值证明，也不证明外部进程已卸载任何模型。
+- 验收库 `.local-acceptance/closeout-20261025/shine.db`：`resource_leases` 全部为 RELEASED，无 ACTIVE 或 RECONCILE_REQUIRED 残留；`app_settings` 中不存在任何 `handoff:`、`renderer-activation:`、`renderer-startup:`、`review-startup:` 记录，即该库此前从未走过交接路径；唯一的 `comfy_instances` 行为 status ONLINE 且 payload 缺少 `managed`/`process`，不是受管实例。本轮未写入该库。
+- `.local-acceptance/data/shine.db` 以只读方式打开即报 `malformed database schema (83580f76-cbc9-4933-afd7-5d3d7293f16b)`。本轮未做任何清理、改写或修复。该 UUID 出现在镜头 continuity JSON 的 `previous_job_id` 值中，属于数据内容而非可修复的 schema 语句；该损坏属本轮之前的既有状态。
+- Git：本轮开始时本地 main=`53a2a81`、origin/main=`f6b196a`、本地超前 1、工作区干净。`git fetch` 因用户级 `~/.gitconfig` 的 `credential.helper` 指向已不存在的 PortableGit GCM 二进制而报错；改用系统 GCM 执行 `git fetch origin main` 成功（exit 0），复核 `origin/main`=`f6b196afa3d53623baa2a8f16a5e62f1d2520649`。`gh` 返回 HTTP 401，托管 CI 状态本轮**无法核实**，既不写成通过也不写成失败。
+
+## 实现状态
+
+本轮把此前只有内部原语的交接机制接进正常 Worker，并补上"首次受管启动"这一缺失环节。
+
+- 新增 `backend/shine/comfyops/handoff_startup.py`：首次受管启动原语。启动前先写入持久意图（`renderer-startup:<instance>`），意图中记录 argv 哈希、cwd、钉住文件的 SHA-256、端口、GPU UUID、阈值、owner PID 与出生标识，以及**控制令牌摘要而非令牌本身**；随后才创建受管 Windows 进程组（命名 Job Object），核验唯一 loopback 监听者属于该进程组、渲染器以封闭（drained）状态起来，再实测 RAM/VRAM 基线，最后登记 `ComfyInstance`（`managed=True`、`is_mock=False`、`process={pid,birth,job_name}`、`RUNNING_PENDING_HEALTH`）。任一环节不确定即写 `RECONCILE_REQUIRED` 并保留租约，重复启动同一实例被拒绝，绝不盲目重投。
+- 新增 `backend/shine/comfyops/managed_recipe.py`：由运维提供的渲染器与审片服务配方。只描述可执行文件、ComfyUI 根目录、钉住的适配器字节和物理阈值；控制令牌每次启动现场生成，不落盘、不进 SQLite、不进 Git。
+- 新增 `backend/shine/comfyops/handoff_startup.py` 中的 `reconcile_managed_startups`：崩溃恢复。只有当记录的 PID 与出生标识仍一致、且命名 Job Object 成员关系仍可核实时才允许停止该进程组；无法确认归属时保持阻塞并保留对账证据，绝不触碰外部或归属不明的进程。所有者进程仍存活时完全不介入，避免两个 Worker 相互干扰。
+- 新增 `owned_process.terminate_named_group`：在归属已被证明后，按命名 Job Object 终止并由内核确认无残留成员。
+- 新增 `handoff_activation.activate_renderer_for_first_attempt`：首次提交前的激活。首次没有可释放的上一轮审片，物理证明改由启动绑定与新鲜实测基线承担；同样先写意图再恢复队列，恢复结果不确定时保留租约并把作业置为 NEEDS_REVIEW。
+- 新增 `review_release.create_cold_review_fence`：客户端侧的首次封闭原语，把服务端已有的"首次封闭 + 一次性绑定预约"接进受管协调器，并复核启动子进程已退出与内存/显存。
+- `backend/shine/worker.py`：新增 `_FirstManagedContinuation` 与 `run_managed_first`；正常 `run_one` 在配置了 `SHINE_MANAGED_RECIPE` 时改走受管启动分支，不再对未受管 ComfyUI 静默请求卸载；`recover_expired_jobs` 先做启动对账；配方或审片服务绑定不成立时在外部调用前阻断并保留待对账租约，不让 Worker 循环崩溃。
+- `backend/shine/quality/client_identity.py`：把 `handoff_startup.py` 与 `owned_process.py` 纳入受钉住的审片客户端源码集合，源码变更后旧登记自动失效。
+
+## 自动化测试
+
+- 新增 `backend/tests/test_managed_startup.py`（13 项合同反例）：意图先于进程、无独占租约拒绝启动、外部租约冲突、渲染器未封闭即拒绝、基线不足即拒绝、控制令牌不落 SQLite、崩溃恢复只停止可证明归属的进程、所有者存活时不介入、已退出进程不做任何终止、首次激活结果不确定时保留租约、首次封闭绑定、封闭被拒时不产生围栏、未受管监督器不能封闭。
+- 新增 `backend/tests/test_real_managed_startup.py`：真实机验收用例，仅在设置 `SHINE_REAL_COMFY_PROBE=1` 并给出本机 ComfyUI 路径时运行，默认跳过，CI 不受影响。
+- 变更前基线：仓库根目录 `.\backend\.venv\Scripts\python.exe -m pytest backend\tests -q` 收集 1038 项，exit 0，日志 `.local-acceptance/closeout-20261025/full-suite-baseline-20261030.log`。
+- 变更后完整回归（两轮，源码固定后各跑一次）：`full-suite-final-20261030.log` **1051 项通过、0 失败、0 错误、0 跳过**，exit 0；加入真实机验收用例后的最终一轮 `full-suite-final2-20261030.log` **1051 项通过、1 跳过、0 失败、0 错误**，exit 0，耗时 383.04 秒，唯一跳过项是需显式设置 `SHINE_REAL_COMFY_PROBE=1` 的真实机用例。
+- 指定套件：`test_v13_preparation.py`、`test_v13_migrations.py`、`test_v13_e2e.py`、`test_offline_e2e.py`、`test_film_crew.py` 联合运行 **95 项通过**，exit 0，日志 `.local-acceptance/closeout-20261025/v13-targeted-managed-startup-20261030.log`。
+- Ruff：`.\backend\.venv\Scripts\python.exe -m ruff check backend` **All checks passed**，exit 0。
+- Alembic：独立临时 SQLite 上 `alembic upgrade head` 走完 8 个版本到 `f130a0030001`，exit 0；本轮未新增迁移。`git diff --check` 通过。
+- 前端：`npm run build`（tsc -b && vite build）exit 0。
+- `uv lock --check --offline` 在默认镜像下仍失败；设 `UV_DEFAULT_INDEX=https://pypi.org/simple` 后 `uv lock --check --offline` 与 `uv sync --locked --offline` 均 exit 0，**锁文件未被改写**。
+- 中间一轮全量回归出现 5 项 `test_structured_review.py` 失败，原因是回归运行期间修改了被钉住的 `shine/worker.py`，触发 `REVIEW_CLIENT_SOURCE_CHANGED_SINCE_LOAD` 关闭失败保护；这属于设计内的行为，不是回归缺陷。固定源码后重跑即全绿，该中间结果不计通过。
+
+## 真实 H3/模型验证
+
+- **真实渲染器（PASS，有限）**：以本机真实 ComfyUI `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI` 运行 `backend/tests/test_real_managed_startup.py`，1 项通过、exit 0、耗时 9.57 秒。证据：受管启动写入持久意图；真实进程组启动并带上真实 `shine_comfy_handoff` 适配器；适配器以封闭状态起来；监听者归属由 PID + 出生标识 + 命名 Job Object 成员关系三重证明；RAM/VRAM 由 `nvidia-smi` 与 `GlobalMemoryStatusEx` 实测；实例登记为 `RUNNING_PENDING_HEALTH`；独占租约保持 ACTIVE；结束时受管进程组由内核确认 `active_processes == 0`。运行使用 CPU 模式、未加载任何模型权重、未提交任何 prompt、未生成任何媒体，未接触生产数据库。
+- 运行结束复核：未残留 python/comfy 进程，8188/8189/8116/8117/8000/8001 无监听，GPU 可用显存回到 14828 MiB。
+- **真实 H3 生成到审片自动链路：NOT RUN**。本轮未向 ComfyUI 提交任何 H3 提示词，未加载 H3 权重，未执行真实视觉审片或 ASR 审片，未产生可复核的真实审片收据。历史 4B/ASR 真实登记属上一版本指纹，本轮源码已改变审片身份（新增 `handoff_startup.py`、`owned_process.py` 进入钉住集合），不能作为当前源码的资格证明。
+
+## 人工验收
+
+**NOT RUN**。未代替用户确认资产权属、未批准任何影片、未进行人工听审、未把任何候选资产提升为正式资产。真实自动链路本身尚未跑通，人工验收的前置条件不成立。
+
+## 外部阻塞
+
+- 托管 CI：`gh` 返回 HTTP 401，无法读取最新 Actions 运行，本轮对远端检查状态**无法核实**；按要求不写成通过，也未修改任何账单或支付信息。
+- 本机 Git 凭据助手：用户级 `C:\Users\Administrator\.gitconfig` 的 `credential.helper` 指向已不存在的 PortableGit GCM 二进制，每次凭据操作都会报错；系统级 `C:\Program Files\Git\etc\gitconfig` 的 `manager` 仍可正常认证，fetch 因此可用。本轮**未改动**用户全局配置，修复方式为删除该失效条目或改回 `manager`。
+- 真实 H3→审片自动链路未跑通属于**未完成工作**，不是外部阻塞；剩余工作包括首次提交的真实 H3 渲染、真实视觉/ASR 审片串行交接、跨作业续期与工作台闭环。
+
+## 可复查证据路径
+
+- `.local-acceptance/closeout-20261025/full-suite-baseline-20261030.log`（变更前基线）
+- `.local-acceptance/closeout-20261025/full-suite-final-20261030.log`、`full-suite-final2-20261030.log`（最终全量回归）
+- `.local-acceptance/closeout-20261025/v13-targeted-managed-startup-20261030.log`（指定套件）
+- `.local-acceptance/closeout-20261025/alembic-managed-startup-20261030/`（临时库迁移）
+- `.local-acceptance/managed-startup-real-20261030/pytest.log`（真实 ComfyUI 受管启动）
+- `.local-acceptance/probe-managed-startup-real-20261030.py`（只读诊断脚本）
+- `.local-acceptance/_probe_state.py`、`.local-acceptance/_probe_corrupt.py`（数据库只读诊断）

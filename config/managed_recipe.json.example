@@ -1,0 +1,77 @@
+{
+  "renderer": {
+    "instance_id": "shine-local-h3",
+    "python": "F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base\\python_embeded\\python.exe",
+    "root": "F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base\\ComfyUI",
+    "base_directory": "F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base",
+    "bootstrap": "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\scripts\\managed_comfy_bootstrap.py",
+    "adapter_dir": "F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base\\custom_nodes\\shine_comfy_handoff",
+    "adapter_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "gpu_uuid": "GPU-00000000-0000-0000-0000-000000000000",
+    "port": 8188,
+    "min_ram_mb": 8192,
+    "min_vram_mb": 12000,
+    "argv": [
+      "{python}",
+      "{bootstrap}",
+      "--base-directory",
+      "{base_directory}",
+      "--disable-all-custom-nodes",
+      "--whitelist-custom-nodes",
+      "shine_comfy_handoff",
+      "--disable-partner-nodes",
+      "--disable-auto-launch",
+      "--listen",
+      "127.0.0.1",
+      "--port",
+      "{port}"
+    ],
+    "pinned_files": [
+      "{python}",
+      "{root}\\main.py",
+      "{adapter_dir}\\__init__.py",
+      "{adapter_dir}\\barrier.py",
+      "{bootstrap}"
+    ]
+  },
+  "reviews": {
+    "VLM": {
+      "service_id": "shine-local-vlm",
+      "python": "F:\\AIGC2026\\review\\python\\python.exe",
+      "manifest": "F:\\AIGC2026\\review\\manifest\\vlm.json",
+      "runtime_packages": "F:\\AIGC2026\\review\\packages",
+      "port": 8116,
+      "min_ram_mb": 8000,
+      "min_vram_mb": 14000,
+      "argv": [
+        "{python}",
+        "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\scripts\\local_review_isolated_server.py",
+        "--manifest",
+        "{manifest}",
+        "--runtime-packages",
+        "{runtime_packages}",
+        "--port",
+        "{port}"
+      ]
+    },
+    "ASR": {
+      "service_id": "shine-local-asr",
+      "python": "F:\\AIGC2026\\review\\python\\python.exe",
+      "manifest": "F:\\AIGC2026\\review\\manifest\\asr.json",
+      "runtime_packages": "F:\\AIGC2026\\review\\packages",
+      "port": 8117,
+      "min_ram_mb": 4000,
+      "min_vram_mb": 8000,
+      "argv": [
+        "{python}",
+        "F:\\ClaudeWorkSpace\\projects\\shine-video-studio\\scripts\\local_review_isolated_server.py",
+        "--manifest",
+        "{manifest}",
+        "--runtime-packages",
+        "{runtime_packages}",
+        "--port",
+        "{port}"
+      ]
+    }
+  }
+}

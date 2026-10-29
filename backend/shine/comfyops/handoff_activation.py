@@ -146,6 +146,75 @@ class ReviewReleaseBoundary:
                 "observed_resource_epoch": current_epoch}
 
 
+def activate_renderer_for_first_attempt(factory, settings, supervisor, job_id, attempt_id, lease_id,
+                                        instance_id, worker_id, state_version, *, startup_boundary=None):
+    """Open the closed renderer for the very first attempt of a managed startup.
+
+    There is no prior review to release, so the proof is the live startup
+    binding and a freshly measured physical baseline. The intent is persisted
+    before the renderer is resumed, and an uncertain resume keeps the lease.
+    """
+    from shine.comfyops.handoff_startup import StartupBoundary
+
+    if not isinstance(supervisor, RendererSupervisor):
+        raise HTTPException(409, "COMFY_ACTIVATION_SUPERVISOR_INVALID")
+    if not isinstance(startup_boundary, StartupBoundary):
+        raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+    supervisor.require_closed_restart()
+    key = "renderer-activation:" + attempt_id
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        if db.get(AppSetting, key):
+            raise HTTPException(409, "COMFY_ACTIVATION_ALREADY_RECORDED")
+        job, instance = _check(db, settings, job_id, attempt_id, lease_id, instance_id, worker_id, state_version)
+        payload, instance_hash = dict(instance.payload), instance.sha256
+        db.add(AppSetting(key=key, value={"stage": "INTENT", "job_id": job_id, "attempt_id": attempt_id,
+                                         "lease_id": lease_id, "instance_id": instance_id,
+                                         "instance_sha256": instance_hash, "worker_id": worker_id,
+                                         "state_version": state_version, "kind": "first-startup"}))
+        add_audit(db, "comfy-worker", "COMFY_ACTIVATION_INTENT", "job", job_id,
+                  {"attempt_id": attempt_id, "instance_id": instance_id, "kind": "first-startup"},
+                  project_id=job.project_id)
+    try:
+        from shine.comfyops.resource_epoch import read_epoch
+
+        release_evidence = startup_boundary.verify(factory, settings, instance_id, attempt_id, lease_id)
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            journal = db.get(AppSetting, key)
+            if not journal or journal.value.get("stage") != "INTENT":
+                raise HTTPException(409, "COMFY_ACTIVATION_INTENT_CHANGED")
+            job, instance = _check(db, settings, job_id, attempt_id, lease_id, instance_id, worker_id, state_version)
+            if instance.sha256 != instance_hash or read_epoch(db) != release_evidence.get("observed_resource_epoch"):
+                raise HTTPException(409, "COMFY_ACTIVATION_INSTANCE_INVALID")
+            owner = supervisor.verify_drained_binding(payload.get("url", ""), payload.get("process"))
+            supervisor._control("POST", "/shine-handoff/resume", "accepting", owner)
+            _check(db, settings, job_id, attempt_id, lease_id, instance_id, worker_id, state_version)
+            if read_epoch(db) != release_evidence["observed_resource_epoch"]:
+                raise HTTPException(409, "COMFY_PHYSICAL_RELEASE_UNVERIFIED")
+            journal.value = {**journal.value, "stage": "CONFIRMED", "listener": owner,
+                             "physical_release": release_evidence}
+            add_audit(db, "comfy-worker", "COMFY_ACTIVATION_CONFIRMED", "job", job_id,
+                      {"attempt_id": attempt_id, "kind": "first-startup"}, project_id=job.project_id)
+        return owner
+    except BaseException:
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            journal, lease, job = db.get(AppSetting, key), db.get(ResourceLease, lease_id), db.get(Job, job_id)
+            if journal and journal.value.get("stage") == "INTENT":
+                journal.value = {**journal.value, "stage": "RECONCILE_REQUIRED"}
+            if lease and lease.owner == "h3:" + job_id:
+                lease.status = "RECONCILE_REQUIRED"
+            if job:
+                try_transition(job, "NEEDS_REVIEW")
+                job.failure_code = "COMFY_ACTIVATION_RECONCILIATION_REQUIRED"
+                job.lease_owner = None
+                job.lease_expires_at = None
+                add_audit(db, "comfy-worker", "COMFY_ACTIVATION_UNCERTAIN", "job", job_id,
+                          {"attempt_id": attempt_id, "resubmitted": False}, project_id=job.project_id)
+        raise
+
+
 def _check(db, settings, job_id, attempt_id, lease_id, instance_id, worker_id, state_version):
     job, attempt = db.get(Job, job_id), db.get(JobAttempt, attempt_id)
     lease, instance = db.get(ResourceLease, lease_id), db.get(ComfyInstance, instance_id)

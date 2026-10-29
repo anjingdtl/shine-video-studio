@@ -714,6 +714,7 @@ def run_one(
     heartbeat(session_factory, worker_id, phase="claiming")
     scheduler = ResourceScheduler()
     resource_id, owner = None, None
+    managed_first = None
     with session_factory.begin() as resource_db:
         _promote_dependencies(resource_db)
         resource_db.flush()
@@ -739,40 +740,70 @@ def run_one(
             if not scheduler.admit(resource_db, resource_id):
                 return None
         effective_settings = settings or Settings.from_env()
-        if not _handoff_preflight_allowed(effective_settings, (semantic_reviewer, asr_reviewer)):
-            with session_factory.begin() as resource_db:
-                resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
-                blocked = resource_db.get(Job, job_id)
-                if blocked and blocked.status == "QUEUED":
-                    try_transition(blocked, "NEEDS_REVIEW")
-                    blocked.failure_code = "COMFY_HANDOFF_OWNERSHIP_UNVERIFIED"
-                    add_audit(resource_db, "orchestrator", "COMFY_HANDOFF_PREFLIGHT_BLOCKED", "job", job_id,
-                              {"submitted": False, "resource_id": resource_id}, project_id=blocked.project_id)
-            return job_id
-        release_client = comfy_client or (comfy_service.client if comfy_service else None)
-        if release_client is None and settings:
-            release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+        managed_recipe = None
+        managed_error = None
         try:
-            if release_client is None or not hasattr(release_client, "free_models"):
-                raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
-            release_client.free_models()
-        except Exception:
+            managed_recipe = _managed_recipe(effective_settings)
+        except HTTPException as exc:
+            managed_error = str(exc.detail)
+        if managed_error is None and managed_recipe is not None and not effective_settings.offline_simulation:
+            # A managed renderer is started behind its own durable intent, so the
+            # job no longer needs the conservative unowned-renderer block.
+            try:
+                managed_first = _FirstManagedContinuation(
+                    session_factory, effective_settings, job_id=job_id, lease_id=resource_id,
+                    recipe=managed_recipe["renderer"],
+                    review_configs=_managed_review_specs(managed_recipe, semantic_reviewer, asr_reviewer),
+                    history_dir=Path(effective_settings.data_dir).resolve() / "comfyops" / "handoff-history",
+                )
+            except HTTPException as exc:
+                managed_error = str(exc.detail)
+        if managed_error is not None:
             with session_factory.begin() as resource_db:
                 resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
                 blocked = resource_db.get(Job, job_id)
                 if blocked and blocked.status == "QUEUED":
                     try_transition(blocked, "NEEDS_REVIEW")
-                    blocked.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
-                    add_audit(
-                        resource_db,
-                        "orchestrator",
-                        "H3_PREFLIGHT_RELEASE_UNCONFIRMED",
-                        "job",
-                        job_id,
-                        {"submitted": False, "resource_id": resource_id},
-                        project_id=blocked.project_id,
-                    )
+                    blocked.failure_code = managed_error
+                    add_audit(resource_db, "orchestrator", "COMFY_MANAGED_STARTUP_BLOCKED", "job", job_id,
+                              {"submitted": False, "resource_id": resource_id, "reason": managed_error},
+                              project_id=blocked.project_id)
             return job_id
+        if managed_first is None:
+            if not _handoff_preflight_allowed(effective_settings, (semantic_reviewer, asr_reviewer)):
+                with session_factory.begin() as resource_db:
+                    resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
+                    blocked = resource_db.get(Job, job_id)
+                    if blocked and blocked.status == "QUEUED":
+                        try_transition(blocked, "NEEDS_REVIEW")
+                        blocked.failure_code = "COMFY_HANDOFF_OWNERSHIP_UNVERIFIED"
+                        add_audit(resource_db, "orchestrator", "COMFY_HANDOFF_PREFLIGHT_BLOCKED", "job", job_id,
+                                  {"submitted": False, "resource_id": resource_id}, project_id=blocked.project_id)
+                return job_id
+            release_client = comfy_client or (comfy_service.client if comfy_service else None)
+            if release_client is None and settings:
+                release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+            try:
+                if release_client is None or not hasattr(release_client, "free_models"):
+                    raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
+                release_client.free_models()
+            except Exception:
+                with session_factory.begin() as resource_db:
+                    resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
+                    blocked = resource_db.get(Job, job_id)
+                    if blocked and blocked.status == "QUEUED":
+                        try_transition(blocked, "NEEDS_REVIEW")
+                        blocked.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
+                        add_audit(
+                            resource_db,
+                            "orchestrator",
+                            "H3_PREFLIGHT_RELEASE_UNCONFIRMED",
+                            "job",
+                            job_id,
+                            {"submitted": False, "resource_id": resource_id},
+                            project_id=blocked.project_id,
+                        )
+                return job_id
     from shine.comfyops.scheduler import CURRENT_RESOURCE
 
     resource_token = CURRENT_RESOURCE.set(resource_id)
@@ -787,6 +818,7 @@ def run_one(
             semantic_reviewer=semantic_reviewer,
             asr_reviewer=asr_reviewer,
             expected_job_id=selected_job_id,
+            managed_continuation=managed_first,
         )
     finally:
         CURRENT_RESOURCE.reset(resource_token)
@@ -800,6 +832,11 @@ def run_one(
                 elif lease.status == "RECONCILE_REQUIRED":
                     # Never turn an uncertain handoff into a release by trying
                     # the renderer's unload endpoint a second time.
+                    pass
+                elif managed_first is not None and _managed_handoff_holds_lease(managed_first):
+                    # The completed managed handoff keeps its own exclusive lease
+                    # alive through the idle keeper; releasing it here would let
+                    # another model enter between two serial stages.
                     pass
                 elif not _isolated_mock_handoff(
                     settings or Settings.from_env(), (semantic_reviewer, asr_reviewer)
@@ -932,6 +969,132 @@ class _ManagedContinuation:
             self.factory, self.settings, self.previous.replacement, self.job_id, attempt_id, self.lease_id,
             self.previous.instance_id, worker_id, state_version, physical_boundary=self.boundary,
         )
+
+
+class _FirstManagedContinuation:
+    """In-process authority for the first managed attempt of a fresh startup.
+
+    Unlike the continuation of a previous handoff, this one owns the very first
+    renderer: it starts the closed renderer behind a durable intent, proves the
+    ownership and the physical baseline, and opens it only for a claimed attempt.
+    """
+
+    def __init__(self, factory, settings, *, job_id, lease_id, recipe, review_configs, history_dir):
+        self.factory, self.settings = factory, settings
+        self.job_id, self.lease_id = job_id, lease_id
+        self.recipe = recipe
+        self.review_configs = review_configs
+        self.history_dir = Path(history_dir)
+        self.renderer = None
+        self.review_services = {}
+        self.coordinator = None
+        self.next = None
+
+    def before_prepare(self, service, attempt_id, worker_id, state_version):
+        from shine.comfy.client import ComfyUIClient
+        from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
+        from shine.comfyops.handoff_startup import start_managed_renderer, start_managed_review_service
+        from shine.comfyops.managed_recipe import build_renderer_launch, build_review_launch
+
+        if self.renderer is not None:
+            raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
+        recipe = self.recipe
+        argv, cwd, env, pins, token, port = build_renderer_launch(recipe)
+        self.renderer = start_managed_renderer(
+            self.factory, self.settings,
+            instance_id=recipe["instance_id"], lease_id=self.lease_id, job_id=self.job_id,
+            worker_id=worker_id, argv=argv, cwd=cwd, env=env, pinned_files=pins,
+            port=port, handoff_token=token, adapter_sha256=recipe["adapter_sha256"],
+            gpu_uuid=recipe["gpu_uuid"], min_ram_mb=recipe["min_ram_mb"],
+            min_vram_mb=recipe["min_vram_mb"],
+        )
+        client = getattr(service, "client", None)
+        if (not client or getattr(client, "base_url", "").rstrip("/") != self.renderer.url
+                or type(client) is not ComfyUIClient or client._transport is not None
+                or client.trust_env is not False):
+            raise HTTPException(409, "HANDOFF_RENDER_CLIENT_UNVERIFIED")
+        configs = {}
+        fences = {}
+        for kind, spec in self.review_configs.items():
+            review_argv, review_cwd, review_env, review_pins, review_token = build_review_launch(spec)
+            started = start_managed_review_service(
+                self.factory, self.settings,
+                service_id=spec["service_id"], lease_id=self.lease_id, job_id=self.job_id,
+                worker_id=worker_id, argv=review_argv, cwd=review_cwd, env=review_env,
+                pinned_files=review_pins, port=spec["port"], handoff_token=review_token,
+                runtime_sha256=spec.get("runtime_sha256"), gpu_uuid=recipe["gpu_uuid"],
+                min_ram_mb=spec.get("min_ram_mb", 8000), min_vram_mb=spec.get("min_vram_mb", 8000),
+            )
+            self.review_services[kind] = started
+            configs[kind] = started["config"]
+            fences[kind] = started["config"]["cold_fence_id"]
+        self.coordinator = ManagedReviewCoordinator(
+            self.renderer.supervisor, self.renderer.instance_id, self.history_dir,
+            self.renderer.gpu_uuid, min_ram_mb=self.renderer.min_ram_mb,
+            min_vram_mb=self.renderer.min_vram_mb, review_configs=configs,
+        )
+        self.coordinator._cold_fences.update(fences)
+        self.next = self.coordinator
+
+    def activate(self, attempt_id, worker_id, state_version):
+        from shine.comfyops.handoff_activation import activate_renderer_for_first_attempt
+        from shine.comfyops.handoff_startup import StartupBoundary
+
+        if self.renderer is None:
+            raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+        return activate_renderer_for_first_attempt(
+            self.factory, self.settings, self.renderer.supervisor, self.job_id, attempt_id,
+            self.lease_id, self.renderer.instance_id, worker_id, state_version,
+            startup_boundary=StartupBoundary(self.renderer),
+        )
+
+
+def run_managed_first(session_factory, worker_id, *, settings, recipe, review_configs,
+                      comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None):
+    """Run the first managed job behind a freshly started, closed renderer.
+
+    The renderer is created only after an exclusive lease exists, and every
+    external action is preceded by its own durable intent.
+    """
+    from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
+
+    if (not isinstance(recipe, dict) or not recipe.get("instance_id")
+            or not isinstance(review_configs, dict) or not review_configs
+            or not (semantic_reviewer or asr_reviewer)):
+        raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
+    scheduler = ResourceScheduler()
+    with session_factory.begin() as db:
+        candidate = db.scalar(
+            select(Job)
+            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                   Job.provider == "comfyui")
+            .order_by(Job.created_at, Job.id)
+            .limit(1)
+        )
+        if not candidate:
+            return None
+        owner = "h3:" + candidate.id
+        lease = scheduler.enqueue(db, owner, 16384, True, 100)
+        if lease.status == "RELEASED":
+            lease.status = "WAITING"
+        db.commit()
+        lease_id, job_id = lease.id, candidate.id
+    with session_factory() as db:
+        if not scheduler.admit(db, lease_id):
+            return None
+    history_dir = Path(settings.data_dir).resolve() / "comfyops" / "handoff-history"
+    continuation = _FirstManagedContinuation(
+        session_factory, settings, job_id=job_id, lease_id=lease_id, recipe=recipe,
+        review_configs=review_configs, history_dir=history_dir,
+    )
+    token = CURRENT_RESOURCE.set(lease_id)
+    try:
+        return _run_one(session_factory, worker_id=worker_id, settings=settings,
+                        comfy_service=comfy_service, comfy_client=comfy_client,
+                        semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+                        expected_job_id=job_id, managed_continuation=continuation)
+    finally:
+        CURRENT_RESOURCE.reset(token)
 
 
 def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_service=None, comfy_client=None,
@@ -1414,6 +1577,41 @@ def _isolated_mock_handoff(settings, reviewers):
     return settings.offline_simulation and all(
         reviewer is None or getattr(reviewer, "is_mock", False) for reviewer in reviewers
     )
+
+
+def _managed_recipe(settings):
+    """Read the operator's managed renderer recipe, if one is configured."""
+    path = os.getenv("SHINE_MANAGED_RECIPE", "").strip()
+    if not path:
+        return None
+    from shine.comfyops.managed_recipe import load_managed_recipe
+
+    return load_managed_recipe(path)
+
+
+def _managed_review_specs(recipe, semantic_reviewer, asr_reviewer):
+    """Bind each configured reviewer to its own owned review service."""
+    from urllib.parse import urlsplit
+
+    specs = {}
+    for kind, provider in (("VLM", semantic_reviewer), ("ASR", asr_reviewer)):
+        if provider is None:
+            continue
+        base_url = getattr(getattr(provider, "config", None), "base_url", "")
+        port = urlsplit(base_url).port
+        entry = (recipe.get("reviews") or {}).get(kind)
+        if entry is None or not port or entry["port"] != port:
+            raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
+        specs[kind] = entry
+    if not specs:
+        raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
+    return specs
+
+
+def _managed_handoff_holds_lease(managed_first):
+    """True when a completed managed handoff keeps its own exclusive lease."""
+    coordinator = getattr(managed_first, "coordinator", None)
+    return bool(coordinator is not None and getattr(coordinator, "keeper", None) is not None)
 
 
 def _handoff_preflight_allowed(settings, reviewers):
@@ -2450,6 +2648,11 @@ def recover_expired_jobs(
 ) -> int:
     """Resolve expired external submissions conservatively; never resubmit blindly."""
     settings = settings or Settings.from_env()
+    from shine.comfyops.handoff_startup import reconcile_managed_startups
+
+    # An interrupted managed startup is reconciled before any other job may
+    # claim the GPU: only a provably owned process may be stopped.
+    reconcile_managed_startups(session_factory, settings)
     with session_factory.begin() as db:
         now = utcnow()
         job_ids = list(

@@ -1,0 +1,692 @@
+"""First managed renderer startup with a durable intent and a physical baseline.
+
+This is the only entry point that may create the owned ComfyUI process group.
+The intent is persisted before the process is launched, ownership is proved by
+PID, OS birth identity and named Job Object membership, the queue must start
+closed, and the memory baseline is measured from the host instead of being
+inferred from a lease. An uncertain outcome is retained for reconciliation and
+is never relaunched blindly.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import time
+from dataclasses import dataclass
+from datetime import timedelta
+from threading import Event, Thread
+from uuid import uuid4
+
+from fastapi import HTTPException
+from sqlalchemy import select, text
+
+from shine.comfy.workflow import graph_hash
+from shine.comfyops.handoff_memory import evaluate_readiness, probe_memory
+from shine.comfyops.installer import process_identity
+from shine.comfyops.models import ComfyInstance, ResourceLease
+from shine.comfyops.owned_process import OwnedProcessGroup, inspect_named_group
+from shine.comfyops.renderer_supervisor import RendererSupervisor, windows_port_listeners
+from shine.models import AppSetting, Job, utcnow
+from shine.services import add_audit
+
+STARTUP_PREFIX = "renderer-startup:"
+REVIEW_PREFIX = "review-startup:"
+TERMINAL_STAGES = {"RECONCILE_REQUIRED"}
+COMPLETE_STAGES = {"RUNNING"}
+
+
+def startup_key(instance_id: str, prefix: str = STARTUP_PREFIX) -> str:
+    if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 128:
+        raise HTTPException(409, "COMFY_STARTUP_IDENTITY_INVALID")
+    return prefix + instance_id
+
+
+def _digest(value) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+class StartupHeartbeat:
+    """Keep the exclusive lease and the job claim alive while the renderer starts.
+
+    A startup that loses its lease stops immediately: the renderer must never
+    keep a GPU without an exclusive admission record.
+    """
+
+    def __init__(self, factory, *, lease_id, job_id, worker_id, state_version,
+                 lease_seconds=60, interval=5):
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
+            raise ValueError("HANDOFF_HEARTBEAT_INTERVAL_INVALID")
+        if interval <= 0 or interval >= lease_seconds:
+            raise ValueError("HANDOFF_HEARTBEAT_INTERVAL_INVALID")
+        self.factory = factory
+        self.lease_id = lease_id
+        self.job_id = job_id
+        self.worker_id = worker_id
+        self.state_version = state_version
+        self.lease_seconds = lease_seconds
+        self.interval = interval
+        self.stopped = Event()
+        self.error = None
+        self.thread = None
+
+    def _pulse(self) -> bool:
+        with self.factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            now = utcnow()
+            lease = db.get(ResourceLease, self.lease_id)
+            job = db.get(Job, self.job_id)
+            if (not lease or lease.status != "ACTIVE" or not lease.exclusive
+                    or lease.expires_at <= now or not job
+                    or job.lease_owner != self.worker_id or job.state_version != self.state_version
+                    or job.stale or not job.lease_expires_at or job.lease_expires_at <= now):
+                if lease and lease.owner.startswith("h3:") and lease.status == "ACTIVE":
+                    lease.status = "RECONCILE_REQUIRED"
+                return False
+            lease.heartbeat_at = now
+            lease.expires_at = now + timedelta(seconds=self.lease_seconds)
+            job.heartbeat_at = now
+            job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
+        return True
+
+    def _run(self) -> None:
+        while not self.stopped.wait(self.interval):
+            try:
+                if not self._pulse():
+                    self.error = "COMFY_STARTUP_LEASE_LOST"
+                    self.stopped.set()
+                    return
+            except Exception:
+                self.error = "COMFY_STARTUP_HEARTBEAT_FAILED"
+                self.stopped.set()
+                return
+
+    def __enter__(self):
+        if not self._pulse():
+            raise HTTPException(409, "COMFY_STARTUP_LEASE_LOST")
+        self.thread = Thread(target=self._run, name="shine-startup-heartbeat", daemon=True)
+        self.thread.start()
+        return self
+
+    def check(self) -> None:
+        if self.error:
+            raise HTTPException(409, self.error)
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                raise HTTPException(409, "COMFY_STARTUP_HEARTBEAT_EXIT_UNCONFIRMED")
+
+
+@dataclass(frozen=True)
+class ManagedRenderer:
+    """A running owned renderer whose intent and baseline are already persisted."""
+
+    instance_id: str
+    startup_id: str
+    group: OwnedProcessGroup
+    supervisor: RendererSupervisor
+    process: dict
+    url: str
+    memory: dict
+    gpu_uuid: str
+    min_ram_mb: int
+    min_vram_mb: int
+    lease_id: str
+    job_id: str
+    probe: object = None
+
+
+def _read_startup(db, instance_id, prefix=STARTUP_PREFIX):
+    row = db.get(AppSetting, startup_key(instance_id, prefix))
+    return row.value if row else {}
+
+
+def _write_startup(db, instance_id, value, prefix=STARTUP_PREFIX):
+    key = startup_key(instance_id, prefix)
+    row = db.get(AppSetting, key)
+    if row is None:
+        db.add(AppSetting(key=key, value=value))
+    else:
+        row.value = value
+    db.flush()
+    return value
+
+
+def _record(factory, instance_id, value, prefix=STARTUP_PREFIX):
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        current = _read_startup(db, instance_id, prefix)
+        if current.get("stage") != value.get("previous_stage"):
+            raise HTTPException(409, "COMFY_STARTUP_STAGE_CHANGED")
+        return _write_startup(db, instance_id, {**current, **{k: v for k, v in value.items()
+                                                             if k != "previous_stage"}}, prefix)
+
+
+def _fail(factory, instance_id, reason, lease_id=None, job_id=None, prefix=STARTUP_PREFIX):
+    """Retain an uncertain startup for reconciliation; never release the GPU."""
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        current = _read_startup(db, instance_id, prefix)
+        if current.get("stage") != "RECONCILE_REQUIRED":
+            current = {**current, "stage": "RECONCILE_REQUIRED",
+                       "last_confirmed_stage": current.get("stage"), "reason": reason,
+                       "recorded_at": utcnow().isoformat()}
+            _write_startup(db, instance_id, current, prefix)
+        if lease_id:
+            lease = db.get(ResourceLease, lease_id)
+            if lease and lease.status == "ACTIVE":
+                lease.status = "RECONCILE_REQUIRED"
+        if job_id:
+            job = db.get(Job, job_id)
+            if job:
+                add_audit(db, "comfy-worker", "COMFY_STARTUP_RECONCILE_REQUIRED", "job", job.id,
+                          {"instance_id": instance_id, "reason": reason}, project_id=job.project_id)
+
+
+def _bind_lease(db, lease_id, job_id):
+    """The startup may only run under an exclusive, unexpired admission."""
+    lease = db.get(ResourceLease, lease_id)
+    job = db.get(Job, job_id)
+    now = utcnow()
+    if (not lease or lease.owner != "h3:" + job_id or lease.status != "ACTIVE"
+            or not lease.exclusive or lease.expires_at <= now):
+        raise HTTPException(409, "COMFY_STARTUP_RESOURCE_LEASE_INVALID")
+    if not job or job.provider != "comfyui" or job.stale:
+        raise HTTPException(409, "COMFY_STARTUP_JOB_INVALID")
+    others = db.scalars(select(ResourceLease).where(
+        ResourceLease.id != lease_id, ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])))
+    if any(True for _ in others):
+        raise HTTPException(409, "COMFY_STARTUP_RESOURCE_CONFLICT")
+    return lease, job
+
+
+def _wait_for_owned_listener(group, port, *, timeout=120):
+    """Wait until the only loopback listener belongs to the owned group.
+
+    The listener may be a descendant of the group leader, which is what the
+    Job Object proves; it must not be a process outside the owned tree.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        listeners = windows_port_listeners(port)
+        if listeners:
+            if len(listeners) != 1 or listeners[0][0] != "127.0.0.1":
+                raise HTTPException(409, "COMFY_STARTUP_LISTENER_UNVERIFIED")
+            pid = listeners[0][1]
+            birth = process_identity(pid)
+            if not birth or not group.owns(pid, birth):
+                raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
+            return {"pid": pid, "birth": birth}
+        if time.monotonic() >= deadline:
+            raise HTTPException(409, "COMFY_STARTUP_LISTENER_TIMEOUT")
+        time.sleep(0.05)
+
+
+def start_managed_renderer(
+    factory,
+    settings,
+    *,
+    instance_id: str,
+    lease_id: str,
+    job_id: str,
+    worker_id: str,
+    argv,
+    cwd,
+    env,
+    pinned_files,
+    port: int,
+    handoff_token: str,
+    adapter_sha256: str,
+    gpu_uuid: str,
+    min_ram_mb: int,
+    min_vram_mb: int,
+    launch=None,
+    supervisor_factory=None,
+    probe=None,
+) -> ManagedRenderer:
+    """Create the owned renderer exactly once, behind a durable intent.
+
+    The intent is written before the process group exists. A repeated call for
+    the same instance is refused, and an uncertain launch is retained for
+    reconciliation rather than retried.
+    """
+    if (not isinstance(argv, list | tuple) or not argv
+            or not isinstance(port, int) or not 0 < port < 65536
+            or not isinstance(handoff_token, str) or len(handoff_token) < 32
+            or not isinstance(adapter_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", adapter_sha256)
+            or not isinstance(gpu_uuid, str) or not gpu_uuid
+            or type(min_ram_mb) is not int or min_ram_mb <= 0
+            or type(min_vram_mb) is not int or min_vram_mb <= 0):
+        raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
+    key = startup_key(instance_id)
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        if db.get(AppSetting, key):
+            raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
+        lease, job = _bind_lease(db, lease_id, job_id)
+        owner_birth = process_identity(os.getpid())
+        if not owner_birth:
+            raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
+        pins = {}
+        for source in pinned_files:
+            path = os.path.abspath(str(source))
+            try:
+                with open(path, "rb") as stream:
+                    pins[path] = hashlib.file_digest(stream, "sha256").hexdigest()
+            except OSError as exc:
+                raise HTTPException(409, "COMFY_STARTUP_SOURCE_INVALID") from exc
+        intent = {
+            "stage": "INTENT",
+            "instance_id": instance_id,
+            "startup_id": str(uuid4()),
+            "lease_id": lease_id,
+            "job_id": job_id,
+            "worker_id": worker_id,
+            "owner_pid": os.getpid(),
+            "owner_birth": owner_birth,
+            "argv_sha256": _digest(" ".join(str(arg) for arg in argv)),
+            "cwd": str(cwd),
+            "pins": pins,
+            "port": port,
+            "gpu_uuid": gpu_uuid,
+            "min_ram_mb": min_ram_mb,
+            "min_vram_mb": min_vram_mb,
+            # The control token itself never reaches SQLite; only its digest.
+            "handoff_token_sha256": _digest(handoff_token),
+            "adapter_sha256": adapter_sha256,
+            "recorded_at": utcnow().isoformat(),
+        }
+        _write_startup(db, instance_id, intent)
+        add_audit(db, "comfy-worker", "COMFY_STARTUP_INTENT", "job", job_id,
+                  {"instance_id": instance_id, "port": port}, project_id=job.project_id)
+        startup_id = intent["startup_id"]
+
+    group = None
+    try:
+        launcher = launch or OwnedProcessGroup.launch
+        group = launcher(list(argv), cwd=cwd, env=dict(env), pinned_files=list(pinned_files),
+                         job_name="Local\\ShineHandoff-" + uuid4().hex)
+        birth = process_identity(group.pid)
+        if not birth or not group.owns(group.pid, birth):
+            raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
+        _record(factory, instance_id, {
+            "previous_stage": "INTENT", "stage": "LAUNCHED",
+            "process": {"pid": group.pid, "birth": birth, "job_name": group.job_name},
+        })
+        with StartupHeartbeat(factory, lease_id=lease_id, job_id=job_id, worker_id=worker_id,
+                              state_version=job.state_version) as guard:
+            guard.check()
+            _wait_for_owned_listener(group, port)
+            supervisor = (supervisor_factory or RendererSupervisor)(group, f"http://127.0.0.1:{port}",
+                                                                     handoff_token, adapter_sha256)
+            # The renderer must come up closed: a fresh start never accepts a prompt.
+            supervisor.require_closed_restart()
+            owner = supervisor._control("GET", "/shine-handoff/status", "drained")
+            _record(factory, instance_id, {
+                "previous_stage": "LAUNCHED", "stage": "LISTENING",
+                "listener": owner, "process": {"pid": group.pid, "birth": birth, "job_name": group.job_name},
+            })
+            guard.check()
+            measured = (probe or probe_memory)(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
+            verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
+                                          gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
+                                          min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
+            if measured.get("ready") is not True or not verified["ready"]:
+                raise HTTPException(409, "COMFY_STARTUP_MEMORY_INSUFFICIENT")
+            guard.check()
+            process = {"pid": group.pid, "birth": birth, "job_name": group.job_name}
+            payload = {
+                "managed": True,
+                "is_mock": False,
+                "url": f"http://127.0.0.1:{port}",
+                "port": port,
+                "process": process,
+                "startup_id": startup_id,
+                "gpu_uuid": gpu_uuid,
+            }
+            with factory.begin() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
+                if db.get(AppSetting, key):
+                    current = _read_startup(db, instance_id)
+                    if current.get("stage") != "LISTENING":
+                        raise HTTPException(409, "COMFY_STARTUP_STAGE_CHANGED")
+                instance = db.get(ComfyInstance, instance_id)
+                if instance is not None and instance.sha256 != graph_hash(payload):
+                    raise HTTPException(409, "COMFY_STARTUP_INSTANCE_CHANGED")
+                if instance is None:
+                    instance = ComfyInstance(id=instance_id, payload=payload, sha256=graph_hash(payload),
+                                             status="RUNNING_PENDING_HEALTH")
+                    db.add(instance)
+                else:
+                    instance.payload = payload
+                    instance.sha256 = graph_hash(payload)
+                    instance.status = "RUNNING_PENDING_HEALTH"
+                from shine.comfyops.resource_epoch import read_epoch
+
+                epoch = read_epoch(db)
+                current = _read_startup(db, instance_id)
+                if current.get("stage") != "LISTENING":
+                    raise HTTPException(409, "COMFY_STARTUP_STAGE_CHANGED")
+                _write_startup(db, instance_id, {
+                    **current,
+                    "stage": "RUNNING", "memory": verified, "process": process,
+                    "instance_sha256": graph_hash(payload), "resource_epoch": epoch,
+                })
+                add_audit(db, "comfy-worker", "COMFY_STARTUP_RUNNING", "job", job_id,
+                          {"instance_id": instance_id, "pid": group.pid}, project_id=job.project_id)
+    except BaseException as exc:
+        _fail(factory, instance_id, getattr(exc, "detail", None) or type(exc).__name__,
+              lease_id=lease_id, job_id=job_id)
+        raise
+    return ManagedRenderer(
+        instance_id=instance_id,
+        startup_id=startup_id,
+        group=group,
+        supervisor=supervisor,
+        process=process,
+        url=f"http://127.0.0.1:{port}",
+        memory=verified,
+        gpu_uuid=gpu_uuid,
+        min_ram_mb=min_ram_mb,
+        min_vram_mb=min_vram_mb,
+        lease_id=lease_id,
+        job_id=job_id,
+        probe=probe,
+    )
+
+
+def reconcile_managed_startups(factory, settings, *, terminate=None):
+    """Recover startup intents left behind by an interrupted worker.
+
+    Only a process whose recorded PID and birth identity still match, and whose
+    membership in the recorded named Job Object is confirmed, may be stopped.
+    Anything else is left untouched and kept blocked for manual reconciliation.
+    """
+    terminate = terminate or _terminate_owned_group
+    with factory() as db:
+        rows = db.scalars(select(AppSetting).where(
+            AppSetting.key.like(STARTUP_PREFIX + "%") | AppSetting.key.like(REVIEW_PREFIX + "%"))).all()
+        pending = []
+        for row in rows:
+            value = row.value if isinstance(row.value, dict) else {}
+            if value.get("stage") in COMPLETE_STAGES | TERMINAL_STAGES:
+                continue
+            prefix = REVIEW_PREFIX if row.key.startswith(REVIEW_PREFIX) else STARTUP_PREFIX
+            pending.append((row.key.removeprefix(prefix), prefix, dict(value)))
+    findings = []
+    for instance_id, prefix, value in pending:
+        owner_pid = value.get("owner_pid")
+        owner_birth = value.get("owner_birth")
+        owner_alive = False
+        if type(owner_pid) is int and owner_pid > 0 and isinstance(owner_birth, str) and owner_birth:
+            try:
+                owner_alive = process_identity(owner_pid) == owner_birth
+            except (OSError, ValueError):
+                owner_alive = False
+        if owner_alive:
+            # Another live worker owns this startup; it must not be reconciled
+            # or blocked from here.
+            continue
+        process = value.get("process") or {}
+        pid = process.get("pid")
+        birth = process.get("birth")
+        job_name = process.get("job_name")
+        finding = {"instance_id": instance_id, "stage": value.get("stage"),
+                   "job_name": job_name, "pid": pid, "action": "none"}
+        alive = False
+        owned = False
+        if type(pid) is int and pid > 0 and isinstance(birth, str) and birth:
+            try:
+                alive = process_identity(pid) == birth
+            except (OSError, ValueError):
+                alive = False
+        if alive and isinstance(job_name, str):
+            try:
+                owned = inspect_named_group(job_name, pid, birth)
+            except OSError:
+                owned = False
+        if alive and owned:
+            try:
+                finding["action"] = "terminated"
+                finding["evidence"] = terminate(job_name)
+            except Exception as exc:
+                finding["action"] = "blocked"
+                finding["reason"] = type(exc).__name__
+        elif alive:
+            finding["action"] = "blocked"
+            finding["reason"] = "OWNERSHIP_UNVERIFIED"
+        else:
+            finding["action"] = "already_exited"
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            current = _read_startup(db, instance_id, prefix)
+            if current.get("stage") in COMPLETE_STAGES | TERMINAL_STAGES:
+                continue
+            lease_id = current.get("lease_id")
+            lease = db.get(ResourceLease, lease_id) if lease_id else None
+            if lease and lease.status == "ACTIVE":
+                lease.status = "RECONCILE_REQUIRED"
+            _write_startup(db, instance_id, {
+                "stage": "RECONCILE_REQUIRED",
+                "last_confirmed_stage": current.get("stage"),
+                "reason": "COMFY_STARTUP_INTERRUPTED",
+                "reconciliation": finding,
+                "recorded_at": utcnow().isoformat(),
+            }, prefix)
+        findings.append(finding)
+    return findings
+
+
+def _terminate_owned_group(job_name):
+    """Stop a named owned group whose ownership was already proved."""
+    from shine.comfyops.owned_process import terminate_named_group
+
+    return terminate_named_group(job_name)
+
+
+def verify_managed_startup(factory, settings, renderer, *, instance_id=None):
+    """Re-prove the startup binding and the live physical baseline."""
+    instance_id = instance_id or renderer.instance_id
+    with factory() as db:
+        value = _read_startup(db, instance_id)
+        instance = db.get(ComfyInstance, instance_id)
+        lease = db.get(ResourceLease, renderer.lease_id)
+        now = utcnow()
+        if (value.get("stage") != "RUNNING" or not instance
+                or instance.sha256 != value.get("instance_sha256")
+                or graph_hash(instance.payload) != instance.sha256
+                or instance.payload.get("process") != renderer.process
+                or instance.payload.get("managed") is not True
+                or instance.payload.get("is_mock") is not False
+                or not lease or lease.status != "ACTIVE" or not lease.exclusive
+                or lease.expires_at <= now):
+            raise HTTPException(409, "COMFY_STARTUP_BINDING_INVALID")
+    renderer.supervisor.verify_drained_binding(renderer.url, renderer.process)
+    measured = (renderer.probe or probe_memory)(renderer.gpu_uuid, min_ram_mb=renderer.min_ram_mb,
+                                                min_vram_mb=renderer.min_vram_mb)
+    verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
+                                  gpu=measured.get("gpu"), min_ram_mb=renderer.min_ram_mb,
+                                  min_vram_mb=renderer.min_vram_mb, expected_gpu=renderer.gpu_uuid)
+    if measured.get("ready") is not True or not verified["ready"]:
+        raise HTTPException(409, "COMFY_STARTUP_MEMORY_INSUFFICIENT")
+    return verified
+
+
+def _review_runtime(*, base_url, port, listener, group):
+    """Read the owned review supervisor's own runtime identity."""
+    import httpx
+
+    if not group.owns(listener["pid"], listener["birth"]):
+        raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
+    with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
+        response = client.get(base_url + "/health")
+    if response.status_code != 200:
+        raise HTTPException(409, "COMFY_REVIEW_SUPERVISOR_NOT_READY")
+    body = response.json()
+    if (not isinstance(body, dict) or body.get("status") != "ok" or body.get("is_mock") is not False
+            or not isinstance(body.get("runtime_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", body["runtime_sha256"])):
+        raise HTTPException(409, "COMFY_REVIEW_SUPERVISOR_NOT_READY")
+    return body["runtime_sha256"]
+
+
+def start_managed_review_service(
+    factory,
+    settings,
+    *,
+    service_id: str,
+    lease_id: str,
+    job_id: str,
+    worker_id: str,
+    argv,
+    cwd,
+    env,
+    pinned_files,
+    port: int,
+    handoff_token: str,
+    runtime_sha256: str,
+    gpu_uuid: str,
+    min_ram_mb: int,
+    min_vram_mb: int,
+    launch=None,
+    probe=None,
+):
+    """Start an owned review supervisor and close it with a first-use fence.
+
+    The supervisor must be an owned process: the review receipt is only
+    trustworthy while the process identity and its exit can be proved. The
+    returned configuration is the only thing a later review may be reserved
+    against, and the fence binds that first reservation.
+    """
+    from shine.quality.review_release import create_cold_review_fence
+
+    if (not isinstance(runtime_sha256, str | None)
+            or (runtime_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", runtime_sha256))
+            or not isinstance(port, int) or not 0 < port < 65536
+            or not isinstance(handoff_token, str) or len(handoff_token) < 32):
+        raise HTTPException(409, "COMFY_REVIEW_STARTUP_ARGUMENTS_INVALID")
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        if db.get(AppSetting, REVIEW_PREFIX + service_id):
+            raise HTTPException(409, "COMFY_REVIEW_STARTUP_ALREADY_RECORDED")
+        lease, job = _bind_lease(db, lease_id, job_id)
+        owner_birth = process_identity(os.getpid())
+        if not owner_birth:
+            raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
+        _write_startup(db, service_id, {
+            "stage": "INTENT", "service_id": service_id, "kind": "review",
+            "lease_id": lease_id, "job_id": job_id, "worker_id": worker_id,
+            "owner_pid": os.getpid(), "owner_birth": owner_birth,
+            "argv_sha256": _digest(" ".join(str(arg) for arg in argv)),
+            "cwd": str(cwd), "port": port, "gpu_uuid": gpu_uuid,
+            "min_ram_mb": min_ram_mb, "min_vram_mb": min_vram_mb,
+            "runtime_sha256": runtime_sha256,
+            "handoff_token_sha256": _digest(handoff_token),
+            "recorded_at": utcnow().isoformat(),
+        }, REVIEW_PREFIX)
+    group = None
+    try:
+        launcher = launch or OwnedProcessGroup.launch
+        group = launcher(list(argv), cwd=cwd, env=dict(env), pinned_files=list(pinned_files),
+                         job_name="Local\\ShineHandoff-" + uuid4().hex)
+        birth = process_identity(group.pid)
+        if not birth or not group.owns(group.pid, birth):
+            raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
+        _record(factory, service_id, {
+            "previous_stage": "INTENT", "stage": "LAUNCHED",
+            "process": {"pid": group.pid, "birth": birth, "job_name": group.job_name},
+        }, REVIEW_PREFIX)
+        listener = _wait_for_owned_listener(group, port)
+        observed_runtime = _review_runtime(base_url=f"http://127.0.0.1:{port}", port=port,
+                                           listener=listener, group=group)
+        if runtime_sha256 and observed_runtime != runtime_sha256:
+            raise HTTPException(409, "COMFY_REVIEW_RUNTIME_CHANGED")
+        runtime_sha256 = observed_runtime
+        measured = (probe or probe_memory)(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
+        verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
+                                      gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
+                                      min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
+        if measured.get("ready") is not True or not verified["ready"]:
+            raise HTTPException(409, "COMFY_STARTUP_MEMORY_INSUFFICIENT")
+        fence = create_cold_review_fence(
+            base_url=f"http://127.0.0.1:{port}", runtime_sha256=runtime_sha256,
+            supervisor={"pid": listener["pid"], "birth": listener["birth"]}, gpu_uuid=gpu_uuid,
+            min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb, handoff_token=handoff_token,
+            owner_group=group,
+        )
+        config = {
+            "base_url": f"http://127.0.0.1:{port}",
+            "runtime_sha256": runtime_sha256,
+            "supervisor": {"pid": listener["pid"], "birth": listener["birth"]},
+            "gpu_uuid": gpu_uuid,
+            "handoff_token": handoff_token,
+            "owner_group": group,
+            "cold_fence_id": fence["fence_id"],
+        }
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            current = _read_startup(db, service_id, REVIEW_PREFIX)
+            if current.get("stage") != "LAUNCHED":
+                raise HTTPException(409, "COMFY_STARTUP_STAGE_CHANGED")
+            _write_startup(db, service_id, {
+                **current,
+                "stage": "RUNNING",
+                "process": {"pid": group.pid, "birth": birth, "job_name": group.job_name},
+                "cold_fence_id": fence["fence_id"], "memory": fence["memory"],
+            }, REVIEW_PREFIX)
+    except BaseException as exc:
+        _fail(factory, service_id, getattr(exc, "detail", None) or type(exc).__name__,
+              lease_id=lease_id, job_id=job_id, prefix=REVIEW_PREFIX)
+        raise
+    return {"group": group, "config": config, "fence": fence}
+
+
+class StartupBoundary:
+    """Live proofs for the first managed startup, never a stored pass flag.
+
+    It replaces the review-release boundary for the very first attempt: there
+    is no prior review to release, so the proof is the live startup binding and
+    a freshly measured physical baseline.
+    """
+
+    def __init__(self, renderer):
+        if not isinstance(renderer, ManagedRenderer):
+            raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+        self._renderer = renderer
+
+    def verify(self, factory, settings, instance_id, current_attempt_id, current_lease_id):
+        from shine.comfyops.resource_epoch import read_epoch
+
+        renderer = self._renderer
+        if instance_id != renderer.instance_id or current_lease_id != renderer.lease_id:
+            raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+        with factory() as db:
+            value = _read_startup(db, instance_id)
+            instance = db.get(ComfyInstance, instance_id)
+            lease = db.get(ResourceLease, current_lease_id)
+            now = utcnow()
+            epoch = read_epoch(db)
+            if (value.get("stage") != "RUNNING" or not instance
+                    or instance.sha256 != value.get("instance_sha256")
+                    or graph_hash(instance.payload) != instance.sha256
+                    or instance.payload.get("process") != renderer.process
+                    or instance.payload.get("managed") is not True
+                    or instance.payload.get("is_mock") is not False
+                    or instance.status != "RUNNING_PENDING_HEALTH"
+                    or not lease or lease.owner != "h3:" + renderer.job_id
+                    or lease.status != "ACTIVE" or not lease.exclusive or lease.expires_at <= now
+                    or epoch != value.get("resource_epoch")):
+                raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+            others = db.scalars(select(ResourceLease).where(
+                ResourceLease.id != current_lease_id,
+                ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])))
+            if any(True for _ in others):
+                raise HTTPException(409, "COMFY_STARTUP_BOUNDARY_INVALID")
+        memory = verify_managed_startup(factory, settings, renderer, instance_id=instance_id)
+        return {"prior_attempt_id": None, "gpu_uuid": renderer.gpu_uuid, "reviews": [],
+                "memory": memory, "observed_resource_epoch": epoch}
+
