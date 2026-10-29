@@ -1075,7 +1075,7 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 | CI 步骤 | 结果 |
 |---|---|
 | `uv sync --project backend --locked` | PASS，exit 0 |
-| `uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests` | **修复前 FAIL（1 failed / 1050 passed）→ 修复后 PASS，1058 passed、1 skipped、0 failed，exit 0**，381.47 秒 |
+| `uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests` | **修复前 FAIL（1 failed / 1050 passed）→ 修复后 PASS，1058 passed、1 skipped、0 failed，exit 0**，381.47 秒；在最终提交树 `4ae33cd` 上复跑同样 **1058 passed、1 skipped、0 failed**，exit 0，385.47 秒 |
 | `uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests` | PASS，exit 0 |
 | `uv run --project backend alembic -c backend/alembic.ini upgrade head`（新库） | PASS，exit 0，8 个版本 |
 | Windows：启动本地工作台并检查 `/health` 与 `/api/v1/system/status` | PASS，exit 0，`status: mock api_online=True` |
