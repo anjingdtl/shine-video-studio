@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -14,8 +14,24 @@ def new_id() -> str:
     return str(uuid4())
 
 
+# The host wall clock does not advance inside one tick, so two rows written
+# milliseconds apart can carry the same timestamp. "Newest row" selection would
+# then fall back to a random identifier. The clock below is therefore strictly
+# increasing, but never runs further ahead of the real clock than this, so a
+# backwards step of the system time cannot pin the recorded time in the future.
+_MAX_CLOCK_AHEAD = timedelta(seconds=1)
+_last_utcnow: datetime | None = None
+
+
 def utcnow() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    """Return the current UTC time as a strictly increasing naive timestamp."""
+    global _last_utcnow
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if _last_utcnow is not None:
+        if now <= _last_utcnow and _last_utcnow - now <= _MAX_CLOCK_AHEAD:
+            now = _last_utcnow + timedelta(microseconds=1)
+    _last_utcnow = now
+    return now
 
 
 class Project(Base):

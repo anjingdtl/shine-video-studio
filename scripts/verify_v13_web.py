@@ -421,6 +421,12 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         page.reload(wait_until="networkidle")
         page.locator("select").first.select_option(p)
         page.get_by_label("提交方式").select_option("comfyui")
+        # The default basic self-review scope checks the expected output size, so
+        # the workbench only offers the real-generation confirmation once the
+        # operator declares the width and height. Fill them exactly as an
+        # operator would before expecting the confirmation dialog.
+        page.get_by_label("预期输出宽度").fill("768")
+        page.get_by_label("预期输出高度").fill("1344")
         queue = page.get_by_role("button", name="加入队列", exact=True).first
         messages = []
         for mode in ("T2VA", "Ref2VA"):

@@ -4,7 +4,7 @@ import hashlib
 import re
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.assets import FAMILIES, require_rights
@@ -93,10 +93,19 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA", review_scope
 
 
 def current_plan(db, project_id):
+    """Return the newest analysed plan.
+
+    Two plans written inside one host clock tick can share a timestamp, so the
+    row id is only a last resort. The table row id is the real insertion order
+    and is used as the tie-break, exactly as elsewhere in this codebase.
+    """
     return db.scalar(
         select(PreProductionPlan)
         .where(PreProductionPlan.project_id == project_id)
-        .order_by(PreProductionPlan.created_at.desc(), PreProductionPlan.id.desc())
+        .order_by(
+            PreProductionPlan.created_at.desc(),
+            literal_column("preproduction_plans.rowid").desc(),
+        )
         .limit(1)
     )
 
@@ -112,7 +121,10 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     voices = db.scalars(
         select(VoiceProfile)
         .where(VoiceProfile.project_id == project_id, VoiceProfile.status == "FROZEN")
-        .order_by(VoiceProfile.created_at.desc(), VoiceProfile.id.desc())
+        .order_by(
+            VoiceProfile.created_at.desc(),
+            literal_column("voice_profiles.rowid").desc(),
+        )
     ).all()
     links, blockers, requirements = [], [], []
     for req in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
@@ -195,7 +207,11 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
         blockers.append({"code": "STYLE_NOT_FROZEN"})
     if not lock:
         blockers.append({"code": "RULEPACK_NOT_FROZEN"})
-    workflows = db.scalars(select(WorkflowRevision).order_by(WorkflowRevision.created_at, WorkflowRevision.id)).all()
+    workflows = db.scalars(
+        select(WorkflowRevision).order_by(
+            WorkflowRevision.created_at, literal_column("workflow_revisions.rowid")
+        )
+    ).all()
     state = "FAKE_EXECUTED" if offline else "PRODUCTION_APPROVED"
     usable = []
     frozen_ids = {w["id"] for w in (plan.payload.get("manifest") or {}).get("workflows", [])}

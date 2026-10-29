@@ -1168,7 +1168,7 @@ def create_app(
         rows = db.scalars(
             select(AuditEvent)
             .where(*filters)
-            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .order_by(AuditEvent.created_at.desc(), literal_column("audit_events.rowid").desc())
             .offset(offset)
             .limit(limit)
         ).all()

@@ -932,3 +932,16 @@ Worker 与模型代理属于审片客户端身份指纹，因此旧 4B/ASR 登�
 本机真实 ComfyUI 已通过新的受管启动路径跑通：真实进程组、真实适配器封闭启动、PID + 出生标识 + 命名 Job Object 三重归属证明、实测内存与显存基线、实例登记为 `RUNNING_PENDING_HEALTH`、受管进程组由内核确认清空，1 项通过、exit 0、耗时 9.57 秒；运行使用 CPU 模式，未加载模型权重、未提交 prompt、未生成媒体。
 
 真实 H3 生成到审片的自动链路、工作台闭环与人工验收仍为 **NOT RUN**；未确认资产权属、未批准影片、未进行人工听审、未提升任何候选资产。本机在轮次前发生过重启，旧 PID 与旧审片收据不再有效；本轮源码改变审片身份，历史 4B/ASR 登记不能作为当前源码资格。托管 CI 因 `gh` 返回 401 **无法核实**，既不写成通过也不写成失败，也未触碰支付信息。详见[实测报告](LOCAL_ENVIRONMENT_VALIDATION.md)。
+# 2026-10-30 CI 全量复现与两处真实阻断缺陷修复：PARTIAL
+
+本轮把 `.github/workflows/ci.yml` 的四个作业（backend、backend-windows、frontend、web-e2e）逐步在本机按 CI 的原始命令复现，**发现并修复了两个会真实打挂 CI 的缺陷**。
+
+其一：前端在 `39410c9`/`71fafff` 引入基础自审并要求先填写预期输出宽高才提供真实生成的逐次确认，而 `scripts/verify_v13_web.py` 最后更新于更早的 `84a6066`、从未填写这两个输入，确认对话框不出现，脚本 `messages[-1]` 抛 `IndexError`，web-e2e 作业失败。修复是让脚本按操作员真实操作填写宽高，**未放宽前端的提交前检查，也未削弱脚本任何断言**。
+
+其二（真实产品缺陷，非测试写法问题）：本机 `datetime.now()` 在一个时钟刻度内不前进（连续 19999 次返回同一时间戳），同一刻度内写入的 `PreProductionPlan` 因此共享 `created_at`，而 `current_plan` 用随机 UUID 作并列决胜，**选中哪个计划是掷硬币**。该函数决定 analyze 幂等命中、readiness 清单（review_scope 与原生审片能力）、生产准入门禁与冻结清单，选错会让基础自审按错误范围放行。修复为 `utcnow()` 严格单调递增（最多领先真实时钟 1 秒，系统时间回拨即重同步），并把计划、声音、工作流与审计事件的并列决胜改为仓库既有的 `literal_column(rowid)` 插入顺序。
+
+修复后：CI 原始命令全量回归 **1058 通过、1 跳过、0 失败**，exit 0，381.47 秒；web-e2e 浏览器作业 exit 0，20 条流程全部 MOCK_VERIFIED、`api_errors: []`；Windows 的 `verify_local_stack.ps1`、`verify_stack_operations.ps1`、`npm ci`、前端构建、Alembic 新库升级与 Ruff 全部 exit 0。新增 `backend/tests/test_timestamp_ordering.py`（7 项）锁定"最新行"合同，修复后同一探针 30 次复现 **0 次选错**。
+
+按本轮授权清理了失效与损坏条目（走可恢复回收站，非永久删除）：损坏的 `.local-acceptance/data/shine.db`（malformed schema）、空的 `.local-data/shine.db`（0 表）、以及两份指向已死进程的 `run/processes.json`。清理前已做全库 `quick_check` 体检，15 个库中仅 1 个损坏，无孤立 WAL/SHM；其余数据库、资产、产物、截图与证据全部保留。
+
+托管 CI 状态仍因 `gh` 401 且本机无 GitHub/CI 连接器而**无法核实**；本轮可确认的是 CI 定义的每一步在本机以原始命令全部通过。真实 H3 到审片的自动链路、工作台闭环与人工验收仍为 **NOT RUN**。详见[实测报告](LOCAL_ENVIRONMENT_VALIDATION.md)。

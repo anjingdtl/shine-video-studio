@@ -1066,3 +1066,75 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 - `.local-acceptance/managed-startup-real-20261030/pytest.log`（真实 ComfyUI 受管启动）
 - `.local-acceptance/probe-managed-startup-real-20261030.py`（只读诊断脚本）
 - `.local-acceptance/_probe_state.py`、`.local-acceptance/_probe_corrupt.py`（数据库只读诊断）
+# 2026-10-30 CI 全量复现、两处真实阻断缺陷修复与失效数据清理
+
+## CI 逐步复现
+
+`.github/workflows/ci.yml` 定义四个作业：`backend`(ubuntu)、`backend-windows`、`frontend`、`web-e2e`。本轮把每个作业的每一步都在本机按 CI 的原始命令跑通（`uv` 在本机默认镜像下解析失败，需 `UV_DEFAULT_INDEX=https://pypi.org/simple`；该设置只影响命令环境，不改锁文件）。
+
+| CI 步骤 | 结果 |
+|---|---|
+| `uv sync --project backend --locked` | PASS，exit 0 |
+| `uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests` | **修复前 FAIL（1 failed / 1050 passed）→ 修复后 PASS，1058 passed、1 skipped、0 failed，exit 0**，381.47 秒 |
+| `uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests` | PASS，exit 0 |
+| `uv run --project backend alembic -c backend/alembic.ini upgrade head`（新库） | PASS，exit 0，8 个版本 |
+| Windows：启动本地工作台并检查 `/health` 与 `/api/v1/system/status` | PASS，exit 0，`status: mock api_online=True` |
+| Windows：`./scripts/verify_local_stack.ps1 -ApiPort 8127` | PASS，exit 0，Mock 作业到达 PASSED、审计 7 条 |
+| Windows：`npm ci --prefix frontend` | PASS，exit 0，70 个包、0 漏洞 |
+| Windows：`./scripts/verify_stack_operations.ps1` | PASS，exit 0（自定义代理、NoWorker、重复启动拒绝、Worker 重启与已核验停机） |
+| frontend：`npm --prefix frontend run build` | PASS，exit 0 |
+| web-e2e：`ruff check scripts/verify_v13_web.py` | PASS，exit 0 |
+| web-e2e：`python -m playwright install chromium` | PASS（Chrome for Testing 151.0.7922.34） |
+| web-e2e：`python scripts/verify_v13_web.py --screenshot ...` | **修复前 FAIL（IndexError）→ 修复后 PASS，exit 0**，20 条流程全部 MOCK_VERIFIED，`api_errors: []` |
+
+日志：`ci-pytest-exact-20261030.log`、`ci-pytest-final-20261030.log`、`web-e2e-20261030-rerun.log`、`web-e2e-final-20261030.log`、`npm-ci-20261030.log`。
+
+## 修复一：web-e2e 作业真实失败（前端与验收脚本漂移）
+
+前端在 `39410c9`/`71fafff` 引入"基础自审"范围，并要求操作员先填写**预期输出宽高**才提供真实生成的逐次确认；`scripts/verify_v13_web.py` 最后更新于更早的 `84a6066`，从未填写这两个输入。因此确认对话框不出现，脚本的 `messages[-1]` 抛出 `IndexError`，整个 web-e2e 作业失败。
+
+修复方式是让脚本按操作员的真实操作填写宽高（768×1344），**没有放宽前端的提交前检查，也没有削弱脚本的任何断言**：取消确认仍必须不产生后端作业、确认仍必须带上 `generation_mode` 与 `workflow_profile_id`、后端作业数仍必须为零。修复后该作业本机 exit 0。
+
+## 修复二：同一时钟刻度内写入的行，"最新行"是不确定的（真实产品缺陷）
+
+上一轮全量回归在 CI 原始命令下出现 `test_v13_preparation.py::test_review_scope_creates_new_plan_and_selects_matching_native_capability` 失败（`KeyError: 'review_scope'`），而在单独运行时 12/12 通过、在整文件运行时 3/3 通过。这是跨用例顺序相关的真实缺陷，不是测试写法问题。
+
+根因已用只读探针证实：
+
+- 本机 `datetime.now()` 在一次时钟刻度内不前进：连续 19999 次调用返回**完全相同**的时间戳。
+- `PreProductionPlan.created_at` 因此相同：`analyze` 写入的"full"计划与"basic"计划的 `created_at` 精确到微秒都一致（`datetime(2026, 10, 29, 23, 9, 4, 430986)`）。
+- `current_plan` 以 `(created_at DESC, id DESC)` 选取"当前计划"，而 `id` 是随机 UUID —— 于是选中哪个计划是**掷硬币**。30 次复现中 2 次选中了旧计划。
+- 后果是产品级的：`current_plan` 决定 `analyze` 的幂等命中、`readiness` 生成的清单（review_scope 与被选中的原生审片能力）、`enforce` 的生产准入门禁，以及 `freeze_manifest` 冻结的清单。选错计划会让基础自审按错误的范围和能力放行。
+
+修复分两层：
+
+- `shine/models.py` 的 `utcnow()` 改为**严格单调递增**（同刻度内逐微秒递增），且最多只领先真实时钟 1 秒，系统时间回拨时重新同步，因此不会把租约到期或审批窗口钉在未来。
+- `current_plan` 以及同模块的 `voice_profiles`、`workflow_revisions` 与审计事件的排序，改用 `literal_column("<table>.rowid")` 作为插入顺序的**确定性并列决胜** —— 这与本仓库既有做法一致（`api_film.py`、`main.py`、`operator_review.py`、`quality/input_assessment.py` 已用同一模式）。
+
+新增 `backend/tests/test_timestamp_ordering.py`（7 项）锁定该合同：连续读数严格递增、时钟不得领先真实时钟超过 1 秒、同一时间戳的两个计划必须解析为最新、重复 `analyze` 不得把最新计划挤掉、重复分析保持幂等。修复后同一探针 30 次复现 **0 次选错**。
+
+## 失效与损坏数据清理（本轮已获授权）
+
+清理前先做了全量只读体检：`.local-acceptance`、`.local-data*` 下共 15 个 SQLite 文件，`pragma quick_check` 全部为 `ok`，**只有一个**损坏；无孤立的 `-wal`/`-shm`；两份 `run/processes.json` 中的 PID 全部已死（对应 2026-10-25 与 2026-10-28 的运行，本机 2026-10-30 01:25:48 重启后失效）。
+
+经授权删除（走可恢复回收站，未做永久删除）：
+
+- `.local-acceptance/data/shine.db` 及 `-shm`/`-wal` —— `malformed database schema`，schema 不可读，无法使用。
+- `.local-data/shine.db` 及 `-shm`/`-wal` —— 4096 字节、0 张表的空库文件，没有任何数据或 schema。
+- `.local-acceptance/closeout-20261025/run/processes.json`、`.local-acceptance/h3run/run/processes.json` —— 指向已死进程的失效受管进程清单，会让 `start_shine.ps1` 以"已有所有者"为由拒绝启动。
+
+未删除：全部可用数据库、资产、产物、截图、证据与日志。
+
+## 托管 CI 状态
+
+`gh` 仍返回 HTTP 401；本机已连接的 Connector 目录中只有媒体生成与邮箱凭据类工具，**没有任何 GitHub/CI 连接器**，因此远端 Actions 的最新状态本轮**无法核实**，既不写成通过也不写成失败。按要求未修改任何账单或支付信息。
+
+本轮在服务器侧可确认的结论是：CI 定义的全部步骤在本机以原始命令**全部通过**，其中两个此前会失败的作业（web-e2e 与全量 pytest）已修复并复跑通过。
+
+## 可复查证据路径
+
+- `.local-acceptance/closeout-20261025/ci-pytest-final-20261030.log`（最终全量回归，exit 0）
+- `.local-acceptance/closeout-20261025/web-e2e-final-20261030.log`、`shine-v13-web-qa-20261030.png`
+- `.local-acceptance/closeout-20261025/npm-ci-20261030.log`
+- `.local-acceptance/_probe_clock.py`（时钟刻度证据）、`.local-acceptance/_probe_plan_order.py`（计划选取顺序复现）
+- `.local-acceptance/_survey_dbs.py`、`.local-acceptance/_survey_stale.py`、`.local-acceptance/_survey_manifests.py`（清理前只读体检）
