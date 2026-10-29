@@ -796,3 +796,203 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 
 
 2026-10-28 隔离 ASR 登记：新档案与隔离执行器已完成真实对白匹配控制并技术发布，调用完成、租约释放、子进程退出；未重投 H3，未作人工听审或影片批准。运行中断后检查 API、Worker 对应服务及 ComfyUI 均未响应，最终恢复未验证；原有进程清单保留，需按进程出生标识和租约对账后恢复。生成到审片的自动进程交接仍未完成。详见 registered-isolated-asr-20261028.json。
+# 2026-10-28 夜间续测
+
+- 启动前 `git fetch origin`、`git ls-remote origin refs/heads/main`：均为 `f6b196afa3d53623baa2a8f16a5e62f1d2520649`；凭据管理器路径失效提示存在，但查询成功。仅有一个工作树。
+- 机器开机时间 19:08:41；显卡 16303 MiB 中占用约 939 MiB。旧验收进程清单记录于 07:32，未按旧 PID 结束进程；实际服务未运行，ComfyUI 队列 **NOT RUN**。验收数据库只读核对资源租约 92 条 RELEASED、作业 4 项 NEEDS_REVIEW 与 2 项 REPAIR_PENDING，未修改数据库或重新提交 H3。
+- 过期租约反例先在原代码失败：`test_expired_stage_lease_requires_reconciliation_even_if_cleanup_succeeds` 未抛出预期错误。修复后 `python -m pytest backend/tests/test_serial_stages.py backend/tests/test_v13_preparation.py backend/tests/test_offline_e2e.py -q` 通过；`test_v13_migrations.py`、`test_v13_e2e.py` 与 `test_film_crew.py` 定向通过；隔离临时数据库 Alembic upgrade head 通过。完整 `python -m pytest backend/tests -q` 通过，收集 894 项；Starlette 弃用与 SQLAlchemy 空主键警告未计为失败。`ruff check backend/shine backend/alembic backend/tests` 和 `npm run build` 通过。
+- 历史 ASR 收据 [registered-isolated-asr](evidence/local-closeout-20261025/registered-isolated-asr-20261028.json) 的调用 `007ea46e-5adc-4035-9a07-7fbfdd44e962` 在数据库中为 COMPLETED；这是历史机器控制结果，非本次实机重跑或人工听审。
+- `gh run list --repo anjingdtl/shine-video-studio` 返回 HTTP 401 Bad credentials；本次远端 CI **BLOCKED**。真实 H3、新视觉/ASR/声音模型调用次数均为 0，自动交接及当前真实工作台端到端 **NOT RUN**。
+# 2026-10-28 自动交接建设续轮
+
+- 在合成 ComfyUI 上先复现三个反例：卸载响应后仍进入审片、恢复扫描释放未核实的 H3 租约、操作员授权将卸载错误标成物理释放。修复后相应反例保持待对账并阻止后续操作；新增提交前无归属阻塞和已下载输出持久化检查。原离线 E2E、repair 与 film crew 保留既有断言，明确注入仅供合成测试的交接替身；生产前检查没有关闭。
+- 排空屏障线程并发测试通过。`F:/AIGC2026/ComfyUI_Mie_2026_V8.0_Base/python_embeded/python.exe scripts/probe_handoff_adapter.py` 使用合成队列和真实 aiohttp 通过授权、队列繁忙及排空后拒绝新任务测试。未启动实际 ComfyUI 或安装适配器；自定义节点绕过队列入口的风险尚未排除。
+- 交接账本合同测试覆盖中断后保留 STOP_INTENT、阻塞后续租约、禁止重复意图、拒绝非受管实例和过期租约。该账本尚未连接实际进程操作，不能代表恢复链路通过。
+- Windows 受管进程组以挂起方式创建并先绑定 Job Object，合成 Python 子进程及其子进程退出、监督进程意外退出、Unicode 环境传递均通过；过程中曾发现活动数量结构读取不完整造成错误零值，现同时核实完整计数与根进程句柄退出。没有加载 H3 或审片模型。
+- 只读物理资源探测：指定 GPU 总显存 16303 MiB、空闲 14996 MiB，系统可用物理内存 22088142848 字节；探测阈值仅作为合成示例，非真实模型预算或 H3 卸载证明。
+- 完整端到端、真实 H3、真实视觉/ASR、自动恢复和人工听审本轮均 **NOT RUN**。现阶段代码和测试未组成完整自动交接，待实现受管监督服务、进程及队列身份绑定、跨阶段心跳和独占、崩溃对账、重启及全链路实机验证。
+- 当前工作区执行 `backend/.venv/Scripts/python.exe -m pytest backend/tests -q` 全部通过，收集 910 项；Ruff 和前端 `npm run build` 通过。保留 Starlette 弃用与 SQLAlchemy 空主键告警；不据此推断真实模型或远端 CI 通过。
+# 2026-10-28 受管交接组件续建实测
+
+- Windows Job Object 使用同一个进程句柄核验 PID 的出生标识、存活状态和进程组归属；本机隔离 Python 进程树的正反例通过。监督原语同时对照操作系统监听表和服务报告，发现端口所有者不一致时在排空前阻止操作；拒绝代理环境以免凭据经代理传输。历史文件先独占创建、同步写入及复验哈希，文件变更时拒绝停止。
+- 排空协议补充历史/队列修改的异步互斥：已有修改完成前不能排空，排空后拒绝修改。适配器身份同时绑定两个源文件，测试对临时副本改动后状态请求被拒绝。实际 ComfyUI 及其第三方节点未安装或验证该适配器，不能排除节点绕过队列入口。
+- 新增 H3 交接心跳：单个 SQLite 写事务核对作业、镜头版本、输出、进程身份及资源状态，然后同时续约作业、尝试和资源；过期租约不得复活。合成跨阶段测试持续超过初始租约时长，其他任务仍无法获得资源。模型代理继承租约时新增到期检查，反例先失败、修复后通过。
+- 使用受管的合成 HTTP 渲染进程及合成视频，将排空、历史快照、停止和模拟内存门禁串到 REVIEW_INTENT；进程与账本使用同一资源租约，未实现恢复时保持 RECONCILE_REQUIRED。此项不包含真实 H3/审片/重启，且没有接入 Worker。
+- Worker 与 `model_calls.py` 已改变，而两者在 `shine/quality/client_identity.py` 的指纹列表中；此前真实 4B/ASR 控制和技术登记仅为历史证据，当前源码的资格需重新核验，不得沿用旧结果。
+- 新增恢复反例：交接停在 STOP_INTENT 且 Worker 租约过期时，原恢复器会查询外部 ComfyUI；现先锁定数据库，将意图和 H3 资源保留为 RECONCILE_REQUIRED，记录停止前阶段和原视频，不联系或重投渲染器。未过期的活跃交接不被恢复器接管。这是安全阻塞，不是自动重启恢复实现。
+- 停止后在显存检查前后核对该端口没有新 IPv4 监听者；出现替换监听者或读数不足均阻塞。测试为隔离进程和合成数据，不证明外部不受控程序不会在其他端口启动。
+- 交接实验入口在账本事务中重新执行现有预制作检查；合成反例在排空后和检查与停止意图之间改变冻结快照，均阻止停止并保留租约。镜头修订变化在建立意图和阶段转换处均被阻止。以上是未接入 Worker 的工程测试，不替代生产前检查或真实 H3 验收。
+- 本续轮 `backend/.venv/Scripts/python.exe -m pytest backend/tests -q` 通过，收集 929 项；Ruff、V1.3 指定测试、旧 offline E2E、film crew、临时数据库 Alembic upgrade head 及前端构建通过。Starlette 弃用与 SQLAlchemy 空主键告警仍存在。合成 HTTP 排空协议与 Windows 受管进程组定向测试通过；没有真实 H3、审片或人工听审调用。
+
+# 2026-10-28 进程释放与审片收据续建实测
+
+- Windows Job Object 合成反例曾观察到活动数归零早于子进程句柄退出；现终止前保留进程句柄并等待退出，同时检查进程组与根进程。隔离审片响应携带请求、响应和执行器哈希及退出收据；监督器使用令牌封闭新请求，并再次检查服务状态、子进程及物理资源。此为实验组件，现有清单不能独立证明服务归属，实际安全生命周期仍未建立。
+- 合成端到端覆盖保留租约、持久化重启意图、审片后重启固定参数受管进程及更新实例记录；释放验证和显存数据使用替身，不能证明真实显存释放。Windows 定向测试 `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_renderer_supervisor.py -q`：14 项通过。
+- 先构造调用方仅声明 ASR 的反例，旧逻辑错误进入重启；修复后从作业冻结请求及项目质量策略推导必需视觉/对白审片。更改不将未审内容写成通过，也不赋予人工批准。
+- 本轮当前源码 `ruff check backend/shine backend/alembic backend/tests scripts/local_review_isolated_server.py scripts/probe_handoff_adapter.py integrations` 和前端 `npm run build` 通过。完整回归第一次误在 backend 目录启动，两个 Alembic 测试无法定位仓库根配置，已中止并从仓库根目录重新执行；以重跑结果为准。
+- 真实 H3、视觉、ASR 和其他声音模型调用次数均为 0；自动工作台流程及人工验收 **NOT RUN**。历史验收库和旧清单未修改，未重投 H3。
+- 释放验证进一步要求审片监听者属于当前持有的 Windows Job Object 进程组，进程归属、出生时间、端口及子进程退出均需核对；缺失归属时在发送封闭请求前失败。`backend/.venv/Scripts/python.exe -m pytest backend/tests/test_review_isolation_receipt.py backend/tests/test_renderer_supervisor.py -q`：18 项通过。现有启动器尚未提供该受管组，不能据此宣称真实服务已受控。
+- 从仓库根目录开始的完整回归中途修改了参与审片指纹的源码，后续身份测试出现错误；该次运行中止，不能计作通过，需在源码稳定后重新执行。
+
+# 2026-10-29 隔离真实 ComfyUI 适配器实测
+
+- 使用安装目录中的真实 ComfyUI 和其 Python，以 `--base-directory` 指向全新验收副本、`--cpu`、禁用其他自定义节点并仅加载复制的 Shine 屏障插件；未加载 H3 或审片权重，没有修改现有 ComfyUI 的目录、配置、队列或历史。Windows Job Object 持有受管实例。
+- 第一次探测的合成 `EmptyImage → SaveImage` 成功，但测试脚本给了非 UUID 尝试标识，排空前按合同拒绝；受管进程组已退出。失败及退出证据保存在 `.local-acceptance/comfy-adapter-cpu-probe-20261029/evidence.json`。
+- 第二次以合法标识运行：合成任务 `34dde4e1-3961-41f0-b13c-fda3b5cc2236` 完成，排空并留存历史哈希；排空后新任务和历史清空均返回 409，进程组 2 个成员均等待退出。验收文件见 `.local-acceptance/comfy-adapter-cpu-probe-20261029-b/evidence.json` 和同目录 `history/`。事后两次端口均无监听、两个根 PID 不存在；GPU 空闲约 14903 MiB。
+- 这是实际 ComfyUI、CPU 合成节点和专用插件的有限兼容测试，不覆盖真实 H3 节点或其他自定义节点绕过队列、模型物理卸载、Worker 自动交接和审片；这些仍为 **NOT RUN/PARTIAL**。
+- 本轮源码稳定后在仓库根目录运行 `backend/.venv/Scripts/python.exe -m pytest backend/tests -q`：收集 944 项，退出码 0；完整输出 `.local-acceptance/closeout-20261025/full-suite-20261029.log`。Starlette 弃用与 SQLAlchemy 空主键警告仍在。Ruff、前端构建和临时 SQLite 的 Alembic upgrade head 通过；这些结果均不证明真实模型验收。
+- 另构造共享租约并发反例：两个不同输入的模型调用同时继承同一有效资源租约时，旧代码允许两个提供方同时执行。修复后在 SQLite 写事务中检查同租约的 RUNNING、NEEDS_REVIEW 和 RECONCILING 模型调用，忙时拒绝第二个；首个调用清理完成后下一调用可执行。`test_serial_stages.py` 8 项通过，旧版 offline E2E 与 film crew 定向通过，Ruff 通过。该保护不代替阶段间实际进程退出和显存检查。
+- 上述 944 项完整回归发生在并发修复之前；修复改变客户端身份，完整后端回归再次运行，结果以 `.local-acceptance/closeout-20261025/full-suite-serial-fix-20261029.log` 的最终退出码为准。
+- GitHub 连接器于 2026-10-29 重新查询：远端 main `f6b196afa3d53623baa2a8f16a5e62f1d2520649` 对应最新 CI 运行 [40603149040](https://github.com/anjingdtl/shine-video-studio/actions/runs/40603149040) 为 completed/failure；frontend、backend-windows、backend、web-e2e 均为 failure，steps 和 logs_url 为 null，backend 日志读取返回 BlobNotFound。实际测试没有可见执行证据，不能视为 CI 通过；本次接口未给出明确失败原因，历史付款提示不可直接当成当前诊断。`gh run list` 仍 HTTP 401。
+- 并发修复后，最终源码完整后端回归收集 945 项、退出码 0；证据 `.local-acceptance/closeout-20261025/full-suite-serial-fix-20261029.log`。明确重跑 `test_v13_preparation.py test_v13_migrations.py test_v13_e2e.py test_offline_e2e.py test_film_crew.py` 全部通过；Ruff 通过。此前 944 项是修复前的结果。仍有 Starlette 弃用和 SQLAlchemy 空主键告警。
+
+# 2026-10-29 审片阶段准入原语
+
+- 新增审片意图登记：同一 SQLite 写事务内重核作业、尝试、镜头、输出、预制作和独占租约后写入 ASR/VLM 意图；已有未核实意图时禁止另一阶段或结束审片。反例先失败，修复后交接账本、受管渲染器和旧 offline E2E 定向测试共 27 项通过，Ruff 通过。中断时保留意图并阻塞资源。
+- 该原语尚未接入实际模型调用，也尚未实现将真实审片释放证据与意图绑定为 VERIFIED 的完整协议；不得将其视为自动链路完成。修改后完整回归日志为 `.local-acceptance/closeout-20261025/full-suite-review-intent-20261029.log`，以其中最终退出码为准；此前 945 项结果属于本修改前。真实 H3 和模型调用本轮 0 次。
+- 此次修改后完整后端回归收集 946 项、退出码 0，日志为 `.local-acceptance/closeout-20261025/full-suite-review-intent-20261029.log`；仍有已记录的 Starlette 弃用及 SQLAlchemy 空主键警告。
+
+# 2026-10-29 审片意图、调用和释放收据绑定
+
+- 实验性交接新增 `review_stage` 上下文；`TrackedProvider` 在调用提供方之前，将未提交调用记录与相应 ASR/VLM 意图及租约绑定。调用返回只能完成调用记录，意图保持 INTENT；只有匹配的隔离释放验证成功后，才在数据库事务中把释放收据和 VERIFIED 写入对应记录。未绑定、已提交或已完成的旧调用不能冒充新意图；重新核验租约、作业状态和镜头版本。
+- 首先构造无意图直接接受旧结果的反例，原实现错误接受；修复后定向交接账本、受管渲染器、串行阶段、旧 offline E2E、film crew 全部通过，Ruff 通过。上述提供方、显存和释放验证为合成替身，非真实模型证据；完整回归日志 `.local-acceptance/closeout-20261025/full-suite-review-binding-20261029.log` 以最终退出码为准。
+- 生产 Worker 尚未接入协议，独立监督与真实服务的受管启动、阶段间物理资源门禁和崩溃恢复仍需完成；真实 H3/视觉/ASR 本轮调用为 0。客户端代码改变，历史资格不能复用。
+- 绑定修改后完整后端回归收集 947 项、退出码 0；指定 V1.3 preparation/migrations/e2e、旧 offline E2E、film crew 单独重跑通过。日志 `.local-acceptance/closeout-20261025/full-suite-review-binding-20261029.log`；Starlette 弃用与 SQLAlchemy 空主键警告仍在。
+
+# 2026-10-29 多阶段释放复核
+
+- 构造两个反例：第一审片监督服务在后续阶段前或渲染器重启前失去可信归属时，原实现仍会继续。现从内存中保存每一已接受阶段的受管验证参数，进入下一阶段及重启前逐一重查封闭状态、进程归属、收据和物理资源；任一失败阻塞。敏感令牌仅保存在进程内，不写入账本。
+- 合成端到端测试现通过真实 `review_stage` 与 `TrackedProvider` 路径完成意图、调用、释放和受管渲染器重启，保留无意图旧结果不得接受的反例；审片释放与 GPU 数据仍为替身。交接账本、渲染器、旧 offline E2E、film crew 定向通过，Ruff 通过。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-review-recheck-20261029.log`，以最终退出码为准。
+- 该流程未接入生产 Worker；真实 H3、审片模型和人类审核 **NOT RUN**。进程组启动、独立监督和中断恢复仍需继续实现与实测。
+- 本次修改后的完整后端回归收集 949 项、退出码 0，日志 `.local-acceptance/closeout-20261025/full-suite-review-recheck-20261029.log`；仍有既存 Starlette 弃用和 SQLAlchemy 空主键告警。
+
+# 2026-10-29 受管重启源码竞态和中断测试
+
+- 先复现重启竞态：已停止的渲染器在旧哈希检查通过后、实际启动重新计算哈希前源文件被替换，原实现错误启动了替换后的代码。修复后把原固定哈希传入启动，并在创建挂起进程、恢复运行前复验；定向 Windows 测试通过。此检查仍不是对任意文件修改的原子锁定，不能宣称所有启动或运行期间源码变化均已防止。
+- 另以受管合成渲染器模拟审片意图产生后的异常：账本保留未确认意图和 RECONCILE_REQUIRED 租约，拒绝再次预留，未重启渲染器。此为异常模拟，非真实进程崩溃恢复或 H3 实测。相关受管进程、交接、旧 offline E2E、film crew 定向测试及 Ruff 通过；完整回归日志 `.local-acceptance/closeout-20261025/full-suite-pinned-relaunch-20261029.log` 以最终退出码为准。
+- 生产 Worker、独立监督服务和真实阶段仍未接入；本轮真实 H3/视觉/ASR 调用 0 次。
+- 此轮固定哈希修复后的完整后端回归收集 951 项，退出码 0；日志为 `.local-acceptance/closeout-20261025/full-suite-pinned-relaunch-20261029.log`。已有 Starlette 弃用及 SQLAlchemy 空主键告警。
+
+# 2026-10-29 受管进程固定文件锁
+
+- 构造反例：固定源码在受管进程存活时仍可写入，旧代码未阻止。现以 Windows 文件共享句柄限制被固定文件的写入和删除，在取得句柄后重新核验哈希，受管进程确认退出后释放；指定文件写入、删除及退出后恢复写入的定向测试通过。只覆盖调用方显式指定的文件，未覆盖未固定依赖、目录替换、模型文件和其他进程；不能作为完整源码不可变或真实 H3 安全证明。
+- 真实 ComfyUI 安装以独立基础目录和 CPU 模式再次启动，固定 Python、入口和适配器源文件；合成任务 `20c37651-b6e0-40c3-9630-ddeac1782af0` 完成，排空后任务提交和历史清空均被拒绝，已归档历史，受管进程组两个成员等待退出。证据 `.local-acceptance/comfy-adapter-cpu-probe-20261029-c/evidence.json`；退出后端口无监听且根进程不存在，GPU 空闲约 14881 MiB。未加载 H3 或审片模型。
+- 受管进程、渲染器、旧 offline E2E 和 film crew 定向测试及 Ruff 通过；完整回归日志 `.local-acceptance/closeout-20261025/full-suite-source-lock-20261029.log`，以最终退出码为准。独立监督、生产 Worker 接线、真实模型和崩溃恢复仍未完成。
+- 本轮修改后完整后端回归收集 952 项、退出码 0，日志 `.local-acceptance/closeout-20261025/full-suite-source-lock-20261029.log`；保留既有 Starlette 弃用及 SQLAlchemy 空主键告警。
+
+# 2026-10-29 串行审片代理
+
+- 为实验交接新增审片代理，封装既有 `TrackedProvider`：调用前预留和绑定意图，得到结果后从账本取匹配收据，完成隔离释放验证后才向调用方返回；无收据或验证失败不得返回成功。拒绝通过该代理调用另一种模型方法。旧结果无意图、调用其他模型方法的反例均在修复前失败；合成端到端测试实际经过代理与受管渲染器重启。
+- 交接账本、受管渲染器、串行阶段、旧 offline E2E 和 film crew 定向通过，Ruff 通过。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-review-proxy-20261029.log`，以最终退出码为准；所有审片和资源释放为合成替身。
+- 生产 Worker 尚未使用该代理，当前受管实例的启动器也尚未持有可供交接的 Job Object；独立监督服务、真实崩溃恢复、真实 H3 及审片仍未完成。
+- 本次代理修改后的完整后端回归收集 952 项、退出码 0，日志 `.local-acceptance/closeout-20261025/full-suite-review-proxy-20261029.log`；既有 Starlette 弃用及 SQLAlchemy 空主键告警仍在。
+
+# 2026-10-29 审片调用前准入
+
+- 先构造代理在核验服务归属之前已能提交模型调用的反例，以及实际调用地址与核验地址不同的反例；修复后调用前要求地址和 GPU 与交接配置一致，并检查受管进程组、端口与出生标识、审片服务空载且未封闭、执行器哈希和实际资源阈值，期间续约并复核。未满足条件时不得提交。
+- 交接、审片收据、旧 offline E2E 和 film crew 定向通过，Ruff 通过；具体进程、健康和显存检查的相关测试使用替身，真实 H3/视觉/ASR 未运行。完整后端回归日志 `.local-acceptance/closeout-20261025/full-suite-review-admission-20261029.log` 以最终退出码为准。
+- 审片代理仍未接入生产 Worker；独立监督服务及真实阶段间恢复未实现。
+
+# 2026-10-29 审片调用前物理准入
+
+- 新增代理模型调用前检查：被核验的地址与实际提供方地址、GPU 身份必须一致；确认受管 Windows 进程组、监听 PID 和出生时间、执行器哈希、服务未封闭且空载、内存显存阈值。隔离服务新增不加载模型的令牌认证探测；错误令牌、封闭服务及非空载状态均不应提交模型调用。两类地址/归属反例在修复前失败。
+- 隔离审片监督器、审片收据、交接账本、渲染器、旧 offline E2E、film crew 定向通过，Ruff 通过。涉及审片归属和显存的测试为合成替身，不是实机模型验收。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-review-readiness-20261029.log` 以最终退出码为准。
+- 中间一次完整回归在加入令牌探测前中止，不计为通过。监督器源码与审片客户端指纹改变，旧 4B/ASR 能力登记不可用于新版本。生产 Worker 与独立受管服务仍未接入，真实自动链路仍 **PARTIAL/NOT RUN**。
+- 调用前准入修改后完整后端回归收集 953 项、退出码 0；日志 `.local-acceptance/closeout-20261025/full-suite-review-readiness-20261029.log`。已有 Starlette 弃用和 SQLAlchemy 空主键警告仍在。
+
+# 2026-10-29 审片服务一次性准入
+
+- 原隔离服务的调用前检查与模型请求之间允许其他本地客户端插入调用。新增经令牌认证的单次意图预留：预留期间拒绝其他请求与重复调用；预留后再次核验服务空载、监督归属和内存/显存。超时或不确定预留不自动重试，意图与租约保留对账。
+- 本地 ASR、VLM 和 basic 人物客户端仅在绑定的 127.0.0.1 地址发送一次性凭据，并在此模式关闭环境代理；凭据留在进程内，不写账本。隔离服务对预留后未调用的旧收据拒绝封闭。
+- 隔离服务、客户端、交接、旧 offline E2E、film crew 定向测试与 Ruff 通过；合成 ASR 客户端经过实际 HTTP 处理逻辑，只执行一次并拒绝重放，但执行器和音频为替身。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-reserved-review-20261029.log` 以最终退出码为准。
+- 真实 Worker 和受管实例启动器尚未接线；真实 H3/视觉/ASR 本轮未调用。此次客户端和服务指纹变化，历史模型资格仍需重新校准。
+- 此次一次性准入修改后完整后端回归收集 956 项、退出码 0；日志 `.local-acceptance/closeout-20261025/full-suite-reserved-review-20261029.log`。已有 Starlette 弃用和 SQLAlchemy 空主键警告仍在。
+
+# 2026-10-29 受管渲染器关闭启动与激活原语
+
+- 构造反例：渲染器重启后默认接受队列，交接租约尚在时外部请求可进入。现支持显式 `SHINE_COMFY_START_DRAINED=1`，受管重启要求该固定启动配置且确认新进程屏障为 drained；不支持关闭启动的配方在停止原渲染器前被拒绝。令牌认证的恢复接口本身不检查 SQLite 租约，不能单独当作生产授权。
+- 新增受管启动入口：监听前核验指定屏障模块、队列绑定、drained 状态、源码哈希及控制路由，禁止非 loopback。独立 CPU 实例实测启动和重启均为 drained，未授权恢复 401、关闭时任务 409；认证恢复后合成任务 `89778bf5-b081-4c18-ac23-66b9c3b2f9bb` 完成并归档历史，进程组已确认退出。证据 `.local-acceptance/comfy-managed-bootstrap-cpu-final-20261029/evidence.json`。缺少插件白名单的另一隔离实例退出且轮询期间未见监听，证据 `.local-acceptance/comfy-bootstrap-missing-adapter-20261029/evidence.json`；该探测未捕获子进程错误日志，不能仅凭此断定具体退出原因。端口及根 PID 事后不存在，显卡空闲约 14913 MiB。未加载 H3 或审片模型。
+- 新增实验激活函数：打开队列前在 SQLite 同时核验作业、镜头、尝试、独占租约和预制作状态，并持久化 INTENT；回复丢失时标记 RECONCILE_REQUIRED，拒绝重放。Worker 的过期恢复扫描会在任何渲染器请求前阻断未完成激活。合成反例、旧 offline E2E、film crew 和恢复定向通过，Ruff 通过。
+- 上述激活原语尚未接入生产 Worker；调用前如何证明前一模型阶段的进程及资源已释放、受管启动器/令牌生命周期、监督进程独立运行和恢复仍未完成。故真实 H3 到审片 **PARTIAL/NOT RUN**，不得将 CPU 或替身测试作为真实通过。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-closed-bootstrap-20261029.log` 以最终退出码为准。
+- 本轮完整后端回归收集 964 项、退出码 0；指定 V1.3 preparation/migrations/e2e、旧 offline E2E、film crew 另行通过，Ruff、前端 TypeScript/Vite 和临时 SQLite Alembic upgrade head 通过。完整日志 `.local-acceptance/closeout-20261025/full-suite-closed-bootstrap-20261029.log`；仍有既存 Starlette 弃用和 SQLAlchemy 空主键警告。
+
+# 2026-10-29 跨进程归属与下一阶段物理边界
+
+- 为受管 Windows Job Object 增加可选随机名称。新进程只以查询权限打开对象，使用同一进程句柄核验 PID、出生时间、存活与组成员；名称已存在时拒绝创建，不接管或改变已有对象。重启生成新名称，绑定的实例进程记录包含该名称。另行模拟监督进程退出，验证无其他持有句柄时子进程退出；这不代表 Worker 已能接管或恢复真实渲染器。
+- 在隔离真实 ComfyUI CPU 实例中，另一 Python 进程验证命名组成员，合成任务 `6c4ca153-5445-4aa2-9393-def2e7eed775` 完成并留存历史；重启产生新组名且队列仍关闭，关闭时提交返回 409。两次受管进程组均等待退出，端口和根 PID 事后不存在，GPU 空闲约 14926 MiB。证据 `.local-acceptance/comfy-managed-named-job-cpu-20261029/evidence.json`；该探测中的恢复由隔离测试显式调用，并非数据库租约驱动的生产流。
+- 构造无上一审片物理证据却可打开队列的反例并修复：实验激活现要求前一次同实例受管审片的持久化记录、非模拟来源、逐阶段匹配的真实释放收据、存活监督进程及针对下一阶段要求的内存显存复核；仅隔离 offline_simulation 测试可使用假证据。缺证时保持关闭；首次 H3 启动的可信物理基线尚无实现，因此不得启用此接口进行首次生产。
+- Windows 归属、审片边界、恢复、旧 offline E2E、film crew 定向和 Ruff 通过；完整回归 `.local-acceptance/closeout-20261025/full-suite-named-boundary-20261029.log` 以最终退出码为准。真实 H3/视觉/ASR 未运行；Worker 接线、独立监督器的运行及崩溃对账尚未完成。
+- 审片释放边界另核对持久化阶段时间及后续资源租约、模型调用：发现其他活跃/待对账租约或之后登记的模型活动时，不复用旧释放证据。反例使用隔离测试数据库；该检查依赖系统时间及当前账本，不能证明未登记的外部进程不存在或系统时钟异常时的顺序。缺少首次启动可信基线和持久化单调活动序号，生产入口继续关闭。
+- 修改后的完整回归日志 `.local-acceptance/closeout-20261025/full-suite-named-boundary-epoch-20261029.log` 以最终退出码为准；一次定向命令误传不存在的路径，pytest 未执行，该命令不计为通过，随后正确定向测试通过。
+
+# 2026-10-29 应用资源活动序号
+
+- 构造固定系统时间下连续资源准入的反例，旧账本不能提供顺序；现于已有 SQLite 写事务中为每次资源准入及共享租约模型调用递增序号。实验交接重启记录序号，下一次激活检查期间有中间活动则拒绝；物理释放复核后在写事务内再次检查序号，并保持写锁至渲染器恢复确认。续约过期或回复不确定仍转待对账，不重投。
+- 定向测试覆盖固定时钟、插入模型活动、释放证据缺失、回执篡改和模拟受管重启；旧 offline E2E、film crew 及 Ruff 通过。定向模型调用、显存与释放检查使用替身。完整后端回归记录于 `.local-acceptance/closeout-20261025/full-suite-resource-epoch-20261029.log`，以日志最终退出码为准；之前一轮完整测试被主动中断，不计为通过。
+- 序号仅覆盖本应用登记的资源活动，不能证明外部进程未占用资源。缺少序号的历史交接不能作为新激活证明；审片客户端身份同时包含这些安全组件，旧版本的真实模型资格须重新核验。首次 H3 基线、独立监督器、生产 Worker 接线、真实模型串联和人工验收仍 **PARTIAL/NOT RUN**。
+- 本次源码的完整后端回归 971 项通过、退出码 0；前端 `npm run build`、Ruff 和独立临时 SQLite 的 `alembic upgrade head` 通过。完整日志为 `.local-acceptance/closeout-20261025/full-suite-resource-epoch-20261029.log`；保留既有 Starlette 弃用与 SQLAlchemy 空主键告警。指定 V1.3 定向测试日志为 `.local-acceptance/closeout-20261025/v13-resource-epoch-20261029.log`，以其最终退出码为准。
+- V1.3 preparation、migrations、e2e、旧 offline E2E 和 film crew 单独重跑退出码 0。完整回归后另外补充并通过一项合成竞态测试：物理复核后、队列恢复前插入模型活动时，队列保持 drained，激活与租约标记 RECONCILE_REQUIRED；该附加测试不包含在上述 971 项完整回归数字中。
+
+# 2026-10-29 审片释放到重启的活动顺序反例
+
+- 构造三个隔离账本反例：最后一次审片释放后、重启前插入活动；重启期间插入活动；同一租约的审片调用完成后又插入模型活动。修复前均能错误采纳新的活动或释放基线。修复后每项共享租约模型调用在准入事务中记录自身序号，释放验证与该调用匹配；下一审片或重启前复核上次释放序号，重启完成记录在 SQLite 写事务内再次比较。活动改变则阻断，保留重启或审片意图供对账。
+- 另构造持久化审片步骤序号被篡改的反例；激活前检查各审片调用和账本序号一致、顺序递增且最后一项与重启基线一致。上述反例和旧 offline E2E、film crew 定向通过，Ruff 通过；真实 GPU、审片执行和进程释放均为测试替身，不能据此认定真实自动交接通过。
+- 本轮代码改变审片客户端指纹；历史能力登记不能直接继承。完整回归日志 `.local-acceptance/closeout-20261025/full-suite-release-order-20261029.log` 以最终退出码为准。生产 Worker、受管监督器、首次启动基线和真实端到端仍 **PARTIAL/NOT RUN**。
+- 本轮完整后端回归 975 项通过、退出码 0；Ruff、前端构建、独立临时 SQLite 的 Alembic 升级通过。V1.3 指定测试、旧 offline E2E 与 film crew 单独运行日志为 `.local-acceptance/closeout-20261025/v13-release-order-20261029.log`，以最终退出码为准。已有 Starlette 弃用及 SQLAlchemy 空主键警告。
+- 上述 V1.3 指定测试、旧 offline E2E 与 film crew 单独运行退出码 0。
+
+# 2026-10-29 受管审片收尾入口
+
+- Worker 的渲染收尾函数新增显式内部协调器入口：原视频登记后，在同一资源租约和心跳下调用已有受管排空、审片代理、释放核验及关闭状态重启，再进行质量门禁记录；受管路径不调用仅返回 HTTP 确认的 `free_models` 捷径。隔离测试使用受管合成渲染器和模拟 ASR，验证一次审片、重启、原视频保留与租约持续占用；非真实 H3 或真实审片模型。
+- 先构造 Worker 把受管审片安全异常转换为普通 ASR 失败的反例，现让受管 ASR/VLM 异常向交接上下文传播；另构造失败后作业仍为 QC_PENDING 的反例，现仅在原 Worker、状态版本仍匹配时将作业置为 NEEDS_REVIEW，保留视频和 RECONCILE_REQUIRED 租约。旧 Worker 不得覆盖新声明；隔离正反例通过。
+- 正常 Worker 启动尚未创建或传入该协调器，初次启动物理基线、跨作业租约延续和独立监督仍未接通；现有生产准入阻断保持。完整后端回归 `.local-acceptance/closeout-20261025/full-suite-worker-managed-review-20261029.log` 以最终退出码为准，真实 H3/视觉/ASR 与人工验收 **NOT RUN**。源码改变导致历史模型能力指纹需重新核验。
+- 本轮完整后端回归 980 项通过、退出码 0，Ruff、前端构建及独立临时 SQLite Alembic 升级通过；保留已有 Starlette 弃用与 SQLAlchemy 空主键警告。V1.3 指定测试、旧 offline E2E 与 film crew 日志为 `.local-acceptance/closeout-20261025/v13-worker-managed-review-20261029.log`，以最终退出码为准。
+- V1.3 指定测试、旧 offline E2E 与 film crew 本轮单独运行退出码 0。
+- 完整回归后补充并通过受管收尾质量边界断言：测试中的合成无效视频字节被判为 `QC_FAILED` / `REPAIR_PENDING`，不是通过；审片异常仍为 `NEEDS_REVIEW` 和待对账。该补充断言单独重跑通过，不改变上述完整回归的测试数量。
+
+# 2026-10-29 跨作业资源租约原子交接
+
+- 新增内部租约交接原语：先复核上一审片的实时释放证明，再以同一 SQLite 写事务校验旧租约、下一作业与尝试、预制作约束和活动序号；将旧租约标记 RELEASED、创建新的 ACTIVE 独占租约并递增活动序号。旧租约不改写归属、不删除历史；重复意图、竞争资源、过期租约、活动变化或缺失工作流图哈希均阻断，事务失败回滚。
+- 构造两个线程竞争同一 SQLite 写锁的隔离反例，确认交接事务持锁期间其他资源申请等待，提交后仍因新租约 ACTIVE 而不能取得资源。另一合成测试经过受管审片释放、旧/新租约切换和下一渲染器关闭启动后的受控激活；并未提交 H3。GPU 资源和审片执行均为替身。
+- 仅凭 `WAITING` 状态无法证明旧版 Worker 从未使用某租约；对缺少可验证准入来源的后续记录仍保守阻断。原子交接原语尚未接入正常 Worker 调度，首次启动物理基线、独立监督器和租约空闲时续期仍未完成；真实模型串联 **PARTIAL/NOT RUN**。完整回归 `.local-acceptance/closeout-20261025/full-suite-atomic-transfer-20261029.log` 以最终退出码为准。
+- 此次完整后端回归 986 项通过、退出码 0；Ruff、前端构建和隔离临时 SQLite 的 Alembic 升级通过。V1.3 指定测试、旧 offline E2E 与 film crew 日志 `.local-acceptance/closeout-20261025/v13-atomic-transfer-20261029.log` 以最终退出码为准。已有 Starlette 弃用及 SQLAlchemy 空主键告警。
+- V1.3 指定测试、旧 offline E2E 与 film crew 单独运行退出码 0。
+
+# 2026-10-29 受管交接空闲心跳
+
+- 复现受管审片完成并重启渲染器后，原交接心跳退出、独占租约不能在等待下一作业期间自动续期的问题。新增空闲监督：只在原 Worker 进程身份、受管进程组、关闭的监听器、实例哈希和活动序号均匹配时续约；租约过期、归属丢失或停止监督均保留 `RECONCILE_REQUIRED`，不按时间推断物理卸载。
+- 合成测试验证后台自动续期、过期不复活、归属丢失和主动停止阻断；另让心跳线程与原子交接竞争，确认交接后旧心跳退出并保留新独占租约。对失败接手保留待对账。测试模型、释放和显存均为替身；未执行真实 H3/审片或人工验收。
+- 收尾协调器现在可持有空闲监督器，但正常 Worker 的受管启动、首次物理基线、任务声明和交接调度尚未接入；不具备真实自动生产资格。完整后端回归日志 `.local-acceptance/closeout-20261025/full-suite-idle-handoff-20261029.log` 以最终退出码为准。
+- 本轮完整后端回归 991 项通过、退出码 0；Ruff、前端构建和独立临时 SQLite Alembic 升级通过。V1.3 指定测试、旧 offline E2E 和 film crew 日志为 `.local-acceptance/closeout-20261025/v13-idle-handoff-20261029.log`，以最终退出码为准；既有 Starlette 弃用与 SQLAlchemy 空主键告警未消除。
+- V1.3 指定测试、旧 offline E2E 与 film crew 本轮单独运行退出码 0。
+- 2026-10-29 14:57（上海）只读资源快照：可用显存 14913 MiB，常用 8188、8189、8116、8117、14338 端口无监听，未找到命令行匹配的相关 Python 服务。`nvidia-smi` 列出的 GPU 进程显存占用均为 `N/A`，包括系统及桌面进程，因此此快照不能证明没有外部模型或先前模型已释放；未停止任何进程。证据 `.local-acceptance/closeout-20261025/gpu-baseline-inventory-20261029.json`。
+- NVIDIA 官方 [NVML 进程信息文档](https://docs.nvidia.com/deploy/nvml-api/latest/api/structnvmlProcessInfo__t.html)说明 WDDM 下进程级显存字段不可用；这与本机 `N/A` 相符，但不证明当前各进程的用途或资源释放。首次启动仍须结合具体受管进程退出证据、物理空闲资源和未知进程边界处理。
+- 本机 Windows 11 build 26200 的 `GPU Process Memory(*)\Dedicated Usage` 性能计数器可以读取数值，单次样本 28 项、其中 22 项非零，留存在 `.local-acceptance/closeout-20261025/gpu-pdh-inventory-20261029.json`。目前未将计数器 LUID 可靠映射到目标 GPU，也未验证计数器完整性和读数与模型占用的对应关系，不能用该单次样本证明模型释放。[Microsoft 已记录 Windows 10 特定场景的进程级 GPU 计数偏差](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/gpu-process-memory-counters-report-wrong-value)；该记录不证明本机 Windows 11 存在同一问题。
+- 随后以只读 DXGI 枚举及不创建 CUDA 上下文的驱动设备查询，将目标 GPU UUID 映射到 LUID `00000000:00012d14`、节点掩码 1；同名 NVIDIA DXGI 项另有不同 LUID，不能仅按名称匹配。对应样本归组得到 25 项，进程名称和出生时间在采样后另行读取，可能发生变化。证据为 `.local-acceptance/closeout-20261025/dxgi-adapters-20261029.json`、`cuda-luid-20261029.json` 和 `gpu-pdh-mapped-20261029.json`。设备映射方法参照 [NVIDIA CUDA 驱动 API](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__DEVICE.html) 和 [Microsoft DXGI 描述](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ns-dxgi-dxgi_adapter_desc1)；计数器的完整性、精度及单次采样边界仍未验证，不能据此放行模型。
+
+# 2026-10-29 受管后续作业与恢复边界
+
+- 新增受管后续作业内部入口：原子预留下一排队作业、领取尝试、持久化工作流图哈希、核验物理释放与受管端点、激活关闭的渲染器、提交后记录确认，再进入受管审片及空闲心跳。隔离合成测试覆盖一次提交及完整收尾、慢准备期间的后台心跳、地址不符、未标记模拟服务、响应不明、提交前声明过期及图被改动；未提交真实 H3。正常 `serve` 启动尚未构造首个受管协调器，首次物理基线和独立监督仍未完成，生产入口仍 **PARTIAL/NOT RUN**。
+- 修复普通 Worker 心跳可复活过期资源、对新声明续约的问题；受管心跳在数据库写事务中核对声明版本、所有者、镜头版本和三类租约期限，并一起续约或保持待对账。过期及丢失声明、镜头更新和缺失资源均有隔离反例。外部任务已确认但声明丢失时新增独立确认收据，保留任务 ID，不覆盖新 Worker 的状态；不明提交保留图哈希，不自动重投。
+- 预留记录在崩溃后可区分仍存活的持有者和失联/过期状态；缺失租约或损坏绑定时保留原始记录，并创建阻塞性待对账资源记录。所有权不确定时不访问渲染器。测试使用隔离账本与合成服务，真实 GPU、H3 和审片模型本轮未执行；源码改变使历史能力指纹需重新核验。
+# 2026-10-29 连续作业审片封存反例与回归
+
+- 反例：隔离服务完成一次审片并封存收据后，普通 `/handoff/ready` 和 `/handoff/reserve` 会拒绝下一次调用。原多作业合成测试替换了这些接口，不能证明实际协议可复用。先新增接口合同用例，修复前请求 `/handoff/rearm-reserve` 返回 404、测试失败。
+- 修复：新增认证、持锁且绑定上一份完整收据的单次重新预约；拒绝错误收据、未认证、重复 ID 和重放。内部受管协调器携带各类型最近一次释放收据，先复核旧收据、进程归属及物理资源，再登记新的审片意图并预约。ASR 和 VLM 若共用同一监听端口则保守阻断，避免覆盖仍需复核的收据。进程或结果不确定仍进入待对账；不自动重放。
+- 用真实 FastAPI 隔离服务接口、假模型执行器和模拟资源/归属探针验证两次封存与预约，并验证认证、错误收据、非预约请求和重放拒绝。此测试不是实际模型执行或物理内存释放证明。
+- 当前源码完整后端测试：仓库根目录 `.\\backend\\.venv\\Scripts\\python.exe -m pytest backend\\tests -q` 退出 0；当时收集 **1029** 项。之后新增一项接口联动测试并单独通过；当前收集 1030 项，不能将新增后的完整套件写成已重跑。指定 V1.3 preparation/migrations/e2e、旧 offline E2E、film crew 和隔离服务用例联合运行退出 0。Ruff、前端 `npm run build`、独立临时 SQLite `alembic upgrade head` 均通过。
+- `uv lock --check --offline` 在默认镜像配置下失败；临时设置 `UV_DEFAULT_INDEX=https://pypi.org/simple` 后 `uv lock --check --offline` 和 `uv sync --locked --offline` 均通过，未修改锁文件。测试从 `backend` 目录启动曾因找不到根目录所需配置而失败，已改为从仓库根目录运行，不将该次失败记为通过。
+- 新增接口改变隔离服务指纹，历史 4B/ASR 能力登记不能证明当前版本资格。首次受管 H3 可信基线与正常 Worker 启动尚未接入；真实 H3、真实视觉/ASR 多作业交接和实际工作台闭环 **NOT RUN**，自动交接 **PARTIAL**。未重投 H3 或代行人工审核。
+- Git `fetch origin main` 后本地 HEAD 与远端 main 均为 `f6b196afa3d53623baa2a8f16a5e62f1d2520649`，ahead/behind 为 0/0；当前工作区包含本轮未提交实现。`gh` 返回 401；连接器复核 [Actions 运行 40603149040](https://github.com/anjingdtl/shine-video-studio/actions/runs/40603149040) 为 **FAIL**，四个 job 均无步骤和日志 URL，原因未证实。
+# 2026-10-29 无审片器的未受管首任务准入反例
+
+- 构造 `test_unowned_renderer_without_reviewer_is_not_contacted`：无审片器、非离线模拟、实例归属未知时，注入只记录 `/free` 的客户端。修复前实际调用了卸载，随后因为该测试客户端不支持提交而进入不确定状态，未满足无外部调用合同。
+- 普通 `run_one` 对所有 ComfyUI 任务执行原有交接准入判断，而不是仅在提供审片器时判断。未证明归属时，提交前标记 `COMFY_HANDOFF_OWNERSHIP_UNVERIFIED`，资源保持 `RECONCILE_REQUIRED`，不调用卸载、不创建 attempt、不提交。这个保守门禁也会阻断无审片器的未受管真实任务；首次受管基线尚未实现，不能视为生产流程贯通。
+- 全量回归首次出现 8 项失败，原因是既有合成 HTTP 用例需要进入新门禁之后，分别验证能力复查、完成窗口、解码检查、重启恢复、卸载失败和提交对账。已在这些用例中显式隔离新准入判断，保留原断言；新反例独立覆盖未受管准入。相关定向套件通过，随后从仓库根目录 `.\\backend\\.venv\\Scripts\\python.exe -m pytest backend\\tests -q` 全量 **1031 项通过**；指定 V1.3 preparation/migrations/e2e、旧 offline E2E、film crew 单独通过；Ruff、前端 TypeScript/Vite 构建、`git diff --check` 通过。迁移在上一轮同一源码所用模型版本的独立临时库通过，本轮没有新增迁移。
+- 运行期间只读检查系统启动时间为 2026-10-28 19:08:41；8000、8001、8116、8117、8188、8189 无监听。测试期间看到两个 Python 进程，未单独确认其命令行；测试结束后复查无 Python 进程。显存空闲约 14929 MiB 只是该时点容量快照，不证明旧模型释放或初始物理基线。未启动真实 H3、视觉模型或 ASR，真实自动交接和人工验收 **NOT RUN**。
+# 2026-10-30 首次隔离服务封闭原语与交接状态
+
+- 新增首次封闭、查询和绑定预约协议。服务仅在未曾执行审片时允许封闭，封闭期间拒绝普通推理；首次预约须匹配封闭标识，错误标识、重复预约与未授权请求均阻断。首次封闭只是协议原语，尚未接入首次持久化启动意图或正常 Worker。
+- 已构造反例：推理子进程运行后返回非法 JSON 时，旧逻辑仍可能将服务当作从未运行；修复后调用一旦开始就不再视为初始状态，非法响应使服务保持不确定状态。客户端复核包含监督进程归属、启动子进程退出、封闭状态及内存/显存；跨作业边界还复核尚未使用的冷封闭服务和旧释放收据。
+- 定向测试 `test_isolated_review_supervisor.py`、`test_review_isolation_receipt.py`、`test_renderer_supervisor.py`、`test_handoff_lease_transfer.py`、`test_offline_e2e.py` 于本轮退出 0；Ruff 通过。此前完整后端 1031 项的结果不覆盖本次首次封闭变更：后续全量测试运行至 90% 后被用户中断，测试句柄已不存在，**最终结果未知，不计通过**。
+- 真实 H3、审片模型、首次受管启动及工作台自动链路 **NOT RUN**。测试中的模型执行、资源读数和部分进程归属为替身；首次启动的持久化意图、独占租约、意外中断对账、监督器创建和 Worker 接线仍需完成。新源码改变审片身份，旧 4B/ASR 真实登记不能替代当前源码重新校准。

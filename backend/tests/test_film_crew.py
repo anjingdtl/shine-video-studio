@@ -152,7 +152,11 @@ def crew_chain(client, project_id):
     return script, director, camera, continuity
 
 
-def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api):
+def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monkeypatch):
+    # This exercises crew/QC behavior with fake ComfyUI, not process ownership.
+    monkeypatch.setattr("shine.worker._isolated_mock_handoff", lambda _settings, reviewers: all(
+        reviewer is None or reviewer.is_mock for reviewer in reviewers
+    ))
     client, factory, settings = api
     project_id, style, _ = prepare(client)
     script, direction, camera, continuity = crew_chain(client, project_id)

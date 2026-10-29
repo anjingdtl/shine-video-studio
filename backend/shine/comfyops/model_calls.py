@@ -21,7 +21,7 @@ from sqlalchemy import select, text
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import ResourceLease
 from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
-from shine.models import AgentTaskRecord, Project, ProjectRuleLock
+from shine.models import AgentTaskRecord, Project, ProjectRuleLock, utcnow
 from shine.quality.client_identity import review_client_identity
 from shine.services import add_audit
 
@@ -252,11 +252,40 @@ class TrackedProvider:
                 identity = task.id
             try:
                 current = CURRENT_RESOURCE.get()
+                from shine.comfyops.handoff_journal import CURRENT_HANDOFF_REVIEW, bind_handoff_review_task
+
+                handoff = CURRENT_HANDOFF_REVIEW.get()
+                if handoff is not None:
+                    attempt_id, review_id, handoff_job_id, handoff_kind, handoff_settings = handoff
+                    if not current or self.production_job_id != handoff_job_id or kind != handoff_kind:
+                        raise HTTPException(409, "HANDOFF_REVIEW_BINDING_INVALID")
+                    bind_handoff_review_task(self.factory, attempt_id, review_id, identity, settings=handoff_settings)
                 if current:
-                    with self.factory() as db:
+                    valid = False
+                    busy = False
+                    with self.factory.begin() as db:
+                        db.execute(text("BEGIN IMMEDIATE"))
                         lease = db.get(ResourceLease, current)
-                        if not lease or lease.status != "ACTIVE" or lease.budget_mb < budget:
-                            raise HTTPException(409, "RESOURCE_LEASE_LOST_OR_BUDGET_EXCEEDED")
+                        if lease and lease.status == "ACTIVE" and lease.expires_at <= utcnow():
+                            lease.status = "RECONCILE_REQUIRED"
+                        valid = bool(lease and lease.status == "ACTIVE" and lease.budget_mb >= budget)
+                        if valid:
+                            other_calls = db.scalars(select(AgentTaskRecord).where(
+                                AgentTaskRecord.id != identity,
+                                AgentTaskRecord.role_id.like("model_call:%"),
+                                AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW", "RECONCILING"]),
+                            ))
+                            busy = any((row.trace or {}).get("resource_id") == current for row in other_calls)
+                            if not busy:
+                                from shine.comfyops.resource_epoch import advance_epoch
+
+                                epoch = advance_epoch(db, current, "model")
+                                current_task = db.get(AgentTaskRecord, identity)
+                                current_task.trace = {**current_task.trace, "resource_epoch": epoch}
+                    if not valid:
+                        raise HTTPException(409, "RESOURCE_LEASE_LOST_OR_BUDGET_EXCEEDED")
+                    if busy:
+                        raise HTTPException(409, "RESOURCE_STAGE_BUSY")
                     context = model_step(self.provider, self.factory, current)
                 else:
 
@@ -320,6 +349,18 @@ class TrackedProvider:
                                     **({"validation": exc.validation} if exc.validation is not None else {}),
                                 }}
                             raise
+                        receipt = getattr(self.provider, "last_isolation_receipt", None)
+                        if receipt is not None and kind in {"VLM", "ASR"}:
+                            from shine.quality.isolation_receipt import validate_receipt_fields
+
+                            try:
+                                receipt = validate_receipt_fields(receipt)
+                            except ValueError as exc:
+                                raise HTTPException(409, "ISOLATION_RECEIPT_INVALID") from exc
+                            # Persist before release or any later verification can fail.
+                            with self.factory.begin() as db:
+                                row = db.get(AgentTaskRecord, identity)
+                                row.trace = {**row.trace, "isolation_receipt": receipt}
                         if client_review_sha256:
                             with self.factory.begin() as db:
                                 row = db.get(AgentTaskRecord, identity)

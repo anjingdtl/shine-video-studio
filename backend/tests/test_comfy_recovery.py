@@ -224,7 +224,9 @@ def test_quality_gates_are_recorded_for_the_recovered_attempt(api, fake_comfy):
     assert final["evidence"]["gates"]
 
 
-def test_worker_restart_does_not_render_again(api, fake_comfy):
+def test_worker_restart_does_not_render_again(api, fake_comfy, monkeypatch):
+    # Exercise recovery of a previously admitted synthetic renderer.
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id = create_project(client)

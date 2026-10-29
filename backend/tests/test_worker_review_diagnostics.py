@@ -40,6 +40,32 @@ def test_worker_distinguishes_received_contract_failure_and_unknown_timeout(api,
     assert "private" not in error
 
 
+def test_managed_vlm_failure_propagates_to_handoff_context(api, tmp_path):
+    from fastapi import HTTPException
+
+    from shine.comfyops.handoff_preparation import HandoffReviewProvider
+
+    class FailingManagedVLM(HandoffReviewProvider):
+        is_mock = True
+        accepts_local_references = False
+
+        def __init__(self):
+            pass
+
+        def review(self, _context):
+            raise HTTPException(409, "HANDOFF_RESOURCE_ACTIVITY_CHANGED")
+
+    _, _, settings = api
+    with pytest.raises(HTTPException, match="HANDOFF_RESOURCE_ACTIVITY_CHANGED"):
+        _semantic_review(
+            reviewer=FailingManagedVLM(), job_id="synthetic",
+            spec=ShotSpec(story_beat="fixture", duration_target_s=6, style_version_id="fixture"),
+            style=StyleBible.model_validate(ENGLISH_STYLE), artifact_path=tmp_path / "synthetic.mp4",
+            artifact_sha256="a" * 64, settings=settings, remote_consent=False, project_id="synthetic",
+            transcript=None,
+        )
+
+
 @pytest.mark.parametrize("transcript_kind", ["missing", "unverified", "mock", "real", "real-hard"])
 def test_image_review_cannot_invent_missing_dialogue_without_real_asr(tmp_path, monkeypatch, transcript_kind):
     import json

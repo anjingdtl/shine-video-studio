@@ -199,3 +199,16 @@ These use synthetic bytes, not model inference.
 ## 2026-10-27: isolated structured review decoder
 
 `lm-format-enforcer`0.11.3 and `interegular`0.3.3: MIT, fixed wheel URLs/SHA-256 and all 37 installed file hashes pinned in `config/review-decoder-lock.json`. Dependencies pydantic/packaging/PyYAML already existed in the separate ML runtime; no third-party source copied into main project, no global environment/model weights changed. Primary sources: https://github.com/noamgat/lm-format-enforcer and versioned PyPI metadata. Qwen tokenizer CPU compatibility passed; numeric ranges are not fully grammar-enforced, so application QC validation remains mandatory. GPU quality/runtime acceptance is separate and pending.
+## 2026-10-28: ComfyUI handoff interface investigation
+
+The installed ComfyUI checkout reports commit `b0b743566f65daafc423b4fea8a2fbda94b3384a`,
+version 0.39.0, with a GPL-3.0 license file. Read-only inspection found that both
+`/prompt` and `/api/prompt` ultimately use the same `PromptQueue.put` method, and that
+queue insertion and queue snapshots use the queue's own lock. An optional self-authored
+adapter is being developed separately under `integrations/shine_comfy_handoff`; no
+ComfyUI source was copied. It is not installed in the user's instance or registered
+as a validated production component. Distribution or combined-use license obligations
+still require legal review. Other installed extensions may bypass or replace this guard;
+the adapter alone is not proof of exclusive ownership or safe process termination.
+
+Windows API 参考（2026-10-29）：[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[OpenJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-openjobobjectw) 和 [Job Object Security and Access Rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights)。命名 Job 可由其他进程按权限打开，kill-on-close 仅在最后一个句柄关闭时触发；因此只读检查应及时关闭句柄，不能把监督进程退出直接等同于资源已释放。本项目自行实现调用，未复制第三方代码；实际 Worker 接入和 ACL 边界尚待验证。

@@ -205,6 +205,8 @@ class OpenAICompatibleVisionReviewer:
         return []
 
     def review(self, context: ReviewContext) -> SemanticReviewResult:
+        if hasattr(self, "last_isolation_receipt"):
+            self.last_isolation_receipt = None
         if self.requires_remote_consent and not context.remote_consent:
             raise PermissionError("Remote semantic review requires explicit user consent in the project settings")
         if not context.frame_paths:
@@ -298,6 +300,9 @@ class OpenAICompatibleVisionReviewer:
             encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
         headers = {"Content-Type": "application/json"}
+        from shine.quality.review_admission import review_admission_headers
+
+        headers.update(review_admission_headers(self.config.base_url))
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         instructions, evidence_spec = content[0]["text"].split("ShotSpec: ", 1)
@@ -318,7 +323,7 @@ class OpenAICompatibleVisionReviewer:
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "shine_visual_review", "strict": True, "schema": schema,
             }}
-        with httpx.Client(timeout=self.config.timeout_s) as client:
+        with httpx.Client(timeout=self.config.timeout_s, trust_env="X-Shine-Handoff-Token" not in headers) as client:
             response = client.post(self._endpoint(), headers=headers, json=payload)
         if response.status_code >= 400:
             if response_protocol and response.status_code < 500:
@@ -401,6 +406,7 @@ class LocalReviewRelease:
 
     requires_remote_consent = False
     last_executor_identity = None
+    last_isolation_receipt = None
 
     def resource_budget_mb(self, method):
         return self._resource_mb
@@ -409,8 +415,17 @@ class LocalReviewRelease:
         # Optional extension: ordinary compatible endpoints remain usable but
         # cannot supply native capability evidence without this fingerprint.
         self.last_executor_identity = None
+        self.last_isolation_receipt = None
+        from shine.quality.isolation_receipt import validate_isolation_receipt
+
+        try:
+            receipt = validate_isolation_receipt(body)
+        except ValueError as exc:
+            raise ReceivedReviewError("ISOLATION_RECEIPT_INVALID", response_hash) from exc
         identity = body.get("executor_identity")
         if identity is None:
+            if receipt is not None:
+                raise ReceivedReviewError("ISOLATION_RECEIPT_INVALID", response_hash)
             return
         from shine.quality.identity import ExecutorIdentity
 
@@ -421,7 +436,10 @@ class LocalReviewRelease:
                 raise ValueError("EXECUTOR_MODEL_IDENTITY_MISMATCH")
         except ValueError as exc:
             raise ReceivedReviewError("EXECUTOR_IDENTITY_INVALID", response_hash) from exc
+        if receipt is not None and receipt["runtime_sha256"] != proof.runtime_sha256:
+            raise ReceivedReviewError("ISOLATION_RECEIPT_INVALID", response_hash)
         self.last_executor_identity = proof.model_dump()
+        self.last_isolation_receipt = receipt
 
     def release_models(self):
         endpoint = require_loopback_url(self.config.base_url).rstrip("/")
@@ -492,10 +510,15 @@ class OpenAICompatibleASRReviewer:
         return f"{base}/v1/audio/transcriptions"
 
     def transcribe(self, path: Path) -> Transcript:
+        if hasattr(self, "last_isolation_receipt"):
+            self.last_isolation_receipt = None
         headers: dict[str, str] = {}
+        from shine.quality.review_admission import review_admission_headers
+
+        headers.update(review_admission_headers(self.config.base_url))
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        with httpx.Client(timeout=self.config.timeout_s) as client:
+        with httpx.Client(timeout=self.config.timeout_s, trust_env="X-Shine-Handoff-Token" not in headers) as client:
             with path.open("rb") as handle:
                 response = client.post(
                     self._endpoint(),

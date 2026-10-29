@@ -30,6 +30,14 @@ from tests.conftest import (
 )
 from tests.fake_http import FakeComfyServer
 
+
+@pytest.fixture(autouse=True)
+def fake_physical_handoff(monkeypatch):
+    """The repair fixture uses a fake renderer and mock reviewer only."""
+    monkeypatch.setattr("shine.worker._isolated_mock_handoff", lambda _settings, reviewers: all(
+        reviewer is None or reviewer.is_mock for reviewer in reviewers
+    ))
+
 STYLE = StyleBible(
     photography_language="平视",
     shot_blocking="轴线",

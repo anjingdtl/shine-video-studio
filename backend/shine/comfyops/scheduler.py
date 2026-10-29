@@ -60,6 +60,9 @@ class ResourceScheduler:
         candidate.status = "ACTIVE"
         candidate.expires_at = now + timedelta(seconds=60)
         candidate.heartbeat_at = now
+        from shine.comfyops.resource_epoch import advance_epoch
+
+        advance_epoch(db, candidate.id, "lease")
         db.commit()
         return True
 
@@ -147,11 +150,19 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None, wait_seconds
                 db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
             raise
         else:
+            stopped.set()
+            thread.join(timeout=2)
+            requires_reconciliation = False
             with factory.begin() as db:
                 lease = db.get(ResourceLease, identity)
-                if lease.status == "RECONCILE_REQUIRED":
-                    raise HTTPException(409, "MODEL_RELEASE_RECONCILIATION_REQUIRED")
-                scheduler.release(db, identity, owner)
+                if (heartbeat_errors or thread.is_alive() or lease.status != "ACTIVE"
+                        or lease.expires_at <= utcnow()):
+                    lease.status = "RECONCILE_REQUIRED"
+                    requires_reconciliation = True
+                else:
+                    scheduler.release(db, identity, owner)
+            if requires_reconciliation:
+                raise HTTPException(409, "MODEL_RELEASE_RECONCILIATION_REQUIRED")
         finally:
             CURRENT_RESOURCE.reset(resource_token)
             stopped.set()

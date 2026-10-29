@@ -226,7 +226,9 @@ def test_workflow_profile_registration_validates_the_template(api):
     assert invalid.status_code == 422
 
 
-def test_comfy_worker_never_reports_a_real_video_as_passed_without_decode(api, fake_comfy):
+def test_comfy_worker_never_reports_a_real_video_as_passed_without_decode(api, fake_comfy, monkeypatch):
+    # Exercise the post-render QC contract with the synthetic HTTP renderer.
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.output_bytes = make_mp4_fixture(duration_s=6, width=768, height=1344, fps=24, audio=True)
     project_id = create_project(client)

@@ -532,3 +532,38 @@ def test_h3_live_worker_cannot_release_lease_and_expired_final_lease_blocks_prom
         assert server.prompt_count == 0
     finally:
         server.stop()
+
+
+def test_operator_grant_does_not_convert_renderer_unload_into_physical_release(prep, monkeypatch):
+    from shine.comfyops.models import ApprovalGrant, ResourceLease
+    from shine.models import Job, utcnow
+    from tests.conftest import create_comfy_job, freeze_style
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job = create_comfy_job(client, project, shot["id"])
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        row.status = "NEEDS_REVIEW"
+        row.failure_code = "COMFY_HANDOFF_OWNERSHIP_UNVERIFIED"
+        lease = ResourceLease(owner="h3:" + row.id, budget_mb=16384, exclusive=True, priority=100,
+                              status="RECONCILE_REQUIRED", expires_at=utcnow())
+        db.add(lease)
+        db.flush()
+        lease_id, owner = lease.id, lease.owner
+    grant = post(client, "/preparation/approval-grants", {"action": "resource_reconcile", "target_id": lease_id},
+                 operator=True)
+    calls = []
+    monkeypatch.setattr("shine.comfy.client.ComfyUIClient.free_models", lambda _self: calls.append("unload"))
+    response = client.post(f"/api/v1/comfyops/resource-reservations/{lease_id}/release", headers=HEADERS, json={
+        "owner": owner, "proof_decision": {"grant_id": grant["grant_id"], "snapshot": grant["snapshot"],
+                                             "evidence": "Synthetic operator decision"},
+    })
+    assert response.status_code == 409
+    assert response.json()["detail"] == "COMFY_PHYSICAL_RELEASE_PROOF_REQUIRED"
+    assert not calls
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+        assert not db.get(ApprovalGrant, grant["grant_id"]).used

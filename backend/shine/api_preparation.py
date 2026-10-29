@@ -1266,15 +1266,16 @@ def resource_release(
     if attached and row.status != "RELEASED":
         if any(t.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"} for t in tasks):
             raise HTTPException(409, "MODEL_CALL_RECONCILIATION_REQUIRED")
+        if job:
+            # An operator grant and a renderer's self-reported CUDA counters do
+            # not prove that the owned process and its host RAM have exited.
+            # Do not consume the grant until physical reconciliation exists.
+            raise HTTPException(409, "COMFY_PHYSICAL_RELEASE_PROOF_REQUIRED")
         if not body.proof_decision:
             raise HTTPException(409, "MODEL_RELEASE_PROOF_REQUIRED")
         decision = body.proof_decision
         approval.consume(db, actor, "resource_reconcile", row, decision.grant_id, decision.snapshot)
-        if job:
-            from shine.comfy.client import ComfyUIClient
-
-            ComfyUIClient(settings.comfyui_base_url, max_retries=0).free_models()
-        elif any(not t.trace.get("is_mock") for t in tasks):
+        if any(not t.trace.get("is_mock") for t in tasks):
             raise HTTPException(409, "USE_MODEL_CALL_RECONCILIATION_WITH_PROVIDER_PROOF")
         ResourceScheduler().release(db, identity, body.owner, reconciled=True)
         add_audit(

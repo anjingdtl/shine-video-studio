@@ -71,7 +71,9 @@ def test_basic_character_job_rejected_before_h3_without_frozen_qualified_reviewe
     assert client.get(f"/api/v1/projects/{project}/jobs").json() == []
 
 
-def test_worker_rechecks_basic_capability_before_submitting(api, fake_comfy):  # noqa: F811
+def test_worker_rechecks_basic_capability_before_submitting(api, fake_comfy, monkeypatch):  # noqa: F811
+    # Isolate the capability recheck behind the separate ownership gate.
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     project = create_project(client)
     style = freeze_style(client, project)

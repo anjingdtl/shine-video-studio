@@ -24,9 +24,47 @@ def _fail():
     raise ValueError("must not expose a model response")
 
 
+def _spawn_descendant_and_return():
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+    return process.pid
+
+
 def _write_pid_wait(path):
     Path(path).write_text(str(os.getpid()), encoding="utf8")
     time.sleep(30)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows job objects")
+def test_stage_never_returns_when_process_group_exit_is_unconfirmed():
+    class UnconfirmedJob:
+        def attach(self, _pid):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            raise RuntimeError("GROUP_EXIT_UNCONFIRMED")
+
+        def close(self):
+            pass
+
+    with pytest.raises(RuntimeError, match="GROUP_EXIT_UNCONFIRMED"):
+        run_isolated(_return_pid, timeout=30, job_factory=UnconfirmedJob, return_evidence=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows job objects")
+def test_stage_receipt_binds_child_birth_and_empty_group():
+    pid, evidence = run_isolated(_return_pid, timeout=30, return_evidence=True)
+    assert evidence["pid"] == pid and isinstance(evidence["birth"], str) and evidence["birth"]
+    assert evidence["joined"] is True and evidence["group_active_processes"] == 0
+    assert process_identity(pid) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows job objects")
+def test_stage_receipt_waits_until_owned_descendant_has_exited():
+    descendant, evidence = run_isolated(_spawn_descendant_and_return, timeout=30, return_evidence=True)
+    assert evidence["group_active_processes"] == 0
+    assert evidence["group_members_waited"] >= 1
+    assert process_identity(descendant) is None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows job objects")

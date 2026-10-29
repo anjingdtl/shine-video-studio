@@ -31,6 +31,32 @@ def test_even_small_legacy_nonexclusive_leases_cannot_overlap(api):
         assert scheduler.admit(db, ids[1])
 
 
+def test_resource_admission_order_does_not_depend_on_wall_clock(api, monkeypatch):
+    from shine.comfyops.resource_epoch import read_epoch
+    from shine.models import utcnow
+
+    _, factory, _ = api
+    fixed = utcnow()
+    monkeypatch.setattr("shine.comfyops.scheduler.utcnow", lambda: fixed)
+    scheduler = ResourceScheduler()
+    with factory.begin() as db:
+        first = scheduler.enqueue(db, "epoch-first", 1, priority=10)
+        second = scheduler.enqueue(db, "epoch-second", 1, priority=1)
+        first_id, second_id = first.id, second.id
+    with factory() as db:
+        assert scheduler.admit(db, first_id)
+    with factory() as db:
+        first_epoch = read_epoch(db)
+    with factory.begin() as db:
+        scheduler.release(db, first_id, "epoch-first")
+    with factory() as db:
+        assert scheduler.admit(db, second_id)
+    with factory() as db:
+        second_epoch = read_epoch(db)
+    assert second_epoch["epoch"] == first_epoch["epoch"] + 1
+    assert second_epoch["lease_id"] == second_id
+
+
 def test_preflight_and_postflight_release_hold_the_slot(api):
     _, factory, _ = api
     events = []
@@ -48,6 +74,117 @@ def test_preflight_and_postflight_release_hold_the_slot(api):
     assert events == ["released", "inference", "released"]
     with resource_slot(factory, "ASR", 4000):
         pass
+
+
+def test_expired_stage_lease_requires_reconciliation_even_if_cleanup_succeeds(api):
+    from datetime import timedelta
+
+    from shine.models import utcnow
+
+    _, factory, _ = api
+    with pytest.raises(HTTPException, match="RECONCILIATION_REQUIRED"):
+        with resource_slot(factory, "VLM", 8000, release_models=lambda: None) as identity:
+            with factory.begin() as db:
+                db.get(ResourceLease, identity).expires_at = utcnow() - timedelta(seconds=1)
+    with factory() as db:
+        assert db.get(ResourceLease, identity).status == "RECONCILE_REQUIRED"
+    with pytest.raises(HTTPException, match="GPU_BUSY"):
+        with resource_slot(factory, "ASR", 4000):
+            pass
+
+
+def test_inherited_expired_lease_cannot_start_another_model(api):
+    from datetime import timedelta
+
+    from shine.comfyops.model_calls import TrackedProvider
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+    from shine.models import utcnow
+    from tests.conftest import create_project
+
+    client, factory, _ = api
+    project = create_project(client)
+    calls = []
+
+    class Provider:
+        is_mock = True
+
+        def generate(self, text):
+            calls.append(text)
+
+    with factory.begin() as db:
+        lease = ResourceLease(owner="h3:expired", budget_mb=16384, exclusive=True, priority=100, status="ACTIVE",
+                              expires_at=utcnow() - timedelta(seconds=1))
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+    token = CURRENT_RESOURCE.set(lease_id)
+    try:
+        with pytest.raises(HTTPException, match="RESOURCE_LEASE_LOST"):
+            TrackedProvider(Provider(), factory, project).generate("synthetic")
+    finally:
+        CURRENT_RESOURCE.reset(token)
+    assert not calls
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_inherited_lease_cannot_admit_parallel_model_calls(api):
+    from datetime import timedelta
+    from threading import Event, Thread
+
+    from shine.comfyops.model_calls import TrackedProvider
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+    from shine.models import utcnow
+    from tests.conftest import create_project
+
+    client, factory, _ = api
+    project = create_project(client)
+    started, release = Event(), Event()
+    entered, failures = [], []
+
+    class Provider:
+        is_mock = True
+
+        def generate(self, text):
+            entered.append(text)
+            if text == "first":
+                started.set()
+                assert release.wait(10)
+            return {"is_mock": True}
+
+    with factory.begin() as db:
+        lease = ResourceLease(owner="h3:serial-test", budget_mb=16384, exclusive=True, priority=100,
+                              status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60))
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+
+    def invoke(text):
+        token = CURRENT_RESOURCE.set(lease_id)
+        try:
+            TrackedProvider(Provider(), factory, project).generate(text)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            CURRENT_RESOURCE.reset(token)
+
+    first = Thread(target=invoke, args=("first",))
+    first.start()
+    try:
+        assert started.wait(10)
+        second = Thread(target=invoke, args=("second",))
+        second.start()
+        second.join(10)
+        assert not second.is_alive()
+        assert entered == ["first"]
+        assert len(failures) == 1 and "RESOURCE_STAGE_BUSY" in str(failures[0])
+    finally:
+        release.set()
+        first.join(10)
+    assert not first.is_alive()
+    invoke("third")
+    assert entered == ["first", "third"]
+    assert len(failures) == 1
 
 
 def test_nested_release_failure_cannot_be_cleared_by_parent_cleanup(api):
@@ -86,7 +223,9 @@ def test_review_intent_tracks_derived_frame_content(tmp_path):
     assert digest_input(Context(frame, "intent-two")) != digest_input(Context(frame, "intent-one"))
 
 
-def test_h3_preflight_release_failure_blocks_without_creating_attempt(api):
+def test_h3_preflight_release_failure_blocks_without_creating_attempt(api, monkeypatch):
+    # Isolate the release failure after admission has been established.
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     from types import SimpleNamespace
 
     from shine.models import Job

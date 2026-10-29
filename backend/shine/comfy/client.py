@@ -89,15 +89,17 @@ class ComfyUIClient:
         max_retries: int = 2,
         client_id: str = "shine",
         transport: httpx.BaseTransport | None = None,
+        trust_env: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.client_id = client_id
         self._transport = transport
+        self.trust_env = trust_env
 
     def _client(self) -> httpx.Client:
-        kwargs: dict[str, Any] = {"timeout": self.timeout_s, "transport": self._transport}
+        kwargs: dict[str, Any] = {"timeout": self.timeout_s, "transport": self._transport, "trust_env": self.trust_env}
         return httpx.Client(**kwargs)
 
     def _get(self, path: str, *, timeout: float | None = None) -> httpx.Response:

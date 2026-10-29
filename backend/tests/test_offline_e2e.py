@@ -30,6 +30,14 @@ from tests.conftest import (
 )
 from tests.fake_http import FakeComfyServer
 
+
+@pytest.fixture(autouse=True)
+def fake_physical_handoff(monkeypatch):
+    """This suite exercises mock QC, not a ComfyUI process lifecycle."""
+    monkeypatch.setattr("shine.worker._isolated_mock_handoff", lambda _settings, reviewers: all(
+        reviewer is None or reviewer.is_mock for reviewer in reviewers
+    ))
+
 SCRIPT = """场景一：雾港码头 夜
 林岚：你终于来了。
 林岚：码头那边灯塔还亮着。

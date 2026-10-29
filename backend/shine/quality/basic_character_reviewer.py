@@ -85,10 +85,14 @@ class BasicCharacterReviewer(LocalVisionReviewer):
                 "name": "shine_basic_character_review", "strict": True, "schema": schema}},
         }
         headers = {"Content-Type": "application/json"}
+        from shine.quality.review_admission import review_admission_headers
+
+        headers.update(review_admission_headers(self.config.base_url))
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        self.last_structured_output = self.last_executor_identity = None
-        with httpx.Client(timeout=self.config.timeout_s, follow_redirects=False) as client:
+        self.last_structured_output = self.last_executor_identity = self.last_isolation_receipt = None
+        with httpx.Client(timeout=self.config.timeout_s, follow_redirects=False,
+                          trust_env="X-Shine-Handoff-Token" not in headers) as client:
             response = client.post(self._endpoint(), headers=headers, json=payload)
         digest = hashlib.sha256(response.content).hexdigest()
         if response.status_code >= 500:

@@ -99,7 +99,7 @@ EXTERNAL_MISSING_GRACE_SECONDS = 30
 
 # Failure codes that mean "the external outcome is not known". Such a job may
 # still be reconcilable against ComfyUI history and must never be resubmitted.
-RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND", "QC_RECHECK_REQUESTED")
+RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND", "QC_RECHECK_REQUESTED", "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL")
 
 
 def _register_worker(db: Session, worker_id: str) -> None:
@@ -133,27 +133,63 @@ def heartbeat(
     phase: str | None = None,
     error: str | None = None,
     processed_delta: int = 0,
-) -> None:
+    expected_state_version: int | None = None,
+    attempt_id: str | None = None,
+    lease_seconds: int = 30,
+    allow_ack_transition: bool = False,
+) -> bool:
     try:
         with session_factory.begin() as db:
+            from sqlalchemy import text
+
+            db.execute(text("BEGIN IMMEDIATE"))
             _register_worker(db, worker_id)
             instance = db.get(WorkerInstance, worker_id)
             instance.status = status
             instance.current_job_id = current_job_id
             instance.current_phase = phase
-            if current_job_id:
+            resource_ok = True
+            if current_job_id and expected_state_version is not None and attempt_id:
                 from shine.comfyops.models import ResourceLease
 
                 resource = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + current_job_id))
-                if resource and resource.status == "ACTIVE":
-                    resource.heartbeat_at = utcnow()
-                    resource.expires_at = utcnow() + timedelta(seconds=60)
+                job, attempt, now = db.get(Job, current_job_id), db.get(JobAttempt, attempt_id), utcnow()
+                version_matches = bool(job and (job.state_version == expected_state_version or (
+                    allow_ack_transition and job.state_version == expected_state_version + 1
+                    and job.status == "RUNNING" and attempt and attempt.provider_job_id
+                    and job.provider_job_id == attempt.provider_job_id)))
+                owned = (job and attempt and attempt.job_id == job.id and job.lease_owner == worker_id
+                         and attempt.lease_owner == worker_id and version_matches
+                         and job.status in {"SUBMITTING", "RUNNING", "QC_PENDING"})
+                if not owned:
+                    resource_ok = False
+                elif (not resource or resource.status != "ACTIVE" or resource.expires_at <= now
+                      or not job.lease_expires_at or job.lease_expires_at <= now
+                      or not attempt.lease_expires_at or attempt.lease_expires_at <= now
+                      or job.stale or not _shot_is_current(db, job)):
+                    if not resource:
+                        from shine.comfyops.scheduler import ResourceScheduler
+
+                        resource = ResourceScheduler().enqueue(db, "h3:" + current_job_id, 16384, True, 100)
+                    resource.status = "RECONCILE_REQUIRED"
+                    if try_transition(job, "NEEDS_REVIEW"):
+                        job.failure_code = "COMFY_HEARTBEAT_RECONCILIATION_REQUIRED"
+                        job.lease_owner, job.lease_expires_at = None, None
+                        add_audit(db, "comfy-worker", "COMFY_HEARTBEAT_RECONCILIATION_REQUIRED", "job", job.id,
+                                  {"attempt_id": attempt_id, "resubmitted": False}, project_id=job.project_id)
+                    resource_ok = False
+                else:
+                    resource.heartbeat_at, resource.expires_at = now, now + timedelta(seconds=60)
+                    job.heartbeat_at = attempt.heartbeat_at = now
+                    job.lease_expires_at = attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
             instance.last_heartbeat_at = utcnow()
             instance.processed_count += processed_delta
             if error:
                 instance.last_error = error[:2000]
-    except Exception:  # pragma: no cover - the heartbeat must not kill the worker
-        logger.exception("worker_heartbeat_failed")
+        return resource_ok
+    except Exception as exc:  # pragma: no cover - the heartbeat must not kill the worker
+        logger.error("worker_heartbeat_failed error_type=%s", type(exc).__name__)
+        return False
 
 
 def _promote_dependencies(db: Session) -> None:
@@ -329,6 +365,14 @@ def _record_gates(
     )
 
 
+def _raise_if_managed_review(reviewer):
+    """An uncertain managed stage must reach its handoff context unchanged."""
+    from shine.comfyops.handoff_preparation import HandoffReviewProvider
+
+    if isinstance(reviewer, HandoffReviewProvider):
+        raise
+
+
 def _semantic_review(
     *,
     reviewer,
@@ -393,10 +437,13 @@ def _semantic_review(
     try:
         result = reviewer.review(context)
     except PermissionError as exc:
+        _raise_if_managed_review(reviewer)
         return [], f"SEMANTIC_REVIEW_FAILED: {exc}"
     except (TimeoutError, httpx.TimeoutException):
+        _raise_if_managed_review(reviewer)
         return [], "SEMANTIC_REVIEW_TIMEOUT: response unavailable"
     except ReceivedReviewError as exc:
+        _raise_if_managed_review(reviewer)
         if str(exc) == "VLM_RESPONSE_INCOMPLETE":
             finish = exc.finish_reason if exc.finish_reason in {"length", "content_filter"} else "UNSPECIFIED"
             return [], f"SEMANTIC_REVIEW_INCOMPLETE: {finish}"
@@ -410,8 +457,10 @@ def _semantic_review(
                    "RESPONSE_SHAPE_INVALID"}
         return [], f"SEMANTIC_REVIEW_CONTRACT_INVALID: {reason if reason in allowed else 'RESPONSE_REJECTED'}"
     except ValueError as exc:
+        _raise_if_managed_review(reviewer)
         return [], f"SEMANTIC_REVIEW_INVALID_JSON: {exc}"
     except Exception as exc:  # pragma: no cover - defensive
+        _raise_if_managed_review(reviewer)
         return [], f"SEMANTIC_REVIEW_FAILED: {type(exc).__name__}"
     if result is None:
         return [], "SEMANTIC_REVIEW_INVALID_JSON: the reviewer returned no result"
@@ -434,8 +483,10 @@ def _transcript_review(
     try:
         transcript = asr.transcribe(artifact_path)
     except TimeoutError as exc:
+        _raise_if_managed_review(asr)
         return None, None, f"ASR_FAILED: {exc}"
     except Exception as exc:  # pragma: no cover - defensive
+        _raise_if_managed_review(asr)
         return None, None, f"ASR_FAILED: {type(exc).__name__}"
     if getattr(asr, "is_mock", False) and not transcript.is_mock:
         transcript = replace(transcript, is_mock=True)
@@ -687,6 +738,17 @@ def run_one(
         with session_factory() as resource_db:
             if not scheduler.admit(resource_db, resource_id):
                 return None
+        effective_settings = settings or Settings.from_env()
+        if not _handoff_preflight_allowed(effective_settings, (semantic_reviewer, asr_reviewer)):
+            with session_factory.begin() as resource_db:
+                resource_db.get(ResourceLease, resource_id).status = "RECONCILE_REQUIRED"
+                blocked = resource_db.get(Job, job_id)
+                if blocked and blocked.status == "QUEUED":
+                    try_transition(blocked, "NEEDS_REVIEW")
+                    blocked.failure_code = "COMFY_HANDOFF_OWNERSHIP_UNVERIFIED"
+                    add_audit(resource_db, "orchestrator", "COMFY_HANDOFF_PREFLIGHT_BLOCKED", "job", job_id,
+                              {"submitted": False, "resource_id": resource_id}, project_id=blocked.project_id)
+            return job_id
         release_client = comfy_client or (comfy_service.client if comfy_service else None)
         if release_client is None and settings:
             release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
@@ -732,8 +794,22 @@ def run_one(
             with session_factory.begin() as resource_db:
                 job = resource_db.get(Job, job_id)
                 lease = resource_db.get(ResourceLease, resource_id)
-                if job and (
-                    job.status in {"SUBMITTING", "RUNNING"} or job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+                if job and job.lease_owner and job.lease_owner != worker_id:
+                    # A newer claim owns the job; this worker must not alter its lease.
+                    pass
+                elif lease.status == "RECONCILE_REQUIRED":
+                    # Never turn an uncertain handoff into a release by trying
+                    # the renderer's unload endpoint a second time.
+                    pass
+                elif not _isolated_mock_handoff(
+                    settings or Settings.from_env(), (semantic_reviewer, asr_reviewer)
+                ):
+                    # Even without a reviewer, another model cannot be admitted
+                    # solely on the renderer's self-reported unload.
+                    lease.status = "RECONCILE_REQUIRED"
+                elif job and (
+                    job.status in {"SUBMITTING", "RUNNING"}
+                    or job.failure_code in {"COMFY_SUBMISSION_OUTCOME_UNKNOWN", "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL"}
                 ):
                     lease.status = "RECONCILE_REQUIRED"
                 else:
@@ -750,6 +826,199 @@ def run_one(
                         scheduler.release(resource_db, resource_id, owner, reconciled=True)
 
 
+class _ManagedRenderHeartbeat:
+    """Extend the claimed job, attempt and resource during slow owned operations."""
+
+    def __init__(self, factory, worker_id, job_id, attempt_id, state_version, lease_seconds):
+        from threading import Event
+
+        self.factory, self.worker_id, self.job_id = factory, worker_id, job_id
+        self.attempt_id, self.state_version, self.lease_seconds = attempt_id, state_version, lease_seconds
+        self.stopped, self.error, self.thread = Event(), False, None
+
+    def _pulse(self):
+        return heartbeat(self.factory, self.worker_id, current_job_id=self.job_id,
+                         expected_state_version=self.state_version, attempt_id=self.attempt_id,
+                         lease_seconds=self.lease_seconds, allow_ack_transition=True)
+
+    def _run(self):
+        interval = min(10.0, max(0.1, self.lease_seconds / 3))
+        while not self.stopped.wait(interval):
+            if not self._pulse():
+                self.error = True
+                self.stopped.set()
+                return
+
+    def __enter__(self):
+        from threading import Thread
+
+        if not self._pulse():
+            raise HTTPException(409, "COMFY_HEARTBEAT_RECONCILIATION_REQUIRED")
+        self.thread = Thread(target=self._run, name="shine-managed-render-heartbeat", daemon=True)
+        self.thread.start()
+        return self
+
+    def check(self):
+        if self.error:
+            raise HTTPException(409, "COMFY_HEARTBEAT_RECONCILIATION_REQUIRED")
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=12)
+            if self.thread.is_alive():
+                raise HTTPException(409, "COMFY_HEARTBEAT_EXIT_UNCONFIRMED")
+        self.check()
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.stop()
+
+
+class _ManagedContinuation:
+    """In-process authority for one previously reserved managed continuation."""
+
+    def __init__(self, factory, settings, previous, boundary, job_id, lease_id):
+        from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
+
+        self.factory, self.settings, self.previous, self.boundary = factory, settings, previous, boundary
+        self.job_id, self.lease_id = job_id, lease_id
+        self.next = ManagedReviewCoordinator(
+            previous.replacement, previous.instance_id, previous.history_dir, previous.gpu_uuid,
+            min_ram_mb=previous.min_ram_mb, min_vram_mb=previous.min_vram_mb,
+            review_configs=previous._review_configs,
+        )
+        self.next._previous_releases = dict(previous._previous_releases)
+        self.next._cold_fences = dict(previous._cold_fences)
+
+    def before_prepare(self, service, attempt_id, worker_id, state_version):
+        from shine.comfy.client import ComfyUIClient
+        from shine.comfy.provider import ComfyUIRenderService
+        from shine.comfyops.models import ComfyInstance, ResourceLease
+        from shine.comfyops.resource_epoch import read_epoch
+        from shine.models import AppSetting
+
+        client = getattr(service, "client", None)
+        simulated = bool(self.settings.offline_simulation and getattr(service, "is_mock", False))
+        if (not client or getattr(client, "base_url", "").rstrip("/") != self.previous.replacement._url
+                or (not simulated and (type(service) is not ComfyUIRenderService
+                    or type(client) is not ComfyUIClient or client._transport is not None
+                    or client.trust_env is not False))):
+            raise HTTPException(409, "HANDOFF_RENDER_CLIENT_UNVERIFIED")
+        with self.factory.begin() as db:
+            guarded = _guard_claimed_job(db, job_id=self.job_id, expected_state_version=state_version,
+                                         worker_id=worker_id, attempt_id=attempt_id, settings=self.settings)
+            row = db.get(AppSetting, "handoff-reservation:" + self.job_id)
+            lease, instance = db.get(ResourceLease, self.lease_id), db.get(ComfyInstance, self.previous.instance_id)
+            if (not guarded or not guarded[0].lease_expires_at or guarded[0].lease_expires_at <= utcnow()
+                    or guarded[1].lease_owner != worker_id or guarded[1].lease_expires_at <= utcnow()
+                    or not row or row.value.get("stage") != "RESERVED"
+                    or row.value.get("lease_id") != self.lease_id or not lease or lease.status != "ACTIVE"
+                    or not instance or read_epoch(db) != row.value.get("resource_epoch")):
+                raise HTTPException(409, "HANDOFF_RESERVATION_INVALID")
+            payload, instance_hash = dict(instance.payload), instance.sha256
+        self.boundary.verify(self.factory, self.settings, self.previous.instance_id, attempt_id, self.lease_id)
+        self.previous.replacement.verify_drained_binding(payload.get("url", ""), payload.get("process"))
+        with self.factory() as db:
+            instance = db.get(ComfyInstance, self.previous.instance_id)
+            row = db.get(AppSetting, "handoff-reservation:" + self.job_id)
+            if (not instance or instance.sha256 != instance_hash or instance.payload != payload or not row
+                    or read_epoch(db) != row.value.get("resource_epoch")):
+                raise HTTPException(409, "HANDOFF_RESERVATION_INVALID")
+
+    def activate(self, attempt_id, worker_id, state_version):
+        from shine.comfyops.handoff_activation import activate_renderer_for_attempt
+
+        return activate_renderer_for_attempt(
+            self.factory, self.settings, self.previous.replacement, self.job_id, attempt_id, self.lease_id,
+            self.previous.instance_id, worker_id, state_version, physical_boundary=self.boundary,
+        )
+
+
+def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_service=None, comfy_client=None,
+                     semantic_reviewer=None, asr_reviewer=None):
+    """Continue one queued H3 job from a live prior handoff; no first-start authority is implied."""
+    from shine.comfyops.handoff_activation import ReviewReleaseBoundary
+    from shine.comfyops.handoff_idle import IdleHandoffKeeper
+    from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+    from shine.models import AppSetting
+
+    if (not isinstance(previous, ManagedReviewCoordinator) or not previous.session or not previous.session.finished
+            or not isinstance(previous.keeper, IdleHandoffKeeper) or not previous.replacement
+            or previous.keeper.factory is not session_factory
+            or previous.keeper.attempt_id != previous.session.attempt_id
+            or previous.keeper.supervisor is not previous.replacement or previous.session.factory is not session_factory
+            or not (semantic_reviewer or asr_reviewer)):
+        raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
+    if (Path(settings.data_dir).resolve() != Path(previous.session.settings.data_dir).resolve()
+            or settings.database_url != previous.session.settings.database_url
+            or bool(settings.offline_simulation) != bool(previous.session.settings.offline_simulation)):
+        raise HTTPException(409, "HANDOFF_SETTINGS_MISMATCH")
+    if not settings.offline_simulation and any(
+        getattr(provider, "is_mock", None) is not False for provider in (semantic_reviewer, asr_reviewer) if provider
+    ):
+        raise HTTPException(409, "HANDOFF_MOCK_REVIEW_FORBIDDEN")
+    with session_factory.begin() as db:
+        _promote_dependencies(db)
+        db.flush()
+        job = db.scalar(select(Job).where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
+                        .order_by(Job.created_at, Job.id).limit(1))
+        if not job or job.provider != "comfyui":
+            return None, previous
+        request = RenderRequest.model_validate(job.request)
+        policy = _project_policy(db, job.project_id)
+        if request.self_review_scope == "basic":
+            required = ({"VLM"} if request.shot_spec.characters else set()) | (
+                {"ASR"} if request.shot_spec.dialogue else set())
+        else:
+            required = ({"VLM"} if policy.require_semantic_review or policy.require_style_review else set()) | (
+                {"ASR"} if policy.require_audio_review and request.shot_spec.dialogue else set())
+        available = {kind for kind, provider in (("VLM", semantic_reviewer), ("ASR", asr_reviewer)) if provider}
+        if not required.issubset(available) or not available.issubset(previous._review_configs):
+            raise HTTPException(409, "HANDOFF_REQUIRED_REVIEW_MISSING")
+        if (not settings.offline_simulation
+                and not available.issubset(set(previous._previous_releases) | set(previous._cold_fences))):
+            raise HTTPException(409, "HANDOFF_REVIEW_COLD_FENCE_REQUIRED")
+        from urllib.parse import urlsplit
+
+        ports = [urlsplit(previous._review_configs[kind]["base_url"]).port for kind in available]
+        if len(ports) != len(set(ports)):
+            raise HTTPException(409, "HANDOFF_REVIEW_SERVICE_SHARED")
+        job_id = job.id
+    boundary = ReviewReleaseBoundary(previous.session, min_ram_mb=previous.min_ram_mb,
+                                     min_vram_mb=previous.min_vram_mb, cold_fences=previous._cold_fences,
+                                     review_configs=previous._review_configs,
+                                     prior_releases=previous._previous_releases)
+    reserved = previous.keeper.reserve(settings, boundary, job_id, previous.instance_id)
+    lease_id = reserved["lease_id"]
+    continuation, token = None, None
+    result = None
+    try:
+        continuation = _ManagedContinuation(session_factory, settings, previous, boundary, job_id, lease_id)
+        token = CURRENT_RESOURCE.set(lease_id)
+        result = _run_one(session_factory, worker_id=worker_id, settings=settings, comfy_service=comfy_service,
+                          comfy_client=comfy_client, semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+                          expected_job_id=job_id, managed_continuation=continuation)
+    finally:
+        if token is not None:
+            CURRENT_RESOURCE.reset(token)
+        if not (continuation and continuation.next.session and continuation.next.session.finished
+                and continuation.next.keeper):
+            with session_factory.begin() as db:
+                lease, job = db.get(ResourceLease, lease_id), db.get(Job, job_id)
+                row = db.get(AppSetting, "handoff-reservation:" + job_id)
+                newer_claim = bool(job and job.lease_owner and job.lease_owner != worker_id)
+                if lease and lease.owner == "h3:" + job_id and not newer_claim:
+                    lease.status = "RECONCILE_REQUIRED"
+                if row and row.value.get("stage") == "RESERVED" and not newer_claim:
+                    row.value = {**row.value, "stage": "RECONCILE_REQUIRED", "reason": "MANAGED_RUN_INCOMPLETE"}
+                if job and job.status == "QUEUED" and not newer_claim:
+                    try_transition(job, "NEEDS_REVIEW")
+                    job.failure_code = "COMFY_HANDOFF_RECONCILIATION_REQUIRED"
+    return result, continuation.next
+
+
 def _run_one(
     session_factory,
     provider: MockH3Provider | None = None,
@@ -761,6 +1030,7 @@ def _run_one(
     semantic_reviewer=None,
     asr_reviewer=None,
     expected_job_id=None,
+    managed_continuation=None,
 ) -> str | None:
     worker_id = worker_id or f"worker-{uuid4().hex[:12]}"
     if provider is None:
@@ -914,18 +1184,26 @@ def _run_one(
     job_id, idempotency_key, attempt_id, expected_version, job_provider, scenario, project_id = claimed
     try:
         if job_provider == "comfyui":
-            return _run_comfy_job(
-                session_factory,
-                job_id=job_id,
-                attempt_id=attempt_id,
-                expected_version=expected_version,
-                worker_id=worker_id,
-                settings=settings,
-                comfy_service=comfy_service,
-                comfy_client=comfy_client,
-                semantic_reviewer=semantic_reviewer,
-                asr_reviewer=asr_reviewer,
-            )
+            from contextlib import nullcontext
+
+            guard_scope = (_ManagedRenderHeartbeat(session_factory, worker_id, job_id, attempt_id,
+                                                    expected_version, settings.worker_lease_seconds)
+                           if managed_continuation is not None else nullcontext(None))
+            with guard_scope as managed_guard:
+                return _run_comfy_job(
+                    session_factory,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    expected_version=expected_version,
+                    worker_id=worker_id,
+                    settings=settings,
+                    comfy_service=comfy_service,
+                    comfy_client=comfy_client,
+                    semantic_reviewer=semantic_reviewer,
+                    asr_reviewer=asr_reviewer,
+                    managed_continuation=managed_continuation,
+                    managed_guard=managed_guard,
+                )
         return _run_mock_job(
             session_factory,
             provider,
@@ -938,18 +1216,34 @@ def _run_one(
             settings=settings,
         )
     except Exception as exc:
-        logger.exception("job_execution_failed job_id=%s", job_id)
+        # Provider exception text may contain URLs, credentials, or private input.
+        logger.error("job_execution_failed job_id=%s error_type=%s", job_id, type(exc).__name__)
         try:
             with session_factory.begin() as db:
                 job = db.get(Job, job_id)
                 attempt = db.get(JobAttempt, attempt_id)
-                if job:
-                    job.failure_code = "WORKER_EXCEPTION"
+                expected_failure_version = expected_version
+                if (job and attempt and job.status == "RUNNING" and job.provider_job_id
+                        and attempt.provider_job_id == job.provider_job_id):
+                    expected_failure_version += 1  # Acknowledgement is one guarded transition.
+                owned = (job and attempt and job.lease_owner == worker_id and attempt.lease_owner == worker_id
+                         and job.state_version == expected_failure_version and job.status in {"SUBMITTING", "RUNNING"}
+                         and job.lease_expires_at and job.lease_expires_at > utcnow()
+                         and attempt.lease_expires_at > utcnow() and not job.stale and _shot_is_current(db, job))
+                if owned:
+                    if job.provider == "comfyui" and attempt.provider_job_id:
+                        job.failure_code = "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL"
+                        attempt.reconciliation_state = "worker_exception_known_id"
+                    elif job.provider == "comfyui" and attempt.prompt_graph_sha256:
+                        job.failure_code = "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+                        attempt.status = "ACK_UNCERTAIN"
+                        attempt.reconciliation_state = "submission_unknown"
+                    else:
+                        job.failure_code = "WORKER_EXCEPTION"
                     job.lease_owner = None
                     job.lease_expires_at = None
-                    if job.status not in {"NEEDS_REVIEW", "FAILED"}:
-                        try_transition(job, "NEEDS_REVIEW")
-                    if attempt:
+                    try_transition(job, "NEEDS_REVIEW")
+                    if job.provider != "comfyui" or not (attempt.provider_job_id or attempt.prompt_graph_sha256):
                         attempt.status = "FAILED"
                         attempt.failure_code = "WORKER_EXCEPTION"
                     add_audit(
@@ -1115,6 +1409,40 @@ def _load_comfy_context(
     return profile, request, manifest, assets, policy, language
 
 
+def _isolated_mock_handoff(settings, reviewers):
+    """Only isolated offline simulation may use the synthetic handoff."""
+    return settings.offline_simulation and all(
+        reviewer is None or getattr(reviewer, "is_mock", False) for reviewer in reviewers
+    )
+
+
+def _handoff_preflight_allowed(settings, reviewers):
+    return _isolated_mock_handoff(settings, reviewers)
+
+
+def _collect_comfy_reviews(*, request, settings, artifact_path, digest, job_id, project_id, remote_consent,
+                           semantic_reviewer, asr_reviewer, review_revision):
+    technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
+        artifact_path,
+        expectations=TechnicalExpectations(
+            duration_s=request.expected_duration_s, expect_audio=bool(request.shot_spec.dialogue),
+        ),
+    )
+    transcript, transcript_findings, asr_error = _transcript_review(
+        asr=asr_reviewer, artifact_path=artifact_path, spec=request.shot_spec, remote_consent=remote_consent,
+    )
+    semantic_results, semantic_error = _semantic_review(
+        reviewer=semantic_reviewer, job_id=job_id, spec=request.shot_spec, style=request.style_snapshot,
+        artifact_path=artifact_path, artifact_sha256=digest, settings=settings, remote_consent=remote_consent,
+        project_id=project_id, transcript=transcript, reference_manifest=request.reference_manifest,
+        review_revision=review_revision,
+        independent_input=({"artifact_id": request.style_input_assessment_id,
+                            "sha256": request.style_input_assessment_sha256}
+                           if request.style_input_assessment_id else None),
+    )
+    return technical, transcript, transcript_findings, asr_error, semantic_results, semantic_error
+
+
 def _finalize_comfy_attempt(
     session_factory,
     *,
@@ -1127,6 +1455,7 @@ def _finalize_comfy_attempt(
     prompt_id: str,
     semantic_reviewer=None,
     asr_reviewer=None,
+    managed_handoff=None,
 ) -> str:
     """Download the external output, run every quality gate and decide the outcome.
 
@@ -1254,28 +1583,81 @@ def _finalize_comfy_attempt(
                     try_transition(job, "NEEDS_REVIEW")
             return job_id
 
+    # Record the downloaded bytes before any process lifecycle operation. A
+    # ComfyUI restart may erase in-memory history; recovery must retain the
+    # exact output and must never submit the render again to recover it.
+    with session_factory.begin() as db:
+        guarded = _guard_claimed_job(
+            db, job_id=job_id,
+            expected_state_version=expected_state_version if expected_state_version is not None else -1,
+            worker_id=worker_id, attempt_id=attempt_id,
+            allowed_status=("RUNNING", "QC_PENDING", "SUBMITTING"), settings=settings,
+        )
+        if guarded is None:
+            return job_id
+        collected_job, collected_attempt = guarded
+        if not collected_job.artifact_id:
+            artifact = MediaArtifact(
+                project_id=project_id, job_id=job_id, attempt_id=attempt_id,
+                artifact_kind="video", storage_path=relative, sha256=digest,
+                byte_size=byte_size, content_type=content_type, is_mock=False,
+                provenance={"prompt_id": prompt_id},
+            )
+            db.add(artifact)
+            db.flush()
+            collected_job.artifact_id = artifact.id
+            collected_attempt.output_path = relative
+            collected_attempt.output_sha256 = digest
+            collected_attempt.output_bytes = byte_size
+            add_audit(db, "comfy-worker", "COMFY_OUTPUT_PERSISTED", "job", job_id,
+                      {"attempt_id": attempt_id, "artifact_id": artifact.id, "sha256": digest},
+                      project_id=project_id)
+
+    if request.self_review_scope == "basic" and not request.shot_spec.characters:
+        semantic_reviewer = None
+    review_scope = None
     if semantic_reviewer or asr_reviewer:
         from shine.comfyops.model_calls import TrackedProvider
         from shine.comfyops.models import ResourceLease
         from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
 
-        # A finished render is not proof that its weights were unloaded. Confirm
-        # release before admitting another model, including during crash recovery.
-        try:
-            service.client.free_models()
-        except Exception:
+        # Offline simulation is restricted to isolated mock reviewers. A real
+        # renderer's HTTP unload is not evidence of process ownership or host
+        # memory release, even if its own CUDA counters report idle.
+        simulated = _isolated_mock_handoff(settings, (semantic_reviewer, asr_reviewer))
+        if not simulated and managed_handoff is None:
             with session_factory.begin() as release_db:
                 current_job = release_db.get(Job, job_id)
-                current_job.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
+                lease = release_db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+                if lease is None:
+                    lease = ResourceScheduler().enqueue(release_db, "h3:" + job_id, 16384, True, 100)
+                lease.status = "RECONCILE_REQUIRED"
+                current_job.failure_code = "COMFY_HANDOFF_OWNERSHIP_UNVERIFIED"
                 current_job.lease_owner = None
                 current_job.lease_expires_at = None
                 try_transition(current_job, "NEEDS_REVIEW")
+                add_audit(release_db, "comfy-worker", "COMFY_HANDOFF_BLOCKED", "job", job_id,
+                          {"attempt_id": attempt_id, "reason": current_job.failure_code,
+                           "render_resubmission": False}, project_id=project_id)
             return job_id
-        with session_factory.begin() as release_db:
-            lease = release_db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
-            if lease:
-                ResourceScheduler().release(release_db, lease.id, lease.owner, reconciled=True)
-        CURRENT_RESOURCE.set(None)
+
+        if managed_handoff is None:
+            # This path is limited to isolated offline mock simulation.
+            try:
+                service.client.free_models()
+            except Exception:
+                with session_factory.begin() as release_db:
+                    current_job = release_db.get(Job, job_id)
+                    current_job.failure_code = "MODEL_RELEASE_RECONCILIATION_REQUIRED"
+                    current_job.lease_owner = None
+                    current_job.lease_expires_at = None
+                    try_transition(current_job, "NEEDS_REVIEW")
+                return job_id
+            with session_factory.begin() as release_db:
+                lease = release_db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+                if lease:
+                    ResourceScheduler().release(release_db, lease.id, lease.owner, reconciled=True)
+            CURRENT_RESOURCE.set(None)
         if semantic_reviewer and request.self_review_scope == "basic":
             from shine.quality.basic_character_reviewer import BasicCharacterReviewer
             from shine.quality.semantic import LocalVisionReviewer
@@ -1284,43 +1666,37 @@ def _finalize_comfy_attempt(
                 semantic_reviewer = BasicCharacterReviewer(
                     semantic_reviewer.config, resource_mb=semantic_reviewer.resource_budget_mb("review")
                 )
-        if semantic_reviewer:
-            semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id, reviewer_kind="VLM",
-                                                 production_job_id=job_id)
-        if asr_reviewer:
-            asr_reviewer = TrackedProvider(asr_reviewer, session_factory, project_id, reviewer_kind="ASR",
-                                            production_job_id=job_id)
+        if managed_handoff is not None:
+            from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
 
-    technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
-        artifact_path,
-        expectations=TechnicalExpectations(
-            duration_s=request.expected_duration_s,
-            expect_audio=bool(request.shot_spec.dialogue),
-        ),
-    )
-    transcript, transcript_findings, asr_error = _transcript_review(
-        asr=asr_reviewer,
-        artifact_path=artifact_path,
-        spec=request.shot_spec,
-        remote_consent=remote_consent,
-    )
-    semantic_results, semantic_error = _semantic_review(
-        reviewer=(semantic_reviewer if request.self_review_scope != "basic" or request.shot_spec.characters else None),
-        job_id=job_id,
-        spec=request.shot_spec,
-        style=request.style_snapshot,
-        artifact_path=artifact_path,
-        artifact_sha256=digest,
-        settings=settings,
-        remote_consent=remote_consent,
-        project_id=project_id,
-        transcript=transcript,
-        reference_manifest=request.reference_manifest,
-        review_revision=review_revision,
-        independent_input=({"artifact_id": request.style_input_assessment_id,
-                            "sha256": request.style_input_assessment_sha256}
-                           if request.style_input_assessment_id else None),
-    )
+            if not isinstance(managed_handoff, ManagedReviewCoordinator):
+                raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
+            with session_factory() as db:
+                lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+                if not lease:
+                    raise HTTPException(409, "HANDOFF_RESOURCE_LEASE_LOST")
+                lease_id = lease.id
+            review_scope = managed_handoff.review(
+                session_factory, settings, job_id, attempt_id, lease_id, worker_id, expected_state_version,
+                project_id, semantic_reviewer, asr_reviewer,
+            )
+        else:
+            if semantic_reviewer:
+                semantic_reviewer = TrackedProvider(semantic_reviewer, session_factory, project_id,
+                                                     reviewer_kind="VLM", production_job_id=job_id)
+            if asr_reviewer:
+                asr_reviewer = TrackedProvider(asr_reviewer, session_factory, project_id, reviewer_kind="ASR",
+                                               production_job_id=job_id)
+
+    from contextlib import nullcontext
+
+    with review_scope or nullcontext((semantic_reviewer, asr_reviewer)) as (semantic, asr):
+        reviewed = _collect_comfy_reviews(
+            request=request, settings=settings, artifact_path=artifact_path, digest=digest, job_id=job_id,
+            project_id=project_id, remote_consent=remote_consent, semantic_reviewer=semantic, asr_reviewer=asr,
+            review_revision=review_revision,
+        )
+        technical, transcript, transcript_findings, asr_error, semantic_results, semantic_error = reviewed
     if request.self_review_scope == "basic":
         from shine.quality.basic_character_reviewer import CharacterReview
         from shine.quality.basic_review import (
@@ -1488,6 +1864,8 @@ def _run_comfy_job(
     comfy_client,
     semantic_reviewer=None,
     asr_reviewer=None,
+    managed_continuation=None,
+    managed_guard=None,
 ) -> str:
     settings = settings or Settings.from_env()
     client = comfy_client
@@ -1519,7 +1897,15 @@ def _run_comfy_job(
                 project_id=job.project_id,
             )
             return job_id
-    heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting")
+    if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting",
+                     expected_state_version=expected_version, attempt_id=attempt_id,
+                     lease_seconds=settings.worker_lease_seconds):
+        return job_id
+    if managed_continuation is not None:
+        if not isinstance(managed_continuation, _ManagedContinuation) or managed_continuation.job_id != job_id:
+            raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
+        managed_guard.check()
+        managed_continuation.before_prepare(service, attempt_id, worker_id, expected_version)
     try:
         prepared = service.prepare(
             request,
@@ -1588,6 +1974,8 @@ def _run_comfy_job(
             )
         return job_id
 
+    if managed_guard is not None:
+        managed_guard.check()
     # The submission intent is durable before the external call. If the call
     # is accepted but the response is lost, the persisted graph hash is enough
     # to find the original task instead of submitting a second one.
@@ -1610,6 +1998,10 @@ def _run_comfy_job(
             },
             project_id=project_id,
         )
+
+    if managed_continuation is not None:
+        managed_continuation.activate(attempt_id, worker_id, expected_version)
+        managed_guard.check()
 
     try:
         with session_factory() as submit_db:
@@ -1640,7 +2032,58 @@ def _run_comfy_job(
                 ):
                     submit_db.commit()  # persist a guard's rejection before ending this writer transaction
                     return job_id
+                if managed_continuation is not None:
+                    from copy import deepcopy
+
+                    from shine.comfy.workflow import graph_hash
+                    from shine.comfyops.handoff_activation import _check
+                    from shine.comfyops.resource_epoch import read_epoch
+                    from shine.models import AppSetting
+
+                    _, managed_instance = _check(
+                        submit_db, settings, job_id, attempt_id, managed_continuation.lease_id,
+                        managed_continuation.previous.instance_id, worker_id, expected_version,
+                    )
+                    activation = submit_db.get(AppSetting, "renderer-activation:" + attempt_id)
+                    activation_value = activation.value if activation else {}
+                    if (activation_value.get("stage") != "CONFIRMED" or activation_value.get("job_id") != job_id
+                            or activation_value.get("lease_id") != managed_continuation.lease_id
+                            or activation_value.get("instance_sha256") != managed_instance.sha256
+                            or read_epoch(submit_db) != activation_value.get("physical_release", {}).get(
+                                "observed_resource_epoch")):
+                        raise HTTPException(409, "COMFY_ACTIVATION_INTENT_CHANGED")
+                    prepared = replace(prepared, prompt=deepcopy(prepared.prompt))
+                    persisted_graph_hash = submit_db.get(JobAttempt, attempt_id).prompt_graph_sha256
+                    if (graph_hash(prepared.prompt) != prepared.prompt_graph_sha256
+                            or persisted_graph_hash != prepared.prompt_graph_sha256):
+                        raise HTTPException(409, "COMFY_PROMPT_GRAPH_CHANGED")
+                    managed_continuation.previous.replacement.verify_binding(
+                        managed_instance.payload.get("url", ""), managed_instance.payload.get("process"),
+                    )
+                    _check(submit_db, settings, job_id, attempt_id, managed_continuation.lease_id,
+                           managed_continuation.previous.instance_id, worker_id, expected_version)
             except HTTPException as exc:
+                if managed_continuation is not None:
+                    from shine.comfyops.models import ResourceLease
+                    from shine.models import AppSetting
+
+                    if (current and current.lease_owner == worker_id and current.state_version == expected_version
+                            and current.status == "SUBMITTING"):
+                        resource = submit_db.get(ResourceLease, managed_continuation.lease_id)
+                        if resource and resource.owner == "h3:" + job_id:
+                            resource.status = "RECONCILE_REQUIRED"
+                        activation = submit_db.get(AppSetting, "renderer-activation:" + attempt_id)
+                        if activation and activation.value.get("stage") == "CONFIRMED":
+                            activation.value = {**activation.value, "stage": "RECONCILE_REQUIRED",
+                                                "last_confirmed_stage": "CONFIRMED", "reason": str(exc.detail)}
+                        current.failure_code = "COMFY_ACTIVATION_RECONCILIATION_REQUIRED"
+                        current.lease_owner, current.lease_expires_at = None, None
+                        try_transition(current, "NEEDS_REVIEW")
+                        add_audit(submit_db, "comfy-worker", "COMFY_SUBMIT_GUARD_BLOCKED", "job", current.id,
+                                  {"attempt_id": attempt_id, "reason": str(exc.detail), "resubmitted": False},
+                                  project_id=current.project_id)
+                    submit_db.commit()
+                    return job_id
                 current.failure_code = str(exc.detail)
                 current.lease_owner = None
                 current.lease_expires_at = None
@@ -1730,6 +2173,15 @@ def _run_comfy_job(
             settings=settings,
         )
         if guarded is None:
+            # The external acknowledgement is evidence even if another worker
+            # now owns the claim; never overwrite its job/attempt state.
+            if db.get(Job, job_id):
+                db.add(ExternalJobReconciliation(
+                    job_id=job_id, provider_job_id=submission.prompt_id,
+                    action="ack_after_claim_lost", result="requires_reconciliation",
+                    evidence={"attempt_id": attempt_id, "prompt_graph_sha256": submission.prompt_graph_sha256,
+                              "resubmitted": False},
+                ))
             return job_id
         job, attempt = guarded
         job.provider_job_id = submission.prompt_id
@@ -1754,10 +2206,17 @@ def _run_comfy_job(
             },
             project_id=job.project_id,
         )
-    heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering")
+    if managed_guard is not None:
+        managed_guard.check()
+    if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering",
+                     expected_state_version=ack_state_version, attempt_id=attempt_id,
+                     lease_seconds=settings.worker_lease_seconds):
+        return job_id
     deadline = time.monotonic() + 600
     missing_since: float | None = None
     while True:
+        if managed_guard is not None:
+            managed_guard.check()
         result = service.poll(submission.prompt_id)
         if result.status == "not_found":
             # ComfyUI removes a finished prompt from the queue before its history
@@ -1772,7 +2231,10 @@ def _run_comfy_job(
             break
         else:
             missing_since = None
-        heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering")
+        if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="rendering",
+                         expected_state_version=ack_state_version, attempt_id=attempt_id,
+                         lease_seconds=settings.worker_lease_seconds):
+            return job_id
         if time.monotonic() >= deadline:
             result = ComfyResult(status="timeout", error_code="COMFY_TIMEOUT")
             break
@@ -1841,6 +2303,8 @@ def _run_comfy_job(
             )
         return job_id
 
+    if managed_guard is not None:
+        managed_guard.stop()
     return _finalize_comfy_attempt(
         session_factory,
         job_id=job_id,
@@ -1852,6 +2316,7 @@ def _run_comfy_job(
         prompt_id=submission.prompt_id,
         semantic_reviewer=semantic_reviewer,
         asr_reviewer=asr_reviewer,
+        managed_handoff=managed_continuation.next if managed_continuation else None,
     )
 
 
@@ -1957,6 +2422,23 @@ def _claim_stranded_job(db: Session, job: Job, worker_id: str, settings: Setting
     return job.state_version
 
 
+def _live_handoff_reservation(db, job, lease, now):
+    from shine.comfyops.installer import process_identity
+    from shine.models import AppSetting
+
+    row = db.get(AppSetting, "handoff-reservation:" + job.id) if job else None
+    value = row.value if row and isinstance(row.value, dict) else {}
+    if (not job or job.status != "QUEUED" or not lease or lease.status != "ACTIVE"
+            or lease.owner != "h3:" + job.id or lease.expires_at <= now or value.get("stage") != "RESERVED"
+            or value.get("job_id") != job.id or value.get("lease_id") != lease.id
+            or type(value.get("worker_pid")) is not int or not value.get("worker_birth")):
+        return False
+    try:
+        return process_identity(value["worker_pid"]) == value["worker_birth"]
+    except (OSError, ValueError):
+        return False
+
+
 def recover_expired_jobs(
     session_factory,
     worker_id: str,
@@ -1987,6 +2469,18 @@ def recover_expired_jobs(
                 )
             ).all()
         )
+        from shine.comfyops.models import ResourceLease
+        from shine.models import AppSetting
+
+        for row in db.scalars(select(AppSetting).where(AppSetting.key.like("handoff-reservation:%"))):
+            value = row.value if isinstance(row.value, dict) else {}
+            reservation_job_id = row.key.removeprefix("handoff-reservation:")
+            job = db.get(Job, reservation_job_id)
+            if not job or job.status != "QUEUED":
+                continue
+            lease = db.get(ResourceLease, value.get("lease_id")) if value.get("lease_id") else None
+            if not _live_handoff_reservation(db, job, lease, now):
+                job_ids.append(job.id)
     recovered = 0
     for job_id in job_ids:
         from shine.comfyops.models import ResourceLease
@@ -2027,8 +2521,16 @@ def recover_expired_jobs(
             db.scalars(select(ResourceLease).where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])))
         )
         for lease in leases:
+            if lease.status == "RECONCILE_REQUIRED":
+                continue  # Requires explicit physical reconciliation, not an HTTP unload retry.
             owner_job_id = lease.owner.removeprefix("h3:")
             job = db.get(Job, owner_job_id)
+            if lease.owner.startswith("h3:"):
+                if _live_handoff_reservation(db, job, lease, utcnow()):
+                    continue
+                if not job or job.status not in ACTIVE_STATUSES or lease.expires_at <= utcnow():
+                    lease.status = "RECONCILE_REQUIRED"
+                continue  # Renderer unload alone cannot establish physical process release.
             if job is not None and job.status in ACTIVE_STATUSES:
                 continue
             attempt = _latest_attempt(db, owner_job_id) if job is not None else None
@@ -2049,6 +2551,62 @@ def recover_expired_jobs(
     return recovered
 
 
+def _block_interrupted_handoff(session_factory, job_id):
+    """Preserve unresolved process side effects before any renderer recovery call."""
+    from sqlalchemy import text
+
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import ResourceScheduler
+    from shine.models import AppSetting
+
+    with session_factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        job = db.get(Job, job_id)
+        if not job or (job.lease_expires_at and job.lease_expires_at > utcnow()):
+            return False
+        attempt = _latest_attempt(db, job_id)
+        journal = db.get(AppSetting, "handoff:" + attempt.id) if attempt else None
+        activation, reservation = False, False
+        if not journal and attempt:
+            journal = db.get(AppSetting, "renderer-activation:" + attempt.id)
+            activation = journal is not None
+        if not journal:
+            journal = db.get(AppSetting, "handoff-reservation:" + job_id)
+            reservation = journal is not None
+        if not journal:
+            return False
+        raw_value = journal.value
+        value = raw_value if isinstance(raw_value, dict) else {"original_value": raw_value}
+        binding_mismatch = value.get("job_id") != job_id
+        if not reservation and (binding_mismatch or not attempt or value.get("attempt_id") != attempt.id):
+            raise HTTPException(409, "HANDOFF_INTENT_BINDING_CHANGED")
+        lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+        lease_mismatch = reservation and value.get("lease_id") != (lease.id if lease else None)
+        if reservation and not lease_mismatch and _live_handoff_reservation(db, job, lease, utcnow()):
+            return False
+        if lease is None:
+            lease = ResourceScheduler().enqueue(db, "h3:" + job_id, 16384, True, 100)
+        lease.status = "RECONCILE_REQUIRED"
+        if value.get("stage") != "RECONCILE_REQUIRED" or binding_mismatch or lease_mismatch:
+            journal.value = {**value, "stage": "RECONCILE_REQUIRED", "last_confirmed_stage": value.get("stage"),
+                             "reason": ("RESERVATION_JOB_BINDING_CHANGED" if binding_mismatch else
+                                        "RESERVATION_LEASE_BINDING_CHANGED" if lease_mismatch else
+                                        "WORKER_LEASE_EXPIRED_DURING_HANDOFF"),
+                             **({"recovery_job_id": job_id} if binding_mismatch else {}),
+                             **({"recovery_lease_id": lease.id} if lease_mismatch else {})}
+        if job.status != "NEEDS_REVIEW":
+            try_transition(job, "NEEDS_REVIEW")
+        job.failure_code = ("COMFY_ACTIVATION_RECONCILIATION_REQUIRED" if activation
+                            else "COMFY_HANDOFF_RECONCILIATION_REQUIRED")
+        job.lease_owner = None
+        job.lease_expires_at = None
+        add_audit(db, "orchestrator", "COMFY_HANDOFF_RECOVERY_BLOCKED", "job", job.id,
+                  {"attempt_id": attempt.id if attempt else None, "last_stage": value.get("stage"),
+                   "resubmitted": False},
+                  project_id=job.project_id)
+        return True
+
+
 def _recover_one_job(
     session_factory,
     worker_id: str,
@@ -2059,6 +2617,8 @@ def _recover_one_job(
     semantic_reviewer=None,
     asr_reviewer=None,
 ) -> int:
+    if _block_interrupted_handoff(session_factory, job_id):
+        return 1
     finalize: dict[str, Any] | None = None
     with session_factory.begin() as db:
         job = db.get(Job, job_id)

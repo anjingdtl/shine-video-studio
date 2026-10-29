@@ -38,7 +38,8 @@ def comfy_settings(settings: Settings) -> Settings:
     )
 
 
-def test_accepted_but_unacknowledged_submission_is_never_resubmitted(api, fake_comfy):
+def test_accepted_but_unacknowledged_submission_is_never_resubmitted(api, fake_comfy, monkeypatch):
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.mode = "accept_then_drop"
     project_id = create_project(client)
@@ -63,7 +64,8 @@ def test_accepted_but_unacknowledged_submission_is_never_resubmitted(api, fake_c
     assert len(fake_comfy.prompts) == 1
 
 
-def test_uncertain_submission_is_recovered_from_history_without_a_second_render(api, fake_comfy):
+def test_uncertain_submission_is_recovered_from_history_without_a_second_render(api, fake_comfy, monkeypatch):
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id = create_project(client)
@@ -178,7 +180,8 @@ def test_offline_comfyui_is_reported_as_unavailable(api, fake_comfy):
     assert result["failure_code"] == "RECONCILIATION_UNAVAILABLE"
 
 
-def test_explicit_rejection_is_a_safe_failure_not_an_uncertain_submission(api, fake_comfy):
+def test_explicit_rejection_is_a_safe_failure_not_an_uncertain_submission(api, fake_comfy, monkeypatch):
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.mode = "reject"
     project_id = create_project(client)
@@ -198,7 +201,8 @@ def test_explicit_rejection_is_a_safe_failure_not_an_uncertain_submission(api, f
     assert fake_comfy.prompt_count == 0
 
 
-def test_execution_error_is_reported_distinctly(api, fake_comfy):
+def test_execution_error_is_reported_distinctly(api, fake_comfy, monkeypatch):
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.mode = "error"
     project_id = create_project(client)
