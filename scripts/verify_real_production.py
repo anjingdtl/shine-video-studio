@@ -41,13 +41,13 @@ import httpx
 from playwright.sync_api import sync_playwright
 
 STYLE = [
-    "平视中近景，稳定缓推，浅景深",
-    "对话保持视线轴线，人物走位连贯",
-    "青灰环境与温暖肤色，雨夜霓虹反射",
-    "单侧主光，保留阴影层次",
-    "自然浅景深，轻颗粒",
-    "对白停顿后切反应镜头",
-    "普通话自然语速，环境声克制",
+    "Medium close shot under neon in the night rain, with a slight handheld breathing movement",
+    "Keep the dialogue eyeline; the character stays in side profile and moves continuously",
+    "Cool grey environment against warm skin tones, neon reflected in the wet asphalt",
+    "Single key light from the side, keeping shadow detail in the rain",
+    "Natural shallow depth of field with a light film grain",
+    "Cut on the pause after a line",
+    "Natural spoken pace in Mandarin, restrained ambience",
 ]
 
 # Three shots with a real Chinese dialogue line, a soft continuity relation and
@@ -56,8 +56,10 @@ STYLE = [
 SHOTS = [
     {
         "name": "验收A-雨夜街口",
-        "beat": "雨夜霓虹街头，人物穿黑色战术外套冒雨走向镜头，湿发贴在脸侧，霓虹在积水路面反光；"
-                "她瞥向一辆驶过的黑色轿车，随即继续前行，神情冷静专注。",
+        "beat": "On a rain-slicked neon boulevard at night, <Subject 1> walks steadily toward the camera in a "
+                "fitted black tactical outfit, her shoulder-length dark hair damp from the rain, neon signage "
+                "reflecting across the wet asphalt around her. She glances once toward a passing black sedan, "
+                "then keeps moving with calm focus.",
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "",
@@ -68,8 +70,9 @@ SHOTS = [
     },
     {
         "name": "验收B-中文对白",
-        "beat": "同一条雨夜霓虹街道，人物在店招下停步，保持侧身面向街道，压低声音说话，音色参考音频参考；"
-                "她用普通话低声说：账册在老地方，别让人看见。雨一直下，霓虹在湿地面上滑动。",
+        "beat": "On the same rain-slicked neon boulevard, <Subject 1> stops beside a storefront, stays in side "
+                "profile toward the street and speaks quietly with the voice timbre referenced from <Audio 1>. "
+                "Rain keeps falling; neon reflections slide across the wet pavement.",
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "账册在老地方，别让人看见。",
@@ -80,8 +83,9 @@ SHOTS = [
     },
     {
         "name": "验收C-软连续性",
-        "beat": "延续上一镜的雨夜街口，人物继续向前，保持侧身，压低声音补上一句：我们天亮之前就走；"
-                "她抬手挡雨，远处霓虹在积水里碎成光斑。",
+        "beat": "Continuing the same rain-slicked boulevard, <Subject 1> keeps walking and adds one more quiet "
+                "line. She raises a hand against the rain; distant neon breaks into light patches in the "
+                "standing water.",
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "我们天亮之前就走。",

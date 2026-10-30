@@ -329,8 +329,17 @@ def _record_gates(
     artifact: MediaArtifact | None,
     gates: list[GateOutcome],
     fused: FusedQCResult,
+    transcript: Transcript | None = None,
 ) -> None:
     payload = fused.model_dump(mode="json")
+    if transcript is not None:
+        # The real transcript is the evidence behind the dialogue gate.  It is
+        # derived from this project's own media, so it belongs in the report.
+        payload["transcript"] = {
+            "text": transcript.text,
+            "is_mock": transcript.is_mock,
+            "model": transcript.model,
+        }
     existing = db.scalars(select(QCReport).where(QCReport.job_id == job.id, QCReport.attempt_id == attempt.id)).all()
     if any(row.report == payload and row.artifact_id == (artifact.id if artifact else None) for row in existing):
         # Idempotent crash recovery; changed reviews are new immutable reports.
@@ -2277,7 +2286,7 @@ def _finalize_comfy_attempt(
         attempt.reconciliation_state = "collected"
         attempt.reconciled_at = utcnow()
         job.last_qc_result = fused.result
-        _record_gates(db, job, attempt, artifact, gates, fused)
+        _record_gates(db, job, attempt, artifact, gates, fused, transcript)
         if job.status in {"SUBMITTING", "RUNNING"}:
             transition(job, "QC_PENDING")
         job.lease_owner = None
