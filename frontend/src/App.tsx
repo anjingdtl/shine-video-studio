@@ -14,6 +14,7 @@ import AssetPanel from './components/AssetPanel';
 import StylePanel from './components/StylePanel';
 import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
+import ProductionSeriesPanel from './components/ProductionSeriesPanel';
 import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
@@ -484,6 +485,19 @@ function App() {
                 onRecheck={recheckReview}
               />
             </section>
+
+            <ProductionSeriesPanel
+              key={`series-${projectId}`}
+              projectId={projectId}
+              shots={shots}
+              workflowProfiles={workflowProfiles}
+              system={system}
+              busy={busy}
+              reviewWidth={reviewWidth}
+              reviewHeight={reviewHeight}
+              onStarted={() => refreshAll().catch(() => undefined)}
+              onMessage={report}
+            />
 
             <SettingsPanel
               project={project}

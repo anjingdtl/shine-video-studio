@@ -1094,11 +1094,16 @@ class _FirstManagedContinuation(_ManagedAttemptContext):
 
 
 def run_managed_first(session_factory, worker_id, *, settings, recipe, review_configs,
-                      comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None):
+                      comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                      expected_job_id: str | None = None):
     """Run the first managed job behind a freshly started, closed renderer.
 
     The renderer is created only after an exclusive lease exists, and every
     external action is preceded by its own durable intent.
+
+    ``expected_job_id`` pins the shot this startup belongs to.  A production
+    series owns the order of its shots, so the series scheduler names the job
+    instead of letting the global queue decide.
     """
     from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
 
@@ -1108,15 +1113,21 @@ def run_managed_first(session_factory, worker_id, *, settings, recipe, review_co
         raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
     scheduler = ResourceScheduler()
     with session_factory.begin() as db:
-        candidate = db.scalar(
-            select(Job)
-            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
-                   Job.provider == "comfyui")
-            .order_by(Job.created_at, Job.id)
-            .limit(1)
-        )
-        if not candidate:
-            return None
+        if expected_job_id:
+            candidate = db.get(Job, expected_job_id)
+            if (candidate is None or candidate.status != "QUEUED" or candidate.paused
+                    or candidate.stale or candidate.provider != "comfyui"):
+                return None
+        else:
+            candidate = db.scalar(
+                select(Job)
+                .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                       Job.provider == "comfyui")
+                .order_by(Job.created_at, Job.id)
+                .limit(1)
+            )
+            if not candidate:
+                return None
         owner = "h3:" + candidate.id
         lease = scheduler.enqueue(db, owner, 16384, True, 100)
         if lease.status == "RELEASED":
@@ -1142,8 +1153,14 @@ def run_managed_first(session_factory, worker_id, *, settings, recipe, review_co
 
 
 def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_service=None, comfy_client=None,
-                     semantic_reviewer=None, asr_reviewer=None):
-    """Continue one queued H3 job from a live prior handoff; no first-start authority is implied."""
+                     semantic_reviewer=None, asr_reviewer=None, expected_job_id: str | None = None,
+                     exclude_series_jobs: bool = False):
+    """Continue one queued H3 job from a live prior handoff; no first-start authority is implied.
+
+    ``expected_job_id`` pins the shot this continuation belongs to, so a
+    production series keeps its own order instead of inheriting the global
+    queue order.
+    """
     from shine.comfyops.handoff_activation import ReviewReleaseBoundary
     from shine.comfyops.handoff_idle import IdleHandoffKeeper
     from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
@@ -1169,10 +1186,18 @@ def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_se
     with session_factory.begin() as db:
         _promote_dependencies(db)
         db.flush()
-        job = db.scalar(select(Job).where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
-                        .order_by(Job.created_at, Job.id).limit(1))
-        if not job or job.provider != "comfyui":
-            return None, previous
+        if expected_job_id:
+            job = db.get(Job, expected_job_id)
+            if (job is None or job.status != "QUEUED" or job.paused or job.stale
+                    or job.provider != "comfyui"):
+                return None, previous
+        else:
+            statement = select(Job).where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
+            if exclude_series_jobs:
+                statement = statement.where(Job.id.not_in(_series_job_ids()))
+            job = db.scalar(statement.order_by(Job.created_at, Job.id).limit(1))
+            if not job or job.provider != "comfyui":
+                return None, previous
         request = RenderRequest.model_validate(job.request)
         policy = _project_policy(db, job.project_id)
         if request.self_review_scope == "basic":
@@ -1226,13 +1251,20 @@ def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_se
     return result, continuation.next
 
 
-def release_managed_series(session_factory, settings, coordinator):
+def release_managed_series(session_factory, settings, coordinator, *, series_id=None, worker_id=None):
     """End a managed series: stop the owned renderer, then release its lease.
 
     The renderer is stopped and proved empty first, the exclusive lease is
     released afterwards, and only then does the idle keeper stop renewing it.
     A failure at any step keeps the lease for reconciliation instead of
     pretending the hardware was released.
+
+    When a production series owns the run, the intent to release is recorded
+    before the first external action, and the lease release and the series
+    state transition commit in ONE transaction.  A crash or a failed commit can
+    therefore never leave a released lease behind a series that still claims
+    to hold it, and a release that already committed is idempotent instead of
+    being reported as a failure.
     """
     from shine.comfyops.models import ResourceLease
     from shine.comfyops.scheduler import ResourceScheduler
@@ -1240,35 +1272,73 @@ def release_managed_series(session_factory, settings, coordinator):
     if coordinator is None or coordinator.keeper is None or coordinator.replacement is None:
         raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
     supervisor = coordinator.replacement
+    lease_id = coordinator.session.lease_id
+    if series_id and worker_id:
+        from shine.comfyops.production_series import record_finalization_intent
+
+        record_finalization_intent(session_factory, series_id, worker_id, lease_id, coordinator)
     stopped = supervisor.stop_closed()
     supervisor.check_memory(coordinator.gpu_uuid, min_ram_mb=coordinator.min_ram_mb,
                             min_vram_mb=coordinator.min_vram_mb)
-    lease_id = coordinator.session.lease_id
     coordinator.keeper.finalize()
     with session_factory.begin() as db:
         lease = db.get(ResourceLease, lease_id)
+        if lease is not None and lease.status == "RELEASED":
+            # The previous attempt committed the release but the caller never
+            # saw the answer.  Releasing twice is not a second release.
+            if series_id and worker_id:
+                from shine.comfyops.production_series import mark_series_released
+
+                mark_series_released(db, series_id, worker_id)
+            return {"lease_id": lease_id, "stopped": stopped, "released": True, "idempotent": True}
         if not lease or lease.status != "ACTIVE":
             raise HTTPException(409, "HANDOFF_RESOURCE_LEASE_LOST")
         ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
-    return {"lease_id": lease_id, "stopped": stopped}
+        if series_id and worker_id:
+            from shine.comfyops.production_series import mark_series_released
+
+            mark_series_released(db, series_id, worker_id)
+    return {"lease_id": lease_id, "stopped": stopped, "released": True}
 
 
-def run_managed_series(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
-                       comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
-                       on_shot_complete=None):
-    """Drive a queue of H3 shots behind one managed renderer.
+_QUEUE_CHOICE = object()
+"""Sentinel: let the global job queue pick the next shot of a sequence."""
 
-    The first shot owns a fresh managed startup.  Every following shot
-    continues the same fenced renderer through the idle keeper's lease
-    transfer, so no second renderer is started and no exclusive resource is
-    released between two shots: the serial model stages can never overlap.
-    This is the unattended production path — the caller queues the shots and
-    the worker drives them to completion.
 
-    ``on_shot_complete`` is called with the finished job id before the next
-    shot is reserved.  A dependent shot can only be created after its source
-    job passed, so the hook is where the caller queues it; the fenced
-    renderer keeps holding the exclusive admission across that gap.
+def _series_job_ids():
+    """The job ids a production series owns; the ordinary queue leaves them alone."""
+    from shine.models import ProductionSeriesItem
+
+    return select(ProductionSeriesItem.job_id).where(ProductionSeriesItem.job_id.is_not(None))
+
+
+def _run_managed_loop(
+    session_factory,
+    worker_id,
+    *,
+    settings,
+    recipe,
+    review_configs,
+    max_shots=8,
+    comfy_service=None,
+    comfy_client=None,
+    semantic_reviewer=None,
+    asr_reviewer=None,
+    first_job_id=None,
+    next_job_id=None,
+    on_shot_complete=None,
+    series_id=None,
+    exclude_series_jobs=False,
+):
+    """The one managed production loop.
+
+    ``first_job_id`` names the shot of the fresh managed startup.  ``next_job_id``
+    is consulted after every finished shot and returns the job the run continues
+    with, or ``None`` to end the run.  The exclusive lease is held across the
+    whole run and released exactly once, at the end.
+
+    ``exclude_series_jobs`` keeps the ordinary job queue away from the jobs a
+    production series owns: a series drives its own shots in its own order.
     """
     from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
 
@@ -1281,17 +1351,26 @@ def run_managed_series(session_factory, worker_id, *, settings, recipe, review_c
         raise HTTPException(409, "COMFY_SERIES_LENGTH_INVALID")
     if on_shot_complete is not None and not callable(on_shot_complete):
         raise HTTPException(409, "COMFY_SERIES_CALLBACK_INVALID")
+    if next_job_id is not None and not callable(next_job_id):
+        raise HTTPException(409, "COMFY_SERIES_CALLBACK_INVALID")
     scheduler = ResourceScheduler()
     with session_factory.begin() as db:
-        candidate = db.scalar(
-            select(Job)
-            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
-                   Job.provider == "comfyui")
-            .order_by(Job.created_at, Job.id)
-            .limit(1)
-        )
-        if not candidate:
-            return []
+        if first_job_id:
+            candidate = db.get(Job, first_job_id)
+            if (candidate is None or candidate.status != "QUEUED" or candidate.paused
+                    or candidate.stale or candidate.provider != "comfyui"):
+                return []
+        else:
+            statement = (
+                select(Job)
+                .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                       Job.provider == "comfyui")
+            )
+            if exclude_series_jobs:
+                statement = statement.where(Job.id.not_in(_series_job_ids()))
+            candidate = db.scalar(statement.order_by(Job.created_at, Job.id).limit(1))
+            if not candidate:
+                return []
         owner = "h3:" + candidate.id
         lease = scheduler.enqueue(db, owner, 16384, True, 100)
         if lease.status == "RELEASED":
@@ -1318,16 +1397,54 @@ def run_managed_series(session_factory, worker_id, *, settings, recipe, review_c
     while coordinator is not None and len(shots) < max_shots:
         if on_shot_complete is not None:
             on_shot_complete(shots[-1], coordinator)
-        result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
-                                                comfy_service=comfy_service, comfy_client=comfy_client,
-                                                semantic_reviewer=semantic_reviewer,
-                                                asr_reviewer=asr_reviewer)
+        target = next_job_id(shots[-1]) if next_job_id is not None else _QUEUE_CHOICE
+        if target is _QUEUE_CHOICE:
+            result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
+                                                    comfy_service=comfy_service, comfy_client=comfy_client,
+                                                    semantic_reviewer=semantic_reviewer,
+                                                    asr_reviewer=asr_reviewer,
+                                                    exclude_series_jobs=exclude_series_jobs)
+        elif target is None:
+            break
+        else:
+            result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
+                                                    comfy_service=comfy_service, comfy_client=comfy_client,
+                                                    semantic_reviewer=semantic_reviewer,
+                                                    asr_reviewer=asr_reviewer,
+                                                    expected_job_id=target)
         if result is None:
             break
         shots.append(result)
     if coordinator is not None and coordinator.keeper is not None:
-        release_managed_series(session_factory, settings, coordinator)
+        release_managed_series(session_factory, settings, coordinator, series_id=series_id,
+                                worker_id=worker_id if series_id else None)
     return shots
+
+
+def run_managed_series(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                       comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                       on_shot_complete=None):
+    """Drive a queue of H3 shots behind one managed renderer.
+
+    The first shot owns a fresh managed startup.  Every following shot
+    continues the same fenced renderer through the idle keeper's lease
+    transfer, so no second renderer is started and no exclusive resource is
+    released between two shots: the serial model stages can never overlap.
+    This is the unattended production path — the caller queues the shots and
+    the worker drives them to completion.
+
+    ``on_shot_complete`` is called with the finished job id before the next
+    shot is reserved.  A dependent shot can only be created after its source
+    job passed, so the hook is where the caller queues it; the fenced
+    renderer keeps holding the exclusive admission across that gap.
+    """
+    return _run_managed_loop(
+        session_factory, worker_id,
+        settings=settings, recipe=recipe, review_configs=review_configs, max_shots=max_shots,
+        comfy_service=comfy_service, comfy_client=comfy_client,
+        semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+        on_shot_complete=on_shot_complete,
+    )
 
 
 def _run_one(
@@ -3284,6 +3401,77 @@ def _recover_comfy_job(
     return True, None
 
 
+def run_configured_series_once(
+    session_factory,
+    worker_id,
+    *,
+    settings,
+    comfy_client=None,
+    semantic_reviewer=None,
+    asr_reviewer=None,
+):
+    """The resident Worker's production entry for real H3 renders.
+
+    This is the scheduling entry the Web workbench actually reaches: a person
+    creates a production series in the browser, and the resident Worker claims
+    it, drives every shot of it behind one managed renderer, and releases the
+    renderer and the exclusive GPU lease exactly once at the end.
+
+    It returns ``None`` when this worker must not run a managed production
+    right now — mock mode, offline simulation, no managed recipe, no reviewer
+    route, or nothing claimable — so the caller falls back to the ordinary
+    single-shot path instead of silently doing nothing.
+    """
+    from shine.comfyops.production_series import (
+        claim_series,
+        reconcile_series,
+        run_production_series,
+    )
+
+    if settings.render_provider != "comfyui" or settings.offline_simulation:
+        return None
+    try:
+        recipe = _managed_recipe(settings)
+    except HTTPException:
+        return None
+    if recipe is None:
+        return None
+    if not (semantic_reviewer or asr_reviewer):
+        return None
+    try:
+        review_configs = _managed_review_specs(recipe, semantic_reviewer, asr_reviewer)
+    except HTTPException:
+        return None
+    reconcile_series(session_factory, worker_id)
+    series = claim_series(session_factory, worker_id)
+    if series is not None:
+        logger.info("production_series_claimed series_id=%s worker_id=%s", series.id, worker_id)
+        result = run_production_series(
+            session_factory, worker_id, series.id,
+            settings=settings, recipe=recipe, review_configs=review_configs,
+            comfy_client=comfy_client,
+            semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+        )
+        logger.info("production_series_finished series_id=%s result=%s", series.id, result.get("status"))
+        return result.get("status")
+    # No series is waiting: the ordinary queue still owns real H3 work.  It is
+    # driven behind the same managed renderer, and the renderer is released at
+    # the end instead of being held forever after the first shot.
+    from shine.worker import _run_managed_loop
+
+    shots = _run_managed_loop(
+        session_factory, worker_id,
+        settings=settings, recipe=recipe, review_configs=review_configs, max_shots=8,
+        comfy_service=None, comfy_client=comfy_client,
+        semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+        first_job_id=None, next_job_id=None, exclude_series_jobs=True,
+    )
+    if not shots:
+        return None
+    logger.info("production_queue_finished worker_id=%s shots=%s", worker_id, len(shots))
+    return "queue"
+
+
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.quality.runtime import configured_reviewers
 
@@ -3298,6 +3486,16 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     )
     if recovered:
         return "reconciled"
+    series = run_configured_series_once(
+        session_factory,
+        worker_id,
+        settings=settings,
+        comfy_client=comfy_client,
+        semantic_reviewer=semantic,
+        asr_reviewer=asr,
+    )
+    if series is not None:
+        return f"series:{series}"
     return run_one(
         session_factory,
         provider,

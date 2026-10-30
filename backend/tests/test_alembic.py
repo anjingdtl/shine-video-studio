@@ -89,7 +89,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
         assert "project_id" in audit_columns
         provider_columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_profiles)")}
         assert "generation_options" in provider_columns
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f130a0030001"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f140a0010001"
     finally:
         connection.close()
 

@@ -29,8 +29,8 @@ from shine.models import (
     AuditEvent,
     Job,
     JobAttempt,
-    JobDependency,
     MediaArtifact,
+    ProductionSeries,
     Project,
     QCReport,
     QualityGate,
@@ -48,12 +48,14 @@ from shine.schemas import (
     AuditEventItem,
     AuditPage,
     CreateJob,
+    CreateProductionSeries,
     CreateProject,
     CreateShot,
     FusedQCResult,
     HardFailure,
     ProjectSettings,
     QualityPolicyUpdate,
+    RenderProvider,
     RepairPlan,
     ReplaceBindings,
     ShotSpec,
@@ -72,8 +74,8 @@ from shine.security import (
 )
 from shine.services import (
     add_audit,
+    create_render_job,
     create_shot_record,
-    dependencies_for_new_job,
     freeze_style,
     make_render_request,
     require_project,
@@ -739,101 +741,10 @@ def create_app(
         locked(db)
         project = require_project(db, project_id)
         shot = require_shot(db, project_id, body.shot_id)
-        from shine.comfyops.preproduction import enforce
-
-        if body.provider.value == "comfyui" and not request.app.state.settings.offline_simulation:
-            for binding in shot.bindings:
-                if (binding.asset.provenance or {}).get("offline_only"):
-                    raise HTTPException(409, "MOCK_ASSET_NOT_PRODUCTION")
-        spec = ShotSpec.model_validate(shot.spec)
-        dependency_ids = list(body.depends_on)
-        dependency_kinds = {dependency_id: "explicit" for dependency_id in dependency_ids}
-        continuity = spec.continuity
-        if continuity.mode.value != "cut":
-            previous_job_id = continuity.previous_job_id
-            if not previous_job_id:
-                raise HTTPException(status_code=422, detail="Continuity modes require a previous_job_id")
-            previous = db.get(Job, previous_job_id)
-            if not previous or previous.project_id != project_id:
-                raise HTTPException(status_code=422, detail="Continuity source job must belong to this project")
-            if continuity.previous_shot_id and previous.shot_id != continuity.previous_shot_id:
-                raise HTTPException(status_code=422, detail="Continuity source job does not match the previous shot")
-            if previous.status != "PASSED" or previous.stale:
-                raise HTTPException(status_code=409, detail="Continuity requires a passed, non-stale source job")
-            previous_shot = db.get(Shot, previous.shot_id)
-            if not previous_shot or previous.shot_revision != previous_shot.revision:
-                raise HTTPException(status_code=409, detail="Continuity source job is stale after a shot revision")
-            if body.provider.value == "comfyui" and not previous.artifact_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail="ComfyUI continuity requires a real approved artifact from the source job",
-                )
-            if previous_job_id not in dependency_ids:
-                dependency_ids.append(previous_job_id)
-            dependency_kinds[previous_job_id] = f"continuity:{continuity.mode.value}"
-        request_data, _assets, compiler_meta = make_render_request(db, project, shot, body)
-        if body.provider.value == "comfyui":
-            from shine.quality.input_assessment import assessment_for_request
-
-            assessment = assessment_for_request(
-                db, project_id, request_data, select_latest=True,
-                offline=request.app.state.settings.offline_simulation,
-            )
-            if assessment:
-                request_data = request_data.model_copy(update={
-                    "style_input_assessment_id": assessment.id,
-                    "style_input_assessment_sha256": assessment.sha256,
-                })
-        preproduction_hash = enforce(
-            db,
-            project_id,
-            render_request=request_data,
-            offline=(body.provider.value == "mock" or request.app.state.settings.offline_simulation),
-            data_dir=settings.data_dir,
-            workflow_profile_id=body.workflow_profile_id if body.provider.value == "comfyui" else None,
-        )
-        parents, initial_status = dependencies_for_new_job(db, project_id, dependency_ids)
-        job = Job(
-            project_id=project_id,
-            shot_id=shot.id,
-            shot_revision=shot.revision,
-            style_version_id=request_data.style_version_id,
-            preproduction_manifest_hash=preproduction_hash,
-            request=request_data.model_dump(mode="json"),
-            idempotency_key=request_data.idempotency_key,
-            status=initial_status,
-            provider=body.provider.value,
-            mock_scenario=body.mock_scenario.value,
-            generation_mode=request_data.generation_mode.value,
-            workflow_profile_id=body.workflow_profile_id,
-            compiled_prompt_sha256=request_data.prompt_sha256,
-        )
-        db.add(job)
-        db.flush()
-        for parent in parents:
-            db.add(
-                JobDependency(
-                    parent_job_id=parent.id,
-                    child_job_id=job.id,
-                    kind=dependency_kinds.get(parent.id, "explicit"),
-                )
-            )
-        add_audit(
-            db,
-            "user",
-            "MOCK_JOB_CREATED" if body.provider.value == "mock" else "COMFY_JOB_CREATED",
-            "job",
-            job.id,
-            {
-                "provider": body.provider.value,
-                "mode": request_data.generation_mode.value,
-                "dependency_count": len(parents),
-                "preproduction_manifest_hash": preproduction_hash,
-                "style_hash": request_data.style_hash,
-                "prompt_sha256": request_data.prompt_sha256,
-                "warnings": compiler_meta.get("warnings", []),
-            },
-            project_id=project.id,
+        job, compiler_meta = create_render_job(
+            db, project, shot, body,
+            settings=request.app.state.settings,
+            offline=request.app.state.settings.offline_simulation,
         )
         db.commit()
         db.refresh(job)
@@ -858,6 +769,119 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         return jsonable_encoder(_job_data(db, job, include_prompt=True))
+
+    @app.post("/api/v1/projects/{project_id}/production-series", status_code=201)
+    def create_production_series(
+        project_id: str, body: CreateProductionSeries, request: Request, db: DBSession
+    ) -> dict[str, Any]:
+        """Queue one ordered, unattended real-H3 production run.
+
+        The resident Worker claims the series and drives every shot of it
+        behind one managed renderer.  The person in the browser never has to
+        run a command for the run to continue.
+        """
+        from shine.api_preparation import locked
+        from shine.comfyops.production_series import create_series, series_public
+
+        locked(db)
+        project = require_project(db, project_id)
+        if body.provider != RenderProvider.COMFYUI:
+            raise HTTPException(422, "A production series needs a real H3 provider")
+        shots = [require_shot(db, project_id, shot_id) for shot_id in body.shot_ids]
+        job_body = CreateJob(
+            shot_id=shots[0].id,
+            mock_scenario=body.mock_scenario,
+            provider=body.provider,
+            generation_mode=body.generation_mode,
+            workflow_profile_id=body.workflow_profile_id,
+            self_review_scope=body.self_review_scope,
+            basic_review_resolution=body.basic_review_resolution,
+        )
+        series, job = create_series(
+            db, project, shots, body=job_body,
+            settings=request.app.state.settings,
+            offline=request.app.state.settings.offline_simulation,
+        )
+        add_audit(
+            db, "user", "PRODUCTION_SERIES_CREATED", "production_series", series.id,
+            {"shot_count": len(shots), "first_job_id": job.id,
+             "workflow_profile_id": series.workflow_profile_id},
+            project_id=project.id,
+        )
+        db.commit()
+        db.refresh(series)
+        return jsonable_encoder(series_public(db, series))
+
+    @app.get("/api/v1/projects/{project_id}/production-series")
+    def list_production_series(project_id: str, db: DBSession) -> list[dict[str, Any]]:
+        from shine.comfyops.production_series import series_public
+
+        require_project(db, project_id)
+        rows = db.scalars(
+            select(ProductionSeries)
+            .where(ProductionSeries.project_id == project_id)
+            .order_by(ProductionSeries.created_at.desc())
+        ).all()
+        return jsonable_encoder([series_public(db, row) for row in rows])
+
+    @app.get("/api/v1/production-series/{series_id}")
+    def get_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
+        from shine.comfyops.production_series import series_public
+
+        series = db.get(ProductionSeries, series_id)
+        if not series:
+            raise HTTPException(status_code=404, detail="Production series not found")
+        return jsonable_encoder(series_public(db, series))
+
+    @app.post("/api/v1/production-series/{series_id}/cancel")
+    def cancel_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
+        from shine.comfyops.production_series import cancel_series_in_session, series_public
+
+        series = db.get(ProductionSeries, series_id)
+        if not series:
+            raise HTTPException(status_code=404, detail="Production series not found")
+        cancel_series_in_session(db, series_id)
+        add_audit(db, "user", "PRODUCTION_SERIES_CANCELLED", "production_series", series_id,
+                  {}, project_id=series.project_id)
+        db.commit()
+        db.refresh(series)
+        return jsonable_encoder(series_public(db, series))
+
+    @app.post("/api/v1/production-series/{series_id}/pause")
+    def pause_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
+        from shine.comfyops.production_series import series_public
+
+        series = db.get(ProductionSeries, series_id)
+        if not series:
+            raise HTTPException(status_code=404, detail="Production series not found")
+        if series.status not in {"QUEUED", "RUNNING"}:
+            raise HTTPException(409, "This production series cannot be paused")
+        series.status = "PAUSE_REQUESTED" if series.status == "RUNNING" else "PAUSED"
+        series.state_version += 1
+        add_audit(db, "user", "PRODUCTION_SERIES_PAUSED", "production_series", series_id,
+                  {}, project_id=series.project_id)
+        db.commit()
+        db.refresh(series)
+        return jsonable_encoder(series_public(db, series))
+
+    @app.post("/api/v1/production-series/{series_id}/resume")
+    def resume_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
+        from shine.comfyops.production_series import series_public
+
+        series = db.get(ProductionSeries, series_id)
+        if not series:
+            raise HTTPException(status_code=404, detail="Production series not found")
+        if series.status not in {"PAUSED", "PAUSE_REQUESTED"}:
+            raise HTTPException(409, "This production series is not paused")
+        series.status = "QUEUED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.state_version += 1
+        add_audit(db, "user", "PRODUCTION_SERIES_RESUMED", "production_series", series_id,
+                  {}, project_id=series.project_id)
+        db.commit()
+        db.refresh(series)
+        return jsonable_encoder(series_public(db, series))
 
     @app.post("/api/v1/jobs/{job_id}/pause")
     def pause_job(job_id: str, db: DBSession) -> dict[str, Any]:

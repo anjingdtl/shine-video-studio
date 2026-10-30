@@ -20,6 +20,7 @@ WORKFLOWS = [
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-2img-1aud.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img-1aud.json",
+    Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img-1aud-portrait.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-upscale-2img.json",
 ]
 

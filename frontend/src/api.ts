@@ -160,3 +160,20 @@ export type RepairSuggestion = {
 };
 
 export type SystemHealth = { ok: boolean; message: string; h3_nodes?: string[]; node_count?: number };
+
+export type ProductionSeriesItem = {
+  id: string; shot_id: string; position: number; status: string; job_id: string | null;
+  continuity_mode: string; failure_code: string | null; job_status: string | null;
+  job_artifact_id: string | null; job_failure_code: string | null;
+};
+
+export type ProductionSeries = {
+  id: string; project_id: string; status: string; provider: string;
+  workflow_profile_id: string | null; generation_mode: string | null;
+  self_review_scope: string; shot_count: number; completed_count: number;
+  worker_id: string | null; lease_id: string | null; current_job_id: string | null;
+  state_version: number; failure_code: string | null;
+  finalization_state: string; finalization_note: string | null;
+  created_at: string | null; started_at: string | null; finished_at: string | null;
+  items: ProductionSeriesItem[];
+};

@@ -34,6 +34,8 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   const [draft, setDraft] = useState<DraftBinding[]>([emptyDraft()]);
   const [editingShot, setEditingShot] = useState('');
   const [editBindings, setEditBindings] = useState<Record<string, { use_as: string; role: string; frame_role: string; checked: boolean }>>({});
+  const [continuityMode, setContinuityMode] = useState<'cut' | 'last_frame' | 'hard_frame_anchor'>('cut');
+  const [continuitySource, setContinuitySource] = useState('');
   const approved = assets.filter((asset) => asset.approved && asset.locked);
 
   function addBinding() {
@@ -60,6 +62,9 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
     const dialogue = speaker.trim() && line.trim()
       ? [{ speaker_id: speaker.trim(), text: line.trim(), start_s: Number(startS), end_s: Number(endS) }]
       : [];
+    const continuity = continuityMode === 'cut'
+      ? { mode: 'cut' }
+      : { mode: continuityMode, previous_shot_id: continuitySource || null };
     onCreate({
       name: shotName.trim() || `镜头 ${shots.length + 1}`,
       spec: {
@@ -73,7 +78,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         required_asset_ids: [...new Set(bindings.map((binding) => binding.asset_id))],
         dialogue,
         sound: { environment: environment.trim(), music_policy: 'low_or_none' },
-        continuity: { mode: 'cut' },
+        continuity,
         locked_story_facts: [],
       },
       bindings,
@@ -112,7 +117,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   }
 
   return (
-    <div className="card section-card storyboard-card">
+    <div className="card section-card storyboard-card" id="shots">
       <div className="section-heading compact">
         <div>
           <div className="section-kicker">03 / SHOT WORKSPACE</div>
@@ -132,6 +137,15 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         <label>对白内容<input value={line} onChange={(event) => setLine(event.target.value)} placeholder="账册在哪儿？" disabled={!currentStyle} /></label>
         <label>开始秒<input type="number" min={0} step={0.1} value={startS} onChange={(event) => setStartS(Number(event.target.value))} disabled={!currentStyle} /></label>
         <label>结束秒<input type="number" min={0} step={0.1} value={endS} onChange={(event) => setEndS(Number(event.target.value))} disabled={!currentStyle} /></label>
+        <label>与上一镜的关系<select value={continuityMode} onChange={(event) => setContinuityMode(event.target.value as 'cut' | 'last_frame' | 'hard_frame_anchor')} disabled={!currentStyle}>
+          <option value="cut">独立镜头（CUT）</option>
+          <option value="last_frame">软连续：引用上一镜末帧（last_frame）</option>
+          <option value="hard_frame_anchor">硬帧锚定（hard_frame_anchor，需已验证的工作流能力）</option>
+        </select></label>
+        {continuityMode !== 'cut' && <label>上一镜<select value={continuitySource} onChange={(event) => setContinuitySource(event.target.value)} disabled={!currentStyle}>
+          <option value="">请选择来源镜头</option>
+          {shots.map((shot) => <option key={shot.id} value={shot.id}>{shot.name}</option>)}
+        </select></label>}
         <div className="wide-field binding-builder">
           <span className="builder-label">镜头引用素材</span>
           {draft.map((row, index) => (

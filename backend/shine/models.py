@@ -52,6 +52,9 @@ class Project(Base):
     style_versions: Mapped[list[StyleVersion]] = relationship(back_populates="project")
     shots: Mapped[list[Shot]] = relationship(back_populates="project", cascade="all, delete-orphan")
     documents: Mapped[list[ProjectDocument]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    production_series: Mapped[list[ProductionSeries]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class ProjectDocument(Base):
@@ -470,6 +473,73 @@ class AgentArtifact(Base):
     approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+class ProductionSeries(Base):
+    """One durable, ordered real-H3 production run for a project.
+
+    A series is the unit the resident Worker claims.  It owns the renderer
+    across every one of its shots, so the exclusive GPU lease is transferred
+    between shots instead of being released and re-taken.  The row is also the
+    ownership proof: only the worker that changed ``worker_id`` may advance or
+    finalize the series.
+    """
+
+    __tablename__ = "production_series"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="QUEUED", index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(24), default="comfyui", nullable=False)
+    workflow_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    generation_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    self_review_scope: Mapped[str] = mapped_column(String(16), default="full", nullable=False)
+    basic_review_resolution: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    mock_scenario: Mapped[str] = mapped_column(String(24), default="success", nullable=False)
+    shot_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    finalization_state: Mapped[str] = mapped_column(String(24), default="NONE", nullable=False)
+    finalization_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    renderer_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="production_series")
+    items: Mapped[list[ProductionSeriesItem]] = relationship(
+        back_populates="series", cascade="all, delete-orphan", order_by="ProductionSeriesItem.position"
+    )
+
+
+class ProductionSeriesItem(Base):
+    """One shot inside a production series, in production order."""
+
+    __tablename__ = "production_series_items"
+    __table_args__ = (UniqueConstraint("series_id", "position", name="uq_series_position"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    series_id: Mapped[str] = mapped_column(ForeignKey("production_series.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="PENDING", nullable=False)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    continuity_mode: Mapped[str] = mapped_column(String(32), default="cut", nullable=False)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    series: Mapped[ProductionSeries] = relationship(back_populates="items")
+    shot: Mapped[Shot] = relationship()
+    job: Mapped[Job | None] = relationship()
+
 
 # V1.3 extends this same metadata/SQLite ledger.
 from shine.comfyops import models as preparation_models  # noqa: E402,F401

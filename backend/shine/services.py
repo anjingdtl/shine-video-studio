@@ -425,10 +425,12 @@ def make_render_request(
     project: Project,
     shot: Shot,
     body: CreateJob,
+    *,
+    spec: ShotSpec | None = None,
 ) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
-    spec = ShotSpec.model_validate(shot.spec)
+    spec = spec or ShotSpec.model_validate(shot.spec)
     style = validate_shot_style(db, project.id, spec, require_current=True)
     if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id:
         raise HTTPException(status_code=409, detail="ComfyUI renders require a registered workflow profile")
@@ -574,6 +576,146 @@ def dependencies_for_new_job(
         raise HTTPException(status_code=409, detail="A dependency is blocked or stale")
     status = "QUEUED" if all(parent.status == "PASSED" for parent in parents) else "PLANNED"
     return parents, status
+
+
+def resolve_continuity_source(
+    db: Session,
+    project_id: str,
+    spec: ShotSpec,
+    *,
+    provider: RenderProvider,
+) -> tuple[str | None, str]:
+    """Resolve the continuity source job of a shot against the current ledger.
+
+    A non-cut shot may only consume a job of the same project that has already
+    passed, is not stale, still matches the current shot revision and — for a
+    real ComfyUI render — owns a real approved artifact.  Nothing here is
+    inferred: an unresolvable source is a hard error, never a silent cut.
+    """
+    continuity = spec.continuity
+    if continuity.mode.value == "cut":
+        return None, "cut"
+    previous_job_id = continuity.previous_job_id
+    if not previous_job_id:
+        raise HTTPException(status_code=422, detail="Continuity modes require a previous_job_id")
+    previous = db.get(Job, previous_job_id)
+    if not previous or previous.project_id != project_id:
+        raise HTTPException(status_code=422, detail="Continuity source job must belong to this project")
+    if continuity.previous_shot_id and previous.shot_id != continuity.previous_shot_id:
+        raise HTTPException(status_code=422, detail="Continuity source job does not match the previous shot")
+    if previous.status != "PASSED" or previous.stale:
+        raise HTTPException(status_code=409, detail="Continuity requires a passed, non-stale source job")
+    previous_shot = db.get(Shot, previous.shot_id)
+    if not previous_shot or previous.shot_revision != previous_shot.revision:
+        raise HTTPException(status_code=409, detail="Continuity source job is stale after a shot revision")
+    if provider == RenderProvider.COMFYUI and not previous.artifact_id:
+        raise HTTPException(
+            status_code=409,
+            detail="ComfyUI continuity requires a real approved artifact from the source job",
+        )
+    return previous_job_id, f"continuity:{continuity.mode.value}"
+
+
+def create_render_job(
+    db: Session,
+    project: Project,
+    shot: Shot,
+    body: CreateJob,
+    *,
+    settings,
+    offline: bool = False,
+    spec: ShotSpec | None = None,
+    depends_on: list[str] | None = None,
+) -> tuple[Job, dict[str, Any]]:
+    """Create one render job for a shot, with every production gate applied.
+
+    This is the single job-creation path.  The HTTP API and the resident
+    Worker both call it, so a job queued by the Worker obeys exactly the same
+    asset, style, dependency and pre-production rules as a job queued by a
+    person in the Web workbench.
+    """
+    spec = spec or ShotSpec.model_validate(shot.spec)
+    if body.provider == RenderProvider.COMFYUI and not offline:
+        for binding in shot.bindings:
+            if (binding.asset.provenance or {}).get("offline_only"):
+                raise HTTPException(409, "MOCK_ASSET_NOT_PRODUCTION")
+
+    dependency_ids = list(depends_on if depends_on is not None else body.depends_on)
+    dependency_kinds = {dependency_id: "explicit" for dependency_id in dependency_ids}
+    previous_job_id, continuity_kind = resolve_continuity_source(
+        db, project.id, spec, provider=body.provider,
+    )
+    if previous_job_id:
+        if previous_job_id not in dependency_ids:
+            dependency_ids.append(previous_job_id)
+        dependency_kinds[previous_job_id] = continuity_kind
+
+    request_data, _assets, compiler_meta = make_render_request(db, project, shot, body, spec=spec)
+    if body.provider == RenderProvider.COMFYUI:
+        from shine.quality.input_assessment import assessment_for_request
+
+        assessment = assessment_for_request(
+            db, project.id, request_data, select_latest=True, offline=offline,
+        )
+        if assessment:
+            request_data = request_data.model_copy(update={
+                "style_input_assessment_id": assessment.id,
+                "style_input_assessment_sha256": assessment.sha256,
+            })
+    from shine.comfyops.preproduction import enforce
+
+    preproduction_hash = enforce(
+        db,
+        project.id,
+        render_request=request_data,
+        offline=(body.provider == RenderProvider.MOCK or offline),
+        data_dir=settings.data_dir,
+        workflow_profile_id=body.workflow_profile_id if body.provider == RenderProvider.COMFYUI else None,
+    )
+    parents, initial_status = dependencies_for_new_job(db, project.id, dependency_ids)
+    job = Job(
+        project_id=project.id,
+        shot_id=shot.id,
+        shot_revision=shot.revision,
+        style_version_id=request_data.style_version_id,
+        preproduction_manifest_hash=preproduction_hash,
+        request=request_data.model_dump(mode="json"),
+        idempotency_key=request_data.idempotency_key,
+        status=initial_status,
+        provider=body.provider.value,
+        mock_scenario=body.mock_scenario.value,
+        generation_mode=request_data.generation_mode.value,
+        workflow_profile_id=body.workflow_profile_id,
+        compiled_prompt_sha256=request_data.prompt_sha256,
+    )
+    db.add(job)
+    db.flush()
+    for parent in parents:
+        db.add(
+            JobDependency(
+                parent_job_id=parent.id,
+                child_job_id=job.id,
+                kind=dependency_kinds.get(parent.id, "explicit"),
+            )
+        )
+    add_audit(
+        db,
+        "user",
+        "MOCK_JOB_CREATED" if body.provider == RenderProvider.MOCK else "COMFY_JOB_CREATED",
+        "job",
+        job.id,
+        {
+            "provider": body.provider.value,
+            "mode": request_data.generation_mode.value,
+            "dependency_count": len(parents),
+            "preproduction_manifest_hash": preproduction_hash,
+            "style_hash": request_data.style_hash,
+            "prompt_sha256": request_data.prompt_sha256,
+            "warnings": compiler_meta.get("warnings", []),
+        },
+        project_id=project.id,
+    )
+    return job, compiler_meta
 
 
 def mark_stale_descendants(db: Session, starting_job_ids: list[str], *, project_id: str | None = None) -> set[str]:

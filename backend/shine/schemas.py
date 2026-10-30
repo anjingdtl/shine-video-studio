@@ -223,6 +223,35 @@ class CreateJob(APIModel):
         return self
 
 
+class CreateProductionSeries(APIModel):
+    """One ordered, unattended real-H3 production run for a project.
+
+    The shots are produced in the given order behind a single managed
+    renderer.  A shot that declares a continuity relation consumes the real,
+    passed job of the shot before it, so the relation is never faked.
+    """
+
+    shot_ids: list[str] = Field(min_length=1, max_length=16)
+    mock_scenario: MockScenario = MockScenario.SUCCESS
+    provider: RenderProvider = RenderProvider.COMFYUI
+    generation_mode: GenerationMode | None = None
+    workflow_profile_id: str | None = None
+    self_review_scope: Literal["full", "basic"] = "full"
+    basic_review_resolution: BasicReviewResolution | None = None
+
+    @model_validator(mode="after")
+    def basic_scope_needs_resolution(self):
+        if self.self_review_scope == "basic" and self.basic_review_resolution is None:
+            raise ValueError("Basic self-review requires explicit expected output dimensions")
+        return self
+
+    @model_validator(mode="after")
+    def shots_are_distinct(self):
+        if len(set(self.shot_ids)) != len(self.shot_ids):
+            raise ValueError("A production series cannot repeat a shot")
+        return self
+
+
 class HardFailure(APIModel):
     code: str = Field(min_length=1, max_length=80)
     evidence: str = Field(min_length=1, max_length=1000)

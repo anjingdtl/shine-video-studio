@@ -1,0 +1,604 @@
+"""The resident Worker must really drive multi-shot H3 production.
+
+These tests cover the scheduling layer that the Web workbench reaches:
+a production series is created in the browser, the resident Worker claims it,
+drives every shot of it in order behind one managed renderer, and releases the
+renderer and the exclusive GPU lease exactly once at the end.
+
+The GPU itself is never touched here.  The real H3 path is proven by the
+local acceptance run; these tests prove the *scheduling* contract, including
+the failure windows that a live renderer makes expensive to reproduce.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import select
+
+from shine.comfyops.models import ResourceLease
+from shine.models import (
+    Job,
+    JobDependency,
+    ProductionSeries,
+    ProductionSeriesItem,
+    utcnow,
+)
+
+from .conftest import (
+    PNG,
+    approve_lock,
+    create_job,
+    create_project,
+    create_shot,
+    freeze_style,
+    register_workflow_profile,
+    upload_asset,
+)
+
+
+def _register_ref2va_profile(client):
+    """A Ref2VA profile: the shot under test carries an image reference."""
+    return register_workflow_profile(client, mode="Ref2VA")
+
+
+def _studio_with_shots(client, factory, settings, *, count=3, continuity=None):
+    """A project with a frozen style, approved assets and ``count`` shots.
+
+    Every shot carries one subject and one picture reference, so the compiled
+    H3 mode is Ref2VA — the same mode the real local production uses.
+    """
+    project_id = create_project(client, "多镜头生产")
+    style = freeze_style(client, project_id)
+    # Distinct bytes: the asset store is content addressed, so two identical
+    # uploads would be one asset, not two references.
+    subject = upload_asset(client, project_id, content=PNG + b"-subject", filename="角色.png")
+    picture = upload_asset(client, project_id, content=PNG + b"-picture", filename="场景.png")
+    approve_lock(client, subject["id"])
+    approve_lock(client, picture["id"])
+    shots = []
+    for index in range(count):
+        shot = create_shot(
+            client, project_id, style["id"],
+            title=f"镜头{index + 1}",
+            beat=f"第{index + 1}个动作",
+            asset_ids=[subject["id"], picture["id"]],
+            bindings=[
+                {"asset_id": subject["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+                {"asset_id": picture["id"], "use_as": "picture", "ordinal": 1},
+            ],
+            continuity=continuity(index) if continuity else {},
+        )
+        shots.append(shot)
+    return project_id, style, shots
+
+
+def _series_body(shots, profile):
+    return {
+        "shot_ids": [shot["id"] for shot in shots],
+        "provider": "comfyui",
+        "workflow_profile_id": profile["id"],
+    }
+
+
+def test_an_ordinary_real_job_stays_out_of_a_series(api):
+    """The ordinary "queue this shot" button keeps its own semantics.
+
+    A production series is an explicit, ordered run.  An ordinary queued job
+    is driven by the resident Worker through the queue path instead, and the
+    two never fight over the same job.
+    """
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    job = create_job(
+        client, project_id, shots[0]["id"], provider="comfyui", workflow_profile_id=profile["id"],
+    )
+    with factory() as db:
+        assert db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id)) is None
+        assert db.get(Job, job["id"]).status == "QUEUED"
+
+
+def test_the_resident_worker_drives_the_ordinary_queue_behind_one_renderer(api, monkeypatch):
+    """An ordinary real job is reachable by the resident Worker."""
+    from dataclasses import replace
+
+    from shine.worker import run_configured_series_once
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    create_job(client, project_id, shots[0]["id"], provider="comfyui", workflow_profile_id=profile["id"])
+
+    real_settings = replace(settings, render_provider="comfyui")
+    monkeypatch.setattr("shine.worker._managed_recipe", lambda _s: {"renderer": {"instance_id": "i"}})
+    monkeypatch.setattr("shine.worker._managed_review_specs", lambda *a, **k: {"VLM": {}})
+
+    captured = {}
+
+    def fake_loop(session_factory, worker_id, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    assert run_configured_series_once(
+        factory, "worker-queue", settings=real_settings, semantic_reviewer=object(),
+    ) is None
+    assert captured["exclude_series_jobs"] is True
+    assert captured["first_job_id"] is None
+
+
+def test_a_production_series_records_its_shot_order(api):
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
+    profile = _register_ref2va_profile(client)
+    response = client.post(
+        f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile)
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["shot_count"] == 3
+    assert [item["shot_id"] for item in body["items"]] == [shot["id"] for shot in shots]
+    assert [item["position"] for item in body["items"]] == [0, 1, 2]
+    assert body["items"][0]["job_id"]
+    assert body["items"][1]["job_id"] is None
+    assert body["items"][2]["job_id"] is None
+
+
+def test_a_second_active_series_for_the_same_shots_is_refused(api):
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    first = client.post(
+        f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile)
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile)
+    )
+    assert second.status_code == 409
+    assert "PRODUCTION_SERIES_SHOT_ALREADY_QUEUED" in second.text
+
+
+def test_unrelated_shots_of_one_project_may_form_their_own_series(api):
+    """A shot that is already covered must not be produced twice; others may."""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
+    profile = _register_ref2va_profile(client)
+    first = client.post(
+        f"/api/v1/projects/{project_id}/production-series",
+        json={"shot_ids": [shots[0]["id"]], "workflow_profile_id": profile["id"]},
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"/api/v1/projects/{project_id}/production-series",
+        json={"shot_ids": [shots[1]["id"], shots[2]["id"]], "workflow_profile_id": profile["id"]},
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["shot_count"] == 2
+
+
+def test_only_one_worker_can_claim_a_series(api):
+    from shine.comfyops.production_series import claim_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+
+    first = claim_series(factory, "worker-one")
+    second = claim_series(factory, "worker-two")
+    assert first is not None
+    assert second is None
+    with factory() as db:
+        series = db.get(ProductionSeries, first.id)
+        assert series.worker_id == "worker-one"
+        assert series.status == "RUNNING"
+
+
+def test_the_next_shot_is_only_created_after_its_source_passed(api, monkeypatch):
+    """A dependent shot may only consume a real, passed source job."""
+    from shine.comfyops import production_series as ps
+    from shine.worker import run_managed_series  # noqa: F401  (import guard for the loop)
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+
+    series = ps.claim_series(factory, "worker-series")
+    assert series is not None
+
+    seen = {}
+
+    def fake_loop(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                  comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                  first_job_id=None, next_job_id=None, on_shot_complete=None, series_id=None):
+        current = first_job_id
+        shots_done = []
+        while current and len(shots_done) < max_shots:
+            with session_factory.begin() as db:
+                job = db.get(Job, current)
+                assert job is not None
+                job.status = "PASSED"
+                job.artifact_id = "artifact-" + current
+            shots_done.append(current)
+            if on_shot_complete:
+                on_shot_complete(current, None)
+            # The next shot must not exist yet while its source still runs.
+            with session_factory() as db:
+                items = db.scalars(
+                    select(ProductionSeriesItem)
+                    .where(ProductionSeriesItem.series_id == series_id)
+                    .order_by(ProductionSeriesItem.position)
+                ).all()
+                seen.setdefault("pending_without_job", []).append(
+                    [item.shot_id for item in items if item.job_id is None]
+                )
+            current = next_job_id(current) if next_job_id else None
+        seen["shots"] = shots_done
+        return shots_done
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    result = ps.run_production_series(
+        factory, "worker-series", series.id,
+        settings=settings,
+        recipe={"renderer": {"instance_id": "i"}},
+        review_configs={"VLM": {}},
+        semantic_reviewer=object(),
+    )
+    assert result["status"] == "COMPLETED"
+    assert len(seen["shots"]) == 2
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all()
+        assert [item.status for item in items] == ["PASSED", "PASSED"]
+        second_job = db.get(Job, items[1].job_id)
+        assert second_job.id == seen["shots"][1]
+        # A cut shot is an independent shot: the order comes from the series,
+        # not from a dependency edge that would pretend a visual relation.
+        assert db.scalar(
+            select(JobDependency).where(JobDependency.child_job_id == second_job.id)
+        ) is None
+
+
+def test_a_continuity_shot_binds_the_real_previous_job(api, monkeypatch):
+    """A soft continuity shot consumes the passed job of the shot before it."""
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+
+    # The second shot declares a soft continuity relation to the first one.
+    with factory() as db:
+        from shine.models import Shot
+
+        shot = db.get(Shot, shots[1]["id"])
+        shot.spec = {**shot.spec, "continuity": {"mode": "last_frame"}}
+        db.commit()
+
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-series")
+    assert series is not None
+
+    def fake_loop(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                  comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                  first_job_id=None, next_job_id=None, on_shot_complete=None, series_id=None):
+        current = first_job_id
+        done = []
+        while current and len(done) < max_shots:
+            with session_factory.begin() as db:
+                job = db.get(Job, current)
+                job.status = "PASSED"
+                job.artifact_id = "artifact-" + current
+            done.append(current)
+            if on_shot_complete:
+                on_shot_complete(current, None)
+            current = next_job_id(current) if next_job_id else None
+        return done
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    result = ps.run_production_series(
+        factory, "worker-series", series.id,
+        settings=settings,
+        recipe={"renderer": {"instance_id": "i"}},
+        review_configs={"VLM": {}},
+        semantic_reviewer=object(),
+    )
+    assert result["status"] == "COMPLETED"
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all()
+        assert items[1].continuity_mode == "last_frame"
+        second = db.get(Job, items[1].job_id)
+        assert second.request["shot_spec"]["continuity"]["previous_job_id"] == items[0].job_id
+        assert second.request["shot_spec"]["continuity"]["previous_shot_id"] == shots[0]["id"]
+        edge = db.scalar(select(JobDependency).where(JobDependency.child_job_id == second.id))
+        assert edge.kind == "continuity:last_frame"
+
+
+def test_a_failed_shot_stops_the_series_and_blocks_the_next_one(api, monkeypatch):
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-series")
+
+    def fake_loop(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                  comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                  first_job_id=None, next_job_id=None, on_shot_complete=None, series_id=None):
+        with session_factory.begin() as db:
+            job = db.get(Job, first_job_id)
+            job.status = "NEEDS_REVIEW"
+            job.failure_code = "QC_NEEDS_REVIEW"
+        if on_shot_complete:
+            on_shot_complete(first_job_id, None)
+        # The next shot must not be queued behind a source that did not pass.
+        return next_job_id(first_job_id) if next_job_id else None
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    result = ps.run_production_series(
+        factory, "worker-series", series.id,
+        settings=settings,
+        recipe={"renderer": {"instance_id": "i"}},
+        review_configs={"VLM": {}},
+        semantic_reviewer=object(),
+    )
+    assert result["status"] == "NEEDS_REVIEW"
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all()
+        assert items[0].status == "FAILED"
+        assert items[1].job_id is None
+        series_row = db.get(ProductionSeries, series.id)
+        assert series_row.status == "NEEDS_REVIEW"
+
+
+def test_a_dead_worker_leaves_a_claimable_series(api):
+    """A worker that stops renewing must not lock its series forever."""
+    from shine.comfyops.production_series import claim_series, reconcile_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+
+    series = claim_series(factory, "worker-dead")
+    assert series is not None
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        row.lease_expires_at = utcnow() - timedelta(seconds=5)
+        db.commit()
+
+    assert reconcile_series(factory, "worker-next") == 1
+    resumed = claim_series(factory, "worker-next")
+    assert resumed is not None
+    assert resumed.worker_id == "worker-next"
+
+
+def test_an_alive_worker_keeps_its_series(api):
+    from shine.comfyops.production_series import claim_series, reconcile_series, renew_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+
+    series = claim_series(factory, "worker-alive")
+    assert series is not None
+    assert renew_series(factory, series.id, "worker-alive") is True
+    assert reconcile_series(factory, "worker-other") == 0
+    assert claim_series(factory, "worker-other") is None
+
+
+def test_cancelling_a_series_stops_its_unfinished_shots(api):
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+
+    response = client.post(f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "CANCELLED"
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem).where(
+                ProductionSeriesItem.series_id == _series_id(factory, project_id)
+            )
+        ).all()
+        assert all(item.status == "CANCELLED" for item in items)
+
+
+def _series_id(factory, project_id) -> str:
+    with factory() as db:
+        return db.scalar(
+            select(ProductionSeries.id).where(ProductionSeries.project_id == project_id)
+        )
+
+
+class _Keeper:
+    def __init__(self):
+        self.finalized = False
+
+    def finalize(self):
+        self.finalized = True
+        return {"released": True}
+
+
+class _Supervisor:
+    instance_id = "renderer-1"
+    _url = "http://127.0.0.1:8188"
+
+    def __init__(self, *, fail_stop=False):
+        self.fail_stop = fail_stop
+        self.stopped = False
+
+    def stop_closed(self):
+        if self.fail_stop:
+            raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
+        self.stopped = True
+        return {"pid": 4242, "active_processes": 0}
+
+    def check_memory(self, gpu_uuid, *, min_ram_mb, min_vram_mb):
+        return {"gpu_uuid": gpu_uuid}
+
+
+def _coordinator(factory, *, lease_id, fail_stop=False):
+    keeper = _Keeper()
+    supervisor = _Supervisor(fail_stop=fail_stop)
+    session = type("S", (), {"lease_id": lease_id})()
+    return type(
+        "C", (), {
+            "keeper": keeper, "replacement": supervisor, "gpu_uuid": "GPU-test",
+            "min_ram_mb": 8000, "min_vram_mb": 12000, "session": session,
+        }
+    )()
+
+
+def test_the_release_and_the_series_state_commit_together(api):
+    """The lease release and the series state are one transaction."""
+    from shine.comfyops.production_series import claim_series
+    from shine.worker import release_managed_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = claim_series(factory, "worker-series")
+
+    with factory.begin() as db:
+        lease = ResourceLease(
+            owner="h3:job-1", budget_mb=16384, exclusive=True, priority=100,
+            status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        db.commit()
+        lease_id = lease.id
+
+    result = release_managed_series(
+        factory, settings, _coordinator(factory, lease_id=lease_id),
+        series_id=series.id, worker_id="worker-series",
+    )
+    assert result["released"] is True
+    with factory() as db:
+        lease = db.get(ResourceLease, lease_id)
+        row = db.get(ProductionSeries, series.id)
+        assert lease.status == "RELEASED"
+        assert row.finalization_state == "RELEASED"
+        assert row.lease_id is None
+
+
+def test_a_release_that_already_committed_is_not_a_second_release(api):
+    from shine.comfyops.production_series import claim_series
+    from shine.worker import release_managed_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = claim_series(factory, "worker-series")
+
+    with factory.begin() as db:
+        lease = ResourceLease(
+            owner="h3:job-1", budget_mb=16384, exclusive=True, priority=100,
+            status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        db.commit()
+        lease_id = lease.id
+
+    release_managed_series(
+        factory, settings, _coordinator(factory, lease_id=lease_id),
+        series_id=series.id, worker_id="worker-series",
+    )
+    # The caller never saw the first answer and asks again.
+    again = release_managed_series(
+        factory, settings, _coordinator(factory, lease_id=lease_id),
+        series_id=series.id, worker_id="worker-series",
+    )
+    assert again["idempotent"] is True
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
+def test_a_renderer_that_cannot_stop_keeps_the_lease(api):
+    from shine.comfyops.production_series import claim_series
+    from shine.worker import release_managed_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = claim_series(factory, "worker-series")
+
+    with factory.begin() as db:
+        lease = ResourceLease(
+            owner="h3:job-1", budget_mb=16384, exclusive=True, priority=100,
+            status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        db.commit()
+        lease_id = lease.id
+
+    with pytest.raises(ValueError, match="COMFY_PROCESS_EXIT_UNCONFIRMED"):
+        release_managed_series(
+            factory, settings, _coordinator(factory, lease_id=lease_id, fail_stop=True),
+            series_id=series.id, worker_id="worker-series",
+        )
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+        row = db.get(ProductionSeries, series.id)
+        # The intent to release is durable, so the run is not silently lost.
+        assert row.finalization_state == "FINALIZING"
+        assert row.lease_id == lease_id
+
+
+def test_the_resident_worker_ignores_the_series_path_in_mock_mode(api):
+    from shine.worker import run_configured_series_once
+
+    client, factory, settings = api
+    assert run_configured_series_once(factory, "worker-mock", settings=settings) is None
+
+
+def test_the_resident_worker_ignores_the_series_path_without_a_managed_recipe(api, monkeypatch):
+    from shine.worker import run_configured_series_once
+
+    client, factory, settings = api
+    monkeypatch.delenv("SHINE_MANAGED_RECIPE", raising=False)
+    monkeypatch.setattr("shine.worker._managed_recipe", lambda _settings: None)
+    assert run_configured_series_once(factory, "worker-norecipe", settings=settings) is None
+
+
+def test_a_production_series_needs_a_real_h3_provider(api):
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    response = client.post(
+        f"/api/v1/projects/{project_id}/production-series",
+        json={"shot_ids": [shots[0]["id"]], "provider": "mock"},
+    )
+    assert response.status_code == 422
+
+
+def test_a_production_series_refuses_a_repeated_shot(api):
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    response = client.post(
+        f"/api/v1/projects/{project_id}/production-series",
+        json={"shot_ids": [shots[0]["id"], shots[0]["id"]], "workflow_profile_id": profile["id"]},
+    )
+    assert response.status_code == 422
