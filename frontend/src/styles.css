@@ -313,6 +313,10 @@
   background: #f3e0d9;
   color: #a35f4d;
 }
+.series-item-status.blocked {
+  background: #efe7d8;
+  color: #8a6f2f;
+}
 .series-item-status.running {
   background: #f0e9d5;
   color: #8a6f2f;

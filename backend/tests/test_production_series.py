@@ -325,7 +325,7 @@ def test_a_continuity_shot_binds_the_real_previous_job(api, monkeypatch):
         assert edge.kind == "continuity:last_frame"
 
 
-def test_a_failed_shot_stops_the_series_and_blocks_the_next_one(api, monkeypatch):
+def test_a_failed_shot_blocks_only_its_dependents(api, monkeypatch):
     from shine.comfyops import production_series as ps
 
     client, factory, settings = api
@@ -361,8 +361,7 @@ def test_a_failed_shot_stops_the_series_and_blocks_the_next_one(api, monkeypatch
             .where(ProductionSeriesItem.series_id == series.id)
             .order_by(ProductionSeriesItem.position)
         ).all()
-        assert items[0].status == "FAILED"
-        assert items[1].job_id is None
+        assert items[0].status == "BLOCKED"
         series_row = db.get(ProductionSeries, series.id)
         assert series_row.status == "NEEDS_REVIEW"
 
@@ -581,6 +580,114 @@ def test_the_resident_worker_ignores_the_series_path_without_a_managed_recipe(ap
     monkeypatch.delenv("SHINE_MANAGED_RECIPE", raising=False)
     monkeypatch.setattr("shine.worker._managed_recipe", lambda _settings: None)
     assert run_configured_series_once(factory, "worker-norecipe", settings=settings) is None
+
+
+def test_an_independent_shot_continues_after_a_blocked_one(api, monkeypatch):
+    """A shot that needs review blocks only the shots that depend on it."""
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-series")
+    assert series is not None
+
+    def fake_loop(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                  comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                  first_job_id=None, next_job_id=None, on_shot_complete=None, series_id=None):
+        current = first_job_id
+        done = []
+        while current and len(done) < max_shots:
+            with session_factory.begin() as db:
+                job = db.get(Job, current)
+                if len(done) == 1:
+                    # The second shot needs a human; its artefact is fine.
+                    job.status = "NEEDS_REVIEW"
+                    job.failure_code = "SEMANTIC_REVIEW_CONTRACT_INVALID: STYLE_INPUT_DECISION_CONTRADICTION"
+                else:
+                    job.status = "PASSED"
+                    job.artifact_id = "artifact-" + current
+            done.append(current)
+            if on_shot_complete:
+                on_shot_complete(current, None)
+            current = next_job_id(current) if next_job_id else None
+        return done
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    result = ps.run_production_series(
+        factory, "worker-series", series.id,
+        settings=settings,
+        recipe={"renderer": {"instance_id": "i"}},
+        review_configs={"VLM": {}},
+        semantic_reviewer=object(),
+    )
+    assert result["status"] == "NEEDS_REVIEW"
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all()
+        # The first shot passed, the second needs review, and the independent
+        # third shot still ran.
+        assert [item.status for item in items] == ["PASSED", "BLOCKED", "PASSED"]
+        assert items[1].failure_code == "SEMANTIC_REVIEW_CONTRACT_INVALID: STYLE_INPUT_DECISION_CONTRADICTION"
+
+
+def test_a_dependent_shot_stays_blocked_when_its_source_did_not_pass(api, monkeypatch):
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    with factory() as db:
+        from shine.models import Shot
+
+        shot = db.get(Shot, shots[1]["id"])
+        shot.spec = {**shot.spec, "continuity": {"mode": "last_frame",
+                                                 "previous_shot_id": shots[0]["id"]}}
+        db.commit()
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-series")
+    assert series is not None
+
+    def fake_loop(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                  comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                  first_job_id=None, next_job_id=None, on_shot_complete=None, series_id=None):
+        current = first_job_id
+        done = []
+        while current and len(done) < max_shots:
+            with session_factory.begin() as db:
+                job = db.get(Job, current)
+                job.status = "NEEDS_REVIEW"
+                job.failure_code = "SEMANTIC_REVIEW_CONTRACT_INVALID: STYLE_INPUT_DECISION_CONTRADICTION"
+            done.append(current)
+            if on_shot_complete:
+                on_shot_complete(current, None)
+            current = next_job_id(current) if next_job_id else None
+        return done
+
+    monkeypatch.setattr("shine.worker._run_managed_loop", fake_loop)
+    result = ps.run_production_series(
+        factory, "worker-series", series.id,
+        settings=settings,
+        recipe={"renderer": {"instance_id": "i"}},
+        review_configs={"VLM": {}},
+        semantic_reviewer=object(),
+    )
+    assert result["status"] == "NEEDS_REVIEW"
+    with factory() as db:
+        items = db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all()
+        assert items[0].status == "BLOCKED"
+        # The dependent shot never got a job, because its source did not pass.
+        assert items[1].job_id is None
+        assert items[1].status == "BLOCKED"
+        assert items[1].failure_code == "SERIES_SOURCE_NOT_PASSED"
 
 
 def test_a_profile_without_the_declared_media_family_is_refused(api):

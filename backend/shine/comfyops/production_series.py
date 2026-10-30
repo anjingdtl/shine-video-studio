@@ -406,12 +406,31 @@ def _item_is_done(item: ProductionSeriesItem, job: Job | None) -> bool:
     return job.status == "PASSED" and not job.stale
 
 
-def _next_pending_item(db, series_id: str) -> tuple[ProductionSeriesItem | None, Job | None]:
-    """The first item of the series that is not finished yet."""
-    for item in _items(db, series_id):
+def _next_runnable_item(db, series_id: str) -> tuple[ProductionSeriesItem | None, Job | None]:
+    """The first item of the series that can still run.
+
+    A shot that needs review blocks only the shots that depend on it.  An
+    independent shot of the same run continues, because a low-confidence
+    judgement about one shot must not stop the whole production.
+    """
+    items = _items(db, series_id)
+    by_position = {item.position: item for item in items}
+    for item in items:
         job = db.get(Job, item.job_id) if item.job_id else None
         if _item_is_done(item, job):
             continue
+        if job is not None and job.status in {"FAILED", "NEEDS_REVIEW"}:
+            item.status = "BLOCKED"
+            item.failure_code = job.failure_code or "SERIES_SHOT_NEEDS_REVIEW"
+            continue
+        if item.continuity_mode != "cut":
+            previous = by_position.get(item.position - 1)
+            if previous is not None:
+                source = db.get(Job, previous.job_id) if previous.job_id else None
+                if source is None or source.status != "PASSED" or source.stale:
+                    item.status = "BLOCKED"
+                    item.failure_code = "SERIES_SOURCE_NOT_PASSED"
+                    continue
         return item, job
     return None, None
 
@@ -427,7 +446,7 @@ def _sync_items(db, series: ProductionSeries) -> None:
             item.status = "PASSED"
             completed += 1
         elif job.status in {"FAILED", "NEEDS_REVIEW"}:
-            item.status = "FAILED"
+            item.status = "BLOCKED"
             item.failure_code = job.failure_code
         elif job.status in {"QUEUED", "PLANNED", "READY"}:
             item.status = "QUEUED"
@@ -460,7 +479,8 @@ def _create_item_job(session_factory, series_id: str, item_id: str, *, settings,
         previous_item = next((row for row in items if row.position == position - 1), None)
         previous_job_id = None
         previous_shot_id = None
-        if previous_item is not None:
+        if previous_item is not None and item.continuity_mode != "cut":
+            # A dependent shot may only consume a source job that really passed.
             if not previous_item.job_id:
                 raise HTTPException(409, "PRODUCTION_SERIES_ORDER_VIOLATION")
             previous_job = db.get(Job, previous_item.job_id)
@@ -568,7 +588,7 @@ def run_production_series(
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         _sync_items(db, series)
-        item, job = _next_pending_item(db, series_id)
+        item, job = _next_runnable_item(db, series_id)
         if item is None:
             _set_series_state(db, series_id, worker_id, status="COMPLETED")
             return {"status": "COMPLETED", "shots": shots}
@@ -583,7 +603,7 @@ def run_production_series(
         with session_factory.begin() as db:
             series = db.get(ProductionSeries, series_id)
             _sync_items(db, series)
-            item, job = _next_pending_item(db, series_id)
+            item, job = _next_runnable_item(db, series_id)
             item_id = item.id
         try:
             current_job_id = _create_item_job(session_factory, series_id, item_id, settings=settings, offline=offline)
@@ -600,7 +620,7 @@ def run_production_series(
             if series is None or series.status != "RUNNING":
                 return None
             _sync_items(db, series)
-            item, job = _next_pending_item(db, series_id)
+            item, job = _next_runnable_item(db, series_id)
             if item is None:
                 return None
             if job is None:
@@ -642,10 +662,14 @@ def run_production_series(
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         _sync_items(db, series)
-        item, job = _next_pending_item(db, series_id)
-        if item is None:
+        item, job = _next_runnable_item(db, series_id)
+        blocked = [row for row in _items(db, series_id) if row.status == "BLOCKED"]
+        if item is None and not blocked:
             status = "COMPLETED"
             failure_code = None
+        elif item is None:
+            status = "NEEDS_REVIEW"
+            failure_code = blocked[0].failure_code or "SERIES_SHOT_NEEDS_REVIEW"
         else:
             status = "NEEDS_REVIEW"
             failure_code = (job.failure_code if job is not None else None) or "SERIES_INCOMPLETE"
@@ -686,8 +710,8 @@ def reconcile_series(session_factory, worker_id: str) -> int:
             if series.status == "RUNNING" and not _series_is_stale(series, now):
                 continue
             _sync_items(db, series)
-            item, job = _next_pending_item(db, series.id)
-            if item is None:
+            item, job = _next_runnable_item(db, series.id)
+            if item is None and not [row for row in _items(db, series.id) if row.status == "BLOCKED"]:
                 series.status = "COMPLETED"
                 series.finished_at = now
                 series.lease_id = None

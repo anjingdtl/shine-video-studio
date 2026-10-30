@@ -443,7 +443,6 @@ def _semantic_review(
         _raise_if_managed_review(reviewer)
         return [], "SEMANTIC_REVIEW_TIMEOUT: response unavailable"
     except ReceivedReviewError as exc:
-        _raise_if_managed_review(reviewer)
         if str(exc) == "VLM_RESPONSE_INCOMPLETE":
             finish = exc.finish_reason if exc.finish_reason in {"length", "content_filter"} else "UNSPECIFIED"
             return [], f"SEMANTIC_REVIEW_INCOMPLETE: {finish}"
@@ -455,9 +454,13 @@ def _semantic_review(
                    "VLM_VERDICT_INVALID", "VLM_DIALOGUE_EVIDENCE_MISSING", "VLM_DIALOGUE_HARD_UNSUPPORTED",
                    "VLM_IDENTITY_REFERENCE_MISSING", "VLM_FINDING_DETAIL_TOO_LONG", "VLM_SUMMARY_TOO_LONG",
                    "RESPONSE_SHAPE_INVALID"}
+        # The review finished and its answer breaks the contract.  That is a
+        # failed review, not an uncertain external stage: the isolation receipt
+        # proves the call completed, the artifact stays valid and the shot
+        # needs a human.  Escalating it would hold the GPU lease for a
+        # probabilistic answer and stop the whole run.
         return [], f"SEMANTIC_REVIEW_CONTRACT_INVALID: {reason if reason in allowed else 'RESPONSE_REJECTED'}"
     except ValueError as exc:
-        _raise_if_managed_review(reviewer)
         return [], f"SEMANTIC_REVIEW_INVALID_JSON: {exc}"
     except Exception as exc:  # pragma: no cover - defensive
         _raise_if_managed_review(reviewer)

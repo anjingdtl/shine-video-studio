@@ -32,6 +32,7 @@ const itemText: Record<string, string> = {
   RUNNING: '渲染中',
   PASSED: '已通过',
   FAILED: '失败',
+  BLOCKED: '已阻断',
   CANCELLED: '已取消',
 };
 
