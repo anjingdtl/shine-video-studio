@@ -29,6 +29,7 @@ class IdleHandoffKeeper:
         self.lease_seconds, self.interval = lease_seconds, interval
         self._lock, self._stop = RLock(), Event()
         self._thread, self._error, self._transferred = None, None, False
+        self._released = False
 
     def _binding(self, db):
         row = db.get(AppSetting, "handoff:" + self.attempt_id)
@@ -111,6 +112,25 @@ class IdleHandoffKeeper:
                 raise HTTPException(409, "HANDOFF_IDLE_KEEPER_EXIT_UNCONFIRMED")
         return result
 
+    def finalize(self):
+        """End the idle hold after an explicit verified release of the renderer.
+
+        The caller must already have stopped the owned renderer and proved the
+        physical release; this only stops the lease renewal so a released
+        lease is never resurrected by the next heartbeat.
+        """
+        with self._lock:
+            if self._error:
+                raise HTTPException(409, "HANDOFF_IDLE_RECONCILIATION_REQUIRED")
+            self._released = True
+            self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                self._fail()
+                raise HTTPException(409, "HANDOFF_IDLE_KEEPER_EXIT_UNCONFIRMED")
+        return {"released": True}
+
     def transfer(self, settings, boundary, job_id, attempt_id, instance_id, worker_id, state_version):
         from shine.comfyops.handoff_transfer import transfer_handoff_lease
 
@@ -127,7 +147,7 @@ class IdleHandoffKeeper:
         """Stop renewal conservatively; a non-transferred lease needs reconciliation."""
         self._stop.set()
         with self._lock:
-            if not self._transferred and not self._error:
+            if not self._transferred and not self._released and not self._error:
                 self._fail()
         if self._thread:
             self._thread.join(timeout=2)

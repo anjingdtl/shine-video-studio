@@ -185,6 +185,24 @@ class RendererSupervisor:
         self._stopped = dict(result)
         return dict(result)
 
+    def stop_closed(self):
+        """Stop the owned, closed renderer that no further shot will use.
+
+        The drain archive already happened for the attempt this renderer served;
+        this path only proves that the still-owned group is empty before the
+        exclusive lease is released.  It never touches a process the supervisor
+        does not own.
+        """
+        if self._stopped is not None:
+            raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
+        self.require_closed_restart()
+        result = self._group.terminate(timeout=10)
+        if (not isinstance(result, dict) or result.get("pid") != self._group.pid
+                or type(result.get("active_processes")) is not int or result["active_processes"] != 0):
+            raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
+        self._stopped = dict(result)
+        return dict(result)
+
     def check_memory(self, gpu_uuid, *, min_ram_mb, min_vram_mb):
         if self._stopped is None:
             raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")

@@ -1226,6 +1226,110 @@ def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_se
     return result, continuation.next
 
 
+def release_managed_series(session_factory, settings, coordinator):
+    """End a managed series: stop the owned renderer, then release its lease.
+
+    The renderer is stopped and proved empty first, the exclusive lease is
+    released afterwards, and only then does the idle keeper stop renewing it.
+    A failure at any step keeps the lease for reconciliation instead of
+    pretending the hardware was released.
+    """
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    if coordinator is None or coordinator.keeper is None or coordinator.replacement is None:
+        raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
+    supervisor = coordinator.replacement
+    stopped = supervisor.stop_closed()
+    supervisor.check_memory(coordinator.gpu_uuid, min_ram_mb=coordinator.min_ram_mb,
+                            min_vram_mb=coordinator.min_vram_mb)
+    lease_id = coordinator.session.lease_id
+    coordinator.keeper.finalize()
+    with session_factory.begin() as db:
+        lease = db.get(ResourceLease, lease_id)
+        if not lease or lease.status != "ACTIVE":
+            raise HTTPException(409, "HANDOFF_RESOURCE_LEASE_LOST")
+        ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    return {"lease_id": lease_id, "stopped": stopped}
+
+
+def run_managed_series(session_factory, worker_id, *, settings, recipe, review_configs, max_shots=8,
+                       comfy_service=None, comfy_client=None, semantic_reviewer=None, asr_reviewer=None,
+                       on_shot_complete=None):
+    """Drive a queue of H3 shots behind one managed renderer.
+
+    The first shot owns a fresh managed startup.  Every following shot
+    continues the same fenced renderer through the idle keeper's lease
+    transfer, so no second renderer is started and no exclusive resource is
+    released between two shots: the serial model stages can never overlap.
+    This is the unattended production path — the caller queues the shots and
+    the worker drives them to completion.
+
+    ``on_shot_complete`` is called with the finished job id before the next
+    shot is reserved.  A dependent shot can only be created after its source
+    job passed, so the hook is where the caller queues it; the fenced
+    renderer keeps holding the exclusive admission across that gap.
+    """
+    from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
+
+    renderer_recipe = recipe.get("renderer") if isinstance(recipe, dict) else None
+    if (not isinstance(renderer_recipe, dict) or not renderer_recipe.get("instance_id")
+            or not isinstance(review_configs, dict) or not review_configs
+            or not (semantic_reviewer or asr_reviewer)):
+        raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
+    if type(max_shots) is not int or not 1 <= max_shots <= 64:
+        raise HTTPException(409, "COMFY_SERIES_LENGTH_INVALID")
+    if on_shot_complete is not None and not callable(on_shot_complete):
+        raise HTTPException(409, "COMFY_SERIES_CALLBACK_INVALID")
+    scheduler = ResourceScheduler()
+    with session_factory.begin() as db:
+        candidate = db.scalar(
+            select(Job)
+            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                   Job.provider == "comfyui")
+            .order_by(Job.created_at, Job.id)
+            .limit(1)
+        )
+        if not candidate:
+            return []
+        owner = "h3:" + candidate.id
+        lease = scheduler.enqueue(db, owner, 16384, True, 100)
+        if lease.status == "RELEASED":
+            lease.status = "WAITING"
+        db.commit()
+        lease_id, job_id = lease.id, candidate.id
+    with session_factory() as db:
+        if not scheduler.admit(db, lease_id):
+            return []
+    history_dir = Path(settings.data_dir).resolve() / "comfyops" / "handoff-history"
+    continuation = _FirstManagedContinuation(
+        session_factory, settings, job_id=job_id, lease_id=lease_id, recipe=renderer_recipe,
+        review_configs=review_configs, history_dir=history_dir)
+    token = CURRENT_RESOURCE.set(lease_id)
+    try:
+        result = _run_one(session_factory, worker_id=worker_id, settings=settings,
+                          comfy_service=comfy_service, comfy_client=comfy_client,
+                          semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+                          expected_job_id=job_id, managed_continuation=continuation)
+    finally:
+        CURRENT_RESOURCE.reset(token)
+    shots = [result]
+    coordinator = continuation.coordinator
+    while coordinator is not None and len(shots) < max_shots:
+        if on_shot_complete is not None:
+            on_shot_complete(shots[-1], coordinator)
+        result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
+                                                comfy_service=comfy_service, comfy_client=comfy_client,
+                                                semantic_reviewer=semantic_reviewer,
+                                                asr_reviewer=asr_reviewer)
+        if result is None:
+            break
+        shots.append(result)
+    if coordinator is not None and coordinator.keeper is not None:
+        release_managed_series(session_factory, settings, coordinator)
+    return shots
+
+
 def _run_one(
     session_factory,
     provider: MockH3Provider | None = None,
