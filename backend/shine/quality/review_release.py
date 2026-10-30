@@ -1,6 +1,7 @@
 """Seal review admission and check a specific isolated-review process receipt."""
 
 import re
+import time
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -195,7 +196,8 @@ def create_cold_review_fence(*, base_url, runtime_sha256, supervisor, gpu_uuid,
 
 
 def verify_cold_review_fence(*, base_url, fence_id, runtime_sha256, supervisor, gpu_uuid,
-                             min_ram_mb, min_vram_mb, handoff_token, api_key=None, owner_group=None):
+                             min_ram_mb, min_vram_mb, handoff_token, api_key=None, owner_group=None,
+                             timeout=60):
     """Verify a live pristine fence and the startup child's physical exit.
 
     This is evidence only: it neither creates a fence nor authorizes an H3
@@ -262,12 +264,20 @@ def verify_cold_review_fence(*, base_url, fence_id, runtime_sha256, supervisor, 
     check_owner()
     with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
         first = check_fence(client)
-        measured = probe_memory(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
-        verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
-                                      gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
-                                      min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
-        if measured.get("ready") is not True or not verified["ready"]:
-            raise ValueError("REVIEW_READY_MEMORY_INSUFFICIENT")
+        # The renderer that served the review releases its GPU memory
+        # asynchronously, so the baseline is measured once the release has
+        # actually happened instead of on the first sample.
+        deadline = time.monotonic() + timeout
+        while True:
+            measured = probe_memory(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
+            verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
+                                          gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
+                                          min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
+            if measured.get("ready") is True and verified["ready"]:
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError("REVIEW_READY_MEMORY_INSUFFICIENT")
+            time.sleep(0.5)
         if check_fence(client) != first:
             raise ValueError("REVIEW_COLD_FENCE_UNCONFIRMED")
     check_owner()

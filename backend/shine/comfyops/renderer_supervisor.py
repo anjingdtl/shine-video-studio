@@ -203,20 +203,28 @@ class RendererSupervisor:
         self._stopped = dict(result)
         return dict(result)
 
-    def check_memory(self, gpu_uuid, *, min_ram_mb, min_vram_mb):
+    def check_memory(self, gpu_uuid, *, min_ram_mb, min_vram_mb, timeout=60):
         if self._stopped is None:
             raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
         if windows_port_listeners(self._port):
             raise ValueError("COMFY_LISTENER_STILL_ACTIVE")
-        measured = probe_memory(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
-        if windows_port_listeners(self._port):
-            raise ValueError("COMFY_LISTENER_STILL_ACTIVE")
-        verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
-                                      gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
-                                      min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
-        if measured.get("ready") is not True or not verified["ready"]:
-            raise ValueError("COMFY_HANDOFF_MEMORY_INSUFFICIENT")
-        return verified
+        # A stopped process releases its GPU memory asynchronously: the driver
+        # reclaims it a moment after the process group is gone.  The baseline is
+        # therefore measured once the release has actually happened, not on the
+        # first sample, otherwise a correct release reads as insufficient.
+        deadline = time.monotonic() + timeout
+        while True:
+            measured = probe_memory(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
+            if windows_port_listeners(self._port):
+                raise ValueError("COMFY_LISTENER_STILL_ACTIVE")
+            verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
+                                          gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
+                                          min_vram_mb=min_vram_mb, expected_gpu=gpu_uuid)
+            if measured.get("ready") is True and verified["ready"]:
+                return verified
+            if time.monotonic() >= deadline:
+                raise ValueError("COMFY_HANDOFF_MEMORY_INSUFFICIENT")
+            time.sleep(0.5)
 
     def restore_after_review(self, review_verification, *, min_ram_mb, min_vram_mb, timeout=30):
         """Restore the pinned owned recipe only after a sealed review release."""

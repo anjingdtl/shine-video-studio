@@ -326,8 +326,11 @@ def test_memory_admission_requires_confirmed_process_exit(server, monkeypatch):
     supervisor.drain_and_archive(root / "history", "f" * 36)
     supervisor.stop_after_drain()
     with pytest.raises(ValueError, match="MEMORY_INSUFFICIENT"):
-        supervisor.check_memory("GPU-test", min_ram_mb=8000, min_vram_mb=14000)
-    assert probes == ["GPU-test"]
+        supervisor.check_memory("GPU-test", min_ram_mb=8000, min_vram_mb=14000, timeout=1)
+    # The admission waits for the stopped process to release its memory, so the
+    # baseline is measured again instead of on the first sample.
+    assert probes and set(probes) == {"GPU-test"}
+    assert len(probes) > 1
 
 
 def test_new_listener_after_stop_blocks_memory_admission(server, monkeypatch):
