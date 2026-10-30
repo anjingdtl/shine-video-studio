@@ -1393,6 +1393,13 @@ def _run_managed_loop(
     with session_factory() as db:
         if not scheduler.admit(db, lease_id):
             return []
+    if series_id:
+        # The exclusive GPU lease is the proof of life of a running series.
+        # Persist it on the series so a crashed worker leaves a reconciliation
+        # trail instead of a series that can be re-queued under a live lease.
+        from shine.comfyops.production_series import record_series_lease
+
+        record_series_lease(session_factory, series_id, worker_id, lease_id)
     history_dir = Path(settings.data_dir).resolve() / "comfyops" / "handoff-history"
     continuation = _FirstManagedContinuation(
         session_factory, settings, job_id=job_id, lease_id=lease_id, recipe=renderer_recipe,
@@ -1407,30 +1414,40 @@ def _run_managed_loop(
         CURRENT_RESOURCE.reset(token)
     shots = [result]
     coordinator = continuation.coordinator
-    while coordinator is not None and len(shots) < max_shots:
-        if on_shot_complete is not None:
-            on_shot_complete(shots[-1], coordinator)
-        target = next_job_id(shots[-1]) if next_job_id is not None else _QUEUE_CHOICE
-        if target is _QUEUE_CHOICE:
-            result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
-                                                    comfy_service=comfy_service, comfy_client=comfy_client,
-                                                    semantic_reviewer=semantic_reviewer,
-                                                    asr_reviewer=asr_reviewer,
-                                                    exclude_series_jobs=exclude_series_jobs)
-        elif target is None:
-            break
-        else:
-            result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
-                                                    comfy_service=comfy_service, comfy_client=comfy_client,
-                                                    semantic_reviewer=semantic_reviewer,
-                                                    asr_reviewer=asr_reviewer,
-                                                    expected_job_id=target)
-        if result is None:
-            break
-        shots.append(result)
-    if coordinator is not None and coordinator.keeper is not None:
-        release_managed_series(session_factory, settings, coordinator, series_id=series_id,
-                                worker_id=worker_id if series_id else None)
+    try:
+        while coordinator is not None and len(shots) < max_shots:
+            if on_shot_complete is not None:
+                on_shot_complete(shots[-1], coordinator)
+            target = next_job_id(shots[-1]) if next_job_id is not None else _QUEUE_CHOICE
+            if target is _QUEUE_CHOICE:
+                result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
+                                                        comfy_service=comfy_service, comfy_client=comfy_client,
+                                                        semantic_reviewer=semantic_reviewer,
+                                                        asr_reviewer=asr_reviewer,
+                                                        exclude_series_jobs=exclude_series_jobs)
+            elif target is None:
+                break
+            else:
+                result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
+                                                        comfy_service=comfy_service, comfy_client=comfy_client,
+                                                        semantic_reviewer=semantic_reviewer,
+                                                        asr_reviewer=asr_reviewer,
+                                                        expected_job_id=target)
+            if result is None:
+                break
+            shots.append(result)
+    finally:
+        # Every exit path releases the renderer and its exclusive lease.  A
+        # failure in the completion callback or in the next-job resolver must
+        # never leave the GPU leased with no series-driven recovery.  A release
+        # failure is recorded, but it never masks the original error.
+        if coordinator is not None and coordinator.keeper is not None:
+            try:
+                release_managed_series(session_factory, settings, coordinator, series_id=series_id,
+                                        worker_id=worker_id if series_id else None)
+            except Exception:
+                logger.exception("managed_series_release_failed series_id=%s worker_id=%s",
+                                 series_id, worker_id)
     return shots
 
 

@@ -750,3 +750,201 @@ def test_a_production_series_refuses_a_repeated_shot(api):
         json={"shot_ids": [shots[0]["id"], shots[0]["id"]], "workflow_profile_id": profile["id"]},
     )
     assert response.status_code == 422
+
+
+def test_a_paused_series_keeps_its_owner_and_cannot_be_stolen(api):
+    """A pause is a request, not a handover.
+
+    The owner is alive while it holds an unexpired lease, so a second worker
+    must not be able to claim the series and decide its outcome.
+    """
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-alive")
+    assert series is not None
+
+    paused = client.post(f"/api/v1/production-series/{series.id}/pause")
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["status"] == "PAUSE_REQUESTED"
+
+    # The owner keeps its ownership proof while the pause is pending.
+    assert ps.renew_series(factory, series.id, "worker-alive") is True
+    # A second worker cannot take a series whose owner is still alive.
+    assert ps.claim_series(factory, "worker-other") is None
+    assert ps.reconcile_series(factory, "worker-other") == 0
+
+    resumed = client.post(f"/api/v1/production-series/{series.id}/resume")
+    assert resumed.status_code == 200, resumed.text
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        # The living owner keeps the series; it is not handed to another worker.
+        assert row.worker_id == "worker-alive"
+        assert row.status == "RUNNING"
+    assert ps.claim_series(factory, "worker-other") is None
+
+
+def test_the_series_records_the_gpu_lease_it_holds(api):
+    """The lease is the proof of life of a running series.
+
+    A crashed worker must leave the lease id behind, so that the reconciliation
+    can tell "the renderer is still alive" from "nothing runs any more".
+    """
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-alive")
+    assert series is not None
+
+    with factory.begin() as db:
+        lease = ResourceLease(
+            owner="h3:job-1", budget_mb=16384, exclusive=True, priority=100,
+            status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        db.commit()
+        lease_id = lease.id
+
+    ps.record_series_lease(factory, series.id, "worker-alive", lease_id)
+    with factory() as db:
+        assert db.get(ProductionSeries, series.id).lease_id == lease_id
+
+    # While the lease is alive the series must not be re-queued by another
+    # worker, even though its owner stopped renewing.
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+    assert ps.claim_series(factory, "worker-other") is None
+    assert ps.reconcile_series(factory, "worker-other") == 0
+
+
+def test_an_interrupted_release_is_not_left_in_finalizing(api):
+    """A release that was interrupted must not stay in a state nobody reads."""
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-alive")
+    assert series is not None
+
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        row.finalization_state = "FINALIZING"
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+
+    ps.reconcile_series(factory, "worker-other")
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        assert row.finalization_state == "RECONCILE_REQUIRED"
+
+
+def test_a_cancelled_series_keeps_its_outcome(api):
+    """A late worker transition must not rewrite a cancellation."""
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-alive")
+    assert series is not None
+
+    cancelled = client.post(f"/api/v1/production-series/{series.id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "CANCELLED"
+
+    with factory.begin() as db:
+        ps._set_series_state(db, series.id, "worker-alive", status="NEEDS_REVIEW",
+                             failure_code="SERIES_INCOMPLETE")
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        assert row.status == "CANCELLED"
+        assert row.failure_code == "SERIES_CANCELLED"
+
+
+def test_a_failing_shot_callback_still_releases_the_renderer(api, monkeypatch):
+    """An exception in the completion callback must not leak the renderer.
+
+    The exclusive GPU lease and the managed renderer must be released on every
+    exit path of the managed loop, including the ones that raise.
+    """
+    from shine.comfyops import production_series as ps
+    from shine.worker import _run_managed_loop
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-alive")
+    assert series is not None
+
+    released: list[str] = []
+
+    class _Coordinator:
+        keeper = type("K", (), {"finalize": staticmethod(lambda: {"released": True})})()
+        replacement = type("S", (), {
+            "instance_id": "renderer-1", "_url": "http://127.0.0.1:8188",
+            "stop_closed": staticmethod(lambda: {"pid": 1, "active_processes": 0}),
+            "check_memory": staticmethod(lambda gpu_uuid, *, min_ram_mb, min_vram_mb: {"gpu_uuid": gpu_uuid}),
+        })()
+        gpu_uuid = "GPU-test"
+        min_ram_mb = 8000
+        min_vram_mb = 12000
+        session = type("S", (), {"lease_id": "lease-1"})()
+
+    monkeypatch.setattr(
+        "shine.worker.release_managed_series",
+        lambda *args, **kwargs: released.append(kwargs.get("series_id") or "none"),
+    )
+
+    class _Continuation:
+        coordinator = _Coordinator()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("shine.worker._FirstManagedContinuation", _Continuation)
+
+    # A real queued job of the series, created through the ordinary API.
+    queued = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={"shot_id": shots[0]["id"], "provider": "comfyui",
+              "workflow_profile_id": profile["id"]},
+    )
+    assert queued.status_code == 201, queued.text
+    job_id = queued.json()["id"]
+
+    def fake_run_one(session_factory, worker_id, *, settings, comfy_service, comfy_client,
+                     semantic_reviewer, asr_reviewer, expected_job_id, managed_continuation):
+        return expected_job_id
+
+    monkeypatch.setattr("shine.worker._run_one", fake_run_one)
+
+    def failing_callback(job_id, coordinator_):
+        raise RuntimeError("SHOT_COMPLETE_CALLBACK_FAILED")
+
+    with pytest.raises(RuntimeError, match="SHOT_COMPLETE_CALLBACK_FAILED"):
+        _run_managed_loop(
+            factory, "worker-alive",
+            settings=settings,
+            recipe={"renderer": {"instance_id": "renderer-1"}},
+            review_configs={"VLM": {}},
+            semantic_reviewer=object(),
+            first_job_id=job_id,
+            next_job_id=lambda _job_id: None,
+            on_shot_complete=failing_callback,
+            series_id=series.id,
+        )
+    # The renderer and its exclusive lease are released even though the run
+    # ended with an exception.
+    assert released == [series.id]

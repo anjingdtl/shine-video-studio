@@ -70,6 +70,13 @@ CASES = [
 
 
 def log(message: str) -> None:
+    # The Windows console may be GBK; the transcripts are Chinese, so the
+    # progress output must never crash the measurement.
+    stream = sys.stdout
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
@@ -115,7 +122,8 @@ def add_noise(path: Path, amplitude: float, seed: int = 7) -> None:
     for index in range(0, len(data) - 1, 2):
         noise = int((random.random() - 0.5) * 2 * 32767 * amplitude)
         value = max(-32768, min(32767, int.from_bytes(data[index:index + 2], "little") + noise))
-        data[index:index + 2] = value.to_bytes(2, "little")
+        # A signed 16 bit sample is stored as two's complement.
+        data[index:index + 2] = (value & 0xFFFF).to_bytes(2, "little")
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
@@ -193,28 +201,45 @@ def transcribe(asr_base: str, audio: Path, model: str) -> dict:
     return body
 
 
-def transcribe_qwen3(audio: Path, packages: Path, model_root: Path) -> dict:
-    """The locally installed Qwen3-ASR model, run in process on the CPU.
+def transcribe_qwen3(audio: Path, packages: Path, model_root: Path, python: str | None = None) -> dict:
+    """The locally installed Qwen3-ASR model, run in a separate local process.
 
     It is an existing local resource and it is independent of the H3 video
-    core, so comparing it with the production executor is allowed.
+    core, so comparing it with the production executor is allowed.  It runs in
+    its own process because the pinned runtime packages belong to the local
+    model runtime, not to the API virtual environment.
     """
-    sys.path.insert(0, str(packages))
-    from qwen_asr import Qwen3ASRModel
-
-    model = Qwen3ASRModel.from_pretrained(str(model_root), device_map="cpu")
-    results = model.transcribe(audio=str(audio), language="Chinese")
-    if isinstance(results, list):
-        text = " ".join(str(getattr(row, "text", row)) for row in results)
-    else:
-        text = str(getattr(results, "text", results))
-    return {"http_status": 200, "response": {"text": text, "is_mock": False, "model": "local-qwen3-asr-0.6b"}}
+    script = f'''
+import json, sys
+sys.path.insert(0, {str(packages)!r})
+from qwen_asr import Qwen3ASRModel
+model = Qwen3ASRModel.from_pretrained({str(model_root)!r}, device_map="cpu")
+results = model.transcribe(audio=sys.argv[1], language="Chinese")
+if isinstance(results, list):
+    text = " ".join(str(getattr(row, "text", row)) for row in results)
+else:
+    text = str(getattr(results, "text", results))
+# The console of this machine may be GBK, so the transcript is written as
+# UTF-8 bytes and decoded by the parent.
+sys.stdout.buffer.write(json.dumps({{"text": text}}, ensure_ascii=False).encode("utf-8"))
+'''
+    interpreter = python or sys.executable
+    result = subprocess.run(
+        [interpreter, "-c", script, str(audio)],
+        capture_output=True, timeout=3600, check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace")[-600:]
+        return {"http_status": 0, "response": {"text": f"FAILED: {detail}"}}
+    payload = json.loads(result.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+    return {"http_status": 200, "response": {"text": payload["text"], "is_mock": False,
+                                             "model": "local-qwen3-asr-0.6b"}}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qualify the local Chinese ASR on ground-truth audio")
     parser.add_argument("--asr-base", required=True, help="Base URL of a running local review executor")
-    parser.add_argument("--asr-model", default="local-whisper-tiny")
+    parser.add_argument("--asr-model", default="local-qwen3-asr-0.6b")
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--tts-packages", default=str(REPO / ".local-acceptance/tts-runtime-packages"))
     parser.add_argument("--tts-model", default=str(
@@ -229,10 +254,19 @@ def main() -> int:
     parser.add_argument("--qwen-asr-model-root", default=str(
         REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
                "/Qwen3-ASR-0.6B-5eb14417-cdn1"))
+    parser.add_argument("--asr-python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe",
+                        help="Interpreter that owns the pinned Qwen3-ASR runtime packages")
     args = parser.parse_args()
 
     evidence = Path(args.evidence_dir).resolve()
     (evidence / "asr").mkdir(parents=True, exist_ok=True)
+
+    # The measurement must not die because the console cannot encode Chinese.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     results: list[dict] = []
     for case in CASES:
@@ -265,7 +299,8 @@ def main() -> int:
         }
         if args.qwen_asr_model_root:
             try:
-                second = transcribe_qwen3(audio, Path(args.qwen_asr_packages), Path(args.qwen_asr_model_root))
+                second = transcribe_qwen3(audio, Path(args.qwen_asr_packages), Path(args.qwen_asr_model_root),
+                                         python=args.asr_python)
             except Exception as exc:
                 second = {"http_status": 0, "response": {"text": f"FAILED: {type(exc).__name__}: {exc}"[:300]}}
             second_body = second.get("response") or {}

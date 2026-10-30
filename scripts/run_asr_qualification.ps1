@@ -9,6 +9,7 @@ param(
     [string]$RuntimePackages = '',
     [string]$ReviewPython = '',
     [int]$AsrPort = 8117,
+    [string]$AsrModel = 'local-qwen3-asr-0.6b',
     [int]$TimeoutMinutes = 90
 )
 
@@ -49,6 +50,7 @@ try {
 
     & $venvPython (Join-Path $PSScriptRoot 'qualify_local_asr.py') `
         --asr-base "http://127.0.0.1:$AsrPort" --evidence-dir $EvidenceDir `
+        --asr-model $AsrModel --asr-python $ReviewPython `
         --tts-python $ReviewPython 2> (Join-Path $EvidenceDir 'asr-qualification.err.log')
     Get-Content (Join-Path $EvidenceDir 'asr-qualification.err.log') -Tail 20 -ErrorAction SilentlyContinue |
         ForEach-Object { Write-Host $_ }

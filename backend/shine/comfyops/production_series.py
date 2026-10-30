@@ -258,6 +258,23 @@ def _series_is_stale(series: ProductionSeries, now) -> bool:
     return series.lease_expires_at is None or series.lease_expires_at <= now
 
 
+def _series_lease_is_alive(db, series: ProductionSeries, now) -> bool:
+    """Whether the exclusive GPU lease of the series is still active.
+
+    The series lease proves that the owner is alive; the GPU lease proves that
+    the renderer is alive.  A series whose renderer is still running must not be
+    handed to another worker, even when its owner stopped renewing.
+    """
+    if not series.lease_id:
+        return False
+    from shine.comfyops.models import ResourceLease
+
+    lease = db.get(ResourceLease, series.lease_id)
+    if lease is None:
+        return False
+    return lease.status == "ACTIVE" and lease.expires_at is not None and lease.expires_at > now
+
+
 def claim_series(session_factory, worker_id: str, *, lease_seconds: int = SERIES_LEASE_SECONDS):
     """Atomically take ownership of one claimable series.
 
@@ -286,12 +303,21 @@ def claim_series(session_factory, worker_id: str, *, lease_seconds: int = SERIES
                    ProductionSeries.status.in_(["QUEUED", "RUNNING"]))
             .order_by(ProductionSeries.created_at, ProductionSeries.id)
         ).all()
-        target = next((row for row in rows if _series_is_stale(row, now)), None)
+        target = next(
+            (row for row in rows
+             if _series_is_stale(row, now) and not _series_lease_is_alive(db, row, now)),
+            None,
+        )
         if target is None:
             return None
         target_id = target.id
     with session_factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
+        # The same guard as the cheap read: a series whose renderer still holds
+        # an active GPU lease is never handed to another worker.
+        live = db.get(ProductionSeries, target_id)
+        if live is None or _series_lease_is_alive(db, live, now):
+            return None
         result = db.execute(
             update(ProductionSeries)
             .where(ProductionSeries.id == target_id, stale_clause)
@@ -311,15 +337,38 @@ def claim_series(session_factory, worker_id: str, *, lease_seconds: int = SERIES
 
 
 def renew_series(session_factory, series_id: str, worker_id: str, *, lease_seconds: int = SERIES_LEASE_SECONDS) -> bool:
-    """Extend the ownership proof of a running series."""
+    """Extend the ownership proof of a running series.
+
+    A paused series still belongs to its owner: the pause is a request that the
+    owner observes between shots, not a handover.  Stopping the heartbeat here
+    would let a second worker claim a series whose renderer is still running.
+    """
     now = utcnow()
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
-        if series is None or series.worker_id != worker_id or series.status != "RUNNING":
+        if series is None or series.worker_id != worker_id:
+            return False
+        if series.status not in {"RUNNING", "PAUSE_REQUESTED"}:
             return False
         series.heartbeat_at = now
         series.lease_expires_at = now + timedelta(seconds=lease_seconds)
         return True
+
+
+def record_series_lease(session_factory, series_id: str, worker_id: str, lease_id: str) -> None:
+    """Persist the exclusive GPU lease that the series currently holds.
+
+    The lease is the proof of life of a running series.  When the owning worker
+    dies, a reconciliation must be able to tell "the renderer is still alive"
+    from "nothing is running any more" by reading this column, so it is written
+    when the lease is admitted and cleared only when the lease is released.
+    """
+    with session_factory.begin() as db:
+        series = _owned_series(db, series_id, worker_id)
+        if series is None:
+            return
+        series.lease_id = lease_id
+        series.state_version += 1
 
 
 class SeriesHeartbeat:
@@ -381,6 +430,10 @@ def _set_series_state(db, series_id: str, worker_id: str, *, status: str, failur
                        note: str | None = None, finalization_state: str | None = None) -> None:
     series = _owned_series(db, series_id, worker_id)
     if series is None:
+        return
+    if series.status in {"COMPLETED", "FAILED", "CANCELLED"} and series.status != status:
+        # A terminal series keeps its outcome.  A late worker transition must
+        # not rewrite a cancellation or a finished run.
         return
     series.status = status
     series.state_version += 1
@@ -535,10 +588,14 @@ def mark_series_released(db, series_id: str, worker_id: str) -> None:
     """Record that the renderer and its exclusive lease are gone.
 
     The series status itself is decided by the caller from the real shot
-    outcomes, so this only records the physical release.
+    outcomes, so this only records the physical release.  Only the recorded
+    owner may mark it, because clearing another worker's lease would destroy
+    the proof that the renderer is still alive.
     """
     series = db.get(ProductionSeries, series_id)
     if series is None:
+        return
+    if series.worker_id and series.worker_id != worker_id:
         return
     series.finalization_state = "RELEASED"
     series.lease_id = None
@@ -639,7 +696,8 @@ def run_production_series(
             return None
 
     try:
-        with SeriesHeartbeat(session_factory, series_id, worker_id):
+        heartbeat = SeriesHeartbeat(session_factory, series_id, worker_id)
+        with heartbeat:
             shots = _run_managed_loop(
                 session_factory, worker_id,
                 settings=settings, recipe=recipe, review_configs=review_configs, max_shots=max_shots,
@@ -652,6 +710,14 @@ def run_production_series(
                 ),
                 series_id=series_id,
             )
+        if heartbeat.error:
+            # The ownership proof was lost while the run was going on.  The
+            # shots that were produced stay, but this worker must not decide
+            # the outcome of a series it no longer owns.
+            with session_factory.begin() as db:
+                _set_series_state(db, series_id, worker_id, status="NEEDS_REVIEW",
+                                  failure_code="SERIES_OWNERSHIP_LOST")
+            return {"status": "NEEDS_REVIEW", "shots": shots, "reason": "SERIES_OWNERSHIP_LOST"}
     except Exception as exc:
         logger.error("production_series_failed series_id=%s error_type=%s", series_id, type(exc).__name__)
         with session_factory.begin() as db:
@@ -662,6 +728,12 @@ def run_production_series(
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         _sync_items(db, series)
+        if series is not None and series.status == "PAUSE_REQUESTED":
+            # The user asked for a pause.  The finished shots stay, the rest of
+            # the series stays claimable, and the renderer and the lease are
+            # released by the managed loop.
+            _set_series_state(db, series_id, worker_id, status="PAUSED", failure_code=None)
+            return {"status": "PAUSED", "shots": shots}
         item, job = _next_runnable_item(db, series_id)
         blocked = [row for row in _items(db, series_id) if row.status == "BLOCKED"]
         if item is None and not blocked:
@@ -725,7 +797,7 @@ def reconcile_series(session_factory, worker_id: str) -> int:
                     from shine.comfyops.models import ResourceLease
 
                     lease = db.get(ResourceLease, series.lease_id)
-                    if lease is not None and lease.status == "ACTIVE" and lease.expires_at > now:
+                    if _series_lease_is_alive(db, series, now):
                         # The renderer is still alive and fenced; leave it alone
                         # and let the lease keeper finish or reconcile it.
                         continue
@@ -735,6 +807,21 @@ def reconcile_series(session_factory, worker_id: str) -> int:
                 series.status = "QUEUED"
                 series.state_version += 1
                 changed += 1
+        # A release that was interrupted between the intent and the release
+        # left the series in FINALIZING.  The lease is reconciled above; the
+        # series must not stay in a state that nobody reads again.
+        interrupted = db.scalars(
+            select(ProductionSeries).where(
+                ProductionSeries.finalization_state == "FINALIZING",
+                ProductionSeries.status.in_(["RUNNING", "QUEUED", "NEEDS_REVIEW"]),
+            )
+        ).all()
+        for series in interrupted:
+            if _series_lease_is_alive(db, series, now):
+                continue
+            series.finalization_state = "RECONCILE_REQUIRED"
+            series.state_version += 1
+            changed += 1
     return changed
 
 
@@ -784,13 +871,22 @@ def pause_series(session_factory, series_id: str) -> str:
 
 
 def resume_series(session_factory, series_id: str) -> str:
+    """Resume a paused series without taking it away from a living owner."""
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         if series is None:
             raise HTTPException(404, "Production series not found")
         if series.status in {"PAUSED", "PAUSE_REQUESTED"}:
-            series.status = "QUEUED"
-            series.worker_id = None
-            series.lease_expires_at = None
+            owner_is_alive = bool(
+                series.worker_id
+                and series.lease_expires_at is not None
+                and series.lease_expires_at > utcnow()
+            )
+            if owner_is_alive:
+                series.status = "RUNNING"
+            else:
+                series.status = "QUEUED"
+                series.worker_id = None
+                series.lease_expires_at = None
             series.state_version += 1
         return series.status

@@ -866,19 +866,31 @@ def create_app(
 
     @app.post("/api/v1/production-series/{series_id}/resume")
     def resume_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
-        from shine.comfyops.production_series import series_public
+        from shine.comfyops.production_series import series_public, utcnow
 
         series = db.get(ProductionSeries, series_id)
         if not series:
             raise HTTPException(status_code=404, detail="Production series not found")
         if series.status not in {"PAUSED", "PAUSE_REQUESTED"}:
             raise HTTPException(409, "This production series is not paused")
-        series.status = "QUEUED"
-        series.worker_id = None
-        series.lease_expires_at = None
+        # A series whose owner still holds an unexpired lease is still alive:
+        # its renderer may be running.  Handing it to another worker would let
+        # two workers decide the same series, so the owner keeps it and simply
+        # continues.
+        owner_is_alive = bool(
+            series.worker_id
+            and series.lease_expires_at is not None
+            and series.lease_expires_at > utcnow()
+        )
+        if owner_is_alive:
+            series.status = "RUNNING"
+        else:
+            series.status = "QUEUED"
+            series.worker_id = None
+            series.lease_expires_at = None
         series.state_version += 1
         add_audit(db, "user", "PRODUCTION_SERIES_RESUMED", "production_series", series_id,
-                  {}, project_id=series.project_id)
+                  {"kept_owner": owner_is_alive}, project_id=series.project_id)
         db.commit()
         db.refresh(series)
         return jsonable_encoder(series_public(db, series))
