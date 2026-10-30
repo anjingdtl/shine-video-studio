@@ -1649,6 +1649,11 @@ def _run_one(
     except Exception as exc:
         # Provider exception text may contain URLs, credentials, or private input.
         logger.error("job_execution_failed job_id=%s error_type=%s", job_id, type(exc).__name__)
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, str) and detail:
+            # The exception's own code names the blocked step without carrying
+            # provider text, URLs or payloads into the log.
+            logger.error("job_execution_failed_code job_id=%s code=%s", job_id, detail)
         try:
             with session_factory.begin() as db:
                 job = db.get(Job, job_id)

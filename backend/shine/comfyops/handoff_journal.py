@@ -337,7 +337,7 @@ class HandoffHeartbeat:
                 fail_handoff(self.factory, self.attempt_id, "HANDOFF_HEARTBEAT_EXIT_UNCONFIRMED")
                 raise HTTPException(409, "HANDOFF_HEARTBEAT_EXIT_UNCONFIRMED")
             if exc is not None:
-                fail_handoff(self.factory, self.attempt_id, "HANDOFF_STAGE_FAILED")
+                fail_handoff(self.factory, self.attempt_id, _stage_failure_reason(exc))
             elif self.error:
                 fail_handoff(self.factory, self.attempt_id, self.error)
                 raise HTTPException(409, self.error)
@@ -345,6 +345,21 @@ class HandoffHeartbeat:
                 self.check()
         finally:
             CURRENT_RESOURCE.reset(self.token)
+
+
+def _stage_failure_reason(exc) -> str:
+    """Name the failure so the ledger says what blocked the stage.
+
+    Only the exception's own code is recorded.  Provider text, URLs and
+    payloads never reach the ledger.
+    """
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail:
+        return f"HANDOFF_STAGE_FAILED:{detail}"[:120]
+    name = type(exc).__name__
+    if name and name not in {"HTTPException"}:
+        return f"HANDOFF_STAGE_FAILED:{name}"[:120]
+    return "HANDOFF_STAGE_FAILED"
 
 
 def fail_handoff(factory, attempt_id, reason):
