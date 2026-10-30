@@ -61,6 +61,8 @@ SHOTS = [
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "",
+        "dialogue_start_s": 0.6,
+        "dialogue_end_s": 6.4,
         "continuity": "cut",
         "bindings": [("character", "subject"), ("scene", "picture")],
     },
@@ -71,6 +73,8 @@ SHOTS = [
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "账册在老地方，账册在老地方，别让人看见。",
+        "dialogue_start_s": 0.6,
+        "dialogue_end_s": 6.4,
         "continuity": "cut",
         "bindings": [("character", "subject"), ("scene", "picture"), ("voice", "audio")],
     },
@@ -81,6 +85,8 @@ SHOTS = [
         "duration": 7,
         "characters": ["CHAR_LIANG"],
         "dialogue": "账册在老地方，别让人看见。",
+        "dialogue_start_s": 0.8,
+        "dialogue_end_s": 5.8,
         "continuity": "last_frame",
         "bindings": [("character", "subject"), ("scene", "picture")],
     },
@@ -106,7 +112,7 @@ def source_assets(source_db: Path, data_root: Path) -> list[dict]:
     rows = con.execute(
         "select id, filename, kind, content_type, role, entity_id, storage_path, sha256, byte_size"
         " from assets where approved = 1 and locked = 1 order by kind, filename"
-    ).all()
+    ).fetchall()
     assets = []
     for row in rows:
         stored = data_root / row["storage_path"]
@@ -195,6 +201,34 @@ def gpu_sample() -> dict:
     return {"available": True, "gpus": rows}
 
 
+CONTENT_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "video/mp4": ".mp4",
+}
+
+
+def stage_upload(asset: dict, staging: Path) -> str:
+    """Copy a content-addressed master asset to a file the browser can name.
+
+    The asset store keeps the bytes under their hash, so the original file
+    name and extension are gone.  The workbench checks the extension against
+    the declared kind, so the upload needs the real name back.
+    """
+    staging.mkdir(parents=True, exist_ok=True)
+    extension = CONTENT_EXTENSIONS.get(asset["content_type"] or "", "")
+    if not extension:
+        extension = {"image": ".png", "audio": ".wav", "video": ".mp4"}.get(asset["kind"], ".bin")
+    name = Path(asset["filename"]).stem
+    target = staging / f"{name}{extension}"
+    target.write_bytes(Path(asset["path"]).read_bytes())
+    return str(target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Real local production acceptance through the Web workbench")
     parser.add_argument("--api", default="http://127.0.0.1:8000")
@@ -209,6 +243,9 @@ def main() -> int:
     parser.add_argument("--timeout-minutes", type=int, default=180)
     parser.add_argument("--shots", type=int, default=3)
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--dom-only", action="store_true",
+                        help="Stop after the series is queued. Used to validate the browser flow "
+                             "without spending GPU time; the run is then NOT a production acceptance.")
     args = parser.parse_args()
 
     evidence = Path(args.evidence_dir).resolve()
@@ -247,7 +284,7 @@ def main() -> int:
 
     status = client.get(api + "/api/v1/system/status").json()
     record["system_status_before"] = status
-    if status.get("render_mode") != "comfyui":
+    if status.get("render_mode") != "comfyui" and not args.dom_only:
         raise SystemExit("The stack is not running in ComfyUI mode; the acceptance must use the real renderer")
     step("system_status", render_mode=status["render_mode"], worker_online=status["worker_online"])
 
@@ -262,27 +299,48 @@ def main() -> int:
         def shot(name: str) -> None:
             page.screenshot(path=str(evidence / "screenshots" / f"{name}.png"), full_page=True)
 
-        page.goto(web, wait_until="networkidle")
+        def ui_error(label: str) -> None:
+            """A visible error toast is a failed step, never a silent no-op."""
+            element = page.query_selector(".toast.error")
+            if element is not None:
+                raise SystemExit(f"The workbench reported an error during {label}: {element.inner_text().strip()}")
+
+        def ui_notice() -> str:
+            element = page.query_selector(".toast")
+            return element.inner_text().strip() if element is not None else ""
+
+        page.goto(web, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
         shot("01-landing")
 
         # 1. the project -------------------------------------------------------
-        page.fill(".create-project input", args.title)
-        page.click(".create-project button.primary-button")
+        if page.query_selector(".create-project input") is not None:
+            page.fill(".create-project input", args.title)
+            page.click(".create-project button.primary-button")
+        else:
+            # A project already exists in this workspace; the inline creator is
+            # the same product action.
+            page.fill(".new-project-inline", args.title)
+            page.click(".project-selector button.subtle-button")
         page.wait_for_selector(".project-selector", timeout=30000)
+        page.wait_for_timeout(1200)
+        ui_error("creating the project")
         projects = client.get(api + "/api/v1/projects").json()
-        project_id = projects[0]["id"]
+        project_id = next((row["id"] for row in projects if row["title"] == args.title), projects[0]["id"])
         record["project_id"] = project_id
         step("project_created", project_id=project_id)
         shot("02-project")
 
         # 2. the historically approved master assets ----------------------------
         for asset in assets:
+            upload_path = stage_upload(asset, evidence / "uploads")
             page.select_option("#assets .upload-row select >> nth=0", asset["kind"])
             page.select_option("#assets .upload-row select >> nth=1", asset["role"] or "generic")
             page.fill("#assets .upload-row input[placeholder='CHAR_A / SCENE_01']", asset["entity_id"] or "")
-            page.set_input_files("#assets .upload-row input[type=file]", asset["path"])
-            page.wait_for_timeout(1500)
+            page.set_input_files("#assets .upload-row input[type=file]", upload_path)
+            page.wait_for_timeout(1800)
+            ui_error(f"uploading {asset['filename']}")
+            log(f"  uploaded {asset['filename']} -> {ui_notice()!r}")
         page.wait_for_selector("#assets .asset-row", timeout=30000)
         page.wait_for_timeout(1500)
         shot("03-assets-uploaded")
@@ -305,7 +363,9 @@ def main() -> int:
             raise SystemExit(f"Only {len(locked)} of {len(assets)} assets are approved and locked")
         record["approved_assets"] = [
             {"id": row["id"], "filename": row["filename"], "sha256": row["sha256"],
-             "role": row["role"], "entity_id": row["entity_id"], "approved_by": row["approved_by"]}
+             "role": row["role"], "entity_id": row["entity_id"],
+             "approved_at": row["approved_at"], "locked_at": row["locked_at"],
+             "provenance": row.get("provenance")}
             for row in locked
         ]
         step("assets_approved_and_locked", count=len(locked))
@@ -332,6 +392,7 @@ def main() -> int:
 
         # 5. the shots ----------------------------------------------------------
         by_role = {row["role"]: row for row in locked}
+        created_shot_ids: list[str] = []
         for index, shot_spec in enumerate(SHOTS[: args.shots]):
             labels = page.query_selector_all("#shots .shot-form label")
             labels[0].query_selector("input").fill(shot_spec["name"])
@@ -340,16 +401,16 @@ def main() -> int:
             labels[3].query_selector("input").fill(",".join(shot_spec["characters"]))
             labels[4].query_selector("input").fill("雨夜霓虹街道")
             if shot_spec["dialogue"]:
-                labels[5].query_selector("input").fill(shot_spec["dialogue"].split("，")[0][:0] or "CHAR_LIANG")
+                labels[5].query_selector("input").fill("CHAR_LIANG")
                 labels[6].query_selector("input").fill(shot_spec["dialogue"])
-            if shot_spec["continuity"] != "cut":
+                labels[7].query_selector("input").fill(str(shot_spec["dialogue_start_s"]))
+                labels[8].query_selector("input").fill(str(shot_spec["dialogue_end_s"]))
+            if shot_spec["continuity"] != "cut" and created_shot_ids:
                 # The relation to the previous shot is part of the shot plan.
                 labels[9].query_selector("select").select_option(shot_spec["continuity"])
                 page.wait_for_timeout(400)
                 source = page.query_selector_all("#shots .shot-form label")[10]
-                source.query_selector("select").select_option(
-                    label=f"验收{chr(64 + index)}-{['雨夜街口', '中文对白', '软连续性'][index - 1]}"
-                )
+                source.query_selector("select").select_option(value=created_shot_ids[-1])
             # bind the approved references
             for order, (role, use_as) in enumerate(shot_spec["bindings"]):
                 asset = by_role[role]
@@ -365,6 +426,12 @@ def main() -> int:
                 page.wait_for_timeout(200)
             page.click("#shots .shot-form button.primary-button")
             page.wait_for_timeout(2000)
+            ui_error(f"creating the shot {shot_spec['name']}")
+            rows = client.get(api + f"/api/v1/projects/{project_id}/shots").json()
+            match = next((row for row in rows if row["name"] == shot_spec["name"]), None)
+            if match is None:
+                raise SystemExit(f"The shot {shot_spec['name']} was not created")
+            created_shot_ids.append(match["id"])
         shots = client.get(api + f"/api/v1/projects/{project_id}/shots").json()
         if len(shots) < args.shots:
             raise SystemExit(f"Only {len(shots)} of {args.shots} shots were created")
@@ -393,6 +460,17 @@ def main() -> int:
         step("series_started", series_id=series["id"], shots=series["shot_count"])
         shot("08-series-started")
 
+        if args.dom_only:
+            record["dom_only"] = True
+            record["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            record["console_errors"] = console_errors[:50]
+            (evidence / "real-production-record.json").write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            log("DOM-only run finished; no production was started.")
+            browser.close()
+            client.close()
+            return 0
+
         # 7. the resident Worker drives the run --------------------------------
         deadline = time.time() + args.timeout_minutes * 60
         samples: list[dict] = []
@@ -412,7 +490,7 @@ def main() -> int:
                             "gpu": gpu_sample()})
             if not reload_done and current["completed_count"] >= 1:
                 # The run must survive the browser being closed and reopened.
-                page.reload(wait_until="networkidle")
+                page.reload(wait_until="domcontentloaded")
                 page.wait_for_timeout(3000)
                 page.select_option("#production-series #series-profile", label=f"{args.profile} · Ref2VA")
                 page.wait_for_timeout(1000)
@@ -492,7 +570,7 @@ def main() -> int:
         delivery_body = delivery.json()
         record["delivery"] = delivery_body
         step("edl_assembled", review_state=delivery_body.get("review_state"))
-        page.reload(wait_until="networkidle")
+        page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         page.evaluate("document.getElementById('delivery')?.scrollIntoView()")
         page.wait_for_timeout(1500)
