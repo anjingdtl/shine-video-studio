@@ -16,7 +16,7 @@ import httpx
 
 ROLES = {
     "vlm_reviewer": ("local-vlm-hash-verified", "local-qwen3-vl-4b"),
-    "asr_reviewer": ("local-asr-hash-verified", "local-whisper-tiny"),
+    "asr_reviewer": ("local-asr-hash-verified", "local-qwen3-asr-0.6b"),
 }
 
 

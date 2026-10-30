@@ -17,6 +17,7 @@ import re
 import sys
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 from threading import Lock
 from fastapi import File, Form, UploadFile
@@ -151,7 +152,11 @@ def review_prefix_function(tokenizer, schema):
 def _verified_model_files(manifest):
     root = Path(manifest["model_root"]).resolve()
     declared = {entry["path"] for entry in manifest["files"]}
-    if not {"config.json", "tokenizer.json"}.issubset(declared) or not (
+    # A tokenizer is pinned by its bytes: a fast tokenizer by ``tokenizer.json``,
+    # a slow one by the configuration, the vocabulary and the merges.
+    fast_tokenizer = "tokenizer.json" in declared
+    slow_tokenizer = {"tokenizer_config.json", "vocab.json", "merges.txt"}.issubset(declared)
+    if not {"config.json"}.issubset(declared) or not (fast_tokenizer or slow_tokenizer) or not (
         "model.safetensors" in declared or "model.safetensors.index.json" in declared
     ):
         raise ValueError("INCOMPLETE_MODEL_HASH_MANIFEST")
@@ -234,6 +239,64 @@ def review_token_limit(body):
     if type(limit) is not int or not 128 <= limit <= 4096:
         raise ValueError("REVIEW_OUTPUT_BUDGET_INVALID")
     return limit
+
+
+def _transcribe_qwen3_asr(asr_manifest, asr_root, decoded, model, executor_identity, guard, state,
+                          current_decoder_identity, decoder_identity):
+    """Transcribe with the locally installed Qwen3-ASR model.
+
+    The model is hash-verified like every other executor model and is loaded
+    from its own pinned runtime packages, so the executor identity still proves
+    which bytes and which runtime produced the transcript.
+    """
+    import sys
+
+    packages = asr_manifest.get("runtime_packages")
+    if not packages or not Path(packages).is_dir():
+        raise ValueError("ASR_RUNTIME_PACKAGES_MISSING")
+    if str(packages) not in sys.path:
+        sys.path.insert(0, str(packages))
+    from qwen_asr import Qwen3ASRModel
+
+    with tempfile.TemporaryDirectory(prefix="shine-local-qwen-asr-") as directory:
+        source = Path(directory) / "evidence.wav"
+        # The decoder emits raw mono 16 kHz float PCM; the model reads a file,
+        # so the samples are written as a real WAV container.
+        import numpy as np
+
+        samples = np.frombuffer(decoded.stdout, dtype=np.float32)
+        pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+        with wave.open(str(source), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(pcm.tobytes())
+        with guard:
+            if current_decoder_identity() != decoder_identity:
+                raise ValueError("EXECUTOR_DECODER_FILES_CHANGED")
+            if state["asr"] is None:
+                verify_model_manifest(asr_manifest)
+                state["asr"] = Qwen3ASRModel.from_pretrained(str(asr_root), device_map="cpu")
+            results = state["asr"].transcribe(audio=str(source), language="Chinese")
+    rows = results if isinstance(results, list) else [results]
+    texts, segments = [], []
+    for row in rows:
+        text = str(getattr(row, "text", row)).strip()
+        if text:
+            texts.append(text)
+        start = getattr(row, "start_time", None)
+        end = getattr(row, "end_time", None)
+        if start is not None and end is not None:
+            segments.append({"start": float(start), "end": float(end), "text": text})
+    return {
+        "text": " ".join(texts),
+        "segments": segments,
+        "is_mock": False,
+        "model": model,
+        "executor_identity": executor_identity(model),
+        "speaker": "UNKNOWN",
+        "confidence": None,
+    }
 
 
 def build_app(manifest):
@@ -376,6 +439,15 @@ def build_app(manifest):
                 check=True,
             )
         import numpy as np
+
+        if asr_manifest.get("executor") == "qwen3-asr":
+            # The locally installed Qwen3-ASR model.  It is an existing local
+            # resource, independent of the H3 video core, and it reads Chinese
+            # far more reliably than the Whisper executor.
+            return _transcribe_qwen3_asr(
+                asr_manifest, asr_root, decoded, model, executor_identity, guard, state,
+                decoder_runtime_identity, decoder_identity,
+            )
         from transformers import pipeline
 
         with guard:

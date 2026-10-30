@@ -39,7 +39,7 @@ $logDir = Join-Path $runDir 'logs'
 New-Item -ItemType Directory -Force -Path $runDir, $logDir | Out-Null
 
 if (-not $ReviewManifest) {
-    $ReviewManifest = Join-Path $repoRoot '.local-acceptance/closeout-20261025/local-review-native-manifest-20261026.json'
+    $ReviewManifest = Join-Path $repoRoot '.local-acceptance/closeout-20261025/local-review-native-manifest-qwen-asr-20261030.json'
 }
 if (-not $ReviewRuntimePackages) {
     $ReviewRuntimePackages = Join-Path $repoRoot '.local-acceptance/review-runtime-packages'
