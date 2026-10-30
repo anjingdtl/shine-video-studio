@@ -362,8 +362,14 @@ class Handler(BaseHTTPRequestHandler):
                                       'last_stage': STAGE})
         return self.respond(404, {})
 server = HTTPServer(('127.0.0.1',int(os.environ['PORT'])),Handler)
+# The bound port is reported to the fixture, so a port that was taken between
+# reservation and bind is detected instead of silently pointing at a different
+# server that happens to own the port.
+pathlib.Path(sys.argv[1]).write_text(str(server.server_port))
 server.serve_forever()
 '''
+
+FENCE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 
 @pytest.fixture
@@ -371,7 +377,7 @@ def review_service(tmp_path, request):
     """An owned review supervisor that behaves like the isolated service."""
     from shine.comfyops.owned_process import OwnedProcessGroup
 
-    script = tmp_path / "review_server.py"
+    script, marker = tmp_path / "review_server.py", tmp_path / "port.txt"
     script.write_text(REVIEW_SERVER, encoding="utf-8")
     with socket.socket() as reserving:
         reserving.bind(("127.0.0.1", 0))
@@ -381,18 +387,19 @@ def review_service(tmp_path, request):
         env["FENCE_STATUS"] = "409"
     from uuid import uuid4
 
-    group = OwnedProcessGroup.launch([sys.executable, str(script)], cwd=tmp_path, env=env,
+    group = OwnedProcessGroup.launch([sys.executable, str(script), str(marker)], cwd=tmp_path, env=env,
                                      pinned_files=[sys.executable, script],
                                      job_name="Local\\ShineHandoff-" + uuid4().hex)
     deadline = time.monotonic() + 20
     listener = None
     while time.monotonic() < deadline:
-        listeners = windows_port_listeners(port)
-        if listeners:
-            listener = listeners[0][1]
-            break
+        if marker.is_file():
+            listeners = windows_port_listeners(port)
+            if listeners:
+                listener = listeners[0][1]
+                break
         time.sleep(0.05)
-    assert listener, "the review supervisor never opened its port"
+    assert listener, "the review supervisor never bound its port"
     yield group, port, listener
     group.close()
 

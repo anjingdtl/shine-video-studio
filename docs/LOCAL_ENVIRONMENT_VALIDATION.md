@@ -1113,6 +1113,8 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 
 新增 `backend/tests/test_timestamp_ordering.py`（7 项）锁定该合同：连续读数严格递增、时钟不得领先真实时钟超过 1 秒、同一时间戳的两个计划必须解析为最新、重复 `analyze` 不得把最新计划挤掉、重复分析保持幂等。修复后同一探针 30 次复现 **0 次选错**。
 
+本轮复跑还暴露出 `backend/tests/test_managed_startup.py` 自身的端口竞争：夹具先预留随机端口再启动服务，若端口在两步之间被另一实例占用，夹具会按端口反查监听者并**误连到别人的服务**，从而出现与本缺陷无关的偶发失败。夹具已改为由服务把**实际绑定的端口**写入标记文件，夹具等待标记后再取监听者；若端口被占则服务启动失败并明确报错，而不是指向另一个服务。修复后该文件连跑 8 次全部通过。
+
 ## 修复三：Windows 本地栈验收脚本泄漏进程
 
 `scripts/verify_local_stack.ps1` 只 `Stop-Process` 掉 `uv run` 启动器，而 `uv` 管理的虚拟环境会把基础解释器**再执行**为子进程，因此 API 与 Worker 的真实进程被留在后台。本轮复现时泄漏出 4 组共 15 个进程（占用 8123/8124/8125/8127/8129），它们仍持有临时数据库句柄。
@@ -1131,11 +1133,25 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 
 未删除：全部可用数据库、资产、产物、截图、证据与日志。
 
-## 托管 CI 状态
+## 托管 CI 状态（本轮已用 GitHub API 证实）
 
-`gh` 仍返回 HTTP 401；本机已连接的 Connector 目录中只有媒体生成与邮箱凭据类工具，**没有任何 GitHub/CI 连接器**，因此远端 Actions 的最新状态本轮**无法核实**，既不写成通过也不写成失败。按要求未修改任何账单或支付信息。
+`gh` 此前返回 401，本轮修复后可直接读取远端。**失败原因已由 GitHub 的作业注解给出原文**：
 
-本轮在服务器侧可确认的结论是：CI 定义的全部步骤在本机以原始命令**全部通过**，其中两个此前会失败的作业（web-e2e 与全量 pytest）已修复并复跑通过。
+> The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings.
+
+四个作业 `backend` / `backend-windows` / `web-e2e` / `frontend` 全部 `runner=` 为空、2–3 秒内 `completed/failure`、**步骤数为 0**：没有任何一个作业真正启动过 runner。这不是代码失败，而是**账户计费/额度阻断**，需要账户所有者处理账单或提高额度。本轮未触碰任何支付信息。
+
+最近 8 次运行的结论一致（全部 failure、全部 0 步骤）：`40974056273`(fe02990)、`40973214662`(4ae33cd)、`40972734952`(087d737)、`40929722967`(8b862df)、`40929665748`(05fd0a7)、`40603149040`(f6b196a)、`40602547640`、`40600931825`。
+
+## 全局配置修复（经授权）
+
+本轮修复了三个反复出现的环境级报错，并都做了独立验证：
+
+1. **失效的 Git 凭据助手**。全局 `~/.gitconfig` 的 `credential.helper` 指向 `C:/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/mingw64/bin/git-credential-manager.exe`，该路径已随 PortableGit 卸载而消失，于是每次 fetch/push 都先报 `No such file or directory`。已删除该条（系统级 `C:\Program Files\Git\etc\gitconfig` 的 `manager` 继续生效），`git ls-remote origin` 现在 exit 0 且无任何报错。修改前的配置已备份到 `.local-acceptance/gitconfig.backup-20261030`。
+2. **`uv` 默认索引与锁文件不一致**。全局 `uv.toml` 把阿里云镜像设为主索引，而 `backend/uv.lock` 的每一项都记录 `source = { registry = "https://pypi.org/simple" }`，因此 `uv lock --check` 与 `uv sync --locked` 一律报"锁文件需要更新"。已改为 `index-url = "https://pypi.org/simple"`（与锁文件逐字一致，无尾斜杠），并把阿里云镜像保留为 `default = false` 的回退索引。现在**不再需要任何环境变量覆盖**：`uv lock --check --offline`、`uv sync --locked --offline`、`uv lock --check` 全部 exit 0，锁文件未被改写。修改前的配置备份在 `.local-acceptance/uv.toml.backup-20261030`。
+3. **GitHub CLI 的 keyring 条目过期**。`gh` 的 keyring 里存的是已失效的 token，而 Git Credential Manager 里存着同一账号的有效 token（`gho_` 前缀，scopes `gist, repo, workflow`，可读私有仓库与 Actions）。`gh auth login --with-token` 会因该 token 缺少 `read:org` 而拒绝入库，因此改为用 Windows `CredWriteW` 把同一 token 写进 gh 读取的凭据键（UTF-8 字节），并恢复 gh 的账号记录；**token 没有落盘到任何明文文件**。现在 `gh auth status` 显示 `✓ Logged in to github.com account anjingdtl (keyring)`，`gh api user` 与 `gh run list` 均 exit 0。
+
+另外新增仓库级 `.gitattributes`（`* text=auto eol=lf` 并显式标注媒体与权重为 binary），使工作区在 Windows 与 Linux CI 上行尾一致，消除每次 `git add` 的 "LF will be replaced by CRLF" 提示；实测未引起任何既有文件的重整，`git status` 除新增文件外保持干净。
 
 ## 可复查证据路径
 

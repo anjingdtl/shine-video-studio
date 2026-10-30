@@ -1,0 +1,24 @@
+# Keep text files in LF in the working tree on every platform, so a Windows
+# checkout and the Linux CI runner never see different line endings.
+* text=auto eol=lf
+
+# Media and archives are never text and must never be touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.mp4 binary
+*.mov binary
+*.mkv binary
+*.webm binary
+*.wav binary
+*.flac binary
+*.mp3 binary
+*.zip binary
+*.safetensors binary
+*.ckpt binary
+*.pt binary
+*.pth binary
+*.onnx binary
+*.gguf binary

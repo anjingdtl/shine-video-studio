@@ -946,4 +946,8 @@ Worker 与模型代理属于审片客户端身份指纹，因此旧 4B/ASR 登�
 
 按本轮授权清理了失效与损坏条目（走可恢复回收站，非永久删除）：损坏的 `.local-acceptance/data/shine.db`（malformed schema）、空的 `.local-data/shine.db`（0 表）、以及两份指向已死进程的 `run/processes.json`。清理前已做全库 `quick_check` 体检，15 个库中仅 1 个损坏，无孤立 WAL/SHM；其余数据库、资产、产物、截图与证据全部保留。
 
-托管 CI 状态仍因 `gh` 401 且本机无 GitHub/CI 连接器而**无法核实**；本轮可确认的是 CI 定义的每一步在本机以原始命令全部通过。真实 H3 到审片的自动链路、工作台闭环与人工验收仍为 **NOT RUN**。详见[实测报告](LOCAL_ENVIRONMENT_VALIDATION.md)。
+托管 CI 状态此前因 `gh` 返回 401 无法核实；本轮修复 GitHub CLI 后已读到 GitHub 的作业注解原文：四个作业全部 `runner=` 为空、2–3 秒即失败、步骤数为 0，注解写明 **"The job was not started because recent account payments have failed or your spending limit needs to be increased."** —— 这是账户计费/额度阻断，不是代码失败，需要账户所有者处理账单；本轮未触碰任何支付信息。
+
+本轮另经授权修复了三个反复出现的环境级报错：全局 `~/.gitconfig` 指向已删除 PortableGit 的失效 `credential.helper`（已删除该条，系统 `manager` 继续生效，git 操作不再报错）；全局 `uv.toml` 把阿里云镜像设为主索引与锁文件记录的 `https://pypi.org/simple` 不一致，导致 `uv lock --check`/`uv sync --locked` 必失败（已改为与锁文件逐字一致，镜像降为 `default = false` 回退索引，现已**无需任何环境变量覆盖**）；`gh` keyring 中的过期 token（已用 Git Credential Manager 中同账号的有效 token 经 `CredWriteW` 修复，token 未落盘明文）。另新增仓库级 `.gitattributes` 统一行尾，消除 CRLF 提示且未引起任何文件重整。
+
+真实 H3 到审片的自动链路、工作台闭环与人工验收仍为 **NOT RUN**；未确认资产权属、未批准影片、未进行人工听审、未提升任何候选资产。详见[实测报告](LOCAL_ENVIRONMENT_VALIDATION.md)。
