@@ -242,12 +242,15 @@ def review_token_limit(body):
 
 
 def _transcribe_qwen3_asr(asr_manifest, asr_root, decoded, model, executor_identity, guard, state,
-                          current_decoder_identity, decoder_identity):
+                          current_decoder_identity, decoder_identity, context=""):
     """Transcribe with the locally installed Qwen3-ASR model.
 
     The model is hash-verified like every other executor model and is loaded
     from its own pinned runtime packages, so the executor identity still proves
     which bytes and which runtime produced the transcript.
+
+    ``context`` is the script's own terminology.  The model uses it to pick the
+    right characters for a proper name; it never rewrites the transcript.
     """
     import sys
 
@@ -277,7 +280,10 @@ def _transcribe_qwen3_asr(asr_manifest, asr_root, decoded, model, executor_ident
             if state["asr"] is None:
                 verify_model_manifest(asr_manifest)
                 state["asr"] = Qwen3ASRModel.from_pretrained(str(asr_root), device_map="cpu")
-            results = state["asr"].transcribe(audio=str(source), language="Chinese")
+            if context:
+                results = state["asr"].transcribe(audio=str(source), language="Chinese", context=context)
+            else:
+                results = state["asr"].transcribe(audio=str(source), language="Chinese")
     rows = results if isinstance(results, list) else [results]
     texts, segments = [], []
     for row in rows:
@@ -388,11 +394,17 @@ def build_app(manifest):
         file: UploadFile = File(...),
         model: str = Form(...),
         response_format: str = Form("verbose_json"),
+        prompt: str = Form(""),
     ):
         if not asr_manifest or model != asr_manifest["model_id"]:
             raise HTTPException(404, "EXACT_ASR_MODEL_ID_REQUIRED")
         if response_format != "verbose_json":
             raise HTTPException(422, "UNSUPPORTED_ASR_RESPONSE_FORMAT")
+        # The script's terminology.  It is a hint for the recognizer and never
+        # a rewrite of the transcript that comes back.
+        context = (prompt or "").strip()
+        if len(context) > 4000:
+            raise HTTPException(422, "ASR_CONTEXT_TOO_LONG")
         content = file.file.read(25 * 1024**2 + 1)
         if len(content) > 25 * 1024**2:
             raise HTTPException(413, "AUDIO_EVIDENCE_TOO_LARGE")
@@ -446,7 +458,7 @@ def build_app(manifest):
             # far more reliably than the Whisper executor.
             return _transcribe_qwen3_asr(
                 asr_manifest, asr_root, decoded, model, executor_identity, guard, state,
-                decoder_runtime_identity, decoder_identity,
+                decoder_runtime_identity, decoder_identity, context=context,
             )
         from transformers import pipeline
 

@@ -14,13 +14,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import Field
+from sqlalchemy import select
 
 from shine.agents.film_contracts import EditDecisionList
 from shine.api_common import DBSession, app_settings
 from shine.config import Settings
 from shine.media.artifacts import safe_asset_path
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
-from shine.models import MediaArtifact
+from shine.models import MediaArtifact, SubtitleTrack
 from shine.security import sha256_bytes
 from shine.services import add_audit, require_project
 
@@ -36,6 +37,12 @@ class DeliveryRequest(EditDecisionList):
     width: int | None = Field(default=None, ge=2, le=8192, multiple_of=2)
     height: int | None = Field(default=None, ge=2, le=8192, multiple_of=2)
     crf: int = Field(default=18, ge=0, le=51)
+    subtitle_revision: int | None = Field(default=None, ge=1, le=100000)
+    """The approved subtitle revision to composite into the reel.
+
+    The subtitles are composited at the very end, so the picture and the audio
+    of the shots are never touched by them.
+    """
 
 
 @router.post("/projects/{project_id}/deliveries", status_code=201)
@@ -62,6 +69,22 @@ def create_delivery(
         ffmpeg_path=settings.ffmpeg_path,
         ffprobe_path=settings.ffprobe_path,
     )
+    subtitle_ass = None
+    subtitle_sha256 = None
+    if body.subtitle_revision is not None:
+        track = db.scalar(
+            select(SubtitleTrack).where(
+                SubtitleTrack.project_id == project_id,
+                SubtitleTrack.revision == body.subtitle_revision,
+            )
+        )
+        if track is None:
+            raise HTTPException(status_code=404, detail="Subtitle revision not found")
+        if track.status != "APPROVED":
+            # Only an approved revision is composited; a draft is never burned in.
+            raise HTTPException(status_code=409, detail="SUBTITLE_REVISION_NOT_APPROVED")
+        subtitle_ass = track.ass
+        subtitle_sha256 = track.sha256
     try:
         result = assembler.assemble(
             db,
@@ -71,6 +94,8 @@ def create_delivery(
             width=body.width,
             height=body.height,
             crf=body.crf,
+            subtitle_ass=subtitle_ass,
+            subtitle_sha256=subtitle_sha256,
         )
     except DeliveryError as exc:
         db.rollback()

@@ -177,3 +177,19 @@ export type ProductionSeries = {
   created_at: string | null; started_at: string | null; finished_at: string | null;
   items: ProductionSeriesItem[];
 };
+
+export type TerminologyTerm = { canonical: string; aliases: string[] };
+
+export type ProjectTerminology = {
+  id: string; project_id: string; revision: number; terms: TerminologyTerm[];
+  notes: string; sha256: string; source: string; created_by: string;
+  created_at: string; updated_at: string;
+};
+
+export type SubtitleCue = { index: number; start_s: number; end_s: number; text: string };
+
+export type SubtitleTrack = {
+  id: string; project_id: string; revision: number; status: string; cues: SubtitleCue[];
+  sha256: string; source: string; source_artifact_sha256: string | null;
+  created_by: string; created_at: string; updated_at: string;
+};

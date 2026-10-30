@@ -326,3 +326,66 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- Script terminology and the external subtitle track ---- */
+#terminology,
+#subtitles {
+  margin-top: 24px;
+  min-width: 0;
+}
+.panel-hint {
+  color: #5e6055;
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 0 0 16px;
+}
+.terminology-builder {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.terminology-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.terminology-row.subtitle-row {
+  grid-template-columns: 110px 110px minmax(200px, 1fr);
+}
+.terminology-row input {
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid #e7e6df;
+  border-radius: 6px;
+  background: #fff;
+}
+.terminology-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+.terminology-notes {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 260px;
+}
+.terminology-notes span {
+  font-size: 10px;
+  color: #5e6055;
+}
+.terminology-notes input {
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid #e7e6df;
+  border-radius: 6px;
+  background: #fff;
+}
+@media (max-width: 900px) {
+  .terminology-row,
+  .terminology-row.subtitle-row {
+    grid-template-columns: 1fr;
+  }
+}

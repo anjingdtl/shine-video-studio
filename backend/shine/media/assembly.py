@@ -218,6 +218,8 @@ class DeliveryAssembler:
         width: int | None = None,
         height: int | None = None,
         crf: int = 18,
+        subtitle_ass: str | None = None,
+        subtitle_sha256: str | None = None,
     ) -> AssembledDelivery:
         if not clips:
             raise DeliveryError(400, "DELIVERY_EMPTY_EDIT")
@@ -266,7 +268,7 @@ class DeliveryAssembler:
                 "\n".join(f"file '{segment.resolve().as_posix()}'" for segment in segments) + "\n",
                 encoding="utf-8",
             )
-            final = work / "delivery.mp4"
+            reel = work / "delivery.mp4"
             self._run(
                 [
                     self.ffmpeg_path,
@@ -282,9 +284,39 @@ class DeliveryAssembler:
                     "copy",
                     "-movflags",
                     "+faststart",
-                    str(final),
+                    str(reel),
                 ]
             )
+            final = reel
+            if subtitle_ass:
+                # The subtitles are composited here, at the very end.  The
+                # picture and the audio are untouched by them, and the reel
+                # without subtitles stays available as its own artifact.
+                final = work / "delivery-subtitled.mp4"
+                self._run(
+                    [
+                        self.ffmpeg_path,
+                        "-nostdin",
+                        "-y",
+                        "-i",
+                        str(reel),
+                        "-vf",
+                        f"ass={subtitle_ass}",
+                        "-c:v",
+                        "libx264",
+                        "-crf",
+                        str(crf),
+                        "-preset",
+                        "medium",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-c:a",
+                        "copy",
+                        "-movflags",
+                        "+faststart",
+                        str(final),
+                    ]
+                )
             content = final.read_bytes()
             # Probe while the temporary directory still exists.
             probe = probe_file(final, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
@@ -336,6 +368,8 @@ class DeliveryAssembler:
                 "duration_s": probe.duration_s,
                 "review_state": review_state,
                 "ffmpeg": shutil.which(self.ffmpeg_path),
+                **({"subtitles_sha256": subtitle_sha256, "subtitles_composited": True}
+                   if subtitle_ass else {"subtitles_composited": False}),
             },
         )
         db.add(artifact_row)

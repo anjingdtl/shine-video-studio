@@ -19,6 +19,7 @@ import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
 import DeliveryPanel from './components/DeliveryPanel';
+import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -496,6 +497,20 @@ function App() {
               reviewWidth={reviewWidth}
               reviewHeight={reviewHeight}
               onStarted={() => refreshAll().catch(() => undefined)}
+              onMessage={report}
+            />
+
+            <TerminologyPanel
+              key={`terminology-${projectId}`}
+              projectId={projectId}
+              busy={busy}
+              onMessage={report}
+            />
+
+            <SubtitlePanel
+              key={`subtitles-${projectId}`}
+              projectId={projectId}
+              busy={busy}
               onMessage={report}
             />
 

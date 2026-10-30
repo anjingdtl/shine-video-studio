@@ -101,7 +101,7 @@ def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_pa
         after = {name: db.execute(f'SELECT {columns[name]} FROM "{name}"').fetchall() for name in legacy}
         assert before == after
         assert not db.execute("PRAGMA foreign_key_check").fetchall()
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f140a0010001"
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f140a0020001"
     engine = make_engine(url)
     inspector = inspect(engine)
     assert set(Base.metadata.tables) <= set(inspector.get_table_names())

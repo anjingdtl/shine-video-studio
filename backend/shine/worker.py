@@ -488,13 +488,21 @@ def _transcript_review(
     artifact_path: Path,
     spec: ShotSpec,
     remote_consent: bool = False,
+    context: str = "",
 ) -> tuple[Transcript | None, list[Any] | None, str | None]:
     if asr is None:
         return None, None, None
     if getattr(asr, "requires_remote_consent", False) and not remote_consent:
         return None, None, "ASR_REMOTE_CONSENT_REQUIRED"
     try:
-        transcript = asr.transcribe(artifact_path)
+        # The script's terminology is a hint for the recognizer, so a proper
+        # name is read with the characters the script uses.  The transcript
+        # that comes back is never rewritten.
+        try:
+            transcript = asr.transcribe(artifact_path, context=context)
+        except TypeError:
+            # A reviewer without the optional hint keeps its own contract.
+            transcript = asr.transcribe(artifact_path)
     except TimeoutError as exc:
         _raise_if_managed_review(asr)
         return None, None, f"ASR_FAILED: {exc}"
@@ -1937,7 +1945,7 @@ def _handoff_preflight_allowed(settings, reviewers):
 
 
 def _collect_comfy_reviews(*, request, settings, artifact_path, digest, job_id, project_id, remote_consent,
-                           semantic_reviewer, asr_reviewer, review_revision):
+                           semantic_reviewer, asr_reviewer, review_revision, terminology_hint=""):
     technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
         artifact_path,
         expectations=TechnicalExpectations(
@@ -1946,6 +1954,7 @@ def _collect_comfy_reviews(*, request, settings, artifact_path, digest, job_id, 
     )
     transcript, transcript_findings, asr_error = _transcript_review(
         asr=asr_reviewer, artifact_path=artifact_path, spec=request.shot_spec, remote_consent=remote_consent,
+        context=terminology_hint,
     )
     semantic_results, semantic_error = _semantic_review(
         reviewer=semantic_reviewer, job_id=job_id, spec=request.shot_spec, style=request.style_snapshot,
@@ -2206,11 +2215,19 @@ def _finalize_comfy_attempt(
 
     from contextlib import nullcontext
 
+    # The script's own terminology is handed to the recognizer before the
+    # transcript exists, so a proper name is read with the characters the
+    # script uses instead of being corrected afterwards.
+    from shine.services import project_terminology_hint
+
+    with session_factory() as db:
+        terminology_hint = project_terminology_hint(db, project_id)
+
     with review_scope or nullcontext((semantic_reviewer, asr_reviewer)) as (semantic, asr):
         reviewed = _collect_comfy_reviews(
             request=request, settings=settings, artifact_path=artifact_path, digest=digest, job_id=job_id,
             project_id=project_id, remote_consent=remote_consent, semantic_reviewer=semantic, asr_reviewer=asr,
-            review_revision=review_revision,
+            review_revision=review_revision, terminology_hint=terminology_hint,
         )
         technical, transcript, transcript_findings, asr_error, semantic_results, semantic_error = reviewed
     if request.self_review_scope == "basic":

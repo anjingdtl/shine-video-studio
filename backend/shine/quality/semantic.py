@@ -509,7 +509,7 @@ class OpenAICompatibleASRReviewer:
             return f"{base}/audio/transcriptions"
         return f"{base}/v1/audio/transcriptions"
 
-    def transcribe(self, path: Path) -> Transcript:
+    def transcribe(self, path: Path, *, context: str = "") -> Transcript:
         if hasattr(self, "last_isolation_receipt"):
             self.last_isolation_receipt = None
         headers: dict[str, str] = {}
@@ -518,12 +518,18 @@ class OpenAICompatibleASRReviewer:
         headers.update(review_admission_headers(self.config.base_url))
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
+        # The script's own terminology is a hint for the recognizer, so a
+        # proper name is read with the characters the script uses.  It never
+        # rewrites the transcript that comes back.
+        form: dict[str, str] = {"model": self.config.model, "response_format": "verbose_json"}
+        if context:
+            form["prompt"] = context
         with httpx.Client(timeout=self.config.timeout_s, trust_env="X-Shine-Handoff-Token" not in headers) as client:
             with path.open("rb") as handle:
                 response = client.post(
                     self._endpoint(),
                     headers=headers,
-                    data={"model": self.config.model, "response_format": "verbose_json"},
+                    data=form,
                     files={"file": (path.name, handle, "application/octet-stream")},
                 )
         if response.status_code >= 400:

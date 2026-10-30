@@ -55,6 +55,12 @@ class Project(Base):
     production_series: Mapped[list[ProductionSeries]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+    terminology: Mapped[list[ProjectTerminology]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="ProjectTerminology.revision"
+    )
+    subtitles: Mapped[list[SubtitleTrack]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="SubtitleTrack.revision"
+    )
 
 
 class ProjectDocument(Base):
@@ -119,6 +125,59 @@ class StyleVersion(Base):
     frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="style_versions")
+
+
+class ProjectTerminology(Base):
+    """The script-specific terminology that the ASR model is told about.
+
+    Every revision is kept, so a production that already ran against one
+    table keeps the table it actually used.  A new revision never rewrites an
+    earlier one.
+    """
+
+    __tablename__ = "project_terminology"
+    __table_args__ = (UniqueConstraint("project_id", "revision", name="uq_project_terminology_revision"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    terms: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(24), default="human", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="terminology")
+
+
+class SubtitleTrack(Base):
+    """A subtitle layer of the project.
+
+    The subtitles live outside the rendered shot, so a human can revise a line
+    or a timing without rendering the shot again.  Every revision is kept and
+    the delivery composites the one that was approved.
+    """
+
+    __tablename__ = "subtitle_tracks"
+    __table_args__ = (UniqueConstraint("project_id", "revision", name="uq_subtitle_track_revision"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
+    cues: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    srt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    ass: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(24), default="alignment", nullable=False)
+    source_artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="subtitles")
 
 
 class Shot(Base):

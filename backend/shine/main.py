@@ -21,6 +21,7 @@ from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
 from shine.api_preparation import Decision
 from shine.api_review import router as review_router
+from shine.api_subtitles import router as subtitles_router
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
@@ -32,6 +33,7 @@ from shine.models import (
     MediaArtifact,
     ProductionSeries,
     Project,
+    ProjectTerminology,
     QCReport,
     QualityGate,
     RepairRecord,
@@ -62,6 +64,7 @@ from shine.schemas import (
     StyleBible,
     StyleFreezeRequest,
     SystemStatus,
+    TerminologyBody,
     WorkerStatus,
 )
 from shine.security import (
@@ -151,6 +154,21 @@ def _style_data(style: StyleVersion) -> dict[str, Any]:
         "approved_by": style.approved_by,
         "approval_note": style.approval_note,
         "frozen_at": style.frozen_at,
+    }
+
+
+def _terminology_data(row: ProjectTerminology) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "revision": row.revision,
+        "terms": row.terms,
+        "notes": row.notes,
+        "sha256": row.sha256,
+        "source": row.source,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
     }
 
 
@@ -344,6 +362,7 @@ def create_app(
     app.include_router(film_router)
     app.include_router(review_router)
     app.include_router(delivery_router)
+    app.include_router(subtitles_router)
     app.include_router(operator_router)
     app.include_router(instances_router)
     from shine.api_preparation import router as preparation_router
@@ -638,6 +657,38 @@ def create_app(
             select(StyleVersion).where(StyleVersion.project_id == project_id).order_by(StyleVersion.version)
         ).all()
         return jsonable_encoder([_style_data(style) for style in styles])
+
+    @app.get("/api/v1/projects/{project_id}/terminology")
+    def list_terminology(project_id: str, db: DBSession) -> list[dict[str, Any]]:
+        """Every revision of the script's terminology, newest first."""
+        require_project(db, project_id)
+        rows = db.scalars(
+            select(ProjectTerminology)
+            .where(ProjectTerminology.project_id == project_id)
+            .order_by(ProjectTerminology.revision.desc())
+        ).all()
+        return jsonable_encoder([_terminology_data(row) for row in rows])
+
+    @app.post("/api/v1/projects/{project_id}/terminology")
+    def create_terminology(project_id: str, body: TerminologyBody, db: DBSession) -> dict[str, Any]:
+        """Store a new revision of the script's terminology.
+
+        The table is handed to the ASR model before it transcribes, so a proper
+        name is read with the characters the script uses.  It never rewrites a
+        transcript, and an earlier revision is never changed.
+        """
+        from shine.services import save_project_terminology
+
+        project = require_project(db, project_id)
+        row = save_project_terminology(
+            db, project, terms=body.terms, notes=body.notes, created_by=body.created_by or "operator",
+            source=body.source or "human",
+        )
+        add_audit(db, body.created_by or "operator", "PROJECT_TERMINOLOGY_SAVED", "project_terminology",
+                  row.id, {"revision": row.revision, "terms": len(row.terms or [])}, project_id=project_id)
+        db.commit()
+        db.refresh(row)
+        return jsonable_encoder(_terminology_data(row))
 
     @app.get("/api/v1/projects/{project_id}/style/impact")
     def style_impact(project_id: str, db: DBSession) -> dict[str, Any]:

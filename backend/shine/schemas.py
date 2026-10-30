@@ -223,6 +223,27 @@ class CreateJob(APIModel):
         return self
 
 
+class TerminologyTerm(APIModel):
+    """One proper noun of the script and the spellings it may be heard as."""
+
+    canonical: str = Field(min_length=1, max_length=64)
+    aliases: list[str] = Field(default_factory=list, max_length=16)
+
+
+class TerminologyBody(APIModel):
+    """A new revision of the script's terminology.
+
+    The table is handed to the ASR model before it transcribes, so a proper
+    name is read with the characters the script uses.  It is a hint and never
+    a rewrite of a transcript.
+    """
+
+    terms: list[TerminologyTerm] = Field(default_factory=list, max_length=200)
+    notes: str = Field(default="", max_length=2000)
+    created_by: str = Field(default="", max_length=64)
+    source: Literal["human", "seed"] = "human"
+
+
 class CreateProductionSeries(APIModel):
     """One ordered, unattended real-H3 production run for a project.
 

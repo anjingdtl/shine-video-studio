@@ -19,6 +19,7 @@ from shine.models import (
     Job,
     JobDependency,
     Project,
+    ProjectTerminology,
     Shot,
     ShotAssetBinding,
     StyleVersion,
@@ -597,6 +598,72 @@ def dependencies_for_new_job(
         raise HTTPException(status_code=409, detail="A dependency is blocked or stale")
     status = "QUEUED" if all(parent.status == "PASSED" for parent in parents) else "PLANNED"
     return parents, status
+
+
+def project_terminology_hint(db: Session, project_id: str) -> str:
+    """The script's terminology, as the hint the ASR model is given.
+
+    The newest revision is the one that is used.  A project without a table
+    produces no hint at all, which is exactly what the recognizer expects.
+    The table is a hint and never a proof: it does not change any transcript.
+    """
+    from shine.quality.terminology import TerminologyError, parse_table
+
+    row = db.scalar(
+        select(ProjectTerminology)
+        .where(ProjectTerminology.project_id == project_id)
+        .order_by(ProjectTerminology.revision.desc())
+        .limit(1)
+    )
+    if row is None:
+        return ""
+    try:
+        table = parse_table(list(row.terms or []), row.notes or "")
+    except TerminologyError:
+        # A malformed table must not silently become a wrong hint.
+        return ""
+    return table.hint()
+
+
+def save_project_terminology(
+    db: Session,
+    project: Project,
+    *,
+    terms: list[dict[str, Any]],
+    notes: str = "",
+    created_by: str,
+    source: str = "human",
+) -> ProjectTerminology:
+    """Store a new revision of the script's terminology.
+
+    Every revision is kept.  A production that already ran keeps the table it
+    actually used, so the evidence of a run never changes afterwards.
+    """
+    from shine.quality.terminology import TerminologyError, parse_table
+
+    try:
+        table = parse_table(terms, notes)
+    except TerminologyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    current = db.scalar(
+        select(ProjectTerminology)
+        .where(ProjectTerminology.project_id == project.id)
+        .order_by(ProjectTerminology.revision.desc())
+        .limit(1)
+    )
+    revision = (current.revision + 1) if current else 1
+    row = ProjectTerminology(
+        project_id=project.id,
+        revision=revision,
+        terms=[{"canonical": term.canonical, "aliases": list(term.aliases)} for term in table.terms],
+        notes=table.notes,
+        sha256=table.sha256(),
+        source=source,
+        created_by=created_by,
+    )
+    db.add(row)
+    db.flush()
+    return row
 
 
 def resolve_continuity_source(
