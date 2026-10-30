@@ -29,9 +29,11 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `main` |
-| 本轮提交 | 见文末"提交与推送"小节（提交后回填） |
+| 本轮提交 | `50dd583` → **`b2d0bbf`**（受管多镜头驱动器与干净收尾）→ **`f6db624`**（VLM 能力资格化与验收报告），已全部推送至 `origin/main`，快进推送、未 force |
+| 推送后复核 | 本地 `main`、`origin/main` 与 `FETCH_HEAD` 三者一致为 `f6db6242ae8328b738a4babaa1f9fad77655bebd`，`rev-list --left-right --count origin/main...main` 为 `0 0`，工作区干净；远端 `backend/tests/test_managed_series.py` 的 blob 哈希与本地一致 |
 | 远端 | `https://github.com/anjingdtl/shine-video-studio` |
 | 轮次起点 | `50dd583916b4827ae9b058c2c4e0010bea1fa989`（上一轮收尾提交，本轮全部变更在其之上） |
+| 远端 CI | **BLOCKED_EXTERNAL**：本轮提交的 run `41002123660` 四个作业（frontend / backend / backend-windows / web-e2e）全部在 2 秒内失败且 **steps = 0**，注解原文："The job was not started because recent account payments have failed or your spending limit needs to be increased." 本轮未修改任何账单或支付设置 |
 
 ---
 
@@ -251,6 +253,7 @@
 ## 十二、对用户的明确交付建议
 
 1. **成片可直接查看**：`.local-acceptance/multishot-20261031/acceptance/artifacts/1f743836-a00c-4787-8343-4f1a24ed9135/delivery/dacee60fed517075ad244bfbc697e9deb5bb8c8b20a4a4e0791c4e47bee660b6.mp4`（15.02 秒，480×864@24fps，三镜 CUT 串联，`review_state=all_passed`）。
-2. **先解决 GitHub 额度**，托管 CI 才会真正跑起来；在此之前本地等价命令已全部通过。
-3. **VLM 侧建议**：若需要在生产中保留"严格风格冲突即失败"的硬判定，本机 16GB 上的 4B/8B 都不足以稳定满足响应合同；建议在更大显存的机器上复核 8B FP8，或把响应合同拆成"检出冲突"与"判定失败"两个可独立签收的阶段（**不得**为通过而放宽既有判定）。
-4. **最终影片与权属批准仍需人工**；本报告不构成对画质、音质、版权或成片的任何批准。
+2. **先解决 GitHub 额度**，托管 CI 才会真正跑起来；在此之前本地等价命令已全部通过（后端 1094 项、Ruff、前端构建、Alembic 全量升级、Playwright 20 条流程）。
+3. **多镜头生产已经产品化**：`shine.worker.run_managed_series` 是新的无人值守入口，调用方排好镜头即可由 Worker 在同一台受管渲染器内连续生产并在结尾干净释放；依赖镜头可在"源作业已 PASSED"时由 `on_shot_complete` 钩子排入。
+4. **审片模型选型已定**：本机 16GB 显存的生产审片执行器为 Qwen3-VL-4B（bnb-4bit，单次审片 43.67 秒）；8B FP8 单次 370.66 秒，不适合本机的无人值守生产。若要在更大显存的机器上复核 8B，可复用同一份能力绑定流程。
+5. **最终影片与权属批准仍需人工**；本报告不构成对画质、音质、版权或成片的任何批准。
