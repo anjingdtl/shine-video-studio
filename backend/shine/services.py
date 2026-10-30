@@ -521,6 +521,27 @@ def make_render_request(
             if capability == VIDEO:
                 code = "SUPPORTED_NODE_UNVERIFIED_TRANSFER"
             raise HTTPException(status_code=422, detail={"code": code, "requested_continuity": capability})
+        # The other direction matters too: a profile that declares a media
+        # transfer needs a reference of that family.  Without one the workflow
+        # would keep its own placeholder, so the render would either use the
+        # wrong bytes or be rejected by the renderer long after the person
+        # queued the shot.
+        from shine.comfy.provider import validate_declared_transfer_families
+
+        try:
+            validate_declared_transfer_families(profile.media_transfers, manifest, assets)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            details = getattr(exc, "details", None)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "WORKFLOW_MEDIA_FAMILY_NOT_BOUND",
+                    "message": str(exc),
+                    "details": details,
+                },
+            ) from exc
 
     render_request = RenderRequest(
         model_checkpoint_id=profile.checkpoint_id if body.workflow_profile_id else "MiniMax-H3-Base",

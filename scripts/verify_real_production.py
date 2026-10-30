@@ -64,7 +64,7 @@ SHOTS = [
         "dialogue_start_s": 0.6,
         "dialogue_end_s": 6.4,
         "continuity": "cut",
-        "bindings": [("character", "subject"), ("scene", "picture")],
+        "bindings": [("character", "subject"), ("scene", "picture"), ("voice", "audio")],
     },
     {
         "name": "验收B-中文对白",
@@ -88,7 +88,7 @@ SHOTS = [
         "dialogue_start_s": 0.8,
         "dialogue_end_s": 5.8,
         "continuity": "last_frame",
-        "bindings": [("character", "subject"), ("scene", "picture")],
+        "bindings": [("character", "subject"), ("scene", "picture"), ("voice", "audio")],
     },
 ]
 

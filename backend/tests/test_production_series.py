@@ -583,6 +583,47 @@ def test_the_resident_worker_ignores_the_series_path_without_a_managed_recipe(ap
     assert run_configured_series_once(factory, "worker-norecipe", settings=settings) is None
 
 
+def test_a_profile_without_the_declared_media_family_is_refused(api):
+    """A profile that declares an audio transfer needs an audio reference."""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = register_workflow_profile(
+        client,
+        mode="Ref2VA",
+        parameter_map={
+            "positive_prompt": "1.inputs.positive_prompt",
+            "seed": "1.inputs.seed",
+            "duration": "1.inputs.duration",
+            "reference_picture_1": "1.inputs.reference_picture_1",
+            "reference_audio_1": "1.inputs.reference_audio_1",
+        },
+        graph={
+            "1": {
+                "class_type": "H3BaseSampler",
+                "inputs": {
+                    "positive_prompt": "", "seed": 0, "duration": 6.0,
+                    "reference_picture_1": "", "reference_audio_1": "",
+                },
+            },
+            "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},
+        },
+        required_nodes=["H3BaseSampler"],
+        media_transfers={
+            "image": {"upload_path": "/upload/image", "field_name": "image",
+                      "subfolder": "shine", "style": "multipart"},
+            "audio": {"upload_path": "/upload/image", "field_name": "image",
+                      "subfolder": "shine", "style": "multipart"},
+        },
+    )
+    response = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={"shot_id": shots[0]["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+    )
+    assert response.status_code == 422, response.text
+    assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" in response.text
+    assert "audio" in response.text
+
+
 def test_a_production_series_needs_a_real_h3_provider(api):
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)

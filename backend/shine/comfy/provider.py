@@ -124,6 +124,37 @@ def validate_reference_slots(parameter_map: dict[str, str], manifest) -> list[tu
     return slots
 
 
+def validate_declared_transfer_families(profile_transfers, manifest, assets) -> None:
+    """A profile that declares a transfer for a media family needs that family.
+
+    The workflow graph holds a loader node for every declared family.  Without
+    the matching reference that node keeps the graph's own placeholder, and the
+    renderer then rejects the prompt long after the person queued the shot.
+    A profile that declares no transfer family constrains nothing.
+    """
+    if not profile_transfers:
+        return
+    families: set[str] = set()
+    for item in manifest:
+        asset = assets.get(item.asset_id) if isinstance(assets, dict) else None
+        if asset is None:
+            continue
+        try:
+            families.add(family_for_content_type(asset.content_type))
+        except Exception:
+            continue
+    missing = sorted(family for family in profile_transfers if family not in families)
+    if missing:
+        raise ComfyPendingWorkflowMapping(
+            "The workflow profile declares media families that this request does not bind",
+            details={
+                "missing_media_families": missing,
+                "bound_media_families": sorted(families),
+                "declared_transfer_families": sorted(profile_transfers),
+            },
+        )
+
+
 class ComfyUIRenderService:
     """Maps an immutable Shine RenderRequest onto a registered API workflow."""
 
@@ -333,6 +364,9 @@ class ComfyUIRenderService:
         class_types = graph_class_types(graph)
         validate_required_parameters(profile.parameter_map, needs_seed=seed is not None)
         validate_reference_slots(profile.parameter_map, request.reference_manifest)
+        validate_declared_transfer_families(
+            self._profile_transfers(profile), request.reference_manifest, assets
+        )
         uploaded = self._upload_references(
             request,
             assets,

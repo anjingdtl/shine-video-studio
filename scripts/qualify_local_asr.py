@@ -123,36 +123,58 @@ def add_noise(path: Path, amplitude: float, seed: int = 7) -> None:
         handle.writeframes(bytes(data))
 
 
-def synth_case(case: dict, out_path: Path, packages: Path, model_root: Path, python: str) -> None:
-    """Render the ground-truth speech with the local Qwen3-TTS model."""
+def synth_case(case: dict, out_path: Path, packages: Path, model_root: Path, python: str,
+               device: str = "cpu") -> str:
+    """Render the ground-truth speech with the local Qwen3-TTS model.
+
+    The 0.6B Base checkpoint only clones an existing voice, so the description
+    driven VoiceDesign checkpoint is used when it is available: it needs no
+    reference audio and therefore no reference transcript, which keeps the
+    expected text exact ground truth.
+    """
     sys.path.insert(0, str(packages))
     script = f'''
 import json, sys
 sys.path.insert(0, {str(packages)!r})
 from qwen_tts import Qwen3TTSModel
-model = Qwen3TTSModel.from_pretrained({str(model_root)!r}, device_map="cpu")
+model = Qwen3TTSModel.from_pretrained({str(model_root)!r}, device_map={device!r})
 payload = json.loads(sys.argv[1])
-audio = model.generate_voice_clone(
-    text=payload["text"], language="Chinese", ref_audio=None, ref_text=None,
-)
+text = payload["text"]
+wavs = fs = None
+method = None
+try:
+    speakers = model.model.get_supported_speakers()
+    if speakers:
+        wavs, fs = model.generate_custom_voice(text=text, speaker=speakers[0], language="Chinese")
+        method = "custom_voice:" + str(speakers[0])
+except Exception as exc:
+    print("custom_voice unavailable:", exc, file=sys.stderr)
+if wavs is None:
+    wavs, fs = model.generate_voice_design(
+        text=text, language="Chinese",
+        instruct="A calm adult woman speaking standard Mandarin Chinese at a natural pace.",
+    )
+    method = "voice_design"
 import numpy as np, wave
-array = np.asarray(audio, dtype="float32")
+array = np.asarray(wavs[0], dtype="float32")
 if array.ndim > 1:
     array = array.mean(axis=1)
 pcm = (np.clip(array, -1.0, 1.0) * 32767).astype("<i2")
 with wave.open(sys.argv[2], "wb") as handle:
-    handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(24000)
+    handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(int(fs))
     handle.writeframes(pcm.tobytes())
-print("ok", len(pcm))
+print(json.dumps({{"method": method, "rate": int(fs), "samples": len(pcm)}}))
 '''
     result = subprocess.run(
         [python, "-c", script, json.dumps({"text": case["text"]}), str(out_path)],
-        capture_output=True, timeout=1800, check=False,
+        capture_output=True, timeout=3600, check=False,
     )
     if result.returncode != 0 or not out_path.is_file():
         raise RuntimeError(
             "TTS synthesis failed: " + result.stderr.decode("utf-8", "replace")[-800:]
         )
+    method = result.stdout.decode("utf-8", "replace").strip().splitlines()[-1]
+    return method
 
 
 def transcribe(asr_base: str, audio: Path, model: str) -> dict:
@@ -178,8 +200,10 @@ def main() -> int:
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--tts-packages", default=str(REPO / ".local-acceptance/tts-runtime-packages"))
     parser.add_argument("--tts-model", default=str(
-        REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages/Qwen3-TTS-12Hz-0.6B-Base-5d839924"))
+        REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
+               "/Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1"))
     parser.add_argument("--tts-python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe")
+    parser.add_argument("--tts-device", default="cpu")
     parser.add_argument("--second-asr-base", default="", help="Optional second ASR endpoint for comparison")
     parser.add_argument("--second-asr-model", default="local-qwen3-asr-0.6b")
     args = parser.parse_args()
@@ -192,7 +216,8 @@ def main() -> int:
         audio = evidence / "asr" / f"{case['id']}.wav"
         log(f"synthesising {case['id']}: {case['text']}")
         try:
-            synth_case(case, audio, Path(args.tts_packages), Path(args.tts_model), args.tts_python)
+            method = synth_case(case, audio, Path(args.tts_packages), Path(args.tts_model),
+                                args.tts_python, args.tts_device)
         except Exception as exc:
             log(f"  TTS unavailable for this case: {exc}")
             results.append({**case, "status": "TTS_UNAVAILABLE", "error": str(exc)[:400]})
@@ -207,6 +232,7 @@ def main() -> int:
             "status": "OK",
             "audio": str(audio),
             "byte_size": audio.stat().st_size,
+            "tts_method": method,
             "asr_http_status": raw.get("http_status"),
             "asr_model": args.asr_model,
             "asr_transcript": transcript,
