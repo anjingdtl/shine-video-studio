@@ -1160,3 +1160,56 @@ Ref2VA 工作流技术闭环：本机已核对的五文件经隔离安装器建�
 - `.local-acceptance/closeout-20261025/npm-ci-20261030.log`
 - `.local-acceptance/_probe_clock.py`（时钟刻度证据）、`.local-acceptance/_probe_plan_order.py`（计划选取顺序复现）
 - `.local-acceptance/_survey_dbs.py`、`.local-acceptance/_survey_stale.py`、`.local-acceptance/_survey_manifests.py`（清理前只读体检）
+# 2026-10-30 真实 H3 生产贯通与六处受管链路缺陷修复
+
+## 本轮定位并修复的真实缺陷
+
+本轮以"正常 Worker 真实跑通 H3"为目标，逐个暴露出六处此前只有内部原语、从未在真实链路上成立的缺陷。每一处都由可复现的反例定位，修复后有定向验证；**没有**放宽断言、关闭生产前检查或降低验收标准。
+
+1. **首次受管启动被类型检查拒绝**。`_run_comfy_job` 只接受"上一轮交接的延续"类型，首次启动上下文永远抛 `HANDOFF_COORDINATOR_INVALID`。现抽出共同基类 `_ManagedAttemptContext`，两种上下文都提供 `instance_id` 与 `supervisor`。
+2. **提交期守卫引用只有延续才有的 `.previous`**。首次启动在提交后崩溃，提交结果被误判为"不明"。现统一走公共访问器。
+3. **渲染器客户端从不满足受管要求**。`ComfyUIClient` 默认 `trust_env=True`，而受管路径要求 `False`；Worker 从不创建合规客户端，本地渲染器流量还可能被环境代理劫持。现由 `_renderer_client` 统一创建：本地渲染器一律 `trust_env=False`，仅显式允许的远端渲染器保留代理行为。
+4. **审片围栏 ID 混入 release config**，导致 `verify_cold_review_fence` 收到不认的参数。围栏归协调器所有，不再进入 release config。
+5. **审片服务的工作目录被设成 python.exe 文件本身**，`Path(cwd).is_dir()` 恒为 False，审片进程永远无法启动。
+6. **`managed_recipe.adapter_identity` 与 `build_review_launch` 的实现错误**（`read_bytes()` 用在已打开的文件对象上；工作目录未取父目录）。
+
+## ComfyUI 节点白名单：枚举、修正与启动期校验
+
+- 以 `/object_info` 枚举全部已登记生产工作流：**29 个节点类型，其中 12 个来自自定义节点包**；再用真实 ComfyUI 的 `/object_info` 逐一确认提供目录。
+- 原配方 `--disable-all-custom-nodes` 且只放行 `shine_comfy_handoff`，真实 Ref2VA 无法运行；更关键的是 `--base-directory` 会把 `custom_nodes` 与 `models` 一并重定向到 BASE 目录，使真实节点包与 H3 权重都不可见，并导致适配器身份核验失败。配方已去掉该参数，与用户自己的生产启动器一致。
+- 修正后的白名单**恰好加载 7 个供应商**（`shine_comfy_handoff`、`ComfyUI-KJNodes`、`ComfyUI-MiniMax-H3-PDD-Acc`、`Comfyui_Minimax_h3_latent_Upscaler`、`ComfyUI-SolAttn_triton`、`comfyui-videohelpersuite`、`shine_h3_sampling_mode.py`），其余全部跳过；`/object_info` 返回 **1281 个节点类型**，13 个必需节点全部存在。
+- 新增**启动期节点完备性校验**：受管启动在登记实例前读取实时 `/object_info`，任一注册工作流所需节点缺失即以 `COMFY_REQUIRED_NODE_MISSING` 失败关闭，并把缺失清单写入启动日志。该校验已实际拦截过一次缺失（验收库自带的合成测试图 `H3BaseSampler`）。
+
+## 本地 API 访问控制
+
+- `security.py` 原先把 `0.0.0.0` 当作回环主机，`config.py` 用它校验 `SHINE_COMFYUI_URL`，因此 `http://0.0.0.0:8188` 会被误判为"本机"。已改为统一的 `is_loopback_peer`，正确处理 `::ffff:127.0.0.1`，拒绝 `0.0.0.0` 与 `::`。
+- 普通项目 API 此前**完全没有访问控制**，只依赖 uvicorn 绑定地址。现新增应用层回环守卫：非回环客户端 403，需局域网暴露必须显式设置 `SHINE_ALLOW_NON_LOOPBACK_API=1`。新增用例 26 项。
+
+## 真实 H3 生产（PASS_REAL）
+
+由**正常 Worker** 完成，不是独立脚本。证据 `.local-acceptance/final-all-pass-20261030/real-production-run.json`。
+
+- 真实 MiniMax-H3 **Ref2VA INT8 ConvRot 剪枝版**，注册 profile `local-h3-ref2va-2img`。
+- 受管启动 5.6–5.9 秒，关闭启动（`drained`），授权前提示词被拒。
+- 提交意图先落库，两张参考图按 profile 的 `media_transfers` 上传，激活后提交。
+- **真实生成约 110 秒**，产物 MP4 **1,822,918 字节**，SHA-256 `a90f67fbd5c82cc3a7d80fe689c444a5b84cd4914e7835fa9ed1f432b3e645f0`。
+- ffprobe：`h264` **480×864**、**24/1** fps、**5.165 s**；`aac` **5.166 s**；容器 5.166 s。`is_mock=false`。
+- 参考素材复用历史**已人工批准并锁定**的角色图与场景图（哈希与库内一致、文件在位）；本轮未新建或晋升任何主资产。
+
+## 真实交接与质检（PASS_REAL / FAIL）
+
+- **ASR：PASS_REAL**。受管审片服务启动、首次封闭围栏成立、预约成功、真实转写完成并产出隔离收据、`result_is_mock=false`、封存成功。
+- **VLM：FAIL**。4B 模型把风格输入字段判为不一致却给出 passed（`STYLE_INPUT_DECISION_CONTRADICTION`），应用按合同拒绝；换 8B FP8 后在本机 16GB 显存上推理超过隔离服务 600 秒上限，隔离服务把结果标记为未知并**拒绝释放**（503），作业进入 `COMFY_HANDOFF_RECONCILE_REQUIRED`。
+- 失败后的行为正确：**未伪造 PASS、未盲重投、租约保留待对账**，渲染器与审片服务进程均已退出，GPU 回落到 1356 MiB。
+
+## 本轮清理（已授权）
+
+- `.local-acceptance/data/shine.db`（malformed schema）、`.local-data/shine.db`（0 表空库）、两份指向已死进程的 `run/processes.json` → 走可恢复回收站删除。
+- 上一轮早期探针遗留在 `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\custom_nodes\shine_comfy_handoff` 的适配器副本（位于真实安装之外、指向错误位置）→ 已删除该副本与随之变空的 `custom_nodes` 目录。
+- 本轮安装的交接适配器保留在真实安装位置 `ComfyUI\custom_nodes\shine_comfy_handoff`，身份 `d182268e70b4d57be695f01f0328c44df05b90480398777829f53785e301a93a`。
+
+## 托管 CI
+
+注解原文（四个作业全部相同）："The job was not started because recent account payments have failed or your spending limit needs to be increased." 作业 `runner=` 为空、2–3 秒内失败、**步骤数为 0** —— 账户计费/额度阻断，不是代码失败。本轮未修改任何账单或支付设置。
+
+完整验收矩阵与交付建议见 [LOCAL_ALL_PASS_FINAL_REPORT.md](LOCAL_ALL_PASS_FINAL_REPORT.md)。

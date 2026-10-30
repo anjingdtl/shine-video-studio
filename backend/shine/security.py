@@ -21,7 +21,7 @@ MAX_TOTAL_REFERENCES = 12
 MAX_REFERENCE_DURATION_S = 15.0
 ALLOWED_ASSET_ROLES = {"character", "costume", "scene", "prop", "voice", "style_reference", "generic"}
 
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOOPBACK_HOSTS = {"localhost", "localhost.localdomain", "127.0.0.1", "::1"}
 
 _SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|secret|password|credential|authorization)", re.IGNORECASE)
 _SENSITIVE_VALUE = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,})")
@@ -90,18 +90,33 @@ def probe_upload(kind: str, content: bytes, content_type: str) -> MediaInfo:
     return info
 
 
+def is_loopback_peer(host: str) -> bool:
+    """True when a peer address belongs to this machine's loopback interface.
+
+    The unspecified address is not a loopback address: a server bound to
+    ``0.0.0.0`` accepts connections from the network, so it must never be
+    treated as "this machine". An IPv4-mapped IPv6 loopback is accepted
+    because that is how a dual-stack socket reports an IPv4 client.
+    """
+    value = (host or "").strip().lower()
+    if not value:
+        return False
+    if value.startswith("[") and "]" in value:
+        value = value[1:value.index("]")]
+    if "%" in value:
+        value = value.split("%", 1)[0]
+    if value in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
 def is_loopback_url(url: str) -> bool:
     """True when the URL points at the local machine."""
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return False
-    if host in LOOPBACK_HOSTS:
-        return True
-    try:
-        return ip_address(host).is_loopback
-    except ValueError:
-        return False
+    return is_loopback_peer(parsed.hostname or "")
 
 
 def require_loopback_url(url: str, *, allow_remote: bool = False) -> str:

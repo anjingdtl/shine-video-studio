@@ -63,6 +63,7 @@ from shine.schemas import (
     WorkerStatus,
 )
 from shine.security import (
+    is_loopback_peer,
     probe_upload,
     read_verified_upload,
     sha256_bytes,
@@ -346,6 +347,27 @@ def create_app(
     from shine.api_preparation import router as preparation_router
 
     app.include_router(preparation_router)
+
+    @app.middleware("http")
+    async def _loopback_only(request: Request, call_next):
+        """Refuse non-loopback clients until the API has real authentication.
+
+        The ordinary project API is unauthenticated, so it may only answer a
+        client on this machine. Binding the socket to loopback is not enough:
+        the application itself refuses a request that arrives from anywhere
+        else. The in-process test transport has no peer address and is allowed.
+        """
+        if not settings.allow_non_loopback_api:
+            client = request.client
+            host = (client.host if client is not None else "") or ""
+            if host and host != "testclient" and not is_loopback_peer(host):
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "The Shine API only answers clients on this machine."},
+                )
+        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:

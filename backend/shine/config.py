@@ -51,6 +51,7 @@ class Settings:
     comfy_probe_ports: tuple[int, ...] = ()
     operator_id: str = ""
     operator_token_sha256: str = ""
+    allow_non_loopback_api: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -91,4 +92,9 @@ class Settings:
             offline_simulation=os.getenv("SHINE_OFFLINE_SIMULATION", "") == "1",
             operator_id=os.getenv("SHINE_OPERATOR_ID", ""),
             operator_token_sha256=os.getenv("SHINE_OPERATOR_TOKEN_SHA256", ""),
+            # The ordinary project API has no per-request authentication yet, so
+            # it must only answer loopback clients. A deliberate LAN exposure
+            # needs this explicit opt-in and a real authentication story.
+            allow_non_loopback_api=os.getenv("SHINE_ALLOW_NON_LOOPBACK_API", "").strip().lower()
+            in {"1", "true", "yes"},
         )

@@ -46,6 +46,8 @@ class Handler(BaseHTTPRequestHandler):
                                   'adapter_sha256':os.environ['BARRIER_HASH']})
     def do_GET(self):
         if self.path == '/history': return self.respond(200, {'historic-prompt':{'status':'complete'}})
+        if self.path == '/object_info':
+            return self.respond(200, json.loads(os.environ.get('NODE_INVENTORY', '{}')))
         auth_ok = self.headers.get('Authorization') == 'Bearer ' + os.environ['TOKEN']
         if self.path == '/shine-handoff/status' and auth_ok:
             return self.respond(200, {'status':'drained' if Handler.drained else 'accepting','protocol':1,
@@ -112,12 +114,16 @@ def claimed(api):
     return factory, settings, job["id"], lease_id, attempt_id, version
 
 
-def launch_arguments(renderer):
+def launch_arguments(renderer, inventory=None):
     script, marker, port, root = renderer
+    # The stub serves the node inventory that a real renderer exposes; the
+    # registered test workflow needs H3BaseSampler and SaveVideo.
+    served = {"H3BaseSampler": {}, "SaveVideo": {}} if inventory is None else inventory
     return {
         "argv": [sys.executable, str(script), str(marker)],
         "cwd": str(root),
         "env": dict(os.environ, TOKEN=TOKEN, BARRIER_HASH=DIGEST, PORT=str(port),
+                    NODE_INVENTORY=json.dumps(served),
                     SHINE_COMFY_START_DRAINED="1"),
         "pinned_files": [sys.executable, str(script)],
         "port": port,
@@ -125,7 +131,7 @@ def launch_arguments(renderer):
 
 
 def start(factory, settings, renderer, claimed, **overrides):
-    arguments = launch_arguments(renderer)
+    arguments = launch_arguments(renderer, overrides.get("inventory"))
     arguments.update(overrides)
     return start_managed_renderer(
         factory, settings,
@@ -211,6 +217,19 @@ def test_startup_requires_a_closed_renderer(claimed, renderer, monkeypatch):
         assert journal.value["stage"] == "RECONCILE_REQUIRED"
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
         assert db.get(ComfyInstance, "shine-test-renderer") is None
+
+
+def test_startup_refuses_a_renderer_that_cannot_serve_a_registered_workflow(claimed, renderer):
+    """A renderer missing a node of a registered workflow is never registered."""
+    factory, settings, job_id, lease_id, attempt_id, version = claimed
+    with pytest.raises(HTTPException, match="COMFY_REQUIRED_NODE_MISSING"):
+        start(factory, settings, renderer, claimed, inventory={"H3BaseSampler": {}})
+    with factory() as db:
+        journal = db.get(AppSetting, STARTUP_PREFIX + "shine-test-renderer")
+        assert journal.value["stage"] == "RECONCILE_REQUIRED"
+        assert "SaveVideo" in journal.value["missing_nodes"]
+        assert db.get(ComfyInstance, "shine-test-renderer") is None
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 
 
 def test_startup_requires_a_measured_physical_baseline(claimed, renderer):

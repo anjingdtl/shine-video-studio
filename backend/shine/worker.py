@@ -706,7 +706,6 @@ def run_one(
     semantic_reviewer=None,
     asr_reviewer=None,
 ):
-    from shine.comfy.client import ComfyUIClient
     from shine.comfyops.models import ResourceLease
     from shine.comfyops.scheduler import ResourceScheduler
 
@@ -782,7 +781,7 @@ def run_one(
                 return job_id
             release_client = comfy_client or (comfy_service.client if comfy_service else None)
             if release_client is None and settings:
-                release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+                release_client = _renderer_client(settings, max_retries=0)
             try:
                 if release_client is None or not hasattr(release_client, "free_models"):
                     raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
@@ -852,7 +851,7 @@ def run_one(
                 else:
                     release_client = comfy_client or (comfy_service.client if comfy_service else None)
                     if release_client is None and settings:
-                        release_client = ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+                        release_client = _renderer_client(settings, max_retries=0)
                     try:
                         if release_client is None or not hasattr(release_client, "free_models"):
                             raise ValueError("MODEL_RELEASE_REQUIRES_LOCAL_RECONCILIATION")
@@ -911,8 +910,44 @@ class _ManagedRenderHeartbeat:
         self.stop()
 
 
-class _ManagedContinuation:
+class _ManagedAttemptContext:
+    """What a managed attempt context must provide to the render path.
+
+    Two kinds exist: the first attempt of a fresh managed startup, and the
+    continuation of a previous handoff. Both own the renderer, prepare the
+    references and open the renderer for one claimed attempt.
+    """
+
+    job_id: str
+    next: Any
+
+    @property
+    def instance_id(self) -> str:
+        """The managed ComfyUI instance this context owns."""
+        raise NotImplementedError
+
+    @property
+    def supervisor(self):
+        """The supervisor bound to that instance."""
+        raise NotImplementedError
+
+    def before_prepare(self, service, attempt_id, worker_id, state_version):
+        raise NotImplementedError
+
+    def activate(self, attempt_id, worker_id, state_version):
+        raise NotImplementedError
+
+
+class _ManagedContinuation(_ManagedAttemptContext):
     """In-process authority for one previously reserved managed continuation."""
+
+    @property
+    def instance_id(self) -> str:
+        return self.previous.instance_id
+
+    @property
+    def supervisor(self):
+        return self.previous.replacement
 
     def __init__(self, factory, settings, previous, boundary, job_id, lease_id):
         from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
@@ -928,7 +963,6 @@ class _ManagedContinuation:
         self.next._cold_fences = dict(previous._cold_fences)
 
     def before_prepare(self, service, attempt_id, worker_id, state_version):
-        from shine.comfy.client import ComfyUIClient
         from shine.comfy.provider import ComfyUIRenderService
         from shine.comfyops.models import ComfyInstance, ResourceLease
         from shine.comfyops.resource_epoch import read_epoch
@@ -971,7 +1005,7 @@ class _ManagedContinuation:
         )
 
 
-class _FirstManagedContinuation:
+class _FirstManagedContinuation(_ManagedAttemptContext):
     """In-process authority for the first managed attempt of a fresh startup.
 
     Unlike the continuation of a previous handoff, this one owns the very first
@@ -990,8 +1024,15 @@ class _FirstManagedContinuation:
         self.coordinator = None
         self.next = None
 
+    @property
+    def instance_id(self) -> str:
+        return self.renderer.instance_id if self.renderer is not None else ""
+
+    @property
+    def supervisor(self):
+        return self.renderer.supervisor if self.renderer is not None else None
+
     def before_prepare(self, service, attempt_id, worker_id, state_version):
-        from shine.comfy.client import ComfyUIClient
         from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
         from shine.comfyops.handoff_startup import start_managed_renderer, start_managed_review_service
         from shine.comfyops.managed_recipe import build_renderer_launch, build_review_launch
@@ -1024,10 +1065,13 @@ class _FirstManagedContinuation:
                 pinned_files=review_pins, port=spec["port"], handoff_token=review_token,
                 runtime_sha256=spec.get("runtime_sha256"), gpu_uuid=recipe["gpu_uuid"],
                 min_ram_mb=spec.get("min_ram_mb", 8000), min_vram_mb=spec.get("min_vram_mb", 8000),
+                base_url=spec.get("base_url"),
             )
             self.review_services[kind] = started
             configs[kind] = started["config"]
-            fences[kind] = started["config"]["cold_fence_id"]
+            # The fence belongs to the coordinator, not to the release config:
+            # the release config is what the fence verification receives.
+            fences[kind] = started["fence"]["fence_id"]
         self.coordinator = ManagedReviewCoordinator(
             self.renderer.supervisor, self.renderer.instance_id, self.history_dir,
             self.renderer.gpu_uuid, min_ram_mb=self.renderer.min_ram_mb,
@@ -1572,6 +1616,21 @@ def _load_comfy_context(
     return profile, request, manifest, assets, policy, language
 
 
+def _renderer_client(settings: Settings, *, max_retries: int = 2):
+    """The renderer client for this worker.
+
+    A local renderer must never be reached through an environment proxy: the
+    managed path refuses a client that could be redirected, and reference
+    bytes travel over that connection. Only an explicitly allowed remote
+    renderer keeps the environment proxy behaviour.
+    """
+
+    return ComfyUIClient(
+        settings.comfyui_base_url, timeout_s=10, max_retries=max_retries,
+        trust_env=bool(settings.allow_remote_comfyui),
+    )
+
+
 def _isolated_mock_handoff(settings, reviewers):
     """Only isolated offline simulation may use the synthetic handoff."""
     return settings.offline_simulation and all(
@@ -1597,12 +1656,13 @@ def _managed_review_specs(recipe, semantic_reviewer, asr_reviewer):
     for kind, provider in (("VLM", semantic_reviewer), ("ASR", asr_reviewer)):
         if provider is None:
             continue
-        base_url = getattr(getattr(provider, "config", None), "base_url", "")
-        port = urlsplit(base_url).port
+        config = getattr(provider, "config", None)
+        base_url = getattr(config, "base_url", None)
+        port = urlsplit(base_url).port if base_url else None
         entry = (recipe.get("reviews") or {}).get(kind)
         if entry is None or not port or entry["port"] != port:
             raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
-        specs[kind] = entry
+        specs[kind] = {**entry, "base_url": base_url}
     if not specs:
         raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
     return specs
@@ -2066,11 +2126,7 @@ def _run_comfy_job(
     managed_guard=None,
 ) -> str:
     settings = settings or Settings.from_env()
-    client = comfy_client
-    if client is None:
-        from shine.comfy.client import ComfyUIClient
-
-        client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+    client = comfy_client or _renderer_client(settings)
     service = comfy_service or ComfyUIRenderService(client, settings.data_dir)
     with session_factory.begin() as db:
         job = db.get(Job, job_id)
@@ -2100,7 +2156,7 @@ def _run_comfy_job(
                      lease_seconds=settings.worker_lease_seconds):
         return job_id
     if managed_continuation is not None:
-        if not isinstance(managed_continuation, _ManagedContinuation) or managed_continuation.job_id != job_id:
+        if not isinstance(managed_continuation, _ManagedAttemptContext) or managed_continuation.job_id != job_id:
             raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
         managed_guard.check()
         managed_continuation.before_prepare(service, attempt_id, worker_id, expected_version)
@@ -2240,7 +2296,7 @@ def _run_comfy_job(
 
                     _, managed_instance = _check(
                         submit_db, settings, job_id, attempt_id, managed_continuation.lease_id,
-                        managed_continuation.previous.instance_id, worker_id, expected_version,
+                        managed_continuation.instance_id, worker_id, expected_version,
                     )
                     activation = submit_db.get(AppSetting, "renderer-activation:" + attempt_id)
                     activation_value = activation.value if activation else {}
@@ -2255,11 +2311,11 @@ def _run_comfy_job(
                     if (graph_hash(prepared.prompt) != prepared.prompt_graph_sha256
                             or persisted_graph_hash != prepared.prompt_graph_sha256):
                         raise HTTPException(409, "COMFY_PROMPT_GRAPH_CHANGED")
-                    managed_continuation.previous.replacement.verify_binding(
+                    managed_continuation.supervisor.verify_binding(
                         managed_instance.payload.get("url", ""), managed_instance.payload.get("process"),
                     )
                     _check(submit_db, settings, job_id, attempt_id, managed_continuation.lease_id,
-                           managed_continuation.previous.instance_id, worker_id, expected_version)
+                           managed_continuation.instance_id, worker_id, expected_version)
             except HTTPException as exc:
                 if managed_continuation is not None:
                     from shine.comfyops.models import ResourceLease
@@ -2719,7 +2775,7 @@ def recover_expired_jobs(
         # A lease whose job already finished must be reconciled against the
         # renderer's real memory state, even when the job itself needs no
         # further recovery, otherwise one stale lease deadlocks the queue.
-        release_client = comfy_client or ComfyUIClient(settings.comfyui_base_url, max_retries=0)
+        release_client = comfy_client or _renderer_client(settings, max_retries=0)
         leases = list(
             db.scalars(select(ResourceLease).where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"])))
         )
@@ -2867,7 +2923,7 @@ def _recover_one_job(
             if _claim_stranded_job(db, job, worker_id, settings) is None:
                 return 0
             transition(job, "RUNNING")
-            client = comfy_client or ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+            client = comfy_client or _renderer_client(settings)
             finalize = {
                 "job_id": job.id,
                 "attempt_id": checked_attempt.id,
@@ -2969,9 +3025,8 @@ def _recover_comfy_job(
     transaction before the descriptor is executed, so the finalisation can
     open its own transaction.
     """
-    from shine.comfy.client import ComfyUIClient
 
-    client = comfy_client or ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+    client = comfy_client or _renderer_client(settings)
     service = ComfyUIRenderService(client, settings.data_dir)
     prompt_id = job.provider_job_id or (attempt.provider_job_id if attempt else None)
     graph_hash = attempt.prompt_graph_sha256 if attempt else None
@@ -3159,9 +3214,8 @@ def serve(poll_seconds: float = 0.5) -> None:
     provider = MockH3Provider()
     comfy_client = None
     if settings.render_provider == "comfyui":
-        from shine.comfy.client import ComfyUIClient
 
-        comfy_client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+        comfy_client = _renderer_client(settings)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
     try:
         while True:
@@ -3192,9 +3246,8 @@ def main() -> None:
     provider = MockH3Provider()
     comfy_client = None
     if settings.render_provider == "comfyui":
-        from shine.comfy.client import ComfyUIClient
 
-        comfy_client = ComfyUIClient(settings.comfyui_base_url, timeout_s=10)
+        comfy_client = _renderer_client(settings)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
     if args.once:
         run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)

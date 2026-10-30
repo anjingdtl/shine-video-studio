@@ -29,8 +29,7 @@ def adapter_identity(adapter_dir) -> str:
     directory = Path(adapter_dir)
     parts = []
     for name in ("__init__.py", "barrier.py"):
-        with (directory / name).open("rb") as stream:
-            parts.append(hashlib.sha256(stream.read_bytes()).digest())
+        parts.append(hashlib.sha256((directory / name).read_bytes()).digest())
     return hashlib.sha256(b"".join(parts)).hexdigest()
 
 
@@ -176,8 +175,13 @@ def build_review_launch(recipe, *, token=None):
     pins = [recipe["python"], recipe["manifest"]]
     if not argv or not Path(argv[0]).is_absolute():
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
-    if str(Path(argv[0]).resolve()) != str(Path(recipe["python"]).resolve()):
+    if str(Path(argv[0]).resolve()) not in {str(Path(pin).resolve()) for pin in pins}:
         raise HTTPException(409, "COMFY_RECIPE_EXECUTABLE_NOT_PINNED")
+    # The working directory must be a directory: the interpreter itself is the
+    # executable, and its parent is the only sensible working directory.
+    cwd = str(Path(recipe["python"]).resolve().parent)
+    if not Path(cwd).is_dir():
+        raise HTTPException(409, "COMFY_RECIPE_INVALID")
     env = dict(os.environ)
     env["SHINE_REVIEW_HANDOFF_TOKEN"] = token
-    return argv, str(Path(recipe["python"]).resolve()), env, pins, token
+    return argv, cwd, env, pins, token

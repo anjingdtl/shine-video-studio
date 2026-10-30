@@ -11,12 +11,14 @@ is never relaunched blindly.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
 from dataclasses import dataclass
 from datetime import timedelta
 from threading import Event, Thread
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -204,11 +206,13 @@ def _bind_lease(db, lease_id, job_id):
     return lease, job
 
 
-def _wait_for_owned_listener(group, port, *, timeout=120):
+def _wait_for_owned_listener(group, port, *, timeout=600):
     """Wait until the only loopback listener belongs to the owned group.
 
     The listener may be a descendant of the group leader, which is what the
-    Job Object proves; it must not be a process outside the owned tree.
+    Job Object proves; it must not be a process outside the owned tree. A real
+    renderer loads thousands of node types before it answers, so the wait is
+    generous: the startup intent is already durable.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -247,6 +251,7 @@ def start_managed_renderer(
     launch=None,
     supervisor_factory=None,
     probe=None,
+    required_node_types=None,
 ) -> ManagedRenderer:
     """Create the owned renderer exactly once, behind a durable intent.
 
@@ -331,6 +336,8 @@ def start_managed_renderer(
                 "listener": owner, "process": {"pid": group.pid, "birth": birth, "job_name": group.job_name},
             })
             guard.check()
+            # Resource admission comes first: a renderer that cannot be measured
+            # must not be registered, whatever it can serve.
             measured = (probe or probe_memory)(gpu_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
             verified = evaluate_readiness(available_ram_bytes=measured.get("available_ram_bytes"),
                                           gpu=measured.get("gpu"), min_ram_mb=min_ram_mb,
@@ -338,6 +345,19 @@ def start_managed_renderer(
             if measured.get("ready") is not True or not verified["ready"]:
                 raise HTTPException(409, "COMFY_STARTUP_MEMORY_INSUFFICIENT")
             guard.check()
+            required = (required_workflow_node_types(factory)
+                        if required_node_types is None else set(required_node_types))
+            try:
+                inventory = verify_required_nodes(f"http://127.0.0.1:{port}", required=required)
+            except MissingRequiredNodes as exc:
+                _record(factory, instance_id, {
+                    "previous_stage": "LISTENING", "stage": "LISTENING",
+                    "missing_nodes": exc.missing, "required_nodes": sorted(required),
+                })
+                raise
+            _record(factory, instance_id, {
+                "previous_stage": "LISTENING", "stage": "LISTENING", "node_inventory": inventory,
+            })
             process = {"pid": group.pid, "birth": birth, "job_name": group.job_name}
             payload = {
                 "managed": True,
@@ -554,6 +574,7 @@ def start_managed_review_service(
     min_vram_mb: int,
     launch=None,
     probe=None,
+    base_url=None,
 ):
     """Start an owned review supervisor and close it with a first-use fence.
 
@@ -618,14 +639,18 @@ def start_managed_review_service(
             min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb, handoff_token=handoff_token,
             owner_group=group,
         )
+        # The review configuration must address the supervisor exactly as the
+        # reviewer's provider profile does, including its version path.
+        service_base_url = base_url or f"http://127.0.0.1:{port}"
+        if urlsplit(service_base_url).port != port:
+            raise HTTPException(409, "COMFY_REVIEW_SERVICE_PORT_MISMATCH")
         config = {
-            "base_url": f"http://127.0.0.1:{port}",
+            "base_url": service_base_url,
             "runtime_sha256": runtime_sha256,
             "supervisor": {"pid": listener["pid"], "birth": listener["birth"]},
             "gpu_uuid": gpu_uuid,
             "handoff_token": handoff_token,
             "owner_group": group,
-            "cold_fence_id": fence["fence_id"],
         }
         with factory.begin() as db:
             db.execute(text("BEGIN IMMEDIATE"))
@@ -643,6 +668,66 @@ def start_managed_review_service(
               lease_id=lease_id, job_id=job_id, prefix=REVIEW_PREFIX)
         raise
     return {"group": group, "config": config, "fence": fence}
+
+
+def required_workflow_node_types(factory):
+    """Every node type that a registered production workflow needs.
+
+    The registered workflow profiles are the authoritative statement of what
+    this installation must be able to run. A renderer that cannot serve all of
+    them is not a valid renderer for this project.
+    """
+    from shine.models import WorkflowProfile
+
+    with factory() as db:
+        rows = db.scalars(select(WorkflowProfile)).all()
+    needed = set()
+    for row in rows:
+        graph = row.graph
+        if isinstance(graph, str):
+            try:
+                graph = json.loads(graph)
+            except ValueError:
+                continue
+        if not isinstance(graph, dict):
+            continue
+        for node in graph.values():
+            if isinstance(node, dict) and node.get("class_type"):
+                needed.add(str(node["class_type"]))
+    return needed
+
+
+class MissingRequiredNodes(HTTPException):
+    """The renderer cannot serve every registered production workflow."""
+
+    def __init__(self, missing):
+        super().__init__(409, "COMFY_REQUIRED_NODE_MISSING")
+        self.missing = list(missing)
+
+
+def verify_required_nodes(base_url, *, required, timeout=30):
+    """Confirm the renderer really exposes every required node type.
+
+    A static whitelist can drift from the installed node packs. Reading the
+    live inventory closes that gap: a renderer that cannot serve every
+    registered workflow is rejected before any prompt is accepted.
+    """
+    import httpx
+
+    with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+        response = client.get(base_url.rstrip("/") + "/object_info")
+    if response.status_code != 200:
+        raise HTTPException(409, "COMFY_NODE_INVENTORY_UNAVAILABLE")
+    try:
+        info = response.json()
+    except ValueError as exc:
+        raise HTTPException(409, "COMFY_NODE_INVENTORY_UNAVAILABLE") from exc
+    if not isinstance(info, dict):
+        raise HTTPException(409, "COMFY_NODE_INVENTORY_UNAVAILABLE")
+    missing = sorted(name for name in required if name not in info)
+    if missing:
+        raise MissingRequiredNodes(missing)
+    return {"verified": len(required), "available": len(info), "missing": missing}
 
 
 class StartupBoundary:
