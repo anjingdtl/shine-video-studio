@@ -421,7 +421,7 @@ def main() -> int:
             labels[1].query_selector("input").fill(str(shot_spec["duration"]))
             labels[2].query_selector("textarea").fill(shot_spec["beat"])
             labels[3].query_selector("input").fill(",".join(shot_spec["characters"]))
-            labels[4].query_selector("input").fill("雨夜霓虹街道")
+            labels[4].query_selector("input").fill("rain-slicked neon street at night")
             if shot_spec["dialogue"]:
                 labels[5].query_selector("input").fill("CHAR_LIANG")
                 labels[6].query_selector("input").fill(shot_spec["dialogue"])

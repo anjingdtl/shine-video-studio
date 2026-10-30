@@ -193,6 +193,24 @@ def transcribe(asr_base: str, audio: Path, model: str) -> dict:
     return body
 
 
+def transcribe_qwen3(audio: Path, packages: Path, model_root: Path) -> dict:
+    """The locally installed Qwen3-ASR model, run in process on the CPU.
+
+    It is an existing local resource and it is independent of the H3 video
+    core, so comparing it with the production executor is allowed.
+    """
+    sys.path.insert(0, str(packages))
+    from qwen_asr import Qwen3ASRModel
+
+    model = Qwen3ASRModel.from_pretrained(str(model_root), device_map="cpu")
+    results = model.transcribe(audio=str(audio), language="Chinese")
+    if isinstance(results, list):
+        text = " ".join(str(getattr(row, "text", row)) for row in results)
+    else:
+        text = str(getattr(results, "text", results))
+    return {"http_status": 200, "response": {"text": text, "is_mock": False, "model": "local-qwen3-asr-0.6b"}}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qualify the local Chinese ASR on ground-truth audio")
     parser.add_argument("--asr-base", required=True, help="Base URL of a running local review executor")
@@ -204,8 +222,13 @@ def main() -> int:
                "/Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1"))
     parser.add_argument("--tts-python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe")
     parser.add_argument("--tts-device", default="cpu")
+    parser.add_argument("--report", default="")
     parser.add_argument("--second-asr-base", default="", help="Optional second ASR endpoint for comparison")
     parser.add_argument("--second-asr-model", default="local-qwen3-asr-0.6b")
+    parser.add_argument("--qwen-asr-packages", default=str(REPO / ".local-acceptance/asr-runtime-packages"))
+    parser.add_argument("--qwen-asr-model-root", default=str(
+        REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
+               "/Qwen3-ASR-0.6B-5eb14417-cdn1"))
     args = parser.parse_args()
 
     evidence = Path(args.evidence_dir).resolve()
@@ -240,17 +263,22 @@ def main() -> int:
             "cer": character_error_rate(case["text"], transcript or ""),
             "exact_match": normalise(case["text"]) == normalise(transcript or ""),
         }
-        if args.second_asr_base:
-            second = transcribe(args.second_asr_base, audio, args.second_asr_model)
+        if args.qwen_asr_model_root:
+            try:
+                second = transcribe_qwen3(audio, Path(args.qwen_asr_packages), Path(args.qwen_asr_model_root))
+            except Exception as exc:
+                second = {"http_status": 0, "response": {"text": f"FAILED: {type(exc).__name__}: {exc}"[:300]}}
             second_body = second.get("response") or {}
             second_text = second_body.get("text") if isinstance(second_body, dict) else None
-            entry["second_asr_model"] = args.second_asr_model
+            entry["second_asr_model"] = "local-qwen3-asr-0.6b"
             entry["second_asr_transcript"] = second_text
             entry["second_asr_cer"] = character_error_rate(case["text"], second_text or "")
             entry["second_asr_exact_match"] = normalise(case["text"]) == normalise(second_text or "")
             entry["second_asr_raw"] = second_body
         results.append(entry)
         log(f"  transcript: {transcript!r} cer={entry['cer']:.3f}")
+        if "second_asr_transcript" in entry:
+            log(f"  qwen3-asr: {entry['second_asr_transcript']!r} cer={entry['second_asr_cer']:.3f}")
 
     silence = evidence / "asr" / "silence.wav"
     write_silence(silence)
@@ -285,15 +313,21 @@ def main() -> int:
         "asr_model": args.asr_model,
         "second_asr_base": args.second_asr_base,
         "second_asr_model": args.second_asr_model,
+        "qwen_asr_model_root": args.qwen_asr_model_root,
         "cases": results,
     }
     scored = [row for row in results if row.get("cer") is not None]
     if scored:
         report["mean_cer"] = sum(row["cer"] for row in scored) / len(scored)
         report["exact_match_rate"] = sum(1 for row in scored if row["exact_match"]) / len(scored)
-    (evidence / "asr-qualification.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"ASR qualification written to {evidence / 'asr-qualification.json'}")
+    compared = [row for row in scored if row.get("second_asr_cer") is not None]
+    if compared:
+        report["second_mean_cer"] = sum(row["second_asr_cer"] for row in compared) / len(compared)
+        report["second_exact_match_rate"] = sum(1 for row in compared if row["second_asr_exact_match"]) / len(compared)
+        report["second_asr_model"] = "local-qwen3-asr-0.6b"
+    target = Path(args.report) if args.report else evidence / "asr-qualification.json"
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"ASR qualification written to {target}")
     return 0
 
 
