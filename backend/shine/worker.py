@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import time
 from dataclasses import replace
 from datetime import timedelta
@@ -1663,6 +1664,8 @@ def _run_one(
             # The exception's own code names the blocked step without carrying
             # provider text, URLs or payloads into the log.
             logger.error("job_execution_failed_code job_id=%s code=%s", job_id, detail)
+        elif isinstance(exc, ValueError) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,63}", str(exc)):
+            logger.error("job_execution_failed_code job_id=%s code=%s", job_id, str(exc))
         try:
             with session_factory.begin() as db:
                 job = db.get(Job, job_id)
