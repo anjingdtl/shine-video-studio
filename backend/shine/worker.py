@@ -482,6 +482,28 @@ def _semantic_review(
     return [result], None
 
 
+def _asr_accepts_context(asr) -> bool:
+    """Whether the recognizer takes the script's terminology as a hint.
+
+    The capability is checked before the call, never after a failed one: a
+    retry would run the same external review a second time, and the second
+    call would be refused because the first one is still in flight.
+    """
+    import inspect
+
+    target = getattr(asr, "provider", asr)
+    method = getattr(target, "transcribe", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+    if "context" in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
 def _transcript_review(
     *,
     asr,
@@ -498,10 +520,9 @@ def _transcript_review(
         # The script's terminology is a hint for the recognizer, so a proper
         # name is read with the characters the script uses.  The transcript
         # that comes back is never rewritten.
-        try:
+        if context and _asr_accepts_context(asr):
             transcript = asr.transcribe(artifact_path, context=context)
-        except TypeError:
-            # A reviewer without the optional hint keeps its own contract.
+        else:
             transcript = asr.transcribe(artifact_path)
     except TimeoutError as exc:
         _raise_if_managed_review(asr)
