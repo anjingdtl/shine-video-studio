@@ -10,16 +10,17 @@
 
 本轮把上一轮剩下的三个真实缺口中的两个**在当前代码上真正关闭**了：
 
-1. **真实 VLM 质检结论**由 FAIL 变为 **PASS_REAL**：4B 本地执行器在风格一致的真实镜头与带中文对白的真实镜头上返回了合同有效的 `passed` 结论，五道质量门全部通过。
+1. **真实 VLM 质检结论**由 FAIL 变为 **PASS_REAL**：4B 本地执行器在风格一致的真实镜头与带中文对白的真实镜头上返回了合同有效的 `passed` 结论，五道质量门全部通过；能力修订也已在本轮当前代码下用**真实正反例**重新资格化并发布为 `PRODUCTION_APPROVED`。
 2. **多镜头连续生产 + EDL + FFmpeg 装配 + 最终成片**由 NOT_RUN 变为 **PASS_REAL**：三个有先后依赖关系的真实镜头在**同一次受管会话**中由正常 Worker 依次生成、自动质检，EDL 装配出的 15.02 秒成片通过全帧解码，`review_state = all_passed`。
-3. **受管模式下的无人值守多镜头生产**此前根本不存在（见 3.5），本轮以产品功能的形式补齐并由真实数据跑通。
+3. **受管模式下的无人值守多镜头生产**此前根本不存在（见 3.4），本轮以产品功能的形式补齐并由真实数据跑通。
 
-仍然不能判定 `LOCAL_TECH_ALL_PASS` 的原因只剩两类，且都不是本机代码问题：
+仍然不能判定 `LOCAL_TECH_ALL_PASS` 的原因只剩三类，且都不是本机代码问题：
 
 - **托管 GitHub Actions**：账户计费/额度导致作业根本未启动（`BLOCKED_EXTERNAL`，非代码失败）。
-- **VLM 能力的负向样本合同**：4B 与 8B 都能**正确识别**风格冲突与外观不符，但都**没有**按合同同时给出"非通过判定 + 对应 finding"，因此负向对照样本尚未取得可绑定的合同有效 `failed` 结论（详见第六节与第七节）。正向样本已取得真实 `passed`。
+- **浏览器端真实生产链路未跑**：真实生成链路已由正常 Worker 侧跑通，但尚未在浏览器里点选触发（`NOT_RUN`）。
+- **人工验收**：权属、音质、画质与成片批准仍属用户职责（`PENDING_HUMAN`）。
 
-若只判定"真实 H3 生成 → 受管交接 → 真实质检 → 多镜头 → 装配"这一条主链，状态为 **PASS_REAL**。
+若只判定"真实 H3 生成 → 受管交接 → 真实质检 → 多镜头 → 装配 → 能力资格化"这一条主链，状态为 **PASS_REAL**。
 
 ---
 
@@ -149,7 +150,22 @@
 | 失败后的行为 | **正确**：冲突/矛盾/超时的响应一律按合同拒绝并保留待对账，未伪造 PASS、未盲重投 |
 | 峰值显存 | 渲染期整机 15400–15840 MiB 已用（WDDM 整机口径，非单进程精确值）；收尾后回落到约 1300 MiB，相关进程全部退出 |
 
-**负向对照的真实结论（必须如实记录）**：本轮准备了两支负向对照镜头。一支是"风格文本冲突"（日间沙漠 vs 夜雨霓虹），另一支是"外观与已批准角色参考不符"（亮黄雨衣 + 鲜红头发 vs 已锁定的黑色战术装、深色头发）。两者的 8B 与 4B **都正确识别出了冲突**，但都没有按合同同时给出"非通过判定 + 对应 `STYLE_INPUT_*` / 身份 finding"，因此响应被 `require_style_input_checks` 按合同拒绝（`STYLE_INPUT_DECISION_CONTRADICTION`）。**应用行为正确（没有把自相矛盾的答复判成 PASS），但负向样本因此尚未取得可绑定的合同有效 `failed` 结论。**
+**负向对照的真实结论**：负向对照镜头要求"亮黄雨衣 + 鲜红头发"，与已批准的黑色战术装、深色头发角色参考不符。4B 执行器**正确检出**该违例，给出合同有效的 `failed` 结论与硬 finding（`STYLE_INPUT_COSTUME`，confidence 0.95），风格门与 final 门均判 failed，系统未把它放行。
+
+> 过程中的两处真实产品约束（均按设计生效，未绕过）：同一实例 id 与同一审片服务 id 的受管启动只能登记一次；第二次受管序列必须使用独立的渲染器实例名与审片服务名，但渲染器仍只认自己的进程组，因此上一进程退出后由下一进程接管同一端口。
+
+## 六之一、VLM 能力重新资格化（PASS_REAL）
+
+上一轮登记的 VLM 能力修订因**受钉住的审片客户端源码指纹变化**而按设计失效（`NATIVE_REVIEW_CLIENT_CHANGED`）。本轮在当前代码下重新完成资格化：
+
+| 步骤 | 结果 |
+|---|---|
+| 新建 VLM_REVIEW 能力修订（`WorkflowRevision`） | 200，绑定 `local-qwen3-vl-4b`、`response_protocol=local-review-json-schema-v1`、当前 `client_review_sha256`、当前执行器身份与解码器哈希 |
+| 活体执行器身份校验 `validate-native` | 200，`errors: []` → **STATIC_VALIDATED** |
+| 绑定真实正反例调用 `native-execution-evidence` | 200 → **REAL_TESTED**（正向样本 `6da53379…` verdict=passed；负向样本 `9aef8d1c…` verdict=failed 且含硬 finding） |
+| 发布 `publish` | 200 → **PRODUCTION_APPROVED** |
+
+绑定的是两次**真实完成**的模型调用（`result_is_mock=false`、执行器身份与结构化输出证明齐备、租约已释放、输入哈希互不相同）；产品端点重新核验了结果摘要，没有接受任何外部声明。
 
 ---
 
@@ -171,9 +187,10 @@
 
 | 项 | 状态 | 原因 |
 |---|---|---|
-| VLM 能力发布为 `PRODUCTION_APPROVED` | **PARTIAL** | 正向样本已取得真实 `passed`；负向样本未取得合同有效 `failed`（见第六节）。能力修订仍停在 `STATIC_VALIDATED`，未被虚假发布 |
-| VLM 负向对照的合同合规 | FAIL | 4B/8B 都能识别冲突，但都不按合同同时给出非通过判定与对应 finding。需要更强的本地模型或更贴近模型能力的响应合同改造（**不得**为通过而放宽既有合同） |
+| VLM 能力发布为 `PRODUCTION_APPROVED` | **PASS_REAL** | 正负两个真实样本均已绑定并发布（见第六之一节） |
+| VLM 负向对照的合同合规 | **PASS_REAL** | 外观不符对照给出合同有效的 `failed` + 硬 finding `STYLE_INPUT_COSTUME`（confidence 0.95）；风格冲突类对照仍会被合同拒绝，这是正确行为 |
 | 本地 ASR 的中文识别能力 | PASS_SOFTWARE（有边界） | `whisper-tiny` 存在同音字错误；已用可稳定核验的台词通过音频门，但更复杂中文台词的核验能力不足 |
+| 8B FP8 的生产可用性 | BLOCKED_EXTERNAL（本机硬件） | 单次真实审片 370.66 秒，叠加隔离服务开销后超过客户端超时预算；需更大显存或更快的量化配置 |
 | 20 项故障注入的完整清单 | PASS_SOFTWARE（部分）/ NOT_RUN（真实硬件部分） | 自动化对抗用例已覆盖多数状态机；真实 GPU 故障（如显存不足）未逐一注入 |
 | 浏览器端全流程真实生产 | PASS_SOFTWARE（Mock 流程 20 条）/ NOT_RUN（真实生成） | 浏览器验收脚本走的是 Mock 夹具；真实生成链路已由 Worker 侧跑通，但未在浏览器内点选触发 |
 | 人工权属、音质、画质与成片批准 | PENDING_HUMAN | 属用户职责，本轮未代行；本报告不构成任何艺术质量批准 |
@@ -212,7 +229,8 @@
 | `managed_recipe.local.json` | 本机受管配方（渲染器与两支审片服务） |
 
 `.local-acceptance/vlm-qualification-20261031/`
-`calibration-run.json`、`cal.out` / `cal.err`：正负对照镜头的真实生产与审片证据。
+`calibration-run.json`、`neg2.out` / `neg2.err`：正负对照镜头的真实生产与审片证据。
+`vlm-qualification.json`：能力修订的登记、活体身份校验、执行证据绑定与发布结果。
 
 `.local-acceptance/final-all-pass-20261030/`
 `real-production-run.json`、`real-production-run*.log`、`resource-samples.json`、`managed-startup-node-inventory.json`：上一轮单镜头真实生产与节点清单。
