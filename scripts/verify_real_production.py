@@ -552,6 +552,7 @@ def main() -> int:
                 "id": job["id"], "shot": job["shot_name"], "status": job["status"],
                 "artifact_id": job["artifact_id"], "qc": job["last_qc_result"],
                 "generation_mode": job["generation_mode"],
+                "attempt_id": attempt,
                 "expected_duration_s": detail["request"].get("expected_duration_s"),
                 "attempts": [{"no": a["attempt_no"], "status": a["status"],
                               "failure": a["failure_code"], "reconciliation": a["reconciliation_state"],
@@ -587,7 +588,15 @@ def main() -> int:
             if entry["status"] != "PASSED":
                 continue
             duration = entry.get("probe", {}).get("duration_s") or entry.get("expected_duration_s") or 7.0
-            clips.append({"job_id": entry["id"], "in_s": 0.0, "out_s": round(float(duration), 3)})
+            clips.append({
+                "job_id": entry["id"],
+                "attempt_id": entry["attempt_id"],
+                "artifact_id": entry["artifact_id"],
+                "in_s": 0.0,
+                "out_s": round(float(duration), 3),
+                "transition": "CUT",
+                "reason": "Real H3 shot that passed every required quality gate",
+            })
         delivery = client.post(api + f"/api/v1/projects/{project_id}/deliveries", json={"clips": clips})
         if delivery.status_code not in (200, 201):
             raise SystemExit(f"The EDL assembly failed: {delivery.status_code} {delivery.text[:400]}")
