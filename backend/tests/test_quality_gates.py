@@ -143,6 +143,18 @@ def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confid
 
 
 def test_low_overall_confidence_never_relaxes_a_hard_failure():
+    # The strict policy keeps the hard rule blocking.
+    gates, fused = evaluate_gates(
+        policy=QualityPolicy(advisory_model_reviews=False),
+        shot_spec=shot(),
+        technical=technical(),
+        semantic_results=[semantic(finding("IDENTITY_MISMATCH"), is_mock=False, confidence=0)],
+        reference_count=1,
+    )
+    assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
+    assert gate(gates, GATE_FINAL).status == STATUS_FAILED and fused.result == STATUS_FAILED
+    # The advisory policy keeps the finding and the honest verdict, and hands
+    # the decision to the human review instead of stopping the production.
     gates, fused = evaluate_gates(
         policy=QualityPolicy(),
         shot_spec=shot(),
@@ -151,7 +163,10 @@ def test_low_overall_confidence_never_relaxes_a_hard_failure():
         reference_count=1,
     )
     assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
-    assert gate(gates, GATE_FINAL).status == STATUS_FAILED and fused.result == STATUS_FAILED
+    assert gate(gates, GATE_SEMANTIC).advisory
+    assert gate(gates, GATE_FINAL).status == STATUS_NEEDS_REVIEW
+    assert fused.result == STATUS_NEEDS_REVIEW and fused.human_review_required
+    assert "IDENTITY_MISMATCH" in [f.code for f in fused.hard_failures]
 
 
 @pytest.mark.parametrize("verdict", ["failed", "needs_review"])
@@ -372,13 +387,24 @@ def test_scene_only_observed_hard_failure_is_not_discarded():
     spec = ShotSpec(story_beat="An empty street in rain", duration_target_s=5)
     review = semantic(finding("SCENE_MISMATCH", category="scene"), is_mock=False)
     gates, result = evaluate_gates(
-        policy=QualityPolicy(require_style_review=False),
+        policy=QualityPolicy(require_style_review=False, advisory_model_reviews=False),
         shot_spec=spec,
         technical=technical(),
         semantic_results=[review],
     )
     assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
     assert result.result == STATUS_FAILED
+    assert [f.code for f in result.hard_failures] == ["SCENE_MISMATCH"]
+    # The advisory policy still records the finding and still asks for the
+    # human review; it only stops the autonomous production from waiting.
+    gates, result = evaluate_gates(
+        policy=QualityPolicy(require_style_review=False),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[review],
+    )
+    assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
+    assert result.result == STATUS_NEEDS_REVIEW and result.human_review_required
     assert [f.code for f in result.hard_failures] == ["SCENE_MISMATCH"]
 
 
@@ -389,7 +415,8 @@ def test_available_findings_cannot_be_hidden_by_optional_review_policy(severity,
     spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
     review = semantic(finding("SCENE_MISMATCH", severity=severity, confidence=confidence), is_mock=False)
     gates, result = evaluate_gates(
-        policy=QualityPolicy(require_semantic_review=False, require_style_review=False),
+        policy=QualityPolicy(require_semantic_review=False, require_style_review=False,
+                             advisory_model_reviews=False),
         shot_spec=spec,
         technical=technical(),
         semantic_results=[review],
@@ -403,12 +430,21 @@ def test_style_hard_failure_retains_a_diagnostic_for_bounded_repair():
     spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
     review = semantic(finding("STYLE_MISMATCH", category="style"), is_mock=False)
     _, result = evaluate_gates(
-        policy=QualityPolicy(require_semantic_review=False),
+        policy=QualityPolicy(require_semantic_review=False, advisory_model_reviews=False),
         shot_spec=spec,
         technical=technical(),
         semantic_results=[review],
     )
     assert result.result == STATUS_FAILED
+    assert "STYLE_MISMATCH" in [f.code for f in result.hard_failures]
+    # The advisory policy keeps the diagnostic for the human review as well.
+    _, result = evaluate_gates(
+        policy=QualityPolicy(require_semantic_review=False),
+        shot_spec=spec,
+        technical=technical(),
+        semantic_results=[review],
+    )
+    assert result.result == STATUS_NEEDS_REVIEW and result.human_review_required
     assert "STYLE_MISMATCH" in [f.code for f in result.hard_failures]
 
 

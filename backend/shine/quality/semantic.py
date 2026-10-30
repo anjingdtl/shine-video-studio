@@ -88,7 +88,13 @@ def review_validation_failure(exc):
 
 
 def require_style_input_checks(result: SemanticReviewResult):
-    """Current wire and new capability evidence share the same coverage contract."""
+    """The coverage and coherence contract of a stored review.
+
+    A review that does not cover every frozen style field, or that declares a
+    conflict without the matching finding, is not usable evidence.  The client
+    binds the reviewer's own words into that shape before the review is
+    recorded, so a review that reaches this check is coherent.
+    """
     checks = result.style_input_checks
     if (checks is None or len(checks) != len(StyleBible.model_fields)
             or {check.field for check in checks} != set(StyleBible.model_fields)):
@@ -101,6 +107,67 @@ def require_style_input_checks(result: SemanticReviewResult):
                 for finding in result.findings
             ):
                 raise ValueError("STYLE_INPUT_DECISION_CONTRADICTION")
+
+
+def bind_style_input_review(result: SemanticReviewResult) -> SemanticReviewResult:
+    """Bind the reviewer's own checklist into usable, honest evidence.
+
+    A small local reviewer frequently reports a frozen style field as
+    ``conflict`` or ``uncertain`` and then omits the matching finding, or keeps
+    the overall verdict at ``passed``.  The checklist and the findings are the
+    reviewer's own words: the server binds them into the required shape
+    instead of running the reviewer a second time for a friendlier answer.
+    The binding is always the stricter reading, so a declared conflict is
+    never turned into a pass and no finding is invented: a field the reviewer
+    did not assess is recorded as uncertain, never as consistent.
+    """
+    checks = list(result.style_input_checks or [])
+    by_field = {check.field: check for check in checks}
+    findings = list(result.findings)
+    normalized = []
+    for name in StyleBible.model_fields:
+        check = by_field.get(name)
+        if check is None:
+            check = StyleInputCheck(
+                field=name,
+                status="uncertain",
+                detail="The reviewer did not assess this frozen style field.",
+            )
+        normalized.append(check)
+        if check.status == "consistent":
+            continue
+        code = "STYLE_INPUT_" + name.upper()
+        if any(
+            finding.code == code and finding.category.casefold() in {"style", "style_drift"}
+            for finding in findings
+        ):
+            continue
+        findings.append(
+            SemanticFinding(
+                code=code,
+                category="style",
+                severity="uncertain",
+                confidence=max(0.0, min(1.0, result.overall_confidence)),
+                message=check.detail[:240],
+                subject=name,
+            )
+        )
+    verdict = result.verdict
+    if verdict == "passed" and any(check.status != "consistent" for check in normalized):
+        # The reviewer declared a conflict or an uncertainty: the strict
+        # reading is that the shot still needs a human.
+        verdict = "needs_review"
+    confidence = result.overall_confidence
+    if any(field not in by_field for field in StyleBible.model_fields):
+        # The reviewer did not cover every frozen field, so the completeness
+        # of this review was not established.
+        confidence = 0.0
+    return result.model_copy(update={
+        "findings": findings,
+        "verdict": verdict,
+        "style_input_checks": normalized,
+        "overall_confidence": confidence,
+    })
 
 
 @dataclass(frozen=True)
@@ -352,7 +419,9 @@ class OpenAICompatibleVisionReviewer:
             if recorder:
                 recorder(body, response_hash)
             result = SemanticReviewResult.model_validate(parsed)
-            require_style_input_checks(result)
+            # The reviewer's own checklist is bound into usable evidence; the
+            # reviewer is never run a second time for a friendlier answer.
+            result = bind_style_input_review(result)
             if response_protocol and any(len(f.message) > 240 for f in result.findings):
                 raise ValueError("VLM_FINDING_DETAIL_TOO_LONG")
             if response_protocol and len(result.raw_summary) > 300:
@@ -393,6 +462,9 @@ class OpenAICompatibleVisionReviewer:
         except ReceivedReviewError:
             raise
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            # The answer arrived and is not usable evidence.  That is a
+            # definitive failure of the review, never an unknown outcome and
+            # never permission to run the reviewer again for a better answer.
             raise ReceivedReviewError("VLM_RESPONSE_CONTRACT_INVALID", response_hash,
                                       validation=review_validation_failure(exc)) from exc
 

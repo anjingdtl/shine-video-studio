@@ -341,13 +341,32 @@ class TrackedProvider:
                         except ReceivedReviewError as exc:
                             # Preserve a definitive response even if subsequent
                             # physical release times out and supersedes the exception.
+                            # The isolation receipt proves that the call reached
+                            # the verified executor, so the answer is a
+                            # definitive outcome even when it is not usable
+                            # evidence: the review happened.
+                            receipt = getattr(self.provider, "last_isolation_receipt", None)
+                            if receipt is not None and kind in {"VLM", "ASR"}:
+                                from shine.quality.isolation_receipt import validate_receipt_fields
+
+                                try:
+                                    receipt = validate_receipt_fields(receipt)
+                                except ValueError as invalid:
+                                    raise HTTPException(409, "ISOLATION_RECEIPT_INVALID") from invalid
                             with self.factory.begin() as db:
                                 row = db.get(AgentTaskRecord, identity)
-                                row.trace = {**row.trace, "received_response": {
-                                    "sha256": exc.response_sha256, "finish_reason": exc.finish_reason,
-                                    "error_code": str(exc), "retryable": False,
-                                    **({"validation": exc.validation} if exc.validation is not None else {}),
-                                }}
+                                row.trace = {
+                                    **row.trace,
+                                    "received_response": {
+                                        "sha256": exc.response_sha256, "finish_reason": exc.finish_reason,
+                                        "error_code": str(exc), "retryable": False,
+                                        **({"validation": exc.validation} if exc.validation is not None else {}),
+                                    },
+                                    **({"isolation_receipt": receipt} if receipt is not None else {}),
+                                    "received_executor_identity": getattr(
+                                        self.provider, "last_executor_identity", None),
+                                    "result_is_mock": bool(self.provider.is_mock),
+                                }
                             raise
                         receipt = getattr(self.provider, "last_isolation_receipt", None)
                         if receipt is not None and kind in {"VLM", "ASR"}:

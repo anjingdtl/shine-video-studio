@@ -29,6 +29,12 @@ class QualityPolicyUpdate(APIModel):
 
     The policy may relax non-critical thresholds per shot priority, but hard
     rules (identity, master asset, key dialogue) are never relaxed.
+
+    ``advisory_model_reviews`` decides how much weight the local small-model
+    self-review carries.  With it enabled (the default) the review runs one
+    round, reports its verdict for the human review that follows, and never
+    stops the autonomous film generation.  A project that wants the model
+    review to decide the production turns it off.
     """
 
     require_semantic_review: bool = True
@@ -37,6 +43,7 @@ class QualityPolicyUpdate(APIModel):
     min_confidence: float = Field(default=0.7, ge=0, le=1)
     accept_mock_review: bool = False
     allow_unverified_technical: bool = False
+    advisory_model_reviews: bool = True
     priority_thresholds: dict[str, float] = Field(default_factory=dict)
     hard_rules: list[str] = Field(default_factory=list, max_length=64)
 
@@ -259,6 +266,8 @@ class CreateProductionSeries(APIModel):
     workflow_profile_id: str | None = None
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
+    edit_intent_artifact_id: str | None = None
+    """The frozen EditIntentPlan artifact that the automatic delivery inherits."""
 
     @model_validator(mode="after")
     def basic_scope_needs_resolution(self):
@@ -729,6 +738,10 @@ class FusedQCResult(APIModel):
     human_review_required: bool = False
     is_mock: bool
     coverage: dict[str, str] = Field(default_factory=dict)
+    #: The advisory state of the local small-model self-review.  These reviews
+    #: run one round, are reported for the human review that follows, and never
+    #: block the autonomous film generation.
+    advisory_reviews: dict[str, str] = Field(default_factory=dict)
 
 
 class RepairSuggestionRequest(APIModel):

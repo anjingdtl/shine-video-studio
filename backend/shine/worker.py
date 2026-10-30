@@ -42,7 +42,10 @@ from shine.models import (
 from shine.providers import MockH3Provider, MockSubmission, ProviderFailure, SubmissionUncertain
 from shine.quality.gates import (
     STATUS_FAILED,
+    STATUS_NOT_APPLICABLE,
+    STATUS_NOT_RUN,
     STATUS_PASSED,
+    STATUS_UNAVAILABLE,
     VERIFICATION_MOCK,
     VERIFICATION_PARTIAL,
     VERIFICATION_REAL,
@@ -381,6 +384,28 @@ def _raise_if_managed_review(reviewer):
 
     if isinstance(reviewer, HandoffReviewProvider):
         raise
+
+
+def _only_advisory_reviews_outstanding(gates) -> bool:
+    """True when the advisory model reviews are the only open gates.
+
+    The deterministic gates (technical QC, the compiled prompt, the approved
+    masters) decide whether a shot may be produced.  The local small-model
+    self-review reports its verdict for the human review that follows, and it
+    never stops the autonomous film generation.  The final gate is the summary
+    of the others, so it is not counted twice.
+    """
+    measured = [gate for gate in gates if gate.gate_name != "final"]
+    blocking_open = [
+        gate for gate in measured
+        if (not gate.advisory or gate.status in {STATUS_NOT_RUN, STATUS_UNAVAILABLE})
+        and gate.status not in {STATUS_PASSED, STATUS_NOT_APPLICABLE}
+    ]
+    advisory_open = [
+        gate for gate in measured
+        if gate.advisory and gate.status not in {STATUS_PASSED, STATUS_NOT_APPLICABLE}
+    ]
+    return not blocking_open and bool(advisory_open)
 
 
 def _semantic_review(
@@ -2371,6 +2396,29 @@ def _finalize_comfy_attempt(
                 worker_id=worker_id,
                 project_language=language,
             )
+        elif _only_advisory_reviews_outstanding(gates):
+            # The local small-model self-review is outstanding and nothing
+            # else is.  Its findings are reported for the human review that
+            # follows, but they never stop the autonomous film generation and
+            # they never spend a repair on a model opinion.
+            job.failure_code = None
+            transition(job, "PASSED")
+            add_audit(
+                db,
+                "comfy-worker",
+                "ADVISORY_MODEL_REVIEW_PENDING",
+                "job",
+                job.id,
+                {
+                    "gates": [
+                        gate.gate_name for gate in gates
+                        if gate.advisory and gate.status not in {STATUS_PASSED, STATUS_NOT_APPLICABLE}
+                    ],
+                    "qc_result": fused.result,
+                    "human_review_required": True,
+                },
+                project_id=job.project_id,
+            )
         else:
             try_transition(job, "NEEDS_REVIEW")
             job.failure_code = "QC_NEEDS_REVIEW"
@@ -3561,6 +3609,13 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     )
     if recovered:
         return "reconciled"
+    from shine.media.delivery_engine import run_pending_deliveries
+
+    delivered = run_pending_deliveries(
+        session_factory, settings=settings, asset_root=settings.data_dir, worker_id=worker_id
+    )
+    if delivered:
+        return f"delivery:{delivered}"
     series = run_configured_series_once(
         session_factory,
         worker_id,

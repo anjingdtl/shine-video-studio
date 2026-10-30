@@ -182,6 +182,9 @@ def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monke
         json={
             "accept_mock_review": True,
             "allow_unverified_technical": True,
+            # This project lets the model review decide the production, so the
+            # synthetic style drift really does trigger the bounded repair.
+            "advisory_model_reviews": False,
         },
     )
     assert policy.status_code == 200, policy.text
@@ -501,14 +504,17 @@ def test_unapproved_assets_and_chinese_description_block_materialization(api):
         == 422
     )
     _, direction, camera, continuity = crew_chain(client, project_id)
+    # A Chinese camera description is now refused at the agent contract itself
+    # (VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE): the compiled H3 prompt is built
+    # from these fields, so the text never reaches the materialisation layer.
     bad_camera = {"shots": [{**CAMERA["shots"][0], "lighting": "中文摄影描述不能伪装已翻译"}]}
-    new_camera = call(client, project_id, "cinematographer", bad_camera, inputs=[direction["id"]])
-    review = call(client, project_id, "continuity_supervisor", CONTINUITY, inputs=[direction["id"], new_camera["id"]])
-    result = client.post(
-        f"/api/v1/projects/{project_id}/film-artifacts/{new_camera['id']}/apply-camera",
-        json={"continuity_artifact_id": review["id"]},
+    rejected = client.post(
+        f"/api/v1/projects/{project_id}/film-agents/cinematographer/run",
+        json={"brief": BRIEF, "locked_story_facts": FACTS, "input_revision_ids": [direction["id"]]},
     )
-    assert result.status_code == 422 and "H3_ENGLISH" in result.text
+    client.app.state.mock_llm_responder = lambda *_: bad_camera
+    assert rejected.status_code == 422
+    assert "CONTRACT_OR_POLICY_REJECTED" in rejected.text
     assert not client.get(f"/api/v1/projects/{project_id}/shots").json()
     with factory.begin() as db:
         row = db.get(AgentArtifact, camera["id"])

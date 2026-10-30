@@ -45,10 +45,27 @@ class AnthropicMessagesProvider:
             try:
                 with httpx.Client(timeout=self.config.timeout_s) as client:
                     response = client.post(self._url(), headers=self._headers(), json=payload)
-            except httpx.TimeoutException:
-                last_error = LLMTimeout("Anthropic request timed out")
-            except httpx.HTTPError as exc:
+            except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                # The connection was never established, so the provider never
+                # saw the request and a replay cannot produce a second answer.
+                last_error = LLMConnectionError(
+                    "Anthropic connection timed out", details={"error": type(exc).__name__})
+            except httpx.ConnectError as exc:
                 last_error = LLMConnectionError("Anthropic connection failed", details={"error": type(exc).__name__})
+            except httpx.TimeoutException as exc:
+                # The request was sent and the answer never arrived: the
+                # external outcome is unknown, so the request is not replayed.
+                raise LLMTimeout(
+                    "Anthropic request timed out",
+                    details={"error": type(exc).__name__, "replayed": False},
+                ) from None
+            except httpx.HTTPError as exc:
+                # The connection broke after the request was sent, so the
+                # outcome is unknown for the same reason as above.
+                raise LLMConnectionError(
+                    "Anthropic connection failed",
+                    details={"error": type(exc).__name__, "replayed": False},
+                ) from None
             else:
                 if response.status_code < 400:
                     return response

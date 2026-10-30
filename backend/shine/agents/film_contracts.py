@@ -20,12 +20,20 @@ class ScriptBreakdown(APIModel):
     beats: list[SceneBeat] = Field(min_length=1, max_length=100)
 
 
+class ShotIntentContinuity(APIModel):
+    """The shot boundary the director wants, materialised by apply-camera."""
+
+    mode: Literal["cut", "last_frame"] = "cut"
+    note: str = Field(default="", max_length=1000)
+
+
 class ShotIntent(APIModel):
     id: str = Field(min_length=1, max_length=80)
     beat_id: str
     visual_description: str = Field(min_length=1, max_length=8000)
     duration_s: float = Field(ge=4, le=15)
     asset_ids: list[str] = Field(default_factory=list, max_length=12)
+    continuity: ShotIntentContinuity | None = None
 
 
 class DirectorialPlan(APIModel):
@@ -52,6 +60,35 @@ class ContinuityReport(APIModel):
     recommendation: Literal["proceed_to_preflight", "needs_review"]
 
 
+class ContinuityArbitrationRuling(APIModel):
+    """One ruling on one raised issue, against one rule of the locked pack.
+
+    The issue is addressed by its index in the arbitration subject; the
+    server binds the authoritative text, so a paraphrase can never detach a
+    ruling from the issue it answers.
+    """
+
+    issue_index: int = Field(ge=0, le=99)
+    issue: str = Field(default="", max_length=2000)
+    verdict: Literal["not_a_conflict", "conflict"]
+    rule_id: str = Field(min_length=1, max_length=80)
+    rationale: str = Field(min_length=1, max_length=2000)
+
+
+class ContinuityArbitration(APIModel):
+    """The crew's arbiter ruling on a conflict between the roles.
+
+    The roles of a sequence can contradict each other.  The role that owns
+    the shots arbitrates, and it arbitrates on the official criteria of the
+    locked rule pack: every issue is ruled on, by name, against a rule that
+    exists in the pack.  The ruling is a proposal; a human still applies it.
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    rulings: list[ContinuityArbitrationRuling] = Field(min_length=1, max_length=100)
+    recommendation: Literal["proceed_to_preflight", "needs_review"]
+
+
 class SoundPlan(APIModel):
     schema_version: Literal["1.1"] = "1.1"
     ambience: str = Field(min_length=1, max_length=4000)
@@ -71,6 +108,43 @@ class EditClip(APIModel):
     def ordered(self):
         if self.out_s <= self.in_s:
             raise ValueError("EDL out point must follow the in point")
+        return self
+
+
+class EditIntentClip(APIModel):
+    """One planned slot of the pre-production edit intent (frozen before any render)."""
+
+    intent_id: str = Field(min_length=1, max_length=80)
+    order: int = Field(ge=1, le=100)
+    planned_duration_s: float = Field(ge=4, le=15, allow_inf_nan=False)
+    transition: Literal["CUT"] = "CUT"
+    continuity_note: str = Field(default="", max_length=1000)
+
+
+class EditIntentPlan(APIModel):
+    """The editor's frozen pre-production intent: order, rhythm, transitions.
+
+    It is a proposal about shots that do not exist yet, so it references
+    DirectorialPlan intent ids, never jobs.  The real EditDecisionList is
+    derived after generation from the real media durations.
+    """
+
+    schema_version: Literal["1.2"] = "1.2"
+    intent_id: str = Field(min_length=1, max_length=80)
+    clips: list[EditIntentClip] = Field(min_length=1, max_length=100)
+    rhythm: str = Field(min_length=1, max_length=2000)
+    dialogue_pace: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def covers_every_intent_once_in_order(self):
+        orders = [clip.order for clip in self.clips]
+        if len(set(orders)) != len(orders):
+            raise ValueError("EDIT_INTENT_ORDER_REPEATED")
+        if self.clips and sorted(orders) != list(range(1, len(self.clips) + 1)):
+            raise ValueError("EDIT_INTENT_ORDER_NOT_A_PERMUTATION")
+        ids = [clip.intent_id for clip in self.clips]
+        if len(set(ids)) != len(ids):
+            raise ValueError("EDIT_INTENT_INTENT_REPEATED")
         return self
 
 
@@ -149,7 +223,7 @@ class FilmRunRequest(APIModel):
     brief: str = Field(default="", max_length=20000)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
     input_revision_ids: list[str] = Field(default_factory=list, max_length=100)
-    tool: Literal["propose", "style_proposal"] = "propose"
+    tool: Literal["propose", "style_proposal", "edit_intent", "continuity_arbitration"] = "propose"
     offline_preview: bool = False
     allow_remote_text: bool = False
     supersedes_artifact_id: str | None = None
@@ -181,11 +255,25 @@ class FilmAgentRegistry:
 
     @classmethod
     def get(cls, role: str, tool: str = "propose"):
-        if role not in cls.roles or tool not in {"propose", "style_proposal"}:
+        if role not in cls.roles or tool not in {"propose", "style_proposal", "edit_intent",
+                                                 "continuity_arbitration"}:
             raise ValueError("ROLE_OR_TOOL_DENIED")
         if tool == "style_proposal":
             if role not in {"scriptwriter", "director", "cinematographer", "editor"}:
                 raise ValueError("ROLE_OR_TOOL_DENIED")
             return StyleProposal, ()
+        if tool == "edit_intent":
+            # The same editor role freezes the pre-production edit intent from
+            # the DirectorialPlan; the real EDL still requires passed jobs.
+            if role != "editor":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            return EditIntentPlan, ("DirectorialPlan",)
+        if tool == "continuity_arbitration":
+            # The role that owns the shots arbitrates a contradiction between
+            # the crew roles.  No other role may rule on another role, and the
+            # arbitration may only be released by a human who applies it.
+            if role != "director":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            return ContinuityArbitration, ("DirectorialPlan", "CameraPlan", "ContinuityReport")
         _, contract, required, _ = cls.roles[role]
         return contract, required

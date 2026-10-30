@@ -199,7 +199,13 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     assert (
         client.put(
             f"/api/v1/projects/{project}/quality-policy",
-            json={"accept_mock_review": True, "allow_unverified_technical": True},
+            json={
+                "accept_mock_review": True,
+                "allow_unverified_technical": True,
+                # This run exercises the bounded repair, so the model review
+                # decides the production here.
+                "advisory_model_reviews": False,
+            },
         ).status_code
         == 200
     )

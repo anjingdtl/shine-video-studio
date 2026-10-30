@@ -259,7 +259,7 @@ def test_verified_input_is_user_evidence_and_cannot_erase_vlm_contradictions(api
 
     from shine.llm.base import ProviderConfig
     from shine.quality.input_assessment import evidence_for_review
-    from shine.quality.semantic import OpenAICompatibleVisionReviewer, ReceivedReviewError
+    from shine.quality.semantic import OpenAICompatibleVisionReviewer
     from tests.review_fixtures import fixture_style_input_checks
 
     _, factory, _ = api
@@ -284,9 +284,11 @@ def test_verified_input_is_user_evidence_and_cannot_erase_vlm_contradictions(api
     original = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
     cfg = ProviderConfig("fixture", "fixture", "openai_compatible", "https://fixture.invalid/v1", "fixture", None)
-    with pytest.raises(ReceivedReviewError) as error:
-        OpenAICompatibleVisionReviewer(cfg).review(context)
-    assert error.value.validation["code"] == "STYLE_INPUT_DECISION_CONTRADICTION"
+    # The contradiction cannot be erased: it is bound into a finding and the
+    # verdict can no longer be a pass.
+    result = OpenAICompatibleVisionReviewer(cfg).review(context)
+    assert result.verdict == "needs_review"
+    assert any(finding.code.startswith("STYLE_INPUT_") for finding in result.findings)
     messages = captured[0]["messages"]
     assert proof["artifact_id"] not in messages[0]["content"]
     assert proof["artifact_id"] in messages[1]["content"][0]["text"]

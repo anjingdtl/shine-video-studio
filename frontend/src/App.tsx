@@ -18,6 +18,7 @@ import ProductionSeriesPanel from './components/ProductionSeriesPanel';
 import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
+import StoryboardPanel from './components/StoryboardPanel';
 import DeliveryPanel from './components/DeliveryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 
@@ -540,6 +541,8 @@ function App() {
             />
 
             <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
+
+            <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
 
             <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
             <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} />

@@ -247,6 +247,9 @@ def _prepare_project(client, *, auto_repair: bool = True):
             "min_confidence": 0.7,
             "accept_mock_review": True,
             "allow_unverified_technical": True,
+            # The bounded repair reacts to the model review, so this project
+            # lets the review decide the production.
+            "advisory_model_reviews": False,
             "priority_thresholds": {"A": 0.85, "B": 0.7, "C": 0.55},
         },
     )

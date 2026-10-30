@@ -12,7 +12,7 @@ asset and key dialogue failures always block a shot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from shine.schemas import (
@@ -82,6 +82,13 @@ class QualityPolicy:
     min_confidence: float = 0.7
     accept_mock_review: bool = False
     allow_unverified_technical: bool = False
+    #: The local small-model self-review is advisory for the production flow.
+    #: It runs exactly one round, its result is recorded and reported for human
+    #: review, and it never stops the autonomous film generation.  The
+    #: deterministic gates (technical QC, the compiled prompt, the approved
+    #: masters) stay hard: a broken video is still refused, and the product
+    #: never turns a model opinion into a silent pass.
+    advisory_model_reviews: bool = True
     priority_thresholds: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_PRIORITY_THRESHOLDS)
     )
@@ -100,6 +107,7 @@ class QualityPolicy:
             "min_confidence": self.min_confidence,
             "accept_mock_review": self.accept_mock_review,
             "allow_unverified_technical": self.allow_unverified_technical,
+            "advisory_model_reviews": self.advisory_model_reviews,
             "priority_thresholds": dict(self.priority_thresholds),
             "hard_rules": list(self.hard_rules),
         }
@@ -124,6 +132,7 @@ class QualityPolicy:
             min_confidence=float(data.get("min_confidence", 0.7)),
             accept_mock_review=bool(data.get("accept_mock_review", False)),
             allow_unverified_technical=bool(data.get("allow_unverified_technical", False)),
+            advisory_model_reviews=bool(data.get("advisory_model_reviews", True)),
             priority_thresholds=thresholds,
             hard_rules=rules,
         )
@@ -144,6 +153,9 @@ class GateOutcome:
     confidence: float | None = None
     error_code: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    #: An advisory gate reports its honest state and is handed to the human
+    #: review that follows, but it never blocks the production flow.
+    advisory: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -276,10 +288,17 @@ def _semantic_gate(
             [],
         )
     if semantic_error:
+        # A complete but unusable answer is a definite review outcome: the
+        # review is reported for the human review and never blocks the
+        # production.  An answer that never arrived stays unavailable, because
+        # an unknown outcome is reconciled by a human, never guessed.
+        definite = str(semantic_error).startswith((
+            "SEMANTIC_REVIEW_CONTRACT_INVALID", "SEMANTIC_REVIEW_INCOMPLETE",
+        ))
         return (
             GateOutcome(
                 gate_name=GATE_SEMANTIC,
-                status=STATUS_UNAVAILABLE,
+                status=STATUS_NEEDS_REVIEW if definite else STATUS_UNAVAILABLE,
                 required=required,
                 is_mock=False,
                 coverage=COVERAGE_FAILED,
@@ -449,6 +468,7 @@ def _style_gate(
     semantic_results: list[SemanticReviewResult],
     style_version_id: str,
     style_hash: str,
+    semantic_error: str | None = None,
 ) -> GateOutcome:
     if not required:
         return GateOutcome(
@@ -460,13 +480,19 @@ def _style_gate(
             evidence={"detail": "The project quality policy does not require a style review."},
         )
     if not semantic_results:
+        # The style review is the same review.  When that review answered and
+        # its answer was not usable, the style gate is outstanding for the
+        # human review too; only a review that never ran leaves it uncovered.
+        definite = bool(semantic_error) and str(semantic_error).startswith((
+            "SEMANTIC_REVIEW_CONTRACT_INVALID", "SEMANTIC_REVIEW_INCOMPLETE",
+        ))
         return GateOutcome(
             gate_name=GATE_STYLE,
-            status=STATUS_NOT_RUN,
+            status=STATUS_NEEDS_REVIEW if definite else STATUS_NOT_RUN,
             required=True,
             is_mock=False,
-            coverage=COVERAGE_NOT_COVERED,
-            error_code="STYLE_REVIEW_NOT_COVERED",
+            coverage=COVERAGE_FAILED if definite else COVERAGE_NOT_COVERED,
+            error_code="STYLE_REVIEW_NOT_COVERED" if not definite else semantic_error,
             evidence={
                 "detail": "Style conformance cannot be asserted without a semantic review.",
                 "style_version_id": style_version_id,
@@ -512,24 +538,36 @@ def _style_gate(
 
 
 def _final_gate(gates: list[GateOutcome]) -> GateOutcome:
-    required = [gate for gate in gates if gate.required]
-    failed = [gate for gate in gates if gate.status == STATUS_FAILED]
+    blocking = [gate for gate in gates if not gate.advisory]
+    advisory = [gate for gate in gates if gate.advisory]
+    required = [gate for gate in blocking if gate.required]
+    failed = [gate for gate in blocking if gate.status == STATUS_FAILED]
     incomplete = [
         gate
         for gate in required
         if gate.status in {STATUS_NEEDS_REVIEW, STATUS_NOT_RUN, STATUS_UNAVAILABLE}
     ]
-    incomplete += [gate for gate in gates if not gate.required and gate.status == STATUS_NEEDS_REVIEW
+    incomplete += [gate for gate in blocking if not gate.required and gate.status == STATUS_NEEDS_REVIEW
                    and (gate.evidence.get("reviewers") or gate.evidence.get("finding_codes"))]
     any_mock = any(gate.is_mock for gate in gates)
     unresolved_optional = [
         gate
-        for gate in gates
+        for gate in blocking
         if not gate.required and gate.status in {STATUS_NEEDS_REVIEW, STATUS_NOT_RUN, STATUS_UNAVAILABLE}
+    ]
+    # The advisory model reviews report their state and are handed to the human
+    # review that follows.  They never fail the production verdict, but an
+    # unresolved one keeps the final gate honest: the attempt is not a clean
+    # pass, it is a produced shot whose model review still waits for a human.
+    advisory_unresolved = [
+        gate for gate in advisory if gate.status in {STATUS_FAILED, STATUS_NEEDS_REVIEW}
+    ]
+    advisory_missing = [
+        gate for gate in advisory if gate.status in {STATUS_NOT_RUN, STATUS_UNAVAILABLE}
     ]
     if any_mock:
         verification = VERIFICATION_MOCK
-    elif unresolved_optional:
+    elif unresolved_optional or advisory_unresolved or advisory_missing:
         verification = VERIFICATION_PARTIAL
     else:
         verification = VERIFICATION_REAL
@@ -539,6 +577,10 @@ def _final_gate(gates: list[GateOutcome]) -> GateOutcome:
         "required_gates": [gate.gate_name for gate in required],
         "unresolved_gates": [gate.gate_name for gate in incomplete],
         "unresolved_optional_gates": [gate.gate_name for gate in unresolved_optional],
+        "advisory_gates": {gate.gate_name: gate.status for gate in advisory},
+        "advisory_pending_human_review": [
+            gate.gate_name for gate in advisory_unresolved + advisory_missing
+        ],
     }
     if failed:
         return GateOutcome(
@@ -560,6 +602,22 @@ def _final_gate(gates: list[GateOutcome]) -> GateOutcome:
             error_code=incomplete[0].error_code or f"GATE_{incomplete[0].gate_name.upper()}_INCOMPLETE",
             evidence=evidence,
         )
+    if advisory_unresolved or advisory_missing:
+        # The production gates are clean; only the advisory model review is
+        # outstanding.  The attempt is produced and the review that follows
+        # decides whether a human has to look at it.
+        return GateOutcome(
+            gate_name=GATE_FINAL,
+            status=STATUS_NEEDS_REVIEW,
+            required=True,
+            is_mock=any_mock,
+            coverage=COVERAGE_COVERED if not any_mock else COVERAGE_MOCK,
+            error_code=(
+                (advisory_unresolved or advisory_missing)[0].error_code
+                or "ADVISORY_MODEL_REVIEW_PENDING"
+            ),
+            evidence=evidence,
+        )
     return GateOutcome(
         gate_name=GATE_FINAL,
         status=STATUS_PASSED,
@@ -568,6 +626,20 @@ def _final_gate(gates: list[GateOutcome]) -> GateOutcome:
         coverage=COVERAGE_COVERED if not any_mock else COVERAGE_MOCK,
         error_code=None,
         evidence=evidence,
+    )
+
+
+def _as_advisory(gate: GateOutcome) -> GateOutcome:
+    """Mark a gate as advisory and record the marker in its evidence.
+
+    The marker travels with the gate record, so the workbench and the audit
+    trail show that this gate reports for the human review instead of
+    deciding the production.
+    """
+    return replace(
+        gate,
+        advisory=True,
+        evidence={**gate.evidence, "advisory": True},
     )
 
 
@@ -621,9 +693,22 @@ def evaluate_gates(
         semantic_results=semantic_results,
         style_version_id=style_version_id,
         style_hash=style_hash,
+        semantic_error=semantic_error,
     )
+    advisory = policy.advisory_model_reviews
+    if advisory:
+        # The local small-model self-review is advisory: it runs exactly one
+        # round, its honest state is reported for the human review that
+        # follows, and it never stops the autonomous film generation.  The
+        # deterministic gates stay hard.
+        semantic_gate = _as_advisory(semantic_gate)
+        audio_gate = _as_advisory(audio_gate)
+        style_gate = _as_advisory(style_gate)
     final_gate = _final_gate([technical_gate, semantic_gate, audio_gate, style_gate])
 
+    # The advisory findings stay in the record: the human review that follows
+    # sees exactly what the reviewer said.  They are not hard failures of the
+    # production verdict, and no repair is spent on a model opinion.
     hard_failures = list(semantic_hard) + list(audio_hard)
     if technical_gate.status == STATUS_FAILED:
         for check in (technical.checks if technical else []):
@@ -639,6 +724,7 @@ def evaluate_gates(
         "style": style_gate.coverage,
         "final": final_gate.coverage,
     }
+    advisory_pending = list(final_gate.evidence.get("advisory_pending_human_review") or [])
     fused = FusedQCResult(
         result=final_gate.status,
         technical=technical,
@@ -650,9 +736,15 @@ def evaluate_gates(
             if semantic_gate.confidence is not None
             else (audio_gate.confidence if audio_gate.confidence is not None else 1.0)
         ),
-        human_review_required=final_gate.status != STATUS_PASSED,
+        # The advisory findings are the human review that follows the run.
+        human_review_required=final_gate.status != STATUS_PASSED or bool(advisory_pending),
         is_mock=any(gate.is_mock for gate in (semantic_gate, audio_gate, style_gate)),
         coverage=coverage,
+        advisory_reviews={
+            gate.gate_name: gate.status
+            for gate in (semantic_gate, audio_gate, style_gate)
+            if gate.advisory
+        },
     )
     return (
         [

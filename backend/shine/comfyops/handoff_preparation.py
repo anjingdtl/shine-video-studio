@@ -25,6 +25,7 @@ from shine.media.artifacts import safe_asset_path
 from shine.models import AgentTaskRecord, AppSetting, Job, MediaArtifact, Project, Shot, utcnow
 from shine.quality.gates import QualityPolicy
 from shine.quality.isolation_receipt import validate_receipt_fields
+from shine.quality.semantic import ReceivedReviewError
 from shine.schemas import RenderRequest
 from shine.services import add_audit
 
@@ -113,6 +114,17 @@ class HandoffReviewProvider:
                                                       self._release_config["handoff_token"], review_id))
                 try:
                     result = method(*args, **kwargs)
+                except ReceivedReviewError as exc:
+                    # The reviewer answered and the answer is not usable
+                    # evidence.  The isolation receipt proves that the call
+                    # reached the verified executor, so the review is sealed as
+                    # a failed review: it happened, it is never run again, and it
+                    # does not hold the renderer or the GPU lease.
+                    try:
+                        self._session.seal_failed_review(review_id, exc)
+                    except Exception:  # noqa: BLE001 - the original failure is the truth
+                        pass
+                    raise
                 finally:
                     CURRENT_REVIEW_ADMISSION.reset(token)
                 with self._session.factory() as db:
@@ -173,13 +185,24 @@ class HandoffSession:
                 if read_epoch(db) != self.last_verified_epoch:
                     raise HTTPException(409, "HANDOFF_RESOURCE_ACTIVITY_CHANGED")
 
-    def _task(self, db, request):
+    def _task(self, db, request, *, allow_failed=False):
         task = db.get(AgentTaskRecord, request.get("task_id"))
         job = db.get(Job, self.job_id)
         trace = task.trace if task else {}
         kind = trace.get("kind")
         receipt = request.get("receipt")
-        if (not task or not job or task.project_id != job.project_id or task.status != "COMPLETED"
+        # A review whose answer was received but is not usable evidence is a
+        # completed call with a definitive, unusable result.  The isolation
+        # receipt and the received response prove that it happened.
+        answered_but_unusable = (
+            allow_failed
+            and task is not None
+            and task.status == "FAILED"
+            and bool(trace.get("received_response"))
+            and bool(trace.get("isolation_receipt"))
+        )
+        if (not task or not job or task.project_id != job.project_id
+                or (task.status != "COMPLETED" and not answered_but_unusable)
                 or kind not in {"ASR", "VLM"} or trace.get("resource_id") != self.lease_id
                 or (trace.get("production_review") or {}).get("job_id") != self.job_id
                 or trace.get("isolation_receipt") != receipt
@@ -200,7 +223,32 @@ class HandoffSession:
             raise HTTPException(409, "HANDOFF_REVIEW_BINDING_INVALID")
         return task, kind, mock
 
-    def accept_review(self, request):
+    def seal_failed_review(self, review_id: str, exc) -> None:
+        """Seal a review that answered but produced no usable evidence.
+
+        The call reached the verified executor and its answer was received, so
+        the review happened.  It is sealed with its receipt and recorded as
+        failed: the stage can close, the renderer and the GPU lease are
+        released, and the finding travels to the human review that follows.
+        The reviewer is never run again for a better answer.
+        """
+        with self.factory() as db:
+            journal = db.get(AppSetting, "handoff:" + self.attempt_id)
+            steps = journal.value.get("review_steps", []) if journal else []
+            if not steps or steps[-1].get("id") != review_id:
+                raise
+            task_id = steps[-1].get("task_id")
+            task = db.get(AgentTaskRecord, task_id) if task_id else None
+            receipt = (task.trace or {}).get("isolation_receipt") if task else None
+        if not receipt:
+            raise
+        self.accept_review(
+            {**self._release_config, "task_id": task_id, "review_id": review_id, "receipt": receipt},
+            failed=True,
+            error_code=str(exc),
+        )
+
+    def accept_review(self, request, *, failed=False, error_code=None):
         """Seal and verify each completed review before allowing the next stage."""
         from shine.comfyops.resource_epoch import read_epoch
         from shine.quality.review_release import verify_review_release
@@ -209,7 +257,7 @@ class HandoffSession:
             raise HTTPException(409, "HANDOFF_REVIEW_BINDING_INVALID")
         self.guard.check()
         with self.factory() as db:
-            _task, kind, mock = self._task(db, request)
+            _task, kind, mock = self._task(db, request, allow_failed=failed)
             self._review_intent(db, request, kind)
             observed_epoch = read_epoch(db)
             if ((_task.trace or {}).get("resource_epoch") != observed_epoch
@@ -222,7 +270,7 @@ class HandoffSession:
         self.guard.check()
         with self.factory.begin() as db:
             db.execute(text("BEGIN IMMEDIATE"))
-            task, current_kind, current_mock = self._task(db, request)
+            task, current_kind, current_mock = self._task(db, request, allow_failed=failed)
             journal, steps = self._review_intent(db, request, current_kind)
             if read_epoch(db) != observed_epoch or (task.trace or {}).get("resource_epoch") != observed_epoch:
                 raise HTTPException(409, "HANDOFF_RESOURCE_ACTIVITY_CHANGED")
@@ -233,8 +281,11 @@ class HandoffSession:
             steps[-1] = {**steps[-1], "status": "VERIFIED", "proof": proof, "resource_epoch": observed_epoch}
             journal.value = {**journal.value, "review_steps": steps}
             add_audit(db, "comfy-worker", "HANDOFF_REVIEW_RELEASE_VERIFIED", "agent_task", task.id,
-                      {"attempt_id": self.attempt_id, "kind": kind, "is_mock": mock}, project_id=task.project_id)
-        self.accepted[kind] = {"task_id": request["task_id"], "proof": proof, "is_mock": mock}
+                      {"attempt_id": self.attempt_id, "kind": kind, "is_mock": mock,
+                       **({"failed": True, "error_code": error_code} if failed else {})},
+                      project_id=task.project_id)
+        self.accepted[kind] = {"task_id": request["task_id"], "proof": proof, "is_mock": mock,
+                               **({"failed": True, "error_code": error_code} if failed else {})}
         self.review_requests[kind] = args
         self.last_request = args
         self.last_verified_epoch = observed_epoch

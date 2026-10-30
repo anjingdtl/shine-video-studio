@@ -220,6 +220,7 @@ class DeliveryAssembler:
         crf: int = 18,
         subtitle_ass: str | None = None,
         subtitle_sha256: str | None = None,
+        reuse_existing: bool = False,
     ) -> AssembledDelivery:
         if not clips:
             raise DeliveryError(400, "DELIVERY_EMPTY_EDIT")
@@ -348,6 +349,30 @@ class DeliveryAssembler:
             for clip, artifact, status, _duration in resolved
         ]
         review_state = "all_passed" if all(self._review_complete(db, clip) for clip in clips) else "pending_review"
+
+        if reuse_existing:
+            # The identical reel may already be registered: a previous attempt
+            # wrote the MP4 but crashed before its ledger row was committed.
+            # Reuse that row instead of producing a duplicate delivery.
+            prior = db.scalar(
+                select(MediaArtifact)
+                .where(
+                    MediaArtifact.project_id == project_id,
+                    MediaArtifact.artifact_kind == "delivery",
+                    MediaArtifact.sha256 == digest,
+                )
+                .order_by(MediaArtifact.created_at)
+            )
+            if prior is not None:
+                return AssembledDelivery(
+                    artifact=prior,
+                    clips=clip_records,
+                    duration_s=probe.duration_s or 0.0,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    review_state=review_state,
+                )
 
         artifact_row = MediaArtifact(
             project_id=project_id,

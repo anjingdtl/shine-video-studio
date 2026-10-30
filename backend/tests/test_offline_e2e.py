@@ -205,6 +205,9 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
             "min_confidence": 0.7,
             "accept_mock_review": True,
             "allow_unverified_technical": True,
+            # This run exercises the bounded repair, so the model review
+            # decides the production here.
+            "advisory_model_reviews": False,
             "priority_thresholds": {"A": 0.85, "B": 0.7, "C": 0.55},
         },
     )

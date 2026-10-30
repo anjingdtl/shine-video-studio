@@ -565,6 +565,8 @@ class ProductionSeries(Base):
     finalization_state: Mapped[str] = mapped_column(String(24), default="NONE", nullable=False)
     finalization_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     renderer_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    edit_intent_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    delivery_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -602,3 +604,6 @@ class ProductionSeriesItem(Base):
 
 # V1.3 extends this same metadata/SQLite ledger.
 from shine.comfyops import models as preparation_models  # noqa: E402,F401
+
+# Auto delivery orders ride the same metadata ledger (V1.4).
+from shine.media import delivery_models  # noqa: E402,F401

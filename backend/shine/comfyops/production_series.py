@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
+from shine.media.delivery_engine import DeliveryBlock, cancel_orders_for_series, enqueue_auto_delivery
 from shine.models import (
     Job,
     ProductionSeries,
@@ -104,6 +105,8 @@ def series_public(db, series: ProductionSeries) -> dict[str, Any]:
         "failure_code": series.failure_code,
         "finalization_state": series.finalization_state,
         "finalization_note": series.finalization_note,
+        "edit_intent_artifact_id": series.edit_intent_artifact_id,
+        "delivery_result": series.delivery_result,
         "created_at": series.created_at.isoformat() if series.created_at else None,
         "started_at": series.started_at.isoformat() if series.started_at else None,
         "finished_at": series.finished_at.isoformat() if series.finished_at else None,
@@ -746,6 +749,13 @@ def run_production_series(
             status = "NEEDS_REVIEW"
             failure_code = (job.failure_code if job is not None else None) or "SERIES_INCOMPLETE"
         _set_series_state(db, series_id, worker_id, status=status, failure_code=failure_code)
+        if status == "COMPLETED":
+            try:
+                enqueue_auto_delivery(db, series)
+            except DeliveryBlock as exc:
+                logger.error(
+                    "auto_delivery_enqueue_blocked series_id=%s code=%s", series_id, exc.code
+                )
     return {"status": status, "shots": shots}
 
 
@@ -790,6 +800,12 @@ def reconcile_series(session_factory, worker_id: str) -> int:
                 series.finalization_state = "RELEASED"
                 series.state_version += 1
                 changed += 1
+                try:
+                    enqueue_auto_delivery(db, series)
+                except DeliveryBlock as exc:
+                    logger.error(
+                        "auto_delivery_enqueue_blocked series_id=%s code=%s", series.id, exc.code
+                    )
                 continue
             if series.status == "RUNNING":
                 # The owner is gone.  The GPU lease is the real proof of life.
@@ -846,6 +862,7 @@ def cancel_series_in_session(db, series_id: str, *, reason: str = "SERIES_CANCEL
         if item.status in {"PENDING", "QUEUED"}:
             item.status = "CANCELLED"
             item.failure_code = reason
+    cancel_orders_for_series(db, series.id)
     return series.status
 
 

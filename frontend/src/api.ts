@@ -174,6 +174,12 @@ export type ProductionSeries = {
   worker_id: string | null; lease_id: string | null; current_job_id: string | null;
   state_version: number; failure_code: string | null;
   finalization_state: string; finalization_note: string | null;
+  edit_intent_artifact_id: string | null;
+  delivery_result: {
+    order_id: string; version: number; artifact_id: string; sha256: string;
+    byte_size: number; duration_s: number; width: number; height: number;
+    fps: number; review_state: string; edl_source: string;
+  } | null;
   created_at: string | null; started_at: string | null; finished_at: string | null;
   items: ProductionSeriesItem[];
 };

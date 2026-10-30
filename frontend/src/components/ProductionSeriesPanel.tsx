@@ -44,6 +44,8 @@ export default function ProductionSeriesPanel({
   const [selected, setSelected] = useState<string[]>([]);
   const [profileId, setProfileId] = useState('');
   const [scope, setScope] = useState<'full' | 'basic'>('full');
+  const [editIntents, setEditIntents] = useState<Array<{ id: string; created_at: string }>>([]);
+  const [editIntentId, setEditIntentId] = useState('');
   const [working, setWorking] = useState(false);
 
   const reload = useCallback(async () => {
@@ -52,6 +54,15 @@ export default function ProductionSeriesPanel({
   }, [projectId]);
 
   useEffect(() => { reload().catch(() => setSeries([])); }, [reload, projectId, shots.length]);
+
+  useEffect(() => {
+    api<Array<{ id: string; kind: string; stale: boolean; created_at: string }>>(`/projects/${projectId}/film-artifacts`)
+      .then((rows) => setEditIntents(
+        rows.filter((row) => row.kind === 'EditIntentPlan' && !row.stale)
+          .map(({ id, created_at }) => ({ id, created_at })),
+      ))
+      .catch(() => setEditIntents([]));
+  }, [projectId, shots.length]);
 
   const ref2vaProfiles = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
@@ -86,6 +97,9 @@ export default function ProductionSeriesPanel({
       };
       if (scope === 'basic') {
         body.basic_review_resolution = { width: Number(reviewWidth), height: Number(reviewHeight) };
+      }
+      if (editIntentId) {
+        body.edit_intent_artifact_id = editIntentId;
       }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
@@ -146,6 +160,14 @@ export default function ProductionSeriesPanel({
           </select>
         </label>
         {scope === 'basic' && <p className="series-hint">基础自审需填写预期输出宽高，并要求已资格化的本地人物审片能力。</p>}
+        <label htmlFor="series-edit-intent">剪辑意图（可选，冻结于分镜阶段）
+          <select id="series-edit-intent" value={editIntentId} onChange={(event) => setEditIntentId(event.target.value)}>
+            <option value="">默认剪辑规则（全片完整镜头、CUT 硬切）</option>
+            {editIntents.map((row) => (
+              <option key={row.id} value={row.id}>剪辑意图 {row.id.slice(0, 8)}…</option>
+            ))}
+          </select>
+        </label>
       </div>
       <div className="series-shots">
         {shots.map((shot) => (
@@ -177,6 +199,7 @@ export default function ProductionSeriesPanel({
               {row.worker_id && <small>执行 Worker：{row.worker_id}</small>}
               {row.failure_code && <small className="failure">· {row.failure_code}</small>}
               {row.finalization_state !== 'NONE' && <small>收尾：{row.finalization_state}</small>}
+              {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
             </div>
             <div className="series-actions">
               {row.status === 'QUEUED' && <button className="secondary-button" disabled={working} onClick={() => act(row.id, 'pause')}>暂停</button>}

@@ -8,6 +8,7 @@ import pytest
 
 from shine.llm.base import ProviderConfig
 from shine.quality.semantic import LocalVisionReviewer, ReceivedReviewError
+from shine.schemas import StyleBible
 from tests.review_fixtures import fixture_style_input_checks
 from tests.test_semantic_qc import context
 
@@ -59,27 +60,41 @@ def test_wire_requires_complete_style_input_comparison(tmp_path, monkeypatch, ca
         result = LocalVisionReviewer(cfg).review(context(tmp_path))
         assert len(result.style_input_checks) == 7
         assert result.verdict == data["verdict"]
+    elif case in {"missing", "incomplete", "duplicate", "conflict-passed", "uncertain-passed",
+                  "conflict-no-finding"}:
+        # The reviewer's own words are bound into usable evidence instead of
+        # being thrown away: one round, one record, never a second answer.
+        result = LocalVisionReviewer(cfg).review(context(tmp_path))
+        assert result.verdict == "needs_review"
+        assert len(result.style_input_checks) == 7
+        assert {check.field for check in result.style_input_checks} == set(StyleBible.model_fields)
+        assert "sk-private" not in json.dumps(result.model_dump(mode="json"))
+        # The field the reviewer did not assess or declared is never passed,
+        # and it is reported as a style finding.
+        assert any(check.status != "consistent" for check in result.style_input_checks)
+        if case in {"missing", "incomplete", "duplicate"}:
+            assert any(check.status == "uncertain" for check in result.style_input_checks)
+        assert any(finding.code == "STYLE_INPUT_SHOT_BLOCKING" for finding in result.findings)
+        assert any(finding.category == "style" for finding in result.findings)
     else:
+        # The answer does not even satisfy the schema: it is a definitive
+        # failure of the review, never an unknown outcome and never a reason to
+        # run the reviewer again.
         with pytest.raises(ReceivedReviewError, match="VLM_RESPONSE_CONTRACT_INVALID") as error:
             LocalVisionReviewer(cfg).review(context(tmp_path))
         assert error.value.response_sha256 == hashlib.sha256(response.content).hexdigest()
         diagnostic = error.value.validation
         assert diagnostic and "sk-private" not in json.dumps(diagnostic)
-        if case in {"missing", "incomplete", "duplicate"}:
-            assert diagnostic["code"] == "STYLE_INPUT_COVERAGE_MISSING"
-        elif case.startswith(("conflict", "uncertain")):
-            assert diagnostic["code"] == "STYLE_INPUT_DECISION_CONTRADICTION"
-        else:
-            assert diagnostic["code"] == "SCHEMA_VALIDATION_FAILED"
-            expected_type = {"unknown-field": "literal_error", "long-detail-secret": "string_too_long",
-                             "unexpected-secret-key": "extra_forbidden"}[case]
-            assert diagnostic["issues"][0]["type"] == expected_type
-            if case == "unexpected-secret-key":
-                assert diagnostic["issues"][0]["path"] == ["?"]
+        assert diagnostic["code"] == "SCHEMA_VALIDATION_FAILED"
+        expected_type = {"unknown-field": "literal_error", "long-detail-secret": "string_too_long",
+                         "unexpected-secret-key": "extra_forbidden"}[case]
+        assert diagnostic["issues"][0]["type"] == expected_type
+        if case == "unexpected-secret-key":
+            assert diagnostic["issues"][0]["path"] == ["?"]
     assert len(requests) == 1  # A received contract failure never resubmits inference.
 
 
-def test_missing_style_coverage_is_failed_received_call_not_unknown_or_passed(api, tmp_path, monkeypatch):
+def test_missing_style_coverage_is_recorded_as_an_unestablished_review(api, tmp_path, monkeypatch):
     from sqlalchemy import select
 
     from shine.comfyops.model_calls import TrackedProvider
@@ -111,13 +126,16 @@ def test_missing_style_coverage_is_failed_received_call_not_unknown_or_passed(ap
                         lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
     cfg = ProviderConfig(profile_id="p", name="p", kind="openai_compatible",
                          base_url="http://127.0.0.1:8116/v1", model="fixture", api_key=None)
-    with pytest.raises(ReceivedReviewError):
-        TrackedProvider(LocalVisionReviewer(cfg), factory, project).review(context(tmp_path))
+    result = TrackedProvider(LocalVisionReviewer(cfg), factory, project).review(context(tmp_path))
     assert len(posts) == 1
+    # The call completed and its answer is on record, so the review says
+    # plainly that nothing was established.  It is not a pass, and it is not an
+    # unknown outcome either: the human review that follows decides.
+    assert result.verdict == "needs_review"
+    assert result.overall_confidence == 0
+    assert any(finding.code.startswith("STYLE_INPUT_") for finding in result.findings)
+    assert all(check.status == "uncertain" for check in result.style_input_checks)
     with factory() as db:
         task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.role_id == "model_call:VLM:review"))
-        assert task.status == "FAILED"
+        assert task.status == "COMPLETED"
         assert db.get(ResourceLease, task.trace["resource_id"]).status == "RELEASED"
-        assert task.trace["received_response"]["sha256"] == hashlib.sha256(response.content).hexdigest()
-        assert task.trace["received_response"]["retryable"] is False
-        assert task.trace["received_response"]["validation"] == {"code": "STYLE_INPUT_COVERAGE_MISSING"}

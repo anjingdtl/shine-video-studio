@@ -63,10 +63,31 @@ class OpenAICompatibleProvider:
             try:
                 with httpx.Client(timeout=self.config.timeout_s, follow_redirects=True) as client:
                     response = client.request(method, url, headers=self._headers(), json=payload)
-            except httpx.TimeoutException:
-                last_error = LLMTimeout("Provider request timed out", details={"attempt": attempt + 1})
+            except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                # The connection was never established, so the provider never
+                # saw the request.  No answer can exist, and a replay cannot
+                # produce a second one.
+                last_error = LLMConnectionError(
+                    "Provider connection timed out", details={"error": type(exc).__name__})
+            except httpx.ConnectError as exc:
+                last_error = LLMConnectionError(
+                    "Provider connection failed", details={"error": type(exc).__name__})
+            except httpx.TimeoutException as exc:
+                # The request was sent and the answer never arrived.  The
+                # external outcome is unknown, so the request is NOT replayed:
+                # one request must never buy two answers, and an unknown result
+                # must never be dressed up as a fresh success.
+                raise LLMTimeout(
+                    "Provider request timed out",
+                    details={"error": type(exc).__name__, "replayed": False},
+                ) from None
             except httpx.HTTPError as exc:
-                last_error = LLMConnectionError("Provider connection failed", details={"error": type(exc).__name__})
+                # The connection broke after the request was sent, so the
+                # outcome is unknown for the same reason as above.
+                raise LLMConnectionError(
+                    "Provider connection failed",
+                    details={"error": type(exc).__name__, "replayed": False},
+                ) from None
             else:
                 if response.status_code < 400:
                     return response

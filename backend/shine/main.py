@@ -26,6 +26,7 @@ from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
 from shine.models import (
+    AgentArtifact,
     Asset,
     AuditEvent,
     Job,
@@ -853,6 +854,24 @@ def create_app(
             settings=request.app.state.settings,
             offline=request.app.state.settings.offline_simulation,
         )
+        if body.edit_intent_artifact_id:
+            artifact = db.get(AgentArtifact, body.edit_intent_artifact_id)
+            if (
+                not artifact
+                or artifact.project_id != project.id
+                or artifact.kind != "EditIntentPlan"
+                or artifact.stale
+            ):
+                db.rollback()
+                raise HTTPException(
+                    422, "EDIT_INTENT_ARTIFACT_INVALID"
+                )
+            series.edit_intent_artifact_id = artifact.id
+            add_audit(
+                db, "user", "SERIES_EDIT_INTENT_BOUND", "production_series", series.id,
+                {"artifact_id": artifact.id, "sha256": artifact.sha256},
+                project_id=project.id,
+            )
         add_audit(
             db, "user", "PRODUCTION_SERIES_CREATED", "production_series", series.id,
             {"shot_count": len(shots), "first_job_id": job.id,

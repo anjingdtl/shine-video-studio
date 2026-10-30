@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import uuid
 
+import httpx
 import pytest
 
 from shine.llm.base import (
     ChatMessage,
     LLMAuthError,
+    LLMConnectionError,
     LLMFormatError,
     LLMNotConfigured,
     LLMTimeout,
@@ -41,6 +43,23 @@ def config(server: FakeOpenAIServer, **overrides) -> ProviderConfig:
     }
     values.update(overrides)
     return ProviderConfig(**values)
+
+
+def _failing_transport(monkeypatch, failure):
+    """Point the provider at a transport that always fails the same way."""
+    real_client = httpx.Client
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise failure(request)
+
+    def factory(**kwargs):
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", factory)
+    return calls
 
 
 def test_openai_compatible_completion_and_capability_probe(fake_openai):
@@ -89,6 +108,40 @@ def test_timeout_is_classified(fake_openai):
     provider = OpenAICompatibleProvider(config(fake_openai, timeout_s=0.1, max_retries=0))
     with pytest.raises(LLMTimeout):
         provider.complete([ChatMessage("user", "x")])
+
+
+def test_an_unknown_read_timeout_is_not_replayed(monkeypatch, fake_openai):
+    """A request that was sent and never answered has an unknown outcome.
+
+    Replaying it would ask the provider for a second answer to one request,
+    so the failure is reported instead of being replayed.
+    """
+    calls = _failing_transport(
+        monkeypatch, lambda request: httpx.ReadTimeout("read timed out", request=request))
+    provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
+    with pytest.raises(LLMTimeout):
+        provider.complete([ChatMessage("user", "x")])
+    assert len(calls) == 1
+
+
+def test_a_broken_connection_after_the_request_is_not_replayed(monkeypatch, fake_openai):
+    """The upstream closed the connection: the answer may exist upstream."""
+    calls = _failing_transport(
+        monkeypatch, lambda request: httpx.RemoteProtocolError("server disconnected", request=request))
+    provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
+    with pytest.raises(LLMConnectionError):
+        provider.complete([ChatMessage("user", "x")])
+    assert len(calls) == 1
+
+
+def test_a_connection_failure_before_the_request_is_replayed(monkeypatch, fake_openai):
+    """The connection was never established, so no answer can exist."""
+    calls = _failing_transport(
+        monkeypatch, lambda request: httpx.ConnectError("connection refused", request=request))
+    provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
+    with pytest.raises(LLMConnectionError):
+        provider.complete([ChatMessage("user", "x")])
+    assert len(calls) == 3
 
 
 def test_json_mode_falls_back_when_provider_rejects_response_format(fake_openai):

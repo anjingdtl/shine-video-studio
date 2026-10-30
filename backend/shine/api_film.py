@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import Field
+from pydantic import Field, ValidationError
 from sqlalchemy import literal_column, select
 
-from shine.agents.film import FilmAgentDispatcher, load_inputs
+from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
@@ -19,15 +20,19 @@ from shine.models import (
     AgentTaskRecord,
     AppSetting,
     Asset,
+    ProjectDocument,
     ProviderProfile,
     RulePack,
     WorkflowProfile,
     utcnow,
 )
 from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, ShotSpec
+from shine.security import is_loopback_url
 from shine.services import add_audit, create_shot_record, make_render_request, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["film-crew", "rulebook"])
+
+logger = logging.getLogger(__name__)
 
 
 class AbandonRemoteResponse(APIModel):
@@ -66,7 +71,45 @@ class SourceImport(APIModel):
 
 class ApplyCamera(APIModel):
     continuity_artifact_id: str
+    arbitration_artifact_id: str | None = None
     name_prefix: str = Field(default="专业分镜", max_length=80)
+
+
+def _arbitration_releases(arbitration: dict | None, issues: list[str]) -> bool:
+    """Whether a crew arbitration releases every raised issue.
+
+    A ruling is only usable when it answers every issue by name, cites rules
+    that exist in the locked rule pack, and leaves no conflict standing.  The
+    arbitration is a proposal: a human still applies the storyboard.
+    """
+    if not arbitration or not issues:
+        return False
+    rulings = arbitration.get("rulings") or []
+    ruled = [ruling.get("issue") for ruling in rulings]
+    if sorted(ruled) != sorted(issues) or len(ruled) != len(issues):
+        return False
+    known = {rule["id"] for rule in H3RulebookRegistry().search(())}
+    if any(ruling.get("rule_id") not in known for ruling in rulings):
+        return False
+    if any(ruling.get("verdict") != "not_a_conflict" for ruling in rulings):
+        return False
+    return arbitration.get("recommendation") == "proceed_to_preflight"
+
+
+def _load_arbitration(db, project_id: str, arbitration_id: str | None,
+                      continuity_id: str, camera_id: str) -> dict | None:
+    """The arbitration artifact of this project, when it really arbitrates this pair."""
+    row = db.get(AgentArtifact, arbitration_id) if arbitration_id else None
+    if (
+        not row
+        or row.project_id != project_id
+        or row.stale
+        or row.kind != "ContinuityArbitration"
+    ):
+        return None
+    if continuity_id not in row.input_revision_ids or camera_id not in row.input_revision_ids:
+        return None
+    return row.payload_json
 
 
 def _artifact(row: AgentArtifact):
@@ -180,12 +223,19 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         artifact, continuity = load_inputs(db, project_id, [artifact_id, body.continuity_artifact_id])
         if artifact.kind != "CameraPlan" or continuity.kind != "ContinuityReport":
             raise ValueError("WRONG_HANDOFF_KIND")
-        if (
-            artifact_id not in continuity.input_revision_ids
-            or continuity.payload_json["issues"]
-            or continuity.payload_json["recommendation"] != "proceed_to_preflight"
-        ):
+        issues = list(continuity.payload_json.get("issues") or [])
+        arbitration = None
+        if artifact_id not in continuity.input_revision_ids:
             raise ValueError("CONTINUITY_REVIEW_REQUIRED")
+        if issues or continuity.payload_json.get("recommendation") != "proceed_to_preflight":
+            # A conflict between the crew roles is released only by a valid
+            # arbitration of the role that owns the shots, on the official
+            # criteria of the locked rule pack.
+            arbitration = _load_arbitration(
+                db, project_id, body.arbitration_artifact_id, continuity.id, artifact_id
+            )
+            if not _arbitration_releases(arbitration, issues):
+                raise ValueError("CONTINUITY_REVIEW_REQUIRED")
         key = f"film-apply:{artifact_id}"
         applied = db.get(AppSetting, key)
         if applied:
@@ -200,6 +250,26 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         for camera in CameraPlan.model_validate(artifact.payload_json).shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
+            # The scriptwriter and the director choose timings independently;
+            # at this materialisation boundary the spoken beats are fitted
+            # proportionally into the shot the director actually planned, so
+            # the spec stays renderable without changing a single word.
+            duration = float(intent["duration_s"])
+            dialogue = []
+            for line in beat["dialogue"]:
+                line = dict(line)
+                start, end = float(line["start_s"]), float(line["end_s"])
+                if end > start:
+                    latest = max(0.5, duration - 0.2)
+                    if end > latest:
+                        scale = (latest - 0.2) / (end - start) if end - start > 0 else 1.0
+                        start = 0.2 + (start - min(start, 0.2)) * scale
+                        start, end = min(start, latest - 0.1), latest
+                        if end - start < 0.3:
+                            start = max(0.2, end - 0.3)
+                    line["start_s"], line["end_s"] = round(start, 3), round(end, 3)
+                dialogue.append(line)
+            beat = {**beat, "dialogue": dialogue}
             spec = ShotSpec(
                 story_beat=intent["visual_description"],
                 duration_target_s=intent["duration_s"],
@@ -214,13 +284,31 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "lighting": camera.lighting,
                     "axis_rule": camera.axis,
                 },
+                **(
+                    {
+                        "continuity": {
+                            "mode": intent["continuity"]["mode"],
+                            "previous_shot_id": created[-1],
+                        }
+                    }
+                    if intent.get("continuity") and intent["continuity"].get("mode") not in (None, "cut")
+                    and created
+                    else {}
+                ),
             )
             bindings = []
             for index, identity in enumerate(intent["asset_ids"]):
                 asset = db.get(Asset, identity)
                 if not asset or asset.project_id != project_id or not asset.approved or not asset.locked:
                     raise ValueError("ASSET_APPROVAL_CHANGED")
-                use_as = {"image": "subject", "audio": "audio", "video": "video"}[asset.kind]
+                # The approved master's role decides the reference family: a
+                # character master is a subject reference, any other picture is
+                # a picture reference; audio and video map to themselves.
+                use_as = {
+                    "image": "subject" if asset.role == "character" else "picture",
+                    "audio": "audio",
+                    "video": "video",
+                }[asset.kind]
                 bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=index))
             shot = create_shot_record(
                 db, project, name=f"{body.name_prefix}-{camera.intent_id}", spec=spec, bindings=bindings
@@ -239,8 +327,9 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
     except HTTPException:
         db.rollback()
         raise
-    except (ValueError, StopIteration, KeyError):
+    except (ValueError, StopIteration, KeyError, ValidationError) as exc:
         db.rollback()
+        logger.error("apply_camera_rejected artifact=%s reason=%s", artifact_id, exc)
         raise HTTPException(status_code=422, detail="FILM_HANDOFF_REJECTED") from None
 
 
@@ -395,3 +484,261 @@ def validate_request(body: RenderRequest, db: DBSession):
         return H3RulebookRegistry().validate(body, pack)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+class StoryboardRequest(APIModel):
+    """One complete-script storyboard generation request (five crew roles)."""
+
+    document_id: str | None = None
+    text: str | None = Field(default=None, max_length=60000)
+    allow_remote_text: bool = False
+    locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
+
+
+def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
+    """Characters the script names that have no approved character master.
+
+    The rule mirrors ``validate_output`` for DirectorialPlan: every beat
+    character must be covered by an approved, locked image/character asset,
+    or the shots that need them cannot enter real production.
+    """
+    covered = {
+        a["entity_id"]
+        for a in assets
+        if a["kind"] == "image" and a["role"] == "character" and a["entity_id"]
+    }
+    named: list[str] = []
+    for beat in breakdown.get("beats", []):
+        for name in beat.get("characters", []):
+            if name and name not in named:
+                named.append(name)
+        for line in beat.get("dialogue", []):
+            speaker = line.get("speaker_id") if isinstance(line, dict) else getattr(line, "speaker_id", None)
+            if speaker and speaker not in named:
+                named.append(speaker)
+    return [name for name in named if name not in covered]
+
+
+@router.post("/projects/{project_id}/storyboard/generate", status_code=201)
+def generate_storyboard(
+    project_id: str,
+    body: StoryboardRequest,
+    request: Request,
+    db: DBSession,
+    gateway: Annotated[LLMGateway, Depends(llm_gateway)],
+) -> dict:
+    """Run the real crew chain on one complete script.
+
+    scriptwriter -> director -> cinematographer -> continuity supervisor ->
+    editor (frozen edit intent).  Every step is a real routed LLM call with
+    its own task record and trace.  Characters without approved masters block
+    the chain with an explicit missing list; nothing is auto-created.
+    """
+    import hashlib
+
+    from shine.agents.execution import rejection_reason
+
+    project = require_project(db, project_id)
+    if not project.frozen_style_version_id:
+        raise HTTPException(409, "STORYBOARD_STYLE_NOT_FROZEN")
+    if body.document_id:
+        document = db.get(ProjectDocument, body.document_id)
+        if not document or document.project_id != project_id:
+            raise HTTPException(404, "Script document not found in this project")
+        script_text, source = document.text, f"document:{document.id}"
+    elif body.text and body.text.strip():
+        script_text, source = body.text.strip(), "inline"
+    else:
+        raise HTTPException(422, "STORYBOARD_SCRIPT_REQUIRED")
+
+    needed_roles = ("scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor")
+    routes = {}
+    for role in needed_roles:
+        try:
+            routes[role] = gateway.profile_for_role(db, role)
+        except LLMError as exc:
+            raise HTTPException(
+                409, f"STORYBOARD_AGENT_ROUTE_MISSING:{role}:{exc.code}"
+            ) from None
+        if routes[role].kind != "mock" and not is_loopback_url(routes[role].base_url) and not body.allow_remote_text:
+            raise HTTPException(403, "REMOTE_AGENT_CONSENT_REQUIRED")
+
+    dispatcher = FilmAgentDispatcher(gateway, request.app.state.settings.data_dir)
+
+    # A definitive contract rejection is a per-sample property of a real text
+    # model, not an uncertain external outcome: the guard keeps the rejected
+    # task record, and a bounded second call is allowed.  Uncertain outcomes
+    # (timeouts, unknown server errors) are never replayed here.
+    RETRYABLE_REJECTIONS = {"CONTRACT_OR_POLICY_REJECTED", "AGENT_CALL_FAILED"}
+
+    def _run(role: str, *, attempts: int = 6, **kwargs) -> dict:
+        last: ValueError | LLMError | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                artifact = dispatcher.run(db, project_id, role, FilmRunRequest(**kwargs))
+                return {"artifact_id": artifact.id, "kind": artifact.kind,
+                        "sha256": artifact.sha256, "attempt": attempt}
+            except (ValueError, LLMError) as exc:
+                last = exc
+                code = str(exc)
+                if code not in RETRYABLE_REJECTIONS or attempt == attempts:
+                    raise
+        raise last  # pragma: no cover - the loop always raises or returns
+
+    steps: dict[str, dict] = {}
+    rejections: list[dict] = []
+    try:
+        steps["scriptwriter"] = _run(
+            "scriptwriter",
+            brief=script_text,
+            locked_story_facts=body.locked_story_facts,
+            allow_remote_text=body.allow_remote_text,
+        )
+    except (ValueError, LLMError) as exc:
+        rejections.append({"role": "scriptwriter", "code": str(exc) or rejection_reason(exc)})
+        return {
+            "status": "REJECTED",
+            "script_source": source,
+            "steps": steps,
+            "rejections": rejections,
+        }
+
+    breakdown = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"]).payload_json
+    missing = _character_coverage(
+        asset_context(db, project_id),
+        breakdown,
+    )
+    if missing:
+        return {
+            "status": "BLOCKED_MISSING_MASTERS",
+            "script_source": source,
+            "steps": steps,
+            "missing_characters": missing,
+            "action": "UPLOAD_AND_APPROVE_MISSING_CHARACTER_MASTERS_THEN_REGENERATE",
+        }
+
+    try:
+        steps["director"] = _run(
+            "director",
+            brief=script_text,
+            input_revision_ids=[steps["scriptwriter"]["artifact_id"]],
+            locked_story_facts=body.locked_story_facts,
+            allow_remote_text=body.allow_remote_text,
+        )
+        steps["cinematographer"] = _run(
+            "cinematographer",
+            brief=script_text,
+            locked_story_facts=body.locked_story_facts,
+            input_revision_ids=[steps["director"]["artifact_id"]],
+            allow_remote_text=body.allow_remote_text,
+        )
+        steps["continuity_supervisor"] = _run(
+            "continuity_supervisor",
+            brief=script_text,
+            locked_story_facts=body.locked_story_facts,
+            # The script breakdown is part of the review basis: without it the
+            # supervisor cannot see the dialogue structure and would flag the
+            # dialogue it cannot see as unverifiable.
+            input_revision_ids=[
+                steps["scriptwriter"]["artifact_id"],
+                steps["director"]["artifact_id"],
+                steps["cinematographer"]["artifact_id"],
+            ],
+            allow_remote_text=body.allow_remote_text,
+        )
+        steps["editor_edit_intent"] = _run(
+            "editor",
+            tool="edit_intent",
+            brief=script_text,
+            locked_story_facts=body.locked_story_facts,
+            input_revision_ids=[steps["director"]["artifact_id"]],
+            allow_remote_text=body.allow_remote_text,
+        )
+    except (ValueError, LLMError) as exc:
+        db.rollback()
+        rejections.append({"role": "chain", "code": str(exc) or rejection_reason(exc)})
+        return {
+            "status": "REJECTED",
+            "script_source": source,
+            "missing_characters": missing,
+            "steps": steps,
+            "rejections": rejections,
+        }
+
+    continuity = db.get(AgentArtifact, steps["continuity_supervisor"]["artifact_id"]).payload_json
+    issues = list(continuity.get("issues") or [])
+    arbitration = None
+    if issues:
+        # The roles of the crew contradict each other.  The role that owns the
+        # shots arbitrates, once, on the official criteria of the locked rule
+        # pack; a contradiction that nobody can rule away still needs a human.
+        try:
+            ruling = _run(
+                "director",
+                tool="continuity_arbitration",
+                brief=script_text,
+                locked_story_facts=body.locked_story_facts,
+                input_revision_ids=[
+                    steps["director"]["artifact_id"],
+                    steps["cinematographer"]["artifact_id"],
+                    steps["continuity_supervisor"]["artifact_id"],
+                ],
+                allow_remote_text=body.allow_remote_text,
+            )
+        except (ValueError, LLMError) as exc:
+            db.rollback()
+            rejections.append({"role": "director_arbitration", "code": str(exc) or rejection_reason(exc)})
+            return {
+                "status": "REJECTED",
+                "script_source": source,
+                "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+                "steps": steps,
+                "missing_characters": [],
+                "rejections": rejections,
+                "continuity_issues": issues,
+            }
+        steps["director_arbitration"] = ruling
+        arbitration = db.get(AgentArtifact, ruling["artifact_id"]).payload_json
+    blocked = bool(issues) and not _arbitration_releases(arbitration, issues)
+    if not issues and continuity.get("recommendation") != "proceed_to_preflight":
+        # No issue to arbitrate, but the supervisor still asked for a human.
+        blocked = True
+    add_audit(
+        db, "film-agent", "STORYBOARD_GENERATED", "project", project.id,
+        {
+            "script_source": source,
+            "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+            "steps": {name: step["sha256"] for name, step in steps.items()},
+            "blocked_by_continuity": blocked,
+            "arbitrated_by": "director" if arbitration else None,
+        },
+        project_id=project_id,
+    )
+    db.commit()
+    return {
+        "status": "NEEDS_REVIEW" if blocked else "PROPOSED",
+        "script_source": source,
+        "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+        "steps": steps,
+        "missing_characters": [],
+        "rejections": [],
+        "continuity_issues": continuity.get("issues", []),
+        "continuity_arbitration": (
+            {"artifact_id": steps["director_arbitration"]["artifact_id"],
+             "rulings": arbitration.get("rulings", []),
+             "recommendation": arbitration.get("recommendation"),
+             "released": _arbitration_releases(arbitration, issues)}
+            if arbitration else None
+        ),
+        "next": {
+            "apply_camera": {
+                "camera_artifact_id": steps["cinematographer"]["artifact_id"],
+                "continuity_artifact_id": steps["continuity_supervisor"]["artifact_id"],
+                "edit_intent_artifact_id": steps["editor_edit_intent"]["artifact_id"],
+                "arbitration_artifact_id": (
+                    steps["director_arbitration"]["artifact_id"] if arbitration else None
+                ),
+            }
+        },
+        "user_actions_required": ["APPLY_CAMERA"] if not blocked else ["RESOLVE_CONTINUITY_ISSUES"],
+    }

@@ -1,0 +1,495 @@
+"""The complete-script storyboard chain: five real routed roles.
+
+scriptwriter -> director -> cinematographer -> continuity supervisor -> editor
+(frozen edit intent).  Offline tests here use the project mock provider; the
+real-provider acceptance run records its own evidence.  Media here is never
+a character, location or prop master asset.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+
+import pytest
+from sqlalchemy import select
+
+from shine.models import AgentArtifact, AgentTaskRecord
+from tests.conftest import PNG, approve_lock, create_project, upload_asset
+from tests.test_film_crew import BRIEF, FACTS, prepare
+
+# A minimal RIFF/WAVE header: the upload verifies the file signature.
+WAV = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVEfmt " + b"\x10\x00\x00\x00"
+
+
+def _responder(registry):
+    """One responder for the whole chain, dispatched by schema title."""
+
+    def respond(messages, schema):
+        title = schema.get("title")
+        if title == "ScriptBreakdown":
+            return copy.deepcopy({
+                "locked_story_facts": FACTS,
+                "beats": [
+                    {"id": "B1", "description": "The woman waits beside a sealed letter.",
+                     "characters": ["Lin"], "dialogue": [
+                         {"speaker_id": "Lin", "text": "你来了。", "start_s": 1, "end_s": 2}]},
+                    {"id": "B2", "description": "She turns toward the door.",
+                     "characters": ["Lin"], "dialogue": []},
+                ],
+            })
+        if title == "DirectorialPlan":
+            return copy.deepcopy({
+                "shots": [
+                    {"id": "I1", "beat_id": "B1",
+                     "visual_description": "A woman waits beside a sealed letter at a wooden table.",
+                     "duration_s": 7, "asset_ids": [registry["lin_asset"]]},
+                    {"id": "I2", "beat_id": "B2",
+                     "visual_description": "She turns her head toward the door.",
+                     "duration_s": 6, "asset_ids": [registry["lin_asset"]]},
+                ],
+            })
+        if title == "CameraPlan":
+            return copy.deepcopy({
+                "shots": [
+                    {"intent_id": "I1",
+                     "composition": "Medium shot, subject left third",
+                     "movement": "Static, preserved axis",
+                     "lighting": "Soft key from screen right",
+                     "axis": "Preserve the established axis"},
+                    {"intent_id": "I2",
+                     "composition": "Close-up on the head turn",
+                     "movement": "Static",
+                     "lighting": "Key follows the turn",
+                     "axis": "Same axis, closer framing"},
+                ],
+            })
+        if title == "ContinuityReport":
+            return {"issues": [], "recommendation": "proceed_to_preflight"}
+        if title == "EditIntentPlan":
+            return copy.deepcopy({
+                "schema_version": "1.2", "intent_id": "D1",
+                "clips": [
+                    {"intent_id": "I1", "order": 1, "planned_duration_s": 7.0,
+                     "transition": "CUT", "continuity_note": "establishing"},
+                    {"intent_id": "I2", "order": 2, "planned_duration_s": 6.0,
+                     "transition": "CUT", "continuity_note": "reaction"},
+                ],
+                "rhythm": "steady, cut after reactions",
+                "dialogue_pace": "natural Mandarin pace",
+            })
+        raise AssertionError(f"unexpected schema {title}")
+
+    return respond
+
+
+def _studio_with_chain(client, *, extra_character: str | None = None):
+    """Frozen style + rulepack + mock routes + one approved Lin master.
+
+    Returns (project_id, style, registry) where registry holds the asset id.
+    """
+    registry = {}
+    project_id, style, profile = prepare(client)
+    assets = client.get(f"/api/v1/projects/{project_id}/assets").json()
+    lin = next(a for a in assets if a["role"] == "character" and a["entity_id"] == "Lin")
+    registry["lin_asset"] = lin["id"]
+    if extra_character:
+        extra = upload_asset(client, project_id, filename="Chen.png", role="character", entity_id=extra_character)
+        approve_lock(client, extra["id"])
+        registry["chen_asset"] = extra["id"]
+    return project_id, style, registry
+
+
+def _storyboard_request(client, project_id, **overrides):
+    payload = {
+        "text": BRIEF,
+        "allow_remote_text": True,
+        "locked_story_facts": FACTS,
+        **overrides,
+    }
+    return client.post(f"/api/v1/projects/{project_id}/storyboard/generate", json=payload)
+
+
+CONFLICT_ISSUE = ("SHOT_03_CONTINUITY omits the required FRAME_A_LAST reference asset "
+                  "from its asset_ids, creating an unresolved last-frame continuity mapping.")
+
+
+def _with_conflict(original, *, verdict="not_a_conflict", rule_id="H3_LABELS"):
+    """A crew that contradicts itself, plus the arbiter that answers it.
+
+    The arbiter echoes the raised issue from the arbitration subject, so the
+    ruling is bound to the exact issue the supervisor raised.
+    """
+
+    def respond(messages, schema):
+        title = schema.get("title")
+        if title == "ContinuityReport":
+            return {"issues": [CONFLICT_ISSUE], "recommendation": "needs_review"}
+        if title == "ContinuityArbitration":
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            subject = context["arbitration_subject"]["issues"]
+            return {
+                "rulings": [
+                    {"issue_index": issue["index"], "issue": issue["text"], "verdict": verdict,
+                     "rule_id": rule_id,
+                     "rationale": "The official criteria do not require this of the plan."}
+                    for issue in subject
+                ],
+                "recommendation": "proceed_to_preflight" if verdict == "not_a_conflict" else "needs_review",
+            }
+        return original(messages, schema)
+
+    return respond
+
+
+def test_crew_conflict_is_arbitrated_by_the_director_on_the_official_rules(studio):
+    """A contradiction between the roles is arbitrated once, not by a rerun."""
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    client.app.state.mock_llm_responder = _with_conflict(original)
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "PROPOSED", body
+    assert body["continuity_issues"] == [CONFLICT_ISSUE]
+    arbitration = body["continuity_arbitration"]
+    assert arbitration is not None
+    assert arbitration["released"] is True
+    assert arbitration["rulings"][0]["issue"] == CONFLICT_ISSUE
+    assert arbitration["rulings"][0]["rule_id"] == "H3_LABELS"
+    # The ruling travels with the storyboard, and the human applies it.
+    apply_camera = body["next"]["apply_camera"]
+    assert apply_camera["arbitration_artifact_id"] == arbitration["artifact_id"]
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{apply_camera['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": apply_camera["continuity_artifact_id"],
+              "arbitration_artifact_id": apply_camera["arbitration_artifact_id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    assert len(applied.json()["shot_ids"]) == 2
+
+
+def test_a_standing_conflict_keeps_the_storyboard_blocked(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    client.app.state.mock_llm_responder = _with_conflict(original, verdict="conflict")
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "NEEDS_REVIEW", body
+    assert body["continuity_arbitration"]["released"] is False
+    apply_camera = body["next"]["apply_camera"]
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{apply_camera['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": apply_camera["continuity_artifact_id"],
+              "arbitration_artifact_id": apply_camera["arbitration_artifact_id"]},
+    )
+    assert applied.status_code == 422
+    # The public answer stays generic; the reason is in the server log.
+    assert applied.json()["detail"] == "FILM_HANDOFF_REJECTED"
+    assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
+
+
+def test_an_arbitration_citing_an_unknown_rule_releases_nothing(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    client.app.state.mock_llm_responder = _with_conflict(original, rule_id="H3_MADE_UP")
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # A rule nobody can verify is a contract violation of the arbiter.
+    assert body["status"] == "REJECTED", body
+    assert body["rejections"][0]["role"] == "director_arbitration"
+    assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
+
+
+def test_the_server_binds_the_authoritative_issue_text(studio):
+    """A paraphrase by the arbiter can never detach a ruling from its issue."""
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+
+    def respond(messages, schema):
+        if schema.get("title") == "ContinuityArbitration":
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            return {
+                "rulings": [
+                    {"issue_index": issue["index"], "issue": "a paraphrase of the issue",
+                     "verdict": "not_a_conflict", "rule_id": "H3_LABELS",
+                     "rationale": "The official criteria do not require this of the plan."}
+                    for issue in context["arbitration_subject"]["issues"]
+                ],
+                "recommendation": "proceed_to_preflight",
+            }
+        return _with_conflict(original)(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "PROPOSED", body
+    assert body["continuity_arbitration"]["rulings"][0]["issue"] == CONFLICT_ISSUE
+
+
+def test_the_arbiter_is_not_called_when_the_crew_agrees(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    calls = []
+
+    def respond(messages, schema):
+        calls.append(schema.get("title"))
+        return original(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PROPOSED"
+    assert "ContinuityArbitration" not in calls
+
+
+def test_storyboard_chain_generates_all_five_artifacts(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    client.app.state.mock_llm_responder = _responder(registry)
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "PROPOSED"
+    assert set(body["steps"]) == {"scriptwriter", "director", "cinematographer",
+                                  "continuity_supervisor", "editor_edit_intent"}
+    with factory() as db:
+        kinds = set(db.scalars(
+            select(AgentArtifact.kind).where(AgentArtifact.project_id == project_id)
+        ).all())
+        assert {"ScriptBreakdown", "DirectorialPlan", "CameraPlan",
+                "ContinuityReport", "EditIntentPlan"}.issubset(kinds)
+        roles = set(db.scalars(
+            select(AgentTaskRecord.role_id).where(AgentTaskRecord.project_id == project_id)
+        ).all())
+        assert {"scriptwriter", "director", "cinematographer",
+                "continuity_supervisor", "editor"}.issubset(roles)
+        trace = db.scalars(
+            select(AgentTaskRecord.trace).where(AgentTaskRecord.project_id == project_id)
+        ).all()
+        # Honest model identity: the offline mock is recorded as a mock.
+        assert all(row["is_mock"] is True for row in trace)
+
+
+def test_storyboard_blocks_on_missing_character_masters(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    client.app.state.mock_llm_responder = _responder(registry)
+    # A second beat names a character without an approved master.
+    original = _responder(registry)
+
+    def with_chen(messages, schema):
+        payload = original(messages, schema)
+        if schema.get("title") == "ScriptBreakdown":
+            payload["beats"][1]["characters"] = ["Chen"]
+            payload["beats"][1]["dialogue"] = [
+                {"speaker_id": "Chen", "text": "你来了。", "start_s": 1, "end_s": 2},
+            ]
+        return payload
+
+    client.app.state.mock_llm_responder = with_chen
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "BLOCKED_MISSING_MASTERS"
+    assert body["missing_characters"] == ["Chen"]
+    # The chain stopped: no director/camera/continuity/edit artifacts exist.
+    assert set(body["steps"]) == {"scriptwriter"}
+    shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
+    assert shots == []
+
+
+def test_continuity_reviewer_receives_the_checked_reference_set_policy(studio):
+    """The reviewer must see the reference-set policy as a checked fact.
+
+    A deliberate exclusion reads exactly like an omission when the policy is
+    left to interpretation, and a compliant shot was then reported as an
+    unresolved reference mapping.  The server states the policy and checks
+    every shot against it.
+    """
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    scene = upload_asset(client, project_id, content=PNG + b"scene", filename="Street.png",
+                         role="scene", entity_id="STREET")
+    approve_lock(client, scene["id"])
+    voice = upload_asset(client, project_id, content=WAV + b"voice", filename="Lin.wav", role="voice",
+                         entity_id="VOICE_LIN", kind="audio", content_type="audio/wav")
+    approve_lock(client, voice["id"])
+    frame = upload_asset(client, project_id, content=PNG + b"frame", filename="A_last_frame.png",
+                         role="style_reference", entity_id="FRAME_A_LAST")
+    approve_lock(client, frame["id"])
+    registry["scene_asset"] = scene["id"]
+    registry["voice_asset"] = voice["id"]
+    registry["frame_asset"] = frame["id"]
+
+    original = _responder(registry)
+    captured: dict = {}
+
+    def respond(messages, schema):
+        payload = original(messages, schema)
+        title = schema.get("title")
+        if title == "DirectorialPlan":
+            # A compliant working reference set: character, location, voice.
+            for shot in payload["shots"]:
+                shot["asset_ids"] = [registry["lin_asset"], registry["scene_asset"],
+                                     registry["voice_asset"]]
+        if title == "ContinuityReport":
+            captured["system"] = messages[0].content
+            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
+        return payload
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PROPOSED"
+
+    policy = captured["context"]["continuity_policy"]
+    excluded = {row["id"] for row in policy["policy"]["excluded_from_shot_references"]}
+    assert frame["id"] in excluded, "the project-level last-frame master is excluded by policy"
+    statuses = policy["reference_set_status"]
+    assert statuses and all(row["policy_compliant"] for row in statuses)
+    assert all(row["missing_required_roles"] == [] for row in statuses)
+    assert all(row["excluded_assets_used"] == [] for row in statuses)
+    # The contract and the data must agree, or the fact is ignored again.
+    assert "policy_compliant" in captured["system"]
+    assert "reference_set_status" in captured["system"]
+    assert "last_frame" in captured["system"]
+
+
+def test_reference_set_policy_marks_a_shot_without_the_voice_master(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    scene = upload_asset(client, project_id, content=PNG + b"scene2", filename="Street.png",
+                         role="scene", entity_id="STREET")
+    approve_lock(client, scene["id"])
+    registry["scene_asset"] = scene["id"]
+
+    original = _responder(registry)
+    captured: dict = {}
+
+    def respond(messages, schema):
+        payload = original(messages, schema)
+        if schema.get("title") == "DirectorialPlan":
+            for shot in payload["shots"]:
+                shot["asset_ids"] = [registry["lin_asset"], registry["scene_asset"]]
+        if schema.get("title") == "ContinuityReport":
+            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
+        return payload
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    statuses = captured["context"]["continuity_policy"]["reference_set_status"]
+    assert statuses and all(row["policy_compliant"] is False for row in statuses)
+    assert all("voice" in row["missing_required_roles"] for row in statuses)
+
+
+def test_storyboard_guards_style_routes_and_consent(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    client.app.state.mock_llm_responder = _responder(registry)
+
+    # 1. Unfrozen style: the chain refuses to start.
+    project2 = create_project(client, "未冻结风格")
+    response = _storyboard_request(client, project2, text=BRIEF)
+    assert response.status_code == 409
+    assert "STORYBOARD_STYLE_NOT_FROZEN" in response.text
+
+    # 2. A missing route: the chain refuses with the role named.
+    from shine.models import AgentRoute
+    with factory.begin() as db:
+        route = db.scalar(select(AgentRoute).where(AgentRoute.role == "cinematographer"))
+        db.delete(route)
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 409
+    assert "STORYBOARD_AGENT_ROUTE_MISSING:cinematographer" in response.text
+
+    # 3. A non-loopback provider without consent: 403, no call goes out.
+    profile = client.post("/api/v1/provider-profiles", json={
+        "name": "remote-mock? no remote", "kind": "openai_compatible",
+        "base_url": "https://api.minimax.cn/v1", "model": "MiniMax-M3.1-flash",
+    })
+    assert profile.status_code == 201, profile.text
+    route = client.put("/api/v1/agent-routes", json={
+        "role": "cinematographer", "provider_profile_id": profile.json()["id"],
+    })
+    assert route.status_code == 200
+    response = _storyboard_request(client, project_id, allow_remote_text=False)
+    assert response.status_code == 403
+    assert "REMOTE_AGENT_CONSENT_REQUIRED" in response.text
+
+
+def test_edit_intent_tool_permissions_and_coverage(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+
+    from shine.agents.film_contracts import FilmAgentRegistry as Registry
+
+    with pytest.raises(ValueError, match="ROLE_OR_TOOL_DENIED"):
+        Registry.get("director", "edit_intent")
+
+    client.app.state.mock_llm_responder = _responder(registry)
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "PROPOSED"
+    edit_intent = body["steps"]["editor_edit_intent"]
+
+    with factory() as db:
+        artifact = db.get(AgentArtifact, edit_intent["artifact_id"])
+        assert artifact.kind == "EditIntentPlan"
+        orders = [clip["order"] for clip in artifact.payload_json["clips"]]
+        assert orders == [1, 2]
+
+
+def test_series_accepts_frozen_edit_intent_and_rejects_invalid(studio):
+    client, factory, tmp_path, settings = studio
+    project_id, style, registry = _studio_with_chain(client)
+    client.app.state.mock_llm_responder = _responder(registry)
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    edit_intent_id = body["next"]["apply_camera"]["edit_intent_artifact_id"]
+
+    apply_response = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{body['next']['apply_camera']['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": body["next"]["apply_camera"]["continuity_artifact_id"]},
+    )
+    assert apply_response.status_code == 200, apply_response.text
+    shot_ids = apply_response.json()["shot_ids"]
+    assert len(shot_ids) == 2
+    shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
+    assert len(shots) == 2
+
+    from tests.conftest import register_workflow_profile
+    profile = register_workflow_profile(client, mode="Ref2VA")
+    series = client.post(f"/api/v1/projects/{project_id}/production-series", json={
+        "shot_ids": shot_ids,
+        "provider": "comfyui",
+        "workflow_profile_id": profile["id"],
+        "edit_intent_artifact_id": edit_intent_id,
+    })
+    assert series.status_code == 201, series.text
+    assert series.json()["edit_intent_artifact_id"] == edit_intent_id
+
+    bad = client.post(f"/api/v1/projects/{project_id}/production-series", json={
+        "shot_ids": [shots[0]["id"]],
+        "provider": "comfyui",
+        "workflow_profile_id": profile["id"],
+        "edit_intent_artifact_id": "00000000-0000-0000-0000-000000000000",
+    })
+    assert bad.status_code == 409 or bad.status_code == 422
+    assert "EDIT_INTENT_ARTIFACT_INVALID" in bad.text or "ALREADY_QUEUED" in bad.text

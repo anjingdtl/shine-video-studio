@@ -171,6 +171,45 @@ def list_deliveries(project_id: str, db: DBSession) -> list[dict[str, Any]]:
     ]
 
 
+@router.get("/projects/{project_id}/delivery-orders")
+def list_delivery_orders(project_id: str, db: DBSession) -> list[dict[str, Any]]:
+    """The durable auto-delivery orders of a project, newest version first."""
+    from shine.media.delivery_engine import _order_public
+    from shine.media.delivery_models import DeliveryOrder
+
+    require_project(db, project_id)
+    rows = (
+        db.query(DeliveryOrder)
+        .filter(DeliveryOrder.project_id == project_id)
+        .order_by(DeliveryOrder.created_at.desc(), DeliveryOrder.version.desc())
+        .all()
+    )
+    return [_order_public(order) for order in rows]
+
+
+@router.post("/delivery-orders/{order_id}/retry", status_code=202)
+def retry_delivery_order(order_id: str, db: DBSession) -> dict[str, Any]:
+    """Requeue a failed auto-delivery order (bounded again by max_attempts)."""
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.services import add_audit
+
+    order = db.get(DeliveryOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Delivery order not found")
+    if order.status not in {"FAILED", "BLOCKED"}:
+        raise HTTPException(status_code=409, detail="DELIVERY_ORDER_NOT_RETRYABLE")
+    order.status = "PENDING"
+    order.attempt_count = 0
+    order.failure_code = None
+    order.failure_note = None
+    order.state_version += 1
+    add_audit(db, "user", "AUTO_DELIVERY_RETRY_QUEUED", "delivery_order", order.id,
+              {"series_id": order.series_id, "version": order.version},
+              project_id=order.project_id)
+    db.commit()
+    return {"id": order.id, "status": order.status}
+
+
 @router.get("/deliveries/{artifact_id}/media")
 def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileResponse:
     artifact = db.get(MediaArtifact, artifact_id)

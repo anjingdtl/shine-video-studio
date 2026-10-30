@@ -361,7 +361,7 @@ class H3RulebookRegistry:
         # Test the text outside dialogue and visible quoted text. CJK is deterministic;
         # fluency and creative quality still need probabilistic review and are not auto-passed here.
         text = request.compiled_prompt or ""
-        descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"", "", text, flags=re.S)
+        descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", text, flags=re.S)
         if re.search(r"[\u3400-\u9fff]", descriptive):
             reject("H3_ENGLISH", "compiled_prompt", "CJK found outside dialogue or quoted visible text")
         for line in request.shot_spec.dialogue:
