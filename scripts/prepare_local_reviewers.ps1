@@ -24,8 +24,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Alembic and the local executors write progress to stderr.  PowerShell turns
+# native stderr into a terminating error, so every native call runs with the
+# preference relaxed and is judged by its exit code instead.
+$PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+
+function Invoke-Native([string]$Label, [scriptblock]$Command) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
+}
 $started = @()
 
 function Stop-Owned([System.Diagnostics.Process]$Process) {
@@ -42,8 +53,12 @@ try {
     $env:SHINE_DATABASE_URL = "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))"
     $env:SHINE_RENDER_PROVIDER = 'comfyui'
 
-    & uv run --project (Join-Path $repoRoot 'backend') alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head
-    if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
+    # Alembic logs to stderr.  The exit code decides, not the log stream.
+    $alembicLog = Join-Path $env:TEMP 'shine-prepare-alembic.log'
+    Invoke-Native 'Database migration' {
+        & uv run --project (Join-Path $repoRoot 'backend') alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $alembicLog
+    }
+    Get-Content $alembicLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 
     $api = Start-Process -PassThru -WindowStyle Hidden -FilePath 'uv' -WorkingDirectory $repoRoot `
         -ArgumentList @('run', '--project', 'backend', 'uvicorn', 'shine.main:app', '--host', '127.0.0.1', '--port', "$ApiPort")
@@ -70,9 +85,12 @@ try {
         Write-Host "Local review executor ready on port $port"
     }
 
-    & $venvPython (Join-Path $PSScriptRoot 'seed_local_review_routes.py') `
-        --api $base --vlm-port $VlmPort --asr-port $AsrPort
-    if ($LASTEXITCODE -ne 0) { throw 'Seeding the local reviewer routes failed.' }
+    $seedLog = Join-Path $env:TEMP 'shine-prepare-seed.log'
+    Invoke-Native 'Seeding the local reviewer routes' {
+        & $venvPython (Join-Path $PSScriptRoot 'seed_local_review_routes.py') `
+            --api $base --vlm-port $VlmPort --asr-port $AsrPort 2> $seedLog
+    }
+    Get-Content $seedLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 } finally {
     foreach ($process in $started) { Stop-Owned $process }
     Start-Sleep -Seconds 2

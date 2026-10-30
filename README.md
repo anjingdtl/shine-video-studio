@@ -29,6 +29,7 @@ are preserved. This is not a declaration of final film-quality acceptance.
 - **Assets:** Agents may create candidates. Masters require authenticated human promotion and locking; Agents cannot approve, replace or mutate them. Fake candidates stay offline-only.
 - **Style:** the user freezes a seven-dimension Style Bible before production. New shots bind to the current frozen version; historical shots keep their original version. A new version invalidates unstarted work that used the old style.
 - **Production:** structured ShotSpec → deterministic H3 prompt compilation → durable job/attempt state → ComfyUI or explicitly labelled Mock → technical/semantic QC → bounded repair or human review.
+- **Multi-shot production:** one production series is the unit of a real H3 run. It owns an ordered list of shots, is claimed by exactly one resident worker, keeps one managed renderer and one exclusive GPU lease across all of its shots, and releases both exactly once at the end.
 
 ## What is implemented
 - **M1 hardening:** strict style-version gates, frozen-style impact analysis, per-shot binding table and API, project-scoped audit pagination/filters, worker heartbeat table and `/system/status`, worker result-version guards, conditional leases, and crash reconciliation.
@@ -36,6 +37,7 @@ are preserved. This is not a declaration of final film-quality acceptance.
 - **M3 offline:** structural media probing, optional FFprobe/FFmpeg technical QC, pluggable VLM/ASR reviewer protocol with evidence, confidence-aware fusion, root-cause classification, bounded RepairPlan engine, and passed-job protection.
 - **M1/M2/M3 final hardening:** strict per-family ComfyUI reference-media transfer (no silent reference loss, content-type based file extensions, explicit video/audio transport adapters), an intent-first submission protocol that never duplicates an external render, five named quality gates (`technical`, `semantic`, `audio`, `style`, `final`) with a per-project quality policy, automatic repair that produces a genuinely different request revision, automatic collection and re-check of external tasks that already finished, and a repeatable Offline Production E2E.
 - **Web workbench:** project status, asset approval/lock/metadata, independent shot bindings, Style Bible freeze/version history, Prompt preview, provider/role settings, ComfyUI test and workflow registration, worker/queue status, QC evidence, per-gate quality ledger, repair suggestions, and audit history.
+- **Unattended production series:** the workbench can queue an ordered run of shots for the real renderer. The resident worker claims the series, renders every shot behind one managed renderer, keeps the exclusive GPU lease across the whole run, and releases the renderer and the lease exactly once when the run ends. The series can be paused, resumed and cancelled, and a dependent shot is only created after its source job really passed.
 
 ## Explicitly not claimed
 - Three local Ref2VA renders exist. Production visual quality is blocked; other generation modes and hard continuity have no acceptance. User playback feedback and authenticated database approvals are distinct evidence sources.
@@ -82,6 +84,28 @@ npm --prefix frontend run dev -- --host 127.0.0.1
 First workflow: create a project → upload your authorized assets with role/entity metadata → approve and lock each asset → fill and freeze all seven Style Bible dimensions → create a shot with independent bindings → preview the compiled H3 prompt → add a Mock job. The worker records durable attempts and mock QC. `PASSED` for a Mock job means only that scheduling and mock QC passed; `video_created=false` and `artifact_kind="none"` remain visible.
 
 `SHINE_DATA_DIR` controls the database, assets, artifacts, and secret files. See [`config/environment.md`](config/environment.md).
+
+### Unattended multi-shot production
+
+A real H3 run is an ordered **production series**. In the workbench: open the
+*多镜头无人值守生产* panel, choose a registered Ref2VA workflow profile, tick the
+shots in production order and press *开始真实生产*. The resident Worker then
+claims the series, starts the managed MiniMax-H3 renderer, renders every shot
+behind that one renderer, reviews each shot with the local VLM and ASR, creates
+the next dependent shot only after its source really passed, and releases the
+renderer and the exclusive GPU lease once the run ends. Closing or reloading the
+browser does not stop the run.
+
+To drive the same chain from a script against a local stack:
+
+```powershell
+./scripts/run_real_acceptance.ps1 -RunName <run-name> -Profile local-h3-ref2va-pdd8-2img-1aud -Shots 3
+```
+
+It prepares the reviewer routes, starts the normal launcher in ComfyUI mode,
+registers the real H3 workflow profiles, drives a real browser through the whole
+production chain and writes the evidence to `.local-acceptance/final-local-pass/`.
+The scripts need PowerShell 7.
 
 ## Tests and checks
 

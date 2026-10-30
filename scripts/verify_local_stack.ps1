@@ -17,8 +17,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# The native tools in this script write progress to stderr.  PowerShell turns
+# native stderr into a terminating error, so those calls run with the
+# preference relaxed and are judged by their exit code instead.
+$PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+
+function Invoke-Native([string]$Label, [scriptblock]$Command) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
+}
 
 if (-not $env:SHINE_DATA_DIR) {
     $env:SHINE_DATA_DIR = Join-Path $env:TEMP "shine-verify-$(Get-Random)"
@@ -31,8 +42,11 @@ $env:SHINE_RENDER_PROVIDER = 'mock'
 
 Write-Host "Data directory: $env:SHINE_DATA_DIR"
 Write-Host 'Applying migrations...'
-& uv run --project (Join-Path $repoRoot 'backend') alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head
-if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
+$migrationLog = Join-Path $env:TEMP 'shine-verify-alembic.log'
+Invoke-Native 'Database migration' {
+    & uv run --project (Join-Path $repoRoot 'backend') alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+}
+Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 
 $api = $null
 $worker = $null

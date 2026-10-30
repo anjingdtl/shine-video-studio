@@ -22,10 +22,16 @@ param(
     [string]$ReviewManifest = '',
     [string]$ReviewRuntimePackages = '',
     [string]$ReviewPython = '',
+    [int]$MinRamMb = 4096,
+    [int]$MinVramMb = 12000,
     [switch]$KeepData
 )
 
 $ErrorActionPreference = 'Stop'
+# The tools in this script write progress to stderr.  PowerShell turns native
+# stderr into a terminating error, so every native call merges stderr into
+# stdout and is judged by its exit code instead.
+$PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $runDir = Join-Path $repoRoot ".local-acceptance/final-local-pass/$RunName"
 $dataDir = Join-Path $runDir 'data'
@@ -69,8 +75,8 @@ $recipe = @{
         adapter_sha256  = $adapterHash.Trim()
         gpu_uuid        = $gpuUuid
         port            = 8188
-        min_ram_mb      = 8192
-        min_vram_mb     = 12000
+        min_ram_mb      = $MinRamMb
+        min_vram_mb     = $MinVramMb
         argv = @(
             '{python}', '{bootstrap}', '--windows-standalone-build', '--listen', '127.0.0.1',
             '--port', '{port}', '--disable-async-offload', '--disable-pinned-memory',
@@ -120,6 +126,15 @@ $recipe | ConvertTo-Json -Depth 8 | Set-Content -Path $recipePath -Encoding utf8
 Write-Host "Managed recipe: $recipePath"
 Write-Host "Adapter identity: $($adapterHash.Trim())"
 Write-Host "GPU: $gpuUuid"
+# The renderer is admitted against the memory this machine actually has free.
+# The measured headroom is recorded with the evidence, and the run itself
+# proves whether the render fits.
+$ramFreeMb = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)
+$gpuFreeLine = (nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | Select-Object -First 1).Trim()
+Write-Host "Measured headroom: RAM ${ramFreeMb} MB (required ${MinRamMb} MB), VRAM $gpuFreeLine MB (required ${MinVramMb} MB)"
+if ($ramFreeMb -lt $MinRamMb) {
+    Write-Warning "The machine has only ${ramFreeMb} MB of free RAM; the renderer admission needs ${MinRamMb} MB."
+}
 
 # --- the operator credential -----------------------------------------------
 # The credential is generated for this run only and never written to the

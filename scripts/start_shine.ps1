@@ -15,9 +15,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# The native tools in this script write progress to stderr.  PowerShell turns
+# native stderr into a terminating error, so those calls run with the
+# preference relaxed and are judged by their exit code instead.
+$PSNativeCommandUseErrorActionPreference = $false
 $explicitDataDir = [bool]$DataDir
 if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+
+function Invoke-Native([string]$Label, [scriptblock]$Command) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
+}
 $startReview = [bool]($ReviewPython -or $ReviewManifest -or $ReviewRuntimePackages)
 if ($IsolatedReviewProcess -and -not $startReview) { throw 'Isolated review requires the local review configuration.' }
 if ($AdditionalReviewManifest -and -not $startReview) { throw 'Additional review requires the primary review runtime configuration.' }
@@ -48,12 +60,14 @@ $env:SHINE_RENDER_PROVIDER = $Provider
 $env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
 
 if ($Install -or -not (Test-Path (Join-Path $repoRoot 'backend/.venv'))) {
-    & uv sync --project (Join-Path $repoRoot 'backend') --locked
-    if ($LASTEXITCODE -ne 0) { throw 'Python dependency installation failed.' }
+    Invoke-Native 'Python dependency installation' {
+        & uv sync --project (Join-Path $repoRoot 'backend') --locked
+    }
 }
 if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules'))) {
-    & npm --prefix (Join-Path $repoRoot 'frontend') ci
-    if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+    Invoke-Native 'Frontend dependency installation' {
+        & npm --prefix (Join-Path $repoRoot 'frontend') ci
+    }
 }
 
 $runDir = Join-Path $env:SHINE_DATA_DIR 'run'
@@ -70,8 +84,11 @@ $env:SHINE_DATABASE_URL = $databaseUrl
 Write-Host "Data directory: $env:SHINE_DATA_DIR"
 Write-Host "Database:       $databaseUrl"
 
-& (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head
-if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
+$migrationLog = Join-Path $env:TEMP 'shine-alembic-upgrade.log'
+Invoke-Native 'Database migration' {
+    & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+}
+Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 
 $venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
 $uvicornArgs = @(

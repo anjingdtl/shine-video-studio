@@ -201,6 +201,24 @@ def gpu_sample() -> dict:
     return {"available": True, "gpus": rows}
 
 
+def memory_sample() -> dict:
+    """The physical memory headroom, so the run records what it actually had."""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "$os = Get-CimInstance Win32_OperatingSystem; "
+         "'{0},{1}' -f [math]::Round($os.TotalVisibleMemorySize/1KB), [math]::Round($os.FreePhysicalMemory/1KB)"],
+        capture_output=True, timeout=60, check=False,
+    )
+    if result.returncode != 0:
+        return {"available": False}
+    text = result.stdout.decode("utf-8", "replace").strip().splitlines()[-1]
+    try:
+        total, free = (int(value) for value in text.split(","))
+    except ValueError:
+        return {"available": False}
+    return {"available": True, "total_mb": total, "free_mb": free}
+
+
 CONTENT_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -487,7 +505,9 @@ def main() -> int:
                             "items": [{"shot": i["shot_id"][:8], "status": i["status"],
                                        "job": i["job_status"], "failure": i["job_failure_code"]}
                                       for i in current["items"]],
-                            "gpu": gpu_sample()})
+                            "gpu": gpu_sample(),
+                            "memory": memory_sample(),
+                            "at_epoch": time.time()})
             if not reload_done and current["completed_count"] >= 1:
                 # The run must survive the browser being closed and reopened.
                 page.reload(wait_until="domcontentloaded")
