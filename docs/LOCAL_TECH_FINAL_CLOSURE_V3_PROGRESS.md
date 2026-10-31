@@ -3,7 +3,7 @@
 > **新机部署轮（2026-10-31/11-01，分支 codex/new-machine-deployment，未推送）**：在 78c622c 基线上建设了空白 Windows 新机→生产就绪的完整链路：
 > bootstrap 入口（PS5.1 可跑）、只读环境探测、14 组件真实钉点部署清单（60.7GB，全部 READY），
 > 目录→安装计划→既有审批链→实例四步链→受管配置生成→六层就绪校验，以及 Web「新机设置」向导。
-> 28 项新增/更新测试全绿；定向回归 114 passed；全量后端 1193 项（结果以最终提交为准）；
+> 15 项新增/更新测试全绿（14 新增 + 1 按新合同重写）；定向回归 114 passed；全量后端 1193 项（结果以最终提交为准）；
 > Ruff/Alembic 新库/前端构建/uv sync --locked 全部通过。真实下载/安装/启动/推理 = NOT_RUN（需用户授权）。
 > 详见 [NEW_MACHINE_DEPLOYMENT.md](NEW_MACHINE_DEPLOYMENT.md) / [TESTLOG](NEW_MACHINE_DEPLOYMENT_TESTLOG.md) / [CATALOG](NEW_MACHINE_DEPLOYMENT_CATALOG.md)。
 

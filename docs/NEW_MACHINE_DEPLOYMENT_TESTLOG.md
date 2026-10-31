@@ -23,7 +23,7 @@
 | B | test_bootstrap_entry.py（3 项：本地 zip 安装→shim 可执行；哈希不符阻断；清单=钉点） | passed | file:// + 真实哈希 |
 | C | test_installer_redirects.py 45 项（含新增按起源重定向策略测试） | passed | 起源↔CDN 操作者匹配强于旧合同 |
 
-专项小计：**28 项新增/更新测试全绿**。
+专项小计：**15 项新增/更新测试全绿（14 新增 + 1 按新合同重写）**。
 
 ## B. 回归门禁（截至本记录）
 
