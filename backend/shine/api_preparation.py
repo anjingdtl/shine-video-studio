@@ -23,7 +23,7 @@ from shine.comfyops.assets import (
     verify_candidate,
 )
 from shine.comfyops.images import FakeImageProvider, LocalImageHTTPProvider
-from shine.comfyops.installer import PackageSpec, check_url, safe_target
+from shine.comfyops.installer import TRUSTED_DOWNLOAD_HOSTS, PackageSpec, check_url, safe_target
 from shine.comfyops.inventory import FakeWindowsHostProbe, WindowsHostProbe
 from shine.comfyops.model_calls import TrackedProvider
 from shine.comfyops.models import (
@@ -167,7 +167,7 @@ def nodes(db: DBSession):
 def register_package(body: PackageSpec, db: DBSession):
     try:
         for file in body.files:
-            check_url(file.url, {"huggingface.co", "raw.githubusercontent.com", "github.com"})
+            check_url(file.url, TRUSTED_DOWNLOAD_HOSTS)
             safe_target(__import__("pathlib").Path.cwd() / "scoped-root", file.relative_path)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -225,7 +225,10 @@ def plan_install(body: InstallRequest, db: DBSession):
             "disk_required": size * 2,
             "isolated": True,
             "executor": "FAKE_ONLY" if body.executor == "fake" else "LOCAL_ISOLATED",
-            "risks": ["THIRD_PARTY_CODE" if p["spec"]["kind"] == "node" else "MODEL_LICENSE" for p in packages],
+            "risks": [
+                "THIRD_PARTY_CODE" if p["spec"]["kind"] in {"node", "source", "wheel"} else "MODEL_LICENSE"
+                for p in packages
+            ],
         },
         "AWAITING_APPROVAL",
         project_id=body.project_id,
@@ -361,7 +364,7 @@ def execute_install(
         db.rollback()
         installer = LocalInstaller(
             settings.data_dir / "comfyops" / "isolated-packages",
-            ControlledDownloader({"huggingface.co", "raw.githubusercontent.com", "github.com"}, HTTPTransport()),
+            ControlledDownloader(TRUSTED_DOWNLOAD_HOSTS, HTTPTransport()),
         )
         try:
             attempt_id = execute_approved(

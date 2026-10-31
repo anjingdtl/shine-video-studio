@@ -1,3 +1,4 @@
+import { SetupPanel } from './components/SetupPanel';
 import { PreproductionPanel } from './components/PreproductionPanel';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -365,6 +366,7 @@ function App() {
         <div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><b>SHINE</b><span>VIDEO STUDIO</span></div></div>
         <div className="workspace-label">工作区</div>
         <button className="nav-item active"><FolderKanban size={17} />项目工作台 <span className="nav-dot" /></button>
+        <button className="nav-item" onClick={() => document.getElementById('setup')?.scrollIntoView({ behavior: 'smooth' })}><Sparkles size={17} />新机设置</button>
         <button className="nav-item" onClick={() => document.getElementById('assets')?.scrollIntoView({ behavior: 'smooth' })}><Film size={17} />素材与风格</button>
         <button className="nav-item" onClick={() => document.getElementById('production')?.scrollIntoView({ behavior: 'smooth' })}><Activity size={17} />生产与质检</button>
         <button className="nav-item" onClick={() => document.getElementById('delivery')?.scrollIntoView({ behavior: 'smooth' })}><ArrowDownToLine size={17} />成片与导出</button>
@@ -539,6 +541,8 @@ function App() {
               onLoad={() => loadAudit(projectId, 0).catch((error: Error) => report(error.message, 'error'))}
               onMore={() => loadAudit(projectId, audit?.items.length ?? 0).catch((error: Error) => report(error.message, 'error'))}
             />
+
+            <SetupPanel key={`setup-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
 
             <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
 

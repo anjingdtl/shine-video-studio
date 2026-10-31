@@ -1,0 +1,50 @@
+{
+ "comfyui": {
+  "filename": "ComfyUI-b0b743566f65daafc423b4fea8a2fbda94b3384a.zip",
+  "revision": "b0b743566f65daafc423b4fea8a2fbda94b3384a",
+  "sha256": "c8997f6781e2b53861697fab23b77a7fdb556ec0640f21653a89689556816b54",
+  "size": 13350160,
+  "slug": "Comfy-Org/ComfyUI",
+  "url": "https://codeload.github.com/Comfy-Org/ComfyUI/zip/b0b743566f65daafc423b4fea8a2fbda94b3384a"
+ },
+ "h3-upscaler": {
+  "filename": "Comfyui_Minimax_h3_latent_Upscaler-40316cf008b2fd8663263270669eb4da23f89d2c.zip",
+  "revision": "40316cf008b2fd8663263270669eb4da23f89d2c",
+  "sha256": "2e8bb5f235bf1f6b80e95345fd365812242e139653b1d6eacaf5f0fe86822883",
+  "size": 8897912,
+  "slug": "LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler",
+  "url": "https://codeload.github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler/zip/40316cf008b2fd8663263270669eb4da23f89d2c"
+ },
+ "kjnodes": {
+  "filename": "ComfyUI-KJNodes-ab72eda7ffad6280422d71ab7d54d3fb87c0ba18.zip",
+  "revision": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18",
+  "sha256": "632b3ad45a67caf11e21d2c4c751caafb097d20a72ea2e6383545a628da7b9ef",
+  "size": 1189105,
+  "slug": "kijai/ComfyUI-KJNodes",
+  "url": "https://codeload.github.com/kijai/ComfyUI-KJNodes/zip/ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+ },
+ "pdd-acc": {
+  "filename": "ComfyUI-MiniMax-H3-PDD-Acc-311a65dd53832d8a5f8177a9d5fb923c09e35a90.zip",
+  "revision": "311a65dd53832d8a5f8177a9d5fb923c09e35a90",
+  "sha256": "b106b37d7e7e9b8ee1773a7387b623065e7e5dd0747de75610ce820004893dab",
+  "size": 2351519,
+  "slug": "Jalen-Brunson/ComfyUI-MiniMax-H3-PDD-Acc",
+  "url": "https://codeload.github.com/Jalen-Brunson/ComfyUI-MiniMax-H3-PDD-Acc/zip/311a65dd53832d8a5f8177a9d5fb923c09e35a90"
+ },
+ "solattn": {
+  "filename": "ComfyUI-SolAttn_triton-26d816ebd4f1e43a2c6e4d4759be3137f10a7a73.zip",
+  "revision": "26d816ebd4f1e43a2c6e4d4759be3137f10a7a73",
+  "sha256": "3a89bfec46dfa683ba0f46d6f42cd7189964196967033f25f8d57f0e6567a9aa",
+  "size": 38505,
+  "slug": "kijai/ComfyUI-SolAttn_triton",
+  "url": "https://codeload.github.com/kijai/ComfyUI-SolAttn_triton/zip/26d816ebd4f1e43a2c6e4d4759be3137f10a7a73"
+ },
+ "videohelpersuite": {
+  "filename": "ComfyUI-VideoHelperSuite-4d907bee61e92c2e65af3bd6383a4e4d356126d1.zip",
+  "revision": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
+  "sha256": "5114977eefb133c76592a5213c45ad3caa1ad7b1c2e4a77905b5ff0c48ca4363",
+  "size": 116108,
+  "slug": "Kosinkadink/ComfyUI-VideoHelperSuite",
+  "url": "https://codeload.github.com/Kosinkadink/ComfyUI-VideoHelperSuite/zip/4d907bee61e92c2e65af3bd6383a4e4d356126d1"
+ }
+}

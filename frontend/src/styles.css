@@ -389,3 +389,11 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* --- New-machine setup (SetupPanel) --- */
+.setup-tools { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.setup-tools td { padding: 4px 8px; border-top: 1px solid var(--line, rgba(128,128,128,.18)); }
+.setup-tools td.ok-cell { color: #34c37e; }
+.setup-tools td.bad-cell { color: #e07a6b; }
+.setup-components { max-height: 280px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.setup-plans { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }

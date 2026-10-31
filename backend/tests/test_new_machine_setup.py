@@ -1,0 +1,278 @@
+"""New-machine deployment: catalog contract, controlled plan assembly, generated configuration, readiness layers.
+
+Offline: isolated databases, tmp directories and synthetic bytes. No model
+download, no real ComfyUI start and no personal paths. The committed catalog is
+validated as real contract data; plan execution uses the existing fake/local
+machinery (fake runners, offline caches), and every test states what it does
+NOT prove: real model inference is never simulated.
+"""
+
+# ruff: noqa: F811
+import json
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+from shine.comfyops import deployment
+from shine.comfyops.managed_recipe import adapter_identity, load_managed_recipe
+from tests.conftest import create_project
+from tests.test_v13_preparation import HEADERS, approve, post, prep  # noqa: F401
+
+CORE_SMALL = ["comfyui", "comfy-runtime-wheels"]
+FULL_COMPONENTS = [
+    "comfyui", "comfy-runtime-wheels", "ComfyUI-KJNodes", "comfyui-videohelpersuite",
+    "ComfyUI-MiniMax-H3-PDD-Acc", "ComfyUI-SolAttn_triton", "Comfyui_Minimax_h3_latent_Upscaler",
+    "minimax-h3-diffusion", "minimax-h3-text-encoder", "minimax-h3-vae", "minimax-h3-lora",
+    "minimax-h3-pdd", "qwen3-vl-8b-fp8", "qwen3-asr-0.6b",
+]
+
+
+def mutated_catalog(tmp_path: Path, mutate) -> Path:
+    """Write a mutated copy of the committed catalog into a temp catalog dir."""
+    raw = json.loads(deployment.load_default_catalog_path().read_text(encoding="utf-8"))
+    mutate(raw)
+    target = tmp_path / "mutated.json"
+    target.write_text(json.dumps(raw), encoding="utf-8")
+    return target
+
+
+def test_catalog_is_valid_contract_data():
+    raw = deployment.load_default_catalog()
+    by_id = deployment._component_map(raw)
+    assert set(by_id) == set(FULL_COMPONENTS)
+    for component in raw["components"]:
+        assert component["status"] == "READY"
+        for f in component["files"]:
+            assert len(f["sha256"]) == 64 and f["size"] > 0 and f["url"].startswith("https://")
+    # The four families the production graph binds actually exist.
+    families = {c["destination_family"] for c in raw["components"] if c["kind"] == "model"}
+    assert {"diffusion_models", "text_encoders", "vae", "loras", "pdd_acc"} <= families
+
+
+def test_catalog_rejects_untrusted_url(tmp_path, monkeypatch):
+    mutated_catalog(tmp_path, lambda raw: raw["components"][0]["files"][0].__setitem__(
+        "url", "https://evil.example/comfyui.zip"))
+    monkeypatch.setattr(deployment, "CATALOG_DIR", tmp_path)
+    with pytest.raises(HTTPException) as excinfo:
+        deployment.load_deployment_catalog("mutated")
+    assert "UNTRUSTED_CATALOG_URL" in str(excinfo.value.detail)
+
+
+def test_catalog_rejects_unsafe_relative_path(tmp_path, monkeypatch):
+    mutated_catalog(tmp_path, lambda raw: raw["components"][0]["files"][0].__setitem__(
+        "relative_path", "../../escape.zip"))
+    monkeypatch.setattr(deployment, "CATALOG_DIR", tmp_path)
+    with pytest.raises(HTTPException) as excinfo:
+        deployment.load_deployment_catalog("mutated")
+    assert "UNSAFE_CATALOG_PATH" in str(excinfo.value.detail)
+
+
+def test_install_plan_via_setup_endpoint(prep):
+    client, factory, settings = prep
+    project = create_project(client)
+    body = {
+        "components": CORE_SMALL, "project_id": project, "disk_free": 10**12,
+    }
+    result = post(client, "/setup/install-plan", body)
+    assert result["status"] == "AWAITING_APPROVAL"
+    assert result["download_bytes"] > 0
+    plan_id = result["plan_id"]
+    # Approval flows through the existing grant -> approve -> execute machinery.
+    plan = approve(client, {"id": plan_id}, "install", f"/comfyops/install-plans/{plan_id}/approve")
+    assert plan["status"] == "APPROVED"
+
+    class AvailableInstaller:
+        """Executor-port injection: records what a real verified install would produce."""
+
+        def install(self, spec):
+            return {"status": "AVAILABLE", "files": [f.model_dump() for f in spec.files]}
+
+    from unittest import mock
+    with mock.patch.object(
+        __import__("shine.comfyops.installer", fromlist=["LocalInstaller"]),
+        "LocalInstaller",
+        lambda root, downloader: AvailableInstaller(),
+    ):
+        with mock.patch.dict("os.environ", {"SHINE_ENABLE_LOCAL_EXECUTION": "1"}):
+            exec_result = post(client, f"/comfyops/install-plans/{plan_id}/execute",
+                               {"plan_hash": plan["sha256"], "executor": "local"}, operator=True)
+    assert exec_result["status"] == "FILES_VERIFIED"
+    # Packages carry the catalog identity; re-planning stays idempotent.
+    again = post(client, "/setup/install-plan", body)
+    assert again["status"] == "AWAITING_APPROVAL"
+    assert again["packages"] == result["packages"]
+
+
+def test_install_plan_requires_real_disk_budget(prep):
+    client, factory, settings = prep
+    project = create_project(client)
+    post(client, "/setup/install-plan",
+         {"components": CORE_SMALL, "project_id": project, "disk_free": 0}, expected=409)
+
+
+def test_component_content_change_is_detected(prep, tmp_path):
+    client, factory, settings = prep
+    project = create_project(client)
+    raw = deployment.load_default_catalog()
+    post(client, "/setup/install-plan",
+         {"components": ["comfyui"], "project_id": project, "disk_free": 10**12})
+    # Register a mutated comfyui component under the same id: content identity must refuse.
+    import copy
+    mutated = copy.deepcopy(raw)
+    for component in mutated["components"]:
+        if component["component_id"] == "comfyui":
+            component["revision"] = "0" * 40
+    target = tmp_path / "h3-ref2va-windows-x64.json"
+    target.write_text(json.dumps(mutated), encoding="utf-8")
+    from unittest import mock
+    with mock.patch.object(deployment, "CATALOG_DIR", tmp_path):
+        response = client.post("/api/v1/setup/install-plan",
+                               json={"components": ["comfyui"], "project_id": project, "disk_free": 10**12})
+    assert response.status_code == 409
+    assert "CATALOG_COMPONENT_CHANGED" in str(response.json()["detail"])
+
+
+def test_next_instance_plan_state_machine(prep):
+    """The setup flow advances one controlled step at a time; nothing executes here."""
+    from sqlalchemy import select
+
+    client, factory, settings = prep
+    project = create_project(client)
+    post(client, "/setup/install-plan",
+         {"components": FULL_COMPONENTS, "project_id": project, "disk_free": 10**15})
+    # Simulate a completed real install (the state a verified local install reaches).
+    from shine.comfyops.models import ModelPackage, NodePackage
+    with factory() as db:
+        for row in db.scalars(select(ModelPackage)):
+            row.status = "FILES_VERIFIED_PENDING_RUNTIME"
+        for row in db.scalars(select(NodePackage)):
+            row.status = "FILES_VERIFIED_PENDING_RUNTIME"
+        db.commit()
+    # Step 1: no managed instance -> CREATE plan carrying the catalog source + wheels.
+    step = post(client, "/setup/next-instance-plan",
+                {"project_id": project, "instance_name": "shine-h3", "port": 8193, "mode": "fake"})
+    assert step["action"] == "CREATE" and not step["complete"]
+    from sqlalchemy import select
+
+    from shine.comfyops.models import ComfyInstance, InstallationPlan
+    with factory() as db:
+        plan = db.get(InstallationPlan, step["plan_id"])
+        spec_names = [p["spec"]["name"] for p in plan.payload["packages"]]
+        assert "comfyui" in spec_names and "comfy-runtime-wheels" in spec_names
+        assert plan.payload["operation"]["source_package_id"] == "comfyui"
+    # Without executing, the state machine stays at CREATE (the instance row only
+    # appears after the CREATE plan really executes).
+    step_again = post(client, "/setup/next-instance-plan",
+                      {"project_id": project, "instance_name": "shine-h3", "port": 8193, "mode": "fake"})
+    assert step_again["action"] == "CREATE"
+    from uuid import NAMESPACE_URL, uuid5
+    identity = str(uuid5(NAMESPACE_URL, "shine-comfy-instance:fake:http://127.0.0.1:8193"))
+    with factory() as db:
+        payload = {"managed": True, "name": "shine-h3", "port": 8193,
+                   "root": str(Path(settings.data_dir) / "comfyops" / "fake-instances" / "shine-h3"),
+                   "is_mock": True}
+        db.add(ComfyInstance(id=identity, payload=payload, sha256="0" * 64, status="STOPPED"))
+        db.commit()
+    node_step = post(client, "/setup/next-instance-plan",
+                     {"project_id": project, "instance_name": "shine-h3", "port": 8193, "mode": "fake"})
+    assert node_step["action"] == "INSTALL_NODE"
+    with factory() as db:
+        plan = db.get(InstallationPlan, node_step["plan_id"])
+        node_names = {p["spec"]["name"] for p in plan.payload["packages"]}
+        assert node_names == {"ComfyUI-KJNodes", "comfyui-videohelpersuite",
+                              "ComfyUI-MiniMax-H3-PDD-Acc", "ComfyUI-SolAttn_triton",
+                              "Comfyui_Minimax_h3_latent_Upscaler"}
+    # With node_versions recorded, the next step is BIND_MODELS with all five families.
+    with factory() as db:
+        instance = db.get(ComfyInstance, identity)
+        instance.payload = {**instance.payload,
+                            "node_versions": {"ComfyUI-KJNodes": "x" * 12}}
+        instance.sha256 = "1" * 64
+        db.commit()
+    bind_step = post(client, "/setup/next-instance-plan",
+                     {"project_id": project, "instance_name": "shine-h3", "port": 8193, "mode": "fake"})
+    assert bind_step["action"] == "BIND_MODELS"
+    with factory() as db:
+        plan = db.get(InstallationPlan, bind_step["plan_id"])
+        assert plan.payload["operation"]["model_bindings"] == {
+            "diffusion_models": "minimax-h3-diffusion",
+            "text_encoders": "minimax-h3-text-encoder",
+            "vae": "minimax-h3-vae",
+            "loras": "minimax-h3-lora",
+            "pdd_acc": "minimax-h3-pdd",
+        }
+
+
+def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
+    """Config generation against a fixture-built instance (v13-style synthetic bytes)."""
+    client, factory, settings = prep
+    project = create_project(client)
+    # Seed one managed instance row the way a real CREATE+START leaves it.
+
+    from shine.comfyops.models import ComfyInstance
+    root = Path(settings.data_dir) / "comfyops" / "fake-instances" / "shine-cfg"
+    root.mkdir(parents=True)
+    (root / ".venv" / "Scripts").mkdir(parents=True)
+    venv_python = root / ".venv" / "Scripts" / "python.exe"
+    venv_python.write_bytes(b"FAKE EXECUTABLE - NEVER EXECUTE")
+    (root / "custom_nodes").mkdir()
+    (root / "main.py").write_bytes(b"# synthetic entrypoint")
+    with factory() as db:
+        payload = {"managed": True, "name": "shine-cfg", "port": 8195,
+                   "root": str(root), "is_mock": True,
+                   "model_bindings": {"diffusion_models": "minimax-h3-diffusion"}}
+        db.add(ComfyInstance(id="fake-id-config", payload=payload,
+                             sha256="0" * 64, status="STOPPED"))
+        db.commit()
+    def fake_gpu():
+        return {"status": "OK", "index": "0", "uuid": "GPU-TEST-UUID", "name": "Test GPU",
+                "driver_version": "1.0", "vram_mb": 16384, "at_floor": True}
+
+    monkeypatch.setattr("shine.comfyops.host_env.probe_gpu", fake_gpu)
+    env_target = Path(settings.data_dir) / "setup-env"
+    monkeypatch.setattr(deployment, "ENV_PATH", env_target)
+    result = post(client, "/setup/configuration", {"project_id": project}, operator=True)
+    recipe_raw = json.loads(Path(result["recipe"]).read_text(encoding="utf-8"))
+    assert result["adapter_sha256"] == adapter_identity(recipe_raw["renderer"]["adapter_dir"])
+    recipe = load_managed_recipe(result["recipe"])
+    assert recipe["renderer"]["adapter_sha256"] == result["adapter_sha256"]
+    assert "shine_h3_sampling_mode.py" in " ".join(recipe["renderer"]["argv"])
+    assert recipe["renderer"]["gpu_uuid"] == "GPU-TEST-UUID"
+    assert result["env_keys"] and env_target.exists()
+    env_text = env_target.read_text(encoding="utf-8")
+    assert "SHINE_MANAGED_RECIPE=" in env_text and "SHINE_RENDER_PROVIDER=comfyui" in env_text
+    for role in ("vlm", "asr"):
+        manifest = json.loads(Path(result["review_manifests"][role.upper()]).read_text(encoding="utf-8"))
+        assert manifest["files"] and all(len(f["sha256"]) == 64 for f in manifest["files"])
+    with factory() as db:
+        instance = db.get(ComfyInstance, "fake-id-config")
+        assert instance.payload["model_bindings"]["diffusion_models"] == "minimax-h3-diffusion"
+
+
+def test_readiness_never_claims_real_inference(prep):
+    client, factory, settings = prep
+    readiness = client.get("/api/v1/setup/readiness").json()
+    layers = {layer["layer"]: layer for layer in readiness["layers"]}
+    assert layers["L5_real_inference"]["status"] == "NOT_VERIFIED"
+    assert "never inferred" in layers["L5_real_inference"]["note"]
+    assert readiness["production_gates"]["operator_configured"] is True
+    assert "approve each install/instance plan" in " ".join(readiness["human_steps"])
+
+
+def test_open_probes_require_no_operator(prep):
+    client, factory, settings = prep
+    for path in ("/api/v1/setup/environment", "/api/v1/setup/catalog", "/api/v1/setup/readiness"):
+        response = client.get(path)
+        assert response.status_code == 200, (path, response.text)
+
+
+def test_environment_probe_reports_this_host(tmp_path):
+    from shine.comfyops.host_env import probe_host_environment, setup_blockers
+
+    report = probe_host_environment(tmp_path / "probe-data")
+    assert report["gpu"]["status"] in {"OK", "BLOCKED"}
+    assert set(report["tools"]) == {"uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe"}
+    blockers = setup_blockers(report)
+    for blocker in blockers:
+        assert blocker["code"]

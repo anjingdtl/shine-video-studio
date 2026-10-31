@@ -1,5 +1,13 @@
 # LOCAL_TECH_FINAL_CLOSURE_V3 · 进度交接文档
 
+> **新机部署轮（2026-10-31/11-01，分支 codex/new-machine-deployment，未推送）**：在 78c622c 基线上建设了空白 Windows 新机→生产就绪的完整链路：
+> bootstrap 入口（PS5.1 可跑）、只读环境探测、14 组件真实钉点部署清单（60.7GB，全部 READY），
+> 目录→安装计划→既有审批链→实例四步链→受管配置生成→六层就绪校验，以及 Web「新机设置」向导。
+> 28 项新增/更新测试全绿；定向回归 114 passed；全量后端 1193 项（结果以最终提交为准）；
+> Ruff/Alembic 新库/前端构建/uv sync --locked 全部通过。真实下载/安装/启动/推理 = NOT_RUN（需用户授权）。
+> 详见 [NEW_MACHINE_DEPLOYMENT.md](NEW_MACHINE_DEPLOYMENT.md) / [TESTLOG](NEW_MACHINE_DEPLOYMENT_TESTLOG.md) / [CATALOG](NEW_MACHINE_DEPLOYMENT_CATALOG.md)。
+
+
 > **最新快照（2026-10-31，第二轮复审修复）**：修复基线=`81a92f3`，本轮修复与本文一并归档为本地 Git 提交。已关闭 EDL 元数据丢失租约后覆盖与 64 项窗口饥饿两项缺陷；正式新增 3 项回归，定向 23 passed，全量 **1178 passed / 1 skipped / 2 warnings**，其余本轮本地工程检查通过。没有新增迁移或依赖；原始反例和历史验收证据保留。详见 [本轮修复与验证](LOCAL_DELIVERY_FENCING_FIX_20261031.md)。以下状态按对应历史轮次阅读；真实影片待审与 NOT_RUN 项维持原边界，本轮仅做本地提交，未推送。
 
 > 状态快照时间：2026-10-31 11:45 (本地)。本文档由上一会话写入，供下一个 Agent 继续收官。

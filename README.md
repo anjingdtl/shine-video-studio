@@ -148,3 +148,36 @@ V1.3 adds isolated instance lifecycle and read-only external backup, pinned offl
 
 ## Security
 The repository must not contain `.env` values, provider keys, private assets, model weights, generated videos, local databases, or logs. Provider keys are stored outside SQLite through Windows DPAPI or a permission-restricted local file and never returned by the API. Remote semantic review requires explicit project consent. Third-party source/license audits and the GPL plugin boundary remain traceable.
+
+## 新机部署（第一套正式支持的配置）
+
+**支持范围**：Windows 10/11 x64 · NVIDIA ≥15.3GiB 显存（RTX 5080 16GB 级）· ≥30GiB RAM · ≥120GB 空闲磁盘。
+完整报告与边界见 [docs/NEW_MACHINE_DEPLOYMENT.md](docs/NEW_MACHINE_DEPLOYMENT.md)。
+
+**唯一推荐入口**（系统自带 PowerShell 即可，无需预装任何工具）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+```
+
+它按固定版本+SHA-256 安装缺失的 uv / Node 20 / PowerShell 7 / FFmpeg（用户级，不改系统），
+之后 `./scripts/start_shine.ps1 -Install` 照常启动。然后打开 `http://127.0.0.1:5173` 的
+**新机设置**面板，按向导完成：环境检查 → 部署清单确认 → 生成安装计划 → 逐计划人工批准执行
+（受控下载+哈希校验+隔离安装）→ 实例四步（CREATE/INSTALL_NODE/BIND_MODELS/START）→
+生成受管配置 → 就绪检查。真实推理就绪层只能由真实生产证据点亮，Mock/Fake 永不冒充。
+
+**自动安装内容**：Shine 自身依赖（uv sync/npm ci）、隔离 ComfyUI 实例（固定 commit b0b74356）、
+93 个哈希锁定的 Windows wheels、5 个节点包、H3 Ref2VA INT8 模型栈（UNet/文本编码器/双 VAE/LoRA/PDD），
+以及本地 VLM/ASR 审片模型（Qwen3-VL-8B-FP8 / Qwen3-ASR-0.6B）。清单明细见
+`config/deployment/h3-ref2va-windows-x64.json`（14 组件，60.7GB）。
+
+**必须的人工作业**：每张安装/实例计划的一次性批准；LLM provider 凭据录入（DPAPI/0600 本机存储）；
+主资产上传与人工晋升；音色/风格冻结；审片 needs_review 的人工裁决与异常对账。
+系统不代替用户做资产批准、风格冻结或最终艺术判断。
+
+**恢复/卸载**：所有部署物都在 `SHINE_DATA_DIR` 下（`comfyops/isolated-packages`、`comfyops/instances`、`setup/`）；
+删除这些目录 + `backend/.venv` + `frontend/node_modules` + `%LOCALAPPDATA%\Shine` 即恢复原状，
+已有外部 ComfyUI 实例从不被触碰（既有保护语义不变）。
+
+**真实验证范围**：本轮为 IMPLEMENTED / TESTED_OFFLINE（含真实小文件下载算法验证与 37MB 归档实测哈希）。
+真实全量下载（60.7GB）、干净 Windows 安装、真实 ComfyUI 启动与真实 H3 推理均为 NOT_RUN，需用户授权后执行。

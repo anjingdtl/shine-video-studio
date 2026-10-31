@@ -212,3 +212,67 @@ still require legal review. Other installed extensions may bypass or replace thi
 the adapter alone is not proof of exclusive ownership or safe process termination.
 
 Windows API 参考（2026-10-29）：[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[OpenJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-openjobobjectw) 和 [Job Object Security and Access Rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights)。命名 Job 可由其他进程按权限打开，kill-on-close 仅在最后一个句柄关闭时触发；因此只读检查应及时关闭句柄，不能把监督进程退出直接等同于资源已释放。本项目自行实现调用，未复制第三方代码；实际 Worker 接入和 ACL 边界尚待验证。
+
+## 2026-10-31: new-machine deployment catalog pins
+
+New-machine deployment requires a versioned material catalog. All pins below were
+read from the upstreams' own published metadata on 2026-10-31 and recorded under
+`config/deployment/_upstream-pins/` (archives/tools/wheels/models). Nothing was
+copied into Shine source; source archives are installed as isolated ComfyUI
+instance trees under the existing controlled installer, never linked into the
+main project. No large model weights were downloaded; HF LFS metadata
+(SHA-256/size) and small non-LFS files (bytes downloaded and hashed) provide the
+recorded digests.
+
+### Source archives (installed as isolated instance trees, never copied into Shine)
+| Component | Pinned revision | License (checked) | Verification |
+|---|---|---|---|
+| Comfy-Org/ComfyUI (v0.39.0 line) | `b0b743566f65daafc423b4fea8a2fbda94b3384a` | GPL-3.0-only | codeload zip downloaded, SHA-256 recorded |
+| kijai/ComfyUI-KJNodes | `ab72eda7ffad6280422d71ab7d54d3fb87c0ba18` | GPL-3.0-only | same |
+| Kosinkadink/ComfyUI-VideoHelperSuite | `4d907bee61e92c2e65af3bd6383a4e4d356126d1` | GPL-3.0-only | same |
+| Jalen-Brunson/ComfyUI-MiniMax-H3-PDD-Acc | `311a65dd53832d8a5f8177a9d5fb923c09e35a90` | Apache-2.0 | same |
+| kijai/ComfyUI-SolAttn_triton | `26d816ebd4f1e43a2c6e4d4759be3137f10a7a73` | Apache-2.0 | same |
+| LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler | `40316cf008b2fd8663263270669eb4da23f89d2c` | MIT | same |
+
+KJNodes/VHS/ComfyUI
+stay GPL-isolated: they are downloaded and installed into the isolated ComfyUI
+instance only, exactly like the Myang plugin boundary. The PDD weights load from
+`models/pdd_acc` (verified against the pack's own `nodes.py`), so the isolated
+BIND_MODELS families now include `pdd_acc`.
+
+### Wheels (93, Windows py3.12, 4.2GB)
+Full dependency closure compiled with `uv pip compile --python-platform windows
+--python-version 3.12 --generate-hashes`; per-package win/cp312 (or abi3 /
+py3-none) wheel digests fetched from PyPI JSON and cross-checked against the
+compiled lock hashes. torch/torchvision/torchaudio 2.7.1+cu128 pins come from
+the official cu128 index anchors (`download-r2.pytorch.org` CDN hashes). All 93
+digests are real upstream-published values; no hash was computed from partial
+bytes. qwen-asr/qwen-tts SDKs are excluded from the closure (sdist-only `sox`,
+gradio); they remain optional manual voiceops overlays.
+
+### Models (7 components, 56.5GB planned)
+| Component | Repo @ revision | License (checked from card metadata) | Planned bytes |
+|---|---|---|---:|
+| Ref2VA UNet pruned INT8 ConvRot | Comfy-Org/MiniMax-H3 @ `e5eb578a89295337b8ff433a035929ce0279e0b6` | minimax-h3-community-license | 20,970,379,616 |
+| Text encoder nvfp4/awq (its own pinned quantized form) | same | minimax-h3-community-license | 15,687,142,551 |
+| video VAE fp16 + audio VAE fp32 | same | minimax-h3-community-license | 5,813,063,304 |
+| h3-realism-people LoRA | fal/MiniMax-H3-Realism-People-LoRA @ `039cc8579d7aa357a882d7f4111b25da4f72dccc` | minimax-h3-community-license (card) | 131,229,656 |
+| PDD Acc 8-step (original alibaba-pai keys) | alibaba-pai/MiniMax-H3-Acc-LoRAs @ `335001fb9e5455d68a0caa18ec2e319072150328` | minimax-h3-community-license-agreement (card) | 1,372,450,680 |
+| Qwen3-VL-8B-Instruct-FP8 (VLM review) | Qwen @ `9cdc6310a8cb770ce18efaf4e9935334512aee45` | Apache-2.0 (card) | 10,605,572,552 |
+| Qwen3-ASR-0.6B (ASR review) | HF tree read at `5eb144179a02acc5e5ba31e748d22b0cf3e303b0` | Apache-2.0 (card) | 1,880,619,678 |
+
+Card license names were read from the HF card metadata (`expand[]=cardData`) at
+the pinned revisions; community-license cards link the MiniMax H3 Community
+License. These are source/license facts, not rights approval, download approval,
+or human quality acceptance.
+
+### Tools (bootstrap manifest)
+uv 0.9.5 (GitHub release digest), Node 20.19.5 (SHASUMS256.txt), PowerShell
+7.4.12 (GitHub release digest), FFmpeg 8.1.3 BtbN build pinned at tag
+`autobuild-2026-10-31-12-59` (GitHub release digest). Downloaded archives are
+verified by SHA-256 + exact size before extraction; user-level install, no
+system-wide changes.
+
+The vendored `shine_h3_sampling_mode.py` is project-authored (operator's own
+file), verified byte-identical in its code body to the original on the
+developer machine; no third-party code is involved.

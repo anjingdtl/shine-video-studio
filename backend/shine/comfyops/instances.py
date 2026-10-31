@@ -109,7 +109,7 @@ def plan_operation(db, settings, body):
     for identity_ in body.model_bindings.values():
         if not db.get(ModelPackage, identity_):
             raise HTTPException(409, "MODEL_PACKAGE_REQUIRED")
-    if set(body.model_bindings) - {"checkpoints", "diffusion_models", "vae", "loras", "text_encoders"}:
+    if set(body.model_bindings) - {"checkpoints", "diffusion_models", "vae", "loras", "text_encoders", "pdd_acc"}:
         raise HTTPException(422, "MODEL_BINDING_KIND_INVALID")
     if body.action == "ROLLBACK" and not body.snapshot_id:
         body = body.model_copy(update={"snapshot_id": instance.payload.get("last_attempt")})

@@ -54,6 +54,41 @@ def test_manifest_cannot_authorize_arbitrary_hosts(hosts):
         spec(hosts)
 
 
+def test_github_origin_may_use_only_github_release_assets(tmp_path=None):
+    """New-machine deployment pins GitHub source archives and release assets.
+
+    The origin set grows from HF-only to {huggingface.co, github.com} (documented
+    in docs/NEW_MACHINE_DEPLOYMENT.md); each origin may still only redirect to
+    its own operator's CDN, never across operators.
+    """
+    github_release = PackageFile(
+        url="https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-pc-windows-msvc.zip",
+        relative_path="uv.zip",
+        sha256=hashlib.sha256(b"data").hexdigest(),
+        size=4,
+        redirect_hosts=["release-assets.githubusercontent.com"],
+    )
+    assert github_release.redirect_hosts == ["release-assets.githubusercontent.com"]
+    # Cross-operator redirect mix stays rejected: a GitHub origin may not
+    # authorize the HF CDN, and HF may not authorize GitHub's asset CDN.
+    with pytest.raises((ValidationError, ValueError)):
+        PackageFile(
+            url="https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-pc-windows-msvc.zip",
+            relative_path="uv.zip",
+            sha256=hashlib.sha256(b"data").hexdigest(),
+            size=4,
+            redirect_hosts=["us.aws.cdn.hf.co"],
+        )
+    with pytest.raises((ValidationError, ValueError)):
+        PackageFile(
+            url="https://huggingface.co/Qwen/model/resolve/" + "a" * 40 + "/model.safetensors",
+            relative_path="model.safetensors",
+            sha256=hashlib.sha256(b"data").hexdigest(),
+            size=4,
+            redirect_hosts=["release-assets.githubusercontent.com"],
+        )
+
+
 def test_policy_only_available_for_official_hf_origin():
     value = spec(["us.aws.cdn.hf.co"]).model_dump()
     value["url"] = "https://github.com/Qwen/model"

@@ -19,6 +19,7 @@ from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.installer import (
+    TRUSTED_DOWNLOAD_HOSTS,
     ControlledDownloader,
     HTTPTransport,
     LocalInstaller,
@@ -205,7 +206,7 @@ def main():
     factory = make_session_factory(make_engine(settings.database_url))
     root: Path = settings.data_dir / "comfyops" / "isolated-packages"
     installer = LocalInstaller(
-        root, ControlledDownloader({"huggingface.co", "raw.githubusercontent.com", "github.com"}, HTTPTransport())
+        root, ControlledDownloader(TRUSTED_DOWNLOAD_HOSTS, HTTPTransport())
     )
     identity = execute_approved(factory, settings, args.plan_id, args.plan_sha256, actor, installer)
     print(f"FILES_VERIFIED; attempt={identity}; runtime and GPU validation remain pending")

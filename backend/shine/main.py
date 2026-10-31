@@ -21,6 +21,7 @@ from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
 from shine.api_preparation import Decision
 from shine.api_review import router as review_router
+from shine.api_setup import router as setup_router
 from shine.api_subtitles import router as subtitles_router
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
@@ -366,6 +367,7 @@ def create_app(
     app.include_router(subtitles_router)
     app.include_router(operator_router)
     app.include_router(instances_router)
+    app.include_router(setup_router)
     from shine.api_preparation import router as preparation_router
 
     app.include_router(preparation_router)

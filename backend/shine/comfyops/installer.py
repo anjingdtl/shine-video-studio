@@ -22,6 +22,11 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+REDIRECT_POLICY_BY_ORIGIN = {
+    "huggingface.co": {"us.aws.cdn.hf.co"},
+    "github.com": {"codeload.github.com", "release-assets.githubusercontent.com"},
+}
+
 
 class PackageFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,12 +34,17 @@ class PackageFile(BaseModel):
     relative_path: str
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     size: int = Field(gt=0)
-    redirect_hosts: list[Literal["huggingface.co", "us.aws.cdn.hf.co"]] = Field(default_factory=list, max_length=2)
+    redirect_hosts: list[
+        Literal["huggingface.co", "us.aws.cdn.hf.co", "codeload.github.com", "release-assets.githubusercontent.com"]
+    ] = Field(default_factory=list, max_length=2)
 
     @model_validator(mode="after")
     def redirect_policy(self):
         if self.redirect_hosts:
-            check_url(self.url, {"huggingface.co"})
+            origin = urlsplit(self.url).hostname
+            allowed = REDIRECT_POLICY_BY_ORIGIN.get(origin, set()) | {origin}
+            if allowed is None or not set(self.redirect_hosts) <= allowed:
+                raise ValueError("UNTRUSTED_DOWNLOAD_URL")
             if len(set(self.redirect_hosts)) != len(self.redirect_hosts):
                 raise ValueError("DUPLICATE_REDIRECT_HOST")
         return self
@@ -51,7 +61,7 @@ class PackageFile(BaseModel):
 class PackageSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
-    kind: str = Field(pattern=r"^(model|node)$")
+    kind: str = Field(pattern=r"^(model|node|source|wheel)$")
     revision: str = Field(min_length=1, max_length=128)
     license_id: str = Field(min_length=1)
     usage: str = Field(pattern=r"^(research|commercial)$")
@@ -113,6 +123,22 @@ def check_url(url: str, hosts: set[str], *, signed_query=False):
         or (parsed.query and not signed_query)
     ):
         raise ValueError("UNTRUSTED_DOWNLOAD_URL")
+
+
+# Deliberate, documented widening for the first supported new-machine deployment:
+# source archives (codeload), GitHub release assets, PyPI wheel bytes and the
+# official CUDA wheel index. Everything else stays refused.
+TRUSTED_DOWNLOAD_HOSTS = frozenset(
+    {
+        "huggingface.co",
+        "raw.githubusercontent.com",
+        "github.com",
+        "codeload.github.com",
+        "release-assets.githubusercontent.com",
+        "files.pythonhosted.org",
+        "download.pytorch.org",
+    }
+)
 
 
 class DownloadStreamInterrupted(ValueError):
