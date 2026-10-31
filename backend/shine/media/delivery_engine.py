@@ -19,7 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
@@ -416,7 +416,9 @@ def run_delivery_order(
         ffprobe_path=settings.ffprobe_path,
     )
     try:
-        with session_factory.begin() as db:
+        # Build local values only. No dirty order may survive across assembly:
+        # a worker can lose its claim while FFmpeg is running.
+        with session_factory() as db:
             order = db.get(DeliveryOrder, order_id)
             series = db.get(ProductionSeries, order.series_id)
             edl, edl_source, edit_rules = build_auto_edl(
@@ -425,9 +427,6 @@ def run_delivery_order(
                 ffmpeg_path=settings.ffmpeg_path,
                 asset_root=asset_root,
             )
-            order.edl_payload = edl
-            order.edl_source = edl_source
-            order.edit_rules = edit_rules
             subtitle_ass = None
             subtitle_sha256 = None
             if order.subtitle_revision:
@@ -451,63 +450,66 @@ def run_delivery_order(
                 )
                 for clip in edl["clips"]
             ]
-            with session_factory() as work_db:
-                result = assembler.assemble(
-                    work_db,
-                    project_id,
-                    clips,
-                    fps=24.0,
-                    width=None,
-                    height=None,
-                    crf=18,
-                    subtitle_ass=subtitle_ass,
-                    subtitle_sha256=subtitle_sha256,
-                    reuse_existing=True,
-                )
-                work_db.commit()
-            with session_factory.begin() as db:
-                if not _write_back(db, order_id, claim, {
-                    "status": "DELIVERED",
-                    "artifact_id": result.artifact.id,
-                    "delivered_at": utcnow(),
-                    "failure_code": None,
-                    "failure_note": None,
-                    "state_version": DeliveryOrder.state_version + 1,
-                }):
-                    return _order_status_now(db, order_id)
-                series = db.get(ProductionSeries, series_id)
-                series.delivery_result = {
-                    "order_id": order_id,
+        with session_factory() as work_db:
+            result = assembler.assemble(
+                work_db,
+                project_id,
+                clips,
+                fps=24.0,
+                width=None,
+                height=None,
+                crf=18,
+                subtitle_ass=subtitle_ass,
+                subtitle_sha256=subtitle_sha256,
+                reuse_existing=True,
+            )
+            work_db.commit()
+        with session_factory.begin() as db:
+            if not _write_back(db, order_id, claim, {
+                "status": "DELIVERED",
+                "artifact_id": result.artifact.id,
+                "delivered_at": utcnow(),
+                "edl_payload": edl,
+                "edl_source": edl_source,
+                "edit_rules": edit_rules,
+                "failure_code": None,
+                "failure_note": None,
+                "state_version": DeliveryOrder.state_version + 1,
+            }):
+                return _order_status_now(db, order_id)
+            series = db.get(ProductionSeries, series_id)
+            series.delivery_result = {
+                "order_id": order_id,
+                "version": version,
+                "artifact_id": result.artifact.id,
+                "sha256": result.artifact.sha256,
+                "byte_size": result.artifact.byte_size,
+                "duration_s": result.duration_s,
+                "width": result.width,
+                "height": result.height,
+                "fps": result.fps,
+                "review_state": result.review_state,
+                "edl_source": edl_source,
+            }
+            from shine.services import add_audit
+
+            add_audit(
+                db,
+                "worker",
+                "AUTO_DELIVERY_ASSEMBLED",
+                "delivery_order",
+                order_id,
+                {
+                    "series_id": series_id,
                     "version": version,
                     "artifact_id": result.artifact.id,
                     "sha256": result.artifact.sha256,
-                    "byte_size": result.artifact.byte_size,
-                    "duration_s": result.duration_s,
-                    "width": result.width,
-                    "height": result.height,
-                    "fps": result.fps,
                     "review_state": result.review_state,
                     "edl_source": edl_source,
-                }
-                from shine.services import add_audit
-
-                add_audit(
-                    db,
-                    "worker",
-                    "AUTO_DELIVERY_ASSEMBLED",
-                    "delivery_order",
-                    order_id,
-                    {
-                        "series_id": series_id,
-                        "version": version,
-                        "artifact_id": result.artifact.id,
-                        "sha256": result.artifact.sha256,
-                        "review_state": result.review_state,
-                        "edl_source": edl_source,
-                        "clip_count": len(result.clips),
-                    },
-                    project_id=project_id,
-                )
+                    "clip_count": len(result.clips),
+                },
+                project_id=project_id,
+            )
     except DeliveryBlock as exc:
         with session_factory.begin() as db:
             if not _write_back(db, order_id, claim, {
@@ -563,19 +565,22 @@ def run_pending_deliveries(session_factory, *, settings, asset_root: Path, worke
     """Drive the runnable auto-delivery orders in one bounded scheduling round.
 
     One call is one round with a definite, finite scope: it snapshots the
-    runnable PENDING/ASSEMBLING orders once and attempts each order at most
-    once.  An order whose assembly lease is still held costs one no-op attempt
-    and the round ends, so the Worker returns to its other duties (series,
-    ordinary jobs, heartbeat) instead of spinning on the same row for the rest
-    of a 2400-second lease.  An order that goes back to PENDING for a bounded
-    retry is picked up again on the next round, not inside this one.
+    PENDING orders and expired ASSEMBLING leases once and attempts each order
+    at most once. Occupied leases are excluded before the batch limit so they
+    cannot hide runnable orders. The Worker then returns to its other duties
+    (series, ordinary jobs, heartbeat). An order that goes back to PENDING for
+    a bounded retry is picked up again on the next round, not inside this one.
     """
     processed = 0
+    cutoff = utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS)
     with session_factory() as db:
         runnable = db.execute(
             select(DeliveryOrder.id, DeliveryOrder.state_version)
-            .where(DeliveryOrder.status.in_(["PENDING", "ASSEMBLING"]))
-            .order_by(DeliveryOrder.updated_at)
+            .where(or_(
+                DeliveryOrder.status == "PENDING",
+                and_(DeliveryOrder.status == "ASSEMBLING", DeliveryOrder.updated_at <= cutoff),
+            ))
+            .order_by(DeliveryOrder.updated_at, DeliveryOrder.id)
             .limit(64)
         ).all()
     for order_id, seen_version in runnable:

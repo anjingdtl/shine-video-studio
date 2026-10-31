@@ -467,7 +467,7 @@ def test_worker_loop_runs_pending_deliveries(api):
     with factory() as db:
         assert db.get(DeliveryOrder, order.id).status == "DELIVERED"
 def test_unexpired_assembly_does_not_starve_other_orders(api):
-    """A held assembly lease costs one no-op attempt; other orders still run."""
+    """A held assembly lease is excluded; other orders still run."""
     state = _finished_two_shot_series(api)
     factory, settings = state["factory"], state["settings"]
     with factory.begin() as db:
@@ -481,8 +481,8 @@ def test_unexpired_assembly_does_not_starve_other_orders(api):
         other_order = enqueue_auto_delivery(db, other_series)
     processed = run_pending_deliveries(factory, settings=settings,
                                        asset_root=settings.data_dir, worker_id="w-recover")
-    # One progressed order: the other PENDING order. The held assembly is
-    # attempted once, makes no progress and burns no attempt budget.
+    # Only the other PENDING order progresses. The held assembly is excluded
+    # from the scheduling round and burns no attempt budget.
     assert processed == 1
     with factory() as db:
         held = db.get(DeliveryOrder, order.id)
@@ -513,7 +513,8 @@ def test_worker_restart_does_not_busy_loop_and_recovers_on_expiry(api, monkeypat
     monkeypatch.setattr(engine_module, "run_delivery_order", bounded)
     first = run_pending_deliveries(factory, settings=settings,
                                    asset_root=settings.data_dir, worker_id="restart")
-    assert attempts == ["ASSEMBLING"]
+    # Occupied leases do not consume a scheduling slot or a claim attempt.
+    assert attempts == []
     assert first == 0
     with factory.begin() as db:
         row = db.get(DeliveryOrder, order.id)
@@ -602,3 +603,80 @@ def test_stolen_lease_during_assembly_is_never_overwritten(api, monkeypatch):
         assert row.status == "ASSEMBLING" and row.worker_id == "worker-B"
         assert row.failure_code is None
         assert row.state_version == 2
+
+
+@pytest.mark.parametrize("held_count", [64, 65])
+def test_held_assemblies_cannot_fill_the_scheduling_window(api, held_count):
+    """Filter occupied leases before the batch limit so a pending order runs."""
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    held_ids = []
+    with factory.begin() as db:
+        for _ in range(held_count):
+            series = ProductionSeries(project_id=state["project"], status="COMPLETED")
+            db.add(series)
+            db.flush()
+            order = DeliveryOrder(
+                project_id=state["project"], series_id=series.id,
+                status="ASSEMBLING", worker_id="live-worker", attempt_count=1,
+                updated_at=utcnow() - timedelta(seconds=60),
+            )
+            db.add(order)
+            db.flush()
+            held_ids.append(order.id)
+        pending = enqueue_auto_delivery(db, db.get(ProductionSeries, state["series"]))
+
+    processed = run_pending_deliveries(
+        factory, settings=settings, asset_root=settings.data_dir, worker_id="available-worker",
+    )
+    assert processed == 1
+    with factory() as db:
+        assert db.get(DeliveryOrder, pending.id).status == "DELIVERED"
+        for identity in held_ids:
+            held = db.get(DeliveryOrder, identity)
+            assert (held.status, held.worker_id, held.state_version, held.attempt_count) == (
+                "ASSEMBLING", "live-worker", 0, 1,
+            )
+
+
+def test_lost_claim_cannot_commit_edl_metadata_after_successful_assembly(api, monkeypatch):
+    """A successful stale assembly cannot commit over the new owner's EDL."""
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    with factory.begin() as db:
+        order = enqueue_auto_delivery(db, db.get(ProductionSeries, state["series"]))
+    original = DeliveryAssembler.assemble
+    new_owner_metadata = {
+        "edl_source": "frozen_edit_intent",
+        "edl_payload": {"owner": "worker-B"},
+        "edit_rules": {"owner": "worker-B"},
+    }
+    snapshot = {}
+
+    def steal_then_assemble(self, *args, **kwargs):
+        with factory.begin() as db:
+            db.get(DeliveryOrder, order.id).updated_at = (
+                utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS + 1)
+            )
+        with factory.begin() as db:
+            assert _claim_order(db, db.get(DeliveryOrder, order.id), "worker-B")
+        with factory.begin() as db:
+            row = db.get(DeliveryOrder, order.id)
+            for name, value in new_owner_metadata.items():
+                setattr(row, name, value)
+        with factory() as db:
+            snapshot["updated_at"] = db.get(DeliveryOrder, order.id).updated_at
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DeliveryAssembler, "assemble", steal_then_assemble)
+    result = run_delivery_order(
+        factory, order.id, settings=settings, asset_root=settings.data_dir, worker_id="worker-A",
+    )
+    assert result == "ASSEMBLING"
+    with factory() as db:
+        row = db.get(DeliveryOrder, order.id)
+        assert (row.worker_id, row.state_version, row.attempt_count) == ("worker-B", 2, 2)
+        assert {name: getattr(row, name) for name in new_owner_metadata} == new_owner_metadata
+        assert row.updated_at == snapshot["updated_at"]
+        assert row.artifact_id is None
+        assert db.get(ProductionSeries, state["series"]).delivery_result is None
