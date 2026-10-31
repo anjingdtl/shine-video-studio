@@ -3,6 +3,7 @@
 The index is the auditable map between the recorded evidence and the bytes on
 disk.  Every file under the root is hashed, so a later reader can prove that a
 screenshot, a log or a rendered movie is the very file the run produced.
+The index never lists itself: the output file is excluded by path, so repeating the build stays stable.
 
     python scripts/build_evidence_index.py --root .local-acceptance/final-closure-v3 \
         --out .local-acceptance/final-closure-v3/evidence-index.json
@@ -28,12 +29,23 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build(root: Path, *, skip: list[str]) -> dict:
+def build(root: Path, *, skip: list[str], out: Path) -> dict:
+    """Hash every evidence file except the index itself.
+
+    The output index is excluded by path, so repeating the build never
+    compares a fresh index against the stale hash of its own predecessor.
+    """
+    try:
+        out_relative = out.resolve().relative_to(root).as_posix()
+    except ValueError:
+        out_relative = None
     files = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(root).as_posix()
+        if relative == out_relative:
+            continue
         if any(relative == pattern or relative.startswith(pattern) for pattern in skip):
             continue
         files.append({"path": relative, "bytes": path.stat().st_size, "sha256": sha256_of(path)})
@@ -62,7 +74,7 @@ def main() -> int:
     if not root.is_dir():
         print(f"not a directory: {root}")
         return 2
-    index = build(root, skip=args.skip)
+    index = build(root, skip=args.skip, out=Path(args.out))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")

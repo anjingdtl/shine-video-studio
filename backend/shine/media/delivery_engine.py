@@ -15,10 +15,11 @@ import hashlib
 import json
 import logging
 import subprocess
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
@@ -269,30 +270,116 @@ def _short(value: str | None) -> str | None:
 
 
 def _claim_order(db: Session, order: DeliveryOrder, worker_id: str | None) -> bool:
-    """Move one PENDING order into ASSEMBLING, or recover a stale ASSEMBLING row."""
-    now = utcnow()
-    if order.status == "ASSEMBLING":
-        from datetime import timedelta
+    """Atomically move one PENDING order into ASSEMBLING, or reclaim an expired lease.
 
-        stale_after = (order.updated_at or now) + timedelta(seconds=ASSEMBLY_LEASE_SECONDS)
-        if stale_after > now:
-            return False
-        order.attempt_count += 1
-        if order.attempt_count > order.max_attempts:
-            order.status = "FAILED"
-            order.failure_code = "DELIVERY_ASSEMBLY_LEASE_LOST"
-            return False
-        order.status = "PENDING"
-        order.state_version += 1
-        order.worker_id = None
+    The claim is a conditional UPDATE judged by its affected-row count, so two
+    workers that read the same PENDING row cannot both win: the loser's UPDATE
+    matches zero rows because the winner already moved the row.  The condition
+    carries the row identity we read (status and state_version); an expired
+    ASSEMBLING lease is only recoverable when its ``updated_at`` is past the
+    lease window, and the attempt budget is consumed atomically with the
+    reclaim, so a stale reader can never resurrect an exhausted budget.
+    """
+    now = utcnow()
+    read_version = order.state_version
+    fresh = db.execute(
+        update(DeliveryOrder)
+        .where(
+            DeliveryOrder.id == order.id,
+            DeliveryOrder.status == "PENDING",
+            DeliveryOrder.state_version == read_version,
+        )
+        .values(
+            status="ASSEMBLING",
+            worker_id=worker_id,
+            state_version=DeliveryOrder.state_version + 1,
+            attempt_count=DeliveryOrder.attempt_count + 1,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if fresh.rowcount == 1:
         return True
-    if order.status != "PENDING":
+
+    cutoff = now - timedelta(seconds=ASSEMBLY_LEASE_SECONDS)
+    closed = db.execute(
+        update(DeliveryOrder)
+        .where(
+            DeliveryOrder.id == order.id,
+            DeliveryOrder.status == "ASSEMBLING",
+            DeliveryOrder.state_version == read_version,
+            DeliveryOrder.updated_at <= cutoff,
+            DeliveryOrder.attempt_count >= DeliveryOrder.max_attempts,
+        )
+        .values(
+            status="FAILED",
+            failure_code="DELIVERY_ASSEMBLY_LEASE_LOST",
+            state_version=DeliveryOrder.state_version + 1,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if closed.rowcount == 1:
         return False
-    order.status = "ASSEMBLING"
-    order.worker_id = worker_id
-    order.state_version += 1
-    order.attempt_count += 1
-    return True
+
+    reclaimed = db.execute(
+        update(DeliveryOrder)
+        .where(
+            DeliveryOrder.id == order.id,
+            DeliveryOrder.status == "ASSEMBLING",
+            DeliveryOrder.state_version == read_version,
+            DeliveryOrder.updated_at <= cutoff,
+            DeliveryOrder.attempt_count < DeliveryOrder.max_attempts,
+        )
+        .values(
+            status="ASSEMBLING",
+            worker_id=worker_id,
+            state_version=DeliveryOrder.state_version + 1,
+            attempt_count=DeliveryOrder.attempt_count + 1,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return reclaimed.rowcount == 1
+
+
+class DeliveryClaim(NamedTuple):
+    """The identity a claimer must present on every write-back.
+
+    A claim establishes (owner, state_version); every completion, failure and
+    retry write-back re-asserts this pair as a conditional UPDATE, so a worker
+    that lost its lease can never overwrite the new owner or a final state.
+    """
+
+    owner: str | None
+    version: int
+
+
+def _write_back(db: Session, order_id: str, claim: DeliveryClaim, values: dict[str, Any]) -> bool:
+    """Apply one order write-back only while this worker still owns the claim.
+
+    The guard is the claim token (owner + state_version); the affected-row
+    count decides.  When the guard matches zero rows the caller must leave the
+    row alone: the new owner or a final state is never overwritten, and the
+    caller reports the authoritative status instead of its own claim.
+    """
+    statement = (
+        update(DeliveryOrder)
+        .where(
+            DeliveryOrder.id == order_id,
+            DeliveryOrder.worker_id == claim.owner,
+            DeliveryOrder.state_version == claim.version,
+        )
+        .values(**values)
+    )
+    result = db.execute(statement)
+    return result.rowcount == 1
+
+
+def _order_status_now(db: Session, order_id: str) -> str:
+    """The authoritative status after a lost write-back, for honest reporting."""
+    row = db.get(DeliveryOrder, order_id)
+    return row.status if row else "GONE"
 
 
 def run_delivery_order(
@@ -311,9 +398,18 @@ def run_delivery_order(
     """
     with session_factory.begin() as db:
         order = db.get(DeliveryOrder, order_id)
-        if order is None or not _claim_order(db, order, worker_id):
-            return order.status if order else "GONE"
+        if order is None:
+            return "GONE"
+        read_version = order.state_version
+        if not _claim_order(db, order, worker_id):
+            db.refresh(order)
+            return order.status
+        claim = DeliveryClaim(owner=worker_id, version=read_version + 1)
         project_id = order.project_id
+        series_id = order.series_id
+        version = order.version
+        attempt = order.attempt_count + 1
+        max_attempts = order.max_attempts
     assembler = DeliveryAssembler(
         asset_root=asset_root,
         ffmpeg_path=settings.ffmpeg_path,
@@ -370,16 +466,19 @@ def run_delivery_order(
                 )
                 work_db.commit()
             with session_factory.begin() as db:
-                order = db.get(DeliveryOrder, order_id)
-                series = db.get(ProductionSeries, order.series_id)
-                order.status = "DELIVERED"
-                order.artifact_id = result.artifact.id
-                order.delivered_at = utcnow()
-                order.failure_code = None
-                order.failure_note = None
+                if not _write_back(db, order_id, claim, {
+                    "status": "DELIVERED",
+                    "artifact_id": result.artifact.id,
+                    "delivered_at": utcnow(),
+                    "failure_code": None,
+                    "failure_note": None,
+                    "state_version": DeliveryOrder.state_version + 1,
+                }):
+                    return _order_status_now(db, order_id)
+                series = db.get(ProductionSeries, series_id)
                 series.delivery_result = {
-                    "order_id": order.id,
-                    "version": order.version,
+                    "order_id": order_id,
+                    "version": version,
                     "artifact_id": result.artifact.id,
                     "sha256": result.artifact.sha256,
                     "byte_size": result.artifact.byte_size,
@@ -388,7 +487,7 @@ def run_delivery_order(
                     "height": result.height,
                     "fps": result.fps,
                     "review_state": result.review_state,
-                    "edl_source": order.edl_source,
+                    "edl_source": edl_source,
                 }
                 from shine.services import add_audit
 
@@ -397,95 +496,96 @@ def run_delivery_order(
                     "worker",
                     "AUTO_DELIVERY_ASSEMBLED",
                     "delivery_order",
-                    order.id,
+                    order_id,
                     {
-                        "series_id": order.series_id,
-                        "version": order.version,
+                        "series_id": series_id,
+                        "version": version,
                         "artifact_id": result.artifact.id,
                         "sha256": result.artifact.sha256,
                         "review_state": result.review_state,
-                        "edl_source": order.edl_source,
+                        "edl_source": edl_source,
                         "clip_count": len(result.clips),
                     },
-                    project_id=order.project_id,
+                    project_id=project_id,
                 )
-                order.state_version += 1
     except DeliveryBlock as exc:
-            with session_factory.begin() as db:
-                order = db.get(DeliveryOrder, order_id)
-                order.status = "BLOCKED"
-                order.failure_code = exc.code
-                order.state_version += 1
-                from shine.services import add_audit
-                add_audit(db, "worker", "AUTO_DELIVERY_BLOCKED", "delivery_order", order.id,
-                          {"series_id": order.series_id, "code": exc.code},
-                          project_id=order.project_id)
+        with session_factory.begin() as db:
+            if not _write_back(db, order_id, claim, {
+                "status": "BLOCKED",
+                "failure_code": exc.code,
+                "state_version": DeliveryOrder.state_version + 1,
+            }):
+                return _order_status_now(db, order_id)
+            from shine.services import add_audit
+            add_audit(db, "worker", "AUTO_DELIVERY_BLOCKED", "delivery_order", order_id,
+                      {"series_id": series_id, "code": exc.code},
+                      project_id=project_id)
     except DeliveryError as exc:
-            retryable = exc.status_code >= 500
-            with session_factory.begin() as db:
-                order = db.get(DeliveryOrder, order_id)
-                from shine.services import add_audit
-
-                if retryable and order.attempt_count < order.max_attempts:
-                    order.status = "PENDING"
-                    order.failure_code = _short(exc.detail)
-                    order.failure_note = "bounded retry scheduled"
-                else:
-                    order.status = "FAILED"
-                    order.failure_code = _short(exc.detail)
-                    order.failure_note = ("retries exhausted" if retryable
-                                          else "definite assembly refusal")
-                order.state_version += 1
-                add_audit(db, "worker", "AUTO_DELIVERY_FAILED", "delivery_order", order.id,
-                          {"series_id": order.series_id, "code": _short(exc.detail),
-                           "retryable": retryable, "attempt": order.attempt_count},
-                          project_id=order.project_id)
+        retryable = exc.status_code >= 500
+        with session_factory.begin() as db:
+            retry_scheduled = retryable and attempt < max_attempts
+            if not _write_back(db, order_id, claim, {
+                "status": "PENDING" if retry_scheduled else "FAILED",
+                "worker_id": None if retry_scheduled else claim.owner,
+                "failure_code": _short(exc.detail),
+                "failure_note": ("bounded retry scheduled" if retry_scheduled
+                                 else ("retries exhausted" if retryable
+                                       else "definite assembly refusal")),
+                "state_version": DeliveryOrder.state_version + 1,
+            }):
+                return _order_status_now(db, order_id)
+            from shine.services import add_audit
+            add_audit(db, "worker", "AUTO_DELIVERY_FAILED", "delivery_order", order_id,
+                      {"series_id": series_id, "code": _short(exc.detail),
+                       "retryable": retryable, "attempt": attempt},
+                      project_id=project_id)
     except Exception as exc:  # noqa: BLE001 - the order must record every failure mode
-            with session_factory.begin() as db:
-                order = db.get(DeliveryOrder, order_id)
-                from shine.services import add_audit
-
-                retryable = order.attempt_count < order.max_attempts and isinstance(
-                    exc, OSError | subprocess.SubprocessError
-                )
-                if retryable:
-                    order.status = "PENDING"
-                    order.failure_code = f"DELIVERY_WORKER_ERROR:{type(exc).__name__}"
-                    order.failure_note = "bounded retry scheduled"
-                else:
-                    order.status = "FAILED"
-                    order.failure_code = f"DELIVERY_WORKER_ERROR:{type(exc).__name__}"
-                    order.failure_note = _short(str(exc))
-                order.state_version += 1
-                add_audit(db, "worker", "AUTO_DELIVERY_FAILED", "delivery_order", order.id,
-                          {"series_id": order.series_id, "code": f"DELIVERY_WORKER_ERROR:{type(exc).__name__}",
-                           "retryable": retryable, "attempt": order.attempt_count},
-                          project_id=order.project_id)
-    return order.status
+        with session_factory.begin() as db:
+            retry_scheduled = attempt < max_attempts and isinstance(exc, OSError | subprocess.SubprocessError)
+            if not _write_back(db, order_id, claim, {
+                "status": "PENDING" if retry_scheduled else "FAILED",
+                "worker_id": None if retry_scheduled else claim.owner,
+                "failure_code": f"DELIVERY_WORKER_ERROR:{type(exc).__name__}",
+                "failure_note": ("bounded retry scheduled" if retry_scheduled else _short(str(exc))),
+                "state_version": DeliveryOrder.state_version + 1,
+            }):
+                return _order_status_now(db, order_id)
+            from shine.services import add_audit
+            add_audit(db, "worker", "AUTO_DELIVERY_FAILED", "delivery_order", order_id,
+                      {"series_id": series_id, "code": f"DELIVERY_WORKER_ERROR:{type(exc).__name__}",
+                       "retryable": retry_scheduled, "attempt": attempt},
+                      project_id=project_id)
+    with session_factory() as db:
+        return _order_status_now(db, order_id)
 
 
 def run_pending_deliveries(session_factory, *, settings, asset_root: Path, worker_id: str | None = None) -> int:
-    """Drive every runnable auto-delivery order; return how many were processed.
+    """Drive the runnable auto-delivery orders in one bounded scheduling round.
 
-    This is the recovery path: a worker that crashed between the last shot
-    and the assembly leaves a durable PENDING or stale ASSEMBLING order, and
-    any worker loop tick resumes it here.
+    One call is one round with a definite, finite scope: it snapshots the
+    runnable PENDING/ASSEMBLING orders once and attempts each order at most
+    once.  An order whose assembly lease is still held costs one no-op attempt
+    and the round ends, so the Worker returns to its other duties (series,
+    ordinary jobs, heartbeat) instead of spinning on the same row for the rest
+    of a 2400-second lease.  An order that goes back to PENDING for a bounded
+    retry is picked up again on the next round, not inside this one.
     """
     processed = 0
-    while True:
-        with session_factory() as db:
-            row = db.scalars(
-                select(DeliveryOrder)
-                .where(DeliveryOrder.status.in_(["PENDING", "ASSEMBLING"]))
-                .order_by(DeliveryOrder.updated_at)
-                .limit(1)
-            ).first()
-        if row is None:
-            break
+    with session_factory() as db:
+        runnable = db.execute(
+            select(DeliveryOrder.id, DeliveryOrder.state_version)
+            .where(DeliveryOrder.status.in_(["PENDING", "ASSEMBLING"]))
+            .order_by(DeliveryOrder.updated_at)
+            .limit(64)
+        ).all()
+    for order_id, seen_version in runnable:
         run_delivery_order(
-            session_factory, row.id, settings=settings, asset_root=asset_root, worker_id=worker_id
+            session_factory, order_id, settings=settings, asset_root=asset_root, worker_id=worker_id
         )
-        processed += 1
+        with session_factory() as db:
+            current = db.get(DeliveryOrder, order_id)
+        if current is not None and current.state_version != seen_version:
+            processed += 1
     return processed
 
 

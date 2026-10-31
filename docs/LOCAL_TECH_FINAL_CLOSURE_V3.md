@@ -3,6 +3,23 @@
 > 本报告是《Shine视频工作台》本地技术收官（任务一：自动 EDL + 自动装配；任务二：完整剧本 → 五真实 Agent 分镜；任务三：最终版真实端到端复验）的最终验收结论。
 > 记录时间：2026-10-31（本地）。被测功能提交：`fd7ebb0`（基线 `09f17c6`）。
 > 所有真实运行的证据根目录：`.local-acceptance/final-closure-v3/`（该目录不入 Git）。
+>
+> **追加轮次（2026-10-31，同日）**：独立审查（基线 `d8ae267`）发现两项代码缺陷与一处证据索引自引用，本轮已全部关闭；被测代码 = `d8ae267` + 未提交工作树修复（3 个文件），全量后端套件 **1175 passed / 1 skipped**，详见 §0 与 `.local-acceptance/final-closure-v4/CLOSURE_ROUND.md`。本轮修复已于同日按用户指令提交并推送至 `origin/main`。
+
+## 0. 追加轮次（2026-10-31 独立审查关闭，同日）
+
+独立审查（`.local-acceptance/audit-20261031-d8ae267/`，审查基线 `d8ae267`）复现了两项代码缺陷与一处证据索引自引用。本轮已按"复现 → 最小修复 → 回归 → 证据"全部关闭：
+
+| 项 | 结论 |
+|---|---|
+| P1 忙等 | **已修复**：`run_pending_deliveries` 改为有限调度轮（快照 `id+state_version`，每单至多尝试一次，按 `state_version` 变化计推进）；未到期装配不再阻塞调度，其他订单/序列/普通任务不被饿死；正常装配、有界重试、崩溃恢复、幂等语义保留 |
+| P2 双领取 | **已修复**：`_claim_order` 与四类写回（完成/阻断/失败/重试）全部改为数据库原子条件 UPDATE，按受影响行数判定；领取与写回均以 `(owner, state_version)` 令牌校验所有权，失去所有权的 Worker 不能覆盖新 owner 或终态；无迁移 |
+| 证据索引自引用 | **已修复**：`scripts/build_evidence_index.py` 按路径排除输出自身；实测 972 项（旧 969 含旧索引自身；+4 为审查轮 SQLite WAL 只读检查产生的 `-wal/-shm` 旁挂文件）；独立校验器两轮 PASS（972/972 匹配，`self_listed=false`） |
+| 验证门禁 | 反例 2 passed；交付套件 16 passed（含 5 项新长期回归）；offline_e2e+film_crew 32 passed；v13 三件套 63 passed；全量 **1175 passed / 1 skipped / 2 warnings**；Ruff clean；Alembic 新库 head=`f140a0030001`（12 迁移链完整）；`uv sync --locked`（Resolved 42 / Checked 41）；npm ci 0 漏洞 + TS/Vite 构建通过；verify_local_stack / verify_stack_operations PASS；verify_v13_web=MOCK_VERIFIED（api_errors=[]）；`git diff --check` 干净；端口/进程释放收据 PASS |
+| 唯一 skip | `test_real_managed_startup.py:85` — 需 `SHINE_REAL_COMFY_PROBE=1` 且本地 ComfyUI；本轮按任务边界不启动真实 ComfyUI，如实记 SKIPPED |
+| 被测代码 | `d8ae267` + 未提交工作树修复（`backend/shine/media/delivery_engine.py`、`backend/tests/test_delivery_orders.py`、`scripts/build_evidence_index.py`）；修复已提交并推送至 `origin/main`（用户 2026-10-31 指令） |
+| 审计记录 | `.local-acceptance(审查目录)/`（反例、审查日志、已存复核 JSON）+ `.local-acceptance/final-closure-v4/CLOSURE_ROUND.md` 与全部命令日志 |
+| 真实生产维持原判 | run-m `all_passed`；portrait-h `pending_review`（首镜 semantic/style/final=needs_review）。建议性审片是用户已定调的产品策略；真实影片质量与用户批准边界不变（§11） |
 
 ---
 
@@ -13,7 +30,7 @@
 | 规格 | 运行 | 结论 |
 |---|---|---|
 | 横屏 1344×768 | `20261031-run-m` | **全链 PASS**（五真实 Agent → 3 镜真实 H3 全 PASSED → 产品自动生成 EDL → 自动 FFmpeg 装配 → Web 实播） |
-| 竖屏 768×1344（正式规格） | `20261031-final-portrait-f` / `-g` | **剧本 → 五真实 Agent → apply → 序列 → 真实 H3 竖屏产物（768×1344 / 7.291 s）全链跑通**；最后一道审片门禁因本地 VLM 结论自相矛盾升级人工（两轮一致，见 §4.2，决策待用户确认） |
+| 竖屏 768×1344（正式规格） | `20261031-final-portrait-h` | **全链 PASS**（剧本 → 五真实 Agent → apply → 序列 → 3 镜真实 H3 → 自动 EDL → 自动装配 → Web 实播）；首镜小模型审片 needs_review 上报人工，成片如实为 `pending_review`（§4.2）；f/g 是它的失败前轮（§4.3） |
 
 本轮（任务三）在收官过程中发现并修复了 **5 类真实缺陷**（§3），其中三类曾直接阻断生产链路；修复后全部离线回归在最终功能 SHA `fd7ebb0` 上通过，横竖屏两个规格的真实全链验收均 **PASS**（§4）。
 
@@ -25,7 +42,7 @@
 
 ---
 
-## 2. 本轮最终验收矩阵（14 项）
+## 2. 最终验收矩阵（16 项）
 
 | # | 条件 | 状态 | 依据 |
 |---|---|---|---|
@@ -36,15 +53,15 @@
 | 5 | 参考集纪律由服务端机器事实保证 | **PASS_SOFTWARE** | `shot_reference_policy` + 2 项回归（§3.3） |
 | 6 | 小模型自审只做一轮、上报人工、绝不阻断自主成片 | **PASS_REAL** | 竖屏第一镜：semantic/style = needs_review 但镜头 PASSED，成片 `review_state=pending_review`（§3.5、§4.2） |
 | 7 | 确定性门禁保持硬阻断 | **PASS_SOFTWARE** | technical QC / 编译提示词 / 已批准主资产 / 租约纪律均不因建议性审片而放行（§3.5） |
-| 6 | 不确定的 LLM 结果绝不重放、绝不伪装成功 | **PASS_SOFTWARE** | provider 层仅重放"连接未建立"与"可重试状态"；3 项新回归（§3.1） |
-| 8 | 真实 H3 生产（独占租约，受管渲染器） | **PASS_REAL** | 横竖屏**各 3/3 PASSED**，逐镜五门禁留痕（§4.1） |
-| 9 | 产品自动生成 EDL（来源=冻结剪辑意图） | **PASS_REAL** | 横竖屏均验证：订单 `edl_source=frozen_edit_intent`，镜头顺序 == 序列 position 顺序，脚本零次构造 EDL（§4.1） |
-| 10 | 产品自动 FFmpeg 装配成片并注册 | **PASS_REAL** | 竖屏 sha256 `471e4315…`，13 156 347 字节，768×1344 / 24 fps / 21.896 s / 525 帧，逐帧解码通过（§4.1） |
-| 11 | Web 实播成片 | **PASS_REAL** | 竖屏：`readyState=4`、`currentTime=3.920042`、`duration=21.895996`（§4.1） |
-| 12 | 官方 H3 规范一致性（哈希/段落/标签族） | **PASS_SOFTWARE** | 三个官方文件 SHA-256 与锁定值逐字节一致；六段顺序与标签族一致（§6） |
-| 13 | 终版 SHA 全量命令清单 | **PASS_SOFTWARE** | `fd7ebb0` 上 uv/pytest(1170 passed)/ruff/npm×2/verify×2 全绿（§7） |
-| 14 | 资源释放（端口/进程/GPU）与证据可审计（逐文件 SHA-256 索引） | **PASS_REAL** / **PASS_SOFTWARE** | 释放收据 PASS：5 端口无监听、无残留进程、GPU 回基线（§8）；`evidence-index.json` 969 文件（§9） |
-| 14 | 证据可审计（逐文件 SHA-256 索引） | **PASS_SOFTWARE** | `evidence-index.json`（§9） |
+| 8 | 不确定的 LLM 结果绝不重放、绝不伪装成功 | **PASS_SOFTWARE** | provider 层仅重放"连接未建立"与"可重试状态"；3 项新回归（§3.1） |
+| 9 | 真实 H3 生产（独占租约，受管渲染器） | **PASS_REAL** | 横竖屏**各 3/3 PASSED**，逐镜五门禁留痕（§4.1） |
+| 10 | 产品自动生成 EDL（来源=冻结剪辑意图） | **PASS_REAL** | 横竖屏均验证：订单 `edl_source=frozen_edit_intent`，镜头顺序 == 序列 position 顺序，脚本零次构造 EDL（§4.1） |
+| 11 | 产品自动 FFmpeg 装配成片并注册 | **PASS_REAL** | 竖屏 sha256 `471e4315…`，13 156 347 字节，768×1344 / 24 fps / 21.896 s / 525 帧，逐帧解码通过（§4.1） |
+| 12 | Web 实播成片 | **PASS_REAL** | 竖屏：`readyState=4`、`currentTime=3.920042`、`duration=21.895996`（§4.1） |
+| 13 | 官方 H3 规范一致性（哈希/段落/标签族） | **PASS_SOFTWARE** | 三个官方文件 SHA-256 与锁定值逐字节一致；六段顺序与标签族一致（§6） |
+| 14 | 终版 SHA 全量命令清单 | **PASS_SOFTWARE** | `fd7ebb0` 上 uv/pytest(1170 passed)/ruff/npm×2/verify×2 全绿（§7）；追加轮次在 `d8ae267`+未提交修复上复验为 **1175 passed / 1 skipped**（§0、§7） |
+| 15 | 资源释放（端口/进程/GPU）与证据可审计（逐文件 SHA-256 索引） | **PASS_REAL** / **PASS_SOFTWARE** | 释放收据 PASS：5 端口无监听、无残留进程、GPU 回基线（§8）；`evidence-index.json` 追加轮次修复自引用后按实测 **972** 项（§9） |
+| 16 | 证据可审计（逐文件 SHA-256 索引） | **PASS_SOFTWARE** | `evidence-index.json`（§9，追加轮次修复自引用后为 972 项，两次独立全量校验 PASS） |
 
 ---
 
@@ -208,6 +225,8 @@
 
 输出留档：`F:/ClaudeWorkSpace/tmp_v3/advisory_suite6.txt`（全量 pytest）、`ruff_*.txt`、`verify_local_stack_fd7ebb0.txt`、`verify_stack_operations_fd7ebb0.txt`。
 
+**追加轮次（d8ae267 + 未提交修复）复验**：全量 pytest **1175 passed / 1 skipped / 2 warnings**（唯一 skip = SHINE_REAL_COMFY_PROBE 门控的真实 ComfyUI 启动探测，本轮按任务边界不启动真实 ComfyUI，如实记 SKIPPED）；Ruff clean；`uv sync --project backend --locked`（Resolved 42 / Checked 41）；npm ci（0 漏洞）+ TS/Vite 构建（327.31 kB）；verify_local_stack.ps1（-ApiPort 18123）与 verify_stack_operations.ps1（-ApiPort 18128 / -WebPort 15188）均 PASS；verify_v13_web.py = MOCK_VERIFIED（api_errors=[]）；Alembic 新库 upgrade head 至 f140a0030001（12 迁移链完整）。命令与退出码全表见 `.local-acceptance/final-closure-v4/CLOSURE_ROUND.md` §3。
+
 ---
 
 ## 8. 资源释放核验
@@ -228,7 +247,7 @@
 
 ## 9. 证据索引与路径
 
-`.local-acceptance/final-closure-v3/evidence-index.json`：**969 个文件、632 916 651 字节**，逐文件记录 `path` / `bytes` / `sha256`（生成器：`scripts/build_evidence_index.py`）。
+`.local-acceptance/final-closure-v3/evidence-index.json`：修复自引用后按实测 **972 个文件、632 805 500 字节**，逐文件记录 `path` / `bytes` / `sha256`（生成器：`scripts/build_evidence_index.py`，已按路径排除索引自身；独立校验器两轮 PASS）。与旧报告 969 的差异 = -1 旧索引自引用 +4 个审查轮 SQLite WAL 只读检查产生的 -wal/-shm 旁挂文件（媒体零改动）。
 
 | 路径 | 内容 |
 |---|---|
@@ -254,6 +273,7 @@
 | 真实竖屏运行所依据的功能提交 | `fd7ebb0`（与最终功能提交一致） |
 | 横屏全链 PASS 所依据的功能提交 | `a403a62`（交付与分镜主路径；该路径代码在 `fd7ebb0` 未变） |
 | 适配器身份 | `d182268e70b4d57be695f01f0328c44df05b90480398777829f53785e301a93a` |
+| 本轮修复 | 已提交并推送至 `origin/main`：delivery_engine.py / test_delivery_orders.py / build_evidence_index.py 共 3 文件 361+/109-；`git diff --check` 干净 |
 | GPU UUID | `GPU-f3fda412-dabc-0f4a-c8e0-9fd69902205b` |
 
 推送核对：`git rev-parse HEAD` 与 `git rev-parse origin/main` 在推送后一致（推送前后各核对一次）。
@@ -317,7 +337,7 @@ backend\.venv\Scripts\python.exe scripts/build_evidence_index.py --root .local-a
 
 | 角色 | 状态 | 说明 |
 |---|---|---|
-| 首席架构师 / 最终验收负责人 | 本报告出具 | 本地技术收官判定：**横屏与竖屏均真实全链 PASS**（剧本 → 五真实 Agent → 3 镜真实 H3 → 自动 EDL → 自动装配 → Web 实播）；5 类缺陷已修复并在最终 SHA `fd7ebb0` 上全量回归（1170 passed） |
+| 首席架构师 / 最终验收负责人 | 本报告出具 | 本地技术收官判定：**横屏与竖屏均真实全链 PASS**（剧本 → 五真实 Agent → 3 镜真实 H3 → 自动 EDL → 自动装配 → Web 实播）；5 类缺陷已修复并在最终 SHA `fd7ebb0` 上全量回归（1170 passed）；追加轮次（同日独立审查）关闭两项代码缺陷与索引自引用，`d8ae267`+未提交修复上全量回归 **1175 passed / 1 skipped**（§0） |
 | 用户（权属 / 艺术 / 最终影片） | **PENDING_HUMAN** | 见 §11 |
 | 小模型自审的门禁权重 | **已决（用户定调）** | 一轮、结果上报人工复核、**不阻断**自主成片；实现见 §3.5，真实运行表现见 §4.2 |
 | GitHub Actions | **WAIVED_EXTERNAL_BILLING** | 见 §11 |

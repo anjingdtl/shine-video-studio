@@ -3,6 +3,17 @@
 > 状态快照时间：2026-10-31 11:45 (本地)。本文档由上一会话写入，供下一个 Agent 继续收官。
 > 功能提交（未推送）：`a403a62`（一条 amend 后的单一功能提交，基线 `09f17c6`）。
 > 工作区状态：干净（无未提交的受管文件改动）。
+> **追加轮次（2026-10-31）**：独立审查基线 `d8ae267` 的两项缺陷（P1 忙等 / P2 双领取）与证据索引自引用已全部关闭；被测代码 = `d8ae267` + 未提交工作树修复（3 文件，未提交未推送，由用户决定）；全量 1175 passed / 1 skipped。修复已按用户指令提交并推送至 `origin/main`。详见 §0。
+
+## 0. 追加轮次快照（2026-10-31 独立审查关闭轮）
+
+- 被测代码：`d8ae26711286bee2d5727444f245cb4d42c8258f` + 未提交工作树修复（`backend/shine/media/delivery_engine.py`、`backend/tests/test_delivery_orders.py`、`scripts/build_evidence_index.py`；3 files, 361+/109-）。
+- 已关闭：P1 未到期 ASSEMBLING 忙等（有限调度轮）；P2 交付订单双领取（原子条件领取 + `(owner, state_version)` 写回令牌）；证据索引自引用（按路径排除输出自身，实测 972 项，两次独立全量校验 PASS）。
+- 反例 2 passed（断言未放宽、反例未修改）；交付套件 16 passed（5 项新长期回归入正式测试目录）；全量后端 1175 passed / 1 skipped / 2 warnings；Ruff clean；Alembic 新库 head=f140a0030001；npm ci 0 漏洞 + 构建通过；verify×2 PASS；verify_v13_web=MOCK_VERIFIED；`git diff --check` 干净；端口/进程释放收据 PASS。
+- 唯一 skip：`test_real_managed_startup.py:85`（SHINE_REAL_COMFY_PROBE 门控；本轮不启动真实 ComfyUI → SKIPPED，不计 PASS）。
+- 验证在未提交的工作树上执行，修复随后已按用户指令提交并推送至 `origin/main`；没有新增真实 LLM/GPU 请求；未动生产栈与 ComfyUI 配置。
+- 审计记录：`.local-acceptance/final-closure-v4/CLOSURE_ROUND.md` + 全部命令日志。
+- §5 的旧交接待办全部关闭，逐项标注见 §5。
 
 ## 1. 三项收尾任务的完成度
 
@@ -10,7 +21,7 @@
 |---|---|---|
 | 任务一：生产序列结束后自动 EDL + 自动装配成片 | ✅ 代码完成 + 真实 E2E 已证明 | `test_delivery_orders.py` 11 项全绿；run-m 横屏真实运行：序列 COMPLETED 后产品自身生成 EDL（来源=冻结剪辑意图）、调用 FFmpeg、注册成片、Web 实播 |
 | 任务二：完整剧本 → 真实 AI Agent 自动分镜与生产编排 | ✅ 代码完成 + 真实 E2E 已证明 | `test_storyboard.py` 5 项全绿；run-m：五个真实 MiniMax Agent（编剧/导演/摄影/场记/剪辑）一次通过，产出 3 镜分镜 + 冻结剪辑意图，人工 apply 后进入生产 |
-| 任务三：最终功能版本完整真实端到端复验 | 🟡 横屏全链已 PASS；**竖屏 768×1344 尚未复现成功** | 横屏 run-m PASS；竖屏各轮被不同外部/采样因素阻断（见 §3） |
+| 任务三：最终功能版本完整真实端到端复验 | ✅（后续轮次更新：portrait-h 竖屏全链 PASS，见报告 §4；本节下文为 11:45 的历史快照）🟡 横屏全链已 PASS；**竖屏 768×1344 尚未复现成功** | 横屏 run-m PASS；竖屏各轮被不同外部/采样因素阻断（见 §3） |
 
 ## 2. 关键证据：run-m 横屏全链（已 LOCKED）
 
@@ -77,17 +88,17 @@
 
 ## 5. 交接待办（按顺序）
 
-1. **monitor/重跑竖屏**：portrait-c 已死（导演调用网络挂起）。直接重跑：
+1. 【已关闭：portrait-h 全链 PASS，f/g 为失败前轮，勿再列为待重跑】**monitor/重跑竖屏**：portrait-c 已死（导演调用网络挂起）。直接重跑：
    `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/run_real_closure_v3.ps1 -RunName 20261031-final-portrait-d -Profile local-h3-ref2va-pdd8-2img-1aud-portrait -TimeoutMinutes 210`
    （控制台日志现写到 `F:/ClaudeWorkSpace/tmp_v3/closure_run_console.log`；每 10 分钟看一眼 `STEP|series status`）
    - 若 apply 又 `CONTINUITY_REVIEW_REQUIRED`：看 `.local-acceptance/final-closure-v3/<run>/data/shine.db` 的 ContinuityReport issues 内容判断（已修为只收冲突，理论上不会再犯）
    - 若 Agent 阶段网络挂起：直接重跑即可（采样波动）；MiniMax 侧延迟通常 30-300s/角色，UI 等待上限已 1800s
-2. **负例**：用仅含无主资产角色的剧本文本对运行中的栈调 `POST /api/v1/projects/{id}/storyboard/generate`（或 UI），断言 `BLOCKED_MISSING_MASTERS` 且缺清单正确；证据存 final-closure-v3
-3. **资源释放**：最终运行后 `scripts/stop_shine.py --data-dir <run>/data`；核验 8140/5183/8188/8116/8117 无监听、无残留 python/node 进程、GPU 回基线（`nvidia-smi`），截图存证据
-4. **终版 SHA 全量命令清单**（必须在该 SHA 上）：`uv sync --project backend --locked`；全量 pytest（当前实测 exit=0，1 skip 为既有 SHINE_REAL_COMFY_PROBE 门控）；ruff（clean）；`npm ci --prefix frontend`；`npm --prefix frontend run build`；`verify_local_stack.ps1`；`verify_stack_operations.ps1`；Alembic 新库+历史库升级（test_alembic/test_migrations_windows 已覆盖，注意 head 已是 `f140a0030001`）
-5. **证据归档**：`.local-acceptance/final-closure-v3/` 下保留 run-m + 最终竖屏 run + 负例 + 释放记录；生成逐文件 SHA-256 索引（参考 `.local-acceptance/final-local-pass/evidence-index.json` 的做法）
-6. **推送**：功能提交 `a403a62`（如后续无功能改动）+ 本文档提交一起 push；核对 `git rev-parse HEAD` == `origin/main`
-7. **最终报告** `docs/LOCAL_TECH_FINAL_CLOSURE_V3.md`：按收官指令 §八 的 14 项内容组织；横屏/竖屏分开列表；把 `WAIVED_EXTERNAL_BILLING`、`RIGHTS/ARTISTIC/FINAL = PENDING_HUMAN` 写明
+2. 【已关闭：BLOCKED_MISSING_MASTERS 负例 PASS（报告 §5）】**负例**：用仅含无主资产角色的剧本文本对运行中的栈调 `POST /api/v1/projects/{id}/storyboard/generate`（或 UI），断言 `BLOCKED_MISSING_MASTERS` 且缺清单正确；证据存 final-closure-v3
+3. 【已关闭：fd7ebb0 轮收据 + 追加轮次端口/进程收据 PASS】**资源释放**：最终运行后 `scripts/stop_shine.py --data-dir <run>/data`；核验 8140/5183/8188/8116/8117 无监听、无残留 python/node 进程、GPU 回基线（`nvidia-smi`），截图存证据
+4. 【已关闭：fd7ebb0 轮 1170 passed；追加轮次 d8ae267+修复 1175 passed / 1 skipped】**终版 SHA 全量命令清单**（必须在该 SHA 上）：`uv sync --project backend --locked`；全量 pytest（当前实测 exit=0，1 skip 为既有 SHINE_REAL_COMFY_PROBE 门控）；ruff（clean）；`npm ci --prefix frontend`；`npm --prefix frontend run build`；`verify_local_stack.ps1`；`verify_stack_operations.ps1`；Alembic 新库+历史库升级（test_alembic/test_migrations_windows 已覆盖，注意 head 已是 `f140a0030001`）
+5. 【已关闭：v3 索引修复自引用后 972 项两次独立校验 PASS；v4 轮审计目录自建索引 28 项 PASS】**证据归档**：`.local-acceptance/final-closure-v3/` 下保留 run-m + 最终竖屏 run + 负例 + 释放记录；生成逐文件 SHA-256 索引（参考 `.local-acceptance/final-local-pass/evidence-index.json` 的做法）
+6. 【已关闭：fd7ebb0 轮已推送核对；追加轮次修复已按用户指令提交并推送至 origin/main】**推送**：功能提交 `a403a62`（如后续无功能改动）+ 本文档提交一起 push；核对 `git rev-parse HEAD` == `origin/main`
+7. 【已关闭：V3.md §0 追加轮次 + 本文档 §0 + TESTLOG §F】**最终报告** `docs/LOCAL_TECH_FINAL_CLOSURE_V3.md`：按收官指令 §八 的 14 项内容组织；横屏/竖屏分开列表；把 `WAIVED_EXTERNAL_BILLING`、`RIGHTS/ARTISTIC/FINAL = PENDING_HUMAN` 写明
 
 ## 6. 操作红线（勿重复踩坑）
 

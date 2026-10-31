@@ -19,9 +19,13 @@ import pytest
 from shine.comfyops.production_series import (
     cancel_series,
 )
+from shine.media.assembly import DeliveryAssembler, DeliveryError
 from shine.media.delivery_engine import (
     ASSEMBLY_LEASE_SECONDS,
     DeliveryBlock,
+    DeliveryClaim,
+    _claim_order,
+    _write_back,
     build_auto_edl,
     enqueue_auto_delivery,
     run_delivery_order,
@@ -462,3 +466,139 @@ def test_worker_loop_runs_pending_deliveries(api):
     assert result == "delivery:1"
     with factory() as db:
         assert db.get(DeliveryOrder, order.id).status == "DELIVERED"
+def test_unexpired_assembly_does_not_starve_other_orders(api):
+    """A held assembly lease costs one no-op attempt; other orders still run."""
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, state["series"])
+        order = enqueue_auto_delivery(db, series)
+        order.status = "ASSEMBLING"
+        order.worker_id = "live-worker"
+    other = _finished_two_shot_series(api)
+    with factory.begin() as db:
+        other_series = db.get(ProductionSeries, other["series"])
+        other_order = enqueue_auto_delivery(db, other_series)
+    processed = run_pending_deliveries(factory, settings=settings,
+                                       asset_root=settings.data_dir, worker_id="w-recover")
+    # One progressed order: the other PENDING order. The held assembly is
+    # attempted once, makes no progress and burns no attempt budget.
+    assert processed == 1
+    with factory() as db:
+        held = db.get(DeliveryOrder, order.id)
+        assert held.status == "ASSEMBLING" and held.worker_id == "live-worker"
+        assert held.attempt_count == 0
+        assert db.get(DeliveryOrder, other_order.id).status == "DELIVERED"
+
+
+def test_worker_restart_does_not_busy_loop_and_recovers_on_expiry(api, monkeypatch):
+    """A restart over an unexpired lease returns control; expiry still recovers."""
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, state["series"])
+        order = enqueue_auto_delivery(db, series)
+        order.status = "ASSEMBLING"
+        order.worker_id = "dead-worker"
+    import shine.media.delivery_engine as engine_module
+
+    real = engine_module.run_delivery_order
+    attempts = []
+
+    def bounded(*args, **kwargs):
+        outcome = real(*args, **kwargs)
+        attempts.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(engine_module, "run_delivery_order", bounded)
+    first = run_pending_deliveries(factory, settings=settings,
+                                   asset_root=settings.data_dir, worker_id="restart")
+    assert attempts == ["ASSEMBLING"]
+    assert first == 0
+    with factory.begin() as db:
+        row = db.get(DeliveryOrder, order.id)
+        row.updated_at = utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS + 60)
+    second = run_pending_deliveries(factory, settings=settings,
+                                    asset_root=settings.data_dir, worker_id="restart")
+    assert second == 1
+    with factory() as db:
+        assert db.get(DeliveryOrder, order.id).status == "DELIVERED"
+def test_two_stale_sessions_cannot_both_claim_the_same_order(api):
+    """Two sessions reading the same PENDING row: exactly one claim wins."""
+    state = _finished_two_shot_series(api)
+    factory = state["factory"]
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, state["series"])
+        order = enqueue_auto_delivery(db, series)
+    with factory() as first, factory() as second:
+        first_view = first.get(DeliveryOrder, order.id)
+        first_claim = _claim_order(first, first_view, "worker-A")
+        first.commit()
+        second_view = second.get(DeliveryOrder, order.id)
+        second_claim = _claim_order(second, second_view, "worker-B")
+        second.commit()
+    assert (first_claim, second_claim) == (True, False)
+    with factory() as db:
+        row = db.get(DeliveryOrder, order.id)
+        assert row.status == "ASSEMBLING" and row.worker_id == "worker-A"
+        assert row.state_version == 1
+def test_claim_losers_cannot_write_back_over_the_new_owner(api):
+    """A lost claim token (owner, state_version) matches zero rows on write-back."""
+    state = _finished_two_shot_series(api)
+    factory = state["factory"]
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, state["series"])
+        order = enqueue_auto_delivery(db, series)
+        first_claim = _claim_order(db, order, "worker-A")
+        assert first_claim is True
+    with factory.begin() as db:
+        row = db.get(DeliveryOrder, order.id)
+        row.updated_at = utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS + 60)
+    with factory.begin() as db:
+        row = db.get(DeliveryOrder, order.id)
+        second_claim = _claim_order(db, row, "worker-B")
+        assert second_claim is True
+    with factory() as db:
+        row = db.get(DeliveryOrder, order.id)
+        assert row.worker_id == "worker-B" and row.state_version == 2
+
+    with factory.begin() as db:
+        stale = _write_back(db, order.id, DeliveryClaim(owner="worker-A", version=1),
+                            {"status": "DELIVERED"})
+        assert stale is False
+        fresh = _write_back(db, order.id, DeliveryClaim(owner="worker-B", version=2),
+                            {"status": "DELIVERED", "delivered_at": utcnow(),
+                             "state_version": DeliveryOrder.state_version + 1})
+        assert fresh is True
+    with factory() as db:
+        row = db.get(DeliveryOrder, order.id)
+        assert row.status == "DELIVERED" and row.worker_id == "worker-B"
+        assert row.state_version == 3
+def test_stolen_lease_during_assembly_is_never_overwritten(api, monkeypatch):
+    """A worker that lost its lease mid-assembly cannot write back its failure."""
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, state["series"])
+        order = enqueue_auto_delivery(db, series)
+
+    def steal_then_fail(self, *args, **kwargs):
+        # Worker B legitimately re-leases the expired lease while A assembles;
+        # A's later write-back must not overwrite B's state.
+        with factory.begin() as db2:
+            row = db2.get(DeliveryOrder, order.id)
+            row.updated_at = utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS + 60)
+        with factory.begin() as db2:
+            row = db2.get(DeliveryOrder, order.id)
+            assert _claim_order(db2, row, "worker-B") is True
+        raise DeliveryError(500, "DELIVERY_FFMPEG_FAILED: injected")
+
+    monkeypatch.setattr(DeliveryAssembler, "assemble", steal_then_fail)
+    status = run_delivery_order(factory, order.id, settings=settings,
+                                asset_root=settings.data_dir, worker_id="worker-A")
+    assert status == "ASSEMBLING"
+    with factory() as db:
+        row = db.get(DeliveryOrder, order.id)
+        assert row.status == "ASSEMBLING" and row.worker_id == "worker-B"
+        assert row.failure_code is None
+        assert row.state_version == 2

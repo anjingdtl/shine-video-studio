@@ -1,6 +1,7 @@
 # LOCAL_TECH_FINAL_CLOSURE_V3 · 测试记录
 
 > 记录截至 2026-10-31 11:45。功能提交 `a403a62`（基线 `09f17c6`）。
+> **2026-10-31 追加轮次**（独立审查基线 `d8ae267` 的两项缺陷与索引自引用，含 5 项新长期回归与全量 1175 passed）见 §F；§D 旧待办已全部关闭并逐项标注。
 
 ## A. 软件测试（离线，FFmpeg 合成测试图样，不含真实模型）
 
@@ -44,16 +45,42 @@
 | final-portrait-c | UI 等待 30min 超时 | 导演调用网络挂起（DB 仅编剧 SUCCEEDED） | 待重跑（portrait-d） |
 | （对照）run-m 横屏 | **全链 PASS** | — | 同一代码，证明产品逻辑无竖屏特有缺陷 |
 
-## D. 待执行的剩余测试（下一 Agent）
+## D. 当时列出的剩余测试（已于后续轮次关闭，保留原清单作历史）
 
-1. 竖屏全链重跑（run-d，命令见进度文档 §5.1）
-2. 负例：无主资产角色剧本 → 断言 `BLOCKED_MISSING_MASTERS` + 缺清单
-3. 资源释放核验（端口/进程/GPU 基线）+ 存证
-4. 终版 SHA 上：uv sync、全量 pytest、ruff、npm ci/build、verify_local_stack.ps1、verify_stack_operations.ps1
-5. 证据索引（逐文件 SHA-256）+ `docs/LOCAL_TECH_FINAL_CLOSURE_V3.md` 最终报告
-6. `git push` + 本地/远端 HEAD 核对
+1. ~~竖屏全链重跑（run-d，命令见进度文档 §5.1）~~ → **已关闭**：portrait-d/e/f/g 为失败前轮，最终 `portrait-h` 全链 PASS（§F 之前已由 fd7ebb0 轮完成；报告 §4）
+2. ~~负例：无主资产角色剧本 → 断言 `BLOCKED_MISSING_MASTERS` + 缺清单~~ → **已关闭**：负例 PASS（报告 §5，`negative_verdict=PASS`，审查轮只读复核维持）
+3. ~~资源释放核验（端口/进程/GPU 基线）+ 存证~~ → **已关闭**（报告 §8 收据 + 追加轮次 §6 端口/进程释放收据）
+4. ~~终版 SHA 上：uv sync、全量 pytest、ruff、npm ci/build、verify×2~~ → **已关闭**（fd7ebb0 轮 + 追加轮次 d8ae267 上复验 1175 passed / 1 skipped）
+5. ~~证据索引 + 最终报告~~ → **已关闭**（索引修复自引用后 972 项两次独立校验 PASS；报告 §0/§9）
+6. ~~`git push` + HEAD 核对~~ → **已关闭**：fd7ebb0 轮已推送核对；追加轮次的 3 文件修复已按用户指令提交并推送至 `origin/main`
 
 ## E. 豁免与人工边界
 
 - GitHub Actions：`WAIVED_EXTERNAL_BILLING`（不计入本地技术判定）
 - `RIGHTS_APPROVAL / ARTISTIC_REVIEW / FINAL_FILM_APPROVAL = PENDING_HUMAN`
+
+## F. 追加轮次测试记录（2026-10-31，独立审查关闭轮，基线 d8ae267 + 未提交修复）
+
+> 完整命令与退出码见 `.local-acceptance/final-closure-v4/CLOSURE_ROUND.md` §3；以下为结果汇总。
+> 反例原文保留于 `.local-acceptance/audit-20261031-d8ae267/`（未修改、未 xfail、未放宽）。
+
+| # | 套件/检查 | 结果 | 备注 |
+|---|---|---|---|
+| 1 | 审查反例 `test_delivery_review_counterexamples.py` | **2 passed**（修复前 2 failed，已复现） | 断言未放宽；反例文件未被修改 |
+| 2 | `backend/tests/test_delivery_orders.py` | **16 passed**（11 旧 + 5 新长期回归） | 新回归：忙等不阻塞他单/重启不忙等且到期可恢复/双会话单领取/丢失令牌不能写回/装配中被重领不能覆盖 |
+| 3 | `test_offline_e2e.py` + `test_film_crew.py` | **32 passed** | 按项目 AGENTS.md 要求的必跑套件 |
+| 4 | v13 三件套 | **63 passed** | preparation / migrations / e2e |
+| 5 | 完整后端套件 `pytest backend/tests` | **1175 passed / 1 skipped / 2 warnings**，exit=0，514.69s | 基线 1170 + 本轮 5 项新回归；唯一 skip = `test_real_managed_startup.py:85`（需 `SHINE_REAL_COMFY_PROBE=1` 且本地 ComfyUI；本轮按任务边界不启动真实 ComfyUI → 如实 SKIPPED，不计 PASS） |
+| 6 | `ruff check backend/shine backend/alembic backend/tests scripts` | **All checks passed!** | exit=0 |
+| 7 | Alembic 新库 `upgrade head` | exit=0，head=`f140a0030001`，12 迁移链完整 | 临时库已删除；历史升级由套件内 test_alembic / test_migrations_windows / test_v13_migrations 继续覆盖 |
+| 8 | `uv sync --project backend --locked` | exit=0，Resolved 42 / Checked 41 | `--locked`（非 --frozen）；必要时进程内设 UV_DEFAULT_INDEX=https://pypi.org/simple |
+| 9 | `npm ci --prefix frontend` | exit=0，0 vulnerabilities | --ignore-scripts |
+| 10 | `npm --prefix frontend run build` | exit=0 | tsc -b && vite build，327.31 kB |
+| 11 | `scripts/verify_local_stack.ps1 -ApiPort 18123 -KeepData` | PASS | 隔离端口 + 一次性数据目录，mock 从不生成视频 |
+| 12 | `scripts/verify_stack_operations.ps1 -ApiPort 18128 -WebPort 15188` | PASS | custom proxy / NoWorker / 拒绝重复启动 / Worker 重启 / 确认停栈 |
+| 13 | `scripts/verify_v13_web.py`（playwright 1.62.0） | **MOCK_VERIFIED**，api_errors=[] | 拦截与 Fake 场景，不能代替真实模型验收 |
+| 14 | 证据索引独立全量校验 ×2 | **PASS**（listed 972 / matched 972 / self_listed=false） | 校验器与本构建脚本零共享代码（`final-closure-v4/verify_evidence_index.py`） |
+| 15 | `git diff --check` | exit=0 | 工作树差异仅 3 个修复文件 |
+| 16 | 端口/进程释放 | PASS | 7 端口无监听；本轮进程全部退出；剩余 2 个 node 为 ZCode 自身服务 |
+
+两个 warning:Starlette/AnyIO 弃用警告 + 既有 SQLAlchemy NULL 主键查询警告（与审查基线一致,无新增）。
