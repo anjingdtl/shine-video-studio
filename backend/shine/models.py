@@ -412,7 +412,11 @@ class AgentRoute(Base):
 
 class WorkflowProfile(Base):
     __tablename__ = "workflow_profiles"
-    __table_args__ = (UniqueConstraint("name", name="uq_workflow_profile_name"),)
+    # Same visibility rule as the list endpoint: a project sees its own
+    # profiles plus global ones, so a name may exist once per project and
+    # once globally.  SQLite treats NULLs as distinct, so the global-name
+    # case is additionally enforced in the API layer.
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_workflow_profile_project_name"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)

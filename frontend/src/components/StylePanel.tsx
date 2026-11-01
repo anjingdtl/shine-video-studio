@@ -52,6 +52,7 @@ export default function StylePanel({ style, setStyle, currentStyle, styles, busy
           </button>
         </div>
       </div>
+      <p className="freeze-hint">点击冻结会先把上面表单中的七项<strong>原样保存</strong>，再冻结这份快照并生成版本哈希——你批准的内容和最终冻结的内容始终一致；保存或冻结失败时表单内容不会丢失。</p>
       {styles.length > 0 && <div className="version-row">
         <span className="version-label"><History size={12} /> 版本记录</span>
         {styles.map((version) => (

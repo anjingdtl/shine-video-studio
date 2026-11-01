@@ -222,6 +222,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     void run(async () => {
       const result = await api<{ profiles: Array<{ name: string; status: string }> }>('/setup/profiles',
         withJson('POST', { project_id: projectRef.current }));
+      // Refresh the shared workflow-profile state so the queue/series template
+      // pickups on this page update immediately, without a manual reload.
+      await onRefresh();
       return result.profiles.map((p) => `${p.name}: ${p.status}`).join('、');
     });
   }
@@ -337,6 +340,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
               onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
+          {!projectId && <p className="guardrail-note">计划生成、Profile 登记、配置生成与激活需要先创建一个项目（本页下方即可创建）；环境检查、上游可达性与部署清单无需项目。</p>}
           <p className="guardrail-note">验证会短暂启动已安装的 ComfyUI、VLM 和 ASR，读取真实节点/工作流契约并探测审片协议，完成后停止；不加载 H3 权重，也不提交镜头。</p>
           {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{label(providerLabels, runtime.render_provider)}
             {runtime.candidate?.project_id === projectId && <> · 待确认配方：<code>{runtime.candidate.recipe_sha256}</code></>}

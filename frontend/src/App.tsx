@@ -25,6 +25,7 @@ import StoryboardPanel from './components/StoryboardPanel';
 import DeliveryPanel from './components/DeliveryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
+import StorageSettings from './components/StorageSettings';
 
 type ViewId = 'setup' | 'production' | 'delivery' | 'pro';
 type NavItem = { id: string; text: string; icon: LucideIcon };
@@ -110,6 +111,9 @@ function App() {
   const [preview, setPreview] = useState<PromptPreview | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Bumped by the global refresh button; panels that keep their own data
+   *  (delivery) listen to it so the topbar refresh covers their data too. */
+  const [dataEpoch, setDataEpoch] = useState(0);
   const [queueProvider, setQueueProvider] = useState('mock');
   const [queueProfile, setQueueProfile] = useState('');
   const [reviewScope, setReviewScope] = useState<'basic' | 'full'>('basic');
@@ -180,6 +184,7 @@ function App() {
   const refreshAll = useCallback(async () => {
     await loadSystem();
     if (projectId) await loadProject(projectId);
+    setDataEpoch((epoch) => epoch + 1);
   }, [loadSystem, loadProject, projectId]);
 
   useEffect(() => {
@@ -351,6 +356,13 @@ function App() {
   async function freezeStyle(operatorToken = '') {
     if (!projectId) return;
     await withBusy(async () => {
+      // Freeze exactly what the user sees: save the on-screen form first, then
+      // request the approval grant against that saved snapshot, then freeze.
+      // The grant snapshot binds the saved draft, so the server refuses to
+      // freeze anything other than what was just approved (PLAN_HASH_CHANGED
+      // if the draft changes in between).
+      const snapshot: Style = { ...style };
+      await api(`/projects/${projectId}/style/draft`, json('PUT', snapshot));
       const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${operatorToken}` };
       const grant = operatorToken ? await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
         ...json('POST', { action: 'style_freeze', target_id: projectId }), headers,
@@ -359,7 +371,7 @@ function App() {
         ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot }), ...(operatorToken ? { headers } : {}),
       });
       await loadProject(projectId);
-      report(`风格基准第 ${frozen.version} 版已冻结，之后的镜头都会按它执行；${frozen.impact?.affected_shot_ids.length ?? 0} 个旧镜头仍引用老版本。`);
+      report(`已冻结第 ${frozen.version} 版（哈希 ${frozen.sha256.slice(0, 12)}…），与屏幕上确认的七项一致；${frozen.impact?.affected_shot_ids.length ?? 0} 个旧镜头仍引用老版本。`);
     });
   }
 
@@ -401,16 +413,21 @@ function App() {
   }
 
   async function createShot(payload: Record<string, unknown>) {
-    await withBusy(async () => {
+    await withBusyReturn(async () => {
       await api(`/projects/${projectId}/shots`, json('POST', payload));
-      await loadProject(projectId); report('分镜已保存，记得给它绑定素材。');
+      // The shot now exists server-side: a failed refresh must not make the
+      // user resubmit and create a duplicate. Surface the refresh failure
+      // without reporting the create as failed.
+      await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
+      report('分镜已保存，记得给它绑定素材。');
     });
   }
 
   async function saveBindings(shotId: string, bindings: Record<string, unknown>[]) {
-    await withBusy(async () => {
+    await withBusyReturn(async () => {
       await api(`/shots/${shotId}/bindings`, json('PUT', { bindings }));
-      await loadProject(projectId); setPreview(null); report('镜头绑定的素材已更新。');
+      await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
+      setPreview(null); report('镜头绑定的素材已更新。');
     });
   }
 
@@ -597,7 +614,6 @@ function App() {
             </div>
           ))}
         </nav>
-        <div className="sidebar-spacer" />
         <div className="privacy-card"><ShieldCheck size={17} /><div><b>本地优先</b><span>素材与密钥不离开本机</span></div><Check size={15} /></div>
         <div className="profile"><div className="avatar">S</div><div><b>本地工作区</b><span>{apiOnline ? '已连接本机服务' : '本机服务未连接'}</span></div><ChevronDown size={16} /></div>
       </aside>
@@ -626,15 +642,29 @@ function App() {
         </header>
 
         <div className="page-wrap">
-          {!project && <section className="empty-project card">
-            <div className="empty-art"><FolderKanban size={26} /></div>
-            <h2>从一个项目开始</h2>
-            <p>所有内容都保存在你自己电脑上：项目、素材、风格、任务和操作记录。</p>
-            <div className="create-project">
-              <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给项目起个名字" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-              <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
-            </div>
-          </section>}
+          {!project && <>
+            {/* 空库也能进入设置板块：环境检查、上游可达性、部署清单、安装目录和偏好都不依赖项目。 */}
+            {view === 'setup' && <>
+              {viewHero('设置板块', '先把工具调教顺手，再开工。', 'SYSTEM SETUP')}
+              <SetupPanel key="setup-no-project" projectId="" onRefresh={refreshAll} />
+              <StorageSettings />
+              <PreferencesPanel onNavigate={goTo} />
+            </>}
+            <section className="empty-project card">
+              <div className="empty-art"><FolderKanban size={26} /></div>
+              <h2>{view === 'setup' ? '接下来，从第一个项目开始' : '从一个项目开始'}</h2>
+              <p>{view === 'setup'
+                ? '上面的环境检查、安装目录和系统探测不需要项目。生产、交付等专业流程需要一个项目来承载：'
+                : '所有内容都保存在你自己电脑上：项目、素材、风格、任务和操作记录。'}</p>
+              <div className="create-project">
+                <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给项目起个名字" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
+                <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
+              </div>
+              {view !== 'setup' && <p className="empty-setup-hint">
+                还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「新机设置」检查环境与安装</button>——不需要先建项目。
+              </p>}
+            </section>
+          </>}
 
           {project && <>
             {/* 生产板块：从素材到镜头成片的主流程 */}
@@ -785,7 +815,7 @@ function App() {
             {/* 交付板块：成片与记录 */}
             <div className={`view-page ${view === 'delivery' ? '' : 'hidden'}`} data-view="delivery">
               {viewHero('交付板块', '成片验收、导出与全程留痕。', 'DELIVERY')}
-              <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} />
+              <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={view === 'delivery'} refreshEpoch={dataEpoch} />
               <AuditPanel
                 page={audit}
                 busy={busy}

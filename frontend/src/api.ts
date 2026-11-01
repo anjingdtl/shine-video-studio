@@ -1,12 +1,47 @@
 export const API = '/api/v1';
 
+/** 中文标签：校验错误里常见的分镜/风格字段，定位到用户能看懂的名字。 */
+const FIELD_LABELS: Record<string, string> = {
+  duration_target_s: '时长（4–15 秒）',
+  story_beat: '镜头意图',
+  name: '名称',
+  characters: '人物',
+  dialogue: '对白',
+  end_s: '对白结束时间',
+  start_s: '对白开始时间',
+  title: '项目名称',
+};
+
+/** Turn a FastAPI/pydantic error payload into one readable line; the raw
+ *  technical JSON stays available for support but is no longer the only
+ *  thing the user sees. */
+function describeDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      const loc: unknown[] = Array.isArray(item?.loc) ? item.loc : [];
+      const field = String(loc.at(-1) ?? '');
+      let msg = String(item.msg ?? '');
+      if (item.type === 'value_error' && msg.startsWith('Value error, ')) msg = msg.slice('Value error, '.length);
+      const prefix = FIELD_LABELS[field] ?? (field === 'spec' ? '' : loc.filter((part) => part !== 'body').join('.'));
+      return prefix ? `${prefix}：${msg}` : msg;
+    });
+    return `服务器拒绝了这次提交（${parts.join('；')}）`;
+  }
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';
+    return `${String(detail.message)}${code}`;
+  }
+  return JSON.stringify(detail);
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, init);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
       const body = await response.json();
-      message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
     } catch { /* keep HTTP status */ }
     throw new Error(message);
   }

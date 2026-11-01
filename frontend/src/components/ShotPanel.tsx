@@ -14,8 +14,8 @@ type Props = {
   preview: PromptPreview | null;
   onPreview: (shotId: string) => void;
   onQueue: (shot: Shot) => void;
-  onCreate: (payload: Record<string, unknown>) => void;
-  onSaveBindings: (shotId: string, bindings: SaveBinding[]) => void;
+  onCreate: (payload: Record<string, unknown>) => Promise<void>;
+  onSaveBindings: (shotId: string, bindings: SaveBinding[]) => Promise<void>;
   setPreview: (preview: PromptPreview | null) => void;
 };
 
@@ -36,6 +36,9 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   const [editBindings, setEditBindings] = useState<Record<string, { use_as: string; role: string; frame_role: string; checked: boolean }>>({});
   const [continuityMode, setContinuityMode] = useState<'cut' | 'last_frame' | 'hard_frame_anchor'>('cut');
   const [continuitySource, setContinuitySource] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [bindingSaving, setBindingSaving] = useState(false);
+  const [formError, setFormError] = useState('');
   const approved = assets.filter((asset) => asset.approved && asset.locked);
 
   function addBinding() {
@@ -46,8 +49,13 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
     setDraft((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
   }
 
-  function submitShot() {
-    if (!currentStyle || !storyBeat.trim()) return;
+  async function submitShot() {
+    if (busy || submitting || !currentStyle || !storyBeat.trim()) return;
+    const durationValue = Number(duration);
+    if (!Number.isFinite(durationValue) || durationValue < 4 || durationValue > 15) {
+      setFormError(`时长需在 4–15 秒之间（当前：${duration}），调整后再保存。`);
+      return;
+    }
     const bindings = draft
       .filter((row) => row.asset_id)
       .map((row, index) => ({
@@ -65,24 +73,35 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
     const continuity = continuityMode === 'cut'
       ? { mode: 'cut' }
       : { mode: continuityMode, previous_shot_id: continuitySource || null };
-    onCreate({
-      name: shotName.trim() || `镜头 ${shots.length + 1}`,
-      spec: {
-        schema_version: '1.0',
-        story_beat: storyBeat.trim(),
-        duration_target_s: Number(duration),
-        shot_priority: 'B',
-        style_version_id: currentStyle.id,
-        camera: { shot_size: 'medium', movement: 'static' },
-        characters: characterList,
-        required_asset_ids: [...new Set(bindings.map((binding) => binding.asset_id))],
-        dialogue,
-        sound: { environment: environment.trim(), music_policy: 'low_or_none' },
-        continuity,
-        locked_story_facts: [],
-      },
-      bindings,
-    });
+    setSubmitting(true);
+    setFormError('');
+    try {
+      // Await the server result: only a confirmed create clears the draft, so
+      // a 4xx or network failure keeps every field the user typed.
+      await onCreate({
+        name: shotName.trim() || `镜头 ${shots.length + 1}`,
+        spec: {
+          schema_version: '1.0',
+          story_beat: storyBeat.trim(),
+          duration_target_s: durationValue,
+          shot_priority: 'B',
+          style_version_id: currentStyle.id,
+          camera: { shot_size: 'medium', movement: 'static' },
+          characters: characterList,
+          required_asset_ids: [...new Set(bindings.map((binding) => binding.asset_id))],
+          dialogue,
+          sound: { environment: environment.trim(), music_policy: 'low_or_none' },
+          continuity,
+          locked_story_facts: [],
+        },
+        bindings,
+      });
+    } catch {
+      // The parent already surfaced the error; keep the form as-is.
+      return;
+    } finally {
+      setSubmitting(false);
+    }
     setStoryBeat('');
     setDraft([emptyDraft()]);
   }
@@ -102,7 +121,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
     setEditBindings(map);
   }
 
-  function saveBindings(shotId: string) {
+  async function saveBindings(shotId: string) {
     const bindings = Object.entries(editBindings)
       .filter(([, value]) => value.checked)
       .map(([assetId, value], index) => ({
@@ -112,8 +131,16 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         frame_role: value.use_as === 'picture' && value.frame_role ? value.frame_role : null,
         ordinal: index,
       }));
-    onSaveBindings(shotId, bindings);
-    setEditingShot('');
+    setBindingSaving(true);
+    try {
+      // Only close the editor after the server confirmed the replacement.
+      await onSaveBindings(shotId, bindings);
+      setEditingShot('');
+    } catch {
+      // The parent already surfaced the error; keep the editor open for edits.
+    } finally {
+      setBindingSaving(false);
+    }
   }
 
   return (
@@ -166,7 +193,8 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
           ))}
           <button className="subtle-button builder-add" onClick={addBinding} disabled={!currentStyle}><Plus size={13} /> 添加引用</button>
         </div>
-        <button className="primary-button wide-button" disabled={busy || !currentStyle || !storyBeat.trim()} onClick={submitShot}><Plus size={14} /> 保存分镜</button>
+        {formError && <p className="shot-form-error" role="alert">{formError}</p>}
+        <button className="primary-button wide-button" disabled={busy || submitting || !currentStyle || !storyBeat.trim()} onClick={submitShot}><Plus size={14} /> {submitting ? '正在保存…' : '保存分镜'}</button>
       </div>
       <div className="shot-list">
         {shots.map((shot) => (
@@ -219,8 +247,8 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
                 </div>
               ))}
               <div className="editor-actions">
-                <button className="primary-button" onClick={() => saveBindings(shot.id)}><Save size={13} /> 保存绑定</button>
-                <button className="secondary-button" onClick={() => setEditingShot('')}>取消</button>
+                <button className="primary-button" disabled={bindingSaving} onClick={() => saveBindings(shot.id)}><Save size={13} /> {bindingSaving ? '正在保存…' : '保存绑定'}</button>
+                <button className="secondary-button" disabled={bindingSaving} onClick={() => setEditingShot('')}>取消</button>
               </div>
             </div>}
           </div>

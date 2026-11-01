@@ -176,7 +176,15 @@ def validate_services(body: ServiceValidationRequest, actor: Operator, settings:
 
 @router.post("/profiles")
 def profiles(body: ProfileRegistrationRequest, db: DBSession):
-    """Register the two supported Ref2VA workflow profiles (idempotent by name)."""
+    """Register the two supported Ref2VA workflow profiles for this project.
+
+    Idempotent per project: the default profiles are project-scoped copies, so
+    a second project registers its own usable entries instead of being told
+    the name was already taken by another project.  A same-name profile inside
+    the same project with different graph/parameter_map/media_transfers/mode
+    stays a hard conflict (PROFILE_CONTENT_CHANGED); profiles of other
+    projects and historical references are never touched.
+    """
     import json as _json
 
     from sqlalchemy import select
@@ -194,7 +202,10 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
         if len(matches) != 1:
             raise HTTPException(409, f"PROFILE_FILE_MISSING_OR_AMBIGUOUS: {name}")
         raw = _json.loads(matches[0].read_text(encoding='utf-8'))
-        existing = db.scalar(select(WorkflowProfile).where(WorkflowProfile.name == name))
+        existing = db.scalar(select(WorkflowProfile).where(
+            WorkflowProfile.name == name,
+            WorkflowProfile.project_id == body.project_id,
+        ))
         if existing:
             if (existing.graph_sha256 != graph_hash(raw['graph'])
                     or existing.parameter_map != raw['parameter_map']

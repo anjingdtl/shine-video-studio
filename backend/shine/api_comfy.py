@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from shine.api_common import DBSession, app_settings
 from shine.comfy.capabilities import profile_metadata
@@ -128,7 +129,16 @@ def list_workflow_profiles(db: DBSession, project_id: str | None = Query(default
 def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> WorkflowProfilePublic:
     if body.project_id:
         require_project(db, body.project_id)
-    if db.scalar(select(WorkflowProfile).where(WorkflowProfile.name == body.name)):
+    # Same visibility rule as the list endpoint: a name is unique within one
+    # project and among global profiles.  (SQLite treats NULLs as distinct,
+    # so the global case cannot rely on the table constraint alone.)
+    scoped = select(WorkflowProfile).where(WorkflowProfile.name == body.name)
+    scoped = (
+        scoped.where(WorkflowProfile.project_id == body.project_id)
+        if body.project_id
+        else scoped.where(WorkflowProfile.project_id.is_(None))
+    )
+    if db.scalar(scoped):
         raise HTTPException(status_code=409, detail="A workflow profile with this name already exists")
     try:
         validate_graph(body.graph, required_nodes=body.required_nodes)
@@ -181,7 +191,15 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
         model_identity=identity,
     )
     db.add(profile)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # Two concurrent registrations for the same project raced past the
+        # name check; the (project_id, name) constraint rejects the copy.
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail="A workflow profile with this name already exists"
+        ) from exc
     add_audit(
         db,
         "user",

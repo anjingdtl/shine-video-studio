@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { API, api, json, type Job } from '../api';
 import { failureLabels, label } from '../constants';
 
@@ -21,32 +21,67 @@ const orderText: Record<string, string> = {
   CANCELLED: '已取消',
 };
 
-export default function DeliveryPanel({ projectId, jobs }: { projectId: string; jobs: Job[] }) {
+type Props = {
+  projectId: string;
+  jobs: Job[];
+  /** Whether the delivery view is currently the visible one; entering it reloads. */
+  active: boolean;
+  /** Bumped by the global topbar refresh so it covers delivery data too. */
+  refreshEpoch: number;
+};
+
+export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }: Props) {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [orders, setOrders] = useState<DeliveryOrder[]>([]);
   const [seriesActive, setSeriesActive] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [selected, setSelected] = useState('');
   const [edl, setEdl] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const projectRef = useRef(projectId);
+  projectRef.current = projectId;
   let clips: Array<{ job_id: string; in_s: number; out_s: number }> = [];
   try { const parsed = JSON.parse(edl); if (Array.isArray(parsed.clips)) clips = parsed.clips; } catch { /* editable draft */ }
 
   const reload = useCallback(async () => {
+    const requested = projectId;
     const [artifacts, rows, orderRows, seriesRows] = await Promise.all([
       api<Proposal[]>(`/projects/${projectId}/film-artifacts`),
       api<Delivery[]>(`/projects/${projectId}/deliveries`),
       api<DeliveryOrder[]>(`/projects/${projectId}/delivery-orders`),
       api<Array<{ id: string; status: string }>>(`/projects/${projectId}/production-series`),
     ]);
+    if (projectRef.current !== requested) return; // a stale response from a previous project
+    setLoadError('');
     setProposals(artifacts.filter(a => a.kind === 'EditDecisionList' && !a.stale));
     setDeliveries(rows);
     setOrders(orderRows);
     setSeriesActive(seriesRows.some(row => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status)));
   }, [projectId]);
 
-  useEffect(() => { reload().catch(e => setMessage(String(e))); }, [reload]);
+  useEffect(() => {
+    // Initial load, project switch, entering the delivery view, and the global
+    // topbar refresh all go through here, so new orders surface without the
+    // user having to find the local refresh button.
+    reload().catch((error: Error) => {
+      setLoadError(String(error.message || error));
+      setMessage('');
+    });
+  }, [reload, active, refreshEpoch]);
+
+  /** Production progress: any change in the shot jobs (a new series job, a
+   *  status transition, a finished render) may produce delivery output, so
+   *  reload on the change — without polling while nothing changes. */
+  const jobFingerprint = jobs.map((job) => `${job.id}:${job.status}:${job.video_created ? 1 : 0}`).join('|');
+  const lastFingerprintRef = useRef(jobFingerprint);
+  useEffect(() => {
+    if (lastFingerprintRef.current === jobFingerprint) return;
+    lastFingerprintRef.current = jobFingerprint;
+    reload().catch(() => undefined);
+  }, [jobFingerprint, reload]);
+
   // While a production series is live (or about to deliver), keep polling so
   // the automatically assembled reel appears without a manual refresh.
   useEffect(() => {
@@ -89,6 +124,8 @@ export default function DeliveryPanel({ projectId, jobs }: { projectId: string; 
   return <section className="card delivery-panel" id="delivery">
     <div className="panel-header"><h2>成片与导出</h2><button disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
 
+    {loadError && <p className="failure" role="alert">交付列表读取失败：{loadError}（显示的不是最新数据，可点击「刷新交付列表」重试）</p>}
+
     {orders.length > 0 && <div className="auto-delivery" aria-label="自动交付">
       {orders.map((order) => <article className="settings-block" key={order.id}>
         <b>自动交付 v{order.version} · {orderText[order.status] ?? order.status}</b>
@@ -115,7 +152,7 @@ export default function DeliveryPanel({ projectId, jobs }: { projectId: string; 
     </li>)}</ol>}
     <button disabled={busy || !edl.trim()} onClick={assemble}>{busy ? '正在装配…' : '校验并装配成片（人工修订）'}</button>
     {message && <p role="status">{message}</p>}
-    {!deliveries.length && !orders.some(o => o.status === 'DELIVERED') && <p>暂无交付成片。</p>}
+    {!loadError && !deliveries.length && !orders.some(o => o.status === 'DELIVERED') && <p>暂无交付成片。</p>}
     {deliveries.map(row => <article className="settings-block" key={row.artifact_id}>
       <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
       <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>

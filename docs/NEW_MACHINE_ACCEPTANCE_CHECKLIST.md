@@ -32,3 +32,12 @@
 - 同目录 `comfy-cpu-contract-after-name-fix/`：真实 CPU 节点/参数契约及私有 SQLite 租约记录。首次脚本因 Job Object 名称不符合接口约束而在创建进程前被拒绝，原失败记录保留；修正调用后重验。
 
 后续先修复受管冷启动交接和审片自动配置，再进行完整物料与真实生产验收；所有未完成项保留原要求，不以 Mock、CPU 或元数据证据替代。
+
+## 2026-11-01 修复轮追加结论（不改动上表历史记录）
+
+本轮（基线 ba3301e，见 `docs/WEB_NEW_USER_FIX_20261101.md` 与 `.local-acceptance/web-new-user-fix-20261101-ba3301e/`）在**已装依赖的开发机**上取得以下新证据，不将分层通过合并为完整新机验收：
+
+- 五项 Web 新用户缺陷（2×P1、3×P2）修复并有 26 个长期回归用例；后端全套件 1307 passed / 1 skipped / 2 warnings；Ruff、TypeScript/Vite、Alembic（新库 head `f150a0010001` 与旧库副本升级保留验证）通过。
+- Web 新用户 Mock 全流程 MOCK_VERIFIED（真实浏览器+真实 API/SQLite/Worker、独立库、隔离操作员身份）。
+- **真实 H3 生产 PASS_REAL**：`run_real_closure_v3.ps1 -RunName web-fix-20261101-b`，五 Agent 5/5 → 系列 2 镜 COMPLETED（同一受管渲染器、租约全程、结束释放）→ 自动 EDL（frozen_edit_intent）→ 自动 FFmpeg 装配 → DELIVERED 订单 → MP4 SHA-256 匹配 + FFprobe + 完整解码通过 → Web 实播（readyState 4）。每镜 submit_intent 先行持久化、真实外部任务 ID、五道质量门全 real；final gate needs_review → 成片 pending_review 如实呈现。证据：`.local-acceptance/final-closure-v3/web-fix-20261101-b/`。
+- 边界保持：现有模型目录复用（60.8GB 从零下载仍 NOT_RUN）；干净 Windows 首启 NOT_RUN；真实素材权属与艺术批准 PENDING_HUMAN；`test_real_managed_startup.py:85` 保持 SKIP。
