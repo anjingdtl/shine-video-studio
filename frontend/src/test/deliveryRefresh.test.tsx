@@ -127,3 +127,32 @@ describe('新交付订单自动出现在页面', () => {
     }, { timeout: 3000 });
   });
 });
+
+describe('可视化 EDL 编辑（D01）', () => {
+  it('入点修改写回提交体，无需手写 JSON；装配按钮仍走原合同', async () => {
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/film-artifacts$/, respond: () => jsonResponse([
+      { id: 'edl-1', kind: 'EditDecisionList', stale: false, payload_json: { schema_version: '1.1', clips: [
+        { job_id: 'job-1', attempt_id: 'att-1', artifact_id: 'art-1', in_s: 0, out_s: 5, transition: 'CUT', reason: '提案顺序' },
+      ] } },
+    ]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/jobs$/, respond: () => jsonResponse([
+      { id: 'job-1', shot_name: '第一镜', status: 'PASSED', state_version: 1, request: {}, attempts: [] },
+    ]) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/deliveries$/, respond: () => jsonResponse({ review_state: 'all_passed' }, 201) });
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(await screen.findByTitle('打开交付板块'));
+    await screen.findByLabelText('装配镜头顺序（可编辑）');
+    await user.selectOptions(screen.getByLabelText('剪辑提案'), 'edl-1');
+    const inPoint = await screen.findByLabelText('入点（秒）');
+    await user.clear(inPoint);
+    await user.type(inPoint, '1.5');
+    await user.click(screen.getByRole('button', { name: /校验并装配成片/ }));
+    await waitFor(() => {
+      expect(stub.callsOf('POST', /deliveries$/)).toHaveLength(1);
+    });
+    const body = stub.callsOf('POST', /deliveries$/)[0].body as { clips: Array<{ in_s: number }> };
+    expect(body.clips[0].in_s).toBe(1.5);
+  });
+});

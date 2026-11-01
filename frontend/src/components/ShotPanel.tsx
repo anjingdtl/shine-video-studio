@@ -25,7 +25,6 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   const [shotName, setShotName] = useState('第一镜');
   const [storyBeat, setStoryBeat] = useState('');
   const [duration, setDuration] = useState(6);
-  const [characters, setCharacters] = useState('');
   const [environment, setEnvironment] = useState('');
   const [speaker, setSpeaker] = useState('');
   const [line, setLine] = useState('');
@@ -36,10 +35,20 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   const [editBindings, setEditBindings] = useState<Record<string, { use_as: string; role: string; frame_role: string; checked: boolean }>>({});
   const [continuityMode, setContinuityMode] = useState<'cut' | 'last_frame' | 'hard_frame_anchor'>('cut');
   const [continuitySource, setContinuitySource] = useState('');
+  const [selectedCharacters, setSelectedCharacters] = useState<string[]>([]);
+  const [newCharacter, setNewCharacter] = useState('');
+  const [shotSize, setShotSize] = useState('medium');
+  const [movement, setMovement] = useState('static');
   const [submitting, setSubmitting] = useState(false);
   const [bindingSaving, setBindingSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const approved = assets.filter((asset) => asset.approved && asset.locked);
+  // 人物选择器数据源：本项目已批准人物主资产的 entity_id + 本项目镜头已用过的人物名。
+  // AI 文本不会变成已批准角色；新增人物必须走显式的新增输入。
+  const characterOptions = [...new Set([
+    ...approved.filter((asset) => asset.kind === 'image' && asset.role === 'character' && asset.entity_id).map((asset) => asset.entity_id as string),
+    ...shots.flatMap((shot) => shot.spec.characters ?? []),
+  ])];
 
   function addBinding() {
     setDraft((rows) => [...rows, emptyDraft()]);
@@ -65,7 +74,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         frame_role: row.use_as === 'picture' && row.frame_role ? row.frame_role : null,
         ordinal: index,
       }));
-    const characterList = characters.split(',').map((value) => value.trim()).filter(Boolean);
+    const characterList = selectedCharacters;
     if (speaker.trim() && !characterList.includes(speaker.trim())) characterList.push(speaker.trim());
     const dialogue = speaker.trim() && line.trim()
       ? [{ speaker_id: speaker.trim(), text: line.trim(), start_s: Number(startS), end_s: Number(endS) }]
@@ -86,7 +95,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
           duration_target_s: durationValue,
           shot_priority: 'B',
           style_version_id: currentStyle.id,
-          camera: { shot_size: 'medium', movement: 'static' },
+          camera: { shot_size: shotSize, movement },
           characters: characterList,
           required_asset_ids: [...new Set(bindings.map((binding) => binding.asset_id))],
           dialogue,
@@ -158,9 +167,55 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         <label>镜头名称<input value={shotName} onChange={(event) => setShotName(event.target.value)} disabled={!currentStyle} /></label>
         <label>时长（4–15 秒）<input type="number" min={4} max={15} value={duration} onChange={(event) => setDuration(Number(event.target.value))} disabled={!currentStyle} /></label>
         <label className="wide-field">镜头意图<textarea value={storyBeat} onChange={(event) => setStoryBeat(event.target.value)} placeholder="描述画面、动作和关键剧情事实" disabled={!currentStyle} /></label>
-        <label>人物（逗号分隔）<input value={characters} onChange={(event) => setCharacters(event.target.value)} placeholder="CHAR_A, CHAR_B" disabled={!currentStyle} /></label>
+        <div className="wide-field character-picker">
+          <span className="builder-label">人物（从本项目选择；新增需显式输入）</span>
+          {characterOptions.length === 0 && <span className="empty-chip">暂无可选人物：先上传并批准人物主资产，或先建过含人物的镜头。</span>}
+          <div className="character-chips">
+            {characterOptions.map((name) => (
+              <label key={name} className={`character-chip ${selectedCharacters.includes(name) ? 'is-selected' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedCharacters.includes(name)}
+                  disabled={!currentStyle}
+                  onChange={() => setSelectedCharacters((current) => current.includes(name)
+                    ? current.filter((value) => value !== name)
+                    : [...current, name])}
+                />
+                {name}
+              </label>
+            ))}
+          </div>
+          <div className="character-add-row">
+            <input
+              value={newCharacter}
+              placeholder="新增人物名（如 CHAR_C）"
+              aria-label="新增人物名"
+              onChange={(event) => setNewCharacter(event.target.value)}
+              disabled={!currentStyle}
+            />
+            <button
+              className="subtle-button"
+              disabled={!currentStyle || !newCharacter.trim() || selectedCharacters.includes(newCharacter.trim())}
+              onClick={() => { setSelectedCharacters((current) => [...current, newCharacter.trim()]); setNewCharacter(''); }}
+            >
+              <Plus size={12} /> 添加人物
+              <span className="character-add-note">仅加入本镜人物名单，不创建主资产</span>
+            </button>
+          </div>
+        </div>
         <label>环境声 / 地点<input value={environment} onChange={(event) => setEnvironment(event.target.value)} placeholder="雨夜码头" disabled={!currentStyle} /></label>
-        <label>对白角色<input value={speaker} onChange={(event) => setSpeaker(event.target.value)} placeholder="CHAR_A" disabled={!currentStyle} /></label>
+        <label>对白角色<select value={speaker} onChange={(event) => setSpeaker(event.target.value)} disabled={!currentStyle}>
+          <option value="">（无对白）</option>
+          {selectedCharacters.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select></label>
+        <label>景别<select value={shotSize} onChange={(event) => setShotSize(event.target.value)} disabled={!currentStyle}>
+          <option value="wide">远景</option><option value="full">全景</option><option value="medium">中景</option>
+          <option value="medium_close">中近景</option><option value="close_up">近景</option><option value="big_close_up">特写</option>
+        </select></label>
+        <label>运镜<select value={movement} onChange={(event) => setMovement(event.target.value)} disabled={!currentStyle}>
+          <option value="static">固定</option><option value="slow_push">缓慢推进</option><option value="pan">横移</option>
+          <option value="follow">跟随</option><option value="handheld">手持</option>
+        </select></label>
         <label>对白内容<input value={line} onChange={(event) => setLine(event.target.value)} placeholder="账册在哪儿？" disabled={!currentStyle} /></label>
         <label>开始秒<input type="number" min={0} step={0.1} value={startS} onChange={(event) => setStartS(Number(event.target.value))} disabled={!currentStyle} /></label>
         <label>结束秒<input type="number" min={0} step={0.1} value={endS} onChange={(event) => setEndS(Number(event.target.value))} disabled={!currentStyle} /></label>

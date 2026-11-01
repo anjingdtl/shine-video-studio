@@ -167,3 +167,40 @@ describe('分镜提交失败必须保留输入', () => {
     expect(screen.getByLabelText(/镜头意图/)).toHaveValue('直接命中服务端校验');
   });
 });
+
+describe('镜头选择器写入真实 ShotSpec（P01/P02）', () => {
+  const characterAsset = {
+    id: 'asset-char', project_id: 'proj-1', filename: '林迟定妆.png', kind: 'image',
+    content_type: 'image/png', sha256: 'e'.repeat(64), byte_size: 10, role: 'character',
+    entity_id: 'CHAR_LINCHI', tags: [], duration_s: null, width: 8, height: 8,
+    approved: true, locked: true, approved_at: 't', locked_at: 't',
+  };
+
+  it('人物来自本项目已批准主资产，选择后进入 POST spec 并带景别/运镜', async () => {
+    const user = userEvent.setup();
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/assets$/, respond: () => jsonResponse([characterAsset]) });
+    stub.add({
+      method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/shots$/,
+      respond: (_url, init) => jsonResponse({ id: 'shot-new', name: '镜头 1', revision: 1, spec: JSON.parse(String(init?.body)).spec, bindings: [] }, 201),
+    });
+    render(<App />);
+    const beat = await screen.findByLabelText(/镜头意图/);
+    await waitFor(() => expect(beat).not.toBeDisabled());
+    await user.type(beat, '林迟在雨夜里核对账册');
+    await user.click(await screen.findByRole('checkbox', { name: 'CHAR_LINCHI' }));
+    await user.selectOptions(screen.getByLabelText('对白角色'), 'CHAR_LINCHI');
+    await user.type(screen.getByLabelText('对白内容'), '账册在哪儿？');
+    await user.selectOptions(screen.getByLabelText('景别'), 'close_up');
+    await user.selectOptions(screen.getByLabelText('运镜'), 'slow_push');
+    await clickSave(user);
+    await waitFor(() => {
+      expect(stub.callsOf('POST', /shots$/)).toHaveLength(1);
+    });
+    const spec = (stub.callsOf('POST', /shots$/)[0].body as { spec: {
+      characters: string[]; dialogue: Array<{ speaker_id: string }>; camera: Record<string, string>;
+    } }).spec;
+    expect(spec.characters).toEqual(['CHAR_LINCHI']);
+    expect(spec.dialogue[0].speaker_id).toBe('CHAR_LINCHI');
+    expect(spec.camera).toMatchObject({ shot_size: 'close_up', movement: 'slow_push' });
+  });
+});

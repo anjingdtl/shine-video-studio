@@ -647,3 +647,28 @@ html[data-theme='dark'] .env-model-card em.muted{background:#2c2d26;color:#9a9c9
 html[data-theme='dark'] .env-model-card em.candidate{background:#38301f;color:#cbb287}
 html[data-theme='dark'] .env-model-card em.absent{background:#343021;color:#c2ac85}
 html[data-theme='dark'] .env-model-card em.verified{background:#2c3325;color:#a9c193}
+
+/* ---- Shot form: project-entity character picker ---- */
+.character-picker{border:1px dashed #e3e4db;border-radius:6px;padding:10px;background:#fafaf7;display:flex;flex-direction:column;gap:7px}
+.character-chips{display:flex;gap:6px;flex-wrap:wrap}
+.character-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #e2e1d9;border-radius:16px;padding:5px 10px;font-size:10px;background:#fff;cursor:pointer}
+.character-chip.is-selected{border-color:#626b47;background:#eef2e3;color:#4e6b3c;font-weight:600}
+.character-add-row{display:flex;gap:6px;align-items:center}
+.character-add-row input{max-width:200px}
+.character-add-note{font-size:9px;color:#a0a198}
+html[data-theme='dark'] .character-picker{background:#22231d;border-color:#3d3e34}
+html[data-theme='dark'] .character-chip{background:#2a2b23;border-color:#3f4036;color:#d9dad0}
+html[data-theme='dark'] .character-chip.is-selected{background:#2c3325;border-color:#5d6446;color:#a9c193}
+
+.series-actions-row{grid-column:1/-1;display:flex;align-items:center;gap:10px}
+.series-excluded-note{font-size:10px;color:#8a8b84}
+
+/* ---- Delivery: visual EDL clip editor ---- */
+.edl-visual{display:flex;flex-direction:column;gap:6px;margin:10px 0;border:1px dashed #e3e4db;border-radius:6px;padding:10px;background:#fafaf7}
+.edl-clip-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px}
+.edl-clip-row b{min-width:180px}
+.edl-clip-row label{display:flex;align-items:center;gap:5px;font-size:10px;color:#8a8b84;margin:0}
+.edl-clip-row input{width:84px;padding:4px 6px;font-size:10px}
+.edl-clip-note{font:9px var(--mono);color:#85877d}
+.edl-advanced summary{cursor:pointer;font-size:10px;color:#8a8b84}
+html[data-theme='dark'] .edl-visual{background:#22231d;border-color:#3d3e34}

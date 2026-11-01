@@ -66,6 +66,11 @@ export default function ProductionSeriesPanel({
   }, [projectId, shots.length]);
 
   const ref2vaProfiles = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
+  // Only one validated Ref2VA profile exists: preselect it instead of making
+  // the user pick from one option; multiple options keep the manual choice.
+  useEffect(() => {
+    if (ref2vaProfiles.length === 1 && !profileId) setProfileId(ref2vaProfiles[0].id);
+  }, [ref2vaProfiles, profileId]);
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
   // A shot that is already being produced must not be queued a second time.
   const busyShotIds = new Set(
@@ -81,6 +86,11 @@ export default function ProductionSeriesPanel({
       : [...current, shotId]);
   }
 
+  /** 选择全部可制作镜头（排除已在生产中的），并按项目镜头顺序提交。 */
+  function selectAllProducible() {
+    setSelected(shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id));
+  }
+
   async function start() {
     if (!profileId) { onMessage('请先选择已注册的 H3 Ref2VA 工作流 Profile。', 'error'); return; }
     if (selected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
@@ -90,8 +100,12 @@ export default function ProductionSeriesPanel({
     }
     setWorking(true);
     try {
+      // 按项目镜头顺序提交，不按勾选顺序改变故事顺序。
+      const shot_ids = shots
+        .map((shot) => shot.id)
+        .filter((id) => selected.includes(id));
       const body: Record<string, unknown> = {
-        shot_ids: selected,
+        shot_ids,
         provider: 'comfyui',
         workflow_profile_id: profileId,
         self_review_scope: scope,
@@ -184,6 +198,10 @@ export default function ProductionSeriesPanel({
           </label>
         ))}
         {shots.length === 0 && <span className="empty-inline">先创建分镜，才能排入生产序列。</span>}
+      </div>
+      <div className="series-actions-row">
+        <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
+        {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
       <button className="primary-button" disabled={busy || working || !canStart} onClick={start}>
         {working ? <Loader2 size={14} /> : <Play size={14} />} 开始真实生产（{selected.length} 镜）

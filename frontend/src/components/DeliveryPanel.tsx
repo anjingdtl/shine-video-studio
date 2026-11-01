@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { API, api, json, type Job } from '../api';
 import { failureLabels, label } from '../constants';
 
-type Proposal = { id: string; kind: string; stale: boolean; payload_json: Record<string, unknown> };
+type Proposal = { id: string; kind: string; stale: boolean; created_at?: string; payload_json: Record<string, unknown> };
 type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string;
   provenance: { review_state?: string; duration_s?: number; clips?: unknown[]; edl_source?: string } };
 type DeliveryOrder = {
@@ -42,8 +42,19 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
   const [message, setMessage] = useState('');
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
-  let clips: Array<{ job_id: string; in_s: number; out_s: number }> = [];
+  let clips: Array<{ job_id: string; in_s: number; out_s: number; transition?: string }> = [];
   try { const parsed = JSON.parse(edl); if (Array.isArray(parsed.clips)) clips = parsed.clips; } catch { /* editable draft */ }
+
+  /** Visual edits write straight back into the EDL JSON state: one source of
+   *  truth, the assembly POST contract stays byte-compatible. */
+  function updateClip(index: number, key: 'in_s' | 'out_s', value: number) {
+    try {
+      const parsed = JSON.parse(edl) as { clips: Array<Record<string, unknown>> };
+      if (!Array.isArray(parsed.clips) || !parsed.clips[index]) return;
+      parsed.clips[index][key] = value;
+      setEdl(JSON.stringify(parsed, null, 2));
+    } catch { /* advanced JSON editing keeps its own draft */ }
+  }
 
   const reload = useCallback(async () => {
     const requested = projectId;
@@ -145,8 +156,23 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
       setSelected(e.target.value);
       const proposal = proposals.find(a => a.id === e.target.value);
       setEdl(proposal ? JSON.stringify(proposal.payload_json, null, 2) : '');
-    }}><option value="">手动填写 EDL / 选择提案</option>{proposals.map(a => <option key={a.id} value={a.id}>{a.id}</option>)}</select>
-    <label>交付 EDL JSON<textarea rows={9} value={edl} onChange={e => { setSelected(''); setEdl(e.target.value); }} /></label>
+    }}><option value="">手动填写 / 选择提案</option>{proposals.map(a => <option key={a.id} value={a.id}>{a.id.slice(0, 10)}…（{new Date(a.created_at ?? Date.now()).toLocaleString()}）</option>)}</select>
+    <div className="edl-visual" aria-label="装配镜头顺序（可编辑）">
+      {clips.length === 0 && <p className="empty-inline">还没有片段：选择一个剪辑提案，或在高级编辑里填写 EDL JSON。</p>}
+      {clips.map((clip, index) => (
+        <div className="edl-clip-row" key={index}>
+          <b>{index + 1}. {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（装配时校验）'}</b>
+          <label>入点（秒）<input type="number" min={0} step={0.1} value={clip?.in_s ?? 0}
+            onChange={e => updateClip(index, 'in_s', Number(e.target.value))} /></label>
+          <label>出点（秒）<input type="number" min={0} step={0.1} value={clip?.out_s ?? 0}
+            onChange={e => updateClip(index, 'out_s', Number(e.target.value))} /></label>
+          <span className="edl-clip-note">{clip?.transition ?? 'CUT'}</span>
+        </div>
+      ))}
+    </div>
+    <details className="edl-advanced"><summary>高级：EDL JSON 编辑</summary>
+      <label>交付 EDL JSON<textarea rows={9} value={edl} onChange={e => { setSelected(''); setEdl(e.target.value); }} /></label>
+    </details>
     {clips.length > 0 && <ol aria-label="装配镜头顺序">{clips.map((clip, index) => <li key={index}>
       {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（提交时会校验）'} · {String(clip?.in_s)}–{String(clip?.out_s)} 秒
     </li>)}</ol>}
