@@ -737,7 +737,21 @@ function App() {
                 onPatchMetadata={patchAssetMetadata}
               />
 
-              <StylePanel style={style} setStyle={setStyle} currentStyle={currentStyle} styles={styles} busy={busy} onSave={saveStyle} onFreeze={freezeStyle} />
+              <StylePanel
+                key={`style-${projectId}`}
+                projectId={projectId}
+                style={style}
+                setStyle={setStyle}
+                serverDraft={project.style_draft}
+                currentStyle={currentStyle}
+                styles={styles}
+                busy={busy}
+                onSave={saveStyle}
+                onFreeze={freezeStyle}
+                onDraftApplied={() => { loadProject(projectId).catch(() => undefined); }}
+                onNavigate={goTo}
+                onMessage={report}
+              />
 
               <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
 

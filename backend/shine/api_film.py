@@ -26,7 +26,7 @@ from shine.models import (
     WorkflowProfile,
     utcnow,
 )
-from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, ShotSpec
+from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, ShotSpec, StyleBible
 from shine.security import is_loopback_url
 from shine.services import add_audit, create_shot_record, make_render_request, require_project
 
@@ -333,17 +333,30 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         raise HTTPException(status_code=422, detail="FILM_HANDOFF_REJECTED") from None
 
 
+class StyleDraftApply(APIModel):
+    """Adopt an AI style proposal into the draft only when the server draft is
+    exactly what the user was looking at (`base_style`); `None` means the
+    server draft must still be empty.  Any other writer's change refuses the
+    adoption so an in-flight proposal can never silently overwrite newer
+    content (docs/UI_SIMPLIFICATION_PLAN_20261102.md §7.2)."""
+
+    base_style: StyleBible | None
+
+
 @router.post("/projects/{project_id}/film-artifacts/{artifact_id}/style-draft")
-def apply_style_suggestion(project_id: str, artifact_id: str, db: DBSession):
+def apply_style_suggestion(project_id: str, artifact_id: str, body: StyleDraftApply, db: DBSession):
     from shine.services import update_style_draft
 
-    require_project(db, project_id)
+    project = require_project(db, project_id)
     try:
         artifact = load_inputs(db, project_id, [artifact_id])[0]
         if artifact.kind != "StyleProposal":
             raise ValueError("NOT_A_STYLE_PROPOSAL")
+        expected = body.base_style.model_dump(mode="json") if body.base_style is not None else None
+        if project.style_draft != expected:
+            raise HTTPException(status_code=409, detail="STYLE_DRAFT_CHANGED")
         proposal = StyleProposal.model_validate(artifact.payload_json)
-        update_style_draft(db, require_project(db, project_id), proposal.suggestion)
+        update_style_draft(db, project, proposal.suggestion)
         add_audit(db, "user", "FILM_STYLE_SUGGESTION_APPLIED", "agent_artifact", artifact.id, project_id=project_id)
         db.commit()
         return {"status": "DRAFT_ONLY", "requires_user_freeze": True}

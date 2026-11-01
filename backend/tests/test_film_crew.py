@@ -343,13 +343,31 @@ def test_permissions_unfrozen_style_missing_route_cross_project_and_tool(api):
     proposal = call(
         client, project_id, "director", {"suggestion": ENGLISH_STYLE, "rationale": "Stable axis"}, tool="style_proposal"
     )
-    assert client.post(f"/api/v1/projects/{project_id}/film-artifacts/{proposal['id']}/style-draft").status_code == 200
+    # The adopt request must carry the draft the user was looking at; the
+    # server refuses when another writer changed the draft in between.
+    current_draft = client.get(f"/api/v1/projects/{project_id}").json()["style_draft"]
+    assert (
+        client.post(
+            f"/api/v1/projects/{project_id}/film-artifacts/{proposal['id']}/style-draft",
+            json={"base_style": current_draft},
+        ).status_code
+        == 200
+    )
     assert client.get(f"/api/v1/projects/{project_id}").json()["frozen_style_version_id"] is None
+    # Concurrency regression: adopting against a stale base refuses (409) and
+    # keeps the server draft unchanged.
+    stale = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{proposal['id']}/style-draft",
+        json={"base_style": None},
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"] == "STYLE_DRAFT_CHANGED"
+    assert client.get(f"/api/v1/projects/{project_id}").json()["style_draft"] == proposal["payload_json"]["suggestion"]
     client.post(f"/api/v1/projects/{project_id}/style/freeze", json={})
     client.delete("/api/v1/agent-routes/scriptwriter")
     assert client.post(f"/api/v1/projects/{project_id}/film-agents/scriptwriter/run", json={}).status_code == 422
     other = create_project(client)
-    assert client.post(f"/api/v1/projects/{other}/film-artifacts/{proposal['id']}/style-draft").status_code == 422
+    assert client.post(f"/api/v1/projects/{other}/film-artifacts/{proposal['id']}/style-draft", json={"base_style": None}).status_code == 422
 
 
 def test_profile_routing_remote_consent_errors_redaction_and_staleness(api):
