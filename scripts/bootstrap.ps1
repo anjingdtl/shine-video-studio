@@ -8,22 +8,50 @@ param(
     [switch]$CheckOnly,
     [string]$ToolsManifest = "",
     [string]$InstallRoot = "",
-    [switch]$NoPathUpdate
+    [switch]$NoPathUpdate,
+    [switch]$NoLaunch,
+    [string]$DataDir = "",
+    [string]$StorageRoot = ""
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$explicitDataDir = [bool]$DataDir
+$defaultManifest = -not [bool]$ToolsManifest
 if (-not $ToolsManifest) { $ToolsManifest = Join-Path $repoRoot "config\deployment\tools-windows-x64.json" }
 if (-not (Test-Path $ToolsManifest)) { throw "Tools manifest missing: $ToolsManifest" }
 $manifest = Get-Content $ToolsManifest -Raw | ConvertFrom-Json
-$binRoot = if ($InstallRoot) { $InstallRoot } else { Join-Path $env:LOCALAPPDATA "Shine\bin" }
+if ($defaultManifest -and -not $CheckOnly -and -not $StorageRoot) {
+    $StorageRoot = Read-Host 'Choose a non-system-drive installation directory (for example D:\ShineVideoStudio)'
+    if (-not $StorageRoot) { throw 'Choose the installation directory before downloading tools or dependencies.' }
+}
+if ($StorageRoot -and -not $CheckOnly) {
+    if (-not [IO.Path]::IsPathRooted($StorageRoot) -or $StorageRoot.StartsWith('\\')) {
+        throw 'StorageRoot must be an absolute local directory.'
+    }
+    $StorageRoot = [IO.Path]::GetFullPath($StorageRoot)
+    $storageDrive = [IO.Path]::GetPathRoot($StorageRoot).TrimEnd('\')
+    $bootstrapSystemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
+    if ($storageDrive -eq $bootstrapSystemDrive) { throw 'Choose a non-system drive for automatic bootstrap downloads.' }
+    New-Item -ItemType Directory -Force -Path $StorageRoot | Out-Null
+    $env:UV_CACHE_DIR = Join-Path $StorageRoot 'download-cache\uv'
+    $env:UV_PYTHON_INSTALL_DIR = Join-Path $StorageRoot 'python'
+    $env:PIP_CACHE_DIR = Join-Path $StorageRoot 'download-cache\pip'
+    $env:npm_config_cache = Join-Path $StorageRoot 'download-cache\npm'
+    $env:SHINE_BACKEND_ENV = Join-Path $StorageRoot 'app\backend-env'
+    $env:SHINE_BOOTSTRAP_ROOT = $StorageRoot
+    $env:TEMP = Join-Path $StorageRoot 'temp'
+    $env:TMP = $env:TEMP
+    New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+}
+$binRoot = if ($InstallRoot) { $InstallRoot } elseif ($StorageRoot) { Join-Path $StorageRoot 'bin' } else { Join-Path $env:LOCALAPPDATA "Shine\bin" }
 
 $probes = @{
-    "uv"      = ,@("uv", "--version")
-    "node"    = ,@("node", "--version")
-    "npm"     = ,@("npm.cmd", "--version")
-    "pwsh"    = ,@("pwsh", "-NoProfile", "-Command", "`$PSVersionTable.PSVersion.ToString()")
-    "ffmpeg"  = ,@("ffmpeg", "-version")
-    "ffprobe" = ,@("ffprobe", "-version")
+    "uv"      = @("uv", "--version")
+    "node"    = @("node", "--version")
+    "npm"     = @("npm.cmd", "--version")
+    "pwsh"    = @("pwsh", "-NoProfile", "-Command", "`$PSVersionTable.PSVersion.ToString()")
+    "ffmpeg"  = @("ffmpeg", "-version")
+    "ffprobe" = @("ffprobe", "-version")
 }
 $floors = @{ "uv" = "0.9"; "node" = "20"; "npm" = "10"; "pwsh" = "7.3"; "ffmpeg" = "6"; "ffprobe" = "6" }
 
@@ -54,6 +82,9 @@ function Get-CommandResult([string]$tool, [string[]]$argv) {
 }
 
 function Install-Tool([string]$name, $entry) {
+    if ($name -notmatch '^[a-z][a-z0-9-]*$' -or $entry.version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$') {
+        throw 'Invalid pinned tool identity.'
+    }
     $url = $entry.url
     $sha256 = $entry.sha256
     $expectedSize = [long]$entry.size
@@ -67,8 +98,15 @@ function Install-Tool([string]$name, $entry) {
     if ($actual -ne $sha256.ToLower()) { throw "sha256 mismatch for $name" }
     if ((Get-Item $archive).Length -ne $expectedSize) { throw "size mismatch for $name" }
     Write-Host "[bootstrap] sha256 verified for $name"
-    $toolDir = Join-Path $env:LOCALAPPDATA ("Shine\tools\" + $name + "-" + $entry.version)
-    if (Test-Path $toolDir) { Remove-Item -Recurse -Force $toolDir }
+    $toolBase = if ($StorageRoot) { Join-Path $StorageRoot 'tools' } else { Join-Path $env:LOCALAPPDATA 'Shine\tools' }
+    $toolsRoot = [IO.Path]::GetFullPath($toolBase)
+    $toolDir = [IO.Path]::GetFullPath((Join-Path $toolsRoot ($name + '-' + $entry.version)))
+    if (-not $toolDir.StartsWith($toolsRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Tool destination escaped the bootstrap tools directory.'
+    }
+    if (Test-Path -LiteralPath $toolDir) {
+        throw 'Pinned tool destination already exists; reconcile the previous installation before replacing it.'
+    }
     New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
     Expand-Archive -Path $archive -DestinationPath $toolDir -Force
     return $toolDir
@@ -84,13 +122,15 @@ function New-ToolShim([string]$binRoot, [string]$name, [string]$target) {
 
 function Add-UserPath([string]$directory) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -split ";" -contains $directory) { return }
-    [Environment]::SetEnvironmentVariable("Path", $directory + ";" + $userPath, "User")
+    if (-not ($userPath -split ";" -contains $directory)) {
+        [Environment]::SetEnvironmentVariable("Path", $directory + ";" + $userPath, "User")
+    }
     $env:Path = $directory + ";" + $env:Path
 }
 
 $report = @{ tools = @(); installed = @(); blockers = @() }
 $shimTargets = @{}
+$nativeDirectories = @()
 foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
     $probe = $probes[$name]
     $result = Get-CommandResult $name $probe
@@ -105,6 +145,7 @@ foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
         continue
     }
     $manifestTool = $manifest.tools.$name
+    if (-not $manifestTool -and $name -in @("npm", "ffprobe")) { continue }
     if (-not $manifestTool) {
         $report.blockers += @{ name = $name; status = "no_pinned_manifest_entry" }
         continue
@@ -127,18 +168,96 @@ foreach ($name in $report.installed) {
         if ($found) {
             $shimName = $leaf.Replace(".exe", "").Replace(".cmd", "")
             New-ToolShim $binRoot $shimName $found.FullName | Out-Null
+            $nativeDirectories += $found.DirectoryName
         } else {
             $report.blockers += @{ name = $name.name; status = "entry_missing_after_extract"; detail = $leaf }
         }
     }
 }
 if ($report.installed.Count -gt 0 -and -not $NoPathUpdate) { Add-UserPath $binRoot }
+if (-not $NoPathUpdate) {
+    foreach ($directory in ($nativeDirectories | Select-Object -Unique)) { Add-UserPath $directory }
+}
 $report.bin_root = $binRoot
 $report.reprobe = @{}
 foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
     $result = Get-CommandResult $name $probes[$name]
     $report.reprobe[$name] = @{ present = $result.Present; version = $result.Version }
+    if (-not $CheckOnly -and -not $NoPathUpdate -and
+        (-not $result.Present -or -not (Test-VersionAtFloor $result.Version $floors[$name]))) {
+        $report.blockers += @{ name = $name; status = "unavailable_after_install" }
+    }
 }
 $report | ConvertTo-Json -Depth 5
 if ($report.blockers.Count -gt 0) { exit 1 }
+if ($defaultManifest -and -not $CheckOnly) {
+    # Bootstrap creates only a local operator identity. Every package/instance
+    # action still requires its own reviewed, one-use grant in the workbench.
+    if (-not $NoLaunch) {
+        . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
+        Initialize-ShineOperator (Join-Path $repoRoot '.env') {
+            Read-Host 'Choose a local operator password (used to approve installation plans)' -AsSecureString
+        }
+    }
+    $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'
+    if (-not $DataDir) {
+        if ($env:SHINE_DATA_DIR) { $DataDir = $env:SHINE_DATA_DIR }
+        else {
+            $existingEnvFile = Join-Path $repoRoot '.env'
+            $storedEnvironment = if (Test-Path -LiteralPath $existingEnvFile) {
+                Get-Content -LiteralPath $existingEnvFile -Raw -Encoding UTF8
+            } else { '' }
+            $storedDataDir = [regex]::Match($storedEnvironment, '(?m)^SHINE_DATA_DIR=([^\r\n]+)')
+            if ($storedDataDir.Success) {
+                $DataDir = $storedDataDir.Groups[1].Value.Trim()
+                if ($DataDir.StartsWith("'") -or $DataDir.StartsWith('"')) {
+                    if ($DataDir.Length -lt 2 -or $DataDir[-1] -ne $DataDir[0]) {
+                        throw 'Pass the resolved existing data directory with -DataDir; its quoted .env value is ambiguous.'
+                    }
+                    $DataDir = $DataDir.Substring(1, $DataDir.Length - 2).Replace("\'", "'").Replace('\\', '\')
+                } else { $DataDir = ($DataDir -replace '[ \t]+#.*$', '').Trim() }
+                if ($DataDir.Contains('${')) { throw 'Pass the resolved existing data directory with -DataDir; bootstrap does not expand .env expressions.' }
+                if (-not [IO.Path]::IsPathRooted($DataDir)) { $DataDir = Join-Path $repoRoot $DataDir }
+            } elseif (Test-Path -LiteralPath (Join-Path $repoRoot '.local-data')) {
+                $DataDir = Join-Path $repoRoot '.local-data'
+            } else { $DataDir = Join-Path $StorageRoot 'data' }
+        }
+    }
+    if (-not $explicitDataDir -and -not [IO.Path]::IsPathRooted($DataDir)) { $DataDir = Join-Path $repoRoot $DataDir }
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    $storagePreferences = Join-Path $DataDir 'deployment-storage.json'
+    if (-not (Test-Path -LiteralPath $storagePreferences)) {
+        $legacyDeployment = Join-Path $DataDir 'comfyops'
+        if ((Test-Path -LiteralPath $legacyDeployment) -and (Get-ChildItem -LiteralPath $legacyDeployment -Force | Select-Object -First 1)) {
+            throw 'Existing deployment files require reconciliation; bootstrap will not redirect or move them.'
+        }
+        $storageJson = @{ version = 1; root = (Join-Path $StorageRoot 'runtime'); allow_system_drive = $false } | ConvertTo-Json
+        [IO.File]::WriteAllText($storagePreferences, $storageJson, (New-Object Text.UTF8Encoding($false)))
+    }
+    $envFile = Join-Path $repoRoot '.env'
+    $localConfig = if (Test-Path -LiteralPath $envFile) { Get-Content -LiteralPath $envFile -Raw -Encoding UTF8 } else { '' }
+    $launchSettings = @{
+        SHINE_DATA_DIR = [IO.Path]::GetFullPath($DataDir)
+        SHINE_BOOTSTRAP_ROOT = $StorageRoot
+        SHINE_BACKEND_ENV = $env:SHINE_BACKEND_ENV
+        UV_CACHE_DIR = $env:UV_CACHE_DIR
+        UV_PYTHON_INSTALL_DIR = $env:UV_PYTHON_INSTALL_DIR
+        PIP_CACHE_DIR = $env:PIP_CACHE_DIR
+        npm_config_cache = $env:npm_config_cache
+    }
+    foreach ($key in $launchSettings.Keys) {
+        $localConfig = [regex]::Replace($localConfig, "(?m)^$key=.*\r?\n?", '')
+        $safeValue = $launchSettings[$key].Replace('\', '/').Replace("'", "\'")
+        $localConfig += "`n$key='$safeValue'`n"
+    }
+    [IO.File]::WriteAllText($envFile, $localConfig, (New-Object Text.UTF8Encoding($false)))
+    if ($NoLaunch) { exit 0 }
+    $env:SHINE_DATA_DIR = [IO.Path]::GetFullPath($DataDir)
+    if ($explicitDataDir) {
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -DataDir $DataDir
+    } else {
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install
+    }
+    exit $LASTEXITCODE
+}
 exit 0

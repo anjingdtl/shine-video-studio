@@ -8,15 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shutil
 import signal
 import subprocess
 import sys
-import zipfile
 from datetime import datetime
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 from fastapi import HTTPException
@@ -33,6 +31,14 @@ from shine.comfyops.installer import (
     safe_target,
 )
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, InstallationPlan, ModelPackage, NodePackage
+from shine.comfyops.runtime_dependencies import (
+    dependency_commands,
+    dependency_lock,
+    prepare_build_directories,
+    source_build_plans,
+    verified_built_wheels,
+)
+from shine.comfyops.storage import prepare_process_environment, process_environment
 from shine.models import utcnow
 from shine.services import add_audit, require_project
 
@@ -65,7 +71,11 @@ def package(db, identity):
 
 
 def instance_root(settings, name, mode):
-    return safe_target(settings.data_dir / "comfyops" / ("fake-instances" if mode == "fake" else "instances"), name)
+    return safe_target(settings.comfyops_dir / ("fake-instances" if mode == "fake" else "instances"), name)
+
+
+def instance_identity(mode, port):
+    return str(uuid5(NAMESPACE_URL, f"shine-comfy-instance:{mode}:http://127.0.0.1:{port}"))
 
 
 def tree_manifest(root):
@@ -84,8 +94,11 @@ def tree_manifest(root):
 
 def plan_operation(db, settings, body):
     require_project(db, body.project_id)
+    if body.mode == 'local':
+        from shine.comfyops.storage import require_storage
+        require_storage(settings)
     root = instance_root(settings, body.name, body.mode)
-    identity = str(uuid5(NAMESPACE_URL, f"shine-comfy-instance:{body.mode}:http://127.0.0.1:{body.port}"))
+    identity = instance_identity(body.mode, body.port)
     instance = db.get(ComfyInstance, identity)
     if instance and instance.payload.get("managed") and instance.payload.get("root") != str(root):
         raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
@@ -127,23 +140,12 @@ def plan_operation(db, settings, body):
     python = str(Path(sys.executable).resolve())
     workspace_python = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     commands = []
+    builds = []
     if body.action == "CREATE":
         commands.append([python, "-m", "venv", str(root / ".venv")])
     if body.action in {"CREATE", "INSTALL_NODE"}:
-        commands.append(
-            [
-                str(workspace_python),
-                "-m",
-                "pip",
-                "install",
-                "--no-index",
-                "--require-hashes",
-                "--find-links",
-                str(root / ".wheelhouse"),
-                "-r",
-                str(root / ".shine-requirements.txt"),
-            ]
-        )
+        builds = source_build_plans(root, packages, settings.comfyops_dir / 'isolated-packages', uuid4().hex)
+        commands.extend(dependency_commands(root, workspace_python, builds))
     if body.action == "START":
         commands.append(
             [str(workspace_python), str(root / "main.py"), "--listen", "127.0.0.1", "--port", str(body.port)]
@@ -155,6 +157,8 @@ def plan_operation(db, settings, body):
         "root": str(root),
         "tier": tier,
         "commands": commands,
+        "command_environment": process_environment(root),
+        "source_builds": builds,
         "packages": packages,
         "python": python,
         "python_sha256": hashlib.sha256(Path(python).read_bytes()).hexdigest(),
@@ -184,10 +188,20 @@ class ProcessRunner(CommandExecutor):
     is_mock = False
     on_started = None
     last_owner = None
+    environment = None
+
+    def child_environment(self):
+        patch = dict(self.environment or {})
+        if self.environment and self.environment.get('TEMP'):
+            # Old approved plans may predate compiler-cache routing. Their
+            # existing instance root remains the authority for safe defaults.
+            patch = {**prepare_process_environment(Path(self.environment['TEMP']).parent), **patch}
+        return {**os.environ, **patch}
 
     def run(self, args, *, cwd):
         process = subprocess.Popen(
-            args, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            args, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=self.child_environment(),
         )
         self.last_owner = {"pid": process.pid, "birth": process_identity(process.pid)}
         if self.on_started:
@@ -201,7 +215,8 @@ class ProcessRunner(CommandExecutor):
 
     def start(self, args, *, cwd):
         process = subprocess.Popen(
-            args, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            args, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=self.child_environment(),
         )
         birth = process_identity(process.pid)
         if birth is None or process.poll() is not None:
@@ -326,45 +341,6 @@ def copy_package(source, target):
     tree_manifest(target)
 
 
-def dependency_lock(root, packages, package_root):
-    wheelhouse = root / ".wheelhouse"
-    wheelhouse.mkdir(exist_ok=True)
-    wheels = {}
-    for p in packages:
-        for spec in p["spec"]["files"]:
-            path = safe_target(package_root / p["spec"]["name"], spec["relative_path"])
-            if path.suffix != ".whl":
-                continue
-            with zipfile.ZipFile(path) as archive:
-                metadata = [n for n in archive.namelist() if n.endswith(".dist-info/METADATA")]
-                if len(metadata) != 1:
-                    raise ValueError("WHEEL_METADATA_INVALID")
-                content = archive.read(metadata[0]).decode()
-            name = re.search(r"^Name: ([A-Za-z0-9_.-]+)$", content, re.M)
-            version = re.search(r"^Version: ([A-Za-z0-9_.+!-]+)$", content, re.M)
-            if not name or not version:
-                raise ValueError("WHEEL_METADATA_INVALID")
-            key = name[1].lower().replace("_", "-")
-            if key in wheels and wheels[key] != (version[1], spec["sha256"]):
-                raise ValueError("DEPENDENCY_VERSION_CONFLICT")
-            wheels[key] = (version[1], spec["sha256"])
-            shutil.copyfile(path, wheelhouse / path.name)
-    requirement_files = [root / "requirements.txt", *list((root / "custom_nodes").glob("*/requirements.txt"))]
-    for requirements in requirement_files:
-        if not requirements.exists():
-            continue
-        for line in requirements.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            name = re.match(r"^([A-Za-z0-9_.-]+)(?:\[|[<>=!~; ]|$)", line)
-            if not name or name[1].lower().replace("_", "-") not in wheels:
-                raise ValueError("PINNED_DEPENDENCY_WHEEL_MISSING")
-    lock = "\n".join(f"{name}=={v} --hash=sha256:{sha}" for name, (v, sha) in sorted(wheels.items())) + "\n"
-    (root / ".shine-requirements.txt").write_text(lock, encoding="utf-8")
-    return graph_hash(wheels)
-
-
 def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None):
     checkpoint = checkpoint or (lambda stage: None)
     runner = runner or ProcessRunner()
@@ -429,8 +405,8 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
             db.add(instance)
         db.commit()  # durable intent, never automatically replayed after an uncertain command
     checkpoint("INTENT")
-    backup = settings.data_dir / "comfyops" / "instance-snapshots" / attempt_id
-    package_root = settings.data_dir / "comfyops" / "isolated-packages"
+    backup = settings.comfyops_dir / "instance-snapshots" / attempt_id
+    package_root = settings.comfyops_dir / "isolated-packages"
     root.parent.mkdir(parents=True, exist_ok=True)
     snapshot = None
     command_phase = "FILES"
@@ -443,6 +419,7 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
         "url": f"http://127.0.0.1:{op.port}",
         "is_mock": runner.is_mock,
     }
+    runner.environment = payload.get('command_environment', process_environment(root))
     try:
         with exclusive_file_lock(root.with_suffix(".lock")):
             if root.exists() and graph_hash(tree_manifest(root)) != payload["tree_hash"]:
@@ -487,9 +464,8 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
                     raise ValueError("COMFY_ENTRYPOINT_MISSING")
             if op.action == "INSTALL_NODE":
                 for p in payload["packages"]:
-                    if p["id"] in op.package_ids and not all(
-                        f["relative_path"].endswith(".whl") for f in p["spec"]["files"]
-                    ):
+                    if (p["id"] in op.package_ids and p['spec']['kind'] != 'wheel'
+                            and not all(f["relative_path"].endswith(".whl") for f in p["spec"]["files"])):
                         copy_package(
                             package_root / p["spec"]["name"], safe_target(root / "custom_nodes", p["spec"]["name"])
                         )
@@ -498,8 +474,26 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
                             p["spec"]["name"]: p["spec"]["revision"],
                         }
             if op.action in {"CREATE", "INSTALL_NODE"}:
-                result["dependency_hash"] = dependency_lock(root, payload["packages"], package_root)
+                builds = payload.get('source_builds', [])
+                result["dependency_hash"] = dependency_lock(
+                    root, payload["packages"], package_root, pending_builds=bool(builds),
+                )
+                prepare_build_directories(root, builds)
                 for command in payload["commands"]:
+                    # The final install sees a new hash-locked manifest containing
+                    # the derived source wheels, never an unresolved source input.
+                    if (builds and command[1:4] == ['-m', 'pip', 'install']
+                            and ('--no-deps' not in command or '--force-reinstall' in command)):
+                        built = verified_built_wheels(root, builds)
+                        result['dependency_hash'] = dependency_lock(
+                            root, payload['packages'], package_root, built_wheels=built,
+                        )
+                        result['source_builds'] = {
+                            'wheels': built, 'python_sha256': payload['python_sha256'],
+                            'package_hashes': {p['id']: p['hash'] for p in payload['packages']},
+                            'commands': payload['commands'],
+                        }
+                        durable_json(root / '.shine-source-builds.json', result['source_builds'])
                     command_phase = "COMMAND_RUNNING"
 
                     def command_started(owner, command=command, command_phase=command_phase):
@@ -561,7 +555,7 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
                     if saved_path:
                         saved = Path(saved_path)
                         if not saved.resolve().is_relative_to(
-                            (settings.data_dir / "comfyops" / "instance-snapshots").resolve()
+                            (settings.comfyops_dir / "instance-snapshots").resolve()
                         ):
                             raise ValueError("SNAPSHOT_PATH_INVALID")
                         if tree_manifest(saved) != evidence["files"]:
@@ -579,7 +573,7 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
                 with factory() as db:
                     saved = db.get(InstallationAttempt, op.snapshot_id)
                     restore = Path(saved.payload["snapshot_path"])
-                    if not restore.is_relative_to(settings.data_dir / "comfyops" / "instance-snapshots"):
+                    if not restore.is_relative_to(settings.comfyops_dir / "instance-snapshots"):
                         raise ValueError("SNAPSHOT_PATH_INVALID")
                     if tree_manifest(restore) != saved.payload["files"]:
                         raise ValueError("SNAPSHOT_HASH_CHANGED")

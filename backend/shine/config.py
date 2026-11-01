@@ -53,6 +53,11 @@ class Settings:
     operator_token_sha256: str = ""
     allow_non_loopback_api: bool = False
 
+    @property
+    def comfyops_dir(self) -> Path:
+        from shine.comfyops.storage import storage_root
+        return storage_root(self.data_dir)
+
     @classmethod
     def from_env(cls) -> Settings:
         repo_root = Path(__file__).resolve().parents[2]

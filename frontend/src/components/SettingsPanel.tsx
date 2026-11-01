@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Activity, Check, Cpu, KeyRound, Plus, Server, ShieldCheck, Trash2, Wifi, X } from 'lucide-react';
 import type { AgentRoute, Project, ProviderProfile, SystemHealth, SystemStatus, WorkflowProfile } from '../api';
+import StorageSettings from './StorageSettings';
 
 type Props = {
   project?: Project;
@@ -83,6 +84,7 @@ export default function SettingsPanel({
       </div>
 
       <div className="settings-grid">
+        <StorageSettings />
         <div className="settings-block">
           <h3><ShieldCheck size={14} /> 项目策略</h3>
           {project ? <>

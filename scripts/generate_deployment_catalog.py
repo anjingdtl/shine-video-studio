@@ -16,6 +16,7 @@ against the pins; it never downloads the large model files.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 PINS = REPO / "config" / "deployment" / "_upstream-pins"
 OUT = REPO / "config" / "deployment"
 
-GENERATED = "2026-10-31"
+GENERATED = "2026-11-01"
 
 H3_COMMUNITY = "minimax-h3-community-license"
 H3_LICENSE_URL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
@@ -56,7 +57,7 @@ COMPONENT_META["comfy-runtime-wheels"] = {
     "kind": "node", "license_id": "mixed-pinned-wheel-licenses", "usage": "research",
     "license_url": "https://pypi.org/",
     "origin": "pypi-json+pytorch-cu128-index",
-    "note": "93-hash-pinned Windows wheels for the isolated venv",
+    "note": "Hash-pinned Windows runtime and reviewer packages; explicit offline builds for source-only inputs",
 }
 COMPONENT_META["minimax-h3-models"] = {
     "kind": "model", "license_id": H3_COMMUNITY, "usage": "research",
@@ -135,7 +136,7 @@ def catalog_components():
     components.append({
         "component_id": WHEEL_COMPONENT,
         "kind": "wheel",
-        "revision": "cu128-2026-10-31",
+        "revision": "cu128-asr-2026-11-01",
         "license_id": COMPONENT_META[WHEEL_COMPONENT]["license_id"],
         "usage": "research",
         "license_url": COMPONENT_META[WHEEL_COMPONENT]["license_url"],
@@ -145,6 +146,11 @@ def catalog_components():
         "destination_family": None,
         "dependencies": [],
         "files": wheel_files,
+        "source_builds": [
+            {"relative_path": w["filename"], "name": name, "version": w["version"],
+             "backend": "setuptools", "license_id": w["license_id"]}
+            for name, w in sorted(wheels.items()) if not w["filename"].endswith('.whl')
+        ],
         "status": "READY",
     })
     # node packs from archives
@@ -243,9 +249,17 @@ def main():
     parser.parse_args()
 
     components = catalog_components() + model_components()
+    wheel_inputs = json.loads((PINS / 'wheels.json').read_text(encoding='utf-8'))
+    inventory = {name: {'sha256': value['sha256'], 'size': value['size']} for name, value in wheel_inputs.items()}
+    inventory_hash = hashlib.sha256(json.dumps(
+        inventory, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+    ).encode()).hexdigest()
+    disk = json.loads((PINS / 'runtime-disk.json').read_text(encoding='utf-8'))
+    if disk['inputs_sha256'] != inventory_hash:
+        raise ValueError('Runtime disk measurement must be refreshed for the exact dependency inputs')
     catalog = {
         "catalog_id": "shine-h3-ref2va-windows-x64",
-        "catalog_version": "1.0.0",
+        "catalog_version": "1.1.0",
         "schema_version": 1,
         "generated": GENERATED,
         "platform": {
@@ -253,16 +267,18 @@ def main():
             "gpu_vendor": "nvidia",
             "min_vram_mb": 15360,
             "min_ram_mb": 32768,
-            "min_disk_gb": 120,
+            "min_disk_gb": 180,
         },
     }
     catalog["components"] = components
-    catalog["review_runtime_wheels"] = ["transformers", "tokenizers", "lm-format-enforcer", "interegular"]
+    catalog["review_runtime_wheels"] = ["transformers", "tokenizers", "lm-format-enforcer", "interegular", "qwen-asr"]
 
     catalog["dependency_policy"] = {
         "wheelhouse": "offline pip --no-index --require-hashes from the isolated wheelhouse",
         "closure": "uv pip compile (windows / py3.12) full dependency closure, hashes cross-checked",
-        "excluded": "qwen-asr/qwen-tts SDKs stay optional voiceops overlays (sdist-only deps)",
+        "excluded": "qwen-tts voiceops overlay is outside this runtime; qwen-asr reviewer SDK is included",
+        "source_builds": "approved hashes + pinned setuptools/wheel; no-index/no-build-isolation; derived hash audit",
+        "runtime_disk": disk,
     }
     catalog["workflow_profiles"] = [
         "local-h3-ref2va-pdd8-2img-1aud",

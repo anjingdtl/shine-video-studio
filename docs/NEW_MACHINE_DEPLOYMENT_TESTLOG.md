@@ -1,5 +1,7 @@
 # 新机部署测试记录（2026-10-31/11-01）
 
+> 最新修复与未完成项见 [2026-11-01 修复记录](NEW_MACHINE_DEPLOYMENT_FIX_20261101.md)。完整新机目标仍为 PARTIAL；以下保留原建设轮次记录，不作为最新验收通过声明。
+
 被测代码：`78c622c`（基线）+ 本轮工作树（分支 `codex/new-machine-deployment`）。
 测试使用隔离临时目录、独立数据库与空闲端口；未启动真实 ComfyUI，未下载大模型权重，
 未触碰生产数据库/素材/模型/已有 ComfyUI 实例。
@@ -47,11 +49,16 @@
 - 6 个 GitHub 归档（~37MB）真实下载并计算 SHA-256；HF 非 LFS 小文件 20 个真实下载核验哈希。
 - host_env 本机探测：uv 0.11.2 / node 24.14.1 / pwsh 7.6.5 / ffmpeg 8.1 / npm 11.14.1 全达标；
   RTX 5080（16303 MiB）+ 驱动 621.01；RAM 32418MB；磁盘 466GB 可用；8188 端口空闲 → **零阻断**。
-- bootstrap.ps1 -CheckOnly（PS5.1 视角）：6 工具全缺失（正是空白机场景）→ 引导安装路径即为此设计。
+- 更正：旧 bootstrap.ps1 -CheckOnly 的“6 工具全缺失”是探测嵌套数组错误，不是空白机场景证据；2026-11-01 已修复。
 - 收编节点 `shine_h3_sampling_mode.py` 与操作员原件代码体逐字节一致（差异仅头部注释）。
 
 ## D. 判定边界
+
+当前最新：**1245 passed / 1 skipped / 2 warnings，exit=0**。命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-cold-start-final.log`，数字按静默日志状态符统计；全目录 Ruff、TypeScript/Vite 构建通过。新增首启身份、停止顺序、部分安装及配置写入阻断共 14 项，原有离线 E2E、film crew、V1.3、Worker/系列合同均在完整后端套件内。详见 `NEW_MACHINE_COLD_START_FIX_20261101.md`。配置激活、审片首启与真实 H3 仍未完成，整体 PARTIAL。
+目录阶段（2026-11-01）：1231 passed / 1 skipped / 2 warnings，exit=0。命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-storage-caches-final.log`；数量从静默日志状态符统计。真实 SDK 依赖安装为 PASS_SDK_ONLY；指定 F 盘的应用依赖安装、Mock 工作台启动/验证式关停、既有 SQLite 保留及浏览器目录保存通过。全目录 Ruff、TypeScript/Vite 构建通过。完整新机目标仍 PARTIAL；详见修复记录与 LOCAL_STORAGE_SETTINGS.md。
+2026-11-01 后续修复回归：1206 passed / 1 skipped / 2 warnings，exit=0。Ruff、TypeScript/Vite、隔离 Alembic 新库升级及当前版本核验通过。`scripts/verify_setup_web.py` 验证真实 API/SQLite 计划恢复和审批哈希；最终安装执行被拦截，因此仅 UI 合同 PASS。完整修复、证据路径与剩余建设项见 `NEW_MACHINE_DEPLOYMENT_FIX_20261101.md`，新机完整目标仍为 PARTIAL。
+
 - IMPLEMENTED / TESTED_OFFLINE：软件链路（目录→计划→审批→配置生成→就绪分层）。
-- NOT_RUN（需用户授权）：真实 60.7GB 下载、真实 venv/pip 安装、真实 ComfyUI 启动、
-  profile 活校验、真实 H3 推理、干净 Windows 验证。
+- 已单独真实验证：154 个 Python 发行包下载核验、隔离 venv/pip 安装、源码受控构建、SDK 导入；固定 ComfyUI/节点的隔离 CPU 启动与默认 profile 节点/参数名合同。后续记录见修复报告，不能升级为模型推理验收。
+- NOT_RUN：完整约 60.8GB 物料下载、实际模型加载、真实 H3 推理、干净 Windows 验证。可选超分 profile 缺少指定 Handoff 节点，仍待建设。
 - 模拟证据不冒充真实部署；未承诺无人工审批的全自动艺术裁决。

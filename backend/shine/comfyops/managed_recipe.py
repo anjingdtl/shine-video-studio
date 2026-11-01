@@ -17,6 +17,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from shine.comfyops.storage import prepare_process_environment
+
 PLACEHOLDERS = {"python", "bootstrap", "base_directory", "root", "adapter_dir", "port",
                 "manifest", "runtime_packages"}
 RENDERER_KEYS = ("instance_id", "python", "root", "base_directory", "bootstrap", "adapter_dir",
@@ -155,7 +157,7 @@ def build_renderer_launch(recipe, *, port=None, token=None):
             raise HTTPException(409, "COMFY_RECIPE_INVALID")
     if str(Path(argv[0]).resolve()) not in {str(Path(pin).resolve()) for pin in pins}:
         raise HTTPException(409, "COMFY_RECIPE_EXECUTABLE_NOT_PINNED")
-    env = dict(os.environ)
+    env = {**os.environ, **prepare_process_environment(recipe['root'])}
     env.update({
         "SHINE_COMFY_HANDOFF_TOKEN": token,
         "SHINE_COMFY_START_DRAINED": "1",
@@ -182,6 +184,6 @@ def build_review_launch(recipe, *, token=None):
     cwd = str(Path(recipe["python"]).resolve().parent)
     if not Path(cwd).is_dir():
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
-    env = dict(os.environ)
+    env = {**os.environ, **prepare_process_environment(recipe['runtime_packages'])}
     env["SHINE_REVIEW_HANDOFF_TOKEN"] = token
     return argv, cwd, env, pins, token

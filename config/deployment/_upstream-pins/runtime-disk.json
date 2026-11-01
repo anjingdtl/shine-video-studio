@@ -1,0 +1,10 @@
+{
+ "first_chain_instance_copies": 4,
+ "inputs_sha256": "b320f8662f25fa05777524b0f59df1d464a09cb431f3a1ac507a3187518a6a74",
+ "installed_venv_bytes": 8159500574,
+ "runtime_reserve_bytes": 52055843216,
+ "scope": "measured pinned SDK venv plus wheelhouse, current instance and three lifecycle snapshots; node/scratch headroom",
+ "scratch_reserve_bytes": 2147483648,
+ "wheel_bytes": 4317589318,
+ "wheel_expanded_bytes": 7902222874
+}

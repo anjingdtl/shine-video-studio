@@ -1,5 +1,7 @@
 # 新机部署建设报告（2026-10-31）
 
+> 最新修复与未完成项见 [2026-11-01 修复记录](NEW_MACHINE_DEPLOYMENT_FIX_20261101.md)。完整新机目标仍为 PARTIAL；以下保留原建设轮次记录，不作为最新验收通过声明。
+
 范围：Windows x64 + NVIDIA（16GB 级显存）上，从"下载/解压项目"到"生产就绪 + 经用户批准后的无人值守制作"的完整工程链路。
 本报告如实记录已实现、已验证与未验证边界；模拟证据不冒充真实 H3 验收。
 
@@ -74,7 +76,7 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
 - handoff 适配器（integrations/shine_comfy_handoff，项目自有代码）部署到实例 custom_nodes（幂等，内容变化即拒绝）；
 - 收编 `shine_h3_sampling_mode.py`（integrations/shine_comfy_sampling_mode/，与操作员原件逐字节一致已验证）——
   该节点此前只存在于个人机 custom_nodes，是真实生产路径的隐藏个人依赖，本轮消除；
-- 受管配方（renderer+reviews，gpu_uuid 来自实时 nvidia-smi 探测）→ `data/setup/managed_recipe.json`；
+- 受管配方（renderer+reviews，gpu_uuid 来自实时 nvidia-smi 探测）→ 所选部署目录下的 `setup/managed_recipe.json`；
 - VLM/ASR 审片 manifest（模型根=隔离包目录，文件哈希=目录钉点）；
 - .env 键值更新（SHINE_MANAGED_RECIPE/SHINE_RENDER_PROVIDER/SHINE_COMFYUI_URL/SHINE_ENABLE_LOCAL_EXECUTION 等）——
   密钥永远不经过此处；DPAPI/0600 文件机制不变，凭据由用户在设置页录入。
@@ -92,18 +94,21 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
 环境检查 → 部署清单 → 计划与批准（生成安装计划/下一步实例计划/登记 profile/生成受管配置 + 每张计划"批准并执行"）→ 就绪检查。
 高级 JSON 控件保留在 PreproductionPanel，向导不要求用户写任何 JSON。
 
+2026-11-01 首启修复：实例准备在模型绑定后保持停止，不再生成普通 START。只有生产 Worker 在资源准入后执行受管启动。旧版已有进程先走自有进程 STOP 审批；配置生成按明确实例身份并拒绝活动/待对账资源。见 [首启交接修复](NEW_MACHINE_COLD_START_FIX_20261101.md)。常驻进程激活和审片首启仍待闭环。
+
 ## 3. 测试与验证矩阵
 
 | 层 | 内容 | 结果 |
 |---|---|---|
 | 单元/合同 | `backend/tests/test_new_machine_setup.py`（11 项：目录合同/拒绝非白名单 URL/拒绝越界路径/计划链/磁盘预算/内容变更检测/状态机/配方生成+load_managed_recipe 验证/就绪诚实性/开放探针/环境探测） | 11 passed |
-| 小文件真实算法 | `backend/tests/test_bootstrap_entry.py`（3 项：file:// zip 下载→哈希→shim 可执行；哈希不符阻断；清单与钉点一致） | 3 passed |
-| 本机实测 | bootstrap.ps1 -CheckOnly（PS5.1 视角全部缺失→正是空白机场景）；host_env 本机探测（uv/node/pwsh/ffmpeg 全达标、RTX 5080 16303MiB、RAM 31.7GB、零阻断）；6 归档 + 20 HF 小文件真实下载核验；确认 vendor 节点与操作员原件一致 | 完成 |
+| 小文件真实算法 | `backend/tests/test_bootstrap_entry.py`：ZIP 下载/哈希/shim、钉点一致、操作员初始化与配置保留、无效凭据拒绝 | 定向通过，详见修复记录 |
+| 本机实测 | 旧 PS5.1 全工具缺失结果来自探测嵌套数组错误，已修复，不能用作空白机证据；本机环境探测和小文件核验只证明各自范围 | 不代表新机验收 |
 | Mock 全链 | v13 fake 链机制（CREATE/INSTALL_NODE/BIND_MODELS/START）由既有 test_v13_instances 覆盖；本轮状态机测试验证了下一步计划生成语义 | 通过 |
-| 真实环境 | 真实下载 60.7GB 物料、真实 venv/pip 安装、真实 ComfyUI 启动、真实 H3 推理 | **NOT_RUN**（需用户执行授权） |
+| 真实 SDK / CPU 契约 | 154 个发行包哈希核验、Windows 隔离环境安装、pip check、SDK 导入；固定节点归档的真实 ComfyUI CPU 启动及默认 profile 节点/参数名核验 | **PASS_SDK_ONLY / CPU_CONTRACT_ONLY**，详见修复记录 |
+| 真实模型 / GPU | 全量约 60.8GB 物料、实际模型加载、真实 H3 推理 | **NOT_RUN** |
 | 干净 Windows 验证 | 无 | **NOT_RUN**（本机非空白机） |
 
-**判定**：本轮新机部署链路整体为 **IMPLEMENTED / TESTED_OFFLINE**；真实环境层为 NOT_RUN，需用户授权后执行。
+**判定**：新机目标为 **PARTIAL**。SDK 安装已单独验证，运行配置与服务综合验收仍待完成，见 `NEW_MACHINE_DEPLOYMENT_FIX_20261101.md`；不能把离线合同通过称为完整链路已经实现。
 
 ## 4. 用户仍需进行的人工作业（产品门禁，不可自动化）
 1. 运行 bootstrap.ps1 并确认工具安装；驱动/重启类阻断人工处理。
@@ -116,6 +121,5 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
 - 真实首启（下载+安装+启动+profile 活校验+seed 审片路由+一次真实 shot）是一次完整授权流程，本轮未执行。
 - 干净 Windows 验证 NOT_RUN。中文/空格路径由设计支持（探测报告不拒绝只标注），
   但未在真实中文路径新机上实测。
-- qwen-asr/qwen-tts SDK（voiceops 路径）不在此配置内（sdist-only 依赖 sox/gradio 不适配离线 wheelhouse）；
-  其安装仍走既有手动流程。upscale profile 的 upscaler 包已列入清单但对应工作流未在本配置验证。
+- Qwen-ASR 审片 SDK 依赖闭包已接入并通过真实 Windows 隔离安装；sox 1.5.0 通过固定工具离线构建，SDK 导入不等于模型推理。Qwen-TTS voiceops 不属于本轮已验证范围。可选 upscale profile 在 CPU 节点契约核验中缺少 `MinimaxH3LatentUpscaler3DRefineHandoff`，不能视为可用。
 - 未承诺"无人工资产审批、无风格确认、无异常对账的全自动最终艺术裁决"。

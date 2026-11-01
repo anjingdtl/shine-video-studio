@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import type { DeploymentStorage } from './StorageSettings';
 
 type ToolInfo = { present: boolean; version: string; at_floor: boolean };
 type EnvReport = {
@@ -11,6 +12,7 @@ type EnvReport = {
   disk: { status: string; free_gb: number; at_floor: boolean };
   port: { status: string; port: number };
   data_dir: { path: string; writable: boolean };
+  deployment_dir?: { path: string; writable: boolean };
   blockers: Array<{ code: string; tool?: string; detail?: string }>;
   bootstrap: string;
 };
@@ -40,8 +42,9 @@ function fmtBytes(value: number): string {
 }
 
 export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
-  const [token, setToken] = useState('local-operator');
+  const [token, setToken] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(null);
+  const [storage, setStorage] = useState<DeploymentStorage | null>(null);
   const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [plans, setPlans] = useState<PlanRef[]>([]);
@@ -76,16 +79,46 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const loadReadiness = useCallback(async () => {
     try { setReadiness(await api<Readiness>('/setup/readiness')); } catch { /* keep prior state */ }
   }, []);
+  const loadStorage = useCallback(async () => {
+    try { setStorage(await api<DeploymentStorage>('/setup/storage')); }
+    catch (error) { say(String(error), 'bad'); }
+  }, [say]);
+  const loadPlans = useCallback(async () => {
+    const selected = projectId;
+    if (!selected) { setPlans([]); return; }
+    const rows = await api<Array<{ id: string; sha256: string; status: string;
+      payload: { kind?: string; deployment?: unknown; operation?: { action?: string } } }>>(
+      `/comfyops/install-plans?project_id=${selected}`);
+    if (projectRef.current !== selected) return;
+    setPlans(rows.filter(row => row.payload.deployment || row.payload.kind === 'INSTANCE_LIFECYCLE')
+      .map(row => ({ plan_id: row.id, sha256: row.sha256, status: row.status,
+        kind: row.payload.kind ?? 'INSTALL', action: row.payload.operation?.action })));
+  }, [projectId]);
+  useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
   useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); }, [loadEnvironment, loadCatalog, loadReadiness]);
+  useEffect(() => {
+    void loadStorage();
+    const refresh = () => {
+      void loadStorage(); void loadEnvironment(); void loadReadiness();
+      void loadPlans().catch(error => say(String(error), 'bad'));
+    };
+    window.addEventListener('shine-storage-changed', refresh);
+    return () => window.removeEventListener('shine-storage-changed', refresh);
+  }, [loadStorage, loadPlans, loadEnvironment, loadReadiness, say]);
 
   async function approveAndExecute(plan: PlanRef, label: string): Promise<void> {
-    const grant = await api<Grant>('/preparation/approval-grants',
-      withJson('POST', { action: 'install', target_id: plan.plan_id, context: null }));
-    await api(`/comfyops/install-plans/${plan.plan_id}/approve`,
-      withJson('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence: 'Setup 向导内人工批准' }));
-    const exec = await api<Record<string, unknown>>(`/comfyops/install-plans/${plan.plan_id}/execute`,
-      { ...withJson('POST', { plan_hash: plan.sha256, executor: 'local' }), signal: AbortSignal.timeout(600000_000) });
+    let approved = { sha256: plan.sha256 };
+    if (plan.status === 'AWAITING_APPROVAL') {
+      const grant = await api<Grant>('/preparation/approval-grants',
+        withJson('POST', { action: 'install', target_id: plan.plan_id, context: null }));
+      approved = await api<{ sha256: string }>(`/comfyops/install-plans/${plan.plan_id}/approve`,
+        withJson('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence: 'Setup 向导内人工批准' }));
+    } else if (plan.status !== 'APPROVED') {
+      throw new Error('该计划已执行或需要对账，请查看原始尝试记录。');
+    }
+    const exec = await api<Record<string, unknown>>(`/comfyops/${plan.kind === 'INSTANCE_LIFECYCLE' ? 'instance-plans' : 'install-plans'}/${plan.plan_id}/execute`,
+      { ...withJson('POST', plan.kind === 'INSTANCE_LIFECYCLE' ? { plan_hash: approved.sha256 } : { plan_hash: approved.sha256, executor: 'local' }), signal: AbortSignal.timeout(600000_000) });
     say(`${label} 执行完成：${JSON.stringify(exec).slice(0, 120)}`);
   }
 
@@ -95,19 +128,21 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         'minimax-h3-vae', 'minimax-h3-lora', 'minimax-h3-pdd',
         'qwen3-vl-8b-fp8', 'qwen3-asr-0.6b', 'ComfyUI-KJNodes', 'comfyui-videohelpersuite',
         'ComfyUI-MiniMax-H3-PDD-Acc', 'ComfyUI-SolAttn_triton', 'Comfyui_Minimax_h3_latent_Upscaler'];
-      const result = await api<{ plan_id: string; sha256: string; download_bytes: number }>(
-        '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: 0 }));
-      return `安装计划 ${result.plan_id} 已创建（下载 ${fmtBytes(result.download_bytes)}）`;
+      const result = await api<{ plan_id: string; sha256: string; download_bytes: number; disk_required: number }>(
+        '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: storage?.free_bytes ?? 0 }));
+      setPlans(previous => [...previous, { ...result, kind: 'INSTALL', status: 'AWAITING_APPROVAL' }]);
+      return `安装计划 ${result.plan_id} 已创建（下载 ${fmtBytes(result.download_bytes)}，预留 ${fmtBytes(result.disk_required)}）`;
     });
   }
 
   function createInstanceChain() {
     void run(async () => {
-      const result = await api<{ plans: PlanRef[] }>('/setup/instance-chain', withJson('POST', {
+      const result = await api<PlanRef & { complete: boolean }>('/setup/next-instance-plan', withJson('POST', {
         project_id: projectRef.current, instance_name: 'shine-h3', port: 8188, mode: 'local',
       }));
-      setPlans(result.plans);
-      return `实例链 4 张计划已创建：${result.plans.map((p) => p.action).join(' → ')}`;
+      if (result.complete) return '实例准备已完成并保持停止，请生成受管配置。生产时由 Worker 启动渲染器。';
+      setPlans(previous => [...previous.filter(p => p.plan_id !== result.plan_id), { ...result, kind: 'INSTANCE_LIFECYCLE' }]);
+      return `下一步：${result.action}，请审核后批准执行`;
     });
   }
 
@@ -115,7 +150,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     setBusy(true);
     try { await approveAndExecute(plan, plan.action || plan.kind); }
     catch (error) { say((error as Error).message, 'bad'); }
-    finally { setBusy(false); void loadReadiness(); }
+    finally { setBusy(false); void loadReadiness(); void loadPlans().catch(error => say(String(error), 'bad')); }
   }
 
   function generateConfiguration() {
@@ -153,7 +188,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           <h3>1 · 环境检查</h3>
           {!env ? <div className="empty-inline">读取中…</div> : <>
             <div className="worker-row"><div><b>GPU</b><span>{String(env.gpu.name ?? '—')} · {String(env.gpu.vram_mb ?? '—')} MiB · 驱动 {String(env.gpu.driver_version ?? '—')}</span></div></div>
-            <div className="worker-row"><div><b>内存/磁盘</b><span>{env.ram.ram_mb ?? '—'} MB · 磁盘可用 {env.disk.free_gb} GB（数据目录 {env.data_dir.path}）</span></div></div>
+            <div className="worker-row"><div><b>内存/磁盘</b><span>{env.ram.ram_mb ?? '—'} MB · 磁盘可用 {env.disk.free_gb} GB（安装目录 {env.deployment_dir?.path ?? env.data_dir.path}）</span></div></div>
             <div className="worker-row"><div><b>端口 {env.port.port}</b><span>{env.port.status === 'OK' ? '可用' : '被占用'}</span></div></div>
             <table className="setup-tools">
               <tbody>
@@ -198,12 +233,16 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
 
         <div className="settings-block">
           <h3>3 · 计划与批准</h3>
+          <p className="guardrail-note">下载与安装到：{storage?.root ?? '读取中…'} · 可用 {storage?.free_gb ?? '—'} GB。
+            <a href="#deployment-storage">修改下载安装目录</a>
+            {storage?.requires_selection && ' 请先选择非系统盘目录，才能自动安装。'}
+          </p>
           <div className="inline-form">
             <input value={token} type="password" placeholder="操作员凭据（仅内存）"
               onChange={(event) => setToken(event.target.value)} />
           </div>
           <div className="inline-form">
-            <button className="primary-button" disabled={busy || !projectId} onClick={createInstallPlan}>生成安装计划</button>
+            <button className="primary-button" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
@@ -212,7 +251,8 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             {plans.map((plan) => (
               <div className="worker-row" key={plan.plan_id}>
                 <div><b>{plan.action ?? plan.kind}</b><span>{plan.plan_id} · {plan.status} · tier {plan.tier ?? '-'}</span></div>
-                <button className="text-button" disabled={busy} onClick={() => void runPlan(plan)}>批准并执行</button>
+                <button className="text-button" disabled={busy || !['AWAITING_APPROVAL', 'APPROVED'].includes(plan.status)}
+                  onClick={() => void runPlan(plan)}>{plan.status === 'APPROVED' ? '执行已批准计划' : '批准并执行'}</button>
               </div>
             ))}
           </div>}

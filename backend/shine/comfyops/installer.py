@@ -58,6 +58,23 @@ class PackageFile(BaseModel):
         return result
 
 
+class SourceWheelBuild(BaseModel):
+    """An explicitly approved source input, built without fetching build dependencies."""
+
+    model_config = ConfigDict(extra="forbid")
+    relative_path: str
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.+!-]{0,99}$")
+    backend: Literal["setuptools"] = "setuptools"
+    license_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def known_license(self):
+        if self.license_id.strip().lower() in {'', 'unknown', 'unverified'}:
+            raise ValueError('SOURCE_LICENSE_NOT_APPROVED')
+        return self
+
+
 class PackageSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
@@ -73,9 +90,17 @@ class PackageSpec(BaseModel):
     precision: str = "UNKNOWN"
     quantization: str = "UNKNOWN"
     resource_mb: int | None = Field(default=None, ge=0)
-    files: list[PackageFile] = Field(min_length=1, max_length=100)
+    files: list[PackageFile] = Field(min_length=1, max_length=256)
     dependencies: dict[str, str] = Field(default_factory=dict)
     runtime_versions: dict[str, str] = Field(default_factory=dict)
+    source_builds: list[SourceWheelBuild] = Field(default_factory=list, max_length=10)
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        if not self.source_builds:
+            result.pop("source_builds", None)  # Preserve historical package/approval hashes.
+        return result
 
     @model_validator(mode="after")
     def pinned(self):
@@ -86,6 +111,13 @@ class PackageSpec(BaseModel):
         paths = [x.relative_path.casefold() for x in self.files]
         if len(set(paths)) != len(paths):
             raise ValueError("DUPLICATE_DESTINATION")
+        if self.source_builds:
+            sources = [build.relative_path.casefold() for build in self.source_builds]
+            if (self.kind != "wheel" or len(set(sources)) != len(sources)
+                    or any(path not in paths or not path.endswith('.tar.gz') for path in sources)):
+                raise ValueError("PINNED_SOURCE_BUILD_INVALID")
+            if {path for path in paths if not path.endswith('.whl')} != set(sources):
+                raise ValueError("UNDECLARED_SOURCE_BUILD")
         return self
 
 
@@ -137,6 +169,7 @@ TRUSTED_DOWNLOAD_HOSTS = frozenset(
         "release-assets.githubusercontent.com",
         "files.pythonhosted.org",
         "download.pytorch.org",
+        "download-r2.pytorch.org",  # Exact host linked by the official CUDA wheel indexes.
     }
 )
 

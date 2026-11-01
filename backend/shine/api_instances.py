@@ -116,7 +116,7 @@ async def offline_package_file(
     entry = next((f for f in spec.files if f.relative_path == relative_path), None)
     if not entry:
         raise HTTPException(409, "FILE_NOT_IN_PINNED_MANIFEST")
-    cache = settings.data_dir / "comfyops" / "isolated-packages" / ".cache"
+    cache = settings.comfyops_dir / "isolated-packages" / ".cache"
     cache.mkdir(parents=True, exist_ok=True)
     if entry.size > shutil.disk_usage(cache).free:
         raise HTTPException(409, "INSUFFICIENT_DISK")
@@ -278,7 +278,7 @@ def reconcile_instance(identity: str, body: ReconcileInstance, actor: Operator, 
         raise HTTPException(409, "COMMAND_OWNER_STILL_ACTIVE")
     approval.consume(db, actor, "instance_reconcile", attempt, body.grant_id, body.snapshot)
     root = Path(plan.payload["root"])
-    if not root.resolve().is_relative_to((settings.data_dir / "comfyops").resolve()):
+    if not root.resolve().is_relative_to((settings.comfyops_dir).resolve()):
         raise HTTPException(409, "INSTANCE_ROOT_OUTSIDE_SCOPE")
     no_change = (
         op["action"] not in {"CREATE", "START", "STOP"}

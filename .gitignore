@@ -27,6 +27,7 @@ build/
 # Node
 node_modules/
 frontend/node_modules/
+frontend/node_modules.before-storage-*/
 frontend/dist/
 frontend/.vite/
 .npm/

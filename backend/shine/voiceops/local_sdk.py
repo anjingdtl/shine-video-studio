@@ -159,7 +159,7 @@ class QwenLocalVoiceProvider:
 
                     if not torch.cuda.is_available() or torch.cuda.mem_get_info()[0] < p["resource_mb"] * 1024**2:
                         raise ValueError("VOICE_PHYSICAL_GPU_BUDGET_UNAVAILABLE")
-            root = self.settings.data_dir / "comfyops" / "isolated-packages" / p["name"]
+            root = self.settings.comfyops_dir / "isolated-packages" / p["name"]
             for entry in p["files"]:
                 if not ControlledDownloader.valid(
                     safe_target(root, entry["relative_path"]), PackageFile.model_validate(entry)

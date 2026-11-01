@@ -22,7 +22,40 @@ $PSNativeCommandUseErrorActionPreference = $false
 $explicitDataDir = [bool]$DataDir
 if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+# Bootstrap persists only these host-local paths. Never evaluate .env as code.
+$launchEnv = Join-Path $repoRoot '.env'
+if (Test-Path -LiteralPath $launchEnv) {
+    $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
+        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache')
+    foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
+        if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
+            $key, $value = $Matches[1], $Matches[2].Trim()
+            if ($value.StartsWith("'") -or $value.StartsWith('"')) {
+                if ($value.Length -lt 2 -or $value[-1] -ne $value[0]) { throw "Invalid quoted local setting: $key" }
+                $value = $value.Substring(1, $value.Length - 2).Replace("\'", "'").Replace('\\', '\')
+            } else { $value = ($value -replace '[ \t]+#.*$', '').Trim() }
+            if ($value.Contains('${')) { throw "Use a resolved local value for $key; launcher does not expand .env expressions." }
+            if (-not [Environment]::GetEnvironmentVariable($key, 'Process')) {
+                [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+            }
+        }
+    }
+}
+$backendEnv = if ($env:SHINE_BACKEND_ENV) { $env:SHINE_BACKEND_ENV } else { Join-Path $repoRoot 'backend/.venv' }
+$venvPython = Join-Path $backendEnv 'Scripts/python.exe'
+if ($env:SHINE_BACKEND_ENV) { $env:UV_PROJECT_ENVIRONMENT = $backendEnv }
+if ($env:SHINE_BOOTSTRAP_ROOT) {
+    if ([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:SHINE_BOOTSTRAP_ROOT)).TrimEnd('\') -eq $env:SystemDrive) {
+        throw 'Choose a non-system-drive bootstrap installation directory.'
+    }
+    $env:UV_CACHE_DIR = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'download-cache/uv'
+    $env:UV_PYTHON_INSTALL_DIR = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'python'
+    $env:PIP_CACHE_DIR = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'download-cache/pip'
+    $env:npm_config_cache = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'download-cache/npm'
+    $env:TEMP = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'temp'
+    $env:TMP = $env:TEMP
+    New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+}
 
 function Invoke-Native([string]$Label, [scriptblock]$Command) {
     $previous = $ErrorActionPreference
@@ -59,14 +92,44 @@ if (Test-Path (Join-Path $env:SHINE_DATA_DIR 'run/processes.json')) {
 $env:SHINE_RENDER_PROVIDER = $Provider
 $env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
 
-if ($Install -or -not (Test-Path (Join-Path $repoRoot 'backend/.venv'))) {
+if ($Install -or -not (Test-Path $backendEnv)) {
     Invoke-Native 'Python dependency installation' {
         & uv sync --project (Join-Path $repoRoot 'backend') --locked
     }
 }
 if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules'))) {
+    $frontendInstallRoot = Join-Path $repoRoot 'frontend'
+    if ($env:SHINE_BOOTSTRAP_ROOT) {
+        $frontendInstallRoot = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'app/frontend'
+        if ((Get-Item -LiteralPath (Join-Path $repoRoot 'frontend')).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Frontend directory link requires reconciliation before relocating dependencies.'
+        }
+        New-Item -ItemType Directory -Force -Path $frontendInstallRoot | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'frontend/package.json'), (Join-Path $repoRoot 'frontend/package-lock.json') -Destination $frontendInstallRoot -Force
+        $modules = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend/node_modules'))
+        $externalModules = [IO.Path]::GetFullPath((Join-Path $frontendInstallRoot 'node_modules'))
+        if (Test-Path -LiteralPath $modules) {
+            $item = Get-Item -LiteralPath $modules -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                if ([IO.Path]::GetFullPath($item.Target) -ne $externalModules) { throw 'Existing node_modules link requires reconciliation.' }
+            } else {
+                $backupModules = $modules + '.before-storage-' + [Guid]::NewGuid().ToString('N')
+                $frontendRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend')) + [IO.Path]::DirectorySeparatorChar
+                if (-not $modules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not $backupModules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Dependency backup escaped the frontend directory.'
+                }
+                Move-Item -LiteralPath $modules -Destination $backupModules
+                Write-Host "Preserved previous dependencies: $backupModules"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $modules)) {
+            New-Item -ItemType Directory -Force -Path $externalModules | Out-Null
+            New-Item -ItemType Junction -Path $modules -Target $externalModules | Out-Null
+        }
+    }
     Invoke-Native 'Frontend dependency installation' {
-        & npm --prefix (Join-Path $repoRoot 'frontend') ci
+        & npm --prefix $frontendInstallRoot ci --fetch-retries=4 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000 --fetch-timeout=300000
     }
 }
 
@@ -78,6 +141,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # resolved data directory, so a copy database never points back at production
 # media while still sharing the production database file.
 $databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
+if (-not $databaseUrl.StartsWith('sqlite:///')) { throw 'The local launcher requires a SQLite database URL.' }
 $env:SHINE_DATABASE_URL = $databaseUrl
 & (Join-Path $PSScriptRoot 'check_environment.ps1')
 
@@ -86,11 +150,10 @@ Write-Host "Database:       $databaseUrl"
 
 $migrationLog = Join-Path $env:TEMP 'shine-alembic-upgrade.log'
 Invoke-Native 'Database migration' {
-    & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+    & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
 }
 Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 
-$venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
 $uvicornArgs = @(
     '-m', 'uvicorn', 'shine.main:app',
     '--host', '127.0.0.1', '--port', "$ApiPort"
@@ -123,7 +186,7 @@ if ($busy) {
     Write-Host 'Cannot start: the requested ports are not free.' -ForegroundColor Red
     $busy | ForEach-Object { Write-Host $_ -ForegroundColor Red }
     Write-Host 'Stop the previous stack first, for example:' -ForegroundColor Yellow
-    Write-Host "  uv run --project backend python scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`"" -ForegroundColor Yellow
+    Write-Host "  `"$venvPython`" scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`"" -ForegroundColor Yellow
     exit 1
 }
 
@@ -258,7 +321,7 @@ Write-Host "Worker mode:    $Provider"
 Write-Host "Logs:           $logDir"
 Write-Host "Process record: $manifestPath"
 Write-Host ''
-Write-Host "Stop with:  uv run --project backend python scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`""
+Write-Host "Stop with:  `"$venvPython`" scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`""
 if ($Provider -eq 'comfyui') {
     Write-Warning 'ComfyUI mode is configured. A queued job is only a real video after a real ComfyUI attempt produced an artifact that passed technical QC.'
 } else {

@@ -180,14 +180,15 @@ def test_next_instance_plan_state_machine(prep):
     with factory() as db:
         plan = db.get(InstallationPlan, node_step["plan_id"])
         node_names = {p["spec"]["name"] for p in plan.payload["packages"]}
-        assert node_names == {"ComfyUI-KJNodes", "comfyui-videohelpersuite",
+        assert node_names == {"comfy-runtime-wheels", "ComfyUI-KJNodes", "comfyui-videohelpersuite",
                               "ComfyUI-MiniMax-H3-PDD-Acc", "ComfyUI-SolAttn_triton",
                               "Comfyui_Minimax_h3_latent_Upscaler"}
     # With node_versions recorded, the next step is BIND_MODELS with all five families.
     with factory() as db:
         instance = db.get(ComfyInstance, identity)
         instance.payload = {**instance.payload,
-                            "node_versions": {"ComfyUI-KJNodes": "x" * 12}}
+                            "node_versions": {cid: c['revision'] for cid, c in deployment._component_map(
+                                deployment.load_default_catalog()).items() if c['kind'] == 'node'}}
         instance.sha256 = "1" * 64
         db.commit()
     bind_step = post(client, "/setup/next-instance-plan",
@@ -208,10 +209,12 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
     """Config generation against a fixture-built instance (v13-style synthetic bytes)."""
     client, factory, settings = prep
     project = create_project(client)
-    # Seed one managed instance row the way a real CREATE+START leaves it.
+    # Synthetic files exercise configuration only. The local identity is stopped;
+    # it is not an installation receipt or evidence of real runtime acceptance.
 
+    from shine.comfyops.instances import instance_identity, instance_root
     from shine.comfyops.models import ComfyInstance
-    root = Path(settings.data_dir) / "comfyops" / "fake-instances" / "shine-cfg"
+    root = instance_root(settings, 'shine-cfg', 'local')
     root.mkdir(parents=True)
     (root / ".venv" / "Scripts").mkdir(parents=True)
     venv_python = root / ".venv" / "Scripts" / "python.exe"
@@ -220,9 +223,9 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
     (root / "main.py").write_bytes(b"# synthetic entrypoint")
     with factory() as db:
         payload = {"managed": True, "name": "shine-cfg", "port": 8195,
-                   "root": str(root), "is_mock": True,
+                   "root": str(root), "is_mock": False,
                    "model_bindings": {"diffusion_models": "minimax-h3-diffusion"}}
-        db.add(ComfyInstance(id="fake-id-config", payload=payload,
+        db.add(ComfyInstance(id=instance_identity('local', 8195), payload=payload,
                              sha256="0" * 64, status="STOPPED"))
         db.commit()
     def fake_gpu():
@@ -232,7 +235,8 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
     monkeypatch.setattr("shine.comfyops.host_env.probe_gpu", fake_gpu)
     env_target = Path(settings.data_dir) / "setup-env"
     monkeypatch.setattr(deployment, "ENV_PATH", env_target)
-    result = post(client, "/setup/configuration", {"project_id": project}, operator=True)
+    result = post(client, "/setup/configuration", {
+        "project_id": project, "instance_name": "shine-cfg", "port": 8195}, operator=True)
     recipe_raw = json.loads(Path(result["recipe"]).read_text(encoding="utf-8"))
     assert result["adapter_sha256"] == adapter_identity(recipe_raw["renderer"]["adapter_dir"])
     recipe = load_managed_recipe(result["recipe"])
@@ -246,7 +250,7 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
         manifest = json.loads(Path(result["review_manifests"][role.upper()]).read_text(encoding="utf-8"))
         assert manifest["files"] and all(len(f["sha256"]) == 64 for f in manifest["files"])
     with factory() as db:
-        instance = db.get(ComfyInstance, "fake-id-config")
+        instance = db.get(ComfyInstance, instance_identity('local', 8195))
         assert instance.payload["model_bindings"]["diffusion_models"] == "minimax-h3-diffusion"
 
 

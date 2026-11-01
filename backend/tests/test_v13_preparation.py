@@ -36,7 +36,7 @@ HEADERS = {"Authorization": "Bearer " + TOKEN}
 
 
 @pytest.fixture
-def prep(api):
+def prep(api, fake_deployment_host):
     client, factory, settings = api
     client.app.state.settings = replace(
         settings, operator_id="v13-test-operator", operator_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest()

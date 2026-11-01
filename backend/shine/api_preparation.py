@@ -187,7 +187,7 @@ class InstallRequest(Strict):
 
 
 @router.post("/comfyops/install-plans")
-def plan_install(body: InstallRequest, db: DBSession):
+def plan_install(body: InstallRequest, db: DBSession, settings: SettingsDep):
     require_project(db, body.project_id)
     if not body.isolated:
         raise HTTPException(409, "EXISTING_INSTANCE_REQUIRES_LOCAL_BACKUP_AND_IDLE_QUEUE")
@@ -216,6 +216,8 @@ def plan_install(body: InstallRequest, db: DBSession):
     size = sum(f["size"] for p in packages for f in p["spec"]["files"])
     if size * 2 > body.disk_free:
         raise HTTPException(409, "INSUFFICIENT_DISK")
+    from shine.comfyops.storage import require_storage
+    storage_root = require_storage(settings) if body.executor == 'local' else settings.comfyops_dir
     row = save(
         db,
         InstallationPlan,
@@ -223,6 +225,7 @@ def plan_install(body: InstallRequest, db: DBSession):
             "packages": packages,
             "download_bytes": size,
             "disk_required": size * 2,
+            "storage_root": str(storage_root),
             "isolated": True,
             "executor": "FAKE_ONLY" if body.executor == "fake" else "LOCAL_ISOLATED",
             "risks": [
@@ -363,7 +366,7 @@ def execute_install(
             raise HTTPException(409, "LOCAL_EXECUTOR_UNAVAILABLE")
         db.rollback()
         installer = LocalInstaller(
-            settings.data_dir / "comfyops" / "isolated-packages",
+            settings.comfyops_dir / "isolated-packages",
             ControlledDownloader(TRUSTED_DOWNLOAD_HOSTS, HTTPTransport()),
         )
         try:

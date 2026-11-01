@@ -41,6 +41,8 @@ class InstanceChainRequest(BaseModel):
 class ConfigurationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
+    instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
+    port: int = Field(default=8188, ge=1024, le=65535)
 
 
 class ProfileRegistrationRequest(BaseModel):
@@ -48,11 +50,29 @@ class ProfileRegistrationRequest(BaseModel):
     project_id: str
 
 
+class StorageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=1024)
+    allow_system_drive: bool = False
+
+
+@router.get('/storage')
+def storage(settings: SettingsDep):
+    from shine.comfyops.storage import storage_report
+    return storage_report(settings)
+
+
+@router.put('/storage')
+def update_storage(body: StorageRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    from shine.comfyops.storage import configure_storage
+    return configure_storage(db, settings, body.path, actor, allow_system_drive=body.allow_system_drive)
+
+
 @router.get("/environment")
 def environment(settings: SettingsDep):
     from shine.comfyops.host_env import probe_host_environment, setup_blockers
 
-    report = probe_host_environment(settings.data_dir)
+    report = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
     return {**report, "blockers": setup_blockers(report),
             "bootstrap": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1"}
 
@@ -91,6 +111,7 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
             "packages": [p["id"] for p in plan.payload["packages"]]}
 
 
+@router.post("/instance-chain", deprecated=True)
 @router.post("/next-instance-plan")
 def next_instance_plan(body: InstanceChainRequest, settings: SettingsDep, db: DBSession):
     raw = deployment.load_deployment_catalog(body.catalog)
@@ -98,14 +119,15 @@ def next_instance_plan(body: InstanceChainRequest, settings: SettingsDep, db: DB
                                                  instance_name=body.instance_name, port=body.port,
                                                  mode=body.mode)
     if plan is None:
-        return {"complete": True, "action": None}
+        return {"complete": True, "action": None, "next_step": "GENERATE_CONFIGURATION"}
     return {"complete": False, "action": action, "plan_id": plan.id, "sha256": plan.sha256,
             "tier": plan.payload["tier"], "status": plan.status}
 
 
 @router.post("/configuration")
 def configuration(body: ConfigurationRequest, actor: Operator, settings: SettingsDep, db: DBSession):
-    return deployment.generate_configuration(db, settings, body.project_id)
+    return deployment.generate_configuration(db, settings, body.project_id,
+                                             instance_name=body.instance_name, port=body.port)
 
 
 @router.get("/readiness")
@@ -127,14 +149,21 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
     deployment._require_project(db, body.project_id)
     registered = []
     for name in deployment.load_default_catalog()["workflow_profiles"]:
+        from shine.comfy.workflow import graph_hash
+        matches = [p for p in deployment.PROFILE_DIR.glob('*.json')
+                   if _json.loads(p.read_text(encoding='utf-8')).get('name') == name]
+        if len(matches) != 1:
+            raise HTTPException(409, f"PROFILE_FILE_MISSING_OR_AMBIGUOUS: {name}")
+        raw = _json.loads(matches[0].read_text(encoding='utf-8'))
         existing = db.scalar(select(WorkflowProfile).where(WorkflowProfile.name == name))
         if existing:
+            if (existing.graph_sha256 != graph_hash(raw['graph'])
+                    or existing.parameter_map != raw['parameter_map']
+                    or existing.media_transfers != raw.get('media_transfers', {})
+                    or existing.mode != raw['mode']):
+                raise HTTPException(409, 'PROFILE_CONTENT_CHANGED')
             registered.append({"name": name, "profile_id": existing.id, "status": "ALREADY_REGISTERED"})
             continue
-        path = deployment.PROFILE_DIR / (name + ".json")
-        if not path.is_file():
-            raise HTTPException(409, f"PROFILE_FILE_MISSING: {name}")
-        raw = _json.loads(path.read_text(encoding="utf-8"))
         request = WorkflowProfileCreate(
             project_id=body.project_id, name=raw["name"], mode=raw["mode"],
             graph=raw["graph"], parameter_map=raw["parameter_map"],

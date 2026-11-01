@@ -14,6 +14,20 @@ from shine.main import create_app
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
 
+
+@pytest.fixture
+def fake_deployment_host(monkeypatch):
+    """Contract fixtures have a non-system volume with ample simulated capacity.
+
+    No multi-GB inputs are downloaded here. Physical capacity/drive-policy
+    cases override these ports explicitly; real installation acceptance is separate.
+    """
+    from shine.comfyops import storage
+    monkeypatch.setattr(storage, 'on_system_drive', lambda _: False)
+    monkeypatch.setattr(storage, 'disk_info', lambda _: {
+        'free_bytes': 10**15, 'total_bytes': 10**15, 'free_gb': round(10**15 / 1024**3, 2),
+    })
+
 COMFY_GRAPH = {
     "1": {
         "class_type": "H3BaseSampler",

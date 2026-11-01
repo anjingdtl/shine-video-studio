@@ -1,5 +1,9 @@
 # Shine视频工作台 · Shine Video Studio
 
+> 安装盘可在设置中选择；首次引导先选择非系统盘，工具、Python 与依赖缓存不再默认落入 C 盘。使用方法和验证边界见 [下载与安装目录](docs/LOCAL_STORAGE_SETTINGS.md)。
+
+> 2026-11-01 修复进展：设置入口、计划哈希、节点依赖、工作流登记及安装盘选择已修复；ASR SDK 完整固定依赖已在隔离 Windows 环境真实安装并通过 pip check/导入。完整新机部署仍为 PARTIAL，受管冷启动、审片路由和真实服务/模型验收尚未完成。见 [修复记录](docs/NEW_MACHINE_DEPLOYMENT_FIX_20261101.md)。
+
 > V1.3 对抗审查的软件修复与收尾实现已补齐，按 **TESTED_OFFLINE / MOCK_VERIFIED** 验收；
 > 最终提交 CI、逐项证据及真机边界见 [对抗审查与重验](docs/V1.3_ADVERSARIAL_REVIEW.md)。真实 GPU/视听质量不由 Fake 结果代替。
 

@@ -88,7 +88,7 @@ def execute_backup(factory, settings, identity, digest, actor, http):
         db.flush()
         aid = attempt.id
         plan.status = "INSTALLING"
-    target = settings.data_dir / "comfyops" / "external-backups" / aid
+    target = settings.comfyops_dir / "external-backups" / aid
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with exclusive_file_lock(target.with_suffix(".lock")):

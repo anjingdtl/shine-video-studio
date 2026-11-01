@@ -67,7 +67,7 @@ def install_fixture(prep, name, files, kind="node", **spec_extra):
             raise AssertionError("Offline cache must not perform HTTP")
 
     installer = LocalInstaller(
-        settings.data_dir / "comfyops" / "isolated-packages",
+        settings.comfyops_dir / "isolated-packages",
         ControlledDownloader({"raw.githubusercontent.com"}, NeverNetwork()),
     )
     execute_approved(factory, settings, plan["id"], plan["sha256"], "v13-test-operator", installer)

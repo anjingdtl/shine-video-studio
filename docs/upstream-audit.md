@@ -276,3 +276,20 @@ system-wide changes.
 The vendored `shine_h3_sampling_mode.py` is project-authored (operator's own
 file), verified byte-identical in its code body to the original on the
 developer machine; no third-party code is involved.
+
+
+## 2026-11-01 审片服务 wheel 补齐
+
+固定来源为 PyPI 各版本 JSON（https://pypi.org/pypi/{name}/{version}/json），记录实际发行 wheel URL、大小及 SHA-256 至 config/deployment/_upstream-pins/wheels.json；生成目录同时更新。新增 fastapi 0.116.1、httpx 0.28.1、uvicorn 0.35.0、starlette 0.47.2、anyio 4.9.0、h11 0.16.0、httpcore 1.0.9、sniffio 1.3.1、click 8.2.1、python-multipart 0.0.20。仅补入受控下载清单，没有复制第三方源码或下载模型。
+
+Qwen-ASR SDK 完整构建/安装闭包仍未验收；不将上述服务依赖补齐称为 ASR 已可运行。详见 NEW_MACHINE_DEPLOYMENT_FIX_20261101.md。
+
+### 2026-11-01 后续：SDK 固定闭包与实际安装
+
+新增 51 个精确发行包，总输入 154 个，实际大小/哈希全部核验。`review-runtime-metadata.lock` 是 Windows CPython 3.12 元数据解析证据，不替代实际 cu128 文件钉点；`review-runtime-audit.json` 保存从已校验发行包中读取的许可证元数据、依赖元数据及其哈希。sox 1.5.0 的 BSD-3-Clause 源包采用受控离线构建；其产物身份、包输入和构建命令进入原安装尝试审计。未将任何第三方源码收编到项目源码树。
+
+PyTorch 官方索引 https://download.pytorch.org/whl/cu128/torch/ 明确链接 download-r2.pytorch.org 的 2.7.1+cu128 Windows CPython 3.12 wheel；三个 CUDA 包仍保留原精确版本和 SHA-256，只统一目录/安装器主机校验规则。
+
+soynlp 0.0.493 的已校验 wheel 自报 License=UNKNOWN。另核验上游 LGPL v3 许可证，精确 revision=264a05c96f0ccd1961f1a669a9df132076a67a15、文件哈希和 47/51 个 Python 文件对照结果见审计 JSON。四个文件未与该历史快照逐字节吻合，未把该快照冒称为发布 wheel 的完整源码身份；发布输入的身份仍是 PyPI wheel 的精确哈希。soxr 是 LGPL-2.1-or-later；这些依赖只在单独安装环境中使用，没有复制 GPL/LGPL 源码到主项目。该记录不构成额外的发行授权结论。
+
+完整 SDK 安装与 pip check/类导入验证已通过，真实权重加载仍 NOT_RUN。下载主机拒绝和 setuptools vendor 元数据误判的原始失败日志均保留于 .local-acceptance/new-machine-goal-20261101/，修复后使用相同已验证输入重验。

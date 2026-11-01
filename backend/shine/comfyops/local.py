@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import platform
-import shutil
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
@@ -52,8 +51,8 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
         raise ValueError("PLAN_HASH_CHANGED")
     if db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status == "SUBMIT_INTENT").limit(1)):
         raise ValueError("INSTALL_ATTEMPT_ACTIVE")
-    root = settings.data_dir / "comfyops" / "isolated-packages"
-    if not root.resolve().is_relative_to(settings.data_dir.resolve()):
+    root = settings.comfyops_dir / "isolated-packages"
+    if not root.resolve().is_relative_to(settings.comfyops_dir.resolve()):
         raise ValueError("INSTALL_ROOT_OUTSIDE_SCOPE")
     observations = []
     with ExitStack() as locks:
@@ -126,7 +125,11 @@ def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
                 or graph_hash(row.payload) != package["hash"] or graph_hash(package["spec"]) != package["hash"]
             ):
                 raise ValueError("PLAN_HASH_CHANGED")
-        if shutil.disk_usage(settings.data_dir).free < plan.payload.get("disk_required", 0):
+        from shine.comfyops.storage import disk_info, require_storage
+        selected_root = require_storage(settings)
+        if plan.payload.get('storage_root', str(selected_root)) != str(selected_root):
+            raise ValueError('DEPLOYMENT_STORAGE_CHANGED_RECREATE_PLAN')
+        if disk_info(selected_root)['free_bytes'] < plan.payload.get("disk_required", 0):
             raise ValueError("INSUFFICIENT_DISK")
         plan.status = "INSTALLING"
         attempt = InstallationAttempt(
@@ -204,7 +207,7 @@ def main():
     settings = Settings.from_env()
     actor = authenticate(settings, getpass.getpass("Local human operator credential: "))
     factory = make_session_factory(make_engine(settings.database_url))
-    root: Path = settings.data_dir / "comfyops" / "isolated-packages"
+    root: Path = settings.comfyops_dir / "isolated-packages"
     installer = LocalInstaller(
         root, ControlledDownloader(TRUSTED_DOWNLOAD_HOSTS, HTTPTransport())
     )

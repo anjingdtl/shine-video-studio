@@ -11,18 +11,24 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.installer import PackageFile, PackageSpec, safe_target
+from shine.comfyops.installer import TRUSTED_DOWNLOAD_HOSTS, PackageFile, PackageSpec, SourceWheelBuild, safe_target
 from shine.comfyops.managed_recipe import adapter_identity as managed_recipe_adapter_identity
-from shine.comfyops.models import ComfyInstance, InstallationPlan, ModelPackage, NodePackage
+from shine.comfyops.models import (
+    ComfyInstance,
+    InstallationAttempt,
+    InstallationPlan,
+    ModelPackage,
+    NodePackage,
+    ResourceLease,
+)
 from shine.config import Settings
 from shine.models import WorkflowProfile
 from shine.services import add_audit
@@ -64,9 +70,10 @@ class CatalogComponent(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     role: str | None = None
     depends_on_wheels: bool = False
-    files: list[CatalogFile] = Field(min_length=1, max_length=100)
+    files: list[CatalogFile] = Field(min_length=1, max_length=256)
     status: Literal["READY", "BLOCKED"] = "READY"
     blocked_reason: str = ""
+    source_builds: list[SourceWheelBuild] = Field(default_factory=list, max_length=10)
 
 
 class DeploymentCatalog(BaseModel):
@@ -96,16 +103,13 @@ def load_deployment_catalog(name: str = "h3-ref2va-windows-x64") -> dict:
         catalog = DeploymentCatalog.model_validate(raw)
     except ValueError as exc:
         raise HTTPException(409, f"DEPLOYMENT_CATALOG_INVALID: {exc}") from exc
-    trusted = {"huggingface.co", "raw.githubusercontent.com", "github.com", "codeload.github.com",
-               "release-assets.githubusercontent.com", "files.pythonhosted.org", "download.pytorch.org",
-               "download-r2.pytorch.org"}
     for component in catalog.components:
         if component.status != "READY":
             continue
         for file_entry in component.files:
             from shine.comfyops.installer import check_url
             try:
-                check_url(file_entry.url, trusted)
+                check_url(file_entry.url, TRUSTED_DOWNLOAD_HOSTS)
             except ValueError as exc:
                 raise HTTPException(409, f"UNTRUSTED_CATALOG_URL: {file_entry.url}") from exc
             try:
@@ -173,6 +177,7 @@ def _catalog_package_spec(component: dict, dependency_map: dict) -> PackageSpec:
         files=files,
         dependencies=dependency_map,
         runtime_versions={"python": "3.12"},
+        source_builds=component.get("source_builds", []),
     )
 
 
@@ -226,23 +231,32 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
     so approval and execution remain the existing controlled endpoints.
     """
     _require_project(db, project_id)
+    from shine.comfyops.storage import disk_info, require_storage
+    storage_root = require_storage(settings)
     rows = register_catalog_packages(db, catalog, requested)
     packages = []
     for component_id in _resolve_closure(_component_map(catalog), requested):
         row = rows[component_id]
         packages.append({"id": row.id, "hash": row.sha256, "spec": row.payload})
     size = sum(f["size"] for p in packages for f in p["spec"]["files"])
-    if size * 2 > disk_free:
+    reserve = int(catalog.get('dependency_policy', {}).get('runtime_disk', {}).get('runtime_reserve_bytes', 0))
+    if WHEEL_COMPONENT_ID not in rows:
+        reserve = 0
+    disk_required = size * 2 + reserve
+    if disk_required > disk_free:
         raise HTTPException(409, "INSUFFICIENT_DISK")
-    if shutil.disk_usage(settings.data_dir).free < size * 2:
+    if disk_info(storage_root)['free_bytes'] < disk_required:
         raise HTTPException(409, "INSUFFICIENT_DISK_ON_HOST")
     payload = {
         "packages": packages,
         "download_bytes": size,
-        "disk_required": size * 2,
+        "disk_required": disk_required,
+        "runtime_reserve_bytes": reserve,
+        "storage_root": str(storage_root),
         "isolated": True,
         "executor": "LOCAL_ISOLATED",
-        "risks": ["THIRD_PARTY_CODE" if p["spec"]["kind"] in {"node", "source"} else "MODEL_LICENSE" for p in packages],
+        "risks": ["THIRD_PARTY_CODE" if p["spec"]["kind"] in {"node", "source", "wheel"}
+                  else "MODEL_LICENSE" for p in packages],
         "deployment": {"catalog_id": catalog["catalog_id"], "catalog_version": catalog["catalog_version"]},
     }
     row = InstallationPlan(
@@ -271,19 +285,45 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str,
     (None, action) when the chain is complete.
     """
     _require_project(db, project_id)
-    from shine.comfyops.instances import InstanceOperation, plan_operation
+    from shine.comfyops.instances import InstanceOperation, instance_identity, instance_root, plan_operation
     components = _component_map(catalog)
-    instance = next((row for row in db.scalars(select(ComfyInstance))
-                     if row.payload.get("managed") and row.payload.get("name") == instance_name), None)
+    expected_nodes = {cid: c['revision'] for cid, c in components.items() if c['kind'] == 'node'}
+    expected_bindings = {c['destination_family']: cid for cid, c in components.items()
+                         if c['kind'] == 'model' and c.get('destination_family')}
+    instance = db.get(ComfyInstance, instance_identity(mode, port))
+    if instance is None and any(
+            row.payload.get('managed') and row.payload.get('root') == str(instance_root(settings, instance_name, mode))
+            for row in db.scalars(select(ComfyInstance))):
+        raise HTTPException(409, 'INSTANCE_IDENTITY_CHANGED')
+    if instance and (not instance.payload.get('managed') or instance.payload.get('name') != instance_name
+                     or instance.payload.get('port') != port
+                     or bool(instance.payload.get('is_mock')) != (mode == 'fake')
+                     or Path(instance.payload.get('root', '')).resolve()
+                     != instance_root(settings, instance_name, mode).resolve()):
+        raise HTTPException(409, 'INSTANCE_IDENTITY_CHANGED')
+    if instance and instance.status not in {'STOPPED', 'MOCK_VERIFIED', 'RUNNING_PENDING_HEALTH'}:
+        raise HTTPException(409, 'INSTANCE_REQUIRES_RECONCILIATION')
+    installed_nodes = instance.payload.get('node_versions', {}) if instance else {}
+    if any(cid in installed_nodes and installed_nodes[cid] != revision for cid, revision in expected_nodes.items()):
+        raise HTTPException(409, 'PINNED_NODE_REVISION_CHANGED')
+    missing_nodes = [cid for cid in expected_nodes if cid not in installed_nodes]
+    bindings = instance.payload.get('model_bindings', {}) if instance else {}
+    if any(family not in expected_bindings or expected_bindings[family] != package_id
+           for family, package_id in bindings.items()):
+        raise HTTPException(409, 'INSTANCE_MODEL_BINDINGS_CHANGED')
     if instance is None:
         action = "CREATE"
-    elif not instance.payload.get("node_versions"):
+    elif instance.payload.get('process'):
+        # A previous setup version started naked main.py here. Stop only its
+        # recorded owned process through the approved lifecycle before mutation.
+        action = 'STOP'
+    elif missing_nodes:
         action = "INSTALL_NODE"
-    elif not instance.payload.get("model_bindings"):
+    elif bindings != expected_bindings:
         action = "BIND_MODELS"
-    elif not instance.payload.get("process"):
-        action = "START"
     else:
+        # Production owns the first fenced startup and GPU admission. An ordinary
+        # START here would keep the same port occupied and bypass that boundary.
         return None, None
     rows = register_catalog_packages(db, catalog, [
         "comfyui", WHEEL_COMPONENT_ID,
@@ -302,7 +342,8 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str,
     elif action == "INSTALL_NODE":
         plan = plan_operation(db, settings, InstanceOperation(
             project_id=project_id, name=instance_name, action=action, mode=mode, port=port,
-            package_ids=[rows[cid].id for cid, c in components.items() if c["kind"] == "node"],
+            package_ids=[rows[WHEEL_COMPONENT_ID].id,
+                         *[rows[cid].id for cid in missing_nodes]],
             risk_confirmed=risk))
     elif action == "BIND_MODELS":
         plan = plan_operation(db, settings, InstanceOperation(
@@ -339,18 +380,35 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 
 
-def generate_configuration(db, settings: Settings, project_id: str) -> dict:
+def generate_configuration(db, settings: Settings, project_id: str, *,
+                           instance_name: str = 'shine-h3', port: int = 8188) -> dict:
     """Generate the instance-bound managed recipe, review manifests and .env entries.
 
     Everything is derived from the deployed isolated instance and the repo, so a
     new machine needs no personal paths, GPU UUID hardcoding or hand-edited JSON.
     """
+    from shine.comfyops.instances import instance_identity, instance_root
+
+    # Serialize with resource admission and instance lifecycle intent. A lease
+    # timeout does not prove that a renderer has stopped.
+    db.execute(text('BEGIN IMMEDIATE'))
     _require_project(db, project_id)
-    instance = next((row for row in db.scalars(select(ComfyInstance))
-                     if row.payload.get("managed")), None)
-    if instance is None:
+    instance = db.get(ComfyInstance, instance_identity('local', port))
+    if (instance is None or not instance.payload.get('managed') or instance.payload.get('is_mock')
+            or instance.payload.get('name') != instance_name
+            or instance.payload.get('port') != port
+            or Path(instance.payload.get('root', '')).resolve()
+            != instance_root(settings, instance_name, 'local').resolve()):
         raise HTTPException(409, "MANAGED_INSTANCE_REQUIRED")
     payload = instance.payload
+    if payload.get('process') or instance.status != 'STOPPED':
+        raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
+    if db.scalar(select(ResourceLease.id).where(
+            ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1)):
+        raise HTTPException(409, 'RUNTIME_RESOURCES_REQUIRE_RECONCILIATION')
+    if db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(
+            ['SUBMIT_INTENT', 'INSTALLING', 'NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])).limit(1)):
+        raise HTTPException(409, 'INSTALLATION_REQUIRES_RECONCILIATION')
     root = Path(payload["root"])
     python = Path(root / ".venv" / "Scripts" / "python.exe")
     if not python.is_file():
@@ -370,7 +428,7 @@ def generate_configuration(db, settings: Settings, project_id: str) -> dict:
     if gpu.get("status") != "OK":
         raise HTTPException(409, f"GPU_UUID_REQUIRED: {gpu.get('reason')}")
     SEP = chr(92)
-    setup_dir = settings.data_dir / "setup"
+    setup_dir = settings.comfyops_dir / "setup"
     (setup_dir / "manifests").mkdir(parents=True, exist_ok=True)
     (setup_dir / "review-runtime").mkdir(parents=True, exist_ok=True)
     recipe_path = setup_dir / "managed_recipe.json"
@@ -410,7 +468,7 @@ def generate_configuration(db, settings: Settings, project_id: str) -> dict:
     for role, component_id in REVIEW_COMPONENTS.items():
         component = components[component_id]
         manifest = {
-            "model_root": str((settings.data_dir / "comfyops" / "isolated-packages" / component_id).resolve()),
+            "model_root": str((settings.comfyops_dir / "isolated-packages" / component_id).resolve()),
             "model_id": component_id,
             "license_id": component["license_id"],
             "files": [
@@ -418,6 +476,15 @@ def generate_configuration(db, settings: Settings, project_id: str) -> dict:
                 for f in component["files"]
             ],
         }
+        if role == "ASR":
+            manifest = {**manifest, "model_id": REVIEW_COMPONENTS["VLM"],
+                        "model_root": str((settings.comfyops_dir / "isolated-packages"
+                                           / REVIEW_COMPONENTS["VLM"]).resolve()),
+                        "files": [{"path": f["relative_path"], "sha256": f["sha256"], "bytes": f["size"]}
+                                  for f in components[REVIEW_COMPONENTS["VLM"]]["files"]],
+                        "asr": {**manifest, "executor": "qwen3-asr",
+                                "runtime_packages": str(root / ".venv" / "Lib" / "site-packages")}}
+        manifest["sha256"] = graph_hash(manifest)
         manifest_path = setup_dir / "manifests" / (role.lower() + ".json")
         from shine.comfyops.installer import durable_json
         durable_json(manifest_path, manifest)
@@ -504,7 +571,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
     catalog = load_default_catalog()
     components = _component_map(catalog)
     layers = []
-    env_report = probe_host_environment(settings.data_dir)
+    env_report = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
     blockers = setup_blockers(env_report)
     layers.append({
         "layer": "L0_host_tools",
@@ -530,18 +597,44 @@ def deployment_readiness(db, settings: Settings) -> dict:
     layer_two = package_layer_status(core_ids)
     layer_two["layer"] = "L2_files_verified"
     layers.append(layer_two)
-    instance = next((row for row in db.scalars(select(ComfyInstance)) if row.payload.get("managed")), None)
-    instance_installed = instance is not None and (Path(instance.payload["root"]) / ".venv").is_dir()
+    candidates = [row for row in db.scalars(select(ComfyInstance))
+                  if row.payload.get("managed") and not row.payload.get("is_mock", True)]
+    instance = candidates[0] if len(candidates) == 1 else None
+    install_blockers = []
+    if instance is None:
+        install_blockers.append("REAL_INSTANCE_MISSING_OR_AMBIGUOUS")
+    else:
+        payload = instance.payload
+        root = Path(payload.get("root", "")).resolve()
+        attempt = db.get(InstallationAttempt, payload.get("last_attempt")) if payload.get("last_attempt") else None
+        if (instance.status not in {"STOPPED", "RUNNING_PENDING_HEALTH"}
+                or instance.sha256 != graph_hash(payload)
+                or not attempt or attempt.status != "COMPLETED"
+                or attempt.sha256 != graph_hash(attempt.payload)
+                or attempt.payload.get("is_mock", True)
+                or attempt.payload.get("result") != payload):
+            install_blockers.append("COMPLETED_REAL_INSTALL_EVIDENCE_REQUIRED")
+        if (not root.is_relative_to((settings.comfyops_dir / "instances").resolve())
+                or not (root / ".venv/Scripts/python.exe").is_file()
+                or not (root / "main.py").is_file()
+                or not (root / ".shine-requirements.txt").is_file()
+                or not payload.get("dependency_hash")):
+            install_blockers.append("INSTALLED_RUNTIME_FILES_MISSING")
+        expected_nodes = {cid: c["revision"] for cid, c in components.items() if c["kind"] == "node"}
+        if any(payload.get("node_versions", {}).get(cid) != revision for cid, revision in expected_nodes.items()):
+            install_blockers.append("PINNED_NODE_INSTALL_INCOMPLETE")
     layers.append({
         "layer": "L3_environment_installed",
-        "status": "READY" if instance_installed else "PENDING",
+        "status": "READY" if not install_blockers else "PENDING",
+        "blockers": install_blockers,
         "instance": instance.id if instance else None,
         "root": instance.payload.get("root") if instance else None,
     })
     recipe_configured = bool(os.getenv("SHINE_MANAGED_RECIPE"))
     layers.append({
         "layer": "L4_services_and_contracts",
-        "status": "READY" if recipe_configured and instance_installed else "PENDING",
+        "status": "PENDING",
+        "note": "Live service and node-contract verification required",
         "managed_recipe_env": recipe_configured,
     })
     layers.append({

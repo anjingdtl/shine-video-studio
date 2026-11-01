@@ -1,9 +1,10 @@
-"""Read-only host environment probe for the new-machine entry script.
+"""Host environment probes for the new-machine entry script.
 
 Every check reports an honest outcome: ``ok``, ``installable`` (the bootstrap
 entry can install a pinned user-level copy), ``stale`` (present but below the
 floor version), or ``blocked`` with the exact reason. Nothing here pretends a
-missing prerequisite is present and no check mutates the host. Command runners
+missing prerequisite is present. Writable checks use temporary files; probes
+never install tools or models. Command runners
 are injectable so tests exercise the same decision logic against synthetic
 outputs.
 """
@@ -12,9 +13,9 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import socket
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ FLOOR_VERSIONS = {
 
 RAM_MB_MIN = 30 * 1024  # 32GB-class machines report ~31.7GB usable
 VRAM_MB_MIN = 15360
-DISK_GB_MIN = 120
+DISK_GB_MIN = 5  # Runtime headroom; the installation plan separately reserves the complete deployment footprint.
 DEFAULT_PORT = 8188
 
 
@@ -148,9 +149,11 @@ def _parse_vram(text: str) -> int:
 
 
 def probe_disk(path: Path) -> dict:
-    usage = shutil.disk_usage(path)
-    free_gb = usage.free / (1024**3)
-    return {"status": "OK", "free_gb": round(free_gb, 1), "at_floor": free_gb >= DISK_GB_MIN}
+    from shine.comfyops.storage import disk_info
+    info = disk_info(path)
+    return {"status": "OK", **info, "path": str(path),
+            "at_floor": info['free_bytes'] >= DISK_GB_MIN * 1024**3,
+            "runtime_floor_gb": DISK_GB_MIN}
 
 
 def probe_port(port: int) -> dict:
@@ -166,16 +169,17 @@ def probe_port(port: int) -> dict:
 def probe_writable(path: Path) -> dict:
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".shine-write-probe"
-        probe.write_bytes(b"ok")
-        probe.unlink()
+        with tempfile.TemporaryFile(dir=path) as probe:
+            probe.write(b'ok')
+            probe.flush()
     except OSError as exc:
         return {"status": "BLOCKED", "reason": "DATA_DIR_NOT_WRITABLE", "detail": type(exc).__name__}
     return {"status": "OK", "writable": True}
 
 
-def probe_host_environment(data_dir: Path, *, port: int = DEFAULT_PORT) -> dict:
-    """Full read-only host report for the setup entry point."""
+def probe_host_environment(data_dir: Path, *, port: int = DEFAULT_PORT, deployment_dir: Path | None = None) -> dict:
+    """Probe the selected deployment disk independently of the project database disk."""
+    target = deployment_dir or data_dir
     tools = {}
     for name in sorted(BOOTSTRAP_INSTALLABLE):
         tools[name] = probe_command(name)
@@ -184,9 +188,10 @@ def probe_host_environment(data_dir: Path, *, port: int = DEFAULT_PORT) -> dict:
         "tools": tools,
         "gpu": probe_gpu(),
         "ram": probe_ram(),
-        "disk": probe_disk(data_dir.parent),
+        "disk": probe_disk(target),
         "port": probe_port(port),
         "data_dir": {"path": str(data_dir), **probe_writable(data_dir)},
+        "deployment_dir": {"path": str(target), **probe_writable(target)},
         "path_issues": _path_issues(data_dir),
     }
 
@@ -231,4 +236,6 @@ def setup_blockers(report: dict) -> list:
         blockers.append({"code": "PORT_OCCUPIED", "port": report["port"]["port"]})
     if not report["data_dir"]["writable"]:
         blockers.append({"code": report["data_dir"].get("reason", "DATA_DIR_NOT_WRITABLE")})
+    if not report.get('deployment_dir', {}).get('writable', True):
+        blockers.append({'code': 'DEPLOYMENT_DIR_NOT_WRITABLE'})
     return blockers
