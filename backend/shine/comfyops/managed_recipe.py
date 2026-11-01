@@ -119,7 +119,7 @@ def _review(raw, kind):
     return recipe
 
 
-def load_managed_recipe(path):
+def load_managed_recipe(path, *, expected_sha256=None):
     """Read and validate the managed renderer and review recipes."""
     target = Path(path)
     if not target.is_absolute() or not target.is_file():
@@ -130,6 +130,10 @@ def load_managed_recipe(path):
         raise HTTPException(409, "COMFY_RECIPE_INVALID") from exc
     if not isinstance(raw, dict) or "renderer" not in raw:
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
+    if expected_sha256:
+        from shine.comfy.workflow import graph_hash
+        if graph_hash(raw) != expected_sha256:
+            raise HTTPException(409, 'ACTIVE_RUNTIME_RECIPE_CHANGED')
     reviews = raw.get("reviews") or {}
     if not isinstance(reviews, dict) or any(kind not in {"VLM", "ASR"} for kind in reviews):
         raise HTTPException(409, "COMFY_RECIPE_INVALID")

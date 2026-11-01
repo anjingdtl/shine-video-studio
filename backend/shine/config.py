@@ -52,6 +52,8 @@ class Settings:
     operator_id: str = ""
     operator_token_sha256: str = ""
     allow_non_loopback_api: bool = False
+    managed_recipe_path: str = ''
+    managed_recipe_sha256: str = ''
 
     @property
     def comfyops_dir(self) -> Path:

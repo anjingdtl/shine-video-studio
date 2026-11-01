@@ -45,6 +45,12 @@ class ConfigurationRequest(BaseModel):
     port: int = Field(default=8188, ge=1024, le=65535)
 
 
+class RuntimeActivationRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    project_id: str
+    recipe_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 class ProfileRegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
@@ -133,6 +139,18 @@ def configuration(body: ConfigurationRequest, actor: Operator, settings: Setting
 @router.get("/readiness")
 def readiness(settings: SettingsDep, db: DBSession):
     return deployment.deployment_readiness(db, settings)
+
+
+@router.get('/runtime')
+def runtime_state(settings: SettingsDep, db: DBSession):
+    from shine.comfyops.runtime_configuration import runtime_report
+    return runtime_report(db, settings)
+
+
+@router.post('/runtime/activate')
+def activate_runtime(body: RuntimeActivationRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    from shine.comfyops.runtime_configuration import activate_runtime as activate
+    return activate(db, settings, body.project_id, body.recipe_sha256, actor)
 
 
 @router.post("/profiles")

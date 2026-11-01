@@ -78,8 +78,7 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
   该节点此前只存在于个人机 custom_nodes，是真实生产路径的隐藏个人依赖，本轮消除；
 - 受管配方（renderer+reviews，gpu_uuid 来自实时 nvidia-smi 探测）→ 所选部署目录下的 `setup/managed_recipe.json`；
 - VLM/ASR 审片 manifest（模型根=隔离包目录，文件哈希=目录钉点）；
-- .env 键值更新（SHINE_MANAGED_RECIPE/SHINE_RENDER_PROVIDER/SHINE_COMFYUI_URL/SHINE_ENABLE_LOCAL_EXECUTION 等）——
-  密钥永远不经过此处；DPAPI/0600 文件机制不变，凭据由用户在设置页录入。
+- .env 保存草稿路径 `SHINE_SETUP_RECIPE`、数据目录及本机执行开关，不再在生成时切换渲染模式。操作员确认配方哈希后在现有 SQLite 持久激活，API/Worker 共享该身份；密钥永远不经过此处，DPAPI/0600 文件机制不变，凭据由用户在设置页录入。
 - 生成的配方直接通过 `load_managed_recipe`（Worker 侧同一加载器）验证；测试断言适配器身份与 GPU UUID 绑定。
 
 ### E. 工作流与生产就绪校验
@@ -94,7 +93,7 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
 环境检查 → 部署清单 → 计划与批准（生成安装计划/下一步实例计划/登记 profile/生成受管配置 + 每张计划"批准并执行"）→ 就绪检查。
 高级 JSON 控件保留在 PreproductionPanel，向导不要求用户写任何 JSON。
 
-2026-11-01 首启修复：实例准备在模型绑定后保持停止，不再生成普通 START。只有生产 Worker 在资源准入后执行受管启动。旧版已有进程先走自有进程 STOP 审批；配置生成按明确实例身份并拒绝活动/待对账资源。见 [首启交接修复](NEW_MACHINE_COLD_START_FIX_20261101.md)。常驻进程激活和审片首启仍待闭环。
+2026-11-01 首启修复：实例准备在模型绑定后保持停止，不再生成普通 START。只有生产 Worker 在资源准入后执行受管启动。旧版已有进程先走自有进程 STOP 审批；配置生成按明确实例身份并拒绝活动/待对账资源。见 [首启交接修复](NEW_MACHINE_COLD_START_FIX_20261101.md)。候选配方经操作员确认后持久激活，API 与常驻 Worker 共享生效身份，见 [运行配置激活](NEW_MACHINE_RUNTIME_ACTIVATION_20261101.md)；审片服务首启仍待闭环。
 
 ## 3. 测试与验证矩阵
 

@@ -1,0 +1,157 @@
+"""Operator activation shared by the API and resident Worker; no second queue."""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import replace
+from pathlib import Path
+
+from fastapi import HTTPException
+from sqlalchemy import select, text
+
+from shine.comfy.workflow import graph_hash
+from shine.comfyops.managed_recipe import load_managed_recipe
+from shine.comfyops.models import ComfyInstance, InstallationAttempt, ResourceLease
+from shine.models import AppSetting, Job, ProductionSeries
+from shine.services import add_audit, require_project
+
+CANDIDATE_KEY = 'deployment-runtime-candidate'
+ACTIVE_KEY = 'deployment-runtime-active'
+
+
+def configuration_identity(db, settings, path):
+    from shine.comfyops.deployment import load_default_catalog
+    from shine.comfyops.instances import instance_identity, instance_root
+
+    path = Path(path).resolve()
+    if path != (settings.comfyops_dir / 'setup/managed_recipe.json').resolve():
+        raise HTTPException(409, 'GENERATED_RUNTIME_RECIPE_REQUIRED')
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        recipe = load_managed_recipe(path, expected_sha256=graph_hash(raw))
+        renderer = recipe['renderer']
+        instance = db.get(ComfyInstance, renderer['instance_id'])
+        if (not instance or not instance.payload.get('managed') or instance.payload.get('is_mock', True)
+                or instance.sha256 != graph_hash(instance.payload)
+                or instance.id != instance_identity('local', renderer['port'])
+                or Path(renderer['root']).resolve() != instance_root(
+                    settings, instance.payload['name'], 'local').resolve()
+                or Path(instance.payload['root']).resolve() != Path(renderer['root']).resolve()
+                or instance.payload['port'] != renderer['port']):
+            raise HTTPException(409, 'REAL_RUNTIME_INSTANCE_IDENTITY_REQUIRED')
+        paths = {path, Path(renderer['root']) / '.shine-requirements.txt'}
+        values = {**renderer, 'port': str(renderer['port'])}
+        for template in renderer['pinned_files']:
+            paths.add(Path(template.format_map(values)))
+        for review in recipe['reviews'].values():
+            paths.add(Path(review['manifest']))
+            # The controlled review entrypoint is part of the confirmed identity.
+            paths.add(Path(review['argv'][1].format_map(review)))
+        pins = {}
+        for target in sorted(paths):
+            if not target.is_absolute() or not target.is_file():
+                raise HTTPException(409, 'RUNTIME_PINNED_FILE_MISSING')
+            with target.open('rb') as stream:
+                pins[str(target.resolve())] = hashlib.file_digest(stream, 'sha256').hexdigest()
+        return {'recipe': str(path), 'recipe_sha256': graph_hash(raw),
+                'instance_id': instance.id, 'instance_sha256': instance.sha256,
+                'catalog_sha256': graph_hash(load_default_catalog()), 'files': pins,
+                'comfyui_base_url': f"http://127.0.0.1:{renderer['port']}"}
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(409, 'RUNTIME_CONFIGURATION_INVALID') from exc
+
+
+def record_candidate(db, settings, project_id, recipe_path):
+    identity = configuration_identity(db, settings, recipe_path)
+    value = {'version': 1, 'project_id': project_id, 'identity': identity}
+    row = db.get(AppSetting, CANDIDATE_KEY)
+    if row is None:
+        db.add(AppSetting(key=CANDIDATE_KEY, value=value))
+    else:
+        row.value = value
+
+
+def resolve_runtime(db, settings):
+    row = db.get(AppSetting, ACTIVE_KEY)
+    if row is None:
+        return settings
+    if settings.offline_simulation:
+        raise HTTPException(409, 'ACTIVE_RUNTIME_OFFLINE_SIMULATION_FORBIDDEN')
+    try:
+        value = row.value
+        identity = value['identity']
+        if (value['version'] != 1 or graph_hash(identity) != value['sha256']
+                or configuration_identity(db, settings, identity['recipe']) != identity):
+            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
+    except HTTPException as exc:
+        raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED') from exc
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_INVALID') from exc
+    return replace(settings, render_provider='comfyui', allow_remote_comfyui=False,
+                   comfyui_base_url=identity['comfyui_base_url'],
+                   managed_recipe_path=identity['recipe'], managed_recipe_sha256=identity['recipe_sha256'])
+
+
+def require_idle_configuration(db):
+    if (db.scalar(select(ResourceLease.id).where(ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1))
+            or db.scalar(select(Job.id).where(Job.status.not_in(['PASSED', 'FAILED', 'CANCELLED'])).limit(1))
+            or db.scalar(select(ProductionSeries.id).where(
+                ProductionSeries.status.not_in(['COMPLETED', 'FAILED', 'CANCELLED'])).limit(1))
+            or db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(
+                ['SUBMIT_INTENT', 'INSTALLING', 'NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])).limit(1))):
+        raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
+
+
+def activate_runtime(db, settings, project_id, recipe_sha256, actor):
+    from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
+
+    db.execute(text('BEGIN IMMEDIATE'))
+    require_project(db, project_id)
+    candidate = db.get(AppSetting, CANDIDATE_KEY)
+    if not candidate or candidate.value.get('project_id') != project_id:
+        raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
+    identity = candidate.value['identity']
+    if recipe_sha256 != identity['recipe_sha256']:
+        raise HTTPException(409, 'RUNTIME_CONFIRMATION_HASH_CHANGED')
+    if configuration_identity(db, settings, identity['recipe']) != identity:
+        raise HTTPException(409, 'RUNTIME_CONFIGURATION_CHANGED_REGENERATE')
+    if settings.offline_simulation:
+        raise HTTPException(409, 'OFFLINE_SIMULATION_CANNOT_ACTIVATE_REAL_RUNTIME')
+    active = db.get(AppSetting, ACTIVE_KEY)
+    if (active and active.value.get('identity') == identity
+            and active.value.get('sha256') == graph_hash(identity)):
+        return runtime_report(db, settings)
+    instance = db.get(ComfyInstance, identity['instance_id'])
+    blockers = installed_instance_blockers(db, settings, instance, load_default_catalog())
+    if blockers:
+        raise HTTPException(409, {'code': 'REAL_INSTALLATION_EVIDENCE_REQUIRED', 'blockers': blockers})
+    if instance.status != 'STOPPED' or instance.payload.get('process'):
+        raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_ACTIVATION')
+    require_idle_configuration(db)
+    value = {'version': 1, 'identity': identity, 'sha256': graph_hash(identity),
+             'project_id': project_id, 'actor': actor}
+    if active is None:
+        db.add(AppSetting(key=ACTIVE_KEY, value=value))
+    else:
+        active.value = value
+    add_audit(db, actor, 'DEPLOYMENT_RUNTIME_ACTIVATED', 'comfy_instance', instance.id,
+              {'configuration_sha256': value['sha256'], 'recipe_sha256': recipe_sha256,
+               'starts_processes': False}, project_id=project_id)
+    db.commit()
+    return runtime_report(db, settings)
+
+
+def runtime_report(db, settings):
+    candidate = db.get(AppSetting, CANDIDATE_KEY)
+    active = db.get(AppSetting, ACTIVE_KEY)
+    try:
+        effective = resolve_runtime(db, settings)
+        status, error = ('ACTIVE' if active else 'NOT_ACTIVATED'), None
+        mode = effective.render_provider
+    except HTTPException as exc:
+        status, error, mode = 'INVALID_REQUIRES_REVIEW', exc.detail, 'unavailable'
+    return {'status': status, 'render_provider': mode, 'error': error,
+            'candidate': ({'project_id': candidate.value['project_id'],
+                           'recipe_sha256': candidate.value['identity']['recipe_sha256']} if candidate else None),
+            'configuration_sha256': active.value.get('sha256') if active else None,
+            'services_verified': False, 'real_inference_verified': False}

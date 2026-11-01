@@ -23,6 +23,7 @@ from shine.api_preparation import Decision
 from shine.api_review import router as review_router
 from shine.api_setup import router as setup_router
 from shine.api_subtitles import router as subtitles_router
+from shine.comfyops.runtime_configuration import resolve_runtime
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
 from shine.media.artifacts import safe_asset_path
@@ -394,25 +395,27 @@ def create_app(
         return await call_next(request)
 
     @app.get("/health")
-    def health() -> dict[str, str | bool]:
+    def health(db: DBSession) -> dict[str, str | bool]:
+        from shine.comfyops.runtime_configuration import runtime_report
+        runtime = runtime_report(db, settings)
         return {
             "status": "ok",
             "service": "shine-api",
-            "render_provider": settings.render_provider,
+            "render_provider": runtime['render_provider'],
             # Cheap configured-state flag; the live connection check lives in
             # /api/v1/system/status so health stays answerable without I/O.
             "h3_connected": False,
             "connection_probe": "not_run_use_system_status",
         }
 
-    def _h3_connected() -> bool:
+    def _h3_connected(effective) -> bool:
         """True only when the configured real renderer answers right now."""
-        if settings.render_provider != "comfyui":
+        if effective is None or effective.render_provider != "comfyui":
             return False
         try:
             from shine.comfy.client import ComfyUIClient
 
-            client = ComfyUIClient(settings.comfyui_base_url, timeout_s=2.0)
+            client = ComfyUIClient(effective.comfyui_base_url, timeout_s=2.0, trust_env=effective.allow_remote_comfyui)
             client.system_stats()
             return True
         except Exception:
@@ -420,6 +423,11 @@ def create_app(
 
     @app.get("/api/v1/system/status", response_model=SystemStatus)
     def system_status(db: DBSession) -> SystemStatus:
+        runtime_error = None
+        try:
+            effective = resolve_runtime(db, settings)
+        except HTTPException as exc:
+            effective, runtime_error = None, str(exc.detail)
         now = utcnow()
         instances = db.scalars(select(WorkerInstance).order_by(WorkerInstance.started_at)).all()
         workers = [
@@ -436,14 +444,14 @@ def create_app(
         return SystemStatus(
             worker_online=any(worker.online for worker in workers),
             mock_provider_available=True,
-            h3_connected=_h3_connected(),
-            render_mode=settings.render_provider,
+            h3_connected=_h3_connected(effective),
+            render_mode=effective.render_provider if effective else 'unavailable',
             pending_jobs=pending or 0,
             running_jobs=running or 0,
             failed_jobs=failed or 0,
             blocked_jobs=blocked or 0,
             workers=workers,
-            last_error=last_error,
+            last_error=runtime_error or last_error,
         )
 
     @app.get("/api/v1/workers", response_model=list[WorkerStatus])
@@ -797,7 +805,7 @@ def create_app(
         shot = require_shot(db, project_id, body.shot_id)
         job, compiler_meta = create_render_job(
             db, project, shot, body,
-            settings=request.app.state.settings,
+            settings=resolve_runtime(db, request.app.state.settings),
             offline=request.app.state.settings.offline_simulation,
         )
         db.commit()
@@ -853,7 +861,7 @@ def create_app(
         )
         series, job = create_series(
             db, project, shots, body=job_body,
-            settings=request.app.state.settings,
+            settings=resolve_runtime(db, request.app.state.settings),
             offline=request.app.state.settings.offline_simulation,
         )
         if body.edit_intent_artifact_id:

@@ -27,7 +27,6 @@ from shine.comfyops.models import (
     InstallationPlan,
     ModelPackage,
     NodePackage,
-    ResourceLease,
 )
 from shine.config import Settings
 from shine.models import WorkflowProfile
@@ -403,12 +402,8 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     payload = instance.payload
     if payload.get('process') or instance.status != 'STOPPED':
         raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
-    if db.scalar(select(ResourceLease.id).where(
-            ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1)):
-        raise HTTPException(409, 'RUNTIME_RESOURCES_REQUIRE_RECONCILIATION')
-    if db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(
-            ['SUBMIT_INTENT', 'INSTALLING', 'NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])).limit(1)):
-        raise HTTPException(409, 'INSTALLATION_REQUIRES_RECONCILIATION')
+    from shine.comfyops.runtime_configuration import require_idle_configuration
+    require_idle_configuration(db)
     root = Path(payload["root"])
     python = Path(root / ".venv" / "Scripts" / "python.exe")
     if not python.is_file():
@@ -427,7 +422,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     gpu = probe_gpu()
     if gpu.get("status") != "OK":
         raise HTTPException(409, f"GPU_UUID_REQUIRED: {gpu.get('reason')}")
-    SEP = chr(92)
+    SEP = os.sep
     setup_dir = settings.comfyops_dir / "setup"
     (setup_dir / "manifests").mkdir(parents=True, exist_ok=True)
     (setup_dir / "review-runtime").mkdir(parents=True, exist_ok=True)
@@ -508,11 +503,11 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     recipe = {"renderer": renderer, "reviews": reviews}
     from shine.comfyops.installer import durable_json
     durable_json(recipe_path, recipe)
+    from shine.comfyops.runtime_configuration import record_candidate
+    record_candidate(db, settings, project_id, recipe_path)
     env_updates = {
         "SHINE_DATA_DIR": str(settings.data_dir),
-        "SHINE_RENDER_PROVIDER": "comfyui",
-        "SHINE_COMFYUI_URL": f"http://127.0.0.1:{payload['port']}",
-        "SHINE_MANAGED_RECIPE": str(recipe_path),
+        "SHINE_SETUP_RECIPE": str(recipe_path),
         "SHINE_ENABLE_LOCAL_EXECUTION": "1",
     }
     env_written = _update_env_file(ENV_PATH, env_updates)
@@ -524,6 +519,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     return {
         "recipe": str(recipe_path),
         "recipe_sha256": graph_hash(recipe),
+        "activation_required": True,
         "adapter_sha256": adapter_identity,
         "gpu_uuid": gpu["uuid"],
         "env_file": str(ENV_PATH),
@@ -556,6 +552,38 @@ def _update_env_file(env_path: Path, updates: dict) -> list:
             result.append(f"{key}={value}")
     env_path.write_text("\n".join(result) + "\n", encoding="utf-8")
     return sorted(handled | set(updates))
+
+
+def installed_instance_blockers(db, settings, instance, catalog):
+    components = _component_map(catalog)
+    install_blockers = []
+    if instance is None:
+        install_blockers.append("REAL_INSTANCE_MISSING_OR_AMBIGUOUS")
+    else:
+        payload = instance.payload
+        root = Path(payload.get("root", "")).resolve()
+        attempt = db.get(InstallationAttempt, payload.get("last_attempt")) if payload.get("last_attempt") else None
+        if (instance.status not in {"STOPPED", "RUNNING_PENDING_HEALTH"}
+                or instance.sha256 != graph_hash(payload)
+                or not attempt or attempt.status != "COMPLETED"
+                or attempt.sha256 != graph_hash(attempt.payload)
+                or attempt.payload.get("is_mock", True)
+                or attempt.payload.get("result") != payload):
+            install_blockers.append("COMPLETED_REAL_INSTALL_EVIDENCE_REQUIRED")
+        if (not root.is_relative_to((settings.comfyops_dir / "instances").resolve())
+                or not (root / ".venv/Scripts/python.exe").is_file()
+                or not (root / "main.py").is_file()
+                or not (root / ".shine-requirements.txt").is_file()
+                or not payload.get("dependency_hash")):
+            install_blockers.append("INSTALLED_RUNTIME_FILES_MISSING")
+        expected_nodes = {cid: c["revision"] for cid, c in components.items() if c["kind"] == "node"}
+        if any(payload.get("node_versions", {}).get(cid) != revision for cid, revision in expected_nodes.items()):
+            install_blockers.append("PINNED_NODE_INSTALL_INCOMPLETE")
+        expected_bindings = {c['destination_family']: cid for cid, c in components.items()
+                             if c['kind'] == 'model' and c.get('destination_family')}
+        if payload.get('model_bindings') != expected_bindings:
+            install_blockers.append('PINNED_MODEL_BINDINGS_INCOMPLETE')
+    return install_blockers
 
 
 def deployment_readiness(db, settings: Settings) -> dict:
@@ -600,29 +628,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
     candidates = [row for row in db.scalars(select(ComfyInstance))
                   if row.payload.get("managed") and not row.payload.get("is_mock", True)]
     instance = candidates[0] if len(candidates) == 1 else None
-    install_blockers = []
-    if instance is None:
-        install_blockers.append("REAL_INSTANCE_MISSING_OR_AMBIGUOUS")
-    else:
-        payload = instance.payload
-        root = Path(payload.get("root", "")).resolve()
-        attempt = db.get(InstallationAttempt, payload.get("last_attempt")) if payload.get("last_attempt") else None
-        if (instance.status not in {"STOPPED", "RUNNING_PENDING_HEALTH"}
-                or instance.sha256 != graph_hash(payload)
-                or not attempt or attempt.status != "COMPLETED"
-                or attempt.sha256 != graph_hash(attempt.payload)
-                or attempt.payload.get("is_mock", True)
-                or attempt.payload.get("result") != payload):
-            install_blockers.append("COMPLETED_REAL_INSTALL_EVIDENCE_REQUIRED")
-        if (not root.is_relative_to((settings.comfyops_dir / "instances").resolve())
-                or not (root / ".venv/Scripts/python.exe").is_file()
-                or not (root / "main.py").is_file()
-                or not (root / ".shine-requirements.txt").is_file()
-                or not payload.get("dependency_hash")):
-            install_blockers.append("INSTALLED_RUNTIME_FILES_MISSING")
-        expected_nodes = {cid: c["revision"] for cid, c in components.items() if c["kind"] == "node"}
-        if any(payload.get("node_versions", {}).get(cid) != revision for cid, revision in expected_nodes.items()):
-            install_blockers.append("PINNED_NODE_INSTALL_INCOMPLETE")
+    install_blockers = installed_instance_blockers(db, settings, instance, catalog)
     layers.append({
         "layer": "L3_environment_installed",
         "status": "READY" if not install_blockers else "PENDING",
@@ -646,10 +652,12 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "workflow_profiles_registered": bool(db.scalars(select(WorkflowProfile)).first()),
         "operator_configured": bool(settings.operator_id and settings.operator_token_sha256),
     }
+    from shine.comfyops.runtime_configuration import runtime_report
     return {
         "catalog": {"id": catalog["catalog_id"], "version": catalog["catalog_version"]},
         "layers": layers,
         "production_gates": production_gates,
+        "runtime_activation": runtime_report(db, settings),
         "human_steps": [
             "approve each install/instance plan (5-minute grants)",
             "enter your own LLM provider credentials in Settings",

@@ -22,6 +22,8 @@
 
 ## 验证
 
+持久激活阶段最新完整回归：**1259 passed / 1 skipped / 2 warnings，exit=0**；全目录 Ruff、TypeScript/Vite、浏览器确认按钮合同和真实 OS Worker 配置热读取通过。见 [运行配置激活记录](NEW_MACHINE_RUNTIME_ACTIVATION_20261101.md)，其中保留首轮完整回归的原始初始化错误及修复后证据。安装/运行身份冲突、审片首启和真实 H3 验收仍待完成。
+
 首启交接修复后的最新完整回归：**1245 passed / 1 skipped / 2 warnings，exit=0**，命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-cold-start-final.log`，数字按静默日志状态符统计。另有全目录 Ruff、TypeScript/Vite 构建通过。安装链不再执行普通 START，配置生成按明确实例身份并拒绝运行中/Fake/资源未对账状态；原实现 8 项失败反例和修复后新增 14 项合同见 [首启交接修复](NEW_MACHINE_COLD_START_FIX_20261101.md)。
 
 下载目录阶段回归：`uv run --project backend --locked pytest backend/tests -q`，**1231 passed / 1 skipped / 2 warnings，exit=0**，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-storage-caches-final.log`。包括下载盘设置、编译缓存落点、NoLaunch 配置保留、源码重装及主/内嵌 wheel 元数据区分。当前 pytest 静默配置没有打印数字摘要，数量从该日志逐行状态符统计得出。真实 ComfyUI 探测仍显式 SKIPPED；Starlette/AnyIO 弃用与 SQLAlchemy 空主键两项既有警告保留。1221、1223、1226、1228 项通过的历史快照单独保留，不混充最终结果。

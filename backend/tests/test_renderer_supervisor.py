@@ -38,7 +38,10 @@ class Handler(BaseHTTPRequestHandler):
                                       'adapter_sha256':os.environ['BARRIER_HASH']})
         return self.respond(401,{})
 server = HTTPServer(('127.0.0.1',int(os.environ['PORT'])),Handler)
-pathlib.Path(sys.argv[1]).write_text(str(server.server_port))
+marker = pathlib.Path(sys.argv[1])
+temporary = marker.with_suffix('.tmp')
+temporary.write_text(str(server.server_port))
+temporary.replace(marker)
 server.serve_forever()
 '''
 
@@ -61,18 +64,20 @@ def server(tmp_path, request):
     job_name = "Local\\ShineHandoff-" + uuid4().hex if getattr(request, "param", None) == "named" else None
     group = OwnedProcessGroup.launch([sys.executable, str(script), str(marker)], cwd=tmp_path, env=env,
                                      pinned_files=[sys.executable, script], job_name=job_name)
-    deadline = time.monotonic() + 10
-    while not marker.is_file() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.is_file()
-    if getattr(request, "param", False):
-        import httpx
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.is_file()
+        if getattr(request, "param", False):
+            import httpx
 
-        response = httpx.post(f"http://127.0.0.1:{port}/shine-handoff/resume",
-                              headers={"Authorization": "Bearer " + token}, trust_env=False)
-        assert response.status_code == 200
-    yield group, f"http://127.0.0.1:{int(marker.read_text())}", token, digest, tmp_path
-    group.close()
+            response = httpx.post(f"http://127.0.0.1:{port}/shine-handoff/resume",
+                                  headers={"Authorization": "Bearer " + token}, trust_env=False)
+            assert response.status_code == 200
+        yield group, f"http://127.0.0.1:{int(marker.read_text())}", token, digest, tmp_path
+    finally:
+        group.close()
 
 
 def test_owned_drain_archives_history_before_stopping(server):

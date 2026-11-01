@@ -221,12 +221,13 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
     venv_python.write_bytes(b"FAKE EXECUTABLE - NEVER EXECUTE")
     (root / "custom_nodes").mkdir()
     (root / "main.py").write_bytes(b"# synthetic entrypoint")
+    (root / '.shine-requirements.txt').write_text('# synthetic lock for configuration contract', encoding='utf-8')
     with factory() as db:
         payload = {"managed": True, "name": "shine-cfg", "port": 8195,
                    "root": str(root), "is_mock": False,
                    "model_bindings": {"diffusion_models": "minimax-h3-diffusion"}}
         db.add(ComfyInstance(id=instance_identity('local', 8195), payload=payload,
-                             sha256="0" * 64, status="STOPPED"))
+                             sha256=deployment.graph_hash(payload), status="STOPPED"))
         db.commit()
     def fake_gpu():
         return {"status": "OK", "index": "0", "uuid": "GPU-TEST-UUID", "name": "Test GPU",
@@ -245,7 +246,8 @@ def test_configuration_generation_and_recipe_validation(prep, monkeypatch):
     assert recipe["renderer"]["gpu_uuid"] == "GPU-TEST-UUID"
     assert result["env_keys"] and env_target.exists()
     env_text = env_target.read_text(encoding="utf-8")
-    assert "SHINE_MANAGED_RECIPE=" in env_text and "SHINE_RENDER_PROVIDER=comfyui" in env_text
+    assert "SHINE_SETUP_RECIPE=" in env_text
+    assert "SHINE_RENDER_PROVIDER=" not in env_text and "SHINE_MANAGED_RECIPE=" not in env_text
     for role in ("vlm", "asr"):
         manifest = json.loads(Path(result["review_manifests"][role.upper()]).read_text(encoding="utf-8"))
         assert manifest["files"] and all(len(f["sha256"]) == 64 for f in manifest["files"])

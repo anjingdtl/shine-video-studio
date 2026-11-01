@@ -47,6 +47,8 @@ def _profile_data(profile: WorkflowProfile, *, include_graph: bool = False) -> d
 
 @router.get("/comfy/config")
 def comfy_config(settings: SettingsDep, db: DBSession) -> dict[str, Any]:
+    from shine.comfyops.runtime_configuration import resolve_runtime
+    settings = resolve_runtime(db, settings)
     profiles = db.scalars(select(WorkflowProfile).order_by(WorkflowProfile.created_at)).all()
     return {
         "base_url": settings.comfyui_base_url,

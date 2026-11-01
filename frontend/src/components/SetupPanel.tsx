@@ -28,9 +28,14 @@ type CatalogSummary = {
 type PlanRef = { plan_id: string; sha256: string; kind: string; action?: string; tier?: string; status: string };
 type Readiness = { catalog: { id: string; version: string }; layers: Array<Record<string, unknown>>; production_gates: Record<string, boolean>; human_steps: string[] };
 type Grant = { grant_id: string; snapshot: string };
+type RuntimeState = { status: string; render_provider: string; error: string | null;
+  candidate: { project_id: string; recipe_sha256: string } | null };
 
 const TOOL_LABELS: Record<string, string> = {
   uv: 'uv', node: 'Node.js', npm: 'npm', pwsh: 'PowerShell 7', ffmpeg: 'FFmpeg', ffprobe: 'FFprobe',
+};
+const RUNTIME_LABELS: Record<string, string> = {
+  ACTIVE: '已激活', NOT_ACTIVATED: '待确认', INVALID_REQUIRES_REVIEW: '配置已变更，需重新核验',
 };
 
 function fmtBytes(value: number): string {
@@ -48,6 +53,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [plans, setPlans] = useState<PlanRef[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const projectRef = useRef(projectId);
@@ -79,6 +85,10 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const loadReadiness = useCallback(async () => {
     try { setReadiness(await api<Readiness>('/setup/readiness')); } catch { /* keep prior state */ }
   }, []);
+  const loadRuntime = useCallback(async () => {
+    try { setRuntime(await api<RuntimeState>('/setup/runtime')); }
+    catch (error) { say(String(error), 'bad'); }
+  }, [say]);
   const loadStorage = useCallback(async () => {
     try { setStorage(await api<DeploymentStorage>('/setup/storage')); }
     catch (error) { say(String(error), 'bad'); }
@@ -96,7 +106,8 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   }, [projectId]);
   useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
-  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); }, [loadEnvironment, loadCatalog, loadReadiness]);
+  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); },
+    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime]);
   useEffect(() => {
     void loadStorage();
     const refresh = () => {
@@ -157,8 +168,21 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     void run(async () => {
       const result = await api<Record<string, unknown>>('/setup/configuration',
         withJson('POST', { project_id: projectRef.current }));
+      await loadRuntime();
       await onRefresh();
       return `受管配置已生成：${String((result as { recipe?: string }).recipe ?? '')}`;
+    });
+  }
+
+  function activateRuntime() {
+    const candidate = runtime?.candidate;
+    if (!candidate || candidate.project_id !== projectRef.current) return;
+    void run(async () => {
+      const result = await api<RuntimeState>('/setup/runtime/activate', withJson('POST', {
+        project_id: candidate.project_id, recipe_sha256: candidate.recipe_sha256,
+      }));
+      setRuntime(result); await loadReadiness(); await onRefresh();
+      return '运行配置已激活，API 和 Worker 将使用同一份配置。服务与真实推理仍需独立核验。';
     });
   }
 
@@ -246,7 +270,13 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             <button className="secondary-button" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
+            <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
+              onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
+          {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{runtime.render_provider}
+            {runtime.candidate?.project_id === projectId && <> · 待确认配方：<code>{runtime.candidate.recipe_sha256}</code></>}
+            {runtime.error && <> · {runtime.error}</>}
+          </p>}
           {plans.length > 0 && <div className="setup-plans">
             {plans.map((plan) => (
               <div className="worker-row" key={plan.plan_id}>

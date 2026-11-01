@@ -89,6 +89,8 @@
 #deployment-storage .field-line{flex-direction:column;align-items:stretch;gap:6px}
 #deployment-storage input:not([type="checkbox"]),#deployment-storage select{width:100%;max-width:none}
 #deployment-storage .guardrail-note{overflow-wrap:anywhere}
+.setup-runtime-state{display:block;overflow-wrap:anywhere}
+.setup-runtime-state code{display:block;white-space:normal;overflow-wrap:anywhere}
 #deployment-storage .secondary-button{margin-top:8px}
 .provider-form{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:7px}
 .provider-form input,.provider-form select{font-size:9px;padding:6px}

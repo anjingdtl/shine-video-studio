@@ -1952,12 +1952,12 @@ def _isolated_mock_handoff(settings, reviewers):
 
 def _managed_recipe(settings):
     """Read the operator's managed renderer recipe, if one is configured."""
-    path = os.getenv("SHINE_MANAGED_RECIPE", "").strip()
+    path = settings.managed_recipe_path or os.getenv("SHINE_MANAGED_RECIPE", "").strip()
     if not path:
         return None
     from shine.comfyops.managed_recipe import load_managed_recipe
 
-    return load_managed_recipe(path)
+    return load_managed_recipe(path, expected_sha256=settings.managed_recipe_sha256 or None)
 
 
 def _managed_review_specs(recipe, semantic_reviewer, asr_reviewer):
@@ -3596,6 +3596,21 @@ def run_configured_series_once(
 
 
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
+    from shine.comfyops.runtime_configuration import resolve_runtime
+
+    with session_factory() as runtime_db:
+        current = resolve_runtime(runtime_db, settings)
+    if current != settings:
+        # No inherited client may point at an old port after activation. Use a
+        # scoped client for this iteration, keeping explicit injected clients
+        # on the unchanged legacy/test path.
+        current_client = _renderer_client(current)
+        return _run_configured_once(session_factory, provider, worker_id,
+                                    settings=current, comfy_client=current_client)
+    return _run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
+
+
+def _run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.quality.runtime import configured_reviewers
 
     semantic, asr = configured_reviewers(session_factory, settings)
@@ -3651,13 +3666,22 @@ def serve(poll_seconds: float = 0.5) -> None:
     heartbeat(session_factory, worker_id, status="online", phase="starting")
     try:
         while True:
-            claimed = run_configured_once(
-                session_factory,
-                provider,
-                worker_id,
-                settings=settings,
-                comfy_client=comfy_client,
-            )
+            try:
+                claimed = run_configured_once(
+                    session_factory,
+                    provider,
+                    worker_id,
+                    settings=settings,
+                    comfy_client=comfy_client,
+                )
+            except HTTPException as exc:
+                if not str(exc.detail).startswith('ACTIVE_RUNTIME_'):
+                    raise
+                logger.error('worker_configuration_blocked code=%s', exc.detail)
+                heartbeat(session_factory, worker_id, status='online', phase='configuration_blocked',
+                          error=str(exc.detail))
+                time.sleep(poll_seconds)
+                continue
             if claimed is None:
                 heartbeat(session_factory, worker_id, status="online", phase="idle")
                 time.sleep(poll_seconds)
@@ -3670,6 +3694,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Shine's standalone local worker")
     parser.add_argument("--once", action="store_true", help="Process at most one queued job and exit")
     args = parser.parse_args()
+    if not args.once:
+        serve()
+        return
     settings = Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     engine = make_engine(settings.database_url)
@@ -3681,11 +3708,8 @@ def main() -> None:
 
         comfy_client = _renderer_client(settings)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
-    if args.once:
-        run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
-        heartbeat(session_factory, worker_id, status="stopped", phase="stopped")
-    else:
-        serve()
+    run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
+    heartbeat(session_factory, worker_id, status="stopped", phase="stopped")
 
 
 if __name__ == "__main__":

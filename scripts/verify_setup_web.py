@@ -88,9 +88,34 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     setup.screenshot(path=str(screenshot))
                 page.locator('select').first.select_option(other)
                 expect(setup.get_by_text(plan['plan_id'], exact=False)).to_have_count(0)
+                # Activation UI contract only. API activation and the live
+                # resident Worker are exercised by test_runtime_activation.py.
+                runtime_state = {'status': 'NOT_ACTIVATED', 'render_provider': 'mock', 'error': None,
+                                 'candidate': {'project_id': project, 'recipe_sha256': 'f' * 64}}
+                page.route('**/setup/runtime', lambda route: route.fulfill(
+                    status=200, content_type='application/json', body=json.dumps(runtime_state)))
+                activation_requests = []
+                def intercept_activation(route):
+                    activation_requests.append(route.request.post_data_json)
+                    route.fulfill(status=200, content_type='application/json', body=json.dumps({
+                        **runtime_state, 'status': 'ACTIVE', 'render_provider': 'comfyui'}))
+                page.route('**/setup/runtime/activate', intercept_activation)
+                page.reload(wait_until='networkidle')
+                page.locator('select').first.select_option(other)
+                expect(setup.get_by_role('button', name='确认并激活运行配置', exact=True)).to_be_disabled()
+                page.locator('select').first.select_option(project)
+                setup.locator('input[type="password"]').fill(harness.TEST_CREDENTIAL)
+                setup.get_by_role('button', name='确认并激活运行配置', exact=True).click()
+                expect(setup.get_by_text('运行配置：已激活', exact=False)).to_be_visible()
+                expect(setup.get_by_role('button', name='确认并激活运行配置', exact=True)).to_be_enabled(timeout=30000)
+                page.wait_for_load_state('networkidle')
+                assert activation_requests == [{'project_id': project, 'recipe_sha256': 'f' * 64}]
+                if screenshot:
+                    setup.screenshot(path=str(screenshot.with_name('runtime-activation-ui-contract.png')))
                 print(json.dumps({'result': 'PASS_UI_CONTRACT_ONLY', 'restored_plan': plan['plan_id'],
                                   'approved_hash_used': True, 'duplicate_approval': False,
-                                  'project_isolation': True, 'real_install': 'NOT_RUN'}))
+                                  'project_isolation': True, 'activation_intercepted': True,
+                                  'real_install': 'NOT_RUN'}))
             finally:
                 browser.close()
 
