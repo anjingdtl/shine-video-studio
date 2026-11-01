@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Clapperboard, Layers, Play, Square, Loader2 } from 'lucide-react';
 import { api, json, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
+import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
 
 type Props = {
   projectId: string;
@@ -140,7 +141,7 @@ export default function ProductionSeriesPanel({
     </div>
 
     {system?.render_mode !== 'comfyui' && <div className="blocked-callout">
-      <AlertTriangle size={15} /><span>当前是 Mock 模式：这里只能演示调度，不会生成真实视频。真实生产需要本地 H3 渲染器。</span>
+      <AlertTriangle size={15} /><span>当前是演示模式：这里只能演练排队和调度，不会生成真实视频。真实生产需要本机 H3 渲染器在线。</span>
     </div>}
 
     <div className="series-builder">
@@ -179,7 +180,7 @@ export default function ProductionSeriesPanel({
               onChange={() => toggle(shot.id)}
             />
             <span className="series-shot-name">{shot.name}</span>
-            <small>{String(shot.spec.continuity?.mode ?? 'cut')}</small>
+            <small>{label(continuityLabels, String(shot.spec.continuity?.mode ?? 'cut'))}</small>
           </label>
         ))}
         {shots.length === 0 && <span className="empty-inline">先创建分镜，才能排入生产序列。</span>}
@@ -197,8 +198,8 @@ export default function ProductionSeriesPanel({
               <b>{statusText[row.status] ?? row.status}</b>
               <span>{row.completed_count}/{row.shot_count} 镜完成 · {row.id.slice(0, 8)}…</span>
               {row.worker_id && <small>执行 Worker：{row.worker_id}</small>}
-              {row.failure_code && <small className="failure">· {row.failure_code}</small>}
-              {row.finalization_state !== 'NONE' && <small>收尾：{row.finalization_state}</small>}
+              {row.failure_code && <small className="failure">· {label(failureLabels, row.failure_code)}</small>}
+              {row.finalization_state !== 'NONE' && <small>收尾：{label(finalizationLabels, row.finalization_state)}</small>}
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
             </div>
             <div className="series-actions">
@@ -214,10 +215,10 @@ export default function ProductionSeriesPanel({
                 <Clapperboard size={12} />
                 <span>{shots.find((shot) => shot.id === item.shot_id)?.name ?? item.shot_id.slice(0, 8)}</span>
                 <em className={`series-item-status ${item.status.toLowerCase()}`}>{itemText[item.status] ?? item.status}</em>
-                {item.job_status && <small>{item.job_status}</small>}
+                {item.job_status && <small>{label(statusLabels, item.job_status)}</small>}
                 {item.job_artifact_id && <small>已出片</small>}
-                {item.continuity_mode !== 'cut' && <small>连续性 {item.continuity_mode}</small>}
-                {item.job_failure_code && <small className="failure">{item.job_failure_code}</small>}
+                {item.continuity_mode !== 'cut' && <small>{label(continuityLabels, item.continuity_mode)}</small>}
+                {item.job_failure_code && <small className="failure">{label(failureLabels, item.job_failure_code)}</small>}
               </li>
             ))}
           </ol>

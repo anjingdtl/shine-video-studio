@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ArrowUpRight, Clapperboard, Eye, Link2, Plus, Save, X } from 'lucide-react';
 import type { Asset, PromptPreview, Shot, StyleVersion } from '../api';
-import { useAsOptions } from '../constants';
+import { continuityLabels, label, modeLabels, useAsLabels, useAsOptions } from '../constants';
 
 type DraftBinding = { asset_id: string; use_as: string; role: string; frame_role: string };
 type SaveBinding = { asset_id: string; use_as: string; role: string | null; frame_role: string | null; ordinal: number };
@@ -126,7 +126,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         </div>
         <div className="section-icon plum"><Clapperboard size={17} /></div>
       </div>
-      {!currentStyle && <div className="blocked-callout"><Clapperboard size={15} /><span>Style Bible 尚未冻结，分镜和生产入口已锁定。</span></div>}
+      {!currentStyle && <div className="blocked-callout"><Clapperboard size={15} /><span>风格基准还没冻结，先去「素材与风格」完成冻结，才能建分镜。</span></div>}
       <div className={`shot-form ${!currentStyle ? 'is-disabled' : ''}`}>
         <label>镜头名称<input value={shotName} onChange={(event) => setShotName(event.target.value)} disabled={!currentStyle} /></label>
         <label>时长（4–15 秒）<input type="number" min={4} max={15} value={duration} onChange={(event) => setDuration(Number(event.target.value))} disabled={!currentStyle} /></label>
@@ -176,14 +176,14 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
               <div className="shot-content">
                 <b>{shot.name}</b>
                 <span>{String(shot.spec.story_beat ?? '')}</span>
-                <small>连续性：{({ last_frame: 'SOFT_REFERENCE_CONTINUITY', hard_frame_anchor: 'HARD_FRAME_ANCHOR_CONTINUITY · 待测试', video_reference: 'VIDEO_REFERENCE_CONTINUITY · 传输未验收' } as Record<string, string>)[String(shot.spec.continuity?.mode)] ?? String(shot.spec.continuity?.mode ?? 'cut')}</small>
+                <small>连续性：{label(continuityLabels, String(shot.spec.continuity?.mode ?? 'cut'))}</small>
                 <div className="binding-chips">
                   {shot.bindings.length === 0 ? <span className="empty-chip">无引用</span> : shot.bindings.map((binding) => (
-                    <span className="binding-chip" key={binding.id}>{binding.use_as} · {binding.filename || binding.asset_id.slice(0, 6)}</span>
+                    <span className="binding-chip" key={binding.id}>{label(useAsLabels, binding.use_as)} · {binding.filename || binding.asset_id.slice(0, 6)}</span>
                   ))}
                 </div>
               </div>
-              <button className="small-action" onClick={() => onPreview(shot.id)}><Eye size={12} /> 预览 Prompt</button>
+              <button className="small-action" onClick={() => onPreview(shot.id)}><Eye size={12} /> 预览提示词</button>
               <button className="small-action" onClick={() => beginBindings(shot)}><Link2 size={12} /> 绑定</button>
               <button className="small-action" disabled={!currentStyle || busy} onClick={() => onQueue(shot)}><ArrowUpRight size={12} /> 加入队列</button>
             </div>
@@ -229,11 +229,11 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
       </div>
       {preview && <div className="prompt-preview">
         <div className="prompt-head">
-          <div><b>H3 编译预览</b><span>{preview.mode} · {preview.compiler_version} · SHA {preview.prompt_sha256.slice(0, 10)}…</span></div>
+          <div><b>H3 提示词预览</b><span>生成方式：{label(modeLabels, preview.mode)} · 编译器 {preview.compiler_version} · 指纹 {preview.prompt_sha256.slice(0, 10)}…</span></div>
           <button className="icon-button tiny" onClick={() => setPreview(null)}><X size={13} /></button>
         </div>
         {preview.warnings.length > 0 && <div className="prompt-warnings">{preview.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
-        <div className="label-row">{Object.entries(preview.labels).map(([label, assetId]) => <code key={label}>{label} → {assetId.slice(0, 8)}</code>)}</div>
+        <div className="label-row">{Object.entries(preview.labels).map(([slot, assetId]) => <code key={slot}>{slot} → {assetId.slice(0, 8)}</code>)}</div>
         <pre>{preview.compiled_prompt}</pre>
       </div>}
     </div>

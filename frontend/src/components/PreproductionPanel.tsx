@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, json, API } from '../api';
+import { label, prepRowLabels } from '../constants';
 
 type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; project_id?: string; formal_asset_id?: string; trace?: Record<string, unknown> };
 type Registry = { categories: string[]; revisions: Row[]; legacy_profiles: unknown[] };
@@ -99,7 +100,8 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
     return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline, listened: action === 'voice_freeze' || (action === 'promote' && dialogueListened), evidence }, true);
   }
   return <section className="card" id="preproduction">
-    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>请求模式：{offline ? '模拟' : '本地'} · 实际执行器与验证级别见后端结果</strong></div>
+    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>当前模式：{offline ? '模拟演练（不落真数据）' : '本地真跑'} · 结果真伪以后端返回为准</strong></div>
+    <p className="prep-intro">正式开拍前的准备间：确认环境、登记模型与节点、验证工作流、制作候选素材、试听音色，最后做开机预检。模拟演练出的结果永远不会被当成真实验证。</p>
     <nav className="button-row">{views.map((name, i) => <button key={name} onClick={() => setView(i)}
       disabled={busy} aria-pressed={view === i}>{name}</button>)}</nav>
     <p>候选晋升、音色冻结与安装审批使用服务器验证的操作员身份；凭据仅保留在当前页面内存。</p>
@@ -153,7 +155,7 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
       <button disabled={busy} onClick={() => act(async () => { const records = await api<Row[]>(`/projects/${projectId}/preparation/model-calls`, { headers: headers() }); setCallRecords(records); return records; })}>读取模型调用与失联记录</button>
       <label>旧审片调用的释放 Provider ID（只生成提案，仍需人工对账）<input aria-label="旧审片释放 Provider ID" value={releaseProfile} onChange={e => setReleaseProfile(e.target.value)} /></label>
       {callRecords.filter(r => ['RUNNING', 'NEEDS_REVIEW', 'RECONCILING'].includes(r.status)).map(r => <article key={r.id}>
-        <p>模型调用 {r.id} · {r.status}</p>
+        <p>模型调用 {r.id.slice(0, 8)}… · {label(prepRowLabels, r.status)}</p>
         {Boolean(r.trace?.review_provider) && <pre>{JSON.stringify(r.trace?.review_provider, null, 2)}</pre>}
         {!r.trace?.review_provider && ['VLM', 'ASR'].includes(String(r.trace?.kind)) && <button disabled={busy || !releaseProfile} onClick={() => act(async () => {
           const proposed = await post<Row>(`/preparation/model-calls/${r.id}/release-provider-proposal`, { provider_profile_id: releaseProfile });
@@ -297,8 +299,8 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
       })}>操作员冻结选定模式清单</button>
     </>}
     {rowView === view && rows.filter(row => view !== 1 || row.project_id === projectId).map(row => <article className="card" key={row.id}>
-      <strong>{String(row.payload.family ?? row.payload.character ?? row.payload.name ?? row.payload.source ?? row.id)} · {row.status}</strong>
-      <p>ID {row.id} · SHA256 {row.sha256}</p>
+      <strong>{String(row.payload.family ?? row.payload.character ?? row.payload.name ?? row.payload.source ?? row.id)} · {label(prepRowLabels, row.status)}</strong>
+      <p>编号 {row.id.slice(0, 8)}… · 校验指纹 {row.sha256.slice(0, 12)}…（指纹一致 = 内容没被改动）</p>
       {view === 1 && row.status === 'AWAITING_APPROVAL' && <button disabled={busy}
         onClick={() => act(() => approve(row, 'install', `/comfyops/install-plans/${row.id}/approve`))}>批准此哈希计划</button>}
       {view === 1 && row.payload.executor === 'LOCAL_ISOLATED' && !row.payload.kind && <>
@@ -309,7 +311,7 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
         })}>查看安装尝试</button>
         {installAttempts[row.id]?.length === 0 && <p>此计划尚未开始安装。</p>}
         {installAttempts[row.id]?.map(attempt => <div key={attempt.id}>
-          <p>安装尝试 {attempt.id} · {attempt.status}{attempt.payload.error_type ? ` · ${String(attempt.payload.error_type)}` : ''}</p>
+          <p>安装尝试 {attempt.id.slice(0, 8)}… · {label(prepRowLabels, attempt.status)}{attempt.payload.error_type ? ` · ${String(attempt.payload.error_type)}` : ''}</p>
           {attempt.status === 'FAILED_RECONCILE_REQUIRED' && <button disabled={busy || offline || !confirmed}
             onClick={() => act(async () => {
               const reconciled = await approve(attempt, 'install_reconcile', `/comfyops/install-attempts/${attempt.id}/reconcile`);
@@ -328,7 +330,7 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
         </>}
       </>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'FAKE_ONLY' && <button disabled={busy} onClick={() => act(() =>
-        post(row.payload.kind === 'INSTANCE_BACKUP' ? `/comfyops/backup-plans/${row.id}/execute` : row.payload.kind === 'INSTANCE_LIFECYCLE' ? `/comfyops/instance-plans/${row.id}/execute` : `/comfyops/install-plans/${row.id}/execute`, ['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) ? { plan_hash: row.sha256 } : { executor: 'fake', plan_hash: row.sha256 }, true))}>模拟执行（无系统变更）</button>}
+        post(row.payload.kind === 'INSTANCE_BACKUP' ? `/comfyops/backup-plans/${row.id}/execute` : row.payload.kind === 'INSTANCE_LIFECYCLE' ? `/comfyops/instance-plans/${row.id}/execute` : `/comfyops/install-plans/${row.id}/execute`, ['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) ? { plan_hash: row.sha256 } : { executor: 'fake', plan_hash: row.sha256 }, true))}>演练执行（不改动系统）</button>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'LOCAL_ISOLATED' && ['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) &&
         <button disabled={busy || !confirmed || offline} onClick={() => act(() => post(`/comfyops/${row.payload.kind === 'INSTANCE_BACKUP' ? 'backup-plans' : 'instance-plans'}/${row.id}/execute`, { plan_hash: row.sha256 }, true))}>执行已批准的本地实例计划（须服务器显式启用）</button>}
       {view === 1 && row.status === 'APPROVED' && row.payload.executor === 'LOCAL_ISOLATED' && !['INSTANCE_LIFECYCLE', 'INSTANCE_BACKUP'].includes(String(row.payload.kind)) &&
@@ -340,9 +342,9 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
           <button disabled={busy || !instanceId} onClick={() => act(() => post(`/workflow-capabilities/${row.id}/validate-local`, { instance_id: instanceId }, true))}>读取本地节点契约验证</button>
         </>)}
       {view === 2 && !row.payload.native_provider && row.status === 'DRAFT'  && <button disabled={busy} onClick={() => act(() =>
-        post(`/workflow-capabilities/${row.id}/validate`, { object_info: { ShineFake: { input: { required: { prompt: ['STRING'] } } } } }))}>使用 Fake 节点目录验证</button>}
+        post(`/workflow-capabilities/${row.id}/validate`, { object_info: { ShineFake: { input: { required: { prompt: ['STRING'] } } } } }))}>离线演练：用内置假节点校验结构</button>}
       {view === 2 && !row.payload.native_provider && row.status === 'STATIC_VALIDATED' && <button disabled={busy} onClick={() => act(() =>
-        post(`/workflow-capabilities/${row.id}/fake-execute`, {}))}>Fake HTTP 执行契约</button>}
+        post(`/workflow-capabilities/${row.id}/fake-execute`, {}))}>离线演练：模拟一次调用（不落真）</button>}
       {view === 2 && !offline && <>
         <button disabled={busy || !confirmed || (Boolean(row.payload.native_provider) && row.status !== 'STATIC_VALIDATED')} onClick={() => act(async () => {
           const payload = JSON.parse(localEvidence);

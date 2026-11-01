@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Activity, Check, Cpu, KeyRound, Plus, Server, ShieldCheck, Trash2, Wifi, X } from 'lucide-react';
 import type { AgentRoute, Project, ProviderProfile, SystemHealth, SystemStatus, WorkflowProfile } from '../api';
+import { label, providerKindLabels, reasoningEffortLabels, routeRoleLabels, statusLabels, workerPhaseLabels } from '../constants';
 import StorageSettings from './StorageSettings';
 
 type Props = {
@@ -78,7 +79,7 @@ export default function SettingsPanel({
         <div>
           <div className="section-kicker">05 / SYSTEM SETTINGS</div>
           <h2>模型、ComfyUI 与本机状态</h2>
-          <p>密钥只写入本机安全存储，不回传前端；未验收的管理接口保持 loopback。</p>
+          <p>密钥只存本机安全存储，页面上永远不会显示；管理接口只监听本机（127.0.0.1）。</p>
         </div>
         <div className="section-icon"><Server size={17} /></div>
       </div>
@@ -100,8 +101,9 @@ export default function SettingsPanel({
           </> : <div className="empty-inline">创建项目后可配置。</div>}
         </div>
 
-        <div className="settings-block">
-          <h3><KeyRound size={14} /> LLM Provider</h3>
+        <div className="settings-block" id="llm-config">
+          <h3><KeyRound size={14} /> AI 模型（LLM）配置</h3>
+          <p className="block-hint">写作、规划、审片各环节用的模型在这里添加和指定；密钥只存本机。</p>
           <div className="provider-form">
             <input value={name} placeholder="配置名称" onChange={(event) => setName(event.target.value)} />
             <select value={kind} onChange={(event) => setKind(event.target.value)}>
@@ -117,16 +119,16 @@ export default function SettingsPanel({
               <input aria-label="最大输出 token" type="number" min="1" max="524288" step="1" value={maxTokens} placeholder="输出上限（含思考，留空沿用服务商默认）" onChange={event => setMaxTokens(event.target.value)} />
               <select aria-label="思考深度" value={reasoningEffort} onChange={event => setReasoningEffort(event.target.value)}>
                 <option value="">服务商默认思考深度</option>
-                {['low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{value}</option>)}
+                {['low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{label(reasoningEffortLabels, value)}</option>)}
               </select>
             </>}
             <button className="primary-button" disabled={busy} onClick={createProfile}><Plus size={13} /> 添加</button>
           </div>
           {profiles.map((profile) => (
             <div className="profile-row" key={profile.id}>
-              <div><b>{profile.name}</b><span>{profile.kind} · {profile.model || '未设置模型'} · {profile.has_api_key ? '已存密钥' : '无密钥'}</span>
+              <div><b>{profile.name}</b><span>{label(providerKindLabels, profile.kind)} · {profile.model || '未设置模型'} · {profile.has_api_key ? '已存密钥' : '无密钥'}</span>
                 {profile.generation_options?.max_completion_tokens && <span>输出上限 {profile.generation_options.max_completion_tokens} token（含思考）</span>}
-                {profile.generation_options?.reasoning_effort && <span>思考深度 {profile.generation_options.reasoning_effort}</span>}
+                {profile.generation_options?.reasoning_effort && <span>思考深度：{label(reasoningEffortLabels, profile.generation_options.reasoning_effort)}</span>}
               </div>
               <div className="profile-actions">
                 <input
@@ -137,23 +139,23 @@ export default function SettingsPanel({
                 />
                 <button className="text-button" disabled={!keyDrafts[profile.id]} onClick={() => { onSetKey(profile.id, keyDrafts[profile.id]); setKeyDrafts((rows) => ({ ...rows, [profile.id]: '' })); }}>保存密钥</button>
                 <button className="text-button" onClick={() => onTestProfile(profile.id)}>测试</button>
-                <button className="text-button" onClick={() => onRoute('shot_planner', profile.id)}>镜头规划</button>
-                <button className="text-button" onClick={() => onRoute('script_planner', profile.id)}>剧本规划</button>
-                <button className="text-button" onClick={() => onRoute('vlm_reviewer', profile.id)}>画面审片</button>
-                <button className="text-button" onClick={() => onRoute('asr_reviewer', profile.id)}>语音核对</button>
+                <button className="text-button" title="把此模型用于镜头规划环节" onClick={() => onRoute('shot_planner', profile.id)}>用作镜头规划</button>
+                <button className="text-button" title="把此模型用于剧本规划环节" onClick={() => onRoute('script_planner', profile.id)}>用作剧本规划</button>
+                <button className="text-button" title="把此模型用于画面审片环节" onClick={() => onRoute('vlm_reviewer', profile.id)}>用作画面审片</button>
+                <button className="text-button" title="把此模型用于语音核对环节" onClick={() => onRoute('asr_reviewer', profile.id)}>用作语音核对</button>
                 <button className="icon-button tiny" onClick={() => onDeleteProfile(profile.id)}><Trash2 size={12} /></button>
               </div>
             </div>
           ))}
           <div className="route-row">
-            {routes.length === 0 ? <span className="empty-inline">未配置角色路由；Agent 将使用本地确定性规划器。</span> : routes.map((route) => (
-              <span className="route-chip" key={route.role}>{route.role} → {route.profile_name}</span>
+            {routes.length === 0 ? <span className="empty-inline">还没给各环节指定模型；AI 会用本机内置规划器。</span> : routes.map((route) => (
+              <span className="route-chip" key={route.role}>{label(routeRoleLabels, route.role)} → {route.profile_name}</span>
             ))}
           </div>
         </div>
 
-        <div className="settings-block">
-          <h3><Wifi size={14} /> ComfyUI 连接</h3>
+        <div className="settings-block" id="comfy-config">
+          <h3><Wifi size={14} /> ComfyUI 生成引擎连接</h3>
           <div className="inline-form">
             <input value={comfyUrl} onChange={(event) => setComfyUrl(event.target.value)} />
             <button className="secondary-button" disabled={busy} onClick={async () => setComfyResult(await onTestComfy(comfyUrl))}>测试连接</button>
@@ -166,11 +168,11 @@ export default function SettingsPanel({
         </div>
 
         <div className="settings-block">
-          <h3><Activity size={14} /> Worker 实例</h3>
+          <h3><Activity size={14} /> 后台执行器状态</h3>
           {system?.workers.length ? system.workers.map((worker) => (
             <div className="worker-row" key={worker.worker_id}>
               <span className={`status-led ${worker.online ? 'mock' : 'offline'}`} />
-              <div><b>{worker.worker_id}</b><span>{worker.status} · {worker.current_phase ?? 'idle'} · 处理 {worker.processed_count}</span></div>
+              <div><b>{worker.worker_id}</b><span>{label(statusLabels, worker.status)} · {label(workerPhaseLabels, worker.current_phase ?? 'idle')} · 已处理 {worker.processed_count} 个</span></div>
               <small>{worker.online ? '在线' : '离线'}</small>
             </div>
           )) : <div className="empty-inline">尚无 Worker 心跳。启动独立 Worker 后会在此显示。</div>}
@@ -201,7 +203,7 @@ export default function SettingsPanel({
               <div><b>{profile.name}</b><span>{profile.mode} · SHA {profile.graph_sha256.slice(0, 10)}… · {profile.required_nodes.join(', ')}</span></div>
               <details><summary>模型、容量、连续性与验证来源</summary>
                 <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify({ identity: profile.model_identity, parameter_map: profile.parameter_map, validation: profile.validated_against }, null, 2)}</pre>
-                <p>超出 reference_slots 容量将阻断：PENDING_WORKFLOW_MAPPING。动态槽位关闭；视频传输未验收；硬接续待测试。</p>
+                <p>提示：引用槽位超容量或缺映射时，任务会被拦下并提示「参考素材还没接入工作流」；动态槽位关闭；视频传输未验收；硬接续待测试。</p>
               </details>
               <button className="icon-button tiny" onClick={() => onDeleteWorkflow(profile.id)}><Trash2 size={12} /></button>
             </div>

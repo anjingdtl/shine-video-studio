@@ -7,6 +7,11 @@ import {
   type SubtitleTrack,
   type TerminologyTerm,
 } from '../api';
+import { auditActorLabels, label, subtitleStatusLabels } from '../constants';
+
+const sourceLabels: Record<string, string> = {
+  human: '人工填写', ai: 'AI 生成', voice_alignment: '语音对齐生成', asr: '语音识别生成',
+};
 
 type Props = {
   projectId: string;
@@ -130,7 +135,7 @@ export default function TerminologyPanel({ projectId, busy, onMessage }: Props) 
                 <div className="shot-number">{String(row.revision).padStart(2, '0')}</div>
                 <div className="shot-content">
                   <b>版本 {row.revision} · {row.terms.length} 个词条</b>
-                  <small>{row.source} · {row.created_by} · {row.sha256.slice(0, 12)}</small>
+                  <small>{label(sourceLabels, row.source)} · {label(auditActorLabels, row.created_by)} · 指纹 {row.sha256.slice(0, 12)}…</small>
                 </div>
               </div>
             </div>
@@ -245,8 +250,8 @@ export function SubtitlePanel({ projectId, busy, onMessage }: Props) {
               <div className="shot-row">
                 <div className="shot-number">{String(row.revision).padStart(2, '0')}</div>
                 <div className="shot-content">
-                  <b>版本 {row.revision} · {row.status} · {row.cues.length} 行</b>
-                  <small>{row.source} · {row.sha256.slice(0, 12)}</small>
+                  <b>版本 {row.revision} · {label(subtitleStatusLabels, row.status)} · {row.cues.length} 行</b>
+                  <small>{label(sourceLabels, row.source)} · 指纹 {row.sha256.slice(0, 12)}…</small>
                 </div>
                 {row.status !== 'APPROVED' && (
                   <button

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { API, api, json, type Job } from '../api';
+import { failureLabels, label } from '../constants';
 
 type Proposal = { id: string; kind: string; stale: boolean; payload_json: Record<string, unknown> };
 type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string;
@@ -94,7 +95,7 @@ export default function DeliveryPanel({ projectId, jobs }: { projectId: string; 
         <p>{order.edl_source === 'frozen_edit_intent' ? '剪辑来源：冻结剪辑意图' : '剪辑来源：默认剪辑规则'}
           {order.artifact_id && <> · <a href={`${API}/deliveries/${order.artifact_id}/media`} download>下载 MP4</a></>}
           {order.attempt_count > 0 && <> · 尝试 {order.attempt_count}/{order.max_attempts}</>}
-          {order.failure_code && <span className="failure"> · {order.failure_code}</span>}
+          {order.failure_code && <span className="failure"> · {label(failureLabels, order.failure_code)}</span>}
         </p>
         {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
         {order.status === 'DELIVERED' && order.artifact_id
@@ -120,7 +121,7 @@ export default function DeliveryPanel({ projectId, jobs }: { projectId: string; 
       <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
       <video controls preload="metadata" src={`${API}/deliveries/${row.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />
       <p><a href={`${API}/deliveries/${row.artifact_id}/media`} download>下载 MP4</a></p>
-      <small>SHA-256 {row.sha256}</small>
+      <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
       <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>
     </article>)}
   </section>;

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api, json } from '../api';
+import { label, qcResultLabels, reviewOptionLabels, statusLabels } from '../constants';
 
 const labels: Record<string, string> = {
   identity: '角色身份一致性', costume: '服装与造型', scene_props: '场景及道具',
   camera_action: '动作与运镜', style: '影视风格', dialogue: '中文对白内容', voice: '声音及音色',
   lip_sync: '口型同步', continuity: '画面连续性', other: '其他异常',
 };
+const reviewOptions = ['NOT_REVIEWED', 'PASS', 'FAIL', 'NOT_APPLICABLE'];
 type Context = { snapshot: string; binding: Record<string, unknown>; operator_id: string };
 
 export default function OperatorReview({ jobId }: { jobId: string }) {
@@ -38,7 +40,7 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
         ...json('POST', { snapshot: context.snapshot, request_id: crypto.randomUUID(), items, watched, listened }),
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${credential}` },
       });
-      setMessage(`已记录人工审核：${result.result} / ${result.status}。请刷新任务查看审计记录。`);
+      setMessage(`已记录人工审片：${label(qcResultLabels, result.result)} · 任务状态 ${label(statusLabels, result.status)}。回到任务列表可看到更新。`);
       setContext(null); setCredential('');
     } catch (error) { setMessage(String(error)); setContext(null); } finally { setBusy(false); }
   }
@@ -56,11 +58,11 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
       <video controls src={media} style={{ width: '100%', maxHeight: 480 }} />
       <label><input type="checkbox" checked={watched} onChange={e => setWatched(e.target.checked)} />我已完整观看当前视频</label>
       <label><input type="checkbox" checked={listened} onChange={e => setListened(e.target.checked)} />我已人工试听对白、音色及声画同步</label>
-      {Object.entries(labels).map(([key, label]) => <div key={key}>
-        <label>{label}<select value={items[key]?.status} onChange={e => setItems({ ...items, [key]: { ...items[key], status: e.target.value } })}>
-          {['NOT_REVIEWED', 'PASS', 'FAIL', 'NOT_APPLICABLE'].map(s => <option key={s}>{s}</option>)}
+      {Object.entries(labels).map(([key, text]) => <div key={key}>
+        <label>{text}<select value={items[key]?.status} onChange={e => setItems({ ...items, [key]: { ...items[key], status: e.target.value } })}>
+          {reviewOptions.map(s => <option key={s} value={s}>{label(reviewOptionLabels, s)}</option>)}
         </select></label>
-        <textarea aria-label={`${label}证据`} placeholder="具体画面/时间点/实际听到的台词；不适用也须说明理由" value={items[key]?.evidence} onChange={e => setItems({ ...items, [key]: { ...items[key], evidence: e.target.value } })} />
+        <textarea aria-label={`${text}的证据`} placeholder="具体画面/时间点/实际听到的台词；选「不适用」也要写清理由" value={items[key]?.evidence} onChange={e => setItems({ ...items, [key]: { ...items[key], evidence: e.target.value } })} />
       </div>)}
       <p>未审项保持缺失；不适用不能替代必需覆盖；FAIL 保持待处理，不会放行。</p>
       <button disabled={busy} onClick={submit}>提交人工审片结论</button>

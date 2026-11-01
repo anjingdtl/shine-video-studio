@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
 import type { Job, JobAttempt, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
-import { statusLabels } from '../constants';
+import {
+  acceptanceLabels, checkStatusLabels, coverageLabels, failureLabels, gateLabels,
+  gateStatusLabels, label, modeLabels, providerLabels, qcResultLabels,
+  reconciliationLabels, repairActionLabels, repairOutcomeLabels, statusLabels,
+} from '../constants';
 import OperatorReview from './OperatorReview';
 
 type Props = {
@@ -19,10 +23,6 @@ type Props = {
 };
 
 const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
-const acceptanceLabels: Record<string, string> = {
-  accepted: '已通过终审', pending_review: '生产完成 · 待人工验收',
-  rejected: '未通过', mock: '仅 Mock 验证', not_run: '未完成',
-};
 
 export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck }: Props) {
   const [selected, setSelected] = useState('');
@@ -60,51 +60,51 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <div>
           <div className="section-kicker">04 / PRODUCTION MONITOR</div>
           <h2>任务、质检与返工</h2>
-          <p>状态、租约、尝试、QC 证据与返工记录都保存在本机数据库。</p>
+          <p>点一条任务查看明细：每次尝试、五道质量关、审片证据和返工记录，全部保存在本机。</p>
         </div>
-        <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? 'Worker 在线' : 'Worker 离线'}</div>
+        <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台执行器在线' : '后台执行器离线'}</div>
       </div>
       <div className={`mock-warning ${system?.render_mode === 'comfyui' ? 'real' : ''}`}>
         {system?.render_mode === 'comfyui' ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
           {system?.render_mode === 'comfyui'
-            ? `ComfyUI 模式 · 当前连接${system.h3_connected ? '在线' : '离线'}；连接成功不代表电影质量通过。`
-            : 'Mock 演示模式：只模拟调度、租约与 QC，不会生成或冒充视频。'}
+            ? `真实生成模式 · 本机 H3 ${system.h3_connected ? '已连接' : '未连接'}；生成成功不等于成片合格，以质检和人工验收为准。`
+            : '演示模式：只演练排队、执行和质检流程，不会生成真视频。'}
         </span>
       </div>
       <div className="status-strip">
-        <span>API {system?.api_online ? '在线' : '离线'} · Provider {system?.render_mode ?? '未知'} · MiniMax-H3</span>
-        <span><b>{system?.pending_jobs ?? 0}</b> 待处理</span>
-        <span><b>{system?.running_jobs ?? 0}</b> 执行中</span>
-        <span><b>{system?.blocked_jobs ?? 0}</b> 需复核</span>
+        <span>网页服务 {system?.api_online ? '在线' : '离线'} · 生成引擎 {label(providerLabels, system?.render_mode ?? undefined)} · MiniMax-H3</span>
+        <span><b>{system?.pending_jobs ?? 0}</b> 排队中</span>
+        <span><b>{system?.running_jobs ?? 0}</b> 生成中</span>
+        <span><b>{system?.blocked_jobs ?? 0}</b> 等人处理</span>
         <span><b>{system?.failed_jobs ?? 0}</b> 失败</span>
         {system?.last_error && <span className="error"><AlertTriangle size={11} /> {system.last_error}</span>}
       </div>
       <div className="scenario-row">
-        <label>下一项模拟结果
+        <label>下一项演示结果
           <select value={scenario} onChange={(event) => setScenario(event.target.value)}>
             <option value="success">正常完成</option><option value="delay">延迟完成</option>
             <option value="fail">模拟失败（可修复）</option><option value="uncertain">提交结果不明</option>
-            <option value="duplicate">幂等重复确认</option>
+            <option value="duplicate">重复提交确认（不重跑）</option>
           </select>
         </label>
         <code>uv run --project backend python -m shine.worker</code>
       </div>
       <div className="job-list">
-        {jobs.length === 0 ? <div className="empty-inline">暂无任务。通过分镜卡片加入队列。</div> : jobs.map((job) => (
+        {jobs.length === 0 ? <div className="empty-inline">还没有任务。在左侧分镜卡片上点「加入队列」。</div> : jobs.map((job) => (
           <div className={`job-row ${selected === job.id ? 'selected' : ''}`} key={job.id} onClick={() => openJob(job)}>
             <div className={`job-state ${job.status.toLowerCase()}`}><span /></div>
             <div className="job-details">
               <div>
                 <b>{job.shot_name}</b>
-                <span className={`job-mode ${job.provider === 'comfyui' ? 'real' : ''}`}>{job.provider.toUpperCase()}</span>
-                {job.generation_mode && <span className="job-mode">{job.generation_mode}</span>}
+                <span className={`job-mode ${job.provider === 'comfyui' ? 'real' : ''}`}>{label(providerLabels, job.provider)}</span>
+                {job.generation_mode && <span className="job-mode">{label(modeLabels, job.generation_mode)}</span>}
                 {job.request.self_review_scope === 'basic' && <span className="job-mode">基础自审</span>}
-                {job.acceptance_status && <span className="job-mode">{acceptanceLabels[job.acceptance_status] ?? job.acceptance_status}</span>}
-                {job.stale && <span className="job-stale">需复核</span>}
+                {job.acceptance_status && <span className="job-mode">{label(acceptanceLabels, job.acceptance_status)}</span>}
+                {job.stale && <span className="job-stale">内容已更新，待复核</span>}
               </div>
-              <span>{statusLabels[job.status] ?? job.status}{job.failure_code ? ` · ${job.failure_code}` : ''}</span>
-              <small>rev {job.shot_revision} · {job.attempts.length} 次尝试 · 返工 {job.semantic_retries}/{job.max_semantic_retries}{job.last_qc_result ? ` · QC ${job.last_qc_result}` : ''}</small>
+              <span>{label(statusLabels, job.status)}{job.failure_code ? ` · ${label(failureLabels, job.failure_code)}` : ''}</span>
+              <small>第 {job.shot_revision} 版 · 尝试 {job.attempts.length} 次 · 返工 {job.semantic_retries}/{job.max_semantic_retries}{job.last_qc_result ? ` · 质检 ${label(qcResultLabels, job.last_qc_result)}` : ''}</small>
             </div>
             {['PLANNED', 'READY', 'QUEUED'].includes(job.status) && <button className="icon-button tiny" title={job.paused ? '继续' : '暂停'} onClick={(event) => { event.stopPropagation(); onTogglePause(job); }}>
               {job.paused ? <Play size={12} /> : <Pause size={12} />}
@@ -115,10 +115,10 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
       {selectedJob && <div className="job-detail">
         {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}
         <div className="detail-head">
-          <div><b>{selectedJob.shot_name}</b><span>{selectedJob.id.slice(0, 12)}… · state v{selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
+          <div><b>{selectedJob.shot_name}</b><span>编号 {selectedJob.id.slice(0, 12)}… · 状态版本 {selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
           <div className="detail-actions">
-            {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="secondary-button" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>仅重跑审片（保留视频）</button>}
-            <button className="subtle-button" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 修复建议</button>
+            {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="secondary-button" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>只重跑机器审片（保留视频）</button>}
+            <button className="subtle-button" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 给修复建议</button>
           </div>
         </div>
         <div className="detail-grid">
@@ -126,52 +126,52 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
             <span className="detail-label"><ClipboardCheck size={11} /> 尝试记录</span>
             {selectedJob.attempts.map((attempt) => (
               <div className="attempt-row" key={attempt.id}>
-                <b>#{attempt.attempt_no}</b><span>{attempt.status}</span>
-                <small>{attempt.failure_code ?? attempt.reconciliation_state ?? '—'}</small>
-                <small>{attempt.progress}%</small>
+                <b>第 {attempt.attempt_no} 次</b><span>{label(statusLabels, attempt.status)}</span>
+                <small>{attempt.failure_code ? label(failureLabels, attempt.failure_code) : label(reconciliationLabels, attempt.reconciliation_state)}</small>
+                <small>进度 {attempt.progress}%</small>
               </div>
             ))}
             {selectedJob.repairs.length > 0 && <>
               <span className="detail-label"><Wrench size={11} /> 返工记录</span>
               {selectedJob.repairs.map((repair) => (
-                <div className="attempt-row" key={repair.id}><b>{repair.outcome}</b><span>{repair.action}</span><small>{repair.root_cause}</small></div>
+                <div className="attempt-row" key={repair.id}><b>{label(repairOutcomeLabels, repair.outcome)}</b><span>{label(repairActionLabels, repair.action)}</span><small>{label(failureLabels, repair.root_cause)}</small></div>
               ))}
             </>}
           </div>
           <div>
-            <span className="detail-label"><ShieldCheck size={11} /> 质量门禁</span>
+            <span className="detail-label"><ShieldCheck size={11} /> 五道质量关</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
-            {!detailBusy && latestGates.length === 0 && <div className="empty-inline">尚无门禁记录。</div>}
+            {!detailBusy && latestGates.length === 0 && <div className="empty-inline">还没有质检记录。</div>}
             {latestGates.map((gate) => (
               <div className="qc-row" key={gate.id}>
                 <div>
-                  <b>{gate.gate_name}</b>
-                  <span>{gate.status}{gate.required ? ' · 必需' : ' · 可选'}{gate.is_mock ? ' · MOCK' : ''}</span>
+                  <b>{label(gateLabels, gate.gate_name)}</b>
+                  <span>{label(gateStatusLabels, gate.status)}{gate.required ? ' · 必查项' : ' · 可选'}{gate.is_mock ? ' · 演示数据' : ''}</span>
                 </div>
-                <small>覆盖：{gate.coverage}{gate.error_code ? ` · ${gate.error_code}` : ''}{gate.model ? ` · ${gate.model}` : ''}</small>
+                <small>{gate.coverage ? `覆盖：${label(coverageLabels, gate.coverage)}` : ''}{gate.error_code ? ` · ${label(failureLabels, gate.error_code)}` : ''}{gate.model ? ` · 用的模型：${gate.model}` : ''}</small>
               </div>
             ))}
-            {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification} · 最终结论见 final 门禁</small>}
-            {selectedJob.request.self_review_scope === 'basic' && <small>本任务仅自审分辨率、人物和对白，不代表人工影片验收。</small>}
-            <span className="detail-label"><Activity size={11} /> QC 证据</span>
+            {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification === 'real' ? '真实生成' : selectedJob.quality_verification === 'mock' ? '演示数据' : selectedJob.quality_verification} · 最终结论以「终审」关为准</small>}
+            {selectedJob.request.self_review_scope === 'basic' && <small>本次只自动查了分辨率、人物和对白三项，不等于人工验收。</small>}
+            <span className="detail-label"><Activity size={11} /> 质检明细</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
-            {!detailBusy && qc.length === 0 && <div className="empty-inline">尚无 QC 报告。</div>}
+            {!detailBusy && qc.length === 0 && <div className="empty-inline">还没有质检报告。</div>}
             {qc.map((report) => (
               <div className="qc-row" key={report.id}>
-                <div><b>{report.result}</b><span>{report.reviewer} · {report.is_mock ? 'MOCK' : 'REAL'}</span></div>
+                <div><b>{label(qcResultLabels, report.result)}</b><span>{report.reviewer} · {report.is_mock ? '演示数据' : '真实检测'}</span></div>
                 {report.report.technical && <div className="check-grid">
-                  {report.report.technical.checks.map((check) => <span className={`check ${check.status}`} key={check.name}>{check.name}: {check.status}</span>)}
+                  {report.report.technical.checks.map((check) => <span className={`check ${check.status}`} key={check.name}>{check.name}：{label(checkStatusLabels, check.status)}</span>)}
                 </div>}
-                {report.report.hard_failures?.map((failure) => <small className="failure" key={failure.code}>{failure.code} · {failure.evidence}</small>)}
-                {report.report.coverage && <small>覆盖：{Object.entries(report.report.coverage).map(([key, value]) => `${key}=${value}`).join(' · ')}</small>}
+                {report.report.hard_failures?.map((failure) => <small className="failure" key={failure.code}>{label(failureLabels, failure.code)} · {failure.evidence}</small>)}
+                {report.report.coverage && <small>覆盖：{Object.entries(report.report.coverage).map(([key, value]) => `${key}=${label(coverageLabels, value)}`).join(' · ')}</small>}
               </div>
             ))}
           </div>
         </div>
         {suggestion && <div className="repair-card">
-          <div><b>根因：{suggestion.error_category}</b><span>{String(suggestion.plan.action)} · {String(suggestion.plan.root_cause ?? '')}</span></div>
+          <div><b>问题归类：{label(failureLabels, suggestion.error_category)}</b><span>建议动作：{label(repairActionLabels, String(suggestion.plan.action))}{suggestion.plan.root_cause ? ` · 原因：${label(failureLabels, String(suggestion.plan.root_cause))}` : ''}</span></div>
           <div className="repair-actions">
-            <small>{suggestion.auto_apply ? '可自动重试' : '需要人工确认'}</small>
+            <small>{suggestion.auto_apply ? '可以自动重试' : '需要人工确认后再动'}</small>
             {!suggestion.auto_apply && String(suggestion.plan.action) !== 'wait_for_human' && <button className="secondary-button" onClick={() => onRepair(selectedJob.id, suggestion.plan)}>按建议重试</button>}
           </div>
         </div>}

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Check, Clock3, Film, LockKeyhole, Pencil, Upload, X } from 'lucide-react';
 import type { Asset } from '../api';
-import { roleOptions } from '../constants';
+import { roleLabels, roleOptions } from '../constants';
 
 type Props = {
   assets: Asset[];
@@ -51,9 +51,9 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
         <div className="section-icon"><Film size={17} /></div>
       </div>
       <div className="form-grid">
-        <label>主资产审批凭据<input type="password" autoComplete="off" value={operatorToken}
+        <label>操作员凭据（审批身份）<input type="password" autoComplete="off" value={operatorToken}
           onChange={e => setOperatorToken(e.target.value)} /></label>
-        <label>主资产核验依据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>
+        <label>核验依据（确认来源合法、内容无误）<input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="例：本人拍摄，已核对内容" /></label>
       </div>
       <div className="upload-stack">
         <div className="upload-row">
@@ -99,7 +99,7 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
                 {asset.duration_s ? ` · ${asset.duration_s.toFixed(1)}s` : ''}
               </span>
               <span className="asset-tags">
-                {asset.role ? `${asset.role}` : '未设角色'}{asset.entity_id ? ` · ${asset.entity_id}` : ''}
+                {asset.role ? roleLabels[asset.role] ?? asset.role : '未设角色'}{asset.entity_id ? ` · ${asset.entity_id}` : ''}
                 {asset.tags?.length ? ` · ${asset.tags.join(' / ')}` : ''}
               </span>
               {editingId === asset.id && <div className="asset-edit">

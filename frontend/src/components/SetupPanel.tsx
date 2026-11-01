@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { label, prepRowLabels, providerLabels, serviceStatusLabels } from '../constants';
 import type { DeploymentStorage } from './StorageSettings';
 
 type ToolInfo = { present: boolean; version: string; at_floor: boolean };
@@ -269,7 +270,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           <h3>1b · 上游可达性（下载前必查）</h3>
           {!connectivity ? <div className="empty-inline">尚未检查。下载 60.8 GB 之前请先检查一次。</div> : <>
             <p className="guardrail-note">
-              {connectivity.checked_at} · 结论 <b>{connectivity.status}</b>
+              {connectivity.checked_at} · 结论 <b>{label(serviceStatusLabels, connectivity.status)}</b>
             </p>
             <table className="setup-tools">
               <tbody>
@@ -337,9 +338,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
               onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
           <p className="guardrail-note">验证会短暂启动已安装的 ComfyUI、VLM 和 ASR，读取真实节点/工作流契约并探测审片协议，完成后停止；不加载 H3 权重，也不提交镜头。</p>
-          {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{runtime.render_provider}
+          {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{label(providerLabels, runtime.render_provider)}
             {runtime.candidate?.project_id === projectId && <> · 待确认配方：<code>{runtime.candidate.recipe_sha256}</code></>}
-            {runtime.service_validation && <> · 服务契约：{runtime.service_validation.status}
+            {runtime.service_validation && <> · 服务契约：{label(serviceStatusLabels, runtime.service_validation.status)}
               {runtime.service_validation.validated_at ? ` · ${runtime.service_validation.validated_at}` : ''}
               {runtime.service_validation.blockers?.length ? ` · ${runtime.service_validation.blockers.join('、')}` : ''}</>}
             {runtime.error && <> · {runtime.error}</>}
@@ -347,7 +348,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           {plans.length > 0 && <div className="setup-plans">
             {plans.map((plan) => (
               <div className="worker-row" key={plan.plan_id}>
-                <div><b>{plan.action ?? plan.kind}</b><span>{plan.plan_id} · {plan.status} · tier {plan.tier ?? '-'}</span></div>
+                <div><b>{plan.action ?? plan.kind}</b><span>编号 {plan.plan_id.slice(0, 8)}… · {label(prepRowLabels, plan.status)} · 层级 {plan.tier ?? '—'}</span></div>
                 <button className="text-button" disabled={busy || !['AWAITING_APPROVAL', 'APPROVED'].includes(plan.status)}
                   onClick={() => void runPlan(plan)}>{plan.status === 'APPROVED' ? '执行已批准计划' : '批准并执行'}</button>
               </div>
@@ -361,12 +362,13 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           {!readiness ? <div className="empty-inline">读取中…</div> : <>
             {readiness.layers.map((layer) => {
               const status = String(layer.status);
+              const blockers = Array.isArray(layer.blockers) ? layer.blockers : [];
               return (
                 <div className="worker-row" key={String(layer.layer)}>
                   <span className={`status-led ${status === 'READY' ? 'mock' : 'offline'}`} />
                   <div>
                     <b>{String(layer.layer)}</b>
-                    <span>{status}{layer.blockers ? ` · ${JSON.stringify(layer.blockers).slice(0, 120)}` : ''}</span>
+                    <span>{label(serviceStatusLabels, status)}{blockers.length ? ` · 待解决：${blockers.map((item) => typeof item === 'string' ? item : JSON.stringify(item)).join('；').slice(0, 160)}` : ''}</span>
                   </div>
                 </div>
               );

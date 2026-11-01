@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, json, type ProviderProfile, type Shot } from '../api';
+import { failureLabels, label, modeLabels, serviceStatusLabels, statusLabels } from '../constants';
 
 type Role = { role: string; label: string; model: string | null; profile_id: string | null;
   output_kind: string; required_inputs: string[]; permissions: string; tool_allowlist: string[] };
@@ -85,7 +86,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           onChange={e => act(() => api('/agent-routes', json('PUT', { role: r.role, provider_profile_id: e.target.value })))}>
           <option value="" disabled>请配置模型路由</option>
           {profiles.map(p => <option value={p.id} key={p.id}>{p.name} · {p.model}</option>)}
-        </select></label><small>{r.model ?? '未配置，不会静默降级'} · 最近：{runs.find(t => t.role_id === r.role)?.status ?? '未运行'}</small>
+        </select></label><small>{r.model ?? '未配置，不会偷偷换别的模型'} · 最近一次：{label(statusLabels, runs.find(t => t.role_id === r.role)?.status ?? '未运行')}</small>
       </article>)}</div>
       <div className="settings-block">
         <h3>工种交接 / 风格预制建议</h3>
@@ -134,7 +135,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
             onChange={e => setReconcileCredential(e.target.value)} /></label>
           <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
         </div>}
-      {runs.map(r => <details key={r.id}><summary>{r.role_id} · {r.model_id} · {r.status} {r.error_code}</summary>
+      {runs.map(r => <details key={r.id}><summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
         {(r.status === 'NEEDS_REVIEW' || (r.status === 'REJECTED' && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(r.error_code ?? ''))) &&
           <button disabled={busy || reconcileCredential.length < 32 || !reconcileEvidence.trim()}
             onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}
@@ -166,9 +167,9 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       {filteredRules.map(r => <p key={r.id}><b>{r.origin} · {r.id}</b> — {r.summary}<br /><small>{r.source_path} · {r.locator}</small></p>)}
       <h3>确定性镜头预检</h3>
       {shots.map(s => <button key={s.id} disabled={busy || !pin} onClick={() => act(() => api(
-        `/shots/${s.id}/compile`, { method: 'POST' }))}>{s.name}：校验并编译</button>)}
+        `/shots/${s.id}/compile`, { method: 'POST' }))}>{s.name}：预检并生成提示词</button>)}
       <h3>本机 Workflow 能力</h3>
-      {hub?.local_workflow_capabilities.map(w => <p key={w.name}>{w.name} · {w.mode} · {w.status}</p>)}
+      {hub?.local_workflow_capabilities.map(w => <p key={w.name}>{w.name} · {label(modeLabels, w.mode)} · {label(serviceStatusLabels, w.status)}</p>)}
       <details><summary>提交候选规则包 / 差异审查</summary>
         <p>仅支持经过当前代码校验的固定官方版本；上游版本或机器规则变化需要开发、测试后才能批准。</p>
         <textarea rows={5} value={candidate} onChange={e => setCandidate(e.target.value)} placeholder="候选 manifest JSON" />

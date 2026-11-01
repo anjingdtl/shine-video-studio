@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, FileText, Loader2, Sparkles } from 'lucide-react';
 import { API, api, json } from '../api';
+import { failureLabels, label } from '../constants';
 
 type DocumentRow = {
   id: string; filename: string; sha256: string; source_format: string;
@@ -91,7 +92,7 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
       } else {
         // A refused chain states its reason in the panel status, never in a
         // toast that disappears before it is read.
-        setMessage(`分镜链被拒绝：${(row.rejections ?? []).map(r => `${r.role}: ${r.code}`).join('；') || '未知原因'}。未创建任何镜头，请复核后重试。`);
+        setMessage(`分镜链被拒绝：${(row.rejections ?? []).map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.code)}`).join('；') || '未知原因'}。未创建任何镜头，请复核后重试。`);
       }
     } catch (e) { setMessage(String(e)); }
     finally { setBusy(false); }
@@ -154,7 +155,7 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
     {result && <div className="storyboard-result">
       {result.status === 'REJECTED' && <div className="blocked-callout">
         <AlertTriangle size={15} />
-        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => `${r.role}: ${r.code}`).join('；') || '未知原因'}</span>
+        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.code)}`).join('；') || '未知原因'}</span>
       </div>}
       {result.status === 'BLOCKED_MISSING_MASTERS' && <div className="blocked-callout">
         <AlertTriangle size={15} />
