@@ -11,7 +11,8 @@ param(
     [switch]$NoPathUpdate,
     [switch]$NoLaunch,
     [string]$DataDir = "",
-    [string]$StorageRoot = ""
+    [string]$StorageRoot = "",
+    [string]$OperatorPasswordFile = ""
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -195,9 +196,16 @@ if ($defaultManifest -and -not $CheckOnly) {
     # action still requires its own reviewed, one-use grant in the workbench.
     if (-not $NoLaunch) {
         . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
-        Initialize-ShineOperator (Join-Path $repoRoot '.env') {
+        $readPassword = {
             Read-Host 'Choose a local operator password (used to approve installation plans)' -AsSecureString
         }
+        if ($OperatorPasswordFile) {
+            # One-click installs generate the operator secret and persist it in a
+            # local credential file, so the tester never has to invent 16+ chars.
+            $operatorCredentialPath = [IO.Path]::GetFullPath($OperatorPasswordFile)
+            $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
+        }
+        Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
     }
     $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'
     if (-not $DataDir) {
@@ -254,9 +262,9 @@ if ($defaultManifest -and -not $CheckOnly) {
     if ($NoLaunch) { exit 0 }
     $env:SHINE_DATA_DIR = [IO.Path]::GetFullPath($DataDir)
     if ($explicitDataDir) {
-        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -DataDir $DataDir
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -DataDir $DataDir -OpenBrowser
     } else {
-        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -OpenBrowser
     }
     exit $LASTEXITCODE
 }

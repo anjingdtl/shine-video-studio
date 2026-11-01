@@ -34,7 +34,7 @@ Deliver actual **M0 + M1**, not design-only outputs. Prioritize working FastAPI 
 - Worker writes require status, `state_version`, lease owner, and shot-revision checks. Expired/ambiguous external submissions are reconciled; never blind-resubmit.
 - The submit intent (including the prompt-graph hash) is persisted **before** the external call, and the external prompt id immediately after it. An uncertain submission is `NEEDS_REVIEW`, never an automatic retry.
 - Deterministic technical QC and probabilistic semantic QC are separate. Missing FFprobe/FFmpeg yields `unavailable`, not `pass`. Probing metadata is not a decode.
-- Five named quality gates (`technical`, `semantic`, `audio`, `style`, `final`) are recorded per attempt. A shot is final-passed only when every required gate passed; a missing review is recorded as missing, never as a pass.
+- Five named quality gates (`technical`, `semantic`, `audio`, `style`, `final`) are recorded per attempt. `PASSED` means the production attempt completed under the project policy; it is not a claim that every advisory model review passed. `acceptance_status` is `accepted` only when the latest final gate really passed. A pending final gate is recorded as `pending_review`, never relabelled as accepted.
 - Repairs are typed, bounded, and must protect passed versions. An automatic repair must produce a **different** request revision (recompiled prompt, rebuilt manifest, or changed parameters). Do not claim unattended full-drama completion or real H3 acceptance from offline tests.
 - Upstream re-renders invalidate their dependants so downstream validity is recomputed; passed shot versions and their artifacts are never overwritten.
 - The ComfyUI renderer URL must be loopback unless `SHINE_ALLOW_REMOTE_COMFYUI=1` is set explicitly, because reference bytes are uploaded to it.
@@ -64,6 +64,21 @@ Never bundle official full-text guides without redistribution permission. Run
 3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.
 4. Use feature branches/PRs for substantial changes where available; do not destroy history or silently force-push.
 5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
+
+## Distribution package (tester hand-off)
+
+- Build releases only from a committed tree: `pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`.
+  The script refuses a dirty working tree, takes files from `git ls-files`, excludes models/databases/secrets/
+  `docs/evidence`/virtualenvs, and writes `BUILD_INFO.json` plus a per-file `PACKAGE_MANIFEST.json`.
+- One tester entry only: `一键安装并启动.cmd` (ASCII fallback `SETUP.cmd`) → `scripts/install_once.ps1`.
+  It must stay idempotent (installed → start, running → open the wizard), pick a non-system drive with
+  ≥180 GiB free, generate the operator secret locally, and land on `#setup`.
+- Encoding is a correctness requirement, not style: `.cmd` entry files stay pure ASCII (cmd.exe uses the
+  active code page), and every `scripts/*.ps1` containing non-ASCII text must be UTF-8 **with BOM**
+  (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and fails to parse). `test_package_entrypoints.py`
+  enforces both.
+- Never package weights, generated media, SQLite files, `.env`, `operator-credentials.txt` or acceptance
+  evidence. Testers get the installer, not the data.
 
 ## V1.3 amendment (supersedes V1.0's source-only restriction)
 

@@ -2,7 +2,7 @@
 
 > 安装盘可在设置中选择；首次引导先选择非系统盘，工具、Python 与依赖缓存不再默认落入 C 盘。使用方法和验证边界见 [下载与安装目录](docs/LOCAL_STORAGE_SETTINGS.md)。
 
-> 2026-11-01 修复进展：设置入口、计划哈希、节点依赖、工作流登记及安装盘选择已修复；ASR SDK 完整固定依赖已在隔离 Windows 环境真实安装并通过 pip check/导入。完整新机部署仍为 PARTIAL，受管冷启动、审片路由和真实服务/模型验收尚未完成。见 [修复记录](docs/NEW_MACHINE_DEPLOYMENT_FIX_20261101.md)。
+> 2026-11-01 P0 收口：新机向导新增真实服务与工作流验证；启动已安装的 ComfyUI、VLM、ASR 读取 live `object_info` 和审片协议后停止，L4 改由密封证据计算，审片路由按实际安装模型（8B/0.6B）自动绑定；同时修复 `TMPDIR` 和磁盘/包数文档。完整 60.8GB 干净机下载与真实 H3 推理仍未执行，见 [修复记录](docs/NEW_MACHINE_DEPLOYMENT_FIX_20261101.md) 和 [验收清单](docs/NEW_MACHINE_ACCEPTANCE_CHECKLIST.md)。
 
 > V1.3 对抗审查的软件修复与收尾实现已补齐，按 **TESTED_OFFLINE / MOCK_VERIFIED** 验收；
 > 最终提交 CI、逐项证据及真机边界见 [对抗审查与重验](docs/V1.3_ADVERSARIAL_REVIEW.md)。真实 GPU/视听质量不由 Fake 结果代替。
@@ -155,10 +155,18 @@ The repository must not contain `.env` values, provider keys, private assets, mo
 
 ## 新机部署（第一套正式支持的配置）
 
-**支持范围**：Windows 10/11 x64 · NVIDIA ≥15.3GiB 显存（RTX 5080 16GB 级）· ≥30GiB RAM · ≥120GB 空闲磁盘。
+**支持范围**：Windows 10/11 x64 · NVIDIA ≥15.3GiB 显存（RTX 5080 16GB 级）· ≥30GiB RAM · ≥180GiB 空闲磁盘。
 完整报告与边界见 [docs/NEW_MACHINE_DEPLOYMENT.md](docs/NEW_MACHINE_DEPLOYMENT.md)。
 
-**唯一推荐入口**（系统自带 PowerShell 即可，无需预装任何工具）：
+**分发包入口（发给测试用户时用）**：双击包内的 `一键安装并启动.cmd`（文件名乱码时用 `SETUP.cmd`）。
+它调用 `scripts/install_once.ps1`，自动挑选剩余空间最大的非系统盘、生成 24 位操作员密码写入
+`<安装盘>\ShineVideoStudio\operator-credentials.txt`、按固定版本装工具链与依赖、启动 API/Worker/Web，
+并直接打开 `http://127.0.0.1:<端口>/#setup` 进入下方的新机设置向导。重复双击是安全的：已安装就只启动，
+已在运行就直接开向导。`START_APP.cmd` 重开、`STOP_APP.cmd` 停止、`CHECK_ENVIRONMENT.cmd` 只读体检。
+分发包由 `scripts/build_test_package.ps1 -OutDir <目录> -Verify` 从某个已提交的树重建，
+产出 zip + SHA-256 + 逐文件清单，不包含模型、数据库、密钥、证据与虚拟环境。
+
+**唯一推荐入口（在仓库里直接装，系统自带 PowerShell 即可，无需预装任何工具）**：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
@@ -168,12 +176,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 之后 `./scripts/start_shine.ps1 -Install` 照常启动。然后打开 `http://127.0.0.1:5173` 的
 **新机设置**面板，按向导完成：环境检查 → 部署清单确认 → 生成安装计划 → 逐计划人工批准执行
 （受控下载+哈希校验+隔离安装）→ 实例四步（CREATE/INSTALL_NODE/BIND_MODELS/START）→
-生成受管配置 → 就绪检查。真实推理就绪层只能由真实生产证据点亮，Mock/Fake 永不冒充。
+登记工作流 Profile → 生成受管配置 → **验证服务与工作流**（启动安装好的服务读取 live
+节点/工作流契约和审片协议，完成后停止）→ 确认并激活运行配置 → 就绪检查。L4 只由这次验证的
+密封证据计算，不再固定 `PENDING`；验证会自动建立 VLM/ASR 审片路由，不把 4B 标签冒充 8B 模型。
 
 **自动安装内容**：Shine 自身依赖（uv sync/npm ci）、隔离 ComfyUI 实例（固定 commit b0b74356）、
-93 个哈希锁定的 Windows wheels、5 个节点包、H3 Ref2VA INT8 模型栈（UNet/文本编码器/双 VAE/LoRA/PDD），
+154 个哈希锁定的 Windows 发行包、5 个节点包、H3 Ref2VA INT8 模型栈（UNet/文本编码器/双 VAE/LoRA/PDD），
 以及本地 VLM/ASR 审片模型（Qwen3-VL-8B-FP8 / Qwen3-ASR-0.6B）。清单明细见
-`config/deployment/h3-ref2va-windows-x64.json`（14 组件，60.7GB）。
+`config/deployment/h3-ref2va-windows-x64.json`（14 组件，60.8GB）。
 
 **必须的人工作业**：每张安装/实例计划的一次性批准；LLM provider 凭据录入（DPAPI/0600 本机存储）；
 主资产上传与人工晋升；音色/风格冻结；审片 needs_review 的人工裁决与异常对账。
@@ -184,4 +194,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 已有外部 ComfyUI 实例从不被触碰（既有保护语义不变）。
 
 **真实验证范围**：本轮为 IMPLEMENTED / TESTED_OFFLINE（含真实小文件下载算法验证与 37MB 归档实测哈希）。
-真实全量下载（60.7GB）、干净 Windows 安装、真实 ComfyUI 启动与真实 H3 推理均为 NOT_RUN，需用户授权后执行。
+真实全量下载（60.8GB）、干净 Windows 安装、真实 ComfyUI 启动与真实 H3 推理均为 NOT_RUN，需用户授权后执行。
