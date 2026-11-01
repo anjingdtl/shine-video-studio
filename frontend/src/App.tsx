@@ -611,7 +611,6 @@ function App() {
                 >
                   <span className="nav-view-title">{group.title}</span>
                   <span className="nav-view-hint">{group.hint}</span>
-                  <ChevronDown size={13} className="nav-view-caret" />
                 </button>
                 <button
                   type="button"
