@@ -23,7 +23,6 @@ function storageError(error: unknown): string {
 export default function StorageSettings() {
   const [storage, setStorage] = useState<DeploymentStorage | null>(null);
   const [path, setPath] = useState('');
-  const [token, setToken] = useState('');
   const [allowSystem, setAllowSystem] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -36,10 +35,10 @@ export default function StorageSettings() {
     setBusy(true); setMessage('');
     try {
       const value = await api<DeploymentStorage & { cancelled_plans: string[] }>('/setup/storage', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, allow_system_drive: allowSystem }),
       });
-      setStorage(value); setPath(value.root); setToken('');
+      setStorage(value); setPath(value.root);
       setMessage(`目录已保存，可用 ${value.free_gb} GB${value.cancelled_plans.length ? '；原待执行计划已取消，请重新生成' : ''}。`);
       window.dispatchEvent(new Event('shine-storage-changed'));
     } catch (error) { setMessage(storageError(error)); }
@@ -69,9 +68,7 @@ export default function StorageSettings() {
     <label className="switch-row"><span>明确选择使用系统盘（默认关闭）</span>
       <input type="checkbox" checked={allowSystem} onChange={event => setAllowSystem(event.target.checked)} />
     </label>
-    <input type="password" aria-label="保存目录的操作员凭据" value={token} placeholder="操作员凭据（仅内存）"
-      onChange={event => setToken(event.target.value)} />
-    <button className="secondary-button" disabled={busy || !path || !token} onClick={() => void save()}>保存下载安装目录</button>
+    <button className="secondary-button" disabled={busy || !path} onClick={() => void save()}>保存下载安装目录</button>
     <p className="guardrail-note">更换目录会取消未执行的安装计划。已有下载或实例时需先对账，系统不会自动搬动或删除文件。</p>
     {message && <div role="status">{message}</div>}
   </div>;

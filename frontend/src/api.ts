@@ -40,7 +40,9 @@ function describeDetail(detail: unknown): string {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, init);
+  const headers = new Headers(init?.headers);
+  headers.set('X-Shine-Local-Action', '1');
+  const response = await fetch(`${API}${path}`, { ...init, headers });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {

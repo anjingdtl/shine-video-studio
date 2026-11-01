@@ -147,7 +147,6 @@ Write-Host '  不会改动系统盘、不装驱动、不写系统级设置。' -
 $envFile = Join-Path $repoRoot '.env'
 $recordedRoot = Get-ShineEnvValue $envFile 'SHINE_BOOTSTRAP_ROOT'
 $recordedData = Get-ShineEnvValue $envFile 'SHINE_DATA_DIR'
-$hasOperator = [bool](Get-ShineEnvValue $envFile 'SHINE_OPERATOR_TOKEN_SHA256')
 
 if (-not $StorageRoot -and $recordedRoot) { $StorageRoot = $recordedRoot }
 
@@ -278,7 +277,6 @@ if ($recordedRoot) {
 $logPath = Join-Path $StorageRoot ('install-log-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 try { Start-Transcript -Path $logPath -Force | Out-Null; $transcript = $logPath } catch { $transcript = $null }
 
-$credentialFile = Join-Path $StorageRoot 'operator-credentials.txt'
 $apiPort = Get-ShineFreePort $defaultApiPort
 $webPort = Get-ShineFreePort ($defaultWebPort + ($apiPort - $defaultApiPort))
 if ($webPort -eq $apiPort) { $webPort = Get-ShineFreePort ($apiPort + 1) }
@@ -288,30 +286,8 @@ if ($apiPort -ne $defaultApiPort -or $webPort -ne $defaultWebPort) {
     Write-Warn "默认端口被占用，本次改用 $apiPort/$webPort。浏览器地址以最后打印的为准。"
 }
 
-# ---- 3. Operator identity -----------------------------------------------
-if (-not $hasOperator) {
-    Write-Host ''
-    Write-Step '生成操作员凭据（用于在网页里批准安装与实例计划）'
-    Write-Host '  密码由本机随机生成，保存在：' -ForegroundColor Gray
-    Write-Host "    $credentialFile" -ForegroundColor Gray
-    if (Test-Path -LiteralPath $credentialFile) {
-        Write-Ok '复用上次生成的操作员密码文件。'
-    } else {
-        . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
-        Get-ShineOperatorPasswordFile $credentialFile | Out-Null
-        Write-Ok '已生成 40 位随机密码并写入本地文件。'
-    }
-    Write-Host '  安装完成后请打开该文件抄下密码，然后删除文件。' -ForegroundColor Yellow
-} else {
-    Write-Ok '检测到已配置的操作员身份，沿用现有凭据。'
-    if (Test-Path -LiteralPath $credentialFile) {
-        Write-Host "  密码记录：$credentialFile" -ForegroundColor Gray
-    } else {
-        Write-Warn '找不到本机保存的操作员密码文件，旧密码无法找回。'
-        Write-Host '  如果你不记得密码：删除 .env 里的 SHINE_OPERATOR_TOKEN_SHA256 这一行，再次运行本安装器，' -ForegroundColor Yellow
-        Write-Host '  它会生成新密码。历史审批记录和已安装内容不受影响。' -ForegroundColor Yellow
-    }
-}
+# ---- 3. Personal desktop confirmation (no password) --------------------
+Write-Ok '本机工作台无需密码，素材和下载仍由你点击确认。'
 
 # ---- 4. Tools + dependencies + services ---------------------------------
 $backendPython = Join-Path $StorageRoot 'app/backend-env/Scripts/python.exe'
@@ -323,7 +299,7 @@ if (-not $pwshPath) {
     $shim = Join-Path $StorageRoot 'bin/pwsh.cmd'
     if (Test-Path -LiteralPath $shim) { $pwshPath = $shim }
 }
-$alreadyInstalled = $hasOperator -and $pwshPath -and
+$alreadyInstalled = $pwshPath -and
     (Test-Path -LiteralPath $backendPython) -and (Test-Path -LiteralPath $frontendModules)
 
 if ($alreadyInstalled) {
@@ -354,9 +330,6 @@ if ($alreadyInstalled) {
     Write-Host ''
     Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
     Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
-    if (Test-Path -LiteralPath $credentialFile) {
-        Write-Host "  操作员密码： $credentialFile" -ForegroundColor Yellow
-    }
     Write-Host '  停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
     if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
     exit 0
@@ -370,7 +343,6 @@ Write-Banner '开始安装（首次约 20-60 分钟，取决于网络；请勿�
 $bootstrapArgs = @{
     StorageRoot = $StorageRoot
     DataDir = $recordedData
-    OperatorPasswordFile = $credentialFile
 }
 if ($NoLaunch) { $bootstrapArgs['NoLaunch'] = $true }
 
@@ -411,13 +383,9 @@ Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
 Write-Host "  API 健康页： http://127.0.0.1:$apiPort/health" -ForegroundColor Gray
 Write-Host "  安装目录：   $StorageRoot" -ForegroundColor Gray
 Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
-if (Test-Path -LiteralPath $credentialFile) {
-    Write-Host "  操作员密码： $credentialFile  （抄录后请删除该文件）" -ForegroundColor Yellow
-}
 Write-Host ''
-Write-Host '  在向导里按顺序完成：环境检查 → 部署清单 → 生成安装计划 → 人工批准' -ForegroundColor Gray
-Write-Host '  → 执行 → 实例步骤 → 登记工作流 → 生成受管配置 → 验证服务与工作流 → 就绪检查' -ForegroundColor Gray
-Write-Host '  每一步的批准都需要输入上面那份操作员密码；这是产品门禁，不是报错。' -ForegroundColor Gray
+Write-Host '  在向导中点击「检测本机环境」，再确认「下载缺项并自动配置」。' -ForegroundColor Gray
+Write-Host '  后续安装、工作流登记和服务检测会自动完成，无需密码。' -ForegroundColor Gray
 Write-Host ''
 Write-Host '  以后再次启动：双击 START_APP.cmd     停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
 if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }

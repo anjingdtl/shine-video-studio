@@ -1,4 +1,4 @@
-# Shine new-machine bootstrap entry.
+﻿# Shine new-machine bootstrap entry.
 # Runs on stock Windows PowerShell 5.1: detects the pinned tools, installs the
 # missing ones at user level from the pinned manifest, and reports honest
 # blockers. Never touches system-wide state, drivers or an existing install.
@@ -227,19 +227,12 @@ foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
 $report | ConvertTo-Json -Depth 5
 if ($report.blockers.Count -gt 0) { exit 1 }
 if ($defaultManifest -and -not $CheckOnly) {
-    # Bootstrap creates only a local operator identity. Every package/instance
-    # action still requires its own reviewed, one-use grant in the workbench.
-    if (-not $NoLaunch) {
+    # Personal desktop installs need no operator password. Preserve explicit
+    # legacy provisioning for scripts that already pass a credential file.
+    if (-not $NoLaunch -and $OperatorPasswordFile) {
         . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
-        $readPassword = {
-            Read-Host 'Choose a local operator password (used to approve installation plans)' -AsSecureString
-        }
-        if ($OperatorPasswordFile) {
-            # One-click installs generate the operator secret and persist it in a
-            # local credential file, so the tester never has to invent 16+ chars.
-            $operatorCredentialPath = [IO.Path]::GetFullPath($OperatorPasswordFile)
-            $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
-        }
+        $operatorCredentialPath = [IO.Path]::GetFullPath($OperatorPasswordFile)
+        $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
         Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
     }
     $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'

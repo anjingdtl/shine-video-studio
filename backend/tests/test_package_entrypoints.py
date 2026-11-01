@@ -90,7 +90,9 @@ def test_one_click_installer_never_writes_to_the_system_drive_and_opens_the_wiza
     assert "非系统盘" in text
     assert "180GB" in text
     assert "#setup" in text, "the installer must land in the guided setup"
-    assert "operator-credentials.txt" in text
+    assert "OperatorPasswordFile =" not in text
+    assert "Get-ShineOperatorPasswordFile" not in text
+    assert "$hasOperator -and" not in text, "idempotent restart must work without credentials"
     assert "Get-ShineFreePort" in text, "busy ports must be handled instead of failing"
     # Idempotence: a second double-click must not install twice.
     assert "processes.json" in text
@@ -165,8 +167,9 @@ def test_bootstrap_accepts_the_operator_password_file_switch():
     text = (SCRIPTS / "bootstrap.ps1").read_text(encoding="utf-8-sig")
     assert "[string]$OperatorPasswordFile" in text
     assert "Get-ShineOperatorPasswordFile $operatorCredentialPath" in text
-    # The interactive prompt must remain the default for repository installs.
-    assert "Read-Host 'Choose a local operator password" in text
+    # Existing explicit callers retain compatibility, ordinary installs never prompt.
+    assert "if (-not $NoLaunch -and $OperatorPasswordFile)" in text
+    assert "Read-Host 'Choose a local operator password" not in text
 
 
 def test_install_once_reports_a_machine_readable_verdict_for_each_gate():

@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Check, History, LockKeyhole, LockOpen } from 'lucide-react';
 import type { Style, StyleVersion } from '../api';
 import { styleFields } from '../constants';
@@ -10,11 +9,10 @@ type Props = {
   styles: StyleVersion[];
   busy: boolean;
   onSave: () => void;
-  onFreeze: (token?: string) => void;
+  onFreeze: () => void;
 };
 
 export default function StylePanel({ style, setStyle, currentStyle, styles, busy, onSave, onFreeze }: Props) {
-  const [operatorToken, setOperatorToken] = useState('');
   return (
     <section className="card section-card" id="style">
       <div className="section-heading">
@@ -27,9 +25,6 @@ export default function StylePanel({ style, setStyle, currentStyle, styles, busy
           {currentStyle ? <><LockKeyhole size={13} /> 已冻结 V{currentStyle.version}</> : <><LockOpen size={13} /> 尚未冻结</>}
         </div>
       </div>
-      <label>V1.3 风格冻结操作员凭据（仅当前页面内存）
-        <input type="password" autoComplete="off" value={operatorToken} onChange={e => setOperatorToken(e.target.value)} />
-      </label>
       <div className="style-grid">
         {styleFields.map(([key, label, hint], index) => (
           <label className="style-field" key={key}>
@@ -48,7 +43,7 @@ export default function StylePanel({ style, setStyle, currentStyle, styles, busy
         <span>{currentStyle ? <><Check size={13} /> 当前哈希 {currentStyle.sha256.slice(0, 18)}…</> : '所有七项必须填写，并由你明确执行冻结'}</span>
         <div>
           <button className="secondary-button" disabled={busy || !style.photography_language} onClick={onSave}>保存草案</button>
-          <button className="primary-button" disabled={busy || styleFields.some(([key]) => !style[key].trim())} onClick={() => onFreeze(operatorToken)}>
+          <button className="primary-button" disabled={busy || styleFields.some(([key]) => !style[key].trim())} onClick={onFreeze}>
             <LockKeyhole size={14} /> {currentStyle ? '冻结为新版本' : '批准并冻结'}
           </button>
         </div>

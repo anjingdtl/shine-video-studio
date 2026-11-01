@@ -353,7 +353,7 @@ function App() {
     });
   }
 
-  async function freezeStyle(operatorToken = '') {
+  async function freezeStyle() {
     if (!projectId) return;
     await withBusy(async () => {
       // Freeze exactly what the user sees: save the on-screen form first, then
@@ -363,12 +363,10 @@ function App() {
       // the same write lock as freezing.
       const snapshot: Style = { ...style };
       await api(`/projects/${projectId}/style/draft`, json('PUT', snapshot));
-      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${operatorToken}` };
-      const grant = operatorToken ? await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
-        ...json('POST', { action: 'style_freeze', target_id: projectId }), headers,
-      }) : { grant_id: undefined, snapshot: undefined };
+      const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+        json('POST', { action: 'style_freeze', target_id: projectId }));
       const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, {
-        ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot, expected_style: snapshot }), ...(operatorToken ? { headers } : {}),
+        ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot, expected_style: snapshot }),
       });
       if (Object.entries(snapshot).some(([key, value]) => frozen.snapshot[key as keyof Style] !== value)) {
         throw new Error('冻结结果与本次确认的风格内容不一致，请核验版本记录；没有自动重试。');
@@ -390,22 +388,30 @@ function App() {
       if (meta.tags) form.append('tags', meta.tags);
       const asset = await api<Asset>(`/projects/${projectId}/assets`, { method: 'POST', body: form });
       await loadProject(projectId);
-      report(`素材已入库（指纹 ${asset.sha256.slice(0, 8)}…）。批准并锁定后才能被镜头使用。`);
+      report(`素材已上传（指纹 ${asset.sha256.slice(0, 8)}…），点击「确认使用」即可用于分镜。`);
     });
   }
 
-  async function updateAsset(assetId: string, action: 'approve' | 'lock', token: string, evidence: string) {
+  async function confirmAssets(assetIds: string[]) {
+    if (!window.confirm(`确认使用这 ${assetIds.length} 项素材？请确认内容无误且你有权使用。确认后将固定素材版本。`)) return;
     await withBusy(async () => {
-      if (!token || evidence.trim().length < 5) throw new Error('请填写操作员凭据和核验依据（至少 5 个字）。');
-      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-      const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
-        ...json('POST', { action: `asset_${action}`, target_id: assetId }), headers,
-      });
-      await api(`/assets/${assetId}/${action}`, {
-        ...json('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence }), headers,
-      });
-      await loadProject(projectId);
-      report(action === 'approve' ? '素材已批准。' : '素材已锁定，镜头现在可以引用它了。');
+      let completed = 0;
+      try {
+        for (const assetId of assetIds) {
+          const asset = assets.find(item => item.id === assetId);
+          if (!asset || asset.locked) continue;
+          for (const action of asset.approved ? ['lock'] : ['approve', 'lock']) {
+            const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+              json('POST', { action: `asset_${action}`, target_id: assetId }));
+            await api(`/assets/${assetId}/${action}`, json('POST', {
+              grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false,
+              evidence: '用户在本机点击确认使用，并确认素材内容及使用权。',
+            }));
+          }
+          completed += 1;
+        }
+        report(`已确认 ${completed} 项素材，可以用于分镜。`);
+      } finally { await loadProject(projectId); }
     });
   }
 
@@ -702,8 +708,7 @@ function App() {
                 assets={assets}
                 busy={busy}
                 onUpload={uploadAsset}
-                onApprove={(assetId, token, evidence) => updateAsset(assetId, 'approve', token, evidence)}
-                onLock={(assetId, token, evidence) => updateAsset(assetId, 'lock', token, evidence)}
+                onConfirm={confirmAssets}
                 onPatchMetadata={patchAssetMetadata}
               />
 

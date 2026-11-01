@@ -15,7 +15,6 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
   const [diskBudget, setDiskBudget] = useState('');
   const [localEvidence, setLocalEvidence] = useState('{}');
   const offline = mode === 'fake';
-  const [token, setToken] = useState('');
   const [rows, setRows] = useState<Row[]>([]);
   const [rowView, setRowView] = useState(-1);
   const activeView = useRef(view);
@@ -60,7 +59,7 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
   const [preview, setPreview] = useState(false);
   const [dialogueListened, setDialogueListened] = useState(false);
   const [requirementsJson, setRequirementsJson] = useState('[]');
-  const headers = () => ({ Authorization: `Bearer ${token}` });
+  const headers = () => ({ 'X-Shine-Local-Action': '1' });
   const post = <T,>(path: string, body: unknown, privileged = false) => api<T>(path, {
     ...json('POST', body), headers: { 'Content-Type': 'application/json', ...(privileged ? headers() : {}) },
   });
@@ -101,12 +100,12 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
   }
   return <section className="card" id="preproduction">
     <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>当前模式：{offline ? '模拟演练（不落真数据）' : '本地真跑'} · 结果真伪以后端返回为准</strong></div>
-    <p className="prep-intro">正式开拍前的准备间：确认环境、登记模型与节点、验证工作流、制作候选素材、试听音色，最后做开机预检。模拟演练出的结果永远不会被当成真实验证。</p>
+    <p className="prep-intro">普通素材在上方上传并确认即可。首次装机请到「新机设置」点击检测；候选素材、音色制作与故障维护在下方按需展开。</p>
+    <details><summary>展开高级准备（候选素材、音色与维护）</summary>
     <nav className="button-row">{views.map((name, i) => <button key={name} onClick={() => setView(i)}
       disabled={busy} aria-pressed={view === i}>{name}</button>)}</nav>
-    <p>候选晋升、音色冻结与安装审批使用服务器验证的操作员身份；凭据仅保留在当前页面内存。</p>
+    <p>本机操作无需密码。候选晋升、音色冻结与安装仍由你点击确认。</p>
     <div className="form-grid">
-      <label>操作员凭据<input type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} /></label>
       <label>人工核验 / 试听 / 权利证据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>
     </div>
     <label>操作模式<select value={mode} onChange={e => { setMode(e.target.value); setConfirmed(false); }}>
@@ -392,5 +391,6 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
       <p><a href={`${API}/voice-renders/${String(result.id)}/subtitles?format=srt`} download>下载 SRT</a>
         {' · '}<a href={`${API}/voice-renders/${String(result.id)}/subtitles?format=ass`} download>下载 ASS</a></p>}
     {result !== null && <details open><summary>后端结果 / 阻滞原因</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}
+    </details>
   </section>;
 }

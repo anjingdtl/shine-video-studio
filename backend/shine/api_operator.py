@@ -21,6 +21,14 @@ def operator(request: Request, settings: SettingsDep, authorization: Annotated[s
     origin = request.headers.get("origin")
     if origin and urlparse(origin).netloc != request.url.netloc:
         raise HTTPException(403, "Cross-origin operator review forbidden")
+    # Personal desktop deployment: a same-origin UI action needs no password.
+    # The custom header prevents cross-site forms from issuing local grants;
+    # grants still bind the exact revision and are consumed once. It is a CSRF
+    # boundary, not proof that a particular person clicked the button.
+    if request.headers.get("x-shine-local-action") == "1" and not authorization.removeprefix("Bearer ").strip():
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            raise HTTPException(403, "Cross-site local action forbidden")
+        return "local-user"
     return authenticate(settings, authorization.removeprefix("Bearer "))
 
 

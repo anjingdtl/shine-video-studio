@@ -47,6 +47,20 @@ const RUNTIME_LABELS: Record<string, string> = {
   ACTIVE: '已激活', NOT_ACTIVATED: '待确认', INVALID_REQUIRES_REVIEW: '配置已变更，需重新核验',
 };
 
+function blockerText(blocker: EnvReport['blockers'][number]): string {
+  const tool = TOOL_LABELS[blocker.tool ?? ''] ?? blocker.tool ?? '';
+  const messages: Record<string, string> = {
+    TOOL_MISSING_INSTALLABLE: `${tool} 尚未安装`, TOOL_STALE: `${tool} 版本需要更新`,
+    GPU_VRAM_BELOW_FLOOR: '显卡可用显存不足', RAM_BELOW_FLOOR: '本机内存不足或无法读取',
+    DISK_BELOW_FLOOR: '安装目录空间不足', PORT_OCCUPIED: '服务端口被占用',
+    DATA_DIR_NOT_WRITABLE: '项目数据目录无法写入', DEPLOYMENT_DIR_NOT_WRITABLE: '安装目录无法写入',
+    NVIDIA_SMI_UNAVAILABLE: '无法检测 NVIDIA 显卡，请检查显卡驱动',
+    NVIDIA_DRIVER_UNAVAILABLE: '无法检测 NVIDIA 显卡，请检查显卡驱动',
+    NVIDIA_SMI_OUTPUT_UNPARSEABLE: '显卡检测结果无法读取，请检查显卡驱动',
+  };
+  return messages[blocker.code] ?? `环境检测未通过（${blocker.code}），请查看检测详情`;
+}
+
 function fmtBytes(value: number): string {
   const units = ['B', 'KB', 'MB', 'GB'];
   let result = value;
@@ -56,7 +70,8 @@ function fmtBytes(value: number): string {
 }
 
 export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
-  const [token, setToken] = useState('');
+  const [checked, setChecked] = useState(false);
+  const [progress, setProgress] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(null);
   const [connectivity, setConnectivity] = useState<Connectivity | null>(null);
   const [storage, setStorage] = useState<DeploymentStorage | null>(null);
@@ -68,12 +83,12 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
-  const headers = useCallback((): RequestInit => ({ headers: { Authorization: `Bearer ${token}` } }), [token]);
   const withJson = useCallback((method: string, body: unknown): RequestInit => {
-    const base = headers();
-    return { ...base, method, headers: { ...base.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
-  }, [headers]);
+    return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  }, []);
 
   const say = useCallback((text: string, kind: 'ok' | 'bad' = 'ok') => {
     setNotice({ kind, text });
@@ -149,6 +164,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     }
     const exec = await api<Record<string, unknown>>(`/comfyops/${plan.kind === 'INSTANCE_LIFECYCLE' ? 'instance-plans' : 'install-plans'}/${plan.plan_id}/execute`,
       { ...withJson('POST', plan.kind === 'INSTANCE_LIFECYCLE' ? { plan_hash: approved.sha256 } : { plan_hash: approved.sha256, executor: 'local' }), signal: AbortSignal.timeout(600000_000) });
+    if (!['FILES_VERIFIED', 'COMPLETED'].includes(String(exec.status))) {
+      throw new Error(`执行停在 ${String(exec.status)}，请展开安装详情检查；没有自动重试。`);
+    }
     say(`${label} 执行完成：${JSON.stringify(exec).slice(0, 120)}`);
   }
 
@@ -229,19 +247,118 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     });
   }
 
+  function detectEnvironment() {
+    void run(async () => {
+      setChecked(false);
+      const [environment, ready, state, disk] = await Promise.all([
+        api<EnvReport>('/setup/environment'), api<Readiness>('/setup/readiness'),
+        api<RuntimeState>('/setup/runtime'), api<DeploymentStorage>('/setup/storage'),
+      ]);
+      setEnv(environment); setReadiness(ready); setRuntime(state); setStorage(disk);
+      setChecked(true);
+      return environment.blockers.length
+        ? '检测完成，请先处理下方提示的硬件或基础工具问题。'
+        : '检测完成。点击下方按钮，即可确认下载缺项并自动完成配置。';
+    });
+  }
+
+  function prepareAutomatically() {
+    if (!projectId || !checked || !storage || storage.requires_selection) return;
+    const selected = projectId;
+    if (!window.confirm(`下载并配置本机生产环境？\n目录：${storage.root}\n完整清单约 ${fmtBytes(catalog?.total_bytes ?? 0)}，已校验的缓存会复用。\n将安装固定版本的第三方程序、节点和模型，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
+    void run(async () => {
+      const ensureCurrent = () => {
+        if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
+      };
+      try {
+        setProgress('检查下载网络…');
+        const network = await api<Connectivity>('/setup/connectivity');
+        setConnectivity(network);
+        if (network.blocked.length) throw new Error(`下载源无法连接：${network.blocked.join('、')}。请检查网络后重新检测。`);
+        ensureCurrent();
+        const pending = await api<Array<{ id: string; sha256: string; status: string; payload: { deployment?: unknown; kind?: string } }>>(
+          `/comfyops/install-plans?project_id=${selected}`);
+        if (pending.some(p => (p.payload.deployment || p.payload.kind === 'INSTANCE_LIFECYCLE')
+          && !['FILES_VERIFIED_PENDING_RUNTIME', 'STOPPED', 'MOCK_VERIFIED', 'CANCELLED', 'RECONCILED_NO_RETRY'].includes(p.status))) {
+          throw new Error('已有未完成的安装记录，请展开安装详情继续原计划或对账；不会新建重复安装。');
+        }
+        const ready = await api<Readiness>('/setup/readiness');
+        if (!ready.layers.some(layer => layer.layer === 'L2_files_verified' && layer.status === 'READY')) {
+          setProgress('下载并校验模型与组件（可耗时较长，请保持页面打开）…');
+          const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
+            components: catalog?.components.map(c => c.component_id) ?? [], project_id: selected, disk_free: storage.free_bytes,
+          }));
+          ensureCurrent();
+          await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');
+        }
+        let complete = false;
+        for (let step = 0; step < 8; step += 1) {
+          ensureCurrent();
+          setProgress('自动准备运行环境…');
+          const plan = await api<PlanRef & { complete: boolean }>('/setup/next-instance-plan', withJson('POST', {
+            project_id: selected, instance_name: 'shine-h3', port: 8188, mode: 'local',
+          }));
+          if (plan.complete) { complete = true; break; }
+          ensureCurrent();
+          await approveAndExecute({ ...plan, kind: 'INSTANCE_LIFECYCLE' }, '准备运行环境');
+        }
+        if (!complete) throw new Error('环境准备步骤超过预期，已停止，请检查安装详情。');
+        ensureCurrent();
+        setProgress('登记工作流并生成配置…');
+        await api('/setup/profiles', withJson('POST', { project_id: selected }));
+        ensureCurrent();
+        await api('/setup/configuration', withJson('POST', { project_id: selected }));
+        const state = await api<RuntimeState>('/setup/runtime');
+        setRuntime(state);
+        if (state.candidate?.project_id !== selected) throw new Error('没有匹配的运行配置，请检查安装详情。');
+        const body = { project_id: selected, recipe_sha256: state.candidate.recipe_sha256 };
+        ensureCurrent();
+        setProgress('启动服务并检测工作流，完成后自动停止…');
+        const validation = await api<{ status: string }>('/setup/services/validate', {
+          ...withJson('POST', body), signal: AbortSignal.timeout(3_600_000),
+        });
+        if (validation.status !== 'READY') throw new Error(`服务检测未通过：${validation.status}。配置尚未激活。`);
+        ensureCurrent();
+        await api('/setup/runtime/activate', withJson('POST', body));
+        await onRefresh();
+        return '环境已配置并通过服务检测，可以回到制片。真实 H3 生成效果将在实际任务中验证。';
+      } finally {
+        setProgress(''); setChecked(false);
+        await Promise.allSettled([loadRuntime(), loadReadiness(), loadPlans()]);
+      }
+    });
+  }
+
   return (
     <section className="card section-card" id="setup">
       <div className="section-heading">
         <div>
           <div className="section-kicker">00 / NEW MACHINE SETUP</div>
           <h2>新机设置与生产就绪</h2>
-          <p>空白 Windows 上的完整链路：环境检查 → 部署计划 → 人工批准 → 隔离安装 → 配置生成 → 就绪检查。</p>
+          <p>先点击检测，再确认下载。安装、工作流登记和运行配置由系统依次完成。</p>
         </div>
         <div className="section-icon"><Sparkles size={17} /></div>
       </div>
 
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
+      <div className="settings-block">
+        <button className="primary-button" disabled={busy} onClick={detectEnvironment}>检测本机环境</button>
+        {checked && <>
+          <p>安装目录：{storage?.root ?? '尚未选择'} · 可用 {storage?.free_gb ?? '—'} GB</p>
+          {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
+            <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '模型与服务尚待准备，确认后自动完成。'}</p>}
+          <button className="primary-button" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
+            || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
+            onClick={prepareAutomatically}>{runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId ? '本项目环境已配置' : '下载缺项并自动配置'}</button>
+          {!projectId && <p>先在下方给项目起个名字，即可开始自动配置。</p>}
+          {storage?.requires_selection && <p>请选择下载安装目录：<a href="#deployment-storage">选择目录</a></p>}
+        </>}
+        {progress && <p role="status">{progress}</p>}
+        <p>检测不会下载模型或提交视频。下载前会显示目录、体积与安装范围，由你确认。</p>
+      </div>
+
+      <details><summary>查看检测与安装详情（高级）</summary>
       <div className="settings-grid">
         <div className="settings-block">
           <h3>1 · 环境检查</h3>
@@ -327,17 +444,13 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             {storage?.requires_selection && ' 请先选择非系统盘目录，才能自动安装。'}
           </p>
           <div className="inline-form">
-            <input value={token} type="password" placeholder="操作员凭据（仅内存）"
-              onChange={(event) => setToken(event.target.value)} />
-          </div>
-          <div className="inline-form">
             <button className="primary-button" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
-            <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
+            <button className="secondary-button" disabled={busy || runtime?.candidate?.project_id !== projectId}
               onClick={validateServices}>验证服务与工作流</button>
-            <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
+            <button className="secondary-button" disabled={busy || runtime?.candidate?.project_id !== projectId}
               onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
           {!projectId && <p className="guardrail-note">计划生成、Profile 登记、配置生成与激活需要先创建一个项目（本页下方即可创建）；环境检查、上游可达性与部署清单无需项目。</p>}
@@ -384,6 +497,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           </>}
         </div>
       </div>
+      </details>
     </section>
   );
 }

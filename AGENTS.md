@@ -72,7 +72,7 @@ Never bundle official full-text guides without redistribution permission. Run
   `docs/evidence`/virtualenvs, and writes `BUILD_INFO.json` plus a per-file `PACKAGE_MANIFEST.json`.
 - One tester entry only: `一键安装并启动.cmd` (ASCII fallback `SETUP.cmd`) → `scripts/install_once.ps1`.
   It must stay idempotent (installed → start, running → open the wizard), pick a non-system drive with
-  ≥180 GiB free, generate the operator secret locally, and land on `#setup`.
+  ≥180 GiB free, and land on `#setup`. Personal desktop setup requires no operator password.
 - Encoding is a correctness requirement, not style: `.cmd` entry files stay pure ASCII (cmd.exe uses the
   active code page), and every `scripts/*.ps1` containing non-ASCII text must be UTF-8 **with BOM**
   (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and fails to parse). `test_package_entrypoints.py`
@@ -82,7 +82,7 @@ Never bundle official full-text guides without redistribution permission. Run
 
 ## V1.3 amendment (supersedes V1.0's source-only restriction)
 
-- AI may generate `CandidateAsset` rows. Only authenticated human grants may promote new
+- AI may generate `CandidateAsset` rows. Only explicit local-user grants may promote new
   `Asset` masters or freeze Voice Profiles. Do not use legacy approve/lock to promote candidates.
 - Retain `offline_only` on Fake masters. Never turn Fake workflow/model/voice/QC evidence into
   real verification. `SHINE_OFFLINE_SIMULATION` is for isolated test data only.
@@ -93,3 +93,15 @@ Never bundle official full-text guides without redistribution permission. Run
 - Run `test_v13_preparation.py`, `test_v13_migrations.py`, `test_v13_e2e.py`, the old offline E2E,
   film crew, complete backend suite, Ruff, Alembic and TypeScript/Vite. Preserve Windows CI.
 - See `docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md` for evidence and explicit local boundaries.
+
+## Personal desktop simplification (2026-11-01, user-authorized)
+
+- No password or manually typed rights evidence is required for uploaded-master confirmation.
+  Same-origin loopback UI actions use a CSRF marker, with the actor recorded as `local-user`.
+  This is a personal-machine trust boundary, not authenticated proof of human identity.
+- Keep action/snapshot-bound one-use grants, file integrity checks, candidate promotion gates,
+  style freezing, cloud consent, and uncertain-submission reconciliation.
+- One explicit download confirmation may cover the displayed pinned deployment and its ordered
+  instance/configuration steps. Stop on failure or changed page/project; never blind-retry.
+- Normal installers do not generate or request an operator password. Preserve existing secrets
+  and explicit legacy provisioning callers without rewriting their files.

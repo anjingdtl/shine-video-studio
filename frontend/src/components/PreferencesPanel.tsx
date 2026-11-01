@@ -13,7 +13,7 @@ const CONFIG_GUIDES: Array<{ id: string; title: string; desc: string }> = [
   { id: 'settings', title: 'AI 模型（LLM）配置', desc: '添加/更换写作、审片用的模型，填密钥，测试连接' },
   { id: 'settings', title: 'ComfyUI 生成引擎连接', desc: '填本机 ComfyUI 地址并测试连通' },
   { id: 'settings', title: '生成工作流模板', desc: '「模型与系统」底部「工作流 Profile 注册」' },
-  { id: 'preproduction', title: '模型与节点安装', desc: '「制片准备 → 模型与节点」页签，登记/安装/审批' },
+    { id: 'setup', title: '模型与节点安装', desc: '点击检测，再确认下载缺项并自动配置' },
   { id: 'setup', title: '新机环境自检', desc: '显卡、磁盘、上游可达性、就绪分层检查' },
 ];
 

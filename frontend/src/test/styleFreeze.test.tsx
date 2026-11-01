@@ -84,11 +84,11 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     const postIndex = stub.calls.findIndex((call) => call.method === 'POST' && /style\/freeze$/.test(call.url));
     expect(putIndex).toBeLessThan(postIndex);
     expect(savedDraft).toMatchObject({ photography_language: '固定远景，禁止推近。（准备批准的最终修改）' });
-    // Tokenless freeze (no operator token): no grant was claimed.
-    expect(stub.callsOf('POST', /approval-grants/)).toHaveLength(0);
+    // Passwordless local actions still obtain an exact, one-use grant.
+    expect(stub.callsOf('POST', /approval-grants/)).toHaveLength(1);
   });
 
-  it('带操作员凭据冻结：保存→授权→冻结顺序，授权后草稿变化会被拒绝并保留表单', async () => {
+  it('免密冻结仍保持保存→授权→冻结顺序，授权后草稿变化会被拒绝并保留表单', async () => {
     const user = userEvent.setup();
     stub.add({
       method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/,
@@ -104,7 +104,6 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     render(<App />);
     await user.type(await screen.findByLabelText(/摄影语言/), '新项目的风格 A');
     await fillSevenFields(user, '（授权路径）');
-    await user.type(await screen.findByLabelText(/V1\.3 风格冻结操作员凭据/), 'op-token-1234567890');
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
 
     await waitFor(() => {
@@ -167,7 +166,6 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
       respond: () => jsonResponse({ detail: 'STYLE_APPROVAL_CONTENT_CHANGED' }, 409) });
     render(<App />);
     await fillSevenFields(user, 'Displayed A');
-    await user.type(screen.getByLabelText(/V1\.3 风格冻结操作员凭据/), 'test-operator-token');
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await screen.findByText(/风格草稿已在其他页面修改/);
     const decision = stub.callsOf('POST', /style\/freeze$/)[0].body;

@@ -667,7 +667,10 @@ def deployment_readiness(db, settings: Settings) -> dict:
     })
     production_gates = {
         "workflow_profiles_registered": bool(db.scalars(select(WorkflowProfile)).first()),
-        "operator_configured": bool(settings.operator_id and settings.operator_token_sha256),
+        # Compatibility key: desktop confirmations no longer need a provisioned
+        # password. Origin checks and revision-bound grants remain in force.
+        "operator_configured": True,
+        "local_confirmation_available": True,
         "services_verified": service_status.get("status") == "READY",
     }
     from shine.comfyops.runtime_configuration import runtime_report
@@ -677,8 +680,8 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "production_gates": production_gates,
         "runtime_activation": runtime_report(db, settings),
         "human_steps": [
-            "approve each install/instance plan (5-minute grants)",
-            "enter your own LLM provider credentials in Settings",
-            "approve+lock master assets, freeze style, confirm production",
+            "点击检测，确认下载安装（后续环境准备自动完成）",
+            "在设置中填写自己的语言模型 API 配置",
+            "确认使用素材、冻结风格，然后确认生产",
         ],
     }

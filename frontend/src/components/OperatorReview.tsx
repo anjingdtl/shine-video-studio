@@ -11,7 +11,6 @@ const reviewOptions = ['NOT_REVIEWED', 'PASS', 'FAIL', 'NOT_APPLICABLE'];
 type Context = { snapshot: string; binding: Record<string, unknown>; operator_id: string };
 
 export default function OperatorReview({ jobId }: { jobId: string }) {
-  const [credential, setCredential] = useState('');
   const [context, setContext] = useState<Context | null>(null);
   const [items, setItems] = useState<Record<string, { status: string; evidence: string }>>({});
   const [watched, setWatched] = useState(false);
@@ -23,7 +22,7 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
   async function load() {
     setBusy(true); setContext(null); setMessage('');
     try {
-      const headers = { Authorization: `Bearer ${credential}` };
+      const headers = { 'X-Shine-Local-Action': '1' };
       const value = await api<Context>(`/operator/jobs/${jobId}`, { headers });
       const response = await fetch(`/api/v1/operator/jobs/${jobId}/media`, { headers });
       if (!response.ok) throw new Error('媒体完整性或授权检查失败');
@@ -38,17 +37,15 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
     try {
       const result = await api<{ status: string; result: string }>(`/operator/jobs/${jobId}/review`, {
         ...json('POST', { snapshot: context.snapshot, request_id: crypto.randomUUID(), items, watched, listened }),
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${credential}` },
       });
       setMessage(`已记录人工审片：${label(qcResultLabels, result.result)} · 任务状态 ${label(statusLabels, result.status)}。回到任务列表可看到更新。`);
-      setContext(null); setCredential('');
+      setContext(null);
     } catch (error) { setMessage(String(error)); setContext(null); } finally { setBusy(false); }
   }
   return <section className="settings-block operator-review">
     <h3>本地操作员分项审片</h3>
-    <p>仅供持有管理员凭据的人工操作员。凭据仅在当前组件内存中使用。普通话对白须逐句试听；音轨存在不能代替对白审核。</p>
-    <input type="password" autoComplete="off" aria-label="本地操作员凭据" value={credential} onChange={e => setCredential(e.target.value)} />
-    <button disabled={busy || !credential} onClick={load}>认证并加载当前媒体</button>
+    <p>直接打开本机视频进行审片。普通话对白须逐句试听；音轨存在不能代替对白审核。</p>
+    <button disabled={busy} onClick={load}>加载当前视频</button>
     {context && <>
       <p>人工审核者：{context.operator_id} · 当前 Attempt / 媒体绑定</p>
       <p style={{ overflowWrap: 'anywhere' }}>Attempt：{String(context.binding.attempt_id)}<br />媒体 SHA-256：{String(context.binding.artifact_sha256)}</p>

@@ -263,7 +263,8 @@ def test_readiness_never_claims_real_inference(prep):
     assert layers["L5_real_inference"]["status"] == "NOT_VERIFIED"
     assert "never inferred" in layers["L5_real_inference"]["note"]
     assert readiness["production_gates"]["operator_configured"] is True
-    assert "approve each install/instance plan" in " ".join(readiness["human_steps"])
+    assert readiness["production_gates"]["local_confirmation_available"] is True
+    assert "确认下载安装" in " ".join(readiness["human_steps"])
 
 
 def test_open_probes_require_no_operator(prep):

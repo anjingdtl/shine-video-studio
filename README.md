@@ -166,8 +166,8 @@ The repository must not contain `.env` values, provider keys, private assets, mo
 完整报告与边界见 [docs/NEW_MACHINE_DEPLOYMENT.md](docs/NEW_MACHINE_DEPLOYMENT.md)。
 
 **分发包入口（发给测试用户时用）**：双击包内的 `一键安装并启动.cmd`（文件名乱码时用 `SETUP.cmd`）。
-它调用 `scripts/install_once.ps1`，自动挑选剩余空间最大的非系统盘、生成 40 位操作员密码写入
-`<安装盘>\ShineVideoStudio\operator-credentials.txt`、按固定版本装工具链与依赖、启动 API/Worker/Web，
+它调用 `scripts/install_once.ps1`，自动挑选剩余空间最大的非系统盘，
+按固定版本装工具链与依赖、启动 API/Worker/Web，个人本机使用无需操作员密码，
 并直接打开 `http://127.0.0.1:<端口>/#setup` 进入下方的新机设置向导。重复双击是安全的：已安装就只启动，
 已在运行就直接开向导。`START_APP.cmd` 重开、`STOP_APP.cmd` 停止、`CHECK_ENVIRONMENT.cmd` 只读体检。
 分发包由 `scripts/build_test_package.ps1 -OutDir <目录> -Verify` 从某个已提交的树重建，
@@ -181,11 +181,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 
 它按固定版本+SHA-256 安装缺失的 uv / Node 20 / PowerShell 7 / FFmpeg（用户级，不改系统），
 之后 `./scripts/start_shine.ps1 -Install` 照常启动。然后打开 `http://127.0.0.1:5173` 的
-**新机设置**面板，按向导完成：环境检查 → 部署清单确认 → 生成安装计划 → 逐计划人工批准执行
-（受控下载+哈希校验+隔离安装）→ 实例四步（CREATE/INSTALL_NODE/BIND_MODELS/START）→
-登记工作流 Profile → 生成受管配置 → **验证服务与工作流**（启动安装好的服务读取 live
-节点/工作流契约和审片协议，完成后停止）→ 确认并激活运行配置 → 就绪检查。L4 只由这次验证的
-密封证据计算，不再固定 `PENDING`；验证会自动建立 VLM/ASR 审片路由，不把 4B 标签冒充 8B 模型。
+**新机设置**面板：点击「检测本机环境」，检查目录与空间，再确认「下载缺项并自动配置」。
+系统会依次下载校验、准备隔离实例、登记工作流、生成配置、验证服务并激活；详细维护入口在高级详情中。
+检测本身不下载、不生成视频。基础工具缺失时重新运行一键安装入口补齐；硬件不足需先处理。
+素材只需上传后点击「确认使用」，不再手填密码或核验依据；角色名称和标签按需填写。
+本机免密仍保留来源与跨站检查、版本绑定的单次授权、文件校验与不确定状态对账。
+流程、测试和验收边界见 [个人部署简化说明](docs/PERSONAL_LOCAL_SIMPLIFICATION_20261101.md)。
 
 **自动安装内容**：Shine 自身依赖（uv sync/npm ci）、隔离 ComfyUI 实例（固定 commit b0b74356）、
 154 个哈希锁定的 Windows 发行包、5 个节点包、H3 Ref2VA INT8 模型栈（UNet/文本编码器/双 VAE/LoRA/PDD），

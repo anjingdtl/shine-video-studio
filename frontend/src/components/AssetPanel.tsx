@@ -7,15 +7,11 @@ type Props = {
   assets: Asset[];
   busy: boolean;
   onUpload: (file: File, meta: { kind: string; role: string; entityId: string; tags: string }) => void;
-  onApprove: (assetId: string, token: string, evidence: string) => void;
-  onLock: (assetId: string, token: string, evidence: string) => void;
+  onConfirm: (assetIds: string[]) => void;
   onPatchMetadata: (assetId: string, patch: { role?: string | null; entity_id?: string; tags?: string[] }) => void;
 };
 
-export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, onPatchMetadata }: Props) {
-  const [operatorToken, setOperatorToken] = useState('');
-  const [evidence, setEvidence] = useState('');
-  const [kind, setKind] = useState('image');
+export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchMetadata }: Props) {
   const [role, setRole] = useState('character');
   const [entityId, setEntityId] = useState('');
   const [tags, setTags] = useState('');
@@ -45,48 +41,44 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
       <div className="section-heading">
         <div>
           <div className="section-kicker">01 / ASSET REGISTRY</div>
-          <h2>素材与主资产审批</h2>
-          <p>只有人工批准并锁定的素材才能被镜头引用；Agent 没有创建或审批权限。</p>
+          <h2>项目素材</h2>
+          <p>上传素材，选好用途，再点击「确认使用」。确认后即可用于分镜，素材只保存在本机。</p>
         </div>
         <div className="section-icon"><Film size={17} /></div>
       </div>
-      <div className="form-grid">
-        <label>操作员凭据（审批身份）<input type="password" autoComplete="off" value={operatorToken}
-          onChange={e => setOperatorToken(e.target.value)} /></label>
-        <label>核验依据（确认来源合法、内容无误）<input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="例：本人拍摄，已核对内容" /></label>
-      </div>
       <div className="upload-stack">
         <div className="upload-row">
-          <div><label>素材类型</label>
-            <select value={kind} onChange={(event) => setKind(event.target.value)}>
-              <option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option>
-            </select>
-          </div>
-          <div><label>实体角色</label>
-            <select value={role} onChange={(event) => setRole(event.target.value)}>
+          <div><label>素材用途</label>
+            <select aria-label="素材用途" value={role} onChange={(event) => setRole(event.target.value)}>
               {roleOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
-          </div>
-          <div><label>实体 ID</label>
-            <input value={entityId} placeholder="CHAR_A / SCENE_01" onChange={(event) => setEntityId(event.target.value)} />
-          </div>
-          <div className="grow"><label>标签（逗号分隔）</label>
-            <input value={tags} placeholder="主角, 夜戏, 定妆" onChange={(event) => setTags(event.target.value)} />
           </div>
           <label className="upload-button"><Upload size={15} /> 上传到本机
             <input
               type="file"
-              accept={kind === 'image' ? 'image/png,image/jpeg,image/webp' : kind === 'audio' ? 'audio/*' : 'video/*'}
+              disabled={busy}
+              accept="image/png,image/jpeg,image/webp,audio/*,video/*"
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 event.target.value = '';
-                if (file) onUpload(file, { kind, role, entityId, tags });
+                if (file) {
+                  const kind = file.type.startsWith('audio/') || /\.(wav|mp3|flac|m4a|ogg)$/i.test(file.name)
+                    ? 'audio' : file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(file.name) ? 'video' : 'image';
+                  onUpload(file, { kind, role: kind === 'audio' && role === 'character' ? 'voice' : role,
+                    entityId: (entityId.trim() || file.name.replace(/\.[^.]+$/, '')).slice(0, 80), tags });
+                }
               }}
             />
           </label>
         </div>
-        <span className="upload-hint">按配置限制大小，校验文件签名，内容寻址去重；素材字节不会发送到云端。</span>
+        <details><summary>可选：角色名称与标签</summary>
+          <label>角色 / 场景名称<input value={entityId} placeholder="默认使用文件名；同一人物可填相同名称" onChange={e => setEntityId(e.target.value)} /></label>
+          <label>标签<input value={tags} placeholder="主角, 夜戏, 定妆" onChange={e => setTags(e.target.value)} /></label>
+        </details>
+        <span className="upload-hint">支持图片、视频和音频，自动识别类型。仅上传你有权使用的素材。</span>
       </div>
+      {assets.some(asset => !asset.locked) && <button className="secondary-button" disabled={busy}
+        onClick={() => onConfirm(assets.filter(asset => !asset.locked).map(asset => asset.id))}>确认使用全部待确认素材</button>}
       <div className="asset-list">
         {assets.length === 0 ? <div className="empty-inline">尚无素材。请只上传你提供且有权使用的素材。</div> : assets.map((asset) => (
           <div className="asset-row" key={asset.id}>
@@ -114,17 +106,15 @@ export default function AssetPanel({ assets, busy, onUpload, onApprove, onLock, 
               </div>}
             </div>
             <div className="asset-state">
-              {asset.locked ? <span className="pill approved"><LockKeyhole size={12} />已锁定</span>
-                : asset.approved ? <span className="pill approved"><Check size={12} />已批准</span>
-                  : <span className="pill pending"><Clock3 size={12} />待人工审批</span>}
+              {asset.locked ? <span className="pill approved"><LockKeyhole size={12} />可用于分镜</span>
+                : <span className="pill pending"><Clock3 size={12} />待你确认</span>}
             </div>
-            {!asset.approved && <button className="text-button" onClick={() => onApprove(asset.id, operatorToken, evidence)}>批准</button>}
-            {asset.approved && !asset.locked && <button className="text-button" onClick={() => onLock(asset.id, operatorToken, evidence)}>锁定</button>}
+            {!asset.locked && <button className="text-button" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
             <button className="icon-button tiny" title="编辑元数据" onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
           </div>
         ))}
       </div>
-      <div className="guardrail-note"><LockKeyhole size={13} /><span>Agent 没有主资产创建、替换或审批权限；素材只在本机使用。</span></div>
+      <div className="guardrail-note"><LockKeyhole size={13} /><span>确认会固定素材版本；AI 无法替你确认或替换。需要修改用途时，可点击右侧编辑。</span></div>
     </section>
   );
 }
