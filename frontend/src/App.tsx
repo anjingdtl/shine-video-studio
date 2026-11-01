@@ -35,7 +35,7 @@ type ViewGroup = { view: ViewId; title: string; hint: string; core?: boolean; it
 const VIEW_GROUPS: ViewGroup[] = [
   {
     view: 'setup', title: '设置板块', hint: '装机 · 模型 · 偏好', items: [
-      { id: 'setup', text: '新机设置', icon: ShieldCheck },
+      { id: 'setup', text: '制作环境', icon: ShieldCheck },
       { id: 'settings', text: '模型与系统', icon: SlidersHorizontal },
       { id: 'preferences', text: '显示与偏好', icon: Sparkles },
     ],
@@ -696,7 +696,7 @@ function App() {
                 <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
               </div>
               {view !== 'setup' && <p className="empty-setup-hint">
-                还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「新机设置」检查环境与安装</button>——不需要先建项目。
+                还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「制作环境」检查本机</button>——不需要先建项目。
               </p>}
             </section>
           </>}
@@ -889,7 +889,7 @@ function App() {
           <div className="help-section">
             <h3>推荐的顺序</h3>
             <ol className="help-steps">
-              <li><b>装机</b>（仅首次）— 在「设置板块 → 新机设置」自检环境、装模型。</li>
+              <li><b>装机</b>（仅首次）— 在「设置板块 → 制作环境」自检环境、复用已有模型。</li>
               <li><b>传素材</b> — 「生产板块 → 素材与风格」上传并由你「批准 + 锁定」。</li>
               <li><b>定风格</b> — 填七项风格约定并「冻结」，之后所有镜头都按它执行。</li>
               <li><b>排分镜</b> — 手写或 AI 自动分镜，给每个镜头绑上素材。</li>
@@ -912,7 +912,7 @@ function App() {
             <ul className="help-glossary">
               <li>页面数据不对 → 点右上角「刷新」。</li>
               <li>任务不动了 → 「设置板块 → 模型与系统」看后台执行器是否在线。</li>
-              <li>新电脑第一次用 → 先走「设置板块 → 新机设置」自检。</li>
+              <li>新电脑第一次用 → 先走「设置板块 → 制作环境」自检。</li>
             </ul>
           </div>
         </div>

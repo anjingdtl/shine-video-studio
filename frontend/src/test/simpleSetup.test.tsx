@@ -21,7 +21,7 @@ beforeEach(() => {
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
 async function detect(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '检测本机环境' }));
+  await user.click(screen.getByRole('button', { name: '检测本机' }));
   await waitFor(() => expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeEnabled());
 }
 
@@ -58,7 +58,7 @@ describe('本机环境简化流程', () => {
     }) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
-    await user.click(screen.getByRole('button', { name: '检测本机环境' }));
+    await user.click(screen.getByRole('button', { name: '检测本机' }));
     await screen.findByText('发现 1 个已有安装。');
     expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
     expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
@@ -80,7 +80,7 @@ describe('本机环境简化流程', () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
-    await user.click(screen.getByRole('button', { name: '检测本机环境' }));
+    await user.click(screen.getByRole('button', { name: '检测本机' }));
     await screen.findByText('扫描失败');
     expect(screen.queryByRole('button', { name: '下载缺项并自动配置' })).toBeNull();
     expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);

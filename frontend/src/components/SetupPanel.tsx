@@ -72,6 +72,64 @@ function fmtBytes(value: number): string {
   return `${result.toFixed(result >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+/** Plain-language model cards: the fixed catalog grouped by purpose, with an
+ *  honest state per group (docs/UI_SIMPLIFICATION_PLAN_20261102.md section 5.2).
+ *  Never claims "installed" from a filename match: candidates stay pending
+ *  until hash verification, and "not scanned yet" never reads as "absent". */
+const PURPOSE_LABELS: Record<string, string> = {
+  video: '视频生成 · MiniMax H3',
+  vision: '画面检查 · Qwen3-VL',
+  audio: '语音检查 · Qwen3-ASR',
+  program: '程序与节点 · ComfyUI',
+};
+
+function purposeOf(component: CatalogComponent): 'video' | 'vision' | 'audio' | 'program' {
+  const id = component.component_id.toLowerCase();
+  if (component.kind === 'node' || component.kind === 'runtime' || id.startsWith('comfyui')) return 'program';
+  if (id.includes('vl')) return 'vision';
+  if (id.includes('asr')) return 'audio';
+  return 'video';
+}
+
+type ModelCard = {
+  key: string;
+  label: string;
+  components: CatalogComponent[];
+  state: { text: string; tone: string };
+  detail: string;
+};
+
+function buildModelCards(
+  checked: boolean,
+  catalog: CatalogSummary | null,
+  scan: ExistingScan | null,
+  resolved: boolean,
+  importedResult: string,
+): ModelCard[] {
+  if (!checked || !catalog) return [];
+  const groups = new Map<string, CatalogComponent[]>();
+  for (const component of catalog.components) {
+    const purpose = purposeOf(component);
+    const bucket = groups.get(purpose) ?? [];
+    bucket.push(component);
+    groups.set(purpose, bucket);
+  }
+  const cards: ModelCard[] = [];
+  for (const [purpose, components] of groups) {
+    const candidateCount = scan ? scan.matches.filter((row) => purposeOf({ component_id: row.component_id } as CatalogComponent) === purpose).length : 0;
+    cards.push({
+      key: purpose,
+      label: PURPOSE_LABELS[purpose] ?? purpose,
+      components,
+      state: scan
+        ? (resolved && importedResult ? { text: '已校验复用（哈希匹配进入缓存）', tone: 'verified' } : candidateCount > 0 ? { text: `发现文件，待校验（${candidateCount} 项）`, tone: 'candidate' } : { text: '未在已检查位置发现（可选择其他目录）', tone: 'absent' })
+        : { text: '待检查已有目录', tone: 'muted' },
+      detail: scan ? `候选 ${candidateCount} · 未发现 ${scan.missing.length}` : '',
+    });
+  }
+  return cards;
+}
+
 export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
   const [checked, setChecked] = useState(false);
   const [progress, setProgress] = useState('');
@@ -369,13 +427,15 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     });
   }
 
+  const modelCards = buildModelCards(checked, catalog, existingScan, existingResolved, importResult);
+
   return (
     <section className="card section-card" id="setup">
       <div className="section-heading">
         <div>
-          <div className="section-kicker">00 / NEW MACHINE SETUP</div>
-          <h2>新机设置与生产就绪</h2>
-          <p>先点击检测，再确认下载。安装、工作流登记和运行配置由系统依次完成。</p>
+          <div className="section-kicker">00 / 制作环境</div>
+          <h2>制作环境</h2>
+          <p>先检测本机：不下载、不启动，只需要看结论和下一步。</p>
         </div>
         <div className="section-icon"><Sparkles size={17} /></div>
       </div>
@@ -383,17 +443,35 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
       <div className="settings-block">
-        <button className="primary-button" disabled={busy} onClick={detectEnvironment}>检测本机环境</button>
+        <button className="primary-button" disabled={busy} onClick={detectEnvironment}>{checked ? '重新检测' : '检测本机'}</button>
+        {!checked && <p role="status">还没有检测结果。检测是只读的：不会下载、复制或启动任何东西，也不需要项目。</p>}
         {checked && <>
-          <p>安装目录：{storage?.root ?? '尚未选择'} · 可用 {storage?.free_gb ?? '—'} GB</p>
+          <div className="env-summary-grid">
+            <div className="env-summary-item"><b>基础环境</b><span>{env?.blockers.length ? '有阻断项（见下方提示）' : '满足制作要求'}</span></div>
+            <div className="env-summary-item"><b>安装空间</b><span>{storage ? `${storage.root} · 可用 ${storage.free_gb} GB` : '读取中'}</span></div>
+            <div className="env-summary-item"><b>生成服务</b><span>{runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
+            <div className="env-summary-item"><b>AI 助手</b><span>在「模型与系统」单独配置；配置 LLM 不代表拥有画面/语音检查能力</span></div>
+            <div className="env-summary-item"><b>真实出片</b><span>只能由真实生产证据更新；Mock/演示不改变它</span></div>
+          </div>
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
           <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '工作台尚未配置就绪；这不代表本机没有安装 ComfyUI 或模型。'}</p>}
+          <h3>本机已有模型</h3>
+          <p className="env-model-note">来自固定清单与已有目录检查；路径、大小、哈希等详情在下方高级区。</p>
+          <div className="env-model-grid">
+            {modelCards.map((card) => (
+              <div className="env-model-card" key={card.key}>
+                <b>{card.label}</b>
+                <span>{card.components.map((component) => component.component_id).join('、')}</span>
+                <em className={card.state.tone}>{card.state.text}</em>
+                {card.detail && <small>{card.detail}</small>}
+              </div>
+            ))}
+  </div>
           <fieldset className="setup-existing" disabled={busy}>
             <legend>已有 ComfyUI 与模型复用</legend>
             <p>{existingRoots.length ? `发现 ${existingRoots.length} 个已有安装。` : '常见目录未发现安装，可手动指定；不会遍历整个磁盘。'}</p>
             {existingRoots.map(root => <p key={root}><button className="secondary-button" onClick={() => {
               setExistingPath(root); setExistingChoice('reuse'); setExistingResolved(false);
-              setExistingScan(null); setImportResult('');
             }}>{root}</button></p>)}
             <label><input type="radio" name="existing-comfy" checked={existingChoice === 'reuse'} onChange={() => {
               setExistingChoice('reuse'); setExistingResolved(false);
@@ -412,13 +490,14 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
                 <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{existingResolved ? '哈希结果见下方' : '待哈希校验'}</li>)}</ul>
                 <details><summary>查看未找到的固定版本模型</summary><ul>{existingScan.missing.map(row =>
                   <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path} · {fmtBytes(row.size)}</li>)}</ul></details>
-                {!!existingScan.skipped.length && <p>部分目录无法读取或为外部链接，未完整扫描，请核对模型位置。</p>}
                 <button className="secondary-button" disabled={!storage || storage.requires_selection || existingResolved} onClick={reuseExisting}>校验并复用匹配模型</button>
               </>}
               {importResult && <p role="status">{importResult}</p>}
             </>}
             <p>复用只复制哈希匹配的模型到工作台缓存；原安装、节点、模型保持不变。工作台仍需独立配置固定版本运行环境，检测到目录不等于生产验证通过。外部链接与 extra_model_paths 指向的模型目录暂不自动读取。</p>
           </fieldset>
+          <p className="env-next-note">下一步只有一个主动作：检测 → 检查已有目录 → 校验并复用 →（需要时）下载缺项并自动配置 → 验证服务 → 进入制作。已完成步骤不要求重做。</p>
+          <p>检测不会下载模型或提交视频。下载前会显示目录、体积与安装范围，由你确认。</p>
           <button className="primary-button" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
             || !existingResolved
             || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
@@ -427,7 +506,6 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           {storage?.requires_selection && <p>请选择下载安装目录：<a href="#deployment-storage">选择目录</a></p>}
         </>}
         {progress && <p role="status">{progress}</p>}
-        <p>检测不会下载模型或提交视频。下载前会显示目录、体积与安装范围，由你确认。</p>
       </div>
 
       <details><summary>查看检测与安装详情（高级）</summary>

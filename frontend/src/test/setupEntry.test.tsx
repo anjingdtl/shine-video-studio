@@ -20,7 +20,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('空数据库的新机设置入口', () => {
+describe('空数据库的制作环境入口', () => {
   function emptyDatabase() {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([]) });
   }
@@ -32,7 +32,7 @@ describe('空数据库的新机设置入口', () => {
     expect(await screen.findByText('从一个项目开始')).toBeInTheDocument();
     // The setup section is reachable without a project through real navigation.
     await user.click(screen.getByTitle('打开设置板块'));
-    expect(await screen.findByText('新机设置与生产就绪')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
     expect(screen.getByText(/1 · 环境检查/)).toBeInTheDocument();
     // The project creation entry stays available in the same view.
     expect(screen.getByText(/接下来，从第一个项目开始/)).toBeInTheDocument();
@@ -44,7 +44,7 @@ describe('空数据库的新机设置入口', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByTitle('打开设置板块'));
-    await screen.findByText('新机设置与生产就绪');
+    await screen.findByRole('heading', { name: '制作环境' });
     expect(screen.getByText(/计划生成、Profile 登记、配置生成与激活需要先创建一个项目/)).toBeInTheDocument();
   });
 
@@ -53,7 +53,7 @@ describe('空数据库的新机设置入口', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByTitle('打开设置板块'));
-    await screen.findByText('新机设置与生产就绪');
+    await screen.findByRole('heading', { name: '制作环境' });
     stub.add({
       method: 'POST', pattern: /\/api\/v1\/projects$/,
       respond: (_url, init) => {

@@ -626,3 +626,24 @@ html[data-theme='dark'] .style-diff th,html[data-theme='dark'] .style-diff td{bo
 html[data-theme='dark'] .style-diff tr.changed td,html[data-theme='dark'] .style-diff tr.changed th{background:#2c3325}
 html[data-theme='dark'] .style-preset-summary{color:#a4a698}
 html[data-theme='dark'] .style-ai-empty,html[data-theme='dark'] .style-ai-note{color:#8f9186}
+
+/* ---- Setup panel: plain-language environment summary (2026-11-02) ---- */
+.env-summary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}
+.env-summary-item{border:1px solid var(--line);border-radius:7px;padding:9px 11px;background:#fcfcf9}
+.env-summary-item b{display:block;font-size:11px;color:#45473f;margin-bottom:3px}
+.env-summary-item span{font-size:10px;color:#6f715f;line-height:1.6}
+.env-model-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0 4px}
+.env-model-card{border:1px solid var(--line);border-radius:7px;padding:10px 11px;background:#fff;display:flex;flex-direction:column;gap:4px;min-width:0}
+.env-model-card b{font-size:11px;color:#3f4138}
+.env-model-card span{font:9px var(--mono);color:#8f9186;overflow-wrap:anywhere}
+.env-model-card em{font-style:normal;font-size:10px;font-weight:600;border-radius:4px;padding:2px 6px;width:fit-content}
+.env-model-card em.muted{color:#8f9186;background:#f2f2ec}
+.env-model-card em.candidate{color:#92783f;background:#f5efdd}
+.env-model-card em.absent{color:#8a6f45;background:#f4f1e7}
+.env-model-card em.verified{color:#5c7553;background:#eef2e3}
+.env-model-note,.env-next-note{font-size:10px;color:#8a8b84;margin:6px 0;line-height:1.7}
+html[data-theme='dark'] .env-summary-item,html[data-theme='dark'] .env-model-card{background:#24251f;border-color:#3a3b31}
+html[data-theme='dark'] .env-model-card em.muted{background:#2c2d26;color:#9a9c90}
+html[data-theme='dark'] .env-model-card em.candidate{background:#38301f;color:#cbb287}
+html[data-theme='dark'] .env-model-card em.absent{background:#343021;color:#c2ac85}
+html[data-theme='dark'] .env-model-card em.verified{background:#2c3325;color:#a9c193}
