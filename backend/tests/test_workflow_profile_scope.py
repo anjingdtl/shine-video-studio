@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from fastapi.testclient import TestClient
@@ -183,6 +184,42 @@ def test_concurrent_registrations_do_not_create_conflicting_copies(tmp_path):
         assert set(codes) <= {200, 409}, codes
         rows = client.get(f"/api/v1/workflow-profiles?project_id={project}").json()
         assert len(rows) == 2, rows
+    finally:
+        app.state.engine.dispose()
+
+
+def test_concurrent_global_creates_are_database_unique(tmp_path, monkeypatch):
+    """All requests pass the precheck before inserting: exactly one may commit."""
+    from shine import api_comfy
+    from tests.conftest import COMFY_GRAPH, COMFY_PARAM_MAP
+
+    client, factory, app = _prep(tmp_path)
+    count = 4
+    barrier = threading.Barrier(count)
+    entered = threading.local()
+    real_metadata = api_comfy.profile_metadata
+
+    def synchronized_metadata(*args, **kwargs):
+        result = real_metadata(*args, **kwargs)
+        # Serialization derives metadata again after the winning commit.
+        # Synchronize only the pre-insert call for each request thread.
+        if not getattr(entered, "precheck_complete", False):
+            entered.precheck_complete = True
+            barrier.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(api_comfy, "profile_metadata", synchronized_metadata)
+    body = {"name": "global-concurrent-profile", "mode": "T2VA", "graph": COMFY_GRAPH,
+            "parameter_map": COMFY_PARAM_MAP, "required_nodes": ["H3BaseSampler"]}
+    try:
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            responses = list(pool.map(lambda _: client.post("/api/v1/workflow-profiles", json=body), range(count)))
+        assert sorted(r.status_code for r in responses) == [201, 409, 409, 409]
+        with factory() as db:
+            rows = db.scalars(select(WorkflowProfile).where(
+                WorkflowProfile.name == body["name"], WorkflowProfile.project_id.is_(None),
+            )).all()
+            assert len(rows) == 1
     finally:
         app.state.engine.dispose()
 

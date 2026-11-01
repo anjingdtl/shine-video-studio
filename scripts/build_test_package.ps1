@@ -190,6 +190,8 @@ $buildInfo = [ordered]@{
         'a full 60.8GB download and a clean Windows install have not been exercised',
         'no real H3 inference through a newly installed managed instance has been demonstrated',
         'the M4 60-second, two-person-dialogue acceptance film has not been run',
+        'existing real films still require final human review; this build does not promote pending_review to accepted',
+        'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine'
     )
     closed_in_this_build = @(
@@ -198,7 +200,10 @@ $buildInfo = [ordered]@{
         'child process TMPDIR no longer falls back to the system drive',
         'production completion (PASSED) is separated from acceptance_status',
         'disk budget, package count and download size match the catalog (180 GiB / 154 / 60.8 GB)',
-        'the acceptance script no longer depends on a personal external ComfyUI checkout'
+        'the acceptance script no longer depends on a personal external ComfyUI checkout',
+        'the Web workbench has four sections with plain-language navigation and five new-user flow fixes',
+        'style freeze compares all seven approved fields and consumes the grant in the same write transaction',
+        'concurrent global workflow registrations are protected by a partial unique database index (f150a0020001)'
     )
     excluded_from_package = @(
         'models and weights',

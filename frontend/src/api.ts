@@ -16,7 +16,11 @@ const FIELD_LABELS: Record<string, string> = {
  *  technical JSON stays available for support but is no longer the only
  *  thing the user sees. */
 function describeDetail(detail: unknown): string {
-  if (typeof detail === 'string') return detail;
+  if (typeof detail === 'string') {
+    if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
+    if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
+    return detail;
+  }
   if (Array.isArray(detail)) {
     const parts = detail.map((item) => {
       const loc: unknown[] = Array.isArray(item?.loc) ? item.loc : [];

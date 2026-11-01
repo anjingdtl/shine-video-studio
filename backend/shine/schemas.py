@@ -54,12 +54,6 @@ class AssetMetadataUpdate(APIModel):
     tags: list[str] | None = Field(default=None, max_length=40)
 
 
-class StyleFreezeRequest(APIModel):
-    grant_id: str | None = None
-    snapshot: str | None = None
-    approval_note: str = Field(default="", max_length=1000)
-
-
 class StyleBible(APIModel):
     photography_language: str = Field(min_length=1, max_length=2000)
     shot_blocking: str = Field(min_length=1, max_length=2000)
@@ -68,6 +62,14 @@ class StyleBible(APIModel):
     lens_texture: str = Field(min_length=1, max_length=2000)
     editing_rhythm: str = Field(min_length=1, max_length=2000)
     sound_performance: str = Field(min_length=1, max_length=2000)
+
+
+class StyleFreezeRequest(APIModel):
+    grant_id: str | None = None
+    snapshot: str | None = None
+    approval_note: str = Field(default="", max_length=1000)
+    # Required for authenticated approvals; optional for the legacy, unprotected API.
+    expected_style: StyleBible | None = None
 
 
 class DialogueLine(APIModel):

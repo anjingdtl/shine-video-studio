@@ -987,11 +987,13 @@ def test_v13_style_freeze_requires_human_grant_for_current_draft(prep):
     changed = style_payload() | {"lens_texture": "Changed after the review snapshot"}
     client.put(f"/api/v1/projects/{project}/style/draft", json=changed).raise_for_status()
     decision = {k: grant[k] for k in ("grant_id", "snapshot")}
+    decision["expected_style"] = style_payload()
     post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=409)
     grant = post(
         client, "/preparation/approval-grants", {"action": "style_freeze", "target_id": project}, operator=True
     )
     decision = {k: grant[k] for k in ("grant_id", "snapshot")}
+    decision["expected_style"] = changed
     frozen = post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=201)
     assert frozen["approved_by"] == "v13-test-operator"
     post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=409)

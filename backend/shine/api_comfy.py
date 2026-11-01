@@ -130,8 +130,8 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
     if body.project_id:
         require_project(db, body.project_id)
     # Same visibility rule as the list endpoint: a name is unique within one
-    # project and among global profiles.  (SQLite treats NULLs as distinct,
-    # so the global case cannot rely on the table constraint alone.)
+    # project and among global profiles. Database constraints protect both
+    # scopes; this precheck only provides an early friendly conflict.
     scoped = select(WorkflowProfile).where(WorkflowProfile.name == body.name)
     scoped = (
         scoped.where(WorkflowProfile.project_id == body.project_id)
@@ -194,8 +194,8 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
     try:
         db.flush()
     except IntegrityError as exc:
-        # Two concurrent registrations for the same project raced past the
-        # name check; the (project_id, name) constraint rejects the copy.
+        # Private or global registrations raced past the name precheck;
+        # their database uniqueness constraint rejects the copy.
         db.rollback()
         raise HTTPException(
             status_code=409, detail="A workflow profile with this name already exists"

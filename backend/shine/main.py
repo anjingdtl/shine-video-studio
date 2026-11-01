@@ -687,8 +687,19 @@ def create_app(
             actor = operator(request, request.app.state.settings, request.headers.get("authorization", ""))
             if not body or not body.grant_id or not body.snapshot:
                 raise HTTPException(409, "STYLE_APPROVAL_GRANT_REQUIRED")
+            if body.expected_style is None:
+                raise HTTPException(409, "STYLE_APPROVAL_CONTENT_REQUIRED")
+        if protected or (body and body.expected_style is not None):
+            # Compare the displayed content and consume its grant under the same
+            # write lock as freezing. A grant alone only binds the server draft
+            # at issuance, which may already differ from the approving page.
             db.rollback()
             db.execute(text("BEGIN IMMEDIATE"))
+            project = require_project(db, project_id)
+            if body and body.expected_style is not None:
+                if project.style_draft != body.expected_style.model_dump(mode="json"):
+                    raise HTTPException(409, "STYLE_APPROVAL_CONTENT_CHANGED")
+        if protected:
             approval.consume(db, actor, "style_freeze", require_project(db, project_id), body.grant_id, body.snapshot)
         project = require_project(db, project_id)
         style, impact = freeze_style(db, project, approval_note=(body.approval_note if body else ""), actor=actor)

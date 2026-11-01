@@ -38,6 +38,7 @@ export default function StylePanel({ style, setStyle, currentStyle, styles, busy
               value={style[key]}
               placeholder={hint}
               rows={2}
+              disabled={busy}
               onChange={(event) => setStyle((value) => ({ ...value, [key]: event.target.value }))}
             />
           </label>

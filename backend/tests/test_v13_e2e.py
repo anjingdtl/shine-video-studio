@@ -114,7 +114,7 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     post(
         client,
         f"/projects/{project}/style/freeze",
-        {k: style_grant[k] for k in ("grant_id", "snapshot")},
+        {**{k: style_grant[k] for k in ("grant_id", "snapshot")}, "expected_style": ENGLISH_STYLE},
         operator=True,
         expected=201,
     )

@@ -1,5 +1,7 @@
 # LOCAL_TECH_FINAL_CLOSURE_V3 · 测试记录
 
+> **当前复验（2026-11-01）**：`af5d6b6` 加并发修复，完整后端 **1315 passed / 1 skipped / 2 warnings，585.28 秒，exit=0**；前端 **20 passed**，Ruff、TypeScript/Vite 通过；独立 HTTP 服务三轮各 8 个同名全局 POST 均为 1×201、7×409、数据库 1 行，过期风格批准 409。唯一 skip 为真实 ComfyUI 启动探针；额外 `alembic check` 存在两条基线已有索引差异。命令及证据见 [本轮报告](WEB_CONCURRENCY_FIX_20261101.md)，重封装记录见 [REPACKAGE_20261101](REPACKAGE_20261101.md)。以下不作为当前套件数字。
+
 > **最新复验（2026-10-31，基线 `81a92f3` + 本轮工作树修复）**：新增 3 项正式回归修复前全部失败、修复后通过；交付套件与两轮原始反例 **23 passed**，全量后端 **1178 passed / 1 skipped / 2 warnings**（495.15 秒，exit=0）。Ruff、TypeScript/Vite、Windows Mock 栈及起停验证均 PASS，浏览器 MOCK_VERIFIED，历史证据索引 972/972 匹配。唯一 skip 为显式门控的真实 ComfyUI 启动探测。命令、证据与验收边界见 [本轮修复与验证](LOCAL_DELIVERY_FENCING_FIX_20261031.md)；以下为历史测试记录。
 
 > 记录截至 2026-10-31 11:45。功能提交 `a403a62`（基线 `09f17c6`）。

@@ -358,9 +358,9 @@ function App() {
     await withBusy(async () => {
       // Freeze exactly what the user sees: save the on-screen form first, then
       // request the approval grant against that saved snapshot, then freeze.
-      // The grant snapshot binds the saved draft, so the server refuses to
-      // freeze anything other than what was just approved (PLAN_HASH_CHANGED
-      // if the draft changes in between).
+      // Carry the actual approved content too: another page may change the
+      // saved draft before the grant is issued. The server checks both under
+      // the same write lock as freezing.
       const snapshot: Style = { ...style };
       await api(`/projects/${projectId}/style/draft`, json('PUT', snapshot));
       const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${operatorToken}` };
@@ -368,8 +368,12 @@ function App() {
         ...json('POST', { action: 'style_freeze', target_id: projectId }), headers,
       }) : { grant_id: undefined, snapshot: undefined };
       const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, {
-        ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot }), ...(operatorToken ? { headers } : {}),
+        ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot, expected_style: snapshot }), ...(operatorToken ? { headers } : {}),
       });
+      if (Object.entries(snapshot).some(([key, value]) => frozen.snapshot[key as keyof Style] !== value)) {
+        throw new Error('冻结结果与本次确认的风格内容不一致，请核验版本记录；没有自动重试。');
+      }
+      if (activeProjectId.current !== projectId) return;
       await loadProject(projectId);
       report(`已冻结第 ${frozen.version} 版（哈希 ${frozen.sha256.slice(0, 12)}…），与屏幕上确认的七项一致；${frozen.impact?.affected_shot_ids.length ?? 0} 个旧镜头仍引用老版本。`);
     });

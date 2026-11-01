@@ -78,6 +78,7 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     const freezes = stub.callsOf('POST', /style\/freeze$/);
     expect(draftPuts).toHaveLength(1);
     expect(freezes).toHaveLength(1);
+    expect(freezes[0].body).toMatchObject({ expected_style: savedDraft });
     expect(draftPuts[0].body).toMatchObject({ photography_language: '固定远景，禁止推近。（准备批准的最终修改）' });
     const putIndex = stub.calls.findIndex((call) => call.method === 'PUT' && /style\/draft$/.test(call.url));
     const postIndex = stub.calls.findIndex((call) => call.method === 'POST' && /style\/freeze$/.test(call.url));
@@ -127,7 +128,9 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     const user = userEvent.setup();
     stub.add({
       method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse(FROZEN_STYLE),
+      respond: (_url, init) => jsonResponse({
+        ...FROZEN_STYLE, snapshot: JSON.parse(String(init?.body)).expected_style,
+      }),
     });
 
     render(<App />);
@@ -154,5 +157,38 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
       expect(screen.getByText(/网络中断/)).toBeInTheDocument();
     });
     expect(screen.getByLabelText(/摄影语言/)).toHaveValue('（断网冻结）');
+  });
+
+  it('携带七项确认内容，签发前的其他页面修改被拒绝时保留输入', async () => {
+    const user = userEvent.setup();
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/,
+      respond: () => jsonResponse({ grant_id: 'grant-for-other-tab', snapshot: 'other-tab-snapshot' }) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
+      respond: () => jsonResponse({ detail: 'STYLE_APPROVAL_CONTENT_CHANGED' }, 409) });
+    render(<App />);
+    await fillSevenFields(user, 'Displayed A');
+    await user.type(screen.getByLabelText(/V1\.3 风格冻结操作员凭据/), 'test-operator-token');
+    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
+    await screen.findByText(/风格草稿已在其他页面修改/);
+    const decision = stub.callsOf('POST', /style\/freeze$/)[0].body;
+    expect(decision).toMatchObject({ expected_style: {
+      photography_language: 'Displayed A', shot_blocking: 'Displayed A', color_palette: 'Displayed A',
+      lighting_tone: 'Displayed A', lens_texture: 'Displayed A', editing_rhythm: 'Displayed A',
+      sound_performance: 'Displayed A',
+    } });
+    expect(screen.getByLabelText(/摄影语言/)).toHaveValue('Displayed A');
+    expect(screen.queryByText(/已冻结第 1 版/)).not.toBeInTheDocument();
+  });
+
+  it('不把不匹配的服务端冻结结果报告为与屏幕一致', async () => {
+    const user = userEvent.setup();
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
+      respond: () => jsonResponse(FROZEN_STYLE) });
+    render(<App />);
+    await fillSevenFields(user, 'Displayed A');
+    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
+    await screen.findByText(/冻结结果与本次确认的风格内容不一致/);
+    expect(screen.getByLabelText(/摄影语言/)).toHaveValue('Displayed A');
+    expect(screen.queryByText(/已冻结第 1 版/)).not.toBeInTheDocument();
   });
 });

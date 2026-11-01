@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shine.db import Base
@@ -414,9 +414,12 @@ class WorkflowProfile(Base):
     __tablename__ = "workflow_profiles"
     # Same visibility rule as the list endpoint: a project sees its own
     # profiles plus global ones, so a name may exist once per project and
-    # once globally.  SQLite treats NULLs as distinct, so the global-name
-    # case is additionally enforced in the API layer.
-    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_workflow_profile_project_name"),)
+    # once globally. SQLite's NULL semantics require a partial unique index
+    # as well, so concurrent global inserts cannot bypass an API precheck.
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_workflow_profile_project_name"),
+        Index("uq_workflow_profile_global_name", "name", unique=True, sqlite_where=text("project_id IS NULL")),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
