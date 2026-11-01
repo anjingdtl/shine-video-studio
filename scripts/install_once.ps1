@@ -314,14 +314,59 @@ if (-not $hasOperator) {
 }
 
 # ---- 4. Tools + dependencies + services ---------------------------------
+$backendPython = Join-Path $StorageRoot 'app/backend-env/Scripts/python.exe'
+$frontendModules = Join-Path $repoRoot 'frontend/node_modules'
+$pwshPath = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+$alreadyInstalled = $hasOperator -and $pwshPath -and
+    (Test-Path -LiteralPath $backendPython) -and (Test-Path -LiteralPath $frontendModules)
+
+if ($alreadyInstalled) {
+    # A second double-click must not reinstall dependencies. start_shine only
+    # reinstalls when -Install is passed or a dependency tree is missing.
+    Write-Host ''
+    Write-Banner '本机已安装：只启动服务并打开向导'
+    Write-Step "复用现有安装：$StorageRoot"
+    $startArgs = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startScript,
+        '-DataDir', $recordedData, '-ApiPort', "$apiPort", '-WebPort', "$webPort", '-OpenBrowser'
+    )
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $pwshPath @startArgs; $installCode = $LASTEXITCODE }
+    catch { Write-Fail $_.Exception.Message; $installCode = 1 }
+    finally { $ErrorActionPreference = $previous }
+    if ($installCode -ne 0) {
+        Write-Host ''
+        Write-Banner '启动失败'
+        Write-Fail "启动器返回码：$installCode"
+        Write-Host '  如果提示端口被占用，先双击 STOP_APP.cmd，再重试。' -ForegroundColor Yellow
+        Write-Host "  日志目录：$(Join-Path $recordedData 'run/logs')" -ForegroundColor Gray
+        if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
+        exit $installCode
+    }
+    $webUrl = "http://127.0.0.1:$webPort/#setup"
+    Write-Host ''
+    Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
+    Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
+    if (Test-Path -LiteralPath $credentialFile) {
+        Write-Host "  操作员密码： $credentialFile" -ForegroundColor Yellow
+    }
+    Write-Host '  停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
+    if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
+    exit 0
+}
+
 Write-Host ''
 Write-Banner '开始安装（首次约 20-60 分钟，取决于网络；请勿关闭窗口）'
-$bootstrapArgs = @(
-    '-StorageRoot', $StorageRoot,
-    '-DataDir', $recordedData,
-    '-OperatorPasswordFile', $credentialFile
-)
-if ($NoLaunch) { $bootstrapArgs += '-NoLaunch' }
+# Hashtable splatting binds by name. An array would bind positionally and hand
+# "-StorageRoot" to -ToolsManifest, which is exactly the kind of silent misuse
+# a one-click entry must not have.
+$bootstrapArgs = @{
+    StorageRoot = $StorageRoot
+    DataDir = $recordedData
+    OperatorPasswordFile = $credentialFile
+}
+if ($NoLaunch) { $bootstrapArgs['NoLaunch'] = $true }
 
 $previous = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -359,7 +404,7 @@ Write-Banner '安装完成，已进入新机设置向导'
 Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
 Write-Host "  API 健康页： http://127.0.0.1:$apiPort/health" -ForegroundColor Gray
 Write-Host "  安装目录：   $StorageRoot" -ForegroundColor Gray
-Write-Host "  数据目录：   $recordedData" -ForegroundColor Gray
+Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
 if (Test-Path -LiteralPath $credentialFile) {
     Write-Host "  操作员密码： $credentialFile  （抄录后请删除该文件）" -ForegroundColor Yellow
 }

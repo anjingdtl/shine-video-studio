@@ -81,3 +81,6 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Local agent workspace notes (never shipped in a package)
+.workbuddy/

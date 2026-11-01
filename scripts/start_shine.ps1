@@ -335,12 +335,18 @@ if ($OpenBrowser) {
     # no project at all; never mutate an existing workspace.
     try {
         $apiBase = "http://127.0.0.1:$ApiPort/api/v1"
-        $existingProjects = @(Invoke-RestMethod "$apiBase/projects" -TimeoutSec 10)
+        # Invoke-RestMethod turns an empty JSON array into $null, and @($null)
+        # still counts as one element. Normalise explicitly, otherwise a fresh
+        # install never creates the guided setup project.
+        $existing = $null
+        try { $existing = Invoke-RestMethod "$apiBase/projects" -TimeoutSec 10 } catch { $existing = $null }
+        $existingProjects = if ($null -eq $existing) { @() } else { @($existing) }
         if ($existingProjects.Count -eq 0) {
             $setupProject = @{ title = '本机安装与联调'; description = '由本地安装器创建的新机设置项目' } | ConvertTo-Json
             $setupProjectBytes = [System.Text.Encoding]::UTF8.GetBytes($setupProject)
             Invoke-RestMethod "$apiBase/projects" -Method Post -ContentType 'application/json; charset=utf-8' `
                 -Body $setupProjectBytes -TimeoutSec 15 | Out-Null
+            Write-Host 'Created the guided setup project: 本机安装与联调'
         }
         Start-Process "http://127.0.0.1:$WebPort/#setup"
     } catch {
