@@ -1,5 +1,7 @@
 # LOCAL_TECH_FINAL_CLOSURE_V3 · 最终收官报告
 
+> **2026-11-02 手工验收修复**：已有 ComfyUI 识别与模型缓存复用已补齐；目录识别与文件大小匹配均不冒充哈希校验或生产就绪。完整后端 1330 passed / 1 skipped / 2 warnings，前端 29 passed，Ruff/TypeScript/Vite 与在线只读探测通过，详见 [本轮报告](EXISTING_COMFYUI_FIX_20261102.md)。真实模型复制、下载与 H3 生产验收未运行，浏览器目视复验因工具无法可靠识别 URL 而未完成。历史影片与人工复审状态不变。
+
 > **当前状态（2026-11-01 重封装）**：在 `af5d6b6` 上追加关闭风格批准签发前竞态与全局工作流同名并发插入两处缺口；完整后端 **1315 passed / 1 skipped / 2 warnings**，前端 **20 passed**，Ruff、TypeScript/Vite、正常 Alembic 升级/回退和真实 HTTP 并发复验通过。`alembic check` 的两条交付表索引差异已在原始基线上复现，仍为 FAIL，不合并宣称全 PASS。既有真实影片 `pending_review`、人工批准和干净新机边界保持。详见 [并发修复报告](WEB_CONCURRENCY_FIX_20261101.md) 与 [本次封装记录](REPACKAGE_20261101.md)；以下为历史记录。
 
 > **最新本地修复（2026-10-31，第二轮复审）**：在 `81a92f3` 上发现的“丢失租约仍覆盖 EDL 元数据”和“64 个占用订单遮挡可执行订单”已直接修复。被测代码为 `81a92f3` 加本轮工作树修复，正式新增 3 项回归；定向 23 passed，全量 **1178 passed / 1 skipped / 2 warnings**。本轮已执行的本地工程检查 PASS，真实 ComfyUI 探测 SKIPPED；影片 `pending_review` 与人工批准边界保持。详见 [本轮修复与验证](LOCAL_DELIVERY_FENCING_FIX_20261031.md)。以下保留各历史轮次记录；本轮按用户指令仅做本地提交，未推送。

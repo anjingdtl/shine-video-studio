@@ -1,5 +1,13 @@
 # Upstream source and license audit
 
+## 2026-11-02 existing-installation detection repair
+
+Baseline `351067f`: independently implemented bounded filesystem discovery and pinned-file cache import.
+Reused only this repository's `ControlledDownloader.valid`, deployment catalog and isolated installer contracts.
+No upstream code copied, dependencies added, pinned revisions changed, or existing ComfyUI code executed.
+Runtime adoption is not inferred from discovery; source/node licensing and existing managed installation gates remain.
+Validation and limits: [repair report](EXISTING_COMFYUI_FIX_20261102.md).
+
 ## V1.1 recheck (2026-10-21)
 
 Re-read the official SKILL.md, base-en.txt and ref-en.txt through the GitHub connector at the

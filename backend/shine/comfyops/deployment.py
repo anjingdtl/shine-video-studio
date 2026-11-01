@@ -238,6 +238,12 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
         row = rows[component_id]
         packages.append({"id": row.id, "hash": row.sha256, "spec": row.payload})
     size = sum(f["size"] for p in packages for f in p["spec"]["files"])
+    from shine.comfyops.installer import ControlledDownloader
+
+    cache = storage_root / 'isolated-packages' / '.cache'
+    cached_bytes = sum(f['size'] for p in packages for f in p['spec']['files']
+                       if (cache / f['sha256']).is_file()
+                       and ControlledDownloader.valid(cache / f['sha256'], PackageFile.model_validate(f)))
     reserve = int(catalog.get('dependency_policy', {}).get('runtime_disk', {}).get('runtime_reserve_bytes', 0))
     if WHEEL_COMPONENT_ID not in rows:
         reserve = 0
@@ -248,7 +254,8 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
         raise HTTPException(409, "INSUFFICIENT_DISK_ON_HOST")
     payload = {
         "packages": packages,
-        "download_bytes": size,
+        "download_bytes": size - cached_bytes,
+        "cached_bytes": cached_bytes,
         "disk_required": disk_required,
         "runtime_reserve_bytes": reserve,
         "storage_root": str(storage_root),

@@ -117,6 +117,7 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'local-grant', snapshot: 'local-snapshot' }) },
     { method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse(SYSTEM_STATUS) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/environment$/, respond: () => jsonResponse(ENV_REPORT) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/existing-installations$/, respond: () => jsonResponse({ installations: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/catalog$/, respond: () => jsonResponse(CATALOG) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/readiness$/, respond: () => jsonResponse(READINESS) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/runtime$/, respond: () => jsonResponse(RUNTIME) },

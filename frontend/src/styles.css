@@ -80,6 +80,12 @@
 .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .settings-block{border:1px solid #eeeee6;border-radius:7px;padding:11px;background:#fcfcf9}
 .settings-block h3{display:flex;align-items:center;gap:6px;font-size:10px;margin:0 0 8px;color:#5e6055}
+.setup-existing{min-width:0;border:1px solid var(--line);border-radius:7px;margin:12px 0;padding:12px;overflow-wrap:anywhere}
+.setup-existing legend{font-weight:600;padding:0 6px}
+.setup-existing>label{display:flex;align-items:center;gap:7px;margin:10px 0}
+.setup-existing .existing-path{align-items:stretch;flex-direction:column}
+.setup-existing .existing-path input{width:100%;min-width:0;padding:8px;border:1px solid var(--line);border-radius:5px;background:#fff}
+.setup-existing .secondary-button{max-width:100%;height:auto;white-space:normal;overflow-wrap:anywhere;text-align:left}
 .switch-row{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dotted #f0f0e8}
 .switch-row b{display:block;font-size:9px}
 .switch-row small{display:block;font-size:8px;color:#a0a198;margin-top:3px;line-height:1.4}

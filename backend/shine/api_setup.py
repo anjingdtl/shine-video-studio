@@ -68,6 +68,44 @@ class StorageRequest(BaseModel):
     allow_system_drive: bool = False
 
 
+class ExistingInstallationRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    path: str = Field(min_length=1, max_length=1024)
+
+
+class ExistingModelImportRequest(ExistingInstallationRequest):
+    snapshot: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+@router.get('/existing-installations')
+def existing_installations(settings: SettingsDep):
+    from shine.comfyops.existing_installation import discover
+
+    return discover(list(settings.comfy_probe_roots))
+
+
+@router.post('/existing-installations/inspect')
+def inspect_existing(body: ExistingInstallationRequest, actor: Operator):
+    from shine.comfyops.existing_installation import inspect
+
+    return inspect(body.path, deployment.load_default_catalog())
+
+
+@router.post('/existing-installations/import-models')
+def import_existing_models(body: ExistingModelImportRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    from shine.comfyops.existing_installation import import_models, inspect
+    from shine.services import add_audit
+
+    report = inspect(body.path, deployment.load_default_catalog())
+    result = import_models(settings, report, body.snapshot)
+    add_audit(db, actor, 'EXISTING_COMFY_MODELS_CACHED', 'deployment', report['catalog_id'],
+              {'root': report['root'], 'snapshot': body.snapshot, 'reused_bytes': result['reused_bytes'],
+               'imported': [{'sha256': item['sha256'], 'source': item.get('source')} for item in result['imported']],
+               'rejected': [item['sha256'] for item in result['rejected']]})
+    db.commit()
+    return result
+
+
 @router.get('/storage')
 def storage(settings: SettingsDep):
     from shine.comfyops.storage import storage_report

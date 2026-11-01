@@ -45,6 +45,47 @@ function automaticRoutes(failValidation = false) {
 }
 
 describe('本机环境简化流程', () => {
+  it('发现已有安装时先检查复用，不能直接要求重新下载', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+      installations: ['F:\\AI\\ComfyUI'],
+    }) });
+    stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
+      root: 'F:\\AI\\ComfyUI', snapshot: 'a'.repeat(64), candidate_bytes: 13, scanned_files: 2,
+      matches: [{ component_id: 'h3', relative_path: 'model.safetensors', size: 13 }], missing: [], skipped: [],
+    }) });
+    stub.add({ method: 'POST', pattern: /existing-installations\/import-models$/, respond: () => jsonResponse({
+      reused_bytes: 13, rejected: [],
+    }) });
+    const user = userEvent.setup();
+    render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
+    await user.click(screen.getByRole('button', { name: '检测本机环境' }));
+    await screen.findByText('发现 1 个已有安装。');
+    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
+    expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: '检查已有目录' }));
+    await screen.findByText('h3 / model.safetensors：待哈希校验');
+    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    await user.click(screen.getByRole('button', { name: '校验并复用匹配模型' }));
+    expect(stub.callsOf('POST', /import-models$/)).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: '校验并复用匹配模型' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeEnabled());
+    expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
+    expect(stub.callsOf('GET', /connectivity$/)).toHaveLength(0);
+    await user.type(screen.getByRole('textbox', { name: '已有 ComfyUI 目录' }), 'changed');
+    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
+  });
+
+  it('自动检索失败时不开放下载，允许重新检测', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
+    const user = userEvent.setup();
+    render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
+    await user.click(screen.getByRole('button', { name: '检测本机环境' }));
+    await screen.findByText('扫描失败');
+    expect(screen.queryByRole('button', { name: '下载缺项并自动配置' })).toBeNull();
+    expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
+  });
+
   it('检测只读，取消下载不发起安装；无需密码', async () => {
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);

@@ -1,0 +1,138 @@
+"""Synthetic files only: no installed ComfyUI execution, downloads or model inference."""
+
+# ruff: noqa: F811
+import hashlib
+
+import pytest
+from fastapi import HTTPException
+
+from shine.comfyops import deployment
+from shine.comfyops import existing_installation as existing
+from tests.conftest import create_project
+from tests.test_v13_preparation import post, prep  # noqa: F401
+
+
+def installation(tmp_path):
+    root = tmp_path / 'portable' / 'ComfyUI'
+    (root / 'comfy').mkdir(parents=True)
+    (root / 'main.py').write_text('raise RuntimeError("must never execute")')
+    (root / 'models' / 'unet').mkdir(parents=True)
+    return root
+
+
+def catalog(data=b'correct model'):
+    return {'catalog_id': 'test', 'catalog_version': '1', 'components': [{
+        'component_id': 'model', 'kind': 'model', 'files': [{
+            'relative_path': 'weights.safetensors', 'size': len(data),
+            'sha256': hashlib.sha256(data).hexdigest(),
+        }],
+    }]}
+
+
+def test_discovery_finds_portable_at_common_depth_without_recursive_disk_scan(tmp_path):
+    parent = tmp_path / 'AIGC2026' / 'ComfyUI_bundle'
+    root = installation(parent)
+    # Put the portable root in the shape found in common Windows bundles.
+    (parent / 'portable').rename(parent / 'ComfyUI_renamed')
+    root = parent / 'ComfyUI_renamed' / 'ComfyUI'
+    result = existing.discover([str(root.parent)], drives=[tmp_path])
+    assert str(root) in result['installations']
+    assert result['coverage'] == 'COMMON_LOCATIONS_ONLY'
+    assert result['runtime_verified'] is False
+    # Direct portable layout is found automatically without a configured root.
+    simple = tmp_path / 'AIGC2026' / 'ComfyUI_simple'
+    (simple / 'ComfyUI' / 'comfy').mkdir(parents=True)
+    (simple / 'ComfyUI' / 'main.py').touch()
+    assert str(simple / 'ComfyUI') in existing.discover([], drives=[tmp_path])['installations']
+
+
+def test_inspection_is_read_only_and_size_never_means_verified(tmp_path):
+    root = installation(tmp_path)
+    source = root / 'models' / 'unet' / 'renamed.safetensors'
+    source.write_bytes(b'wrong!! model')
+    before = sorted(str(p) for p in tmp_path.rglob('*'))
+    report = existing.inspect(str(root.parent), catalog())
+    assert report['matches'][0]['status'] == 'PENDING_HASH'
+    assert report['runtime_verified'] is False
+    assert sorted(str(p) for p in tmp_path.rglob('*')) == before
+    assert source.read_bytes() == b'wrong!! model'
+
+
+def test_import_hashes_copied_bytes_rejects_mismatch_and_preserves_originals(prep, tmp_path):
+    _, _, settings = prep
+    root = installation(tmp_path)
+    source = root / 'models' / 'unet' / 'renamed.safetensors'
+    source.write_bytes(b'wrong!! model')
+    report = existing.inspect(str(root), catalog())
+    result = existing.import_models(settings, report, report['snapshot'])
+    assert result['reused_bytes'] == 0
+    assert result['rejected'][0]['status'] == 'HASH_MISMATCH'
+    cache = settings.comfyops_dir / 'isolated-packages' / '.cache'
+    assert list(cache.iterdir()) == []
+    source.write_bytes(b'correct model')
+    report = existing.inspect(str(root), catalog())
+    result = existing.import_models(settings, report, report['snapshot'])
+    assert result['reused_bytes'] == len(b'correct model')
+    assert source.read_bytes() == b'correct model'
+    assert (cache / report['matches'][0]['sha256']).read_bytes() == source.read_bytes()
+    assert result['status'] == 'CACHED_NOT_INSTALLED'
+    assert result['runtime_verified'] is False
+
+
+def test_import_rejects_changed_snapshot(prep, tmp_path):
+    _, _, settings = prep
+    root = installation(tmp_path)
+    report = existing.inspect(str(root), catalog())
+    (root / 'models' / 'unet' / 'added').write_bytes(b'correct model')
+    changed = existing.inspect(str(root), catalog())
+    with pytest.raises(HTTPException, match='409'):
+        existing.import_models(settings, changed, report['snapshot'])
+    assert not (settings.comfyops_dir / 'isolated-packages' / '.cache').exists()
+
+
+@pytest.mark.parametrize('path', ['relative/path', '//server/share', '\\\\server\\share'])
+def test_network_and_relative_roots_rejected(path):
+    with pytest.raises(HTTPException, match='422'):
+        existing.local_path(path)
+
+
+def test_endpoints_require_local_user_and_import_audit(prep, tmp_path, monkeypatch):
+    client, factory, settings = prep
+    root = installation(tmp_path)
+    source = root / 'models' / 'unet' / 'weights'
+    source.write_bytes(b'correct model')
+    monkeypatch.setattr(deployment, 'load_default_catalog', catalog)
+    post(client, '/setup/existing-installations/inspect', {'path': str(root)}, expected=403)
+    report = post(client, '/setup/existing-installations/inspect', {'path': str(root)}, operator=True)
+    response = client.post('/api/v1/setup/existing-installations/import-models', json={
+        'path': str(root), 'snapshot': report['snapshot'],
+    }, headers={'X-Shine-Local-Action': '1'})
+    assert response.status_code == 200, response.text
+    assert response.json()['reused_bytes'] == 13
+    from sqlalchemy import select
+
+    from shine.models import AuditEvent
+    with factory() as db:
+        assert any(row.event_type == 'EXISTING_COMFY_MODELS_CACHED' for row in db.scalars(select(AuditEvent)))
+
+
+def test_install_plan_excludes_only_hash_verified_cache_from_download(prep):
+    client, _, settings = prep
+    project = create_project(client)
+    component = deployment.load_default_catalog()['components'][0]
+    spec = component['files'][0]
+    # Use a small valid catalog package instead of allocating real archives.
+    from unittest.mock import patch
+
+    raw = deployment.load_default_catalog()
+    raw['components'][0]['files'][0].update(size=13, sha256=hashlib.sha256(b'correct model').hexdigest())
+    cache = settings.comfyops_dir / 'isolated-packages' / '.cache'
+    cache.mkdir(parents=True)
+    target = cache / raw['components'][0]['files'][0]['sha256']
+    target.write_bytes(b'wrong!! model')
+    with patch.object(deployment, 'load_deployment_catalog', return_value=raw):
+        body = {'components': [component['component_id']], 'project_id': project, 'disk_free': 10**12}
+        assert post(client, '/setup/install-plan', body)['download_bytes'] == 13
+        target.write_bytes(b'correct model')
+        assert post(client, '/setup/install-plan', body)['download_bytes'] == 0
+    assert spec['size'] > 13

@@ -5,6 +5,9 @@ import { label, prepRowLabels, providerLabels, serviceStatusLabels } from '../co
 import type { DeploymentStorage } from './StorageSettings';
 
 type ToolInfo = { present: boolean; version: string; at_floor: boolean };
+type ExistingScan = { root: string; snapshot: string; candidate_bytes: number; scanned_files: number;
+  matches: Array<{ component_id: string; relative_path: string; size: number }>;
+  missing: Array<{ component_id: string; relative_path: string; size: number }>; skipped: string[] };
 type EnvReport = {
   platform: Record<string, string>;
   tools: Record<string, ToolInfo>;
@@ -72,6 +75,12 @@ function fmtBytes(value: number): string {
 export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
   const [checked, setChecked] = useState(false);
   const [progress, setProgress] = useState('');
+  const [existingRoots, setExistingRoots] = useState<string[]>([]);
+  const [existingPath, setExistingPath] = useState('');
+  const [existingScan, setExistingScan] = useState<ExistingScan | null>(null);
+  const [existingResolved, setExistingResolved] = useState(false);
+  const [existingChoice, setExistingChoice] = useState<'reuse' | 'new'>('reuse');
+  const [importResult, setImportResult] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(null);
   const [connectivity, setConnectivity] = useState<Connectivity | null>(null);
   const [storage, setStorage] = useState<DeploymentStorage | null>(null);
@@ -250,22 +259,53 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   function detectEnvironment() {
     void run(async () => {
       setChecked(false);
-      const [environment, ready, state, disk] = await Promise.all([
+      setExistingResolved(false); setExistingScan(null); setImportResult('');
+      const [environment, ready, state, disk, existing] = await Promise.all([
         api<EnvReport>('/setup/environment'), api<Readiness>('/setup/readiness'),
         api<RuntimeState>('/setup/runtime'), api<DeploymentStorage>('/setup/storage'),
+        api<{ installations: string[] }>('/setup/existing-installations'),
       ]);
       setEnv(environment); setReadiness(ready); setRuntime(state); setStorage(disk);
+      setExistingRoots(existing.installations);
+      setExistingChoice(existing.installations.length ? 'reuse' : 'new');
+      setExistingPath(existing.installations[0] ?? '');
+      setExistingResolved(existing.installations.length === 0);
       setChecked(true);
       return environment.blockers.length
         ? '检测完成，请先处理下方提示的硬件或基础工具问题。'
-        : '检测完成。点击下方按钮，即可确认下载缺项并自动完成配置。';
+        : existing.installations.length ? '发现已有 ComfyUI，请先检查可复用的模型。'
+          : '常见目录检测完成。如已有 ComfyUI，可手动指定目录；未发现不代表未安装。';
+    });
+  }
+
+  function inspectExisting() {
+    void run(async () => {
+      setExistingScan(null); setExistingResolved(false); setImportResult('');
+      const result = await api<ExistingScan>('/setup/existing-installations/inspect',
+        withJson('POST', { path: existingPath }));
+      setExistingScan(result);
+      return `目录已识别，发现 ${result.matches.length} 项待哈希校验的模型文件。`;
+    });
+  }
+
+  function reuseExisting() {
+    if (!existingScan || !storage) return;
+    if (!window.confirm(`校验并复用已有模型？\n来源：${existingScan.root}\n目标：${storage.root}\n最多复制 ${fmtBytes(existingScan.candidate_bytes)}；仅哈希与固定清单一致的文件进入缓存。原安装保持不变，不会下载或启动服务。`)) return;
+    void run(async () => {
+      const result = await api<{ reused_bytes: number; rejected: Array<{ component_id: string; relative_path: string }> }>(
+        '/setup/existing-installations/import-models', { ...withJson('POST', {
+          path: existingScan.root, snapshot: existingScan.snapshot,
+        }), signal: AbortSignal.timeout(3_600_000) });
+      const message = `已校验并缓存 ${fmtBytes(result.reused_bytes)}，${result.rejected.length} 项哈希不匹配，不能按固定版本复用。${result.rejected.map(row => `${row.component_id}/${row.relative_path}`).join('、')} 后续只下载缓存中缺少的组件。`;
+      setImportResult(message); setExistingResolved(true);
+      return message;
     });
   }
 
   function prepareAutomatically() {
-    if (!projectId || !checked || !storage || storage.requires_selection) return;
+    if (!projectId || !checked || !storage || storage.requires_selection || !existingResolved) return;
     const selected = projectId;
-    if (!window.confirm(`下载并配置本机生产环境？\n目录：${storage.root}\n完整清单约 ${fmtBytes(catalog?.total_bytes ?? 0)}，已校验的缓存会复用。\n将安装固定版本的第三方程序、节点和模型，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
+    if (!window.confirm(`下载并配置本机生产环境？\n目录：${storage.root}\n完整清单约 ${fmtBytes(catalog?.total_bytes ?? 0)}，已校验复用的模型与缓存不会重复下载。\n将独立安装固定版本的程序、节点及缺少的模型，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
     void run(async () => {
       const ensureCurrent = () => {
         if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
@@ -347,8 +387,40 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         {checked && <>
           <p>安装目录：{storage?.root ?? '尚未选择'} · 可用 {storage?.free_gb ?? '—'} GB</p>
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
-            <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '模型与服务尚待准备，确认后自动完成。'}</p>}
+          <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '工作台尚未配置就绪；这不代表本机没有安装 ComfyUI 或模型。'}</p>}
+          <fieldset className="setup-existing" disabled={busy}>
+            <legend>已有 ComfyUI 与模型复用</legend>
+            <p>{existingRoots.length ? `发现 ${existingRoots.length} 个已有安装。` : '常见目录未发现安装，可手动指定；不会遍历整个磁盘。'}</p>
+            {existingRoots.map(root => <p key={root}><button className="secondary-button" onClick={() => {
+              setExistingPath(root); setExistingChoice('reuse'); setExistingResolved(false);
+              setExistingScan(null); setImportResult('');
+            }}>{root}</button></p>)}
+            <label><input type="radio" name="existing-comfy" checked={existingChoice === 'reuse'} onChange={() => {
+              setExistingChoice('reuse'); setExistingResolved(false);
+            }} />检查并复用已有模型</label>
+            <label><input type="radio" name="existing-comfy" checked={existingChoice === 'new'} onChange={() => {
+              setExistingChoice('new'); setExistingResolved(true);
+            }} />独立安装，不导入已有模型</label>
+            {existingChoice === 'reuse' && <>
+              <label className="existing-path">已有 ComfyUI 目录<input value={existingPath} onChange={e => {
+                setExistingPath(e.target.value); setExistingScan(null); setExistingResolved(false); setImportResult('');
+              }} placeholder="包含 main.py 的目录或整合包目录" /></label>
+              <button className="secondary-button" disabled={!existingPath.trim()} onClick={inspectExisting}>检查已有目录</button>
+              {existingScan && <>
+                <p>已识别：{existingScan.root} · 扫描 {existingScan.scanned_files} 个文件。</p>
+                <p>候选可复用 {existingScan.matches.length} 项（{fmtBytes(existingScan.candidate_bytes)}，{existingResolved ? '哈希结果见下方' : '待哈希校验'}）；未找到固定版本文件 {existingScan.missing.length} 项。</p>
+                <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{existingResolved ? '哈希结果见下方' : '待哈希校验'}</li>)}</ul>
+                <details><summary>查看未找到的固定版本模型</summary><ul>{existingScan.missing.map(row =>
+                  <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path} · {fmtBytes(row.size)}</li>)}</ul></details>
+                {!!existingScan.skipped.length && <p>部分目录无法读取或为外部链接，未完整扫描，请核对模型位置。</p>}
+                <button className="secondary-button" disabled={!storage || storage.requires_selection || existingResolved} onClick={reuseExisting}>校验并复用匹配模型</button>
+              </>}
+              {importResult && <p role="status">{importResult}</p>}
+            </>}
+            <p>复用只复制哈希匹配的模型到工作台缓存；原安装、节点、模型保持不变。工作台仍需独立配置固定版本运行环境，检测到目录不等于生产验证通过。外部链接与 extra_model_paths 指向的模型目录暂不自动读取。</p>
+          </fieldset>
           <button className="primary-button" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
+            || !existingResolved
             || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
             onClick={prepareAutomatically}>{runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId ? '本项目环境已配置' : '下载缺项并自动配置'}</button>
           {!projectId && <p>先在下方给项目起个名字，即可开始自动配置。</p>}
