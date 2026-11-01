@@ -530,6 +530,11 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     }
 
 
+def persist_env(updates: dict, env_path: Path | None = None) -> list:
+    """Persist host-local settings into .env; the single writer for this file."""
+    return _update_env_file(env_path or ENV_PATH, updates)
+
+
 def _update_env_file(env_path: Path, updates: dict) -> list:
     """Update or create the repo .env; never touches values for keys it does not own."""
     existing_lines = []

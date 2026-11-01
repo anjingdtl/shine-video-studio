@@ -89,6 +89,15 @@ def environment(settings: SettingsDep):
             "bootstrap": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1"}
 
 
+@router.get("/connectivity")
+def connectivity():
+    """Read-only upstream reachability for the fixed 60.8 GB deployment."""
+    from shine.comfyops.connectivity import connectivity_blockers, probe_upstreams
+
+    report = probe_upstreams()
+    return {**report, "blockers": connectivity_blockers(report)}
+
+
 @router.get("/catalog")
 def catalog_summary():
     raw = deployment.load_deployment_catalog()

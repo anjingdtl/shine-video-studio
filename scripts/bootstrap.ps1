@@ -82,6 +82,28 @@ function Get-CommandResult([string]$tool, [string[]]$argv) {
     return @{ Present = $true; Version = (Get-ToolVersion $out); Source = $cmd.Source }
 }
 
+function Get-RemoteFile([string]$Url, [string]$Destination) {
+    # A bare Windows may not ship curl.exe (older Win10 builds, Server images).
+    # curl is preferred because it pins no .NET TLS default; the fallback sets
+    # TLS 1.2 explicitly and stays usable without any installed tool.
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & curl.exe -sS -L --retry 3 --retry-delay 2 --connect-timeout 30 -o $Destination $Url
+        if ($LASTEXITCODE -eq 0) { return }
+        throw "download failed (curl exit $LASTEXITCODE)"
+    }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $previousProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 900
+    } catch {
+        throw "download failed ($($_.Exception.Message))"
+    } finally {
+        $ProgressPreference = $previousProgress
+    }
+}
+
 function Install-Tool([string]$name, $entry) {
     if ($name -notmatch '^[a-z][a-z0-9-]*$' -or $entry.version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$') {
         throw 'Invalid pinned tool identity.'
@@ -89,25 +111,38 @@ function Install-Tool([string]$name, $entry) {
     $url = $entry.url
     $sha256 = $entry.sha256
     $expectedSize = [long]$entry.size
-    $cache = Join-Path $env:TEMP "shine-bootstrap-cache"
-    New-Item -ItemType Directory -Force -Path $cache | Out-Null
-    $archive = Join-Path $cache ($name + ".zip")
-    Write-Host "[bootstrap] downloading $name $($entry.version)"
-    & curl.exe -sS -L -o $archive $url
-    if ($LASTEXITCODE -ne 0) { throw "download failed for $name (curl exit $LASTEXITCODE)" }
-    $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
-    if ($actual -ne $sha256.ToLower()) { throw "sha256 mismatch for $name" }
-    if ((Get-Item $archive).Length -ne $expectedSize) { throw "size mismatch for $name" }
-    Write-Host "[bootstrap] sha256 verified for $name"
     $toolBase = if ($StorageRoot) { Join-Path $StorageRoot 'tools' } else { Join-Path $env:LOCALAPPDATA 'Shine\tools' }
     $toolsRoot = [IO.Path]::GetFullPath($toolBase)
     $toolDir = [IO.Path]::GetFullPath((Join-Path $toolsRoot ($name + '-' + $entry.version)))
     if (-not $toolDir.StartsWith($toolsRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Tool destination escaped the bootstrap tools directory.'
     }
+    # A second run must not re-download, and must not die because the previous
+    # install already put the pinned version here. Reuse only a complete tree:
+    # every manifest entry has to be present, otherwise the operator has to
+    # reconcile instead of silently running a half-extracted toolchain.
     if (Test-Path -LiteralPath $toolDir) {
-        throw 'Pinned tool destination already exists; reconcile the previous installation before replacing it.'
+        $missing = @()
+        foreach ($leafEntry in $entry.entries) {
+            $leaf = Split-Path -Leaf $leafEntry
+            $found = Get-ChildItem $toolDir -Recurse -Filter $leaf -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { $missing += $leaf }
+        }
+        if ($missing.Count -gt 0) {
+            throw "Pinned tool directory exists but is incomplete ($($missing -join ', ')); reconcile the previous installation."
+        }
+        Write-Host "[bootstrap] reusing $name $($entry.version) at $toolDir"
+        return $toolDir
     }
+    $cache = Join-Path $env:TEMP "shine-bootstrap-cache"
+    New-Item -ItemType Directory -Force -Path $cache | Out-Null
+    $archive = Join-Path $cache ($name + ".zip")
+    Write-Host "[bootstrap] downloading $name $($entry.version)"
+    Get-RemoteFile $url $archive
+    $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $sha256.ToLower()) { throw "sha256 mismatch for $name" }
+    if ((Get-Item $archive).Length -ne $expectedSize) { throw "size mismatch for $name" }
+    Write-Host "[bootstrap] sha256 verified for $name"
     New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
     Expand-Archive -Path $archive -DestinationPath $toolDir -Force
     return $toolDir

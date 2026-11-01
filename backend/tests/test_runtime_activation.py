@@ -66,6 +66,10 @@ def test_generation_does_not_activate_and_operator_activation_survives_restart(p
     assert effective.managed_recipe_sha256 == candidate[3]['recipe_sha256']
     assert client.get('/health').json()['render_provider'] == 'comfyui'
     assert client.get('/api/v1/comfy/config').json()['render_mode'] == 'comfyui'
+    # Activation is also the operator's statement that this host renders for real,
+    # so the choice is persisted for the next START_APP.cmd instead of relying on
+    # the launcher flag that created today's process.
+    assert 'SHINE_RENDER_PROVIDER=comfyui' in deployment.ENV_PATH.read_text(encoding='utf-8')
     from shine.comfy.client import ComfyUIClient
     def no_renderer(*args):
         raise RuntimeError('No real renderer exists in this contract test')

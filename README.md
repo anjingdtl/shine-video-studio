@@ -103,13 +103,20 @@ browser does not stop the run.
 To drive the same chain from a script against a local stack:
 
 ```powershell
-./scripts/run_real_acceptance.ps1 -RunName <run-name> -Profile local-h3-ref2va-pdd8-2img-1aud -Shots 3
+./scripts/run_real_acceptance.ps1 -RunName <run-name> -ComfyRoot <本机 ComfyUI 目录> `
+  -Profile local-h3-ref2va-pdd8-2img-1aud -Shots 3
 ```
 
 It prepares the reviewer routes, starts the normal launcher in ComfyUI mode,
 registers the real H3 workflow profiles, drives a real browser through the whole
 production chain and writes the evidence to `.local-acceptance/final-local-pass/`.
 The scripts need PowerShell 7.
+
+`run_real_acceptance.ps1` / `run_real_closure_v3.ps1` / `run_asr_qualification.ps1` are
+**maintainer** tools: they intentionally have no default ComfyUI path, because a package
+never knows where a tester keeps one. Pass `-ComfyRoot` / `-ReviewPython` explicitly; a
+managed new-machine install keeps ComfyUI under
+`<SHINE_DATA_DIR>\comfyops\instances\<id>\ComfyUI`.
 
 ## Tests and checks
 
@@ -159,7 +166,7 @@ The repository must not contain `.env` values, provider keys, private assets, mo
 完整报告与边界见 [docs/NEW_MACHINE_DEPLOYMENT.md](docs/NEW_MACHINE_DEPLOYMENT.md)。
 
 **分发包入口（发给测试用户时用）**：双击包内的 `一键安装并启动.cmd`（文件名乱码时用 `SETUP.cmd`）。
-它调用 `scripts/install_once.ps1`，自动挑选剩余空间最大的非系统盘、生成 24 位操作员密码写入
+它调用 `scripts/install_once.ps1`，自动挑选剩余空间最大的非系统盘、生成 40 位操作员密码写入
 `<安装盘>\ShineVideoStudio\operator-credentials.txt`、按固定版本装工具链与依赖、启动 API/Worker/Web，
 并直接打开 `http://127.0.0.1:<端口>/#setup` 进入下方的新机设置向导。重复双击是安全的：已安装就只启动，
 已在运行就直接开向导。`START_APP.cmd` 重开、`STOP_APP.cmd` 停止、`CHECK_ENVIRONMENT.cmd` 只读体检。

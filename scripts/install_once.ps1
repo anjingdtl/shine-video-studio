@@ -4,7 +4,7 @@
 # guided setup wizard at http://127.0.0.1:<port>/#setup.  Everything that can be
 # decided safely is decided here:
 #   * the install drive (largest non-system fixed disk with >= 180 GiB free)
-#   * a generated 24-character operator credential (persisted locally, never logged)
+#   * a generated 40-character operator credential (persisted locally, never logged)
 #   * free API/Web ports
 #   * the data directory and every cache directory (all on the selected disk)
 # It never installs drivers, never edits system-wide state, and never downloads
@@ -299,7 +299,7 @@ if (-not $hasOperator) {
     } else {
         . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
         Get-ShineOperatorPasswordFile $credentialFile | Out-Null
-        Write-Ok '已生成 24 位随机密码并写入本地文件。'
+        Write-Ok '已生成 40 位随机密码并写入本地文件。'
     }
     Write-Host '  安装完成后请打开该文件抄下密码，然后删除文件。' -ForegroundColor Yellow
 } else {
@@ -316,7 +316,13 @@ if (-not $hasOperator) {
 # ---- 4. Tools + dependencies + services ---------------------------------
 $backendPython = Join-Path $StorageRoot 'app/backend-env/Scripts/python.exe'
 $frontendModules = Join-Path $repoRoot 'frontend/node_modules'
+# The pinned PowerShell may be installed while the current shell's PATH is stale
+# (a new window opened right after the first run), so check the bootstrap shim too.
 $pwshPath = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+if (-not $pwshPath) {
+    $shim = Join-Path $StorageRoot 'bin/pwsh.cmd'
+    if (Test-Path -LiteralPath $shim) { $pwshPath = $shim }
+}
 $alreadyInstalled = $hasOperator -and $pwshPath -and
     (Test-Path -LiteralPath $backendPython) -and (Test-Path -LiteralPath $frontendModules)
 

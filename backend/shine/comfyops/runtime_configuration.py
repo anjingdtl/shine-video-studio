@@ -241,6 +241,13 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
     add_audit(db, actor, 'DEPLOYMENT_RUNTIME_ACTIVATED', 'comfy_instance', instance.id,
               {'configuration_sha256': value['sha256'], 'recipe_sha256': recipe_sha256,
                'starts_processes': False}, project_id=project_id)
+    # Activation is the operator's statement that this host now renders for real.
+    # Persist the renderer choice so a later START_APP.cmd reuses it instead of
+    # silently dropping back to Mock after a reboot.
+    from shine.comfyops.deployment import persist_env
+    env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'})
+    add_audit(db, actor, 'DEPLOYMENT_RENDER_PROVIDER_PERSISTED', 'comfy_instance', instance.id,
+              {'env_keys': env_keys, 'value': 'comfyui'}, project_id=project_id)
     db.commit()
     return runtime_report(db, settings)
 

@@ -25,7 +25,7 @@ param(
     [int]$WebPort = 5183,
     [int]$Shots = 3,
     [int]$TimeoutMinutes = 180,
-    [string]$ComfyRoot = 'F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base',
+    [string]$ComfyRoot = '',
     [string]$ReviewManifest = '',
     [string]$ReviewRuntimePackages = '',
     [string]$ReviewPython = '',
@@ -35,6 +35,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Maintainer script: never assume a personal ComfyUI checkout. A managed
+# new-machine install keeps it under <SHINE_DATA_DIR>/comfyops/instances/<id>/ComfyUI.
+if (-not $ComfyRoot) {
+    throw 'This is a maintainer acceptance script: pass -ComfyRoot with the ComfyUI directory on THIS machine.'
+}
+if (-not (Test-Path -LiteralPath $ComfyRoot)) { throw "ComfyRoot does not exist: $ComfyRoot" }
 # The tools in this script write progress to stderr.  PowerShell turns native
 # stderr into a terminating error, so every native call merges stderr into
 # stdout and is judged by its exit code instead.

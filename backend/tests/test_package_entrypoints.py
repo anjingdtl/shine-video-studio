@@ -129,7 +129,9 @@ def test_generated_operator_password_is_reused_and_hashed_into_env(tmp_path):
     assert result.returncode == 0, result.stderr
 
     stored = credential.read_text(encoding="utf-8").strip()
-    assert len(stored) >= 16
+    # operator_review.authenticate rejects anything shorter than 32 characters,
+    # so a shorter generated secret would leave a tester unable to approve plans.
+    assert len(stored) >= 32
     assert stored.isalnum(), "the generated password must be retypeable"
     assert f"LEN={len(stored)}" in result.stdout, "the second call must reuse the stored secret"
     assert stored not in result.stdout + result.stderr

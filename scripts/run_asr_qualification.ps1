@@ -25,7 +25,7 @@ if (-not $RuntimePackages) {
     $RuntimePackages = Join-Path $repoRoot '.local-acceptance/review-runtime-packages'
 }
 if (-not $ReviewPython) {
-    $ReviewPython = 'F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe'
+    throw 'Maintainer script: pass -ReviewPython with the interpreter that owns the pinned review runtime on THIS machine.'
 }
 foreach ($path in @($Manifest, $RuntimePackages, $ReviewPython)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing local review input: $path" }

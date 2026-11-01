@@ -1,5 +1,5 @@
 # Shared with bootstrap.ps1; dot-sourcing this file performs no writes.
-function Get-ShineOperatorPasswordFile([string]$Path, [int]$Length = 24) {
+function Get-ShineOperatorPasswordFile([string]$Path, [int]$Length = 40) {
     <#
     One-click installs cannot depend on a human inventing a 16+ character
     password correctly.  This returns a SecureString from a local credential
@@ -10,8 +10,8 @@ function Get-ShineOperatorPasswordFile([string]$Path, [int]$Length = 24) {
     $Path = [IO.Path]::GetFullPath($Path)
     if (Test-Path -LiteralPath $Path) {
         $stored = (Get-Content -LiteralPath $Path -Raw -Encoding UTF8).Trim()
-        if ($stored.Length -lt 16) {
-            throw "Existing operator credential file is invalid: $Path"
+        if ($stored.Length -lt 32) {
+            throw "Existing operator credential is shorter than the 32 characters the API requires: $Path"
         }
         return (ConvertTo-SecureString $stored -AsPlainText -Force)
     }
@@ -41,8 +41,10 @@ function Initialize-ShineOperator([string]$EnvFile, [scriptblock]$ReadPassword) 
         }
     } else {
         $password = & $ReadPassword
-        if ($password -isnot [Security.SecureString] -or $password.Length -lt 16) {
-            throw 'The operator password must contain at least 16 characters.'
+        # The API rejects anything shorter than 32 characters (operator_review.authenticate),
+        # so the prompt enforces the same floor instead of accepting a secret that cannot approve.
+        if ($password -isnot [Security.SecureString] -or $password.Length -lt 32) {
+            throw 'The operator password must contain at least 32 characters.'
         }
         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
         try {

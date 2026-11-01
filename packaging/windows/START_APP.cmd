@@ -9,7 +9,14 @@ if not exist "%~dp0.env" (
   pause
   exit /b 2
 )
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser
+rem Prefer the pinned PowerShell 7 the installer put on PATH; fall back to the
+rem bundled Windows PowerShell so this entry never depends on a missing tool.
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser
+) else (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser
+)
 set "RC=%ERRORLEVEL%"
 echo.
 if not "%RC%"=="0" (

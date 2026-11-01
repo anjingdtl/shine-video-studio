@@ -26,6 +26,10 @@ type CatalogSummary = {
   platform: Record<string, unknown>; total_bytes: number; components: CatalogComponent[];
 };
 type PlanRef = { plan_id: string; sha256: string; kind: string; action?: string; tier?: string; status: string };
+type UpstreamRow = { id: string; label: string; host: string; status: string;
+  http_status: number | null; error: string | null; needed_by: string };
+type Connectivity = { status: string; checked_at: string; blocked: string[]; degraded: string[];
+  upstreams: UpstreamRow[]; guidance: string[] };
 type Readiness = { catalog: { id: string; version: string }; layers: Array<Record<string, unknown>>; production_gates: Record<string, boolean>; human_steps: string[] };
 type Grant = { grant_id: string; snapshot: string };
 type RuntimeState = { status: string; render_provider: string; error: string | null;
@@ -53,6 +57,7 @@ function fmtBytes(value: number): string {
 export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
   const [token, setToken] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(null);
+  const [connectivity, setConnectivity] = useState<Connectivity | null>(null);
   const [storage, setStorage] = useState<DeploymentStorage | null>(null);
   const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
@@ -83,6 +88,15 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const loadEnvironment = useCallback(async () => {
     try { setEnv(await api<EnvReport>('/setup/environment')); } catch { /* loopback probe stays silent */ }
   }, []);
+
+  function checkConnectivity() {
+    void run(async () => {
+      const result = await api<Connectivity>('/setup/connectivity');
+      setConnectivity(result);
+      if (result.blocked.length > 0) return `上游不可达：${result.blocked.join('、')}。先解决代理/VPN 再下载。`;
+      return `上游检查通过：${result.status} · ${result.upstreams.map((row) => row.host).join(' / ')}`;
+    });
+  }
   const loadCatalog = useCallback(async () => {
     try { setCatalog(await api<CatalogSummary>('/setup/catalog')); } catch { /* keep prior state */ }
   }, []);
@@ -249,6 +263,36 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
               可安装项运行：<code>pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1</code>
             </div>}
           </>}
+        </div>
+
+        <div className="settings-block">
+          <h3>1b · 上游可达性（下载前必查）</h3>
+          {!connectivity ? <div className="empty-inline">尚未检查。下载 60.8 GB 之前请先检查一次。</div> : <>
+            <p className="guardrail-note">
+              {connectivity.checked_at} · 结论 <b>{connectivity.status}</b>
+            </p>
+            <table className="setup-tools">
+              <tbody>
+                {connectivity.upstreams.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.label}</td>
+                    <td>{row.host}</td>
+                    <td className={row.status === 'OK' ? 'ok-cell' : 'bad-cell'}>
+                      {row.status === 'OK'
+                        ? (row.http_status === 404 ? '可达（根路径 404 属正常）' : `可达 ${row.http_status}`)
+                        : row.status === 'DEGRADED' ? `服务异常 ${row.http_status}` : `不可达（${row.error}）`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {connectivity.blocked.length > 0 && <div className="guardrail-note">
+              阻断：{connectivity.blocked.join('、')}。先解决代理/VPN/防火墙，再回到这里复检；否则下载会在中途失败。
+            </div>}
+          </>}
+          <div className="inline-form">
+            <button className="secondary-button" disabled={busy} onClick={checkConnectivity}>检查上游可达性</button>
+          </div>
         </div>
 
         <div className="settings-block">

@@ -245,7 +245,7 @@ def main() -> int:
     parser.add_argument("--tts-model", default=str(
         REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
                "/Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1"))
-    parser.add_argument("--tts-python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe")
+    parser.add_argument("--tts-python", default="", help="Interpreter that owns the pinned TTS runtime")
     parser.add_argument("--tts-device", default="cpu")
     parser.add_argument("--report", default="")
     parser.add_argument("--second-asr-base", default="", help="Optional second ASR endpoint for comparison")
@@ -254,9 +254,12 @@ def main() -> int:
     parser.add_argument("--qwen-asr-model-root", default=str(
         REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
                "/Qwen3-ASR-0.6B-5eb14417-cdn1"))
-    parser.add_argument("--asr-python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe",
+    parser.add_argument("--asr-python", default="",
                         help="Interpreter that owns the pinned Qwen3-ASR runtime packages")
     args = parser.parse_args()
+    for flag, value in (("--tts-python", args.tts_python), ("--asr-python", args.asr_python)):
+        if not Path(value).is_file():
+            parser.error(f"{flag} must point at an existing interpreter on this machine")
 
     evidence = Path(args.evidence_dir).resolve()
     (evidence / "asr").mkdir(parents=True, exist_ok=True)

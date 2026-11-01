@@ -32,6 +32,8 @@
   → start_shine.ps1 -Install（既有链路：uv sync → npm ci → Alembic → API/Worker/Web）
   → 自动打开 http://127.0.0.1:<端口>/#setup
   → Web「新机设置」面板（/api/v1/setup/*）
+      0) GET /setup/connectivity  只读探测四个上游主机（HF/GitHub 归档/PyPI/PyTorch），
+         把“60.8GB 下到一半失败”变成下载前就能看到的主机级阻断
       1) GET /setup/environment   只读环境检查（工具/GPU/RAM/磁盘/端口/可写性/路径说明）
       2) GET /setup/catalog       部署清单摘要（14 组件 60.8GB，全部 READY、全部有真实钉点）
       3) POST /setup/install-plan → 既有 grant → approve → execute（local）→ 受控下载+校验+隔离安装

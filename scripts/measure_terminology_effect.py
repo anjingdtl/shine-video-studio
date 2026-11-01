@@ -102,11 +102,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Measure the terminology hint on the local recognizer")
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--audio-dir", required=True, help="Directory with the synthesised ground-truth audio")
-    parser.add_argument("--python", default=r"F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\python_embeded\python.exe")
+    parser.add_argument("--python", default="",
+                        help="Interpreter that owns the pinned ASR runtime packages on this machine")
     parser.add_argument("--packages", default=str(REPO / ".local-acceptance/asr-runtime-packages"))
     parser.add_argument("--model-root", default=str(
         REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages/Qwen3-ASR-0.6B-5eb14417-cdn1"))
     args = parser.parse_args()
+    if not Path(args.python).is_file():
+        parser.error("--python must point at an existing interpreter that owns the pinned ASR runtime packages")
 
     evidence = Path(args.evidence_dir).resolve()
     evidence.mkdir(parents=True, exist_ok=True)

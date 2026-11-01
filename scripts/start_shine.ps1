@@ -27,7 +27,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $launchEnv = Join-Path $repoRoot '.env'
 if (Test-Path -LiteralPath $launchEnv) {
     $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
-        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache')
+        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER')
     foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
             $key, $value = $Matches[1], $Matches[2].Trim()
@@ -41,6 +41,14 @@ if (Test-Path -LiteralPath $launchEnv) {
             }
         }
     }
+}
+# The operator activates a managed configuration in the setup wizard, which
+# persists the renderer choice. Honor it on every later start unless the caller
+# passed -Provider explicitly, so a tester does not silently fall back to Mock
+# after a reboot.
+if (-not $PSBoundParameters.ContainsKey('Provider')) {
+    $persistedProvider = [Environment]::GetEnvironmentVariable('SHINE_RENDER_PROVIDER', 'Process')
+    if ($persistedProvider -eq 'mock' -or $persistedProvider -eq 'comfyui') { $Provider = $persistedProvider }
 }
 $backendEnv = if ($env:SHINE_BACKEND_ENV) { $env:SHINE_BACKEND_ENV } else { Join-Path $repoRoot 'backend/.venv' }
 $venvPython = Join-Path $backendEnv 'Scripts/python.exe'
@@ -84,8 +92,8 @@ if ($AdditionalReviewManifest) {
 if (-not $DataDir) {
     $DataDir = if ($env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR } else { Join-Path $repoRoot '.local-data' }
 }
-$env:SHINE_DATA_DIR = (Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue)?.Path
-if (-not $env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR = [System.IO.Path]::GetFullPath($DataDir) }
+$resolvedDataDir = Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue
+$env:SHINE_DATA_DIR = if ($resolvedDataDir) { $resolvedDataDir.Path } else { [System.IO.Path]::GetFullPath($DataDir) }
 New-Item -ItemType Directory -Force -Path $env:SHINE_DATA_DIR | Out-Null
 if (Test-Path (Join-Path $env:SHINE_DATA_DIR 'run/processes.json')) {
     throw 'This data directory already has a process manifest. Stop or reconcile that stack before restarting.'

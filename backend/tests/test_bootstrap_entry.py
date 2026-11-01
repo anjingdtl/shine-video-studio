@@ -171,7 +171,7 @@ def test_pinned_tools_manifest_matches_recorded_pins():
     assert manifest["tools"] == pins
 
 
-def _initialize_identity(tmp_path, initial, password="isolated-test-password-12345"):
+def _initialize_identity(tmp_path, initial, password="isolated-test-password-12345-abcdef"):
     env_file = tmp_path / ".env"
     env_file.write_text(initial, encoding="utf-8")
     script = tmp_path / "initialize.ps1"
@@ -192,7 +192,7 @@ def _initialize_identity(tmp_path, initial, password="isolated-test-password-123
 
 
 def test_bootstrap_creates_hashed_operator_and_preserves_other_configuration(tmp_path):
-    password = "isolated-test-password-12345"
+    password = "isolated-test-password-12345-abcdef"
     result, content = _initialize_identity(tmp_path, "# keep\nUNRELATED=中文value\n", password)
     assert result.returncode == 0, result.stderr
     assert "UNRELATED=中文value" in content
@@ -217,7 +217,7 @@ def test_bootstrap_preserves_operator_and_repairs_missing_id_without_password_re
 
 @pytest.mark.parametrize("initial,password", [
     ("UNRELATED=value\n", "short"),
-    ("SHINE_OPERATOR_TOKEN_SHA256=invalid\n", "isolated-test-password-12345"),
+    ("SHINE_OPERATOR_TOKEN_SHA256=invalid\n", "isolated-test-password-12345-abcdef"),
 ])
 def test_bootstrap_rejects_bad_identity_without_mutating_configuration(tmp_path, initial, password):
     result, content = _initialize_identity(tmp_path, initial, password)
