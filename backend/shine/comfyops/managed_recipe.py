@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 
@@ -91,8 +92,34 @@ def _renderer(raw):
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
     if adapter_identity(recipe["adapter_dir"]) != recipe["adapter_sha256"]:
         raise HTTPException(409, "COMFY_RECIPE_ADAPTER_CHANGED")
+    if 'installation' in raw:
+        binding = raw['installation']
+        if (not isinstance(binding, dict) or set(binding) != {'id', 'sha256'}
+                or binding['id'] != recipe['instance_id']
+                or not re.fullmatch(r'[a-f0-9]{64}', str(binding['sha256']))):
+            raise HTTPException(409, 'COMFY_RECIPE_INSTALLATION_INVALID')
+        recipe['installation'] = dict(binding)
     _check_templates(list(recipe["argv"]) + list(recipe["pinned_files"]))
     return recipe
+
+
+def managed_run_identity(installation_id, attempt_id):
+    return str(uuid5(NAMESPACE_URL, f'shine-managed-run:{installation_id}:{attempt_id}'))
+
+
+def managed_run_binding(recipe, attempt_id):
+    """The installation binding and the run identity for one production attempt.
+
+    A recipe without an installation binding keeps the legacy behaviour: the
+    renderer runs under the recipe's own instance identity. A bound recipe runs
+    under a per-attempt identity, so a later production run never collides with
+    the installation row or with an earlier run's startup record.
+    """
+    installation = recipe.get('installation') if isinstance(recipe, dict) else None
+    if not installation:
+        return None, recipe['instance_id']
+    binding = {**installation, 'attempt_id': attempt_id}
+    return binding, managed_run_identity(installation['id'], attempt_id)
 
 
 def _review(raw, kind):

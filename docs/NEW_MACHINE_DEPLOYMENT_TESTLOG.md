@@ -54,6 +54,8 @@
 
 ## D. 判定边界
 
+最新运行身份绑定回归：**1274 passed / 1 skipped / 2 warnings，exit=0**，命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-run-identity-binding.log`，数字按静默日志状态符统计。全目录 Ruff、TypeScript/Vite、隔离 Alembic 新库升级通过；新增 15 项安装/运行身份绑定定向合同与 75 项合跑定向合同通过；变异校验证明这 15 项不是恒真断言。安装证据与每次运行身份已在同一数据库内绑定，首次与后续生产均被验证；审片首启和真实 H3 仍未完成，整体 PARTIAL。详见 `NEW_MACHINE_RUN_IDENTITY_BINDING_20261101.md`。
+
 最新持久激活回归：**1259 passed / 1 skipped / 2 warnings，exit=0**，命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-runtime-activation-marker-final.log`，数字按静默日志状态符统计。全目录 Ruff、TypeScript/Vite、55 项激活相关定向合同、47 项监督器合同及浏览器确认按钮合同通过；真实 OS Worker 的配置热读取和变更阻断通过。首轮全量 1258 passed / 1 skipped / 1 error 的空就绪文件竞态及修复证据保留，详见 `NEW_MACHINE_RUNTIME_ACTIVATION_20261101.md`。安装/运行身份冲突、审片首启和真实 H3 仍未完成，整体 PARTIAL。
 
 首启阶段：**1245 passed / 1 skipped / 2 warnings，exit=0**。命令 `uv run --project backend --locked pytest backend/tests -q`，日志 `.local-acceptance/new-machine-goal-20261101/full-suite-cold-start-final.log`，数字按静默日志状态符统计；全目录 Ruff、TypeScript/Vite 构建通过。新增首启身份、停止顺序、部分安装及配置写入阻断共 14 项，原有离线 E2E、film crew、V1.3、Worker/系列合同均在完整后端套件内。详见 `NEW_MACHINE_COLD_START_FIX_20261101.md`。配置激活、审片首启与真实 H3 仍未完成，整体 PARTIAL。

@@ -39,6 +39,8 @@ def configuration_identity(db, settings, path):
                 or Path(instance.payload['root']).resolve() != Path(renderer['root']).resolve()
                 or instance.payload['port'] != renderer['port']):
             raise HTTPException(409, 'REAL_RUNTIME_INSTANCE_IDENTITY_REQUIRED')
+        if renderer.get('installation') != {'id': instance.id, 'sha256': instance.sha256}:
+            raise HTTPException(409, 'RUNTIME_INSTALLATION_BINDING_REQUIRED')
         paths = {path, Path(renderer['root']) / '.shine-requirements.txt'}
         values = {**renderer, 'port': str(renderer['port'])}
         for template in renderer['pinned_files']:

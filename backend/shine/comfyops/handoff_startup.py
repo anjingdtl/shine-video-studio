@@ -230,6 +230,42 @@ def _wait_for_owned_listener(group, port, *, timeout=600):
         time.sleep(0.05)
 
 
+def _installation_evidence(db, settings, binding, *, port, cwd=None):
+    """Prove that the installation a run is bound to is still the proven one.
+
+    The installation row is durable evidence: it is never rewritten by a run,
+    and a run may only use it while it is real, stopped and complete.
+    """
+    from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
+    from shine.comfyops.instances import instance_identity
+
+    installed = db.get(ComfyInstance, binding['id'])
+    if (not installed or installed.id != instance_identity('local', port)
+            or installed.sha256 != binding['sha256'] or installed.payload.get('is_mock', True)
+            or installed.payload.get('process') or installed.status != 'STOPPED'
+            or (cwd is not None
+                and os.path.realpath(installed.payload.get('root', '')) != os.path.realpath(cwd))
+            or installed_instance_blockers(db, settings, installed, load_default_catalog())):
+        raise HTTPException(409, 'COMFY_INSTALLATION_BINDING_CHANGED')
+    return installed
+
+
+def _installation_binding(db, settings, binding, *, instance_id, job_id, cwd, port):
+    """Bind one run to one installation, both inside the same database."""
+    from shine.comfyops.managed_recipe import managed_run_identity
+    from shine.models import JobAttempt
+
+    if (not isinstance(binding, dict) or set(binding) != {'id', 'sha256', 'attempt_id'}
+            or any(not isinstance(v, str) or not v for v in binding.values())):
+        raise HTTPException(409, 'COMFY_INSTALLATION_BINDING_INVALID')
+    attempt = db.get(JobAttempt, binding['attempt_id'])
+    if (not attempt or attempt.job_id != job_id
+            or instance_id != managed_run_identity(binding['id'], attempt.id)):
+        raise HTTPException(409, 'COMFY_INSTALLATION_BINDING_CHANGED')
+    _installation_evidence(db, settings, binding, port=port, cwd=cwd)
+    return dict(binding)
+
+
 def start_managed_renderer(
     factory,
     settings,
@@ -252,6 +288,7 @@ def start_managed_renderer(
     supervisor_factory=None,
     probe=None,
     required_node_types=None,
+    installation=None,
 ) -> ManagedRenderer:
     """Create the owned renderer exactly once, behind a durable intent.
 
@@ -273,6 +310,9 @@ def start_managed_renderer(
         if db.get(AppSetting, key):
             raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
         lease, job = _bind_lease(db, lease_id, job_id)
+        if installation is not None:
+            _installation_binding(db, settings, installation, instance_id=instance_id, job_id=job_id,
+                                  cwd=cwd, port=port)
         owner_birth = process_identity(os.getpid())
         if not owner_birth:
             raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
@@ -304,10 +344,20 @@ def start_managed_renderer(
             "handoff_token_sha256": _digest(handoff_token),
             "adapter_sha256": adapter_sha256,
             "recorded_at": utcnow().isoformat(),
+            "installation": installation,
         }
         _write_startup(db, instance_id, intent)
         add_audit(db, "comfy-worker", "COMFY_STARTUP_INTENT", "job", job_id,
                   {"instance_id": instance_id, "port": port}, project_id=job.project_id)
+        if installation is not None:
+            # The run identity and the installation it uses are one durable
+            # fact; neither may be established without the other.
+            add_audit(db, "comfy-worker", "COMFY_INSTALLATION_BOUND", "comfy_instance",
+                      installation["id"],
+                      {"instance_id": instance_id, "installation_id": installation["id"],
+                       "installation_sha256": installation["sha256"],
+                       "attempt_id": installation["attempt_id"]},
+                      project_id=job.project_id)
         startup_id = intent["startup_id"]
 
     group = None
@@ -367,6 +417,7 @@ def start_managed_renderer(
                 "process": process,
                 "startup_id": startup_id,
                 "gpu_uuid": gpu_uuid,
+                "installation": installation,
             }
             with factory.begin() as db:
                 db.execute(text("BEGIN IMMEDIATE"))
@@ -375,6 +426,9 @@ def start_managed_renderer(
                     if current.get("stage") != "LISTENING":
                         raise HTTPException(409, "COMFY_STARTUP_STAGE_CHANGED")
                 instance = db.get(ComfyInstance, instance_id)
+                if installation is not None:
+                    _installation_binding(db, settings, installation, instance_id=instance_id, job_id=job_id,
+                                          cwd=cwd, port=port)
                 if instance is not None and instance.sha256 != graph_hash(payload):
                     raise HTTPException(409, "COMFY_STARTUP_INSTANCE_CHANGED")
                 if instance is None:
@@ -525,6 +579,12 @@ def verify_managed_startup(factory, settings, renderer, *, instance_id=None):
                 or not lease or lease.status != "ACTIVE" or not lease.exclusive
                 or lease.expires_at <= now):
             raise HTTPException(409, "COMFY_STARTUP_BINDING_INVALID")
+        binding = instance.payload.get("installation")
+        if binding:
+            # A continued run stays bound to the installation it started from:
+            # the evidence must not have moved underneath the running renderer.
+            _installation_evidence(db, settings, binding, port=instance.payload.get("port"),
+                                   cwd=value.get("cwd"))
     renderer.supervisor.verify_drained_binding(renderer.url, renderer.process)
     measured = (renderer.probe or probe_memory)(renderer.gpu_uuid, min_ram_mb=renderer.min_ram_mb,
                                                 min_vram_mb=renderer.min_vram_mb)
@@ -575,6 +635,8 @@ def start_managed_review_service(
     launch=None,
     probe=None,
     base_url=None,
+    renderer_instance_id=None,
+    logical_service_id=None,
 ):
     """Start an owned review supervisor and close it with a first-use fence.
 
@@ -595,6 +657,11 @@ def start_managed_review_service(
         if db.get(AppSetting, REVIEW_PREFIX + service_id):
             raise HTTPException(409, "COMFY_REVIEW_STARTUP_ALREADY_RECORDED")
         lease, job = _bind_lease(db, lease_id, job_id)
+        if renderer_instance_id is not None:
+            parent = _read_startup(db, renderer_instance_id)
+            if (parent.get('stage') != 'RUNNING' or parent.get('lease_id') != lease_id
+                    or parent.get('job_id') != job_id or not logical_service_id):
+                raise HTTPException(409, 'COMFY_REVIEW_PARENT_RUNTIME_INVALID')
         owner_birth = process_identity(os.getpid())
         if not owner_birth:
             raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
@@ -608,6 +675,7 @@ def start_managed_review_service(
             "runtime_sha256": runtime_sha256,
             "handoff_token_sha256": _digest(handoff_token),
             "recorded_at": utcnow().isoformat(),
+            "renderer_instance_id": renderer_instance_id, "logical_service_id": logical_service_id,
         }, REVIEW_PREFIX)
     group = None
     try:

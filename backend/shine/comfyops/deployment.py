@@ -441,6 +441,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     ]
     renderer = {
         "instance_id": instance.id,
+        "installation": {"id": instance.id, "sha256": instance.sha256},
         "python": venv_python,
         "root": str(root),
         "base_directory": str(root),
@@ -626,7 +627,8 @@ def deployment_readiness(db, settings: Settings) -> dict:
     layer_two["layer"] = "L2_files_verified"
     layers.append(layer_two)
     candidates = [row for row in db.scalars(select(ComfyInstance))
-                  if row.payload.get("managed") and not row.payload.get("is_mock", True)]
+                  if row.payload.get("managed") and not row.payload.get("is_mock", True)
+                  and row.payload.get("root") and not row.payload.get("installation")]
     instance = candidates[0] if len(candidates) == 1 else None
     install_blockers = installed_instance_blockers(db, settings, instance, catalog)
     layers.append({

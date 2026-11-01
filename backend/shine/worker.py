@@ -1102,19 +1102,26 @@ class _FirstManagedContinuation(_ManagedAttemptContext):
     def before_prepare(self, service, attempt_id, worker_id, state_version):
         from shine.comfyops.handoff_preparation import ManagedReviewCoordinator
         from shine.comfyops.handoff_startup import start_managed_renderer, start_managed_review_service
-        from shine.comfyops.managed_recipe import build_renderer_launch, build_review_launch
+        from shine.comfyops.managed_recipe import (
+            build_renderer_launch,
+            build_review_launch,
+            managed_run_binding,
+            managed_run_identity,
+        )
 
         if self.renderer is not None:
             raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
         recipe = self.recipe
+        installation, runtime_id = managed_run_binding(recipe, attempt_id)
         argv, cwd, env, pins, token, port = build_renderer_launch(recipe)
         self.renderer = start_managed_renderer(
             self.factory, self.settings,
-            instance_id=recipe["instance_id"], lease_id=self.lease_id, job_id=self.job_id,
+            instance_id=runtime_id, lease_id=self.lease_id, job_id=self.job_id,
             worker_id=worker_id, argv=argv, cwd=cwd, env=env, pinned_files=pins,
             port=port, handoff_token=token, adapter_sha256=recipe["adapter_sha256"],
             gpu_uuid=recipe["gpu_uuid"], min_ram_mb=recipe["min_ram_mb"],
             min_vram_mb=recipe["min_vram_mb"],
+            **({'installation': installation} if installation else {}),
         )
         client = getattr(service, "client", None)
         if (not client or getattr(client, "base_url", "").rstrip("/") != self.renderer.url
@@ -1124,15 +1131,19 @@ class _FirstManagedContinuation(_ManagedAttemptContext):
         configs = {}
         fences = {}
         for kind, spec in self.review_configs.items():
+            service_id = (managed_run_identity(runtime_id, kind + ':' + spec['service_id'])
+                          if installation else spec['service_id'])
             review_argv, review_cwd, review_env, review_pins, review_token = build_review_launch(spec)
             started = start_managed_review_service(
                 self.factory, self.settings,
-                service_id=spec["service_id"], lease_id=self.lease_id, job_id=self.job_id,
+                service_id=service_id, lease_id=self.lease_id, job_id=self.job_id,
                 worker_id=worker_id, argv=review_argv, cwd=review_cwd, env=review_env,
                 pinned_files=review_pins, port=spec["port"], handoff_token=review_token,
                 runtime_sha256=spec.get("runtime_sha256"), gpu_uuid=recipe["gpu_uuid"],
                 min_ram_mb=spec.get("min_ram_mb", 8000), min_vram_mb=spec.get("min_vram_mb", 8000),
                 base_url=spec.get("base_url"),
+                **({'renderer_instance_id': runtime_id, 'logical_service_id': spec['service_id']}
+                   if installation else {}),
             )
             self.review_services[kind] = started
             configs[kind] = started["config"]
