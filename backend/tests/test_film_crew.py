@@ -367,7 +367,11 @@ def test_permissions_unfrozen_style_missing_route_cross_project_and_tool(api):
     client.delete("/api/v1/agent-routes/scriptwriter")
     assert client.post(f"/api/v1/projects/{project_id}/film-agents/scriptwriter/run", json={}).status_code == 422
     other = create_project(client)
-    assert client.post(f"/api/v1/projects/{other}/film-artifacts/{proposal['id']}/style-draft", json={"base_style": None}).status_code == 422
+    cross_project = client.post(
+        f"/api/v1/projects/{other}/film-artifacts/{proposal['id']}/style-draft",
+        json={"base_style": None},
+    )
+    assert cross_project.status_code == 422
 
 
 def test_profile_routing_remote_consent_errors_redaction_and_staleness(api):
