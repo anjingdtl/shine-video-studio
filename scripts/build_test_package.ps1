@@ -135,14 +135,6 @@ function New-FileManifest([string]$Root) {
     }
     return [ordered]@{ file_count = $files.Count; total_bytes = $total; files = $files }
 }
-# The manifest never describes itself: a file that lists its own hash can never
-# match.  Resolve the reported file count first (the token replacement changes
-# bytes, not the number of files), then hash the final tree once.
-$preliminary = New-FileManifest $staging
-$finalCount = $preliminary.file_count
-$startHere = Join-Path $staging 'START_HERE.md'
-$startHereText = [IO.File]::ReadAllText($startHere, [Text.UTF8Encoding]::new($false)).Replace('{{FILE_COUNT}}', [string]$finalCount)
-[IO.File]::WriteAllText($startHere, $startHereText, (New-Object Text.UTF8Encoding($false)))
 
 $buildInfo = [ordered]@{
     product = 'Shine视频工作台 / Shine Video Studio'
@@ -220,6 +212,15 @@ $buildInfo = [ordered]@{
     license_note = 'Model, node and source licenses are not changed by this package. MiniMax-H3 community license restrictions and local-law compliance must be reviewed before publication or commercial use.'
 }
 [IO.File]::WriteAllText((Join-Path $staging 'BUILD_INFO.json'), ($buildInfo | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+
+# The manifest never describes itself: a file that lists its own hash can never
+# match. Resolve the count now that every document exists, substitute it, then
+# hash the final bytes once.
+$preliminary = New-FileManifest $staging
+$finalCount = $preliminary.file_count
+$startHere = Join-Path $staging 'START_HERE.md'
+$startHereText = [IO.File]::ReadAllText($startHere, [Text.UTF8Encoding]::new($false)).Replace('{{FILE_COUNT}}', [string]$finalCount)
+[IO.File]::WriteAllText($startHere, $startHereText, (New-Object Text.UTF8Encoding($false)))
 
 # Hash the final bytes now that every document exists, then write the manifest.
 $manifest = New-FileManifest $staging

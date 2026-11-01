@@ -192,8 +192,34 @@ if ($recordedData) {
             Start-Process $url
             exit 0
         }
-        Write-Warn '发现了上次运行的进程记录，但服务已不在运行。'
-        Write-Host '  将清理陈旧记录后继续安装/启动。' -ForegroundColor Yellow
+        # The launcher refuses to start while a manifest exists, so a crashed
+        # run would otherwise deadlock the tester. Reconciliation only ends
+        # processes whose OS identity still matches the record.
+        Write-Warn '发现上次运行的进程记录，但服务已不在运行；正在安全收尾。'
+        $backendEnv = Get-ShineEnvValue $envFile 'SHINE_BACKEND_ENV'
+        if (-not $backendEnv) { $backendEnv = Join-Path $recordedData '..\app\backend-env' }
+        $reconcilePython = Join-Path ([IO.Path]::GetFullPath($backendEnv)) 'Scripts/python.exe'
+        if (-not (Test-Path -LiteralPath $reconcilePython)) {
+            $reconcilePython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+        }
+        if (Test-Path -LiteralPath $reconcilePython) {
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { & $reconcilePython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $recordedData }
+            finally { $ErrorActionPreference = $previous }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail '上次运行的进程身份无法自动收尾，安装器不会盲杀进程。'
+                Write-Host '  请双击 STOP_APP.cmd，按提示处理后再双击安装入口。' -ForegroundColor Yellow
+                Write-Host "  进程记录：$manifest" -ForegroundColor Gray
+                exit 14
+            }
+            Write-Ok '陈旧记录已清理，继续安装/启动。'
+        } else {
+            Write-Fail '本机缺少后端环境，无法安全收尾上次运行的进程。'
+            Write-Host '  确认没有 Shine 进程在运行后，删除下面这个文件再重试：' -ForegroundColor Yellow
+            Write-Host "    $manifest" -ForegroundColor Gray
+            exit 14
+        }
     }
 }
 

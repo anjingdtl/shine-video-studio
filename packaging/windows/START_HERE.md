@@ -4,7 +4,7 @@
 - 构建号：`{{BUILD_ID}}`
 - 源码提交：`{{SOURCE_COMMIT}}`
 - 构建时间：`{{BUILT_AT}}`
-- 包内文件数：`{{FILE_COUNT}}`
+- 包内文件数：`{{FILE_COUNT}}`（不含清单文件本身）
 - 构建类型：`TEST_BUILD / PARTIAL`
 - 用途：干净 Windows 电脑上的安装链、环境探测、受管实例与真实 H3 联调
 - 不是：M4 完整短剧验收包，也不是可直接商用的发行版

@@ -170,10 +170,13 @@ def test_bootstrap_accepts_the_operator_password_file_switch():
 def test_install_once_reports_a_machine_readable_verdict_for_each_gate():
     """The window is the only UI a tester has before the browser opens."""
     text = INSTALL_ONCE.read_text(encoding="utf-8-sig")
-    for code in ["exit 10", "exit 11", "exit 12", "exit 13"]:
+    for code in ["exit 10", "exit 11", "exit 12", "exit 13", "exit 14"]:
         assert code in text, f"missing distinct failure exit code {code}"
     assert "install-log-" in text, "the installer must leave a log next to the install root"
     assert "Stop-Transcript" in text
+    # A crashed previous run must not deadlock the only entry point.
+    assert "stop_shine.py" in text
+    assert "不会盲杀进程" in text
 
 
 def test_package_documents_are_rendered_from_templates():
