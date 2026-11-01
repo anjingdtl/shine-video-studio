@@ -180,9 +180,9 @@ $buildInfo = [ordered]@{
     }
     auto_decisions = [ordered]@{
         install_drive = 'largest non-system fixed disk with >= 180 GiB free'
-        install_root = '<drive>:\\ShineVideoStudio'
-        data_dir = '<install_root>\\data'
-        operator_password = 'generated 24-char secret at <install_root>\\operator-credentials.txt'
+        install_root = '<drive>:\ShineVideoStudio'
+        data_dir = '<install_root>\data'
+        operator_password = 'generated 24-char secret at <install_root>\operator-credentials.txt'
         ports = 'API 8000 / Web 5173, advanced automatically when busy'
         browser = 'http://127.0.0.1:<web port>/#setup'
     }
