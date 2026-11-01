@@ -121,6 +121,8 @@ function App() {
   const [reviewHeight, setReviewHeight] = useState('');
   const [activeSection, setActiveSection] = useState('overview');
   const [helpOpen, setHelpOpen] = useState(false);
+  /** Nav density contract: the current view's group is expanded by default; other groups expand only via their explicit toggle button. */
+  const [manualExpanded, setManualExpanded] = useState<Set<ViewId>>(() => new Set());
   const [initialRoute] = useState(() => resolveHash(window.location.hash));
   const [view, setView] = useState<ViewId>(initialRoute.view);
   const viewScrollRef = useRef<Partial<Record<ViewId, number>>>({});
@@ -593,21 +595,43 @@ function App() {
       <aside className="sidebar">
         <div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><b>SHINE</b><span>VIDEO STUDIO</span></div></div>
         <nav className="nav-groups" aria-label="工作区导航">
-          {VIEW_GROUPS.map((group) => (
-            <div className={`nav-group ${group.core ? 'core' : ''} ${view === group.view ? 'current' : ''}`} key={group.view}>
-              <button
-                className={`nav-view-head ${view === group.view ? 'active' : ''}`}
-                title={`打开${group.title}`}
-                onClick={() => {
-                  switchView(group.view);
-                  window.history.pushState(null, '', `#v/${group.view}`);
-                }}
-              >
-                <span className="nav-view-title">{group.title}</span>
-                <span className="nav-view-hint">{group.hint}</span>
-                <ChevronDown size={13} className="nav-view-caret" />
-              </button>
-              {view === group.view && group.items.map((item) => {
+          {VIEW_GROUPS.map((group) => {
+            const isCurrent = view === group.view;
+            const isExpanded = isCurrent || manualExpanded.has(group.view);
+            return (
+            <div className={`nav-group ${group.core ? 'core' : ''} ${isCurrent ? 'current' : ''} ${isExpanded ? 'expanded' : ''}`} key={group.view}>
+              <div className="nav-view-head-row">
+                <button
+                  className={`nav-view-head ${isCurrent ? 'active' : ''}`}
+                  title={`打开${group.title}`}
+                  onClick={() => {
+                    switchView(group.view);
+                    window.history.pushState(null, '', `#v/${group.view}`);
+                  }}
+                >
+                  <span className="nav-view-title">{group.title}</span>
+                  <span className="nav-view-hint">{group.hint}</span>
+                  <ChevronDown size={13} className="nav-view-caret" />
+                </button>
+                <button
+                  type="button"
+                  className="nav-view-toggle"
+                  aria-expanded={isExpanded}
+                  aria-label={`${isExpanded ? '收起' : '展开'}${group.title}子项`}
+                  title={`${isExpanded ? '收起' : '展开'}${group.title}子项`}
+                  onClick={() => {
+                    setManualExpanded((current) => {
+                      const next = new Set(current);
+                      if (next.has(group.view)) next.delete(group.view);
+                      else next.add(group.view);
+                      return next;
+                    });
+                  }}
+                >
+                  <ChevronDown size={13} className="nav-view-caret caret-in-toggle" />
+                </button>
+              </div>
+              {isExpanded && group.items.map((item) => {
                 const Icon = item.icon;
                 return (
                   <button
@@ -622,7 +646,8 @@ function App() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
         <div className="privacy-card"><ShieldCheck size={17} /><div><b>本地优先</b><span>素材与密钥不离开本机</span></div><Check size={15} /></div>
         <div className="profile"><div className="avatar">S</div><div><b>本地工作区</b><span>{apiOnline ? '已连接本机服务' : '本机服务未连接'}</span></div><ChevronDown size={16} /></div>
