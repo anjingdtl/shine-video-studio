@@ -125,6 +125,14 @@ function App() {
   useEffect(() => { loadSystem(); }, [loadSystem]);
 
   useEffect(() => {
+    if (!projectId || window.location.hash !== '#setup') return;
+    const timer = window.setTimeout(() => {
+      document.getElementById('setup')?.scrollIntoView({ behavior: 'smooth' });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [projectId]);
+
+  useEffect(() => {
     if (!projectId) return;
     const timer = window.setInterval(() => {
       Promise.all([
@@ -428,7 +436,7 @@ function App() {
             <section className="metrics-grid">
               <div className="metric-card"><div className="metric-top"><span>项目素材</span><div className="metric-icon mint"><Film size={15} /></div></div><div className="metric-value">{assets.length}<small>项</small></div><div className="metric-foot">{approvedAssets.length} 项已批准并锁定</div></div>
               <div className="metric-card"><div className="metric-top"><span>冻结风格</span><div className="metric-icon sand"><LockKeyhole size={15} /></div></div><div className="metric-value">{currentStyle ? `V${currentStyle.version}` : '—'}</div><div className="metric-foot">{currentStyle ? `SHA · ${currentStyle.sha256.slice(0, 10)}` : '完成七项规则后由你冻结'}</div></div>
-              <div className="metric-card"><div className="metric-top"><span>分镜任务</span><div className="metric-icon blue"><Activity size={15} /></div></div><div className="metric-value">{jobs.length}<small>个</small></div><div className="metric-foot">{jobs.filter((job) => job.status === 'PASSED').length} 个通过 · {jobs.filter((job) => job.status === 'NEEDS_REVIEW').length} 个待复核</div></div>
+              <div className="metric-card"><div className="metric-top"><span>分镜任务</span><div className="metric-icon blue"><Activity size={15} /></div></div><div className="metric-value">{jobs.length}<small>个</small></div><div className="metric-foot">{jobs.filter((job) => job.status === 'PASSED').length} 个生产完成 · {jobs.filter((job) => job.acceptance_status === 'accepted').length} 个已验收 · {jobs.filter((job) => job.acceptance_status === 'pending_review').length} 个待人工</div></div>
               <div className="metric-card accent-metric"><div className="metric-top"><span>运行模式</span><div className="metric-icon cream"><Sparkles size={15} /></div></div><div className="metric-value small-value">{modeLabel}</div><div className="metric-foot">{system?.h3_connected ? '真实 H3 已连接' : '真实 H3 未连接 · 待真机验收'}</div></div>
             </section>
 

@@ -8,7 +8,7 @@
 - `tools-windows-x64.json`：bootstrap 工具清单（uv/Node/pwsh/FFmpeg，固定版本+SHA-256+size+解压后入口文件）。
 - `_upstream-pins/`：实测钉点存档（2026-10-31 自上游发布元数据读取，程序化获取，零手工输入哈希）。
 
-## 组件一览（全部 READY，60.7GB）
+## 组件一览（全部 READY，60.8GB）
 | 组件 | kind | 固定版本 | 许可证（已核实） |
 |---|---|---|---|
 | comfyui | source | b0b74356…（v0.39.0） | GPL-3.0-only |

@@ -29,7 +29,11 @@ type PlanRef = { plan_id: string; sha256: string; kind: string; action?: string;
 type Readiness = { catalog: { id: string; version: string }; layers: Array<Record<string, unknown>>; production_gates: Record<string, boolean>; human_steps: string[] };
 type Grant = { grant_id: string; snapshot: string };
 type RuntimeState = { status: string; render_provider: string; error: string | null;
-  candidate: { project_id: string; recipe_sha256: string } | null };
+  candidate: { project_id: string; recipe_sha256: string } | null;
+  services_verified?: boolean;
+  service_validation?: { status: string; blockers?: string[]; validated_at?: string | null;
+    node_count?: number | null; workflow_profiles?: string[]; review_models?: Record<string, string> } | null;
+};
 
 const TOOL_LABELS: Record<string, string> = {
   uv: 'uv', node: 'Node.js', npm: 'npm', pwsh: 'PowerShell 7', ffmpeg: 'FFmpeg', ffprobe: 'FFprobe',
@@ -186,6 +190,19 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     });
   }
 
+  function validateServices() {
+    const candidate = runtime?.candidate;
+    if (!candidate || candidate.project_id !== projectRef.current) return;
+    void run(async () => {
+      const result = await api<{ status: string; node_count: number; workflow_profiles: string[];
+        review_models: Record<string, string> }>('/setup/services/validate', withJson('POST', {
+        project_id: candidate.project_id, recipe_sha256: candidate.recipe_sha256,
+      }));
+      await loadRuntime(); await loadReadiness();
+      return `服务与工作流验证完成：${result.status} · ${result.workflow_profiles.length} 个工作流 · ${result.node_count} 个节点 · 审片 ${Object.values(result.review_models).join(' / ')}`;
+    });
+  }
+
   function registerProfiles() {
     void run(async () => {
       const result = await api<{ profiles: Array<{ name: string; status: string }> }>('/setup/profiles',
@@ -271,10 +288,16 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
             <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
+              onClick={validateServices}>验证服务与工作流</button>
+            <button className="secondary-button" disabled={busy || !token || runtime?.candidate?.project_id !== projectId}
               onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
+          <p className="guardrail-note">验证会短暂启动已安装的 ComfyUI、VLM 和 ASR，读取真实节点/工作流契约并探测审片协议，完成后停止；不加载 H3 权重，也不提交镜头。</p>
           {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{runtime.render_provider}
             {runtime.candidate?.project_id === projectId && <> · 待确认配方：<code>{runtime.candidate.recipe_sha256}</code></>}
+            {runtime.service_validation && <> · 服务契约：{runtime.service_validation.status}
+              {runtime.service_validation.validated_at ? ` · ${runtime.service_validation.validated_at}` : ''}
+              {runtime.service_validation.blockers?.length ? ` · ${runtime.service_validation.blockers.join('、')}` : ''}</>}
             {runtime.error && <> · {runtime.error}</>}
           </p>}
           {plans.length > 0 && <div className="setup-plans">

@@ -209,6 +209,42 @@ def _shot_data(db: Session, shot: Shot) -> dict[str, Any]:
     }
 
 
+def _acceptance_status(db: Session, job: Job) -> dict[str, Any]:
+    """Separate production completion from final human/model acceptance.
+
+    A PASSED production job may still carry advisory review findings.  It is
+    only "accepted" when the latest final gate really passed; exposing the two
+    states explicitly prevents a pending review from being reported as a clean
+    five-gate pass.
+    """
+    if job.status == "FAILED":
+        return {"status": "rejected", "final_gate": None,
+                "note": "The production attempt failed; it cannot be accepted."}
+    if job.status in {"REPAIR_PENDING", "NEEDS_REVIEW"}:
+        return {"status": "pending_review", "final_gate": None,
+                "note": "The production attempt is not final-passed."}
+    if job.status != "PASSED":
+        return {"status": "not_run", "final_gate": None,
+                "note": "The production attempt has not completed."}
+    if job.provider == "mock" or job.quality_verification == "mock_verified":
+        return {"status": "mock", "final_gate": None,
+                "note": "Mock evidence is not film acceptance."}
+    final = db.scalar(
+        select(QualityGate)
+        .where(QualityGate.job_id == job.id, QualityGate.gate_name == "final")
+        .order_by(QualityGate.created_at.desc(), literal_column("quality_gates.rowid").desc())
+        .limit(1)
+    )
+    if final is None:
+        return {"status": "not_run", "final_gate": None,
+                "note": "No final gate was recorded for this production attempt."}
+    if final.status == "passed" and not final.is_mock:
+        return {"status": "accepted", "final_gate": final.status,
+                "note": "The latest final gate passed."}
+    return {"status": "pending_review", "final_gate": final.status,
+            "note": "The production attempt is complete, but the final acceptance gate is still pending."}
+
+
 def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[str, Any]:
     attempts = db.scalars(select(JobAttempt).where(JobAttempt.job_id == job.id).order_by(JobAttempt.attempt_no)).all()
     shot = db.get(Shot, job.shot_id)
@@ -235,6 +271,7 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
         "max_semantic_retries": job.max_semantic_retries,
         "request_revision": job.request_revision,
         "quality_verification": job.quality_verification,
+        **{f"acceptance_{key}": value for key, value in _acceptance_status(db, job).items()},
         "style_version_id": job.style_version_id,
         "generation_mode": job.generation_mode,
         "workflow_profile_id": job.workflow_profile_id,

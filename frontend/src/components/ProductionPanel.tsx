@@ -19,6 +19,10 @@ type Props = {
 };
 
 const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
+const acceptanceLabels: Record<string, string> = {
+  accepted: '已通过终审', pending_review: '生产完成 · 待人工验收',
+  rejected: '未通过', mock: '仅 Mock 验证', not_run: '未完成',
+};
 
 export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck }: Props) {
   const [selected, setSelected] = useState('');
@@ -96,6 +100,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
                 <span className={`job-mode ${job.provider === 'comfyui' ? 'real' : ''}`}>{job.provider.toUpperCase()}</span>
                 {job.generation_mode && <span className="job-mode">{job.generation_mode}</span>}
                 {job.request.self_review_scope === 'basic' && <span className="job-mode">基础自审</span>}
+                {job.acceptance_status && <span className="job-mode">{acceptanceLabels[job.acceptance_status] ?? job.acceptance_status}</span>}
                 {job.stale && <span className="job-stale">需复核</span>}
               </div>
               <span>{statusLabels[job.status] ?? job.status}{job.failure_code ? ` · ${job.failure_code}` : ''}</span>
@@ -110,7 +115,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
       {selectedJob && <div className="job-detail">
         {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}
         <div className="detail-head">
-          <div><b>{selectedJob.shot_name}</b><span>{selectedJob.id.slice(0, 12)}… · state v{selectedJob.state_version}</span></div>
+          <div><b>{selectedJob.shot_name}</b><span>{selectedJob.id.slice(0, 12)}… · state v{selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
           <div className="detail-actions">
             {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="secondary-button" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>仅重跑审片（保留视频）</button>}
             <button className="subtle-button" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 修复建议</button>

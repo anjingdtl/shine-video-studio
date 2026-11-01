@@ -12,11 +12,113 @@ from sqlalchemy import select, text
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, ResourceLease
-from shine.models import AppSetting, Job, ProductionSeries
+from shine.models import AgentRoute, AppSetting, Job, ProductionSeries, ProviderProfile, WorkflowProfile
 from shine.services import add_audit, require_project
 
 CANDIDATE_KEY = 'deployment-runtime-candidate'
 ACTIVE_KEY = 'deployment-runtime-active'
+SERVICE_EVIDENCE_KEY = 'deployment-service-validation'
+
+
+def workflow_contract_sha256(profile: WorkflowProfile) -> str:
+    """Identity of everything a live node contract was checked against."""
+    return graph_hash({
+        'graph': profile.graph,
+        'parameter_map': profile.parameter_map,
+        'media_transfers': profile.media_transfers,
+        'required_nodes': profile.required_nodes,
+        'mode': profile.mode,
+        'checkpoint_id': profile.checkpoint_id,
+    })
+
+
+def _current_identity(db, settings):
+    """The identity the setup wizard is working on, active first then candidate."""
+    active = db.get(AppSetting, ACTIVE_KEY)
+    if active:
+        try:
+            return configuration_identity(db, settings, active.value['identity']['recipe'])
+        except (HTTPException, KeyError, TypeError) as exc:
+            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED') from exc
+    candidate = db.get(AppSetting, CANDIDATE_KEY)
+    if candidate:
+        try:
+            return configuration_identity(db, settings, candidate.value['identity']['recipe'])
+        except (HTTPException, KeyError, TypeError) as exc:
+            raise HTTPException(409, 'RUNTIME_CONFIGURATION_CHANGED_REGENERATE') from exc
+    raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
+
+
+def _evidence_seal(payload: dict) -> str:
+    return graph_hash({key: value for key, value in payload.items() if key != 'sha256'})
+
+
+def record_service_evidence(db, identity, evidence: dict) -> dict:
+    """Persist one sealed live service/node validation for the current identity."""
+    payload = {
+        'version': 1,
+        'configuration_sha256': graph_hash(identity),
+        'recipe_sha256': identity['recipe_sha256'],
+        'instance_id': identity['instance_id'],
+        'instance_sha256': identity['instance_sha256'],
+        **evidence,
+    }
+    payload['sha256'] = _evidence_seal(payload)
+    row = db.get(AppSetting, SERVICE_EVIDENCE_KEY)
+    if row is None:
+        db.add(AppSetting(key=SERVICE_EVIDENCE_KEY, value=payload))
+    else:
+        row.value = payload
+    return payload
+
+
+def service_evidence_status(db, settings, *, identity=None) -> dict:
+    """Return readiness derived from evidence, never from a hard-coded flag.
+
+    The evidence is only current if the complete configuration identity, the
+    workflow profile contracts and the reviewer profiles/routes are unchanged.
+    """
+    try:
+        identity = identity or _current_identity(db, settings)
+    except HTTPException as exc:
+        return {'status': 'PENDING', 'blockers': [str(exc.detail)], 'validated_at': None}
+    row = db.get(AppSetting, SERVICE_EVIDENCE_KEY)
+    if row is None or not isinstance(row.value, dict):
+        return {'status': 'PENDING', 'blockers': ['SERVICE_VALIDATION_REQUIRED'], 'validated_at': None}
+    evidence = dict(row.value)
+    blockers = []
+    if evidence.get('sha256') != _evidence_seal(evidence):
+        blockers.append('SERVICE_VALIDATION_TAMPERED')
+    if evidence.get('configuration_sha256') != graph_hash(identity):
+        blockers.append('SERVICE_VALIDATION_STALE_CONFIGURATION')
+    if evidence.get('recipe_sha256') != identity.get('recipe_sha256'):
+        blockers.append('SERVICE_VALIDATION_STALE_RECIPE')
+    for name, expected in (evidence.get('workflow_profiles') or {}).items():
+        profile = db.get(WorkflowProfile, expected.get('id'))
+        if (profile is None or profile.name != name
+                or workflow_contract_sha256(profile) != expected.get('contract_sha256')):
+            blockers.append(f'WORKFLOW_CONTRACT_CHANGED:{name}')
+    for role, expected in (evidence.get('review_profiles') or {}).items():
+        route_role = {'VLM': 'vlm_reviewer', 'ASR': 'asr_reviewer'}.get(role, role)
+        profile = db.get(ProviderProfile, expected.get('id'))
+        route = db.scalar(select(AgentRoute).where(AgentRoute.role == route_role))
+        if (profile is None or route is None or route.provider_profile_id != profile.id
+                or profile.model != expected.get('model') or profile.base_url != expected.get('base_url')
+                or graph_hash(profile.capabilities or {}) != expected.get('capabilities_sha256')):
+            blockers.append(f'REVIEW_ROUTE_CHANGED:{role}')
+    if blockers:
+        return {'status': 'PENDING', 'blockers': sorted(set(blockers)),
+                'validated_at': evidence.get('validated_at')}
+    return {
+        'status': 'READY',
+        'blockers': [],
+        'validated_at': evidence.get('validated_at'),
+        'node_count': evidence.get('node_count'),
+        'node_inventory_sha256': evidence.get('node_inventory_sha256'),
+        'workflow_profiles': sorted((evidence.get('workflow_profiles') or {}).keys()),
+        'review_models': {role: item.get('model') for role, item in
+                          (evidence.get('review_profiles') or {}).items()},
+    }
 
 
 def configuration_identity(db, settings, path):
@@ -152,8 +254,13 @@ def runtime_report(db, settings):
         mode = effective.render_provider
     except HTTPException as exc:
         status, error, mode = 'INVALID_REQUIRES_REVIEW', exc.detail, 'unavailable'
+    validation = None
+    if active or candidate:
+        validation = service_evidence_status(db, settings)
     return {'status': status, 'render_provider': mode, 'error': error,
             'candidate': ({'project_id': candidate.value['project_id'],
                            'recipe_sha256': candidate.value['identity']['recipe_sha256']} if candidate else None),
             'configuration_sha256': active.value.get('sha256') if active else None,
-            'services_verified': False, 'real_inference_verified': False}
+            'services_verified': bool(active and validation and validation.get('status') == 'READY'),
+            'service_validation': validation,
+            'real_inference_verified': False}

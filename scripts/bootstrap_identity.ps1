@@ -1,4 +1,37 @@
 # Shared with bootstrap.ps1; dot-sourcing this file performs no writes.
+function Get-ShineOperatorPasswordFile([string]$Path, [int]$Length = 24) {
+    <#
+    One-click installs cannot depend on a human inventing a 16+ character
+    password correctly.  This returns a SecureString from a local credential
+    file, generating it once with a crypto RNG when the file is absent.  The
+    plaintext never leaves this function and is never written to the log.
+    #>
+    if (-not $Path) { throw 'Operator credential path is required.' }
+    $Path = [IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $Path) {
+        $stored = (Get-Content -LiteralPath $Path -Raw -Encoding UTF8).Trim()
+        if ($stored.Length -lt 16) {
+            throw "Existing operator credential file is invalid: $Path"
+        }
+        return (ConvertTo-SecureString $stored -AsPlainText -Force)
+    }
+    # No 0/O/1/l/I: testers read this off a screen and retype it.
+    $alphabet = 'abcdefghijkmnpqrstuvwxyz'.ToCharArray() + 'ABCDEFGHJKLMNPQRSTUVWXYZ'.ToCharArray() + '23456789'.ToCharArray()
+    $bytes = New-Object 'byte[]' ($Length * 4)
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $builder = New-Object Text.StringBuilder
+    for ($i = 0; $i -lt $Length; $i++) {
+        $value = [BitConverter]::ToUInt32($bytes, $i * 4)
+        [void]$builder.Append($alphabet[$value % $alphabet.Length])
+    }
+    $generated = $builder.ToString()
+    $directory = Split-Path -Parent $Path
+    if ($directory) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
+    [IO.File]::WriteAllText($Path, $generated + "`n", (New-Object Text.UTF8Encoding($false)))
+    return (ConvertTo-SecureString $generated -AsPlainText -Force)
+}
+
 function Initialize-ShineOperator([string]$EnvFile, [scriptblock]$ReadPassword) {
     $existing = if (Test-Path -LiteralPath $EnvFile) { Get-Content -LiteralPath $EnvFile -Raw -Encoding UTF8 } else { '' }
     $hashMatch = [regex]::Match($existing, '(?m)^SHINE_OPERATOR_TOKEN_SHA256=([^\r\n]*)')

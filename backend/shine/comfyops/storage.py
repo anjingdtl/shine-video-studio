@@ -55,6 +55,7 @@ def process_environment(root):
     """Pinned local commands must not spill pip/model caches or temp files onto C:."""
     root = Path(root)
     return {'TEMP': str(root / '.runtime-tmp'), 'TMP': str(root / '.runtime-tmp'),
+            'TMPDIR': str(root / '.runtime-tmp'),
             'PIP_CACHE_DIR': str(root / '.runtime-cache/pip'),
             'HF_HOME': str(root / '.runtime-cache/huggingface'),
             'TORCH_HOME': str(root / '.runtime-cache/torch'),

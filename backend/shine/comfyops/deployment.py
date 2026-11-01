@@ -631,19 +631,29 @@ def deployment_readiness(db, settings: Settings) -> dict:
                   and row.payload.get("root") and not row.payload.get("installation")]
     instance = candidates[0] if len(candidates) == 1 else None
     install_blockers = installed_instance_blockers(db, settings, instance, catalog)
-    layers.append({
+    environment_layer = {
         "layer": "L3_environment_installed",
         "status": "READY" if not install_blockers else "PENDING",
         "blockers": install_blockers,
         "instance": instance.id if instance else None,
         "root": instance.payload.get("root") if instance else None,
-    })
-    recipe_configured = bool(os.getenv("SHINE_MANAGED_RECIPE"))
+    }
+    layers.append(environment_layer)
+    from shine.comfyops.runtime_configuration import service_evidence_status
+    service_status = service_evidence_status(db, settings)
+    l4_blockers = list(service_status.get("blockers") or [])
+    if environment_layer["status"] != "READY":
+        l4_blockers.append("L3_ENVIRONMENT_NOT_READY")
     layers.append({
         "layer": "L4_services_and_contracts",
-        "status": "PENDING",
-        "note": "Live service and node-contract verification required",
-        "managed_recipe_env": recipe_configured,
+        "status": "READY" if not l4_blockers and service_status.get("status") == "READY" else "PENDING",
+        "blockers": l4_blockers,
+        "validated_at": service_status.get("validated_at"),
+        "node_count": service_status.get("node_count"),
+        "workflow_profiles": service_status.get("workflow_profiles", []),
+        "review_models": service_status.get("review_models", {}),
+        "note": "Live object_info, workflow input contracts and review-service identity "
+                "are recorded as sealed evidence",
     })
     layers.append({
         "layer": "L5_real_inference",
@@ -653,6 +663,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
     production_gates = {
         "workflow_profiles_registered": bool(db.scalars(select(WorkflowProfile)).first()),
         "operator_configured": bool(settings.operator_id and settings.operator_token_sha256),
+        "services_verified": service_status.get("status") == "READY",
     }
     from shine.comfyops.runtime_configuration import runtime_report
     return {

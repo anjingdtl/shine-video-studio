@@ -98,6 +98,8 @@ export type Job = {
   compiled_prompt_sha256: string | null; artifact_id: string | null; last_qc_result: string | null;
   last_repair_plan: Record<string, unknown> | null;
   request_revision?: number; quality_verification?: string | null;
+  acceptance_status?: 'accepted' | 'pending_review' | 'rejected' | 'mock' | 'not_run';
+  acceptance_note?: string | null; acceptance_final_gate?: string | null;
   request: {
     reference_manifest: Array<{ label: string; asset_id: string; sha256: string; use_as: string }>;
     compiled_prompt_sha256?: string; compiler_version?: string; rule_version?: string;

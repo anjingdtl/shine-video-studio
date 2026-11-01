@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Install,
     [ValidateSet('mock', 'comfyui')][string]$Provider = 'mock',
     [ValidateRange(1,65535)][int]$ApiPort = 8000,
@@ -11,7 +11,8 @@ param(
     [switch]$IsolatedReviewProcess,
     [ValidateRange(1,65535)][int]$ReviewPort = 8116,
     [string]$AdditionalReviewManifest = '',
-    [ValidateRange(1,65535)][int]$AdditionalReviewPort = 8117
+    [ValidateRange(1,65535)][int]$AdditionalReviewPort = 8117,
+    [switch]$OpenBrowser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -328,3 +329,22 @@ if ($Provider -eq 'comfyui') {
     Write-Host 'Mock mode simulates scheduling and QC only. It never creates or presents a video.'
 }
 Write-Host 'Open the Web workbench, approve and lock assets, freeze the Style Bible, then create shots.'
+if ($OpenBrowser) {
+    # The first installer launch must land in the guided setup, not on a blank
+    # project page. Create one local setup project only when the workspace has
+    # no project at all; never mutate an existing workspace.
+    try {
+        $apiBase = "http://127.0.0.1:$ApiPort/api/v1"
+        $existingProjects = @(Invoke-RestMethod "$apiBase/projects" -TimeoutSec 10)
+        if ($existingProjects.Count -eq 0) {
+            $setupProject = @{ title = '本机安装与联调'; description = '由本地安装器创建的新机设置项目' } | ConvertTo-Json
+            $setupProjectBytes = [System.Text.Encoding]::UTF8.GetBytes($setupProject)
+            Invoke-RestMethod "$apiBase/projects" -Method Post -ContentType 'application/json; charset=utf-8' `
+                -Body $setupProjectBytes -TimeoutSec 15 | Out-Null
+        }
+        Start-Process "http://127.0.0.1:$WebPort/#setup"
+    } catch {
+        Write-Warning "The workbench started, but the guided browser entry could not be opened: $($_.Exception.Message)"
+        Start-Process "http://127.0.0.1:$WebPort"
+    }
+}

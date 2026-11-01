@@ -12,7 +12,7 @@
 | OS | Windows 10/11 x64（引导脚本在系统自带 PowerShell 5.1 下运行） |
 | GPU | NVIDIA ≥ 15.3 GiB 显存（RTX 5080 16GB 级），驱动可用（nvidia-smi 可查） |
 | RAM | ≥ 30 GiB（32GB 级机器实测 31.7GB 可用） |
-| 磁盘 | ≥ 120 GB 空闲（下载 60.7GB × 2 预算） |
+| 磁盘 | ≥ 180 GiB 空闲（当前安装预算约 174GB，含下载、缓存和恢复快照） |
 | 工具 | uv 0.9.5 / Node 20.19.5 / PowerShell 7.4.12 / FFmpeg 8.1.3（全部可由引导安装，固定版本+SHA-256） |
 | Python | 3.12（由 uv 托管） |
 | 生成路径 | MiniMax-H3 Ref2VA INT8 ConvRot（`local-h3-ref2va-pdd8-2img-1aud[-portrait]` 两个 profile），未更换模型/模式/量化 |
@@ -24,20 +24,28 @@
 ## 1. 链路总览
 
 ```
-bootstrap.ps1（PS5.1 可跑，唯一系统入口）
+一键安装并启动.cmd / SETUP.cmd（分发包根目录，双击即用）
+  → install_once.ps1：选非系统盘 + 生成操作员密码 + 选空闲端口
+  → bootstrap.ps1（PS5.1 可跑，唯一系统入口）
   → 探测 uv/node/npm/pwsh/ffmpeg/ffprobe
   → 缺失工具按固定版本下载 → SHA-256+大小校验 → 用户级解压 → shim + 用户 PATH
   → start_shine.ps1 -Install（既有链路：uv sync → npm ci → Alembic → API/Worker/Web）
+  → 自动打开 http://127.0.0.1:<端口>/#setup
   → Web「新机设置」面板（/api/v1/setup/*）
       1) GET /setup/environment   只读环境检查（工具/GPU/RAM/磁盘/端口/可写性/路径说明）
-      2) GET /setup/catalog       部署清单摘要（14 组件 60.7GB，全部 READY、全部有真实钉点）
+      2) GET /setup/catalog       部署清单摘要（14 组件 60.8GB，全部 READY、全部有真实钉点）
       3) POST /setup/install-plan → 既有 grant → approve → execute（local）→ 受控下载+校验+隔离安装
       4) POST /setup/next-instance-plan → CREATE → INSTALL_NODE → BIND_MODELS → START（逐步，每步人工批准执行）
       5) POST /setup/configuration（操作员）→ 部署 handoff 适配器 + 收编采样节点 →
          生成受管配方/审片 manifest/.env（无个人路径依赖）
       6) POST /setup/profiles      登记两个 Ref2VA profile（幂等）
-      首次生产前：scripts/seed_local_review_routes.py 绑定审片路由（既有脚本，幂等）
+      7) POST /setup/services/validate（操作员）→ 短暂启动已安装的 ComfyUI/VLM/ASR，
+         读取 live object_info、工作流输入契约和审片协议；自动建立 8B/0.6B 审片路由并停止服务
+      8) POST /setup/runtime/activate（操作员）→ 使用验证证据激活运行配置
 ```
+
+分发包由 `scripts/build_test_package.ps1 -OutDir <目录> -Verify` 从已提交的树重建；它拒绝脏工作区，
+按 `git ls-files` 取文件，排除模型/数据库/密钥/证据/虚拟环境，写入逐文件 SHA-256 清单并复验解压结果。
 
 ## 2. 分项建设内容
 
@@ -53,7 +61,7 @@ bootstrap.ps1（PS5.1 可跑，唯一系统入口）
 `config/deployment/_upstream-pins/`（4 文件）+ `scripts/generate_deployment_catalog.py` 装配 + loader 严格校验：
 - 6 个源码归档（codeload zip 实测哈希）：ComfyUI @ b0b74356（v0.39.0, GPL-3.0-only）+ 5 个节点包
   （KJNodes/VHS/PDD-Acc/SolAttn/Upscaler，许可证逐一核实：GPL-3.0-only ×3、Apache-2.0 ×2、MIT ×1）。
-- 93 个 Windows/py3.12 wheel（4.2GB）：uv pip compile（--python-platform windows --python-version 3.12）生成
+- 154 个 Windows/py3.12 固定发行包（4.3GB，含审片运行时依赖）：uv pip compile（--python-platform windows --python-version 3.12）生成
   完整依赖闭包，逐包 PyPI JSON 取哈希并与锁文件哈希交叉验证；torch 2.7.1+cu128 三件套取自 cu128 索引锚点哈希。
 - 7 个模型组件（56.5GB）：HF API 按 pinned revision 取 LFS oid/size；非 LFS 小文件实测哈希；
   许可证逐一核实（H3 系=minimax-h3-community-license，Qwen=Apache-2.0）。
