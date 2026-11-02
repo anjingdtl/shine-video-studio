@@ -2,6 +2,12 @@
 
 Legacy manifests without OS birth identities require manual reconciliation.
 A reused PID never grants authority to stop its new owner.
+
+A PID that the OS refuses to describe is classified with a read-only probe:
+a recycled PID is released without touching the process that holds it now,
+because the recorded process is provably gone. Only a PID that still holds
+the recorded process, or one that cannot be classified at all, is retained
+for manual reconciliation.
 """
 
 from __future__ import annotations
@@ -15,14 +21,32 @@ from pathlib import Path
 
 from shine.comfyops.installer import process_identity
 from shine.comfyops.instances import ProcessRunner
+from shine.comfyops.process_probe import (
+    GONE,
+    RECYCLED,
+    SAME,
+    UNKNOWN,
+    classify_unverifiable,
+    creation_stamps,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / ".local-data"
 
 
-def stop_manifest(manifest_path: Path, *, runner=None, identity=None) -> int:
+def stop_manifest(manifest_path: Path, *, runner=None, identity=None, classify=None) -> int:
     runner = runner or ProcessRunner()
     identity = identity or process_identity
+    stamps = None
+
+    def resolve(pid, birth):
+        """Classify a PID the OS would not describe, without touching it."""
+        nonlocal stamps
+        if stamps is None:
+            stamps = creation_stamps()
+        return classify_unverifiable(pid, birth, stamps)
+
+    classify = classify or resolve
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     unresolved = []
     for entry in reversed(manifest.get("processes", [])):
@@ -41,7 +65,26 @@ def stop_manifest(manifest_path: Path, *, runner=None, identity=None) -> int:
             try:
                 current = identity(pid)
             except ValueError:
-                print(f"[refused] pid {pid}: liveness unavailable")
+                # The OS refused to describe this PID, for example because a
+                # higher privileged process holds it now. A read-only probe can
+                # still tell a recycled PID from a process that never died.
+                verdict = classify(pid, birth)
+                if verdict == RECYCLED:
+                    print(
+                        f"[released] pid {pid}: the recorded process is gone; "
+                        "this PID now belongs to another process"
+                    )
+                    continue
+                if verdict == GONE:
+                    print(f"[gone] pid {pid}: the recorded process is gone")
+                    continue
+                if verdict == SAME:
+                    print(
+                        f"[refused] pid {pid}: the recorded process is still running "
+                        "but cannot be verified"
+                    )
+                else:
+                    print(f"[refused] pid {pid}: liveness unavailable")
                 remaining.append(owner)
                 continue
             if current is None:

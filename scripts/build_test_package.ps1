@@ -203,7 +203,8 @@ $buildInfo = [ordered]@{
         'the acceptance script no longer depends on a personal external ComfyUI checkout',
         'the Web workbench has four sections with plain-language navigation and five new-user flow fixes',
         'style freeze compares all seven approved fields and consumes the grant in the same write transaction',
-        'concurrent global workflow registrations are protected by a partial unique database index (f150a0020001)'
+        'concurrent global workflow registrations are protected by a partial unique database index (f150a0020001)',
+        'a stale process record whose PID was recycled by Windows can no longer block the single entry point'
     )
     excluded_from_package = @(
         'models and weights',

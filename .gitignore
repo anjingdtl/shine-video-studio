@@ -81,6 +81,9 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+# Machine specific shortcuts (absolute paths to this checkout). They must stay
+# untracked, or the working tree is never clean and the release build refuses.
+*.lnk
 
 # Local agent workspace notes (never shipped in a package)
 .workbuddy/
