@@ -39,6 +39,10 @@ function describeDetail(detail: unknown): string {
   return JSON.stringify(detail);
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) { super(message); }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('X-Shine-Local-Action', '1');
@@ -49,7 +53,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await response.json();
       message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
     } catch { /* keep HTTP status */ }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

@@ -90,7 +90,8 @@ describe('本机环境简化流程', () => {
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
-    expect(document.querySelector('input[type=password]')).toBeNull();
+    expect(document.querySelector('input[type=password]:not([placeholder="API Key（不会回显）"]):not([placeholder="更新密钥"])')).toBeNull();
+    expect(screen.queryByLabelText(/操作员.*密码|操作员.*凭据/)).toBeNull();
     expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
     vi.mocked(window.confirm).mockReturnValue(false);
     await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));

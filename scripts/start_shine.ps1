@@ -27,7 +27,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $launchEnv = Join-Path $repoRoot '.env'
 if (Test-Path -LiteralPath $launchEnv) {
     $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
-        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER')
+        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER', 'SHINE_ENABLE_LOCAL_EXECUTION')
     foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
             $key, $value = $Matches[1], $Matches[2].Trim()

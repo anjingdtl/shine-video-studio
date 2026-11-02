@@ -506,6 +506,8 @@ function App() {
                   shots={shots}
                   workflowProfiles={workflowProfiles}
                   system={system}
+                  demoSelected={demoOverride || queueProvider === 'mock'}
+                  onSelectReal={() => setDemoOverride(false)}
                   busy={busy}
                   reviewWidth={reviewWidth}
                   reviewHeight={reviewHeight}
@@ -528,7 +530,8 @@ function App() {
                             <option value="comfyui">真实生成（默认）</option>
                             <option value="mock">演示（不出真视频）</option>
                           </select>
-                        : <select value="mock" disabled>
+                        : <select value={queueProvider} disabled={queueProvider === 'mock'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
+                            <option value="comfyui" disabled>真实制作受阻，请检查环境</option>
                             <option value="mock">演示体验（真实制作未启用）</option>
                           </select>}
                     </label>
@@ -697,7 +700,10 @@ function App() {
                           <option value="comfyui">真实生成（默认）</option>
                           <option value="mock">演示（不出真视频）</option>
                         </select></label>
-                      : <label>生成方式<select value="mock" disabled><option value="mock">演示体验（真实制作未启用）</option></select></label>}
+                      : <label>生成方式<select value={queueProvider} disabled={queueProvider === 'mock'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
+                          <option value="comfyui" disabled>真实制作受阻，请检查环境</option>
+                          <option value="mock">演示体验（真实制作未启用）</option>
+                        </select></label>}
                     {queueProvider === 'comfyui' && <label>生成模板<select value={queueProfile} onChange={(event) => setQueueProfile(event.target.value)}>
                       <option value="">请选择…</option>{workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
                     </select></label>}
@@ -746,6 +752,8 @@ function App() {
                   shots={shots}
                   workflowProfiles={workflowProfiles}
                   system={system}
+                  demoSelected={demoOverride || queueProvider === 'mock'}
+                  onSelectReal={() => setDemoOverride(false)}
                   busy={busy}
                   reviewWidth={reviewWidth}
                   reviewHeight={reviewHeight}
@@ -762,6 +770,7 @@ function App() {
                 {viewHero('设置板块', '先把工具调教顺手，再开工。', 'SYSTEM SETUP')}
                 <SetupPanel key={`setup-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
                 <SettingsPanel
+                  onRefresh={refreshAll}
                   project={project}
                   profiles={profiles}
                   routes={routes}
@@ -803,7 +812,7 @@ function App() {
         </div>
       </main>
 
-      {wizard && <RealProductionWizard
+      {wizard && <RealProductionWizard key={`${projectId}-${wizard}`}
         mode={wizard}
         projectId={projectId}
         onClose={() => setWizard(null)}

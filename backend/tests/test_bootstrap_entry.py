@@ -122,7 +122,9 @@ def test_bootstrap_system_drive_is_rejected_before_any_download(tmp_path):
 
 
 @pytest.mark.parametrize('existing_data', [False, True])
-def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(tmp_path, existing_data):
+@pytest.mark.parametrize('execution_optout', [False, True])
+def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(
+        tmp_path, existing_data, execution_optout):
     """PS5.1 with six synthetic tool shims: no network, password prompt or app launch."""
     from dotenv import dotenv_values
 
@@ -132,7 +134,8 @@ def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(t
     shutil.copyfile(BOOTSTRAP, repo / 'scripts/bootstrap.ps1')
     shutil.copyfile(REPO / 'config/deployment/tools-windows-x64.json',
                     repo / 'config/deployment/tools-windows-x64.json')
-    (repo / '.env').write_text('UNRELATED=preserve-me\nSHINE_ENABLE_LOCAL_EXECUTION=0\n', encoding='utf-8')
+    initial_env = 'UNRELATED=preserve-me\n' + ('SHINE_ENABLE_LOCAL_EXECUTION=0\n' if execution_optout else '')
+    (repo / '.env').write_text(initial_env, encoding='utf-8')
     legacy = repo / '.local-data'
     if existing_data:
         legacy.mkdir()
@@ -161,7 +164,7 @@ def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(t
     assert Path(values['SHINE_BACKEND_ENV']).is_relative_to(selected)
     assert Path(values['UV_CACHE_DIR']).is_relative_to(selected)
     assert values['UNRELATED'] == 'preserve-me'
-    assert values['SHINE_ENABLE_LOCAL_EXECUTION'] == '0'
+    assert values['SHINE_ENABLE_LOCAL_EXECUTION'] == ('0' if execution_optout else '1')
     assert 'SHINE_OPERATOR_TOKEN_SHA256' not in values
     preferences = json.loads((expected_data / 'deployment-storage.json').read_text(encoding='utf-8'))
     assert Path(preferences['root']) == selected / 'runtime'

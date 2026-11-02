@@ -262,3 +262,9 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
         registered.append({"name": name, "profile_id": profile.id, "status": "REGISTERED"})
     db.commit()
     return {"profiles": registered}
+
+
+@router.get('/llm-readiness')
+def text_model_readiness(db: DBSession):
+    from shine.comfyops.llm_readiness import llm_readiness
+    return llm_readiness(db)

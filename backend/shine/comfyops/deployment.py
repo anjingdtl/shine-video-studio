@@ -331,6 +331,20 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str,
         # Production owns the first fenced startup and GPU admission. An ordinary
         # START here would keep the same port occupied and bypass that boundary.
         return None, None
+    # Resume the same durable intent after a closed/disconnected wizard. Creating
+    # another plan must not provide a route around an ambiguous execution.
+    pending = list(db.scalars(select(InstallationPlan).where(
+        InstallationPlan.project_id == project_id,
+        InstallationPlan.status.in_(['AWAITING_APPROVAL', 'APPROVED', 'INSTALLING', 'NEEDS_REVIEW']),
+    )))
+    for existing in pending:
+        op = existing.payload.get('operation', {})
+        if (existing.payload.get('kind') == 'INSTANCE_LIFECYCLE'
+                and op.get('name') == instance_name and op.get('port') == port and op.get('mode') == mode):
+            if existing.status in {'INSTALLING', 'NEEDS_REVIEW'}:
+                raise HTTPException(409, 'INSTANCE_REQUIRES_RECONCILIATION')
+            if op.get('action') == action:
+                return existing, action
     rows = register_catalog_packages(db, catalog, [
         "comfyui", WHEEL_COMPONENT_ID,
         *[cid for cid, c in components.items() if c["kind"] == "node"],

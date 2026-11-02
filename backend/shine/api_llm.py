@@ -100,6 +100,8 @@ def update_profile(
         )
         if duplicate:
             raise HTTPException(status_code=409, detail="A provider profile with this name already exists")
+    if set(updates) - {'name'}:
+        profile.capabilities = {}
     for key, value in updates.items():
         setattr(profile, key, value)
     add_audit(
@@ -145,6 +147,7 @@ def set_profile_key(
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
     secrets.delete(profile.api_key_ref)
+    profile.capabilities = {}
     try:
         profile.api_key_ref = secrets.store(profile.id, body.api_key)
     except SecureStoreUnavailable as exc:
@@ -166,6 +169,7 @@ def clear_profile_key(
         raise HTTPException(status_code=404, detail="Provider profile not found")
     secrets.delete(profile.api_key_ref)
     profile.api_key_ref = None
+    profile.capabilities = {}
     add_audit(db, "user", "PROVIDER_KEY_CLEARED", "provider_profile", profile.id)
     db.commit()
     db.refresh(profile)
@@ -184,7 +188,11 @@ def test_profile(
     try:
         capabilities = _gateway(secrets).test_profile(profile)
     except LLMError as exc:
+        profile.capabilities = {'available': False, 'error_code': exc.code}
+        db.commit()
         return ProviderTestResult(ok=False, error_code=exc.code, message=str(exc))
+    from shine.comfyops.llm_readiness import profile_identity
+    capabilities = {**capabilities, 'setup_config_sha256': profile_identity(profile)}
     profile.capabilities = capabilities
     add_audit(
         db,

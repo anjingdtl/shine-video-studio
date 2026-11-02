@@ -10,9 +10,9 @@ export async function gotoDirectorPage(
   await user.click(await screen.findByRole('button', { name }));
 }
 
-/** A tiny fetch stub with a route table.  Successful-path tests do NOT
- *  intercept: routes are the backend contract the UI talks to, and the stub
- *  only plays back the state the real API would return.  Failure-injection
+/** A tiny fetch stub with a route table.  All routes here are stubbed UI fixtures, not API contract evidence.
+ *  Real route verification lives in test_director_setup_contract.py and
+ *  scripts/test_director_browser.py.  Failure-injection
  *  tests explicitly return 4xx/5xx (they are marked in the test name). */
 export type StubResponse = { status?: number; body?: unknown } | undefined;
 export type StubHandler = (
@@ -145,12 +145,14 @@ export function baseRoutes(project = baseProject()): Route[] {
   return [
     { method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'local-grant', snapshot: 'local-snapshot' }) },
     { method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse(SYSTEM_STATUS) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/llm-readiness$/, respond: () => jsonResponse({ status: 'READY', roles: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/environment$/, respond: () => jsonResponse(ENV_REPORT) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/existing-installations$/, respond: () => jsonResponse({ installations: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/catalog$/, respond: () => jsonResponse(CATALOG) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/readiness$/, respond: () => jsonResponse(READINESS) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/runtime$/, respond: () => jsonResponse(RUNTIME) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/storage$/, respond: () => jsonResponse(STORAGE) },
+    { method: 'GET', pattern: /\/api\/v1\/comfyops\/execution-context$/, respond: () => jsonResponse({ local_execution_enabled: true }) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/install-plans/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/workflow-capabilities$/, respond: () => jsonResponse({ revisions: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/inventory$/, respond: () => jsonResponse([]) },

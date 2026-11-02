@@ -9,7 +9,7 @@ import { emptyStyle } from './constants';
 /** 数据与操作层：项目/素材/风格/镜头/任务/系统状态的全部加载、轮询和提交。
  *  App.tsx 只负责布局与导航，不再自带业务逻辑。
  *  「演示 / 真实制作」的唯一事实来源是后端 /system/status 的 production_mode：
- *  这里不维护第二份模式状态，也不允许前端自行推断环境就绪。 */
+ *  用户的生成意图单独保存，绝不据此推断环境就绪。 */
 export function useStudio() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
@@ -42,12 +42,22 @@ export function useStudio() {
   const currentStyle = styles.find((item) => item.id === project?.frozen_style_version_id);
   const approvedAssets = useMemo(() => assets.filter((asset) => asset.approved && asset.locked), [assets]);
   const production = system?.production_mode ?? null;
-  /** 后端模式允许真实提交时，单镜头默认真实生成；否则只有演示。
-   *  该派生值是唯一的生成方式来源，页面刷新与轮询都会跟随后端刷新。 */
+  /** 后端环境决定能否提交真实任务；用户演示选择独立、持久保存。 */
   const realSubmissionAllowed = production !== null
     && ['READY', 'RUNNING'].includes(production.mode);
-  const [demoOverride, setDemoOverride] = useState(false);
-  const queueProvider: 'mock' | 'comfyui' = realSubmissionAllowed && !demoOverride ? 'comfyui' : 'mock';
+  const [demoOverride, updateDemoOverride] = useState(() => localStorage.getItem('shine.productionIntent') === 'mock');
+  function setDemoOverride(demo: boolean) {
+    localStorage.setItem('shine.productionIntent', demo ? 'mock' : 'comfyui');
+    updateDemoOverride(demo);
+  }
+  const hasSeenReal = useRef(false);
+  if (realSubmissionAllowed) hasSeenReal.current = true;
+  useEffect(() => {
+    if (realSubmissionAllowed && !demoOverride) localStorage.setItem('shine.productionIntent', 'comfyui');
+  }, [realSubmissionAllowed, demoOverride]);
+  // Capability loss must never turn a real submission into a successful demo.
+  const queueProvider: 'mock' | 'comfyui' = demoOverride || (!hasSeenReal.current && !realSubmissionAllowed && production?.mode === 'DEMO'
+    && localStorage.getItem('shine.productionIntent') !== 'comfyui') ? 'mock' : 'comfyui';
 
   function report(text: string, kind: 'success' | 'error' = 'success') {
     setNotice({ text, kind });

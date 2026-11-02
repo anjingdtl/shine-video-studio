@@ -1,5 +1,17 @@
 # Upstream source and license audit
 
+## 2026-11-02 director acceptance V2 and core LLM preparation
+
+Baseline `5b06f5e17784d899230b91a6fd6c438c7bc6e57a`. Reused this repository's
+SetupPanel approval contract, FastAPI routes, lifecycle state machines, Gateway,
+SecretStore and provider/role routing. No external source code copied, model or
+workflow pin changed, or existing ComfyUI modified. The shared LLM form was
+extracted from SettingsPanel, not copied from a third-party product.
+Playwright 1.64.1 is a temporary test-only overlay; it is not an application
+runtime dependency. Browser fixtures explicitly isolate external OS/service
+ports and use synthetic bytes, never real-H3 or real-provider acceptance.
+See [V2 acceptance](FINAL_DIRECTOR_WORKBENCH_ACCEPTANCE_V2_20261102.md).
+
 ## 2026-11-02 existing-installation detection repair
 
 Baseline `351067f`: independently implemented bounded filesystem discovery and pinned-file cache import.

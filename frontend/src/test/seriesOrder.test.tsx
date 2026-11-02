@@ -89,4 +89,16 @@ describe('Web 发起生产序列（P04）', () => {
     expect(screen.getByText(/不会生成真实影片/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '启用真实制作' })).toBeInTheDocument();
   });
+  it('环境 READY 但用户选择演示，连续制作禁用且不提交真实任务', async () => {
+    const selectReal = vi.fn();
+    render(<ProductionSeriesPanel projectId="proj-1" shots={shots} workflowProfiles={profiles}
+      system={readySystem} busy={false} reviewWidth="1280" reviewHeight="720" demoSelected
+      onSelectReal={selectReal} onStarted={() => undefined} onMessage={() => undefined} onModeAction={() => undefined} />);
+    await userEvent.click(screen.getByText('选择全部可制作镜头'));
+    expect(screen.getByRole('button', { name: /开始制作影片/ })).toBeDisabled();
+    expect(stub.callsOf('POST', /production-series$/)).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: '切回真实制作' }));
+    expect(selectReal).toHaveBeenCalledTimes(1);
+  });
+
 });

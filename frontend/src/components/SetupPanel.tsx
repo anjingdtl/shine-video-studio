@@ -1,6 +1,8 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { LLMSetupPanel } from './LLMSetupPanel';
+import { approveAndExecuteSetupPlan } from '../setupExecution';
 import { label, prepRowLabels, providerLabels, serviceStatusLabels } from '../constants';
 import type { DeploymentStorage } from './StorageSettings';
 
@@ -35,7 +37,6 @@ type UpstreamRow = { id: string; label: string; host: string; status: string;
 type Connectivity = { status: string; checked_at: string; blocked: string[]; degraded: string[];
   upstreams: UpstreamRow[]; guidance: string[] };
 type Readiness = { catalog: { id: string; version: string }; layers: Array<Record<string, unknown>>; production_gates: Record<string, boolean>; human_steps: string[] };
-type Grant = { grant_id: string; snapshot: string };
 type RuntimeState = { status: string; render_provider: string; error: string | null;
   candidate: { project_id: string; recipe_sha256: string } | null;
   services_verified?: boolean;
@@ -220,20 +221,10 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   }, [loadStorage, loadPlans, loadEnvironment, loadReadiness, say]);
 
   async function approveAndExecute(plan: PlanRef, label: string): Promise<void> {
-    let approved = { sha256: plan.sha256 };
-    if (plan.status === 'AWAITING_APPROVAL') {
-      const grant = await api<Grant>('/preparation/approval-grants',
-        withJson('POST', { action: 'install', target_id: plan.plan_id, context: null }));
-      approved = await api<{ sha256: string }>(`/comfyops/install-plans/${plan.plan_id}/approve`,
-        withJson('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence: 'Setup 向导内人工批准' }));
-    } else if (plan.status !== 'APPROVED') {
-      throw new Error('该计划已执行或需要对账，请查看原始尝试记录。');
-    }
-    const exec = await api<Record<string, unknown>>(`/comfyops/${plan.kind === 'INSTANCE_LIFECYCLE' ? 'instance-plans' : 'install-plans'}/${plan.plan_id}/execute`,
-      { ...withJson('POST', plan.kind === 'INSTANCE_LIFECYCLE' ? { plan_hash: approved.sha256 } : { plan_hash: approved.sha256, executor: 'local' }), signal: AbortSignal.timeout(600000_000) });
-    if (!['FILES_VERIFIED', 'COMPLETED'].includes(String(exec.status))) {
-      throw new Error(`执行停在 ${String(exec.status)}，请展开安装详情检查；没有自动重试。`);
-    }
+    const selected = projectRef.current;
+    const exec = await approveAndExecuteSetupPlan(plan, () => {
+      if (!mounted.current || projectRef.current !== selected) throw new Error('作品已切换，操作已停止。已提交的操作请查看尝试记录。');
+    });
     say(`${label} 执行完成：${JSON.stringify(exec).slice(0, 120)}`);
   }
 
@@ -369,6 +360,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
       };
       try {
+        const llm = await api<{ status: string }>('/setup/llm-readiness');
+        ensureCurrent();
+        if (llm.status !== 'READY') throw new Error('LLM_SETUP_REQUIRED：请先完成核心 LLM 配置、测试和文本工种路由。');
         setProgress('检查下载网络…');
         const network = await api<Connectivity>('/setup/connectivity');
         setConnectivity(network);
@@ -440,6 +434,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         <div className="section-icon"><Sparkles size={17} /></div>
       </div>
 
+      <details className="advanced-fold"><summary>0 · 核心 LLM 配置（新机必备）</summary><LLMSetupPanel onChanged={onRefresh} /></details>
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
       <div className="settings-block">

@@ -240,7 +240,20 @@ if ($defaultManifest -and -not $CheckOnly) {
         $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
         Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
     }
-    $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'
+    # Persist the installer opt-in for later installed -> start launches.
+    # Preserve an administrator's explicit opt-out; the UI explains how to enable it.
+    $executionEnvFile = Join-Path $repoRoot '.env'
+    $executionEnvText = if (Test-Path -LiteralPath $executionEnvFile) {
+        Get-Content -LiteralPath $executionEnvFile -Raw -Encoding UTF8
+    } else { '' }
+    $executionSetting = [regex]::Match($executionEnvText, '(?m)^SHINE_ENABLE_LOCAL_EXECUTION=([^\r\n]*)')
+    if ($executionSetting.Success) {
+        $env:SHINE_ENABLE_LOCAL_EXECUTION = $executionSetting.Groups[1].Value.Trim()
+    } else {
+        $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'
+        $executionEnvText += "`nSHINE_ENABLE_LOCAL_EXECUTION=1`n"
+        [IO.File]::WriteAllText($executionEnvFile, $executionEnvText, (New-Object Text.UTF8Encoding($false)))
+    }
     if (-not $DataDir) {
         if ($env:SHINE_DATA_DIR) { $DataDir = $env:SHINE_DATA_DIR }
         else {

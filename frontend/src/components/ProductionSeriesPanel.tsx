@@ -9,6 +9,8 @@ type Props = {
   workflowProfiles: WorkflowProfile[];
   system: SystemStatus | null;
   busy: boolean;
+  demoSelected?: boolean;
+  onSelectReal?: () => void;
   reviewWidth: string;
   reviewHeight: string;
   onStarted: () => void;
@@ -41,7 +43,7 @@ const itemText: Record<string, string> = {
 
 export default function ProductionSeriesPanel({
   projectId, shots, workflowProfiles, system, busy, reviewWidth, reviewHeight,
-  onStarted, onMessage, onModeAction,
+  onStarted, onMessage, onModeAction, demoSelected = false, onSelectReal,
 }: Props) {
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -94,6 +96,7 @@ export default function ProductionSeriesPanel({
   }
 
   async function start() {
+    if (demoSelected || system?.production_mode?.mode !== 'READY' || working || busy) return;
     if (!profileId) { onMessage('当前没有可用的生成方案，请先在制作环境中完成登记。', 'error'); return; }
     if (selected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
     if (selectedBusy.length > 0) {
@@ -146,7 +149,7 @@ export default function ProductionSeriesPanel({
   // 单一权威来源：后端 production_mode。READY 才允许开始新的连续制作；
   // 渲染器空闲停机不影响 READY（受管渲染器按需启动）。
   const mode = system?.production_mode?.mode ?? null;
-  const canStart = mode === 'READY' && !activeSeries && selected.length > 0
+  const canStart = !demoSelected && mode === 'READY' && !activeSeries && selected.length > 0
     && selectedBusy.length === 0 && !!profileId;
 
   return <div className="card section-card series-card" id="production-series">
@@ -168,6 +171,10 @@ export default function ProductionSeriesPanel({
         && <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查并修复</button>}
     </div>}
 
+    {demoSelected && <div className="blocked-callout">
+      <span>当前选择演示；连续制作只支持真实 H3，演示态不能启动。</span>
+      <button type="button" className="text-button" onClick={onSelectReal}>切回真实制作</button>
+    </div>}
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案

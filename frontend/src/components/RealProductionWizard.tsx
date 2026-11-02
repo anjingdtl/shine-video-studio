@@ -1,6 +1,8 @@
 import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { api, json } from '../api';
+import { api as request, json, type SystemStatus } from '../api';
+import { LLMSetupPanel } from './LLMSetupPanel';
+import { approveAndExecuteSetupPlan, type SetupPlan } from '../setupExecution';
 
 /** 「启用真实制作」单一路径向导。检查顺序和每个接口调用都与专业版
  *  制作环境面板共用同一后端合同；这里只做普通用户能读懂的进度呈现。
@@ -8,12 +10,13 @@ import { api, json } from '../api';
  *  重新下载几十 GB 模型。底层八个安装步骤由程序按顺序协调，用户只看
  *  到进度、缺失项和确需授权的操作。 */
 
-type StageId = 'project' | 'hardware' | 'existing' | 'models' | 'workflows' | 'runtime' | 'done';
+type StageId = 'project' | 'llm' | 'hardware' | 'existing' | 'models' | 'workflows' | 'runtime' | 'done';
 type StageStatus = 'pending' | 'running' | 'ok' | 'warn' | 'blocked';
 type Stage = { id: StageId; title: string; status: StageStatus; note: string };
 
 const STAGE_TITLES: Array<{ id: StageId; title: string }> = [
   { id: 'project', title: '检查当前作品' },
+  { id: 'llm', title: '配置核心 LLM 与文本工种' },
   { id: 'hardware', title: '检查本机硬件与基础程序' },
   { id: 'existing', title: '检测已有 ComfyUI 与模型' },
   { id: 'models', title: '核对模型版本与固定配置' },
@@ -71,19 +74,45 @@ export function RealProductionWizard({
   const [finished, setFinished] = useState<null | { ok: boolean; summary: string }>(null);
   const [reuseOffer, setReuseOffer] = useState<null | { scans: ExistingScan[]; totalBytes: number }>(null);
   const [reusedBytes, setReusedBytes] = useState(0);
+  const [llmRequired, setLlmRequired] = useState(false);
   const [needProject, setNeedProject] = useState(false);
   const cancelled = useRef(false);
   const mounted = useRef(true);
+  const operation = useRef(false);
+  const currentStage = useRef<StageId>('project');
+  const selectedProject = useRef(projectId);
+  selectedProject.current = projectId;
+  const originalProject = useRef(projectId);
+  function check() {
+    if (!mounted.current || cancelled.current || selectedProject.current !== originalProject.current) throw new Error('WIZARD_CANCELLED');
+  }
+  async function api<T>(path: string, init?: RequestInit): Promise<T> {
+    check();
+    const result = await request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(60_000) });
+    check();
+    return result;
+  }
+  async function safely(action: () => Promise<void>) {
+    if (operation.current) return;
+    operation.current = true;
+    try { check(); await action(); }
+    catch (error) {
+      if (mounted.current && !cancelled.current && selectedProject.current === originalProject.current) {
+        stopWith(currentStage.current, `操作未完成：${String(error)}。已提交的操作可能仍在服务端进行；请在专业设置查看记录。重新检查会先读取实际状态。`);
+      }
+    } finally { operation.current = false; }
+  }
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; cancelled.current = true; }; }, []);
 
   function setStage(id: StageId, patch: Partial<Stage>) {
-    if (!mounted.current) return;
+    if (!mounted.current || cancelled.current || selectedProject.current !== originalProject.current) return;
+    currentStage.current = id;
     setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
   }
 
   function stopWith(id: StageId, note: string) {
     setStage(id, { status: 'blocked', note });
-    if (mounted.current) setFinished({ ok: false, summary: note });
+    if (mounted.current && !cancelled.current && selectedProject.current === originalProject.current) setFinished({ ok: false, summary: note });
   }
 
   async function importReuse(scans: ExistingScan[]): Promise<number> {
@@ -99,10 +128,17 @@ export function RealProductionWizard({
     return total;
   }
 
+  async function verifyProductionReady() {
+    const status = await api<SystemStatus>('/system/status');
+    if (!['READY', 'RUNNING'].includes(status.production_mode.mode)) {
+      throw new Error(`真实制作暂未就绪（${status.production_mode.code ?? status.production_mode.mode}）：${status.production_mode.detail}`);
+    }
+  }
+
   async function run() {
     cancelled.current = false;
     setStages(INITIAL_STAGES.map((stage) => ({ ...stage, status: 'pending', note: '' })));
-    setFinished(null); setReuseOffer(null); setReusedBytes(0); setNeedProject(false);
+    setFinished(null); setLlmRequired(false); setReuseOffer(null); setReusedBytes(0); setNeedProject(false);
     const alive = () => !cancelled.current && mounted.current;
     const onlyDiagnose = mode === 'diagnose';
 
@@ -114,6 +150,39 @@ export function RealProductionWizard({
       return;
     }
     setStage('project', { status: 'ok', note: '当前作品已就绪。' });
+
+    setStage('llm', { status: 'running', note: '检查文本模型、连接检测与全部文本工种路由…' });
+    const llm = await api<{ status: string }>('/setup/llm-readiness');
+    if (llm.status !== 'READY') {
+      setLlmRequired(true);
+      stopWith('llm', '请先完成核心 LLM 配置、连接测试及文本工种指定（LLM_SETUP_REQUIRED），再点击重新检查继续。');
+      return;
+    }
+    setStage('llm', { status: 'ok', note: '核心 LLM 配置与连接检查通过；文本生成质量独立验收。' });
+
+    // Read durable state before creating any further intent. Never replay ambiguous work.
+    const plans = await api<Array<{ id: string; status: string }>>(`/comfyops/install-plans?project_id=${projectId}`);
+    for (const plan of plans) {
+      const key = `shine.setupUnconfirmed.${plan.id}`;
+      if (localStorage.getItem(key)) {
+        if (['FILES_VERIFIED_PENDING_RUNTIME', 'STOPPED', 'RECONCILED_NO_RETRY'].includes(plan.status)) localStorage.removeItem(key);
+        else { stopWith('project', '有执行结果未确认（EXECUTION_UNCONFIRMED），请到专业设置对账。'); return; }
+      }
+    }
+    if (plans.some(plan => ['INSTALLING', 'SUBMIT_INTENT', 'NEEDS_REVIEW'].includes(plan.status))) {
+      stopWith('project', '存在执行中或需要对账的计划（RECONCILE_REQUIRED）。请到专业设置查看尝试记录，不能重新执行。');
+      return;
+    }
+    const active = await api<RuntimeState>('/setup/runtime');
+    if (active.status === 'INVALID_REQUIRES_REVIEW') {
+      stopWith('project', `配置需要检查（INVALID_REQUIRES_REVIEW）：${String(active.error)}。请到专业设置处理。`); return;
+    }
+    if (active.status === 'ACTIVE' && active.candidate?.project_id === projectId && active.service_validation?.status === 'READY') {
+      await verifyProductionReady();
+      for (const stage of STAGE_TITLES) setStage(stage.id, { status: 'ok', note: '已有配置与服务验证有效。' });
+      setFinished({ ok: true, summary: '真实制作已就绪；渲染器空闲停止时也无需重新安装。' });
+      return;
+    }
 
     // 2. 硬件与基础程序
     setStage('hardware', { status: 'running', note: RUNNING_TEXT.hardware });
@@ -146,7 +215,10 @@ export function RealProductionWizard({
         const scan = await api<ExistingScan>('/setup/existing-installations/inspect', json('POST', { path: root }));
         if (!alive()) return;
         if (scan.matches.length) scans.push(scan);
-      } catch { /* 单个目录检测失败不阻塞整体 */ }
+      } catch (error) {
+        stopWith('existing', `已有目录检查失败：${String(error)}。请到专业设置确认目录，避免漏掉可复用模型。`);
+        return;
+      }
     }
     const candidateBytes = scans.reduce((sum, scan) => sum + scan.candidate_bytes, 0);
     if (candidateBytes > 0) {
@@ -189,29 +261,20 @@ export function RealProductionWizard({
         return;
       }
       const catalog = await api<Catalog>('/setup/catalog');
-      if (!alive()) return;
-      const estimate = Math.max(0, catalog.total_bytes - reused);
-      const note = `将按固定清单下载并校验缺少的组件（最多约 ${fmtBytes(estimate)}；已复用 ${fmtBytes(reused)} 不会重复下载）。`;
-      setStage('models', { status: 'warn', note: `模型尚未校验。${note}` });
-      // 下载属于重操作：先征求确认。
-      if (!window.confirm(`需要下载并校验缺少的模型与组件（最多约 ${fmtBytes(estimate)}，已复用部分不重复下载）。\n目录与版本由系统固定，完成后自动继续。是否继续？`)) {
-        stopWith('models', '已按你的选择停止：没有下载任何模型。需要时可重新打开向导继续。');
-        return;
-      }
-      const plan = await api<{ plan_id: string; sha256: string; kind: string }>(
-        '/setup/install-plan', json('POST', {
-          components: catalog.components.map(c => c.component_id), project_id: projectId,
-          disk_free: storage.free_bytes,
+      const previous = await api<Array<{ id: string; sha256: string; status: string; payload: { deployment?: unknown } }>>(`/comfyops/install-plans?project_id=${projectId}`);
+      const pending = previous.filter(p => p.payload.deployment && ['AWAITING_APPROVAL', 'APPROVED'].includes(p.status));
+      if (pending.length > 1) throw new Error('MULTIPLE_PENDING_PLANS：请到专业设置选择并核对计划。');
+      const plan = pending.length ? { plan_id: pending[0].id, sha256: pending[0].sha256, status: pending[0].status }
+        : await api<SetupPlan & { download_bytes: number }>('/setup/install-plan', json('POST', {
+          components: catalog.components.map(c => c.component_id), project_id: projectId, disk_free: storage.free_bytes,
         }));
       if (!alive()) return;
-      const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
-        json('POST', { action: 'install_approve', target_id: plan.plan_id }));
-      await api(`/comfyops/install-plans/${plan.plan_id}/approve`, json('POST', {
-        grant_id: grant.grant_id, snapshot: grant.snapshot,
-      }));
-      if (!alive()) return;
-      setStage('models', { status: 'running', note: '正在下载并校验模型与组件（耗时较长，请保持页面打开）…' });
-      await api(`/comfyops/install-plans/${plan.plan_id}/execute`, { method: 'POST' });
+      if (!window.confirm(`批准固定部署清单中的缺失组件下载与校验？\n作品：${projectId}\n目录：${storage.root}\n计划：${plan.plan_id}\n哈希：${plan.sha256}\n已复用 ${fmtBytes(reused)}，已有缓存将校验复用，完整清单上限约 ${fmtBytes(catalog.total_bytes)}。原安装保持不变。`)) {
+        stopWith('models', '已取消下载，没有执行安装计划。需要时可重新检查并审核原计划。');
+        return;
+      }
+      setStage('models', { status: 'running', note: '正在批准、下载并校验缺少的组件…' });
+      await approveAndExecuteSetupPlan(plan, check);
       if (!alive()) return;
       ready = await api<Readiness>('/setup/readiness');
       const verified = ready.layers.find(layer => layer.layer === 'L2_files_verified');
@@ -226,16 +289,21 @@ export function RealProductionWizard({
     setStage('workflows', { status: 'running', note: RUNNING_TEXT.workflows });
     if (!onlyDiagnose) {
       try {
+        if (!window.confirm('将按固定部署清单准备受管实例、配置节点和模型绑定，并启动本机服务验证后停止。是否批准这些有序步骤？')) {
+          stopWith('workflows', '已取消实例准备，没有执行实例计划。'); return;
+        }
+        let complete = false;
         for (let step = 0; step < 8; step += 1) {
           if (!alive()) return;
           setStage('workflows', { status: 'running', note: `正在准备运行环境（第 ${step + 1} 步）…` });
-          const next = await api<{ complete: boolean; plan_id?: string; sha256?: string; kind?: string }>(
+          const next = await api<SetupPlan & { complete: boolean }>(
             '/setup/next-instance-plan', json('POST', { project_id: projectId, instance_name: 'shine-h3', port: 8188, mode: 'local' }));
           if (!alive()) return;
-          if (next.complete) break;
-          await api(`/comfyops/instance-plans/${next.plan_id}/execute`, { method: 'POST' });
+          if (next.complete) { complete = true; break; }
+          await approveAndExecuteSetupPlan({ ...next, kind: 'INSTANCE_LIFECYCLE' }, check);
           if (!alive()) return;
         }
+        if (!complete) throw new Error('INSTANCE_CHAIN_INCOMPLETE：实例步骤未收敛，请检查计划记录。');
         await api('/setup/profiles', json('POST', { project_id: projectId }));
         if (!alive()) return;
         await api('/setup/configuration', json('POST', { project_id: projectId }));
@@ -287,9 +355,12 @@ export function RealProductionWizard({
     // 6. 激活
     setStage('runtime', { status: 'running', note: RUNNING_TEXT.runtime });
     try {
-      await api('/setup/runtime/activate', json('POST', body));
+      const activated = await api<RuntimeState>('/setup/runtime/activate', json('POST', body));
+      if (activated.status !== 'ACTIVE') throw new Error(`RUNTIME_NOT_ACTIVE：${activated.status}`);
       if (!alive()) return;
+      await verifyProductionReady();
       await onRefresh();
+      if (!alive()) return;
     } catch (error) {
       stopWith('runtime', `启用失败：${(error as Error).message}`);
       return;
@@ -302,9 +373,11 @@ export function RealProductionWizard({
     if (!reuseOffer) return;
     setReuseOffer(null);
     setStage('existing', { status: 'running', note: '正在校验并复制可复用的模型（仅哈希与固定清单一致的文件）…' });
+    let imported = 0;
     try {
       const total = await importReuse(reuseOffer.scans);
       if (!mounted.current) return;
+      imported = total;
       setReusedBytes(total);
       setStage('existing', { status: 'ok', note: `已复用 ${fmtBytes(total)} 已有模型；缺少的部分才会在后续按需下载。` });
     } catch (error) {
@@ -312,27 +385,34 @@ export function RealProductionWizard({
       return;
     }
     const storage = await api<StorageState>('/setup/storage');
-    await runTail(() => !cancelled.current && mounted.current, false, reuseOffer.totalBytes, storage);
+    await runTail(() => !cancelled.current && mounted.current, false, imported, storage);
   }
 
   function declineReuse() {
     if (!reuseOffer) return;
     const bytes = reuseOffer.totalBytes;
-    setReuseOffer(null);
     if (!window.confirm(`不复用已有模型的话，缺少的组件将按固定清单下载（可能多花约 ${fmtBytes(bytes)} 的下载量）。\n确认不复用、直接继续？`)) return;
+    setReuseOffer(null);
     setStage('existing', { status: 'ok', note: '已选择不复用；缺少的组件将在确认后下载。' });
-    void (async () => {
+    void safely(async () => {
       const storage = await api<StorageState>('/setup/storage');
       await runTail(() => !cancelled.current && mounted.current, false, 0, storage);
-    })();
+    });
   }
 
-  useEffect(() => { void run(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => {
+    // Defer until the effect survives React StrictMode's setup/cleanup probe.
+    let active = true;
+    cancelled.current = false;
+    queueMicrotask(() => { if (active) void safely(run); });
+    return () => { active = false; };
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, []);
 
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={mode === 'enable' ? '启用真实制作' : '检查真实制作环境'} onClick={() => undefined}>
       <div className="wizard-modal" onClick={(event) => event.stopPropagation()}>
-        <button className="modal-close" aria-label="关闭" onClick={onClose}><X size={16} /></button>
+        <button className="modal-close" aria-label="关闭" onClick={() => { cancelled.current = true; onClose(); }}><X size={16} /></button>
         <h2>{mode === 'enable' ? '启用真实制作' : '检查真实制作环境'}</h2>
         <p className="wizard-lead">
           {mode === 'enable'
@@ -355,11 +435,12 @@ export function RealProductionWizard({
             </li>
           ))}
         </ol>
+        {llmRequired && <LLMSetupPanel onChanged={onRefresh} />}
         {reuseOffer && (
           <div className="wizard-reuse" data-testid="wizard-reuse">
             <p>发现可复用的已有模型（约 {fmtBytes(reuseOffer.totalBytes)}）。复用会先做哈希校验，只复制与固定清单一致的文件，原安装不会被修改。</p>
             <div className="wizard-actions">
-              <button type="button" className="primary-button" onClick={() => void continueAfterReuse()}>校验并复用</button>
+              <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>校验并复用</button>
               <button type="button" className="subtle-button" onClick={declineReuse}>不复用，直接继续</button>
             </div>
           </div>
@@ -367,7 +448,7 @@ export function RealProductionWizard({
         {needProject && (
           <div className="wizard-reuse">
             <p>先创建一个作品，再回来启用真实制作。</p>
-            <div className="wizard-actions"><button type="button" className="primary-button" onClick={onClose}>去创建作品</button></div>
+            <div className="wizard-actions"><button type="button" className="primary-button" onClick={() => { cancelled.current = true; onClose(); }}>去创建作品</button></div>
           </div>
         )}
         {finished && (
@@ -376,7 +457,7 @@ export function RealProductionWizard({
             <div className="wizard-actions">
               {finished.ok && <button type="button" className="primary-button" onClick={onFinished}>返回作品，开始制作</button>}
               {!finished.ok && <button type="button" className="subtle-button" onClick={onOpenExpertSetup}>到专业设置处理</button>}
-              <button type="button" className="subtle-button" onClick={() => void run()}>
+              <button type="button" className="subtle-button" onClick={() => void safely(run)}>
                 <RefreshCw size={13} /> 重新检查
               </button>
             </div>

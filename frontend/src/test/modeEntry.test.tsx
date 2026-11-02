@@ -138,6 +138,9 @@ describe('顶部模式入口（唯一权威状态）', () => {
       method: 'POST', pattern: /setup\/runtime\/activate$/,
       respond: (_url, init) => {
         calls.push('activate');
+        stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({
+          ...SYSTEM_STATUS, production_mode: productionMode({ mode: 'READY' }),
+        }) });
         const body = JSON.parse(String(init?.body));
         expect(body.recipe_sha256).toBe('r'.repeat(64));
         return jsonResponse({ status: 'ACTIVE' });

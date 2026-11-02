@@ -1,0 +1,193 @@
+{
+  "baseline": "5b06f5e17784d899230b91a6fd6c438c7bc6e57a",
+  "backend": {
+    "passed": 1379,
+    "skipped": 1,
+    "failed": 0,
+    "warnings": 2,
+    "seconds": 654.04
+  },
+  "frontend": {
+    "passed": 70,
+    "failed": 0
+  },
+  "browser": {
+    "passed": 3,
+    "api_routes": "real ASGI routes / SQLite; no page.route interception",
+    "external_ports": "synthetic catalog/cache, OS and service/LLM probe fixtures",
+    "scenarios": [
+      {
+        "scenario": "missing",
+        "browser_version": "156.0.8078.74",
+        "post_counts": {
+          "/api/v1/provider-profiles": 1,
+          "/api/v1/provider-profiles/{id}/test": 1,
+          "/api/v1/setup/existing-installations/inspect": 2,
+          "/api/v1/setup/install-plan": 1,
+          "/api/v1/preparation/approval-grants": 4,
+          "/api/v1/comfyops/install-plans/{id}/approve": 4,
+          "/api/v1/comfyops/install-plans/{id}/execute": 1,
+          "/api/v1/setup/next-instance-plan": 5,
+          "/api/v1/comfyops/instance-plans/{id}/execute": 3,
+          "/api/v1/setup/profiles": 2,
+          "/api/v1/setup/configuration": 2,
+          "/api/v1/setup/services/validate": 2,
+          "/api/v1/setup/runtime/activate": 1
+        },
+        "non_2xx_responses": [
+          [
+            "/api/v1/setup/services/validate",
+            409
+          ]
+        ],
+        "production_mode": {
+          "mode": "READY",
+          "label": "真实制作已就绪",
+          "detail": "本机 H3 制作环境可用；渲染器会在开始制作时自动启动，平时空闲属于正常。",
+          "action": "start_making",
+          "code": null,
+          "render_provider": "comfyui",
+          "runtime_status": "ACTIVE",
+          "renderer_online": false,
+          "worker_online": true,
+          "running_jobs": 0,
+          "series_active": 0
+        },
+        "external_execution": "ISOLATED_SYNTHETIC_PORTS",
+        "real_h3_inference": "NOT_RUN"
+      },
+      {
+        "scenario": "models_complete",
+        "browser_version": "156.0.8078.74",
+        "post_counts": {
+          "/api/v1/setup/existing-installations/inspect": 1,
+          "/api/v1/setup/next-instance-plan": 4,
+          "/api/v1/preparation/approval-grants": 3,
+          "/api/v1/comfyops/install-plans/{id}/approve": 3,
+          "/api/v1/comfyops/instance-plans/{id}/execute": 3,
+          "/api/v1/setup/profiles": 1,
+          "/api/v1/setup/configuration": 1,
+          "/api/v1/setup/services/validate": 1,
+          "/api/v1/setup/runtime/activate": 1
+        },
+        "non_2xx_responses": [],
+        "production_mode": {
+          "mode": "READY",
+          "label": "真实制作已就绪",
+          "detail": "本机 H3 制作环境可用；渲染器会在开始制作时自动启动，平时空闲属于正常。",
+          "action": "start_making",
+          "code": null,
+          "render_provider": "comfyui",
+          "runtime_status": "ACTIVE",
+          "renderer_online": false,
+          "worker_online": true,
+          "running_jobs": 0,
+          "series_active": 0
+        },
+        "external_execution": "ISOLATED_SYNTHETIC_PORTS",
+        "real_h3_inference": "NOT_RUN"
+      },
+      {
+        "scenario": "instance_ready",
+        "browser_version": "156.0.8078.74",
+        "post_counts": {
+          "/api/v1/setup/existing-installations/inspect": 1,
+          "/api/v1/setup/next-instance-plan": 1,
+          "/api/v1/setup/profiles": 1,
+          "/api/v1/setup/configuration": 1,
+          "/api/v1/setup/services/validate": 1,
+          "/api/v1/setup/runtime/activate": 1
+        },
+        "non_2xx_responses": [],
+        "production_mode": {
+          "mode": "READY",
+          "label": "真实制作已就绪",
+          "detail": "本机 H3 制作环境可用；渲染器会在开始制作时自动启动，平时空闲属于正常。",
+          "action": "start_making",
+          "code": null,
+          "render_provider": "comfyui",
+          "runtime_status": "ACTIVE",
+          "renderer_online": false,
+          "worker_online": true,
+          "running_jobs": 0,
+          "series_active": 0
+        },
+        "external_execution": "ISOLATED_SYNTHETIC_PORTS",
+        "real_h3_inference": "NOT_RUN"
+      }
+    ]
+  },
+  "migrations": {
+    "fresh": {
+      "upgrade": "PASS",
+      "alembic_check": "PASS",
+      "revision": "f150a0030001",
+      "historical_rows_preserved": false,
+      "expected_legacy_normalization": "f121a0010001 graph-derived workflow checkpoint only"
+    },
+    "historical-copy": {
+      "upgrade": "PASS",
+      "alembic_check": "PASS",
+      "revision": "f150a0030001",
+      "historical_rows_preserved": true,
+      "expected_legacy_normalization": "f121a0010001 graph-derived workflow checkpoint only"
+    },
+    "source_database_untouched_sha256": "6b45860caaa9b2ea9c914e62041b639a2883eeba0d3c0320617d95d6baf7a43f"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "typescript_vite": "PASS",
+    "windows_start_stop": "PASS",
+    "locked_environment": "PASS",
+    "package": "PENDING",
+    "push": "PENDING"
+  },
+  "raw_logs": {
+    "v2-backend-final.log": {
+      "sha256": "e214ec50b2924855468ccf11524fec535eb15bc53250c5d8169fe7ba1e2b3f8b",
+      "bytes": 2809
+    },
+    "v2-vitest.log": {
+      "sha256": "0c8d278ed1e42e414241d5dd10357f26842e27abdae4413481a37c565545aeb5",
+      "bytes": 3489
+    },
+    "v2-build.log": {
+      "sha256": "8c36bd40f7583cdf6537412632a166d7fe604ad249d48d0891beb277147559e2",
+      "bytes": 408
+    },
+    "v2-browser.log": {
+      "sha256": "c9f03cc48d45fa2c41123be06db12e5596b234a407b39e9de8fb3640323c8365",
+      "bytes": 1982
+    },
+    "v2-ruff.log": {
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0",
+      "bytes": 20
+    },
+    "v2-lock.log": {
+      "sha256": "585ea5193c1fec3a17348ce9ce07d16814e955873cd31ef508dc6b63d6f00741",
+      "bytes": 129
+    },
+    "v2-migrations-verified.log": {
+      "sha256": "49d8704ef427d1febf197c2cc1dd94d20ccdff7778c4cfb49cd30e80811e1a4a",
+      "bytes": 4708
+    },
+    "v2-windows-stack.log": {
+      "sha256": "a6266d5108738969880912ec075304728e11f917f5b976d046427804e0e6da34",
+      "bytes": 5461
+    },
+    "v2-contract.log": {
+      "sha256": "ec0fbaa1e90057bff19a4ac00f2cd3f5eecdc0952c5073395378fe3d9cc68cdb",
+      "bytes": 643
+    },
+    "v2-llm.log": {
+      "sha256": "82855ad9566fa2f013fd2beaee7a1c18e893048c498c5b0a2c5e6a7515b59d8d",
+      "bytes": 643
+    }
+  },
+  "boundary": {
+    "real_h3": "NOT_RUN",
+    "real_llm_generation": "NOT_RUN",
+    "hosted_ci": "USER_WAIVED",
+    "human_art_review": "USER_WAIVED"
+  }
+}
