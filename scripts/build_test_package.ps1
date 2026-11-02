@@ -23,6 +23,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Subprocess encoding contract: Windows Git always emits UTF-8 (tracked
+# filenames included).  Pin the decoder so a GBK/OEM console cannot mojibake
+# paths into "Tracked file is missing on disk" failures.  The script itself
+# stays UTF-8 with BOM per the packaging entry-point rules.
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packagingRoot = Join-Path $repoRoot 'packaging/windows'
 
