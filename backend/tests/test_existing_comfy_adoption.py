@@ -168,6 +168,33 @@ def test_adoption_blocks_incomplete_h3_hash_evidence_without_creating_an_instanc
         assert list(db.scalars(select(ComfyInstance))) == []
 
 
+def test_adopted_identity_ignores_catalog_membership_but_not_missing_h3_files(prep, tmp_path, monkeypatch):
+    client, factory, settings = prep
+    project = create_project(client, "adopted catalog membership")
+    catalog = deployment.load_default_catalog()
+    root, report, verified_files = _install_fixture(tmp_path, catalog)
+    _seed_verification(factory, catalog, report, verified_files)
+    monkeypatch.setattr(adoption, "inspect", lambda _path, _catalog: report)
+    monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: report)
+    response = client.post("/api/v1/setup/existing-installations/adopt", headers=HEADERS, json={
+        "project_id": project, "path": str(root), "snapshot": report["snapshot"],
+    })
+    assert response.status_code == 200, response.text
+
+    with factory() as db:
+        instance = db.get(ComfyInstance, response.json()["instance_id"])
+        # A newer catalog that groups files differently still describes the same
+        # user installation and must not block it.
+        revised = {**report, "snapshot": "b" * 64, "catalog_version": "1.1.1"}
+        monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: revised)
+        assert not deployment.installed_instance_blockers(db, settings, instance, catalog)
+        h3_row = next(row for row in report["matches"] if row["component_id"].startswith("minimax-h3-"))
+        missing = {**report, "matches": [row for row in report["matches"] if row is not h3_row]}
+        monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: missing)
+        assert "ADOPTED_COMFY_FILES_CHANGED" in deployment.installed_instance_blockers(
+            db, settings, instance, catalog)
+
+
 def test_adopted_node_tree_change_invalidates_installation_evidence(prep, tmp_path, monkeypatch):
     client, factory, settings = prep
     project = create_project(client, "adopted node identity")

@@ -551,8 +551,8 @@ function App() {
                       </label>
                       <label>审片建议（可选）
                         <select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                          <option value="full">完整建议：画面、对白与风格</option>
-                          <option value="basic">基础建议：人物与对白</option>
+                          <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
+                          <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
                         </select>
                       </label>
                       {reviewScope === 'basic' && <>
@@ -718,8 +718,8 @@ function App() {
                     </select></label>}
                     {queueProvider === 'comfyui' && <>
                       <label>审片建议（可选）<select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                        <option value="full">完整建议：画面、对白与风格</option>
-                        <option value="basic">基础建议：人物与对白</option>
+                        <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
+                        <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
                       </select></label>
                       {reviewScope === 'basic' && <>
                         <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>

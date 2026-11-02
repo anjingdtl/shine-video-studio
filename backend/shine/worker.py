@@ -801,6 +801,7 @@ def run_one(
             resource_db.commit()
             resource_id = lease.id
             job_id = candidate.id
+            project_id = candidate.project_id
     if resource_id:
         with session_factory() as resource_db:
             if not scheduler.admit(resource_db, resource_id):
@@ -815,11 +816,17 @@ def run_one(
         if managed_error is None and managed_recipe is not None and not effective_settings.offline_simulation:
             # A managed renderer is started behind its own durable intent, so the
             # job no longer needs the conservative unowned-renderer block.
+            review_configs = _managed_review_specs(managed_recipe, semantic_reviewer, asr_reviewer)
+            with session_factory() as policy_db:
+                advisory_only = _project_policy(policy_db, project_id).advisory_model_reviews
+            if advisory_only:
+                # Advisory reviewers are evidence, never a production gate. An
+                # unavailable or slow local reviewer must not strand the render.
+                review_configs = {}
             try:
                 managed_first = _FirstManagedContinuation(
                     session_factory, effective_settings, job_id=job_id, lease_id=resource_id,
-                    recipe=managed_recipe["renderer"],
-                    review_configs=_managed_review_specs(managed_recipe, semantic_reviewer, asr_reviewer),
+                    recipe=managed_recipe["renderer"], review_configs=review_configs,
                     history_dir=Path(effective_settings.data_dir).resolve() / "comfyops" / "handoff-history",
                 )
             except HTTPException as exc:
@@ -1461,10 +1468,16 @@ def _run_managed_loop(
             lease.status = "WAITING"
         db.commit()
         lease_id, job_id = lease.id, candidate.id
+        project_id = candidate.project_id
     with session_factory() as db:
         if not scheduler.admit(db, lease_id):
             logger.info("managed_loop_lease_not_admitted job=%s lease=%s", job_id, lease_id)
             return []
+    with session_factory() as policy_db:
+        advisory_only = _project_policy(policy_db, project_id).advisory_model_reviews
+    if advisory_only:
+        # Advisory reviewers are evidence, never a production gate.
+        review_configs = {}
     if series_id:
         # The exclusive GPU lease is the proof of life of a running series.
         # Persist it on the series so a crashed worker leaves a reconciliation

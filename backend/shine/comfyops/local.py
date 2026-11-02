@@ -43,13 +43,18 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
     from shine.comfyops import approval
 
     plan = db.get(InstallationPlan, attempt.plan_id)
-    if attempt.status != "FAILED_RECONCILE_REQUIRED" or not plan or plan.status != "NEEDS_REVIEW":
+    if not plan or attempt.status not in {"FAILED_RECONCILE_REQUIRED", "SUBMIT_INTENT"}:
+        raise ValueError("FAILED_INSTALL_ATTEMPT_REQUIRED")
+    if plan.status not in {"NEEDS_REVIEW", "INSTALLING"}:
         raise ValueError("FAILED_INSTALL_ATTEMPT_REQUIRED")
     if plan.payload.get("kind") or plan.payload.get("executor") != "LOCAL_ISOLATED" or not plan.payload.get("isolated"):
         raise ValueError("ISOLATED_PACKAGE_PLAN_REQUIRED")
     if graph_hash(plan.payload) != plan.sha256 or attempt.payload.get("plan_hash") != plan.sha256:
         raise ValueError("PLAN_HASH_CHANGED")
-    if db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status == "SUBMIT_INTENT").limit(1)):
+    # The attempt being reconciled is expected to look active when the owning
+    # process died mid-install; only some *other* active install blocks it.
+    if db.scalar(select(InstallationAttempt.id).where(
+            InstallationAttempt.status == "SUBMIT_INTENT", InstallationAttempt.id != attempt.id).limit(1)):
         raise ValueError("INSTALL_ATTEMPT_ACTIVE")
     root = settings.comfyops_dir / "isolated-packages"
     if not root.resolve().is_relative_to(settings.comfyops_dir.resolve()):
@@ -67,6 +72,11 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
             ):
                 raise ValueError("PLAN_HASH_CHANGED")
             if root.exists():
+                # A killed download leaves a journal/staging behind. Recovery is
+                # deterministic and verified; it never retries a network call.
+                # It takes (and releases) the same exclusive lock itself, so the
+                # lock is re-acquired afterwards for the observation below.
+                LocalInstaller(root, None).recover(spec.name)
                 locks.enter_context(exclusive_file_lock(safe_target(root, spec.name + ".lock")))
             for suffix in (".journal", ".staging", ".rollback"):
                 if safe_target(root, spec.name + suffix).exists():
@@ -86,10 +96,12 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
                 status = "MATCHES_PINNED_FILES"
             observations.append({"package_id": package["id"], "package_sha256": package["hash"], "files": status})
         approval.consume(db, actor, "install_reconcile", attempt, decision.grant_id, decision.snapshot)
+        previous_status = attempt.status
         attempt.status = "RECONCILED_NO_RETRY"
         attempt.payload = {**attempt.payload, "reconciliation": {
             "actor": actor, "at": str(utcnow()), "evidence": decision.evidence, "packages": observations,
-            "files_modified": False, "runtime_verified": False, "resubmitted": False,
+            "previous_status": previous_status, "files_modified": False, "runtime_verified": False,
+            "resubmitted": False,
         }}
         attempt.sha256 = graph_hash(attempt.payload)
         plan.status = "RECONCILED_NO_RETRY"

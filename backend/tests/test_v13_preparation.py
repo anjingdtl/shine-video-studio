@@ -791,6 +791,39 @@ def test_install_reconcile_verified_files_does_not_promote_runtime(prep):
     assert (destination / "中文/test.bin").read_bytes() == b"data"
 
 
+def test_interrupted_install_is_recovered_without_resubmitting(prep):
+    from shine.comfyops.models import InstallationAttempt, InstallationPlan
+
+    client, factory, _, root, model, plan, identity, _ = failed_package_install(prep)
+    name = model["payload"]["name"]
+    stage = root / (name + ".staging")
+    stage.mkdir()
+    (stage / "partial.bin").write_bytes(b"partial")
+    journal = root / (name + ".journal")
+    journal.write_text(json.dumps({
+        "schema": 1, "had_destination": False, "phase": "DOWNLOADING",
+        "spec": plan["payload"]["packages"][0]["spec"],
+    }), encoding="utf-8")
+    # Model a process that died between the submit intent and any package swap.
+    with factory.begin() as db:
+        db.get(InstallationAttempt, identity).status = "SUBMIT_INTENT"
+        db.get(InstallationPlan, plan["id"]).status = "INSTALLING"
+    grant = post(client, "/preparation/approval-grants", {
+        "action": "install_reconcile", "target_id": identity,
+    }, operator=True)
+    decision = {k: grant[k] for k in ("grant_id", "snapshot")} | {
+        "evidence": "Explicit test-only recovery of an interrupted install",
+    }
+    result = post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True)
+    assert result["status"] == "RECONCILED_NO_RETRY"
+    assert result["payload"]["reconciliation"]["previous_status"] == "SUBMIT_INTENT"
+    assert result["payload"]["reconciliation"]["packages"][0]["files"] == "ABSENT"
+    assert not stage.exists() and not journal.exists()
+    assert not (root / name).exists()
+    with factory() as db:
+        assert db.get(InstallationPlan, plan["id"]).status == "RECONCILED_NO_RETRY"
+
+
 def test_install_history_is_plan_scoped_and_plan_list_can_filter_project(prep):
     client, _, _, _, model, plan, identity, decision = failed_package_install(prep)
     other_project = create_project(client)

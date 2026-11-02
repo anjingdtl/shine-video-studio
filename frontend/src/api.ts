@@ -20,6 +20,16 @@ const ERROR_CODE_LABELS: Record<string, string> = {
   GENERATE_RUNTIME_CONFIGURATION_FIRST: '还没有为本机生成运行配置。请先在「制作环境」完成一次准备，再验证工作流。',
   STOP_OWNED_INSTANCE_BEFORE_VALIDATION: '本机渲染器仍在运行。请先停止受管实例，再验证工作流节点。',
   ACTIVE_RUNTIME_CONFIGURATION_CHANGED: '本机运行配置已经变化。请重新加载工作台后再验证。',
+  FAILED_INSTALL_ATTEMPT_REQUIRED: '这条安装记录已经结束或不在可整理状态。请刷新安装列表后查看最新状态。',
+  INSTALL_ATTEMPT_ACTIVE: '本机还有另一项安装正在执行。请等它结束或失败后再整理这一项。',
+  INSTALL_OWNER_ACTIVE: '这次安装的进程仍在运行。请等它自行结束，或先停止服务再整理；系统不会强制覆盖正在写入的文件。',
+  INSTALL_FILESYSTEM_RECOVERY_REQUIRED: '安装目录里留下了无法确认的临时文件，系统没有自动清理。请到专业设置查看安装详情后再处理。',
+  INSTALL_JOURNAL_MISSING: '安装目录里有临时文件但缺少安装日志，系统无法确认它们属于哪一步，因此没有改动。',
+  INSTALL_JOURNAL_UNVERIFIABLE: '安装日志无法解析，系统无法安全回滚，因此没有改动任何文件。',
+  INSTALL_BACKUP_MISSING: '安装换入前缺少可恢复的原目录备份，系统没有改动文件。请到专业设置查看详情。',
+  INSTALL_DESTINATION_CHANGED: '已安装目录的内容与固定清单不一致，系统没有改动它。请到专业设置查看差异。',
+  APPROVAL_REQUIRED_OR_REPLAYED: '这次确认已过期或已经用过。请重新加载安装列表后再确认一次。',
+  STOP_WORKER_BEFORE_SERVICE_VALIDATION: '本机后台制作服务正在运行，重新验证需要先停止它（一键启动器窗口里可以停止后台服务）。首次安装验证不受影响。',
 };
 
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw

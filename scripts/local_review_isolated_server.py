@@ -13,6 +13,7 @@ import importlib.metadata
 import json
 import os
 import secrets
+import subprocess
 import sys
 from pathlib import Path
 from threading import Lock
@@ -191,6 +192,24 @@ def build_isolated_app(manifest, packages, *, runner=run_isolated, identity_prob
             if state["uncertain"] or _supervised_runtime(baseline["runtime_sha256"]) != runtime:
                 raise HTTPException(503, "ISOLATED_SUPERVISOR_SOURCE_CHANGED")
             return {**rewrite(baseline), "last_stage": dict(last_stage), "handoff_sealed": state["sealed"]}
+
+    @app.get("/ready")
+    def ready():
+        """Import-only readiness in a throwaway child: no model hashing, no weights."""
+        with lock:
+            if state["uncertain"] or _supervised_runtime(baseline["runtime_sha256"]) != runtime:
+                raise HTTPException(503, "ISOLATED_SUPERVISOR_SOURCE_CHANGED")
+        modules = ("qwen_asr" if manifest.get("asr")
+                   else "transformers, tokenizers, lmformatenforcer, interegular")
+        code = f"import sys; sys.path.insert(0, sys.argv[1]); import {modules}"
+        try:
+            completed = subprocess.run([sys.executable, "-c", code, str(packages)],
+                                       capture_output=True, timeout=240)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(503, "REVIEW_EXECUTOR_IMPORT_FAILED:Timeout") from None
+        if completed.returncode != 0:
+            raise HTTPException(503, "REVIEW_EXECUTOR_IMPORT_FAILED:ImportError")
+        return {"status": "ok", "model": baseline["model"], "runtime_sha256": runtime}
 
     def seal_receipt(receipt):
         with lock:

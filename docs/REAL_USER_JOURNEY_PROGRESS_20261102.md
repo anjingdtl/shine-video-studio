@@ -6,6 +6,8 @@
 >
 > **2026-11-03 更新（已提交并推送 main `ef22534`）：** 审片改为纯辅助——「基础建议」不再因缺少冻结原生能力在建任务时 409，改为记录 `needs_review` 并继续出片；已在界面用「基础建议」跑通单镜系列 `db223693…`（`COMPLETED 1/1`、真实出片、`technical=passed`）。ASR/VLM 每个角色是 **1 个模型包**，界面 13/10 是包内文件数，文案已澄清。导演/专业两套界面各板块逐页打开无加载错误。
 
+> **2026-11-03 续验 2（待提交）：** 建议审片模型已从界面装好（`huggingface.co` 不可达时自动回退 `hf-mirror.com`，仍按固定 sha256/字节数强校验）；中断/失败安装可在界面「整理中断的安装」收尾（只回滚临时文件，不重投）。审片验证改为在一次性子进程里做真实 import 探测：本机已有 ComfyUI 使用 CPython 3.13，而 ASR 运行时是 cp312 原生轮子，因此 ASR 记为 advisory `UNAVAILABLE` 并退役该本机路由；`advisory_model_reviews` 项目的受管交接不再把审片放进出片关键路径。界面发起单镜系列 `da97279a…` → `COMPLETED 1/1`，任务 `31e32cb6…` → `PASSED`，`technical=passed`、`semantic/audio=not_run`、`final=needs_review`。
+
 > 续验更新：最新结果见 [测试报告续验更新](REAL_USER_JOURNEY_TEST_REPORT_20261102.md)。实际隔离项目 ID 为 `b6f22954-258e-4544-ad89-c4e8862387e8`；下文原交接 ID 有误。当前 HEAD 为 `f076d71a0cb2a50a898083cef88afba6de181f90`。摄影任务经只读对账仍为 UNKNOWN，禁止原样重放。真人总验收仍为 PARTIAL。
 
 ## 当前结论

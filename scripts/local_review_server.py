@@ -380,6 +380,26 @@ def build_app(manifest):
             return {"status": "ok", "is_mock": False, "verified_models": current,
                     "runtime_sha256": runtime_sha256, "structured_output": decoder_identity}
 
+    @app.get("/ready")
+    def ready():
+        """Prove the reviewer's runtime can import its executor, without loading weights.
+
+        A health check alone only proves the wrapper started. This endpoint
+        surfaces a Python/decoder incompatibility as an advisory "unavailable"
+        instead of letting the first real review call fail inside the handoff.
+        """
+        try:
+            if asr_manifest:
+                from qwen_asr import Qwen3ASRModel  # noqa: F401
+            else:
+                import transformers  # noqa: F401
+                import tokenizers  # noqa: F401
+                import lmformatenforcer  # noqa: F401
+                import interegular  # noqa: F401
+        except Exception as exc:
+            raise HTTPException(503, f"REVIEW_EXECUTOR_IMPORT_FAILED:{type(exc).__name__}") from None
+        return {"status": "ok", "model": manifest["model_id"], "weighted": False}
+
     @app.get("/v1/models")
     def models():
         ids = [manifest["model_id"]] + (

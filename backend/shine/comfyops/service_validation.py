@@ -238,6 +238,14 @@ def _probe_review(role: str, spec: dict) -> dict:
             predicate=lambda body: body.get("status") == "ok" and body.get("is_mock") is False,
             owned_group=group,
         )
+        # Import-only readiness: a reviewer whose Python cannot import its
+        # executor must not be reported as READY and must not enter the handoff.
+        _wait_json(
+            f"http://127.0.0.1:{port}/ready",
+            timeout_s=300,  # importing torch/transformers can take tens of seconds
+            predicate=lambda body: body.get("status") == "ok",
+            owned_group=group,
+        )
         models = _json_get(f"http://127.0.0.1:{port}/v1/models", timeout=30)
         ids = {item.get("id") for item in (models.get("data") or []) if isinstance(item, dict)}
         capabilities = models.get("capabilities") or {}
@@ -401,6 +409,26 @@ def _worker_online(db: Session, settings: Settings) -> bool:
     ).limit(1)) is not None
 
 
+def _retire_local_reviewer(db: Session, role: str, recipe: dict, status: dict):
+    """Drop a setup-owned local route whose executor cannot import.
+
+    Only the exact loopback endpoint generated from this recipe is touched; an
+    operator-configured remote route is never disabled by a probe failure.
+    """
+    profile = db.scalar(select(ProviderProfile).where(ProviderProfile.name == REVIEW_PROFILE_NAMES[role]))
+    spec = (recipe.get("reviews") or {}).get(role) or {}
+    expected = f"http://127.0.0.1:{spec.get('port')}/v1"
+    if profile is None or profile.base_url != expected:
+        return
+    profile.enabled = False
+    route_role = REVIEW_ROLES[role]
+    route = db.scalar(select(AgentRoute).where(AgentRoute.role == route_role))
+    if route is not None and route.provider_profile_id == profile.id:
+        db.delete(route)
+        add_audit(db, "setup-wizard", "REVIEW_ROUTE_RETIRED", "agent_route", route.id,
+                  {"role": role, "reason": status.get("codes") or status.get("code") or "UNAVAILABLE"})
+
+
 def _upsert_reviewer(db: Session, probe: dict) -> tuple[ProviderProfile, AgentRoute]:
     role = probe["role"]
     name = REVIEW_PROFILE_NAMES[role]
@@ -520,6 +548,11 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
     if configuration_identity(db, settings, current.value["identity"]["recipe"]) != identity:
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
+    # A reviewer that cannot import its executor must not stay routed into a
+    # production handoff; its optional failure is recorded, not retried.
+    for role, status in advisory_reviews.items():
+        if status.get("status") != "READY":
+            _retire_local_reviewer(db, role, recipe, status)
     profiles = {}
     for probe in reviews.values():
         profile, route = _upsert_reviewer(db, probe)

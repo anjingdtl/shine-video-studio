@@ -330,6 +330,28 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
     finally { setBusy(false); void loadReadiness(); void loadPlans().catch(error => say(String(error), 'bad')); }
   }
 
+  /** Close an install record that stopped (network failure, killed process).
+   *  Recovery only rolls back temporary staging bytes; it never re-downloads. */
+  function reconcileInstall(plan: PlanRef) {
+    const selected = projectRef.current;
+    if (!window.confirm('整理这次未完成的安装？\n只核对并回滚中断的临时文件，不会重新下载，也不会删除已经核验的模型。整理后可以重新发起安装。')) return;
+    void run(async () => {
+      const attempts = await api<Array<{ id: string; status: string }>>(`/comfyops/install-plans/${plan.plan_id}/attempts`);
+      const attempt = [...attempts].reverse().find(row => ['FAILED_RECONCILE_REQUIRED', 'SUBMIT_INTENT'].includes(row.status));
+      if (!attempt) throw new Error('没有找到可整理的安装尝试。请刷新后再查看安装详情。');
+      const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', withJson('POST', {
+        action: 'install_reconcile', target_id: attempt.id,
+      }));
+      if (projectRef.current !== selected) throw new Error('作品已切换，操作已停止。');
+      await api(`/comfyops/install-attempts/${attempt.id}/reconcile`, withJson('POST', {
+        grant_id: grant.grant_id, snapshot: grant.snapshot,
+        evidence: '本机用户整理中断的安装；未重投下载',
+      }));
+      await loadPlans();
+      return '这次安装已整理关闭：临时文件已回滚，没有重新下载。可以重新发起安装。';
+    });
+  }
+
   function generateConfiguration() {
     void run(async () => {
       const result = await api<Record<string, unknown>>('/setup/configuration',
@@ -764,8 +786,12 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
             {plans.map((plan) => (
               <div className="worker-row" key={plan.plan_id}>
                 <div><b>{plan.action ?? plan.kind}</b><span>编号 {plan.plan_id.slice(0, 8)}… · {label(prepRowLabels, plan.status)} · 层级 {plan.tier ?? '—'}</span></div>
-                <button className="text-button" disabled={busy || !['AWAITING_APPROVAL', 'APPROVED'].includes(plan.status)}
-                  onClick={() => void runPlan(plan)}>{plan.status === 'APPROVED' ? '执行已批准计划' : '批准并执行'}</button>
+                {['NEEDS_REVIEW', 'INSTALLING'].includes(plan.status)
+                  ? <button className="text-button" disabled={busy} onClick={() => reconcileInstall(plan)}>整理中断的安装</button>
+                  : ['AWAITING_APPROVAL', 'APPROVED'].includes(plan.status)
+                    ? <button className="text-button" disabled={busy} onClick={() => void runPlan(plan)}>
+                      {plan.status === 'APPROVED' ? '执行已批准计划' : '批准并执行'}</button>
+                    : null}
               </div>
             ))}
           </div>}

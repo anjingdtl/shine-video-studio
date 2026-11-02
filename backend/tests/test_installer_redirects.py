@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.installer import ControlledDownloader, HTTPTransport, PackageFile, PackageSpec
+from shine.comfyops.installer import ControlledDownloader, HTTPTransport, PackageFile, PackageSpec, mirror_url
 
 
 def spec(hosts=()):
@@ -184,8 +184,132 @@ def test_exhausted_connection_does_not_expose_signed_url(monkeypatch, tmp_path):
     monkeypatch.setattr(httpx, "stream", stream)
     with pytest.raises(ValueError, match="^DOWNLOAD_CONNECTION_FAILED:ConnectTimeout$"):
         ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(spec(), tmp_path)
-    assert len(calls) == 3
+
+
+MIRROR_HOSTS = {"huggingface.co", "hf-mirror.com", "cas-bridge.xethub.hf.co"}
+
+
+def test_mirror_url_only_rewrites_pinned_huggingface_files():
+    revision = "a" * 40
+    url = f"https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/{revision}/config.json"
+    assert mirror_url(url) == f"https://hf-mirror.com/Qwen/Qwen3-ASR-0.6B/resolve/{revision}/config.json"
+    assert mirror_url("https://huggingface.co/Qwen/Qwen3-ASR-0.6B") is None
+    assert mirror_url("https://evil.com/Qwen/Qwen3-ASR-0.6B/resolve/master/config.json") is None
+    assert mirror_url(url + "?download=1") is None
+
+
+def test_unreachable_primary_falls_back_to_the_mirror(monkeypatch, tmp_path):
+    file = spec()
+    calls = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        if len(calls) <= 3:
+            raise httpx.ConnectError("unreachable")
+        yield httpx.Response(200, content=b"data")
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    downloader = ControlledDownloader(MIRROR_HOSTS, HTTPTransport())
+    assert downloader.download(file, tmp_path).read_bytes() == b"data"
+    assert calls[:3] == [file.url] * 3
+    assert calls[3] == "https://hf-mirror.com/Qwen/model/resolve/" + "a" * 40 + "/model.safetensors"
+
+
+def test_mirror_is_not_used_without_its_trusted_host(monkeypatch, tmp_path):
+    file = spec()
+    calls = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        raise httpx.ConnectError("unreachable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="DOWNLOAD_CONNECTION_FAILED:ConnectError"):
+        ControlledDownloader({"huggingface.co"}, HTTPTransport()).download(file, tmp_path)
+    assert calls == [file.url] * 3
     assert not list(tmp_path.iterdir())
+
+
+def test_mirror_bytes_are_still_verified_against_the_pin(monkeypatch, tmp_path):
+    file = spec()
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        if url == file.url:
+            raise httpx.ConnectError("unreachable")
+        yield httpx.Response(200, content=b"evil")
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="FILE_CHECKSUM_FAILED"):
+        ControlledDownloader(MIRROR_HOSTS, HTTPTransport()).download(file, tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_mirror_is_used_directly_after_the_primary_is_proven_unreachable(monkeypatch, tmp_path):
+    first = spec()
+    second = PackageFile(
+        url=first.url.replace("model.safetensors", "other.safetensors"),
+        relative_path="other.safetensors",
+        sha256=hashlib.sha256(b"other").hexdigest(),
+        size=5,
+    )
+    calls = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        if url.startswith("https://huggingface.co/"):
+            raise httpx.ConnectError("unreachable")
+        yield httpx.Response(200, content=b"data" if url.endswith("model.safetensors") else b"other")
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    downloader = ControlledDownloader(MIRROR_HOSTS, HTTPTransport())
+    assert downloader.download(first, tmp_path).read_bytes() == b"data"
+    before = len(calls)
+    assert downloader.download(second, tmp_path).read_bytes() == b"other"
+    assert len(calls) == before + 1
+    assert calls[-1].startswith("https://hf-mirror.com/")
+
+
+def test_mirror_follows_only_its_declared_redirect_hosts(monkeypatch, tmp_path):
+    file = spec()
+    calls = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        if url == file.url:
+            raise httpx.ConnectError("unreachable")
+        yield httpx.Response(302, headers={"location": "https://evil.example/x?Signature=private"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ValueError, match="UNTRUSTED_DOWNLOAD_URL"):
+        ControlledDownloader(MIRROR_HOSTS, HTTPTransport()).download(file, tmp_path)
+    assert calls[-1] == "https://hf-mirror.com/Qwen/model/resolve/" + "a" * 40 + "/model.safetensors"
+
+
+def test_mirror_signed_cdn_redirect_keeps_the_range(monkeypatch, tmp_path):
+    file = spec()
+    (tmp_path / (file.sha256 + ".part")).write_bytes(b"da")
+    headers = []
+    signed = "https://cas-bridge.xethub.hf.co/xet/file?Signature=transient"
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        headers.append(kwargs["headers"])
+        if url == file.url:
+            raise httpx.ConnectError("unreachable")
+        if url.startswith("https://hf-mirror.com/"):
+            yield httpx.Response(302, headers={"location": signed})
+        else:
+            yield httpx.Response(206, content=b"ta", headers={"content-range": "bytes 2-3/4"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    assert ControlledDownloader(MIRROR_HOSTS, HTTPTransport()).download(file, tmp_path).read_bytes() == b"data"
+    assert headers[-2:] == [{"Range": "bytes=2-"}, {"Range": "bytes=2-"}]
 
 
 def test_partial_response_is_not_replayed(monkeypatch, tmp_path):

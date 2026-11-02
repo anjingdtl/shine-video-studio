@@ -34,6 +34,18 @@
 - **模型包 ≠ 文件数**：ASR/VLM 每个角色只需 **1 个模型包**。页面显示的 VLM 13 / ASR 10 是包内文件数（权重分片、分词器、配置、README），不是 13 个模型；界面文案已改为「N 个模型包 · 已核验 X/Y 个文件」。
 - **真实复验**：在界面把「审片建议」切到「基础建议：人物与对白」，发起单镜系列 `db223693-75d8-44d3-9903-ea50efc452be`，结果 `COMPLETED 1/1`、`finalization_state=RELEASED`：真实出片 3,268,307 B，`technical=passed`（required），`semantic/audio=needs_review`（required=0），`final=needs_review`；自动交付订单 `0dde76bf…`，7.31 s、768×1344、24 fps。此前同样的选择会在建任务时返回 409。
 
+### 续验（2026-11-03 凌晨 2）：审片安装、镜像回退与“审片绝不阻断”
+
+- **建议审片模型已从界面真实安装**：在「制作环境」点击「补装建议审片模型（可选）」，安装计划 `68454e70-571c-4559-bdb9-e50df807d6c6` 从 `INSTALLING` 走到 `FILES_VERIFIED_PENDING_RUNTIME`；VLM 13 个文件、ASR 10 个文件全部按固定 sha256/字节数核验，运行时轮子（154 个）同时落到隔离目录。缺失/中断时页面立即给出可读原因，不再永久卡在“安装中”。
+- **网络边界与镜像回退**：本网络 `huggingface.co` 不可达（连接超时），`hf-mirror.com` 可访问且提供**逐字节相同**的固定版本文件：`.gitattributes` 实测 1,519 B / `11ad7efa…`，与目录钉死值一致；大分片 `Range` 请求返回 `206` 与正确 `Content-Range`。安装器仅在主站连接失败后回退到镜像，首个文件失败一次后同一次安装直接走镜像；每个文件仍按目录里的 sha256 与字节数强校验，镜像字节不符即 `FILE_CHECKSUM_FAILED`，绝不静默接受。回归：`test_unreachable_primary_falls_back_to_the_mirror`、`test_mirror_bytes_are_still_verified_against_the_pin`、`test_mirror_signed_cdn_redirect_keeps_the_range`、`test_mirror_follows_only_its_declared_redirect_hosts`。
+- **中断安装可从界面收尾**：安装计划在失败/进程被杀后，页面出现「整理中断的安装」。后端仅在持有包锁的进程确实不在时，回滚 `.staging/.journal`（`LocalInstaller.recover`）并把尝试/计划置 `RECONCILED_NO_RETRY`，**不重投下载**；虚假/未知日志仍拒绝并保持阻塞。回归：`test_interrupted_install_is_recovered_without_resubmitting`、既有 `test_install_reconcile_uncertainty_does_not_consume_grant_or_mutate_files`。
+- **审片运行时探测与定位**：隔离审片服务新增 `/ready`，在一次性子进程里只做执行器 import，不加载权重、不哈希大模型。验证结果因此变得诚实：本机采用已有 ComfyUI 的 **CPython 3.13**，而钉死的 ASR 运行时（qwen-asr→nagisa）是 cp312 原生轮子，ASR 被记录为 `UNAVAILABLE` 并退役该本机审片路由；VLM 侧（纯 Python/abi3）import 通过。两者都带 `advisory: true`，不影响 H3 出片。
+- **重新验证的前提**：运行配置已激活且后台制作服务在线时，「验证服务与工作流」会返回 `STOP_WORKER_BEFORE_SERVICE_VALIDATION`（页面已有中文说明：先在启动器停止后台服务）。首次安装的首次验证发生在激活之前，不受影响；本次复验即按此步骤完成。
+- **审片不再硬阻断的真实证据**：同一台机器上 VLM 实际推理（8B FP8 在 16 GB 卡上按 bf16 加载）在 600 s 内未完成，旧逻辑会把交接阶段判失败、任务停在 `NEEDS_REVIEW`。现在 `advisory_model_reviews` 项目的受管交接不再把审片服务放进出片关键路径；审片不可用/超时不会占住渲染器或租约。界面选项改为「完整建议：画面、对白与风格（只记录，不阻断）」。
+- **真实复验（界面发起）**：系列 `da97279a-859b-46cc-b36d-effb77d36fe1` → `COMPLETED 1/1`；任务 `31e32cb6-752d-4928-9a9c-84342af3eaad` → `PASSED`，真实 H3 出片；门禁记录 `technical=passed`（required），`semantic/audio/style=not_run`（advisory），`final=needs_review`（`required_gates=['technical']`，无未解决硬项）。出片后渲染器与审片服务均未驻留。
+- **已采用安装的标识更稳健**：`adopted_installation_blockers` 现在只要求“用户确认过的 H3 文件仍在位”，不再因为目录清单成员变化（例如是否包含 `.gitattributes`）误报 `ADOPTED_COMFY_FILES_CHANGED`；缺失真实 H3 文件仍会阻断。回归：`test_adopted_identity_ignores_catalog_membership_but_not_missing_h3_files`。
+- **回归**：后端全量 `pytest tests -q` 收集 1,443 项、1 项跳过、其余全部通过；前端 Vitest 90 passed；`npm run build`、Ruff（`shine tests`）、Alembic `upgrade head` + `check` 均通过。
+
 ### 界面全板块穿测（2026-11-03）
 
 - 导演模式 1→4 步与专业模式侧栏逐页打开：素材与风格、制片准备、人名与字幕、分镜与任务、多镜头连续生产、成片与导出、制作环境、模型与系统、显示与偏好、影视制片团队、H3 官方规范均正常渲染，未出现「加载失败 / 请求失败 / 无法连接 / undefined」。

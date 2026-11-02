@@ -187,8 +187,8 @@ export default function ProductionSeriesPanel({
         </label>
         <label htmlFor="series-scope">审片建议（可选）
           <select id="series-scope" value={scope} onChange={(event) => setScope(event.target.value as 'full' | 'basic')}>
-            <option value="full">完整建议：画面、对白与风格</option>
-            <option value="basic">基础建议：人物与对白</option>
+            <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
+            <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
           </select>
         </label>
         {scope === 'basic' && <p className="series-hint">画面规格仍会做技术校验；人物与对白建议未覆盖时会留待查看，不影响制作。</p>}

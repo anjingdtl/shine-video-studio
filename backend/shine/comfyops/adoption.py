@@ -346,7 +346,19 @@ def adopted_installation_blockers(instance, catalog: dict) -> list[str]:
         if root is None or str(root) != payload.get("root"):
             return ["ADOPTED_COMFY_ROOT_CHANGED"]
         report = inspect(str(root), catalog)
-        if report.get("snapshot") != adoption.get("snapshot"):
+        # The catalog's own file membership may change (for example when an
+        # optional reviewer package drops repository metadata). That is not a
+        # change to the user's installation. Only the H3 files the user actually
+        # confirmed must still be present; model bytes are never rehashed here.
+        present = {
+            (row.get("component_id"), row.get("relative_path"))
+            for row in report.get("matches", [])
+        }
+        confirmed = {
+            (item.get("component_id"), item.get("relative_path"))
+            for item in adoption.get("verified_h3_files", [])
+        }
+        if not confirmed <= present:
             blockers.append("ADOPTED_COMFY_FILES_CHANGED")
         if report.get("software", {}).get("actual_revision") != adoption.get("source_revision"):
             blockers.append("ADOPTED_COMFY_REVISION_CHANGED")

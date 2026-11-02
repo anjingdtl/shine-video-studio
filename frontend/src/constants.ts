@@ -138,7 +138,8 @@ export const prepRowLabels: Record<string, string> = {
   REAL_TESTED: '真实测试通过', PRODUCTION_APPROVED: '生产已采纳', DEPRECATED: '已弃用',
   PREVIEW: '待试听确认', FROZEN: '已冻结',
   RECONCILED_NO_RETRY: '已对账收尾（不重试）', FAILED_RECONCILE_REQUIRED: '失败，需人工对账',
-  SUBMIT_INTENT: '提交中断，待核实', OK: '正常',
+  SUBMIT_INTENT: '提交中断，待核实', INSTALLING: '正在安装',
+  FILES_VERIFIED_PENDING_RUNTIME: '文件已核验，待运行验证', OK: '正常',
 };
 
 export const providerLabels: Record<string, string> = {

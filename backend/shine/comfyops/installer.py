@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ REDIRECT_POLICY_BY_ORIGIN = {
     "huggingface.co": {"us.aws.cdn.hf.co"},
     "github.com": {"codeload.github.com", "release-assets.githubusercontent.com"},
 }
+
+logger = logging.getLogger(__name__)
 
 
 class PackageFile(BaseModel):
@@ -170,8 +173,35 @@ TRUSTED_DOWNLOAD_HOSTS = frozenset(
         "files.pythonhosted.org",
         "download.pytorch.org",
         "download-r2.pytorch.org",  # Exact host linked by the official CUDA wheel indexes.
+        "hf-mirror.com",  # Byte-identical mirror used only when huggingface.co is unreachable.
+        "cas-bridge.xethub.hf.co",  # HF's signed download endpoint linked by that mirror.
     }
 )
+
+# The mirror serves small files from its own cache and redirects large LFS files
+# to the signed HF download endpoint. Only those two hosts may be followed; every
+# byte is still verified against the pinned sha256 and size.
+MIRROR_REDIRECT_HOSTS = frozenset({"hf-mirror.com", "cas-bridge.xethub.hf.co"})
+
+
+def mirror_url(url: str) -> str | None:
+    """Return the byte-identical mirror URL of a pinned HuggingFace model file.
+
+    This is a transport alternative only. The caller still verifies the pinned
+    sha256 and byte size, so a mirror that serves different bytes fails loudly
+    instead of being accepted.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != "huggingface.co" or parsed.query or parsed.fragment:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    # huggingface.co/<owner>/<repo>/resolve/<revision>/<relative path...>
+    if len(parts) < 5 or parts[2] != "resolve":
+        return None
+    owner, repo, _, revision, *rest = parts
+    if not owner or not repo or not rest:
+        return None
+    return f"https://hf-mirror.com/{owner}/{repo}/resolve/{revision}/{'/'.join(rest)}"
 
 
 class DownloadStreamInterrupted(ValueError):
@@ -242,6 +272,9 @@ class ControlledDownloader:
     max_bytes: int = 100 * 1024**3
     max_stream_attempts: int = 3
     segment_bytes: int = 64 * 1024**2
+    # Once the primary origin is proven unreachable, later files in the same
+    # installation skip the repeated connect timeouts and try the mirror directly.
+    primary_unreachable: bool = False
 
     def download(self, spec: PackageFile, cache: Path):
         check_url(spec.url, self.hosts)
@@ -281,6 +314,65 @@ class ControlledDownloader:
         os.replace(partial, final)
         return final
 
+    @contextmanager
+    def _open(self, spec: PackageFile, offset, end):
+        """Open the pinned URL, then try the mirror after a connect failure.
+
+        Only connection establishment may fall back: no byte is replayed and the
+        mirror response is still subjected to the exact size/hash verification.
+        """
+        mirror = mirror_url(spec.url)
+        if self.primary_unreachable and mirror is not None and urlsplit(mirror).hostname in self.hosts:
+            with self._stream_mirror(mirror, offset, end) as response:
+                yield response
+            return
+        try:
+            with self._open_primary(spec, offset, end) as response:
+                yield response
+            return
+        except ValueError as exc:
+            if not str(exc).startswith("DOWNLOAD_CONNECTION_FAILED"):
+                raise
+            primary_error = exc
+        if mirror is None or urlsplit(mirror).hostname not in self.hosts:
+            raise primary_error
+        self.primary_unreachable = True
+        logger.warning("installer_mirror_fallback file=%s host=%s", spec.relative_path, urlsplit(mirror).hostname)
+        with self._stream_mirror(mirror, offset, end) as response:
+            yield response
+
+    @contextmanager
+    def _stream_mirror(self, url, offset, end):
+        # The mirror redirects cached files to itself and LFS objects to HF's
+        # signed endpoint. Only those hosts may be followed, and the original
+        # Range is preserved on every hop.
+        for hop in range(6):
+            with self.transport.stream(url, offset, end=end) as response:
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    yield response
+                    return
+                if hop == 5:
+                    raise ValueError("DOWNLOAD_REDIRECT_LIMIT")
+                location = response.headers.get("location")
+                if not location:
+                    raise ValueError("DOWNLOAD_REDIRECT_LOCATION_MISSING")
+                target = urljoin(url, location)
+                check_url(target, set(MIRROR_REDIRECT_HOSTS), signed_query=True)
+                url = target
+
+    def _open_primary(self, spec: PackageFile, offset, end):
+        range_stream = getattr(self.transport, "stream_range", None)
+        if end is not None:
+            if range_stream is None:
+                raise ValueError("TRANSPORT_REDIRECT_POLICY_UNSUPPORTED")
+            return range_stream(spec, offset, end)
+        if spec.redirect_hosts:
+            approved_stream = getattr(self.transport, "stream_approved", None)
+            if approved_stream is None:
+                raise ValueError("TRANSPORT_REDIRECT_POLICY_UNSUPPORTED")
+            return approved_stream(spec, offset)
+        return self.transport.stream(spec.url, offset)
+
     def _transfer(self, spec: PackageFile, partial: Path):
         offset = partial.stat().st_size if partial.exists() else 0
         if offset >= spec.size:
@@ -291,16 +383,7 @@ class ControlledDownloader:
             min((offset // self.segment_bytes + 1) * self.segment_bytes, spec.size) - 1
             if range_stream and spec.size > self.segment_bytes else None
         )
-        if end is not None:
-            stream = range_stream(spec, offset, end)
-        elif spec.redirect_hosts:
-            approved_stream = getattr(self.transport, "stream_approved", None)
-            if approved_stream is None:
-                raise ValueError("TRANSPORT_REDIRECT_POLICY_UNSUPPORTED")
-            stream = approved_stream(spec, offset)
-        else:
-            stream = self.transport.stream(spec.url, offset)
-        with stream as response:
+        with self._open(spec, offset, end) as response:
             if response.status_code not in {200, 206}:
                 raise ValueError("DOWNLOAD_HTTP_REJECTED")
             if response.status_code == 206:
