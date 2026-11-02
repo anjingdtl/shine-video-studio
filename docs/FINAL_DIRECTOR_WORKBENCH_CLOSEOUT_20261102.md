@@ -8,7 +8,7 @@
 | 项 | 值 |
 |---|---|
 | 审查起始基线 | `7b49a6c`（与 `origin/main` 一致，工作树干净） |
-| 代码终点（本报告全部软件改动的提交） | `06975bc` Unify demo/real production behind one authoritative mode and collapse the director UI |
+| 代码终点（本报告全部软件改动的提交） | `06975bc` 产品与测试改动 + `ffd26ce` 打包脚本 UTF-8 修复 |
 | 文档与证据提交 | 本报告 + `docs/evidence/20261102-director-closeout/`（随本文件同批提交，仅文档，不改变任何软件行为；测试包自代码终点构建） |
 | 推送方式 | 正常快进 push 到 `origin/main`，无强推、无历史改写 |
 
@@ -171,7 +171,7 @@ DEMO                无激活配置（演示体验，用户可主动选择停留
 
 ## 12. 提交、推送与工作树
 
-- 代码终点：`06975bc`（30 文件，+2423/−689）。
+- 代码终点：`06975bc`（30 文件，+2423/−689，产品与测试改动）+ `ffd26ce`（打包脚本 UTF-8 修复，见下）。
 - 本报告与 `docs/evidence/20261102-director-closeout/`（8 张实机截图：作品首页、素材与风格、AI导演制作、成片中心、专业模式、启用真实制作向导、1366×768 与 1280×720 布局检查）随文档提交入库。
-- 测试包：`pwsh -File scripts\build_test_package.ps1 -OutDir <临时目录> -Verify` 自代码终点的干净树构建，BUILD_INFO.json 记录提交 SHA，逐文件 SHA-256 清单核对通过；包内不含模型、数据库、密钥与证据目录。
+- 测试包构建实录：首次构建在中文 GBK 控制台下暴露出打包器真实缺陷——`git ls-files` 的 UTF-8 文件名被按控制台编码解码成乱码，报 "Tracked file is missing on disk"。已按子进程编码合同修复（`ffd26ce`：脚本自行钉住 UTF-8，不依赖调用方控制台）。最终自 `ffd26ce` 干净树构建并通过 `-Verify`：`ShineVideoStudio-20261102-ffd26ce-win64.zip`，416 个受控文件入包 / 109 个排除路径（packaging、docs/evidence 等），展开后 425 个文件逐一 SHA-256 核对通过；包内不含模型、数据库、密钥与证据目录。
 - 推送：`git push origin main`（快进），推送后 `git status` 清洁。
