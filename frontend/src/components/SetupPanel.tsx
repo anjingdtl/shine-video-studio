@@ -465,6 +465,23 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
     });
   }
 
+  function installOptionalReviewers() {
+    const selected = projectRef.current;
+    const reviewers = (catalog?.components ?? []).filter(component => component.kind === 'review-model');
+    if (!selected || !storage || !reviewers.length) return;
+    const bytes = reviewers.reduce((sum, component) => sum + component.bytes, 0);
+    if (!window.confirm(`补装建议审片模型？\n每类只安装 1 个模型包（画面检查、语音检查），约 ${fmtBytes(bytes)}；不会替换 H3 权重，也不会改动已冻结的作品设置。它们只提供建议，不阻断出片。`)) return;
+    void run(async () => {
+      const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
+        components: reviewers.map(component => component.component_id), project_id: selected,
+        disk_free: storage.free_bytes,
+      }));
+      await approveAndExecute({ ...plan, kind: 'INSTALL' }, '补装建议审片模型');
+      await Promise.allSettled([loadRuntime(), loadReadiness(), loadPlans()]);
+      return '建议审片模型的安装计划已提交。装好后可在「验证服务与工作流」里确认它们是否就绪；缺失仍不阻断 H3 出片。';
+    });
+  }
+
   function prepareAutomatically() {
     if (!projectId || !checked || !storage || storage.requires_selection || !existingResolved) return;
     if (existingChoice === 'reuse' && existingScan?.software?.installed) {
@@ -583,6 +600,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
               </div>
             ))}
   </div>
+          <button className="secondary-button" disabled={busy} onClick={installOptionalReviewers}>补装建议审片模型（可选）</button>
           <fieldset className="setup-existing" disabled={busy}>
             <legend>已有 ComfyUI 与模型复用</legend>
             <p>{existingRoots.length ? `发现 ${existingRoots.length} 个已有安装。` : '常见目录未发现安装，可手动指定；不会遍历整个磁盘。'}</p>
