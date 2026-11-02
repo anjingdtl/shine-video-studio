@@ -4,6 +4,7 @@ import type { AgentRoute, Project, ProviderProfile, SystemHealth, SystemStatus, 
 import { label, statusLabels, workerPhaseLabels } from '../constants';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import StorageSettings from './StorageSettings';
+import WorkflowProfileImport from './WorkflowProfileImport';
 
 type Props = {
   project?: Project;
@@ -21,38 +22,39 @@ type Props = {
   onRoute: (role: string, profileId: string) => void;
   onTestComfy: (baseUrl: string) => Promise<SystemHealth>;
   onRegisterWorkflow: (payload: Record<string, unknown>) => void;
+  onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
 };
 
-const defaultGraph = `{
-  "1": {"class_type": "H3BaseSampler", "inputs": {"positive_prompt": "", "seed": 0, "duration": 6.0}},
-  "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}}
-}`;
-const defaultMap = `{"positive_prompt": "1.inputs.positive_prompt", "seed": "1.inputs.seed", "duration": "1.inputs.duration"}`;
+const defaultGraph = '{}';
+const defaultMap = '{}';
 
 export default function SettingsPanel({
-  project, onRefresh, workflowProfiles, system, busy, onProjectSettings, onTestComfy, onRegisterWorkflow, onDeleteWorkflow,
+  project, onRefresh, workflowProfiles, system, busy, onProjectSettings, onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow,
 }: Props) {
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188');
   const [comfyResult, setComfyResult] = useState<SystemHealth | null>(null);
-  const [workflowName, setWorkflowName] = useState('local-h3-t2va');
+  const [workflowName, setWorkflowName] = useState('');
   const [workflowMode, setWorkflowMode] = useState('T2VA');
   const [graphText, setGraphText] = useState(defaultGraph);
   const [mapText, setMapText] = useState(defaultMap);
-  const [requiredNodes, setRequiredNodes] = useState('H3BaseSampler');
+  const [transferText, setTransferText] = useState('{}');
+  const [requiredNodes, setRequiredNodes] = useState('');
   const [advanced, setAdvanced] = useState(false);
 
   function registerWorkflow() {
     try {
       const graph = JSON.parse(graphText);
       const parameterMap = JSON.parse(mapText);
+      const mediaTransfers = JSON.parse(transferText);
       onRegisterWorkflow({
         name: workflowName, mode: workflowMode, graph, parameter_map: parameterMap,
+        media_transfers: mediaTransfers,
         required_nodes: requiredNodes.split(',').map((value) => value.trim()).filter(Boolean),
         project_id: project?.id ?? null,
       });
     } catch {
-      window.alert('工作流 JSON 或参数映射不是合法 JSON。');
+      window.alert('工作流、参数映射或媒体传输配置不是合法 JSON。');
     }
   }
 
@@ -116,6 +118,16 @@ export default function SettingsPanel({
         <button className="text-button" onClick={() => setAdvanced((value) => !value)}>{advanced ? '收起' : '展开'} 工作流 Profile 注册</button>
       </div>
       {advanced && <div className="workflow-editor">
+        <WorkflowProfileImport onLoad={(candidate) => {
+          if (typeof candidate.name === 'string') setWorkflowName(candidate.name);
+          if (typeof candidate.mode === 'string' && ['T2VA', 'I2VA', 'FL2VA', 'L2VA', 'Ref2VA'].includes(candidate.mode)) {
+            setWorkflowMode(candidate.mode);
+          }
+          setGraphText(JSON.stringify(candidate.graph, null, 2));
+          setMapText(JSON.stringify(candidate.parameter_map, null, 2));
+          setTransferText(JSON.stringify(candidate.media_transfers ?? {}, null, 2));
+          setRequiredNodes(Array.isArray(candidate.required_nodes) ? candidate.required_nodes.join(', ') : '');
+        }} />
         <div className="provider-form">
           <input value={workflowName} placeholder="Profile 名称" onChange={(event) => setWorkflowName(event.target.value)} />
           <select value={workflowMode} onChange={(event) => setWorkflowMode(event.target.value)}>
@@ -127,6 +139,7 @@ export default function SettingsPanel({
         <div className="json-grid">
           <label>ComfyUI API Workflow JSON<textarea value={graphText} rows={10} onChange={(event) => setGraphText(event.target.value)} /></label>
           <label>参数映射（逻辑名 → node.inputs.field）<textarea value={mapText} rows={10} onChange={(event) => setMapText(event.target.value)} /></label>
+          <label>媒体传输配置 JSON（音频或视频引用需要明确配置）<textarea value={transferText} rows={5} onChange={(event) => setTransferText(event.target.value)} /></label>
         </div>
         <button className="primary-button" disabled={busy} onClick={registerWorkflow}><Plus size={13} /> 注册工作流</button>
         <div className="workflow-list">
@@ -137,6 +150,7 @@ export default function SettingsPanel({
                 <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify({ identity: profile.model_identity, parameter_map: profile.parameter_map, validation: profile.validated_against }, null, 2)}</pre>
                 <p>提示：引用槽位超容量或缺映射时，任务会被拦下并提示「参考素材还没接入工作流」；动态槽位关闭；视频传输未验收；硬接续待测试。</p>
               </details>
+              <button className="small-action" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
               <button className="icon-button tiny" onClick={() => onDeleteWorkflow(profile.id)}><Trash2 size={12} /></button>
             </div>
           ))}

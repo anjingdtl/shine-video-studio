@@ -253,6 +253,33 @@ class OwnedProcessGroup:
         self._close_source_handles()
         return {"pid": self.pid, **evidence}
 
+    def exit_code_if_stopped(self):
+        """Return the root exit code only after the whole owned group has exited.
+
+        Service readiness polls use this to stop waiting immediately when a
+        launched process fails before binding its health endpoint. An exited
+        parent with a still-running child is not treated as a failed service.
+        """
+        if self._terminated or not self._job or not self._job._handle:
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = self._job._kernel
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        state = kernel.WaitForSingleObject(self._process, 0)
+        if state != 0:
+            return None
+        active = self._job.active_process_count()
+        if active is None or active > 0:
+            return None
+        code = wintypes.DWORD()
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.GetExitCodeProcess.restype = wintypes.BOOL
+        if not kernel.GetExitCodeProcess(self._process, ctypes.byref(code)):
+            return None
+        return int(code.value)
+
     def _close_source_handles(self):
         if self._source_handles:
             import ctypes

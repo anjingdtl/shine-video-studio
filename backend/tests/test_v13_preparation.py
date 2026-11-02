@@ -651,11 +651,15 @@ def test_voice_http_protocol_and_bad_asr_alignment():
     assert "{evil}" not in subtitles([{"text": "{evil}", "start_s": 0, "end_s": 1}])["ass"]
 
 
-def test_local_install_business_service_runs_production_code_with_fake_http(prep):
+def test_local_install_business_service_runs_production_code_with_fake_http(prep, monkeypatch):
     from shine.comfyops.local import execute_approved
     from shine.comfyops.models import InstallationPlan, ModelPackage
 
     client, factory, settings = prep
+    # This test exercises the isolated business service directly. Keep the
+    # Web API's local side-effect route disabled even when the developer's
+    # .env enables it for the installed application.
+    monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "0")
     project = create_project(client)
     model = package(client, files=[file_spec().model_dump()])
     plan = post(

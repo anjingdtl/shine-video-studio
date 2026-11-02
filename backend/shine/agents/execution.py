@@ -21,6 +21,12 @@ SAFE_REJECTIONS = {
     "STYLE_INPUT_FROZEN_QUOTE_CHANGED", "STYLE_INPUT_SHOT_QUOTE_INVENTED",
     "INPUT_CONTEXT_CHANGED_DURING_CALL",
     "STYLE_INPUT_SHOT_PATH_INVALID",
+    "LOCKED_FACTS_CHANGED", "DUPLICATE_BEAT", "DIALOGUE_NOT_IN_USER_SCRIPT",
+    "DUPLICATE_SHOT_INTENT", "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE",
+    "UNAPPROVED_ASSET_OR_UNKNOWN_BEAT", "CHARACTER_MASTER_BINDING_REQUIRED",
+    "CAMERA_INTENT_COVERAGE", "EDIT_INTENT_INTENT_COVERAGE",
+    "H3_LOCKED_FACT_TRANSLATION_REQUIRED",
+    "H3_STYLE_TRANSLATION_REQUIRED",
 }
 
 
@@ -45,7 +51,8 @@ def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, 
             continue
         old_contract = row.trace.get("review_contract_sha256")
         if row.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"} or (
-            row.status == "REJECTED" and row.error_code in UNKNOWN_CODES and row.trace.get("is_mock") is not True
+            row.status == "REJECTED" and row.error_code in UNKNOWN_CODES
+            and row.trace.get("external_outcome") != "NOT_SENT" and row.trace.get("is_mock") is not True
         ):
             raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
         binding = row.trace.get("review_provider") or {}
@@ -62,7 +69,9 @@ def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, 
 
 def abandon_remote_response(db, row, actor, grant_id, snapshot, evidence):
     if row.role_id not in FilmAgentRegistry.roles or not (
-        row.status == "NEEDS_REVIEW" or row.status == "REJECTED" and row.error_code in UNKNOWN_CODES
+        row.status == "NEEDS_REVIEW"
+        or row.status == "REJECTED" and row.error_code in UNKNOWN_CODES
+        and row.trace.get("external_outcome") != "NOT_SENT"
     ):
         raise HTTPException(409, "REMOTE_AGENT_OUTCOME_NOT_UNCERTAIN")
     binding = row.trace.get("review_provider") or {}

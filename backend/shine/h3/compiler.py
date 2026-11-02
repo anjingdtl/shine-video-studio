@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from shine.asset_identity import character_reference_matches
 from shine.schemas import (
     CompiledPrompt,
     ContinuityMode,
@@ -86,6 +87,12 @@ def _style_sentences(style: StyleBible, style_version_id: str) -> str:
         f"Lighting and tone: {style.lighting_tone}. Lens and texture: {style.lens_texture}. "
         f"Editing rhythm: {style.editing_rhythm}. Performance and sound: {style.sound_performance}."
     )
+
+
+def _prompt_style(spec: ShotSpec, style: StyleBible) -> StyleBible:
+    # The translated draft is part of the shot revision; the original frozen
+    # style and its hash remain authoritative and unchanged.
+    return spec.prompt_style or style
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -233,7 +240,8 @@ def _label_for_character(
     for item in manifest:
         if item.use_as not in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}:
             continue
-        if item.role == character or item.entity_id == character:
+        if (item.asset_id == character or item.role == character
+                or character_reference_matches(character, item.entity_id)):
             return item.label
         if item.role and style_roles.get(item.role) == character:
             return item.label
@@ -282,7 +290,7 @@ def _camera_sentence(spec: ShotSpec) -> str:
 
 
 def _shot_text(ctx: _Context) -> str:
-    parts: list[str] = ["[Shot 1] " + _style_sentences(ctx.style, ctx.spec.style_version_id)]
+    parts: list[str] = ["[Shot 1] " + _style_sentences(_prompt_style(ctx.spec, ctx.style), ctx.spec.style_version_id)]
     parts.append(ctx.spec.story_beat.strip())
     camera = _camera_sentence(ctx.spec)
     if camera:
@@ -290,7 +298,15 @@ def _shot_text(ctx: _Context) -> str:
     environment = ctx.spec.sound.get("environment")
     if environment:
         parts.append(f"The scene is set in {environment}.")
-    for fact in ctx.spec.locked_story_facts:
+    facts = ctx.spec.locked_story_facts
+    if any(re.search(r"[\u3400-\u9fff]", fact) for fact in facts):
+        translated = ctx.spec.prompt_story_facts
+        if (len(translated) != len(facts) or any(not value.strip() or re.search(r"[\u3400-\u9fff]", value)
+                                                  for value in translated)):
+            raise PromptCompilationError("H3_LOCKED_FACT_TRANSLATION_REQUIRED",
+                                         "Chinese locked facts require corresponding English prompt translations")
+        facts = translated
+    for fact in facts:
         parts.append(f"Locked story fact: {fact}.")
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
         parts.append(_dialogue_sentence(ctx, line))
@@ -311,6 +327,7 @@ def _shot_text(ctx: _Context) -> str:
 
 
 def _soundscape(spec: ShotSpec, style: StyleBible) -> str:
+    style = _prompt_style(spec, style)
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
     if not environment and not ambience:
@@ -379,6 +396,8 @@ def _subject_definitions(ctx: _Context) -> str:
     for item in ctx.manifest:
         if item.use_as == ReferenceUse.SUBJECT:
             role = item.role or item.entity_id or "approved subject"
+            if re.search(r"[\u3400-\u9fff]", role):
+                role = "approved subject"
             lines.append(
                 f"{item.label} is the approved reference for {role}, "
                 f"shown in <Picture {positions[id(item)]}>, derived from the user's locked asset."
@@ -412,6 +431,8 @@ def _retention(ctx: _Context) -> str:
         marker = "reference" if item.use_as == ReferenceUse.AUDIO else "fully_preserved"
         if item.use_as == ReferenceUse.SUBJECT:
             role = item.role or item.entity_id or "approved subject"
+            if re.search(r"[\u3400-\u9fff]", role):
+                role = "approved subject"
             lines.append(f"{item.label} (appears in [Shot 1]): {marker} - the {role} identity is retained.")
         elif item.use_as == ReferenceUse.PICTURE:
             lines.append(f"{item.label} ([Shot 1] frame): {marker} - the approved frame composition is retained.")

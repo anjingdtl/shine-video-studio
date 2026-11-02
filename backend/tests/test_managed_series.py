@@ -31,17 +31,23 @@ class _DrainedGroup(_Group):
     starts_drained = True
 
 
-def test_series_rejects_a_missing_recipe_or_reviewer(api):
+def test_series_rejects_a_missing_recipe_but_allows_advisory_reviews_to_be_absent(api):
     from shine.worker import run_managed_series
 
     _client, factory, settings = api
     for kwargs in (
         {"recipe": {}, "review_configs": {"VLM": {}}},
         {"recipe": {"renderer": {}}, "review_configs": {"VLM": {}}},
-        {"recipe": {"renderer": {"instance_id": "i"}}, "review_configs": {}},
     ):
         with pytest.raises(HTTPException, match="COMFY_STARTUP_ARGUMENTS_INVALID"):
             run_managed_series(factory, "worker-series", settings=settings, **kwargs)
+
+    # The H3 renderer is the production prerequisite. Optional local review
+    # services may be absent, and an empty queue must remain a no-op.
+    assert run_managed_series(
+        factory, "worker-series", settings=settings,
+        recipe={"renderer": {"instance_id": "i"}}, review_configs={},
+    ) == []
 
 
 def test_series_rejects_an_invalid_length(api):
@@ -112,7 +118,10 @@ def test_release_managed_series_keeps_the_lease_when_the_renderer_cannot_stop():
     from shine.worker import release_managed_series
 
     class _Coordinator:
-        keeper = object()
+        keeper = type("K", (), {
+            "stop_renewal": staticmethod(lambda: {"renewal_stopped": True}),
+            "finalize": staticmethod(lambda: {"released": True}),
+        })()
         replacement = RendererSupervisor(_Group(), "http://127.0.0.1:8190", "t" * 40, "a" * 64)
         gpu_uuid = "GPU-test"
         min_ram_mb = 8000

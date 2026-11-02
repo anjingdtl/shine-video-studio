@@ -26,25 +26,31 @@ const STAGE_TITLES: Array<{ id: StageId; title: string }> = [
 
 const INITIAL_STAGES: Stage[] = STAGE_TITLES.map(({ id, title }) => ({ id, title, status: 'pending', note: '' }));
 
-type EnvReport = { blockers: Array<{ code: string; tool?: string; detail?: string }>; ram: { status: string }; disk: { status: string; free_gb: number }; gpu: Record<string, unknown> };
+type EnvReport = {
+  blockers: Array<{ code: string; tool?: string; detail?: string }>;
+  ram: { status: string }; disk: { status: string; free_gb: number }; gpu: Record<string, unknown>;
+  advisory_reviews?: Record<string, { status: string; model_id?: string; model_files_present?: number;
+    model_files_expected?: number; runtime_ready?: boolean }>;
+};
 type ExistingScan = {
   root: string; snapshot: string; candidate_bytes: number;
-  matches: Array<{ component_id: string; size: number }>;
+  matches: Array<{ component_id: string; size: number; relative_path?: string }>;
   software?: { installed: boolean; version_status: string; actual_revision?: string | null;
     runtime?: { status: string }; node_revisions_verified?: boolean };
 };
 type ExistingVerification = { status: string; software: NonNullable<ExistingScan['software']>;
-  verified: Array<{ component_id: string; size: number }>;
-  rejected: Array<{ component_id: string; size: number }>;
+  verified: Array<{ component_id: string; size: number; relative_path?: string }>;
+  rejected: Array<{ component_id: string; size: number; relative_path?: string }>;
+  missing?: Array<{ component_id: string; relative_path: string }>;
   verified_bytes: number; copied_bytes: number; verification_reused?: boolean; retry_after_ms?: number };
 type RuntimeState = {
   status: string; error: string | null; render_provider: string;
   candidate: { project_id: string; recipe_sha256: string } | null;
-  service_validation?: { status: string; blockers?: string[] } | null;
+  service_validation?: { status: string; blockers?: string[]; advisory_reviews?: Record<string, { status: string }> } | null;
 };
 type Readiness = { layers: Array<{ layer?: string; status?: string }> };
 type StorageState = { root: string; requires_selection: boolean; free_bytes: number };
-type Catalog = { total_bytes: number; components: Array<{ component_id: string }> };
+type Catalog = { total_bytes: number; components: Array<{ component_id: string; files: number; role?: string | null }> };
 
 const HARDWARE_BLOCKER_ZH: Record<string, string> = {
   TOOL_MISSING_INSTALLABLE: '缺少必需的基础程序', TOOL_STALE: '基础程序版本过旧',
@@ -202,7 +208,13 @@ export function RealProductionWizard({
         stopWith('hardware', `本机还缺少必要条件：${env.blockers.map(b => HARDWARE_BLOCKER_ZH[b.code] ?? `环境检测未通过（${b.code}）`).join('；')}。处理后在专业设置的「制作环境」里可查看细节。`);
         return;
       }
-      setStage('hardware', { status: 'ok', note: '显卡、内存、磁盘与基础程序均满足要求。' });
+      const reviewStatus = Object.entries(env.advisory_reviews ?? {}).map(([role, item]) =>
+        `${role === 'VLM' ? '画面建议审阅' : role === 'ASR' ? '对白识别建议' : role}：${item.status === 'READY' ? '资源已就绪' : '暂未就绪'}`,
+      );
+      const advisoryNote = reviewStatus.length
+        ? `建议审片检查：${reviewStatus.join('；')}。它们只提供参考，缺失不影响真实制作，未覆盖内容会留待人工复核。`
+        : '建议审片与对白识别为可选参考，不会阻止真实制作。';
+      setStage('hardware', { status: 'ok', note: `显卡、内存、磁盘与基础程序均满足要求。${advisoryNote}` });
     } catch (error) {
       stopWith('hardware', `环境检查失败：${(error as Error).message}`);
       return;
@@ -255,7 +267,8 @@ export function RealProductionWizard({
   }
 
   /** 4–6：模型核对 → 生成方案与服务验证 → 激活。 */
-  async function runTail(alive: () => boolean, onlyDiagnose: boolean, reused: number, storage: StorageState) {
+  async function runTail(alive: () => boolean, onlyDiagnose: boolean, reused: number, storage: StorageState,
+    adoptedExisting = false) {
     // 4. 模型与固定清单（readiness L2 证据）
     setStage('models', { status: 'running', note: RUNNING_TEXT.models });
     let ready: Readiness;
@@ -268,6 +281,11 @@ export function RealProductionWizard({
     if (!alive()) return;
     const l2 = ready.layers.find(layer => layer.layer === 'L2_files_verified');
     if (!l2 || l2.status !== 'READY') {
+      if (adoptedExisting) {
+        const missing = (l2 as { missing_components?: string[] } | undefined)?.missing_components ?? [];
+        stopWith('models', `已确认复用本机 ComfyUI 与 H3 模型，但仍有本地文件需要核验${missing.length ? `：${missing.join('、')}` : '。'}不会因为复用而自动下载新模型。请到专业设置查看缺项；确认要补齐其他组件时再单独审核下载。`);
+        return;
+      }
       if (onlyDiagnose) {
         stopWith('models', '模型与固定清单尚未核对完成（未校验的文件不会用于真实生成）。请到专业设置的「制作环境」执行下载与校验。');
         return;
@@ -278,10 +296,15 @@ export function RealProductionWizard({
       if (pending.length > 1) throw new Error('MULTIPLE_PENDING_PLANS：请到专业设置选择并核对计划。');
       const plan = pending.length ? { plan_id: pending[0].id, sha256: pending[0].sha256, status: pending[0].status }
         : await api<SetupPlan & { download_bytes: number }>('/setup/install-plan', json('POST', {
-          components: catalog.components.map(c => c.component_id), project_id: projectId, disk_free: storage.free_bytes,
+          components: catalog.components.filter(c => !['VLM', 'ASR'].includes(c.role ?? '')).map(c => c.component_id),
+          project_id: projectId, disk_free: storage.free_bytes,
         }));
       if (!alive()) return;
-      if (!window.confirm(`批准固定部署清单中的缺失组件下载与校验？\n作品：${projectId}\n目录：${storage.root}\n计划：${plan.plan_id}\n哈希：${plan.sha256}\n已复用 ${fmtBytes(reused)}，已有缓存将校验复用，完整清单上限约 ${fmtBytes(catalog.total_bytes)}。原安装保持不变。`)) {
+      const expectedDownload = 'download_bytes' in plan ? plan.download_bytes : undefined;
+      const downloadText = expectedDownload === undefined
+        ? '沿用之前已审核的待处理计划'
+        : `本计划预计新下载 ${fmtBytes(expectedDownload)}；ASR/VLM 建议审片资源不包含在内`;
+      if (!window.confirm(`批准缺少的核心制作组件下载与校验？\n作品：${projectId}\n目录：${storage.root}\n计划：${plan.plan_id}\n哈希：${plan.sha256}\n${downloadText}。已复用 ${fmtBytes(reused)}，原安装保持不变。`)) {
         stopWith('models', '已取消下载，没有执行安装计划。需要时可重新检查并审核原计划。');
         return;
       }
@@ -295,27 +318,33 @@ export function RealProductionWizard({
         return;
       }
     }
-    setStage('models', { status: 'ok', note: '模型与固定清单核对一致（哈希校验通过）。' });
+    setStage('models', { status: 'ok', note: adoptedExisting
+      ? `已复用原目录中哈希校验通过的 H3 权重（${fmtBytes(reused)}）；0 字节复制，0 字节下载。`
+      : '模型与固定清单核对一致（哈希校验通过）。' });
 
     // 5. 运行环境 + 生成方案登记 + 服务验证
     setStage('workflows', { status: 'running', note: RUNNING_TEXT.workflows });
     if (!onlyDiagnose) {
       try {
-        if (!window.confirm('将按固定部署清单准备受管实例、配置节点和模型绑定，并启动本机服务验证后停止。是否批准这些有序步骤？')) {
-          stopWith('workflows', '已取消实例准备，没有执行实例计划。'); return;
+        if (!adoptedExisting) {
+          if (!window.confirm('将按固定部署清单准备受管实例、配置节点和模型绑定，并启动本机服务验证后停止。是否批准这些有序步骤？')) {
+            stopWith('workflows', '已取消实例准备，没有执行实例计划。'); return;
+          }
+          let complete = false;
+          for (let step = 0; step < 8; step += 1) {
+            if (!alive()) return;
+            setStage('workflows', { status: 'running', note: `正在准备运行环境（第 ${step + 1} 步）…` });
+            const next = await api<SetupPlan & { complete: boolean }>(
+              '/setup/next-instance-plan', json('POST', { project_id: projectId, instance_name: 'shine-h3', port: 8188, mode: 'local' }));
+            if (!alive()) return;
+            if (next.complete) { complete = true; break; }
+            await approveAndExecuteSetupPlan({ ...next, kind: 'INSTANCE_LIFECYCLE' }, check);
+            if (!alive()) return;
+          }
+          if (!complete) throw new Error('INSTANCE_CHAIN_INCOMPLETE：实例步骤未收敛，请检查计划记录。');
+        } else {
+          setStage('workflows', { status: 'running', note: '保留现有 ComfyUI 与模型，只登记固定工作流并生成 Shine 隔离运行配置…' });
         }
-        let complete = false;
-        for (let step = 0; step < 8; step += 1) {
-          if (!alive()) return;
-          setStage('workflows', { status: 'running', note: `正在准备运行环境（第 ${step + 1} 步）…` });
-          const next = await api<SetupPlan & { complete: boolean }>(
-            '/setup/next-instance-plan', json('POST', { project_id: projectId, instance_name: 'shine-h3', port: 8188, mode: 'local' }));
-          if (!alive()) return;
-          if (next.complete) { complete = true; break; }
-          await approveAndExecuteSetupPlan({ ...next, kind: 'INSTANCE_LIFECYCLE' }, check);
-          if (!alive()) return;
-        }
-        if (!complete) throw new Error('INSTANCE_CHAIN_INCOMPLETE：实例步骤未收敛，请检查计划记录。');
         await api('/setup/profiles', json('POST', { project_id: projectId }));
         if (!alive()) return;
         await api('/setup/configuration', json('POST', { project_id: projectId }));
@@ -349,8 +378,8 @@ export function RealProductionWizard({
       return;
     }
     try {
-      setStage('workflows', { status: 'running', note: '正在启动本机服务并验证工作流与审片能力，完成后自动停止…' });
-      const validation = await api<{ status: string }>('/setup/services/validate', {
+      setStage('workflows', { status: 'running', note: '正在检查本机 H3 服务与工作流；建议审片资源会单独报告，不会阻止制作…' });
+      const validation = await api<{ status: string; advisory_reviews?: Record<string, { status: string }> }>('/setup/services/validate', {
         ...json('POST', body), signal: AbortSignal.timeout(3_600_000),
       });
       if (!alive()) return;
@@ -358,7 +387,9 @@ export function RealProductionWizard({
         stopWith('workflows', '本机服务验证未通过，配置未启用。请到专业设置的「制作环境」查看具体未通过项。');
         return;
       }
-      setStage('workflows', { status: 'ok', note: '工作流、审片能力与固定节点全部验证通过。' });
+      const reviewerReady = Object.values(validation.advisory_reviews ?? {}).filter(item => item.status === 'READY').length;
+      const reviewerTotal = Object.keys(validation.advisory_reviews ?? {}).length;
+      setStage('workflows', { status: 'ok', note: `H3 服务与工作流已验证。建议审片资源就绪 ${reviewerReady}/${reviewerTotal} 项；未就绪时仍可制作，相关检查会留待人工复核。` });
     } catch (error) {
       stopWith('workflows', `服务验证失败：${(error as Error).message}`);
       return;
@@ -383,9 +414,14 @@ export function RealProductionWizard({
 
   async function continueAfterReuse() {
     if (!reuseOffer) return;
+    const alive = () => !cancelled.current && mounted.current;
     setReuseOffer(null);
     const installedScans = reuseOffer.scans.filter(scan => scan.software?.installed);
     if (installedScans.length) {
+      if (installedScans.length !== 1) {
+        stopWith('existing', '检测到多套已安装 ComfyUI。为避免选错目录或重复安装，请到专业设置选择要复用的那一套；本次没有复制、下载或修改文件。');
+        return;
+      }
       setStage('existing', { status: 'running', note: '正在原目录核验 ComfyUI 版本与模型哈希；大文件可能需要几分钟，不会复制或修改文件…' });
       try {
         const results: ExistingVerification[] = [];
@@ -406,12 +442,38 @@ export function RealProductionWizard({
         const verifiedBytes = results.reduce((sum, result) => sum + result.verified_bytes, 0);
         const rejectedCount = results.reduce((sum, result) => sum + result.rejected.length, 0);
         const version = results.map(result => result.software.version_status).join('、');
-        const nodeVersionsKnown = results.every(result => result.software.node_revisions_verified);
         const recovered = results.some(result => result.verification_reused) ? '已恢复此前完成的核验结果，未重复读取权重。' : '';
-        setStage('existing', { status: 'ok', note: `已安装 ComfyUI：${version}；已核验 ${fmtBytes(verifiedBytes)} 权重，${rejectedCount} 项未通过哈希；0 字节复制，0 字节下载。${recovered}` });
-        stopWith('workflows', `发现并确认了现有 ComfyUI 与模型（EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED）。当前运行环境兼容性${results.some(result => result.software.runtime?.status === 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED') ? '尚未验证' : '未确认'}，${nodeVersionsKnown ? '节点版本已核实' : '节点固定版本尚未核实'}。为避免重复安装、覆盖或下载，向导已停止；请在专业设置查看本机安装诊断。`);
+        const scan = installedScans[0];
+        const verification = results[0];
+        const catalog = await api<Catalog>('/setup/catalog');
+        const expectedH3Files = catalog.components
+          .filter(component => component.component_id.startsWith('minimax-h3-'))
+          .reduce((sum, component) => sum + component.files, 0);
+        const verifiedH3Files = verification.verified
+          .filter(item => item.component_id.startsWith('minimax-h3-')).length;
+        if (verification.status !== 'INSTALLED_VERIFIED' || rejectedCount || verifiedH3Files < expectedH3Files) {
+          setStage('existing', { status: 'warn', note: `ComfyUI 已安装（${version}），已核验 ${fmtBytes(verifiedBytes)}；${rejectedCount} 项校验失败。` });
+          stopWith('models', 'ComfyUI 已按“已安装”识别，但 H3 固定权重没有全部通过哈希校验。为保护已有文件，本次不复制也不下载；请在专业设置查看具体缺项。');
+          return;
+        }
+        setStage('existing', { status: 'ok', note: `已安装 ComfyUI：${version}；固定 H3 权重哈希校验通过 ${fmtBytes(verifiedBytes)}。${recovered}` });
+        if (!window.confirm(`确认复用这套已安装环境？\n目录：${scan.root}\nH3 权重已通过哈希校验：${fmtBytes(verification.verified_bytes)}\n程序会在本机受管流程中启动并停止 ComfyUI，运行数据写入 Shine 的隔离目录。原安装目录不写入；0 字节复制，0 字节下载。`)) {
+          setFinished({ ok: false, summary: '已确认这套环境已安装；你取消了本次接入，没有复制、下载或修改原安装。' });
+          return;
+        }
+        setStage('existing', { status: 'running', note: '正在把已安装环境登记为本机复用项；不会复制或下载软件与模型…' });
+        const adoption = await api<{ status: string; installed_h3_bytes: number; copied_bytes: number; downloaded_bytes: number }>(
+          '/setup/existing-installations/adopt', json('POST', {
+            project_id: projectId, path: scan.root, snapshot: scan.snapshot,
+            instance_name: 'shine-h3', port: 8188,
+          }));
+        if (!alive()) return;
+        setReusedBytes(adoption.installed_h3_bytes);
+        setStage('existing', { status: 'ok', note: `已登记为“复用本机已安装环境”：${fmtBytes(adoption.installed_h3_bytes)} H3 权重原位使用；复制 ${adoption.copied_bytes} 字节，下载 ${adoption.downloaded_bytes} 字节。` });
+        const storage = await api<StorageState>('/setup/storage');
+        await runTail(alive, false, adoption.installed_h3_bytes, storage, true);
       } catch (error) {
-        stopWith('existing', `现有安装核验失败：${(error as Error).message}。原目录未被复制或修改；请重新检测后再试。`);
+        stopWith('existing', `现有安装接入失败：${(error as Error).message}。原目录未被复制或修改，也没有下载软件或模型；请先查看原因再决定下一步。`);
       }
       return;
     }
@@ -487,7 +549,7 @@ export function RealProductionWizard({
               ? `发现已安装的 ComfyUI${reuseOffer.totalBytes ? `，另有约 ${fmtBytes(reuseOffer.totalBytes)} 权重待核验` : ''}。核验会直接读取原文件；大文件可能需要几分钟，不会复制、覆盖或下载。再次打开时会查询已完成的核验结果。`
               : `发现可复用的已有模型（约 ${fmtBytes(reuseOffer.totalBytes)}）。核验后只复制与固定清单一致的模型到本机缓存，原安装不会被修改。`}</p>
             <div className="wizard-actions">
-              <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验已安装环境' : '校验并复用模型'}</button>
+          <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验并确认复用' : '校验并复用模型'}</button>
               {!reuseHasInstalledSoftware && <button type="button" className="subtle-button" onClick={declineReuse}>不复用，直接继续</button>}
             </div>
           </div>

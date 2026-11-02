@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import replace
 
 import pytest
 from sqlalchemy.orm.attributes import flag_modified
@@ -110,9 +109,53 @@ def test_editor_uses_human_reviewed_sources_without_relaxing_real_gates(studio, 
         assert not eligible_edits(db, project, offline=False, artifact_root=settings.data_dir)
 
 
-def prepare(client, *, freeze=True):
+def test_editor_accepts_real_shots_with_advisory_model_findings(studio):
+    from tests.conftest import freeze_style
+    from tests.test_delivery_assembly import _seed_passed_job
+
+    client, factory, _, settings = studio
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job_id, _attempt_id, _artifact_id, _, _ = _seed_passed_job(
+        factory, settings, project, shot["id"], style["id"]
+    )
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        gates = {gate.gate_name: gate for gate in db.query(QualityGate).filter_by(job_id=job_id).all()}
+        for name in ("semantic", "audio", "style"):
+            gates[name].status = "needs_review"
+            gates[name].evidence = {"advisory": True}
+        gates["final"].status = "needs_review"
+        gates["final"].evidence = {
+            "unresolved_gates": [],
+            "unresolved_optional_gates": [],
+            "advisory_pending_human_review": ["semantic", "audio", "style"],
+        }
+        job.status = "PASSED"
+        job.quality_verification = "real"
+        job.request = {"expected_duration_s": 6.0}
+
+    with factory() as db:
+        edits = eligible_edits(db, project, offline=False, artifact_root=settings.data_dir)
+        assert [item["shot_id"] for item in edits] == [shot["id"]]
+
+    with factory.begin() as db:
+        gates = {gate.gate_name: gate for gate in db.query(QualityGate).filter_by(job_id=job_id).all()}
+        gates["technical"].status = "needs_review"
+    with factory() as db:
+        assert not eligible_edits(db, project, offline=False, artifact_root=settings.data_dir)
+
+
+def prepare(client, *, freeze=True, character_entity_id="Lin", character_filename="Lin.png"):
     project_id = create_project(client)
-    master = upload_asset(client, project_id, filename="Lin.png", role="character", entity_id="Lin")
+    master = upload_asset(
+        client,
+        project_id,
+        filename=character_filename,
+        role="character",
+        entity_id=character_entity_id,
+    )
     approve_lock(client, master["id"])
     assert client.post(f"/api/v1/projects/{project_id}/rulepack/freeze", json={}).status_code == 200
     if freeze:
@@ -152,7 +195,7 @@ def crew_chain(client, project_id):
     return script, director, camera, continuity
 
 
-def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monkeypatch):
+def test_four_roles_handoff_fake_comfy_advisory_qc_invalidation_and_edl(api, monkeypatch):
     # This exercises crew/QC behavior with fake ComfyUI, not process ownership.
     monkeypatch.setattr("shine.worker._isolated_mock_handoff", lambda _settings, reviewers: all(
         reviewer is None or reviewer.is_mock for reviewer in reviewers
@@ -182,8 +225,7 @@ def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monke
         json={
             "accept_mock_review": True,
             "allow_unverified_technical": True,
-            # This project lets the model review decide the production, so the
-            # synthetic style drift really does trigger the bounded repair.
+        # The legacy switch is ignored: local model findings stay advisory.
             "advisory_model_reviews": False,
         },
     )
@@ -222,27 +264,25 @@ def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monke
     )
     reviewer = ScriptedSemanticReviewer([[drift], []])
     asr = ScriptedASR(LINE["text"])
-    offline = replace(settings, ffprobe_path="missing-ffprobe", ffmpeg_path="missing-ffmpeg")
     fake = FakeComfyServer().start()
     try:
         fake.output_bytes = make_test_video_bytes(duration_s=6)
         kwargs = {
-            "settings": offline,
+            "settings": settings,
             "semantic_reviewer": reviewer,
             "asr_reviewer": asr,
             "comfy_client": ComfyUIClient(fake.base_url, timeout_s=2),
         }
         assert run_one(factory, worker_id="v11-a", **kwargs) == job["id"]
         state = client.get(f"/api/v1/jobs/{job['id']}").json()
-        assert state["status"] == "QUEUED", state
-        assert run_one(factory, worker_id="v11-b", **kwargs) == job["id"]
-        state = client.get(f"/api/v1/jobs/{job['id']}").json()
         assert state["status"] == "PASSED", state
         assert state["quality_verification"] == "mock_verified"
-        assert fake.prompt_count == 2
-        assert fake.upload_count == 2
-        assert state["attempts"][0]["prompt_sha256"] != state["attempts"][1]["prompt_sha256"]
-        assert client.get(f"/api/v1/jobs/{dependent['id']}").json()["stale"]
+        assert state["acceptance_status"] == "mock"
+        assert fake.prompt_count == 1
+        assert fake.upload_count == 1
+        assert len(state["attempts"]) == 1
+        assert state["repairs"] == []
+        assert client.get(f"/api/v1/jobs/{dependent['id']}").json()["stale"] is False
         with factory() as db:
             assert eligible_edits(db, project_id, offline=True), [
                 (g["gate_name"], g["status"], g["required"], g["attempt_id"])
@@ -263,12 +303,9 @@ def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monke
         assert rejected.status_code == 422
         clip["attempt_id"] = state["attempts"][0]["id"]
         client.app.state.mock_llm_responder = lambda *_: {"clips": [clip]}
-        assert (
-            client.post(
-                f"/api/v1/projects/{project_id}/film-agents/editor/run", json={"offline_preview": True}
-            ).status_code
-            == 422
-        )
+        assert client.post(
+            f"/api/v1/projects/{project_id}/film-agents/editor/run", json={"offline_preview": True}
+        ).status_code == 201
         with factory() as db:
             artifact = db.get(MediaArtifact, state["artifact_id"])
             assert artifact.attempt_id == state["attempts"][-1]["id"]
@@ -285,6 +322,7 @@ def test_four_roles_handoff_fake_comfy_qc_repair_invalidation_and_edl(api, monke
             client, project_id, "cinematographer", CAMERA, inputs=[direction["id"]], supersedes_artifact_id=camera["id"]
         )
         assert client.get(f"/api/v1/jobs/{job['id']}").json()["stale"]
+        assert client.get(f"/api/v1/jobs/{dependent['id']}").json()["stale"]
     finally:
         fake.stop()
     runs = client.get(f"/api/v1/projects/{project_id}/film-runs").json()

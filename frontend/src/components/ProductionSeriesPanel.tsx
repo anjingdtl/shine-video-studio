@@ -123,7 +123,7 @@ export default function ProductionSeriesPanel({
       }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
-      onMessage('已开始连续制作；本机会自动依次完成全部镜头并自动检查。', 'success');
+      onMessage('已开始连续制作；本机会依次生成镜头并自动整理成片。小模型审片和对白识别只提供建议。', 'success');
       await reload();
       onStarted();
     } catch (error) {
@@ -157,7 +157,7 @@ export default function ProductionSeriesPanel({
       <div>
         <div className="section-kicker">04 / CONTINUOUS PRODUCTION</div>
         <h2>连续制作影片</h2>
-        <p>勾选要制作的镜头，点「开始制作影片」。系统会在本机自动连续生成、自动检查、必要时返工，全部完成后整理成片。</p>
+        <p>勾选镜头后点「开始制作影片」。本机会连续生成并自动整理成片；文件损坏或规格不符会暂停处理，小模型画面判断和对白识别只作建议，不会卡住后续镜头。</p>
       </div>
       <div className="section-icon plum"><Layers size={17} /></div>
     </div>
@@ -185,13 +185,13 @@ export default function ProductionSeriesPanel({
             ))}
           </select>
         </label>
-        <label htmlFor="series-scope">自动检查
+        <label htmlFor="series-scope">审片建议（可选）
           <select id="series-scope" value={scope} onChange={(event) => setScope(event.target.value as 'full' | 'basic')}>
-            <option value="full">完整检查（推荐）：画面、声音、风格与最终成片</option>
-            <option value="basic">基础检查：分辨率、人物、对白</option>
+            <option value="full">完整建议：画面、对白与风格</option>
+            <option value="basic">基础建议：人物与对白</option>
           </select>
         </label>
-        {scope === 'basic' && <p className="series-hint">基础检查需填写预期画面宽高，并要求本机已具备人物审片能力。</p>}
+        {scope === 'basic' && <p className="series-hint">画面规格仍会做技术校验；人物与对白建议未覆盖时会留待查看，不影响制作。</p>}
         <label htmlFor="series-edit-intent">剪辑方案（可选，分镜阶段冻结）
           <select id="series-edit-intent" value={editIntentId} onChange={(event) => setEditIntentId(event.target.value)}>
             <option value="">默认剪辑（全片完整镜头、直接切换）</option>

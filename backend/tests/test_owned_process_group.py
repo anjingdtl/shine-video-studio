@@ -77,6 +77,23 @@ def test_managed_group_accepts_explicit_unicode_environment(tmp_path):
         group.close()
 
 
+def test_owned_group_reports_exit_code_only_after_all_members_exit(tmp_path):
+    from shine.comfyops.owned_process import OwnedProcessGroup
+
+    group = OwnedProcessGroup.launch([sys.executable, "-c", "import sys; sys.exit(17)"], cwd=tmp_path)
+    try:
+        deadline = time.monotonic() + 5
+        exit_code = None
+        while exit_code is None and time.monotonic() < deadline:
+            exit_code = group.exit_code_if_stopped()
+            if exit_code is None:
+                time.sleep(0.02)
+        assert exit_code == 17
+        assert group.terminate(timeout=5)["active_processes"] == 0
+    finally:
+        group.close()
+
+
 def test_restart_requires_confirmed_exit_and_unchanged_pinned_sources(tmp_path):
     from shine.comfyops.owned_process import OwnedProcessGroup
 

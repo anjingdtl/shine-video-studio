@@ -1,11 +1,10 @@
-"""One-shot live validation of the installed renderer and review services.
+"""One-shot live validation of the installed renderer and optional review services.
 
 The setup wizard calls this once after the isolated instance and workflow
 profiles exist and before the runtime is activated.  It starts the installed
-renderer closed, reads its real ``object_info``, starts the two isolated review
-services long enough to pin their protocol, then stops every process.  The
-result is a sealed evidence record; it is not model inference and never claims
-quality acceptance.
+renderer closed and reads its real ``object_info``. Review services are probed
+only when their resources are already installed; a missing or unavailable
+reviewer is recorded as advisory and does not prevent H3 production.
 """
 
 from __future__ import annotations
@@ -74,7 +73,8 @@ def _json_get(url: str, *, timeout: float = 30.0, headers: dict | None = None) -
     return body
 
 
-def _wait_json(url: str, *, timeout_s: float, predicate, headers: dict | None = None) -> dict:
+def _wait_json(url: str, *, timeout_s: float, predicate, headers: dict | None = None,
+               owned_group=None) -> dict:
     deadline = time.monotonic() + timeout_s
     last_error = None
     while time.monotonic() < deadline:
@@ -87,6 +87,18 @@ def _wait_json(url: str, *, timeout_s: float, predicate, headers: dict | None = 
             last_error = str(exc.detail)
         except (httpx.HTTPError, OSError) as exc:
             last_error = type(exc).__name__
+        if owned_group is not None:
+            exit_code = owned_group.exit_code_if_stopped()
+            if exit_code is not None:
+                raise HTTPException(409, {
+                    "code": "SERVICE_VALIDATION_PROCESS_EXITED",
+                    "message": (
+                        "本机验证服务启动后提前退出，系统已停止等待并清理本次受管进程。"
+                        "请查看缺少项或专业日志后再重试。"
+                    ),
+                    "exit_code": exit_code,
+                    "last_connection_error": last_error,
+                })
         time.sleep(1)
     raise HTTPException(409, last_error or "SERVICE_VALIDATION_TIMEOUT")
 
@@ -113,6 +125,7 @@ def _probe_renderer(recipe: dict) -> dict:
             f"http://127.0.0.1:{port}/object_info",
             timeout_s=180,
             predicate=lambda body: len(body) >= 1,
+            owned_group=group,
         )
         handoff = _json_get(
             f"http://127.0.0.1:{port}/shine-handoff/status",
@@ -125,11 +138,75 @@ def _probe_renderer(recipe: dict) -> dict:
     except BaseException:
         try:
             _stop_group(group)
-        except HTTPException:
-            pass
+        except HTTPException as cleanup_error:
+            raise cleanup_error
         raise
     _stop_group(group)
     return result
+
+
+def validate_registered_workflow(db: Session, settings: Settings, profile_id: str) -> dict:
+    """Probe one registered graph against a fenced, weight-free renderer startup."""
+    from shine.comfyops.runtime_configuration import _current_identity
+    from shine.comfyops.scheduler import resource_slot
+    from shine.db import make_session_factory
+
+    if os.name != "nt":
+        raise HTTPException(409, "SERVICE_VALIDATION_WINDOWS_ONLY")
+    profile = db.get(WorkflowProfile, profile_id)
+    if profile is None:
+        raise HTTPException(404, "Workflow profile not found")
+    expected_contract = workflow_contract_sha256(profile)
+    identity = _current_identity(db, settings)
+    active = db.get(AppSetting, ACTIVE_KEY)
+    if not active or active.value.get("identity") != identity:
+        raise HTTPException(409, "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")
+    require_idle_configuration(db)
+    db.commit()
+    clean = {"confirmed": True}
+
+    def require_clean_stop():
+        if not clean["confirmed"]:
+            raise RuntimeError("SERVICE_VALIDATION_CLEANUP_FAILED")
+
+    with resource_slot(make_session_factory(db.get_bind()), "WORKFLOW_VALIDATION", 1,
+                       release_models=require_clean_stop):
+        db.expire_all()
+        if _current_identity(db, settings) != identity:
+            raise HTTPException(409, "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")
+        instance = db.get(ComfyInstance, identity["instance_id"])
+        if instance is None or instance.status != "STOPPED" or instance.payload.get("process"):
+            raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_VALIDATION")
+        recipe = load_managed_recipe(identity["recipe"], expected_sha256=identity["recipe_sha256"])
+        try:
+            probe = _probe_renderer(recipe)  # returns only after the owned process has stopped
+        except HTTPException as exc:
+            if "SERVICE_VALIDATION_CLEANUP_FAILED" in str(exc.detail):
+                clean["confirmed"] = False
+            raise
+        db.expire_all()
+        profile = db.get(WorkflowProfile, profile_id)
+        if profile is None or workflow_contract_sha256(profile) != expected_contract:
+            raise HTTPException(409, "WORKFLOW_PROFILE_CHANGED_DURING_VALIDATION")
+        validation = validate_against_object_info(profile.graph or {}, profile.parameter_map, probe["object_info"])
+    db.rollback()
+    db.execute(text("BEGIN IMMEDIATE"))
+    profile = db.get(WorkflowProfile, profile_id)
+    if profile is None or workflow_contract_sha256(profile) != expected_contract:
+        raise HTTPException(409, "WORKFLOW_PROFILE_CHANGED_DURING_VALIDATION")
+    if _current_identity(db, settings) != identity:
+        raise HTTPException(409, "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")
+    profile.validated_against = {
+        **validation, "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source": "managed_live_object_info", "generation_verified": False,
+        "services_stopped": True,
+    }
+    add_audit(db, "local-user", "WORKFLOW_PROFILE_VALIDATED", "workflow_profile", profile.id,
+              {"missing_nodes": validation["missing_nodes"],
+               "missing_input_count": len(validation["missing_inputs"]), "services_stopped": True},
+              project_id=profile.project_id)
+    db.commit()
+    return profile.validated_against
 
 
 def _review_model(manifest: dict, role: str) -> str:
@@ -159,6 +236,7 @@ def _probe_review(role: str, spec: dict) -> dict:
             f"http://127.0.0.1:{port}/health",
             timeout_s=300,
             predicate=lambda body: body.get("status") == "ok" and body.get("is_mock") is False,
+            owned_group=group,
         )
         models = _json_get(f"http://127.0.0.1:{port}/v1/models", timeout=30)
         ids = {item.get("id") for item in (models.get("data") or []) if isinstance(item, dict)}
@@ -185,8 +263,11 @@ def _probe_review(role: str, spec: dict) -> dict:
     except BaseException:
         try:
             _stop_group(group)
-        except HTTPException:
-            pass
+        except HTTPException as cleanup_error:
+            # A failed optional probe is advisory only after we have proved
+            # its owned process stopped. Otherwise it may still hold the GPU
+            # needed by the real renderer and must enter reconciliation.
+            raise cleanup_error
         raise
     _stop_group(group)
     return result
@@ -216,6 +297,84 @@ def _workflow_contracts(db: Session, project_id: str) -> tuple[dict, dict]:
             raise HTTPException(409, f"WORKFLOW_PROFILE_CONTENT_CHANGED:{name}")
         contracts[name] = profile
     return files, contracts
+
+
+def _review_resource_blockers(recipe: dict) -> list[dict]:
+    """Find plainly missing review files before starting a renderer or model.
+
+    This inexpensive existence/size check avoids long health timeouts for a
+    reviewer whose fixed model package is absent. The isolated reviewer still
+    verifies all model and runtime hashes before it can become ready.
+    """
+    blockers = []
+    lock_path = Path(__file__).resolve().parents[3] / "config" / "review-decoder-lock.json"
+    try:
+        decoder_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        decoder_lock = {"packages": []}
+    for role, spec in sorted(recipe.get("reviews", {}).items()):
+        try:
+            manifest = json.loads(Path(spec["manifest"]).read_text(encoding="utf-8"))
+        except (OSError, KeyError, TypeError, ValueError):
+            blockers.append({"role": role, "code": "REVIEW_MANIFEST_UNAVAILABLE"})
+            continue
+        manifests = [manifest]
+        if role == "ASR" and isinstance(manifest.get("asr"), dict):
+            manifests.append(manifest["asr"])
+        missing_by_model = []
+        for model_manifest in manifests:
+            model_id = model_manifest.get("model_id", "unknown")
+            root_value = model_manifest.get("model_root")
+            entries = model_manifest.get("files")
+            missing = 0
+            try:
+                root = Path(root_value).resolve(strict=True)
+                if not root.is_dir() or not isinstance(entries, list):
+                    raise ValueError("MANIFEST_INVALID")
+                for entry in entries:
+                    relative = Path(entry["path"])
+                    target = (root / relative).resolve()
+                    if (relative.is_absolute() or ".." in relative.parts
+                            or not target.is_relative_to(root) or not target.is_file()
+                            or target.stat().st_size != entry.get("bytes")):
+                        missing += 1
+            except (OSError, KeyError, TypeError, ValueError):
+                missing = len(entries) if isinstance(entries, list) and entries else 1
+            if missing:
+                missing_by_model.append({"model_id": model_id, "missing_files": missing})
+        if missing_by_model:
+            blockers.append({"role": role, "code": "REVIEW_MODEL_FILES_MISSING", "models": missing_by_model})
+
+        package_root = Path(spec.get("runtime_packages", ""))
+        required_roots = []
+        if role == "VLM":
+            required_roots = [root for package in decoder_lock.get("packages", [])
+                              for root in package.get("roots", [])]
+        elif role == "ASR":
+            required_roots = ["qwen_asr", "qwen_asr-0.0.6.dist-info"]
+        missing_roots = [name for name in required_roots if not (package_root / name).is_dir()]
+        if missing_roots:
+            blockers.append({"role": role, "code": "REVIEW_RUNTIME_PACKAGES_MISSING",
+                             "packages": sorted({name.split("-")[0] for name in missing_roots})})
+    return blockers
+
+
+def _advisory_review_status(blockers: list[dict]) -> dict:
+    """Summarize optional reviewer readiness without turning it into a gate."""
+    by_role: dict[str, list[dict]] = {"VLM": [], "ASR": []}
+    for blocker in blockers:
+        role = blocker.get("role")
+        if role in by_role:
+            by_role[role].append(blocker)
+    return {
+        role: {
+            "status": "NOT_READY" if role_blockers else "READY",
+            "advisory": True,
+            "codes": sorted({str(item.get("code", "REVIEW_RESOURCE_UNAVAILABLE")) for item in role_blockers}),
+            "details": role_blockers,
+        }
+        for role, role_blockers in by_role.items()
+    }
 
 
 def _validate_workflows_against_object_info(contracts: dict, object_info: dict) -> None:
@@ -315,6 +474,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_VALIDATION")
     _files, contracts = _workflow_contracts(db, project_id)
     recipe = load_managed_recipe(identity["recipe"], expected_sha256=identity["recipe_sha256"])
+    missing_resources = _review_resource_blockers(recipe)
+    advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
     object_info = renderer["object_info"]
     _validate_workflows_against_object_info(contracts, object_info)
@@ -323,7 +484,35 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
 
     reviews = {}
     for role, spec in recipe["reviews"].items():
-        reviews[role] = _probe_review(role, spec)
+        if advisory_reviews.get(role, {}).get("status") != "READY":
+            continue
+        try:
+            reviews[role] = _probe_review(role, spec)
+        except HTTPException as exc:
+            detail = exc.detail
+            code = detail.get("code") if isinstance(detail, dict) else detail
+            code = str(code) if isinstance(code, str) and code.startswith("SERVICE_VALIDATION_CLEANUP_FAILED") else None
+            if code:
+                # An unconfirmed process stop can still own the GPU. Keep the
+                # existing reconciliation boundary; only a cleanly stopped,
+                # optional reviewer failure is advisory.
+                raise
+            advisory_reviews[role] = {
+                "status": "UNAVAILABLE", "advisory": True,
+                "codes": ["REVIEW_SERVICE_UNAVAILABLE"],
+                "detail_code": (str(detail)[:96] if isinstance(detail, str) else "REVIEW_SERVICE_UNAVAILABLE"),
+            }
+        except Exception as exc:  # a failed optional probe is evidence, not a production gate
+            advisory_reviews[role] = {
+                "status": "UNAVAILABLE", "advisory": True,
+                "codes": ["REVIEW_SERVICE_UNAVAILABLE"],
+                "detail_code": type(exc).__name__,
+            }
+    for role, probe in reviews.items():
+        advisory_reviews[role] = {
+            "status": "READY", "advisory": True, "model": probe["model"],
+            "runtime_sha256": probe.get("runtime_sha256"), "codes": [],
+        }
 
     db.execute(text("BEGIN IMMEDIATE"))
     current = db.get(AppSetting, CANDIDATE_KEY)
@@ -356,6 +545,7 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         "node_inventory_sha256": hashlib.sha256(object_info_payload.encode("utf-8")).hexdigest(),
         "workflow_profiles": profiles_inventory,
         "review_profiles": profiles,
+        "advisory_reviews": advisory_reviews,
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
         "renderer_port": renderer["port"],
         "services_stopped": True,
@@ -366,6 +556,7 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         "node_count": len(object_info),
         "workflows": sorted(contracts),
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
+        "advisory_reviews": advisory_reviews,
         "services_stopped": True,
     }, project_id=project_id)
     db.commit()
@@ -377,6 +568,7 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         "workflow_profiles": sorted(contracts),
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
+        "advisory_reviews": advisory_reviews,
         "services_stopped": True,
         "evidence_sha256": evidence["sha256"],
     }

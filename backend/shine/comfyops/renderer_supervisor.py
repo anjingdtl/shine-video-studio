@@ -226,8 +226,14 @@ class RendererSupervisor:
                 raise ValueError("COMFY_HANDOFF_MEMORY_INSUFFICIENT")
             time.sleep(0.5)
 
-    def restore_after_review(self, review_verification, *, min_ram_mb, min_vram_mb, timeout=30):
-        """Restore the pinned owned recipe only after a sealed review release."""
+    def restore_after_review(self, review_verification, *, min_ram_mb, min_vram_mb, timeout=120, gpu_uuid=None):
+        """Restore the pinned owned recipe after a sealed review release.
+
+        ``review_verification`` is ``None`` when the project uses advisory-only
+        model review and no review stage was requested. The stopped renderer is
+        then the whole physical boundary; memory recovery is still measured from
+        ``gpu_uuid`` before the replacement may load the model again.
+        """
         from shine.quality.review_release import verify_review_release
 
         if self._restore_attempted:
@@ -235,13 +241,21 @@ class RendererSupervisor:
         if self._stopped is None:
             raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
         self.require_closed_restart()
-        if (not isinstance(review_verification, dict) or not review_verification.get("gpu_uuid")
-                or type(timeout) not in {int, float} or not 0 < timeout <= 120):
+        if type(timeout) not in {int, float} or not 0 < timeout <= 120:
             raise ValueError("COMFY_RESTART_REQUEST_INVALID")
-        verified_review = verify_review_release(**{
-            **review_verification, "min_ram_mb": min_ram_mb, "min_vram_mb": min_vram_mb,
-        })
-        self.check_memory(review_verification["gpu_uuid"], min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
+        if review_verification is None:
+            if not isinstance(gpu_uuid, str) or not gpu_uuid:
+                raise ValueError("COMFY_RESTART_REQUEST_INVALID")
+            verified_review = {"review_stage_id": None, "model_reviewed": False}
+            memory_uuid = gpu_uuid
+        else:
+            if not isinstance(review_verification, dict) or not review_verification.get("gpu_uuid"):
+                raise ValueError("COMFY_RESTART_REQUEST_INVALID")
+            verified_review = verify_review_release(**{
+                **review_verification, "min_ram_mb": min_ram_mb, "min_vram_mb": min_vram_mb,
+            })
+            memory_uuid = review_verification["gpu_uuid"]
+        self.check_memory(memory_uuid, min_ram_mb=min_ram_mb, min_vram_mb=min_vram_mb)
         self._restore_attempted = True  # Lost/failed launch results are never automatically retried.
         self._replacement = self._group.relaunch()
         replacement = RendererSupervisor(self._replacement, self._url, self._token, self._adapter_sha256)
@@ -269,5 +283,6 @@ class RendererSupervisor:
                 if not birth or not self._replacement.owns(process["pid"], birth):
                     raise ValueError("COMFY_RESTART_OUTCOME_UNCONFIRMED")
                 return replacement, {"process": process, "listener": listener,
-                                     "review_stage_id": verified_review["review_stage_id"]}
+                                     "review_stage_id": verified_review["review_stage_id"],
+                                     "model_reviewed": verified_review.get("model_reviewed", True)}
             time.sleep(0.1)

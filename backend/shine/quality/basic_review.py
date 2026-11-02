@@ -212,7 +212,7 @@ def evaluate_basic_gates(
     character_error: str | None = None, audio_error: str | None = None, offline_simulation: bool = False,
 ):
     """Record the three self-review decisions with their scope and evidence."""
-    from shine.quality.gates import GateOutcome, _final_gate
+    from shine.quality.gates import GateOutcome, _as_advisory, _final_gate
     from shine.schemas import FusedQCResult, HardFailure
 
     # Do not attach valid evidence for some other file to this attempt.
@@ -251,6 +251,10 @@ def evaluate_basic_gates(
                                 "transcript_sha256": dialogue.transcript_sha256 if dialogue else None,
                                 "transcript_truncated": dialogue.transcript_truncated if dialogue else False,
                                 "error": audio_error})
+    # Small local VLM/ASR checks remain visible as suggestions for later human
+    # review. They do not gate creation of the shot or the assembled episode.
+    character_gate = _as_advisory(character_gate)
+    audio_gate = _as_advisory(audio_gate)
     style_gate = gate("style", "not_applicable", False, evidence={"reason": "outside basic self-review"})
     final = _final_gate([technical_gate, character_gate, audio_gate, style_gate])
     final.evidence["scope"] = "basic-self-review-v1"

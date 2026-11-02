@@ -44,6 +44,14 @@ function automaticRoutes(failValidation = false) {
   stub.add({ method: 'POST', pattern: /setup\/runtime\/activate$/, respond: () => jsonResponse({ status: 'ACTIVE' }) });
 }
 
+function catalogComponent(component_id: string, kind: string, role: string | null, files: number, bytes: number) {
+  return {
+    component_id, kind, role, files, bytes, revision: '1'.repeat(40), license_id: 'test-license',
+    usage: 'test fixture', license_url: 'https://example.invalid/license', destination_family: null,
+    status: 'READY', blocked_reason: '',
+  };
+}
+
 describe('本机环境简化流程', () => {
   it('发现已有安装时先检查复用，不能直接要求重新下载', async () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
@@ -54,7 +62,7 @@ describe('本机环境简化流程', () => {
       matches: [{ component_id: 'h3', relative_path: 'model.safetensors', size: 13 }], missing: [], skipped: [],
     }) });
     stub.add({ method: 'POST', pattern: /existing-installations\/import-models$/, respond: () => jsonResponse({
-      reused_bytes: 13, rejected: [],
+      reused_bytes: 13, imported: [{ component_id: 'h3', relative_path: 'model.safetensors', size: 13, status: 'CACHED' }], rejected: [],
     }) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
@@ -107,6 +115,59 @@ describe('本机环境简化流程', () => {
     expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
   });
 
+  it('新机自检区分不完整的建议审片模型，不把局部文件显示为已就绪', async () => {
+    const components = [
+      catalogComponent('comfyui', 'source', null, 0, 0),
+      catalogComponent('minimax-h3-diffusion', 'model', null, 1, 100),
+      catalogComponent('qwen3-vl-8b-fp8', 'review-model', 'VLM', 3, 300),
+      catalogComponent('qwen3-asr-0.6b', 'review-model', 'ASR', 4, 400),
+    ];
+    stub.add({ method: 'GET', pattern: /setup\/catalog$/, respond: () => jsonResponse({
+      catalog_id: 'c', catalog_version: '1', generated: '', platform: {}, total_bytes: 800, components,
+    }) });
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+      installations: ['F:\\AI\\ComfyUI'],
+    }) });
+    const verified = [
+      { component_id: 'minimax-h3-diffusion', relative_path: 'h3.safetensors', size: 100, status: 'INSTALLED_HASH_MATCH' },
+      { component_id: 'qwen3-vl-8b-fp8', relative_path: '.gitattributes', size: 10, status: 'INSTALLED_HASH_MATCH' },
+      { component_id: 'qwen3-asr-0.6b', relative_path: '.gitattributes', size: 10, status: 'INSTALLED_HASH_MATCH' },
+      { component_id: 'qwen3-asr-0.6b', relative_path: 'merges.txt', size: 10, status: 'INSTALLED_HASH_MATCH' },
+      { component_id: 'qwen3-asr-0.6b', relative_path: 'vocab.json', size: 10, status: 'INSTALLED_HASH_MATCH' },
+    ];
+    stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
+      root: 'F:\\AI\\ComfyUI', snapshot: 'a'.repeat(64), candidate_bytes: 140, scanned_files: 10,
+      matches: verified.map(row => ({ ...row, status: 'PENDING_HASH' })),
+      missing: [
+        { component_id: 'qwen3-vl-8b-fp8', relative_path: 'model-00001.safetensors', size: 100 },
+        { component_id: 'qwen3-vl-8b-fp8', relative_path: 'model-00002.safetensors', size: 100 },
+        { component_id: 'qwen3-asr-0.6b', relative_path: 'model.safetensors', size: 100 },
+      ], skipped: [], software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+        runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false },
+    }) });
+    stub.add({ method: 'POST', pattern: /existing-installations\/verify$/, respond: () => jsonResponse({
+      status: 'INSTALLED_VERIFIED', software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+        runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false },
+      verified, rejected: [], verified_bytes: 140, copied_bytes: 0, runtime_verified: false,
+    }) });
+
+    const user = userEvent.setup();
+    render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
+    await user.click(screen.getByRole('button', { name: '检测本机' }));
+    await screen.findByText('发现 1 个已有安装。');
+    await user.click(screen.getByRole('button', { name: '检查已有目录' }));
+    await screen.findByText(/候选可复用 5 项.*未找到固定版本文件 3 项/);
+    expect(screen.getByText(/minimax-h3-diffusion \/ h3.safetensors：待哈希校验/)).toBeInTheDocument();
+    expect(screen.queryByText(/哈希不匹配或文件已变化/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '确认已安装并核验' }));
+
+    expect(await screen.findByText(/建议审片模型未就绪（已核验 1\/3 项，不阻断 H3 出片）/)).toBeInTheDocument();
+    expect(screen.getByText(/建议审片模型未就绪（已核验 3\/4 项，不阻断 H3 出片）/)).toBeInTheDocument();
+    expect(screen.getByText(/默认安装只准备 H3 所需组件，不会自动下载 ASR\/VLM 审片模型/)).toBeInTheDocument();
+    expect(screen.queryByText('已安装并核验（原目录，未复制）')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '已有安装等待兼容性验证' })).toBeDisabled();
+  });
+
   it('自动检索失败时不开放下载，允许重新检测', async () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
     const user = userEvent.setup();
@@ -131,6 +192,15 @@ describe('本机环境简化流程', () => {
 
   it('一次确认依次完成下载、实例、工作流、服务验证和激活', async () => {
     automaticRoutes();
+    stub.add({ method: 'GET', pattern: /setup\/catalog$/, respond: () => jsonResponse({
+      catalog_id: 'c', catalog_version: '1', generated: '', platform: {}, total_bytes: 800,
+      components: [
+        catalogComponent('comfyui', 'source', null, 1, 100),
+        catalogComponent('minimax-h3-diffusion', 'model', null, 1, 100),
+        catalogComponent('qwen3-vl-8b-fp8', 'review-model', 'VLM', 3, 300),
+        catalogComponent('qwen3-asr-0.6b', 'review-model', 'ASR', 4, 400),
+      ],
+    }) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
@@ -143,6 +213,9 @@ describe('本机环境简化流程', () => {
     expect(index('/setup/configuration')).toBeLessThan(index('/services/validate'));
     expect(index('/services/validate')).toBeLessThan(index('/runtime/activate'));
     expect(stub.callsOf('POST', /approval-grants$/)).toHaveLength(2);
+    const installPlan = stub.callsOf('POST', /setup\/install-plan$/)[0];
+    expect((installPlan.body as { components: string[] }).components).toEqual(['comfyui', 'minimax-h3-diffusion']);
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('ASR/VLM 仅用于建议审片，不会自动下载'));
     expect(window.confirm).toHaveBeenCalledTimes(1);
     expect(refresh).toHaveBeenCalledTimes(1);
     for (const call of stub.calls) expect(new Headers(call.init?.headers).get('X-Shine-Local-Action')).toBe('1');

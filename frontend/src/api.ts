@@ -12,10 +12,22 @@ const FIELD_LABELS: Record<string, string> = {
   title: '项目名称',
 };
 
+const ERROR_CODE_LABELS: Record<string, string> = {
+  EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
+  EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
+  EXISTING_MODEL_HASH_REJECTIONS_PRESENT: '本机有模型文件未通过完整性校验。为保护原文件，本次没有复用或下载替代文件；请到专业设置查看失败项。',
+};
+
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw
  *  technical JSON stays available for support but is no longer the only
  *  thing the user sees. */
 function describeDetail(detail: unknown): string {
+  if (detail && typeof detail === 'object' && !Array.isArray(detail) && 'violations' in detail) {
+    const violations = (detail as { violations?: Array<{ rule_id?: string; evidence?: string; remediation?: string }> }).violations;
+    if (Array.isArray(violations) && violations.length) {
+      return violations.map(v => `${v.rule_id ?? '校验'}：${v.evidence ?? '未通过'}${v.remediation ? `；${v.remediation}` : ''}`).join('；');
+    }
+  }
   if (typeof detail === 'string') {
     if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
     if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
@@ -36,6 +48,13 @@ function describeDetail(detail: unknown): string {
     const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';
     return `${String(detail.message)}${code}`;
   }
+  if (detail && typeof detail === 'object' && 'code' in detail && detail.code) {
+    const code = String(detail.code);
+    return ERROR_CODE_LABELS[code]
+      ? `${ERROR_CODE_LABELS[code]}（${code}）`
+      : `本机操作没有完成，请到专业设置查看专业日志。错误代码：${code}。`;
+  }
+  if (detail && typeof detail === 'object') return '本机操作没有完成，请到专业设置查看专业日志。错误代码：SETUP_OPERATION_FAILED。';
   return JSON.stringify(detail);
 }
 

@@ -6,13 +6,13 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from shine.llm.base import LLMTimeout
+from shine.llm.base import LLMConnectionError, LLMTimeout
 from shine.models import AgentTaskRecord, utcnow
 from tests.test_style_input_assessment import setup_inputs
 from tests.test_v13_preparation import HEADERS, post, prep  # noqa: F401
 
 
-def uncertain(prep, monkeypatch, *, local=False):  # noqa: F811
+def uncertain(prep, monkeypatch, *, local=False, failure=None):  # noqa: F811
     client, factory, _ = prep
     project, _, spec, _ = setup_inputs(client)
     client.app.state.settings = prep[2]  # Asset fixture temporarily installs its own operator.
@@ -25,6 +25,8 @@ def uncertain(prep, monkeypatch, *, local=False):  # noqa: F811
 
     def timeout(*a, **kw):
         calls.append(1)
+        if failure is not None:
+            raise failure()
         raise LLMTimeout("sk-secret-response-must-not-be-persisted")
 
     monkeypatch.setattr("shine.llm.gateway.LLMGateway.complete_for_role", timeout)
@@ -35,6 +37,26 @@ def uncertain(prep, monkeypatch, *, local=False):  # noqa: F811
         task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project))
         task_id = task.id
     return client, factory, project, task_id, path, body, calls
+
+
+def test_connect_failure_known_not_sent_is_retryable_by_user_without_reconciliation(prep, monkeypatch):  # noqa: F811
+    def not_sent():
+        return LLMConnectionError("connection refused", details={"external_outcome": "NOT_SENT"})
+
+    client, factory, project_id, task_id, path, body, calls = uncertain(
+        prep, monkeypatch, failure=not_sent,
+    )
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "REJECTED"
+        assert task.trace["external_outcome"] == "NOT_SENT"
+        assert task.trace["automatic_replay"] is False
+    repeated = client.post(path, json=body)
+    assert repeated.status_code == 422
+    with factory() as db:
+        rows = db.scalars(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project_id)).all()
+        assert len(rows) == 2
+    assert len(calls) == 2
 
 
 def test_nonmock_timeout_is_unknown_and_same_request_does_not_call_again(prep, monkeypatch):  # noqa: F811

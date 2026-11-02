@@ -30,11 +30,9 @@ class QualityPolicyUpdate(APIModel):
     The policy may relax non-critical thresholds per shot priority, but hard
     rules (identity, master asset, key dialogue) are never relaxed.
 
-    ``advisory_model_reviews`` decides how much weight the local small-model
-    self-review carries.  With it enabled (the default) the review runs one
-    round, reports its verdict for the human review that follows, and never
-    stops the autonomous film generation.  A project that wants the model
-    review to decide the production turns it off.
+    Local small-model image/style/audio reviews are always advisory. Their
+    availability or findings never stop H3 production or delivery. The legacy
+    ``advisory_model_reviews`` field remains accepted for old project records.
     """
 
     require_semantic_review: bool = True
@@ -73,10 +71,23 @@ class StyleFreezeRequest(APIModel):
 
 
 class DialogueLine(APIModel):
-    speaker_id: str = Field(min_length=1, max_length=80)
+    speaker_id: str = Field(
+        min_length=1,
+        max_length=80,
+        description="Human-readable character name/entity ID, not a UUID for an asset file.",
+    )
     text: str = Field(min_length=1, max_length=1000)
-    start_s: float = Field(ge=0)
-    end_s: float = Field(gt=0)
+    start_s: float = Field(
+        ge=0,
+        description=(
+            "Seconds from the start of the containing beat or shot. "
+            "Reset to zero for each beat; never use cumulative episode time."
+        ),
+    )
+    end_s: float = Field(
+        gt=0,
+        description="Seconds from the start of the containing beat or shot; must fit inside the planned shot duration.",
+    )
 
     @model_validator(mode="after")
     def ordered_times(self) -> DialogueLine:
@@ -137,6 +148,8 @@ class ShotSpec(APIModel):
     sound: dict[str, str] = Field(default_factory=dict)
     continuity: ContinuitySettings = Field(default_factory=ContinuitySettings)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=30)
+    prompt_story_facts: list[str] = Field(default_factory=list, max_length=30)
+    prompt_style: StyleBible | None = None
 
     @model_validator(mode="after")
     def dialogue_fits_duration(self) -> ShotSpec:
@@ -495,7 +508,7 @@ class ProviderProfileCreate(APIModel):
     base_url: str = Field(default="", max_length=500)
     model: str = Field(default="", max_length=160)
     api_key: str | None = Field(default=None, max_length=4096)
-    timeout_s: float = Field(default=60, ge=1, le=600)
+    timeout_s: float = Field(default=180, ge=1, le=600)
     max_retries: int = Field(default=2, ge=0, le=5)
     temperature: float = Field(default=0.2, ge=0, le=2)
     enabled: bool = True

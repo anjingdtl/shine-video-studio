@@ -22,12 +22,13 @@ from shine.worker import _only_advisory_reviews_outstanding
 from tests.test_quality_gates import finding, gate, semantic, shot, technical
 
 
-def test_the_advisory_policy_is_explicit_and_reversible():
+def test_the_advisory_policy_cannot_be_disabled_by_legacy_project_data():
     policy = QualityPolicy()
     assert policy.advisory_model_reviews is True
     assert QualityPolicy.from_dict(policy.to_dict()).advisory_model_reviews is True
-    strict = QualityPolicy.from_dict({"advisory_model_reviews": False})
-    assert strict.advisory_model_reviews is False
+    legacy_strict = QualityPolicy.from_dict({"advisory_model_reviews": False})
+    assert legacy_strict.advisory_model_reviews is True
+    assert QualityPolicy(advisory_model_reviews=False).advisory_model_reviews is True
 
 
 def test_an_advisory_model_review_never_stops_the_production_flow():
@@ -41,6 +42,7 @@ def test_an_advisory_model_review_never_stops_the_production_flow():
     # The reviewer reported a violation and the record says so.
     assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
     assert gate(gates, GATE_SEMANTIC).advisory is True
+    assert gate(gates, GATE_SEMANTIC).required is False
     assert "IDENTITY_MISMATCH" in [item.code for item in fused.hard_failures]
     # The verdict stays honest and the human review is requested.
     assert fused.result == STATUS_NEEDS_REVIEW
@@ -77,8 +79,8 @@ def test_a_clean_review_is_a_clean_pass():
     assert _only_advisory_reviews_outstanding(gates) is False
 
 
-def test_a_missing_review_is_not_a_model_opinion():
-    """A review that never ran is a fact about the run, not an opinion."""
+def test_a_missing_review_is_pending_human_but_does_not_block_production():
+    """Missing advisory coverage stays visible without holding the production queue."""
     gates, fused = evaluate_gates(
         policy=QualityPolicy(),
         shot_spec=shot(),
@@ -87,5 +89,15 @@ def test_a_missing_review_is_not_a_model_opinion():
     )
     assert gate(gates, GATE_SEMANTIC).status == "not_run"
     assert fused.result == STATUS_NEEDS_REVIEW
-    # The shot waits: the review never happened.
-    assert _only_advisory_reviews_outstanding(gates) is False
+    assert fused.human_review_required is True
+    assert _only_advisory_reviews_outstanding(gates) is True
+
+
+def test_unavailable_advisory_review_does_not_block_production():
+    gates, fused = evaluate_gates(
+        policy=QualityPolicy(), shot_spec=shot(), technical=technical(),
+        semantic_error="SEMANTIC_REVIEW_TIMEOUT: response unavailable", reference_count=1,
+    )
+    assert gate(gates, GATE_SEMANTIC).status == "unavailable"
+    assert fused.result == STATUS_NEEDS_REVIEW
+    assert _only_advisory_reviews_outstanding(gates) is True

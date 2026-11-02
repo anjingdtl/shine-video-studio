@@ -76,6 +76,9 @@ class ProviderConfig:
     max_retries: int = 2
     temperature: float = 0.2
     generation_options: dict[str, Any] = field(default_factory=dict)
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    context_window_source: str = "provider_did_not_declare_limits"
 
 
 def text_provider_snapshot(profile) -> dict:

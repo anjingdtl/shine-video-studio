@@ -127,7 +127,7 @@ def test_all_required_gates_pass_yields_a_final_pass():
 
 
 @pytest.mark.parametrize("confidence", [0, 0.69])
-def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confidence):
+def test_real_empty_low_confidence_review_stays_pending_for_human(confidence):
     gates, fused = evaluate_gates(
         policy=QualityPolicy(),
         shot_spec=shot(),
@@ -142,8 +142,8 @@ def test_real_empty_low_confidence_review_blocks_semantic_style_and_final(confid
     assert fused.result == STATUS_NEEDS_REVIEW and fused.human_review_required
 
 
-def test_low_overall_confidence_never_relaxes_a_hard_failure():
-    # The strict policy keeps the hard rule blocking.
+def test_low_overall_confidence_never_relaxes_a_hard_finding():
+    # Legacy strict settings cannot turn a small-model opinion into a stop.
     gates, fused = evaluate_gates(
         policy=QualityPolicy(advisory_model_reviews=False),
         shot_spec=shot(),
@@ -152,9 +152,9 @@ def test_low_overall_confidence_never_relaxes_a_hard_failure():
         reference_count=1,
     )
     assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
-    assert gate(gates, GATE_FINAL).status == STATUS_FAILED and fused.result == STATUS_FAILED
-    # The advisory policy keeps the finding and the honest verdict, and hands
-    # the decision to the human review instead of stopping the production.
+    assert gate(gates, GATE_SEMANTIC).advisory
+    assert gate(gates, GATE_FINAL).status == STATUS_NEEDS_REVIEW and fused.result == STATUS_NEEDS_REVIEW
+    # The finding and human-review request remain visible.
     gates, fused = evaluate_gates(
         policy=QualityPolicy(),
         shot_spec=shot(),
@@ -194,7 +194,8 @@ def test_dialogue_without_asr_records_missing_audio_coverage():
         reference_count=1,
     )
     audio = gate(gates, GATE_AUDIO)
-    assert audio.required is True
+    assert audio.required is False
+    assert audio.advisory is True
     assert audio.status == STATUS_NOT_RUN
     assert audio.error_code == "ASR_NOT_CONFIGURED"
     assert gate(gates, GATE_FINAL).status == STATUS_NEEDS_REVIEW
@@ -373,12 +374,13 @@ def test_priority_thresholds_are_configurable_per_project(priority):
     assert policy.threshold_for(priority) == {"A": 0.9, "B": 0.7, "C": 0.5}[priority]
 
 
-def test_scene_only_shot_still_requires_configured_semantic_review():
+def test_scene_only_shot_records_missing_semantic_review_as_advisory():
     spec = ShotSpec(story_beat="An empty street in rain", duration_target_s=5)
     gates, result = evaluate_gates(
         policy=QualityPolicy(require_style_review=False), shot_spec=spec, technical=technical()
     )
-    assert gate(gates, GATE_SEMANTIC).required
+    assert gate(gates, GATE_SEMANTIC).required is False
+    assert gate(gates, GATE_SEMANTIC).advisory is True
     assert gate(gates, GATE_SEMANTIC).status == STATUS_NOT_RUN
     assert result.result == STATUS_NEEDS_REVIEW
 
@@ -393,7 +395,8 @@ def test_scene_only_observed_hard_failure_is_not_discarded():
         semantic_results=[review],
     )
     assert gate(gates, GATE_SEMANTIC).status == STATUS_FAILED
-    assert result.result == STATUS_FAILED
+    assert gate(gates, GATE_SEMANTIC).advisory
+    assert result.result == STATUS_NEEDS_REVIEW
     assert [f.code for f in result.hard_failures] == ["SCENE_MISMATCH"]
     # The advisory policy still records the finding and still asks for the
     # human review; it only stops the autonomous production from waiting.
@@ -408,10 +411,8 @@ def test_scene_only_observed_hard_failure_is_not_discarded():
     assert [f.code for f in result.hard_failures] == ["SCENE_MISMATCH"]
 
 
-@pytest.mark.parametrize(
-    "severity,confidence,expected", [("hard", 0.95, STATUS_FAILED), ("uncertain", 0.5, STATUS_NEEDS_REVIEW)]
-)
-def test_available_findings_cannot_be_hidden_by_optional_review_policy(severity, confidence, expected):
+@pytest.mark.parametrize("severity,confidence", [("hard", 0.95), ("uncertain", 0.5)])
+def test_available_findings_remain_visible_as_advisory(severity, confidence):
     spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
     review = semantic(finding("SCENE_MISMATCH", severity=severity, confidence=confidence), is_mock=False)
     gates, result = evaluate_gates(
@@ -422,20 +423,22 @@ def test_available_findings_cannot_be_hidden_by_optional_review_policy(severity,
         semantic_results=[review],
     )
     assert not gate(gates, GATE_SEMANTIC).required
-    assert result.result == expected
+    assert gate(gates, GATE_SEMANTIC).advisory
+    assert result.result == STATUS_NEEDS_REVIEW
     assert result.human_review_required
 
 
 def test_style_hard_failure_retains_a_diagnostic_for_bounded_repair():
     spec = ShotSpec(story_beat="QA scene", duration_target_s=5)
     review = semantic(finding("STYLE_MISMATCH", category="style"), is_mock=False)
-    _, result = evaluate_gates(
+    gates, result = evaluate_gates(
         policy=QualityPolicy(require_semantic_review=False, advisory_model_reviews=False),
         shot_spec=spec,
         technical=technical(),
         semantic_results=[review],
     )
-    assert result.result == STATUS_FAILED
+    assert result.result == STATUS_NEEDS_REVIEW
+    assert gate(gates, GATE_SEMANTIC).advisory
     assert "STYLE_MISMATCH" in [f.code for f in result.hard_failures]
     # The advisory policy keeps the diagnostic for the human review as well.
     _, result = evaluate_gates(

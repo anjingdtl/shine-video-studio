@@ -22,7 +22,7 @@ from tests.test_film_crew import BRIEF, FACTS, prepare
 WAV = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVEfmt " + b"\x10\x00\x00\x00"
 
 
-def _responder(registry):
+def _responder(registry, *, character_name="Lin"):
     """One responder for the whole chain, dispatched by schema title."""
 
     def respond(messages, schema):
@@ -32,10 +32,10 @@ def _responder(registry):
                 "locked_story_facts": FACTS,
                 "beats": [
                     {"id": "B1", "description": "The woman waits beside a sealed letter.",
-                     "characters": ["Lin"], "dialogue": [
-                         {"speaker_id": "Lin", "text": "你来了。", "start_s": 1, "end_s": 2}]},
+                     "characters": [character_name], "dialogue": [
+                         {"speaker_id": character_name, "text": "你来了。", "start_s": 1, "end_s": 2}]},
                     {"id": "B2", "description": "She turns toward the door.",
-                     "characters": ["Lin"], "dialogue": []},
+                     "characters": [character_name], "dialogue": []},
                 ],
             })
         if title == "DirectorialPlan":
@@ -83,15 +83,18 @@ def _responder(registry):
     return respond
 
 
-def _studio_with_chain(client, *, extra_character: str | None = None):
+def _studio_with_chain(client, *, extra_character: str | None = None, character_entity_id="Lin"):
     """Frozen style + rulepack + mock routes + one approved Lin master.
 
     Returns (project_id, style, registry) where registry holds the asset id.
     """
     registry = {}
-    project_id, style, profile = prepare(client)
+    filename = "Lin.png" if character_entity_id == "Lin" else f"{character_entity_id}.png"
+    project_id, style, profile = prepare(
+        client, character_entity_id=character_entity_id, character_filename=filename
+    )
     assets = client.get(f"/api/v1/projects/{project_id}/assets").json()
-    lin = next(a for a in assets if a["role"] == "character" and a["entity_id"] == "Lin")
+    lin = next(a for a in assets if a["role"] == "character" and a["entity_id"] == character_entity_id)
     registry["lin_asset"] = lin["id"]
     if extra_character:
         extra = upload_asset(client, project_id, filename="Chen.png", role="character", entity_id=extra_character)
@@ -266,6 +269,16 @@ def test_storyboard_chain_generates_all_five_artifacts(studio):
     assert set(body["steps"]) == {"scriptwriter", "director", "cinematographer",
                                   "continuity_supervisor", "editor_edit_intent"}
     with factory() as db:
+        steps = body["steps"]
+        camera = db.get(AgentArtifact, steps["cinematographer"]["artifact_id"])
+        edit = db.get(AgentArtifact, steps["editor_edit_intent"]["artifact_id"])
+        assert set(camera.input_revision_ids) == {
+            steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"],
+        }
+        assert set(edit.input_revision_ids) == {
+            steps[key]["artifact_id"] for key in
+            ("scriptwriter", "director", "cinematographer", "continuity_supervisor")
+        }
         kinds = set(db.scalars(
             select(AgentArtifact.kind).where(AgentArtifact.project_id == project_id)
         ).all())
@@ -281,6 +294,107 @@ def test_storyboard_chain_generates_all_five_artifacts(studio):
         ).all()
         # Honest model identity: the offline mock is recorded as a mock.
         assert all(row["is_mock"] is True for row in trace)
+
+
+def test_storyboard_accepts_omitted_redundant_facts_and_optional_camera_details(studio):
+    client, factory, _tmp_path, _settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+
+    def minimal(messages, schema):
+        result = original(messages, schema)
+        if schema.get("title") == "ScriptBreakdown":
+            result.pop("locked_story_facts")
+        if schema.get("title") == "CameraPlan":
+            for shot in result["shots"]:
+                for field in ("movement", "lighting", "axis"):
+                    shot.pop(field)
+        return result
+
+    client.app.state.mock_llm_responder = minimal
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201
+    assert response.json()["status"] == "PROPOSED"
+    with factory() as db:
+        script = db.get(AgentArtifact, response.json()["steps"]["scriptwriter"]["artifact_id"])
+        assert script.payload_json["locked_story_facts"] == FACTS
+
+
+def test_director_is_instructed_to_include_materially_depicted_approved_props(studio):
+    client, _factory, _tmp_path, _settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    instructions = []
+
+    def capture(messages, schema):
+        if schema.get("title") == "DirectorialPlan":
+            instructions.append(messages[0].content)
+        return original(messages, schema)
+
+    client.app.state.mock_llm_responder = capture
+    assert _storyboard_request(client, project_id).json()["status"] == "PROPOSED"
+    assert "approved prop or other master materially depicted" in instructions[0]
+
+
+def test_chinese_locked_fact_translation_is_shown_and_kept_with_original(studio):
+    client, factory, _tmp_path, _settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+
+    def translate(messages, schema):
+        result = original(messages, schema)
+        if schema.get("title") == "ScriptBreakdown":
+            result["locked_story_facts"] = ["怀表停在十二点"]
+            result["prompt_story_facts"] = ["The watch is stopped at twelve."]
+        return result
+
+    client.app.state.mock_llm_responder = translate
+    response = _storyboard_request(client, project_id, locked_story_facts=["怀表停在十二点"])
+    assert response.status_code == 201
+    body = response.json()
+    assert body["prompt_story_facts"] == ["The watch is stopped at twelve."]
+    with factory() as db:
+        script = db.get(AgentArtifact, body["steps"]["scriptwriter"]["artifact_id"])
+        assert script.payload_json["locked_story_facts"] == ["怀表停在十二点"]
+
+
+def test_unknown_storyboard_result_blocks_exact_replay_before_agent_calls(studio):
+    client, factory, _tmp_path, _settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    calls = []
+
+    def respond(messages, schema):
+        calls.append(schema.get("title"))
+        return _responder(registry)(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    original = _storyboard_request(client, project_id)
+    assert original.status_code == 201, original.text
+    original_body = original.json()
+    editor_artifact = original_body["steps"]["editor_edit_intent"]["artifact_id"]
+
+    with factory() as db:
+        artifact = db.get(AgentArtifact, editor_artifact)
+        task = db.get(AgentTaskRecord, artifact.source_task_id)
+        task.status = "NEEDS_REVIEW"
+        task.error_code = "LLM_TIMEOUT"
+        task.trace = {
+            **task.trace,
+            "is_mock": False,
+            "external_outcome": "UNKNOWN",
+            "automatic_replay": False,
+        }
+        db.commit()
+
+    calls.clear()
+    repeated = _storyboard_request(client, project_id)
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["rejections"][0]["code"] == "AGENT_REQUEST_RECONCILIATION_REQUIRED"
+    assert calls == []
+
+    revised = _storyboard_request(client, project_id, text=BRIEF + "\n修订：第三幕改为窗外雨停。")
+    assert revised.status_code == 201, revised.text
+    assert revised.json()["status"] == "PROPOSED"
 
 
 def test_storyboard_blocks_on_missing_character_masters(studio):
@@ -309,6 +423,58 @@ def test_storyboard_blocks_on_missing_character_masters(studio):
     assert set(body["steps"]) == {"scriptwriter"}
     shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
     assert shots == []
+
+
+def test_storyboard_matches_character_view_suffix_to_approved_master(studio):
+    client, _factory, _tmp_path, _settings = studio
+    character_entity_id = "R01 杜万山胸上"
+    project_id, _style, registry = _studio_with_chain(client, character_entity_id=character_entity_id)
+    client.app.state.mock_llm_responder = _responder(registry, character_name="R01 杜万山")
+
+    response = _storyboard_request(client, project_id)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PROPOSED"
+    assert set(response.json()["steps"]) == {
+        "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor_edit_intent"
+    }
+
+
+def test_storyboard_canonicalizes_character_asset_uuids_from_scriptwriter(studio):
+    client, factory, _tmp_path, _settings = studio
+    entity_id = "R01 杜万山胸上"
+    project_id, _style, registry = _studio_with_chain(client, character_entity_id=entity_id)
+    asset_id = registry["lin_asset"]
+    client.app.state.mock_llm_responder = _responder(registry, character_name=asset_id)
+
+    response = _storyboard_request(client, project_id)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PROPOSED"
+    with factory() as db:
+        artifact = db.get(AgentArtifact, response.json()["steps"]["scriptwriter"]["artifact_id"])
+        assert artifact.payload_json["beats"][0]["characters"] == [entity_id]
+        assert artifact.payload_json["beats"][0]["dialogue"][0]["speaker_id"] == entity_id
+
+
+def test_agent_contracts_describe_beat_local_dialogue_timecodes():
+    from shine.agents.film_contracts import ScriptBreakdown, ShotIntent
+    from shine.schemas import DialogueLine
+
+    line_schema = DialogueLine.model_json_schema()["properties"]
+    character_description = (
+        ScriptBreakdown.model_json_schema()["$defs"]["SceneBeat"]["properties"]["characters"]["description"]
+    )
+    start_description = line_schema["start_s"]["description"]
+    end_description = line_schema["end_s"]["description"]
+    shot_description = ShotIntent.model_json_schema()["properties"]["duration_s"]["description"]
+    beat_description = ScriptBreakdown.model_json_schema()["$defs"]["SceneBeat"]["description"]
+
+    assert "Reset to zero for each beat" in start_description
+    assert "fit inside the planned shot duration" in end_description
+    assert "contain every dialogue timecode" in shot_description
+    assert "local to this beat" in beat_description
+    assert "Never put opaque asset UUIDs here" in character_description
 
 
 def test_continuity_reviewer_receives_the_checked_reference_set_policy(studio):

@@ -35,8 +35,13 @@ from shine.services import add_audit
 
 STARTUP_PREFIX = "renderer-startup:"
 REVIEW_PREFIX = "review-startup:"
+HANDOFF_PREFIX = "handoff:"
 TERMINAL_STAGES = {"RECONCILE_REQUIRED"}
 COMPLETE_STAGES = {"RUNNING"}
+# The renderer is already stopped at these stages, so a failed restart has
+# nothing left to protect once the recorded process and its port are gone.
+STOPPED_HANDOFF_STAGES = {"STOPPED", "PHYSICAL_READY", "REVIEW_INTENT", "REVIEW_FINISHED",
+                          "RESTART_INTENT", "RESTARTED"}
 
 
 def startup_key(instance_id: str, prefix: str = STARTUP_PREFIX) -> str:
@@ -551,6 +556,64 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
                 "reconciliation": finding,
                 "recorded_at": utcnow().isoformat(),
             }, prefix)
+        findings.append(finding)
+    return findings
+
+
+def reconcile_stopped_handoffs(factory) -> list[dict]:
+    """Release a failed handoff whose owned renderer is provably stopped.
+
+    A handoff that failed at or after ``STOPPED`` has no live process left to
+    protect, but its lease stays ``RECONCILE_REQUIRED`` and blocks every later
+    GPU user. Only a dead recorded renderer process and a free loopback port may
+    release it. The job itself stays ``NEEDS_REVIEW``; this never turns an
+    unreviewed render into a pass.
+    """
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    findings: list[dict] = []
+    with factory() as db:
+        rows = db.scalars(select(AppSetting).where(AppSetting.key.like(HANDOFF_PREFIX + "%"))).all()
+        pending = [(row.key, dict(row.value)) for row in rows
+                   if isinstance(row.value, dict) and row.value.get("stage") == "RECONCILE_REQUIRED"]
+    for key, value in pending:
+        attempt_id = key.removeprefix(HANDOFF_PREFIX)
+        if value.get("last_confirmed_stage") not in STOPPED_HANDOFF_STAGES:
+            continue
+        process = value.get("process") or {}
+        pid, birth = process.get("pid"), process.get("birth")
+        if type(pid) is not int or pid <= 0 or not isinstance(birth, str) or not birth:
+            continue  # nothing proves the renderer exited
+        try:
+            if process_identity(pid) == birth:
+                continue  # the recorded renderer is still alive
+        except (OSError, ValueError):
+            pass
+        port = urlsplit(value.get("instance_url") or "").port
+        if not port or windows_port_listeners(port):
+            continue  # an unclear or occupied port cannot be declared released
+        finding = {"attempt_id": attempt_id, "job_id": value.get("job_id"), "action": "released"}
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            row = db.get(AppSetting, key)
+            current = dict(row.value) if row and isinstance(row.value, dict) else {}
+            if current.get("stage") != "RECONCILE_REQUIRED":
+                continue
+            lease = db.get(ResourceLease, current.get("resource_id"))
+            if (not lease or lease.owner != "h3:" + str(current.get("job_id") or "")
+                    or lease.status != "RECONCILE_REQUIRED"):
+                continue
+            ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+            row.value = {**current, "stage": "RECONCILE_COMPLETE",
+                         "last_confirmed_stage": "RECONCILE_REQUIRED",
+                         "reconciled_at": utcnow().isoformat(),
+                         "reason": "OWNED_RENDERER_STOPPED",
+                         "reconciliation": finding}
+            job = db.get(Job, current.get("job_id"))
+            if job:
+                add_audit(db, "comfy-worker", "COMFY_HANDOFF_RECONCILED_RELEASE", "job", job.id,
+                          {"attempt_id": attempt_id, "resource_id": lease.id,
+                           "renderer_stopped": True}, project_id=job.project_id)
         findings.append(finding)
     return findings
 

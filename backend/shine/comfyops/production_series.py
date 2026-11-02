@@ -862,6 +862,11 @@ def cancel_series_in_session(db, series_id: str, *, reason: str = "SERIES_CANCEL
         if item.status in {"PENDING", "QUEUED"}:
             item.status = "CANCELLED"
             item.failure_code = reason
+            # A cancelled item's queued job must not stay claimable: the series
+            # owns it, so the ordinary queue would otherwise render it alone.
+            job = db.get(Job, item.job_id) if item.job_id else None
+            if job is not None and job.status == "QUEUED":
+                job.stale = True
     cancel_orders_for_series(db, series.id)
     return series.status
 

@@ -83,7 +83,7 @@ class ProducerAgentRuntime:
             user=(
                 f"Retries left: {max(0, retries_left)}\n"
                 f"Error categories: {', '.join(error_categories) or 'unknown'}\n"
-                f"QC evidence:\n{qc_summary[:8000]}"
+                f"QC evidence:\n{qc_summary}"
             ),
             schema=schema,
         )

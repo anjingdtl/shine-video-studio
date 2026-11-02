@@ -75,6 +75,10 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   const current = roles.find(r => r.role === role);
   const reviewShot = shots.find(s => s.id === reviewShotId && s.project_id === projectId);
   const filteredRules = hub?.rules.filter(r => JSON.stringify(r).toLowerCase().includes(query.toLowerCase())) ?? [];
+  const needsRemoteReconciliation = (run: Run) => run.status === 'NEEDS_REVIEW' || (
+    run.status === 'REJECTED' && run.trace.external_outcome !== 'NOT_SENT'
+    && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(run.error_code ?? '')
+  );
   return <>
     <section className="panel" id="film-crew">
       <div className="panel-header"><h2>影视制片团队 <small>V1.1</small></h2>
@@ -128,7 +132,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           })))}>人工应用摄影方案（需勾选对应场记报告）</button>}
       </details>)}
       <h3>Agent 运行记录</h3>
-      {runs.some(r => r.status === 'NEEDS_REVIEW' || (r.status === 'REJECTED' && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(r.error_code ?? ''))) &&
+      {runs.some(needsRemoteReconciliation) &&
         <div className="settings-block">
           <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。</p>
           <label>远端响应对账凭据<input type="password" autoComplete="off" value={reconcileCredential}
@@ -136,7 +140,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
         </div>}
       {runs.map(r => <details key={r.id}><summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
-        {(r.status === 'NEEDS_REVIEW' || (r.status === 'REJECTED' && ['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(r.error_code ?? ''))) &&
+        {needsRemoteReconciliation(r) &&
           <button disabled={busy || reconcileCredential.length < 32 || !reconcileEvidence.trim()}
             onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}
         <pre>{JSON.stringify(r, null, 2)}</pre></details>)}

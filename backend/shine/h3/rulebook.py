@@ -287,6 +287,8 @@ class H3RulebookRegistry:
             rule_id = "SHINE_PROVENANCE"
         elif code == "H3_SECTION_MISSING":
             rule_id = "H3_SECTIONS"
+        elif code == "H3_LOCKED_FACT_TRANSLATION_REQUIRED":
+            rule_id = "H3_ENGLISH"
         else:
             rule_id = "H3_LABELS"
         rule = next(r for r in RULES if r["id"] == rule_id)

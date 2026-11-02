@@ -105,7 +105,7 @@ if (savedZoom) document.documentElement.style.zoom = savedZoom;
 function App() {
   const studio = useStudio();
   const {
-    projects, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notice, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
@@ -114,14 +114,14 @@ function App() {
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
-    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, deleteWorkflow,
+    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
   } = studio;
 
   const [ui, setUi] = useState<'director' | 'expert'>(() => {
     const saved = window.localStorage.getItem('shine-interface');
     return saved === 'expert' ? 'expert' : 'director';
   });
-  const [directorPage, setDirectorPage] = useState<DirectorPage>('projects');
+  const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
   const [wizard, setWizard] = useState<null | 'enable' | 'diagnose'>(null);
   const [activeSection, setActiveSection] = useState('overview');
   const [helpOpen, setHelpOpen] = useState(false);
@@ -404,16 +404,22 @@ function App() {
           {ui === 'director' && <>
             {!project && <section className="first-run card">
               <div className="first-run-art"><Clapperboard size={30} /></div>
-              <h2>创建我的第一部AI短剧</h2>
-              <p>只需要三步：建作品、给素材定风格、让AI导演团队排镜头。所有内容都保存在你自己的电脑上。</p>
-              <div className="create-project">
-                <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-                <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
-              </div>
-              <p className="empty-setup-hint">
-                想先看看本机环境？<button className="text-button" onClick={() => goToExpert('setup', 'setup')}>检查制作环境</button>——不需要先建作品。
-                制作环境不足也不影响创建作品、导入剧本和整理素材。
-              </p>
+              {projectsLoaded ? <>
+                <h2>创建我的第一部AI短剧</h2>
+                <p>只需要三步：建作品、给素材定风格、让AI导演团队排镜头。所有内容都保存在你自己的电脑上。</p>
+                <div className="create-project">
+                  <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
+                  <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
+                </div>
+                <p className="empty-setup-hint">
+                  想先看看本机环境？<button className="text-button" onClick={() => goToExpert('setup', 'setup')}>检查制作环境</button>——不需要先建作品。
+                  制作环境不足也不影响创建作品、导入剧本和整理素材。
+                </p>
+              </> : <>
+                <h2>{projectsLoadError ? '本机工作区暂时不可用' : '正在读取本机作品'}</h2>
+                <p>{projectsLoadError || '正在连接本机服务。稍等片刻，已有作品会自动显示。'}</p>
+                <button className="primary-button" onClick={() => refreshAll().catch(() => undefined)}>重新连接</button>
+              </>}
             </section>}
 
             {project && <>
@@ -542,16 +548,16 @@ function App() {
                           {workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                         </select>
                       </label>
-                      <label>自动检查范围
+                      <label>审片建议（可选）
                         <select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                          <option value="basic">基础检查：分辨率、人物、对白</option>
-                          <option value="full">完整五道检查</option>
+                          <option value="full">完整建议：画面、对白与风格</option>
+                          <option value="basic">基础建议：人物与对白</option>
                         </select>
                       </label>
                       {reviewScope === 'basic' && <>
                         <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>
                         <label>预期画面高度<input type="number" min="2" max="8192" step="1" value={reviewHeight} onChange={(event) => setReviewHeight(event.target.value)} /></label>
-                        <p>宽高只用来核对生成结果，不会改动生成设置。</p>
+                        <p>宽高只做视频技术校验，不会改动生成设置；小模型人物和对白建议不会阻止制作。</p>
                       </>}
                     </>}
                   </div>
@@ -597,21 +603,22 @@ function App() {
               {/* 空库也能进入设置板块：环境检查、上游可达性、部署清单、安装目录和偏好都不依赖项目。 */}
               {view === 'setup' && <>
                 {viewHero('设置板块', '先把工具调教顺手，再开工。', 'SYSTEM SETUP')}
-                <SetupPanel key="setup-no-project" projectId="" onRefresh={refreshAll} />
+                <SetupPanel key="setup-no-project" projectId="" onRefresh={refreshAll} refreshEpoch={dataEpoch} />
                 <StorageSettings />
                 <PreferencesPanel onNavigate={goTo} />
               </>}
               <section className="empty-project card">
                 <div className="empty-art"><FolderKanban size={26} /></div>
-                <h2>{view === 'setup' ? '接下来，从第一个项目开始' : '从一个项目开始'}</h2>
-                <p>{view === 'setup'
+                <h2>{!projectsLoaded ? (projectsLoadError ? '本机工作区暂时不可用' : '正在读取本机作品') : view === 'setup' ? '接下来，从第一个项目开始' : '从一个项目开始'}</h2>
+                <p>{!projectsLoaded ? (projectsLoadError || '正在连接本机服务。稍等片刻，已有作品会自动显示。') : view === 'setup'
                   ? '上面的环境检查、安装目录和系统探测不需要项目。生产、交付等专业流程需要一个项目来承载：'
                   : '所有内容都保存在你自己电脑上：项目、素材、风格、任务和操作记录。'}</p>
-                <div className="create-project">
+                {projectsLoaded && <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给项目起个名字" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
                   <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
-                </div>
-                {view !== 'setup' && <p className="empty-setup-hint">
+                </div>}
+                {!projectsLoaded && <button className="primary-button" onClick={() => refreshAll().catch(() => undefined)}>重新连接</button>}
+                {projectsLoaded && view !== 'setup' && <p className="empty-setup-hint">
                   还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「制作环境」检查本机</button>——不需要先建项目。
                 </p>}
               </section>
@@ -708,14 +715,14 @@ function App() {
                       <option value="">请选择…</option>{workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
                     </select></label>}
                     {queueProvider === 'comfyui' && <>
-                      <label>自动检查范围<select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                        <option value="basic">基础检查：分辨率、人物、对白</option>
-                        <option value="full">完整五道质量关</option>
+                      <label>审片建议（可选）<select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
+                        <option value="full">完整建议：画面、对白与风格</option>
+                        <option value="basic">基础建议：人物与对白</option>
                       </select></label>
                       {reviewScope === 'basic' && <>
                         <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>
                         <label>预期画面高度<input type="number" min="2" max="8192" step="1" value={reviewHeight} onChange={(event) => setReviewHeight(event.target.value)} /></label>
-                        <p>宽高只用来核对生成结果对不对，不会改动生成设置。人物检查需要先配好本机基础审片能力。</p>
+                        <p>宽高只做视频技术校验，不会改动生成设置；小模型人物和对白建议未覆盖时也能继续生产。</p>
                       </>}
                     </>}
                   </div>
@@ -768,7 +775,7 @@ function App() {
               {/* 设置板块：装机、模型与系统、个人偏好 */}
               <div className={`view-page ${view === 'setup' ? '' : 'hidden'}`} data-view="setup">
                 {viewHero('设置板块', '先把工具调教顺手，再开工。', 'SYSTEM SETUP')}
-                <SetupPanel key={`setup-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
+                <SetupPanel key={`setup-${projectId}`} projectId={projectId} onRefresh={refreshAll} refreshEpoch={dataEpoch} />
                 <SettingsPanel
                   onRefresh={refreshAll}
                   project={project}
@@ -785,6 +792,7 @@ function App() {
                   onRoute={routeProfile}
                   onTestComfy={testComfy}
                   onRegisterWorkflow={registerWorkflow}
+                  onValidateWorkflow={validateWorkflow}
                   onDeleteWorkflow={deleteWorkflow}
                 />
                 <PreferencesPanel onNavigate={goTo} />

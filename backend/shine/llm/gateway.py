@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
@@ -16,10 +17,31 @@ from shine.llm.base import (
     LLMResponse,
     ProviderConfig,
 )
+from shine.llm.context_window import model_context_for_profile
 from shine.llm.mock import MockLLMProvider, Responder
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, ProviderProfile
+
+
+def agent_output_config(config: ProviderConfig) -> ProviderConfig:
+    """Limit each agent response without expanding a configured smaller budget."""
+    limits = [100_000]
+    configured = config.generation_options.get("max_completion_tokens")
+    if configured:
+        limits.append(configured)
+    if config.max_output_tokens:
+        limits.append(config.max_output_tokens)
+    output_limit = min(limits)
+    if config.kind == "openai_compatible":
+        return replace(config, generation_options={
+            **config.generation_options, "max_completion_tokens": output_limit,
+        })
+    if config.kind == "ollama":
+        return replace(config, generation_options={
+            **config.generation_options, "max_tokens": output_limit,
+        })
+    return config  # Anthropic adapter already uses 4096; mock has no external output.
 
 
 def build_provider(
@@ -62,6 +84,7 @@ class LLMGateway:
         key = api_key_override
         if key is None and profile.api_key_ref:
             key = self.secrets.load(profile.api_key_ref)
+        model_context = model_context_for_profile(profile)
         return ProviderConfig(
             profile_id=profile.id,
             name=profile.name,
@@ -73,6 +96,9 @@ class LLMGateway:
             max_retries=profile.max_retries,
             temperature=profile.temperature,
             generation_options=options,
+            context_window_tokens=model_context["context_window_tokens"],
+            max_output_tokens=model_context["max_output_tokens"],
+            context_window_source=model_context["source"],
         )
 
     def provider_for(self, profile: ProviderProfile, *, api_key_override: str | None = None) -> Any:
@@ -98,7 +124,8 @@ class LLMGateway:
         schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         profile = self.profile_for_role(db, role)
-        provider = self.provider_for(profile)
+        config = agent_output_config(self.config_for(profile))
+        provider = self.provider_factory(config, self.mock_responder)
         if schema is not None:
             # The provider validates the answer against this schema, so the model
             # has to be told the contract it must satisfy. The schema is used
@@ -121,7 +148,6 @@ class LLMGateway:
         # provider never silently runs beside a local GPU model.
         if CURRENT_RESOURCE.get() is not None:
             raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
-        config = self.config_for(profile)
         with resource_slot(
             make_session_factory(db.get_bind()),
             "AGENT",

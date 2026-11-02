@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from shine.asset_identity import character_reference_matches
 from shine.comfy.client import ComfyError, ComfySubmissionUncertain, ComfyUIClient, ComfyUIError
 from shine.comfy.media import ComfyPendingWorkflowMapping
 from shine.comfy.provider import ComfyResult, ComfySubmission, ComfyUIRenderService
@@ -43,9 +44,7 @@ from shine.providers import MockH3Provider, MockSubmission, ProviderFailure, Sub
 from shine.quality.gates import (
     STATUS_FAILED,
     STATUS_NOT_APPLICABLE,
-    STATUS_NOT_RUN,
     STATUS_PASSED,
-    STATUS_UNAVAILABLE,
     VERIFICATION_MOCK,
     VERIFICATION_PARTIAL,
     VERIFICATION_REAL,
@@ -398,8 +397,7 @@ def _only_advisory_reviews_outstanding(gates) -> bool:
     measured = [gate for gate in gates if gate.gate_name != "final"]
     blocking_open = [
         gate for gate in measured
-        if (not gate.advisory or gate.status in {STATUS_NOT_RUN, STATUS_UNAVAILABLE})
-        and gate.status not in {STATUS_PASSED, STATUS_NOT_APPLICABLE}
+        if not gate.advisory and gate.status not in {STATUS_PASSED, STATUS_NOT_APPLICABLE}
     ]
     advisory_open = [
         gate for gate in measured
@@ -453,7 +451,8 @@ def _semantic_review(
         for entry in reference_manifest
         if entry.content_type.startswith("image/") and entry.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}
         and (entry.role or "").casefold() not in {"scene", "location", "prop", "costume", "voice"}
-        and (entry.entity_id in spec.characters or entry.role in spec.characters)
+        and (entry.role in spec.characters
+             or any(character_reference_matches(character, entry.entity_id) for character in spec.characters))
     }
     context = ReviewContext(
         job_id=job_id,
@@ -786,7 +785,8 @@ def run_one(
         resource_db.flush()
         candidate = resource_db.scalar(
             select(Job)
-            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False))
+            .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                   Job.id.not_in(_series_job_ids()))
             .order_by(Job.created_at, Job.id)
             .limit(1)
         )
@@ -903,12 +903,13 @@ def run_one(
                     # The completed managed handoff keeps its own exclusive lease
                     # alive through the idle keeper; releasing it here would let
                     # another model enter between two serial stages.
-                    pass
+                    logger.info("managed_lease_held_by_idle_keeper job=%s", job_id)
                 elif not _isolated_mock_handoff(
                     settings or Settings.from_env(), (semantic_reviewer, asr_reviewer)
                 ):
                     # Even without a reviewer, another model cannot be admitted
                     # solely on the renderer's self-reported unload.
+                    logger.info("managed_lease_reconcile_required_no_keeper job=%s", job_id)
                     lease.status = "RECONCILE_REQUIRED"
                 elif job and (
                     job.status in {"SUBMITTING", "RUNNING"}
@@ -1186,8 +1187,8 @@ def run_managed_first(session_factory, worker_id, *, settings, recipe, review_co
     from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
 
     if (not isinstance(recipe, dict) or not recipe.get("instance_id")
-            or not isinstance(review_configs, dict) or not review_configs
-            or not (semantic_reviewer or asr_reviewer)):
+            or not isinstance(review_configs, dict)
+            or not set(review_configs).issubset({"VLM", "ASR"})):
         raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
     scheduler = ResourceScheduler()
     with session_factory.begin() as db:
@@ -1250,8 +1251,8 @@ def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_se
             or not isinstance(previous.keeper, IdleHandoffKeeper) or not previous.replacement
             or previous.keeper.factory is not session_factory
             or previous.keeper.attempt_id != previous.session.attempt_id
-            or previous.keeper.supervisor is not previous.replacement or previous.session.factory is not session_factory
-            or not (semantic_reviewer or asr_reviewer)):
+            or previous.keeper.supervisor is not previous.replacement
+            or previous.session.factory is not session_factory):
         raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
     if (Path(settings.data_dir).resolve() != Path(previous.session.settings.data_dir).resolve()
             or settings.database_url != previous.session.settings.database_url
@@ -1278,14 +1279,12 @@ def run_managed_once(session_factory, worker_id, previous, *, settings, comfy_se
                 return None, previous
         request = RenderRequest.model_validate(job.request)
         policy = _project_policy(db, job.project_id)
-        if request.self_review_scope == "basic":
-            required = ({"VLM"} if request.shot_spec.characters else set()) | (
-                {"ASR"} if request.shot_spec.dialogue else set())
-        else:
-            required = ({"VLM"} if policy.require_semantic_review or policy.require_style_review else set()) | (
-                {"ASR"} if policy.require_audio_review and request.shot_spec.dialogue else set())
-        available = {kind for kind, provider in (("VLM", semantic_reviewer), ("ASR", asr_reviewer)) if provider}
-        if not required.issubset(available) or not available.issubset(previous._review_configs):
+        required = set() if policy.advisory_model_reviews else (
+            ({"VLM"} if policy.require_semantic_review or policy.require_style_review else set()) | (
+                {"ASR"} if policy.require_audio_review and request.shot_spec.dialogue else set()))
+        available = {kind for kind, provider in (("VLM", semantic_reviewer), ("ASR", asr_reviewer))
+                     if provider and kind in previous._review_configs}
+        if not required.issubset(available):
             raise HTTPException(409, "HANDOFF_REQUIRED_REVIEW_MISSING")
         if (not settings.offline_simulation
                 and not available.issubset(set(previous._previous_releases) | set(previous._cold_fences))):
@@ -1355,15 +1354,19 @@ def release_managed_series(session_factory, settings, coordinator, *, series_id=
         from shine.comfyops.production_series import record_finalization_intent
 
         record_finalization_intent(session_factory, series_id, worker_id, lease_id, coordinator)
+    # Stop renewal first: the heartbeat verifies a live, drained renderer, so
+    # stopping the renderer while it still renews would make the keeper fail
+    # and abort the very release it is meant to complete.
+    coordinator.keeper.stop_renewal()
     stopped = supervisor.stop_closed()
     supervisor.check_memory(coordinator.gpu_uuid, min_ram_mb=coordinator.min_ram_mb,
                             min_vram_mb=coordinator.min_vram_mb)
-    coordinator.keeper.finalize()
     with session_factory.begin() as db:
         lease = db.get(ResourceLease, lease_id)
         if lease is not None and lease.status == "RELEASED":
             # The previous attempt committed the release but the caller never
             # saw the answer.  Releasing twice is not a second release.
+            coordinator.keeper.finalize()
             if series_id and worker_id:
                 from shine.comfyops.production_series import mark_series_released
 
@@ -1372,6 +1375,7 @@ def release_managed_series(session_factory, settings, coordinator, *, series_id=
         if not lease or lease.status != "ACTIVE":
             raise HTTPException(409, "HANDOFF_RESOURCE_LEASE_LOST")
         ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+        coordinator.keeper.finalize()
         if series_id and worker_id:
             from shine.comfyops.production_series import mark_series_released
 
@@ -1422,8 +1426,8 @@ def _run_managed_loop(
 
     renderer_recipe = recipe.get("renderer") if isinstance(recipe, dict) else None
     if (not isinstance(renderer_recipe, dict) or not renderer_recipe.get("instance_id")
-            or not isinstance(review_configs, dict) or not review_configs
-            or not (semantic_reviewer or asr_reviewer)):
+            or not isinstance(review_configs, dict)
+            or not set(review_configs).issubset({"VLM", "ASR"})):
         raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
     if type(max_shots) is not int or not 1 <= max_shots <= 64:
         raise HTTPException(409, "COMFY_SERIES_LENGTH_INVALID")
@@ -1437,6 +1441,8 @@ def _run_managed_loop(
             candidate = db.get(Job, first_job_id)
             if (candidate is None or candidate.status != "QUEUED" or candidate.paused
                     or candidate.stale or candidate.provider != "comfyui"):
+                logger.info("managed_loop_no_start job=%s status=%s", first_job_id,
+                            candidate.status if candidate else None)
                 return []
         else:
             statement = (
@@ -1457,6 +1463,7 @@ def _run_managed_loop(
         lease_id, job_id = lease.id, candidate.id
     with session_factory() as db:
         if not scheduler.admit(db, lease_id):
+            logger.info("managed_loop_lease_not_admitted job=%s lease=%s", job_id, lease_id)
             return []
     if series_id:
         # The exclusive GPU lease is the proof of life of a running series.
@@ -1491,6 +1498,7 @@ def _run_managed_loop(
                                                         asr_reviewer=asr_reviewer,
                                                         exclude_series_jobs=exclude_series_jobs)
             elif target is None:
+                logger.info("managed_loop_no_next_job previous=%s", shots[-1])
                 break
             else:
                 result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
@@ -1499,6 +1507,7 @@ def _run_managed_loop(
                                                         asr_reviewer=asr_reviewer,
                                                         expected_job_id=target)
             if result is None:
+                logger.info("managed_loop_next_returned_none previous=%s", shots[-1])
                 break
             shots.append(result)
     finally:
@@ -1513,6 +1522,9 @@ def _run_managed_loop(
             except Exception:
                 logger.exception("managed_series_release_failed series_id=%s worker_id=%s",
                                  series_id, worker_id)
+        else:
+            logger.info("managed_loop_release_skipped coordinator=%s keeper=%s", coordinator is not None,
+                        getattr(coordinator, "keeper", None) is not None)
     return shots
 
 
@@ -1984,10 +1996,10 @@ def _managed_review_specs(recipe, semantic_reviewer, asr_reviewer):
         port = urlsplit(base_url).port if base_url else None
         entry = (recipe.get("reviews") or {}).get(kind)
         if entry is None or not port or entry["port"] != port:
-            raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
+            # Review is advisory. Missing route/service coverage is recorded
+            # by QC, while the real H3 render continues normally.
+            continue
         specs[kind] = {**entry, "base_url": base_url}
-    if not specs:
-        raise HTTPException(409, "COMFY_REVIEW_SERVICE_UNCONFIGURED")
     return specs
 
 
@@ -2198,7 +2210,7 @@ def _finalize_comfy_attempt(
     if request.self_review_scope == "basic" and not request.shot_spec.characters:
         semantic_reviewer = None
     review_scope = None
-    if semantic_reviewer or asr_reviewer:
+    if semantic_reviewer or asr_reviewer or managed_handoff is not None:
         from shine.comfyops.model_calls import TrackedProvider
         from shine.comfyops.models import ResourceLease
         from shine.comfyops.scheduler import CURRENT_RESOURCE, ResourceScheduler
@@ -2301,11 +2313,18 @@ def _finalize_comfy_attempt(
         if not semantic_error and len(semantic_results) == 1 and isinstance(semantic_results[0], CharacterReview):
             result = semantic_results[0]
             character_response = result.response
-            bound = {item.entity_id or item.role for item in request.reference_manifest
-                     if item.content_type.startswith("image/")
-                     and item.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}
-                     and (item.role or "").casefold() not in {"scene", "location", "prop", "costume", "voice"}
-                     and (item.entity_id in request.shot_spec.characters or item.role in request.shot_spec.characters)}
+            bound = {
+                character
+                for character in request.shot_spec.characters
+                if any(
+                    item.content_type.startswith("image/")
+                    and item.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}
+                    and (item.role or "").casefold() not in {"scene", "location", "prop", "costume", "voice"}
+                    and (item.asset_id == character or item.role == character
+                         or character_reference_matches(character, item.entity_id))
+                    for item in request.reference_manifest
+                )
+            }
             try:
                 characters = character_evidence_from_response(
                     CharacterReviewResponse.model_validate(result.response),
@@ -3059,11 +3078,14 @@ def recover_expired_jobs(
 ) -> int:
     """Resolve expired external submissions conservatively; never resubmit blindly."""
     settings = settings or Settings.from_env()
-    from shine.comfyops.handoff_startup import reconcile_managed_startups
+    from shine.comfyops.handoff_startup import reconcile_managed_startups, reconcile_stopped_handoffs
 
     # An interrupted managed startup is reconciled before any other job may
     # claim the GPU: only a provably owned process may be stopped.
     reconcile_managed_startups(session_factory, settings)
+    # A handoff that failed after its renderer stopped must not block the GPU
+    # forever; only a provably dead renderer and a free port may release it.
+    reconcile_stopped_handoffs(session_factory)
     with session_factory.begin() as db:
         now = utcnow()
         job_ids = list(
@@ -3569,8 +3591,6 @@ def run_configured_series_once(
     except HTTPException:
         return None
     if recipe is None:
-        return None
-    if not (semantic_reviewer or asr_reviewer):
         return None
     try:
         review_configs = _managed_review_specs(recipe, semantic_reviewer, asr_reviewer)

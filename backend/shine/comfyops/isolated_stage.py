@@ -169,6 +169,31 @@ class WindowsJob:
             for handle in handles:
                 kernel.CloseHandle(handle)
 
+    def active_process_count(self):
+        """Return the kernel-reported active member count, or None if unknown."""
+        import ctypes
+        from ctypes import wintypes
+
+        class Accounting(ctypes.Structure):
+            _fields_ = (
+                [(name, ctypes.c_longlong) for name in (
+                    "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodTotalKernelTime")]
+                + [(name, wintypes.DWORD) for name in (
+                    "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+            )
+
+        if not self._handle:
+            return None
+        self._kernel.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+        ]
+        self._kernel.QueryInformationJobObject.restype = wintypes.BOOL
+        info = Accounting()
+        if not self._kernel.QueryInformationJobObject(
+                self._handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            return None
+        return int(info.ActiveProcesses)
+
     def close(self):
         if self._handle:
             self._kernel.CloseHandle(self._handle)

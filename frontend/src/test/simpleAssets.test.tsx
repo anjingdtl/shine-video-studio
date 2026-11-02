@@ -11,6 +11,13 @@ beforeEach(() => {
 });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
+it('刷新后按 director 深链接恢复素材页，而不是回到作品概览', async () => {
+  window.history.replaceState(null, '', '#d/assets');
+  render(<App />);
+  expect(await screen.findByRole('heading', { name: '项目素材' })).toBeInTheDocument();
+  expect(screen.queryByText('MY WORK')).toBeNull();
+});
+
 it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已固定素材', async () => {
   const asset = { id: 'asset-1', project_id: 'proj-1', filename: '主角.png', kind: 'image',
     sha256: 'a'.repeat(64), byte_size: 32, approved: false, locked: false, tags: [] };

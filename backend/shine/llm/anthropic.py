@@ -49,22 +49,28 @@ class AnthropicMessagesProvider:
                 # The connection was never established, so the provider never
                 # saw the request and a replay cannot produce a second answer.
                 last_error = LLMConnectionError(
-                    "Anthropic connection timed out", details={"error": type(exc).__name__})
+                    "Anthropic connection timed out", details={
+                        "error": type(exc).__name__, "external_outcome": "NOT_SENT",
+                    })
             except httpx.ConnectError as exc:
-                last_error = LLMConnectionError("Anthropic connection failed", details={"error": type(exc).__name__})
+                last_error = LLMConnectionError("Anthropic connection failed", details={
+                    "error": type(exc).__name__, "external_outcome": "NOT_SENT",
+                })
             except httpx.TimeoutException as exc:
                 # The request was sent and the answer never arrived: the
                 # external outcome is unknown, so the request is not replayed.
                 raise LLMTimeout(
                     "Anthropic request timed out",
-                    details={"error": type(exc).__name__, "replayed": False},
+                    details={"error": type(exc).__name__, "replayed": False,
+                             "external_outcome": "UNKNOWN"},
                 ) from None
             except httpx.HTTPError as exc:
                 # The connection broke after the request was sent, so the
                 # outcome is unknown for the same reason as above.
                 raise LLMConnectionError(
                     "Anthropic connection failed",
-                    details={"error": type(exc).__name__, "replayed": False},
+                    details={"error": type(exc).__name__, "replayed": False,
+                             "external_outcome": "UNKNOWN"},
                 ) from None
             else:
                 if response.status_code < 400:
@@ -74,7 +80,9 @@ class AnthropicMessagesProvider:
                 if response.status_code == 429:
                     last_error = LLMRateLimit("Anthropic rate limit reached")
                 elif response.status_code >= 500:
-                    last_error = LLMServerError("Anthropic server error")
+                    raise LLMServerError("Anthropic server error", details={
+                        "status": response.status_code, "external_outcome": "UNKNOWN",
+                    })
                 else:
                     raise LLMError(
                         "Anthropic rejected the request",
@@ -105,7 +113,7 @@ class AnthropicMessagesProvider:
             system_parts.append(instruction)
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "max_tokens": 4096,
+            "max_tokens": min(4096, self.config.max_output_tokens or 4096),
             "temperature": self.config.temperature,
             "messages": conversation,
         }
@@ -124,7 +132,8 @@ class AnthropicMessagesProvider:
             model=body.get("model") or self.config.model,
             latency_ms=int((time.perf_counter() - started) * 1000),
             usage=body.get("usage") or {},
-            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False))},
+            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False)),
+                      "http_status": response.status_code},
         )
 
     def detect_capabilities(self) -> dict[str, Any]:

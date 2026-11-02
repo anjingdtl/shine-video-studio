@@ -16,6 +16,8 @@ type ExistingVerification = { software: NonNullable<ExistingScan['software']>;
   verified: Array<{ component_id: string; relative_path: string; size: number; status: string }>;
   rejected: Array<{ component_id: string; relative_path: string; size: number; status: string }>;
   verified_bytes: number; copied_bytes: number; verification_reused?: boolean };
+type ExistingModelImport = { imported: Array<{ component_id: string; relative_path: string; size: number; status: string }>;
+  rejected: Array<{ component_id: string; relative_path: string }>; reused_bytes: number };
 type EnvReport = {
   platform: Record<string, string>;
   tools: Record<string, ToolInfo>;
@@ -108,6 +110,14 @@ function purposeOf(component: CatalogComponent): 'video' | 'vision' | 'audio' | 
   return 'video';
 }
 
+function productionCatalogComponents(components: CatalogComponent[]): CatalogComponent[] {
+  return components.filter((component) => {
+    const role = (component.role ?? '').toUpperCase();
+    const purpose = purposeOf(component);
+    return role !== 'VLM' && role !== 'ASR' && purpose !== 'vision' && purpose !== 'audio';
+  });
+}
+
 type ModelCard = {
   key: string;
   label: string;
@@ -134,24 +144,56 @@ function buildModelCards(
   }
   const cards: ModelCard[] = [];
   for (const [purpose, components] of groups) {
-    const candidateCount = scan ? scan.matches.filter((row) => purposeOf({ component_id: row.component_id } as CatalogComponent) === purpose).length : 0;
+    const componentIds = new Set(components.map((component) => component.component_id));
+    const matches = scan?.matches.filter((row) => componentIds.has(row.component_id)) ?? [];
+    const missing = scan?.missing.filter((row) => componentIds.has(row.component_id)) ?? [];
+    const candidateCount = matches.length;
+    const verifiedCount = matches.filter((row) => row.status === 'INSTALLED_HASH_MATCH' || row.status === 'CACHED').length;
+    const expectedCount = components.reduce((sum, component) => sum + (component.files || 0), 0)
+      || matches.length + missing.length;
+    const incompleteCount = Math.max(0, expectedCount - verifiedCount);
+    const optionalReview = purpose === 'vision' || purpose === 'audio';
+    let resolvedState: { text: string; tone: string } | undefined;
+    if (resolved && importedResult) {
+      if (purpose === 'program' && scan?.software?.installed) {
+        resolvedState = { text: 'ComfyUI 已安装，运行兼容性待核验', tone: 'candidate' };
+      } else if (expectedCount > 0 && incompleteCount === 0) {
+        resolvedState = { text: optionalReview ? '模型文件已安装并核验（可选建议项）' : '固定版本文件已安装并哈希核验', tone: 'verified' };
+      } else if (optionalReview) {
+        resolvedState = { text: `建议审片模型未就绪（已核验 ${verifiedCount}/${expectedCount} 项，不阻断 H3 出片）`, tone: verifiedCount ? 'candidate' : 'absent' };
+      } else {
+        resolvedState = { text: `仅有部分固定版本文件已核验（${verifiedCount}/${expectedCount} 项）`, tone: 'candidate' };
+      }
+    }
     cards.push({
       key: purpose,
       label: PURPOSE_LABELS[purpose] ?? purpose,
       components,
       state: scan
-        ? (resolved && importedResult
-          ? { text: resolvedMode === 'installed' ? '已安装并核验（原目录，未复制）' : '已校验并复用（无重复下载）', tone: 'verified' }
+        ? (resolvedState
+          ? resolvedMode === 'installed' && resolvedState.tone === 'verified'
+            ? { ...resolvedState, text: `${resolvedState.text}（原目录，未复制）` }
+            : resolvedMode === 'cached' && resolvedState.tone === 'verified'
+              ? { ...resolvedState, text: '已校验并缓存（尚未激活）' }
+              : resolvedState
           : candidateCount > 0 ? { text: `发现文件，待校验（${candidateCount} 项）`, tone: 'candidate' }
-            : { text: '未在已检查位置发现（可选择其他目录）', tone: 'absent' })
+            : optionalReview
+              ? { text: '建议审片模型未发现（不阻断 H3 出片）', tone: 'absent' }
+              : { text: '未在已检查位置发现（可选择其他目录）', tone: 'absent' })
         : { text: '待检查已有目录', tone: 'muted' },
-      detail: scan ? `候选 ${candidateCount} · 未发现 ${scan.missing.length}` : '',
+      detail: scan
+        ? resolved
+          ? `已核验 ${verifiedCount} / ${expectedCount} 个固定版本文件${incompleteCount ? ` · 仍缺或未匹配 ${incompleteCount} 项` : ''}`
+          : `发现候选 ${candidateCount} · 未找到固定版本文件 ${missing.length}`
+        : '',
     });
   }
   return cards;
 }
 
-export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
+export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
+  projectId: string; onRefresh: () => Promise<void>; refreshEpoch?: number;
+}) {
   const [checked, setChecked] = useState(false);
   const [progress, setProgress] = useState('');
   const [existingRoots, setExistingRoots] = useState<string[]>([]);
@@ -209,12 +251,16 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     try { setReadiness(await api<Readiness>('/setup/readiness')); } catch { /* keep prior state */ }
   }, []);
   const loadRuntime = useCallback(async () => {
-    try { setRuntime(await api<RuntimeState>('/setup/runtime')); }
-    catch (error) { say(String(error), 'bad'); }
+    try {
+      setRuntime(await api<RuntimeState>('/setup/runtime'));
+      setNotice((current) => current?.kind === 'bad' ? null : current);
+    } catch { say('本机环境状态暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad'); }
   }, [say]);
   const loadStorage = useCallback(async () => {
-    try { setStorage(await api<DeploymentStorage>('/setup/storage')); }
-    catch (error) { say(String(error), 'bad'); }
+    try {
+      setStorage(await api<DeploymentStorage>('/setup/storage'));
+      setNotice((current) => current?.kind === 'bad' ? null : current);
+    } catch { say('本机存储信息暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad'); }
   }, [say]);
   const loadPlans = useCallback(async () => {
     const selected = projectId;
@@ -230,7 +276,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
   useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); },
-    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime]);
+    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime, refreshEpoch]);
   useEffect(() => {
     void loadStorage();
     const refresh = () => {
@@ -239,7 +285,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     };
     window.addEventListener('shine-storage-changed', refresh);
     return () => window.removeEventListener('shine-storage-changed', refresh);
-  }, [loadStorage, loadPlans, loadEnvironment, loadReadiness, say]);
+  }, [loadStorage, loadPlans, loadEnvironment, loadReadiness, say, refreshEpoch]);
 
   async function approveAndExecute(plan: PlanRef, label: string): Promise<void> {
     const selected = projectRef.current;
@@ -255,10 +301,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
       return;
     }
     void run(async () => {
-      const core = ['comfyui', 'comfy-runtime-wheels', 'minimax-h3-diffusion', 'minimax-h3-text-encoder',
-        'minimax-h3-vae', 'minimax-h3-lora', 'minimax-h3-pdd',
-        'qwen3-vl-8b-fp8', 'qwen3-asr-0.6b', 'ComfyUI-KJNodes', 'comfyui-videohelpersuite',
-        'ComfyUI-MiniMax-H3-PDD-Acc', 'ComfyUI-SolAttn_triton', 'Comfyui_Minimax_h3_latent_Upscaler'];
+      const core = productionCatalogComponents(catalog?.components ?? []).map((component) => component.component_id);
       const result = await api<{ plan_id: string; sha256: string; download_bytes: number; disk_required: number }>(
         '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: storage?.free_bytes ?? 0 }));
       setPlans(previous => [...previous, { ...result, kind: 'INSTALL', status: 'AWAITING_APPROVAL' }]);
@@ -400,10 +443,15 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     if (!existingScan || !storage) return;
     if (!window.confirm(`校验并复用已有模型？\n来源：${existingScan.root}\n目标：${storage.root}\n最多复制 ${fmtBytes(existingScan.candidate_bytes)}；仅哈希与固定清单一致的文件进入缓存。原安装保持不变，不会下载或启动服务。`)) return;
     void run(async () => {
-      const result = await api<{ reused_bytes: number; rejected: Array<{ component_id: string; relative_path: string }> }>(
+      const result = await api<ExistingModelImport>(
         '/setup/existing-installations/import-models', { ...withJson('POST', {
           path: existingScan.root, snapshot: existingScan.snapshot,
         }), signal: AbortSignal.timeout(3_600_000) });
+      const importedSet = new Set(result.imported.map(row => `${row.component_id}:${row.relative_path}`));
+      setExistingScan(previous => previous ? ({ ...previous,
+        matches: previous.matches.map(row => ({ ...row, status: importedSet.has(`${row.component_id}:${row.relative_path}`)
+          ? 'CACHED' : 'HASH_MISMATCH_OR_CHANGED' })),
+      }) : previous);
       const message = `已校验并缓存 ${fmtBytes(result.reused_bytes)}，${result.rejected.length} 项哈希不匹配，不能按固定版本复用。${result.rejected.map(row => `${row.component_id}/${row.relative_path}`).join('、')} 后续只下载缓存中缺少的组件。`;
       setImportResult(message); setExistingResolved(true);
       setResolvedMode('cached');
@@ -418,7 +466,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
       return;
     }
     const selected = projectId;
-    if (!window.confirm(`下载并配置本机生产环境？\n目录：${storage.root}\n完整清单约 ${fmtBytes(catalog?.total_bytes ?? 0)}，已校验复用的模型与缓存不会重复下载。\n将独立安装固定版本的程序、节点及缺少的模型，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
+    const productionComponents = productionCatalogComponents(catalog?.components ?? []);
+    const productionBytes = productionComponents.reduce((sum, component) => sum + component.bytes, 0);
+    if (!window.confirm(`准备本机 H3 生产环境？\n目录：${storage.root}\n本次只包含 H3 出片所需程序和权重，约 ${fmtBytes(productionBytes)}；ASR/VLM 仅用于建议审片，不会自动下载。已校验复用的模型与缓存不会重复下载。\n将独立安装缺少的固定版本组件，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
     void run(async () => {
       const ensureCurrent = () => {
         if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
@@ -440,9 +490,9 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         }
         const ready = await api<Readiness>('/setup/readiness');
         if (!ready.layers.some(layer => layer.layer === 'L2_files_verified' && layer.status === 'READY')) {
-          setProgress('下载并校验模型与组件（可耗时较长，请保持页面打开）…');
+          setProgress('准备 H3 出片所需程序与权重；ASR/VLM 建议审片模型不在本次下载内…');
           const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
-            components: catalog?.components.map(c => c.component_id) ?? [], project_id: selected, disk_free: storage.free_bytes,
+            components: productionComponents.map(component => component.component_id), project_id: selected, disk_free: storage.free_bytes,
           }));
           ensureCurrent();
           await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');
@@ -516,7 +566,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
           <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '工作台尚未配置就绪；这不代表本机没有安装 ComfyUI 或模型。'}</p>}
           <h3>本机已有模型</h3>
-          <p className="env-model-note">来自固定清单与已有目录检查；路径、大小、哈希等详情在下方高级区。</p>
+          <p className="env-model-note">画面检查和语音转写只提供建议；缺失时留待人工复核，不阻断 H3 出片。默认安装只准备 H3 所需组件，不会自动下载 ASR/VLM 审片模型。</p>
           <div className="env-model-grid">
             {modelCards.map((card) => (
               <div className="env-model-card" key={card.key}>
@@ -554,7 +604,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
                   节点修订版本{existingScan.software.node_revisions_verified ? '已核验' : '待核验'}。
                 </p>}
                 <p>候选可复用 {existingScan.matches.length} 项（{fmtBytes(existingScan.candidate_bytes)}，{existingResolved ? '哈希结果见下方' : '待哈希校验'}）；未找到固定版本文件 {existingScan.missing.length} 项。</p>
-                <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{row.status === 'INSTALLED_HASH_MATCH' ? '已安装，哈希匹配' : row.status ? '哈希不匹配或文件已变化' : existingResolved ? '哈希结果见上方' : '待哈希校验'}</li>)}</ul>
+                <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{row.status === 'INSTALLED_HASH_MATCH' ? '已安装，哈希匹配' : row.status === 'CACHED' ? '已校验并缓存' : row.status === 'HASH_MISMATCH' || row.status === 'HASH_MISMATCH_OR_CHANGED' ? '哈希不匹配或文件已变化' : existingResolved ? '哈希结果待确认' : '待哈希校验'}</li>)}</ul>
                 <details><summary>查看未找到的固定版本模型</summary><ul>{existingScan.missing.map(row =>
                   <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path} · {fmtBytes(row.size)}</li>)}</ul></details>
                 <button className="secondary-button" disabled={existingResolved}

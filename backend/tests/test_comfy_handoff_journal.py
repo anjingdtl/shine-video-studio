@@ -195,6 +195,96 @@ def test_restart_does_not_trust_activity_after_release_check(handoff, monkeypatc
         )
 
 
+def test_stopped_handoff_releases_the_gpu_without_turning_a_failure_into_a_pass(handoff, monkeypatch):
+    """A dead renderer after STOPPED frees the GPU; the failed job stays NEEDS_REVIEW."""
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    fail_handoff(factory, attempt_id, "COMFY_RESTART_OUTCOME_UNCONFIRMED")
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+
+    findings = handoff_startup.reconcile_stopped_handoffs(factory)
+
+    assert findings == [{"attempt_id": attempt_id, "job_id": job_id, "action": "released"}]
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+        assert db.get(AppSetting, "handoff:" + attempt_id).value["stage"] == "RECONCILE_COMPLETE"
+        job = db.get(Job, job_id)
+        assert job.status == "NEEDS_REVIEW"
+        assert job.failure_code == "COMFY_HANDOFF_RECONCILIATION_REQUIRED"
+
+
+def test_live_renderer_keeps_a_failed_handoff_blocked(handoff, monkeypatch):
+    """A renderer whose ownership is still provable must never be released by inference."""
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    fail_handoff(factory, attempt_id, "COMFY_RESTART_OUTCOME_UNCONFIRMED")
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "4")
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+
+    assert handoff_startup.reconcile_stopped_handoffs(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+        assert db.get(AppSetting, "handoff:" + attempt_id).value["stage"] == "RECONCILE_REQUIRED"
+
+
+def test_advisory_only_handoff_restarts_without_a_review_receipt(handoff):
+    """A project that requested no model review still restarts from the stopped GPU state."""
+    from types import SimpleNamespace
+
+    from shine.comfyops.handoff_preparation import HandoffSession
+    from shine.comfyops.resource_epoch import read_epoch
+    from shine.models import Project
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED"),
+                          ("STOPPED", "PHYSICAL_READY"), ("PHYSICAL_READY", "REVIEW_INTENT")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    with factory.begin() as db:
+        db.get(Project, db.get(Job, job_id).project_id).quality_policy = {
+            "require_semantic_review": False, "require_style_review": False,
+            "require_audio_review": False, "advisory_model_reviews": True,
+        }
+    calls = {}
+
+    def restore(review_verification, **kwargs):
+        calls["review_verification"] = review_verification
+        calls["gpu_uuid"] = kwargs.get("gpu_uuid")
+        return object(), {"process": {"pid": 456, "birth": "7"}, "review_stage_id": None,
+                          "model_reviewed": False}
+
+    supervisor = SimpleNamespace(restore_after_review=restore)
+    session = HandoffSession(factory, None, job_id, attempt_id, lease_id,
+                             SimpleNamespace(check=lambda: None), supervisor, "GPU-test", 1, 1)
+    with factory() as db:
+        session.last_verified_epoch = read_epoch(db)
+
+    _replacement, evidence = session.finish(required_kinds=set())
+
+    assert calls == {"review_verification": None, "gpu_uuid": "GPU-test"}
+    assert session.finished is True
+    assert evidence["model_reviewed"] is False
+    with factory() as db:
+        journal = db.get(AppSetting, "handoff:" + attempt_id)
+        assert journal.value["stage"] == "RESTARTED"
+        assert journal.value["evidence"]["REVIEW_FINISHED"]["model_review_skipped"] == "ADVISORY_ONLY"
+
+
 def test_review_release_rejects_later_activity_on_same_lease(handoff, monkeypatch):
     import hashlib
     from types import SimpleNamespace

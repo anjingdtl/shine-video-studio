@@ -322,14 +322,12 @@ class HandoffSession:
                 raise HTTPException(409, "HANDOFF_JOB_CLAIM_LOST")
             request = RenderRequest.model_validate(job.request)
             policy = QualityPolicy.from_dict(project.quality_policy)
-            if request.self_review_scope == "basic":
-                required = ({"VLM"} if request.shot_spec.characters else set()) | (
-                    {"ASR"} if request.shot_spec.dialogue else set())
-            else:
-                required = ({"VLM"} if policy.require_semantic_review or policy.require_style_review else set()) | (
-                    {"ASR"} if policy.require_audio_review and request.shot_spec.dialogue else set())
-        required.update(required_kinds)
-        if (self.finished or not self.accepted or not required.issubset(self.accepted)
+            required = set() if policy.advisory_model_reviews else (
+                ({"VLM"} if policy.require_semantic_review or policy.require_style_review else set()) | (
+                    {"ASR"} if policy.require_audio_review and request.shot_spec.dialogue else set()))
+        if not policy.advisory_model_reviews:
+            required.update(required_kinds)
+        if (self.finished or not required.issubset(self.accepted)
                 or set(self.accepted) != set(self.review_requests)):
             raise HTTPException(409, "HANDOFF_REQUIRED_REVIEW_MISSING")
         from shine.comfyops.resource_epoch import read_epoch
@@ -342,11 +340,17 @@ class HandoffSession:
         self._check_review_releases()
         record_handoff_stage(self.factory, self.attempt_id, "REVIEW_INTENT", "REVIEW_FINISHED", {
             "reviews": list(self.accepted.values()), "is_mock": any(item["is_mock"] for item in self.accepted.values()),
+            **({} if self.review_requests else {"model_review_skipped": "ADVISORY_ONLY"}),
         }, settings=self.settings)
         record_handoff_stage(self.factory, self.attempt_id, "REVIEW_FINISHED", "RESTART_INTENT", {},
                              settings=self.settings)
+        # Advisory-only projects may have requested no review at all; the
+        # stopped renderer is then the physical boundary, so the restart is
+        # authorised by its verified GPU release rather than a review receipt.
+        review_release = self.last_request if self.review_requests else None
         replacement, evidence = self.supervisor.restore_after_review(
-            self.last_request, min_ram_mb=self.min_ram_mb, min_vram_mb=self.min_vram_mb,
+            review_release, min_ram_mb=self.min_ram_mb, min_vram_mb=self.min_vram_mb,
+            gpu_uuid=None if review_release else self.gpu_uuid,
         )
         self.guard.check()
         record_handoff_stage(self.factory, self.attempt_id, "RESTART_INTENT", "RESTARTED", evidence,
@@ -369,7 +373,7 @@ class ManagedReviewCoordinator:
         if (not isinstance(supervisor, RendererSupervisor) or not isinstance(instance_id, str) or not instance_id
                 or not isinstance(gpu_uuid, str) or not gpu_uuid or type(min_ram_mb) is not int or min_ram_mb <= 0
                 or type(min_vram_mb) is not int or min_vram_mb <= 0 or not isinstance(review_configs, dict)
-                or not review_configs or not set(review_configs).issubset({"ASR", "VLM"})):
+                or not set(review_configs).issubset({"ASR", "VLM"})):
             raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
         self.supervisor, self.instance_id, self.history_dir, self.gpu_uuid = (
             supervisor, instance_id, Path(history_dir), gpu_uuid
@@ -387,8 +391,9 @@ class ManagedReviewCoordinator:
                project_id, semantic, asr):
         from shine.comfyops.model_calls import TrackedProvider
 
-        selected = {kind: provider for kind, provider in (("VLM", semantic), ("ASR", asr)) if provider is not None}
-        if self.session is not None or not selected or not set(selected).issubset(self._review_configs):
+        selected = {kind: provider for kind, provider in (("VLM", semantic), ("ASR", asr))
+                    if provider is not None and kind in self._review_configs}
+        if self.session is not None:
             raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
         ports = [urlsplit(self._review_configs[kind]["base_url"]).port for kind in selected]
         if len(ports) != len(set(ports)):
@@ -453,6 +458,11 @@ def prepare_review_handoff(factory, settings, job_id, attempt_id, lease_id, inst
         record_handoff_stage(factory, attempt_id, "PHYSICAL_READY", "REVIEW_INTENT", {}, settings=settings)
         session = HandoffSession(factory, settings, job_id, attempt_id, lease_id, guard, supervisor, gpu_uuid,
                                  min_ram_mb, min_vram_mb)
+        from shine.comfyops.resource_epoch import read_epoch
+        with factory() as db:
+            # Fence the no-review path too: when no reviewer loads, the
+            # renderer's stopped physical state is the baseline to preserve.
+            session.last_verified_epoch = read_epoch(db)
         yield session
         if not session.finished:
             # A caller that exits early cannot release the shared resource.

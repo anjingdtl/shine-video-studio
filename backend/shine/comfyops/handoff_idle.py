@@ -1,5 +1,6 @@
 """Keep a completed managed handoff exclusive while its renderer is fenced."""
 
+import logging
 import os
 from datetime import timedelta
 from threading import Event, RLock, Thread
@@ -13,6 +14,8 @@ from shine.comfyops.installer import process_identity
 from shine.comfyops.models import ComfyInstance, ResourceLease
 from shine.comfyops.resource_epoch import read_epoch
 from shine.models import AppSetting, utcnow
+
+logger = logging.getLogger(__name__)
 
 
 class IdleHandoffKeeper:
@@ -37,14 +40,34 @@ class IdleHandoffKeeper:
         lease = db.get(ResourceLease, value.get("resource_id")) if value.get("resource_id") else None
         instance = db.get(ComfyInstance, value.get("instance_id")) if value.get("instance_id") else None
         payload = instance.payload if instance else {}
-        if (value.get("stage") != "RESTARTED" or value.get("attempt_id") != self.attempt_id
-                or value.get("worker_pid") != os.getpid() or not value.get("worker_birth")
-                or process_identity(os.getpid()) != value.get("worker_birth")
-                or not lease or lease.owner != "h3:" + value.get("job_id", "")
-                or lease.status != "ACTIVE" or not lease.exclusive or lease.expires_at <= utcnow()
-                or not instance or instance.sha256 != value.get("restarted_instance_sha256")
-                or graph_hash(payload) != instance.sha256 or payload.get("managed") is not True
-                or payload.get("is_mock") is not False or read_epoch(db) != value.get("resource_epoch")):
+        try:
+            same_worker = process_identity(os.getpid()) == value.get("worker_birth")
+        except (OSError, ValueError):
+            same_worker = False
+        now = utcnow()
+        owner = "h3:" + str(value.get("job_id") or "")
+        checks = {
+            "stage": value.get("stage") == "RESTARTED",
+            "attempt": value.get("attempt_id") == self.attempt_id,
+            "worker_pid": value.get("worker_pid") == os.getpid(),
+            "worker_birth": bool(value.get("worker_birth")) and same_worker,
+            "lease_owner": lease is not None and lease.owner == owner,
+            "lease_active": (lease is not None and lease.status == "ACTIVE"
+                             and bool(lease.exclusive) and lease.expires_at > now),
+            "instance": instance is not None and instance.sha256 == value.get("restarted_instance_sha256"),
+            "payload_sha": instance is not None and graph_hash(payload) == instance.sha256,
+            "payload_flags": payload.get("managed") is True and payload.get("is_mock") is False,
+            "epoch": read_epoch(db) == value.get("resource_epoch"),
+        }
+        failed = [name for name, ok in checks.items() if not ok]
+        if failed:
+            # The reason code alone hid which fence failed; operators reconcile
+            # from this line, so name the exact checks without leaking payloads.
+            logger.error(
+                "handoff_idle_binding_failed attempt_id=%s checks=%s lease_status=%s exclusive=%s "
+                "expires_at=%s now=%s", self.attempt_id, failed, getattr(lease, "status", None),
+                getattr(lease, "exclusive", None), getattr(lease, "expires_at", None), now,
+            )
             raise HTTPException(409, "HANDOFF_IDLE_CLAIM_LOST")
         return value, dict(payload)
 
@@ -56,14 +79,21 @@ class IdleHandoffKeeper:
             db.execute(text("BEGIN IMMEDIATE"))
             current, current_payload = self._binding(db)
             if current != value or current_payload != payload:
+                logger.error("handoff_idle_recheck_changed attempt_id=%s journal_changed=%s instance_changed=%s",
+                             self.attempt_id, current != value, current_payload != payload)
                 raise HTTPException(409, "HANDOFF_IDLE_CLAIM_LOST")
             lease = db.get(ResourceLease, current["resource_id"])
             now = utcnow()
             lease.heartbeat_at, lease.expires_at = now, now + timedelta(seconds=self.lease_seconds)
 
-    def _fail(self):
+    def _fail(self, error: BaseException | None = None):
         self._error = "HANDOFF_IDLE_RECONCILIATION_REQUIRED"
         self._stop.set()
+        if error is not None:
+            # The journal only keeps a fixed reason code; the operator needs the
+            # real cause to reconcile without guessing.
+            logger.error("handoff_idle_failed attempt_id=%s error=%s: %s",
+                         self.attempt_id, type(error).__name__, error)
         fail_handoff(self.factory, self.attempt_id, self._error)
 
     def check(self):
@@ -72,8 +102,8 @@ class IdleHandoffKeeper:
                 raise HTTPException(409, "HANDOFF_IDLE_RECONCILIATION_REQUIRED")
             try:
                 self._pulse()
-            except Exception:
-                self._fail()
+            except Exception as error:
+                self._fail(error)
                 raise
 
     def _run(self):
@@ -90,8 +120,8 @@ class IdleHandoffKeeper:
         self._thread = Thread(target=self._run, name="shine-handoff-idle-heartbeat", daemon=True)
         try:
             self._thread.start()
-        except Exception:
-            self._fail()
+        except Exception as error:
+            self._fail(error)
             raise
         return self
 
@@ -100,8 +130,8 @@ class IdleHandoffKeeper:
             self.check()
             try:
                 result = operation()
-            except Exception:
-                self._fail()
+            except Exception as error:
+                self._fail(error)
                 raise
             self._transferred = True
             self._stop.set()
@@ -111,6 +141,24 @@ class IdleHandoffKeeper:
                 self._fail()
                 raise HTTPException(409, "HANDOFF_IDLE_KEEPER_EXIT_UNCONFIRMED")
         return result
+
+    def stop_renewal(self):
+        """Stop the heartbeat before an explicitly proven release.
+
+        The lease stays held and is never released here; the caller must still
+        stop the owned renderer and prove the physical release afterwards. If
+        that proof fails the unrenewed lease expires instead of being revived.
+        """
+        with self._lock:
+            if self._error:
+                raise HTTPException(409, "HANDOFF_IDLE_RECONCILIATION_REQUIRED")
+            self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                self._fail()
+                raise HTTPException(409, "HANDOFF_IDLE_KEEPER_EXIT_UNCONFIRMED")
+        return {"renewal_stopped": True}
 
     def finalize(self):
         """End the idle hold after an explicit verified release of the renderer.

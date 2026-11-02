@@ -25,6 +25,8 @@ from tests.conftest import (
     COMFY_GRAPH,
     PNG,
     create_project,
+    ffmpeg_executable,
+    ffprobe_executable,
     freeze_style,
     make_test_video_bytes,
 )
@@ -127,12 +129,16 @@ def fake_comfy():
 
 
 def worker_settings(settings: Settings) -> Settings:
+    ffprobe = ffprobe_executable()
+    ffmpeg = ffmpeg_executable()
+    if not ffprobe or not ffmpeg:
+        pytest.skip("full offline production E2E requires FFprobe and FFmpeg")
     return Settings(
         data_dir=settings.data_dir,
         database_url=settings.database_url,
         secret_store_dir=settings.secret_store_dir,
-        ffprobe_path="missing-ffprobe",
-        ffmpeg_path="missing-ffmpeg",
+        ffprobe_path=ffprobe,
+        ffmpeg_path=ffmpeg,
         render_provider="comfyui",
     )
 
@@ -327,8 +333,9 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     asr = ScriptedASR("你终于来了。码头那边灯塔还亮着。")
     client_kwargs = {"comfy_client": ComfyUIClient(fake_comfy.base_url, timeout_s=2)}
 
-    # 10-13. The first job renders, the fake ComfyUI produces media, the
-    #        technical QC runs and the mock semantic review finds a style drift.
+    # 10-13. The first job renders and passes deterministic technical QC.
+    #        The mock VLM's style finding remains advisory and does not trigger
+    #        an automatic repair or hold the dependent shot.
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=float(first["spec"]["duration_target_s"]))
     assert (
         run_one(
@@ -342,68 +349,35 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
         == job_first["id"]
     )
     first_state = client.get(f"/api/v1/jobs/{job_first['id']}").json()
-    assert first_state["status"] == "QUEUED", (
-        first_state,
-        client.get(f"/api/v1/projects/{project_id}/events", params={"limit": 50}).json(),
-    )
-    assert first_state["semantic_retries"] == 1
-    assert first_state["repairs"][0]["outcome"] == "auto_queued"
+    assert first_state["status"] == "PASSED"
+    assert first_state["semantic_retries"] == 0
+    assert first_state["repairs"] == []
+    assert first_state["acceptance_status"] != "accepted"
+    assert len(first_state["attempts"]) == 1
     assert fake_comfy.prompt_count == 1
 
-    # 14-17. The repair produced a materially different request; the new
-    #         attempt is executed by the fake ComfyUI and re-checked.
-    assert (
-        run_one(
-            factory,
-            settings=offline,
-            worker_id="worker-e2e",
-            semantic_reviewer=reviewer,
-            asr_reviewer=asr,
-            **client_kwargs,
-        )
-        == job_first["id"]
-    )
-    first_state = client.get(f"/api/v1/jobs/{job_first['id']}").json()
-    assert first_state["status"] == "PASSED"
+    # A pending model suggestion stays visible in the quality ledger while
+    # acceptance remains pending human review.
     assert first_state["quality_verification"] == "mock_verified"
-    attempts = first_state["attempts"]
-    assert len(attempts) == 2
-    assert attempts[0]["request_fingerprint"] != attempts[1]["request_fingerprint"]
-    assert attempts[0]["prompt_sha256"] != attempts[1]["prompt_sha256"]
-    assert attempts[1]["attempt_kind"] == "repair"
-    assert attempts[1]["repair_reason"]
-    assert fake_comfy.prompt_count == 2
 
     gates = client.get(f"/api/v1/jobs/{job_first['id']}/quality-gates").json()
     assert {"technical", "semantic", "audio", "style", "final"}.issubset({gate["gate_name"] for gate in gates})
-    # The ledger keeps one row per gate and attempt. The first attempt failed
-    # the semantic gate, the repaired attempt passed every gate.
+    # The advisory finding is preserved without becoming a production pass.
     finals = [gate for gate in gates if gate["gate_name"] == "final"]
-    assert [gate["status"] for gate in finals] == ["failed", "passed"]
-    final_gate = finals[-1]
-    assert final_gate["status"] == "passed"
+    assert len(finals) == 1
+    final_gate = finals[0]
+    assert final_gate["status"] == "needs_review"
     assert final_gate["evidence"]["verification"] == "mock_verified"
+    assert {"semantic", "style"}.issubset(set(final_gate["evidence"]["advisory_pending_human_review"]))
 
-    # The upstream re-render invalidated the dependent job. Its validity is
-    # recomputed, never silently reused.
-    invalidated = client.get(f"/api/v1/jobs/{job_second['id']}").json()
-    assert invalidated["stale"] is True
-    assert invalidated["status"] == "NEEDS_REVIEW"
-    assert invalidated["failure_code"] == "DEPENDENCY_INVALIDATED"
+    # The dependent job is still eligible because an advisory VLM finding did
+    # not mark the passed source job stale.
+    waiting = client.get(f"/api/v1/jobs/{job_second['id']}").json()
+    assert waiting["stale"] is False
+    assert waiting["status"] == "PLANNED"
 
-    # 18-19. The dependent shot is re-queued and runs once its parent passed.
-    job_second_retry = client.post(
-        f"/api/v1/projects/{project_id}/jobs",
-        json={
-            "shot_id": second["id"],
-            "provider": "comfyui",
-            "workflow_profile_id": profile_id,
-            "depends_on": [job_first["id"]],
-        },
-    )
-    assert job_second_retry.status_code == 201, job_second_retry.text
-    job_second = job_second_retry.json()
-    assert job_second["status"] == "QUEUED"
+    # 18-19. The dependent shot runs after the worker promotes its completed
+    #        prerequisite; its acknowledgement is deliberately lost.
     fake_comfy.mode = "accept_then_drop"
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=float(second["spec"]["duration_target_s"]))
     assert (
@@ -421,7 +395,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     # The acknowledgement was lost, so the job is blocked for reconciliation.
     assert second_state["status"] == "NEEDS_REVIEW"
     assert second_state["failure_code"] == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
-    assert fake_comfy.prompt_count == 3
+    assert fake_comfy.prompt_count == 2
 
     # 20. The worker restarts and reconciles the lost acknowledgement. The
     #     original external task is collected; nothing is rendered again.
@@ -434,7 +408,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
         **client_kwargs,
     )
     assert recovered == 1
-    assert fake_comfy.prompt_count == 3
+    assert fake_comfy.prompt_count == 2
     second_state = client.get(f"/api/v1/jobs/{job_second['id']}").json()
     assert second_state["status"] in {"PASSED", "QC_PENDING", "NEEDS_REVIEW"}
     assert second_state["artifact_id"]
@@ -459,7 +433,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
             elif job.stale:
                 # An invalidated job never received a result.
                 assert job.artifact_id is None
-    assert len(fake_comfy.prompts) == 3
+    assert len(fake_comfy.prompts) == 2
     # Every reference upload belongs to the shot that declared it.
     uploaded_names = sorted(upload["filename"] for upload in fake_comfy.uploads)
     assert any("林岚" not in name for name in uploaded_names)
@@ -482,7 +456,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
         "SUBMIT_INTENT",
         "COMFY_ACKNOWLEDGED",
         "COMFY_ARTIFACT_QC",
-        "AUTO_REPAIR_QUEUED",
+        "ADVISORY_MODEL_REVIEW_PENDING",
         "SUBMISSION_REQUIRES_RECONCILIATION",
         "COMFY_RECONCILED_HISTORY",
     ):
@@ -505,10 +479,10 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
         "uploads": fake_comfy.upload_count,
         "mock_marker": "mock_verified",
     }
-    repaired = next(job for job in report["jobs"] if job["id"] == job_first["id"])
-    assert repaired["request_revision"] == 2
-    assert repaired["attempts"] == 2
-    assert report["external_prompts"] == 3
+    completed = next(job for job in report["jobs"] if job["id"] == job_first["id"])
+    assert completed["request_revision"] == 1
+    assert completed["attempts"] == 1
+    assert report["external_prompts"] == 2
     assert report["mock_marker"] == "mock_verified"
 
 

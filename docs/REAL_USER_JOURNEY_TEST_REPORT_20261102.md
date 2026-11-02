@@ -1,5 +1,68 @@
 # 真人模拟验收测试报告（2026-11-02，本轮暂停版）
 
+## 最终续验（2026-11-03 凌晨）：真实 Web 用户旅程跑通
+
+本轮由接手 Agent 用本机内置浏览器（agent-browser 驱动 Chrome）**真实点击工作台界面**完成，不再用直接 API 调用代替用户操作。API `127.0.0.1:8110`、Web `127.0.0.1:5191`、常驻 Worker 与本地 Ref2VA INT8 渲染器均取自当前源码。
+
+### 真实三镜连续制作（界面发起）
+
+- `PASS_REAL_USER`：在「分镜与任务」勾选 3 个镜头，点击「开始制作影片（3 镜）」。系列 `51f22d82-fcc1-4baf-937d-51ea1e1cbdef` 进入 `RUNNING`，页面逐镜推进到 `COMPLETED 3/3`，`finalization_state=RELEASED`。
+- `PASS_REAL_MODEL`：三镜均由本地 MiniMax-H3 Ref2VA INT8 真实生成（`is_mock=0`），任务 `5d34125f`（3,268,307 B）、`5c6af42b`（3,347,674 B）、`dc346aff`（4,092,989 B），每镜技术质检 `technical=passed`。
+- 审计链完整：`PRODUCTION_SERIES_CREATED → COMFY_STARTUP_INTENT/RUNNING → COMFY_SUBMIT_INTENT/ACKNOWLEDGED → COMFY_OUTPUT_PERSISTED → COMFY_HANDOFF_STAGE(DRAIN→STOP→REVIEW→RESTART) → COMFY_HANDOFF_JOB_RESERVED → 下一镜`，最后一镜结束后停止渲染器并一次性释放独占租约。
+- `PASS_SOFTWARE`：建议式审片闸门保持 `semantic/audio/style=not_run`、`final=needs_review`、`required=0`；硬性 `technical` 仍为 `passed`。这是项目策略下的正常结果，不等于审美/对白已通过人工审核。
+
+### 自动装配与播放/导出（界面验证）
+
+- 自动交付订单 `74b12db5-82f0-46e7-8078-26cf634d15be` 状态 `DELIVERED`，成片产物 `e64ba9fd-8676-445e-8a45-8407bffa8b99`，SHA-256 `9039fc307f3dee89d09039a7f50dd603a36d460efd1bfde38f05f914a370e99c`，9,927,251 B，`21.895996 s`，768×1344，24 fps，AAC 48 kHz 双声道（ffprobe 实测）。
+- `PASS_REAL_USER`：在「成片与导出」页面加载该成片，浏览器媒体栈 `readyState=4`、`videoWidth=768`、`videoHeight=1344`、`duration=21.896`、无播放错误；触发播放后 `paused=false`、`currentTime` 持续前进。
+- 导出链接指向 `/api/v1/deliveries/{id}/media`，在页面上下文实测返回 `200 video/mp4`、`Content-Disposition: attachment`、9,927,251 B，与产物字节一致。自动化 CLI 的下载捕获被无头浏览器取消，因此**不声称**已通过自动化保存文件；导出端点与链接本身已验证。
+
+### 本轮发现并修复的真实缺陷
+
+| 缺陷 | 触发场景 | 修复 | 回归 |
+|---|---|---|---|
+| `COMFY_RESTART_REQUEST_INVALID` | 项目为建议式审片且本机无审片模型时，交接仍要求“审片释放凭据”才允许重启 | `restore_after_review` 支持“无审片阶段”的物理边界（仍验证进程已停、端口已释放、显存已回收） | `test_advisory_only_handoff_restarts_without_a_review_receipt` |
+| `HANDOFF_IDLE_CLAIM_LOST` → 租约永久卡死 | 结束受管运行时先停渲染器、后停租约心跳，心跳在停机窗口判定渲染器丢失 | `IdleHandoffKeeper.stop_renewal()`：先停续期 → 再停渲染器 → 证明释放 → 再释放租约；失败时租约自然过期而非被复活 | `test_release_stops_renewal_before_stopping_the_renderer` |
+| `COMFY_RESTART_OUTCOME_UNCONFIRMED` | 真实渲染器重启偶发超过 30 秒才监听 | 重启等待上限由 30 s 放宽到 120 s（与首次受管启动的等待策略一致） | 现有 supervisor 回归 |
+| 系列镜头被普通队列单独抢跑，系列错位并 `SERIES_INCOMPLETE` | 系列任务同时留在普通队列，`run_one` 未排除系列所属任务 | `run_one` 排除 `ProductionSeriesItem` 所属任务；取消系列时把其 `QUEUED` 任务置 `stale` | 全量后端回归 |
+| 已停机交接失败后租约无人可解 | 渲染后交接失败，任务 `NEEDS_REVIEW`、租约 `RECONCILE_REQUIRED`，界面无释放入口 | `reconcile_stopped_handoffs`：仅当记录的渲染器进程已死且端口空闲时释放租约，任务保持 `NEEDS_REVIEW` | `test_stopped_handoff_releases_the_gpu_without_turning_a_failure_into_a_pass`、`test_live_renderer_keeps_a_failed_handoff_blocked` |
+| 看守失败原因不可诊断 | 只记录固定原因码 | 记录具体未通过的校验项与租约状态/到期时间；记录循环与释放决策 | 手工复现确认 |
+
+### 本轮测试结果（当前源码）
+
+- 后端全量：`backend\.venv\Scripts\python.exe -m pytest -c backend/pyproject.toml backend/tests -ra --tb=short` → **1432 passed、1 skipped、2 warnings，exit 0，716.30 s**。跳过项 `test_real_managed_startup.py:85` 需 `SHINE_REAL_COMFY_PROBE=1` 与本机 ComfyUI。
+- 前端全量：**90 passed（15 个测试文件）**；`npm run build`（tsc + Vite）**通过**。
+- `ruff check backend/shine backend/tests`：**通过**。
+- 隔离库 Alembic：`upgrade head` 与 `check` 均**通过**（`No new upgrade operations detected`）。
+- 未提交、未推送；`.local-acceptance/` 仍在 `.gitignore` 内，无媒体/数据库/密钥进入 Git 索引。
+
+### 仍未完成 / 不能声称的部分
+
+- ASR/VLM 建议式审片资源未安装，`semantic/audio/style` 为 `not_run`，`final=needs_review`；`acceptance_status` 为 `pending_review`，**不是** `accepted`。
+- 该验收项目没有预生产计划（走 legacy 契约），因此 `comfyops.preproduction.enforce` 为既有的“无计划即放行”路径；本轮**不声称**已完成“分析过的项目”全链路验收。
+- 审美、版权与发布审批仍为 `PENDING_HUMAN`。真实 H3 只在本机 RTX 5080 上验证。
+- 不签发 `REAL_USER_JOURNEY_ALL_PASS`：核心用户旅程已真实跑通，但建议审片未执行、人工审片/版权未决，且导出仅验证端点与页面链接，未由自动化保存文件。
+
+## 续验更新（2026-11-02 晚间）
+
+### 后续真实 Agent 与分镜进展
+
+- `PASS_REAL_MODEL`：在更新后的隔离 API / Codex 内置浏览器中，编剧、导演、摄影、场记、剪辑五个真实 MiniMax Agent 完成；页面逐项显示 HTTP 200 / 服务商代码 0，进度按完成角色而非虚构模型内部百分比显示。单次输出预算为 100,000 tokens，低于配置或模型已知更低上限时取更低值。
+- `PASS_REAL_USER`：经页面复核英文事实和七项英文风格草案后，点击应用创建 3 个分镜：`428332e1-c1c0-4f8a-958e-5c2a05242178`、`9d445e05-ab7d-40ce-b932-5a97ea93d7cf`、`d6e265a3-4f0b-4797-8f32-5b5838affc14`。每镜 7.2 秒，均保存人物、场景、怀表和声音 4 项绑定；第二镜为 `last_frame`，原中文事实与冻结风格仍保留。实际生成、连续性画面和视觉质量尚未验证。
+- 发现并修复中文冻结风格、锁定事实及素材显示名直接进入英文 H3 描述导致应用分镜失败的问题；译文作为需核对的草案进入镜头修订，原始风格快照和事实不被改写。临时数据库副本的三镜头应用仅作故障复现，不计入真实验收。
+- `BLOCKED`：三图一音候选 Profile `79bdd263-68fd-4e18-96a1-48065066be24` 由页面登记，API 图结构检查通过；它扩展自现有 API 图并参考本机节点定义，**未通过实时节点或真实生成验证**。登记后图哈希 `8df95767beda99ee7896888d5bc1c6e608053ef2d0391478c91a7df73d355273`；导入前候选序列化哈希不同，解析后的图对象相等。未启动 H3 推理、未下载或替换权重。
+- 保留两项未知远端任务：摄影 `b789edde-c08b-4bba-9abd-ffdff9d2e877` 和场记 `637fce4e-c3d2-4198-ae33-1191311deed1`；均不得原样重放。不同剧情修订的新请求另行记录。
+- 代码继续变化后的最终完整后端、前端全套与构建以本次最新运行结束摘要为准；中途启动且跨源码变更的 pytest 不作为最终源码全套通过证据。
+
+- 总判定仍为 **`PARTIAL`**。当前 HEAD 为 `f076d71a0cb2a50a898083cef88afba6de181f90`，本地 `origin/main` 为 `b943780eb9bdedfad927ca80f10af93d947efc24`；HEAD 多出的提交仅记录暂停交接，原有大量未提交修改均保留。
+- 隔离数据库和内置浏览器的 Agent 运行记录只读对账：摄影任务 `b789edde-c08b-4bba-9abd-ffdff9d2e877` 为 `NEEDS_REVIEW / LLM_TIMEOUT`，`external_outcome=UNKNOWN`，`automatic_replay=false`，无任务产物。未重放。该任务及页面所示验收作品实际关联 ID 为 `b6f22954-258e-4544-ad89-c4e8862387e8`；交接文字中的 `b6f22954-258e-4544-ad89-4c2e8862387e` 与数据库不一致。
+- `PASS_SOFTWARE`：SetupPanel 定向 15 项通过；修正扫描阶段 `PENDING_HASH` 被误报为哈希不匹配后，前端全套 88 项通过，`npm run build` 通过。`ruff check backend/shine backend/alembic backend/tests` 通过，修复仅为 `test_workflow.py` 导入排序。
+- `PASS_REAL_USER`（页面状态范围）：Codex 内置浏览器的隔离工作台显示 VLM `1/13`、ASR `3/10` 未就绪且不阻断 H3；默认安装说明不自动下载 ASR/VLM。页面恢复既有 41 GB 哈希核验结果，未重新读取权重、复制或下载；再次扫描时逐文件显示“待哈希校验”。这不证明 H3 运行时或视频生成通过。
+- `BLOCKED`：实际验收项目仍无已登记 Workflow Profile；数据库中另外两项属于另一个项目且 `validated_against` 为空。无有效分镜；没有启动 H3。真实三镜头、装配、播放和导出均 `NOT_RUN`。
+- `PASS_SOFTWARE`：从仓库根目录以独立 `SHINE_DATA_DIR` 运行 `backend\.venv\Scripts\python.exe -m pytest -c backend/pyproject.toml backend/tests -ra --tb=short`，最终 **1417 passed、1 skipped、2 warnings，exit 0，677.62 秒**。跳过项 `test_real_managed_startup.py:85` 需要 `SHINE_REAL_COMFY_PROBE=1` 和本机 ComfyUI；因此真实启动探测仍为 `NOT_RUN`。日志 `.local-acceptance/real-user-journey-final/logs/full-backend-pytest-continuation.log`。警告分别为 AnyIO 别名弃用与 SQLAlchemy 空主键告警。
+
+下方矩阵是暂停时的历史快照；前端、Ruff 和全量 pytest 状态以上述续验更新为准，真实生产链状态仍未改变。
+
 ## 判定
 
 **`PARTIAL`。本轮应用户要求中止，不能签发 `REAL_USER_JOURNEY_ALL_PASS`。** 下表只记录当前源码/本轮操作的证据；暂停前没有结论的测试统一标为 `UNKNOWN/INTERRUPTED` 或 `NOT_RUN`，不以进度百分比、旧报告、页面就绪徽标或 Mock 结果推断通过。

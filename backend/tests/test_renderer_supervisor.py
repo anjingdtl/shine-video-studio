@@ -874,7 +874,7 @@ def test_synthetic_review_release_restores_owned_renderer_without_releasing_leas
                     data_dir=settings.data_dir / "other" if with_intervening_event == "managed_wrong_data_dir"
                     else settings.data_dir, offline_simulation=with_intervening_event != "managed_mock_real")
                 if with_intervening_event in {
-                    "managed_missing_required", "managed_wrong_data_dir", "managed_mock_real"
+                    "managed_wrong_data_dir", "managed_mock_real"
                 }:
                     with pytest.raises(HTTPException):
                         run_managed_once(factory, "worker-next", prior, settings=effective_settings,
@@ -887,6 +887,18 @@ def test_synthetic_review_release_restores_owned_renderer_without_releasing_leas
                 result, next_coordinator = run_managed_once(factory, "worker-next", prior,
                     settings=effective_settings, comfy_service=service, asr_reviewer=NewProvider())
                 assert result == new_job_id
+                if with_intervening_event == "managed_missing_required":
+                    # Semantic/Style model review is advisory, so the actual
+                    # managed H3 submission still happens when that reviewer
+                    # is absent. The test intentionally makes technical tools
+                    # unavailable; that separate QC result remains pending.
+                    assert service.submissions == 1
+                    with factory() as db:
+                        job = db.get(Job, new_job_id)
+                        assert job.artifact_id
+                        assert job.failure_code != "HANDOFF_REQUIRED_REVIEW_MISSING"
+                    assert next_coordinator.keeper and next_coordinator.session.finished
+                    return
                 if with_intervening_event not in {"managed_worker", "managed_slow_prepare"}:
                     with factory() as db:
                         from sqlalchemy import select

@@ -127,7 +127,7 @@ class LLMScriptPlanner:
                 "Return schema-valid JSON only. Never invent user assets, approve assets, or change locked story "
                 "facts. Keep character names exactly as written in the script."
             ),
-            user=f"Title: {title}\nScript:\n{text[:60000]}",
+            user=f"Title: {title}\nScript:\n{text}",
             schema=schema,
         )
         plan = ScriptPlan.model_validate(response)

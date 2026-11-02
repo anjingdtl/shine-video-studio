@@ -400,6 +400,65 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 
 
+def advisory_review_readiness(settings: Settings) -> dict:
+    """Read-only inventory for optional local review resources.
+
+    Review models are suggestions, not prerequisites for H3 production. This
+    report checks only whether the pinned files and small runtime packages are
+    already present; it never downloads, copies, hashes multi-GB weights, or
+    changes activation readiness.
+    """
+    try:
+        catalog = load_default_catalog()
+        components = _component_map(catalog)
+        lock_path = REPO_ROOT / "config" / "review-decoder-lock.json"
+        decoder_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return {
+            role: {"status": "UNKNOWN", "model_id": component_id, "advisory": True,
+                   "code": "REVIEW_RESOURCE_INVENTORY_UNAVAILABLE"}
+            for role, component_id in REVIEW_COMPONENTS.items()
+        }
+
+    runtime_root = settings.comfyops_dir / "setup" / "review-runtime"
+    result = {}
+    for role, component_id in REVIEW_COMPONENTS.items():
+        component = components.get(component_id)
+        files = component.get("files", []) if component else []
+        model_root = (settings.comfyops_dir / "isolated-packages" / component_id).resolve()
+        present = 0
+        for item in files:
+            relative = Path(item.get("relative_path", ""))
+            try:
+                target = (model_root / relative).resolve(strict=True)
+                valid = (not relative.is_absolute() and ".." not in relative.parts
+                         and target.is_relative_to(model_root) and target.is_file()
+                         and target.stat().st_size == item.get("size"))
+            except (OSError, ValueError, TypeError):
+                valid = False
+            present += int(valid)
+
+        if role == "VLM":
+            runtime_roots = [root for package in decoder_lock.get("packages", [])
+                             for root in package.get("roots", [])]
+        else:
+            runtime_roots = ["qwen_asr", "qwen_asr-0.0.6.dist-info"]
+        runtime_missing = sorted(name for name in runtime_roots if not (runtime_root / name).is_dir())
+        model_ready = bool(files) and present == len(files)
+        runtime_ready = not runtime_missing
+        result[role] = {
+            "status": "READY" if model_ready and runtime_ready else "NOT_READY",
+            "model_id": component_id,
+            "advisory": True,
+            "model_files_present": present,
+            "model_files_expected": len(files),
+            "runtime_ready": runtime_ready,
+            "runtime_packages_missing": [Path(name).name.split("-")[0] for name in runtime_missing],
+            "code": None if model_ready and runtime_ready else "ADVISORY_REVIEW_RESOURCES_NOT_READY",
+        }
+    return result
+
+
 def generate_configuration(db, settings: Settings, project_id: str, *,
                            instance_name: str = 'shine-h3', port: int = 8188) -> dict:
     """Generate the instance-bound managed recipe, review manifests and .env entries.
@@ -414,29 +473,46 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     db.execute(text('BEGIN IMMEDIATE'))
     _require_project(db, project_id)
     instance = db.get(ComfyInstance, instance_identity('local', port))
+    adopted = bool(instance and instance.payload.get('adopted'))
     if (instance is None or not instance.payload.get('managed') or instance.payload.get('is_mock')
             or instance.payload.get('name') != instance_name
             or instance.payload.get('port') != port
-            or Path(instance.payload.get('root', '')).resolve()
-            != instance_root(settings, instance_name, 'local').resolve()):
+            or (not adopted and Path(instance.payload.get('root', '')).resolve()
+                != instance_root(settings, instance_name, 'local').resolve())):
         raise HTTPException(409, "MANAGED_INSTANCE_REQUIRED")
     payload = instance.payload
     if payload.get('process') or instance.status != 'STOPPED':
         raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
     from shine.comfyops.runtime_configuration import require_idle_configuration
     require_idle_configuration(db)
-    root = Path(payload["root"])
-    python = Path(root / ".venv" / "Scripts" / "python.exe")
+    root = Path(payload["root"]).resolve()
+    if adopted:
+        from shine.comfyops.adoption import adopted_installation_blockers
+        blockers = adopted_installation_blockers(instance, load_default_catalog())
+        if blockers:
+            raise HTTPException(409, {"code": "ADOPTED_INSTALLATION_CHANGED", "blockers": blockers})
+        python = Path(payload["python"]).resolve()
+    else:
+        python = root / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         raise HTTPException(409, "INSTANCE_VENV_MISSING")
     venv_python = str(python.resolve())
-    # 1) Deploy the pinned handoff adapter and the vendored sampling node.
+    # 1) Prepare the handoff adapter. Adoption only validates existing bytes;
+    # it never writes into the user's ComfyUI tree.
     adapter_dir = root / "custom_nodes" / "shine_comfy_handoff"
     results = []
-    for name in ("__init__.py", "barrier.py"):
-        results.append(_deploy_repo_file(ADAPTER_DIR / name, adapter_dir / name, what="HANDOFF_ADAPTER"))
-    results.append(_deploy_repo_file(SAMPLING_NODE, root / "custom_nodes" / "shine_h3_sampling_mode.py",
-                                     what="SAMPLING_NODE"))
+    if adopted:
+        if managed_recipe_adapter_identity(adapter_dir) != managed_recipe_adapter_identity(ADAPTER_DIR):
+            raise HTTPException(409, "EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH")
+        results.append({"status": "REUSED_EXISTING", "kind": "HANDOFF_ADAPTER"})
+        if not (root / "custom_nodes" / "shine_h3_sampling_mode.py").is_file():
+            raise HTTPException(409, "EXISTING_COMFY_SAMPLING_NODE_MISSING")
+        results.append({"status": "REUSED_EXISTING", "kind": "SAMPLING_NODE"})
+    else:
+        for name in ("__init__.py", "barrier.py"):
+            results.append(_deploy_repo_file(ADAPTER_DIR / name, adapter_dir / name, what="HANDOFF_ADAPTER"))
+        results.append(_deploy_repo_file(SAMPLING_NODE, root / "custom_nodes" / "shine_h3_sampling_mode.py",
+                                         what="SAMPLING_NODE"))
     # 2) GPU identity from the live probe — a generated recipe without the real
     # UUID would fail the renderer admission check at first production start.
     from shine.comfyops.host_env import probe_gpu
@@ -447,6 +523,18 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     setup_dir = settings.comfyops_dir / "setup"
     (setup_dir / "manifests").mkdir(parents=True, exist_ok=True)
     (setup_dir / "review-runtime").mkdir(parents=True, exist_ok=True)
+    runtime_data_root = (settings.comfyops_dir / "adopted-runtime" / graph_hash({
+        "root": str(root), "instance_id": instance.id,
+    })[:24]) if adopted else root
+    if adopted:
+        for folder in ("user/default/ComfyUI-Manager", "input", "output", "temp"):
+            (runtime_data_root / folder).mkdir(parents=True, exist_ok=True)
+        # An isolated offline Manager profile prevents catalog/network activity
+        # and keeps the user's own ComfyUI user directory untouched.
+        manager_config = runtime_data_root / "user/default/ComfyUI-Manager/config.ini"
+        if not manager_config.exists():
+            manager_config.write_text("[default]\nnetwork_mode=offline\nbypass_ssl=false\nsecurity_level=strong\n",
+                                     encoding="utf-8")
     recipe_path = setup_dir / "managed_recipe.json"
     adapter_identity = managed_recipe_adapter_identity(adapter_dir)
     whitelist = ["shine_comfy_handoff", "shine_h3_sampling_mode.py"]
@@ -455,17 +543,27 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     argv = [
         "{python}", str(REPO_ROOT / "scripts" / "managed_comfy_bootstrap.py"),
         "--listen", "127.0.0.1", "--port", "{port}",
+    ]
+    if adopted:
+        argv.extend([
+            "--user-directory", "{runtime_data_root}" + SEP + "user",
+            "--input-directory", "{runtime_data_root}" + SEP + "input",
+            "--output-directory", "{runtime_data_root}" + SEP + "output",
+            "--temp-directory", "{runtime_data_root}" + SEP + "temp",
+        ])
+    argv.extend([
         "--disable-async-offload", "--disable-pinned-memory",
         "--reserve-vram", "1",
         "--fast", "fp16_accumulation",
         "--disable-all-custom-nodes", "--whitelist-custom-nodes", *whitelist,
-    ]
+    ])
     renderer = {
         "instance_id": instance.id,
         "installation": {"id": instance.id, "sha256": instance.sha256},
         "python": venv_python,
         "root": str(root),
         "base_directory": str(root),
+        "runtime_data_root": str(runtime_data_root.resolve()),
         "bootstrap": str(REPO_ROOT / "scripts" / "managed_comfy_bootstrap.py"),
         "adapter_dir": str(adapter_dir),
         "adapter_sha256": adapter_identity,
@@ -476,7 +574,8 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "argv": argv,
         "pinned_files": [
             "{python}", "{root}" + SEP + "main.py", "{adapter_dir}" + SEP + "__init__.py",
-            "{adapter_dir}" + SEP + "barrier.py", "{bootstrap}",
+            "{adapter_dir}" + SEP + "barrier.py", "{root}" + SEP + "custom_nodes" + SEP
+            + "shine_h3_sampling_mode.py", "{bootstrap}",
         ],
     }
     reviews = {}
@@ -597,6 +696,14 @@ def installed_instance_blockers(db, settings, instance, catalog):
                 or attempt.payload.get("is_mock", True)
                 or attempt.payload.get("result") != payload):
             install_blockers.append("COMPLETED_REAL_INSTALL_EVIDENCE_REQUIRED")
+        if payload.get("adopted"):
+            from shine.comfyops.adoption import adopted_installation_blockers
+
+            if (payload.get("external_installation") is not True
+                    or payload.get("status_origin") != "USER_CONFIRMED_EXISTING_INSTALLATION"):
+                install_blockers.append("EXISTING_INSTALL_CONFIRMATION_REQUIRED")
+            install_blockers.extend(adopted_installation_blockers(instance, catalog))
+            return sorted(set(install_blockers))
         if (not root.is_relative_to((settings.comfyops_dir / "instances").resolve())
                 or not (root / ".venv/Scripts/python.exe").is_file()
                 or not (root / "main.py").is_file()
@@ -611,6 +718,10 @@ def installed_instance_blockers(db, settings, instance, catalog):
         if payload.get('model_bindings') != expected_bindings:
             install_blockers.append('PINNED_MODEL_BINDINGS_INCOMPLETE')
     return install_blockers
+
+
+def _verified_h3_key(item: dict) -> tuple[str, str, str, int]:
+    return item.get("component_id"), item.get("relative_path"), item.get("sha256"), item.get("size")
 
 
 def deployment_readiness(db, settings: Settings) -> dict:
@@ -646,16 +757,41 @@ def deployment_readiness(db, settings: Settings) -> dict:
             return {"status": "PENDING", "packages": rows}
         return {"status": "NOT_STARTED", "packages": rows}
 
-    core_ids = ["comfyui", WHEEL_COMPONENT_ID, *[c for c in components if components[c]["kind"] in {"node", "model"}]]
+    core_ids = ["comfyui", WHEEL_COMPONENT_ID, *[
+        component_id for component_id in components
+        if components[component_id]["kind"] in {"node", "model"}
+        and component_id not in REVIEW_COMPONENTS.values()
+    ]]
     layers.append({"layer": "L1_catalog", "status": "READY", "catalog_id": catalog["catalog_id"],
                    "catalog_version": catalog["catalog_version"], "total_bytes": catalog["total_bytes"]})
-    layer_two = package_layer_status(core_ids)
-    layer_two["layer"] = "L2_files_verified"
-    layers.append(layer_two)
     candidates = [row for row in db.scalars(select(ComfyInstance))
                   if row.payload.get("managed") and not row.payload.get("is_mock", True)
                   and row.payload.get("root") and not row.payload.get("installation")]
     instance = candidates[0] if len(candidates) == 1 else None
+    if instance and instance.payload.get("adopted"):
+        adoption = instance.payload.get("adoption") or {}
+        verified_h3 = {_verified_h3_key(item) for item in adoption.get("verified_h3_files", [])}
+        required_h3 = {
+            (component["component_id"], item["relative_path"], item["sha256"], item["size"])
+            for component in catalog.get("components", [])
+            if component.get("kind") == "model" and component["component_id"].startswith("minimax-h3-")
+            for item in component.get("files", [])
+        }
+        layer_two = {
+            "layer": "L2_files_verified",
+            "status": "READY" if required_h3 <= verified_h3 else "PENDING",
+            "evidence_source": "USER_CONFIRMED_EXISTING_INSTALLATION",
+            "verified_h3_components": sorted({key[0] for key in verified_h3}),
+            "verified_h3_bytes": sum(item["size"] for item in adoption.get("verified_h3_files", [])),
+            "copied_bytes": 0,
+            "downloaded_bytes": 0,
+            "review_model_file_counts": adoption.get("review_model_file_counts", {}),
+            "review_model_expected_counts": adoption.get("review_model_expected_counts", {}),
+        }
+    else:
+        layer_two = package_layer_status(core_ids)
+        layer_two["layer"] = "L2_files_verified"
+    layers.append(layer_two)
     install_blockers = installed_instance_blockers(db, settings, instance, catalog)
     environment_layer = {
         "layer": "L3_environment_installed",
@@ -678,8 +814,9 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "node_count": service_status.get("node_count"),
         "workflow_profiles": service_status.get("workflow_profiles", []),
         "review_models": service_status.get("review_models", {}),
-        "note": "Live object_info, workflow input contracts and review-service identity "
-                "are recorded as sealed evidence",
+        "note": "Live object_info and workflow input contracts are required; small-model review "
+                "services are advisory",
+        "advisory_reviews": service_status.get("advisory_reviews", {}),
     })
     layers.append({
         "layer": "L5_real_inference",
@@ -698,6 +835,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
     return {
         "catalog": {"id": catalog["catalog_id"], "version": catalog["catalog_version"]},
         "layers": layers,
+        "advisory_reviews": advisory_review_readiness(settings),
         "production_gates": production_gates,
         "runtime_activation": runtime_report(db, settings),
         "human_steps": [

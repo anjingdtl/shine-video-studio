@@ -13,8 +13,11 @@ import { emptyStyle } from './constants';
 export function useStudio() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const [projectsLoadError, setProjectsLoadError] = useState('');
   const activeProjectId = useRef(projectId);
   activeProjectId.current = projectId;
+  const projectsRequest = useRef(0);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [styles, setStyles] = useState<StyleVersion[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
@@ -34,9 +37,9 @@ export function useStudio() {
    *  (delivery) listen to it so the topbar refresh covers their data too. */
   const [dataEpoch, setDataEpoch] = useState(0);
   const [queueProfile, setQueueProfile] = useState('');
-  const [reviewScope, setReviewScope] = useState<'basic' | 'full'>('basic');
-  const [reviewWidth, setReviewWidth] = useState('');
-  const [reviewHeight, setReviewHeight] = useState('');
+  const [reviewScope, setReviewScope] = useState<'basic' | 'full'>('full');
+  const [reviewWidth, setReviewWidth] = useState('768');
+  const [reviewHeight, setReviewHeight] = useState('1344');
 
   const project = projects.find((item) => item.id === projectId);
   const currentStyle = styles.find((item) => item.id === project?.frozen_style_version_id);
@@ -119,22 +122,58 @@ export function useStudio() {
     await loadAudit(id, 0);
   }, [loadAudit, loadSettings]);
 
+  const loadProjects = useCallback(async () => {
+    const requestId = ++projectsRequest.current;
+    let lastError: unknown;
+    // The Windows launcher starts the web server and API independently. Retry
+    // short startup races so a new user does not mistake an unavailable API
+    // for an empty workspace. A later manual refresh supersedes this request.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const rows = await api<Project[]>('/projects');
+        if (requestId !== projectsRequest.current) return null;
+        setProjects(rows);
+        setProjectsLoaded(true);
+        setProjectsLoadError('');
+        setNotice((current) => current?.kind === 'error' ? null : current);
+        const remembered = window.localStorage.getItem('shine-project');
+        const currentId = activeProjectId.current;
+        const preferred = currentId || remembered;
+        const nextId = rows.find((row) => row.id === preferred)?.id ?? (rows[0]?.id ?? '');
+        if (nextId !== currentId) setProjectId(nextId);
+        return nextId;
+      } catch (error) {
+        if (requestId !== projectsRequest.current) return null;
+        lastError = error;
+        if (attempt < 3) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
+        }
+      }
+    }
+    if (requestId === projectsRequest.current) {
+      const message = '暂时连接不上本机工作区。请检查本机服务是否已启动，然后点“重新连接”重试。';
+      setProjectsLoadError(message);
+      report(message, 'error');
+    }
+    throw lastError instanceof Error ? lastError : new Error('无法读取本机作品列表');
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await loadSystem();
-    if (projectId) await loadProject(projectId);
-    setDataEpoch((epoch) => epoch + 1);
-  }, [loadSystem, loadProject, projectId]);
+    try {
+      const selectedId = await loadProjects();
+      // If the list restored a remembered project, its normal selection effect
+      // loads the detail. Avoid a duplicate request in the common case.
+      if (selectedId && selectedId === activeProjectId.current) await loadProject(selectedId);
+    } finally {
+      setDataEpoch((epoch) => epoch + 1);
+    }
+  }, [loadSystem, loadProject, loadProjects]);
 
   useEffect(() => {
-    api<Project[]>('/projects').then((rows) => {
-      setProjects(rows);
-      // Stay on the work the user had open: a refresh (or app restart) must
-      // not silently jump to a different project. Falls back to the first
-      // project for a genuinely fresh browser.
-      const remembered = window.localStorage.getItem('shine-project');
-      setProjectId(rows.some((row) => row.id === remembered) ? remembered! : (rows[0]?.id ?? ''));
-    }).catch((error: Error) => report(error.message, 'error'));
-  }, []);
+    void loadProjects().catch(() => undefined);
+    return () => { projectsRequest.current += 1; };
+  }, [loadProjects]);
 
   useEffect(() => {
     if (projectId) window.localStorage.setItem('shine-project', projectId);
@@ -402,9 +441,19 @@ export function useStudio() {
     });
   }
 
+  async function validateWorkflow(profileId: string) {
+    await withBusy(async () => {
+      const result = await api<WorkflowProfile>(`/workflow-profiles/${profileId}/validate-managed`, json('POST', {}));
+      await loadSettings(projectId);
+      const validation = result.validated_against as { missing_nodes?: unknown[]; missing_inputs?: unknown[] } | null;
+      report(validation && !validation.missing_nodes?.length && !validation.missing_inputs?.length
+        ? '节点接口检查完成；仍需真实生成验证。' : '节点检查发现缺项，请展开验证详情。');
+    });
+  }
+
   return {
     // data
-    projects, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notice, report, dismissNotice, busy, dataEpoch, apiOnline: system?.api_online ?? false,
@@ -418,6 +467,6 @@ export function useStudio() {
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
-    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, deleteWorkflow,
+    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
   };
 }

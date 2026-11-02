@@ -189,7 +189,7 @@ describe('任务提交与模式一致', () => {
     render(<App />);
     await openSingleShotTools(user);
     await user.selectOptions(await within(singleShotCard()).findByLabelText(/生成方案/), 'wf-1');
-    await user.selectOptions(await within(singleShotCard()).findByLabelText(/自动检查范围/), 'full');
+    await user.selectOptions(await within(singleShotCard()).findByLabelText(/审片建议/), 'full');
     const queue = await within(advancedFold()).findByRole('button', { name: /加入队列/ });
     await waitFor(() => { expect(queue).toBeEnabled(); });
     await user.click(queue);

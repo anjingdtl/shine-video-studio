@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from shine.config import Settings
 from shine.db import Base, make_engine, make_session_factory
 from shine.main import create_app
 from shine.models import Job, JobAttempt, utcnow
@@ -28,7 +29,9 @@ def studio(tmp_path):
     engine = make_engine(f"sqlite:///{db_path.as_posix()}")
     Base.metadata.create_all(engine)
     factory = make_session_factory(engine)
-    app = create_app(database_url=f"sqlite:///{db_path.as_posix()}", asset_root=tmp_path / "素材库")
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    settings = Settings(data_dir=tmp_path, database_url=database_url, render_provider="mock")
+    app = create_app(settings=settings, database_url=database_url, asset_root=tmp_path / "素材库")
     app.state.engine.dispose()
     app.state.engine = engine
     app.state.session_factory = factory

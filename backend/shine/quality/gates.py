@@ -94,6 +94,13 @@ class QualityPolicy:
     )
     hard_rules: tuple[str, ...] = HARD_RULES
 
+    def __post_init__(self):
+        # Local small-model VLM/ASR findings are suggestions for a human.
+        # Keep accepting the legacy field on disk/API inputs, but never allow
+        # it to turn reviewer availability or a probabilistic finding into a
+        # production stop.
+        object.__setattr__(self, "advisory_model_reviews", True)
+
     def threshold_for(self, priority: str | None) -> float:
         if priority and priority in self.priority_thresholds:
             return float(self.priority_thresholds[priority])
@@ -639,7 +646,12 @@ def _as_advisory(gate: GateOutcome) -> GateOutcome:
     return replace(
         gate,
         advisory=True,
-        evidence={**gate.evidence, "advisory": True},
+        required=False,
+        evidence={
+            **gate.evidence,
+            "advisory": True,
+            "configured_as_required": gate.required,
+        },
     )
 
 

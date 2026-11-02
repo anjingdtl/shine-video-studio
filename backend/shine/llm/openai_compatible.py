@@ -24,6 +24,7 @@ from shine.llm.base import (
     ProviderConfig,
     parse_json_object,
 )
+from shine.llm.context_window import model_context_from_capabilities
 
 
 def _chat_url(base_url: str) -> str:
@@ -68,10 +69,14 @@ class OpenAICompatibleProvider:
                 # saw the request.  No answer can exist, and a replay cannot
                 # produce a second one.
                 last_error = LLMConnectionError(
-                    "Provider connection timed out", details={"error": type(exc).__name__})
+                    "Provider connection timed out", details={
+                        "error": type(exc).__name__, "external_outcome": "NOT_SENT",
+                    })
             except httpx.ConnectError as exc:
                 last_error = LLMConnectionError(
-                    "Provider connection failed", details={"error": type(exc).__name__})
+                    "Provider connection failed", details={
+                        "error": type(exc).__name__, "external_outcome": "NOT_SENT",
+                    })
             except httpx.TimeoutException as exc:
                 # The request was sent and the answer never arrived.  The
                 # external outcome is unknown, so the request is NOT replayed:
@@ -79,20 +84,22 @@ class OpenAICompatibleProvider:
                 # must never be dressed up as a fresh success.
                 raise LLMTimeout(
                     "Provider request timed out",
-                    details={"error": type(exc).__name__, "replayed": False},
+                    details={"error": type(exc).__name__, "replayed": False,
+                             "external_outcome": "UNKNOWN"},
                 ) from None
             except httpx.HTTPError as exc:
                 # The connection broke after the request was sent, so the
                 # outcome is unknown for the same reason as above.
                 raise LLMConnectionError(
                     "Provider connection failed",
-                    details={"error": type(exc).__name__, "replayed": False},
+                    details={"error": type(exc).__name__, "replayed": False,
+                             "external_outcome": "UNKNOWN"},
                 ) from None
             else:
                 if response.status_code < 400:
                     return response
                 last_error = self._classify(response)
-                if not last_error.retryable:
+                if not last_error.retryable or isinstance(last_error, LLMServerError):
                     raise last_error
             if attempt + 1 < attempts:
                 time.sleep(min(2.0, 0.25 * (2**attempt)))
@@ -110,7 +117,9 @@ class OpenAICompatibleProvider:
         if response.status_code == 429:
             return LLMRateLimit("Provider rate limit reached", details={"status": 429})
         if response.status_code >= 500:
-            return LLMServerError("Provider server error", details={"status": response.status_code})
+            return LLMServerError("Provider server error", details={
+                "status": response.status_code, "external_outcome": "UNKNOWN",
+            })
         return LLMError(f"Provider rejected the request: {text}", details={"status": response.status_code})
 
     def complete(
@@ -142,17 +151,28 @@ class OpenAICompatibleProvider:
             body = response.json()
         except json.JSONDecodeError as exc:
             raise LLMFormatError("Provider returned a non-JSON response") from exc
+        base_resp = body.get("base_resp")
+        provider_code = base_resp.get("status_code") if isinstance(base_resp, dict) else None
+        response_details = {"status": response.status_code}
+        if isinstance(provider_code, int):
+            response_details["provider_code"] = provider_code
+        if isinstance(provider_code, int) and provider_code != 0:
+            raise LLMError("Provider returned an error status", details=response_details)
         choices = body.get("choices") or []
         if not choices:
-            raise LLMFormatError("Provider returned no completions")
+            raise LLMFormatError("Provider returned no completions", details=response_details)
         if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:
-            raise LLMFormatError("Provider completion is truncated or filtered")
+            raise LLMFormatError("Provider completion is truncated or filtered", details=response_details)
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         if not isinstance(content, str) or not content.strip():
-            raise LLMFormatError("Provider returned an empty completion")
-        parsed = parse_json_object(content) if json_mode else None
+            raise LLMFormatError("Provider returned an empty completion", details=response_details)
+        try:
+            parsed = parse_json_object(content) if json_mode else None
+        except LLMFormatError as exc:
+            exc.details.update(response_details)
+            raise
         if parsed is not None and schema is not None:
             validator = Draft202012Validator(schema)
             errors = sorted(validator.iter_errors(parsed), key=lambda error: list(error.path))
@@ -160,7 +180,8 @@ class OpenAICompatibleProvider:
                 first = errors[0]
                 raise LLMFormatError(
                     "Model JSON does not match the required schema",
-                    details={"path": "/".join(str(part) for part in first.path), "message": first.message},
+                    details={**response_details, "path": "/".join(str(part) for part in first.path),
+                             "message": first.message},
                 )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(
@@ -169,7 +190,8 @@ class OpenAICompatibleProvider:
             model=body.get("model") or self.config.model,
             latency_ms=latency_ms,
             usage=body.get("usage") or {},
-            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False))},
+            raw_meta={"id": body.get("id"), "is_mock": bool(body.get("is_mock", False)),
+                      "http_status": response.status_code, "provider_code": provider_code},
         )
 
     def detect_capabilities(self) -> dict[str, Any]:
@@ -179,9 +201,20 @@ class OpenAICompatibleProvider:
         except json.JSONDecodeError:
             body = {}
         models = []
+        model_metadata = []
         for item in body.get("data") or []:
             if isinstance(item, dict) and item.get("id"):
-                models.append(str(item["id"]))
+                model_id = str(item["id"])
+                models.append(model_id)
+                declared = {"id": model_id}
+                context_window = item.get("context_window", item.get("context_window_tokens"))
+                max_output = item.get("max_output_tokens")
+                if isinstance(context_window, int) and not isinstance(context_window, bool) and context_window > 0:
+                    declared["context_window_tokens"] = context_window
+                if isinstance(max_output, int) and not isinstance(max_output, bool) and max_output > 0:
+                    declared["max_output_tokens"] = max_output
+                if len(declared) > 1:
+                    model_metadata.append(declared)
         extra = body.get("capabilities") or {}
         protocol = extra.get("review_response_protocol") if isinstance(extra, dict) else None
         review = {}
@@ -191,7 +224,7 @@ class OpenAICompatibleProvider:
                     or not re.fullmatch("[a-f0-9]{64}", decoder)):
                 raise LLMCapabilityError("Review response protocol declaration is invalid")
             review = {"review_response_protocol": protocol, "review_decoder_sha256": decoder}
-        return {
+        result = {
             "available": True,
             "models": models[:200],
             "model_listed": (not models) or self.config.model in models,
@@ -200,6 +233,14 @@ class OpenAICompatibleProvider:
             "tools": None,
             **review,
         }
+        if model_metadata:
+            result["model_metadata"] = model_metadata[:200]
+        model_context = model_context_from_capabilities(
+            {"model_metadata": model_metadata}, self.config.base_url, self.config.model,
+        )
+        if model_context["context_window_tokens"] is not None or model_context["max_output_tokens"] is not None:
+            result["model_context"] = model_context
+        return result
 
 
 def validate_with_jsonschema(instance: dict[str, Any], schema: dict[str, Any]) -> None:

@@ -22,7 +22,8 @@ class ReviewReleaseBoundary:
                  prior_releases=None):
         from shine.comfyops.handoff_preparation import HandoffSession
 
-        if (not isinstance(session, HandoffSession) or not session.finished or not session.accepted
+        if (not isinstance(session, HandoffSession) or not session.finished
+                or set(session.accepted) != set(session.review_requests)
                 or type(min_ram_mb) is not int or min_ram_mb < session.min_ram_mb
                 or type(min_vram_mb) is not int or min_vram_mb < session.min_vram_mb):
             raise HTTPException(409, "COMFY_PHYSICAL_RELEASE_UNVERIFIED")
@@ -114,7 +115,8 @@ class ReviewReleaseBoundary:
                         or config.get("gpu_uuid") != session.gpu_uuid):
                     raise HTTPException(409, "COMFY_PHYSICAL_RELEASE_UNVERIFIED")
                 expected[kind] = config
-            if not steps or steps[-1].get("resource_epoch") != recorded_epoch:
+            if ((steps and steps[-1].get("resource_epoch") != recorded_epoch)
+                    or (not steps and (session.accepted or session.review_requests))):
                 raise HTTPException(409, "COMFY_PHYSICAL_RELEASE_UNVERIFIED")
         verified = []
         for kind, config in expected.items():

@@ -89,4 +89,40 @@ describe('空数据库与两层界面入口', () => {
       expect(document.querySelector('.date-chip')?.textContent).toContain('1 个');
     });
   });
+
+  it('首次读取作品遇到短暂 API 启动延迟时自动恢复已有作品', async () => {
+    let attempts = 0;
+    stub.add({
+      method: 'GET', pattern: /\/api\/v1\/projects$/,
+      respond: () => ++attempts === 1
+        ? jsonResponse({ detail: 'API is starting' }, 503)
+        : jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]),
+    });
+
+    render(<App />);
+    expect(await screen.findAllByText('雾港夜账')).not.toHaveLength(0);
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText('本机工作区暂时不可用')).not.toBeInTheDocument();
+  });
+
+  it('全局刷新会重新读取设置页启动时失败的本机存储状态', async () => {
+    let attempts = 0;
+    stub.add({
+      method: 'GET', pattern: /\/api\/v1\/setup\/storage$/,
+      respond: () => ++attempts === 1
+        ? jsonResponse({ detail: 'API is starting' }, 500)
+        : jsonResponse({ root: 'D:\\Shine', configured: true, system_drive: false,
+          requires_selection: false, free_bytes: 1, free_gb: 100, paths: {}, drives: [] }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('雾港夜账');
+    await user.click(screen.getByRole('button', { name: /专业模式/ }));
+    await user.click(await screen.findByTitle('打开设置板块'));
+    expect(await screen.findByText(/本机存储信息暂时不可用/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '刷新全部数据' }));
+    await waitFor(() => expect(screen.queryByText(/本机存储信息暂时不可用/)).not.toBeInTheDocument());
+    expect(attempts).toBeGreaterThanOrEqual(2);
+  });
 });

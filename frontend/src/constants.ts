@@ -30,7 +30,7 @@ export const statusLabels: Record<string, string> = {
 };
 
 export const acceptanceLabels: Record<string, string> = {
-  accepted: '已通过终审', pending_review: '待人工验收',
+  accepted: '已确认', pending_review: '待人工确认（不阻断制作）',
   rejected: '未通过', mock: '仅演示验证', not_run: '未执行',
 };
 
@@ -67,6 +67,8 @@ export const failureLabels: Record<string, string> = {
   COMFY_HEARTBEAT_RECONCILIATION_REQUIRED: '心跳中断，状态待核实',
   RULE_PREFLIGHT_FAILED: '规则包预检未通过',
   LLM_TIMEOUT: '远端模型响应超时', LLM_CONNECTION: '连不上远端模型', LLM_SERVER: '远端模型服务出错',
+  AGENT_REQUEST_RECONCILIATION_REQUIRED: '远端模型结果待核实，请勿重试',
+  AGENT_REQUEST_REPLAY_BLOCKED: '这次未知请求已放弃，需要新的剧本修订',
   SOURCE_UNAVAILABLE: '官方原文暂不可用',
   SERIES_SOURCE_NOT_PASSED: '前序镜头未通过',
   SERIES_OWNERSHIP_LOST: '连续生产的接管权丢失',
@@ -75,8 +77,8 @@ export const failureLabels: Record<string, string> = {
 };
 
 export const gateLabels: Record<string, string> = {
-  technical: '技术校验（画面/声音规格）', semantic: '内容审查（AI 看片）',
-  audio: '声音校验', style: '风格一致性', final: '终审',
+  technical: '技术校验（完整性与规格）', semantic: '画面建议',
+  audio: '对白识别建议', style: '风格建议', final: '综合状态',
 };
 
 export const gateStatusLabels: Record<string, string> = {

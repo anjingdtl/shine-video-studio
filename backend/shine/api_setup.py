@@ -81,6 +81,12 @@ class ExistingModelImportRequest(ExistingInstallationRequest):
     snapshot: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
+class ExistingInstallationAdoptRequest(ExistingModelImportRequest):
+    project_id: str
+    instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
+    port: int = Field(default=8188, ge=1024, le=65535)
+
+
 @router.get('/existing-installations')
 def existing_installations(settings: SettingsDep):
     from shine.comfyops.existing_installation import discover
@@ -200,6 +206,23 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
             _active_installation_verifications.discard(key)
 
 
+@router.post('/existing-installations/adopt')
+def adopt_existing(body: ExistingInstallationAdoptRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Confirm an existing H3 install for reuse without copying or downloading it."""
+    from shine.comfyops.adoption import adopt_existing_installation
+
+    return adopt_existing_installation(
+        db,
+        settings,
+        project_id=body.project_id,
+        path=body.path,
+        snapshot=body.snapshot,
+        name=body.instance_name,
+        port=body.port,
+        actor=actor,
+    )
+
+
 @router.get('/storage')
 def storage(settings: SettingsDep):
     from shine.comfyops.storage import storage_report
@@ -218,6 +241,7 @@ def environment(settings: SettingsDep):
 
     report = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
     return {**report, "blockers": setup_blockers(report),
+            "advisory_reviews": deployment.advisory_review_readiness(settings),
             "bootstrap": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1"}
 
 

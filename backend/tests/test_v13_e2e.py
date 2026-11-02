@@ -8,7 +8,13 @@ from shine.comfy.client import ComfyUIClient
 from shine.schemas import SemanticFinding
 from shine.voiceops.providers import LocalVoiceHTTPProvider
 from shine.worker import run_one
-from tests.conftest import create_project, make_test_video_bytes, register_workflow_profile
+from tests.conftest import (
+    create_project,
+    ffmpeg_executable,
+    ffprobe_executable,
+    make_test_video_bytes,
+    register_workflow_profile,
+)
 from tests.fake_http import FakeComfyServer
 from tests.fake_voice import FakeVoiceServer
 from tests.test_film_crew import CAMERA, CONTINUITY, ENGLISH_STYLE, call
@@ -25,7 +31,7 @@ def fake_voice_server():
         server.stop()
 
 
-def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_server):  # noqa: F811
+def test_v13_full_preproduction_to_fake_h3_advisory_review_and_archive(prep, fake_voice_server):  # noqa: F811
     client, factory, settings = prep
     client.app.state.voice_provider = LocalVoiceHTTPProvider(fake_voice_server.base_url)
     project = create_project(client, "V1.3 simulated production")
@@ -210,7 +216,10 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
         == 200
     )
     assert client.patch(f"/api/v1/projects/{project}/settings", json={"auto_repair_enabled": True}).status_code == 200
-    settings = replace(settings, offline_simulation=True, ffprobe_path="missing-ffprobe", ffmpeg_path="missing-ffmpeg")
+    ffprobe, ffmpeg = ffprobe_executable(), ffmpeg_executable()
+    if not ffprobe or not ffmpeg:
+        pytest.skip("V1.3 fake-H3 E2E requires FFprobe and FFmpeg for deterministic technical QC")
+    settings = replace(settings, offline_simulation=True, ffprobe_path=ffprobe, ffmpeg_path=ffmpeg)
     client.app.state.settings = settings
     wrong_profile = register_workflow_profile(
         client, name="unfrozen-ref2va", mode="Ref2VA", graph=E2E_GRAPH, parameter_map=E2E_PARAM_MAP
@@ -245,7 +254,7 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
     asr = ScriptedASR(LINE["text"])
     server = FakeComfyServer().start()
     try:
-        server.output_bytes = make_test_video_bytes(duration_s=6, width=320, height=240)
+        server.output_bytes = make_test_video_bytes(duration_s=6)
         comfy = ComfyUIClient(server.base_url, max_retries=0)
         for _ in range(4):
             run_one(factory, settings=settings, comfy_client=comfy, semantic_reviewer=reviewer, asr_reviewer=asr)
@@ -254,10 +263,12 @@ def test_v13_full_preproduction_to_fake_h3_repair_and_archive(prep, fake_voice_s
                 break
         assert current["status"] == "PASSED", current
         assert current["quality_verification"] == "mock_verified"
-        assert len(current["attempts"]) == 2
-        assert current["attempts"][0]["request_fingerprint"] != current["attempts"][1]["request_fingerprint"]
+        assert len(current["attempts"]) == 1
         gates = client.get(f"/api/v1/jobs/{job['id']}/quality-gates").json()
         assert any(g["is_mock"] for g in gates)
+        final_gate = next(g for g in gates if g["gate_name"] == "final")
+        assert final_gate["status"] == "needs_review"
+        assert "semantic" in final_gate["evidence"]["advisory_pending_human_review"]
     finally:
         server.stop()
     events = client.get(f"/api/v1/projects/{project}/events?limit=500").json()["items"]

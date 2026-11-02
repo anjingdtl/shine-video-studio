@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -75,8 +76,9 @@ def record_service_evidence(db, identity, evidence: dict) -> dict:
 def service_evidence_status(db, settings, *, identity=None) -> dict:
     """Return readiness derived from evidence, never from a hard-coded flag.
 
-    The evidence is only current if the complete configuration identity, the
-    workflow profile contracts and the reviewer profiles/routes are unchanged.
+    Core readiness depends on the complete H3 configuration and workflow
+    contracts. Reviewer routes are reported separately because they are
+    optional suggestions and must not gate production.
     """
     try:
         identity = identity or _current_identity(db, settings)
@@ -98,6 +100,7 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         if (profile is None or profile.name != name
                 or workflow_contract_sha256(profile) != expected.get('contract_sha256')):
             blockers.append(f'WORKFLOW_CONTRACT_CHANGED:{name}')
+    advisory_reviews = dict(evidence.get('advisory_reviews') or {})
     for role, expected in (evidence.get('review_profiles') or {}).items():
         route_role = {'VLM': 'vlm_reviewer', 'ASR': 'asr_reviewer'}.get(role, role)
         profile = db.get(ProviderProfile, expected.get('id'))
@@ -105,7 +108,10 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         if (profile is None or route is None or route.provider_profile_id != profile.id
                 or profile.model != expected.get('model') or profile.base_url != expected.get('base_url')
                 or graph_hash(profile.capabilities or {}) != expected.get('capabilities_sha256')):
-            blockers.append(f'REVIEW_ROUTE_CHANGED:{role}')
+            advisory_reviews[role] = {
+                'status': 'UNAVAILABLE', 'advisory': True,
+                'codes': ['REVIEW_ROUTE_CHANGED'],
+            }
     if blockers:
         return {'status': 'PENDING', 'blockers': sorted(set(blockers)),
                 'validated_at': evidence.get('validated_at')}
@@ -118,6 +124,7 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         'workflow_profiles': sorted((evidence.get('workflow_profiles') or {}).keys()),
         'review_models': {role: item.get('model') for role, item in
                           (evidence.get('review_profiles') or {}).items()},
+        'advisory_reviews': advisory_reviews,
     }
 
 
@@ -133,17 +140,31 @@ def configuration_identity(db, settings, path):
         recipe = load_managed_recipe(path, expected_sha256=graph_hash(raw))
         renderer = recipe['renderer']
         instance = db.get(ComfyInstance, renderer['instance_id'])
+        adopted = bool(instance and instance.payload.get('adopted'))
+        expected_root = (Path(instance.payload.get('root', '')).resolve() if adopted
+                         else instance_root(settings, instance.payload['name'], 'local').resolve()
+                         if instance else None)
         if (not instance or not instance.payload.get('managed') or instance.payload.get('is_mock', True)
                 or instance.sha256 != graph_hash(instance.payload)
                 or instance.id != instance_identity('local', renderer['port'])
-                or Path(renderer['root']).resolve() != instance_root(
-                    settings, instance.payload['name'], 'local').resolve()
+                or Path(renderer['root']).resolve() != expected_root
                 or Path(instance.payload['root']).resolve() != Path(renderer['root']).resolve()
                 or instance.payload['port'] != renderer['port']):
             raise HTTPException(409, 'REAL_RUNTIME_INSTANCE_IDENTITY_REQUIRED')
+        if adopted:
+            from shine.comfyops.adoption import adopted_installation_blockers
+            from shine.comfyops.deployment import load_default_catalog
+
+            if adopted_installation_blockers(instance, load_default_catalog()):
+                raise HTTPException(409, 'ADOPTED_COMFY_INSTALLATION_CHANGED')
+            runtime_root = Path(renderer['runtime_data_root']).resolve()
+            if not runtime_root.is_relative_to(settings.comfyops_dir.resolve()):
+                raise HTTPException(409, 'ADOPTED_RUNTIME_DATA_ROOT_INVALID')
         if renderer.get('installation') != {'id': instance.id, 'sha256': instance.sha256}:
             raise HTTPException(409, 'RUNTIME_INSTALLATION_BINDING_REQUIRED')
-        paths = {path, Path(renderer['root']) / '.shine-requirements.txt'}
+        paths = {path}
+        if not adopted:
+            paths.add(Path(renderer['root']) / '.shine-requirements.txt')
         values = {**renderer, 'port': str(renderer['port'])}
         for template in renderer['pinned_files']:
             paths.add(Path(template.format_map(values)))
@@ -244,8 +265,12 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
     # Activation is the operator's statement that this host now renders for real.
     # Persist the renderer choice so a later START_APP.cmd reuses it instead of
     # silently dropping back to Mock after a reboot.
-    from shine.comfyops.deployment import persist_env
-    env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'})
+    from shine.comfyops.deployment import ENV_PATH, persist_env
+    runtime_env_override = os.getenv('SHINE_RUNTIME_ENV_PATH')
+    runtime_env_path = Path(runtime_env_override).resolve() if runtime_env_override else ENV_PATH
+    if runtime_env_override and not runtime_env_path.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(409, 'RUNTIME_SETTINGS_PATH_OUTSIDE_DATA_DIR')
+    env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'}, runtime_env_path)
     add_audit(db, actor, 'DEPLOYMENT_RENDER_PROVIDER_PERSISTED', 'comfy_instance', instance.id,
               {'env_keys': env_keys, 'value': 'comfyui'}, project_id=project_id)
     db.commit()

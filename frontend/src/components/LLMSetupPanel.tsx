@@ -42,6 +42,7 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
     {notice && <p role="alert">{notice}</p>}
     <LLMConfiguration profiles={profiles} routes={routes} busy={busy}
       onCreateProfile={body => void run(() => api('/provider-profiles', json('POST', body)))}
+      onUpdateProfile={(id, body) => void run(() => api(`/provider-profiles/${id}`, json('PUT', body)))}
       onTestProfile={id => void run(async () => {
         const result = await api<{ ok: boolean; error_code?: string; message: string }>(`/provider-profiles/${id}/test`, { method: 'POST' });
         if (!result.ok) throw new Error(result.error_code ?? result.message);

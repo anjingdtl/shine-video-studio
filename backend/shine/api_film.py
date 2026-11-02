@@ -11,8 +11,9 @@ from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
+from shine.asset_identity import resolve_character_asset
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
-from shine.llm.base import LLMError
+from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
 from shine.models import (
     AgentArtifact,
@@ -278,6 +279,8 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 characters=beat["characters"],
                 dialogue=beat["dialogue"],
                 locked_story_facts=script.payload_json["locked_story_facts"],
+                prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
+                prompt_style=script.payload_json.get("prompt_style"),
                 camera={
                     "composition": camera.composition,
                     "movement": camera.movement,
@@ -509,17 +512,13 @@ class StoryboardRequest(APIModel):
 
 
 def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
-    """Characters the script names that have no approved character master.
+    """Characters without one uniquely matching approved character master.
 
     The rule mirrors ``validate_output`` for DirectorialPlan: every beat
     character must be covered by an approved, locked image/character asset,
     or the shots that need them cannot enter real production.
     """
-    covered = {
-        a["entity_id"]
-        for a in assets
-        if a["kind"] == "image" and a["role"] == "character" and a["entity_id"]
-    }
+    character_assets = [a for a in assets if a["kind"] == "image" and a["role"] == "character"]
     named: list[str] = []
     for beat in breakdown.get("beats", []):
         for name in beat.get("characters", []):
@@ -529,7 +528,7 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
             speaker = line.get("speaker_id") if isinstance(line, dict) else getattr(line, "speaker_id", None)
             if speaker and speaker not in named:
                 named.append(speaker)
-    return [name for name in named if name not in covered]
+    return [name for name in named if resolve_character_asset(name, character_assets) is None]
 
 
 @router.post("/projects/{project_id}/storyboard/generate", status_code=201)
@@ -548,8 +547,6 @@ def generate_storyboard(
     the chain with an explicit missing list; nothing is auto-created.
     """
     import hashlib
-
-    from shine.agents.execution import rejection_reason
 
     project = require_project(db, project_id)
     if not project.frozen_style_version_id:
@@ -576,6 +573,40 @@ def generate_storyboard(
         if routes[role].kind != "mock" and not is_loopback_url(routes[role].base_url) and not body.allow_remote_text:
             raise HTTPException(403, "REMOTE_AGENT_CONSENT_REQUIRED")
 
+    storyboard_request_sha256 = digest({
+        "project_id": project_id,
+        "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+        "locked_story_facts": body.locked_story_facts,
+        "style_version_id": project.frozen_style_version_id,
+        "approved_asset_manifest": asset_context(db, project_id),
+        "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
+    })
+    from shine.agents.execution import UNKNOWN_CODES
+
+    for prior in db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id.in_(needed_roles),
+    )):
+        if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
+            continue
+        unresolved = (
+            prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
+            or prior.status == "REJECTED" and prior.error_code in UNKNOWN_CODES
+            and prior.trace.get("external_outcome") != "NOT_SENT"
+            or prior.status == "ABANDONED" and prior.trace.get("external_outcome") == "UNKNOWN"
+        )
+        if unresolved and prior.trace.get("is_mock") is not True:
+            code = ("AGENT_REQUEST_REPLAY_BLOCKED" if prior.status == "ABANDONED"
+                    else "AGENT_REQUEST_RECONCILIATION_REQUIRED")
+            return {
+                "status": "REJECTED",
+                "script_source": source,
+                "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+                "steps": {},
+                "missing_characters": [],
+                "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id}],
+            }
+
     dispatcher = FilmAgentDispatcher(gateway, request.app.state.settings.data_dir)
 
     # A definitive contract rejection is a per-sample property of a real text
@@ -584,11 +615,17 @@ def generate_storyboard(
     # (timeouts, unknown server errors) are never replayed here.
     RETRYABLE_REJECTIONS = {"CONTRACT_OR_POLICY_REJECTED", "AGENT_CALL_FAILED"}
 
-    def _run(role: str, *, attempts: int = 6, **kwargs) -> dict:
+    def _run(role: str, *, attempts: int = 2, **kwargs) -> dict:
         last: ValueError | LLMError | None = None
         for attempt in range(1, attempts + 1):
             try:
-                artifact = dispatcher.run(db, project_id, role, FilmRunRequest(**kwargs))
+                artifact = dispatcher.run(
+                    db,
+                    project_id,
+                    role,
+                    FilmRunRequest(**kwargs),
+                    storyboard_request_sha256=storyboard_request_sha256,
+                )
                 return {"artifact_id": artifact.id, "kind": artifact.kind,
                         "sha256": artifact.sha256, "attempt": attempt}
             except (ValueError, LLMError) as exc:
@@ -597,6 +634,24 @@ def generate_storyboard(
                 if code not in RETRYABLE_REJECTIONS or attempt == attempts:
                     raise
         raise last  # pragma: no cover - the loop always raises or returns
+
+    def _rejection(role: str, exc: Exception) -> dict:
+        rejection = {"role": role, "code": getattr(exc, "code", None) or str(exc) or "AGENT_CALL_FAILED"}
+        details = getattr(exc, "details", {})
+        if isinstance(details, dict) and details.get("external_outcome") in {"NOT_SENT", "UNKNOWN"}:
+            rejection["external_outcome"] = details["external_outcome"]
+        rows = db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project_id,
+            AgentTaskRecord.role_id == role,
+        ).order_by(AgentTaskRecord.created_at.desc()).limit(20))
+        task = next((row for row in rows
+                     if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256), None)
+        if task:
+            rejection["task_id"] = task.id
+            outcome = task.trace.get("external_outcome")
+            if outcome in {"NOT_SENT", "UNKNOWN"}:
+                rejection["external_outcome"] = outcome
+        return rejection
 
     steps: dict[str, dict] = {}
     rejections: list[dict] = []
@@ -608,7 +663,7 @@ def generate_storyboard(
             allow_remote_text=body.allow_remote_text,
         )
     except (ValueError, LLMError) as exc:
-        rejections.append({"role": "scriptwriter", "code": str(exc) or rejection_reason(exc)})
+        rejections.append(_rejection("scriptwriter", exc))
         return {
             "status": "REJECTED",
             "script_source": source,
@@ -630,6 +685,7 @@ def generate_storyboard(
             "action": "UPLOAD_AND_APPROVE_MISSING_CHARACTER_MASTERS_THEN_REGENERATE",
         }
 
+    active_role = "director"
     try:
         steps["director"] = _run(
             "director",
@@ -638,13 +694,15 @@ def generate_storyboard(
             locked_story_facts=body.locked_story_facts,
             allow_remote_text=body.allow_remote_text,
         )
+        active_role = "cinematographer"
         steps["cinematographer"] = _run(
             "cinematographer",
             brief=script_text,
             locked_story_facts=body.locked_story_facts,
-            input_revision_ids=[steps["director"]["artifact_id"]],
+            input_revision_ids=[steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"]],
             allow_remote_text=body.allow_remote_text,
         )
+        active_role = "continuity_supervisor"
         steps["continuity_supervisor"] = _run(
             "continuity_supervisor",
             brief=script_text,
@@ -659,17 +717,20 @@ def generate_storyboard(
             ],
             allow_remote_text=body.allow_remote_text,
         )
+        active_role = "editor"
         steps["editor_edit_intent"] = _run(
             "editor",
             tool="edit_intent",
             brief=script_text,
             locked_story_facts=body.locked_story_facts,
-            input_revision_ids=[steps["director"]["artifact_id"]],
+            input_revision_ids=[steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"],
+                                steps["cinematographer"]["artifact_id"],
+                                steps["continuity_supervisor"]["artifact_id"]],
             allow_remote_text=body.allow_remote_text,
         )
     except (ValueError, LLMError) as exc:
         db.rollback()
-        rejections.append({"role": "chain", "code": str(exc) or rejection_reason(exc)})
+        rejections.append(_rejection(active_role, exc))
         return {
             "status": "REJECTED",
             "script_source": source,
@@ -700,7 +761,9 @@ def generate_storyboard(
             )
         except (ValueError, LLMError) as exc:
             db.rollback()
-            rejections.append({"role": "director_arbitration", "code": str(exc) or rejection_reason(exc)})
+            arbitration_rejection = _rejection("director", exc)
+            arbitration_rejection["role"] = "director_arbitration"
+            rejections.append(arbitration_rejection)
             return {
                 "status": "REJECTED",
                 "script_source": source,
@@ -736,6 +799,8 @@ def generate_storyboard(
         "missing_characters": [],
         "rejections": [],
         "continuity_issues": continuity.get("issues", []),
+        "prompt_story_facts": breakdown.get("prompt_story_facts", []),
+        "prompt_style": breakdown.get("prompt_style"),
         "continuity_arbitration": (
             {"artifact_id": steps["director_arbitration"]["artifact_id"],
              "rulings": arbitration.get("rulings", []),

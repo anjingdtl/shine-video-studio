@@ -432,8 +432,16 @@ def _series_id(factory, project_id) -> str:
 class _Keeper:
     def __init__(self):
         self.finalized = False
+        self.renewal_stopped = False
+        self.calls = []
+
+    def stop_renewal(self):
+        self.calls.append("stop_renewal")
+        self.renewal_stopped = True
+        return {"renewal_stopped": True}
 
     def finalize(self):
+        self.calls.append("finalize")
         self.finalized = True
         return {"released": True}
 
@@ -445,8 +453,10 @@ class _Supervisor:
     def __init__(self, *, fail_stop=False):
         self.fail_stop = fail_stop
         self.stopped = False
+        self.calls = []
 
     def stop_closed(self):
+        self.calls.append("stop_closed")
         if self.fail_stop:
             raise ValueError("COMFY_PROCESS_EXIT_UNCONFIRMED")
         self.stopped = True
@@ -499,6 +509,34 @@ def test_the_release_and_the_series_state_commit_together(api):
         assert lease.status == "RELEASED"
         assert row.finalization_state == "RELEASED"
         assert row.lease_id is None
+
+
+def test_release_stops_renewal_before_stopping_the_renderer(api):
+    """The heartbeat verifies a live drained renderer, so renewal must stop first."""
+    from shine.comfyops.production_series import claim_series
+    from shine.worker import release_managed_series
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = claim_series(factory, "worker-series")
+    with factory.begin() as db:
+        lease = ResourceLease(
+            owner="h3:job-order", budget_mb=16384, exclusive=True, priority=100,
+            status="ACTIVE", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        db.commit()
+        lease_id = lease.id
+
+    coordinator = _coordinator(factory, lease_id=lease_id)
+    release_managed_series(
+        factory, settings, coordinator, series_id=series.id, worker_id="worker-series",
+    )
+
+    assert coordinator.keeper.calls == ["stop_renewal", "finalize"]
+    assert coordinator.replacement.calls == ["stop_closed"]
 
 
 def test_a_release_that_already_committed_is_not_a_second_release(api):

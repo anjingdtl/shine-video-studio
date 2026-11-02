@@ -8,15 +8,29 @@ from shine.schemas import APIModel, DialogueLine, ShotSpec, StyleBible, StyleInp
 
 
 class SceneBeat(APIModel):
+    """One story beat; its dialogue timecodes are local to this beat."""
+
     id: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=4000)
-    characters: list[str] = Field(default_factory=list, max_length=20)
+    characters: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Human-readable approved character names/entity IDs. Never put opaque asset UUIDs here.",
+    )
     dialogue: list[DialogueLine] = Field(default_factory=list, max_length=100)
 
 
 class ScriptBreakdown(APIModel):
     schema_version: Literal["1.1"] = "1.1"
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
+    prompt_story_facts: list[str] = Field(
+        default_factory=list, max_length=100,
+        description="For non-English locked facts, one faithful English visual-prompt translation per fact, in order.",
+    )
+    prompt_style: StyleBible | None = Field(
+        default=None,
+        description="Faithful English rendering of all seven frozen style fields; original stays frozen.",
+    )
     beats: list[SceneBeat] = Field(min_length=1, max_length=100)
 
 
@@ -31,7 +45,11 @@ class ShotIntent(APIModel):
     id: str = Field(min_length=1, max_length=80)
     beat_id: str
     visual_description: str = Field(min_length=1, max_length=8000)
-    duration_s: float = Field(ge=4, le=15)
+    duration_s: float = Field(
+        ge=4,
+        le=15,
+        description="Seconds for this shot; must contain every dialogue timecode in its beat with a short tail.",
+    )
     asset_ids: list[str] = Field(default_factory=list, max_length=12)
     continuity: ShotIntentContinuity | None = None
 
@@ -44,9 +62,9 @@ class DirectorialPlan(APIModel):
 class CameraShot(APIModel):
     intent_id: str
     composition: str = Field(min_length=1, max_length=2000)
-    movement: str = Field(min_length=1, max_length=1000)
-    lighting: str = Field(min_length=1, max_length=2000)
-    axis: str = Field(min_length=1, max_length=1000)
+    movement: str = Field(default="", max_length=1000)
+    lighting: str = Field(default="", max_length=2000)
+    axis: str = Field(default="", max_length=1000)
 
 
 class CameraPlan(APIModel):

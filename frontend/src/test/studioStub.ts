@@ -107,7 +107,10 @@ export const ENV_REPORT = {
   platform: {}, tools: {}, gpu: {}, ram: { status: 'OK' },
   disk: { status: 'OK', free_gb: 100, at_floor: true },
   port: { status: 'OK', port: 8000 }, data_dir: { path: 'D:\\Shine', writable: true },
-  blockers: [], bootstrap: '',
+  blockers: [], bootstrap: '', advisory_reviews: {
+    VLM: { status: 'NOT_READY', model_id: 'qwen3-vl-8b-fp8', model_files_present: 0, model_files_expected: 13 },
+    ASR: { status: 'NOT_READY', model_id: 'qwen3-asr-0.6b', model_files_present: 0, model_files_expected: 10 },
+  },
 };
 
 export const CATALOG = { catalog_id: 'c', catalog_version: '1', generated: 'g', platform: {}, total_bytes: 0, components: [] };

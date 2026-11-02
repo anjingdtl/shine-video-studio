@@ -253,6 +253,15 @@ def validate_workflow_profile(profile_id: str, settings: SettingsDep, db: DBSess
     return WorkflowProfilePublic.model_validate(_profile_data(profile))
 
 
+@router.post("/workflow-profiles/{profile_id}/validate-managed", response_model=WorkflowProfilePublic)
+def validate_managed_workflow_profile(profile_id: str, settings: SettingsDep, db: DBSession) -> WorkflowProfilePublic:
+    from shine.comfyops.service_validation import validate_registered_workflow
+
+    validate_registered_workflow(db, settings, profile_id)
+    profile = db.get(WorkflowProfile, profile_id)
+    return WorkflowProfilePublic.model_validate(_profile_data(profile))
+
+
 @router.get("/workflow-profiles/{profile_id}")
 def get_workflow_profile(profile_id: str, db: DBSession) -> dict[str, Any]:
     profile = db.get(WorkflowProfile, profile_id)

@@ -82,6 +82,29 @@ def test_generation_does_not_activate_and_operator_activation_survives_restart(p
         assert resolve_runtime(db, replace(settings)).managed_recipe_sha256 == effective.managed_recipe_sha256
 
 
+def test_isolated_runtime_activation_persists_only_inside_selected_data_dir(prep, candidate, monkeypatch):
+    _, _, settings = prep
+    isolated_env = settings.data_dir / "runtime.env"
+    monkeypatch.setenv("SHINE_RUNTIME_ENV_PATH", str(isolated_env))
+
+    response = activate(prep, candidate)
+
+    assert response.status_code == 200, response.text
+    assert "SHINE_RENDER_PROVIDER=comfyui" in isolated_env.read_text(encoding="utf-8")
+    assert "SHINE_RENDER_PROVIDER=" not in deployment.ENV_PATH.read_text(encoding="utf-8")
+
+
+def test_runtime_settings_override_cannot_write_outside_data_dir(prep, candidate, monkeypatch):
+    _, _, settings = prep
+    monkeypatch.setenv("SHINE_RUNTIME_ENV_PATH", str(settings.data_dir.parent / "outside.env"))
+
+    response = activate(prep, candidate)
+
+    assert response.status_code == 409
+    assert "RUNTIME_SETTINGS_PATH_OUTSIDE_DATA_DIR" in response.text
+    assert not (settings.data_dir.parent / "outside.env").exists()
+
+
 def test_resident_worker_reloads_activation_before_its_next_iteration(prep, candidate, monkeypatch):
     from shine import worker
     client, factory, settings = prep

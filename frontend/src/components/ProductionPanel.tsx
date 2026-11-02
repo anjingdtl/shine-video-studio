@@ -24,6 +24,17 @@ type Props = {
 
 const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
 
+function isAdvisoryOnlyFinal(gate: QualityGate): boolean {
+  const evidence = gate.evidence;
+  const pending = evidence.advisory_pending_human_review;
+  const unresolved = evidence.unresolved_gates;
+  const unresolvedOptional = evidence.unresolved_optional_gates;
+  return gate.gate_name === 'final'
+    && Array.isArray(pending) && pending.length > 0
+    && Array.isArray(unresolved) && unresolved.length === 0
+    && Array.isArray(unresolvedOptional) && unresolvedOptional.length === 0;
+}
+
 export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck }: Props) {
   const [selected, setSelected] = useState('');
   const [qc, setQc] = useState<QCReport[]>([]);
@@ -62,7 +73,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <div>
           <div className="section-kicker">04 / PRODUCTION MONITOR</div>
           <h2>生成进度与检查</h2>
-          <p>点一条任务查看明细：每次尝试、五道自动检查、审片证据和返工记录，全部保存在本机。</p>
+          <p>点开任务可查看生成进度、技术校验和审片建议。画面、风格与对白模型只提供建议；视频完整性和规格异常仍会阻止成片整理。</p>
         </div>
         <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台制作服务在线' : '后台制作服务离线'}</div>
       </div>
@@ -70,7 +81,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         {realReady ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
           {production
-            ? `${production.label}：${production.detail}生成成功不等于成片合格，以自动检查和人工验收为准。`
+            ? `${production.label}：${production.detail}小模型审片只提供建议，不会阻止镜头继续制作；正式发布前的审美与版权决定仍由你确认。`
             : '本机服务未连接，暂无法确认制作模式。'}
         </span>
       </div>
@@ -148,12 +159,16 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
               <div className="qc-row" key={gate.id}>
                 <div>
                   <b>{label(gateLabels, gate.gate_name)}</b>
-                  <span>{label(gateStatusLabels, gate.status)}{gate.required ? ' · 必查项' : ' · 可选'}{gate.is_mock ? ' · 演示数据' : ''}</span>
+                  <span>{gate.evidence?.advisory === true
+                    ? `建议项 · ${label(gateStatusLabels, gate.status)} · 不阻断制作`
+                    : isAdvisoryOnlyFinal(gate)
+                      ? '小模型建议待查看 · 不阻断制作'
+                      : `${label(gateStatusLabels, gate.status)}${gate.gate_name === 'technical' && gate.required ? ' · 技术必查' : gate.required ? ' · 必查' : ' · 可选'}`}{gate.is_mock ? ' · 演示数据' : ''}</span>
                 </div>
                 <small>{gate.coverage ? `覆盖：${label(coverageLabels, gate.coverage)}` : ''}{gate.error_code ? ` · ${label(failureLabels, gate.error_code)}` : ''}{gate.model ? ` · 用的模型：${gate.model}` : ''}</small>
               </div>
             ))}
-            {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification === 'real' ? '真实生成' : selectedJob.quality_verification === 'mock' ? '演示数据' : selectedJob.quality_verification} · 最终结论以「终审」关为准</small>}
+            {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification === 'real' ? '真实生成' : selectedJob.quality_verification === 'mock' ? '演示数据' : selectedJob.quality_verification} · 小模型建议和待人工确认状态会单独留档。</small>}
             {selectedJob.request.self_review_scope === 'basic' && <small>本次只自动查了分辨率、人物和对白三项，不等于人工验收。</small>}
             <span className="detail-label"><Activity size={11} /> 质检明细</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}

@@ -10,11 +10,14 @@ from shine.llm.base import (
     ChatMessage,
     LLMAuthError,
     LLMConnectionError,
+    LLMError,
     LLMFormatError,
     LLMNotConfigured,
+    LLMServerError,
     LLMTimeout,
     ProviderConfig,
 )
+from shine.llm.gateway import agent_output_config
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from tests.fake_http import FakeOpenAIServer
@@ -78,6 +81,27 @@ def test_openai_compatible_completion_and_capability_probe(fake_openai):
     assert capabilities["model_listed"] is True
 
 
+def test_provider_error_code_in_http_200_is_not_a_success(monkeypatch, fake_openai):
+    provider = OpenAICompatibleProvider(config(fake_openai))
+    response = httpx.Response(200, json={"base_resp": {"status_code": 1008}, "choices": []})
+    monkeypatch.setattr(provider, "_request", lambda *args, **kwargs: response)
+    with pytest.raises(LLMError) as error:
+        provider.complete([ChatMessage("user", "x")])
+    assert error.value.details == {"status": 200, "provider_code": 1008}
+
+
+@pytest.mark.parametrize(("configured", "model_limit", "expected"), [
+    (None, None, 100_000), (200_000, None, 100_000),
+    (4096, None, 4096), (None, 8192, 8192),
+])
+def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, model_limit, expected):
+    options = {"max_completion_tokens": configured} if configured else {}
+    original = config(fake_openai, generation_options=options, max_output_tokens=model_limit)
+    bounded = agent_output_config(original)
+    assert bounded.generation_options["max_completion_tokens"] == expected
+    assert original.generation_options == options
+
+
 def test_schema_mismatch_malformed_json_and_auth_errors_are_classified(fake_openai):
     fake_openai.response_content = json.dumps({"wrong": 1})
     provider = OpenAICompatibleProvider(config(fake_openai))
@@ -94,13 +118,14 @@ def test_schema_mismatch_malformed_json_and_auth_errors_are_classified(fake_open
         provider.complete([ChatMessage("user", "x")])
 
 
-def test_transient_server_errors_are_retried(fake_openai):
+def test_transient_server_errors_with_unknown_outcome_are_not_retried(fake_openai):
     fake_openai.mode = "status_500"
-    fake_openai.server_error_times = 1
-    fake_openai.response_content = json.dumps({"ok": True})
+    fake_openai.server_error_times = 5
     provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
-    response = provider.complete([ChatMessage("user", "x")])
-    assert response.parsed == {"ok": True}
+    with pytest.raises(LLMServerError) as exc:
+        provider.complete([ChatMessage("user", "x")])
+    assert exc.value.details["external_outcome"] == "UNKNOWN"
+    assert len(fake_openai.requests) == 1
 
 
 def test_timeout_is_classified(fake_openai):
@@ -119,9 +144,10 @@ def test_an_unknown_read_timeout_is_not_replayed(monkeypatch, fake_openai):
     calls = _failing_transport(
         monkeypatch, lambda request: httpx.ReadTimeout("read timed out", request=request))
     provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
-    with pytest.raises(LLMTimeout):
+    with pytest.raises(LLMTimeout) as exc:
         provider.complete([ChatMessage("user", "x")])
     assert len(calls) == 1
+    assert exc.value.details["external_outcome"] == "UNKNOWN"
 
 
 def test_a_broken_connection_after_the_request_is_not_replayed(monkeypatch, fake_openai):
@@ -129,9 +155,10 @@ def test_a_broken_connection_after_the_request_is_not_replayed(monkeypatch, fake
     calls = _failing_transport(
         monkeypatch, lambda request: httpx.RemoteProtocolError("server disconnected", request=request))
     provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
-    with pytest.raises(LLMConnectionError):
+    with pytest.raises(LLMConnectionError) as exc:
         provider.complete([ChatMessage("user", "x")])
     assert len(calls) == 1
+    assert exc.value.details["external_outcome"] == "UNKNOWN"
 
 
 def test_a_connection_failure_before_the_request_is_replayed(monkeypatch, fake_openai):
@@ -139,9 +166,10 @@ def test_a_connection_failure_before_the_request_is_replayed(monkeypatch, fake_o
     calls = _failing_transport(
         monkeypatch, lambda request: httpx.ConnectError("connection refused", request=request))
     provider = OpenAICompatibleProvider(config(fake_openai, max_retries=2))
-    with pytest.raises(LLMConnectionError):
+    with pytest.raises(LLMConnectionError) as exc:
         provider.complete([ChatMessage("user", "x")])
     assert len(calls) == 3
+    assert exc.value.details["external_outcome"] == "NOT_SENT"
 
 
 def test_json_mode_falls_back_when_provider_rejects_response_format(fake_openai):

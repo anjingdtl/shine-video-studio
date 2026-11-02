@@ -6,10 +6,11 @@ import { label, providerKindLabels, reasoningEffortLabels, routeRoleLabels } fro
 type Props = {
   profiles: ProviderProfile[]; routes: AgentRoute[]; busy: boolean;
   onCreateProfile: (payload: Record<string, unknown>) => void;
+  onUpdateProfile: (id: string, payload: Record<string, unknown>) => void;
   onTestProfile: (id: string) => void; onSetKey: (id: string, key: string) => void;
   onDeleteProfile: (id: string) => void; onRoute: (role: string, id: string) => void;
 };
-export function LLMConfiguration({ profiles, routes, busy, onCreateProfile, onTestProfile, onSetKey, onDeleteProfile, onRoute }: Props) {
+export function LLMConfiguration({ profiles, routes, busy, onCreateProfile, onUpdateProfile, onTestProfile, onSetKey, onDeleteProfile, onRoute }: Props) {
   const [name, setName] = useState('Local LLM');
   const [kind, setKind] = useState('openai_compatible');
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:11434/v1');
@@ -18,8 +19,10 @@ export function LLMConfiguration({ profiles, routes, busy, onCreateProfile, onTe
   const [maxTokens, setMaxTokens] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [timeoutDrafts, setTimeoutDrafts] = useState<Record<string, string>>({});
+  const [outputTokenDrafts, setOutputTokenDrafts] = useState<Record<string, string>>({});
   function createProfile() {
-    onCreateProfile({ name, kind, base_url: baseUrl, model, api_key: apiKey || null, timeout_s: 60, max_retries: 2,
+    onCreateProfile({ name, kind, base_url: baseUrl, model, api_key: apiKey || null, timeout_s: 180, max_retries: 2,
       generation_options: kind === 'openai_compatible' ? {
         ...(maxTokens ? { max_completion_tokens: Number(maxTokens) } : {}),
         ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
@@ -44,7 +47,7 @@ export function LLMConfiguration({ profiles, routes, busy, onCreateProfile, onTe
             <input value={model} placeholder="Model ID" onChange={(event) => setModel(event.target.value)} />
             <input value={apiKey} type="password" placeholder="API Key（不会回显）" onChange={(event) => setApiKey(event.target.value)} />
             {kind === 'openai_compatible' && <>
-              <input aria-label="最大输出 token" type="number" min="1" max="524288" step="1" value={maxTokens} placeholder="输出上限（含思考，留空沿用服务商默认）" onChange={event => setMaxTokens(event.target.value)} />
+              <input aria-label="最大输出 token" type="number" min="1" max="524288" step="1" value={maxTokens} placeholder="回复上限（留空沿用服务商默认；与输入上下文分开）" onChange={event => setMaxTokens(event.target.value)} />
               <select aria-label="思考深度" value={reasoningEffort} onChange={event => setReasoningEffort(event.target.value)}>
                 <option value="">服务商默认思考深度</option>
                 {['low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{label(reasoningEffortLabels, value)}</option>)}
@@ -55,23 +58,67 @@ export function LLMConfiguration({ profiles, routes, busy, onCreateProfile, onTe
           {profiles.map((profile) => (
             <div className="profile-row" key={profile.id}>
               <div><b>{profile.name}</b><span>{label(providerKindLabels, profile.kind)} · {profile.model || '未设置模型'} · {profile.has_api_key ? '已存密钥' : '无密钥'}</span>
+                {(() => {
+                  const context = profile.capabilities.model_context as {
+                    context_window_tokens?: number | null; source?: string;
+                  } | undefined;
+                  const tokens = context?.context_window_tokens;
+                  return tokens
+                    ? <span>输入上下文：{tokens.toLocaleString()} tokens · {context?.source?.includes('official') ? '官方模型说明' : '服务商模型目录'}</span>
+                    : <span>输入上下文：未报告固定上限；完整内容交由模型服务判定，不做小字符截断</span>;
+                })()}
                 {profile.generation_options?.max_completion_tokens && <span>输出上限 {profile.generation_options.max_completion_tokens} token（含思考）</span>}
                 {profile.generation_options?.reasoning_effort && <span>思考深度：{label(reasoningEffortLabels, profile.generation_options.reasoning_effort)}</span>}
+                <details className="profile-timeout-settings">
+                  <summary>调整结构化回复上限（可选）</summary>
+                  <label>最大输出 token（包含思考）
+                    <input aria-label={`最大输出 token ${profile.name}`} type="number" min="1" max="524288" step="1"
+                      value={outputTokenDrafts[profile.id] ?? String(profile.generation_options?.max_completion_tokens ?? '')}
+                      placeholder="留空沿用服务商默认"
+                      disabled={busy}
+                      onChange={event => setOutputTokenDrafts(rows => ({ ...rows, [profile.id]: event.target.value }))} />
+                  </label>
+                  <small>这是回复长度限制，不是输入上下文窗口。留空时不附加较小的固定回复上限。</small>
+                  <button className="text-button" type="button" disabled={busy}
+                    onClick={() => {
+                      const raw = outputTokenDrafts[profile.id] ?? String(profile.generation_options?.max_completion_tokens ?? '');
+                      onUpdateProfile(profile.id, { generation_options: {
+                        ...(raw.trim() ? { max_completion_tokens: Number(raw) } : {}),
+                        ...(profile.generation_options?.reasoning_effort
+                          ? { reasoning_effort: profile.generation_options.reasoning_effort } : {}),
+                      } });
+                    }}>保存回复上限</button>
+                </details>
+                <details className="profile-timeout-settings">
+                  <summary>模型回复较慢？调整等待时间</summary>
+                  <label>最长等待时间
+                    <select aria-label={`最长等待时间 ${profile.name}`} value={timeoutDrafts[profile.id] ?? String(profile.timeout_s)}
+                      disabled={busy} onChange={event => setTimeoutDrafts(rows => ({ ...rows, [profile.id]: event.target.value }))}>
+                      {[60, 120, 180, 300, 600].map(seconds => <option key={seconds} value={seconds}>{seconds < 60 ? `${seconds} 秒` : `${seconds / 60} 分钟`}</option>)}
+                    </select>
+                  </label>
+                  <small>模型回复较慢时可以延长等待。超时后请求会保留待核实状态，不会自动重发。</small>
+                  <button className="text-button" type="button" disabled={busy || Number(timeoutDrafts[profile.id] ?? profile.timeout_s) === profile.timeout_s}
+                    onClick={() => onUpdateProfile(profile.id, { timeout_s: Number(timeoutDrafts[profile.id] ?? profile.timeout_s) })}>
+                    保存等待时间
+                  </button>
+                </details>
               </div>
               <div className="profile-actions">
                 <input
                   value={keyDrafts[profile.id] ?? ''}
                   type="password"
                   placeholder="更新密钥"
+                  disabled={busy}
                   onChange={(event) => setKeyDrafts((rows) => ({ ...rows, [profile.id]: event.target.value }))}
                 />
-                <button className="text-button" disabled={!keyDrafts[profile.id]} onClick={() => { onSetKey(profile.id, keyDrafts[profile.id]); setKeyDrafts((rows) => ({ ...rows, [profile.id]: '' })); }}>保存密钥</button>
-                <button className="text-button" onClick={() => onTestProfile(profile.id)}>测试</button>
-                <button className="text-button" title="把此模型用于镜头规划环节" onClick={() => onRoute('shot_planner', profile.id)}>用作镜头规划</button>
-                <button className="text-button" title="把此模型用于剧本规划环节" onClick={() => onRoute('script_planner', profile.id)}>用作剧本规划</button>
-                <button className="text-button" title="把此模型用于画面审片环节" onClick={() => onRoute('vlm_reviewer', profile.id)}>用作画面审片</button>
-                <button className="text-button" title="把此模型用于语音核对环节" onClick={() => onRoute('asr_reviewer', profile.id)}>用作语音核对</button>
-                <button className="icon-button tiny" onClick={() => onDeleteProfile(profile.id)}><Trash2 size={12} /></button>
+                <button className="text-button" disabled={busy || !keyDrafts[profile.id]} onClick={() => { onSetKey(profile.id, keyDrafts[profile.id]); setKeyDrafts((rows) => ({ ...rows, [profile.id]: '' })); }}>保存密钥</button>
+                <button className="text-button" disabled={busy} onClick={() => onTestProfile(profile.id)}>测试</button>
+                <button className="text-button" disabled={busy} title="把此模型用于镜头规划环节" onClick={() => onRoute('shot_planner', profile.id)}>用作镜头规划</button>
+                <button className="text-button" disabled={busy} title="把此模型用于剧本规划环节" onClick={() => onRoute('script_planner', profile.id)}>用作剧本规划</button>
+                <button className="text-button" disabled={busy} title="把此模型用于画面审片环节" onClick={() => onRoute('vlm_reviewer', profile.id)}>用作画面审片</button>
+                <button className="text-button" disabled={busy} title="把此模型用于语音核对环节" onClick={() => onRoute('asr_reviewer', profile.id)}>用作语音核对</button>
+                <button className="icon-button tiny" disabled={busy} onClick={() => onDeleteProfile(profile.id)}><Trash2 size={12} /></button>
               </div>
             </div>
           ))}

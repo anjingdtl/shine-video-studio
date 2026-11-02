@@ -20,7 +20,7 @@ from fastapi import HTTPException
 
 from shine.comfyops.storage import prepare_process_environment
 
-PLACEHOLDERS = {"python", "bootstrap", "base_directory", "root", "adapter_dir", "port",
+PLACEHOLDERS = {"python", "bootstrap", "base_directory", "root", "adapter_dir", "runtime_data_root", "port",
                 "manifest", "runtime_packages"}
 RENDERER_KEYS = ("instance_id", "python", "root", "base_directory", "bootstrap", "adapter_dir",
                  "adapter_sha256", "gpu_uuid", "argv", "pinned_files")
@@ -74,6 +74,7 @@ def _renderer(raw):
         "python": _absolute(raw["python"]),
         "root": _absolute(raw["root"]),
         "base_directory": _absolute(raw["base_directory"]),
+        "runtime_data_root": _absolute(raw.get("runtime_data_root", raw["root"])),
         "bootstrap": _absolute(raw["bootstrap"]),
         "adapter_dir": _absolute(raw["adapter_dir"]),
         "adapter_sha256": raw["adapter_sha256"],
@@ -178,7 +179,8 @@ def build_renderer_launch(recipe, *, port=None, token=None):
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
     values = {"python": recipe["python"], "bootstrap": recipe["bootstrap"],
               "base_directory": recipe["base_directory"], "root": recipe["root"],
-              "adapter_dir": recipe["adapter_dir"], "port": str(port)}
+              "adapter_dir": recipe["adapter_dir"], "runtime_data_root": recipe["runtime_data_root"],
+              "port": str(port)}
     argv = [_expand(item, values) for item in recipe["argv"]]
     pins = [_expand(item, values) for item in recipe["pinned_files"]]
     if not argv or not Path(argv[0]).is_absolute():
@@ -188,7 +190,14 @@ def build_renderer_launch(recipe, *, port=None, token=None):
             raise HTTPException(409, "COMFY_RECIPE_INVALID")
     if str(Path(argv[0]).resolve()) not in {str(Path(pin).resolve()) for pin in pins}:
         raise HTTPException(409, "COMFY_RECIPE_EXECUTABLE_NOT_PINNED")
-    env = {**os.environ, **prepare_process_environment(recipe['root'])}
+    env = {**os.environ, **prepare_process_environment(recipe['runtime_data_root'])}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.update({
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "PIP_NO_INDEX": "1",
+        "UV_NO_INDEX": "1",
+    })
     env.update({
         "SHINE_COMFY_HANDOFF_TOKEN": token,
         "SHINE_COMFY_START_DRAINED": "1",
@@ -217,4 +226,11 @@ def build_review_launch(recipe, *, token=None):
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
     env = {**os.environ, **prepare_process_environment(recipe['runtime_packages'])}
     env["SHINE_REVIEW_HANDOFF_TOKEN"] = token
+    env.update({
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "PIP_NO_INDEX": "1",
+        "UV_NO_INDEX": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
     return argv, cwd, env, pins, token

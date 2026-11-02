@@ -25,6 +25,8 @@ from tests.conftest import (
     create_comfy_job,
     create_project,
     create_shot,
+    ffmpeg_executable,
+    ffprobe_executable,
     freeze_style,
     make_test_video_bytes,
 )
@@ -74,12 +76,16 @@ class ScriptedReviewer:
 
 
 def worker_settings(settings: Settings) -> Settings:
+    ffprobe = ffprobe_executable()
+    ffmpeg = ffmpeg_executable()
+    if not ffprobe or not ffmpeg:
+        pytest.skip("offline worker integration requires FFprobe and FFmpeg")
     return Settings(
         data_dir=settings.data_dir,
         database_url=settings.database_url,
         secret_store_dir=settings.secret_store_dir,
-        ffprobe_path="missing-ffprobe",
-        ffmpeg_path="missing-ffmpeg",
+        ffprobe_path=ffprobe,
+        ffmpeg_path=ffmpeg,
         render_provider="comfyui",
     )
 
@@ -270,7 +276,7 @@ def _prepare_project(client, *, auto_repair: bool = True):
     return project_id, style, shot
 
 
-def test_auto_repair_creates_a_materially_different_request(api, fake_comfy):
+def test_advisory_style_finding_does_not_trigger_auto_repair_or_block(api, fake_comfy):
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id, _style, shot = _prepare_project(client)
@@ -292,32 +298,18 @@ def test_auto_repair_creates_a_materially_different_request(api, fake_comfy):
         semantic_reviewer=reviewer,
     )
     first = client.get(f"/api/v1/jobs/{job['id']}").json()
-    assert first["status"] == "QUEUED"
-    assert first["semantic_retries"] == 1
-    assert first["request_revision"] == 2
-    assert first["repairs"][0]["outcome"] == "auto_queued"
-    assert "Recompiled" in " ".join(first["repairs"][0]["changes"])
-
-    # The second attempt uses a different request and a different prompt hash.
-    run_one(
-        factory,
-        settings=offline,
-        worker_id="comfy-worker",
-        comfy_client=ComfyUIClient(fake_comfy.base_url, timeout_s=2),
-        semantic_reviewer=reviewer,
-    )
-    second = client.get(f"/api/v1/jobs/{job['id']}").json()
-    attempts = second["attempts"]
-    assert len(attempts) == 2
-    assert attempts[0]["request_fingerprint"] != attempts[1]["request_fingerprint"]
-    assert attempts[0]["prompt_sha256"] != attempts[1]["prompt_sha256"]
-    assert attempts[1]["attempt_kind"] == "repair"
-    assert attempts[1]["parent_attempt_id"] == attempts[0]["id"]
-    assert attempts[1]["repair_reason"]
-    assert attempts[0]["status"] != "COMPLETED" or attempts[0]["output_sha256"]
-    # The original attempt is preserved, not overwritten.
-    assert attempts[0]["id"] != attempts[1]["id"]
-    assert fake_comfy.prompt_count == 2
+    assert first["status"] == "PASSED"
+    assert first["semantic_retries"] == 0
+    assert first["request_revision"] == 1
+    assert first["repairs"] == []
+    assert len(first["attempts"]) == 1
+    assert fake_comfy.prompt_count == 1
+    gates = client.get(f"/api/v1/jobs/{job['id']}/quality-gates").json()
+    semantic_gate = next(row for row in gates if row["gate_name"] == "semantic")
+    final_gate = next(row for row in gates if row["gate_name"] == "final")
+    assert "STYLE_DRIFT" in semantic_gate["evidence"]["finding_codes"]
+    assert final_gate["status"] == "needs_review"
+    assert "semantic" in final_gate["evidence"]["advisory_pending_human_review"]
 
 
 def test_auto_repair_is_skipped_when_the_project_disables_it(api, fake_comfy):
@@ -341,9 +333,9 @@ def test_auto_repair_is_skipped_when_the_project_disables_it(api, fake_comfy):
         semantic_reviewer=ScriptedReviewer([[drift]]),
     )
     result = client.get(f"/api/v1/jobs/{job['id']}").json()
-    assert result["status"] == "REPAIR_PENDING"
+    assert result["status"] == "PASSED"
     assert result["semantic_retries"] == 0
-    assert result["repairs"][0]["outcome"] == "escalated"
+    assert result["repairs"] == []
 
 
 def test_identity_mismatch_is_never_repaired_automatically(api, fake_comfy):
@@ -367,12 +359,15 @@ def test_identity_mismatch_is_never_repaired_automatically(api, fake_comfy):
         semantic_reviewer=ScriptedReviewer([[identity]]),
     )
     result = client.get(f"/api/v1/jobs/{job['id']}").json()
-    assert result["status"] == "REPAIR_PENDING"
+    assert result["status"] == "PASSED"
     assert result["semantic_retries"] == 0
-    assert result["repairs"][0]["outcome"] == "escalated"
+    assert result["repairs"] == []
+    gates = client.get(f"/api/v1/jobs/{job['id']}/quality-gates").json()
+    semantic_gate = next(row for row in gates if row["gate_name"] == "semantic")
+    assert "IDENTITY_MISMATCH" in semantic_gate["evidence"]["finding_codes"]
 
 
-def test_repair_budget_stops_after_two_rounds(api, fake_comfy):
+def test_advisory_findings_do_not_spend_the_repair_budget(api, fake_comfy):
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id, _style, shot = _prepare_project(client)
@@ -386,14 +381,14 @@ def test_repair_budget_stops_after_two_rounds(api, fake_comfy):
     )
     offline = worker_settings(settings)
     reviewer = ScriptedReviewer([[drift], [drift], [drift], [drift]])
-    for _ in range(4):
-        run_one(
-            factory,
-            settings=offline,
-            worker_id="comfy-worker",
-            comfy_client=ComfyUIClient(fake_comfy.base_url, timeout_s=2),
-            semantic_reviewer=reviewer,
-        )
+    run_one(
+        factory,
+        settings=offline,
+        worker_id="comfy-worker",
+        comfy_client=ComfyUIClient(fake_comfy.base_url, timeout_s=2),
+        semantic_reviewer=reviewer,
+    )
     result = client.get(f"/api/v1/jobs/{job['id']}").json()
-    assert result["semantic_retries"] <= 2
-    assert result["status"] in {"REPAIR_PENDING", "NEEDS_REVIEW"}
+    assert result["semantic_retries"] == 0
+    assert result["status"] == "PASSED"
+    assert result["repairs"] == []

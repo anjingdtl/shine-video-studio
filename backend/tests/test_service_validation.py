@@ -4,12 +4,15 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from shine.comfyops import deployment, service_validation
 from shine.comfyops.runtime_configuration import (
+    ACTIVE_KEY,
     CANDIDATE_KEY,
     runtime_report,
     service_evidence_status,
@@ -60,6 +63,39 @@ def _fake_review(role, spec):
     }
 
 
+@pytest.mark.skipif(__import__('os').name != 'nt', reason='managed renderer probing is Windows-only')
+def test_registered_workflow_managed_probe_records_only_node_validation(prep, monkeypatch):
+    client, factory, settings = prep
+    exercise_configuration(prep, monkeypatch)
+    with factory.begin() as db:
+        candidate = db.get(AppSetting, CANDIDATE_KEY)
+        identity = candidate.value['identity']
+        project_id = candidate.value['project_id']
+        db.add(AppSetting(key=ACTIVE_KEY, value={'identity': identity, 'project_id': project_id}))
+    registered = post(client, '/setup/profiles', {'project_id': project_id})
+    profile_id = registered['profiles'][0]['profile_id']
+    monkeypatch.setattr('shine.comfyops.runtime_configuration._current_identity', lambda db, settings: identity)
+    monkeypatch.setattr(service_validation, 'load_managed_recipe', lambda *a, **kw: {'renderer': {}})
+    monkeypatch.setattr(service_validation, '_probe_renderer', lambda recipe: {'object_info': _fake_object_info()})
+
+    response = client.post(f'/api/v1/workflow-profiles/{profile_id}/validate-managed')
+    assert response.status_code == 200, response.text
+    proof = response.json()['validated_against']
+    assert proof['missing_nodes'] == [] and proof['missing_inputs'] == []
+    assert proof['generation_verified'] is False and proof['services_stopped'] is True
+    assert proof['source'] == 'managed_live_object_info'
+
+    def cleanup_failed(recipe):
+        raise HTTPException(409, 'SERVICE_VALIDATION_CLEANUP_FAILED')
+
+    monkeypatch.setattr(service_validation, '_probe_renderer', cleanup_failed)
+    with pytest.raises(RuntimeError, match='SERVICE_VALIDATION_CLEANUP_FAILED'):
+        client.post(f'/api/v1/workflow-profiles/{profile_id}/validate-managed')
+    from shine.comfyops.models import ResourceLease
+    with factory() as db:
+        assert db.scalar(select(ResourceLease.id).where(ResourceLease.status == 'RECONCILE_REQUIRED'))
+
+
 def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypatch):
     client, factory, settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -73,6 +109,7 @@ def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypa
                         lambda recipe: {"object_info": _fake_object_info(),
                                         "port": recipe["renderer"]["port"]})
     monkeypatch.setattr(service_validation, "_probe_review", _fake_review)
+    monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda recipe: [])
 
     result = post(client, "/setup/services/validate", {
         "project_id": project_id, "recipe_sha256": recipe_sha256,
@@ -92,6 +129,8 @@ def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypa
         assert status["review_models"] == {
             "VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b",
         }
+        assert status["advisory_reviews"]["VLM"]["status"] == "READY"
+        assert status["advisory_reviews"]["ASR"]["status"] == "READY"
         # Evidence exists before activation, but the active runtime has not
         # claimed it yet.
         assert runtime_report(db, settings)["status"] == "NOT_ACTIVATED"
@@ -105,7 +144,7 @@ def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypa
 
 
 def test_service_validation_rejects_live_workflow_contract_missing_node(prep, monkeypatch):
-    client, factory, _ = prep
+    client, factory, settings = prep
     exercise_configuration(prep, monkeypatch)
     with factory() as db:
         candidate = db.get(AppSetting, CANDIDATE_KEY)
@@ -117,11 +156,112 @@ def test_service_validation_rejects_live_workflow_contract_missing_node(prep, mo
     monkeypatch.setattr(service_validation, "_probe_renderer",
                         lambda recipe: {"object_info": object_info,
                                         "port": recipe["renderer"]["port"]})
+    monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda recipe: [])
     response = client.post("/api/v1/setup/services/validate", json={
         "project_id": project_id, "recipe_sha256": recipe_sha256,
     }, headers=HEADERS)
     assert response.status_code == 409
     assert "LIVE_WORKFLOW_CONTRACT_FAILED" in response.text
+
+
+def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_renderer(prep, monkeypatch):
+    client, factory, settings = prep
+    exercise_configuration(prep, monkeypatch)
+    with factory() as db:
+        candidate = db.get(AppSetting, CANDIDATE_KEY)
+        project_id = candidate.value["project_id"]
+        recipe_sha256 = candidate.value["identity"]["recipe_sha256"]
+    post(client, "/setup/profiles", {"project_id": project_id})
+    started = []
+    monkeypatch.setattr(service_validation, "_probe_renderer", lambda recipe: (
+        started.append(True) or {"object_info": _fake_object_info(), "port": recipe["renderer"]["port"]}
+    ))
+
+    response = client.post("/api/v1/setup/services/validate", json={
+        "project_id": project_id, "recipe_sha256": recipe_sha256,
+    }, headers=HEADERS)
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "READY"
+    assert started == [True]
+    assert result["advisory_reviews"]["VLM"]["status"] == "NOT_READY"
+    assert result["advisory_reviews"]["ASR"]["status"] == "NOT_READY"
+    assert not result["review_models"]
+    with factory() as db:
+        status = service_evidence_status(db, settings)
+        assert status["status"] == "READY", status
+        assert status["advisory_reviews"]["VLM"]["status"] == "NOT_READY"
+        assert status["advisory_reviews"]["ASR"]["status"] == "NOT_READY"
+
+
+def test_unavailable_review_probes_are_advisory_after_clean_process_exit(prep, monkeypatch):
+    client, factory, _settings = prep
+    exercise_configuration(prep, monkeypatch)
+    with factory() as db:
+        candidate = db.get(AppSetting, CANDIDATE_KEY)
+        project_id = candidate.value["project_id"]
+        recipe_sha256 = candidate.value["identity"]["recipe_sha256"]
+    post(client, "/setup/profiles", {"project_id": project_id})
+    monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda _recipe: [])
+    monkeypatch.setattr(service_validation, "_probe_renderer", lambda recipe: {
+        "object_info": _fake_object_info(), "port": recipe["renderer"]["port"],
+    })
+    monkeypatch.setattr(service_validation, "_probe_review", lambda role, _spec: (_ for _ in ()).throw(
+        HTTPException(409, f"SERVICE_VALIDATION_REVIEW_UNAVAILABLE:{role}"),
+    ))
+
+    response = client.post("/api/v1/setup/services/validate", json={
+        "project_id": project_id, "recipe_sha256": recipe_sha256,
+    }, headers=HEADERS)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "READY"
+    assert {role: item["status"] for role, item in response.json()["advisory_reviews"].items()} == {
+        "VLM": "UNAVAILABLE", "ASR": "UNAVAILABLE",
+    }
+
+
+def test_review_probe_cleanup_failure_keeps_core_environment_unconfirmed(prep, monkeypatch):
+    client, factory, _settings = prep
+    exercise_configuration(prep, monkeypatch)
+    with factory() as db:
+        candidate = db.get(AppSetting, CANDIDATE_KEY)
+        project_id = candidate.value["project_id"]
+        recipe_sha256 = candidate.value["identity"]["recipe_sha256"]
+    post(client, "/setup/profiles", {"project_id": project_id})
+    monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda _recipe: [])
+    monkeypatch.setattr(service_validation, "_probe_renderer", lambda recipe: {
+        "object_info": _fake_object_info(), "port": recipe["renderer"]["port"],
+    })
+    monkeypatch.setattr(service_validation, "_probe_review", lambda _role, _spec: (_ for _ in ()).throw(
+        HTTPException(409, "SERVICE_VALIDATION_CLEANUP_FAILED"),
+    ))
+
+    response = client.post("/api/v1/setup/services/validate", json={
+        "project_id": project_id, "recipe_sha256": recipe_sha256,
+    }, headers=HEADERS)
+
+    assert response.status_code == 409
+    assert "SERVICE_VALIDATION_CLEANUP_FAILED" in response.text
+
+
+def test_service_validation_stops_waiting_when_owned_process_exits(monkeypatch):
+    class ExitedGroup:
+        def exit_code_if_stopped(self):
+            return 9
+
+    def unavailable(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(service_validation, "_json_get", unavailable)
+    with pytest.raises(HTTPException) as failure:
+        service_validation._wait_json(
+            "http://127.0.0.1:8116/health", timeout_s=300,
+            predicate=lambda body: True, owned_group=ExitedGroup(),
+        )
+    assert failure.value.detail["code"] == "SERVICE_VALIDATION_PROCESS_EXITED"
+    assert failure.value.detail["exit_code"] == 9
 
 
 def test_service_validation_requires_candidate_and_operator(prep):

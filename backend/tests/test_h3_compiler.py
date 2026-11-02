@@ -93,6 +93,31 @@ def test_t2va_uses_the_three_official_fields_in_order():
     assert len(compiled.prompt_sha256) == 64
 
 
+def test_chinese_locked_facts_require_and_use_explicit_english_prompt_translation():
+    original = ["怀表停在十二点"]
+    shot = spec(locked_story_facts=original, prompt_story_facts=["The watch is stopped at twelve."])
+    compiled = compile_prompt([], shot=shot)
+    assert "Locked story fact: The watch is stopped at twelve." in compiled.prompt
+    assert original == shot.locked_story_facts
+    with pytest.raises(PromptCompilationError) as error:
+        compile_prompt([], shot=spec(locked_story_facts=original))
+    assert error.value.code == "H3_LOCKED_FACT_TRANSLATION_REQUIRED"
+
+
+def test_prompt_style_and_subject_alias_preserve_original_identity():
+    english = StyleBible(
+        photography_language="Steady medium shots", shot_blocking="Preserve the axis",
+        color_palette="Cool colors", lighting_tone="Soft side light", lens_texture="Subtle grain",
+        editing_rhythm="Pause after dialogue", sound_performance="Natural Mandarin speech",
+    )
+    subject = item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="杜万山", role="杜万山")
+    compiled = compile_prompt([subject], shot=spec(prompt_style=english))
+    assert "Steady medium shots" in compiled.prompt
+    assert "approved subject" in compiled.sections["subject_definitions"]
+    assert subject.entity_id == "杜万山"
+    assert STYLE.photography_language == "平视中近景，稳定缓推"
+
+
 def test_i2va_starts_with_the_official_alignment_instruction():
     manifest = [item("<Picture 1>", ReferenceUse.PICTURE, frame_role=FrameRole.FIRST)]
     compiled = compile_prompt(manifest, mode=GenerationMode.I2VA)
@@ -179,6 +204,20 @@ def test_ref2va_speaker_requires_a_matching_subject_reference():
     with pytest.raises(PromptCompilationError) as exc:
         compile_prompt(manifest, shot=shot)
     assert exc.value.code == "H3_SPEAKER_REFERENCE_MISSING"
+
+
+def test_ref2va_speaker_matches_approved_character_view_suffix():
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山胸上", role="character")
+    ]
+    shot = spec(
+        characters=["R01 杜万山"],
+        dialogue=[{"speaker_id": "R01 杜万山", "text": "还差一分钟。", "start_s": 0.4, "end_s": 1.5}],
+    )
+
+    compiled = compile_prompt(manifest, shot=shot)
+
+    assert "<Subject 1> (S1) says:" in compiled.prompt
 
 
 def test_ref2va_subject_definitions_cite_presentation_picture_slots():

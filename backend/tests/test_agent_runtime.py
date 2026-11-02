@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from shine.agents.planner import HeuristicScriptPlanner, ShotPlanner, build_context
+from shine.agents.planner import HeuristicScriptPlanner, LLMScriptPlanner, ShotPlanner, build_context
 from shine.agents.runtime import ProducerAgentRuntime
 from shine.agents.script import ScriptParseError, parse_document
 from shine.agents.tools import AssetView
@@ -102,6 +102,36 @@ def test_llm_script_planner_validates_the_contract():
 
     with pytest.raises(ValueError):
         ProducerAgentRuntime(BadModel()).analyze_script("text")
+
+
+def test_llm_script_planner_does_not_clip_long_scripts():
+    full_script = "剧本正文。" * 13_000
+    captured = {}
+
+    class CaptureModel:
+        def complete_json(self, *, system, user, schema):
+            captured["user"] = user
+            raise RuntimeError("capture only")
+
+    with pytest.raises(RuntimeError, match="capture only"):
+        LLMScriptPlanner(CaptureModel()).plan(full_script, title="长篇")
+    assert full_script in captured["user"]
+
+
+def test_repair_agent_receives_all_qc_evidence():
+    qc_summary = "完整质检证据。" * 2_000
+    captured = {}
+
+    class CaptureModel:
+        def complete_json(self, *, system, user, schema):
+            captured["user"] = user
+            raise RuntimeError("capture only")
+
+    with pytest.raises(RuntimeError, match="capture only"):
+        ProducerAgentRuntime(CaptureModel()).suggest_repair(
+            qc_summary=qc_summary, error_categories=["TECHNICAL"], retries_left=1,
+        )
+    assert qc_summary in captured["user"]
 
 
 def test_shot_planner_uses_only_approved_assets_and_keeps_the_frozen_style():
