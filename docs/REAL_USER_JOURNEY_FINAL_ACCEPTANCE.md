@@ -4,7 +4,8 @@
 
 - 验收日期：2026-11-02（Asia/Shanghai）
 - 验收基线：`61bb50e0b34fe35a43a85ff2d569f33149ab9828`
-- 最终源码提交：待本报告对应的工程提交完成后回填
+- 验收源码提交：`2b70d77500157801edc802ccc8d9970a6309b012`（包含本轮已测试的应用代码）
+- 报告更新提交：本文件回填后的后续文档提交；只更新验收信息，不改应用代码
 - 本地证据目录：`.local-acceptance/real-user-journey-final/`（被 Git 忽略，不进入发布包）
 - 隔离应用数据：`.local-acceptance/real-user-journey-final/data/`
 - 远端 CI：`WAIVED_EXTERNAL_BILLING`
@@ -18,14 +19,15 @@
 4. **哪几处曾让模拟用户停住？** 模型哈希校验超过前端等待时间时，页面先报超时但后台已完成；刷新后单份剧本未选中且提示不清；剧情事实框只能输入单行；风格建议用英文。修复后在浏览器里复验了缓存核验恢复、自动选择剧本、多行事实提交及中文风格建议。素材缺失仍是实际阻断，系统给出补充已批准角色素材的中文原因。
 5. **最终影片来自本轮源码和本轮生成吗？** 本轮没有最终影片，也没有原始 H3 镜头、EDL、交付 MP4、视频哈希或浏览器解码证据；不能声称出片或播放通过。
 6. **关闭浏览器、重启软件和异常退出后任务安全吗？** 关闭并重开隔离浏览器后，项目、剧本与风格冻结仍存在；重新进入导演制作页可见导入剧本。隔离 API/Worker/Web 通过项目进程身份清单启动和停止，停止后 8110/5191 端口释放。因为没有 H3 生产任务，本轮无法以真实生产任务验证浏览器关闭、Worker 崩溃、ComfyUI 崩溃、第二镜头失败、租约释放或成片响应丢失后的恢复。
-7. **剩余限制是什么？** 没有可合法用于隔离验收的人物/场景/声音主资产；已有 ComfyUI 的 Python、节点修订及实际服务契约未验证；隔离数据中没有可用的正式 H3 Workflow Profile。真实 H3、多镜头、ASR/VLM、返工、EDL/FFmpeg、播放和导出因此未运行。完整一键安装包在本轮没有作为交付包双击安装；运行过只读安装体检和隔离启动链。
+7. **剩余限制是什么？** 没有可合法用于隔离验收的人物/场景/声音主资产；已有 ComfyUI 的 Python、节点修订及实际服务契约未验证；隔离数据中没有可用的正式 H3 Workflow Profile。真实 H3、多镜头、ASR/VLM、返工、EDL/FFmpeg、播放和导出因此未运行。发行包已从验收源码提交构建并逐文件 SHA-256 验证；没有双击其中的 `.cmd`，因为它会调用 Windows 默认浏览器，而本轮浏览器 Profile 必须隔离且不能改动用户日常 Profile。
 
 ## 验收矩阵
 
 | 范围 | 状态 | 证据与边界 |
 |---|---|---|
 | Windows 安装器只读环境检查 | `PASS_SOFTWARE` | `install_once.ps1 -CheckOnly` 检查 Windows、磁盘和固定版本工具链；未写文件。它不等于双击安装。 |
-| 正式发行包 `.cmd` 首次安装 | `NOT_RUN` | 未构建并双击正式包；避免安装器将浏览器导航到用户日常 Chrome Profile。 |
+| 正式发行包 `.cmd` 首次安装 | `NOT_RUN` | 已构建并校验发行包，但没有双击 `.cmd`；该入口会用 Windows 默认浏览器打开向导，本轮只使用隔离浏览器 Profile，未改动用户日常 Chrome Profile。 |
+| 正式发行包构建及哈希检查 | `PASS_SOFTWARE` | `build_test_package.ps1 -Verify` 从源码提交 `2b70d77500157801edc802ccc8d9970a6309b012` 构建；438 项清单经 SHA-256 校验。包内无模型权重、视频、SQLite、`.env` 或操作员凭据文件。 |
 | 隔离栈脚本启动/停止 | `PASS_SOFTWARE` | `start_shine.ps1` 在隔离数据目录启动；API `/health` 返回 200；`stop_shine.py` 按 PID 创建身份停止，进程清单移除且 8110/5191 端口释放。启动由工程工具触发，不冒充双击 `.cmd`。用户原有 8000/5173 服务没有停止。 |
 | 首次体验与演示/真实入口 | `PASS_REAL_USER` | 首次空项目、演示标识及“启用真实制作”入口可见；演示页明确表示不生成真实影片。 |
 | 真实环境激活 | `BLOCKED` | 发现已有 ComfyUI 后如实提示运行兼容性仍待验证，并阻止另行下载/接管；用户目录有 H3 Ref2VA UI 图，但未注册 API Workflow Profile，也未验证节点和服务。 |
@@ -77,7 +79,8 @@
 
 - `traces/real-user-journey.zip`、`traces/browser-reopen-resume.zip`：隔离浏览器 Playwright Trace。
 - `screenshots/01-empty-setup-1920x1080-css.jpg`、`03-detected-comfyui-installation-1920x1080-css.jpg`、`30-verification-result-recovered-in-ui.png`、`34-real-minimax-style-proposal.png`、`35-style-frozen.png`、`37-screenplay-imported-through-file-picker.png`、`43-real-llm-storyboard-result-1366.png`、`45-style-chinese-proposal-result.png`、`46-storyboard-1920x1080.png`、`47-storyboard-1366x768.png`、`48-storyboard-1280x720.png`、`49-storyboard-facts-full-width-1280x720.png`、`50-before-browser-close.png`、`51-after-browser-reopen-director.png`。
-- `logs/full-backend-pytest-final.log`、`logs/full-frontend-vitest-rerun.log`、`logs/full-ruff.log`、`logs/alembic-upgrade-head.log`、`logs/alembic-current.log`、`logs/alembic-check.log`、`logs/isolated-stack-stop.log`、`logs/isolated-start-stop-summary.json`、`logs/gpu-and-memory-final.log`。
+- `logs/full-backend-pytest-final.log`、`logs/package-entrypoints-final.log`、`logs/full-frontend-vitest-rerun.log`、`logs/full-ruff.log`、`logs/alembic-upgrade-head.log`、`logs/alembic-current.log`、`logs/alembic-check.log`、`logs/isolated-stack-stop.log`、`logs/isolated-start-stop-summary.json`、`logs/package-build-final.log`、`logs/gpu-and-memory-final.log`。
+- `package-output-final/ShineVideoStudio-20261102-2b70d77-win64.zip`：本地隔离构建包；SHA-256 `0a7d7f0cf68e5d619030af6e8f3a5e16318ff35db8e6d8ff861fc71d7fa2f904`。它不是已双击安装的证据。
 - `logs/comfyui-workflow-inspection.json`：用户目录 H3 Ref2VA 工作流的只读结构检查与 SHA-256；不包含提示词或图像内容。
 - `input/rainy-night-page-17.txt`：仅用于隔离验收的虚构剧本；不声称其中人物、场景或声音已是主资产。
 - 没有原始 H3 MP4、ASR/VLM 报告、EDL、最终 MP4、视频 SHA-256 或播放器解码证据；这些项目保持 `NOT_RUN`。
