@@ -355,7 +355,10 @@ export function RealProductionWizard({
     }
     const runtime = await api<RuntimeState>('/setup/runtime');
     if (!alive()) return;
-    if (!runtime.candidate || runtime.candidate.project_id !== projectId) {
+    // The runtime configuration is machine-wide: it is created once and reused
+    // by every project on this computer, so another project's candidate is a
+    // valid shared environment instead of "no configuration".
+    if (!runtime.candidate) {
       stopWith('workflows', '还没有本机可用的真实制作配置。请到专业设置的「制作环境」生成运行配置。');
       return;
     }

@@ -354,11 +354,14 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
 
   function validateServices() {
     const candidate = runtime?.candidate;
-    if (!candidate || candidate.project_id !== projectRef.current) return;
+    const project = projectRef.current;
+    if (!candidate || !project) return;
     void run(async () => {
+      // The recipe is machine-wide; the workflows being validated belong to the
+      // project currently open, even when the recipe was created elsewhere.
       const result = await api<{ status: string; node_count: number; workflow_profiles: string[];
         review_models: Record<string, string> }>('/setup/services/validate', withJson('POST', {
-        project_id: candidate.project_id, recipe_sha256: candidate.recipe_sha256,
+        project_id: project, recipe_sha256: candidate.recipe_sha256,
       }));
       await loadRuntime(); await loadReadiness();
       return `服务与工作流验证完成：${result.status} · ${result.workflow_profiles.length} 个工作流 · ${result.node_count} 个节点 · 审片 ${Object.values(result.review_models).join(' / ')}`;
