@@ -28,6 +28,18 @@
 | 已停机交接失败后租约无人可解 | 渲染后交接失败，任务 `NEEDS_REVIEW`、租约 `RECONCILE_REQUIRED`，界面无释放入口 | `reconcile_stopped_handoffs`：仅当记录的渲染器进程已死且端口空闲时释放租约，任务保持 `NEEDS_REVIEW` | `test_stopped_handoff_releases_the_gpu_without_turning_a_failure_into_a_pass`、`test_live_renderer_keeps_a_failed_handoff_blocked` |
 | 看守失败原因不可诊断 | 只记录固定原因码 | 记录具体未通过的校验项与租约状态/到期时间；记录循环与释放决策 | 手工复现确认 |
 
+### 审片定位调整（2026-11-03）
+
+- **审片不再硬阻断**：`preproduction.enforce` 与 `native.production_review_binding` 在缺少冻结原生审片能力时改为继续制作；人物/对白门记录为 `needs_review` 且 `required=0`。确定性媒体硬错误仍阻断。
+- **模型包 ≠ 文件数**：ASR/VLM 每个角色只需 **1 个模型包**。页面显示的 VLM 13 / ASR 10 是包内文件数（权重分片、分词器、配置、README），不是 13 个模型；界面文案已改为「N 个模型包 · 已核验 X/Y 个文件」。
+- **真实复验**：在界面把「审片建议」切到「基础建议：人物与对白」，发起单镜系列 `db223693-75d8-44d3-9903-ea50efc452be`，结果 `COMPLETED 1/1`、`finalization_state=RELEASED`：真实出片 3,268,307 B，`technical=passed`（required），`semantic/audio=needs_review`（required=0），`final=needs_review`；自动交付订单 `0dde76bf…`，7.31 s、768×1344、24 fps。此前同样的选择会在建任务时返回 409。
+
+### 界面全板块穿测（2026-11-03）
+
+- 导演模式 1→4 步与专业模式侧栏逐页打开：素材与风格、制片准备、人名与字幕、分镜与任务、多镜头连续生产、成片与导出、制作环境、模型与系统、显示与偏好、影视制片团队、H3 官方规范均正常渲染，未出现「加载失败 / 请求失败 / 无法连接 / undefined」。
+- 「模型与系统」显示核心 LLM 为 MiniMax 真人验收（1,000,000 上下文），状态「LLM 准备：配置及连接检查通过（尚非文本生成验收）」；工作流 Profile 注册区可展开。
+- 专业板块显示各 Agent 产物为「待用户审查」，没有被自动批准或替换主资产。
+
 ### 本轮测试结果（当前源码）
 
 - 后端全量：`backend\.venv\Scripts\python.exe -m pytest -c backend/pyproject.toml backend/tests -ra --tb=short` → **1432 passed、1 skipped、2 warnings，exit 0，716.30 s**。跳过项 `test_real_managed_startup.py:85` 需 `SHINE_REAL_COMFY_PROBE=1` 与本机 ComfyUI。

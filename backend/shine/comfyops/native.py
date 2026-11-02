@@ -299,9 +299,10 @@ def production_review_binding(db, project_id, job_id, kind, provider, *, live, i
         raise HTTPException(409, "PRODUCTION_REVIEW_JOB_MISMATCH")
     plan = current_plan(db, project_id)
     if not plan and not job.preproduction_manifest_hash:
-        if getattr(provider, "review_scope", None) == "basic_character":
-            raise HTTPException(409, "BASIC_REVIEW_REQUIRES_FROZEN_NATIVE_CAPABILITY")
-        return None  # Existing unanalyzed projects keep their legacy contract.
+        # An unanalyzed project keeps its legacy contract. The basic character
+        # review is advisory, so it runs without a frozen executor binding and
+        # its result can never be reported as a real pass.
+        return None
     if job.provider == "mock":
         return None  # Mock jobs never become real evidence.
     manifest = plan.payload.get("manifest") if plan else None

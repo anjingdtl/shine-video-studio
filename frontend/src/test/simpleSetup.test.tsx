@@ -161,8 +161,8 @@ describe('本机环境简化流程', () => {
     expect(screen.queryByText(/哈希不匹配或文件已变化/)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '确认已安装并核验' }));
 
-    expect(await screen.findByText(/建议审片模型未就绪（已核验 1\/3 项，不阻断 H3 出片）/)).toBeInTheDocument();
-    expect(screen.getByText(/建议审片模型未就绪（已核验 3\/4 项，不阻断 H3 出片）/)).toBeInTheDocument();
+    expect(await screen.findByText(/建议审片模型未就绪（1 个模型包 · 已核验 1\/3 个文件，不阻断 H3 出片）/)).toBeInTheDocument();
+    expect(screen.getByText(/建议审片模型未就绪（1 个模型包 · 已核验 3\/4 个文件，不阻断 H3 出片）/)).toBeInTheDocument();
     expect(screen.getByText(/默认安装只准备 H3 所需组件，不会自动下载 ASR\/VLM 审片模型/)).toBeInTheDocument();
     expect(screen.queryByText('已安装并核验（原目录，未复制）')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '已有安装等待兼容性验证' })).toBeDisabled();

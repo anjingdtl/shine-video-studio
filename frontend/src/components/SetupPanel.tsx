@@ -153,6 +153,9 @@ function buildModelCards(
       || matches.length + missing.length;
     const incompleteCount = Math.max(0, expectedCount - verifiedCount);
     const optionalReview = purpose === 'vision' || purpose === 'audio';
+    // A reviewer is ONE model package; the catalog splits it into files
+    // (weight shards, tokenizer, configs). Say so instead of "13 models".
+    const packageCount = Math.max(1, components.length);
     let resolvedState: { text: string; tone: string } | undefined;
     if (resolved && importedResult) {
       if (purpose === 'program' && scan?.software?.installed) {
@@ -160,7 +163,7 @@ function buildModelCards(
       } else if (expectedCount > 0 && incompleteCount === 0) {
         resolvedState = { text: optionalReview ? '模型文件已安装并核验（可选建议项）' : '固定版本文件已安装并哈希核验', tone: 'verified' };
       } else if (optionalReview) {
-        resolvedState = { text: `建议审片模型未就绪（已核验 ${verifiedCount}/${expectedCount} 项，不阻断 H3 出片）`, tone: verifiedCount ? 'candidate' : 'absent' };
+        resolvedState = { text: `建议审片模型未就绪（${packageCount} 个模型包 · 已核验 ${verifiedCount}/${expectedCount} 个文件，不阻断 H3 出片）`, tone: verifiedCount ? 'candidate' : 'absent' };
       } else {
         resolvedState = { text: `仅有部分固定版本文件已核验（${verifiedCount}/${expectedCount} 项）`, tone: 'candidate' };
       }
@@ -183,7 +186,7 @@ function buildModelCards(
         : { text: '待检查已有目录', tone: 'muted' },
       detail: scan
         ? resolved
-          ? `已核验 ${verifiedCount} / ${expectedCount} 个固定版本文件${incompleteCount ? ` · 仍缺或未匹配 ${incompleteCount} 项` : ''}`
+          ? `已核验 ${verifiedCount} / ${expectedCount} 个固定版本文件${incompleteCount ? ` · 仍缺或未匹配 ${incompleteCount} 项` : ''}${optionalReview ? `（同属 ${packageCount} 个模型包，含权重分片、分词器与配置）` : ''}`
           : `发现候选 ${candidateCount} · 未找到固定版本文件 ${missing.length}`
         : '',
     });

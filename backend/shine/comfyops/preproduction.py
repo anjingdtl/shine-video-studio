@@ -317,15 +317,17 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
         if plan and not offline and plan.payload.get("review_scope", "full") != request.self_review_scope:
             raise HTTPException(409, "PREPRODUCTION_REVIEW_SCOPE_MISMATCH")
         if not offline and request.self_review_scope == "basic" and request.shot_spec.characters:
-            # Block before an H3 submission if the frozen plan cannot perform
-            # the selected character review. Legacy projects cannot infer a
-            # qualified provider merely from a mutable route or a live server.
+            # The basic character review is an advisory aid. When the frozen
+            # plan has no qualified native reviewer, production continues and
+            # the character gate stays pending instead of blocking the shot.
             pins = (plan.payload.get("manifest") or {}).get("workflows", []) if plan else []
             rows = [db.get(WorkflowRevision, pin.get("id")) for pin in pins]
             reviewers = [row for row in rows if row and row.payload.get("category") == "VLM_REVIEW"]
             if (len(reviewers) != 1 or reviewers[0].status != "PRODUCTION_APPROVED"
                     or (reviewers[0].payload.get("native_provider") or {}).get("review_scope") != "basic_character"):
-                raise HTTPException(409, "BASIC_REVIEW_REQUIRES_FROZEN_NATIVE_CAPABILITY")
+                # Advisory-only: the character gate is recorded as pending by
+                # the QC step, and the shot is allowed to continue rendering.
+                pass
 
         # New analyzed real projects require independent input evidence. Pinned
         # evidence is rechecked for legacy jobs too; historical data is not rewritten.
