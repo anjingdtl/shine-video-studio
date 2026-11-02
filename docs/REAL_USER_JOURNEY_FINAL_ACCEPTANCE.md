@@ -14,7 +14,7 @@
 ## 对七个验收问题的回答
 
 1. **普通用户现在能否独立从启动做到一部 AI 短剧？** 还不能。本轮完成了新项目、剧本导入、风格建议与冻结、真实 LLM 分镜请求以及已有安装识别；分镜链在创建镜头前正确阻止，因为隔离作品没有经授权可用于测试的人物和场景主资产。ComfyUI 目录中找到一份 H3 Ref2VA 三段式前端工作流，但它不是工作台可直接提交的 API 工作流；运行时、节点版本和参数映射也未完成兼容性核验，因此没有真实 H3 任务。
-2. **哪些链路是真实的？** 浏览器操作经过 Web → API；MiniMax M3.1 Flash 真实返回了风格建议与编剧 Agent 结果，记录均为 `is_mock=false`。已有 ComfyUI 目录及固定模型文件由工作台只读检查并做 SHA-256 核验。没有 Web → 常驻 Worker → H3 → MP4 的链路，本轮未提交视频任务。
+2. **哪些链路是真实的？** 浏览器操作经过 Web → API；MiniMax M3.1 Flash 真实返回了风格建议与编剧 Agent 结果，记录均为 `is_mock=false`。向导通过 Web UI 将发现的 ComfyUI 和模型明确确认成“已安装”，并复用已有 SHA-256 核验结果；没有复制、下载或重复读取模型。没有 Web → 常驻 Worker → H3 → MP4 的链路，本轮未提交视频任务。
 3. **本轮发现和修复了什么？** 修复长时间模型核验被 60 秒前端超时截断、Windows PowerShell 5.1 进程清单解析、剧情事实单行输入、单份已导入剧本未自动选中、中文风格建议返回英文、1280×720 剧情事实输入框过窄，以及安装资料仍要求操作员密码等问题。后端全量测试第一次运行还暴露 `stop_shine.py` 移除 `UNKNOWN` 导入造成恢复测试失败；恢复兼容导出后重跑结果见下方测试矩阵。
 4. **哪几处曾让模拟用户停住？** 模型哈希校验超过前端等待时间时，页面先报超时但后台已完成；刷新后单份剧本未选中且提示不清；剧情事实框只能输入单行；风格建议用英文。修复后在浏览器里复验了缓存核验恢复、自动选择剧本、多行事实提交及中文风格建议。素材缺失仍是实际阻断，系统给出补充已批准角色素材的中文原因。
 5. **最终影片来自本轮源码和本轮生成吗？** 本轮没有最终影片，也没有原始 H3 镜头、EDL、交付 MP4、视频哈希或浏览器解码证据；不能声称出片或播放通过。
@@ -28,10 +28,10 @@
 | Windows 安装器只读环境检查 | `PASS_SOFTWARE` | `install_once.ps1 -CheckOnly` 检查 Windows、磁盘和固定版本工具链；未写文件。它不等于双击安装。 |
 | 正式发行包 `.cmd` 首次安装 | `NOT_RUN` | 已构建并校验发行包，但没有双击 `.cmd`；该入口会用 Windows 默认浏览器打开向导，本轮只使用隔离浏览器 Profile，未改动用户日常 Chrome Profile。 |
 | 正式发行包构建及哈希检查 | `PASS_SOFTWARE` | `build_test_package.ps1 -Verify` 从源码提交 `2b70d77500157801edc802ccc8d9970a6309b012` 构建；438 项清单经 SHA-256 校验。包内无模型权重、视频、SQLite、`.env` 或操作员凭据文件。 |
-| 隔离栈脚本启动/停止 | `PASS_SOFTWARE` | `start_shine.ps1` 在隔离数据目录启动；API `/health` 返回 200；`stop_shine.py` 按 PID 创建身份停止，进程清单移除且 8110/5191 端口释放。启动由工程工具触发，不冒充双击 `.cmd`。用户原有 8000/5173 服务没有停止。 |
+| 隔离栈脚本启动/停止 | `PASS_SOFTWARE` | `start_shine.ps1` 在隔离数据目录启动；API `/health` 返回 200；`stop_shine.py` 按 PID 创建身份停止，进程清单移除且 8110/5191 端口释放。最终停止证据见 `logs/isolated-stack-stop-final.log`。启动由工程工具触发，不冒充双击 `.cmd`。用户原有 8000/5173 服务没有停止。 |
 | 首次体验与演示/真实入口 | `PASS_REAL_USER` | 首次空项目、演示标识及“启用真实制作”入口可见；演示页明确表示不生成真实影片。 |
-| 真实环境激活 | `BLOCKED` | 发现已有 ComfyUI 后如实提示运行兼容性仍待验证，并阻止另行下载/接管；用户目录有 H3 Ref2VA UI 图，但未注册 API Workflow Profile，也未验证节点和服务。 |
-| 已有 ComfyUI 与权重识别 | `PASS_REAL_USER` | 浏览器确认已有安装；10 个固定组件文件哈希匹配，43,978,717,531 字节，0 项拒绝、0 字节复制；重复点击恢复缓存结果，未重读权重。H3 软件版本匹配，但运行时未验证。 |
+| 真实环境激活 | `BLOCKED` | 向导明确显示 ComfyUI 与模型“已安装”，随后以 `EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED` 阻止真实激活；阻断原因是运行兼容性与固定节点版本尚未验证。没有把已有安装标成缺失，也没有建议重下或接管。用户目录有 H3 Ref2VA UI 图，但未注册 API Workflow Profile。 |
+| 已有 ComfyUI 与权重识别 | `PASS_REAL_USER` | 通过“启用真实制作”→“核验已安装环境”实际操作；界面显示 `INSTALLED_VERSION_MATCH`、约 41 GB 已核验、0 项哈希失败、0 字节复制、0 字节下载，并明确“已恢复此前完成的核验结果，未重复读取权重”。此前 10 个固定组件文件哈希匹配，43,978,717,531 字节。H3 软件版本匹配，但运行时未验证。证据：`screenshots/52-wizard-confirmed-existing-install.png`、`logs/wizard-existing-install-confirmation.json`。 |
 | 真实 MiniMax LLM | `PASS_REAL_MODEL` | 通过 UI 配置用户提供的 MiniMax 凭据；MiniMax M3.1 Flash 风格建议和编剧 Agent 请求真实成功，`is_mock=false`。密钥未进入仓库或验收日志。 |
 | 创建作品、输入剧本、刷新与重开 | `PASS_REAL_USER` | 通过 UI 创建《Shine真人模拟验收短剧》，从文件选择器导入 547 字符剧本；浏览器关闭重开后项目和剧本仍在。 |
 | 素材绑定与正式资产批准 | `BLOCKED` | 隔离作品为 0 个资产；没有可确认允许本轮使用的人物/场景/声音主资产。没有读取或复制正式数据库中的私人素材，没有伪造资产。 |
@@ -70,7 +70,7 @@
 - **已修复：** 只有一份已导入剧本时刷新后没有自动选中；现在进入分镜页自动选中。
 - **已修复：** “每行一条”的剧情事实只能在单行框输入；现在可多行录入并在小窗口全宽显示。
 - **已修复：** 中文风格建议以英文返回；现在给用户的风格提案使用简体中文。
-- **仍阻断真实制作：** 系统确认了现有 ComfyUI 和 H3 权重后，兼容性未验证会停下，不会冒险接管或另下权重；普通用户可见“运行兼容性待核验”说明，但此安装暂时没有可在当前向导内完成的自动验证路径。
+- **仍阻断真实制作：** 向导已按“已安装”确认现有 ComfyUI 和 H3 权重，复用校验且没有重复读取、复制或下载；只有运行兼容性与固定节点版本未验证，因此以 `EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED` 停下，不会冒险接管或另下权重。普通用户可见阻断原因和专业设置入口，但此安装暂时没有可在当前向导内完成的自动运行验证路径。
 - **可恢复但不完全：** 浏览器重开后工作区返回作品概览；项目、剧本、风格仍保留，用户需再点一次“AI导演制作”回到分镜页。
 
 ## 本地证据清单
@@ -78,8 +78,8 @@
 证据均在 `.local-acceptance/real-user-journey-final/`，不会被提交或打包：
 
 - `traces/real-user-journey.zip`、`traces/browser-reopen-resume.zip`：隔离浏览器 Playwright Trace。
-- `screenshots/01-empty-setup-1920x1080-css.jpg`、`03-detected-comfyui-installation-1920x1080-css.jpg`、`30-verification-result-recovered-in-ui.png`、`34-real-minimax-style-proposal.png`、`35-style-frozen.png`、`37-screenplay-imported-through-file-picker.png`、`43-real-llm-storyboard-result-1366.png`、`45-style-chinese-proposal-result.png`、`46-storyboard-1920x1080.png`、`47-storyboard-1366x768.png`、`48-storyboard-1280x720.png`、`49-storyboard-facts-full-width-1280x720.png`、`50-before-browser-close.png`、`51-after-browser-reopen-director.png`。
-- `logs/full-backend-pytest-final.log`、`logs/package-entrypoints-final.log`、`logs/full-frontend-vitest-rerun.log`、`logs/full-ruff.log`、`logs/alembic-upgrade-head.log`、`logs/alembic-current.log`、`logs/alembic-check.log`、`logs/isolated-stack-stop.log`、`logs/isolated-start-stop-summary.json`、`logs/package-build-final.log`、`logs/gpu-and-memory-final.log`。
+- `screenshots/01-empty-setup-1920x1080-css.jpg`、`03-detected-comfyui-installation-1920x1080-css.jpg`、`30-verification-result-recovered-in-ui.png`、`34-real-minimax-style-proposal.png`、`35-style-frozen.png`、`37-screenplay-imported-through-file-picker.png`、`43-real-llm-storyboard-result-1366.png`、`45-style-chinese-proposal-result.png`、`46-storyboard-1920x1080.png`、`47-storyboard-1366x768.png`、`48-storyboard-1280x720.png`、`49-storyboard-facts-full-width-1280x720.png`、`50-before-browser-close.png`、`51-after-browser-reopen-director.png`、`52-wizard-confirmed-existing-install.png`。
+- `logs/full-backend-pytest-final.log`、`logs/package-entrypoints-final.log`、`logs/full-frontend-vitest-rerun.log`、`logs/full-ruff.log`、`logs/alembic-upgrade-head.log`、`logs/alembic-current.log`、`logs/alembic-check.log`、`logs/isolated-stack-stop.log`、`logs/isolated-stack-stop-final.log`、`logs/isolated-start-stop-summary.json`、`logs/package-build-final.log`、`logs/gpu-and-memory-final.log`、`logs/wizard-existing-install-confirmation.json`。
 - `package-output-final/ShineVideoStudio-20261102-2b70d77-win64.zip`：本地隔离构建包；SHA-256 `0a7d7f0cf68e5d619030af6e8f3a5e16318ff35db8e6d8ff861fc71d7fa2f904`。它不是已双击安装的证据。
 - `logs/comfyui-workflow-inspection.json`：用户目录 H3 Ref2VA 工作流的只读结构检查与 SHA-256；不包含提示词或图像内容。
 - `input/rainy-night-page-17.txt`：仅用于隔离验收的虚构剧本；不声称其中人物、场景或声音已是主资产。
