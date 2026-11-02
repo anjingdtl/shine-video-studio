@@ -218,8 +218,13 @@ def resolve_runtime(db, settings):
 
 
 def require_idle_configuration(db):
+    from shine.services import ACTIVE_JOB_STATUSES
+
+    # Only work that can still touch the GPU blocks a re-validation. A
+    # NEEDS_REVIEW record with no active lease is an audit trail, not live work.
     if (db.scalar(select(ResourceLease.id).where(ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1))
-            or db.scalar(select(Job.id).where(Job.status.not_in(['PASSED', 'FAILED', 'CANCELLED'])).limit(1))
+            or db.scalar(select(Job.id).where(
+                Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
             or db.scalar(select(ProductionSeries.id).where(
                 ProductionSeries.status.not_in(['COMPLETED', 'FAILED', 'CANCELLED'])).limit(1))
             or db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(

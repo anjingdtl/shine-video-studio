@@ -16,6 +16,10 @@ const ERROR_CODE_LABELS: Record<string, string> = {
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
   EXISTING_MODEL_HASH_REJECTIONS_PRESENT: '本机有模型文件未通过完整性校验。为保护原文件，本次没有复用或下载替代文件；请到专业设置查看失败项。',
+  RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: '本机还有未核对或未结束的任务，暂时不能重新验证或启用运行配置。请先处理「有任务待核对」的镜头任务，或取消未完成的生产系列，再重试。',
+  GENERATE_RUNTIME_CONFIGURATION_FIRST: '还没有为本机生成运行配置。请先在「制作环境」完成一次准备，再验证工作流。',
+  STOP_OWNED_INSTANCE_BEFORE_VALIDATION: '本机渲染器仍在运行。请先停止受管实例，再验证工作流节点。',
+  ACTIVE_RUNTIME_CONFIGURATION_CHANGED: '本机运行配置已经变化。请重新加载工作台后再验证。',
 };
 
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw
@@ -31,6 +35,7 @@ function describeDetail(detail: unknown): string {
   if (typeof detail === 'string') {
     if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
     if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
+    if (ERROR_CODE_LABELS[detail]) return `${ERROR_CODE_LABELS[detail]}（${detail}）`;
     return detail;
   }
   if (Array.isArray(detail)) {

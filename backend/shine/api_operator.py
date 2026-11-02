@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from shine.api_common import DBSession, app_settings
 from shine.comfy.client import ComfyError
@@ -52,3 +53,19 @@ def review(job_id: str, body: OperatorDecision, actor: Operator, settings: Setti
         return submit_review(db, settings, job_id, actor, body)
     except ComfyError as exc:
         raise HTTPException(503, "ComfyUI history unavailable; approval was not recorded") from exc
+
+
+class AbandonRequest(BaseModel):
+    evidence: str = Field(default="", max_length=200)
+
+
+@router.post("/jobs/{job_id}/abandon")
+def abandon(job_id: str, body: AbandonRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """A local user ends an unreconcilable attempt; the artifact is kept."""
+    from shine.api_preparation import locked
+    from shine.operator_review import abandon_unreconciled_job
+
+    locked(db)
+    result = abandon_unreconciled_job(db, settings, job_id, actor, body.evidence)
+    db.commit()
+    return result

@@ -40,10 +40,12 @@
 - 「模型与系统」显示核心 LLM 为 MiniMax 真人验收（1,000,000 上下文），状态「LLM 准备：配置及连接检查通过（尚非文本生成验收）」；工作流 Profile 注册区可展开。
 - 专业板块显示各 Agent 产物为「待用户审查」，没有被自动批准或替换主资产。
 - 修复一处界面矛盾：运行配置原先按“创建它的作品”判断，导致顶部显示「真实制作已就绪」而环境检查却报「还没有本机可用的真实制作配置」。现在把运行配置视为整机共享（新作品复用同一套本机环境），服务验证针对当前作品的工作流执行。
+- 新增用户可用的了结入口：镜头详情出现「放弃这次生成（保留产物，不重投）」。它只结束这次无法核对的任务（`USER_ABANDONED_UNRECONCILED`），解除其租约并保留产物，绝不重新提交；界面已实际点通。
+- 「验证本机节点」已从界面真实跑通：审计新增 `WORKFLOW_PROFILE_VALIDATED`（`missing_nodes: []`、`services_stopped: true`，2026-11-03 02:15:58）。同时把“空闲”判定收窄为**真正在途**的任务（进行中状态、非 stale、在途租约、未结束系列），不再让历史待核对记录永久挡住运行配置。
 
 ### 本轮测试结果（当前源码）
 
-- 后端全量：`backend\.venv\Scripts\python.exe -m pytest -c backend/pyproject.toml backend/tests -ra --tb=short` → **1432 passed、1 skipped、2 warnings，exit 0，716.30 s**。跳过项 `test_real_managed_startup.py:85` 需 `SHINE_REAL_COMFY_PROBE=1` 与本机 ComfyUI。
+- 后端全量：`backend\.venv\Scripts\python.exe -m pytest -c backend/pyproject.toml backend/tests -ra --tb=short` → **1433 passed、1 skipped、2 warnings，exit 0，730.02 s**。跳过项 `test_real_managed_startup.py:85` 需 `SHINE_REAL_COMFY_PROBE=1` 与本机 ComfyUI。
 - 前端全量：**90 passed（15 个测试文件）**；`npm run build`（tsc + Vite）**通过**。
 - `ruff check backend/shine backend/tests`：**通过**。
 - 隔离库 Alembic：`upgrade head` 与 `check` 均**通过**（`No new upgrade operations detected`）。

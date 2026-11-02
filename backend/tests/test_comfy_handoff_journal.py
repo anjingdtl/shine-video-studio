@@ -285,6 +285,33 @@ def test_advisory_only_handoff_restarts_without_a_review_receipt(handoff):
         assert journal.value["evidence"]["REVIEW_FINISHED"]["model_review_skipped"] == "ADVISORY_ONLY"
 
 
+def test_user_can_abandon_an_uncertain_render_without_resubmitting(handoff, monkeypatch):
+    """A local user ends the wait; the produced artifact and the GPU are handled honestly."""
+    from shine.operator_review import abandon_unreconciled_job
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    fail_handoff(factory, attempt_id, "COMFY_RESTART_OUTCOME_UNCONFIRMED")
+    # The renderer process is gone and its port is free.
+    monkeypatch.setattr("shine.comfyops.installer.process_identity", lambda pid: None)
+    monkeypatch.setattr("shine.comfyops.renderer_supervisor.windows_port_listeners", lambda port: [])
+
+    with factory.begin() as db:
+        result = abandon_unreconciled_job(db, None, job_id, "local-user", "user stopped waiting")
+
+    assert result["resubmitted"] is False
+    with factory() as db:
+        job = db.get(Job, job_id)
+        assert job.status == "FAILED"
+        assert job.failure_code == "USER_ABANDONED_UNRECONCILED"
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+        assert db.get(AppSetting, "handoff:" + attempt_id).value["stage"] == "RECONCILE_COMPLETE"
+
+
 def test_review_release_rejects_later_activity_on_same_lease(handoff, monkeypatch):
     import hashlib
     from types import SimpleNamespace

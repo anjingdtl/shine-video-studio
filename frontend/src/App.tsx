@@ -115,6 +115,7 @@ function App() {
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
+    abandonJob,
   } = studio;
 
   const [ui, setUi] = useState<'director' | 'expert'>(() => {
@@ -586,6 +587,7 @@ function App() {
                   onSuggest={suggestRepair}
                   onRepair={applyRepair}
                   onRecheck={recheckReview}
+                  onAbandon={abandonJob}
                 />
               </div>}
 
@@ -750,6 +752,7 @@ function App() {
                     onSuggest={suggestRepair}
                     onRepair={applyRepair}
                     onRecheck={recheckReview}
+                    onAbandon={abandonJob}
                   />
                 </section>
 

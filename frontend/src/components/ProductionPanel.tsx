@@ -20,6 +20,7 @@ type Props = {
   onSuggest: (jobId: string) => Promise<RepairSuggestion>;
   onRepair: (jobId: string, plan: Record<string, unknown>) => void;
   onRecheck: (job: Job) => void;
+  onAbandon: (jobId: string) => void;
 };
 
 const gateOrder = ['technical', 'semantic', 'audio', 'style', 'final'];
@@ -35,7 +36,7 @@ function isAdvisoryOnlyFinal(gate: QualityGate): boolean {
     && Array.isArray(unresolvedOptional) && unresolvedOptional.length === 0;
 }
 
-export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck }: Props) {
+export default function ProductionPanel({ jobs, system, busy, scenario, setScenario, onTogglePause, onLoadQC, onLoadGates, onSuggest, onRepair, onRecheck, onAbandon }: Props) {
   const [selected, setSelected] = useState('');
   const [qc, setQc] = useState<QCReport[]>([]);
   const [gates, setGates] = useState<QualityGate[]>([]);
@@ -190,6 +191,15 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
           <div className="repair-actions">
             <small>{suggestion.auto_apply ? '可以自动重试' : '需要人工确认后再动'}</small>
             {!suggestion.auto_apply && String(suggestion.plan.action) !== 'wait_for_human' && <button className="secondary-button" onClick={() => onRepair(selectedJob.id, suggestion.plan)}>按建议重试</button>}
+          </div>
+        </div>}
+        {selectedJob.status === 'NEEDS_REVIEW' && <div className="repair-card">
+          <div>
+            <b>这次生成的外部结果无法自行核实</b>
+            <span>系统不会自动重投。放弃只会结束这次任务，已经生成的产物仍按原样保留在作品里。</span>
+          </div>
+          <div className="repair-actions">
+            <button className="secondary-button" disabled={busy} onClick={() => onAbandon(selectedJob.id)}>放弃这次生成（保留产物，不重投）</button>
           </div>
         </div>}
       </div>}

@@ -211,6 +211,68 @@ def review_context(db, settings, job_id: str):
     }
 
 
+def abandon_unreconciled_job(db, settings, job_id, actor, evidence: str = ""):
+    """Record a local user's decision to stop waiting for an uncertain render.
+
+    The produced artifact stays as evidence, the attempt is never resubmitted,
+    and the job ends FAILED. Only a provably stopped renderer may be abandoned.
+    """
+    from urllib.parse import urlsplit
+
+    from shine.comfyops.installer import process_identity
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.renderer_supervisor import windows_port_listeners
+    from shine.comfyops.scheduler import ResourceScheduler
+    from shine.models import AppSetting, ExternalJobReconciliation, utcnow
+
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.status != "NEEDS_REVIEW":
+        raise HTTPException(409, "JOB_NOT_UNCERTAIN")
+    if job.lease_owner or job.lease_expires_at:
+        raise HTTPException(409, "H3_WORKER_STILL_OWNS_JOB")
+    lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job.id))
+    if lease is not None and lease.status == "ACTIVE":
+        raise HTTPException(409, "H3_LEASE_STILL_ACTIVE")
+    attempt = db.scalar(
+        select(JobAttempt).where(JobAttempt.job_id == job.id).order_by(JobAttempt.attempt_no.desc()).limit(1)
+    )
+    journal = db.get(AppSetting, "handoff:" + attempt.id) if attempt else None
+    value = dict(journal.value) if journal is not None and isinstance(journal.value, dict) else {}
+    process = value.get("process") or {}
+    pid, birth = process.get("pid"), process.get("birth")
+    if type(pid) is int and isinstance(birth, str) and birth:
+        try:
+            if process_identity(pid) == birth:
+                raise HTTPException(409, "OWNED_RENDERER_STILL_RUNNING")
+        except (OSError, ValueError):
+            pass
+    port = urlsplit(value.get("instance_url") or "").port
+    if port and windows_port_listeners(port):
+        raise HTTPException(409, "OWNED_RENDERER_STILL_RUNNING")
+    artifact_id = job.artifact_id
+    if lease is not None and lease.status == "RECONCILE_REQUIRED":
+        ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    if journal is not None and value.get("stage") == "RECONCILE_REQUIRED":
+        journal.value = {**value, "stage": "RECONCILE_COMPLETE",
+                         "last_confirmed_stage": "RECONCILE_REQUIRED",
+                         "reason": "USER_ABANDONED_UNRECONCILED",
+                         "reconciled_at": utcnow().isoformat()}
+    transition(job, "FAILED")
+    job.failure_code = "USER_ABANDONED_UNRECONCILED"
+    job.lease_owner = None
+    job.lease_expires_at = None
+    db.add(ExternalJobReconciliation(
+        job_id=job.id, provider_job_id=job.provider_job_id, action="user_abandon", result="abandoned",
+        evidence={"artifact_kept": artifact_id, "resubmitted": False, "note": evidence[:200]},
+    ))
+    add_audit(db, actor, "JOB_ABANDONED_UNCERTAIN", "job", job.id,
+              {"artifact_kept": artifact_id, "resubmitted": False, "note": evidence[:200]},
+              project_id=job.project_id)
+    return {"status": job.status, "artifact_kept": artifact_id, "resubmitted": False}
+
+
 def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, client=None):
     # External reads and decode happen before the short database write lock.
     job, attempt, artifact, request, path, binding = context(db, settings, job_id)

@@ -55,7 +55,8 @@ JOB_TRANSITIONS = {
     "REPAIR_PENDING": {"READY", "FAILED", "NEEDS_REVIEW", "QUEUED"},
     # NEEDS_REVIEW may only move forward again through external
     # reconciliation, which proves that the original submission exists.
-    "NEEDS_REVIEW": {"RUNNING"},
+    # FAILED is reachable only through an explicit local-user abandon decision.
+    "NEEDS_REVIEW": {"RUNNING", "FAILED"},
     "FAILED": set(),
 }
 

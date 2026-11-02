@@ -1,6 +1,6 @@
 # 真人模拟验收进度与交接（2026-11-02）
 
-> **最终续验（2026-11-03 凌晨）：核心用户旅程已真实跑通。** 详见 [测试报告最终续验](REAL_USER_JOURNEY_TEST_REPORT_20261102.md)。本轮由接手 Agent 用本机内置浏览器真实点击界面完成：3 镜系列 `51f22d82-fcc1-4baf-937d-51ea1e1cbdef` 以 `COMPLETED 3/3` 结束，三镜均为本地 Ref2VA INT8 真实出片并通过技术质检；自动装配成片 21.896 s、768×1344、24 fps、AAC，浏览器内已实际播放；导出链接与端点返回同一产物字节。后端全量 1432 passed / 1 skipped，前端 90 passed，构建与 Ruff、Alembic 均通过。
+> **最终续验（2026-11-03 凌晨）：核心用户旅程已真实跑通。** 详见 [测试报告最终续验](REAL_USER_JOURNEY_TEST_REPORT_20261102.md)。本轮由接手 Agent 用本机内置浏览器真实点击界面完成：3 镜系列 `51f22d82-fcc1-4baf-937d-51ea1e1cbdef` 以 `COMPLETED 3/3` 结束，三镜均为本地 Ref2VA INT8 真实出片并通过技术质检；自动装配成片 21.896 s、768×1344、24 fps、AAC，浏览器内已实际播放；导出链接与端点返回同一产物字节。后端全量 1433 passed / 1 skipped，前端 90 passed，构建与 Ruff、Alembic 均通过。
 >
 > 总验收仍**不签发 `REAL_USER_JOURNEY_ALL_PASS`**：ASR/VLM 建议式审片未执行（`final=needs_review`、`acceptance_status=pending_review`），审美/版权/发布为 `PENDING_HUMAN`，导出仅验证端点与页面链接（自动化下载捕获被无头浏览器取消）。当前工作区未提交、未推送。
 >

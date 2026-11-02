@@ -441,6 +441,17 @@ export function useStudio() {
     });
   }
 
+  async function abandonJob(jobId: string) {
+    if (!window.confirm('放弃这次生成？已经生成的产物会保留，但系统不会自动重投。')) return;
+    await withBusy(async () => {
+      await api(`/operator/jobs/${jobId}/abandon`, json('POST', {
+        evidence: 'local user abandoned an unreconciled render',
+      }));
+      await loadProject(projectId);
+      report('已结束这次任务；产物保留，未重新提交。');
+    });
+  }
+
   async function validateWorkflow(profileId: string) {
     await withBusy(async () => {
       const result = await api<WorkflowProfile>(`/workflow-profiles/${profileId}/validate-managed`, json('POST', {}));
@@ -468,5 +479,6 @@ export function useStudio() {
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
+    abandonJob,
   };
 }
