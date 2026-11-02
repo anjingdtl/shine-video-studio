@@ -100,6 +100,21 @@ Unresolved process identities retained for reconciliation.
   与本次改动无关；从仓库根目录复验这些用例全部通过。
 - 完整后端：`python -m pytest backend/tests -q`（**从仓库根目录**）→ exit 0，
   1 skipped，2 warnings（AnyIO 弃用提示与旧质检路径的空主键查询，均为仓库既有）。
+- 前端：`npm --prefix frontend run build`（`tsc -b` + vite）→ exit 0；
+  `npm --prefix frontend test` → 32 passed / 8 files。
+- 提交：`d7bff50`（main），已推送到 `origin/main`。
+
+## 封装
+
+- `pwsh -File scripts\build_test_package.ps1 -OutDir releases -Verify` → exit 0。
+  产物 `ShineVideoStudio-20261102-d7bff50-win64.zip`（1,942,601 bytes），
+  `sha256=1a24e82c32997cd2642342b4501e9981471ba07df34db348a28897e661b78caf`；
+  `Expand-Archive` 后按 `PACKAGE_MANIFEST.json` 逐文件 SHA-256 复核，417 个文件全部一致。
+- 包内已包含本轮修复（`process_probe.py`、`start_dev.ps1`、`stop_shine.py`、本文件）。
+- 包内不含：模型权重、生成媒体、SQLite、`.env`、`operator-credentials.txt`、
+  `node_modules`、虚拟环境、`docs/evidence`、嵌套 zip。
+- `*.lnk` 为本机快捷方式（含本机绝对路径），已加入 `.gitignore`：
+  它既不该进仓库，也不该进包，而且它会让工作树永远不干净、打包脚本一直拒绝执行。
 
 ## 边界
 
