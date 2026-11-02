@@ -157,10 +157,28 @@ export type WorkerStatus = {
   last_heartbeat_at: string; last_error: string | null; processed_count: number;
 };
 
+/** 后端权威的「演示 / 真实制作」状态。renderer_online 只是当前探活结果：
+ * 受管渲染器空闲停机是正常状态，不代表制作模式失效。 */
+export type ProductionModeStatus = {
+  mode: 'DEMO' | 'SETUP_REQUIRED' | 'VALIDATION_REQUIRED' | 'READY' | 'RUNNING'
+  | 'BLOCKED' | 'RECONCILE_REQUIRED' | string;
+  label: string;
+  detail: string;
+  action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix' | null;
+  code: string | null;
+  render_provider: string;
+  runtime_status: string;
+  renderer_online: boolean;
+  worker_online: boolean;
+  running_jobs: number;
+  series_active: number;
+};
+
 export type SystemStatus = {
   api_online: boolean; worker_online: boolean; mock_provider_available: boolean;
   h3_connected: boolean; render_mode: string; pending_jobs: number; running_jobs: number;
   failed_jobs: number; blocked_jobs: number; workers: WorkerStatus[]; last_error: string | null;
+  production_mode: ProductionModeStatus;
 };
 
 export type QCReport = {

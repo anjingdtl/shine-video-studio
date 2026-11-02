@@ -31,7 +31,12 @@ def run_bootstrap(manifest_path, install_root, *arguments, environment_overrides
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(BOOTSTRAP),
          "-ToolsManifest", str(manifest_path),
          *(["-InstallRoot", str(install_root)] if install_root else []), "-NoPathUpdate", *arguments],
-        capture_output=True, text=True, timeout=300, env=environment,
+        capture_output=True, timeout=300, env=environment,
+        # Subprocess encoding contract: bootstrap.ps1 pins its stdout/stderr to
+        # UTF-8 on PS 5.1 and PS 7, so tests decode UTF-8 explicitly instead of
+        # trusting the host locale or PYTHONUTF8; errors='replace' keeps the
+        # reader thread alive so assertions always see real output, never None.
+        encoding="utf-8", errors="replace",
     )
 
 

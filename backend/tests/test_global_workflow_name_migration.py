@@ -41,7 +41,7 @@ def test_global_index_upgrade_preserves_private_scopes_and_reverses_without_row_
         with pytest.raises(sqlite3.IntegrityError):
             insert_profile(db, "duplicate-global")
         db.rollback()
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f150a0020001"
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f150a0030001"
     command.downgrade(config, "f150a0010001")
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT * FROM workflow_profiles ORDER BY id").fetchall() == before

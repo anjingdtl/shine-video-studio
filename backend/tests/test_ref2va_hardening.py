@@ -32,7 +32,7 @@ from tests.test_reference_transfer import make_profile, make_request
     ],
 )
 def test_real_profile_identity_preserves_entire_sampling_graph(name, expected):
-    body = json.loads((Path("config/workflows") / name).read_text(encoding="utf-8"))
+    body = json.loads((Path(__file__).resolve().parents[2] / "config" / "workflows" / name).read_text(encoding="utf-8"))
     metadata = profile_metadata(body["graph"], body["mode"], body["parameter_map"], body["media_transfers"])
     assert metadata["variant"] == "Ref2VA INT8 ConvRot"
     assert body["mode"] == metadata["generation_mode"] == "Ref2VA"
@@ -153,7 +153,9 @@ def test_v12_database_copy_migration_preserves_graph_and_historical_rows(tmp_pat
     monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
     config = alembic_config(path)
     command.upgrade(config, "e8f1a2b3c4d5")
-    body = json.loads(Path("config/workflows/ref2va-2img.json").read_text(encoding="utf-8"))
+    body = json.loads(
+        (Path(__file__).resolve().parents[2] / "config" / "workflows" / "ref2va-2img.json").read_text(encoding="utf-8")
+    )
     with sqlite3.connect(path) as db:
         db.execute(
             "INSERT INTO workflow_profiles (id,name,mode,graph,parameter_map,required_nodes,checkpoint_id,"

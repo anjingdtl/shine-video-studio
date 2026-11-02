@@ -14,6 +14,11 @@ param(
     [string]$StorageRoot = "",
     [string]$OperatorPasswordFile = ""
 )
+# Output encoding contract: everything this script writes to stdout/stderr is
+# UTF-8 on both Windows PowerShell 5.1 and PowerShell 7, so callers (tests and
+# the installer) can decode it deterministically regardless of system locale.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $explicitDataDir = [bool]$DataDir

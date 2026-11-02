@@ -13,11 +13,13 @@ type Props = {
   reviewHeight: string;
   onStarted: () => void;
   onMessage: (message: string, kind?: 'success' | 'error') => void;
+  /** 模式入口动作：enable_real 打开启用向导，check_fix 打开检查修复。 */
+  onModeAction: (action: 'enable_real' | 'check_fix') => void;
 };
 
 const statusText: Record<string, string> = {
-  QUEUED: '等待 Worker 接管',
-  RUNNING: '生产中',
+  QUEUED: '排队等待制作',
+  RUNNING: '制作中',
   PAUSED: '已暂停',
   PAUSE_REQUESTED: '正在暂停',
   COMPLETED: '已完成',
@@ -39,7 +41,7 @@ const itemText: Record<string, string> = {
 
 export default function ProductionSeriesPanel({
   projectId, shots, workflowProfiles, system, busy, reviewWidth, reviewHeight,
-  onStarted, onMessage,
+  onStarted, onMessage, onModeAction,
 }: Props) {
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -92,7 +94,7 @@ export default function ProductionSeriesPanel({
   }
 
   async function start() {
-    if (!profileId) { onMessage('请先选择已注册的 H3 Ref2VA 工作流 Profile。', 'error'); return; }
+    if (!profileId) { onMessage('当前没有可用的生成方案，请先在制作环境中完成登记。', 'error'); return; }
     if (selected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
     if (selectedBusy.length > 0) {
       onMessage('选中的镜头已经在生产队列中，请勿重复提交。', 'error');
@@ -118,7 +120,7 @@ export default function ProductionSeriesPanel({
       }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
-      onMessage('生产序列已提交；常驻 Worker 会自动依次完成全部镜头。', 'success');
+      onMessage('已开始连续制作；本机会自动依次完成全部镜头并自动检查。', 'success');
       await reload();
       onStarted();
     } catch (error) {
@@ -141,45 +143,53 @@ export default function ProductionSeriesPanel({
     }
   }
 
-  const canStart = system?.render_mode === 'comfyui' && !activeSeries && selected.length > 0
+  // 单一权威来源：后端 production_mode。READY 才允许开始新的连续制作；
+  // 渲染器空闲停机不影响 READY（受管渲染器按需启动）。
+  const mode = system?.production_mode?.mode ?? null;
+  const canStart = mode === 'READY' && !activeSeries && selected.length > 0
     && selectedBusy.length === 0 && !!profileId;
 
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">
       <div>
-        <div className="section-kicker">04 / PRODUCTION SERIES</div>
-        <h2>多镜头无人值守生产</h2>
-        <p>按顺序排入镜头后由常驻 Worker 自动连续生产：同一台受管渲染器贯穿全程，独占 GPU 租约在镜头之间续接，序列结束后才释放。</p>
+        <div className="section-kicker">04 / CONTINUOUS PRODUCTION</div>
+        <h2>连续制作影片</h2>
+        <p>勾选要制作的镜头，点「开始制作影片」。系统会在本机自动连续生成、自动检查、必要时返工，全部完成后整理成片。</p>
       </div>
       <div className="section-icon plum"><Layers size={17} /></div>
     </div>
 
-    {system?.render_mode !== 'comfyui' && <div className="blocked-callout">
-      <AlertTriangle size={15} /><span>当前是演示模式：这里只能演练排队和调度，不会生成真实视频。真实生产需要本机 H3 渲染器在线。</span>
+    {mode !== 'READY' && mode !== 'RUNNING' && <div className="blocked-callout">
+      <AlertTriangle size={15} />
+      <span>{system?.production_mode?.detail ?? '本机服务未连接，无法确认制作模式。'}</span>
+      {system?.production_mode?.action === 'enable_real'
+        && <button type="button" className="text-button" onClick={() => onModeAction('enable_real')}>启用真实制作</button>}
+      {system?.production_mode?.action === 'check_fix'
+        && <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查并修复</button>}
     </div>}
 
     <div className="series-builder">
       <div className="series-profile">
-        <label htmlFor="series-profile">H3 工作流 Profile
+        <label htmlFor="series-profile">生成方案
           <select id="series-profile" value={profileId} onChange={(event) => setProfileId(event.target.value)}>
-            <option value="">选择已注册的 Ref2VA Profile</option>
+            <option value="">自动选择已验证的方案</option>
             {ref2vaProfiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>{profile.name} · {profile.mode}</option>
+              <option key={profile.id} value={profile.id}>{profile.name}</option>
             ))}
           </select>
         </label>
-        <label htmlFor="series-scope">质量门禁
+        <label htmlFor="series-scope">自动检查
           <select id="series-scope" value={scope} onChange={(event) => setScope(event.target.value as 'full' | 'basic')}>
-            <option value="full">完整门禁：技术 + 语义 + 对白 + 风格 + 最终</option>
-            <option value="basic">基础自审：分辨率、人物、对白</option>
+            <option value="full">完整检查（推荐）：画面、声音、风格与最终成片</option>
+            <option value="basic">基础检查：分辨率、人物、对白</option>
           </select>
         </label>
-        {scope === 'basic' && <p className="series-hint">基础自审需填写预期输出宽高，并要求已资格化的本地人物审片能力。</p>}
-        <label htmlFor="series-edit-intent">剪辑意图（可选，冻结于分镜阶段）
+        {scope === 'basic' && <p className="series-hint">基础检查需填写预期画面宽高，并要求本机已具备人物审片能力。</p>}
+        <label htmlFor="series-edit-intent">剪辑方案（可选，分镜阶段冻结）
           <select id="series-edit-intent" value={editIntentId} onChange={(event) => setEditIntentId(event.target.value)}>
-            <option value="">默认剪辑规则（全片完整镜头、CUT 硬切）</option>
+            <option value="">默认剪辑（全片完整镜头、直接切换）</option>
             {editIntents.map((row) => (
-              <option key={row.id} value={row.id}>剪辑意图 {row.id.slice(0, 8)}…</option>
+              <option key={row.id} value={row.id}>剪辑方案 {row.id.slice(0, 8)}…</option>
             ))}
           </select>
         </label>
@@ -204,7 +214,7 @@ export default function ProductionSeriesPanel({
         {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
       <button className="primary-button" disabled={busy || working || !canStart} onClick={start}>
-        {working ? <Loader2 size={14} /> : <Play size={14} />} 开始真实生产（{selected.length} 镜）
+        {working ? <Loader2 size={14} /> : <Play size={14} />} 开始制作影片（{selected.length} 镜）
       </button>
     </div>
 
@@ -215,7 +225,7 @@ export default function ProductionSeriesPanel({
             <div>
               <b>{statusText[row.status] ?? row.status}</b>
               <span>{row.completed_count}/{row.shot_count} 镜完成 · {row.id.slice(0, 8)}…</span>
-              {row.worker_id && <small>执行 Worker：{row.worker_id}</small>}
+              {row.worker_id && <small>执行：本机制作服务 {row.worker_id.slice(0, 12)}</small>}
               {row.failure_code && <small className="failure">· {label(failureLabels, row.failure_code)}</small>}
               {row.finalization_state !== 'NONE' && <small>收尾：{label(finalizationLabels, row.finalization_state)}</small>}
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}

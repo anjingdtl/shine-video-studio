@@ -1,12 +1,14 @@
 /** P04 regression: the Web start button submits shots in project order (not
  *  click order), preselects the only validated Ref2VA profile, excludes shots
- *  already in production, and a second click cannot re-queue them. */
+ *  already in production, and a second click cannot re-queue them.
+ *  The start gate reads the authoritative backend production_mode (READY),
+ *  never a frontend guess. */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ProductionSeriesPanel from '../components/ProductionSeriesPanel';
-import { SYSTEM_STATUS, StudioStub, jsonResponse } from './studioStub';
+import { SYSTEM_STATUS, StudioStub, jsonResponse, productionMode } from './studioStub';
 
 let stub: StudioStub;
 
@@ -21,6 +23,8 @@ const profiles = [{
   parameter_map: {}, required_nodes: [], checkpoint_id: 'h3', validated_against: null,
   created_at: 't', model_identity: {},
 }];
+
+const readySystem = { ...SYSTEM_STATUS, render_mode: 'comfyui', production_mode: productionMode({ mode: 'READY' }) };
 
 beforeEach(() => {
   stub = new StudioStub([
@@ -43,24 +47,46 @@ describe('Web 发起生产序列（P04）', () => {
         projectId="proj-1"
         shots={shots}
         workflowProfiles={profiles}
-        system={{ ...SYSTEM_STATUS, render_mode: 'comfyui' }}
+        system={readySystem}
         busy={false}
         reviewWidth="1280"
         reviewHeight="720"
         onStarted={() => undefined}
         onMessage={() => undefined}
+        onModeAction={() => undefined}
       />,
     );
     await screen.findByText('选择全部可制作镜头');
     await user.click(screen.getByText('选择全部可制作镜头'));
-    await user.click(screen.getByRole('button', { name: /开始真实生产/ }));
+    await user.click(screen.getByRole('button', { name: /开始制作影片/ }));
     await waitFor(() => {
       expect(stub.callsOf('POST', /production-series$/)).toHaveLength(1);
     });
-    await user.click(screen.getByRole('button', { name: /开始真实生产/ }));
+    await user.click(screen.getByRole('button', { name: /开始制作影片/ }));
     expect(stub.callsOf('POST', /production-series$/)).toHaveLength(1);
     const body = stub.callsOf('POST', /production-series$/)[0].body as { shot_ids: string[]; workflow_profile_id: string };
     expect(body.shot_ids).toEqual(['shot-a', 'shot-b', 'shot-c']);
     expect(body.workflow_profile_id).toBe('wf-1');
+  });
+
+  it('演示模式下开始按钮不可用，且提供启用真实制作入口', async () => {
+    render(
+      <ProductionSeriesPanel
+        projectId="proj-1"
+        shots={shots}
+        workflowProfiles={profiles}
+        system={SYSTEM_STATUS}
+        busy={false}
+        reviewWidth="1280"
+        reviewHeight="720"
+        onStarted={() => undefined}
+        onMessage={() => undefined}
+        onModeAction={() => undefined}
+      />,
+    );
+    const start = await screen.findByRole('button', { name: /开始制作影片/ });
+    expect(start).toBeDisabled();
+    expect(screen.getByText(/不会生成真实影片/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启用真实制作' })).toBeInTheDocument();
   });
 });

@@ -478,10 +478,13 @@ def create_app(
         failed = db.scalar(select(func.count(Job.id)).where(Job.status == "FAILED"))
         blocked = db.scalar(select(func.count(Job.id)).where(Job.status == "NEEDS_REVIEW"))
         last_error = next((worker.last_error for worker in reversed(workers) if worker.last_error), None)
+        worker_online = any(worker.online for worker in workers)
+        h3_connected = _h3_connected(effective)
+        from shine.production_mode import summarize_production_mode
         return SystemStatus(
-            worker_online=any(worker.online for worker in workers),
+            worker_online=worker_online,
             mock_provider_available=True,
-            h3_connected=_h3_connected(effective),
+            h3_connected=h3_connected,
             render_mode=effective.render_provider if effective else 'unavailable',
             pending_jobs=pending or 0,
             running_jobs=running or 0,
@@ -489,6 +492,11 @@ def create_app(
             blocked_jobs=blocked or 0,
             workers=workers,
             last_error=runtime_error or last_error,
+            production_mode=summarize_production_mode(
+                db, settings,
+                effective=effective, runtime_error=runtime_error,
+                worker_online=worker_online, renderer_online=h3_connected,
+            ),
         )
 
     @app.get("/api/v1/workers", response_model=list[WorkerStatus])

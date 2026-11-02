@@ -10,7 +10,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
-import { StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
@@ -48,6 +48,7 @@ describe('新交付订单自动出现在页面', () => {
   it('初始为空；全局刷新按钮（刷新全部数据）后合成订单出现', async () => {
     const user = userEvent.setup();
     render(<App />);
+    await gotoDirectorPage(user, /成片中心/);
     // Initially empty and no error pretending to be empty.
     await screen.findByText('暂无交付成片。', {}, { timeout: 3000 });
     injectBlockedOrder();
@@ -55,18 +56,22 @@ describe('新交付订单自动出现在页面', () => {
     await expectOrderVisible();
   });
 
-  it('进入交付板块即重新读取，合成订单出现', async () => {
+  it('进入成片中心即重新读取，合成订单出现', async () => {
+    const user = userEvent.setup();
     render(<App />);
+    // The delivery panel loads when its page is entered through the real
+    // step navigation (not while it sits unopened).
+    await gotoDirectorPage(user, /成片中心/);
     await screen.findByText('暂无交付成片。', {}, { timeout: 3000 });
     injectBlockedOrder();
-    // Enter the delivery view through the real navigation.
-    const deliveryNav = await screen.findByTitle('打开交付板块');
-    await userEvent.setup().click(deliveryNav);
+    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /成片中心/);
     await expectOrderVisible();
   });
 
   it('镜头任务状态变化会触发交付列表重读（任务推进 → 交付发现）', async () => {
     render(<App />);
+    await gotoDirectorPage(userEvent.setup(), /成片中心/);
     await screen.findByText('暂无交付成片。', {}, { timeout: 3000 });
     injectBlockedOrder();
     // Simulate backend job progress that the 3s poller picks up.
@@ -98,6 +103,7 @@ describe('新交付订单自动出现在页面', () => {
       respond: () => jsonResponse({ detail: 'DATABASE_OFFLINE' }, 500),
     });
     render(<App />);
+    await gotoDirectorPage(userEvent.setup(), /成片中心/);
     await waitFor(() => {
       expect(screen.getByText(/交付列表读取失败/)).toBeInTheDocument();
     }, { timeout: 3000 });
@@ -115,10 +121,11 @@ describe('新交付订单自动出现在页面', () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-2\/(terminology|subtitles|documents|candidate-assets|voice-profiles|production-series|film-artifacts|deliveries|delivery-orders)$/, respond: () => jsonResponse([]) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/workflow-profiles\?project_id=proj-2/, respond: () => jsonResponse([]) });
     render(<App />);
+    await gotoDirectorPage(user, /成片中心/);
     await screen.findByText('暂无交付成片。', {}, { timeout: 3000 });
     // The old project's panel gets a poisoned response AFTER switching.
     injectBlockedOrder();
-    const switcher = screen.getByLabelText('切换项目');
+    const switcher = screen.getByLabelText('快速切换作品');
     await user.selectOptions(switcher, 'proj-2');
     await waitFor(() => {
       // DeliveryPanel remounts per project (key) and reads the new project's
@@ -142,9 +149,9 @@ describe('可视化 EDL 编辑（D01）', () => {
     const user = userEvent.setup();
 
     render(<App />);
-    await user.click(await screen.findByTitle('打开交付板块'));
+    await gotoDirectorPage(user, /成片中心/);
     await screen.findByLabelText('装配镜头顺序（可编辑）');
-    await user.selectOptions(screen.getByLabelText('剪辑提案'), 'edl-1');
+    await user.selectOptions(screen.getByLabelText('剪辑方案'), 'edl-1');
     const inPoint = await screen.findByLabelText('入点（秒）');
     await user.clear(inPoint);
     await user.type(inPoint, '1.5');

@@ -151,14 +151,14 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
       </article>)}
     </div>}
 
-    <p>生产序列完成后，常驻 Worker 会自动生成 EDL 并装配成片（无需人工填写）。以下手工装配保留给人工修订与补剪。</p>
-    <label htmlFor="delivery-proposal">剪辑提案</label><select id="delivery-proposal" value={selected} onChange={e => {
+    <p>连续制作完成后，系统会自动整理并装配成片，无需人工填写。下面的手工装配保留给人工修订与补剪。</p>
+    <label htmlFor="delivery-proposal">剪辑方案</label><select id="delivery-proposal" value={selected} onChange={e => {
       setSelected(e.target.value);
       const proposal = proposals.find(a => a.id === e.target.value);
       setEdl(proposal ? JSON.stringify(proposal.payload_json, null, 2) : '');
-    }}><option value="">手动填写 / 选择提案</option>{proposals.map(a => <option key={a.id} value={a.id}>{a.id.slice(0, 10)}…（{new Date(a.created_at ?? Date.now()).toLocaleString()}）</option>)}</select>
+    }}><option value="">选择剪辑方案</option>{proposals.map(a => <option key={a.id} value={a.id}>{a.id.slice(0, 10)}…（{new Date(a.created_at ?? Date.now()).toLocaleString()}）</option>)}</select>
     <div className="edl-visual" aria-label="装配镜头顺序（可编辑）">
-      {clips.length === 0 && <p className="empty-inline">还没有片段：选择一个剪辑提案，或在高级编辑里填写 EDL JSON。</p>}
+      {clips.length === 0 && <p className="empty-inline">还没有片段：选择一个剪辑方案，或展开高级编辑手动填写。</p>}
       {clips.map((clip, index) => (
         <div className="edl-clip-row" key={index}>
           <b>{index + 1}. {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（装配时校验）'}</b>
@@ -170,8 +170,8 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         </div>
       ))}
     </div>
-    <details className="edl-advanced"><summary>高级：EDL JSON 编辑</summary>
-      <label>交付 EDL JSON<textarea rows={9} value={edl} onChange={e => { setSelected(''); setEdl(e.target.value); }} /></label>
+    <details className="edl-advanced"><summary>高级：剪辑数据编辑（技术格式）</summary>
+      <label>剪辑数据<textarea rows={9} value={edl} onChange={e => { setSelected(''); setEdl(e.target.value); }} /></label>
     </details>
     {clips.length > 0 && <ol aria-label="装配镜头顺序">{clips.map((clip, index) => <li key={index}>
       {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（提交时会校验）'} · {String(clip?.in_s)}–{String(clip?.out_s)} 秒

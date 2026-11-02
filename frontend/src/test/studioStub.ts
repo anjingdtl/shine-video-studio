@@ -1,4 +1,14 @@
 import { vi } from 'vitest';
+import { screen } from '@testing-library/react';
+
+/** 导演模式导航：通过真实的步骤按钮进入目标页面（与用户操作一致，
+ *  不直接改内部状态）。 */
+export async function gotoDirectorPage(
+  user: { click: (element: Element) => Promise<void> },
+  name: RegExp,
+): Promise<void> {
+  await user.click(await screen.findByRole('button', { name }));
+}
 
 /** A tiny fetch stub with a route table.  Successful-path tests do NOT
  *  intercept: routes are the backend contract the UI talks to, and the stub
@@ -68,10 +78,29 @@ export function jsonResponse(body: unknown, status = 200): StubResponse {
   return { status, body };
 }
 
+/** 基线：演示体验（后端 production_mode 的 DEMO 状态）。 */
+export const PRODUCTION_MODE_DEMO: import('../api').ProductionModeStatus = {
+  mode: 'DEMO', label: '演示体验', detail: '当前用演示引擎演练流程，不会生成真实影片。',
+  action: 'enable_real', code: null, render_provider: 'mock', runtime_status: 'NOT_ACTIVATED',
+  renderer_online: false, worker_online: true, running_jobs: 0, series_active: 0,
+};
+
+export const PRODUCTION_MODE_READY: import('../api').ProductionModeStatus = {
+  ...PRODUCTION_MODE_DEMO,
+  mode: 'READY', label: '真实制作已就绪', action: 'start_making',
+  detail: '本机 H3 制作环境可用；渲染器会在开始制作时自动启动，平时空闲属于正常。',
+  render_provider: 'comfyui', runtime_status: 'ACTIVE',
+};
+
+export function productionMode(overrides: Partial<import('../api').ProductionModeStatus> = {}) {
+  return { ...PRODUCTION_MODE_DEMO, ...overrides };
+}
+
 export const SYSTEM_STATUS = {
   api_online: true, worker_online: true, mock_provider_available: true,
   h3_connected: false, render_mode: 'mock', pending_jobs: 0, running_jobs: 0,
   failed_jobs: 0, blocked_jobs: 0, workers: [], last_error: null,
+  production_mode: PRODUCTION_MODE_DEMO,
 };
 
 export const ENV_REPORT = {

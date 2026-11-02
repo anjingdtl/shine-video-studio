@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from '../App';
-import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 beforeEach(() => {
@@ -23,6 +23,7 @@ it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已�
   } });
   const user = userEvent.setup();
   render(<App />);
+  await gotoDirectorPage(user, /素材与风格/);
   const confirm = await screen.findByRole('button', { name: '确认使用' });
   expect(screen.queryByLabelText(/操作员凭据|核验依据/)).toBeNull();
   vi.mocked(window.confirm).mockReturnValue(false);
@@ -50,6 +51,7 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   } });
   const user = userEvent.setup();
   render(<App />);
+  await gotoDirectorPage(user, /素材与风格/);
   await user.click(await screen.findByRole('button', { name: '确认使用' }));
   await screen.findByText('PLAN_HASH_CHANGED');
   await waitFor(() => expect(screen.getByRole('button', { name: '确认使用' })).toBeEnabled());

@@ -54,33 +54,35 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
   const latestGates = gateOrder
     .map((name) => [...currentGates].reverse().find((gate) => gate.gate_name === name))
     .filter((gate): gate is QualityGate => Boolean(gate));
+  const production = system?.production_mode ?? null;
+  const realReady = production !== null && ['READY', 'RUNNING'].includes(production.mode);
   return (
     <div className="card section-card monitor-card">
       <div className="section-heading compact">
         <div>
           <div className="section-kicker">04 / PRODUCTION MONITOR</div>
-          <h2>任务、质检与返工</h2>
-          <p>点一条任务查看明细：每次尝试、五道质量关、审片证据和返工记录，全部保存在本机。</p>
+          <h2>生成进度与检查</h2>
+          <p>点一条任务查看明细：每次尝试、五道自动检查、审片证据和返工记录，全部保存在本机。</p>
         </div>
-        <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台执行器在线' : '后台执行器离线'}</div>
+        <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台制作服务在线' : '后台制作服务离线'}</div>
       </div>
-      <div className={`mock-warning ${system?.render_mode === 'comfyui' ? 'real' : ''}`}>
-        {system?.render_mode === 'comfyui' ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
+      <div className={`mock-warning ${realReady ? 'real' : ''}`}>
+        {realReady ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
-          {system?.render_mode === 'comfyui'
-            ? `真实生成模式 · 本机 H3 ${system.h3_connected ? '已连接' : '未连接'}；生成成功不等于成片合格，以质检和人工验收为准。`
-            : '演示模式：只演练排队、执行和质检流程，不会生成真视频。'}
+          {production
+            ? `${production.label}：${production.detail}生成成功不等于成片合格，以自动检查和人工验收为准。`
+            : '本机服务未连接，暂无法确认制作模式。'}
         </span>
       </div>
       <div className="status-strip">
-        <span>网页服务 {system?.api_online ? '在线' : '离线'} · 生成引擎 {label(providerLabels, system?.render_mode ?? undefined)} · MiniMax-H3</span>
+        <span>网页服务 {system?.api_online ? '在线' : '离线'} · {production?.label ?? '状态未知'} · MiniMax-H3</span>
         <span><b>{system?.pending_jobs ?? 0}</b> 排队中</span>
         <span><b>{system?.running_jobs ?? 0}</b> 生成中</span>
         <span><b>{system?.blocked_jobs ?? 0}</b> 等人处理</span>
         <span><b>{system?.failed_jobs ?? 0}</b> 失败</span>
         {system?.last_error && <span className="error"><AlertTriangle size={11} /> {system.last_error}</span>}
       </div>
-      <div className="scenario-row">
+      {!realReady && <div className="scenario-row">
         <label>下一项演示结果
           <select value={scenario} onChange={(event) => setScenario(event.target.value)}>
             <option value="success">正常完成</option><option value="delay">延迟完成</option>
@@ -88,8 +90,8 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
             <option value="duplicate">重复提交确认（不重跑）</option>
           </select>
         </label>
-        <code>uv run --project backend python -m shine.worker</code>
-      </div>
+        {!system?.worker_online && <code>uv run --project backend python -m shine.worker</code>}
+      </div>}
       <div className="job-list">
         {jobs.length === 0 ? <div className="empty-inline">还没有任务。在左侧分镜卡片上点「加入队列」。</div> : jobs.map((job) => (
           <div className={`job-row ${selected === job.id ? 'selected' : ''}`} key={job.id} onClick={() => openJob(job)}>

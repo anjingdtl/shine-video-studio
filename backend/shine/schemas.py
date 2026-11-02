@@ -426,6 +426,26 @@ class WorkerStatus(APIModel):
     processed_count: int
 
 
+class ProductionModeStatus(APIModel):
+    """The one authoritative demo/real production state the UI shows.
+
+    ``renderer_online`` is a liveness probe only: the managed renderer is
+    idle-stopped between shots by design, so it never decides the mode.
+    """
+
+    mode: str
+    label: str
+    detail: str
+    action: str | None
+    code: str | None
+    render_provider: str
+    runtime_status: str
+    renderer_online: bool
+    worker_online: bool
+    running_jobs: int
+    series_active: int
+
+
 class SystemStatus(APIModel):
     api_online: bool = True
     worker_online: bool
@@ -438,6 +458,7 @@ class SystemStatus(APIModel):
     blocked_jobs: int
     workers: list[WorkerStatus]
     last_error: str | None
+    production_mode: ProductionModeStatus
 
 
 class ArtifactItem(APIModel):
