@@ -190,7 +190,7 @@ $buildInfo = [ordered]@{
         install_drive = 'largest non-system fixed disk with >= 180 GiB free'
         install_root = '<drive>:\ShineVideoStudio'
         data_dir = '<install_root>\data'
-        operator_password = 'generated 40-char secret at <install_root>\operator-credentials.txt'
+        operator_password = 'not_required_for_personal_desktop'
         ports = 'API 8000 / Web 5173, advanced automatically when busy'
         browser = 'http://127.0.0.1:<web port>/#setup'
     }

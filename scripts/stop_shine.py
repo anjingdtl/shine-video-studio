@@ -34,6 +34,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / ".local-data"
 
 
+def _process_owners(value):
+    """Normalize verified process identities from current and PS 5.1 manifests.
+
+    Windows PowerShell 5.1 wraps a piped root JSON array in a single object
+    containing ``value`` and ``Count``. Older isolated manifests can contain
+    that shape; accept it only when the count and every identity are valid.
+    """
+    if not isinstance(value, list):
+        return None
+    if (
+        len(value) == 1
+        and isinstance(value[0], dict)
+        and set(value[0]) >= {"value", "Count"}
+    ):
+        wrapper = value[0]
+        unwrapped = wrapper.get("value")
+        if not isinstance(unwrapped, list) or wrapper.get("Count") != len(unwrapped):
+            return None
+        value = unwrapped
+    if not value or any(
+        not isinstance(owner, dict)
+        or not isinstance(owner.get("pid"), int)
+        or not owner.get("birth")
+        for owner in value
+    ):
+        return None
+    return value
+
+
 def stop_manifest(manifest_path: Path, *, runner=None, identity=None, classify=None) -> int:
     runner = runner or ProcessRunner()
     identity = identity or process_identity
@@ -50,11 +79,9 @@ def stop_manifest(manifest_path: Path, *, runner=None, identity=None, classify=N
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     unresolved = []
     for entry in reversed(manifest.get("processes", [])):
-        owners = entry.get("owners", [])
+        owners = _process_owners(entry.get("owners", []))
         if not owners:
-            print(
-                f"[refused] {entry.get('name')}: no birth identities; reconcile legacy manifest manually"
-            )
+            print(f"[refused] {entry.get('name')}: missing or malformed birth identities; reconcile manually")
             unresolved.append(entry)
             continue
         remaining = []

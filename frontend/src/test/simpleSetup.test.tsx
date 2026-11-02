@@ -76,6 +76,37 @@ describe('本机环境简化流程', () => {
     expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
   });
 
+  it('已有 ComfyUI 被明确确认已安装，模型只读哈希核验且不复制或创建重复计划', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+      installations: ['F:\\AI\\ComfyUI'],
+    }) });
+    stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
+      root: 'F:\\AI\\ComfyUI', snapshot: 'a'.repeat(64), candidate_bytes: 13, scanned_files: 2,
+      matches: [{ component_id: 'h3', relative_path: 'model.safetensors', size: 13 }], missing: [], skipped: [],
+      software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+        runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED', python_executable: 'F:\\AI\\python.exe' },
+        node_revisions_verified: false },
+    }) });
+    stub.add({ method: 'POST', pattern: /existing-installations\/verify$/, respond: () => jsonResponse({
+      status: 'INSTALLED_VERIFIED', software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+        runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false },
+      verified: [{ component_id: 'h3', relative_path: 'model.safetensors', size: 13, status: 'INSTALLED_HASH_MATCH' }],
+      rejected: [], verified_bytes: 13, copied_bytes: 0, runtime_verified: false,
+    }) });
+    const user = userEvent.setup();
+    render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
+    await user.click(screen.getByRole('button', { name: '检测本机' }));
+    await screen.findByText('发现 1 个已有安装。');
+    await user.click(screen.getByRole('button', { name: '检查已有目录' }));
+    await screen.findByText(/ComfyUI 已安装：主程序版本与固定清单一致/);
+    await user.click(screen.getByRole('button', { name: '确认已安装并核验' }));
+    await waitFor(() => expect(document.body).toHaveTextContent(/原目录未修改、未复制、未下载/));
+    expect(screen.getByRole('button', { name: '已有安装等待兼容性验证' })).toBeDisabled();
+    expect(stub.callsOf('POST', /existing-installations\/verify$/)).toHaveLength(1);
+    expect(stub.callsOf('POST', /existing-installations\/import-models$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+  });
+
   it('自动检索失败时不开放下载，允许重新检测', async () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
     const user = userEvent.setup();

@@ -35,6 +35,48 @@ def test_legacy_manifest_never_kills_by_pid_alone(tmp_path):
     assert path.exists()
 
 
+def test_stop_accepts_wrapped_root_array_from_windows_powershell_51(tmp_path):
+    path = tmp_path / "processes.json"
+    owners = [{"pid": 123, "birth": "api"}, {"pid": 456, "birth": "child"}]
+    path.write_text(
+        json.dumps(
+            {"processes": [{"name": "api", "owners": [{"value": owners, "Count": len(owners)}]}]}
+        )
+    )
+    stopped = []
+
+    class Runner:
+        def stop(self, owner):
+            stopped.append(owner)
+
+    identities = {123: "api", 456: "child"}
+    assert module.stop_manifest(path, runner=Runner(), identity=identities.get) == 0
+    assert stopped == list(reversed(owners))
+    assert not path.exists()
+
+
+def test_malformed_wrapped_process_identities_are_never_stopped(tmp_path):
+    path = tmp_path / "processes.json"
+    path.write_text(
+        json.dumps(
+            {
+                "processes": [
+                    {"name": "api", "owners": [{"value": [{"pid": 123, "birth": "old"}], "Count": 2}]}
+                ]
+            }
+        )
+    )
+    calls = []
+
+    class Runner:
+        def stop(self, owner):
+            calls.append(owner)
+
+    assert module.stop_manifest(path, runner=Runner(), identity=lambda _: "old") == 1
+    assert calls == []
+    assert path.exists()
+
+
 def test_stop_confirms_exit_when_launcher_child_exits_during_stop(tmp_path):
     path = tmp_path / "processes.json"
     path.write_text(json.dumps({"processes": [{"name": "api", "owners": [{"pid": 123, "birth": "same"}]}]}))

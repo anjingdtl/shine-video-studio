@@ -27,7 +27,16 @@ const STAGE_TITLES: Array<{ id: StageId; title: string }> = [
 const INITIAL_STAGES: Stage[] = STAGE_TITLES.map(({ id, title }) => ({ id, title, status: 'pending', note: '' }));
 
 type EnvReport = { blockers: Array<{ code: string; tool?: string; detail?: string }>; ram: { status: string }; disk: { status: string; free_gb: number }; gpu: Record<string, unknown> };
-type ExistingScan = { root: string; snapshot: string; candidate_bytes: number; matches: Array<{ component_id: string; size: number }> };
+type ExistingScan = {
+  root: string; snapshot: string; candidate_bytes: number;
+  matches: Array<{ component_id: string; size: number }>;
+  software?: { installed: boolean; version_status: string; actual_revision?: string | null;
+    runtime?: { status: string }; node_revisions_verified?: boolean };
+};
+type ExistingVerification = { status: string; software: NonNullable<ExistingScan['software']>;
+  verified: Array<{ component_id: string; size: number }>;
+  rejected: Array<{ component_id: string; size: number }>;
+  verified_bytes: number; copied_bytes: number; verification_reused?: boolean; retry_after_ms?: number };
 type RuntimeState = {
   status: string; error: string | null; render_provider: string;
   candidate: { project_id: string; recipe_sha256: string } | null;
@@ -214,17 +223,20 @@ export function RealProductionWizard({
       try {
         const scan = await api<ExistingScan>('/setup/existing-installations/inspect', json('POST', { path: root }));
         if (!alive()) return;
-        if (scan.matches.length) scans.push(scan);
+        if (scan.matches.length || scan.software?.installed) scans.push(scan);
       } catch (error) {
         stopWith('existing', `已有目录检查失败：${String(error)}。请到专业设置确认目录，避免漏掉可复用模型。`);
         return;
       }
     }
     const candidateBytes = scans.reduce((sum, scan) => sum + scan.candidate_bytes, 0);
-    if (candidateBytes > 0) {
+    const installedSoftware = scans.some(scan => scan.software?.installed);
+    if (candidateBytes > 0 || installedSoftware) {
       setStage('existing', {
         status: 'warn',
-        note: `发现已有 ComfyUI：${scans.length} 个目录中有可复用模型（约 ${fmtBytes(candidateBytes)}）。下面选择「校验并复用」即可避免重复下载。`,
+        note: installedSoftware
+          ? `确认本机已有 ComfyUI 软件${candidateBytes ? `，并发现约 ${fmtBytes(candidateBytes)} 的权重文件` : ''}。先核验原文件；不能确认运行兼容性前不会复制或下载替代文件。`
+          : `发现约 ${fmtBytes(candidateBytes)} 的已有权重文件。下面可校验后复用，避免重复下载。`,
       });
       if (!onlyDiagnose) {
         setReuseOffer({ scans, totalBytes: candidateBytes });
@@ -372,6 +384,37 @@ export function RealProductionWizard({
   async function continueAfterReuse() {
     if (!reuseOffer) return;
     setReuseOffer(null);
+    const installedScans = reuseOffer.scans.filter(scan => scan.software?.installed);
+    if (installedScans.length) {
+      setStage('existing', { status: 'running', note: '正在原目录核验 ComfyUI 版本与模型哈希；大文件可能需要几分钟，不会复制或修改文件…' });
+      try {
+        const results: ExistingVerification[] = [];
+        for (const scan of installedScans) {
+          let result: ExistingVerification;
+          do {
+            result = await api<ExistingVerification>('/setup/existing-installations/verify', {
+              ...json('POST', { path: scan.root, snapshot: scan.snapshot }),
+              signal: AbortSignal.timeout(3_600_000),
+            });
+            if (result.status === 'VERIFYING') {
+              setStage('existing', { status: 'running', note: '另一个核验仍在读取本地文件；正在查询结果，不会重复扫描权重…' });
+              await new Promise(resolve => setTimeout(resolve, result.retry_after_ms ?? 5000));
+            }
+          } while (result.status === 'VERIFYING');
+          results.push(result);
+        }
+        const verifiedBytes = results.reduce((sum, result) => sum + result.verified_bytes, 0);
+        const rejectedCount = results.reduce((sum, result) => sum + result.rejected.length, 0);
+        const version = results.map(result => result.software.version_status).join('、');
+        const nodeVersionsKnown = results.every(result => result.software.node_revisions_verified);
+        const recovered = results.some(result => result.verification_reused) ? '已恢复此前完成的核验结果，未重复读取权重。' : '';
+        setStage('existing', { status: 'ok', note: `已安装 ComfyUI：${version}；已核验 ${fmtBytes(verifiedBytes)} 权重，${rejectedCount} 项未通过哈希；0 字节复制，0 字节下载。${recovered}` });
+        stopWith('workflows', `发现并确认了现有 ComfyUI 与模型（EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED）。当前运行环境兼容性${results.some(result => result.software.runtime?.status === 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED') ? '尚未验证' : '未确认'}，${nodeVersionsKnown ? '节点版本已核实' : '节点固定版本尚未核实'}。为避免重复安装、覆盖或下载，向导已停止；请在专业设置查看本机安装诊断。`);
+      } catch (error) {
+        stopWith('existing', `现有安装核验失败：${(error as Error).message}。原目录未被复制或修改；请重新检测后再试。`);
+      }
+      return;
+    }
     setStage('existing', { status: 'running', note: '正在校验并复制可复用的模型（仅哈希与固定清单一致的文件）…' });
     let imported = 0;
     try {
@@ -399,6 +442,8 @@ export function RealProductionWizard({
       await runTail(() => !cancelled.current && mounted.current, false, 0, storage);
     });
   }
+
+  const reuseHasInstalledSoftware = reuseOffer?.scans.some(scan => scan.software?.installed) ?? false;
 
   useEffect(() => {
     // Defer until the effect survives React StrictMode's setup/cleanup probe.
@@ -438,10 +483,12 @@ export function RealProductionWizard({
         {llmRequired && <LLMSetupPanel onChanged={onRefresh} />}
         {reuseOffer && (
           <div className="wizard-reuse" data-testid="wizard-reuse">
-            <p>发现可复用的已有模型（约 {fmtBytes(reuseOffer.totalBytes)}）。复用会先做哈希校验，只复制与固定清单一致的文件，原安装不会被修改。</p>
+            <p>{reuseHasInstalledSoftware
+              ? `发现已安装的 ComfyUI${reuseOffer.totalBytes ? `，另有约 ${fmtBytes(reuseOffer.totalBytes)} 权重待核验` : ''}。核验会直接读取原文件；大文件可能需要几分钟，不会复制、覆盖或下载。再次打开时会查询已完成的核验结果。`
+              : `发现可复用的已有模型（约 ${fmtBytes(reuseOffer.totalBytes)}）。核验后只复制与固定清单一致的模型到本机缓存，原安装不会被修改。`}</p>
             <div className="wizard-actions">
-              <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>校验并复用</button>
-              <button type="button" className="subtle-button" onClick={declineReuse}>不复用，直接继续</button>
+              <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验已安装环境' : '校验并复用模型'}</button>
+              {!reuseHasInstalledSoftware && <button type="button" className="subtle-button" onClick={declineReuse}>不复用，直接继续</button>}
             </div>
           </div>
         )}

@@ -2,6 +2,7 @@
 
 # ruff: noqa: F811
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -54,8 +55,70 @@ def test_inspection_is_read_only_and_size_never_means_verified(tmp_path):
     report = existing.inspect(str(root.parent), catalog())
     assert report['matches'][0]['status'] == 'PENDING_HASH'
     assert report['runtime_verified'] is False
+    assert report['software']['installed'] is True
+    assert report['software']['version_status'] == 'INSTALLED_VERSION_UNKNOWN'
     assert sorted(str(p) for p in tmp_path.rglob('*')) == before
     assert source.read_bytes() == b'wrong!! model'
+
+
+def test_verify_confirms_matching_models_in_place_without_cache_copy(tmp_path):
+    root = installation(tmp_path)
+    source = root / 'models' / 'unet' / 'renamed.safetensors'
+    source.write_bytes(b'correct model')
+    report = existing.inspect(str(root), catalog())
+    before = source.stat()
+
+    result = existing.verify_models(report, report['snapshot'])
+
+    assert result['status'] == 'INSTALLED_VERIFIED'
+    assert result['verified_bytes'] == len(b'correct model')
+    assert result['copied_bytes'] == 0
+    assert result['verified'][0]['status'] == 'INSTALLED_HASH_MATCH'
+    assert source.read_bytes() == b'correct model'
+    assert source.stat().st_mtime_ns == before.st_mtime_ns
+    assert not (tmp_path / 'isolated-packages' / '.cache').exists()
+
+
+def test_existing_comfyui_source_version_is_reported_without_running_python(tmp_path, monkeypatch):
+    root = installation(tmp_path)
+    (root / '.git').mkdir()
+    expected = 'a' * 40
+
+    def fake_run(args, **kwargs):
+        if 'rev-parse' in args:
+            return SimpleNamespace(returncode=0, stdout=expected + '\n', stderr='')
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(existing.subprocess, 'run', fake_run)
+    report = existing.inspect(str(root), {
+        **catalog(),
+        'components': catalog()['components'] + [{
+            'component_id': 'comfyui', 'kind': 'source', 'revision': expected, 'files': [],
+        }],
+    })
+
+    assert report['software']['installed'] is True
+    assert report['software']['version_status'] == 'INSTALLED_VERSION_MATCH'
+    assert report['software']['actual_revision'] == expected
+    assert report['software']['node_revisions_verified'] is False
+
+
+def test_existing_comfyui_tracked_edits_are_not_reported_as_version_match(tmp_path, monkeypatch):
+    root = installation(tmp_path)
+    (root / '.git').mkdir()
+    expected = 'b' * 40
+
+    def fake_run(args, **kwargs):
+        if 'rev-parse' in args:
+            return SimpleNamespace(returncode=0, stdout=expected + '\n', stderr='')
+        return SimpleNamespace(returncode=1, stdout='', stderr='')
+
+    monkeypatch.setattr(existing.subprocess, 'run', fake_run)
+    raw = catalog()
+    raw['components'].append({'component_id': 'comfyui', 'kind': 'source', 'revision': expected, 'files': []})
+    report = existing.inspect(str(root), raw)
+
+    assert report['software']['version_status'] == 'INSTALLED_VERSION_MODIFIED'
 
 
 def test_import_hashes_copied_bytes_rejects_mismatch_and_preserves_originals(prep, tmp_path):
@@ -114,6 +177,58 @@ def test_endpoints_require_local_user_and_import_audit(prep, tmp_path, monkeypat
     from shine.models import AuditEvent
     with factory() as db:
         assert any(row.event_type == 'EXISTING_COMFY_MODELS_CACHED' for row in db.scalars(select(AuditEvent)))
+
+
+def test_verify_endpoint_requires_local_user_and_never_copies(prep, tmp_path, monkeypatch):
+    client, _, _ = prep
+    root = installation(tmp_path)
+    (root / 'models' / 'unet' / 'weights').write_bytes(b'correct model')
+    monkeypatch.setattr(deployment, 'load_default_catalog', catalog)
+    report = post(client, '/setup/existing-installations/inspect', {'path': str(root)}, operator=True)
+
+    response = client.post('/api/v1/setup/existing-installations/verify', json={
+        'path': str(root), 'snapshot': report['snapshot'],
+    }, headers={'X-Shine-Local-Action': '1'})
+    assert response.status_code == 200, response.text
+    assert response.json()['verified_bytes'] == 13
+    assert response.json()['copied_bytes'] == 0
+    assert response.json()['verified'][0]['status'] == 'INSTALLED_HASH_MATCH'
+    assert response.json()['verification_reused'] is False
+
+    def should_not_hash_again(*_args, **_kwargs):
+        pytest.fail('a matching audit result must be reused without reading model bytes again')
+
+    monkeypatch.setattr(existing, 'verify_models', should_not_hash_again)
+    repeated = client.post('/api/v1/setup/existing-installations/verify', json={
+        'path': str(root), 'snapshot': report['snapshot'],
+    }, headers={'X-Shine-Local-Action': '1'})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()['verified_bytes'] == 13
+    assert repeated.json()['copied_bytes'] == 0
+    assert repeated.json()['verification_reused'] is True
+
+
+def test_verify_endpoint_reports_inflight_work_without_duplicate_hash(prep, tmp_path, monkeypatch):
+    client, _, _ = prep
+    root = installation(tmp_path)
+    (root / 'models' / 'unet' / 'weights').write_bytes(b'correct model')
+    monkeypatch.setattr(deployment, 'load_default_catalog', catalog)
+    report = post(client, '/setup/existing-installations/inspect', {'path': str(root)}, operator=True)
+    from shine import api_setup
+
+    active_key = (report['root'].casefold(), report['snapshot'])
+    monkeypatch.setattr(api_setup, '_active_installation_verifications', {active_key})
+
+    def should_not_hash(*_args, **_kwargs):
+        pytest.fail('an active verification must be polled instead of duplicated')
+
+    monkeypatch.setattr(existing, 'verify_models', should_not_hash)
+    response = client.post('/api/v1/setup/existing-installations/verify', json={
+        'path': str(root), 'snapshot': report['snapshot'],
+    }, headers={'X-Shine-Local-Action': '1'})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'VERIFYING'
+    assert response.json()['retry_after_ms'] == 5000
 
 
 def test_install_plan_excludes_only_hash_verified_cache_from_download(prep):

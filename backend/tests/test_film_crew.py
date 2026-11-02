@@ -340,9 +340,18 @@ def test_permissions_unfrozen_style_missing_route_cross_project_and_tool(api):
         == 422
     )
     # Style suggestions may run before freezing, but applying remains a separate user action.
-    proposal = call(
-        client, project_id, "director", {"suggestion": ENGLISH_STYLE, "rationale": "Stable axis"}, tool="style_proposal"
+    prompts = []
+    client.app.state.mock_llm_responder = lambda messages, _schema: (
+        prompts.append(messages)
+        or {"suggestion": ENGLISH_STYLE, "rationale": "保持人物轴线稳定。"}
     )
+    proposal_response = client.post(
+        f"/api/v1/projects/{project_id}/film-agents/director/run",
+        json={"brief": "冷调悬疑", "tool": "style_proposal"},
+    )
+    assert proposal_response.status_code == 201, proposal_response.text
+    assert "Simplified Chinese" in str(prompts[0])
+    proposal = proposal_response.json()
     # The adopt request must carry the draft the user was looking at; the
     # server refuses when another writer changed the draft in between.
     current_draft = client.get(f"/api/v1/projects/{project_id}").json()["style_draft"]

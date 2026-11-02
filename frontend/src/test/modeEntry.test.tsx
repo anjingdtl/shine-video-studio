@@ -154,7 +154,7 @@ describe('顶部模式入口（唯一权威状态）', () => {
     // 复用邀请出现：已有模型优先，不默认重新下载。
     const reuse = await screen.findByTestId('wizard-reuse');
     expect(reuse.textContent).toContain('可复用的已有模型');
-    await user.click(within(reuse).getByRole('button', { name: '校验并复用' }));
+    await user.click(within(reuse).getByRole('button', { name: '校验并复用模型' }));
     const result = await screen.findByTestId('wizard-result');
     await waitFor(() => {
       expect(result.textContent).toContain('真实制作已准备好');

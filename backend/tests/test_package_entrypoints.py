@@ -90,6 +90,8 @@ def test_one_click_installer_never_writes_to_the_system_drive_and_opens_the_wiza
     assert "非系统盘" in text
     assert "180GB" in text
     assert "#setup" in text, "the installer must land in the guided setup"
+    assert "先检查本机已有 ComfyUI 和模型" in text
+    assert "只有明确选择新建环境并确认后" in text
     assert "OperatorPasswordFile =" not in text
     assert "Get-ShineOperatorPasswordFile" not in text
     assert "$hasOperator -and" not in text, "idempotent restart must work without credentials"
@@ -192,8 +194,24 @@ def test_package_documents_are_rendered_from_templates():
     assert "一键安装并启动.cmd" in start_here
     assert "SETUP.cmd" in start_here
     assert "acceptance_status" in start_here, "the completion/acceptance split must be documented"
+    assert "标记为“已安装”" in start_here
+    assert "不会复制、覆盖或重复下载" in start_here
+    assert "向导会暂停真实制作配置并说明下一步" in start_here
     checklist = (PACKAGING / "TESTER_CHECKLIST.md").read_text(encoding="utf-8")
     assert "验证服务与工作流" in checklist
+
+
+def test_personal_desktop_package_does_not_claim_an_operator_password_is_required():
+    start_here = (PACKAGING / "START_HERE.md").read_text(encoding="utf-8")
+    checklist = (PACKAGING / "TESTER_CHECKLIST.md").read_text(encoding="utf-8")
+    installer = INSTALL_ONCE.read_text(encoding="utf-8-sig")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8-sig")
+    assert "无需操作员密码" in start_here
+    assert "不会生成 `operator-credentials.txt`" in start_here
+    assert "没有要求输入或抄录操作员密码" in checklist
+    assert "无需密码" in installer
+    assert "not_required_for_personal_desktop" in build
+    assert "generated 40-char secret" not in build
 
 
 def test_build_info_template_lists_the_real_catalog_numbers():

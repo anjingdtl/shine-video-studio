@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -28,6 +29,81 @@ def comfy_root(path: Path) -> Path | None:
         if (candidate / 'main.py').is_file() and (candidate / 'comfy').is_dir():
             return candidate.resolve()
     return None
+
+
+def _source_software_state(root: Path, catalog: dict) -> dict:
+    """Identify an existing ComfyUI checkout without executing its Python code.
+
+    A matching Git revision is useful installation evidence, but it is not
+    runtime or node compatibility evidence. Tracked edits make the source
+    version non-matching; untracked user files such as runtime caches are not
+    used to reject the installation.
+    """
+    source = next((c for c in catalog.get("components", []) if c.get("kind") == "source"), None)
+    expected = str(source.get("revision") or "") if source else ""
+    actual = None
+    tracked_clean = None
+    if (root / ".git").exists():
+        env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+        try:
+            revision = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=5, check=False, env=env,
+            )
+            if revision.returncode == 0:
+                actual = revision.stdout.strip()
+                dirty = subprocess.run(
+                    ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--"],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    timeout=5, check=False, env=env,
+                )
+                if dirty.returncode in {0, 1}:
+                    tracked_clean = dirty.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    if actual and expected and actual != expected:
+        version_status = "INSTALLED_VERSION_MISMATCH"
+    elif actual and expected and tracked_clean is False:
+        version_status = "INSTALLED_VERSION_MODIFIED"
+    elif actual and expected and tracked_clean is True:
+        version_status = "INSTALLED_VERSION_MATCH"
+    else:
+        version_status = "INSTALLED_VERSION_UNKNOWN"
+
+    python_candidates = (
+        root.parent / "python_embeded" / "python.exe",
+        root.parent / "python_embedded" / "python.exe",
+        root / ".venv" / "Scripts" / "python.exe",
+        root / "venv" / "Scripts" / "python.exe",
+    )
+    python = next((path.resolve() for path in python_candidates if path.is_file()), None)
+    expected_nodes = [c["component_id"] for c in catalog.get("components", [])
+                      if c.get("kind") == "node"]
+    nodes = {node: (root / "custom_nodes" / node).is_dir() for node in expected_nodes}
+    return {
+        "installed": True,
+        "version_status": version_status,
+        "actual_revision": actual,
+        "expected_revision": expected or None,
+        "tracked_files_clean": tracked_clean,
+        "runtime": {
+            "status": "PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED" if python else "PYTHON_NOT_FOUND",
+            "python_executable": str(python) if python else None,
+        },
+        "nodes": nodes,
+        "node_revisions_verified": False,
+    }
+
+
+def _stat_identity(stat) -> dict:
+    return {
+        "size": stat.st_size,
+        "mtime_ns": getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+        "device": getattr(stat, "st_dev", None),
+        "inode": getattr(stat, "st_ino", None),
+    }
 
 
 def fixed_drives() -> list[Path]:
@@ -74,7 +150,7 @@ def inspect(root_value: str, catalog: dict) -> dict:
         raise HTTPException(422, '该目录不是 ComfyUI，请选择包含 main.py 的目录或整合包目录。')
     # Inventory model files only. Junctions, external model paths and linked folders
     # are deliberately not followed without selecting those roots separately.
-    sizes: dict[int, list[Path]] = {}
+    sizes: dict[int, list[tuple[Path, dict]]] = {}
     skipped = []
     count = 0
     models = root / 'models'
@@ -98,7 +174,8 @@ def inspect(root_value: str, catalog: dict) -> dict:
                     skipped.append(str(file))
                     continue
                 try:
-                    sizes.setdefault(file.stat().st_size, []).append(file)
+                    stat = file.stat()
+                    sizes.setdefault(stat.st_size, []).append((file, _stat_identity(stat)))
                 except OSError:
                     skipped.append(str(file))
     matches, missing = [], []
@@ -108,18 +185,63 @@ def inspect(root_value: str, catalog: dict) -> dict:
         for spec in component['files']:
             # Size is a candidate filter only. Renamed files are eligible; hashes
             # are verified while copying, never inferred from names or size.
-            paths = sizes.get(spec['size'], [])
+            candidates = sizes.get(spec['size'], [])
             entry = {'component_id': component['component_id'], 'relative_path': spec['relative_path'],
                      'sha256': spec['sha256'], 'size': spec['size']}
-            if paths:
-                matches.append({**entry, 'sources': [str(p) for p in paths], 'status': 'PENDING_HASH'})
+            if candidates:
+                matches.append({**entry,
+                                'sources': [str(path) for path, _ in candidates],
+                                'source_stats': {str(path): stat for path, stat in candidates},
+                                'status': 'PENDING_HASH'})
             else:
                 missing.append(entry)
-    payload = {'root': str(root), 'matches': matches, 'missing': missing,
+    software = _source_software_state(root, catalog)
+    payload = {'root': str(root), 'software': software, 'matches': matches, 'missing': missing,
                'skipped': skipped, 'scanned_files': count, 'runtime_verified': False,
                'catalog_id': catalog['catalog_id'], 'catalog_version': catalog['catalog_version']}
     return {**payload, 'snapshot': graph_hash(payload),
             'candidate_bytes': sum(row['size'] for row in matches)}
+
+
+def verify_models(report: dict, snapshot: str) -> dict:
+    """Confirm exact catalog model bytes in place; never copies or writes them."""
+    if snapshot != report['snapshot']:
+        raise HTTPException(409, '已有目录或部署清单已变化，请重新检测后确认。')
+    verified, rejected = [], []
+    for match in report['matches']:
+        valid_source = None
+        for source_value in match['sources']:
+            source = Path(source_value)
+            try:
+                if source.resolve() != source or not source.is_file():
+                    continue
+                expected_stat = match.get('source_stats', {}).get(source_value)
+                with source.open('rb') as stream:
+                    before = _stat_identity(os.fstat(stream.fileno()))
+                    if expected_stat and before != expected_stat:
+                        continue
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                    after = _stat_identity(os.fstat(stream.fileno()))
+                path_after = _stat_identity(source.stat())
+                if (before == after == path_after and before['size'] == match['size']
+                        and digest == match['sha256']):
+                    valid_source = source_value
+                    break
+            except OSError:
+                continue
+        if valid_source:
+            verified.append({**match, 'source': valid_source, 'status': 'INSTALLED_HASH_MATCH'})
+        else:
+            rejected.append({**match, 'status': 'HASH_MISMATCH_OR_CHANGED'})
+    return {
+        'status': 'INSTALLED_VERIFIED',
+        'software': report['software'],
+        'verified': verified,
+        'rejected': rejected,
+        'verified_bytes': sum(row['size'] for row in verified),
+        'copied_bytes': 0,
+        'runtime_verified': False,
+    }
 
 
 def import_models(settings, report: dict, snapshot: str) -> dict:

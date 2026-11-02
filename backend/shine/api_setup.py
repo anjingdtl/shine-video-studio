@@ -7,6 +7,8 @@ through the existing grant/approve/execute machinery - nothing here executes.
 
 from __future__ import annotations
 
+import threading
+from collections import Counter
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,6 +21,8 @@ from shine.config import Settings
 
 router = APIRouter(prefix="/api/v1/setup", tags=["new-machine-setup"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
+_installation_verification_lock = threading.Lock()
+_active_installation_verifications: set[tuple[str, str]] = set()
 
 
 class InstallPlanRequest(BaseModel):
@@ -104,6 +108,96 @@ def import_existing_models(body: ExistingModelImportRequest, actor: Operator, se
                'rejected': [item['sha256'] for item in result['rejected']]})
     db.commit()
     return result
+
+
+@router.post('/existing-installations/verify')
+def verify_existing_installation(body: ExistingModelImportRequest, actor: Operator, db: DBSession):
+    """Verify existing software/model identity in place without copying files."""
+    from sqlalchemy import select
+
+    from shine.comfyops.existing_installation import inspect, verify_models
+    from shine.models import AuditEvent
+    from shine.services import add_audit
+
+    report = inspect(body.path, deployment.load_default_catalog())
+    if body.snapshot != report['snapshot']:
+        return verify_models(report, body.snapshot)  # raises the snapshot conflict before reading weights
+
+    audits = db.scalars(select(AuditEvent).where(
+        AuditEvent.event_type == 'EXISTING_COMFY_INSTALLATION_VERIFIED',
+        AuditEvent.entity_type == 'deployment',
+        AuditEvent.entity_id == report['catalog_id'],
+    ).order_by(AuditEvent.created_at.desc()).limit(100)).all()
+    for event in audits:
+        payload = event.payload or {}
+        # Audit sanitization redacts absolute paths. The inspection snapshot
+        # includes the canonical root, so an exact snapshot still binds this
+        # result to the same selected installation without storing its path.
+        if payload.get('root') not in {report['root'], '[local-path]'} or payload.get('snapshot') != body.snapshot:
+            continue
+        verified_counts = Counter(payload.get('verified_components') or [])
+        rejected_counts = Counter(payload.get('rejected_components') or [])
+        if set(verified_counts) & set(rejected_counts):
+            continue  # Summary evidence cannot identify mixed per-file results safely.
+        verified, rejected = [], []
+        for match in report['matches']:
+            component = match['component_id']
+            if verified_counts[component] > 0:
+                verified.append({**match, 'status': 'INSTALLED_HASH_MATCH'})
+                verified_counts[component] -= 1
+            elif rejected_counts[component] > 0:
+                rejected.append({**match, 'status': 'HASH_MISMATCH_OR_CHANGED'})
+                rejected_counts[component] -= 1
+            else:
+                break
+        if (len(verified) + len(rejected) != len(report['matches'])
+                or any(verified_counts.values()) or any(rejected_counts.values())):
+            continue
+        verified_bytes = payload.get('verified_bytes')
+        if verified_bytes != sum(row['size'] for row in verified):
+            continue
+        return {
+            **report,
+            'status': 'INSTALLED_VERIFIED',
+            'verified': verified,
+            'rejected': rejected,
+            'verified_bytes': verified_bytes,
+            'copied_bytes': 0,
+            'runtime_verified': False,
+            'verification_reused': True,
+        }
+
+    key = (report['root'].casefold(), body.snapshot)
+    with _installation_verification_lock:
+        if key in _active_installation_verifications:
+            return {**report, 'status': 'VERIFYING', 'retry_after_ms': 5000}
+        _active_installation_verifications.add(key)
+    try:
+        result = verify_models(report, body.snapshot)
+        add_audit(db, actor, 'EXISTING_COMFY_INSTALLATION_VERIFIED', 'deployment', report['catalog_id'], {
+            'root': report['root'],
+            'snapshot': body.snapshot,
+            'software_version_status': report['software']['version_status'],
+            'verified_components': [item['component_id'] for item in result['verified']],
+            'rejected_components': [item['component_id'] for item in result['rejected']],
+            'verified_files': [
+                {'component_id': item['component_id'], 'relative_path': item['relative_path'],
+                 'sha256': item['sha256'], 'size': item['size']}
+                for item in result['verified']
+            ],
+            'rejected_files': [
+                {'component_id': item['component_id'], 'relative_path': item['relative_path'],
+                 'sha256': item['sha256'], 'size': item['size']}
+                for item in result['rejected']
+            ],
+            'verified_bytes': result['verified_bytes'],
+            'copied_bytes': 0,
+        })
+        db.commit()
+        return {**report, **result, 'verification_reused': False}
+    finally:
+        with _installation_verification_lock:
+            _active_installation_verifications.discard(key)
 
 
 @router.get('/storage')

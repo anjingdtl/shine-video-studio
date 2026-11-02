@@ -4,7 +4,7 @@
 # guided setup wizard at http://127.0.0.1:<port>/#setup.  Everything that can be
 # decided safely is decided here:
 #   * the install drive (largest non-system fixed disk with >= 180 GiB free)
-#   * a generated 40-character operator credential (persisted locally, never logged)
+#   * no operator credential for the personal desktop trust boundary
 #   * free API/Web ports
 #   * the data directory and every cache directory (all on the selected disk)
 # It never installs drivers, never edits system-wide state, and never downloads
@@ -141,7 +141,8 @@ function Show-ToolReport {
 
 Write-Banner 'Shine 视频工作台 · 一键安装'
 Write-Host '  本程序会：安装固定版本工具链、Python/前端依赖、启动本地服务，' -ForegroundColor Gray
-Write-Host '  然后自动打开浏览器里的「新机设置」向导。模型权重在向导内按计划下载。' -ForegroundColor Gray
+Write-Host '  然后自动打开浏览器里的「新机设置」向导，先检查本机已有 ComfyUI 和模型。' -ForegroundColor Gray
+Write-Host '  只有明确选择新建环境并确认后，才会下载缺少的软件或模型。' -ForegroundColor Gray
 Write-Host '  不会改动系统盘、不装驱动、不写系统级设置。' -ForegroundColor Gray
 
 $envFile = Join-Path $repoRoot '.env'

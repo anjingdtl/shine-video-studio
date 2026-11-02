@@ -109,6 +109,56 @@ it('核心 LLM 未配置时在下载前阻断，并提供同一配置入口', as
   await userEvent.click(screen.getByRole('button', { name: '重新检查' }));
   await screen.findByText(/真实制作已准备好/);
 });
+it('识别已安装 ComfyUI 后原位核验并停止重复安装', async () => {
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+    installations: ['F:\\AI\\ComfyUI'],
+  }) });
+  stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
+    root: 'F:\\AI\\ComfyUI', snapshot: 'b'.repeat(64), candidate_bytes: 13,
+    matches: [{ component_id: 'h3', size: 13 }],
+    software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+      runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false },
+  }) });
+  stub.add({ method: 'POST', pattern: /existing-installations\/verify$/, respond: () => jsonResponse({
+    status: 'INSTALLED_VERIFIED', software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+      runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false },
+    verified: [{ component_id: 'h3', size: 13 }], rejected: [], verified_bytes: 13, copied_bytes: 0,
+  }) });
+  show();
+  await screen.findByTestId('wizard-reuse');
+  await userEvent.click(screen.getByRole('button', { name: '核验已安装环境' }));
+  await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent(/EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED/));
+  expect(stub.callsOf('POST', /existing-installations\/verify$/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /existing-installations\/import-models$/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /setup\/next-instance-plan$/)).toHaveLength(0);
+});
+it('长时间核验使用宽限时限，并对账进行中的请求而不重复扫权重', async () => {
+  const timeout = vi.spyOn(AbortSignal, 'timeout');
+  const software = { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
+    runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false };
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+    installations: ['F:\\AI\\ComfyUI'],
+  }) });
+  stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
+    root: 'F:\\AI\\ComfyUI', snapshot: 'c'.repeat(64), candidate_bytes: 13,
+    matches: [{ component_id: 'h3', size: 13 }], software,
+  }) });
+  let verifyCalls = 0;
+  stub.add({ method: 'POST', pattern: /existing-installations\/verify$/, respond: () => jsonResponse(
+    verifyCalls++ === 0
+      ? { status: 'VERIFYING', retry_after_ms: 0, software }
+      : { status: 'INSTALLED_VERIFIED', software, verified: [{ component_id: 'h3', size: 13 }],
+        rejected: [], verified_bytes: 13, copied_bytes: 0, verification_reused: true },
+  ) });
+  show();
+  await screen.findByTestId('wizard-reuse');
+  await userEvent.click(screen.getByRole('button', { name: '核验已安装环境' }));
+  await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent(/EXISTING_INSTALL_RUNTIME_ADOPTION_REQUIRED/));
+  expect(verifyCalls).toBe(2);
+  expect(timeout).toHaveBeenCalledWith(3_600_000);
+  expect(screen.getByTestId('wizard-stages')).toHaveTextContent(/已恢复此前完成的核验结果，未重复读取权重/);
+});
 it('React 严格模式初次挂载仍完成，不能并发重复创建计划', async () => {
   render(<StrictMode><RealProductionWizard mode="enable" projectId="proj-1" {...callbacks} /></StrictMode>);
   await screen.findByText(/真实制作已准备好/);

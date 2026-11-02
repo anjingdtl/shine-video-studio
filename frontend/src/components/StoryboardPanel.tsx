@@ -49,6 +49,9 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
     try {
       const rows = await api<DocumentRow[]>(`/projects/${projectId}/documents`);
       setDocuments(rows);
+      setSelectedDoc(current => current && rows.some(doc => doc.id === current)
+        ? current
+        : rows.length === 1 ? rows[0].id : '');
     } catch { setDocuments([]); }
   }, [projectId]);
 
@@ -72,7 +75,12 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
 
   async function generate() {
     if (!consent) { setMessage('需要先勾选同意把剧本文本发给已配置的 LLM 服务商。'); return; }
-    if (!selectedDoc && !inlineText.trim()) { setMessage('请导入剧本文件或粘贴完整剧本文本。'); return; }
+    if (!selectedDoc && !inlineText.trim()) {
+      setMessage(documents.length
+        ? '请先从“已导入剧本”中选择一份，或导入/粘贴剧本。'
+        : '请导入剧本文件或粘贴完整剧本文本。');
+      return;
+    }
     setBusy(true); setResult(null); setMessage('');
     try {
       const body: Record<string, unknown> = {
@@ -132,7 +140,7 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
       </label>
       <label htmlFor="storyboard-doc">或选择已导入剧本
         <select id="storyboard-doc" value={selectedDoc} onChange={e => { setSelectedDoc(e.target.value); if (e.target.value) setInlineText(''); }}>
-          <option value="">—</option>
+          <option value="">{documents.length ? '请选择剧本' : '—'}</option>
           {documents.map(doc => <option key={doc.id} value={doc.id}>{doc.filename}（{doc.text_length} 字符）</option>)}
         </select>
       </label>
@@ -140,8 +148,9 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
     {!selectedDoc && (
       <label>粘贴完整剧本文本<textarea rows={6} value={inlineText} onChange={e => setInlineText(e.target.value)} /></label>
     )}
-    <label>锁定剧情事实（每行一条，可选）
-      <input id="storyboard-facts" type="text" value={facts} onChange={e => setFacts(e.target.value)} placeholder="例如：信封始终未拆封" />
+    <label className="storyboard-facts">锁定剧情事实（每行一条，可选）
+      <textarea id="storyboard-facts" rows={3} value={facts} onChange={e => setFacts(e.target.value)}
+        placeholder={'例如：信封始终未拆封\n账册第十七页缺失'} />
     </label>
     <label className="consent-row">
       <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />

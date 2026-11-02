@@ -8,8 +8,14 @@ import type { DeploymentStorage } from './StorageSettings';
 
 type ToolInfo = { present: boolean; version: string; at_floor: boolean };
 type ExistingScan = { root: string; snapshot: string; candidate_bytes: number; scanned_files: number;
-  matches: Array<{ component_id: string; relative_path: string; size: number }>;
-  missing: Array<{ component_id: string; relative_path: string; size: number }>; skipped: string[] };
+  matches: Array<{ component_id: string; relative_path: string; size: number; status?: string }>;
+  missing: Array<{ component_id: string; relative_path: string; size: number }>; skipped: string[];
+  software?: { installed: boolean; version_status: string; actual_revision?: string | null;
+    runtime?: { status: string; python_executable?: string | null }; node_revisions_verified?: boolean } };
+type ExistingVerification = { software: NonNullable<ExistingScan['software']>;
+  verified: Array<{ component_id: string; relative_path: string; size: number; status: string }>;
+  rejected: Array<{ component_id: string; relative_path: string; size: number; status: string }>;
+  verified_bytes: number; copied_bytes: number; verification_reused?: boolean };
 type EnvReport = {
   platform: Record<string, string>;
   tools: Record<string, ToolInfo>;
@@ -73,6 +79,16 @@ function fmtBytes(value: number): string {
   return `${result.toFixed(result >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function installedVersionText(status: string): string {
+  const labels: Record<string, string> = {
+    INSTALLED_VERSION_MATCH: '主程序版本与固定清单一致',
+    INSTALLED_VERSION_MISMATCH: '主程序版本与固定清单不同',
+    INSTALLED_VERSION_MODIFIED: '固定版本存在本地修改',
+    INSTALLED_VERSION_UNKNOWN: '已安装，版本无法核验',
+  };
+  return labels[status] ?? '已安装，版本待核验';
+}
+
 /** Plain-language model cards: the fixed catalog grouped by purpose, with an
  *  honest state per group (docs/UI_SIMPLIFICATION_PLAN_20261102.md section 5.2).
  *  Never claims "installed" from a filename match: candidates stay pending
@@ -106,6 +122,7 @@ function buildModelCards(
   scan: ExistingScan | null,
   resolved: boolean,
   importedResult: string,
+  resolvedMode: 'none' | 'installed' | 'cached',
 ): ModelCard[] {
   if (!checked || !catalog) return [];
   const groups = new Map<string, CatalogComponent[]>();
@@ -123,7 +140,10 @@ function buildModelCards(
       label: PURPOSE_LABELS[purpose] ?? purpose,
       components,
       state: scan
-        ? (resolved && importedResult ? { text: '已校验复用（哈希匹配进入缓存）', tone: 'verified' } : candidateCount > 0 ? { text: `发现文件，待校验（${candidateCount} 项）`, tone: 'candidate' } : { text: '未在已检查位置发现（可选择其他目录）', tone: 'absent' })
+        ? (resolved && importedResult
+          ? { text: resolvedMode === 'installed' ? '已安装并核验（原目录，未复制）' : '已校验并复用（无重复下载）', tone: 'verified' }
+          : candidateCount > 0 ? { text: `发现文件，待校验（${candidateCount} 项）`, tone: 'candidate' }
+            : { text: '未在已检查位置发现（可选择其他目录）', tone: 'absent' })
         : { text: '待检查已有目录', tone: 'muted' },
       detail: scan ? `候选 ${candidateCount} · 未发现 ${scan.missing.length}` : '',
     });
@@ -138,6 +158,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   const [existingPath, setExistingPath] = useState('');
   const [existingScan, setExistingScan] = useState<ExistingScan | null>(null);
   const [existingResolved, setExistingResolved] = useState(false);
+  const [resolvedMode, setResolvedMode] = useState<'none' | 'installed' | 'cached'>('none');
   const [existingChoice, setExistingChoice] = useState<'reuse' | 'new'>('reuse');
   const [importResult, setImportResult] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(null);
@@ -229,6 +250,10 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   }
 
   function createInstallPlan() {
+    if (existingChoice === 'reuse' && existingScan?.software?.installed) {
+      say('已发现本机 ComfyUI 已安装。先完成运行兼容性核验；当前不会创建另一套安装计划。', 'bad');
+      return;
+    }
     void run(async () => {
       const core = ['comfyui', 'comfy-runtime-wheels', 'minimax-h3-diffusion', 'minimax-h3-text-encoder',
         'minimax-h3-vae', 'minimax-h3-lora', 'minimax-h3-pdd',
@@ -309,6 +334,7 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     void run(async () => {
       setChecked(false);
       setExistingResolved(false); setExistingScan(null); setImportResult('');
+      setResolvedMode('none');
       const [environment, ready, state, disk, existing] = await Promise.all([
         api<EnvReport>('/setup/environment'), api<Readiness>('/setup/readiness'),
         api<RuntimeState>('/setup/runtime'), api<DeploymentStorage>('/setup/storage'),
@@ -330,10 +356,43 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
   function inspectExisting() {
     void run(async () => {
       setExistingScan(null); setExistingResolved(false); setImportResult('');
+      setResolvedMode('none');
       const result = await api<ExistingScan>('/setup/existing-installations/inspect',
         withJson('POST', { path: existingPath }));
       setExistingScan(result);
-      return `目录已识别，发现 ${result.matches.length} 项待哈希校验的模型文件。`;
+      return result.software?.installed
+        ? `ComfyUI 已安装（${installedVersionText(result.software.version_status)}）；发现 ${result.matches.length} 项权重候选，运行兼容性与节点版本仍待核验。`
+        : `目录已识别，发现 ${result.matches.length} 项待哈希校验的模型文件。`;
+    });
+  }
+
+  function verifyExistingInstallation() {
+    if (!existingScan) return;
+    setProgress('正在原目录只读核验程序版本和模型哈希；文件不会复制或下载…');
+    void run(async () => {
+      try {
+        const result = await api<ExistingVerification>('/setup/existing-installations/verify', {
+          ...withJson('POST', { path: existingScan.root, snapshot: existingScan.snapshot }),
+          signal: AbortSignal.timeout(3_600_000),
+        });
+        const verifiedSet = new Set(result.verified.map(row => `${row.component_id}:${row.relative_path}`));
+        const resultRows = [...result.verified, ...result.rejected];
+        setExistingScan(previous => previous ? ({
+          ...previous,
+          matches: previous.matches.map(row => {
+            const key = `${row.component_id}:${row.relative_path}`;
+            return { ...row, status: verifiedSet.has(key)
+              ? 'INSTALLED_HASH_MATCH'
+              : resultRows.find(item => `${item.component_id}:${item.relative_path}` === key)?.status ?? 'HASH_MISMATCH_OR_CHANGED' };
+          }),
+        }) : previous);
+        const recovered = result.verification_reused ? '已恢复此前完成的核验结果，未重复读取权重。' : '';
+        const message = `${recovered}已确认 ComfyUI 已安装（${installedVersionText(result.software.version_status)}）；${fmtBytes(result.verified_bytes)} 权重哈希匹配，${result.rejected.length} 项未通过。原目录未修改、未复制、未下载。当前还需核验运行环境和节点版本。`;
+        setExistingResolved(true); setResolvedMode('installed'); setImportResult(message);
+        return message;
+      } finally {
+        setProgress('');
+      }
     });
   }
 
@@ -347,12 +406,17 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
         }), signal: AbortSignal.timeout(3_600_000) });
       const message = `已校验并缓存 ${fmtBytes(result.reused_bytes)}，${result.rejected.length} 项哈希不匹配，不能按固定版本复用。${result.rejected.map(row => `${row.component_id}/${row.relative_path}`).join('、')} 后续只下载缓存中缺少的组件。`;
       setImportResult(message); setExistingResolved(true);
+      setResolvedMode('cached');
       return message;
     });
   }
 
   function prepareAutomatically() {
     if (!projectId || !checked || !storage || storage.requires_selection || !existingResolved) return;
+    if (existingChoice === 'reuse' && existingScan?.software?.installed) {
+      say('已确认现有 ComfyUI 与权重安装。当前向导尚不能安全接管这套外部运行环境，因此不会创建新安装计划或重复下载；请先在专业设置核验 Python、节点修订版本和服务兼容性。', 'bad');
+      return;
+    }
     const selected = projectId;
     if (!window.confirm(`下载并配置本机生产环境？\n目录：${storage.root}\n完整清单约 ${fmtBytes(catalog?.total_bytes ?? 0)}，已校验复用的模型与缓存不会重复下载。\n将独立安装固定版本的程序、节点及缺少的模型，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
     void run(async () => {
@@ -421,7 +485,8 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
     });
   }
 
-  const modelCards = buildModelCards(checked, catalog, existingScan, existingResolved, importResult);
+  const modelCards = buildModelCards(checked, catalog, existingScan, existingResolved, importResult, resolvedMode);
+  const existingComfyInstalled = existingChoice === 'reuse' && !!existingScan?.software?.installed;
 
   return (
     <section className="card section-card" id="setup">
@@ -467,36 +532,50 @@ export function SetupPanel({ projectId, onRefresh }: { projectId: string; onRefr
             <p>{existingRoots.length ? `发现 ${existingRoots.length} 个已有安装。` : '常见目录未发现安装，可手动指定；不会遍历整个磁盘。'}</p>
             {existingRoots.map(root => <p key={root}><button className="secondary-button" onClick={() => {
               setExistingPath(root); setExistingChoice('reuse'); setExistingResolved(false);
+              setExistingScan(null); setImportResult(''); setResolvedMode('none');
             }}>{root}</button></p>)}
             <label><input type="radio" name="existing-comfy" checked={existingChoice === 'reuse'} onChange={() => {
               setExistingChoice('reuse'); setExistingResolved(false);
             }} />检查并复用已有模型</label>
             <label><input type="radio" name="existing-comfy" checked={existingChoice === 'new'} onChange={() => {
               setExistingChoice('new'); setExistingResolved(true);
-            }} />独立安装，不导入已有模型</label>
+            }} />新建独立运行环境（会安装缺少的程序和模型）</label>
             {existingChoice === 'reuse' && <>
               <label className="existing-path">已有 ComfyUI 目录<input value={existingPath} onChange={e => {
                 setExistingPath(e.target.value); setExistingScan(null); setExistingResolved(false); setImportResult('');
+              setResolvedMode('none');
               }} placeholder="包含 main.py 的目录或整合包目录" /></label>
               <button className="secondary-button" disabled={!existingPath.trim()} onClick={inspectExisting}>检查已有目录</button>
               {existingScan && <>
                 <p>已识别：{existingScan.root} · 扫描 {existingScan.scanned_files} 个文件。</p>
+                {existingScan.software?.installed && <p role="status">
+                  ComfyUI 已安装：{installedVersionText(existingScan.software.version_status)}。
+                  运行环境 {existingScan.software.runtime?.python_executable ? '检测到 Python 程序，版本兼容性待核验' : '未检测到随包 Python'}；
+                  节点修订版本{existingScan.software.node_revisions_verified ? '已核验' : '待核验'}。
+                </p>}
                 <p>候选可复用 {existingScan.matches.length} 项（{fmtBytes(existingScan.candidate_bytes)}，{existingResolved ? '哈希结果见下方' : '待哈希校验'}）；未找到固定版本文件 {existingScan.missing.length} 项。</p>
-                <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{existingResolved ? '哈希结果见下方' : '待哈希校验'}</li>)}</ul>
+                <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{row.status === 'INSTALLED_HASH_MATCH' ? '已安装，哈希匹配' : row.status ? '哈希不匹配或文件已变化' : existingResolved ? '哈希结果见上方' : '待哈希校验'}</li>)}</ul>
                 <details><summary>查看未找到的固定版本模型</summary><ul>{existingScan.missing.map(row =>
                   <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path} · {fmtBytes(row.size)}</li>)}</ul></details>
-                <button className="secondary-button" disabled={!storage || storage.requires_selection || existingResolved} onClick={reuseExisting}>校验并复用匹配模型</button>
+                <button className="secondary-button" disabled={existingResolved}
+                  onClick={existingScan.software?.installed ? verifyExistingInstallation : reuseExisting}>
+                  {existingScan.software?.installed ? '确认已安装并核验' : '校验并复用匹配模型'}
+                </button>
               </>}
               {importResult && <p role="status">{importResult}</p>}
             </>}
-            <p>复用只复制哈希匹配的模型到工作台缓存；原安装、节点、模型保持不变。工作台仍需独立配置固定版本运行环境，检测到目录不等于生产验证通过。外部链接与 extra_model_paths 指向的模型目录暂不自动读取。</p>
+            <p>发现已安装的 ComfyUI 时，会在原目录只读核验版本和模型哈希，不复制、覆盖或下载已安装文件。若现有 Python 或节点兼容性没有核验通过，工作台会停止准备，避免重复安装。外部链接与 extra_model_paths 指向的模型目录暂不自动读取。</p>
           </fieldset>
-          <p className="env-next-note">下一步只有一个主动作：检测 → 检查已有目录 → 校验并复用 →（需要时）下载缺项并自动配置 → 验证服务 → 进入制作。已完成步骤不要求重做。</p>
+          <p className="env-next-note">下一步只有一个主动作：检测 → 确认已安装的软件和权重 → 核验兼容性 → 验证服务 → 进入制作。只有明确选择新建独立环境时才会准备另一套程序。</p>
           <p>检测不会下载模型或提交视频。下载前会显示目录、体积与安装范围，由你确认。</p>
+          {existingComfyInstalled && <p role="status">{existingResolved
+            ? '已确认本机软件与权重安装；当前版本尚不能直接接管外部目录，因此自动安装已停用，不会重复下载。请先在专业设置完成运行兼容性检查。'
+            : '已发现本机 ComfyUI。先核验原目录的软件版本与模型哈希；确认之前不会另行下载或复制。'}</p>}
           <button className="primary-button" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
             || !existingResolved
+            || existingComfyInstalled
             || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
-            onClick={prepareAutomatically}>{runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId ? '本项目环境已配置' : '下载缺项并自动配置'}</button>
+            onClick={prepareAutomatically}>{existingComfyInstalled ? '已有安装等待兼容性验证' : runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId ? '本项目环境已配置' : '下载缺项并自动配置'}</button>
           {!projectId && <p>先在下方给项目起个名字，即可开始自动配置。</p>}
           {storage?.requires_selection && <p>请选择下载安装目录：<a href="#deployment-storage">选择目录</a></p>}
         </>}

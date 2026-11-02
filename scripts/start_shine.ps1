@@ -296,7 +296,12 @@ $webEntry.listener_pid = $webListener
 foreach ($entry in $started) {
     $identities = & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $entry.pid $entry.birth
     if ($LASTEXITCODE -ne 0) { throw "Cannot identify $($entry.name) process tree" }
-    $entry.owners = @($identities | ConvertFrom-Json)
+    # Windows PowerShell 5.1 pipes a top-level JSON array as one array object,
+    # which ConvertTo-Json serializes as { value: [...], Count: n }. Parse the
+    # complete JSON input directly so the manifest always contains owner rows.
+    $identityJson = ($identities -join [Environment]::NewLine).Trim()
+    $parsedIdentities = ConvertFrom-Json -InputObject $identityJson
+    $entry.owners = @($parsedIdentities)
 }
 
 $manifestPath = Join-Path $runDir 'processes.json'
