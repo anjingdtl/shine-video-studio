@@ -139,8 +139,8 @@
     "typescript_vite": "PASS",
     "windows_start_stop": "PASS",
     "locked_environment": "PASS",
-    "package": "PENDING",
-    "push": "PENDING"
+    "package": "PASS",
+    "push": "PASS"
   },
   "raw_logs": {
     "v2-backend-final.log": {
@@ -182,6 +182,10 @@
     "v2-llm.log": {
       "sha256": "82855ad9566fa2f013fd2beaee7a1c18e893048c498c5b0a2c5e6a7515b59d8d",
       "bytes": 643
+    },
+    "v2-package-source.log": {
+      "sha256": "31a05e166ae394bba1ced852d8580634f345ff781f7d1027de41004aa32a3735",
+      "bytes": 779
     }
   },
   "boundary": {
@@ -189,5 +193,20 @@
     "real_llm_generation": "NOT_RUN",
     "hosted_ci": "USER_WAIVED",
     "human_art_review": "USER_WAIVED"
+  },
+  "source_commit": "bb4ce6039e0f3bd0d45d7ebc9e08a01a012ec739",
+  "engineering_verdict": "ENGINEERING_ALL_PASS",
+  "package": {
+    "source_commit": "bb4ce6039e0f3bd0d45d7ebc9e08a01a012ec739",
+    "archive": "releases/director-v2-source-bb4ce60/ShineVideoStudio-20261102-bb4ce60-win64.zip",
+    "sha256": "72523f2b51f70001a0acaf1ae51ebdc9e06aca171cb63cc7d12dac3653215465",
+    "bytes": 2015401,
+    "expanded_files_verified": 436,
+    "forbidden_files": []
+  },
+  "remote_verification": {
+    "ref": "refs/heads/main",
+    "sha": "bb4ce6039e0f3bd0d45d7ebc9e08a01a012ec739",
+    "force_push": false
   }
 }

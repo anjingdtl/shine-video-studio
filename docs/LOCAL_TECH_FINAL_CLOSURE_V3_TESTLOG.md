@@ -1,6 +1,6 @@
 # LOCAL_TECH_FINAL_CLOSURE_V3 · 测试记录
 
-> **2026-11-02 V2 更新**：真实制作向导审批/执行合同、演示意图一致性及异常恢复已修复；核心 LLM 已纳入新机准备。最终软件检查：后端 **1379 passed / 1 skipped / 2 warnings**，前端 **70 passed**，真实浏览器合同 **3 passed**，TypeScript/Vite、Ruff、Alembic 新库/历史库副本零漂移、Windows 启停均通过。源码打包与远端核对待交付审计；此条之后的旧轮次数字为历史记录，最新结论以 [V2 报告](FINAL_DIRECTOR_WORKBENCH_ACCEPTANCE_V2_20261102.md) 为准。真实 H3/真实 LLM 生成本轮未运行，历史影片审片状态不变。
+> **2026-11-02 V2 更新**：真实制作向导审批/执行合同、演示意图一致性及异常恢复已修复；核心 LLM 已纳入新机准备。最终软件检查：后端 **1379 passed / 1 skipped / 2 warnings**，前端 **70 passed**，真实浏览器合同 **3 passed**，TypeScript/Vite、Ruff、Alembic 新库/历史库副本零漂移、Windows 启停均通过。已提交源码 `bb4ce60` 打包验证 436 个文件 SHA-256 一致并正常推送 main，工程范围 **ENGINEERING ALL PASS**；此条之后的旧轮次数字为历史记录，最新结论以 [V2 报告](FINAL_DIRECTOR_WORKBENCH_ACCEPTANCE_V2_20261102.md) 为准。真实 H3/真实 LLM 生成本轮未运行，历史影片审片状态不变。
 
 > **2026-11-02 已有 ComfyUI 复用修复**：本轮新增后端 9 项与前端 2 项回归；完整后端 1330 passed / 1 skipped / 2 warnings，后端定向 20 passed、前端 29 passed，Ruff、TypeScript/Vite 和真实网页代理只读探测通过。命令及精确边界见 [本轮报告](EXISTING_COMFYUI_FIX_20261102.md)。未下载或复制个人模型，未进行 H3 生产验收；浏览器目视检查受工具 URL 识别失败限制。
 

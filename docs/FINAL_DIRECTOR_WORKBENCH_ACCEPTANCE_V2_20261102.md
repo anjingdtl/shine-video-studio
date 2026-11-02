@@ -1,6 +1,6 @@
 # Shine 视频工作台 · 最终工程验收 V2 · 2026-11-02
 
-当前结论：本轮软件工程检查全部通过；已提交源码打包及远端核对完成前，暂不宣告最终 ENGINEERING ALL PASS。
+当前结论：**SHINE VIDEO STUDIO — ENGINEERING ALL PASS（本轮软件工程范围）**。代码、真实 API 合同、浏览器、数据库、Windows 启停、已提交树打包及正常推送均已实际通过。真实 H3/真实 LLM 生成和干净新机大模型安装不在本轮实测范围；真人体验与艺术审查、托管 CI 按用户要求豁免。
 
 ## 1. 基线与范围
 
@@ -81,8 +81,8 @@ LLM 设置复用 `LLMConfiguration.tsx` / `LLMSetupPanel.tsx`，保留现有 Gat
 | 浏览器合同 E2E | v2-browser.log，三条参数化路径 | 3 passed |
 | Windows 启停 | `pwsh -NoProfile -File scripts/verify_stack_operations.ps1 -ApiPort 49281 -WebPort 49282` | PASS，独立目录；自定义代理、NoWorker、重复启动拒绝、Worker 重启、退出验证 |
 | cmd / PowerShell 编码与入口 | test_package_entrypoints.py、test_bootstrap_entry.py | PASS，已包含于最终全量 |
-| 已提交树打包与逐文件/SHA-256 校验 | build_test_package.ps1 -Verify | PENDING |
-| 正常提交与 push / 远端 SHA 核对 | git | PENDING |
+| 已提交树打包与逐文件/SHA-256 校验 | build_test_package.ps1 -Verify，v2-package-source.log | PASS，436 个解压文件 SHA-256 一致 |
+| 正常提交与 push / 远端 SHA 核对 | git | PASS，正常快进推送 main；远端与源码 SHA 一致 |
 
 证据日志均位于 `.local-acceptance/`，无私人媒体入库或入包。Ruff 为 Python 静态检查；前端没有单独 ESLint script，不虚报额外 lint 门禁。
 
@@ -99,7 +99,13 @@ LLM 设置复用 `LLMConfiguration.tsx` / `LLMSetupPanel.tsx`，保留现有 Gat
 
 ## 7. 交付记录
 
-全部软件检查通过。源提交、打包文件、校验结果及正常推送核对在提交后的交付审计追加。当前待已提交树打包和推送核对。
+- 最终代码 HEAD：`bb4ce6039e0f3bd0d45d7ebc9e08a01a012ec739`，全部产品源文件与最终完整回归时一致。
+- 该源码已正常快进推送至 `origin/main`，`git ls-remote origin refs/heads/main` 实际返回同一 SHA；没有 force push。
+- 源提交封装：`releases/director-v2-source-bb4ce60/ShineVideoStudio-20261102-bb4ce60-win64.zip`，2,015,401 字节，SHA-256 `72523f2b51f70001a0acaf1ae51ebdc9e06aca171cb63cc7d12dac3653215465`。
+- `BUILD_INFO.json` 指向上述源码提交；`-Verify` 解压后校验 436 个文件。另独立核对 ZIP sidecar 与真实摘要，确认不含模型、生成媒体、数据库、.env、凭据或 docs/evidence。
+- 包构建前工作树干净。随后收官审计提交只更新报告和脱敏证据；本报告所在提交是最终交付 HEAD（见 Git 日志），不再改变 backend/frontend/scripts 的已测代码，避免文档自引用 SHA。
+- 最终交付包会从该干净审计提交再次运行同一 `-Verify`；其确切 SHA 和源提交由包旁 `.zip.sha256` 与包内 `BUILD_INFO.json` 给出，本地证据 `v2-package-final.log`。这样交付包包含本报告的最终结论，同时保留上面已验证源码包的不可变身份。
+- 唯一测试跳过与用户豁免见 §6；没有残留本轮软件代码阻断，最终判断为 ENGINEERING ALL PASS。
 
 
 提交保留的脱敏证据：[摘要](evidence/20261102-director-v2/summary.json)、[LLM 首步](evidence/20261102-director-v2/llm-first.png)、[演示意图与就绪环境并存](evidence/20261102-director-v2/demo-intent-ready-environment.png)。原始日志 SHA-256 见摘要，详细请求与原始截图留在隔离证据目录，不随安装包发放。
