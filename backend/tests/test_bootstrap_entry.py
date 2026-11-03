@@ -172,6 +172,16 @@ def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(
         assert (legacy / 'shine.db').read_bytes() == b'preserve-existing-database-fixture'
 
 
+def test_first_install_forwards_free_ports_instead_of_defaults():
+    """A first install must not fall back to occupied 8000/5173."""
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
+    installer = (REPO / "scripts" / "install_once.ps1").read_text(encoding="utf-8-sig")
+    assert "[int]$ApiPort = 0" in bootstrap and "[int]$WebPort = 0" in bootstrap
+    assert "$startArgs += @('-ApiPort', \"$ApiPort\")" in bootstrap
+    assert "$startArgs += @('-WebPort', \"$WebPort\")" in bootstrap
+    assert "ApiPort = $apiPort" in installer and "WebPort = $webPort" in installer
+
+
 def test_pinned_tools_manifest_matches_recorded_pins():
     """The committed tools manifest stays in sync with the upstream pins file."""
     pins = json.loads((REPO / "config" / "deployment" / "_upstream-pins" / "tools.json").read_text(encoding="utf-8"))

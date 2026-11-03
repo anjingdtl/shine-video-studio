@@ -344,6 +344,8 @@ Write-Banner '开始安装（首次约 20-60 分钟，取决于网络；请勿�
 $bootstrapArgs = @{
     StorageRoot = $StorageRoot
     DataDir = $recordedData
+    ApiPort = $apiPort
+    WebPort = $webPort
 }
 if ($NoLaunch) { $bootstrapArgs['NoLaunch'] = $true }
 

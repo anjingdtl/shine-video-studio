@@ -12,7 +12,9 @@ param(
     [switch]$NoLaunch,
     [string]$DataDir = "",
     [string]$StorageRoot = "",
-    [string]$OperatorPasswordFile = ""
+    [string]$OperatorPasswordFile = "",
+    [ValidateRange(0, 65535)][int]$ApiPort = 0,
+    [ValidateRange(0, 65535)][int]$WebPort = 0
 )
 # Output encoding contract: everything this script writes to stdout/stderr is
 # UTF-8 on both Windows PowerShell 5.1 and PowerShell 7, so callers (tests and
@@ -307,11 +309,15 @@ if ($defaultManifest -and -not $CheckOnly) {
     [IO.File]::WriteAllText($envFile, $localConfig, (New-Object Text.UTF8Encoding($false)))
     if ($NoLaunch) { exit 0 }
     $env:SHINE_DATA_DIR = [IO.Path]::GetFullPath($DataDir)
-    if ($explicitDataDir) {
-        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -DataDir $DataDir -OpenBrowser
-    } else {
-        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start_shine.ps1') -Install -OpenBrowser
-    }
+    # A first install must honor the free ports the installer picked.  Passing
+    # no port lets start_shine fall back to 8000/5173, which may belong to an
+    # unrelated local service on the same machine.
+    $startArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $PSScriptRoot 'start_shine.ps1'), '-Install', '-OpenBrowser')
+    if ($explicitDataDir) { $startArgs += @('-DataDir', $DataDir) }
+    if ($ApiPort -gt 0) { $startArgs += @('-ApiPort', "$ApiPort") }
+    if ($WebPort -gt 0) { $startArgs += @('-WebPort', "$WebPort") }
+    & pwsh @startArgs
     exit $LASTEXITCODE
 }
 exit 0
