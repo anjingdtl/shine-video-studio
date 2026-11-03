@@ -61,14 +61,15 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
     if (!window.confirm('仅放弃这次远端未知响应；不重试、不批准质量，也不证明本机模型已卸载。继续？')) {
       setReconcileCredential(''); setReconcileEvidence(''); return;
     }
-    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${reconcileCredential}` };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (reconcileCredential) headers.Authorization = `Bearer ${reconcileCredential}`;
     try {
       await act(async () => {
         const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
           ...json('POST', { action: 'model_reconcile', target_id: run.id }), headers,
         });
         return api(`/projects/${projectId}/film-runs/${run.id}/abandon-remote-response`, {
-          ...json('POST', { ...grant, evidence: reconcileEvidence }), headers,
+          ...json('POST', { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence: reconcileEvidence }), headers,
         });
       });
     } finally { setReconcileCredential(''); setReconcileEvidence(''); }
@@ -135,7 +136,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       <h3>Agent 运行记录</h3>
       {runs.some(needsRemoteReconciliation) &&
         <div className="settings-block">
-          <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。</p>
+          <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。个人桌面部署无需口令，本机操作会记录为 local-user；如本机配置了操作员凭据可填写，留空即按本机身份操作。</p>
           <label>远端响应对账凭据<input type="password" autoComplete="off" value={reconcileCredential}
             onChange={e => setReconcileCredential(e.target.value)} /></label>
           <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
@@ -143,7 +144,8 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       {runs.map(r => <details key={r.id}>
         <summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
         {needsRemoteReconciliation(r) &&
-          <button disabled={busy || reconcileCredential.length < 32 || !reconcileEvidence.trim()}
+          <button
+            disabled={busy || (reconcileCredential.length > 0 && reconcileCredential.length < 32) || !reconcileEvidence.trim()}
             onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}
         <pre>{JSON.stringify(r, null, 2)}</pre></details>)}
     </section>

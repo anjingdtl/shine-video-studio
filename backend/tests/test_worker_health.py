@@ -95,6 +95,36 @@ def test_offline_worker_is_reported_from_heartbeat_age(studio):
     assert status["workers"][0]["online"] is False
 
 
+def test_dead_worker_history_does_not_speak_for_the_system(studio):
+    client, factory, _root, _settings = studio
+    create_project(client)
+    with factory.begin() as db:
+        db.add(
+            WorkerInstance(
+                worker_id="fresh-worker",
+                version="test",
+                status="online",
+                started_at=utcnow(),
+                last_heartbeat_at=utcnow(),
+            )
+        )
+        db.add(
+            WorkerInstance(
+                worker_id="dead-worker",
+                version="test",
+                status="online",
+                started_at=utcnow() - timedelta(hours=30),
+                last_heartbeat_at=utcnow() - timedelta(hours=30),
+                last_error="job: HTTPException",
+            )
+        )
+    status = client.get("/api/v1/system/status").json()
+    assert status["last_error"] is None
+    by_id = {w["worker_id"]: w for w in status["workers"]}
+    assert by_id["fresh-worker"]["online"] is True
+    assert by_id["dead-worker"]["online"] is False
+
+
 def test_worker_exception_moves_job_to_review_without_claiming_success(studio):
     client, factory, _root, _settings = studio
     project_id = create_project(client)

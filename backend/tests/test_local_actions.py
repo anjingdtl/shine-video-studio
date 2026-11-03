@@ -39,6 +39,20 @@ def test_local_action_rejects_missing_marker_cross_site_and_invalid_explicit_tok
     assert response.status_code == 403
 
 
+def test_local_action_treats_trimmed_bearer_as_no_credential(api):
+    """HTTP 栈会修剪尾部空格："Bearer " 到达时是 "Bearer"，必须仍按本机身份处理。"""
+    client, _, _ = api
+    project = create_project(client)
+    style = style_payload()
+    assert client.put(f"/api/v1/projects/{project}/style/draft", json=style).status_code == 200
+    response = client.post(
+        "/api/v1/preparation/approval-grants",
+        json={"action": "style_freeze", "target_id": project},
+        headers={**LOCAL, "Authorization": "Bearer"},
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_local_asset_confirmation_checks_real_bytes_and_consumes_separate_grants(api):
     client, _, settings = api
     project = create_project(client)

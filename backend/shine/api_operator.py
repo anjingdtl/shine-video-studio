@@ -26,11 +26,18 @@ def operator(request: Request, settings: SettingsDep, authorization: Annotated[s
     # The custom header prevents cross-site forms from issuing local grants;
     # grants still bind the exact revision and are consumed once. It is a CSRF
     # boundary, not proof that a particular person clicked the button.
-    if request.headers.get("x-shine-local-action") == "1" and not authorization.removeprefix("Bearer ").strip():
+    # Header values may arrive with trailing whitespace trimmed ("Bearer " -> "Bearer");
+    # both forms mean "no credential" for the personal-desktop path.
+    token = authorization.strip()
+    if token[:7].lower() == "bearer ":
+        token = token[7:].strip()
+    elif token[:6].lower() == "bearer":
+        token = token[6:].strip()
+    if request.headers.get("x-shine-local-action") == "1" and not token:
         if request.headers.get("sec-fetch-site") == "cross-site":
             raise HTTPException(403, "Cross-site local action forbidden")
         return "local-user"
-    return authenticate(settings, authorization.removeprefix("Bearer "))
+    return authenticate(settings, token)
 
 
 Operator = Annotated[str, Depends(operator)]

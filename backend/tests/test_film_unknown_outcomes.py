@@ -125,6 +125,7 @@ def test_explicit_remote_abandon_is_authenticated_bounded_and_never_infers(prep,
             assert task.status == "ABANDONED"
             assert task.trace["external_outcome"] == "UNKNOWN"
             assert task.trace["local_model_unload_claimed"] is False
+            assert task.trace["local_interruption_verified"] is True
             assert db.get(ApprovalGrant, grant["grant_id"]).used
         repeat = client.post(path, json=body)
         assert repeat.status_code == 422

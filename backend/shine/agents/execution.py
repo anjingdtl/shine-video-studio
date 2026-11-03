@@ -91,10 +91,19 @@ def abandon_remote_response(db, row, actor, grant_id, snapshot, evidence):
     approval.consume(db, actor, "model_reconcile", row, grant_id, snapshot)
     previous = row.status
     row.status = "ABANDONED"
+    # The local wait is verifiably over: no resource lease is active (guard
+    # above) and the task is no longer running. Record it so the single-use
+    # replacement path can engage without an out-of-band database edit.
     row.trace = {**row.trace, "prior_status_before_abandon": previous,
                  "external_outcome": "UNKNOWN", "automatic_replay": False,
                  "local_model_unload_claimed": False, "reconciled_by": actor,
-                 "remote_response_abandon_evidence": evidence}
+                 "remote_response_abandon_evidence": evidence,
+                 "local_interruption_verified": True,
+                 "local_interruption_evidence": {
+                     "verified_by": "abandon_remote_response",
+                     "no_active_resource_leases": True,
+                     "prior_status": previous,
+                 }}
     if row.role_id == "qc_reviewer" and not row.trace.get("review_contract_sha256"):
         row.trace = {**row.trace, "review_contract_sha256": digest(StyleInputWire.model_json_schema())}
     add_audit(db, actor, "REMOTE_AGENT_RESPONSE_ABANDONED", "agent_task", row.id,

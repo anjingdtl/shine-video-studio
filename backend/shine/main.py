@@ -501,7 +501,11 @@ def create_app(
         running = db.scalar(select(func.count(Job.id)).where(Job.status.in_(["SUBMITTING", "RUNNING", "QC_PENDING"])))
         failed = db.scalar(select(func.count(Job.id)).where(Job.status == "FAILED"))
         blocked = db.scalar(select(func.count(Job.id)).where(Job.status == "NEEDS_REVIEW"))
-        last_error = next((worker.last_error for worker in reversed(workers) if worker.last_error), None)
+        # A dead worker's historical error is history: only a worker that is
+        # still online (fresh heartbeat) may speak for the system right now.
+        last_error = next(
+            (worker.last_error for worker in reversed(workers) if worker.online and worker.last_error), None
+        )
         worker_online = any(worker.online for worker in workers)
         h3_connected = _h3_connected(effective)
         from shine.production_mode import summarize_production_mode
