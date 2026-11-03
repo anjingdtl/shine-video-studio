@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import { API, ApiError, api, json } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
-import { AgentProgress, agentPhaseLabels, type AgentRunProgress } from './AgentProgress';
+import { AgentProgress, agentPhaseLabels, reusedRolesFromInputs, type AgentRunProgress } from './AgentProgress';
 
 type DocumentRow = {
   id: string; filename: string; sha256: string; source_format: string;
@@ -17,6 +17,7 @@ type StoryboardResult = {
   missing_characters?: string[];
   rejections?: Array<{ role: string; code: string; task_id?: string; external_outcome?: string }>;
   continuity_issues?: string[];
+  repair_failure?: { role: string; code: string } | null;
   editorial_timing_preview?: {
     editorial_shot_count: number;
     total_s: number;
@@ -58,6 +59,7 @@ const stepLabels: Record<string, string> = {
   continuity_supervisor: '场记 Agent · 连续性审查',
   editor_edit_intent: '剪辑 Agent · 冻结剪辑意图',
   editor: '剪辑 Agent · 冻结剪辑意图',
+  director_arbitration: '导演 Agent · 连续性裁定',
 };
 
 /** The crew order the workbench shows and the server runs. */
@@ -67,7 +69,8 @@ const CHAIN_STEPS = ['scriptwriter', 'director', 'cinematographer', 'continuity_
  *  that goes into the prompt, so it stays English. */
 export { DIALOGUE_LANGUAGES };
 
-export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
+export default function StoryboardPanel({ projectId, onRefresh, onNavigate, backendDisconnected = false }: {
+  backendDisconnected?: boolean;
   projectId: string;
   onRefresh: () => void;
   onNavigate?: (page: string) => void;
@@ -79,6 +82,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const [facts, setFacts] = useState('');
   const [busy, setBusy] = useState(false);
   const [requiresReconciliation, setRequiresReconciliation] = useState(false);
+  const [checkingPreviousRun, setCheckingPreviousRun] = useState(false);
+  const [replacement, setReplacement] = useState<{ taskId: string; scriptwriter: string } | null>(null);
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState('');
   const [result, setResult] = useState<StoryboardResult | null>(null);
@@ -91,6 +96,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const [bindingBusy, setBindingBusy] = useState(false);
   const [rulepackId, setRulepackId] = useState<string | null | undefined>(undefined);
   const [pollError, setPollError] = useState('');
+  const [connectionInterrupted, setConnectionInterrupted] = useState(false);
+  const progressPaused = backendDisconnected || connectionInterrupted || !!pollError;
+  useEffect(() => {
+    if (busy && backendDisconnected) setConnectionInterrupted(true);
+  }, [busy, backendDisconnected]);
   const [completedRoles, setCompletedRoles] = useState<string[]>([]);
   const [lastCheckedAt, setLastCheckedAt] = useState<number>();
   const [confirmedBreakdownId, setConfirmedBreakdownId] = useState<string | null>(null);
@@ -161,15 +171,23 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   }
 
   /** Run the crew chain, optionally continuing from one role. */
-  async function runChain(options?: { start_role?: string; resume_steps?: Record<string, string> }) {
+  async function runChain(options?: { start_role?: string; resume_steps?: Record<string, string>; verifiedUnsent?: boolean;
+    replaceInterruptedTaskId?: string }) {
+    if (requiresReconciliation && !options?.verifiedUnsent && !options?.replaceInterruptedTaskId) return;
+    if (backendDisconnected) { setMessage('工作台后端失联，请先使用顶栏的重连按钮。'); return; }
     if (!consent) { setMessage('需要先勾选同意把剧本文本发给已配置的 LLM 服务商。'); return; }
     if (!selectedDoc && !inlineText.trim()) {
       setMessage('请先从“已导入剧本”中选择一份，或导入/粘贴剧本。');
       return;
     }
     setBusy(true); setResult(null); setProgressRuns([]); setPollError('');
+    setRequiresReconciliation(false);
+    setReplacement(null);
+    setConnectionInterrupted(false);
     if (!options?.start_role) setConfirmedBreakdownId(null);
-    const inheritedRoles = Object.keys(options?.resume_steps ?? {}).map(role => role === 'editor_edit_intent' ? 'editor' : role);
+    const crewRoles = ['scriptwriter', 'director', 'cinematographer', 'continuity_supervisor', 'editor'];
+    const inheritedRoles = Object.keys(options?.resume_steps ?? {})
+      .map(role => role === 'editor_edit_intent' ? 'editor' : role).filter(role => crewRoles.includes(role));
     setCompletedRoles(inheritedRoles);
     setMessage(options?.start_role
       ? `已复用 ${inheritedRoles.length} 个已完成步骤，正在从「${stepLabels[options.start_role] ?? options.start_role}」继续。`
@@ -188,8 +206,17 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         setLastCheckedAt(Date.now());
         const currentRuns = runs.filter(run => !priorRunIds.has(run.id));
         setProgressRuns(currentRuns);
-        const completed = new Set([...inheritedRoles, ...currentRuns.filter(run => run.status === 'SUCCEEDED'
-          && run.trace?.tool !== 'continuity_arbitration').map(run => run.role_id)]).size;
+        let reusedRoles: string[] = [];
+        if (currentRuns.some(run => run.trace?.input_revision_ids?.length)) {
+          const artifacts = await api<Array<{ id: string; kind: string; producer_role: string; stale: boolean }>>(
+            `/projects/${projectId}/film-artifacts`, { signal: AbortSignal.timeout(5000) }).catch(() => []);
+          if (!polling) return;
+          reusedRoles = reusedRolesFromInputs(currentRuns, artifacts);
+        }
+        const completedRolesNow = [...new Set([...inheritedRoles, ...reusedRoles])];
+        setCompletedRoles(completedRolesNow);
+        const completed = new Set([...completedRolesNow, ...currentRuns.filter(run => run.status === 'SUCCEEDED'
+          && run.trace?.tool !== 'continuity_arbitration' && crewRoles.includes(run.role_id)).map(run => run.role_id)]).size;
         const active = currentRuns.find(run => run.status === 'RUNNING');
         if (active) {
           if (active.trace?.tool === 'continuity_arbitration') {
@@ -204,7 +231,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         } else if (completed > 0) {
           setMessage(`已完成 ${Math.min(5, completed)}/5 步真实模型调用，正在准备下一位 Agent。`);
         }
-      } catch { setPollError('暂时无法读取运行进度，生成请求仍在等待返回。请检查本机服务；不要重复提交。'); }
+      } catch {
+        if (polling) setPollError('无法读取后台进度，当前任务状态待核对。');
+      }
       finally { pollInFlight = false; }
     };
     const progressTimer = window.setInterval(() => { void pollProgress(); }, 2000);
@@ -212,9 +241,10 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       const body: Record<string, unknown> = {
         allow_remote_text: consent,
         locked_story_facts: facts.split('\n').map(s => s.trim()).filter(Boolean),
-        confirm_characters: !options?.start_role,
+        confirm_characters: !options?.start_role && !options?.verifiedUnsent,
         ...(options?.start_role ? { start_role: options.start_role } : {}),
         ...(options?.resume_steps ? { resume_steps: options.resume_steps } : {}),
+        ...(options?.replaceInterruptedTaskId ? { replace_interrupted_task_id: options.replaceInterruptedTaskId } : {}),
       };
       if (selectedDoc) body.document_id = selectedDoc; else body.text = inlineText;
       const row = await api<StoryboardResult>(`/projects/${projectId}/storyboard/generate`, json('POST', body));
@@ -223,7 +253,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       polling = false;
       window.clearInterval(progressTimer);
       setResult(row);
-      setCompletedRoles(Object.keys(row.steps).map(role => role === 'editor_edit_intent' ? 'editor' : role));
+      setCompletedRoles(Object.keys(row.steps).map(role => role === 'editor_edit_intent' ? 'editor' : role)
+        .filter(role => crewRoles.includes(role)));
       const uncertain = (row.rejections ?? []).some(r => r.external_outcome !== 'NOT_SENT' && [
         'LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER',
         'AGENT_REQUEST_RECONCILIATION_REQUIRED', 'AGENT_REQUEST_REPLAY_BLOCKED',
@@ -248,7 +279,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         const definitelyNotSent = rejections.some(r => r.external_outcome === 'NOT_SENT');
         const taskId = rejections.find(r => r.task_id)?.task_id;
         setMessage(uncertain
-          ? `分镜链暂停：${reason}。远端结果未确认，系统已保留请求且不会自动重发；本次未创建镜头。${taskId ? `任务编号：${taskId}。` : ''}请先在「专业模式 → 影视制片团队 → Agent 运行记录」核对该请求。`
+          ? `远端结果未确认，系统已保留请求且不会自动重发。请核对服务商的前次请求结果。`
           : definitelyNotSent
             ? `分镜链未能连接到模型服务：${reason}。系统确认请求未送达，没有产生远端结果；检查网络恢复后可以重新生成。${taskId ? `任务编号：${taskId}。` : ''}`
             : `分镜链被拒绝：${reason}。未创建任何镜头，请先处理提示中的问题。`);
@@ -273,6 +304,39 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
 
   const generate = () => runChain();
 
+  async function checkAndResumeDirector(restartAll = false) {
+    const taskId = result?.rejections?.find(rejection => rejection.role === 'director')?.task_id;
+    if (!taskId) {
+      setMessage('尚未找到可核对的导演任务编号，无法自动续跑。');
+      return;
+    }
+    setCheckingPreviousRun(true);
+    try {
+      const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
+      const previous = runs.find(run => run.id === taskId && run.role_id === 'director');
+      setLastCheckedAt(Date.now());
+      const scriptwriter = previous?.trace?.input_revision_ids?.[0];
+      if (previous?.status === 'ABANDONED' && previous.trace?.local_interruption_verified === true && scriptwriter) {
+        setReplacement({ taskId, scriptwriter });
+        setMessage('旧请求已结束本机等待。可以复用已保存的编剧和人物，开启一轮新的导演调用。旧请求的远端结果仍未知，新调用可能另计费用。');
+        return;
+      }
+      if (previous?.status === 'REJECTED' && previous.trace?.external_outcome === 'NOT_SENT') {
+        if (restartAll || !scriptwriter) {
+          await runChain({ verifiedUnsent: true });
+        } else {
+          await runChain({ start_role: 'director', resume_steps: { scriptwriter }, verifiedUnsent: true });
+        }
+        return;
+      }
+      setMessage('前次导演请求仍无可续跑的确认结果。从头跑也会再次调用导演，请先核对服务商是否已经处理旧请求。');
+    } catch {
+      setMessage('暂时无法核对前次请求。请检查工作台连接后再点检查。');
+    } finally {
+      setCheckingPreviousRun(false);
+    }
+  }
+
   /** Ask the server which uploaded master answers each script character. */
   async function openBinding(reason?: string, breakdownId?: string) {
     setBindingBusy(true);
@@ -293,7 +357,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         }
       }
       setBindingChoice(choices);
-      setMessage(`${reason ?? ''}已打开人物对照：逐条核对「谁是哪张图」，必要时改名，再点「确认并写入名字」。`);
+      setMessage(requiresReconciliation ? '已读取保存的人物对照。你可以核对素材与风格。'
+        : `${reason ?? ''}已打开人物对照：逐条核对「谁是哪张图」，必要时改名，再点「确认并写入名字」。`);
     } catch (e) {
       setMessage(`${reason ?? ''}人物对照暂时打不开：${String(e)}`);
     } finally { setBindingBusy(false); }
@@ -301,7 +366,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
 
   /** Write the confirmed names on the masters and freeze the ones that are not. */
   async function applyBinding() {
-    if (!binding) return;
+    if (!binding || requiresReconciliation) return;
     if (!consent) { setMessage('人物已保留。请先勾选同意发送剧本文本，才能调用导演。'); return; }
     if (!selectedDoc && !inlineText.trim()) { setMessage('人物已保留。请先在上方选择对应剧本，才能继续导演。'); return; }
     if (confirmedBreakdownId) {
@@ -367,8 +432,10 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
     finally { setApplying(false); }
   }
 
-  const failedRole = result?.failed_role;
-  const resumeSteps = result?.resume_steps ?? {};
+  const arbitrationFailed = result?.rejections?.some(rejection => rejection.role === 'director_arbitration');
+  const failedRole = result?.failed_role ?? (arbitrationFailed ? 'director_arbitration' : undefined);
+  const resumeSteps = result?.resume_steps ?? (arbitrationFailed
+    ? Object.fromEntries(Object.entries(result?.steps ?? {}).map(([role, step]) => [role, step.artifact_id])) : {});
 
   return <section className="card section-card" id="storyboard">
     <div className="section-heading compact">
@@ -439,25 +506,39 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
     <div className="required-action">
       <Sparkles size={17} className="required-icon" />
       <div className="required-text">
-        <b>必做：生成 AI 分镜方案</b>
-        <small>需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。</small>
+        <b>{requiresReconciliation ? '前次模型请求结果待核对' : '必做：生成 AI 分镜方案'}</b>
+        <small>{requiresReconciliation ? '系统会先检查前次调用。确认请求未送达时，复用已保存的编剧结果并自动从导演继续。' : '需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。'}</small>
       </div>
-      <button className="must-button" disabled={busy || bindingBusy || !!binding || requiresReconciliation} onClick={generate}>
+      {requiresReconciliation && replacement ? <button type="button" className="must-button" disabled={backendDisconnected || busy}
+        onClick={() => void runChain({ start_role: 'director', resume_steps: { scriptwriter: replacement.scriptwriter },
+          replaceInterruptedTaskId: replacement.taskId })}>开始新一轮导演</button>
+      : requiresReconciliation ? <button type="button" className="must-button" disabled={backendDisconnected || checkingPreviousRun || busy}
+        onClick={() => void checkAndResumeDirector()}>
+        {checkingPreviousRun ? '正在核对前次请求…' : '检查并自动继续导演'}
+      </button> : <button className="must-button" disabled={backendDisconnected || busy || bindingBusy || !!binding} onClick={generate}>
         {busy ? <Loader2 size={14} /> : <Sparkles size={14} />}
-        {requiresReconciliation ? '先核实前次请求' : '生成 AI 分镜方案'}
-      </button>
+        生成 AI 分镜方案
+      </button>}
     </div>
-    {message && <p role="status">{message}</p>}
+    {message && <p role="status">{busy && progressPaused
+      ? '本次任务状态待核对，等待计时已暂停。' : message}</p>}
+    {requiresReconciliation && <details>
+      <summary>前次请求详情</summary>
+      <p>任务编号 {result?.rejections?.find(rejection => rejection.task_id)?.task_id ?? '暂未取得'}。远端结果待核对。</p>
+      <button type="button" className="secondary-button" disabled={backendDisconnected || checkingPreviousRun || busy}
+        onClick={() => void checkAndResumeDirector(true)}>检查后从头重跑</button>
+    </details>}
     {!busy && !binding && <button type="button" disabled={bindingBusy}
       onClick={() => openBinding('读取本项目最近一次编剧结果，请核对它属于当前选择的剧本。')}>
       读取已完成的编剧人物对照（不重跑模型）
     </button>}
     {pollError && <p role="alert">{pollError}</p>}
-    {busy && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
+    {busy && !progressPaused && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
     {(busy || result || progressRuns.length > 0) && <AgentProgress runs={progressRuns}
-      completedRoles={completedRoles} awaitingCharacters={!!binding || result?.status === 'AWAITING_CHARACTER_CONFIRMATION'}
+      completedRoles={completedRoles} awaitingCharacters={!requiresReconciliation && (!!binding || result?.status === 'AWAITING_CHARACTER_CONFIRMATION')}
       charactersConfirmed={!!confirmedBreakdownId}
       lastCheckedAt={lastCheckedAt}
+      paused={progressPaused || !busy}
       onConfirmCharacters={() => document.getElementById(`character-confirmation-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
 
     {result && <div className="storyboard-result">
@@ -480,7 +561,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       {binding && <div className="binding-panel" id={`character-confirmation-${projectId}`}>
         <div className="section-kicker">人物对照（剧本人物 ↔ 你的素材）</div>
         <p className="binding-intro">系统按名字、标签和上传顺序给出了建议，只作参考。以缩略图为准逐条核对；名字会写进素材本身，五个 Agent 就靠它把剧本人物和你的图对上。</p>
-        <div className="binding-list">
+        <fieldset className="binding-list" disabled={requiresReconciliation}>
           {binding.characters.map((row) => {
             const choice = bindingChoice[row.script_name];
             return <div className={`binding-row ${choice?.asset_id ? 'accepted' : ''}`} key={row.script_name}>
@@ -535,8 +616,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
               </div>
             </div>;
           })}
-        </div>
-        {!consent && <div className="required-action">
+        </fieldset>
+        {!requiresReconciliation && !consent && <div className="required-action">
           <div className="required-text">
             <b>导演还未启动：需要同意发送剧本文本</b>
             <label><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
@@ -544,11 +625,13 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             </label>
           </div>
         </div>}
-        {!selectedDoc && !inlineText.trim() && <div className="required-action">
+        {!requiresReconciliation && !selectedDoc && !inlineText.trim() && <div className="required-action">
           <div className="required-text"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
           <button type="button" className="must-button" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
         </div>}
-        <div className="required-action">
+        {requiresReconciliation ? onNavigate && <button type="button" className="must-button" onClick={() => onNavigate('assets')}>
+          继续核对素材与风格
+        </button> : <div className="required-action">
           <CheckCircle2 size={17} className="required-icon" />
           <div className="required-text">
             <b>{confirmedBreakdownId ? '人物名字已经保存，可以继续导演' : '必做：确认名图对应'}</b>
@@ -558,7 +641,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />}
             {confirmedBreakdownId ? '复用已确认人物，继续导演' : '确认并写入名字'}
           </button>
-        </div>
+        </div>}
       </div>}
       {(result.status === 'PROPOSED' || result.status === 'NEEDS_REVIEW') && <>
         <div className="agent-step-list">
@@ -580,17 +663,18 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         {result.prompt_style && <details><summary>核对冻结风格的英文提示词表述</summary>
           {Object.entries(result.prompt_style).map(([key, value]) => <p key={key}>{key}：{value}</p>)}
         </details>}
-        {(result.continuity_issues ?? []).length > 0 && <div className="blocked-callout">
+        {(result.continuity_issues ?? []).some(issue => /[\u3400-\u9fff]/.test(issue)) && <div className="blocked-callout">
           <AlertTriangle size={15} />
-          <span>场记报告连续性问题：{(result.continuity_issues ?? []).join('；')}</span>
+          <span>场记报告连续性问题：{(result.continuity_issues ?? []).filter(issue => /[\u3400-\u9fff]/.test(issue)).join('；')}</span>
         </div>}
         {result.continuity_arbitration && <div className="storyboard-arbitration">
           <div className="section-kicker">导演仲裁（按已锁定规则包）</div>
           {(result.continuity_arbitration.rulings ?? []).map((ruling, index) => (
             <p key={index}>
               <strong>{ruling.verdict === 'not_a_conflict' ? '不构成冲突' : '构成冲突'}</strong>
-              {' · '}{ruling.rule_id} · {ruling.issue}
-              <small>{ruling.rationale}</small>
+              {' · '}{ruling.rule_id} · {/[㐀-鿿]/.test(ruling.issue) ? ruling.issue : '历史报告为英文，请使用 AI 修复并重新检查。'}
+              {/[㐀-鿿]/.test(ruling.rationale) ? <small>{ruling.rationale}</small>
+                : <details><summary>查看英文原始报告</summary><small>{ruling.issue} {ruling.rationale}</small></details>}
             </p>
           ))}
         </div>}
@@ -615,8 +699,14 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         {result.status === 'NEEDS_REVIEW' && <div className="required-action">
           <div className="required-text">
             <b>分镜有待解决的问题，暂不能应用</b>
-            <small>先处理上方的连续性或时长冲突，再生成可应用的方案。</small>
+            <small>{result.repair_failure ? '本轮自动修复未通过检查，原方案已保留。可以再次尝试修复。'
+              : 'AI 会复用已完成的步骤，尝试修订冲突并重新检查，不会修改已冻结风格或素材。'}</small>
           </div>
+          <button className="must-button" type="button" disabled={busy || backendDisconnected}
+            onClick={() => void resumeFrom('director_arbitration', Object.fromEntries(
+              Object.entries(result.steps).map(([role, step]) => [role, step.artifact_id])))}>
+            AI 修复并重新检查
+          </button>
         </div>}
         {result.status === 'PROPOSED' && result.next && <button className="primary-button" disabled={applying} onClick={apply}>
           {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）

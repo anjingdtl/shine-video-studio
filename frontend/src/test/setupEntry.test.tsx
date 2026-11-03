@@ -24,6 +24,34 @@ afterEach(() => {
 });
 
 describe('空数据库与两层界面入口', () => {
+  it('中央重新连接显示检查进度、失联原因和恢复后的作品读取进度', async () => {
+    let online = false;
+    let probeNext = false;
+    let finishProbe: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
+    let finishProjects: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
+    const probe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProbe = resolve; });
+    const projects = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProjects = resolve; });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => {
+      if (probeNext) {
+        probeNext = false;
+        return online ? jsonResponse([]) : probe;
+      }
+      return online ? projects : jsonResponse({}, 503);
+    } });
+    render(<App />);
+    probeNext = true;
+    await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
+    expect(screen.getByRole('progressbar', { name: '正在检查后端…' })).toBeInTheDocument();
+    finishProbe(jsonResponse({}, 503));
+    expect(await screen.findByText(/后端未响应。请双击/)).toBeInTheDocument();
+    online = true;
+    probeNext = true;
+    await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
+    expect(await screen.findByRole('progressbar', { name: '后端已连接，正在读取作品…' })).toBeInTheDocument();
+    finishProjects(jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '重新连接' })).not.toBeInTheDocument());
+    expect(screen.getByText('工作台后端在线')).toBeInTheDocument();
+  });
   function emptyDatabase() {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([]) });
   }

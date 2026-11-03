@@ -174,7 +174,7 @@ export default function ProductionSeriesPanel({
 
     {mode !== 'READY' && mode !== 'RUNNING' && <div className="blocked-callout">
       <AlertTriangle size={15} />
-      <span>{system?.production_mode?.detail ?? '本机服务未连接，无法确认制作模式。'}</span>
+      <span>{system?.production_mode?.detail ?? '暂无法确认制作模式。'}</span>
       {system?.production_mode?.action === 'enable_real'
         && <button type="button" className="text-button" onClick={() => onModeAction('enable_real')}>启用真实制作</button>}
       {system?.production_mode?.action === 'check_fix'

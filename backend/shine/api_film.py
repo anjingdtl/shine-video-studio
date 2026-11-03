@@ -532,9 +532,10 @@ class StoryboardRequest(APIModel):
     # earlier roles already produced.  A failed role is retried from itself
     # instead of paying for the whole chain again.
     start_role: Literal[
-        "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"
+        "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor", "director_arbitration"
     ] | None = None
     resume_steps: dict[str, str] = Field(default_factory=dict, max_length=8)
+    replace_interrupted_task_id: str | None = Field(default=None, max_length=36)
 
 
 # The crew order.  The chain and the resume request both walk this list.
@@ -634,11 +635,60 @@ def generate_storyboard(
     })
     from shine.agents.execution import UNKNOWN_CODES
 
+    if body.replace_interrupted_task_id:
+        old = db.get(AgentTaskRecord, body.replace_interrupted_task_id)
+        if (body.start_role != "director" or not old or old.project_id != project_id or old.role_id != "director"
+                or old.status != "ABANDONED" or old.trace.get("local_interruption_verified") is not True
+                or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256):
+            raise HTTPException(409, "AGENT_REPLACEMENT_NOT_AVAILABLE")
+
+    recovered_director = None
     for prior in db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
         AgentTaskRecord.role_id.in_(needed_roles),
     )):
         if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
+            continue
+        # A single-use replacement may already have succeeded before a later
+        # role failed. Reuse only its exact, intact result; never send it again.
+        receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
+        replacement = db.get(AgentTaskRecord, receipt.value.get("replacement_task_id")) if receipt else None
+        writer_id = (body.resume_steps or {}).get("scriptwriter")
+        candidate = db.scalar(select(AgentArtifact).where(
+            AgentArtifact.source_task_id == replacement.id,
+            AgentArtifact.kind == "DirectorialPlan",
+        )) if replacement else None
+        requested_director_id = (body.resume_steps or {}).get("director")
+        requested_director = db.get(AgentArtifact, requested_director_id) if requested_director_id else None
+        repair_source = db.get(AgentTaskRecord, requested_director.source_task_id) if requested_director else None
+        valid_repair = bool(candidate and requested_director and repair_source
+            and requested_director.project_id == project_id and requested_director.kind == "DirectorialPlan"
+            and not requested_director.stale and requested_director.sha256 == digest(requested_director.payload_json)
+            and len(requested_director.input_revision_ids) == 5
+            and requested_director.input_revision_ids[:2] == [writer_id, candidate.id]
+            and repair_source.project_id == project_id and repair_source.role_id == "director"
+            and repair_source.status == "SUCCEEDED"
+            and repair_source.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+            and repair_source.trace.get("output_hash") == requested_director.sha256)
+        if (body.start_role and body.start_role != "scriptwriter" and writer_id
+                and prior.role_id == "director" and prior.status == "ABANDONED"
+                and prior.trace.get("local_interruption_verified") is True
+                and prior.trace.get("external_outcome") == "UNKNOWN"
+                and prior.trace.get("input_revision_ids") == [writer_id]
+                and replacement and replacement.project_id == project_id
+                and replacement.role_id == "director" and replacement.status == "SUCCEEDED"
+                and replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+                and replacement.trace.get("input_revision_ids") == [writer_id]
+                and candidate and candidate.project_id == project_id and not candidate.stale
+                and candidate.producer_role == "director" and candidate.input_revision_ids == [writer_id]
+                and candidate.sha256 == digest(candidate.payload_json)
+                and replacement.trace.get("output_hash") == candidate.sha256
+                and (not requested_director_id or requested_director_id == candidate.id or valid_repair)):
+            if recovered_director and recovered_director.id != candidate.id:
+                raise HTTPException(409, "STORYBOARD_RECOVERY_AMBIGUOUS")
+            recovered_director = candidate
+            continue
+        if prior.id == body.replace_interrupted_task_id:
             continue
         unresolved = (
             prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
@@ -673,15 +723,18 @@ def generate_storyboard(
     # calling them again.  The server checks every referenced artifact: it must
     # belong to this project, carry the role's contract kind and not be stale.
     start_role = body.start_role or "scriptwriter"
-    if start_role not in STORYBOARD_CHAIN:
+    if start_role not in (*STORYBOARD_CHAIN, "director_arbitration"):
         raise HTTPException(422, "STORYBOARD_RESUME_ROLE_UNKNOWN")
     if start_role != "scriptwriter":
-        for role in STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)]:
-            artifact_id = (body.resume_steps or {}).get(role)
+        prior_roles = (STORYBOARD_CHAIN if start_role == "director_arbitration"
+                       else STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)])
+        for role in prior_roles:
+            step_name = "editor_edit_intent" if role == "editor" else role
+            artifact_id = (body.resume_steps or {}).get(step_name)
             if not artifact_id:
                 raise HTTPException(409, f"STORYBOARD_RESUME_STEP_MISSING:{role}")
             artifact = db.get(AgentArtifact, artifact_id)
-            expected_kind = FilmAgentRegistry.roles[role][1].__name__
+            expected_kind = "EditIntentPlan" if role == "editor" else FilmAgentRegistry.roles[role][1].__name__
             if (
                 not artifact
                 or artifact.project_id != project_id
@@ -689,14 +742,35 @@ def generate_storyboard(
                 or artifact.kind != expected_kind
             ):
                 raise HTTPException(409, f"STORYBOARD_RESUME_STEP_INVALID:{role}")
-            steps[role] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
+            steps[step_name] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
+
+    if start_role == "director_arbitration":
+        lineage = [steps[role]["artifact_id"] for role in (
+            "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor_edit_intent")]
+        for index, artifact_id in enumerate(lineage[1:], start=1):
+            artifact = db.get(AgentArtifact, artifact_id)
+            inputs_match = artifact.input_revision_ids == lineage[:index]
+            if index == 1 and len(artifact.input_revision_ids) == 5:
+                repair_inputs = [db.get(AgentArtifact, item) for item in artifact.input_revision_ids]
+                inputs_match = (artifact.input_revision_ids[0] == lineage[0]
+                                and all(item and item.project_id == project_id and not item.stale
+                                        and item.sha256 == digest(item.payload_json) for item in repair_inputs)
+                                and [item.kind for item in repair_inputs] == ["ScriptBreakdown", "DirectorialPlan",
+                                    "CameraPlan", "ContinuityReport", "ContinuityArbitration"])
+            if not inputs_match or artifact.sha256 != digest(artifact.payload_json):
+                raise HTTPException(409, "STORYBOARD_RESUME_LINEAGE_INVALID")
+
+    if recovered_director and start_role == "director":
+        steps["director"] = {"artifact_id": recovered_director.id, "kind": recovered_director.kind,
+                             "sha256": recovered_director.sha256}
 
     delay = _agent_step_delay_seconds()
     calls_in_request = 0
 
-    def _run(role: str, *, attempts: int = 2, **kwargs) -> dict:
+    def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
         last: ValueError | LLMError | None = None
+        repair_visual_language = False
         for attempt in range(1, attempts + 1):
             if calls_in_request:
                 # Leave a real gap between two crew calls, and between the
@@ -710,6 +784,11 @@ def generate_storyboard(
                     role,
                     FilmRunRequest(**kwargs),
                     storyboard_request_sha256=storyboard_request_sha256,
+                    repair_visual_language=repair_visual_language,
+                    repair_director=repair_director,
+                    replace_interrupted_task_id=(body.replace_interrupted_task_id
+                        if role == "director" and not repair_director
+                        and kwargs.get("tool") != "continuity_arbitration" else None),
                 )
                 return {"artifact_id": artifact.id, "kind": artifact.kind,
                         "sha256": artifact.sha256, "attempt": attempt}
@@ -718,6 +797,13 @@ def generate_storyboard(
                 code = str(exc)
                 if code not in RETRYABLE_REJECTIONS or attempt == attempts:
                     raise
+                failure = _rejection(role, exc)
+                if failure.get("external_outcome") == "UNKNOWN":
+                    raise
+                repair_visual_language = (
+                    role in {"director", "cinematographer"}
+                    and failure.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
+                )
         raise last  # pragma: no cover - the loop always raises or returns
 
     def _rejection(role: str, exc: Exception) -> dict:
@@ -733,6 +819,8 @@ def generate_storyboard(
                      if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256), None)
         if task:
             rejection["task_id"] = task.id
+            if task.trace.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE":
+                rejection["rejection_reason_code"] = "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:
                 rejection["external_outcome"] = outcome
@@ -877,6 +965,8 @@ def generate_storyboard(
                 "missing_characters": [],
                 "rejections": rejections,
                 "continuity_issues": issues,
+                "failed_role": "director_arbitration",
+                "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
             }
         steps["director_arbitration"] = ruling
         arbitration = db.get(AgentArtifact, ruling["artifact_id"]).payload_json
@@ -884,6 +974,62 @@ def generate_storyboard(
     if not issues and continuity.get("recommendation") != "proceed_to_preflight":
         # No issue to arbitrate, but the supervisor still asked for a human.
         blocked = True
+    repair_failure = None
+    if blocked and arbitration and any(r.get("verdict") == "conflict" for r in arbitration.get("rulings", [])):
+        # One bounded repair round creates new proposals; no master, frozen style,
+        # prior artifact or user approval is overwritten. Unknown outcomes stop.
+        original_steps = dict(steps)
+        repair_role = "director"
+        try:
+            common = {"brief": script_text, "locked_story_facts": body.locked_story_facts,
+                      "allow_remote_text": body.allow_remote_text}
+            steps["director"] = _run("director", repair_director=True, **common, input_revision_ids=[
+                original_steps["scriptwriter"]["artifact_id"], original_steps["director"]["artifact_id"],
+                original_steps["cinematographer"]["artifact_id"],
+                original_steps["continuity_supervisor"]["artifact_id"],
+                original_steps["director_arbitration"]["artifact_id"],
+            ])
+            repair_role = "cinematographer"
+            steps["cinematographer"] = _run("cinematographer", **common, input_revision_ids=[
+                steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"]])
+            repair_role = "continuity_supervisor"
+            steps["continuity_supervisor"] = _run("continuity_supervisor", **common, input_revision_ids=[
+                steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"],
+                steps["cinematographer"]["artifact_id"]])
+            repair_role = "editor"
+            steps["editor_edit_intent"] = _run("editor", tool="edit_intent", **common, input_revision_ids=[
+                steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"],
+                steps["cinematographer"]["artifact_id"], steps["continuity_supervisor"]["artifact_id"]])
+            continuity = db.get(AgentArtifact, steps["continuity_supervisor"]["artifact_id"]).payload_json
+            issues = list(continuity.get("issues") or [])
+            arbitration = None
+            steps.pop("director_arbitration", None)
+            if issues:
+                repair_role = "director_arbitration"
+                steps["director_arbitration"] = _run("director", tool="continuity_arbitration", **common,
+                    input_revision_ids=[steps["director"]["artifact_id"], steps["cinematographer"]["artifact_id"],
+                                        steps["continuity_supervisor"]["artifact_id"]])
+                arbitration = db.get(AgentArtifact, steps["director_arbitration"]["artifact_id"]).payload_json
+            blocked = (bool(issues) and not _arbitration_releases(arbitration, issues)) or (
+                not issues and continuity.get("recommendation") != "proceed_to_preflight")
+        except (ValueError, LLMError) as exc:
+            db.rollback()
+            failure = _rejection("director" if repair_role == "director_arbitration" else repair_role, exc)
+            failure["role"] = repair_role
+            if failure.get("external_outcome") == "UNKNOWN" or failure["code"] in {
+                "AGENT_REQUEST_RECONCILIATION_REQUIRED", "AGENT_REQUEST_REPLAY_BLOCKED",
+                "LLM_TIMEOUT", "LLM_CONNECTION", "LLM_SERVER",
+            }:
+                return {"status": "REJECTED", "script_source": source, "steps": steps,
+                        "rejections": [failure], "failed_role": repair_role,
+                        "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+                        "continuity_issues": issues}
+            repair_failure = failure
+            steps = original_steps
+            continuity = db.get(AgentArtifact, steps["continuity_supervisor"]["artifact_id"]).payload_json
+            issues = list(continuity.get("issues") or [])
+            arbitration = db.get(AgentArtifact, steps["director_arbitration"]["artifact_id"]).payload_json
+            blocked = True
     add_audit(
         db, "film-agent", "STORYBOARD_GENERATED", "project", project.id,
         {
@@ -905,6 +1051,7 @@ def generate_storyboard(
         "rejections": [],
         "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),
+        "repair_failure": repair_failure,
         "editorial_timing_preview": editorial_timing_preview(script_text),
         "prompt_story_facts": breakdown.get("prompt_story_facts", []),
         "prompt_style": breakdown.get("prompt_style"),

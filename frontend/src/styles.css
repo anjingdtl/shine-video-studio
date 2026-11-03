@@ -835,3 +835,5 @@ html[data-theme='dark'] .agent-step-row b{color:#cdcec0}
 
 /* Keep the running crew mounted while another director step is visible. */
 #produce[hidden]{display:none!important}
+.status-led.offline{background:#c15b50;box-shadow:0 0 0 3px #c15b5030}
+fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}

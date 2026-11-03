@@ -133,22 +133,74 @@ def _storyboard_request(client, project_id, **overrides):
     return client.post(f"/api/v1/projects/{project_id}/storyboard/generate", json=payload)
 
 
-@pytest.mark.parametrize("duration", [4.3, 4.4])
-def test_director_groups_editorial_beats_and_applies_timed_cut(studio, duration):
+def test_verified_interrupted_director_replacement_is_explicit_and_single_use(studio):
+    client, factory, *_ = studio
+    project_id, _, registry = _studio_with_chain(client)
+    responder = _responder(registry)
+    calls = []
+
+    def respond(messages, schema):
+        calls.append(schema["title"])
+        return responder(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    first = _storyboard_request(client, project_id).json()
+    scriptwriter = first["steps"]["scriptwriter"]["artifact_id"]
+    with factory.begin() as db:
+        old = db.scalar(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == "director"))
+        old_id = old.id
+        old.status = "ABANDONED"
+        old.trace = {**old.trace, "is_mock": False, "external_outcome": "UNKNOWN", "local_interruption_verified": True}
+    calls.clear()
+    args = {"start_role": "director", "resume_steps": {"scriptwriter": scriptwriter}}
+    blocked = _storyboard_request(client, project_id, **args).json()
+    assert blocked["rejections"][0]["code"] == "AGENT_REQUEST_REPLAY_BLOCKED"
+    assert calls == []
+    responder = _with_conflict(responder)
+    replacement = _storyboard_request(client, project_id, replace_interrupted_task_id=old_id, **args)
+    assert replacement.json()["status"] == "PROPOSED", replacement.text
+    assert calls == ["DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan", "ContinuityArbitration"]
+    calls.clear()
+    duplicate = _storyboard_request(client, project_id, replace_interrupted_task_id=old_id, **args)
+    assert duplicate.json()["status"] == "PROPOSED", duplicate.text
+    assert calls == ["CameraPlan", "ContinuityReport", "EditIntentPlan", "ContinuityArbitration"]
+    assert (duplicate.json()["steps"]["director"]["artifact_id"]
+            == replacement.json()["steps"]["director"]["artifact_id"])
+    calls.clear()
+    arbitration_resume = _storyboard_request(client, project_id, start_role="director_arbitration",
+                                              resume_steps=replacement.json()["resume_steps"])
+    assert arbitration_resume.json()["status"] == "PROPOSED", arbitration_resume.text
+    assert calls == ["ContinuityArbitration"]
+    calls.clear()
+    with factory.begin() as db:
+        db.get(AgentArtifact, replacement.json()["steps"]["director"]["artifact_id"]).stale = True
+    invalid = _storyboard_request(client, project_id, **args)
+    assert invalid.json()["status"] == "REJECTED"
+    assert calls == []
+
+
+@pytest.mark.parametrize(("duration", "language_retry"), [(4.3, False), (4.4, False), (4.3, True)])
+def test_director_groups_editorial_beats_and_applies_timed_cut(studio, duration, language_retry):
     client, *_ = studio
     project_id, _, registry = _studio_with_chain(client)
     original = _responder(registry)
+    director_prompts = []
 
     def respond(messages, schema):
         value = original(messages, schema)
         title = schema["title"]
         if title == "DirectorialPlan":
+            director_prompts.append(messages[0].content)
+            assert "shots[].cuts[].visual_description" in director_prompts[-1]
             context = json.JSONDecoder().raw_decode(messages[1].content)[0]
             assert context["editorial_timing"]["cut_starts_s"] == [0, 2.4]
             first, second = value["shots"]
             first["duration_s"] = duration
             first["cuts"] = [{"beat_id": "B2", "start_s": 2.4,
                               "visual_description": second["visual_description"]}]
+            if language_retry and len(director_prompts) == 1:
+                first["cuts"][0]["visual_description"] = "她转身望向门口。"
             value["shots"] = [first]
         elif title == "CameraPlan":
             value["shots"] = value["shots"][:1]
@@ -167,6 +219,9 @@ def test_director_groups_editorial_beats_and_applies_timed_cut(studio, duration)
         assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
         return
     assert response.json()["status"] == "PROPOSED", response.text
+    if language_retry:
+        assert len(director_prompts) == 2
+        assert "previous proposal failed the visual language check" in director_prompts[1]
     apply = response.json()["next"]["apply_camera"]
     applied = client.post(
         f"/api/v1/projects/{project_id}/film-artifacts/{apply['camera_artifact_id']}/apply-camera",
@@ -195,7 +250,10 @@ def _with_conflict(original, *, verdict="not_a_conflict", rule_id="H3_LABELS"):
         if title == "ContinuityReport":
             return {"issues": [CONFLICT_ISSUE], "recommendation": "needs_review"}
         if title == "ContinuityArbitration":
+            assert "never assert that T2VA" in messages[0].content
+            assert "multi-reference H3 Ref2VA" in messages[0].content
             context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            assert "registered_production_workflows" in context
             subject = context["arbitration_subject"]["issues"]
             return {
                 "rulings": [
@@ -263,6 +321,66 @@ def test_a_standing_conflict_keeps_the_storyboard_blocked(studio):
     assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
 
 
+def test_conflict_repair_creates_new_plan_then_rechecks_without_mutating_original(studio):
+    client, factory, *_ = studio
+    project_id, _, registry = _studio_with_chain(client)
+    base = _responder(registry)
+    calls = []
+
+    def respond(messages, schema):
+        title = schema["title"]
+        calls.append(title)
+        if title == "ContinuityReport":
+            return ({"issues": [CONFLICT_ISSUE], "recommendation": "needs_review"}
+                    if calls.count(title) == 1 else {"issues": [], "recommendation": "proceed_to_preflight"})
+        if title == "ContinuityArbitration":
+            return _with_conflict(base, verdict="conflict")(messages, schema)
+        result = base(messages, schema)
+        if title == "DirectorialPlan" and calls.count(title) == 2:
+            result["shots"][0]["visual_description"] = "The woman waits in soft, restrained lighting."
+        return result
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.json()["status"] == "PROPOSED", response.text
+    assert calls == ["ScriptBreakdown", "DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan",
+                     "ContinuityArbitration", "DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan"]
+    with factory() as db:
+        plans = list(db.scalars(select(AgentArtifact).where(AgentArtifact.project_id == project_id,
+                                                            AgentArtifact.kind == "DirectorialPlan")))
+        assert len(plans) == 2
+        assert not any(plan.stale for plan in plans)
+        assert plans[0].sha256 != plans[1].sha256
+
+
+def test_conflict_repair_cannot_change_locked_segment_timing(studio):
+    client, factory, *_ = studio
+    project_id, _, registry = _studio_with_chain(client)
+    base = _responder(registry)
+    director_calls = 0
+
+    def respond(messages, schema):
+        nonlocal director_calls
+        title = schema["title"]
+        if title == "DirectorialPlan":
+            director_calls += 1
+            plan = base(messages, schema)
+            if director_calls > 1:
+                plan["shots"][0]["duration_s"] = 9
+            return plan
+        return _with_conflict(base, verdict="conflict")(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    result = _storyboard_request(client, project_id).json()
+    assert result["status"] == "NEEDS_REVIEW"
+    assert result["repair_failure"]["code"] == "CONTRACT_OR_POLICY_REJECTED"
+    with factory() as db:
+        plans = list(db.scalars(select(AgentArtifact).where(AgentArtifact.project_id == project_id,
+                                                            AgentArtifact.kind == "DirectorialPlan")))
+        assert len(plans) == 1
+        assert plans[0].payload_json["shots"][0]["duration_s"] == 7
+
+
 def test_an_arbitration_citing_an_unknown_rule_releases_nothing(studio):
     client, factory, tmp_path, settings = studio
     project_id, _style, registry = _studio_with_chain(client)
@@ -276,6 +394,18 @@ def test_an_arbitration_citing_an_unknown_rule_releases_nothing(studio):
     assert body["status"] == "REJECTED", body
     assert body["rejections"][0]["role"] == "director_arbitration"
     assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
+    calls = []
+    valid = _with_conflict(original)
+
+    def resume(messages, schema):
+        calls.append(schema["title"])
+        return valid(messages, schema)
+
+    client.app.state.mock_llm_responder = resume
+    resumed = _storyboard_request(client, project_id, start_role="director_arbitration",
+                                  resume_steps=body["resume_steps"])
+    assert resumed.json()["status"] == "PROPOSED", resumed.text
+    assert calls == ["ContinuityArbitration"]
 
 
 def test_the_server_binds_the_authoritative_issue_text(studio):

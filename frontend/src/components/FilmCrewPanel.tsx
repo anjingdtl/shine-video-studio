@@ -38,13 +38,14 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   const [result, setResult] = useState<unknown>(null);
 
   async function reload() {
-    const [rs, ars, ts, h, lock] = await Promise.all([
+    const [rs, ars, , h, lock] = await Promise.all([
       api<Role[]>('/film-agents'), api<Artifact[]>(`/projects/${projectId}/film-artifacts`),
-      api<Run[]>(`/projects/${projectId}/film-runs`), api<RuleHub>('/h3-rulebook'),
+      api<Run[]>(`/projects/${projectId}/film-runs`).then(setRuns), api<RuleHub>('/h3-rulebook'),
       api<{ rulepack_id: string | null }>(`/projects/${projectId}/rulepack`),
     ]);
-    setRoles(rs); setArtifacts(ars); setRuns(ts); setHub(h); setPin(lock.rulepack_id ?? '');
+    setRoles(rs); setArtifacts(ars); setHub(h); setPin(lock.rulepack_id ?? '');
   }
+
   useEffect(() => {
     setInputs([]); setReviewShotId(''); setRemoteText(false);
     setReconcileCredential(''); setReconcileEvidence('');
@@ -139,7 +140,8 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
             onChange={e => setReconcileCredential(e.target.value)} /></label>
           <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
         </div>}
-      {runs.map(r => <details key={r.id}><summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
+      {runs.map(r => <details key={r.id}>
+        <summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
         {needsRemoteReconciliation(r) &&
           <button disabled={busy || reconcileCredential.length < 32 || !reconcileEvidence.trim()}
             onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}

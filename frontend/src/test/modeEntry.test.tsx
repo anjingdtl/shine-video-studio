@@ -77,6 +77,19 @@ afterEach(() => {
 });
 
 describe('顶部模式入口（唯一权威状态）', () => {
+  it('后端失联时显示重连入口，点击后按实际响应恢复在线灯', async () => {
+    let online = false;
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => online
+      ? jsonResponse([baseProject()]) : jsonResponse({ detail: 'offline' }, 503) });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({ detail: 'slow probe' }, 504) });
+    render(<App />);
+    expect(await screen.findByText('工作台后端失联')).toBeInTheDocument();
+    const reconnect = screen.getByRole('button', { name: '重连工作台' });
+    online = true;
+    await userEvent.click(reconnect);
+    expect(await screen.findByText('工作台后端在线')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /重连/ })).not.toBeInTheDocument());
+  });
   it('演示徽章常驻且提供启用入口；点击打开向导', async () => {
     const user = userEvent.setup();
     render(<App />);

@@ -26,6 +26,9 @@ export function useStudio() {
   const [projectTitle, setProjectTitle] = useState('');
   const [mockScenario, setMockScenario] = useState('success');
   const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [systemChecked, setSystemChecked] = useState(false);
+  const [apiOnline, setApiOnline] = useState(false);
+  const healthProbe = useRef(0);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [routes, setRoutes] = useState<AgentRoute[]>([]);
   const [workflowProfiles, setWorkflowProfiles] = useState<WorkflowProfile[]>([]);
@@ -82,55 +85,70 @@ export function useStudio() {
     finally { setBusy(false); }
   }
 
+  const checkConnection = useCallback(async () => {
+    const probe = ++healthProbe.current;
+    let online = false;
+    try {
+      const projects = await api<Project[]>('/projects', { signal: AbortSignal.timeout(2500), cache: 'no-store' });
+      online = Array.isArray(projects);
+    } catch { /* A failed health probe means the API cannot be reached. */ }
+    if (probe === healthProbe.current) {
+      setApiOnline(online);
+      setSystemChecked(true);
+    }
+    return online;
+  }, []);
+
   const loadSystem = useCallback(async () => {
-    try { setSystem(await api<SystemStatus>('/system/status')); }
+    try { setSystem(await api<SystemStatus>('/system/status', { signal: AbortSignal.timeout(8000), cache: 'no-store' })); }
     catch { setSystem(null); }
   }, []);
 
-  const loadAudit = useCallback(async (id: string, offset = 0) => {
-    const page = await api<AuditPage>(`/projects/${id}/events?limit=30&offset=${offset}`);
+  const loadAudit = useCallback(async (id: string, offset = 0, signal?: AbortSignal) => {
+    const page = await api<AuditPage>(`/projects/${id}/events?limit=30&offset=${offset}`, { signal });
     if (activeProjectId.current !== id) return;
     setAudit((current) => offset === 0 || !current
       ? page
       : { ...page, items: [...current.items, ...page.items] });
   }, []);
 
-  const loadSettings = useCallback(async (id: string) => {
+  const loadSettings = useCallback(async (id: string, signal?: AbortSignal) => {
     const [profileRows, routeRows, workflowRows] = await Promise.all([
-      api<ProviderProfile[]>('/provider-profiles'),
-      api<AgentRoute[]>('/agent-routes'),
-      api<WorkflowProfile[]>(`/workflow-profiles?project_id=${id}`),
+      api<ProviderProfile[]>('/provider-profiles', { signal }),
+      api<AgentRoute[]>('/agent-routes', { signal }),
+      api<WorkflowProfile[]>(`/workflow-profiles?project_id=${id}`, { signal }),
     ]);
     if (activeProjectId.current !== id) return;
     setProfiles(profileRows); setRoutes(routeRows); setWorkflowProfiles(workflowRows);
   }, []);
 
   const loadProject = useCallback(async (id: string) => {
-    const selected = await api<Project>(`/projects/${id}`);
+    const signal = AbortSignal.timeout(8000);
+    const selected = await api<Project>(`/projects/${id}`, { signal });
     if (activeProjectId.current !== id) return;
     setProjects((rows) => rows.map((row) => row.id === id ? selected : row));
     const [assetRows, styleRows, shotRows, jobRows] = await Promise.all([
-      api<Asset[]>(`/projects/${id}/assets`),
-      api<StyleVersion[]>(`/projects/${id}/styles`),
-      api<Shot[]>(`/projects/${id}/shots`),
-      api<Job[]>(`/projects/${id}/jobs`),
+      api<Asset[]>(`/projects/${id}/assets`, { signal }),
+      api<StyleVersion[]>(`/projects/${id}/styles`, { signal }),
+      api<Shot[]>(`/projects/${id}/shots`, { signal }),
+      api<Job[]>(`/projects/${id}/jobs`, { signal }),
     ]);
     if (activeProjectId.current !== id) return;
     setAssets(assetRows); setStyles(styleRows); setShots(shotRows); setJobs(jobRows);
     setStyle(selected.style_draft ?? styleRows.at(-1)?.snapshot ?? emptyStyle);
-    await loadSettings(id);
-    await loadAudit(id, 0);
+    await loadSettings(id, signal);
+    await loadAudit(id, 0, signal);
   }, [loadAudit, loadSettings]);
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async (attempts = 4) => {
     const requestId = ++projectsRequest.current;
     let lastError: unknown;
     // The Windows launcher starts the web server and API independently. Retry
     // short startup races so a new user does not mistake an unavailable API
     // for an empty workspace. A later manual refresh supersedes this request.
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const rows = await api<Project[]>('/projects');
+        const rows = await api<Project[]>('/projects', { signal: AbortSignal.timeout(3000), cache: 'no-store' });
         if (requestId !== projectsRequest.current) return null;
         setProjects(rows);
         setProjectsLoaded(true);
@@ -145,7 +163,7 @@ export function useStudio() {
       } catch (error) {
         if (requestId !== projectsRequest.current) return null;
         lastError = error;
-        if (attempt < 3) {
+        if (attempt < attempts - 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
         }
       }
@@ -158,17 +176,21 @@ export function useStudio() {
     throw lastError instanceof Error ? lastError : new Error('无法读取本机作品列表');
   }, []);
 
-  const refreshAll = useCallback(async () => {
-    await loadSystem();
+  const refreshWorkspace = useCallback(async (attempts = 4) => {
     try {
-      const selectedId = await loadProjects();
+      const selectedId = await loadProjects(attempts);
       // If the list restored a remembered project, its normal selection effect
       // loads the detail. Avoid a duplicate request in the common case.
       if (selectedId && selectedId === activeProjectId.current) await loadProject(selectedId);
     } finally {
       setDataEpoch((epoch) => epoch + 1);
     }
-  }, [loadSystem, loadProject, loadProjects]);
+  }, [loadProject, loadProjects]);
+
+  const refreshAll = useCallback(async () => {
+    await loadSystem();
+    await refreshWorkspace();
+  }, [loadSystem, refreshWorkspace]);
 
   useEffect(() => {
     void loadProjects().catch(() => undefined);
@@ -185,7 +207,17 @@ export function useStudio() {
     if (projectId) loadProject(projectId).catch((error: Error) => report(error.message, 'error'));
   }, [projectId, loadProject]);
 
-  useEffect(() => { loadSystem(); }, [loadSystem]);
+  useEffect(() => {
+    void loadSystem();
+    const timer = window.setInterval(loadSystem, 10000);
+    return () => window.clearInterval(timer);
+  }, [loadSystem]);
+
+  useEffect(() => {
+    void checkConnection();
+    const timer = window.setInterval(checkConnection, 3000);
+    return () => window.clearInterval(timer);
+  }, [checkConnection]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -197,10 +229,9 @@ export function useStudio() {
         if (activeProjectId.current !== projectId) return;
         setJobs(jobRows); setShots(shotRows);
       }).catch(() => undefined);
-      loadSystem();
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [projectId, loadSystem]);
+  }, [projectId]);
 
   async function createProject() {
     if (!projectTitle.trim()) return;
@@ -466,8 +497,8 @@ export function useStudio() {
     // data
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
-    system, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
-    notice, report, dismissNotice, busy, dataEpoch, apiOnline: system?.api_online ?? false,
+    system, systemChecked, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
+    notice, report, dismissNotice, busy, dataEpoch, apiOnline,
     // generation settings
     queueProvider, queueProfile, setQueueProfile, reviewScope, setReviewScope,
     reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,

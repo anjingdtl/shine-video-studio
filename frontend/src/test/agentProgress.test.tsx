@@ -1,6 +1,23 @@
 import { act, render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
-import { AgentProgress } from '../components/AgentProgress';
+import { AgentProgress, reusedRolesFromInputs } from '../components/AgentProgress';
+
+it('仅根据本次任务引用的有效产物识别复用步骤，忽略旧记录及错误类型', () => {
+  const runs = [{ id: 'camera', role_id: 'cinematographer', status: 'RUNNING', created_at: '',
+    trace: { input_revision_ids: ['writer', 'director'] } }];
+  const artifacts = [
+    { id: 'writer', kind: 'ScriptBreakdown', producer_role: 'scriptwriter', stale: false },
+    { id: 'director', kind: 'DirectorialPlan', producer_role: 'director', stale: false },
+    { id: 'old-camera', kind: 'CameraPlan', producer_role: 'cinematographer', stale: false },
+    { id: 'director', kind: 'CameraPlan', producer_role: 'director', stale: false },
+  ];
+  const reused = reusedRolesFromInputs(runs, artifacts);
+  expect(reused).toEqual(['scriptwriter', 'director']);
+  render(<AgentProgress runs={runs} completedRoles={reused} />);
+  expect(screen.getByRole('progressbar')).toHaveValue(2);
+  expect(screen.getByText(/导演：已完成（复用已保存结果）/)).toBeInTheDocument();
+  expect(reusedRolesFromInputs(runs, artifacts.map(a => ({ ...a, stale: true })))).toEqual([]);
+});
 
 it('人物确认是人工交接，明确说明导演未启动并保留已完成编剧', () => {
   const confirm = vi.fn();
@@ -27,12 +44,17 @@ it('即使模型尚无新返回，等待秒数也持续更新', () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-11-03T12:00:00Z'));
   try {
-    const view = render(<AgentProgress runs={[
+    const runs = [
       { id: 'waiting', role_id: 'director', status: 'RUNNING', created_at: '2026-11-03T12:00:00Z' },
-    ]} />);
+    ];
+    const view = render(<AgentProgress runs={runs} />);
     expect(screen.getByText(/已等待 0 秒/)).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(3000));
     expect(screen.getByText(/已等待 3 秒/)).toBeInTheDocument();
+    view.rerender(<AgentProgress runs={runs} paused />);
+    act(() => vi.advanceTimersByTime(10000));
+    expect(screen.queryByText(/已等待 \d+ 秒/)).not.toBeInTheDocument();
+    expect(screen.getByText(/状态待核对/)).toBeInTheDocument();
     view.unmount();
   } finally { vi.useRealTimers(); }
 });

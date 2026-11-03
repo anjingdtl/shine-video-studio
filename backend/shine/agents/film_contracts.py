@@ -53,13 +53,19 @@ class ShotIntentContinuity(APIModel):
 class EditorialCut(APIModel):
     beat_id: str
     start_s: float = Field(gt=0, lt=15, allow_inf_nan=False)
-    visual_description: str = Field(min_length=1, max_length=1000)
+    visual_description: str = Field(
+        min_length=1, max_length=1000,
+        description="English visual prose with English role labels. Omit spoken lines and lyrics.",
+    )
 
 
 class ShotIntent(APIModel):
     id: str = Field(min_length=1, max_length=80)
     beat_id: str
-    visual_description: str = Field(min_length=1, max_length=8000)
+    visual_description: str = Field(
+        min_length=1, max_length=8000,
+        description="English opening visual prose with English role labels. Omit speech and lyrics.",
+    )
     duration_s: float = Field(
         ge=4,
         le=15,

@@ -107,7 +107,7 @@ function App() {
   const {
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
-    system, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
+    system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notice, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
     setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
     realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
@@ -126,6 +126,28 @@ function App() {
   const [wizard, setWizard] = useState<null | 'enable' | 'diagnose'>(null);
   const [activeSection, setActiveSection] = useState('overview');
   const [helpOpen, setHelpOpen] = useState(false);
+  const [reconnectPhase, setReconnectPhase] = useState<'checking' | 'loading' | null>(null);
+  const [reconnectError, setReconnectError] = useState('');
+  const reconnecting = reconnectPhase !== null;
+  const reconnectLabel = reconnectPhase === 'checking' ? '正在检查后端…' : '后端已连接，正在读取作品…';
+
+  async function reconnectWorkbench() {
+    if (reconnecting) return;
+    setReconnectError('');
+    setReconnectPhase('checking');
+    try {
+      if (!await checkConnection()) {
+        setReconnectError('后端未响应。请双击项目根目录的「一键启动 Shine 视频工作台」，启动后再点重新连接。');
+        return;
+      }
+      setReconnectPhase('loading');
+      await refreshWorkspace(1);
+    } catch {
+      setReconnectError('后端连接检查已通过，但作品数据读取失败。请重新连接。');
+    } finally {
+      setReconnectPhase(null);
+    }
+  }
   /** Nav density contract: the current view's group is expanded by default; other groups expand only via their explicit toggle button. */
   const [manualExpanded, setManualExpanded] = useState<Set<ViewId>>(() => new Set());
   const [initialRoute] = useState(() => resolveHash(window.location.hash));
@@ -309,6 +331,14 @@ function App() {
 
   const modeLabel = production?.label ?? '状态未知';
 
+  const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting}>
+    <button type="button" className="primary-button" disabled={reconnecting} onClick={reconnectWorkbench}>
+      {reconnecting ? reconnectLabel : '重新连接'}
+    </button>
+    {reconnecting && <div role="status"><progress aria-label={reconnectLabel} /></div>}
+    {reconnectError && <p role="alert">{reconnectError}</p>}
+  </div>;
+
   return (
     <div className={`app-shell ${ui === 'director' ? 'ui-director' : 'ui-expert'}`}>
       {ui === 'expert' && <aside className="sidebar">
@@ -381,6 +411,15 @@ function App() {
             {ui === 'director' && project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}
           </div>
           <div className="top-actions">
+            <span className="service-status" aria-live="polite">
+              <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
+              {apiOnline ? '工作台后端在线' : systemChecked ? '工作台后端失联' : '正在检查工作台后端'}
+            </span>
+            {systemChecked && (!apiOnline || reconnecting || !!projectsLoadError) && <button type="button" className="secondary-button"
+              disabled={reconnecting}
+              title="后端未启动时，请先启动本机工作台"
+              onClick={reconnectWorkbench}>{reconnecting ? reconnectLabel : '重连工作台'}</button>}
+            {reconnectError && projectsLoaded && <span role="alert" className="service-status">{reconnectError}</span>}
             {projects.length > 1 && ui === 'director' && <select className="topbar-project" aria-label="快速切换作品" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
               {projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}
             </select>}
@@ -419,7 +458,7 @@ function App() {
               </> : <>
                 <h2>{projectsLoadError ? '本机工作区暂时不可用' : '正在读取本机作品'}</h2>
                 <p>{projectsLoadError || '正在连接本机服务。稍等片刻，已有作品会自动显示。'}</p>
-                <button className="primary-button" onClick={() => refreshAll().catch(() => undefined)}>重新连接</button>
+                {workspaceReconnect}
               </>}
             </section>}
 
@@ -445,7 +484,7 @@ function App() {
                 })}
               </nav>
               <DemoRibbon production={production ?? {
-                mode: 'BLOCKED', label: '状态未知', detail: '本机服务未连接。', action: null, code: null,
+                mode: 'BLOCKED', label: '状态未知', detail: '暂无法确认制作环境。', action: null, code: null,
                 render_provider: 'mock', runtime_status: 'NOT_ACTIVATED', renderer_online: false,
                 worker_online: false, running_jobs: 0, series_active: 0,
               }} onEnable={() => setWizard('enable')} />
@@ -509,6 +548,7 @@ function App() {
 
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
                 <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                  backendDisconnected={systemChecked && !apiOnline}
                   onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
                 {routes.length === 0 && <div className="blocked-callout">
                   <Sparkles size={15} />
@@ -627,7 +667,7 @@ function App() {
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给项目起个名字" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
                   <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
                 </div>}
-                {!projectsLoaded && <button className="primary-button" onClick={() => refreshAll().catch(() => undefined)}>重新连接</button>}
+                {!projectsLoaded && workspaceReconnect}
                 {projectsLoaded && view !== 'setup' && <p className="empty-setup-hint">
                   还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「制作环境」检查本机</button>——不需要先建项目。
                 </p>}
@@ -689,6 +729,7 @@ function App() {
                 <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
 
                 <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                  backendDisconnected={systemChecked && !apiOnline}
                   onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
 
                 <TerminologyPanel

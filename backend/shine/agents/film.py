@@ -41,6 +41,7 @@ from shine.models import (
     MediaArtifact,
     QualityGate,
     StyleVersion,
+    WorkflowProfile,
     utcnow,
 )
 from shine.security import is_loopback_url
@@ -460,6 +461,9 @@ class FilmAgentDispatcher:
         body: FilmRunRequest,
         *,
         storyboard_request_sha256: str | None = None,
+        repair_visual_language: bool = False,
+        replace_interrupted_task_id: str | None = None,
+        repair_director: bool = False,
     ) -> AgentArtifact:
         contract, required = FilmAgentRegistry.get(role, body.tool)
         project = require_project(db, project_id)
@@ -536,6 +540,11 @@ class FilmAgentDispatcher:
                 ],
                 "rule_ids": [rule["id"] for rule in registry_rules()],
             }
+            context["registered_production_workflows"] = [
+                {"id": workflow.id, "mode": workflow.mode,
+                 "validated": bool(workflow.validated_against)}
+                for workflow in db.scalars(select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))
+            ]
         if role in {"comfyops", "director", "cinematographer", "sound_director", "producer"}:
             from shine.comfyops.models import EnvironmentSnapshot, ModelPackage, WorkflowRevision
 
@@ -611,9 +620,24 @@ class FilmAgentDispatcher:
                 if "database is locked" not in str(exc).lower() or attempt == 4:
                     raise
                 time.sleep(0.4 * (attempt + 1))
+        replacement_key = None
+        if replace_interrupted_task_id:
+            from shine.comfyops.models import ResourceLease
+
+            old = db.get(AgentTaskRecord, replace_interrupted_task_id)
+            replacement_key = f"film-replacement:{replace_interrupted_task_id}"
+            if (not old or old.project_id != project_id or old.role_id != role or old.status != "ABANDONED"
+                    or old.trace.get("local_interruption_verified") is not True
+                    or old.trace.get("external_outcome") != "UNKNOWN"
+                    or not storyboard_request_sha256
+                    or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256
+                    or old.trace.get("input_revision_ids") != body.input_revision_ids
+                    or db.get(AppSetting, replacement_key)
+                    or db.scalar(select(ResourceLease.id).where(ResourceLease.status != "RELEASED").limit(1))):
+                raise ValueError("AGENT_REPLACEMENT_NOT_AVAILABLE")
         guard_request(db, project_id, role, digest(context), profile,
                       text_hash=digest(model_context) if role == "qc_reviewer" else None,
-                      contract_hash=contract_hash)
+                      contract_hash=contract_hash, replace_interrupted_task_id=replace_interrupted_task_id)
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,
@@ -653,6 +677,12 @@ class FilmAgentDispatcher:
             },
         )
         db.add(task)
+        if replacement_key:
+            db.flush()
+            db.add(AppSetting(key=replacement_key, value={"replacement_task_id": task.id}))
+            add_audit(db, "local-user", "FILM_INTERRUPTED_TASK_REPLACED", "agent_task", task.id,
+                      {"previous_task_id": replace_interrupted_task_id, "external_outcome": "UNKNOWN"},
+                      project_id=project_id)
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
         if body.tool == "continuity_arbitration":
             system_prompt = (
@@ -676,7 +706,12 @@ class FilmAgentDispatcher:
                 "not_a_conflict; otherwise it is needs_review. Do not rule on anything else: the "
                 "script, the locked facts, the approved masters and the quality gates are not yours to "
                 "review, and an arbitration never approves a render or an asset. The ruling is a "
-                "proposal that a human applies."
+                "proposal that a human applies. A script filename or script prose is not evidence of the "
+                "selected generation workflow: never assert that T2VA or any other mode is selected from "
+                "the script. The intended production path is multi-reference H3 Ref2VA; only a registered "
+                "and verified workflow can establish the actual execution mode. If no such mode is supplied, "
+                "state that it is unverified and do not dismiss a reference issue by assuming T2VA."
+                " Write every rationale in Simplified Chinese for the user."
             )
         else:
             system_prompt = (
@@ -719,7 +754,13 @@ class FilmAgentDispatcher:
                        "Its suggested groups may be adjusted only at original cut boundaries. "
                        "Never extend every editorial shot to four seconds. "
                        "Use the union of required approved references for all beats in a segment. "
-                       "The visual_description of every shot is English prose only: spoken lines live "
+                       "Both shots[].visual_description and shots[].cuts[].visual_description must be English prose. "
+                       "The brief and upstream beats can be Chinese. Describe their action, location and camera "
+                       "movement in English rather than copying Chinese phrases, names, shot labels or lyrics. "
+                       "Use English role labels such as 'the lead performer' in visual prose and keep the original "
+                       "character identity through approved asset_ids. Example: 'The lead performer opens the door. "
+                       "The camera cranes upward.' Check every opening and cut description before returning JSON. "
+                       "Spoken lines live "
                        "exclusively in the beats' dialogue structure and must never appear inside "
                        "visual_description, quoted or not. Every shot of a sequence must reference the "
                        "approved audio (voice) master in asset_ids so the timbre stays continuous, "
@@ -729,10 +770,27 @@ class FilmAgentDispatcher:
                        "never list style or last-frame reference images as shot references, and "
                        "never list an asset twice."
                        if role == "director" else "")
+                    + (" Repair the supplied DirectorialPlan using the supplied continuity report and arbitration. "
+                       "Produce a revised proposal that follows the frozen style and resolves the identified "
+                       "conflicts. Preserve every segment ID, beat ID, cut time, duration and approved asset ID "
+                       "exactly. Change only visual direction and boundary continuity where needed. "
+                       "Do not alter the script, dialogue, approved assets, frozen style or workflow."
+                       if role == "director" and repair_director else "")
                     + (" Every camera field (composition, movement, lighting, axis) is English prose only: "
                        "never write any spoken line or Chinese text inside a camera field; refer to speech "
-                       "only as 'she delivers her line' without quoting it."
+                       "only as 'she delivers her line' without quoting it. "
+                       "The upstream DirectorialPlan shots are render segments. Return exactly one CameraPlan "
+                       "shots entry for EACH DirectorialPlan shots entry, copying its id verbatim into intent_id. "
+                       "Do not invent, omit or duplicate IDs. Internal cuts are not separate render segments: "
+                       "describe their camera changes within the parent segment's camera fields. Before returning, "
+                       "compare the complete set of intent_id values with the DirectorialPlan shot IDs."
                        if role == "cinematographer" else "")
+                    + (" For edit_intent, the upstream DirectorialPlan shots are render segments. "
+                       "Return exactly one clip per segment, copying each segment id verbatim to intent_id. "
+                       "Do not create separate clips for internal cuts; retain their order inside their segment. "
+                       "Use contiguous order values starting at 1 and the segment's duration_s as "
+                       "planned_duration_s. Never omit, duplicate or invent a segment ID."
+                       if role == "editor" and body.tool == "edit_intent" else "")
                     + (" Set each shot's duration_s long enough to contain the latest dialogue end_s in its beat "
                        "plus a short natural tail. Dialogue timecodes are local to each beat, not cumulative. "
                        "Do not shorten a shot below its spoken dialogue."
@@ -751,7 +809,8 @@ class FilmAgentDispatcher:
                        "project-level references that a shot never lists by design. Dialogue start_s/end_s "
                        "are local to their own beat and reset at zero for each beat; do not compare them to "
                        "cumulative act or episode time. Check each beat's lines against the duration of the "
-                       "shot that uses that beat."
+                       "shot that uses that beat. Write each issue in Simplified Chinese for the user; "
+                       "preserve shot IDs, asset IDs and technical mode names exactly."
                        if role == "continuity_supervisor" else "")
                     + (" Compare ONLY the two text inputs, frozen Style and ShotSpec. No images or audio are "
                        "available and you cannot judge their conformance. For each frozen field, return your "
@@ -776,6 +835,13 @@ class FilmAgentDispatcher:
             task.trace = {**task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
                           "network_timeout_s": profile.timeout_s}
             db.commit()
+
+        if repair_visual_language:
+            system_prompt += (
+                " The previous proposal failed the visual language check. Rewrite all visual and camera "
+                "descriptions in English, including every segment's cuts. Check for copied Chinese names, "
+                "stage directions and lyrics. Keep the original timeline, approved references and dialogue contract."
+            )
 
         try:
             response = self.gateway.complete_for_role(
@@ -804,6 +870,17 @@ class FilmAgentDispatcher:
                         else contract.model_validate(response_data))
             proposal = canonicalize_script_character_asset_ids(proposal, context["assets"])
             validate_output(role, proposal, body, inputs, context)
+            if repair_director:
+                old = next(a for a in inputs if a.kind == "DirectorialPlan")
+                original = old.payload_json["shots"]
+                revised = proposal.model_dump(mode="json")["shots"]
+                def fixed_shape(shots):
+                    return [(s["id"], s["beat_id"], s["duration_s"], s["asset_ids"],
+                             [(c["beat_id"], c["start_s"]) for c in s.get("cuts", [])]) for s in shots]
+                if fixed_shape(original) != fixed_shape(revised):
+                    raise ValueError("REPAIR_CHANGED_LOCKED_SHOT_STRUCTURE")
+                if digest(old.payload_json) == digest(proposal.model_dump(mode="json")):
+                    raise ValueError("REPAIR_DID_NOT_CHANGE_PLAN")
             # Re-read context after a potentially long external call.
             db.expire_all()
             project = require_project(db, project_id)

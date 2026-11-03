@@ -21,17 +21,17 @@ const VISUALS: Record<string, Visual> = {
 
 export function ModeStatusEntry({ system, onAction }: { system: SystemStatus | null; onAction: ModeActionHandler }) {
   const production = system?.production_mode ?? null;
-  // API 未连接时不假装处于任何模式：明确显示服务失联。
+  // 制作环境探测与 API 连通性分开显示。
   if (!production) {
     return (
       <button
         type="button"
         className="mode-entry unknown"
-        title="无法连接本机服务，正在显示缓存前的空白状态"
+        title="暂时无法确认制作环境状态"
         onClick={() => onAction('check_fix')}
       >
         <MonitorPlay size={15} />
-        <span className="mode-entry-label">本机服务未连接</span>
+        <span className="mode-entry-label">制作状态暂不可用</span>
         <span className="mode-entry-cta">重试</span>
       </button>
     );

@@ -26,6 +26,7 @@ SAFE_REJECTIONS = {
     "EDITORIAL_TIMING_CONFLICT",
     "UNAPPROVED_ASSET_OR_UNKNOWN_BEAT", "CHARACTER_MASTER_BINDING_REQUIRED",
     "CAMERA_INTENT_COVERAGE", "EDIT_INTENT_INTENT_COVERAGE",
+    "REPAIR_CHANGED_LOCKED_SHOT_STRUCTURE", "REPAIR_DID_NOT_CHANGE_PLAN",
     "H3_LOCKED_FACT_TRANSLATION_REQUIRED",
     "H3_STYLE_TRANSLATION_REQUIRED",
 }
@@ -42,11 +43,14 @@ def rejection_reason(exc):
     return str(exc) if str(exc) in SAFE_REJECTIONS else "SCHEMA_OR_POLICY_REJECTED"
 
 
-def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, contract_hash=None):
+def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, contract_hash=None,
+                  replace_interrupted_task_id=None):
     rows = db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == role,
     ))
     for row in rows:
+        if row.id == replace_interrupted_task_id and row.status == "ABANDONED":
+            continue  # The dispatcher has checked and consumed the explicit replacement.
         same = (row.trace.get("text_input_sha256") == text_hash if text_hash else row.input_hash == input_hash)
         if not same:
             continue

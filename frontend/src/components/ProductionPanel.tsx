@@ -83,7 +83,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <span>
           {production
             ? `${production.label}：${production.detail}小模型审片只提供建议，不会阻止镜头继续制作；正式发布前的审美与版权决定仍由你确认。`
-            : '本机服务未连接，暂无法确认制作模式。'}
+            : '暂无法确认制作模式。'}
         </span>
       </div>
       <div className="status-strip">
