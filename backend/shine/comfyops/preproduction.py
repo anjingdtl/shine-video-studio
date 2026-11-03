@@ -305,6 +305,25 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
     }
 
 
+def _profile_matches_frozen_revision(revision, profile, project_id) -> bool:
+    """A project-local profile may use a published revision only by exact identity.
+
+    A published capability revision is project-independent; its validated graph
+    and parameter map are the identity. A new project registers its own profile
+    from those values, so the historical ``legacy_profile_id`` back-reference
+    must not tie production to the original project. The local profile still
+    has to reproduce the pinned graph and slot mapping exactly. Media transfer
+    declarations stay on the local profile and are validated separately.
+    """
+    return bool(
+        profile
+        and (profile.project_id is None or profile.project_id == project_id)
+        and graph_hash(revision.payload["graph"]) == profile.graph_sha256
+        and revision.payload["category"] == "H3_" + profile.mode.upper()
+        and (revision.payload.get("parameter_map") or {}) == (profile.parameter_map or {})
+    )
+
+
 def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None, render_request=None):
     plan = current_plan(db, project_id)
     if plan and plan.status != "FROZEN":
@@ -361,11 +380,7 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
         matched = [
             w
             for w in db.scalars(select(WorkflowRevision))
-            if w.id in frozen_ids
-            and w.payload.get("legacy_profile_id") == workflow_profile_id
-            and profile
-            and graph_hash(w.payload["graph"]) == profile.graph_sha256
-            and w.payload["category"] == "H3_" + profile.mode.upper()
+            if w.id in frozen_ids and _profile_matches_frozen_revision(w, profile, project_id)
         ]
         if not matched:
             raise HTTPException(409, "PREPRODUCTION_WORKFLOW_NOT_FROZEN")

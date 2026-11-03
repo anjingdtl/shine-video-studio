@@ -102,7 +102,12 @@ EXTERNAL_MISSING_GRACE_SECONDS = 30
 
 # Failure codes that mean "the external outcome is not known". Such a job may
 # still be reconcilable against ComfyUI history and must never be resubmitted.
-RECONCILABLE_FAILURE_CODES = ("COMFY_JOB_NOT_FOUND", "QC_RECHECK_REQUESTED", "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL")
+RECONCILABLE_FAILURE_CODES = (
+    "COMFY_JOB_NOT_FOUND",
+    "QC_RECHECK_REQUESTED",
+    "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL",
+    "COMFY_ACTIVATION_RECONCILIATION_REQUIRED",
+)
 
 
 def _register_worker(db: Session, worker_id: str) -> None:
@@ -190,7 +195,17 @@ def heartbeat(
             if error:
                 instance.last_error = error[:2000]
         return resource_ok
-    except Exception as exc:  # pragma: no cover - the heartbeat must not kill the worker
+    except Exception as exc:
+        from sqlalchemy.exc import OperationalError
+
+        if isinstance(exc, OperationalError) and (
+            "database is locked" in str(exc).lower() or "database is busy" in str(exc).lower()
+        ):
+            # Another writer (a submit guard or a state transition) held the
+            # SQLite writer briefly. That is writer contention, not proof that
+            # this worker lost its claim; the next pulse re-verifies the lease.
+            logger.warning("worker_heartbeat_deferred reason=database_locked")
+            return True
         logger.error("worker_heartbeat_failed error_type=%s", type(exc).__name__)
         return False
 
@@ -2751,8 +2766,12 @@ def _run_comfy_job(
                 transition(current, "NEEDS_REVIEW")
                 submit_db.commit()
                 return job_id
-            submission: ComfySubmission = service.submit_prepared(prepared, request)
             submit_db.commit()
+        # The external submission uploads reference bytes and waits for the
+        # renderer to accept the prompt. Holding the SQLite writer transaction
+        # across that call starves the managed heartbeat that keeps this claim
+        # alive, so it is deliberately issued after the guard commits.
+        submission: ComfySubmission = service.submit_prepared(prepared, request)
     except ComfySubmissionUncertain as exc:
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
@@ -3082,6 +3101,41 @@ def _claim_stranded_job(db: Session, job: Job, worker_id: str, settings: Setting
     return job.state_version
 
 
+def _activation_owned_alive(db, job, attempt, value: dict) -> bool:
+    """Whether the renderer recorded by this activation is still ours.
+
+    An activation journal that was confirmed before the worker lost its lease
+    can leave an already-submitted prompt whose outcome is unknown. The
+    external task may be read from ComfyUI history only when the recorded
+    renderer process is provably the same live process inside the same named
+    job object; otherwise the journal must stay a reconciliation blocker.
+    """
+    from shine.comfyops.handoff_startup import STARTUP_PREFIX
+    from shine.comfyops.installer import process_identity
+    from shine.comfyops.owned_process import inspect_named_group
+    from shine.models import AppSetting
+
+    if (not attempt or not job.provider_job_id
+            or value.get("stage") != "RECONCILE_REQUIRED"
+            or value.get("last_confirmed_stage") != "CONFIRMED"
+            or value.get("job_id") != job.id or value.get("attempt_id") != attempt.id):
+        return False
+    startup = db.get(AppSetting, STARTUP_PREFIX + str(value.get("instance_id") or ""))
+    record = startup.value if startup is not None and isinstance(startup.value, dict) else {}
+    process = record.get("process") or {}
+    pid, birth, job_name = process.get("pid"), process.get("birth"), process.get("job_name")
+    if (record.get("lease_id") != value.get("lease_id")
+            or type(pid) is not int or pid <= 0
+            or not isinstance(birth, str) or not birth or not isinstance(job_name, str) or not job_name):
+        return False
+    try:
+        if process_identity(pid) != birth:
+            return False
+        return bool(inspect_named_group(job_name, pid, birth))
+    except (OSError, ValueError):
+        return False
+
+
 def _live_handoff_reservation(db, job, lease, now):
     from shine.comfyops.installer import process_identity
     from shine.models import AppSetting
@@ -3248,6 +3302,11 @@ def _block_interrupted_handoff(session_factory, job_id):
         binding_mismatch = value.get("job_id") != job_id
         if not reservation and (binding_mismatch or not attempt or value.get("attempt_id") != attempt.id):
             raise HTTPException(409, "HANDOFF_INTENT_BINDING_CHANGED")
+        if activation and _activation_owned_alive(db, job, attempt, value):
+            # The confirmed renderer is still the same live, owned process.
+            # The only unresolved side effect is the external prompt, which
+            # recovery may read from history and adopt without resubmitting.
+            return False
         lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
         lease_mismatch = reservation and value.get("lease_id") != (lease.id if lease else None)
         if reservation and not lease_mismatch and _live_handoff_reservation(db, job, lease, utcnow()):

@@ -659,6 +659,15 @@ def _review_one(factory, settings, task_id: str, reviewers, used_kinds: set[str]
         )
         return 1
     _bind_execution_identity(factory, task_id, reviewer)
+    # A guided shot pins an independent text assessment. The reviewer only
+    # accepts evidence rebuilt from that database pin, so the advisory call
+    # goes through the same tracked adapter the production path uses instead
+    # of handing the raw pin to the model client.
+    call_reviewer = reviewer
+    if kind == "VLM" and context["request"].style_input_assessment_id:
+        from shine.comfyops.model_calls import TrackedProvider
+
+        call_reviewer = TrackedProvider(reviewer, factory, context["project_id"], reviewer_kind="VLM")
 
     # The queue task itself is the durable call ledger for this advisory
     # review: it is already bound to the artifact, shot revision and provider
@@ -678,8 +687,8 @@ def _review_one(factory, settings, task_id: str, reviewers, used_kinds: set[str]
             job_id=context["job_id"],
             project_id=context["project_id"],
             remote_consent=context["remote_consent"],
-            semantic_reviewer=reviewer if kind == "VLM" else None,
-            asr_reviewer=reviewer if kind == "ASR" else None,
+            semantic_reviewer=call_reviewer if kind == "VLM" else None,
+            asr_reviewer=call_reviewer if kind == "ASR" else None,
             review_revision=None,
             terminology_hint=context["terminology"],
         )

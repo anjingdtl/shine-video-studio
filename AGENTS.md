@@ -106,3 +106,42 @@ Never bundle official full-text guides without redistribution permission. Run
   instance/configuration steps. Stop on failure or changed page/project; never blind-retry.
 - Normal installers do not generate or request an operator password. Preserve existing secrets
   and explicit legacy provisioning callers without rewriting their files.
+
+## 2026-11-03 late supplement (real-production recovery)
+
+- **Do not hold the SQLite writer transaction across an external ComfyUI submit.** The claim,
+  preproduction and activation guards commit first; the upload/`/prompt` call runs outside the
+  transaction. A managed heartbeat or series heartbeat that sees `database is locked/busy`
+  defers to its next beat instead of declaring the lease lost.
+- A series whose shots all passed but whose ownership proof was lost is reconciled, not left
+  blocked. If the GPU lease is still `RECONCILE_REQUIRED/ACTIVE`, only a renderer proven by
+  PID/birth/named Job Object may be stopped, and the lease release plus `COMPLETED/RELEASED`
+  commit in one transaction. If the lease is already released, the series outcome is merged
+  without touching any renderer. Never resubmit a shot for this path.
+- An activation journal with `last_confirmed_stage=CONFIRMED` may reconcile a completed
+  external prompt only while the recorded renderer is still the same live, owned process.
+  Otherwise it remains a blocker. Operator abandon must also check startup/activation
+  renderer ownership before releasing the lease.
+- Guided advisory reviews must use `TrackedProvider` (which rebuilds `VerifiedInputEvidence`
+  from the database pin). Never pass a raw `{artifact_id, sha256}` pin to the reviewer;
+  a guided review that fails for this reason is an infrastructure defect, not a model verdict.
+- `client_review_identity` pins `worker.py`, `preproduction.py`, the handoff modules and the
+  quality client. Any change to those files invalidates an existing VLM revision by design:
+  rerun real positive/negative calibration calls, publish a new VLM revision, deprecate the
+  old one, analyze a new preproduction plan revision and re-freeze it. Old evidence is never
+  reused.
+- The formal project's frozen look was corrected after the first real render exposed a
+  daylight-versus-rainy-night conflict: Style V2 `7c3ed722-7bd0-4a52-96e1-2e2c4c0a7624`,
+  shot revision 4, frozen plan `3187c16d-3b80-4ea8-a3d7-f6047d2873eb`. Style V1 and the
+  earlier renders remain as history; they are not rewritten.
+- Current pending blocker (see `docs/PROGRESS_20261103_CONTINUATION.md`): shot `f0173fbe…`
+  has a persisted artifact `469ee15a…` but the worker process was lost before QC. The GPU
+  lease `96971172…` is `ACTIVE` and expired while the renderer is already gone. Recovery must
+  prefer QC from the persisted artifact (artifact SHA + attempt output SHA + prompt graph
+  hash) and must not blind-resubmit. The corrected current shot is **not yet accepted**.
+- After worker/quality changes run `backend/tests/test_offline_e2e.py`,
+  `test_comfy_completion_window.py`, `test_production_series.py`, `test_advisory_queue.py`
+  and the full backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`.
+  Build the Windows package only from the final committed tree with
+  `pwsh -File scripts\build_test_package.ps1`.
+

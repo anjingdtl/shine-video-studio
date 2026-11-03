@@ -411,3 +411,87 @@ def test_stranded_job_is_reconciled_against_external_history(api, fake_comfy, fa
 
     events = client.get(f"/api/v1/projects/{project_id}/events?limit=200").json()["items"]
     assert any(event["event_type"] == "COMFY_RECONCILED_HISTORY" for event in events)
+
+
+def test_activation_uncertainty_adopts_completed_work_without_resubmitting(api, fake_comfy, monkeypatch):
+    """An activation journal left after a lost lease must not block a finished prompt.
+
+    The activation was already confirmed and the external prompt completed, so
+    the only unresolved fact is the external outcome. Recovery may read it from
+    history because the recorded renderer is still the same live, owned process.
+    """
+    from sqlalchemy import select
+
+    from shine.comfyops import installer, owned_process
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import ResourceScheduler
+    from shine.models import AppSetting, JobAttempt
+
+    client, factory, settings = api
+    fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
+    project_id = create_project(client)
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"])
+    job = create_comfy_job(client, project_id, shot["id"])
+
+    fake_comfy.prompts["prompt-activation"] = {"prompt": {"1": {"class_type": "H3BaseSampler", "inputs": {}}}}
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        lease = ResourceScheduler().enqueue(db, "h3:" + row.id, 16384, True, 100)
+        db.flush()
+        lease.status = "RECONCILE_REQUIRED"
+        attempt = JobAttempt(
+            job_id=row.id,
+            attempt_no=1,
+            request_fingerprint="f" * 64,
+            status="ACKNOWLEDGED",
+            provider_job_id="prompt-activation",
+            prompt_graph_sha256="c" * 64,
+            lease_owner="stopped-worker",
+            lease_expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(attempt)
+        db.flush()
+        row.status = "NEEDS_REVIEW"
+        row.failure_code = "COMFY_ACTIVATION_RECONCILIATION_REQUIRED"
+        row.provider_job_id = "prompt-activation"
+        row.lease_owner = None
+        row.lease_expires_at = None
+        db.add(AppSetting(key="renderer-activation:" + attempt.id, value={
+            "stage": "RECONCILE_REQUIRED",
+            "last_confirmed_stage": "CONFIRMED",
+            "job_id": row.id,
+            "attempt_id": attempt.id,
+            "lease_id": lease.id,
+            "instance_id": "activation-instance",
+        }))
+        db.add(AppSetting(key="renderer-startup:activation-instance", value={
+            "stage": "RUNNING",
+            "instance_id": "activation-instance",
+            "lease_id": lease.id,
+            "port": 0,
+            "process": {"pid": 424242, "birth": "1", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+    monkeypatch.setattr(installer, "process_identity", lambda pid: "1")
+    monkeypatch.setattr(owned_process, "inspect_named_group", lambda *args, **kwargs: True)
+
+    assert (
+        recover_expired_jobs(
+            factory,
+            "reconciler",
+            settings=worker_settings(settings),
+            comfy_client=ComfyUIClient(fake_comfy.base_url, timeout_s=2),
+        )
+        == 1
+    )
+    assert fake_comfy.prompt_count == 0
+    result = client.get(f"/api/v1/jobs/{job['id']}").json()
+    assert result["artifact_id"], result
+    artifacts = client.get(f"/api/v1/jobs/{job['id']}/artifacts").json()
+    assert len(artifacts) == 1
+    with factory() as db:
+        attempt = db.scalar(select(JobAttempt).where(JobAttempt.job_id == job["id"]))
+        assert attempt.reconciliation_state in {"history_found", "collected"}
+        # Job recovery adopts the artifact but never releases the physical
+        # renderer; that remains the reconciliation of its owning series.
+        assert db.get(ResourceLease, lease.id).status == "RECONCILE_REQUIRED"

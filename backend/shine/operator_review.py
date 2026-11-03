@@ -240,7 +240,21 @@ def abandon_unreconciled_job(db, settings, job_id, actor, evidence: str = ""):
     )
     journal = db.get(AppSetting, "handoff:" + attempt.id) if attempt else None
     value = dict(journal.value) if journal is not None and isinstance(journal.value, dict) else {}
-    process = value.get("process") or {}
+    # A job may have been blocked by an interrupted activation instead of a
+    # handoff. Its renderer is recorded in the startup journal, and abandoning
+    # it without checking that process would release a live GPU lease.
+    activation = db.get(AppSetting, "renderer-activation:" + attempt.id) if attempt else None
+    activation_value = (
+        dict(activation.value) if activation is not None and isinstance(activation.value, dict) else {}
+    )
+    startup = (
+        db.get(AppSetting, "renderer-startup:" + str(activation_value.get("instance_id") or ""))
+        if activation_value.get("instance_id") else None
+    )
+    startup_value = (
+        dict(startup.value) if startup is not None and isinstance(startup.value, dict) else {}
+    )
+    process = value.get("process") or startup_value.get("process") or {}
     pid, birth = process.get("pid"), process.get("birth")
     if type(pid) is int and isinstance(birth, str) and birth:
         try:
@@ -249,6 +263,8 @@ def abandon_unreconciled_job(db, settings, job_id, actor, evidence: str = ""):
         except (OSError, ValueError):
             pass
     port = urlsplit(value.get("instance_url") or "").port
+    if not port and startup_value.get("port"):
+        port = int(startup_value["port"])
     if port and windows_port_listeners(port):
         raise HTTPException(409, "OWNED_RENDERER_STILL_RUNNING")
     artifact_id = job.artifact_id
@@ -259,6 +275,11 @@ def abandon_unreconciled_job(db, settings, job_id, actor, evidence: str = ""):
                          "last_confirmed_stage": "RECONCILE_REQUIRED",
                          "reason": "USER_ABANDONED_UNRECONCILED",
                          "reconciled_at": utcnow().isoformat()}
+    if activation is not None and activation_value.get("stage") == "RECONCILE_REQUIRED":
+        activation.value = {**activation_value, "stage": "RECONCILE_COMPLETE",
+                            "last_confirmed_stage": "RECONCILE_REQUIRED",
+                            "reason": "USER_ABANDONED_UNRECONCILED",
+                            "reconciled_at": utcnow().isoformat()}
     transition(job, "FAILED")
     job.failure_code = "USER_ABANDONED_UNRECONCILED"
     job.lease_owner = None

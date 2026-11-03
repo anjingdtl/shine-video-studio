@@ -221,8 +221,12 @@ def test_v13_full_preproduction_to_fake_h3_advisory_review_and_archive(prep, fak
         pytest.skip("V1.3 fake-H3 E2E requires FFprobe and FFmpeg for deterministic technical QC")
     settings = replace(settings, offline_simulation=True, ffprobe_path=ffprobe, ffmpeg_path=ffmpeg)
     client.app.state.settings = settings
+    wrong_graph = {
+        **E2E_GRAPH,
+        "1": {**E2E_GRAPH["1"], "inputs": {**E2E_GRAPH["1"]["inputs"], "seed": 7}},
+    }
     wrong_profile = register_workflow_profile(
-        client, name="unfrozen-ref2va", mode="Ref2VA", graph=E2E_GRAPH, parameter_map=E2E_PARAM_MAP
+        client, name="unfrozen-ref2va", mode="Ref2VA", graph=wrong_graph, parameter_map=E2E_PARAM_MAP
     )
     rejected = post(
         client,

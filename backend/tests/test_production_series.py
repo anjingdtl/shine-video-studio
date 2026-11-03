@@ -886,6 +886,58 @@ def test_an_interrupted_release_is_not_left_in_finalizing(api):
         assert row.finalization_state == "RECONCILE_REQUIRED"
 
 
+def test_a_passed_shot_stranded_in_review_finishes_and_releases_its_renderer(api, monkeypatch):
+    """A series whose only shot passed must not stay blocked behind its lease.
+
+    The worker lost its claim mid-handoff, but the shot was collected and
+    passed. The recovery stops the recorded renderer only after proving its
+    ownership, releases the lease and completes the series in one transaction.
+    """
+    from shine.comfyops import production_series as ps
+    from shine.models import AppSetting
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-owner")
+    assert series is not None
+
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        item = db.scalar(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == row.id)
+            .order_by(ProductionSeriesItem.position)
+        )
+        job = db.get(Job, item.job_id)
+        job.status = "PASSED"
+        lease = ResourceLease(
+            owner="h3:" + job.id, budget_mb=16384, exclusive=True, priority=100,
+            status="RECONCILE_REQUIRED", expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(lease)
+        db.flush()
+        row.status = "NEEDS_REVIEW"
+        row.failure_code = "SERIES_EXECUTION_FAILED:HTTPException"
+        row.lease_id = lease.id
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.add(AppSetting(key="renderer-startup:stranded-instance", value={
+            "stage": "RUNNING", "instance_id": "stranded-instance", "lease_id": lease.id, "port": 0,
+            "process": {"pid": 999999, "birth": "1", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+        lease_id = lease.id
+    monkeypatch.setattr(ps, "_stop_owned_renderer", lambda record, timeout_s=20.0: (True, "STOPPED"))
+    assert ps.reconcile_series(factory, "worker-next") == 1
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        assert row.status == "COMPLETED"
+        assert row.finalization_state == "RELEASED"
+        assert row.lease_id is None
+        assert row.failure_code is None
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
 def test_a_cancelled_series_keeps_its_outcome(api):
     """A late worker transition must not rewrite a cancellation."""
     from shine.comfyops import production_series as ps

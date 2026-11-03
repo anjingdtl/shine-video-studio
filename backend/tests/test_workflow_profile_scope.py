@@ -224,6 +224,40 @@ def test_concurrent_global_creates_are_database_unique(tmp_path, monkeypatch):
         app.state.engine.dispose()
 
 
+def test_a_project_local_profile_matches_a_published_revision_by_exact_graph_identity():
+    """A new project may use a frozen published revision with its own same-graph profile."""
+    from shine.comfyops.models import WorkflowRevision
+    from shine.comfyops.preproduction import _profile_matches_frozen_revision
+
+    graph = {"1": {"class_type": "H3BaseSampler", "inputs": {"prompt": ""}}}
+    param_map = {"positive_prompt": "1.inputs.prompt", "duration": "1.inputs.duration"}
+    transfers = {"image": {"upload_path": "/upload/image", "field_name": "image"}}
+    revision = WorkflowRevision(
+        id="published-revision",
+        payload={"category": "H3_REF2VA", "graph": graph, "parameter_map": param_map,
+                 "media_transfers": transfers},
+        sha256=graph_hash({"graph": graph}), status="PRODUCTION_APPROVED",
+    )
+    fields = dict(mode="Ref2VA", graph=graph, graph_sha256=graph_hash(graph),
+                  parameter_map=param_map, media_transfers=transfers, required_nodes=[])
+    profile_b = WorkflowProfile(project_id="project-b", name="b", **fields)
+    assert _profile_matches_frozen_revision(revision, profile_b, "project-b")
+    assert not _profile_matches_frozen_revision(revision, profile_b, "project-c")
+    assert not _profile_matches_frozen_revision(
+        revision, WorkflowProfile(project_id="project-b", name="b2", **{
+            **fields, "parameter_map": {**param_map, "duration": "1.inputs.other"},
+        }), "project-b",
+    )
+    assert not _profile_matches_frozen_revision(
+        revision, WorkflowProfile(project_id="project-b", name="b3", **{
+            **fields, "graph_sha256": "0" * 64,
+        }), "project-b",
+    )
+    assert not _profile_matches_frozen_revision(
+        revision, WorkflowProfile(project_id="project-b", name="b4", **{
+            **fields, "mode": "T2VA",
+        }), "project-b",
+    )
 
 
 def test_old_database_copy_upgrade_preserves_profiles_and_job_references(tmp_path, monkeypatch):
