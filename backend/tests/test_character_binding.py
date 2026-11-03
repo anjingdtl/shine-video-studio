@@ -46,6 +46,39 @@ def test_web_chain_pauses_for_confirmation_even_when_master_already_matches(stud
     assert next(a for a in assets if a['id'] == registry['master'])['entity_id'] == 'Lin'
 
 
+def test_agent_phase_is_committed_before_provider_wait_and_finishes_truthfully(studio):
+    from sqlalchemy import select
+
+    from shine.models import AgentTaskRecord
+
+    client, factory, _tmp_path, _settings = studio
+    project_id, registry = _studio(client)
+    responder = _responder(registry)
+    phases = []
+
+    def respond(messages, schema):
+        with factory() as db:
+            task = db.scalar(select(AgentTaskRecord).where(
+                AgentTaskRecord.project_id == project_id,
+                AgentTaskRecord.role_id == 'scriptwriter',
+            ))
+            assert task.status == 'RUNNING'
+            phases.append(task.trace['phase'])
+            assert task.trace['phase_started_at']
+            assert task.trace['network_timeout_s'] > 0
+        return responder(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    response = client.post(f'/api/v1/projects/{project_id}/storyboard/generate', json={
+        'text': BRIEF, 'allow_remote_text': True, 'locked_story_facts': FACTS, 'confirm_characters': True,
+    })
+    assert response.status_code == 201, response.text
+    assert phases == ['WAITING_PROVIDER']
+    row = client.get(f'/api/v1/projects/{project_id}/film-runs').json()[0]
+    assert row['status'] == 'SUCCEEDED'
+    assert row['trace']['phase'] == 'SUCCEEDED'
+
+
 def test_character_confirmation_cannot_skip_a_character_or_reuse_a_master(studio):
     client, _factory, _tmp_path, _settings = studio
     project_id, registry = _studio(client)
@@ -196,6 +229,9 @@ def test_character_binding_apply_names_the_master_and_rekeys_the_breakdown(studi
     assert artifact.kind == "ScriptBreakdown"
     assert artifact.payload_json["beats"][0]["characters"] == ["阿德"]
     assert artifact.payload_json["beats"][0]["dialogue"][0]["speaker_id"] == "阿德"
+    reopened = client.post(f"/api/v1/projects/{project_id}/storyboard/character-binding/proposal",
+                           json={"breakdown_artifact_id": artifact.id}).json()
+    assert reopened["already_confirmed"] is True
     # The earlier breakdown stays readable; the new one supersedes it.
     assert client.app.state.session_factory().get(AgentArtifact, breakdown_id) is not None
 

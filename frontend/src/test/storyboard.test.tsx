@@ -133,6 +133,40 @@ it('本项目没绑定官方规则包时，第 3 步直接给出入口', async (
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('读取已确认人物后先明确补齐文本同意，再直接从导演续跑且不重复写名字', async () => {
+  const submitted: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/documents$/, respond: () => jsonResponse([
+      { id: 'doc-1', filename: 'script.md', text_length: 100 },
+    ]) },
+    { method: 'POST', pattern: /character-binding\/proposal$/, respond: () => jsonResponse({
+      proposal_id: 'saved-proposal', breakdown_artifact_id: 'confirmed-breakdown', already_confirmed: true,
+      characters: [{ script_name: '阿德', suggested_asset_id: 'asset-1', suggested_name: '阿德', candidates: [] }],
+      masters: [{ id: 'asset-1', filename: 'photo.png', entity_id: '阿德', approved: true, locked: true }],
+    }) },
+    { method: 'POST', pattern: /storyboard\/generate$/, respond: (_url, init) => {
+      submitted.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ status: 'PROPOSED', script_source: 'document:doc-1', steps: {} });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+  await user.click(screen.getByRole('button', { name: /读取已完成的编剧人物对照/ }));
+  const continueButton = await screen.findByRole('button', { name: '复用已确认人物，继续导演' });
+  expect(continueButton).toBeDisabled();
+  expect(screen.getByText('导演还未启动：需要同意发送剧本文本')).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: '分镜交接状态' })).toHaveTextContent('人物已确认，导演尚未启动');
+  expect(stub.callsOf('POST', /character-binding\/apply$/)).toHaveLength(0);
+  await user.click(screen.getByRole('checkbox', { name: /同意把当前剧本文本/ }));
+  await user.click(continueButton);
+  await waitFor(() => expect(submitted).toHaveLength(1));
+  expect(submitted[0]).toEqual(expect.objectContaining({
+    document_id: 'doc-1', start_role: 'director', resume_steps: { scriptwriter: 'confirmed-breakdown' },
+  }));
+  expect(stub.callsOf('POST', /character-binding\/apply$/)).toHaveLength(0);
+  stub.restore();
+});
+
 it('切换素材步骤再返回时保留正在运行的分镜请求和最终结果', async () => {
   window.history.replaceState(null, '', '#d/produce');
   let finish!: (value: ReturnType<typeof jsonResponse>) => void;
@@ -195,6 +229,8 @@ it('人物对不上时给出人物对照，并可确认名图后从导演这一�
 
   expect(await screen.findByText(/人物对照（剧本人物/)).toBeInTheDocument();
   expect(screen.getByDisplayValue('阿德')).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: '分镜交接状态' })).toHaveTextContent('导演尚未启动');
+  expect(screen.getByRole('progressbar')).toHaveValue(1);
   expect(submitted).toHaveLength(1);
   expect(submitted[0].confirm_characters).toBe(true);
   expect(stub.callsOf('POST', /character-binding\/proposal$/)[0].body)

@@ -998,6 +998,13 @@ def character_binding_proposal(project_id: str, body: CharacterBindingRequest, d
         name = proposed_names.get(row["script_name"])
         if isinstance(name, str) and name.strip() and len(name.strip()) <= 80:
             row["suggested_name"] = name.strip()
+    confirmed_rows = payload.get("character_bindings") or []
+    approved_masters = asset_context(db, project_id)
+    already_confirmed = bool(confirmed_rows) and {row.get("name") for row in confirmed_rows} == set(characters)
+    already_confirmed = already_confirmed and all(
+        (resolve_character_asset(row.get("name"), approved_masters) or {}).get("id") == row.get("asset_id")
+        for row in confirmed_rows
+    )
     proposal_payload = {
         "breakdown_artifact_id": breakdown.id,
         "breakdown_sha256": breakdown.sha256,
@@ -1026,6 +1033,7 @@ def character_binding_proposal(project_id: str, body: CharacterBindingRequest, d
     return {
         "proposal_id": artifact.id,
         "breakdown_artifact_id": breakdown.id,
+        "already_confirmed": already_confirmed,
         "characters": proposals,
         "unbound_masters": proposal_payload["unbound_masters"],
         "masters": masters,

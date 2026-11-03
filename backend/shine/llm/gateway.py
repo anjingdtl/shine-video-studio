@@ -122,6 +122,7 @@ class LLMGateway:
         system: str,
         user: str,
         schema: dict[str, Any] | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         profile = self.profile_for_role(db, role)
         config = agent_output_config(self.config_for(profile))
@@ -148,18 +149,28 @@ class LLMGateway:
         # provider never silently runs beside a local GPU model.
         if CURRENT_RESOURCE.get() is not None:
             raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
+        if on_progress:
+            on_progress("WAITING_RESOURCE")
         with resource_slot(
             make_session_factory(db.get_bind()),
             "AGENT",
             1,
             release_models=partial(release_text_model, config),
             wait_seconds=0 if profile.kind == "mock" else 300,
+            on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
         ):
-            return provider.complete(
+            if on_progress:
+                on_progress("WAITING_PROVIDER")
+            response = provider.complete(
                 [ChatMessage("system", system), ChatMessage("user", user)],
                 schema=schema,
                 json_mode=True,
             )
+            if on_progress:
+                on_progress("RELEASING_PROVIDER")
+        if on_progress:
+            on_progress("VALIDATING_RESULT")
+        return response
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:
         provider = self.provider_for(profile, api_key_override=api_key)

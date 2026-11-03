@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import { API, ApiError, api, json } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
-import { AgentProgress, type AgentRunProgress } from './AgentProgress';
+import { AgentProgress, agentPhaseLabels, type AgentRunProgress } from './AgentProgress';
 
 type DocumentRow = {
   id: string; filename: string; sha256: string; source_format: string;
@@ -41,6 +41,7 @@ type BindingRow = {
 };
 type BindingProposal = {
   proposal_id: string; breakdown_artifact_id: string;
+  already_confirmed?: boolean;
   characters: BindingRow[];
   masters: Array<{ id: string; filename: string; entity_id: string | null; tags: string[]; approved: boolean; locked: boolean }>;
 };
@@ -84,6 +85,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const [bindingBusy, setBindingBusy] = useState(false);
   const [rulepackId, setRulepackId] = useState<string | null | undefined>(undefined);
   const [pollError, setPollError] = useState('');
+  const [completedRoles, setCompletedRoles] = useState<string[]>([]);
+  const [lastCheckedAt, setLastCheckedAt] = useState<number>();
+  const [confirmedBreakdownId, setConfirmedBreakdownId] = useState<string | null>(null);
 
   const saveLanguage = useCallback(async (value: string) => {
     setLanguage(value);
@@ -158,7 +162,12 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       return;
     }
     setBusy(true); setResult(null); setProgressRuns([]); setPollError('');
-    setMessage('正在按顺序调用真实 LLM 的五个影视 Agent。模型可能需要几分钟，请稍候。');
+    if (!options?.start_role) setConfirmedBreakdownId(null);
+    const inheritedRoles = Object.keys(options?.resume_steps ?? {}).map(role => role === 'editor_edit_intent' ? 'editor' : role);
+    setCompletedRoles(inheritedRoles);
+    setMessage(options?.start_role
+      ? `已复用 ${inheritedRoles.length} 个已完成步骤，正在从「${stepLabels[options.start_role] ?? options.start_role}」继续。`
+      : '正在启动编剧 Agent。编剧完成后先核对人物对照，确认后才会继续导演。');
     const priorRuns = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) }).catch(() => []);
     const priorRunIds = new Set(priorRuns.map(run => run.id));
     let polling = true;
@@ -170,10 +179,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
         if (!polling) return;
         setPollError('');
+        setLastCheckedAt(Date.now());
         const currentRuns = runs.filter(run => !priorRunIds.has(run.id));
         setProgressRuns(currentRuns);
-        const completed = new Set(currentRuns.filter(run => run.status === 'SUCCEEDED'
-          && run.trace?.tool !== 'continuity_arbitration').map(run => run.role_id)).size;
+        const completed = new Set([...inheritedRoles, ...currentRuns.filter(run => run.status === 'SUCCEEDED'
+          && run.trace?.tool !== 'continuity_arbitration').map(run => run.role_id)]).size;
         const active = currentRuns.find(run => run.status === 'RUNNING');
         if (active) {
           if (active.trace?.tool === 'continuity_arbitration') {
@@ -183,7 +193,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
           const currentIndex = ['scriptwriter', 'director', 'cinematographer', 'continuity_supervisor', 'editor']
             .indexOf(active.role_id);
           const currentLabel = stepLabels[active.role_id] ?? active.role_id;
-          setMessage(`正在调用第 ${Math.max(1, currentIndex + 1)}/5 步：${currentLabel}。已完成 ${completed}/5 步，模型可能需要几分钟。`);
+          const phase = agentPhaseLabels[active.trace?.phase ?? ''] ?? '任务已登记，等待后台更新阶段';
+          setMessage(`第 ${Math.max(1, currentIndex + 1)}/5 步：${currentLabel}。${phase}。已完成 ${completed}/5 步。`);
         } else if (completed > 0) {
           setMessage(`已完成 ${Math.min(5, completed)}/5 步真实模型调用，正在准备下一位 Agent。`);
         }
@@ -201,7 +212,12 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       };
       if (selectedDoc) body.document_id = selectedDoc; else body.text = inlineText;
       const row = await api<StoryboardResult>(`/projects/${projectId}/storyboard/generate`, json('POST', body));
+      // The chain response is authoritative. A late progress GET must not
+      // overwrite its human-confirmation state with "preparing next agent".
+      polling = false;
+      window.clearInterval(progressTimer);
       setResult(row);
+      setCompletedRoles(Object.keys(row.steps).map(role => role === 'editor_edit_intent' ? 'editor' : role));
       const uncertain = (row.rejections ?? []).some(r => r.external_outcome !== 'NOT_SENT' && [
         'LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER',
         'AGENT_REQUEST_RECONCILIATION_REQUIRED', 'AGENT_REQUEST_REPLAY_BLOCKED',
@@ -243,6 +259,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       try {
         const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
         setProgressRuns(runs.filter(run => !priorRunIds.has(run.id)));
+        setLastCheckedAt(Date.now());
       } catch { /* Keep the last observed progress. */ }
       setBusy(false);
     }
@@ -257,6 +274,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       const proposal = await api<BindingProposal>(`/projects/${projectId}/storyboard/character-binding/proposal`,
         json('POST', breakdownId ? { breakdown_artifact_id: breakdownId } : {}));
       setBinding(proposal);
+      setConfirmedBreakdownId(proposal.already_confirmed ? proposal.breakdown_artifact_id : null);
+      setCompletedRoles(current => Array.from(new Set([...current, 'scriptwriter'])));
       setResult(current => current ?? {
         status: 'AWAITING_CHARACTER_CONFIRMATION', script_source: 'saved-breakdown',
         steps: { scriptwriter: { artifact_id: proposal.breakdown_artifact_id, kind: 'ScriptBreakdown', sha256: '' } },
@@ -277,6 +296,13 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   /** Write the confirmed names on the masters and freeze the ones that are not. */
   async function applyBinding() {
     if (!binding) return;
+    if (!consent) { setMessage('人物已保留。请先勾选同意发送剧本文本，才能调用导演。'); return; }
+    if (!selectedDoc && !inlineText.trim()) { setMessage('人物已保留。请先在上方选择对应剧本，才能继续导演。'); return; }
+    if (confirmedBreakdownId) {
+      setBinding(null);
+      await runChain({ start_role: 'director', resume_steps: { scriptwriter: confirmedBreakdownId } });
+      return;
+    }
     const bindings = Object.entries(bindingChoice)
       .filter(([, value]) => value.asset_id && value.name.trim())
       .map(([script_name, value]) => ({ script_name, asset_id: value.asset_id, name: value.name.trim() }));
@@ -303,6 +329,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         }
       }
       const resumeSteps = { scriptwriter: applied.artifact_id };
+      setConfirmedBreakdownId(applied.artifact_id);
       setBinding(null);
       onRefresh();
       setMessage('名字已写入素材，素材已冻结。现在从导演这一步继续，不必重跑编剧。');
@@ -422,7 +449,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
     </button>}
     {pollError && <p role="alert">{pollError}</p>}
     {busy && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
-    {(busy || progressRuns.length > 0) && <AgentProgress runs={progressRuns} />}
+    {(busy || result || progressRuns.length > 0) && <AgentProgress runs={progressRuns}
+      completedRoles={completedRoles} awaitingCharacters={!!binding || result?.status === 'AWAITING_CHARACTER_CONFIRMATION'}
+      charactersConfirmed={!!confirmedBreakdownId}
+      lastCheckedAt={lastCheckedAt}
+      onConfirmCharacters={() => document.getElementById(`character-confirmation-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
 
     {result && <div className="storyboard-result">
       {result.status === 'REJECTED' && <div className="blocked-callout">
@@ -441,7 +472,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
           从「{stepLabels[failedRole] ?? failedRole}」这一步重试
         </button>
       </div>}
-      {binding && <div className="binding-panel">
+      {binding && <div className="binding-panel" id={`character-confirmation-${projectId}`}>
         <div className="section-kicker">人物对照（剧本人物 ↔ 你的素材）</div>
         <p className="binding-intro">系统按名字、标签和上传顺序给出了建议，只作参考。以缩略图为准逐条核对；名字会写进素材本身，五个 Agent 就靠它把剧本人物和你的图对上。</p>
         <div className="binding-list">
@@ -456,6 +487,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
               <div>
                 <span className="binding-label">用这张图</span>
                 <select value={choice?.asset_id ?? ''} onChange={e => {
+                  setConfirmedBreakdownId(null);
                   const asset = binding.masters.find(m => m.id === e.target.value);
                   setBindingChoice(current => ({
                     ...current,
@@ -476,21 +508,21 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
               <div>
                 <span className="binding-label">素材上写这个名字</span>
                 <input value={choice?.name ?? ''} placeholder={row.suggested_name || row.script_name}
-                  onChange={e => setBindingChoice(current => ({
+                  onChange={e => { setConfirmedBreakdownId(null); setBindingChoice(current => ({
                     ...current, [row.script_name]: { ...current[row.script_name], name: e.target.value },
-                  }))} />
+                  })); }} />
               </div>
               <div className="binding-candidates">
                 {row.candidates.slice(0, 4).map(candidate => (
                   <button type="button" key={candidate.asset_id}
                     className={`binding-candidate ${choice?.asset_id === candidate.asset_id ? 'selected' : ''}`}
-                    onClick={() => setBindingChoice(current => ({
+                    onClick={() => { setConfirmedBreakdownId(null); setBindingChoice(current => ({
                       ...current,
                       [row.script_name]: {
                         asset_id: candidate.asset_id,
                         name: current[row.script_name]?.name || row.suggested_name || row.script_name,
                       },
-                    }))}>
+                    })); }}>
                     <img className="asset-thumb small" src={`${API}/assets/${candidate.asset_id}/media`} alt={candidate.filename} />
                     <small>{candidate.reason}</small>
                   </button>
@@ -499,14 +531,27 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             </div>;
           })}
         </div>
+        {!consent && <div className="required-action">
+          <div className="required-text">
+            <b>导演还未启动：需要同意发送剧本文本</b>
+            <label><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
+              同意把当前剧本文本发送给已配置的 LLM 服务商，继续导演（不上传媒体）
+            </label>
+          </div>
+        </div>}
+        {!selectedDoc && !inlineText.trim() && <div className="required-action">
+          <div className="required-text"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
+          <button type="button" className="must-button" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
+        </div>}
         <div className="required-action">
           <CheckCircle2 size={17} className="required-icon" />
           <div className="required-text">
-            <b>必做：确认名图对应</b>
-            <small>确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。</small>
+            <b>{confirmedBreakdownId ? '人物名字已经保存，可以继续导演' : '必做：确认名图对应'}</b>
+            <small>{confirmedBreakdownId ? '将复用已确认的人物，不再重复写入名字，也不重跑编剧。' : '确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。'}</small>
           </div>
-          <button className="must-button" disabled={busy || bindingBusy} onClick={applyBinding}>
-            {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />} 确认并写入名字
+          <button className="must-button" disabled={busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim())} onClick={applyBinding}>
+            {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />}
+            {confirmedBreakdownId ? '复用已确认人物，继续导演' : '确认并写入名字'}
           </button>
         </div>
       </div>}

@@ -2,6 +2,27 @@ import { act, render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { AgentProgress } from '../components/AgentProgress';
 
+it('人物确认是人工交接，明确说明导演未启动并保留已完成编剧', () => {
+  const confirm = vi.fn();
+  render(<AgentProgress runs={[]} completedRoles={['scriptwriter']} awaitingCharacters onConfirmCharacters={confirm} />);
+  expect(screen.getByRole('progressbar')).toHaveValue(1);
+  expect(screen.getByRole('region', { name: '分镜交接状态' })).toHaveTextContent('等待你确认人物，导演尚未启动');
+  expect(screen.getByText(/导演：未启动：等待人物确认/)).toBeInTheDocument();
+  screen.getByRole('button', { name: '去确认人物并继续导演' }).click();
+  expect(confirm).toHaveBeenCalledTimes(1);
+});
+
+it('运行阶段来自后台记录，同时显示模型与最近成功查询时间', () => {
+  render(<AgentProgress runs={[
+    { id: 'phase-1', role_id: 'director', status: 'RUNNING', created_at: '', model_id: 'configured-model',
+      trace: { phase: 'WAITING_RESOURCE', network_timeout_s: 180 } },
+  ]} completedRoles={['scriptwriter']} lastCheckedAt={Date.parse('2026-11-03T15:00:00Z')} />);
+  expect(screen.getByText(/后台当前阶段：等待前一个模型释放资源/)).toBeInTheDocument();
+  expect(screen.getByText(/当前模型：configured-model/)).toBeInTheDocument();
+  expect(screen.getByText(/最近一次成功查询后台：23:00:00/)).toBeInTheDocument();
+  expect(screen.getByRole('progressbar')).toHaveValue(1);
+});
+
 it('即使模型尚无新返回，等待秒数也持续更新', () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-11-03T12:00:00Z'));

@@ -40,6 +40,7 @@ from shine.models import (
     MediaArtifact,
     QualityGate,
     StyleVersion,
+    utcnow,
 )
 from shine.security import is_loopback_url
 from shine.services import add_audit, mark_stale_descendants, require_project, try_transition
@@ -730,6 +731,13 @@ class FilmAgentDispatcher:
                        "only permits consideration at preflight; it never approves a render or asset."
                        if role == "qc_reviewer" else "")
             )
+        def record_progress(phase: str) -> None:
+            # Commit diagnostic state before waiting externally; never hold
+            # SQLite's writer across resource admission or a provider call.
+            task.trace = {**task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
+                          "network_timeout_s": profile.timeout_s}
+            db.commit()
+
         try:
             response = self.gateway.complete_for_role(
                 db,
@@ -737,6 +745,7 @@ class FilmAgentDispatcher:
                 system=system_prompt,
                 user=json.dumps(model_context, ensure_ascii=False),
                 schema=wire_contract.model_json_schema(),
+                on_progress=record_progress,
             )
             task.trace = {**task.trace, "received_result_sha256": digest(response.parsed),
                           "response_latency_ms": response.latency_ms,
@@ -785,6 +794,7 @@ class FilmAgentDispatcher:
             task.status = "SUCCEEDED"
             task.trace = {
                 **task.trace,
+                "phase": "SUCCEEDED",
                 "is_mock": bool(task.trace.get("is_mock") or response.raw_meta.get("is_mock")
                                 or response.raw_meta.get("mock")),
                 "latency_ms": response.latency_ms,
