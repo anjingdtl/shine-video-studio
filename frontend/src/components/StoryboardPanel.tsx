@@ -17,6 +17,11 @@ type StoryboardResult = {
   missing_characters?: string[];
   rejections?: Array<{ role: string; code: string; task_id?: string; external_outcome?: string }>;
   continuity_issues?: string[];
+  editorial_timing_preview?: {
+    editorial_shot_count: number;
+    total_s: number;
+    segments: Array<{ first_shot: number; last_shot: number; duration_s: number }>;
+  } | null;
   prompt_story_facts?: string[];
   prompt_style?: Record<string, string> | null;
   continuity_arbitration?: {
@@ -75,6 +80,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const [busy, setBusy] = useState(false);
   const [requiresReconciliation, setRequiresReconciliation] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState('');
   const [result, setResult] = useState<StoryboardResult | null>(null);
   const [message, setMessage] = useState('');
   const [progressRuns, setProgressRuns] = useState<AgentRunProgress[]>([]);
@@ -345,20 +351,19 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   }
 
   async function apply() {
-    if (!result?.next) return;
+    if (result?.status !== 'PROPOSED' || !result.next) return;
+    setApplyError('');
     setApplying(true);
     try {
       const camera = result.next.apply_camera;
-      const row = await api<{ shot_ids: string[] }>(`/projects/${projectId}/storyboard/apply`, json('POST', {
-        camera_artifact_id: camera.camera_artifact_id,
+      const row = await api<{ shot_ids: string[] }>(`/projects/${projectId}/film-artifacts/${camera.camera_artifact_id}/apply-camera`, json('POST', {
         continuity_artifact_id: camera.continuity_artifact_id,
-        edit_intent_artifact_id: camera.edit_intent_artifact_id,
         ...(camera.arbitration_artifact_id ? { arbitration_artifact_id: camera.arbitration_artifact_id } : {}),
       }),
       );
       setMessage(`分镜已应用：创建 ${row.shot_ids.length} 个镜头。可在生产序列面板排入生产。`);
       onRefresh();
-    } catch (e) { setMessage(String(e)); }
+    } catch (e) { setApplyError(`应用分镜失败：${e instanceof Error ? e.message : String(e)}`); }
     finally { setApplying(false); }
   }
 
@@ -589,6 +594,15 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             </p>
           ))}
         </div>}
+        {!!result.editorial_timing_preview?.segments.length && <div className="module-guide">
+          <div>
+            <b>剪辑时长分组建议 · 保留 {result.editorial_timing_preview.editorial_shot_count} 镜，共 {result.editorial_timing_preview.total_s} 秒</b>
+            <ol>{result.editorial_timing_preview.segments.map(segment => <li key={segment.first_shot}>
+              镜头 {segment.first_shot}–{segment.last_shot} · 生成 {segment.duration_s} 秒
+            </li>)}</ol>
+            <p>按剧本原切点计算的参考分组。导演会结合内容和素材确定正式生成段。</p>
+          </div>
+        </div>}
         <ol className="storyboard-steps">
           {Object.entries(result.steps).map(([name, step]) => (
             <li key={name}>
@@ -598,9 +612,16 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             </li>
           ))}
         </ol>
-        {result.next && <button className="primary-button" disabled={applying} onClick={apply}>
+        {result.status === 'NEEDS_REVIEW' && <div className="required-action">
+          <div className="required-text">
+            <b>分镜有待解决的问题，暂不能应用</b>
+            <small>先处理上方的连续性或时长冲突，再生成可应用的方案。</small>
+          </div>
+        </div>}
+        {result.status === 'PROPOSED' && result.next && <button className="primary-button" disabled={applying} onClick={apply}>
           {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）
         </button>}
+        {applyError && <p role="alert">{applyError}</p>}
       </>}
     </div>}
   </section>;

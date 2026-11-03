@@ -50,6 +50,12 @@ class ShotIntentContinuity(APIModel):
     note: str = Field(default="", max_length=1000)
 
 
+class EditorialCut(APIModel):
+    beat_id: str
+    start_s: float = Field(gt=0, lt=15, allow_inf_nan=False)
+    visual_description: str = Field(min_length=1, max_length=1000)
+
+
 class ShotIntent(APIModel):
     id: str = Field(min_length=1, max_length=80)
     beat_id: str
@@ -61,6 +67,7 @@ class ShotIntent(APIModel):
     )
     asset_ids: list[str] = Field(default_factory=list, max_length=12)
     continuity: ShotIntentContinuity | None = None
+    cuts: list[EditorialCut] = Field(default_factory=list, max_length=19)
 
 
 class DirectorialPlan(APIModel):

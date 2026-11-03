@@ -14,12 +14,32 @@ import json
 import pytest
 from sqlalchemy import select
 
+from shine.agents.editorial_timing import editorial_timing_preview
 from shine.models import AgentArtifact, AgentTaskRecord
 from tests.conftest import PNG, approve_lock, create_project, upload_asset
 from tests.test_film_crew import BRIEF, FACTS, prepare
 
 # A minimal RIFF/WAVE header: the upload verifies the file signature.
 WAV = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVEfmt " + b"\x10\x00\x00\x00"
+
+
+def test_editorial_timing_preview_preserves_eight_editorial_shots_in_three_segments():
+    cuts = [0, 2400, 4300, 6000, 7700, 9400, 11100, 12800, 15000]
+    table = "模式 **Ref2VA**\n| # | 切点 | 时长 |\n|---|---|---|\n"
+    for i, (start, end) in enumerate(zip(cuts[:-1], cuts[1:], strict=True), 1):
+        table += f"| {i} | {start / 1000:.3f} | {(end - start) / 1000:.3f}s |\n"
+    plan = editorial_timing_preview(table)
+    assert plan == {
+        "editorial_shot_count": 8,
+        "cut_starts_s": [cut / 1000 for cut in cuts[:-1]],
+        "total_s": 15.0,
+        "segments": [
+            {"first_shot": 1, "last_shot": 2, "duration_s": 4.3},
+            {"first_shot": 3, "last_shot": 5, "duration_s": 5.1},
+            {"first_shot": 6, "last_shot": 8, "duration_s": 5.6},
+        ],
+    }
+    assert editorial_timing_preview(table.replace("4.300", "4.301")) is None
 
 
 def _responder(registry, *, character_name="Lin"):
@@ -111,6 +131,52 @@ def _storyboard_request(client, project_id, **overrides):
         **overrides,
     }
     return client.post(f"/api/v1/projects/{project_id}/storyboard/generate", json=payload)
+
+
+@pytest.mark.parametrize("duration", [4.3, 4.4])
+def test_director_groups_editorial_beats_and_applies_timed_cut(studio, duration):
+    client, *_ = studio
+    project_id, _, registry = _studio_with_chain(client)
+    original = _responder(registry)
+
+    def respond(messages, schema):
+        value = original(messages, schema)
+        title = schema["title"]
+        if title == "DirectorialPlan":
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            assert context["editorial_timing"]["cut_starts_s"] == [0, 2.4]
+            first, second = value["shots"]
+            first["duration_s"] = duration
+            first["cuts"] = [{"beat_id": "B2", "start_s": 2.4,
+                              "visual_description": second["visual_description"]}]
+            value["shots"] = [first]
+        elif title == "CameraPlan":
+            value["shots"] = value["shots"][:1]
+        elif title == "EditIntentPlan":
+            value["clips"] = value["clips"][:1]
+            value["clips"][0]["planned_duration_s"] = 4.3
+        return value
+
+    client.app.state.mock_llm_responder = respond
+    brief = BRIEF + "\n\n| # | 切点 | 时长 |\n|---|---|---|\n| 1 | 0.000 | 2.40s |\n| 2 | 2.400 | 1.90s |\n"
+    response = _storyboard_request(client, project_id, text=brief)
+    assert response.status_code == 201, response.text
+    if duration != 4.3:
+        assert response.json()["status"] == "REJECTED"
+        assert response.json()["failed_role"] == "director"
+        assert client.get(f"/api/v1/projects/{project_id}/shots").json() == []
+        return
+    assert response.json()["status"] == "PROPOSED", response.text
+    apply = response.json()["next"]["apply_camera"]
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{apply['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": apply["continuity_artifact_id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
+    assert len(shots) == 1
+    assert shots[0]["spec"]["duration_target_s"] == 4.3
+    assert "At 00:02.400, hard cut." in shots[0]["spec"]["story_beat"]
 
 
 CONFLICT_ISSUE = ("SHOT_03_CONTINUITY omits the required FRAME_A_LAST reference asset "

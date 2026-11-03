@@ -11,6 +11,7 @@ from sqlalchemy import literal_column, select
 from sqlalchemy.orm import Session
 
 from shine.agents import character_binding
+from shine.agents.editorial_timing import editorial_timing_preview
 from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
@@ -255,6 +256,19 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         for camera in CameraPlan.model_validate(artifact.payload_json).shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
+            cuts = intent.get("cuts", [])
+            visual = intent["visual_description"]
+            if cuts:
+                characters = list(beat["characters"])
+                lines = list(beat["dialogue"])
+                for cut in cuts:
+                    cut_beat = beats[cut["beat_id"]]
+                    offset = cut["start_s"]
+                    visual += f'\nAt 00:{offset:06.3f}, hard cut. {cut["visual_description"]}'
+                    characters.extend(cut_beat["characters"])
+                    lines.extend({**line, "start_s": round(line["start_s"] + offset, 3),
+                                  "end_s": round(line["end_s"] + offset, 3)} for line in cut_beat["dialogue"])
+                beat = {**beat, "characters": list(dict.fromkeys(characters)), "dialogue": lines}
             # The scriptwriter and the director choose timings independently;
             # at this materialisation boundary the spoken beats are fitted
             # proportionally into the shot the director actually planned, so
@@ -264,7 +278,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             for line in beat["dialogue"]:
                 line = dict(line)
                 start, end = float(line["start_s"]), float(line["end_s"])
-                if end > start:
+                if not cuts and end > start:
                     latest = max(0.5, duration - 0.2)
                     if end > latest:
                         scale = (latest - 0.2) / (end - start) if end - start > 0 else 1.0
@@ -276,7 +290,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 dialogue.append(line)
             beat = {**beat, "dialogue": dialogue}
             spec = ShotSpec(
-                story_beat=intent["visual_description"],
+                story_beat=visual,
                 duration_target_s=intent["duration_s"],
                 style_version_id=project.frozen_style_version_id,
                 required_asset_ids=intent["asset_ids"],
@@ -563,6 +577,9 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
                 if part not in named:
                     named.append(part)
     return [name for name in named if resolve_character_asset(name, character_assets) is None]
+
+
+
 
 
 @router.post("/projects/{project_id}/storyboard/generate", status_code=201)
@@ -888,6 +905,7 @@ def generate_storyboard(
         "rejections": [],
         "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),
+        "editorial_timing_preview": editorial_timing_preview(script_text),
         "prompt_story_facts": breakdown.get("prompt_story_facts", []),
         "prompt_style": breakdown.get("prompt_style"),
         "continuity_arbitration": (

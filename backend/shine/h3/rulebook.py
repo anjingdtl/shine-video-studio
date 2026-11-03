@@ -369,7 +369,13 @@ class H3RulebookRegistry:
         for line in request.shot_spec.dialogue:
             if line.text not in text or line.end_s > request.expected_duration_s:
                 reject("H3_DIALOGUE", "shot_spec.dialogue", "Dialogue changed, missing, or outside duration")
-        times = [int(m) * 60 + float(s) for m, s in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", text)]
+        # Dialogue intervals are validated above. Their timestamps may precede
+        # editorial cuts even though the compiler appends dialogue after visuals.
+        visual_timeline = re.sub(
+            r"At \d{2}:\d{2}\.\d{3}, (?:<[^>]+>|The speaker) \([^)]*\) says: <d>.*?</d>",
+            "", text, flags=re.S,
+        )
+        times = [int(m) * 60 + float(s) for m, s in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", visual_timeline)]
         if times != sorted(set(times)) or any(t <= 0 or t >= request.expected_duration_s for t in times):
             reject("H3_TIMING", "compiled_prompt", "Cut timestamps are not increasing inside the duration")
         return RuleValidationReport(

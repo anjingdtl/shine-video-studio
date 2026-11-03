@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from shine.agents.editorial_timing import editorial_timing_preview
 from shine.agents.film_contracts import (
     CameraPlan,
     ContinuityArbitration,
@@ -335,28 +336,50 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         assets = {a["id"] for a in context["assets"]}
         if len({s.id for s in proposal.shots}) != len(proposal.shots):
             raise ValueError("DUPLICATE_SHOT_INTENT")
+        timing = context.get("editorial_timing")
+        timeline = []
+        elapsed = 0.0
         for shot in proposal.shots:
             # Spoken words belong to the dialogue structure, never to the
             # visual prose: text the model renders as picture description is
             # otherwise read aloud by H3 outside the audio channel.
-            descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", shot.visual_description)
+            visual = " ".join([shot.visual_description, *(cut.visual_description for cut in shot.cuts)])
+            descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", visual)
             if re.search(r"[㐀-鿿]", descriptive):
                 raise ValueError("VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
-            if shot.beat_id not in beats or not set(shot.asset_ids).issubset(assets):
+            beat_ids = [shot.beat_id, *(cut.beat_id for cut in shot.cuts)]
+            starts = [0.0, *(cut.start_s for cut in shot.cuts)]
+            if any(b not in beats for b in beat_ids) or not set(shot.asset_ids).issubset(assets):
                 raise ValueError("UNAPPROVED_ASSET_OR_UNKNOWN_BEAT")
+            if starts != sorted(set(starts)) or starts[-1] >= shot.duration_s:
+                raise ValueError("EDITORIAL_TIMING_CONFLICT")
+            if timing or shot.cuts:
+                ends = starts[1:] + [shot.duration_s]
+                for beat_id, start, end in zip(beat_ids, starts, ends, strict=True):
+                    if any(line["end_s"] > end - start + 1e-6 for line in beats[beat_id].get("dialogue", [])):
+                        raise ValueError("EDITORIAL_TIMING_CONFLICT")
+            timeline.extend((beat_id, round(elapsed + start, 3))
+                            for beat_id, start in zip(beat_ids, starts, strict=True))
+            elapsed += shot.duration_s
             bound_character_assets = [
                 a
                 for a in context["assets"]
                 if a["id"] in shot.asset_ids and a["kind"] == "image" and a["role"] == "character"
             ]
-            required_characters = list(beats[shot.beat_id]["characters"])
+            required_characters = [name for beat_id in beat_ids for name in beats[beat_id]["characters"]]
             required_characters.extend(
                 line["speaker_id"]
-                for line in beats[shot.beat_id].get("dialogue", [])
+                for beat_id in beat_ids
+                for line in beats[beat_id].get("dialogue", [])
                 if line.get("speaker_id") and line["speaker_id"] not in required_characters
             )
             if any(resolve_character_asset(name, bound_character_assets) is None for name in required_characters):
                 raise ValueError("CHARACTER_MASTER_BINDING_REQUIRED")
+        if timing and (round(elapsed, 3) != timing["total_s"]
+                       or timeline != list(zip(beats, timing["cut_starts_s"], strict=False))
+                       or len(timeline) != timing["editorial_shot_count"]
+                       or len(beats) != len(timeline)):
+            raise ValueError("EDITORIAL_TIMING_CONFLICT")
     elif isinstance(proposal, CameraPlan):
         plan = next(a for a in inputs if a.kind == "DirectorialPlan")
         expected = {s["id"] for s in plan.payload_json["shots"]}
@@ -488,6 +511,10 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
+            timing = editorial_timing_preview(body.brief)
+            if timing:
+                context["editorial_timing"] = timing
         if role == "qc_reviewer":
             context["shot_spec"] = body.shot_spec.model_dump(mode="json")
         if role == "continuity_supervisor":
@@ -680,7 +707,19 @@ class FilmAgentDispatcher:
                        "reset the timeline to zero for each beat and never use cumulative act, scene or episode time. "
                        "Keep each line within a plausible 4-to-15-second beat timeline. "
                        "Use only listed asset IDs. No video model substitution. You have no execution tools.")
-                    + (" The visual_description of every shot is English prose only: spoken lines live "
+                    + (" If editorial_timing exists, return exactly one beat per editorial shot, in table order. "
+                       "Fit verbatim dialogue within that editorial shot's interval, measured from its local zero."
+                       if role == "scriptwriter" else "")
+                    + (" Plan for the registered multi-reference H3 Ref2VA production path. "
+                       "Each shots entry is one 4–15 second render segment, not necessarily one editorial shot. "
+                       "Group consecutive beats by action, pacing and compatible approved references. "
+                       "Use beat_id and visual_description for the opening shot and cuts for later beats, "
+                       "with each cut's start_s measured from the segment start. "
+                       "When editorial_timing is present, preserve every original cut and the total duration. "
+                       "Its suggested groups may be adjusted only at original cut boundaries. "
+                       "Never extend every editorial shot to four seconds. "
+                       "Use the union of required approved references for all beats in a segment. "
+                       "The visual_description of every shot is English prose only: spoken lines live "
                        "exclusively in the beats' dialogue structure and must never appear inside "
                        "visual_description, quoted or not. Every shot of a sequence must reference the "
                        "approved audio (voice) master in asset_ids so the timbre stays continuous, "
