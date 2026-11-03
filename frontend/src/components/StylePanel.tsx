@@ -102,8 +102,11 @@ export default function StylePanel({
     : STYLE_PROPOSAL_ROLES.map((role) => aiRoles?.find((row) => row.role === role)).find((row) => row && row.profile_id) ?? null;
   const aiConfigured = Boolean(aiRole);
   const allSevenFilled = styleFields.every(([field]) => style[field].trim().length > 0);
-  const canFreeze = allSevenFilled && styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''));
-  const canSave = allSevenFilled && canFreeze;
+  // Freezing is a separate confirmation of the current snapshot.  It must stay
+  // available after the same content was saved as a draft; only saving needs a
+  // draft change to be meaningful.
+  const canFreeze = allSevenFilled;
+  const canSave = allSevenFilled && styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''));
   const diffRows = aiProposal
     ? styleFields.map(([field, label]) => ({ field, label, current: style[field], suggested: aiProposal.suggestion[field] ?? '' }))
     : [];

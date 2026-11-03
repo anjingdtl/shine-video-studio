@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
 import type { Job, JobAttempt, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
 import {
-  acceptanceLabels, checkStatusLabels, coverageLabels, failureLabels, gateLabels,
-  gateStatusLabels, label, modeLabels, providerLabels, qcResultLabels,
+  acceptanceLabels, advisoryReviewKindLabels, advisoryReviewLabels, checkStatusLabels, coverageLabels,
+  failureLabels, gateLabels, gateStatusLabels, label, modeLabels, providerLabels, qcResultLabels,
   reconciliationLabels, repairActionLabels, repairOutcomeLabels, statusLabels,
 } from '../constants';
 import OperatorReview from './OperatorReview';
@@ -171,6 +171,18 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
             ))}
             {selectedJob.quality_verification && <small>证据来源：{selectedJob.quality_verification === 'real' ? '真实生成' : selectedJob.quality_verification === 'mock' ? '演示数据' : selectedJob.quality_verification} · 小模型建议和待人工确认状态会单独留档。</small>}
             {selectedJob.request.self_review_scope === 'basic' && <small>本次只自动查了分辨率、人物和对白三项，不等于人工验收。</small>}
+            {selectedJob.advisory_reviews && selectedJob.advisory_reviews.length > 0 && <>
+              <span className="detail-label"><Sparkles size={11} /> 建议式审片（独立队列，不占出片时间）</span>
+              {selectedJob.advisory_reviews.map((review) => (
+                <div className="qc-row" key={review.id}>
+                  <div>
+                    <b>{label(advisoryReviewKindLabels, review.kind ?? '')}</b>
+                    <span>{label(advisoryReviewLabels, review.status)}</span>
+                  </div>
+                  <small>{review.model_id ?? '未知模型'}{review.artifact_sha256 ? ` · 视频 ${review.artifact_sha256.slice(0, 12)}…` : ''}{review.error_code ? ` · ${label(failureLabels, review.error_code)}` : ''}</small>
+                </div>
+              ))}
+            </>}
             <span className="detail-label"><Activity size={11} /> 质检明细</span>
             {detailBusy && <div className="empty-inline">读取中…</div>}
             {!detailBusy && qc.length === 0 && <div className="empty-inline">还没有质检报告。</div>}

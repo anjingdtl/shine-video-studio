@@ -45,6 +45,7 @@ from shine.models import (
     WorkerInstance,
     utcnow,
 )
+from shine.quality.advisory_queue import advisory_reviews_for_job
 from shine.quality.gates import DEFAULT_PRIORITY_THRESHOLDS, HARD_RULES, QualityPolicy
 from shine.quality.repair import RepairEngine
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
@@ -279,6 +280,7 @@ def _job_data(db: Session, job: Job, *, include_prompt: bool = False) -> dict[st
         "artifact_id": job.artifact_id,
         "last_qc_result": job.last_qc_result,
         "last_repair_plan": job.last_repair_plan,
+        "advisory_reviews": advisory_reviews_for_job(db, job.project_id, job.id),
         "request": {
             "idempotency_key": job.request.get("idempotency_key"),
             "shot_id": job.request.get("shot_id"),

@@ -34,6 +34,16 @@ export const acceptanceLabels: Record<string, string> = {
   rejected: '未通过', mock: '仅演示验证', not_run: '未执行',
 };
 
+export const advisoryReviewLabels: Record<string, string> = {
+  QUEUED: '排队等待审片', RUNNING: '审片中', COMPLETED: '审片建议已记录',
+  UNAVAILABLE: '审片不可用（未阻断制作）', SUPERSEDED: '视频或镜头已更新，旧建议作废',
+  NEEDS_REVIEW: '审片结果不明，需人工对账',
+};
+
+export const advisoryReviewKindLabels: Record<string, string> = {
+  VLM: '画面与风格建议', ASR: '对白转写建议',
+};
+
 export const failureLabels: Record<string, string> = {
   PENDING_WORKFLOW_MAPPING: '参考素材还没接入工作流（缺参数映射）',
   PENDING_HARD_CONTINUITY_TEST: '硬性连续性测试还没做',

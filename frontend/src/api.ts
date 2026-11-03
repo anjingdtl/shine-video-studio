@@ -168,6 +168,13 @@ export type RepairRecord = {
   id: string; action: string; root_cause: string; changes: string[]; outcome: string; created_at: string;
 };
 
+export type AdvisoryReview = {
+  id: string; kind: string | null; status: string; error_code: string | null;
+  model_id: string | null; artifact_id: string | null; artifact_sha256: string | null;
+  job_id: string | null; started_at: string | null; finished_at: string | null;
+  outcome: string | null; is_mock: boolean | null;
+};
+
 export type Job = {
   id: string; project_id: string; shot_id: string; shot_name: string; shot_revision: number;
   status: string; state_version: number; provider: string; simulated: boolean;
@@ -179,6 +186,7 @@ export type Job = {
   request_revision?: number; quality_verification?: string | null;
   acceptance_status?: 'accepted' | 'pending_review' | 'rejected' | 'mock' | 'not_run';
   acceptance_note?: string | null; acceptance_final_gate?: string | null;
+  advisory_reviews?: AdvisoryReview[];
   request: {
     reference_manifest: Array<{ label: string; asset_id: string; sha256: string; use_as: string }>;
     compiled_prompt_sha256?: string; compiler_version?: string; rule_version?: string;

@@ -2222,6 +2222,20 @@ def _finalize_comfy_attempt(
 
     if request.self_review_scope == "basic" and not request.shot_spec.characters:
         semantic_reviewer = None
+    # Real local reviewers are suggestions for the human who follows.  They
+    # are queued as durable, independent work items after this shot's bytes and
+    # technical checks are final, so they never hold the renderer or the GPU
+    # lease and never gate the next shot.  Explicit mock reviewers remain on
+    # the offline/simulation path, where they are cheap and are the only QC.
+    mock_only = (
+        (semantic_reviewer is None or getattr(semantic_reviewer, "is_mock", False))
+        and (asr_reviewer is None or getattr(asr_reviewer, "is_mock", False))
+        and bool(semantic_reviewer or asr_reviewer)
+    )
+    decoupled_reviews = bool(policy.advisory_model_reviews) and not mock_only
+    if decoupled_reviews:
+        semantic_reviewer = None
+        asr_reviewer = None
     review_scope = None
     if semantic_reviewer or asr_reviewer or managed_handoff is not None:
         from shine.comfyops.model_calls import TrackedProvider
@@ -2486,6 +2500,11 @@ def _finalize_comfy_attempt(
             },
             project_id=job.project_id,
         )
+        technical_gate = next((gate for gate in gates if gate.gate_name == "technical"), None)
+        if decoupled_reviews and technical_gate is not None and technical_gate.status == STATUS_PASSED:
+            from shine.quality.advisory_queue import enqueue_advisory_reviews
+
+            enqueue_advisory_reviews(db, job, attempt, artifact, policy)
     heartbeat(session_factory, worker_id, phase="idle", processed_delta=1)
     return job_id
 
@@ -3658,6 +3677,10 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     from shine.quality.runtime import configured_reviewers
 
     semantic, asr = configured_reviewers(session_factory, settings)
+    if settings.render_provider == "comfyui" and not settings.offline_simulation:
+        from shine.quality.advisory_queue import reconcile_review_leases
+
+        reconcile_review_leases(session_factory, settings)
     recovered = recover_expired_jobs(
         session_factory,
         worker_id,
@@ -3685,6 +3708,20 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
     if series is not None:
         return f"series:{series}"
+    if settings.render_provider == "comfyui" and not settings.offline_simulation:
+        from shine.quality.advisory_queue import run_pending_advisory_reviews
+
+        # Advisory reviews run only here: after every real H3 series and queued
+        # shot is done, so they never hold the renderer or the GPU lease.
+        reviewed = run_pending_advisory_reviews(
+            session_factory,
+            worker_id,
+            settings=settings,
+            semantic_reviewer=semantic,
+            asr_reviewer=asr,
+        )
+        if reviewed:
+            return f"advisory:{reviewed}"
     return run_one(
         session_factory,
         provider,
