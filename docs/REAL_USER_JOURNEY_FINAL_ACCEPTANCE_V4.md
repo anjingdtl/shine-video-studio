@@ -3,7 +3,7 @@
 - 验收日期：2026-11-03（Asia/Shanghai）
 - 上轮远端基线：`cc0d6ec119e2352d6822489a4c2f34b9ed3a7cad`
 - 本轮被测代码提交：`17c94daaf9b6a65f845fd37e78a0da69bd07cb82`（`17c94da`）；补充验收代码提交 `784cf36`
-- 晚间收尾轮代码提交：见 `docs/PROGRESS_20261103_CONTINUATION.md`（收尾轮提交号）
+- 晚间收尾轮代码提交：`cfbae97792ea39f763ed60831d27318f6db0f181`（`cfbae97`），已推送到远端 `main`
 - 报告提交：包含本文件的文档提交；推送后远端 `main` 与该提交一致
 - 本地证据目录：`.local-acceptance/real-user-journey-final-v4/`（被 Git 忽略，不进入发布包）
 - 主验收数据目录：`.local-acceptance/real-user-journey-final/data/`

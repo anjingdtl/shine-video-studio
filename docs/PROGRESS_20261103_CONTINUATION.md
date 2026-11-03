@@ -1,7 +1,8 @@
 # 《Shine 视频工作台》V4 收尾进度（2026-11-03 晚间补充轮 + 收尾轮）
 
-- 记录时间：2026-11-03 18:05（Asia/Shanghai）；**收尾轮更新：2026-11-03 20:50**
-- 已推送基线：代码 `784cf36`，V4 报告 `e7b3b99`，后续 `4d8123a`（远端 `main` 一致）
+- 记录时间：2026-11-03 18:05（Asia/Shanghai）；**收尾轮更新：2026-11-03 21:30**
+- 已推送基线：代码 `784cf36`，V4 报告 `e7b3b99`，后续 `4d8123a`；**收尾轮提交 `cfbae97792ea39f763ed60831d27318f6db0f181`（`cfbae97`）已推送到远端 `main`**
+- 收尾轮 Windows 测试包：`ShineVideoStudio-20261103-cfbae97-win64.zip`，2,188,854 B，SHA-256 `5b8f5ac55060d71e33137f629f610b779277c78d8928986675f1b28f4393d64d`（从 `cfbae97` 的干净树构建，`-Verify` 复核 458 个文件）
 - 本轮改动：见本文末“收尾轮代码与文档变更”
 - 主验收数据：`.local-acceptance/real-user-journey-final/data/`
 - 证据目录：`.local-acceptance/real-user-journey-final/` 与 `.local-acceptance/real-user-journey-final-v4/evidence/`
@@ -166,8 +167,8 @@ R1–R4 触及 `worker.py` / `preproduction.py` / `handoff_startup.py`，按规�
 2. ~~通过本地操作员分项审片决定 `manual_verified` 或真实 `failed`。~~ → **已达成**（`manual_verified`，逐项证据）。
 3. ~~浏览器复验正式系列、成片中心播放、真实 MP4 下载（文件 SHA 与 ffprobe）。~~ → **已达成**（R7）。
 4. ~~更新 V4 最终报告并重新跑完整后端套件、Ruff、Alembic、前端构建/Vitest。~~ → **已达成**（见 `docs/TEST_REPORT_20261103.md`）。
-5. **仍待**：从最终提交构建 Windows 测试包（`pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`，必须干净树）并校验 `BUILD_INFO.json`、`PACKAGE_MANIFEST.json` 与入口脚本。
-6. **明确未做（如实保留）**：带人声的真实 H3 重渲染，以验证对白语言设置在模型侧的实际口音；正式作品版权、审美与正式发行审批。
+5. ~~从最终提交构建 Windows 测试包（`pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`，必须干净树）并校验 `BUILD_INFO.json`、`PACKAGE_MANIFEST.json` 与入口脚本。~~ → **已达成**：`ShineVideoStudio-20261103-cfbae97-win64.zip`，SHA-256 `5b8f5ac5…`，`BUILD_INFO.json` 记录 `source_tree=CLEAN_TREE`，`-Verify` 复核 458 个文件。
+6. **明确未做（如实保留）**：带人声的真实 H3 重渲染，以验证对白语言设置在模型侧的实际口音；正式作品版权、审美与正式发行审批；Windows 之外的操作系统验证；上游 CI（仍为 `WAIVED_EXTERNAL_BILLING`）。
 
 ## 证据索引
 
