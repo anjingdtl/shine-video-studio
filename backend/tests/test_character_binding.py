@@ -18,6 +18,52 @@ from tests.conftest import PNG, approve_lock, upload_asset
 from tests.test_film_crew import BRIEF, FACTS, prepare
 
 
+def test_web_chain_pauses_for_confirmation_even_when_master_already_matches(studio):
+    client, _factory, _tmp_path, _settings = studio
+    project_id, registry = _studio(client)
+    calls = []
+    responder = _responder(registry)
+
+    def respond(messages, schema):
+        calls.append(schema['title'])
+        value = responder(messages, schema)
+        value['character_names'] = {'Lin': '林澈'}
+        return value
+
+    client.app.state.mock_llm_responder = respond
+    result = client.post(f'/api/v1/projects/{project_id}/storyboard/generate', json={
+        'text': BRIEF, 'allow_remote_text': True, 'locked_story_facts': FACTS,
+        'confirm_characters': True,
+    }).json()
+    assert result['status'] == 'AWAITING_CHARACTER_CONFIRMATION'
+    assert calls == ['ScriptBreakdown']
+    proposal = client.post(f'/api/v1/projects/{project_id}/storyboard/character-binding/proposal', json={
+        'breakdown_artifact_id': result['steps']['scriptwriter']['artifact_id'],
+    }).json()
+    assert proposal['characters'][0]['suggested_name'] == '林澈'
+    assert proposal['characters'][0]['suggested_asset_id'] == registry['master']
+    assets = client.get(f'/api/v1/projects/{project_id}/assets').json()
+    assert next(a for a in assets if a['id'] == registry['master'])['entity_id'] == 'Lin'
+
+
+def test_character_confirmation_cannot_skip_a_character_or_reuse_a_master(studio):
+    client, _factory, _tmp_path, _settings = studio
+    project_id, registry = _studio(client)
+    client.app.state.mock_llm_responder = _responder(registry, characters=('S1', 'S2'))
+    result = client.post(f'/api/v1/projects/{project_id}/storyboard/generate', json={
+        'text': BRIEF, 'allow_remote_text': True, 'locked_story_facts': FACTS,
+        'confirm_characters': True,
+    }).json()
+    binding = {'script_name': 'S1', 'asset_id': registry['master'], 'name': '林澈'}
+    url = f'/api/v1/projects/{project_id}/storyboard/character-binding/apply'
+    body = {'breakdown_artifact_id': result['steps']['scriptwriter']['artifact_id'], 'bindings': [binding]}
+    assert client.post(url, json=body).status_code == 422
+    body['bindings'].append({**binding, 'script_name': 'S2', 'name': '阿德'})
+    response = client.post(url, json=body)
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'CHARACTER_BINDING_MASTER_REUSED'
+
+
 def _responder(registry, *, characters=("Lin",), fail_director=False):
     def respond(messages, schema):
         title = schema.get("title")

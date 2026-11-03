@@ -832,3 +832,6 @@ html[data-theme='dark'] .agent-step-row.done{border-color:#3f4a32;background:#24
 html[data-theme='dark'] .agent-step-row.failed{border-color:#55382f;background:#2e211c;color:#c39a8f}
 html[data-theme='dark'] .agent-step-row.running{border-color:#4a4027;background:#2b2718;color:#c9b98c}
 html[data-theme='dark'] .agent-step-row b{color:#cdcec0}
+
+/* Keep the running crew mounted while another director step is visible. */
+#produce[hidden]{display:none!important}

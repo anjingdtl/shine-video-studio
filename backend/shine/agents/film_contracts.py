@@ -22,6 +22,15 @@ class SceneBeat(APIModel):
 
 class ScriptBreakdown(APIModel):
     schema_version: Literal["1.1"] = "1.1"
+    character_names: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Proposed readable character names keyed by the original script label. "
+            "For S1/S2 or numbered characters, suggest distinct human names in the script language "
+            "for user confirmation. Preserve original labels in beats and dialogue; "
+            "never rename or approve assets."
+        ),
+    )
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
     prompt_story_facts: list[str] = Field(
         default_factory=list, max_length=100,

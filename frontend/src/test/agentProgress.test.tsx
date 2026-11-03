@@ -1,6 +1,20 @@
-import { render, screen } from '@testing-library/react';
-import { expect, it } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
+import { expect, it, vi } from 'vitest';
 import { AgentProgress } from '../components/AgentProgress';
+
+it('即使模型尚无新返回，等待秒数也持续更新', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-03T12:00:00Z'));
+  try {
+    const view = render(<AgentProgress runs={[
+      { id: 'waiting', role_id: 'director', status: 'RUNNING', created_at: '2026-11-03T12:00:00Z' },
+    ]} />);
+    expect(screen.getByText(/已等待 0 秒/)).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(3000));
+    expect(screen.getByText(/已等待 3 秒/)).toBeInTheDocument();
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
 
 it('按完成角色计数，并保留失败返回码和导演裁定状态', () => {
   render(<AgentProgress runs={[

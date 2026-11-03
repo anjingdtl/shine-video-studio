@@ -40,6 +40,26 @@ afterEach(() => {
 });
 
 describe('Web 发起生产序列（P04）', () => {
+  it('0 镜时在开始按钮旁解释分镜尚未应用，并提供返回分镜的入口', async () => {
+    const user = userEvent.setup();
+    const target = document.createElement('section');
+    target.id = 'storyboard';
+    target.scrollIntoView = vi.fn();
+    document.body.appendChild(target);
+    try {
+      render(<ProductionSeriesPanel projectId="proj-1" shots={[]} workflowProfiles={[]}
+        system={readySystem} busy={false} reviewWidth="1280" reviewHeight="720"
+        onStarted={() => undefined} onMessage={() => undefined} onModeAction={() => undefined} />);
+      const blockers = screen.getByRole('status', { name: '开始制作前还需完成' });
+      expect(blockers).toHaveTextContent('还没有应用分镜，制作列表为 0 镜');
+      expect(blockers).toHaveTextContent('还没有选定生成方案');
+      expect(screen.getByRole('button', { name: /开始制作影片/ })).toBeDisabled();
+      await user.click(screen.getByRole('button', { name: '去完成并应用分镜' }));
+      expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(stub.callsOf('POST', /production-series$/)).toHaveLength(0);
+    } finally { target.remove(); }
+  });
+
   it('按项目顺序提交、预选唯一方案、重复点击不重复提交', async () => {
     const user = userEvent.setup();
     render(
@@ -86,7 +106,7 @@ describe('Web 发起生产序列（P04）', () => {
     );
     const start = await screen.findByRole('button', { name: /开始制作影片/ });
     expect(start).toBeDisabled();
-    expect(screen.getByText(/不会生成真实影片/)).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '开始制作前还需完成' })).toHaveTextContent('不会生成真实影片');
     expect(screen.getByRole('button', { name: '启用真实制作' })).toBeInTheDocument();
   });
   it('环境 READY 但用户选择演示，连续制作禁用且不提交真实任务', async () => {

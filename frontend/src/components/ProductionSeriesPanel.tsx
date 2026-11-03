@@ -151,6 +151,16 @@ export default function ProductionSeriesPanel({
   const mode = system?.production_mode?.mode ?? null;
   const canStart = !demoSelected && mode === 'READY' && !activeSeries && selected.length > 0
     && selectedBusy.length === 0 && !!profileId;
+  const blockers = [
+    ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜。请先在上方完成 AI 分镜，并点击「应用为正式分镜（人工确认）」将方案加入制作列表。'] : []),
+    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。请点击「选择全部可制作镜头」，或逐个勾选。'] : []),
+    ...(!profileId ? ['还没有选定生成方案。若下拉框里没有方案，请到制作环境登记并验证 H3 工作流。'] : []),
+    ...(demoSelected ? ['当前选择演示，请先切回真实制作。'] : []),
+    ...(mode !== 'READY' ? [system?.production_mode?.detail ?? '尚未连接本机服务，无法确认制作环境。'] : []),
+    ...(activeSeries ? ['已有未结束的生产序列，请先查看下方进度或处理该序列。'] : []),
+    ...(selectedBusy.length > 0 ? ['选中的部分镜头已经在生产中，请取消这些镜头的勾选。'] : []),
+    ...(busy || working ? ['正在处理当前操作，请等待完成。'] : []),
+  ];
 
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">
@@ -223,6 +233,19 @@ export default function ProductionSeriesPanel({
       <button className="primary-button" disabled={busy || working || !canStart} onClick={start}>
         {working ? <Loader2 size={14} /> : <Play size={14} />} 开始制作影片（{selected.length} 镜）
       </button>
+      {blockers.length > 0 && <div className="required-action" role="status" aria-label="开始制作前还需完成">
+        <AlertTriangle size={17} className="required-icon" />
+        <div className="required-text">
+          <b>现在为什么不能开始制作</b>
+          <ul>{blockers.map(reason => <li key={reason}>{reason}</li>)}</ul>
+          {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
+        </div>
+        {shots.length === 0 && <button type="button" className="must-button"
+          onClick={() => document.getElementById('storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+          去完成并应用分镜
+        </button>}
+        {!profileId && <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查生成方案</button>}
+      </div>}
     </div>
 
     {series.length > 0 && <div className="series-list">

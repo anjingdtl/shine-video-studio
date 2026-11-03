@@ -313,3 +313,8 @@ PyTorch 官方索引 https://download.pytorch.org/whl/cu128/torch/ 明确链接 
 soynlp 0.0.493 的已校验 wheel 自报 License=UNKNOWN。另核验上游 LGPL v3 许可证，精确 revision=264a05c96f0ccd1961f1a669a9df132076a67a15、文件哈希和 47/51 个 Python 文件对照结果见审计 JSON。四个文件未与该历史快照逐字节吻合，未把该快照冒称为发布 wheel 的完整源码身份；发布输入的身份仍是 PyPI wheel 的精确哈希。soxr 是 LGPL-2.1-or-later；这些依赖只在单独安装环境中使用，没有复制 GPL/LGPL 源码到主项目。该记录不构成额外的发行授权结论。
 
 完整 SDK 安装与 pip check/类导入验证已通过，真实权重加载仍 NOT_RUN。下载主机拒绝和 setuptools vendor 元数据误判的原始失败日志均保留于 .local-acceptance/new-machine-goal-20261101/，修复后使用相同已验证输入重验。
+
+
+## 2026-11-03 分镜交接与制作入口修复
+
+在本仓库 `0aa6246` 的既有 Gateway、FilmAgentDispatcher、人物绑定、React 工作台上修复；没有引入或复用第三方源码，没有变更上游节点、工作流或许可证边界。验证与实机限制见 WORKBENCH_HANDOFF_FIX_20261103.md。

@@ -1,8 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import StoryboardPanel from '../components/StoryboardPanel';
-import { StudioStub, jsonResponse } from './studioStub';
+import App from '../App';
+import { StudioStub, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 it('锁定剧情事实可以逐行输入并完整发送给分镜流程', async () => {
   const submit = vi.fn<(body: Record<string, unknown>) => void>();
@@ -132,6 +133,30 @@ it('本项目没绑定官方规则包时，第 3 步直接给出入口', async (
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('切换素材步骤再返回时保留正在运行的分镜请求和最终结果', async () => {
+  window.history.replaceState(null, '', '#d/produce');
+  let finish!: (value: ReturnType<typeof jsonResponse>) => void;
+  const response = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finish = resolve; });
+  const stub = new StudioStub([
+    ...baseRoutes(),
+    { method: 'POST', pattern: /storyboard\/generate$/, respond: () => response },
+  ]);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(await screen.findByLabelText('粘贴完整剧本文本'), '剧本不会因切页丢失');
+  await user.click(screen.getByRole('checkbox', { name: /我同意把该剧本/ }));
+  await user.click(screen.getByRole('button', { name: /生成 AI 分镜方案/ }));
+  await waitFor(() => expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1));
+  await gotoDirectorPage(user, /素材与风格/);
+  await gotoDirectorPage(user, /AI\s*导演制作/);
+  expect(screen.getByLabelText('粘贴完整剧本文本')).toHaveValue('剧本不会因切页丢失');
+  expect(screen.getByRole('button', { name: /生成 AI 分镜方案/ })).toBeDisabled();
+  await act(async () => { finish(jsonResponse({ status: 'PROPOSED', steps: {}, script_source: 'inline' })); });
+  expect(await screen.findByText(/五个 Agent 已完成真实调用/)).toBeInTheDocument();
+  expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1);
+  stub.restore();
+});
+
 it('人物对不上时给出人物对照，并可确认名图后从导演这一步继续', async () => {
   const submitted: Array<Record<string, unknown>> = [];
   const applied: Array<Record<string, unknown>> = [];
@@ -156,7 +181,8 @@ it('人物对不上时给出人物对照，并可确认名图后从导演这一�
     { method: 'POST', pattern: /\/projects\/proj-1\/storyboard\/generate$/, respond: (_url, init) => {
       submitted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return submitted.length === 1
-        ? jsonResponse({ status: 'BLOCKED_MISSING_MASTERS', script_source: 'inline', steps: {}, missing_characters: ['S1'] })
+        ? jsonResponse({ status: 'AWAITING_CHARACTER_CONFIRMATION', script_source: 'inline',
+            steps: { scriptwriter: { artifact_id: 'b-2', kind: 'ScriptBreakdown', sha256: 'a' } } })
         : jsonResponse({ status: 'PROPOSED', script_source: 'inline', steps: {}, next: null });
     } },
   ]);
@@ -169,6 +195,10 @@ it('人物对不上时给出人物对照，并可确认名图后从导演这一�
 
   expect(await screen.findByText(/人物对照（剧本人物/)).toBeInTheDocument();
   expect(screen.getByDisplayValue('阿德')).toBeInTheDocument();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0].confirm_characters).toBe(true);
+  expect(stub.callsOf('POST', /character-binding\/proposal$/)[0].body)
+    .toEqual({ breakdown_artifact_id: 'b-2' });
   await user.click(screen.getByRole('button', { name: /确认并写入名字/ }));
 
   await waitFor(() => expect(applied).toHaveLength(1));

@@ -58,7 +58,7 @@ it('图片素材显示缩略图，待确认素材用高对比按钮提示必做'
   const must = screen.getByRole('button', { name: /确认使用全部待确认素材/ });
   expect(must.className).toContain('must-button');
   expect(screen.getByText(/必做：确认使用 1 项素材/)).toBeInTheDocument();
-  expect(screen.getByText(/分镜要靠这个名字把剧本人物和你的图对上/)).toBeInTheDocument();
+  expect(screen.getByText(/人物对照确认后才调用导演/)).toBeInTheDocument();
 });
 
 it('锁定失败会保留已批准状态；再次确认只补锁定，不重复批准', async () => {

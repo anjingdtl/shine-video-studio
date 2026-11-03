@@ -507,7 +507,7 @@ function App() {
                 />
               </div>}
 
-              {directorPage === 'produce' && <div className="director-page" id="produce">
+              <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
                 <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
                   onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
                 {routes.length === 0 && <div className="blocked-callout">
@@ -597,7 +597,7 @@ function App() {
                   onRecheck={recheckReview}
                   onAbandon={abandonJob}
                 />
-              </div>}
+              </div>
 
               {directorPage === 'deliver' && <div className="director-page" id="deliver">
                 <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active refreshEpoch={dataEpoch} />

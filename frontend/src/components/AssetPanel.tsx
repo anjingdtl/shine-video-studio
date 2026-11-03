@@ -52,8 +52,8 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
       <div className="module-guide">
         <HelpCircle size={13} />
         <div>
-          <p><b>这一步要做什么：</b>上传你有权使用的人物、场景、道具与声音素材，给每张图写上「它是谁」的名字，然后点下面的橙色按钮确认。</p>
-          <p><b>为什么必须做：</b>分镜要靠这个名字把剧本人物和你的图对上；名字对不上，五个 Agent 会在第一步就停下来。</p>
+          <p><b>这一步要做什么：</b>上传你有权使用的素材并选好用途。人物名字可以先不填；在「AI 导演制作」由编剧提出名字和名图对应，再由你二次确认。</p>
+          <p><b>为什么必须做：</b>人物对照确认后才调用导演；自动匹配只是建议，需要你按缩略图核对。</p>
         </div>
       </div>
       <div className="upload-stack">

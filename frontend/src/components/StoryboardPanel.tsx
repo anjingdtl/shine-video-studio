@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
-import { API, api, json } from '../api';
+import { API, ApiError, api, json } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
 import { AgentProgress, type AgentRunProgress } from './AgentProgress';
 
@@ -10,7 +10,7 @@ type DocumentRow = {
 };
 type Step = { artifact_id: string; kind: string; sha256: string };
 type StoryboardResult = {
-  status: 'PROPOSED' | 'NEEDS_REVIEW' | 'BLOCKED_MISSING_MASTERS' | 'REJECTED';
+  status: 'PROPOSED' | 'NEEDS_REVIEW' | 'BLOCKED_MISSING_MASTERS' | 'AWAITING_CHARACTER_CONFIRMATION' | 'REJECTED';
   script_source: string;
   script_sha256?: string;
   steps: Record<string, Step>;
@@ -83,6 +83,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const [bindingChoice, setBindingChoice] = useState<Record<string, { asset_id: string; name: string }>>({});
   const [bindingBusy, setBindingBusy] = useState(false);
   const [rulepackId, setRulepackId] = useState<string | null | undefined>(undefined);
+  const [pollError, setPollError] = useState('');
 
   const saveLanguage = useCallback(async (value: string) => {
     setLanguage(value);
@@ -156,9 +157,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       setMessage('请先从“已导入剧本”中选择一份，或导入/粘贴剧本。');
       return;
     }
-    setBusy(true); setResult(null); setProgressRuns([]);
+    setBusy(true); setResult(null); setProgressRuns([]); setPollError('');
     setMessage('正在按顺序调用真实 LLM 的五个影视 Agent。模型可能需要几分钟，请稍候。');
-    const priorRuns = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`).catch(() => []);
+    const priorRuns = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) }).catch(() => []);
     const priorRunIds = new Set(priorRuns.map(run => run.id));
     let polling = true;
     let pollInFlight = false;
@@ -166,8 +167,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       if (!polling || pollInFlight) return;
       pollInFlight = true;
       try {
-        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`);
+        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
         if (!polling) return;
+        setPollError('');
         const currentRuns = runs.filter(run => !priorRunIds.has(run.id));
         setProgressRuns(currentRuns);
         const completed = new Set(currentRuns.filter(run => run.status === 'SUCCEEDED'
@@ -185,7 +187,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         } else if (completed > 0) {
           setMessage(`已完成 ${Math.min(5, completed)}/5 步真实模型调用，正在准备下一位 Agent。`);
         }
-      } catch { /* The in-flight generation request remains authoritative. */ }
+      } catch { setPollError('暂时无法读取运行进度，生成请求仍在等待返回。请检查本机服务；不要重复提交。'); }
       finally { pollInFlight = false; }
     };
     const progressTimer = window.setInterval(() => { void pollProgress(); }, 2000);
@@ -193,6 +195,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       const body: Record<string, unknown> = {
         allow_remote_text: consent,
         locked_story_facts: facts.split('\n').map(s => s.trim()).filter(Boolean),
+        confirm_characters: !options?.start_role,
         ...(options?.start_role ? { start_role: options.start_role } : {}),
         ...(options?.resume_steps ? { resume_steps: options.resume_steps } : {}),
       };
@@ -208,10 +211,12 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         setMessage('五个 Agent 已完成真实调用，分镜方案已生成。请人工复核后应用。');
       } else if (row.status === 'NEEDS_REVIEW') {
         setMessage('分镜已生成，但场记 Agent 报告了连续性问题，需人工复核。');
+      } else if (row.status === 'AWAITING_CHARACTER_CONFIRMATION') {
+        await openBinding('编剧已完成。请二次确认人物、建议名字与素材，确认后才会调用导演。', row.steps.scriptwriter?.artifact_id);
       } else if (row.status === 'BLOCKED_MISSING_MASTERS') {
         const reason = `这些人物没有匹配到唯一的已确认人物素材：${(row.missing_characters ?? []).join('、')}。`;
         setMessage(`${reason}请检查素材用途和名称；系统不会创建或替换人物素材。`);
-        await openBinding(reason);
+        await openBinding(reason, row.steps.scriptwriter?.artifact_id);
       } else {
         // A refused chain states its reason in the panel status, never in a
         // toast that disappears before it is read.
@@ -226,11 +231,17 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             ? `分镜链未能连接到模型服务：${reason}。系统确认请求未送达，没有产生远端结果；检查网络恢复后可以重新生成。${taskId ? `任务编号：${taskId}。` : ''}`
             : `分镜链被拒绝：${reason}。未创建任何镜头，请先处理提示中的问题。`);
       }
-    } catch (e) { setMessage(String(e)); }
+    } catch (e) {
+      const uncertain = !(e instanceof ApiError) || e.status >= 500;
+      setRequiresReconciliation(uncertain);
+      setMessage(uncertain
+        ? `生成请求未能返回：${String(e)}。后台可能仍在运行，请先核对 Agent 运行记录，不要重复提交。`
+        : `分镜请求被拒绝：${String(e)}。请处理提示后继续。`);
+    }
     finally {
       polling = false; window.clearInterval(progressTimer);
       try {
-        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`);
+        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
         setProgressRuns(runs.filter(run => !priorRunIds.has(run.id)));
       } catch { /* Keep the last observed progress. */ }
       setBusy(false);
@@ -240,12 +251,16 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
   const generate = () => runChain();
 
   /** Ask the server which uploaded master answers each script character. */
-  async function openBinding(reason?: string) {
+  async function openBinding(reason?: string, breakdownId?: string) {
     setBindingBusy(true);
     try {
       const proposal = await api<BindingProposal>(`/projects/${projectId}/storyboard/character-binding/proposal`,
-        json('POST', {}));
+        json('POST', breakdownId ? { breakdown_artifact_id: breakdownId } : {}));
       setBinding(proposal);
+      setResult(current => current ?? {
+        status: 'AWAITING_CHARACTER_CONFIRMATION', script_source: 'saved-breakdown',
+        steps: { scriptwriter: { artifact_id: proposal.breakdown_artifact_id, kind: 'ScriptBreakdown', sha256: '' } },
+      });
       const choices: Record<string, { asset_id: string; name: string }> = {};
       for (const row of proposal.characters) {
         if (row.suggested_asset_id) {
@@ -265,7 +280,10 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
     const bindings = Object.entries(bindingChoice)
       .filter(([, value]) => value.asset_id && value.name.trim())
       .map(([script_name, value]) => ({ script_name, asset_id: value.asset_id, name: value.name.trim() }));
-    if (!bindings.length) { setMessage('还没有确认任何一条人物对照。'); return; }
+    if (bindings.length !== binding.characters.length) { setMessage('请为每一位人物选择素材并填写名字，再一起确认。'); return; }
+    if (new Set(bindings.map(row => row.asset_id)).size !== bindings.length) {
+      setMessage('同一张人物素材不能同时对应不同人物，请逐条核对。'); return;
+    }
     setBindingBusy(true);
     try {
       const applied = await api<{ artifact_id: string; assets: Array<{ id: string; entity_id: string; locked: boolean }> }>(
@@ -286,6 +304,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       }
       const resumeSteps = { scriptwriter: applied.artifact_id };
       setBinding(null);
+      onRefresh();
       setMessage('名字已写入素材，素材已冻结。现在从导演这一步继续，不必重跑编剧。');
       await runChain({ start_role: 'director', resume_steps: resumeSteps });
     } catch (e) { setMessage(String(e)); }
@@ -391,12 +410,18 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
         <b>必做：生成 AI 分镜方案</b>
         <small>需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。</small>
       </div>
-      <button className="must-button" disabled={busy || requiresReconciliation} onClick={generate}>
+      <button className="must-button" disabled={busy || bindingBusy || !!binding || requiresReconciliation} onClick={generate}>
         {busy ? <Loader2 size={14} /> : <Sparkles size={14} />}
         {requiresReconciliation ? '先核实前次请求' : '生成 AI 分镜方案'}
       </button>
     </div>
     {message && <p role="status">{message}</p>}
+    {!busy && !binding && <button type="button" disabled={bindingBusy}
+      onClick={() => openBinding('读取本项目最近一次编剧结果，请核对它属于当前选择的剧本。')}>
+      读取已完成的编剧人物对照（不重跑模型）
+    </button>}
+    {pollError && <p role="alert">{pollError}</p>}
+    {busy && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
     {(busy || progressRuns.length > 0) && <AgentProgress runs={progressRuns} />}
 
     {result && <div className="storyboard-result">
@@ -411,7 +436,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
       {result.status === 'REJECTED' && failedRole && Object.keys(resumeSteps).length > 0 && <div className="step-retry">
         <RefreshCw size={14} />
         <span>这一步已经完成的部分不会重跑。</span>
-        <button className="must-button" disabled={busy}
+        <button className="must-button" disabled={busy || requiresReconciliation}
           onClick={() => resumeFrom(failedRole, resumeSteps)}>
           从「{stepLabels[failedRole] ?? failedRole}」这一步重试
         </button>
@@ -480,7 +505,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate }: {
             <b>必做：确认名图对应</b>
             <small>确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。</small>
           </div>
-          <button className="must-button" disabled={bindingBusy} onClick={applyBinding}>
+          <button className="must-button" disabled={busy || bindingBusy} onClick={applyBinding}>
             {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />} 确认并写入名字
           </button>
         </div>

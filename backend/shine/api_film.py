@@ -513,6 +513,7 @@ class StoryboardRequest(APIModel):
     text: str | None = Field(default=None, max_length=60000)
     allow_remote_text: bool = False
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
+    confirm_characters: bool = False
     # Resume support: start at one crew role and reuse the artifacts the
     # earlier roles already produced.  A failed role is retried from itself
     # instead of paying for the whole chain again.
@@ -744,6 +745,15 @@ def generate_storyboard(
         asset_context(db, project_id),
         breakdown,
     )
+    if body.confirm_characters and "director" not in steps and character_binding.script_characters(breakdown):
+        return {
+            "status": "AWAITING_CHARACTER_CONFIRMATION",
+            "script_source": source,
+            "steps": steps,
+            "missing_characters": missing,
+            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+            "action": "CONFIRM_CHARACTER_BINDINGS_THEN_RESUME_DIRECTOR",
+        }
     if missing:
         return {
             "status": "BLOCKED_MISSING_MASTERS",
@@ -983,6 +993,11 @@ def character_binding_proposal(project_id: str, body: CharacterBindingRequest, d
     characters = character_binding.script_characters(payload)
     masters = _character_masters(db, project_id)
     proposals = character_binding.propose_bindings(characters, masters)
+    proposed_names = payload.get("character_names") or {}
+    for row in proposals:
+        name = proposed_names.get(row["script_name"])
+        if isinstance(name, str) and name.strip() and len(name.strip()) <= 80:
+            row["suggested_name"] = name.strip()
     proposal_payload = {
         "breakdown_artifact_id": breakdown.id,
         "breakdown_sha256": breakdown.sha256,
@@ -1029,6 +1044,13 @@ def character_binding_apply(project_id: str, body: CharacterBindingApply, db: DB
     breakdown = _load_breakdown(db, project_id, body.breakdown_artifact_id)
     if not body.bindings:
         raise HTTPException(422, "CHARACTER_BINDING_EMPTY")
+
+    expected = set(character_binding.script_characters(breakdown.payload_json))
+    supplied = [row.script_name.strip() for row in body.bindings]
+    if set(supplied) != expected or len(supplied) != len(expected):
+        raise HTTPException(422, "CHARACTER_BINDING_CONFIRM_EVERY_CHARACTER")
+    if len({row.asset_id for row in body.bindings}) != len(body.bindings):
+        raise HTTPException(409, "CHARACTER_BINDING_MASTER_REUSED")
 
     names = [row.name.strip() for row in body.bindings]
     if len(set(names)) != len(names):
