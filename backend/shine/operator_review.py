@@ -105,7 +105,7 @@ def context(db, settings, job_id: str):
     lock = db.get(ProjectRuleLock, job.project_id)
     pack = db.get(RulePack, request.rulepack_id) if request.rulepack_id else None
     if (
-        job.status != "NEEDS_REVIEW"
+        job.status not in {"NEEDS_REVIEW", "PASSED"}
         or job.stale
         or job.paused
         or job.lease_owner
@@ -283,17 +283,39 @@ def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, cl
     for item in decision.items.values():
         if item.status != "NOT_REVIEWED" and not item.evidence.strip():
             raise HTTPException(422, "Each reviewed or inapplicable item needs specific evidence")
-    history = (client or ComfyUIClient(settings.comfyui_base_url, timeout_s=15)).history(job.provider_job_id)
-    record = history.get(job.provider_job_id, {})
+    # A completed production attempt may be reviewed after the managed renderer
+    # has already been stopped. The persisted attempt/artifact binding is then
+    # the authoritative submission evidence; live ComfyUI history is still
+    # required whenever the renderer actually answers.
+    was_passed = job.status == "PASSED"
+    persisted_ok = bool(
+        was_passed
+        and attempt is not None
+        and attempt.status == "COMPLETED"
+        and attempt.provider_job_id == job.provider_job_id
+        and attempt.prompt_graph_sha256
+        and attempt.output_sha256 == artifact.sha256
+    )
+    record = {}
+    live_error = None
+    try:
+        history = (client or ComfyUIClient(settings.comfyui_base_url, timeout_s=15)).history(job.provider_job_id)
+        record = history.get(job.provider_job_id, {})
+    except Exception as exc:  # noqa: BLE001 - a stopped renderer is not a failed review
+        live_error = exc
     prompt = record.get("prompt") or []
-    if (
-        (record.get("status") or {}).get("status_str") != "success"
-        or not (record.get("status") or {}).get("completed")
-        or len(prompt) < 3
-        or prompt[1] != job.provider_job_id
-        or graph_hash(prompt[2]) != attempt.prompt_graph_sha256
-    ):
+    live_ok = bool(
+        record
+        and (record.get("status") or {}).get("status_str") == "success"
+        and (record.get("status") or {}).get("completed")
+        and len(prompt) >= 3
+        and prompt[1] == job.provider_job_id
+        and graph_hash(prompt[2]) == attempt.prompt_graph_sha256
+    )
+    if record and not live_ok:
         raise HTTPException(409, "ComfyUI history does not match completed submission")
+    if not record and not persisted_ok:
+        raise HTTPException(409, "Completed submission evidence is unavailable") from live_error
     technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
         path,
         expectations=TechnicalExpectations(
@@ -322,7 +344,7 @@ def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, cl
         .where(
             Job.id == job.id,
             Job.state_version == job.state_version,
-            Job.status == "NEEDS_REVIEW",
+            Job.status.in_(["NEEDS_REVIEW", "PASSED"]),
             Job.lease_owner.is_(None),
         )
         .values(state_version=job.state_version + 1),
@@ -407,12 +429,16 @@ def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, cl
         )
     )
     if final.status == "passed":
-        transition(job, "RUNNING")
-        transition(job, "QC_PENDING")
-        transition(job, "PASSED")
+        if not was_passed:
+            transition(job, "RUNNING")
+            transition(job, "QC_PENDING")
+            transition(job, "PASSED")
         job.failure_code = None
         job.quality_verification = "manual_verified"
-    else:
+    elif not was_passed:
+        # A failed manual review of an already passed production attempt keeps
+        # the production status and artifact untouched; the new final gate
+        # makes the acceptance state fail instead of rewriting the render.
         job.failure_code = "MANUAL_REVIEW_INCOMPLETE" if final.status == "needs_review" else "MANUAL_REVIEW_FAILED"
     job.last_qc_result = final.status
     add_audit(db, actor, "OPERATOR_REVIEW_RECORDED", "job", job.id, evidence, project_id=job.project_id)

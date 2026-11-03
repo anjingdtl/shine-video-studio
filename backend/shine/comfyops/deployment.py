@@ -143,7 +143,7 @@ def _resolve_closure(components: dict, requested: list[str]) -> list[str]:
         component = components.get(component_id)
         if not component:
             raise HTTPException(409, "CATALOG_COMPONENT_MISSING")
-        for dep in component["dependencies"]:
+        for dep in component.get("dependencies", []):
             visit(dep, chain + (component_id,))
         seen.add(component_id)
         ordered.append(component_id)
@@ -197,7 +197,7 @@ def register_catalog_packages(db, catalog: dict, requested: list[str]) -> dict:
     for component_id in ordered:
         component = components[component_id]
         dependency_map = {}
-        for dep_id in component["dependencies"]:
+        for dep_id in component.get("dependencies", []):
             dep_row = rows[dep_id]
             dependency_map[dep_row.id] = dep_row.payload["revision"]
         spec = _catalog_package_spec(component, dependency_map)

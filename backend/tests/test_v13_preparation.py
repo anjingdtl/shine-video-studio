@@ -25,7 +25,7 @@ from shine.comfyops.installer import (
     safe_target,
 )
 from shine.comfyops.inventory import WindowsHostProbe
-from shine.comfyops.models import ApprovalGrant, CandidateAsset, ResourceLease
+from shine.comfyops.models import ApprovalGrant, CandidateAsset, ModelPackage, ResourceLease
 from shine.comfyops.scheduler import ResourceScheduler
 from shine.models import Asset, utcnow
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
@@ -1034,3 +1034,29 @@ def test_v13_style_freeze_requires_human_grant_for_current_draft(prep):
     frozen = post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=201)
     assert frozen["approved_by"] == "v13-test-operator"
     post(client, f"/projects/{project}/style/freeze", decision, operator=True, expected=409)
+
+
+def test_a_fully_verified_existing_component_becomes_a_verified_package(api):
+    """Existing-install reuse must feed the formal package registry, not only cache bytes."""
+    from shine.comfyops.deployment import load_default_catalog
+    from shine.comfyops.existing_installation import register_verified_packages
+
+    _client, factory, _settings = api
+    catalog = load_default_catalog()
+    component = next(row for row in catalog["components"] if row["component_id"] == "minimax-h3-diffusion")
+    verified = [
+        {
+            "component_id": "minimax-h3-diffusion",
+            "relative_path": item["relative_path"],
+            "sha256": item["sha256"],
+            "size": item["size"],
+            "status": "INSTALLED_HASH_MATCH",
+        }
+        for item in component["files"]
+    ]
+    with factory.begin() as db:
+        registered = register_verified_packages(db, verified, catalog)
+        assert "minimax-h3-diffusion" in registered
+        package = db.get(ModelPackage, "minimax-h3-diffusion")
+        assert package is not None
+        assert package.status == "FILES_VERIFIED_PENDING_RUNTIME"

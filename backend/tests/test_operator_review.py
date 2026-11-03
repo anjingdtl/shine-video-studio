@@ -167,6 +167,59 @@ def test_manual_pass_is_once_and_audited(reviewable):
         assert db.scalar(select(QualityGate).where(QualityGate.gate_name == "style")).evidence["operator_id"]
 
 
+def test_completed_production_can_be_manually_accepted_without_rewriting_the_render(reviewable):
+    """A passed real shot may receive the human acceptance that unlocks its workflow.
+
+    The production status and artifact must stay untouched; only a new manual
+    final gate makes acceptance_status accepted.
+    """
+    _, factory, settings, job_id, fake, _ = reviewable
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.status = "PASSED"
+        job.quality_verification = "real"
+        artifact_id = job.artifact_id
+    with factory() as db:
+        body = decision(db, settings, job_id)
+        result = submit_review(db, settings, job_id, "test-authorized-human", body, client=fake)
+        assert result["status"] == "PASSED"
+        assert result["result"] == "passed"
+    with factory() as db:
+        job = db.get(Job, job_id)
+        assert job.status == "PASSED"
+        assert job.quality_verification == "manual_verified"
+        assert job.artifact_id == artifact_id
+        final = db.scalars(select(QualityGate).where(
+            QualityGate.job_id == job_id, QualityGate.gate_name == "final").order_by(QualityGate.created_at)
+        ).all()[-1]
+        assert final.status == "passed"
+        assert db.scalars(select(AuditEvent).where(AuditEvent.event_type == "OPERATOR_REVIEW_RECORDED")).all()
+
+
+def test_failed_manual_review_does_not_rewrite_a_completed_render(reviewable):
+    _, factory, settings, job_id, fake, _ = reviewable
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.status = "PASSED"
+        job.quality_verification = "real"
+        artifact_id = job.artifact_id
+    with factory() as db:
+        body = decision(db, settings, job_id)
+        body.items["identity"].status = "FAIL"
+        result = submit_review(db, settings, job_id, "test-authorized-human", body, client=fake)
+        assert result["status"] == "PASSED"
+        assert result["result"] == "failed"
+    with factory() as db:
+        job = db.get(Job, job_id)
+        assert job.status == "PASSED"
+        assert job.quality_verification == "real"
+        assert job.artifact_id == artifact_id
+        final = db.scalars(select(QualityGate).where(
+            QualityGate.job_id == job_id, QualityGate.gate_name == "final").order_by(QualityGate.created_at)
+        ).all()[-1]
+        assert final.status == "failed"
+
+
 @pytest.mark.parametrize("change", ["policy", "request", "history", "fail", "not_reviewed", "no_watch"])
 def test_snapshot_history_and_incomplete_decisions(reviewable, change):
     _, factory, settings, job_id, fake, _ = reviewable

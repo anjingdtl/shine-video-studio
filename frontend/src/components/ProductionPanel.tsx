@@ -127,7 +127,8 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         ))}
       </div>
       {selectedJob && <div className="job-detail">
-        {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}
+        {selectedJob.provider === 'comfyui' && (selectedJob.status === 'NEEDS_REVIEW'
+          || (selectedJob.status === 'PASSED' && selectedJob.acceptance_status !== 'accepted')) && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}
         <div className="detail-head">
           <div><b>{selectedJob.shot_name}</b><span>编号 {selectedJob.id.slice(0, 12)}… · 状态版本 {selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
           <div className="detail-actions">

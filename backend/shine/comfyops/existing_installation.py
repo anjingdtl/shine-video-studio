@@ -244,6 +244,33 @@ def verify_models(report: dict, snapshot: str) -> dict:
     }
 
 
+def register_verified_packages(db, verified: list[dict], catalog: dict) -> list[str]:
+    """Register the catalog packages whose every file was hash-verified in place.
+
+    The existing-install reuse path historically only cached or verified bytes;
+    formal pre-production also needs those identities in the package registry.
+    Only components whose complete catalog file set is verified become
+    FILES_VERIFIED_PENDING_RUNTIME. Nothing is copied, downloaded or promoted.
+    """
+    from shine.comfyops.deployment import _component_map, register_catalog_packages
+
+    matched = {(row['component_id'], row['relative_path']) for row in verified}
+    complete = []
+    for component_id, component in _component_map(catalog).items():
+        files = component.get('files') or []
+        if files and all((component_id, item['relative_path']) in matched for item in files):
+            complete.append(component_id)
+    if not complete:
+        return []
+    rows = register_catalog_packages(db, catalog, complete)
+    registered = []
+    for component_id, row in rows.items():
+        if row.status == 'UNVERIFIED_ORIGIN':
+            row.status = 'FILES_VERIFIED_PENDING_RUNTIME'
+            registered.append(component_id)
+    return registered
+
+
 def import_models(settings, report: dict, snapshot: str) -> dict:
     if snapshot != report['snapshot']:
         raise HTTPException(409, '已有目录或部署清单已变化，请重新检测后确认复用。')

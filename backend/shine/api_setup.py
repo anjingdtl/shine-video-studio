@@ -121,11 +121,12 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
     """Verify existing software/model identity in place without copying files."""
     from sqlalchemy import select
 
-    from shine.comfyops.existing_installation import inspect, verify_models
+    from shine.comfyops.existing_installation import inspect, register_verified_packages, verify_models
     from shine.models import AuditEvent
     from shine.services import add_audit
 
-    report = inspect(body.path, deployment.load_default_catalog())
+    catalog = deployment.load_default_catalog()
+    report = inspect(body.path, catalog)
     if body.snapshot != report['snapshot']:
         return verify_models(report, body.snapshot)  # raises the snapshot conflict before reading weights
 
@@ -162,6 +163,11 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
         verified_bytes = payload.get('verified_bytes')
         if verified_bytes != sum(row['size'] for row in verified):
             continue
+        registered = register_verified_packages(db, verified, catalog)
+        if registered:
+            add_audit(db, actor, 'EXISTING_VERIFIED_PACKAGES_REGISTERED', 'deployment', report['catalog_id'],
+                      {'components': sorted(registered)})
+            db.commit()
         return {
             **report,
             'status': 'INSTALLED_VERIFIED',
@@ -171,6 +177,7 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
             'copied_bytes': 0,
             'runtime_verified': False,
             'verification_reused': True,
+            'registered_packages': sorted(registered),
         }
 
     key = (report['root'].casefold(), body.snapshot)
@@ -199,8 +206,13 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
             'verified_bytes': result['verified_bytes'],
             'copied_bytes': 0,
         })
+        registered = register_verified_packages(db, result['verified'], catalog)
+        if registered:
+            add_audit(db, actor, 'EXISTING_VERIFIED_PACKAGES_REGISTERED', 'deployment', report['catalog_id'],
+                      {'components': sorted(registered)})
         db.commit()
-        return {**report, **result, 'verification_reused': False}
+        return {**report, **result, 'verification_reused': False,
+                'registered_packages': sorted(registered)}
     finally:
         with _installation_verification_lock:
             _active_installation_verifications.discard(key)

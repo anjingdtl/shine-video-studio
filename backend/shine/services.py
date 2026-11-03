@@ -870,6 +870,23 @@ def create_shot_record(
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating production shots")
     if not spec.style_version_id:
         spec = spec.model_copy(update={"style_version_id": project.frozen_style_version_id})
+    # A manually written shot has the same frozen Style Bible as the AI
+    # storyboard shots but no English style wording of its own. Inherit the
+    # exact English rendition already accepted for this style version instead
+    # of leaking the Chinese Style Bible text into the H3 prompt.
+    inherited_from = None
+    if spec.prompt_style is None:
+        for candidate in db.scalars(
+            select(Shot).where(Shot.project_id == project.id).order_by(Shot.created_at.desc())
+        ).all():
+            try:
+                prior = ShotSpec.model_validate(candidate.spec)
+            except ValueError:
+                continue
+            if prior.style_version_id == spec.style_version_id and prior.prompt_style is not None:
+                spec = spec.model_copy(update={"prompt_style": prior.prompt_style})
+                inherited_from = candidate.id
+                break
     validate_shot_style(db, project.id, spec, require_current=True)
     binding_inputs = list(bindings or [])
     if not binding_inputs and spec.required_asset_ids:
@@ -902,7 +919,11 @@ def create_shot_record(
         "SHOT_CREATED",
         "shot",
         shot.id,
-        {"revision": shot.revision, "binding_count": len(binding_inputs)},
+        {
+            "revision": shot.revision,
+            "binding_count": len(binding_inputs),
+            "prompt_style_inherited_from": inherited_from,
+        },
         project_id=project.id,
     )
     return shot

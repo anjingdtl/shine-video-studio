@@ -23,9 +23,13 @@ def installation(tmp_path):
 
 def catalog(data=b'correct model'):
     return {'catalog_id': 'test', 'catalog_version': '1', 'components': [{
-        'component_id': 'model', 'kind': 'model', 'files': [{
+        'component_id': 'model', 'kind': 'model', 'revision': 'test-revision',
+        'license_id': 'TEST-ONLY', 'usage': 'research', 'dependencies': [],
+        'files': [{
             'relative_path': 'weights.safetensors', 'size': len(data),
             'sha256': hashlib.sha256(data).hexdigest(),
+            'url': 'https://huggingface.co/fixture/model/resolve/test-revision/weights.safetensors',
+            'redirect_hosts': [],
         }],
     }]}
 

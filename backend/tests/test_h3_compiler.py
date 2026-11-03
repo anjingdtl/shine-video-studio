@@ -11,6 +11,7 @@ from shine.schemas import (
     ShotSpec,
     StyleBible,
 )
+from tests.conftest import create_project, create_shot, freeze_style, shot_payload
 
 STYLE = StyleBible(
     photography_language="平视中近景，稳定缓推",
@@ -286,3 +287,23 @@ def test_mode_hint_conflicting_with_references_is_rejected():
     with pytest.raises(PromptCompilationError) as exc:
         compile_prompt(manifest, mode=GenerationMode.T2VA)
     assert exc.value.code == "H3_MODE_REFERENCE_MISMATCH"
+
+
+def test_a_manual_shot_inherits_the_projects_english_style_prompt(api):
+    client, _factory, _settings = api
+    project_id = create_project(client, "手写镜头继承英文风格")
+    style = freeze_style(client, project_id)
+    english = {
+        "photography_language": "Eye-level medium framing, slow controlled push.",
+        "shot_blocking": "Single subject, diagonal composition, stable axis.",
+        "color_palette": "Cool low-saturation cyan-blue and gray-green.",
+        "lighting_tone": "Low-key side and rim light, readable shadows.",
+        "lens_texture": "Clean realistic texture, moderate depth of field.",
+        "editing_rhythm": "Restrained suspense rhythm, complete shots, hard cuts.",
+        "sound_performance": "Restrained rain ambience, low music bed, no dialogue.",
+    }
+    template = shot_payload(style["id"], title="AI 英文风格模板")
+    template["spec"]["prompt_style"] = english
+    assert client.post(f"/api/v1/projects/{project_id}/shots", json=template).status_code == 201
+    manual = create_shot(client, project_id, style["id"], title="手写干净镜头")
+    assert manual["spec"]["prompt_style"] == english
