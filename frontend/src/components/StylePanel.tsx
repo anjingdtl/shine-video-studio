@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, History, LockKeyhole, LockOpen, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, HelpCircle, History, LockKeyhole, LockOpen, ShieldCheck, Sparkles } from 'lucide-react';
 import { api, json, type Style, type StyleVersion } from '../api';
 import { styleFields } from '../constants';
 import {
@@ -202,6 +202,14 @@ export default function StylePanel({
         </div>
       </div>
 
+      <div className="module-guide">
+        <HelpCircle size={13} />
+        <div>
+          <p><b>这一步要做什么：</b>选一套风格或逐项调整，然后点右下角「冻结为新版本」。</p>
+          <p><b>为什么要冻结：</b>风格是七个维度的不可变版本，之后每个镜头都引用它；不冻结，下面的 AI 分镜会直接拒绝运行。</p>
+        </div>
+      </div>
+
       <div className="style-preset-row">
         <label className="style-preset-label" htmlFor="style-preset">整套风格
           <select
@@ -272,10 +280,14 @@ export default function StylePanel({
           尚未配置 AI 助手，预设和手工选择照常可用。
           <button type="button" className="text-button" onClick={() => onNavigate('settings')}>去配置 AI 助手</button>
         </p>}
-        {aiConfigured && rulepackId === null && rulepacks.length > 0 && <p className="style-ai-empty">
-          首次使用 AI 助手前，需要把官方规则包绑定到本项目（一次性）。
-          <button type="button" className="text-button" onClick={enableRulepack}>启用官方规则包</button>
-        </p>}
+        {aiConfigured && rulepackId === null && rulepacks.length > 0 && <div className="required-action">
+          <ShieldCheck size={17} className="required-icon" />
+          <div className="required-text">
+            <b>必做：启用官方规则包</b>
+            <small>每个项目都要先绑定一次官方 H3 规则包，五个 Agent 才会按同一套规范工作。绑定后不能再换。</small>
+          </div>
+          <button type="button" className="must-button" onClick={enableRulepack}>启用官方规则包</button>
+        </div>}
         {aiConfigured && rulepackId !== null && <>
           <label className="style-ai-hint">给 AI 的补充说明（可留空）
             <input value={aiHint} maxLength={2000} onChange={(event) => setAiHint(event.target.value)} placeholder="例如：更接近夜戏质感的风格" />
@@ -326,14 +338,25 @@ export default function StylePanel({
           <button className="secondary-button" disabled={busy || !canSave} onClick={onSave}>保存草稿</button>
         </div>
       </div>
-      <div className="section-footer">
-        <span>冻结会生成新版本并写审计；只影响新镜头，旧镜头和历史任务继续用原版本。</span>
-        <div>
-          <button className="primary-button" disabled={busy || !canFreeze} onClick={onFreeze}>
-            <LockKeyhole size={14} /> {currentStyle ? '冻结为新版本' : '批准并冻结'}
-          </button>
+      {currentStyle
+        ? <div className="section-footer">
+          <span>冻结会生成新版本并写审计；只影响新镜头，旧镜头和历史任务继续用原版本。</span>
+          <div>
+            <button className="primary-button" disabled={busy || !canFreeze} onClick={onFreeze}>
+              <LockKeyhole size={14} /> 冻结为新版本
+            </button>
+          </div>
         </div>
-      </div>
+        : <div className="required-action">
+          <LockKeyhole size={17} className="required-icon" />
+          <div className="required-text">
+            <b>必做：冻结这一版风格</b>
+            <small>冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照。</small>
+          </div>
+          <button className="must-button" disabled={busy || !canFreeze} onClick={onFreeze}>
+            <LockKeyhole size={14} /> 批准并冻结
+          </button>
+        </div>}
       <p className="freeze-hint">点击冻结会先把屏幕上这七项<strong>原样保存</strong>，再申请一次性授权并冻结这份快照——你批准的内容和最终冻结的内容始终一致；失败时表单内容不会丢失。</p>
       {styles.length > 0 && <div className="version-row">
         <span className="version-label"><History size={12} /> 版本记录</span>

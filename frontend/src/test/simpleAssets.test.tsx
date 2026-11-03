@@ -44,6 +44,23 @@ it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已�
   expect(screen.queryByRole('button', { name: '确认使用' })).toBeNull();
 });
 
+it('图片素材显示缩略图，待确认素材用高对比按钮提示必做', async () => {
+  const asset = { id: 'asset-1', project_id: 'proj-1', filename: '主角.png', kind: 'image',
+    sha256: 'a'.repeat(64), byte_size: 32, approved: false, locked: false, tags: [] };
+  stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
+  const user = userEvent.setup();
+  render(<App />);
+  await gotoDirectorPage(user, /素材与风格/);
+
+  const thumb = await screen.findByAltText('主角.png');
+  expect(thumb).toHaveAttribute('src', '/api/v1/assets/asset-1/media');
+  // The one action the user must take here is loud, not a grey text link.
+  const must = screen.getByRole('button', { name: /确认使用全部待确认素材/ });
+  expect(must.className).toContain('must-button');
+  expect(screen.getByText(/必做：确认使用 1 项素材/)).toBeInTheDocument();
+  expect(screen.getByText(/分镜要靠这个名字把剧本人物和你的图对上/)).toBeInTheDocument();
+});
+
 it('锁定失败会保留已批准状态；再次确认只补锁定，不重复批准', async () => {
   const asset = { id: 'asset-1', project_id: 'proj-1', filename: '主角.png', kind: 'image',
     sha256: 'a'.repeat(64), byte_size: 32, approved: false, locked: false, tags: [] };

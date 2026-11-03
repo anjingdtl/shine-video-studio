@@ -195,3 +195,32 @@ Never bundle official full-text guides without redistribution permission. Run
   backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`. Build the Windows
   package only from the final committed tree with `pwsh -File scripts\build_test_package.ps1`.
 
+## 2026-11-03 workbench usability round (naming, step gap, resume)
+
+- **`entity_id` is the only join key** between a script character and an uploaded master
+  (`shine/asset_identity.py`). A crew step that needs a character master resolves the name
+  through `resolve_character_asset`, which matches `entity_id` (or an exact asset UUID) and
+  nothing else. `tags` are never consulted.
+- **The order is script first, material second.** The user imports the script; the
+  scriptwriter names the characters; the server retrieves the masters and proposes a mapping
+  (`POST /projects/{id}/storyboard/character-binding/proposal`); the user confirms every row;
+  the confirmed names are written on the masters and the script breakdown is re-keyed into a
+  **new** artifact (`.../character-binding/apply`); only then are the masters approved and
+  locked. A proposal never approves, locks, creates or replaces a master. An ambiguous or
+  duplicated name is refused (`CHARACTER_NAME_ALREADY_IN_USE`), because an ambiguous binding is
+  a blocked shot.
+- **A proposal is a reading, not a verdict.** Name matches outrank tag and filename matches;
+  upload order is offered only as the weakest candidate and is labelled as needing a human.
+  The human confirmation is the authority.
+- **One crew step at a time, with a real gap.** `SHINE_AGENT_STEP_DELAY_MS` (default 1200ms)
+  separates two real model calls. A failed role is retried from itself:
+  `POST /projects/{id}/storyboard/generate` accepts `start_role` and `resume_steps`, and the
+  server reuses an artifact only when it belongs to the project, carries the role's contract
+  kind and is not stale. A rejected response carries `failed_role` and `resume_steps`.
+- **Every action the user must take is loud.** A required action uses the same
+  `.required-action` / `.must-button` block, and every module carries a short
+  `.module-guide` that says what to do and why it is required. A raw error code is never the
+  only thing on screen.
+- Evidence: `docs/WORKBENCH_USABILITY_ROUND_20261103.md`,
+  `backend/tests/test_character_binding.py`.
+

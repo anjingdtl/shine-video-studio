@@ -12,6 +12,19 @@ import re
 import unicodedata
 from typing import Any
 
+# A model sometimes puts a whole list into one ``characters[]`` entry
+# ("S1, S2, S3").  Treating that as one name hides the real gap from the
+# user, so every consumer splits it the same way.
+_NAME_SEPARATORS = re.compile(r"[,，、;；/]+")
+
+
+def split_character_names(value: str | None) -> list[str]:
+    """Split one character entry into the names it really lists."""
+    if not value:
+        return []
+    parts = [part.strip() for part in _NAME_SEPARATORS.split(str(value))]
+    return [part for part in parts if part]
+
 _VIEW_SUFFIXES = (
     "角色参考图",
     "人物参考图",

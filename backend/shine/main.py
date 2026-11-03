@@ -8,6 +8,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse
 from sqlalchemy import func, literal_column, select
 from sqlalchemy.orm import Session
 
@@ -646,6 +647,17 @@ def create_app(
         require_project(db, project_id)
         assets = db.scalars(select(Asset).where(Asset.project_id == project_id).order_by(Asset.created_at)).all()
         return jsonable_encoder([_asset_data(asset) for asset in assets])
+
+    @app.get("/api/v1/assets/{asset_id}/media")
+    def asset_media(asset_id: str, db: DBSession) -> FileResponse:
+        """Serve one uploaded master so the workbench can show a thumbnail."""
+        asset = db.get(Asset, asset_id)
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        path = safe_asset_path(actual_asset_root, asset.storage_path)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Asset file is missing on disk")
+        return FileResponse(path, media_type=asset.content_type, headers={"Cache-Control": "no-store"})
 
     @app.patch("/api/v1/assets/{asset_id}/metadata")
     def update_asset_metadata(asset_id: str, body: AssetMetadataUpdate, db: DBSession) -> dict[str, Any]:

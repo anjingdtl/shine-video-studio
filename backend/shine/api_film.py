@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+import os
+import time
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import Field, ValidationError
 from sqlalchemy import literal_column, select
+from sqlalchemy.orm import Session
 
+from shine.agents import character_binding
 from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
-from shine.asset_identity import resolve_character_asset
+from shine.asset_identity import resolve_character_asset, split_character_names
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
@@ -509,6 +513,33 @@ class StoryboardRequest(APIModel):
     text: str | None = Field(default=None, max_length=60000)
     allow_remote_text: bool = False
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
+    # Resume support: start at one crew role and reuse the artifacts the
+    # earlier roles already produced.  A failed role is retried from itself
+    # instead of paying for the whole chain again.
+    start_role: Literal[
+        "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"
+    ] | None = None
+    resume_steps: dict[str, str] = Field(default_factory=dict, max_length=8)
+
+
+# The crew order.  The chain and the resume request both walk this list.
+STORYBOARD_CHAIN = (
+    "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor",
+)
+
+
+def _agent_step_delay_seconds() -> float:
+    """The pause between two crew calls.
+
+    Two real model calls back to back share the same provider connection and
+    the same rate limit; the gap keeps the second call from starting while the
+    first one is still settling, and gives the workbench a visible boundary
+    between two steps.
+    """
+    try:
+        return max(0.0, int(os.getenv("SHINE_AGENT_STEP_DELAY_MS", "1200")) / 1000)
+    except ValueError:
+        return 1.2
 
 
 def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
@@ -522,12 +553,14 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
     named: list[str] = []
     for beat in breakdown.get("beats", []):
         for name in beat.get("characters", []):
-            if name and name not in named:
-                named.append(name)
+            for part in split_character_names(name if isinstance(name, str) else str(name)):
+                if part not in named:
+                    named.append(part)
         for line in beat.get("dialogue", []):
             speaker = line.get("speaker_id") if isinstance(line, dict) else getattr(line, "speaker_id", None)
-            if speaker and speaker not in named:
-                named.append(speaker)
+            for part in split_character_names(speaker if isinstance(speaker, str) else None):
+                if part not in named:
+                    named.append(part)
     return [name for name in named if resolve_character_asset(name, character_assets) is None]
 
 
@@ -561,7 +594,7 @@ def generate_storyboard(
     else:
         raise HTTPException(422, "STORYBOARD_SCRIPT_REQUIRED")
 
-    needed_roles = ("scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor")
+    needed_roles = STORYBOARD_CHAIN
     routes = {}
     for role in needed_roles:
         try:
@@ -615,9 +648,43 @@ def generate_storyboard(
     # (timeouts, unknown server errors) are never replayed here.
     RETRYABLE_REJECTIONS = {"CONTRACT_OR_POLICY_REJECTED", "AGENT_CALL_FAILED"}
 
+    steps: dict[str, dict] = {}
+    rejections: list[dict] = []
+
+    # Resume: reuse the artifacts the earlier roles already produced instead of
+    # calling them again.  The server checks every referenced artifact: it must
+    # belong to this project, carry the role's contract kind and not be stale.
+    start_role = body.start_role or "scriptwriter"
+    if start_role not in STORYBOARD_CHAIN:
+        raise HTTPException(422, "STORYBOARD_RESUME_ROLE_UNKNOWN")
+    if start_role != "scriptwriter":
+        for role in STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)]:
+            artifact_id = (body.resume_steps or {}).get(role)
+            if not artifact_id:
+                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_MISSING:{role}")
+            artifact = db.get(AgentArtifact, artifact_id)
+            expected_kind = FilmAgentRegistry.roles[role][1].__name__
+            if (
+                not artifact
+                or artifact.project_id != project_id
+                or artifact.stale
+                or artifact.kind != expected_kind
+            ):
+                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_INVALID:{role}")
+            steps[role] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
+
+    delay = _agent_step_delay_seconds()
+    calls_in_request = 0
+
     def _run(role: str, *, attempts: int = 2, **kwargs) -> dict:
+        nonlocal calls_in_request
         last: ValueError | LLMError | None = None
         for attempt in range(1, attempts + 1):
+            if calls_in_request:
+                # Leave a real gap between two crew calls, and between the
+                # retry of one crew call and its next attempt.
+                time.sleep(delay)
+            calls_in_request += 1
             try:
                 artifact = dispatcher.run(
                     db,
@@ -653,15 +720,14 @@ def generate_storyboard(
                 rejection["external_outcome"] = outcome
         return rejection
 
-    steps: dict[str, dict] = {}
-    rejections: list[dict] = []
     try:
-        steps["scriptwriter"] = _run(
-            "scriptwriter",
-            brief=script_text,
-            locked_story_facts=body.locked_story_facts,
-            allow_remote_text=body.allow_remote_text,
-        )
+        if "scriptwriter" not in steps:
+            steps["scriptwriter"] = _run(
+                "scriptwriter",
+                brief=script_text,
+                locked_story_facts=body.locked_story_facts,
+                allow_remote_text=body.allow_remote_text,
+            )
     except (ValueError, LLMError) as exc:
         rejections.append(_rejection("scriptwriter", exc))
         return {
@@ -669,6 +735,8 @@ def generate_storyboard(
             "script_source": source,
             "steps": steps,
             "rejections": rejections,
+            "failed_role": "scriptwriter",
+            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         }
 
     breakdown = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"]).payload_json
@@ -683,28 +751,36 @@ def generate_storyboard(
             "steps": steps,
             "missing_characters": missing,
             "action": "UPLOAD_AND_APPROVE_MISSING_CHARACTER_MASTERS_THEN_REGENERATE",
+            "failed_role": "scriptwriter",
+            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         }
+
+    def _run_step(name: str, role: str, **kwargs) -> dict:
+        """Run one crew role unless a resumed step already produced it."""
+        if name in steps:
+            return steps[name]
+        return _run(role, **kwargs)
 
     active_role = "director"
     try:
-        steps["director"] = _run(
-            "director",
+        steps["director"] = _run_step(
+            "director", "director",
             brief=script_text,
             input_revision_ids=[steps["scriptwriter"]["artifact_id"]],
             locked_story_facts=body.locked_story_facts,
             allow_remote_text=body.allow_remote_text,
         )
         active_role = "cinematographer"
-        steps["cinematographer"] = _run(
-            "cinematographer",
+        steps["cinematographer"] = _run_step(
+            "cinematographer", "cinematographer",
             brief=script_text,
             locked_story_facts=body.locked_story_facts,
             input_revision_ids=[steps["scriptwriter"]["artifact_id"], steps["director"]["artifact_id"]],
             allow_remote_text=body.allow_remote_text,
         )
         active_role = "continuity_supervisor"
-        steps["continuity_supervisor"] = _run(
-            "continuity_supervisor",
+        steps["continuity_supervisor"] = _run_step(
+            "continuity_supervisor", "continuity_supervisor",
             brief=script_text,
             locked_story_facts=body.locked_story_facts,
             # The script breakdown is part of the review basis: without it the
@@ -718,8 +794,8 @@ def generate_storyboard(
             allow_remote_text=body.allow_remote_text,
         )
         active_role = "editor"
-        steps["editor_edit_intent"] = _run(
-            "editor",
+        steps["editor_edit_intent"] = _run_step(
+            "editor_edit_intent", "editor",
             tool="edit_intent",
             brief=script_text,
             locked_story_facts=body.locked_story_facts,
@@ -737,6 +813,8 @@ def generate_storyboard(
             "missing_characters": missing,
             "steps": steps,
             "rejections": rejections,
+            "failed_role": active_role,
+            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         }
 
     continuity = db.get(AgentArtifact, steps["continuity_supervisor"]["artifact_id"]).payload_json
@@ -798,6 +876,7 @@ def generate_storyboard(
         "steps": steps,
         "missing_characters": [],
         "rejections": [],
+        "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),
         "prompt_story_facts": breakdown.get("prompt_story_facts", []),
         "prompt_style": breakdown.get("prompt_style"),
@@ -819,4 +898,228 @@ def generate_storyboard(
             }
         },
         "user_actions_required": ["APPLY_CAMERA"] if not blocked else ["RESOLVE_CONTINUITY_ISSUES"],
+    }
+
+
+class CharacterBindingRequest(APIModel):
+    """Ask which uploaded master answers each character the script named."""
+
+    breakdown_artifact_id: str | None = None
+
+
+class CharacterBindingConfirm(APIModel):
+    """The user's own answer: this script character is this master, under this name."""
+
+    script_name: str = Field(min_length=1, max_length=80)
+    asset_id: str = Field(min_length=1, max_length=36)
+    name: str = Field(min_length=1, max_length=80)
+
+
+class CharacterBindingApply(APIModel):
+    breakdown_artifact_id: str = Field(min_length=1, max_length=36)
+    bindings: list[CharacterBindingConfirm] = Field(default_factory=list, max_length=32)
+
+
+def _character_masters(db: Session, project_id: str) -> list[dict]:
+    """Every character image of the project, confirmed or not.
+
+    The naming step happens before the material is frozen, so an image the
+    user has not confirmed yet still has to be offered.
+    """
+    rows = db.scalars(
+        select(Asset)
+        .where(Asset.project_id == project_id, Asset.kind == "image", Asset.role == "character")
+        .order_by(Asset.created_at, Asset.id)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "kind": row.kind,
+            "role": row.role,
+            "filename": row.filename,
+            "entity_id": row.entity_id,
+            "tags": list(row.tags or []),
+            "approved": bool(row.approved),
+            "locked": bool(row.locked),
+        }
+        for row in rows
+    ]
+
+
+def _load_breakdown(db: Session, project_id: str, artifact_id: str | None) -> AgentArtifact:
+    if artifact_id:
+        artifact = db.get(AgentArtifact, artifact_id)
+    else:
+        artifact = db.scalar(
+            select(AgentArtifact)
+            .where(
+                AgentArtifact.project_id == project_id,
+                AgentArtifact.kind == "ScriptBreakdown",
+                AgentArtifact.stale.is_(False),
+            )
+            .order_by(
+                AgentArtifact.created_at.desc(),
+                literal_column("agent_artifacts.rowid").desc(),
+            )
+            .limit(1)
+        )
+    if not artifact or artifact.project_id != project_id or artifact.kind != "ScriptBreakdown":
+        raise HTTPException(404, "Script breakdown not found in this project")
+    if artifact.stale:
+        raise HTTPException(409, "SCRIPT_BREAKDOWN_STALE")
+    return artifact
+
+
+@router.post("/projects/{project_id}/storyboard/character-binding/proposal", status_code=201)
+def character_binding_proposal(project_id: str, body: CharacterBindingRequest, db: DBSession) -> dict:
+    """Propose, for every character the script names, which master answers it.
+
+    The proposal is a reading of the user's own uploads.  It never approves,
+    locks or replaces an asset, and the user still confirms every row.
+    """
+    require_project(db, project_id)
+    breakdown = _load_breakdown(db, project_id, body.breakdown_artifact_id)
+    payload = breakdown.payload_json or {}
+    characters = character_binding.script_characters(payload)
+    masters = _character_masters(db, project_id)
+    proposals = character_binding.propose_bindings(characters, masters)
+    proposal_payload = {
+        "breakdown_artifact_id": breakdown.id,
+        "breakdown_sha256": breakdown.sha256,
+        "characters": proposals,
+        "unbound_masters": character_binding.unbound_masters(masters, proposals),
+        "source": "DETERMINISTIC_NAME_AND_ORDER_MATCH",
+    }
+    artifact = AgentArtifact(
+        project_id=project_id,
+        kind="CharacterBindingProposal",
+        schema_version="1.1",
+        payload_json=proposal_payload,
+        sha256=digest(proposal_payload),
+        producer_role="scriptwriter",
+        source_task_id=breakdown.source_task_id,
+        input_revision_ids=[breakdown.id],
+        stale=False,
+    )
+    db.add(artifact)
+    add_audit(
+        db, "film-agent", "CHARACTER_BINDING_PROPOSED", "project", project_id,
+        {"breakdown_artifact_id": breakdown.id, "characters": len(characters)},
+        project_id=project_id,
+    )
+    db.commit()
+    return {
+        "proposal_id": artifact.id,
+        "breakdown_artifact_id": breakdown.id,
+        "characters": proposals,
+        "unbound_masters": proposal_payload["unbound_masters"],
+        "masters": masters,
+    }
+
+
+@router.post("/projects/{project_id}/storyboard/character-binding/apply", status_code=201)
+def character_binding_apply(project_id: str, body: CharacterBindingApply, db: DBSession) -> dict:
+    """Apply the user's confirmed mapping: name the masters and re-key the script.
+
+    The master keeps its bytes and its identity; only the name the crew binds
+    to changes, and only because the user said so.  The script breakdown is
+    rewritten into a new artifact so the earlier one stays readable.
+    """
+    require_project(db, project_id)
+    breakdown = _load_breakdown(db, project_id, body.breakdown_artifact_id)
+    if not body.bindings:
+        raise HTTPException(422, "CHARACTER_BINDING_EMPTY")
+
+    names = [row.name.strip() for row in body.bindings]
+    if len(set(names)) != len(names):
+        raise HTTPException(409, "CHARACTER_NAME_DUPLICATED_IN_CONFIRMATION")
+
+    assets = {
+        row.id: row
+        for row in db.scalars(
+            select(Asset).where(Asset.project_id == project_id, Asset.id.in_([r.asset_id for r in body.bindings]))
+        ).all()
+    }
+    bound_ids = set(assets)
+    for row in body.bindings:
+        asset = assets.get(row.asset_id)
+        if not asset or asset.kind != "image" or asset.role != "character":
+            raise HTTPException(409, f"CHARACTER_MASTER_NOT_IN_PROJECT:{row.asset_id}")
+
+    # A name that already belongs to another master makes the binding
+    # ambiguous, and an ambiguous binding is a blocked shot.
+    others = db.scalars(
+        select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.kind == "image",
+            Asset.role == "character",
+            Asset.id.notin_(bound_ids),
+        )
+    ).all()
+    taken = {str(row.entity_id or "").strip() for row in others if row.entity_id}
+    for row in body.bindings:
+        if row.name.strip() in taken:
+            raise HTTPException(409, f"CHARACTER_NAME_ALREADY_IN_USE:{row.name.strip()}")
+
+    rename = {row.script_name.strip(): row.name.strip() for row in body.bindings}
+    for row in body.bindings:
+        assets[row.asset_id].entity_id = row.name.strip()
+
+    payload = dict(breakdown.payload_json or {})
+    rewritten_beats = []
+    for beat in payload.get("beats", []) or []:
+        beat = dict(beat)
+        characters: list[str] = []
+        for name in beat.get("characters", []) or []:
+            for part in split_character_names(name if isinstance(name, str) else str(name)):
+                canonical = rename.get(part, part)
+                if canonical not in characters:
+                    characters.append(canonical)
+        beat["characters"] = characters
+        dialogue = []
+        for line in beat.get("dialogue", []) or []:
+            line = dict(line)
+            speaker = line.get("speaker_id")
+            if isinstance(speaker, str):
+                line["speaker_id"] = rename.get(speaker.strip(), speaker)
+            dialogue.append(line)
+        beat["dialogue"] = dialogue
+        rewritten_beats.append(beat)
+    payload["beats"] = rewritten_beats
+    payload["character_bindings"] = [
+        {"script_name": row.script_name.strip(), "asset_id": row.asset_id, "name": row.name.strip()}
+        for row in body.bindings
+    ]
+
+    artifact = AgentArtifact(
+        project_id=project_id,
+        kind="ScriptBreakdown",
+        schema_version="1.1",
+        payload_json=payload,
+        sha256=digest(payload),
+        producer_role="scriptwriter",
+        source_task_id=breakdown.source_task_id,
+        input_revision_ids=[breakdown.id],
+        stale=False,
+    )
+    db.add(artifact)
+    add_audit(
+        db, "local-user", "CHARACTER_BINDING_APPLIED", "project", project_id,
+        {
+            "breakdown_artifact_id": breakdown.id,
+            "new_breakdown_artifact_id": artifact.id,
+            "bindings": payload["character_bindings"],
+        },
+        project_id=project_id,
+    )
+    db.commit()
+    return {
+        "artifact_id": artifact.id,
+        "breakdown_artifact_id": breakdown.id,
+        "assets": [
+            {"id": row.asset_id, "entity_id": row.name.strip(), "locked": bool(assets[row.asset_id].locked)}
+            for row in body.bindings
+        ],
+        "resume_steps": {"scriptwriter": artifact.id},
+        "next": "FREEZE_AND_RESUME",
     }

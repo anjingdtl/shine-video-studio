@@ -759,3 +759,76 @@ html[data-theme='dark'] .wizard-modal{background:#24251f}
 html[data-theme='dark'] .wizard-stage{background:#22231d;border-color:#3a3b31}
 html[data-theme='dark'] .wizard-stage.ok{background:#262d1f;border-color:#41502f}
 html[data-theme='dark'] .wizard-stage.blocked{background:#33241e;border-color:#5c3c30}
+
+/* ---- 必做操作的高对比引导（每页必须点击的那一步） ---- */
+.required-action{display:flex;align-items:center;gap:11px;flex-wrap:wrap;border:1px solid #d98b3f;background:#fff4e4;border-radius:8px;padding:12px 13px;margin:11px 0}
+.required-action .required-icon{color:#b8621d;flex-shrink:0}
+.required-action .required-text{flex:1;min-width:190px}
+.required-action b{display:block;font-size:11px;color:#8a4a12;letter-spacing:.2px}
+.required-action small{display:block;font-size:9px;color:#9a6a3a;margin-top:4px;line-height:1.6}
+.must-button{height:38px;border:1px solid #b8621d;background:#b8621d;color:#fff;border-radius:6px;padding:0 17px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 7px #b8621d33}
+.must-button:hover:not(:disabled){background:#a4571a;border-color:#a4571a}
+.must-button:disabled{opacity:.55;box-shadow:none}
+.must-button.wide{width:100%;height:44px;font-size:12.5px}
+.module-guide{display:flex;gap:8px;align-items:flex-start;border-left:3px solid #cdd4b4;background:#fafaf4;border-radius:0 6px 6px 0;padding:9px 12px;margin:11px 0;font-size:9px;color:#7e8072;line-height:1.65}
+.module-guide svg{color:#8d946d;flex-shrink:0;margin-top:1px}
+.module-guide b{color:#56584b}
+.module-guide p{margin:0 0 4px}
+.module-guide p:last-child{margin-bottom:0}
+
+/* ---- 素材缩略图 ---- */
+.asset-thumb{width:56px;height:56px;border-radius:6px;object-fit:cover;border:1px solid #e4e4dc;background:#f3f3ee;flex-shrink:0;display:block}
+.asset-thumb-fallback{width:56px;height:56px;border-radius:6px;background:#f2eee6;color:#9a8558;display:grid;place-items:center;font:9px var(--mono);flex-shrink:0}
+.asset-thumb.small{width:40px;height:40px}
+.asset-type-wrap{display:flex;align-items:center;gap:7px;flex-shrink:0}
+
+/* ---- 人物对照（剧本人物 ↔ 素材） ---- */
+.binding-panel{margin-top:14px;padding:13px;border:1px solid #e6e6dd;border-radius:8px;background:#fdfdfa}
+.binding-panel .section-kicker{margin-bottom:6px}
+.binding-intro{font-size:9px;color:#82847a;line-height:1.6;margin:0 0 4px}
+.binding-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.binding-row{display:flex;gap:10px;align-items:flex-start;border:1px solid #e6e6dd;border-radius:7px;padding:10px;background:#fcfcfa;flex-wrap:wrap}
+.binding-row.accepted{border-color:#cfd9bc;background:#f7f9f1}
+.binding-row > div:first-child{min-width:74px}
+.binding-row .binding-label{font:8px var(--mono);color:#9a9b8f;display:block;margin-bottom:3px}
+.binding-row .binding-script{font-size:11px;font-weight:600;color:#4f5148}
+.binding-row select,.binding-row input{font-size:9px;padding:6px 7px;max-width:190px}
+.binding-row .binding-reason{font-size:8px;color:#989a8e;margin-top:4px;flex-basis:100%;line-height:1.5}
+.binding-candidates{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px}
+.binding-candidate{display:flex;align-items:center;gap:6px;border:1px solid #e6e6dd;border-radius:6px;padding:5px 8px;background:#fff;cursor:pointer}
+.binding-candidate.selected{border-color:#b8621d;background:#fff4e4}
+.binding-candidate small{font-size:8px;color:#8b8d7d;margin:0}
+
+/* ---- 分镜步骤续跑 ---- */
+.step-retry{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:11px;padding:10px 12px;border:1px solid #e8e2d0;background:#fbf8ee;border-radius:7px;font-size:9px;color:#7c6841;line-height:1.55}
+.step-retry b{color:#6a5834}
+.agent-step-list{display:flex;flex-direction:column;gap:5px;margin-top:10px}
+.agent-step-row{display:flex;align-items:center;gap:8px;border:1px solid #eeeee6;border-radius:6px;padding:8px 10px;background:#fcfcfa;font-size:9px;color:#7e8072}
+.agent-step-row.done{border-color:#dfe7d0;background:#f6f8f1;color:#5b6a4a}
+.agent-step-row.failed{border-color:#efd9d2;background:#faf0ed;color:#96604f}
+.agent-step-row.running{border-color:#e2dfc6;background:#faf8ec;color:#7c6841}
+.agent-step-row b{font-size:10px;color:#4f5148}
+.agent-step-row .step-when{margin-left:auto;font:8px var(--mono);color:#9a9b8f}
+
+html[data-theme='dark'] .required-action{border-color:#8a5a25;background:#33261a}
+html[data-theme='dark'] .required-action b{color:#e3b483}
+html[data-theme='dark'] .required-action small{color:#c39a73}
+html[data-theme='dark'] .required-action .required-icon{color:#d99b56}
+html[data-theme='dark'] .must-button{border-color:#c9762f;background:#c9762f;color:#1f1b14}
+html[data-theme='dark'] .must-button:hover:not(:disabled){background:#b36524;border-color:#b36524}
+html[data-theme='dark'] .module-guide{border-left-color:#5a6045;background:#25261f;color:#a9aa9c}
+html[data-theme='dark'] .module-guide b{color:#cdcec0}
+html[data-theme='dark'] .module-guide svg{color:#9aa171}
+html[data-theme='dark'] .asset-thumb{border-color:#3d3e34;background:#2a2b23}
+html[data-theme='dark'] .asset-thumb-fallback{background:#332f26;color:#b7a37c}
+html[data-theme='dark'] .binding-row{border-color:#3a3b31;background:#25261f}
+html[data-theme='dark'] .binding-row.accepted{border-color:#414a33;background:#252b1f}
+html[data-theme='dark'] .binding-candidate{border-color:#3d3e34;background:#2a2b23}
+html[data-theme='dark'] .binding-candidate.selected{border-color:#c9762f;background:#33261a}
+html[data-theme='dark'] .step-retry{border-color:#4a4027;background:#2b2718;color:#c0ae83}
+html[data-theme='dark'] .step-retry b{color:#d6c493}
+html[data-theme='dark'] .agent-step-row{border-color:#3a3b31;background:#25261f;color:#a9aa9c}
+html[data-theme='dark'] .agent-step-row.done{border-color:#3f4a32;background:#242a1d;color:#a9c193}
+html[data-theme='dark'] .agent-step-row.failed{border-color:#55382f;background:#2e211c;color:#c39a8f}
+html[data-theme='dark'] .agent-step-row.running{border-color:#4a4027;background:#2b2718;color:#c9b98c}
+html[data-theme='dark'] .agent-step-row b{color:#cdcec0}

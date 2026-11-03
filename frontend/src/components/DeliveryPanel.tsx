@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { HelpCircle } from 'lucide-react';
 import { API, api, json, type Job } from '../api';
 import { failureLabels, label } from '../constants';
 
@@ -134,6 +135,13 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
 
   return <section className="card delivery-panel" id="delivery">
     <div className="panel-header"><h2>成片与导出</h2><button disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
+    <div className="module-guide">
+      <HelpCircle size={13} />
+      <div>
+        <p><b>这一步要做什么：</b>镜头全部通过质检后，这里自动出现成片；点「下载 MP4」拿到最终文件。</p>
+        <p><b>还没出现成片？</b>说明镜头还没全部通过——回到上一步看「生成进度与检查」里卡住的镜头。</p>
+      </div>
+    </div>
 
     {loadError && <p className="failure" role="alert">交付列表读取失败：{loadError}（显示的不是最新数据，可点击「刷新交付列表」重试）</p>}
 

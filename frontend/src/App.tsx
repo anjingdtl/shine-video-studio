@@ -473,6 +473,13 @@ function App() {
                   <input className="new-project-inline" value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="新作品名称" />
                   <button className="subtle-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建作品</button>
                 </section>
+                <div className="module-guide">
+                  <CircleHelp size={13} />
+                  <div>
+                    <p><b>四步走完一部片子：</b>① 素材与风格（上传素材、绑定规则包、冻结风格）→ ② AI 导演制作（导入剧本、生成并应用分镜）→ ③ 成片中心（排生产、逐镜审片）→ ④ 下载成片。</p>
+                    <p><b>每一步都有必须点一次的按钮：</b>它们是橙色高亮的，页面上方的指引会告诉你这一步要做什么。</p>
+                  </div>
+                </div>
               </div>}
 
               {directorPage === 'assets' && <div className="director-page" id="assets">
@@ -501,7 +508,8 @@ function App() {
               </div>}
 
               {directorPage === 'produce' && <div className="director-page" id="produce">
-                <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
+                <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                  onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
                 {routes.length === 0 && <div className="blocked-callout">
                   <Sparkles size={15} />
                   <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
@@ -680,7 +688,8 @@ function App() {
 
                 <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
 
-                <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
+                <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                  onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
 
                 <TerminologyPanel
                   key={`terminology-${projectId}`}

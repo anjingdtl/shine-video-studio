@@ -115,4 +115,105 @@ it('远端结果未知时说明不自动重发并锁住同版剧本', async () =
   stub.restore();
 });
 
+it('本项目没绑定官方规则包时，第 3 步直接给出入口', async () => {
+  const navigated: string[] = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/projects\/proj-1\/rulepack$/, respond: () => jsonResponse({ rulepack_id: null }) },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} onNavigate={(page) => navigated.push(page)} />);
+
+  expect(await screen.findByText(/本项目还没绑定官方规则包/)).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /去启用官方规则包/ }));
+  expect(navigated).toEqual(['assets']);
+  stub.restore();
+});
+
 afterEach(() => vi.unstubAllGlobals());
+
+it('人物对不上时给出人物对照，并可确认名图后从导演这一步继续', async () => {
+  const submitted: Array<Record<string, unknown>> = [];
+  const applied: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/storyboard\/character-binding\/proposal$/, respond: () => jsonResponse({
+      proposal_id: 'p-1', breakdown_artifact_id: 'b-2',
+      characters: [{
+        script_name: 'S1', needs_real_name: true, confidence: 'low',
+        suggested_asset_id: 'asset-1', suggested_name: '阿德',
+        candidates: [{ asset_id: 'asset-1', filename: '001.png', entity_id: '001', tags: ['主角', '阿德'],
+          score: 0.3, reason: '剧本第 1 位人物，按上传顺序对应，请人工核对', approved: false, locked: false }],
+      }],
+      masters: [{ id: 'asset-1', filename: '001.png', entity_id: '001', tags: ['主角', '阿德'], approved: false, locked: false }],
+    }) },
+    { method: 'POST', pattern: /\/storyboard\/character-binding\/apply$/, respond: (_url, init) => {
+      applied.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ artifact_id: 'b-3', assets: [{ id: 'asset-1', entity_id: '阿德', locked: false }] });
+    } },
+    { method: 'POST', pattern: /\/preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'g-1', snapshot: 's-1' }) },
+    { method: 'POST', pattern: /\/assets\/asset-1\/(approve|lock)$/, respond: () => jsonResponse({ id: 'asset-1' }) },
+    { method: 'POST', pattern: /\/projects\/proj-1\/storyboard\/generate$/, respond: (_url, init) => {
+      submitted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return submitted.length === 1
+        ? jsonResponse({ status: 'BLOCKED_MISSING_MASTERS', script_source: 'inline', steps: {}, missing_characters: ['S1'] })
+        : jsonResponse({ status: 'PROPOSED', script_source: 'inline', steps: {}, next: null });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+
+  await user.type(screen.getByLabelText('粘贴完整剧本文本'), '三幕测试剧本');
+  await user.click(screen.getByRole('checkbox'));
+  await user.click(screen.getByRole('button', { name: /生成 AI 分镜方案/ }));
+
+  expect(await screen.findByText(/人物对照（剧本人物/)).toBeInTheDocument();
+  expect(screen.getByDisplayValue('阿德')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /确认并写入名字/ }));
+
+  await waitFor(() => expect(applied).toHaveLength(1));
+  expect(applied[0]).toEqual(expect.objectContaining({
+    breakdown_artifact_id: 'b-2',
+    bindings: [{ script_name: 'S1', asset_id: 'asset-1', name: '阿德' }],
+  }));
+  await waitFor(() => expect(submitted).toHaveLength(2));
+  expect(submitted[1]).toEqual(expect.objectContaining({
+    start_role: 'director',
+    resume_steps: { scriptwriter: 'b-3' },
+  }));
+  stub.restore();
+});
+
+it('某一步失败后可以从那一步重试，不重跑已完成的步骤', async () => {
+  const submitted: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/projects\/proj-1\/storyboard\/generate$/, respond: (_url, init) => {
+      submitted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return submitted.length === 1
+        ? jsonResponse({
+            status: 'REJECTED', script_source: 'inline',
+            steps: { scriptwriter: { artifact_id: 'b-1', kind: 'ScriptBreakdown', sha256: 'a'.repeat(64) } },
+            rejections: [{ role: 'director', code: 'CONTRACT_OR_POLICY_REJECTED' }],
+            failed_role: 'director',
+            resume_steps: { scriptwriter: 'b-1' },
+          })
+        : jsonResponse({ status: 'PROPOSED', script_source: 'inline', steps: {}, next: null });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+
+  await user.type(screen.getByLabelText('粘贴完整剧本文本'), '三幕测试剧本');
+  await user.click(screen.getByRole('checkbox'));
+  await user.click(screen.getByRole('button', { name: /生成 AI 分镜方案/ }));
+
+  const retry = await screen.findByRole('button', { name: /从「导演 Agent · 镜头拆分」这一步重试/ });
+  await user.click(retry);
+  await waitFor(() => expect(submitted).toHaveLength(2));
+  expect(submitted[1]).toEqual(expect.objectContaining({
+    start_role: 'director',
+    resume_steps: { scriptwriter: 'b-1' },
+  }));
+  stub.restore();
+});
