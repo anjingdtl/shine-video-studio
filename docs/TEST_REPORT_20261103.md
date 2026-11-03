@@ -175,7 +175,7 @@ npm.cmd test
 pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify
 ```
 
-结果：**`EXIT=0`**。包 `ShineVideoStudio-20261103-cfbae97-win64.zip`，2,188,854 B，SHA-256 `5b8f5ac55060d71e33137f629f610b779277c78d8928986675f1b28f4393d64d`；从 449 个受版本控制的文件构建（排除 112 条路径），`BUILD_INFO.json` 记录 `source_commit=cfbae97…`、`source_tree=CLEAN_TREE`、`contains_models/database/secrets=false`；`-Verify` 解包后按 SHA-256 复核 458 个文件全部通过。包必须从已提交的干净树构建（脚本会拒绝脏工作树）。
+结果：**`EXIT=0`**。包名带提交号（`ShineVideoStudio-<日期>-<提交号>-win64.zip`）。构建自代码提交 `cfbae97` 的那一份：2,188,854 B，SHA-256 `5b8f5ac55060d71e33137f629f610b779277c78d8928986675f1b28f4393d64d`；从 449 个受版本控制的文件构建（排除 112 条路径），`BUILD_INFO.json` 记录 `source_commit=cfbae97…`、`source_tree=CLEAN_TREE`、`contains_models/database/secrets=false`；`-Verify` 解包后按 SHA-256 复核 458 个文件全部通过。按仓库约定，**最终交付包在包含本报告的最后一次提交上重建**，同样通过 `-Verify` 复核，其文件名与 SHA-256 见交接说明。包必须从已提交的干净树构建（脚本会拒绝脏工作树）。
 
 ### 8. 收尾轮未运行项与边界（如实保留）
 
