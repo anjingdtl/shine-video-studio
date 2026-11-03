@@ -69,12 +69,12 @@ def spec(**overrides) -> ShotSpec:
     return ShotSpec(**payload)
 
 
-def compile_prompt(manifest, *, shot=None, mode=None):
+def compile_prompt(manifest, *, shot=None, mode=None, project_language="Chinese"):
     return H3PromptCompiler().compile(
         spec=shot or spec(),
         style=STYLE,
         manifest=manifest,
-        project_language="Chinese",
+        project_language=project_language,
         mode_hint=mode,
     )
 
@@ -92,6 +92,74 @@ def test_t2va_uses_the_three_official_fields_in_order():
     assert "夜雨中的旧码头" in compiled.sections["overall_soundscape"]
     assert compiled.sections["non_diegetic_music"].startswith("Sparse low strings")
     assert len(compiled.prompt_sha256) == 64
+
+
+def test_the_prompt_states_the_spoken_language_contract():
+    """The prompt says which voice to use, and says when there is no voice.
+
+    The whole prompt is written in English.  Without an explicit instruction the
+    model invents English speech, and it invents speech at all in a silent shot.
+    """
+    silent = compile_prompt([])
+    assert "There is no spoken dialogue in this shot" in silent.sections["overall_soundscape"]
+
+    spoken = spec(
+        characters=["R01 杜万山"],
+        dialogue=[
+            {"speaker_id": "R01 杜万山", "text": "你来了。", "start_s": 1.0, "end_s": 2.4},
+        ],
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山", role="character"),
+        item("<Picture 2>", ReferenceUse.PICTURE, asset_id="asset-2"),
+    ]
+    compiled = compile_prompt(manifest, shot=spoken)
+    soundscape = compiled.sections["overall_soundscape"]
+    assert "All spoken dialogue must be spoken in Chinese" in soundscape
+    assert "<d>[Chinese] 你来了。</d>" in compiled.prompt
+    # The spoken-language instruction is English prose: the H3 rulebook only
+    # forbids CJK outside the dialogue itself.
+    assert "All spoken dialogue must be spoken in Chinese" in compiled.prompt
+
+
+def test_a_language_written_in_another_script_never_reaches_the_english_prompt():
+    """The spoken language is stated in English, whatever the project wrote.
+
+    The official rule pack rejects CJK outside the dialogue tags, so a project
+    setting written in Chinese must be normalised instead of copied into the
+    prompt.  Otherwise creating the job fails with an unrelated error.
+    """
+    import re
+
+    spoken = spec(
+        characters=["R01 杜万山"],
+        dialogue=[
+            {"speaker_id": "R01 杜万山", "text": "你来了。", "start_s": 1.0, "end_s": 2.4},
+        ],
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山", role="character"),
+        item("<Picture 2>", ReferenceUse.PICTURE, asset_id="asset-2"),
+    ]
+    compiled = compile_prompt(manifest, shot=spoken, project_language="中文")
+    soundscape = compiled.sections["overall_soundscape"]
+    contract = (
+        "All spoken dialogue must be spoken in Chinese, matching the original line text "
+        "exactly; no other spoken language may appear."
+    )
+    assert contract in soundscape
+    # The contract itself is English prose, and the raw project value never
+    # reaches the prompt: the rule pack rejects CJK outside the dialogue tags.
+    assert contract.isascii()
+    assert "中文" not in compiled.prompt
+    assert not re.search(r"[\u3400-\u9fff]", contract)
+
+
+def test_an_unknown_language_falls_back_to_the_default_voice():
+    """A language the build cannot state must not silently disappear."""
+    compiled = compile_prompt([], shot=spec(), project_language="火星语")
+    assert "All spoken dialogue" not in compiled.sections["overall_soundscape"]
+    assert any("cannot be written in the English prompt" in w for w in compiled.warnings)
 
 
 def test_chinese_locked_facts_require_and_use_explicit_english_prompt_translation():

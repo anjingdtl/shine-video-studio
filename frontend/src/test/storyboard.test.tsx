@@ -31,6 +31,55 @@ it('锁定剧情事实可以逐行输入并完整发送给分镜流程', async (
   stub.restore();
 });
 
+it('对白语言保存到项目，并说明它会进入 H3 提示词', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/projects\/proj-1$/, respond: () => jsonResponse({ id: 'proj-1', language: 'Chinese' }) },
+    { method: 'PATCH', pattern: /\/projects\/proj-1\/settings$/, respond: (_url, init) => {
+      saved.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ language: 'Japanese' });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+
+  await waitFor(() => expect(screen.getByLabelText('对白语言')).toHaveValue('Chinese'));
+  await user.selectOptions(screen.getByLabelText('对白语言'), 'Japanese');
+
+  await waitFor(() => expect(saved).toEqual([{ language: 'Japanese' }]));
+  expect(await screen.findByRole('status')).toHaveTextContent(/对白语言已设为/);
+  stub.restore();
+});
+
+it('对白语言保存失败时如实显示失败，并保留已选语言', async () => {
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/projects\/proj-1$/, respond: () => jsonResponse({ id: 'proj-1', language: 'Chinese' }) },
+    { method: 'PATCH', pattern: /\/projects\/proj-1\/settings$/, respond: () => jsonResponse({ detail: 'boom' }, 500) },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+
+  await waitFor(() => expect(screen.getByLabelText('对白语言')).toHaveValue('Chinese'));
+  await user.selectOptions(screen.getByLabelText('对白语言'), 'Korean');
+
+  expect(await screen.findByText(/保存失败/)).toBeInTheDocument();
+  expect(screen.getByLabelText('对白语言')).toHaveValue('Korean');
+  stub.restore();
+});
+
+it('项目语言不在可选集合内时显示默认语言而不是空白', async () => {
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/projects\/proj-1$/, respond: () => jsonResponse({ id: 'proj-1', language: '火星语' }) },
+  ]);
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
+
+  await waitFor(() => expect(screen.getByLabelText('对白语言')).toHaveValue('Chinese'));
+  stub.restore();
+});
+
 it('仅有一份已导入剧本时在进入分镜页后自动选中', async () => {
   const stub = new StudioStub([
     { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([{

@@ -107,6 +107,10 @@ RECONCILABLE_FAILURE_CODES = (
     "QC_RECHECK_REQUESTED",
     "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL",
     "COMFY_ACTIVATION_RECONCILIATION_REQUIRED",
+    # A handoff that was interrupted leaves an unknown external side effect.
+    # Such a job may still be reconciled against the stored result and must
+    # never be resubmitted.
+    "COMFY_HANDOFF_RECONCILIATION_REQUIRED",
 )
 
 
@@ -2438,7 +2442,10 @@ def _finalize_comfy_attempt(
         attempt.output_bytes = byte_size
         attempt.progress = 100
         attempt.status = "COMPLETED"
-        attempt.reconciliation_state = "collected"
+        if attempt.reconciliation_state != "adopted_persisted_artifact":
+            # An adopted artifact keeps how it was recovered; only bytes that
+            # were downloaded here are recorded as collected.
+            attempt.reconciliation_state = "collected"
         attempt.reconciled_at = utcnow()
         job.last_qc_result = fused.result
         _record_gates(db, job, attempt, artifact, gates, fused, transcript)
@@ -3164,7 +3171,11 @@ def recover_expired_jobs(
 ) -> int:
     """Resolve expired external submissions conservatively; never resubmit blindly."""
     settings = settings or Settings.from_env()
-    from shine.comfyops.handoff_startup import reconcile_managed_startups, reconcile_stopped_handoffs
+    from shine.comfyops.handoff_startup import (
+        reconcile_dead_renderer_leases,
+        reconcile_managed_startups,
+        reconcile_stopped_handoffs,
+    )
 
     # An interrupted managed startup is reconciled before any other job may
     # claim the GPU: only a provably owned process may be stopped.
@@ -3172,6 +3183,10 @@ def recover_expired_jobs(
     # A handoff that failed after its renderer stopped must not block the GPU
     # forever; only a provably dead renderer and a free port may release it.
     reconcile_stopped_handoffs(session_factory)
+    # The same proof releases the exclusive lease of a renderer that died with
+    # its worker: the lease is a claim on a live process, and a process that
+    # has really exited holds nothing.
+    reconcile_dead_renderer_leases(session_factory)
     with session_factory.begin() as db:
         now = utcnow()
         job_ids = list(
@@ -3244,14 +3259,19 @@ def recover_expired_jobs(
         )
         for lease in leases:
             if lease.status == "RECONCILE_REQUIRED":
-                continue  # Requires explicit physical reconciliation, not an HTTP unload retry.
+                # Requires explicit physical reconciliation, not an HTTP unload
+                # retry.  A renderer that has really exited holds nothing, so
+                # its lease may still be released.
+                _release_dead_renderer_lease(db, lease)
+                continue
             owner_job_id = lease.owner.removeprefix("h3:")
             job = db.get(Job, owner_job_id)
             if lease.owner.startswith("h3:"):
                 if _live_handoff_reservation(db, job, lease, utcnow()):
                     continue
                 if not job or job.status not in ACTIVE_STATUSES or lease.expires_at <= utcnow():
-                    lease.status = "RECONCILE_REQUIRED"
+                    if not _release_dead_renderer_lease(db, lease):
+                        lease.status = "RECONCILE_REQUIRED"
                 continue  # Renderer unload alone cannot establish physical process release.
             if job is not None and job.status in ACTIVE_STATUSES:
                 continue
@@ -3313,7 +3333,10 @@ def _block_interrupted_handoff(session_factory, job_id):
             return False
         if lease is None:
             lease = ResourceScheduler().enqueue(db, "h3:" + job_id, 16384, True, 100)
-        lease.status = "RECONCILE_REQUIRED"
+        if lease.status != "RELEASED":
+            # A lease that was already released cannot be un-released: the GPU
+            # it protected is free, and the job is blocked for the human only.
+            lease.status = "RECONCILE_REQUIRED"
         if value.get("stage") != "RECONCILE_REQUIRED" or binding_mismatch or lease_mismatch:
             journal.value = {**value, "stage": "RECONCILE_REQUIRED", "last_confirmed_stage": value.get("stage"),
                              "reason": ("RESERVATION_JOB_BINDING_CHANGED" if binding_mismatch else
@@ -3334,6 +3357,26 @@ def _block_interrupted_handoff(session_factory, job_id):
         return True
 
 
+def _handoff_state(session_factory, job_id) -> str:
+    """Whether the last handoff of this job was interrupted, reconciled or absent.
+
+    A handoff that was already reconciled is finished: the recovery of that
+    attempt happened, and the job waits for the human.  A handoff that was
+    interrupted is the signature of a worker that died mid-handoff, and that
+    is the case the stored artifact may resolve.
+    """
+    from shine.models import AppSetting
+
+    with session_factory() as db:
+        attempt = _latest_attempt(db, job_id)
+        if attempt is None:
+            return "NONE"
+        journal = db.get(AppSetting, "handoff:" + attempt.id)
+        if journal is None or not isinstance(journal.value, dict):
+            return "NONE"
+        return "RECONCILED" if journal.value.get("stage") == "RECONCILE_COMPLETE" else "UNRESOLVED"
+
+
 def _recover_one_job(
     session_factory,
     worker_id: str,
@@ -3344,7 +3387,23 @@ def _recover_one_job(
     semantic_reviewer=None,
     asr_reviewer=None,
 ) -> int:
-    if _block_interrupted_handoff(session_factory, job_id):
+    with session_factory() as check_db:
+        candidate = check_db.get(Job, job_id)
+        candidate_attempt = _latest_attempt(check_db, job_id) if candidate is not None else None
+        persisted = _persisted_render_artifact(check_db, candidate, candidate_attempt)
+    if _handoff_state(session_factory, job_id) == "RECONCILED":
+        # The handoff of this attempt was already reconciled, so its outcome is
+        # history and the recovery does not rewrite it.  The one exception is a
+        # render whose bytes are already stored and whose quality gates never
+        # ran: there is no conclusion to protect, so the gates may continue on
+        # the stored bytes.
+        if (persisted is None or candidate is None
+                or candidate.status in {"PASSED", "FAILED", "CANCELLED"}):
+            return 0
+    if persisted is None and _block_interrupted_handoff(session_factory, job_id):
+        # An interrupted handoff hides an external side effect that only the
+        # human may resolve.  A render whose bytes are already stored is not
+        # such a case: its outcome is known, so the quality gates continue.
         return 1
     finalize: dict[str, Any] | None = None
     with session_factory.begin() as db:
@@ -3478,6 +3537,173 @@ def _recover_one_job(
     return 0
 
 
+def _release_dead_renderer_lease(db: Session, lease) -> bool:
+    """Release an exclusive lease whose renderer is provably gone.
+
+    The lease is a claim on a live renderer.  When the recorded process has
+    really exited and nothing answers on its loopback port any more, the claim
+    holds nothing and the lease may be released.  A renderer that cannot be
+    proved gone keeps its lease for reconciliation.
+    """
+    from shine.comfyops.handoff_startup import release_dead_renderer_lease
+
+    return release_dead_renderer_lease(db, lease)
+
+
+def _persisted_render_artifact(
+    db: Session, job: Job, attempt: JobAttempt | None
+) -> MediaArtifact | None:
+    """The collected bytes of a render that already finished, when they are provably ours.
+
+    A worker that is lost after the external render completed but before the
+    quality gates ran leaves the downloaded bytes behind in the database.  That
+    artifact is the authoritative result of the render; the external history is
+    only corroboration, because a restarted or dead renderer has usually lost
+    it.  Those bytes may only be used again when the whole identity chain
+    still agrees:
+
+    * the artifact belongs to this attempt and this job,
+    * the attempt recorded the same output digest,
+    * the attempt recorded the prompt graph hash of the submitted render,
+    * the job, the attempt and the artifact agree on the external prompt id.
+    """
+    if job is None or attempt is None or job.provider != "comfyui":
+        return None
+    prompt_id = job.provider_job_id
+    if not prompt_id or not attempt.prompt_graph_sha256 or attempt.provider_job_id != prompt_id:
+        return None
+    if not job.artifact_id:
+        return None
+    artifact = db.get(MediaArtifact, job.artifact_id)
+    if artifact is None:
+        return None
+    if (
+        artifact.job_id != job.id
+        or artifact.attempt_id != attempt.id
+        or artifact.project_id != job.project_id
+        or artifact.is_mock
+        or not artifact.sha256
+        or artifact.sha256 != attempt.output_sha256
+        or (artifact.provenance or {}).get("prompt_id") != prompt_id
+    ):
+        return None
+    return artifact
+
+
+def _recover_from_persisted_artifact(
+    db: Session,
+    job: Job,
+    attempt: JobAttempt,
+    *,
+    artifact: MediaArtifact,
+    worker_id: str,
+    settings: Settings,
+    comfy_client,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Continue the quality gates from the bytes the lost worker already stored.
+
+    The renderer may be gone and its history may be empty, but the render
+    itself succeeded: its output was downloaded, hashed and stored before the
+    worker was lost.  Recovery therefore re-runs the deterministic technical QC
+    and the five named gates on those bytes and never resubmits the prompt.
+    """
+    if job.status == "NEEDS_REVIEW":
+        if job.failure_code not in RECONCILABLE_FAILURE_CODES:
+            # A different blocker keeps the job with the human who must look at
+            # it; this path never overrides an unrelated decision.
+            return False, None
+        if _claim_stranded_job(db, job, worker_id, settings) is None:
+            return False, None
+        transition(job, "RUNNING")
+    elif job.status in set(ACTIVE_STATUSES):
+        if _take_recovery_lease(db, job, worker_id, settings) is None:
+            return False, None
+    else:
+        return False, None
+    if job.status == "RUNNING":
+        transition(job, "QC_PENDING")
+    state_version = job.state_version
+    # The stored bytes are verified *before* anything claims that they were
+    # adopted.  A file that changed after it was written is not the render the
+    # attempt recorded, so it must not leave an adoption record behind that
+    # would stop a later recovery from looking at this attempt again.
+    from shine.media.artifacts import safe_asset_path
+
+    try:
+        stored = safe_asset_path(settings.data_dir, str(artifact.storage_path))
+        if stored.stat().st_size != int(artifact.byte_size) or _file_digest(stored) != artifact.sha256:
+            raise ValueError("artifact changed")
+    except (OSError, ValueError, HTTPException):
+        job.failure_code = "ARTIFACT_HASH_MISMATCH"
+        job.lease_owner = None
+        job.lease_expires_at = None
+        if job.status not in {"NEEDS_REVIEW", "FAILED"}:
+            try_transition(job, "NEEDS_REVIEW")
+        attempt.status = "FAILED"
+        attempt.failure_code = "ARTIFACT_HASH_MISMATCH"
+        add_audit(
+            db,
+            "orchestrator",
+            "PERSISTED_ARTIFACT_BYTES_CHANGED",
+            "job",
+            job.id,
+            {"artifact_id": artifact.id, "artifact_sha256": artifact.sha256, "resubmitted": False},
+            project_id=job.project_id,
+        )
+        return False, None
+    attempt.reconciliation_state = "adopted_persisted_artifact"
+    attempt.reconciled_at = utcnow()
+    from shine.models import AppSetting
+
+    journal = db.get(AppSetting, "handoff:" + attempt.id)
+    if journal is not None and isinstance(journal.value, dict) and journal.value.get("stage") not in {
+        "RECONCILE_COMPLETE",
+    }:
+        journal.value = {
+            **journal.value,
+            "stage": "RECONCILE_COMPLETE",
+            "last_confirmed_stage": journal.value.get("stage"),
+            "reason": "OUTPUT_ALREADY_PERSISTED",
+            "reconciled_at": utcnow().isoformat(),
+        }
+    db.add(
+        ExternalJobReconciliation(
+            job_id=job.id,
+            provider_job_id=job.provider_job_id,
+            action="recover_persisted_artifact",
+            result="artifact_persisted",
+            evidence={
+                "artifact_id": artifact.id,
+                "artifact_sha256": artifact.sha256,
+                "prompt_graph_sha256": attempt.prompt_graph_sha256,
+                "resubmitted": False,
+            },
+        )
+    )
+    add_audit(
+        db,
+        "orchestrator",
+        "COMFY_RECONCILED_PERSISTED_ARTIFACT",
+        "job",
+        job.id,
+        {
+            "artifact_id": artifact.id,
+            "artifact_sha256": artifact.sha256,
+            "prompt_graph_sha256": attempt.prompt_graph_sha256,
+            "resubmitted": False,
+        },
+        project_id=job.project_id,
+    )
+    client = comfy_client or _renderer_client(settings)
+    return True, {
+        "job_id": job.id,
+        "attempt_id": attempt.id,
+        "expected_state_version": state_version,
+        "prompt_id": job.provider_job_id,
+        "service": ComfyUIRenderService(client, settings.data_dir),
+    }
+
+
 def _recover_comfy_job(
     db: Session,
     job: Job,
@@ -3493,6 +3719,21 @@ def _recover_comfy_job(
     transaction before the descriptor is executed, so the finalisation can
     open its own transaction.
     """
+
+    persisted = _persisted_render_artifact(db, job, attempt)
+    if persisted is not None and attempt is not None:
+        # The render already finished and its bytes are stored.  The external
+        # history is only corroboration here, so the renderer is not contacted
+        # at all and the prompt is never submitted again.
+        return _recover_from_persisted_artifact(
+            db,
+            job,
+            attempt,
+            artifact=persisted,
+            worker_id=worker_id,
+            settings=settings,
+            comfy_client=comfy_client,
+        )
 
     client = comfy_client or _renderer_client(settings)
     service = ComfyUIRenderService(client, settings.data_dir)

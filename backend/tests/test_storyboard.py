@@ -257,6 +257,25 @@ def test_the_arbiter_is_not_called_when_the_crew_agrees(studio):
     assert "ContinuityArbitration" not in calls
 
 
+def test_the_project_language_must_be_writable_in_the_english_prompt(studio):
+    """A language the H3 prompt cannot state is refused with a clear message.
+
+    The prompt is written in English and the official rule pack rejects CJK
+    outside the dialogue tags, so the project language is normalised when it is
+    saved instead of breaking the job creation later.
+    """
+    client, _factory, _tmp, _settings = studio
+    created = client.post("/api/v1/projects", json={"title": "对白语言", "language": "中文"}).json()
+    assert created["language"] == "Chinese"
+
+    updated = client.patch(f"/api/v1/projects/{created['id']}/settings", json={"language": "粤语"}).json()
+    assert updated["language"] == "Cantonese"
+
+    refused = client.patch(f"/api/v1/projects/{created['id']}/settings", json={"language": "火星语"})
+    assert refused.status_code == 422, refused.text
+    assert "H3 prompt" in refused.json()["detail"]
+
+
 def test_storyboard_chain_generates_all_five_artifacts(studio):
     client, factory, tmp_path, settings = studio
     project_id, _style, registry = _studio_with_chain(client)

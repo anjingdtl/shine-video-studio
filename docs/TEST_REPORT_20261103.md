@@ -1,7 +1,7 @@
-# 测试报告（2026-11-03 晚间补充轮）
+# 测试报告（2026-11-03 晚间补充轮 + 收尾轮）
 
-- 记录时间：2026-11-03 18:06（Asia/Shanghai）
-- 被测代码：当前工作树（在 `784cf36` 之上的未提交改动，见进度文档）
+- 记录时间：2026-11-03 18:06（Asia/Shanghai）；**收尾轮更新：2026-11-03 20:50**
+- 被测代码：当前工作树（在 `4d8123a` 之上的收尾轮改动，见进度文档）
 - 环境：Windows、Python 3.12（`backend/.venv`）、SQLite、Node.js、本地 ComfyUI 8188（本轮渲染后已停止）、本地 VLM 8116、本地 ASR 8117
 - 说明：本报告只记录实际执行过的命令和结果；未执行的项明确标注为未运行。
 
@@ -96,7 +96,91 @@ npm.cmd test
 
 ## 四、未运行项与边界
 
-- 本轮未重新执行浏览器全流程复验（正式项目当前镜头阻塞，待恢复后再做）。
-- 未从本轮最终提交重新构建 Windows 测试包；包构建与入口脚本校验列为后续工作。
+- 本轮未重新执行浏览器全流程复验（正式项目当前镜头阻塞，待恢复后再做）→ **已在收尾轮完成，见第五节**。
+- 未从本轮最终提交重新构建 Windows 测试包；包构建与入口脚本校验列为后续工作 → **已在收尾轮完成，见第五节**。
 - GitHub Actions 仍为 `WAIVED_EXTERNAL_BILLING`，不以上游 CI 作为通过证据。
 - 真实作品版权、审美与正式发行审批仍为 `PENDING_HUMAN`。
+
+---
+
+## 五、收尾轮（2026-11-03 晚间后段）
+
+被测代码：收尾轮改动（`worker.py` 持久化产物恢复、`handoff_startup.py` 死渲染器租约释放、`preproduction.py` 重新校验、`production_series.py` 同事务归并、`h3/compiler.py` 发声合同、前端对白语言下拉）。
+
+### 1. 后端全量测试
+
+命令：
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pytest -q 2>&1 | Tee-Object -FilePath ..\.local-acceptance\backend-suite-final-20261103.log
+```
+
+结果：**`PYTEST_EXIT=0`**；按进度行逐字符统计 **`1472 passed` / `1 skipped` / `0 failed`**（共收集 1473 项，跳过 1 项为既有 Windows Job Object 依赖标记）。日志：`.local-acceptance/backend-suite-postfix-20261103.log`（这是独立复核修复之后的最终全量；此前一轮 `1464 passed / 1 skipped / 0 failed`，日志 `.local-acceptance/backend-suite-final-20261103.log`）。
+
+该轮包含新增回归：`test_comfy_completion_window.py`（产物已持久化 → 不重投 → QC 通过 → PASSED；**落盘字节被篡改 → 不认领 → `ARTIFACT_HASH_MISMATCH`**）、`test_comfy_handoff_journal.py`（死渲染器释放 / 存活渲染器不释放 / **命名 Job Object 有成员则不释放** / **身份不可读则不释放**）、`test_production_series.py`（陈旧系列释放死渲染器租约 / 无法证明则保留租约 / **已完成但有阻塞镜头的系列被纠正**）、`test_v13_preparation.py`（重新校验成功 / 渲染合同变更时拒绝 / requirement 行重写不改变绑定 / **审片模型不算渲染绑定**）、`test_h3_compiler.py`（发声合同 / 语言名以英文规范名写入提示词）、`test_storyboard.py`（项目语言在 API 边界被规范化或明确拒绝）。
+
+### 2. Ruff
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m ruff check shine tests
+```
+
+结果：`All checks passed!`（`RUFF_EXIT=0`）。
+
+### 3. Alembic
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m alembic heads
+.\.venv\Scripts\python.exe -m alembic history -r head:head
+```
+
+结果：单头 `f150a0030001 (head)`，`HEADS_EXIT=0`；无多头、无迁移漂移。
+
+### 4. 前端构建
+
+```powershell
+cd frontend
+npm.cmd run build
+```
+
+结果：`BUILD_EXIT=0`。产物：`dist/index.html 0.47 kB`、`index-DNeT5LWc.css 56.51 kB`、`index-UlvaeEEW.js 475.97 kB`（`tsc -b && vite build`，1606 modules）。
+
+### 5. 前端测试
+
+```powershell
+cd frontend
+npm.cmd test
+```
+
+结果：**`15 passed` 个测试文件 / `93 passed` 个测试**，`TEST_EXIT=0`（含新增「对白语言」保存、保存失败如实显示、未知语言回退默认 3 条）。
+
+### 6. 真实模型与真实生产证据（收尾轮）
+
+- **VLM 真实重校准**（最终 pinned review client `client_review_sha256=8b8d9bd3…`，本地 `qwen3-vl-4b-bnb4`）：正向 `3f82719e-49a7-4cc9-911c-57c94b5f0e22` → `passed`（confidence 0.98，0 findings）；负向 `87a00a00-41b2-4789-b98f-4e4409db401e` → `failed`（confidence 0.85，7 findings）。记录：`.local-acceptance/vlm-recalibration-20261103.json`。（独立复核修复后又重做一次，此为最终结果；上一轮校准 `7b2246d0…`/`32310955…` 已作废。）
+- **新修订发布**：VLM `03f32432-4c94-4476-8580-e1a14e9fc37f` `PRODUCTION_APPROVED`；此前发布/迭代产生的 `82906927…`/`f930e8ec…`/`43ca215d…`/`ed841a10…`/`e83b9b54…` 已 `DEPRECATED`，`839aeef6…` 保持 DRAFT。
+- **重新冻结**：计划 `7832906a-d383-4eaa-a94d-0e0b510769d2`（`FROZEN`，绑定 H3 `93da6ba3…`、VLM `03f32432…`、ASR `1f0263da…`），`readiness(offline=false)` = `SHOOT_READY`。
+- **正式镜头真实恢复**：镜头 `f0173fbe-41c0-4ee0-ac26-9c6fecc74635` = `PASSED`，`quality_verification=manual_verified`，`acceptance_status=accepted`；attempt `reconciliation_state=adopted_persisted_artifact`，**`resubmitted=false`**（未重投 H3）。门禁：technical `passed`（ffprobe + FFmpeg 全帧解码）、semantic `passed`、style `passed`（真实 VLM 0 findings / 0.98）、audio `not_applicable`、final `passed`。按新冻结合同重新校验后 `preproduction_manifest_hash` = `55b03fe7…`，状态不变。
+- **人工逐项审片**（浏览器 OperatorReview，`local-user`）：7 项「通过」+ 3 项「不适用」，逐项写有具体证据；「我已完整观看当前视频」已勾选；**「已人工试听」未勾选**（本轮未做人工听辨，不冒充）。
+- **租约与系列**：GPU 租约 `96971172-9ad9-4518-b82a-3f0e2de5abb0` → `RELEASED`（走「已证明死亡」释放路径）；系列 `a6b97b5e-1cb3-4daa-ae71-409686fe806d` → `COMPLETED / RELEASED`，`completed_count=1/1`。
+- **交付与成片**：交付订单 `ac7f0298-4411-4c71-9f29-f7588686e2ba` → `DELIVERED`；成片 artifact `6c65ee08-193e-4b02-9c95-b58e08f649bd`，下载得 3,644,345 B，SHA-256 `04dc2cff7ce579b89ca54ff754d24dad6a6c9aee305dd857f7f0bbd91bb03241`（与界面指纹前缀一致）；ffprobe：mp4 / h264 768x1344 / 24fps / AAC 48kHz 立体声 / 9.44 s；独立 `ffmpeg -f null -` 全片解码 exit 0。
+
+### 7. Windows 测试包
+
+命令：
+
+```powershell
+pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify
+```
+
+结果：**__PACKAGE_RESULT__**。包必须从已提交的干净树构建（脚本会拒绝脏工作树）。
+
+### 8. 收尾轮未运行项与边界（如实保留）
+
+- **未做带人声的真实 H3 重渲染**：对白语言设置已验证到提示词层（编译器回归 + 前端回归），模型实际口音未验证。
+- **未做新的完整多镜正式系列生产**：正式项目本轮只完成单镜头（1/1）恢复与交付；多镜连拍的真实生产证据仍来自回归作品三镜系列 `0dd7ad85…`。
+- **未做 Windows 之外的操作系统验证**：所有验证都在 Windows 11 本机完成。
+- **未使用上游 CI 作为通过证据**：GitHub Actions 仍为 `WAIVED_EXTERNAL_BILLING`。
+- 真实作品版权、审美与正式发行审批仍为 `PENDING_HUMAN`；建议式模型审片不等于人工签字。

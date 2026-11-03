@@ -68,6 +68,48 @@ def inspect_named_group(name, pid, birth):
         kernel.CloseHandle(job)
 
 
+def named_group_active_processes(name):
+    """How many processes of a named owned group are still alive.
+
+    Read-only: the group is never terminated and never adopted here.  A group
+    that no longer exists has no members left, so it reports zero.  Anything
+    else raises, because a lease may only be released when the renderer is
+    *provably* gone — uncertainty is never death.
+    """
+    if os.name != "nt" or not isinstance(name, str) or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name):
+        raise ValueError("NAMED_JOB_ID_INVALID")
+    import ctypes
+    from ctypes import wintypes
+
+    class Accounting(ctypes.Structure):
+        _fields_ = (
+            [(field, ctypes.c_longlong) for field in (
+                "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodTotalKernelTime")]
+            + [(field, wintypes.DWORD) for field in (
+                "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+        )
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.OpenJobObjectW.restype = wintypes.HANDLE
+    kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                wintypes.DWORD, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = kernel.OpenJobObjectW(0x0004, False, name)  # JOB_OBJECT_QUERY only.
+    if not job:
+        error = ctypes.get_last_error()
+        if error == 2:
+            return 0  # the named group no longer exists, so it has no members
+        raise OSError(error, "NAMED_JOB_QUERY_UNAVAILABLE")
+    try:
+        info = Accounting()
+        if not kernel.QueryInformationJobObject(job, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            raise OSError(ctypes.get_last_error(), "QueryInformationJobObject")
+        return int(info.ActiveProcesses)
+    finally:
+        kernel.CloseHandle(job)
+
+
 def terminate_named_group(name, *, timeout=10):
     """Stop a named owned group after its supervisor is gone.
 
@@ -94,7 +136,7 @@ def terminate_named_group(name, *, timeout=10):
     kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.OpenJobObjectW.restype = wintypes.HANDLE
     kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-    kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.INT, ctypes.c_void_p,
+    kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
                                                 wintypes.DWORD, ctypes.c_void_p]
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     job = kernel.OpenJobObjectW(0x0008 | 0x0004, False, name)  # TERMINATE | QUERY

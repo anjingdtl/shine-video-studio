@@ -139,9 +139,59 @@ Never bundle official full-text guides without redistribution permission. Run
   lease `96971172…` is `ACTIVE` and expired while the renderer is already gone. Recovery must
   prefer QC from the persisted artifact (artifact SHA + attempt output SHA + prompt graph
   hash) and must not blind-resubmit. The corrected current shot is **not yet accepted**.
+  (Resolved in the 2026-11-03 closing round — see the supplement below.)
 - After worker/quality changes run `backend/tests/test_offline_e2e.py`,
   `test_comfy_completion_window.py`, `test_production_series.py`, `test_advisory_queue.py`
   and the full backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`.
   Build the Windows package only from the final committed tree with
   `pwsh -File scripts\build_test_package.ps1`.
+
+## 2026-11-03 closing round (persisted-artifact recovery, dead-renderer lease, spoken language)
+
+- **A persisted render artifact is authoritative when its whole identity chain matches.** Adopt
+  an already-persisted artifact only if `artifact.sha256 == attempt.output_sha256`, the attempt
+  carries a `prompt_graph_sha256`, the job/attempt/artifact agree on the external prompt id, and
+  the artifact's attempt/job/project ids match and it is not a mock. Then re-run technical QC and
+  the five gates from the stored bytes, record `reconciliation_state=adopted_persisted_artifact`
+  and `resubmitted=false`, and never contact the renderer or resubmit H3. Bytes changed after
+  persistence stay rejected (`ARTIFACT_HASH_MISMATCH`). External history is corroboration only.
+- **Verify the stored bytes before recording the adoption.** The digest/size check on disk runs
+  before `adopted_persisted_artifact`, the reconciliation row and the `RECONCILE_COMPLETE` journal
+  are written. A tampered file must leave no adoption evidence behind, otherwise the attempt can
+  never be reviewed again.
+- A handoff journal already reconciled to `RECONCILE_COMPLETE` is history: the persisted-artifact
+  path never rewrites it. The one exception is a render whose bytes are stored and whose gates
+  never ran: no conclusion exists yet, so the gates may still continue on the stored bytes.
+- **An exclusive GPU lease is a claim on a live process.** Release it only when PID/birth identity,
+  the named Job Object (no live member) and a free port all prove the renderer is gone
+  (`reconcile_dead_renderer_leases`). An unreadable process identity is uncertainty, never death.
+  Otherwise the lease stays `RECONCILE_REQUIRED`. The lease release and the series
+  `COMPLETED/RELEASED` transition commit in one transaction; a release that already committed is
+  idempotent. A series with a blocked shot is never marked complete, and a completion that was
+  merged before its shots were decided is explicitly corrected to `NEEDS_REVIEW`.
+- Re-validating already-produced media against the current frozen contract is allowed only when
+  the **render bindings** (style, rule pack, master assets, models, H3 workflow) are unchanged;
+  a changed render binding is refused. Advisory-review capability revisions — including the
+  models they run on — are not render bindings and may be re-bound explicitly through the
+  operator action.
+- **The H3 prompt must state the spoken-language contract explicitly.** With dialogue:
+  `All spoken dialogue must be spoken in {project language}, matching the original line text
+  exactly`. Without dialogue: `do not produce speech, voice-over or vocal sounds of any kind`.
+  The language is written in its canonical English name: the official rule pack rejects CJK
+  outside the dialogue tags, so a project setting written in another script is normalised
+  (`shine/h3/spoken_language.py`) or refused with 422 at the API boundary — never copied into the
+  prompt. The project `language` setting is the single source of truth and is exposed in the
+  director UI; already-produced shots are never rewritten. Verifying the model's actual accent
+  still requires a real re-render with spoken lines.
+- After worker/quality changes in this area, rerun the real VLM positive/negative calibration,
+  publish a new revision, deprecate the old one, re-analyze and re-freeze the plan. Current
+  approved VLM revision: `03f32432-4c94-4476-8580-e1a14e9fc37f`; frozen plan
+  `7832906a-d383-4eaa-a94d-0e0b510769d2`; the formal shot `f0173fbe…` is `PASSED` with
+  `acceptance_status=accepted`, its series `a6b97b5e…` is `COMPLETED/RELEASED`, lease
+  `96971172…` is `RELEASED`, and the delivery `ac7f0298…` is `DELIVERED`.
+- After worker/quality changes run `backend/tests/test_offline_e2e.py`,
+  `test_comfy_completion_window.py`, `test_production_series.py`, `test_advisory_queue.py`,
+  `test_comfy_handoff_journal.py`, `test_v13_preparation.py`, `test_h3_compiler.py` and the full
+  backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`. Build the Windows
+  package only from the final committed tree with `pwsh -File scripts\build_test_package.ps1`.
 

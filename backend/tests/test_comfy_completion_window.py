@@ -495,3 +495,222 @@ def test_activation_uncertainty_adopts_completed_work_without_resubmitting(api, 
         # Job recovery adopts the artifact but never releases the physical
         # renderer; that remains the reconciliation of its owning series.
         assert db.get(ResourceLease, lease.id).status == "RECONCILE_REQUIRED"
+
+
+def test_a_lost_worker_is_recovered_from_the_persisted_artifact(api, fake_comfy):
+    """The stored bytes of a finished render are the authority; H3 is never asked again.
+
+    A worker that dies after the download but before the quality gates ran
+    leaves the collected bytes behind.  Recovery must continue from those bytes
+    and must never submit the prompt a second time, even when the renderer is
+    gone and its history can no longer answer anything.
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from shine.media.artifacts import store_artifact
+    from shine.models import ExternalJobReconciliation, JobAttempt, MediaArtifact
+    from tests.conftest import ffmpeg_executable, ffprobe_executable
+
+    client, factory, settings = api
+    probe, ffmpeg = ffprobe_executable(), ffmpeg_executable()
+    if not probe or not ffmpeg:
+        pytest.skip("the persisted-artifact recovery needs FFprobe and FFmpeg")
+    recovery_settings = Settings(
+        data_dir=settings.data_dir,
+        database_url=settings.database_url,
+        secret_store_dir=settings.secret_store_dir,
+        ffprobe_path=probe,
+        ffmpeg_path=ffmpeg,
+        render_provider="comfyui",
+    )
+
+    project_id = create_project(client)
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"])
+    job = create_comfy_job(client, project_id, shot["id"])
+
+    # The render finished and its bytes were stored; the worker then died
+    # before the quality gates ran.
+    content = make_test_video_bytes(duration_s=6)
+    digest = hashlib.sha256(content).hexdigest()
+    relative, stored_digest, byte_size = store_artifact(
+        settings.data_dir, project_id, job["id"], content, "video/mp4"
+    )
+    assert stored_digest == digest
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        attempt = JobAttempt(
+            job_id=row.id,
+            attempt_no=1,
+            request_fingerprint="f" * 64,
+            status="ACKNOWLEDGED",
+            provider_job_id="prompt-lost",
+            prompt_graph_sha256="a" * 64,
+            output_path=relative,
+            output_sha256=digest,
+            output_bytes=byte_size,
+            lease_owner="dead-worker",
+            lease_expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(attempt)
+        db.flush()
+        artifact = MediaArtifact(
+            project_id=project_id,
+            job_id=row.id,
+            attempt_id=attempt.id,
+            artifact_kind="video",
+            storage_path=relative,
+            sha256=digest,
+            byte_size=byte_size,
+            content_type="video/mp4",
+            is_mock=False,
+            provenance={"prompt_id": "prompt-lost"},
+        )
+        db.add(artifact)
+        db.flush()
+        row.artifact_id = artifact.id
+        row.provider_job_id = "prompt-lost"
+        row.status = "RUNNING"
+        row.lease_owner = "dead-worker"
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        row.state_version = 2
+        artifact_id = artifact.id
+
+    # The renderer is gone: nothing answers on its port any more.
+    dead_renderer = ComfyUIClient("http://127.0.0.1:1", timeout_s=1)
+
+    assert (
+        recover_expired_jobs(
+            factory,
+            "recovery-worker",
+            settings=recovery_settings,
+            comfy_client=dead_renderer,
+        )
+        == 1
+    )
+    # The prompt was never submitted again.
+    assert fake_comfy.prompt_count == 0
+
+    state = client.get(f"/api/v1/jobs/{job['id']}").json()
+    assert state["status"] == "PASSED", state
+    assert state["artifact_id"] == artifact_id
+    assert state["quality_verification"] == "real"
+    gates = client.get(f"/api/v1/jobs/{job['id']}/quality-gates").json()
+    technical = next(gate for gate in gates if gate["gate_name"] == "technical")
+    assert technical["status"] == "passed", gates
+    assert technical["is_mock"] is False
+
+    with factory() as db:
+        attempt = db.scalar(select(JobAttempt).where(JobAttempt.job_id == job["id"]))
+        assert attempt.reconciliation_state == "adopted_persisted_artifact"
+        assert attempt.output_sha256 == digest
+        evidence = db.scalar(
+            select(ExternalJobReconciliation).where(
+                ExternalJobReconciliation.job_id == job["id"],
+                ExternalJobReconciliation.action == "recover_persisted_artifact",
+            )
+        )
+        assert evidence is not None
+        assert evidence.evidence["resubmitted"] is False
+        assert evidence.evidence["artifact_sha256"] == digest
+
+
+def test_persisted_artifact_whose_bytes_changed_is_never_adopted(api, fake_comfy):
+    """Bytes that changed after they were stored are not the recorded render.
+
+    The adoption record and the reconciliation journal are written only after
+    the stored bytes still match the digest the attempt recorded.  A tampered
+    file must therefore leave no adoption evidence behind, so a later recovery
+    may still look at this attempt again.
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from shine.media.artifacts import store_artifact
+    from shine.models import ExternalJobReconciliation, JobAttempt, MediaArtifact
+
+    client, factory, settings = api
+    project_id = create_project(client)
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"])
+    job = create_comfy_job(client, project_id, shot["id"])
+
+    content = make_test_video_bytes(duration_s=6)
+    digest = hashlib.sha256(content).hexdigest()
+    relative, stored_digest, byte_size = store_artifact(
+        settings.data_dir, project_id, job["id"], content, "video/mp4"
+    )
+    assert stored_digest == digest
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        attempt = JobAttempt(
+            job_id=row.id,
+            attempt_no=1,
+            request_fingerprint="f" * 64,
+            status="ACKNOWLEDGED",
+            provider_job_id="prompt-tampered",
+            prompt_graph_sha256="a" * 64,
+            output_path=relative,
+            output_sha256=digest,
+            output_bytes=byte_size,
+            lease_owner="dead-worker",
+            lease_expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(attempt)
+        db.flush()
+        artifact = MediaArtifact(
+            project_id=project_id,
+            job_id=row.id,
+            attempt_id=attempt.id,
+            artifact_kind="video",
+            storage_path=relative,
+            sha256=digest,
+            byte_size=byte_size,
+            content_type="video/mp4",
+            is_mock=False,
+            provenance={"prompt_id": "prompt-tampered"},
+        )
+        db.add(artifact)
+        db.flush()
+        row.artifact_id = artifact.id
+        row.provider_job_id = "prompt-tampered"
+        row.status = "RUNNING"
+        row.lease_owner = "dead-worker"
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        row.state_version = 2
+
+    # The stored file is replaced after it was written.
+    stored_path = settings.data_dir / relative
+    stored_path.write_bytes(b"not the recorded render")
+
+    dead_renderer = ComfyUIClient("http://127.0.0.1:1", timeout_s=1)
+    recover_expired_jobs(
+        factory,
+        "recovery-worker",
+        settings=Settings(
+            data_dir=settings.data_dir,
+            database_url=settings.database_url,
+            secret_store_dir=settings.secret_store_dir,
+            render_provider="comfyui",
+        ),
+        comfy_client=dead_renderer,
+    )
+
+    # The prompt was never submitted again.
+    assert fake_comfy.prompt_count == 0
+    state = client.get(f"/api/v1/jobs/{job['id']}").json()
+    assert state["status"] == "NEEDS_REVIEW", state
+    assert state["failure_code"] == "ARTIFACT_HASH_MISMATCH", state
+    with factory() as db:
+        attempt = db.scalar(select(JobAttempt).where(JobAttempt.job_id == job["id"]))
+        assert attempt.reconciliation_state != "adopted_persisted_artifact"
+        evidence = db.scalar(
+            select(ExternalJobReconciliation).where(
+                ExternalJobReconciliation.job_id == job["id"],
+                ExternalJobReconciliation.action == "recover_persisted_artifact",
+            )
+        )
+        assert evidence is None

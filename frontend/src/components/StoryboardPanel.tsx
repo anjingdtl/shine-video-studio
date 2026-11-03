@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, FileText, Loader2, Sparkles } from 'lucide-react';
 import { API, api, json } from '../api';
-import { failureLabels, label } from '../constants';
+import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
 import { AgentProgress, type AgentRunProgress } from './AgentProgress';
 
 type DocumentRow = {
@@ -38,6 +38,10 @@ const stepLabels: Record<string, string> = {
   editor: '剪辑 Agent · 冻结剪辑意图',
 };
 
+/** The languages the H3 model is asked to speak. The value is the language name
+ *  that goes into the prompt, so it stays in English. */
+export { DIALOGUE_LANGUAGES };
+
 export default function StoryboardPanel({ projectId, onRefresh }: { projectId: string; onRefresh: () => void }) {
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
   const [selectedDoc, setSelectedDoc] = useState('');
@@ -50,6 +54,21 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
   const [result, setResult] = useState<StoryboardResult | null>(null);
   const [message, setMessage] = useState('');
   const [progressRuns, setProgressRuns] = useState<AgentRunProgress[]>([]);
+  const [language, setLanguage] = useState('Chinese');
+  const [languageState, setLanguageState] = useState<'saved' | 'saving' | 'failed'>('saved');
+
+  const saveLanguage = useCallback(async (value: string) => {
+    setLanguage(value);
+    setLanguageState('saving');
+    try {
+      await api(`/projects/${projectId}/settings`, json('PATCH', { language: value }));
+      setLanguageState('saved');
+      setMessage(`对白语言已设为 ${value}：之后的镜头会按这个语言说出台词。`);
+    } catch (error) {
+      setLanguageState('failed');
+      setMessage(String(error));
+    }
+  }, [projectId]);
 
   const reloadDocuments = useCallback(async () => {
     try {
@@ -61,7 +80,19 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
     } catch { setDocuments([]); }
   }, [projectId]);
 
-  useEffect(() => { reloadDocuments(); }, [reloadDocuments]);
+  const reloadLanguage = useCallback(async () => {
+    try {
+      const project = await api<{ language: string }>(`/projects/${projectId}`);
+      const stored = project.language || 'Chinese';
+      // The project may still carry a language this build does not know; the
+      // control then shows the default instead of an empty selection.
+      const known = DIALOGUE_LANGUAGES.some(item => item.id === stored);
+      setLanguage(known ? stored : 'Chinese');
+      setLanguageState('saved');
+    } catch { /* the control keeps its last known value */ }
+  }, [projectId]);
+
+  useEffect(() => { reloadDocuments(); reloadLanguage(); }, [reloadDocuments, reloadLanguage]);
 
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -207,7 +238,17 @@ export default function StoryboardPanel({ projectId, onRefresh }: { projectId: s
           {documents.map(doc => <option key={doc.id} value={doc.id}>{doc.filename}（{doc.text_length} 字符）</option>)}
         </select>
       </label>
+      <label htmlFor="storyboard-language">对白语言
+        <select id="storyboard-language" value={language} disabled={busy} onChange={e => saveLanguage(e.target.value)}>
+          {DIALOGUE_LANGUAGES.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+        </select>
+      </label>
     </div>
+    <p className="storyboard-language-note">
+      对白语言会写进 H3 提示词：{languageState === 'saved' ? '已保存' : languageState === 'saving' ? '保存中' : '保存失败'}。
+      之后的镜头会要求模型用这个语言说出台词；没有台词的镜头会明确要求不要出现任何人声。
+      已经生成的镜头不会被改写。
+    </p>
     {!selectedDoc && (
       <label>粘贴完整剧本文本<textarea rows={6} value={inlineText} onChange={e => {
         setInlineText(e.target.value); setRequiresReconciliation(false); setResult(null);

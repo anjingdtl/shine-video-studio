@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
+from shine.comfyops.models import ResourceLease
 from shine.media.delivery_engine import DeliveryBlock, cancel_orders_for_series, enqueue_auto_delivery
 from shine.models import (
     Job,
@@ -438,6 +439,35 @@ def _owned_series(db, series_id: str, worker_id: str) -> ProductionSeries | None
     return series
 
 
+def _correct_completed_series_to_review(db, series, blocked_item) -> bool:
+    """Undo an incorrect completion: a series with a blocked shot is not complete.
+
+    A terminal series normally keeps its outcome, but a completion that was
+    merged before its shots were decided is wrong, not history: a blocked shot
+    means the run did not finish.  The correction is explicit and is only
+    reported as a change when the row really changed.
+    """
+    failure_code = blocked_item.failure_code or "SERIES_SHOT_NEEDS_REVIEW"
+    if series.status == "NEEDS_REVIEW" and series.failure_code == failure_code:
+        return False
+    series.status = "NEEDS_REVIEW"
+    series.failure_code = failure_code
+    series.finished_at = utcnow()
+    series.state_version += 1
+    from shine.services import add_audit
+
+    add_audit(
+        db,
+        "orchestrator",
+        "SERIES_COMPLETION_CORRECTED",
+        "production_series",
+        series.id,
+        {"failure_code": failure_code, "previous_status": "COMPLETED"},
+        project_id=series.project_id,
+    )
+    return True
+
+
 def _set_series_state(db, series_id: str, worker_id: str, *, status: str, failure_code: str | None = None,
                        note: str | None = None, finalization_state: str | None = None) -> None:
     series = _owned_series(db, series_id, worker_id)
@@ -509,6 +539,7 @@ def _sync_items(db, series: ProductionSeries) -> None:
             continue
         if job.status == "PASSED" and not job.stale:
             item.status = "PASSED"
+            item.failure_code = None
             completed += 1
         elif job.status in {"FAILED", "NEEDS_REVIEW"}:
             item.status = "BLOCKED"
@@ -659,6 +690,14 @@ def run_production_series(
         _sync_items(db, series)
         item, job = _next_runnable_item(db, series_id)
         if item is None:
+            blocked = [row for row in _items(db, series_id) if row.status == "BLOCKED"]
+            if blocked:
+                # A shot that waits for a human blocks the series.  The run is
+                # not finished: it is waiting for the decision that only the
+                # human may make.
+                _set_series_state(db, series_id, worker_id, status="NEEDS_REVIEW",
+                                  failure_code=blocked[0].failure_code or "SERIES_SHOT_NEEDS_REVIEW")
+                return {"status": "NEEDS_REVIEW", "shots": shots}
             _set_series_state(db, series_id, worker_id, status="COMPLETED")
             return {"status": "COMPLETED", "shots": shots}
         if job is None:
@@ -793,22 +832,32 @@ def reconcile_series(session_factory, worker_id: str) -> int:
     """
     now = utcnow()
     changed = 0
+    stop_plans: list[tuple[str, str, str, dict]] = []
     with session_factory.begin() as db:
         rows = db.scalars(
-            select(ProductionSeries).where(ProductionSeries.status.in_(["RUNNING", "QUEUED"]))
+            select(ProductionSeries).where(
+                ProductionSeries.status.in_(["RUNNING", "QUEUED", "COMPLETED"])
+            )
         ).all()
         for series in rows:
-            if series.status == "RUNNING" and not _series_is_stale(series, now):
-                continue
-            _sync_items(db, series)
-            item, job = _next_runnable_item(db, series.id)
-            if item is None and not [row for row in _items(db, series.id) if row.status == "BLOCKED"]:
-                series.status = "COMPLETED"
-                series.finished_at = now
-                series.lease_id = None
-                series.finalization_state = "RELEASED"
-                series.state_version += 1
-                changed += 1
+            if series.status == "COMPLETED":
+                # A completed series whose shots were not all decided when the
+                # outcome was merged is inconsistent.  The shots have since been
+                # decided, so the series is finished here: the lease it still
+                # claims is gone, and its delivery may now be assembled.
+                _sync_items(db, series)
+                blocked = [row for row in _items(db, series.id) if row.status == "BLOCKED"]
+                if blocked:
+                    if _correct_completed_series_to_review(db, series, blocked[0]):
+                        changed += 1
+                    continue
+                if series.completed_count < series.shot_count:
+                    continue
+                if series.finalization_state != "RELEASED" or series.lease_id:
+                    series.finalization_state = "RELEASED"
+                    series.lease_id = None
+                    series.state_version += 1
+                    changed += 1
                 try:
                     enqueue_auto_delivery(db, series)
                 except DeliveryBlock as exc:
@@ -816,11 +865,39 @@ def reconcile_series(session_factory, worker_id: str) -> int:
                         "auto_delivery_enqueue_blocked series_id=%s code=%s", series.id, exc.code
                     )
                 continue
+            if series.status == "RUNNING" and not _series_is_stale(series, now):
+                continue
+            _sync_items(db, series)
+            item, job = _next_runnable_item(db, series.id)
+            if item is None and not [row for row in _items(db, series.id) if row.status == "BLOCKED"]:
+                lease = db.get(ResourceLease, series.lease_id) if series.lease_id else None
+                if lease is None or lease.status == "RELEASED":
+                    # The GPU lease is already gone, so the series outcome is
+                    # merged here without touching any renderer.
+                    series.status = "COMPLETED"
+                    series.finished_at = now
+                    series.lease_id = None
+                    series.finalization_state = "RELEASED"
+                    series.state_version += 1
+                    changed += 1
+                    try:
+                        enqueue_auto_delivery(db, series)
+                    except DeliveryBlock as exc:
+                        logger.error(
+                            "auto_delivery_enqueue_blocked series_id=%s code=%s", series.id, exc.code
+                        )
+                    continue
+                # The exclusive GPU lease is still held.  A series may only
+                # claim "RELEASED" when that lease is really released, and the
+                # release needs the renderer that owned it to be provably gone.
+                record = _renderer_startup_for_lease(db, lease.id)
+                if record is None:
+                    continue
+                stop_plans.append((series.id, lease.id, lease.owner, record))
+                continue
             if series.status == "RUNNING":
                 # The owner is gone.  The GPU lease is the real proof of life.
                 if series.lease_id:
-                    from shine.comfyops.models import ResourceLease
-
                     lease = db.get(ResourceLease, series.lease_id)
                     if _series_lease_is_alive(db, series, now):
                         # The renderer is still alive and fenced; leave it alone
@@ -847,22 +924,84 @@ def reconcile_series(session_factory, worker_id: str) -> int:
             series.finalization_state = "RECONCILE_REQUIRED"
             series.state_version += 1
             changed += 1
+    # The renderer that owned the exclusive lease is stopped outside the
+    # writer transaction, and the lease release and the series transition then
+    # commit together.  A renderer that cannot be proven gone keeps its lease
+    # for reconciliation instead of pretending the GPU was released.
+    changed += _release_finished_series_leases(session_factory, stop_plans)
     # A series whose shots are all done but whose renderer was stranded
     # mid-handoff is finished here, outside the transaction that stops it.
     changed += reconcile_abandoned_series(session_factory)
     return changed
 
 
+def _release_finished_series_leases(
+    session_factory, plans: list[tuple[str, str, str, dict]]
+) -> int:
+    """Release the exclusive GPU lease of a finished series and close it.
+
+    The renderer is stopped only when its process identity and named-group
+    ownership still prove that it belongs to this run; a renderer that is
+    already gone is confirmed by its free loopback port.  The lease release
+    and the ``COMPLETED`` transition commit in one transaction, so a crash can
+    never leave a released lease behind a series that still claims to hold it.
+    """
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    changed = 0
+    for series_id, lease_id, lease_owner, record in plans:
+        stopped, reason = _stop_owned_renderer(record)
+        if not stopped:
+            logger.warning(
+                "series_lease_release_blocked series_id=%s reason=%s", series_id, reason
+            )
+            continue
+        with session_factory.begin() as db:
+            series = db.get(ProductionSeries, series_id)
+            lease = db.get(ResourceLease, lease_id)
+            if (
+                series is None
+                or series.status not in {"RUNNING", "QUEUED"}
+                or lease is None
+                or lease.owner != lease_owner
+                or lease.status not in {"ACTIVE", "RECONCILE_REQUIRED"}
+            ):
+                continue
+            _sync_items(db, series)
+            item, _job = _next_runnable_item(db, series.id)
+            blocked = [row for row in _items(db, series.id) if row.status == "BLOCKED"]
+            if item is not None or blocked:
+                continue
+            ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+            series.status = "COMPLETED"
+            series.failure_code = None
+            series.finished_at = utcnow()
+            series.lease_id = None
+            series.finalization_state = "RELEASED"
+            series.completed_count = series.shot_count
+            series.state_version += 1
+            from shine.services import add_audit
+
+            add_audit(
+                db, "comfy-worker", "SERIES_RECONCILED_RELEASE", "production_series", series.id,
+                {"lease_id": lease_id, "renderer_stopped": True, "resubmitted": False},
+                project_id=series.project_id,
+            )
+            try:
+                enqueue_auto_delivery(db, series)
+            except DeliveryBlock as exc:
+                logger.error(
+                    "auto_delivery_enqueue_blocked series_id=%s code=%s", series.id, exc.code
+                )
+        changed += 1
+    return changed
+
+
 def _renderer_startup_for_lease(db, lease_id: str) -> dict | None:
     """The startup record that launched the renderer owning this lease."""
-    from shine.comfyops.handoff_startup import STARTUP_PREFIX
-    from shine.models import AppSetting
+    from shine.comfyops.handoff_startup import startup_record_for_lease
 
-    for row in db.scalars(select(AppSetting).where(AppSetting.key.like(STARTUP_PREFIX + "%"))).all():
-        value = row.value if isinstance(row.value, dict) else {}
-        if value.get("lease_id") == lease_id:
-            return dict(value)
-    return None
+    return startup_record_for_lease(db, lease_id)
 
 
 def _stop_owned_renderer(record: dict, *, timeout_s: float = 20.0) -> tuple[bool, str]:

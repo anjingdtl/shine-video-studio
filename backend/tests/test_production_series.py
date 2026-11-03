@@ -938,6 +938,134 @@ def test_a_passed_shot_stranded_in_review_finishes_and_releases_its_renderer(api
         assert db.get(ResourceLease, lease_id).status == "RELEASED"
 
 
+def _dead_renderer_series(api, monkeypatch, *, lease_status="RECONCILE_REQUIRED"):
+    """A stale series whose only shot passed while its renderer already died.
+
+    The worker lost the run before it could finish, so the series still claims
+    the exclusive GPU lease of a renderer that no longer exists.
+    """
+    from shine.comfyops import production_series as ps
+    from shine.models import AppSetting
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-crashed")
+    assert series is not None
+
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        item = db.scalar(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == row.id)
+            .order_by(ProductionSeriesItem.position)
+        )
+        job = db.get(Job, item.job_id)
+        job.status = "PASSED"
+        lease = ResourceLease(
+            owner="h3:" + job.id, budget_mb=16384, exclusive=True, priority=100,
+            status=lease_status, expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(lease)
+        db.flush()
+        row.status = "RUNNING"
+        row.worker_id = "worker-crashed"
+        row.lease_id = lease.id
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.add(AppSetting(key="renderer-startup:dead-instance", value={
+            "stage": "RUNNING", "instance_id": "dead-instance", "lease_id": lease.id, "port": 8188,
+            "process": {"pid": 999999, "birth": "1", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+        lease_id = lease.id
+    # The recorded renderer is gone and nothing answers on its port.
+    monkeypatch.setattr("shine.comfyops.installer.process_identity", lambda pid: None)
+    monkeypatch.setattr("shine.comfyops.renderer_supervisor.windows_port_listeners", lambda port: [])
+    return series, lease_id
+
+
+def test_a_stale_series_releases_the_lease_of_a_dead_renderer(api, monkeypatch):
+    """A crashed series whose shot passed must release the GPU lease it held.
+
+    The renderer that owned the exclusive lease is provably gone, so the lease
+    may be released; the release and the ``COMPLETED`` transition commit
+    together, so no later job is blocked by a lease nobody owns any more.
+    """
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    series, lease_id = _dead_renderer_series(api, monkeypatch)
+
+    assert ps.reconcile_series(factory, "worker-next") >= 1
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        assert row.status == "COMPLETED"
+        assert row.finalization_state == "RELEASED"
+        assert row.lease_id is None
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
+def test_a_stale_series_keeps_the_lease_when_the_renderer_cannot_be_proved_gone(api, monkeypatch):
+    """An unprovable renderer keeps the lease; the series is not closed behind it."""
+    from shine.comfyops import production_series as ps
+
+    client, factory, settings = api
+    series, lease_id = _dead_renderer_series(api, monkeypatch)
+    monkeypatch.setattr(
+        ps, "_stop_owned_renderer", lambda record, timeout_s=20.0: (False, "RENDERER_OWNERSHIP_UNVERIFIED")
+    )
+
+    ps.reconcile_series(factory, "worker-next")
+    with factory() as db:
+        row = db.get(ProductionSeries, series.id)
+        assert row.status != "COMPLETED"
+        assert row.finalization_state != "RELEASED"
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_a_completed_series_with_a_blocked_shot_is_corrected_to_review(api):
+    """A run with a blocked shot is not complete; the wrong outcome is corrected.
+
+    A terminal series normally keeps its outcome, but a completion that was
+    merged before its shots were decided is wrong, not history.  The correction
+    must really change the row and must be counted as a change.
+    """
+    from shine.comfyops import production_series as ps
+    from shine.models import Job
+
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    series = ps.claim_series(factory, "worker-crashed")
+    assert series is not None
+
+    with factory.begin() as db:
+        row = db.get(ProductionSeries, series.id)
+        item = db.scalar(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == row.id)
+            .order_by(ProductionSeriesItem.position)
+        )
+        job = db.get(Job, item.job_id)
+        job.status = "NEEDS_REVIEW"
+        job.failure_code = "SHOT_NEEDS_REVIEW"
+        row.status = "COMPLETED"
+        row.finalization_state = "RELEASED"
+        row.lease_id = None
+        row.completed_count = row.shot_count
+        series_id = row.id
+
+    assert ps.reconcile_series(factory, "worker-next") >= 1
+    with factory() as db:
+        row = db.get(ProductionSeries, series_id)
+        assert row.status == "NEEDS_REVIEW"
+        assert row.failure_code == "SHOT_NEEDS_REVIEW"
+
+    # A second run has nothing left to correct and must not claim a change.
+    assert ps.reconcile_series(factory, "worker-next") == 0
+
+
 def test_a_cancelled_series_keeps_its_outcome(api):
     """A late worker transition must not rewrite a cancellation."""
     from shine.comfyops import production_series as ps

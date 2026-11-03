@@ -1,5 +1,18 @@
 import type { Style } from './api';
 
+/** The languages the H3 model is asked to speak. The value is the language name
+ *  that goes into the prompt, so it stays in English. */
+export const DIALOGUE_LANGUAGES: Array<{ id: string; label: string }> = [
+  { id: 'Chinese', label: '中文（普通话）' },
+  { id: 'English', label: 'English' },
+  { id: 'Japanese', label: '日本語' },
+  { id: 'Korean', label: '한국어' },
+  { id: 'Cantonese', label: '粤语' },
+  { id: 'French', label: 'Français' },
+  { id: 'German', label: 'Deutsch' },
+  { id: 'Spanish', label: 'Español' },
+];
+
 export const emptyStyle: Style = {
   photography_language: '', shot_blocking: '', color_palette: '', lighting_tone: '',
   lens_texture: '', editing_rhythm: '', sound_performance: '',

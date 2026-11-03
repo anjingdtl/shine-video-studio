@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shine.asset_identity import character_reference_matches
+from shine.h3.spoken_language import (
+    DEFAULT_SPOKEN_LANGUAGE,
+    canonical_spoken_language,
+)
 from shine.schemas import (
     CompiledPrompt,
     ContinuityMode,
@@ -20,7 +24,7 @@ from shine.schemas import (
 
 # Pinned official skill material from MiniMax-AI/MiniMax-H3 commit
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
-COMPILER_VERSION = "shine-h3-compiler/1.0.0"
+COMPILER_VERSION = "shine-h3-compiler/1.1.1"
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -326,17 +330,48 @@ def _shot_text(ctx: _Context) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
 
-def _soundscape(spec: ShotSpec, style: StyleBible) -> str:
+def _spoken_language_sentence(spec: ShotSpec, project_language: str) -> str:
+    """The spoken-language contract of the shot.
+
+    The whole prompt is written in English, so the language of the voice has to
+    be stated explicitly.  A per-line language tag alone is not enough: the
+    model invents English speech when nothing tells it which voice to use, and
+    it invents speech at all when a silent shot never says so.
+
+    The language is written in its canonical English name: the official rule
+    pack rejects CJK outside the dialogue tags, so a project setting written in
+    another script may never be copied into the prompt.
+    """
+    language = (project_language or "").strip()
+    if not language:
+        return ""
+    if not spec.dialogue:
+        return (
+            "There is no spoken dialogue in this shot: do not produce speech, voice-over or "
+            "vocal sounds of any kind."
+        )
+    return (
+        f"All spoken dialogue must be spoken in {language}, matching the original line text "
+        "exactly; no other spoken language may appear."
+    )
+
+
+def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "") -> str:
     style = _prompt_style(spec, style)
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
     if not environment and not ambience:
-        return (
+        sentences = [
             f"Natural room ambience continues throughout the video, shaped by the frozen sound rule: "
             f"{style.sound_performance}."
-        )
-    pieces = [piece for piece in (environment, ambience) if piece]
-    return " ".join(piece.rstrip(".") + "." for piece in pieces)
+        ]
+    else:
+        pieces = [piece.rstrip(".") + "." for piece in (environment, ambience) if piece]
+        sentences = pieces
+    spoken = _spoken_language_sentence(spec, project_language)
+    if spoken:
+        sentences.append(spoken)
+    return " ".join(sentences)
 
 
 def _music(spec: ShotSpec) -> str:
@@ -469,6 +504,13 @@ class H3PromptCompiler:
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
         speaker_labels, speaker_order = _speaker_mapping(spec)
+        # The prompt is English.  The spoken language is therefore stated in its
+        # canonical English name; a project setting written in another script
+        # falls back to the default instead of breaking the rule pack.
+        spoken_language = canonical_spoken_language(project_language)
+        language_fallback = spoken_language is None
+        if spoken_language is None:
+            spoken_language = DEFAULT_SPOKEN_LANGUAGE
         ctx = _Context(
             spec=spec,
             style=style,
@@ -477,8 +519,13 @@ class H3PromptCompiler:
             asset_roles={item.asset_id: item.role or "" for item in manifest},
             speaker_labels=speaker_labels,
             speaker_order=speaker_order,
-            project_language=project_language,
+            project_language=spoken_language,
         )
+        if language_fallback:
+            ctx.warnings.append(
+                "The project language cannot be written in the English prompt; "
+                f"the shot is spoken in {spoken_language} instead."
+            )
         if mode == GenerationMode.REF2VA:
             _validate_dialogue(ctx, mode)
         else:
@@ -493,7 +540,7 @@ class H3PromptCompiler:
         shots = _shot_text(ctx)
         if mode in {GenerationMode.T2VA, GenerationMode.I2VA, GenerationMode.FL2VA, GenerationMode.L2VA}:
             sections["integrated_multimodal_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style)
+            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
             sections["non_diegetic_music"] = _music(spec)
             instruction = _align_instruction(mode, manifest, spec.duration_target_s)
             body = "\n".join(f"{name}: {sections[name]}" for name in BASE_SECTION_ORDER)
@@ -504,7 +551,7 @@ class H3PromptCompiler:
             sections["summary"] = _summary(ctx)
             sections["retention_analysis"] = _retention(ctx)
             sections["detailed_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style)
+            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
             sections["non_diegetic_music"] = _music(spec)
             prompt = "\n\n".join(f"{name}:\n{sections[name]}" for name in REF_SECTION_ORDER)
             section_order = REF_SECTION_ORDER
@@ -525,10 +572,13 @@ class H3PromptCompiler:
         for name in section_order:
             if not sections.get(name):
                 raise PromptCompilationError("H3_SECTION_MISSING", f"Official section {name} is empty")
-        if project_language and any(
-            _language_tag(line.text, "") != project_language for line in spec.dialogue
+        if spoken_language and any(
+            _language_tag(line.text, "") != spoken_language for line in spec.dialogue
         ):
-            ctx.warnings.append("Dialogue language tags were inferred from the line text, not the project language.")
+            ctx.warnings.append(
+                "A dialogue line is written in another language than the project language; "
+                "the line is tagged with the project language and the prompt asks for that voice."
+            )
 
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         return CompiledPrompt(

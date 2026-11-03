@@ -148,6 +148,10 @@
 #film-crew, #h3-rulebook { background: var(--paper); border: 1px solid var(--line); border-radius: 9px; }
 .storyboard-facts { display: block; margin: 10px 0; }
 .storyboard-facts textarea { display: block; width: 100%; min-width: 0; margin-top: 6px; }
+.storyboard-import { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.storyboard-import > label { display: flex; flex-direction: column; gap: 5px; font-size: 9px; color: #898b82; }
+.storyboard-import select { min-width: 190px; }
+.storyboard-language-note { margin: 8px 0 0; font-size: 9px; color: #898b82; line-height: 1.6; }
 #film-crew .panel-header, #h3-rulebook .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 #film-crew button, #h3-rulebook button { border: 1px solid var(--line); background: var(--mint); color: var(--olive-dark); border-radius: 6px; padding: 8px 12px; font-size: 12px; }
 #film-crew h2, #h3-rulebook h2 { margin: 0; font-size: 20px; }

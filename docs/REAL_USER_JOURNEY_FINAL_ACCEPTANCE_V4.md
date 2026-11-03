@@ -3,6 +3,7 @@
 - 验收日期：2026-11-03（Asia/Shanghai）
 - 上轮远端基线：`cc0d6ec119e2352d6822489a4c2f34b9ed3a7cad`
 - 本轮被测代码提交：`17c94daaf9b6a65f845fd37e78a0da69bd07cb82`（`17c94da`）；补充验收代码提交 `784cf36`
+- 晚间收尾轮代码提交：见 `docs/PROGRESS_20261103_CONTINUATION.md`（收尾轮提交号）
 - 报告提交：包含本文件的文档提交；推送后远端 `main` 与该提交一致
 - 本地证据目录：`.local-acceptance/real-user-journey-final-v4/`（被 Git 忽略，不进入发布包）
 - 主验收数据目录：`.local-acceptance/real-user-journey-final/data/`
@@ -339,3 +340,76 @@
 - 远端 `main` 与本地一致性将在推送后核对；若远端有新提交，以实际远端为准，不伪造本地一致。
 
 **最终签核：`REAL_USER_JOURNEY_ALL_PASS`。** 原报告的两条真实门禁（正式预制作冻结、正式包直接接管外部 ComfyUI 并切换真实制作）均已用真实、可审计的证据解除；软件测试、真实 H3 生产、人工验收、成片播放/下载、异常恢复与 Windows 包启动全部通过。版权、审美与正式发行审批仍为 `PENDING_HUMAN`，审片建议不等于人工签字。
+
+---
+
+## 十二、2026-11-03 晚间收尾轮：QC 前丢进程的镜头被真实恢复
+
+### 12.1 问题
+
+正式项目 `ff6096c5…` 的镜头 `f0173fbe…` 在**外部渲染完成、字节已落盘之后**，受管 worker 进程丢失（执行记录 `process_lost`，无异常栈）。落盘证据齐全：
+
+| 项 | 值 |
+| --- | --- |
+| 外部任务 | `52e492e7-ecc6-4e52-ba4b-b1f55361a267`（已完成） |
+| 产物 | artifact `469ee15a-2330-43b9-8f06-ac6f00acf6a3`，`video/mp4`，3,865,537 B |
+| 产物 SHA-256 | `4f094edb972b5a1ffdce08d276553127912de8effbecdcac22f6577e1cba4585` |
+| attempt | `6470491c…`，`output_sha256` 与产物一致，`prompt_graph_sha256=f548f254…` 已记录 |
+| GPU 租约 | `96971172…`，`ACTIVE` 且已过期；8188 渲染器已不在 |
+
+丢失点是「产物已采集、质检尚未开始」，原实现只有两条路：把镜头判为需要人工核实，或者重投 H3。前者让已经成功的真实渲染白白卡住，后者违背「绝不盲重投」。
+
+### 12.2 修复（产品化恢复，不是手工改库）
+
+- `worker.py`：新增 `_persisted_render_artifact` 与 `_recover_from_persisted_artifact`。当 **产物 SHA、attempt `output_sha256`、`prompt_graph_sha256`、job/attempt/artifact 的外部 prompt id** 四段身份链完全吻合时，外部历史只作佐证：**不连渲染器、不重投**，直接从已落盘字节重跑技术 QC 与五道门禁并落库（`reconciliation_state=adopted_persisted_artifact`，审计 `COMFY_RECONCILED_PERSISTED_ARTIFACT`，`resubmitted=false`）。字节在落盘后被改动时仍按 `ARTIFACT_HASH_MISMATCH` 拒绝。
+- `worker.py`：已核对产物的镜头优先于「交接中断」封锁，不再被历史遗留的封锁码挡住；**交接已被对账完成**的旧镜头不受影响（不改写历史结论）。
+- `handoff_startup.py`：新增 `reconcile_dead_renderer_leases` —— 独占 GPU 租约是「对活进程的占用声明」，**记录在案的进程确实已退出且端口已释放**时租约才可释放（PID/birth + 命名 Job Object + 端口三重证据），否则保持 `RECONCILE_REQUIRED` 阻塞。
+- `production_series.py`：完成的系列只有在 GPU 租约真正释放后才写 `COMPLETED/RELEASED`，租约释放与状态迁移同一事务；**有镜头被阻塞的系列不得标记完成**。
+- `preproduction.py` / `api_operator.py`：新增显式的「按当前冻结合同重新校验」操作。当合同修订只换了审片能力修订、而渲染相关的绑定（风格、规则包、母版、模型、H3 工作流）完全相同时，已产出媒体按新合同重新绑定；渲染绑定一旦变化则拒绝。
+
+### 12.3 真实恢复结果（本机 MiniMax-H3 产物，未重投）
+
+- 镜头 `f0173fbe…`：`PASSED`，`quality_verification=real`。
+- 门禁：`technical=passed`（ffprobe + FFmpeg 全帧解码）、`semantic=passed`、`style=passed`（建议式真实本地 VLM `qwen3-vl-4b-bnb4`，0 findings，confidence 0.98）、`audio=not_applicable`（本镜无台词）、`final=passed`（人工逐项审片）。
+- 人工审片（浏览器 OperatorReview，`local-user`，逐项填写具体证据）：角色身份、服装造型、场景道具、动作与运镜、影视风格、画面连续性、其他异常均「通过」；中文对白内容、声音及音色、口型同步「不适用」（本镜 `dialogue` 为空，故事节拍写明静音，音轨为雨夜环境声与低底噪：实测平均 -20.7 dB、峰值 -2.6 dB、无 1 秒以上静音段）。**「已人工试听」一项未勾选**：本轮没有做人工听辨，不冒充。
+- 动作与运镜一项如实留档：画幅从 0.0s 膝上中景持续收紧到 8.5s 手与怀表特写（人脸出画），比冻结分镜「保持同一机位距离、不要推近」更近；本次按「有动机的连续推进、落点在剧情道具、轴线与光线未变、故事节拍全部交付」判定可用，差异原文写进证据。
+- 系列 `a6b97b5e…`：`COMPLETED / RELEASED`，`completed_count=1/1`；GPU 租约 `96971172…`：`RELEASED`。
+- 交付订单 `ac7f0298…`：`DELIVERED`，成片 artifact `6c65ee08-193e-4b02-9c95-b58e08f649bd`。
+- 成片播放与真实下载：浏览器「成片中心」内嵌播放（9.44 秒）✓；通过同一导出端点下载 MP4 得 3,644,345 B，SHA-256 `04dc2cff7ce579b89ca54ff754d24dad6a6c9aee305dd857f7f0bbd91bb03241`，与界面打印的指纹前缀 `04dc2cff7ce579b8…` 一致；ffprobe：mp4 / h264 768x1344 / 24fps / AAC 48kHz 立体声 / 9.44 s；独立 `ffmpeg -f null -` 全片解码 exit 0。
+
+### 12.4 审片能力修订的重校准（`client_review_identity` 失效是设计行为）
+
+本轮改动触及 `worker.py` / `preproduction.py` / `handoff_startup.py`，按规则必须重新做真实正/负校准并发布新修订、弃用旧修订、重新分析并冻结计划。最终（在第十二章 12.6 的复核修复之后又重做一次）：
+
+- 真实校准调用（本地 `qwen3-vl-4b-bnb4`，`client_review_sha256=8b8d9bd3…`）：正向 `3f82719e-49a7-4cc9-911c-57c94b5f0e22` verdict `passed`（confidence 0.98，0 findings）；负向 `87a00a00-41b2-4789-b98f-4e4409db401e` verdict `failed`（confidence 0.85，7 findings）。校准记录：`.local-acceptance/vlm-recalibration-20261103.json`。
+- 新修订 `03f32432-4c94-4476-8580-e1a14e9fc37f`：`PRODUCTION_APPROVED`，绑定当前 `client_review_identity`；此前发布的 `82906927…`、`f930e8ec…`、`43ca215d…`、`ed841a10…`、`e83b9b54…` 已全部 `DEPRECATED`，`839aeef6…` 保持 DRAFT。
+- 冻结计划 `7832906a-d383-4eaa-a94d-0e0b510769d2`：`FROZEN`，绑定 H3 `93da6ba3…`、VLM `03f32432…`、ASR `1f0263da…`；`readiness(offline=false)` = `SHOOT_READY`，无阻塞项。
+- 已产出镜头按新冻结合同**重新校验并重新绑定**（渲染绑定未变）：`preproduction_manifest_hash` 由 `e421c90c…` 更新为 `55b03fe7…`，镜头状态仍为 `PASSED`，`quality_verification=manual_verified` 不变。
+
+### 12.5 对白语言设置（用户反馈：成片里的对白听不懂）
+
+真实问题不是「语言没设」，而是**提示词从头到尾是英文**：H3 在没有明确指令时按默认英文发声，无台词的镜头甚至会自己造人声。修复：
+
+- `h3/compiler.py`（`shine-h3-compiler/1.0.0` → `1.1.0` → `1.1.1`）：`overall_soundscape` 现在显式写出「发声合同」——有台词时 `All spoken dialogue must be spoken in {项目语言}, matching the original line text exactly`；**没有台词时明确要求 `do not produce speech, voice-over or vocal sounds of any kind`**。
+- 语言名称以英文规范名写入提示词（`shine/h3/spoken_language.py`）：官方规则包禁止 `<d>…</d>` 之外出现 CJK，若把「中文」原样写进英文提示词，建任务会被规则包以 `H3_ENGLISH` 拒绝（422）。现在：项目设置里的 `中文/粤语/日本語…` 在保存时规范为 `Chinese/Cantonese/Japanese…`；无法规范的名字（例如「火星语」）在 API 边界以 422 明确拒绝，而不是留到建任务时才失败。
+- 前端：导演模式「AI 导演制作」页新增「对白语言」下拉（中文/English/日本語/한국어/粤语/Français/Deutsch/Español），设置板块的「叙事语言」改为同一枚举；保存失败时如实显示「保存失败」而不是一直停在「保存中」。
+- 已验证到提示词层（`test_h3_compiler.py` 新增回归 + `test_storyboard.py` 新增 API 回归 + 前端 `storyboard.test.tsx` 新增 2 条回归）。**未验证**：带人声的真实 H3 重渲染（需要一次带台词的真实渲染才能确认模型口音），本轮没有为此重渲染正式镜头，已生成镜头一律不改写。
+
+### 12.6 独立复核轮：对收尾轮改动的只读审查与修复
+
+收尾轮改动完成后，对整个 diff 做了一次**独立只读代码复核**（不改动真实验收数据），结论是核心安全属性成立，但发现 8 个可复现缺陷，全部修复并补了回归：
+
+| # | 缺陷 | 修复 |
+| --- | --- | --- |
+| D1 | 「已完成但有阻塞镜头」的系列改判 `NEEDS_REVIEW` 是**空操作**（终态守卫直接返回），但 `changed` 仍 +1，`reconcile_series` 谎报有变化 | 新增 `_correct_completed_series_to_review()`：显式纠正 + 只在真的变化时计数 + 写审计 `SERIES_COMPLETION_CORRECTED` |
+| D2 | 渲染绑定里的 `models` **没有排除审片模型**，换审片模型会被误判为渲染合同变化而拒绝重新绑定 | `_render_bindings()` 按非审片工作流的 `model_ids`/`node_package_ids` 过滤模型；工作流修订缺失时保守不过滤 |
+| D3 | 语言名含 CJK 时提示词被 `H3_ENGLISH` 拒绝，**建任务直接 422**（本轮新引入的失败模式） | 新增 `shine/h3/spoken_language.py` 规范语言名；编译器与 API 边界双重保证英文提示词里不出现 CJK |
+| D4 | `renderer_is_gone()` 只查 PID/birth + 端口，**没有查命名 Job Object**（AGENTS.md 要求三重证据）；且把 `process_identity` 的 `ValueError`（不确定性）当成「进程已死」 | 新增只读 `named_group_active_processes()`；`renderer_is_gone()` 改为 PID/birth + 命名 Job Object + 端口三重证据，任一不可证即保持阻塞 |
+| D5 | 认领记录（`adopted_persisted_artifact`、journal `RECONCILE_COMPLETE`）**先于字节校验落库**，字节被篡改也会留下「已认领」证据并让该镜头永远无法再被复核 | 把磁盘字节校验前移到认领之前：SHA/大小不符直接 `ARTIFACT_HASH_MISMATCH` + `NEEDS_REVIEW`，不写任何认领记录、不翻 journal |
+| D6 | 前端保存失败后提示永远停在「保存中」；项目语言不在枚举内时下拉无选中项 | 增加第三态「保存失败」；`reloadLanguage` 对未知值回退默认 |
+| D7 | `reconcile_dead_renderer_leases()` 未防 SQLite 忙，瞬时写锁会把**常驻 Worker 直接打死** | 捕获 `OperationalError` 并延后到下一拍，与既有「写竞争不等于租约丢失」的约定一致 |
+| D8 | 交接 journal 已被 `reconcile_stopped_handoffs` 判为 `RECONCILE_COMPLETE` 时，已落盘产物会被**永久孤立** | `_recover_one_job()` 在「已对账但镜头尚无结论且存在已核对产物」时仍继续质检；已有结论的镜头依旧不被改写 |
+
+另外修掉一个既有缺陷：`owned_process.py` 里 `ctypes.INT` 并不存在（应为 `ctypes.c_int`），`terminate_named_group()` 在真机上会直接 `AttributeError`。
+
+修复触及 `worker.py` / `preproduction.py` / `handoff_startup.py` / `owned_process.py`，按规则**再次**重做真实正/负校准并发布新修订（`03f32432…`）、弃用旧修订、重新 analyze + freeze 计划（`7832906a…`），并按新冻结合同重新校验已产出镜头（12.4 末段）。

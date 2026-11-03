@@ -502,3 +502,166 @@ def asset_metadata_hash(asset):
             "storage_path": asset.storage_path,
         }
     )
+
+
+#: Capability categories that decide how a produced shot is *reviewed*.  They are
+#: not part of what a render is allowed to use, so a new revision of a reviewer
+#: is not a new production contract.
+REVIEW_CAPABILITY_CATEGORIES = {"VLM_REVIEW", "ASR"}
+
+
+def _render_bindings(manifest: dict, db) -> dict:
+    """The part of a frozen manifest that decides what a render may use.
+
+    The advisory reviewer revisions are deliberately left out: they decide how
+    a produced shot is judged afterwards, never what it may be made of.
+
+    The masters are compared by what they *are*, not by the requirement rows
+    that the analysis happens to create: every analysis writes new requirement
+    rows, so their ids say nothing about the production contract.  A link is
+    therefore resolved to the requirement it satisfies and to the master it
+    freezes.
+    """
+    workflows = []
+    render_model_ids: set[str] = set()
+    models_known = True
+    for pin in manifest.get("workflows", []):
+        row = db.get(WorkflowRevision, pin.get("id"))
+        category = (row.payload.get("category") if row is not None else "") or ""
+        if category in REVIEW_CAPABILITY_CATEGORIES:
+            continue
+        workflows.append({"id": pin.get("id"), "hash": pin.get("hash")})
+        if row is None:
+            # Without the revision the model set cannot be resolved, so nothing
+            # may be filtered out of the declared models.
+            models_known = False
+            continue
+        payload = row.payload
+        render_model_ids.update(payload.get("model_ids") or [])
+        render_model_ids.update(payload.get("node_package_ids") or [])
+    links = []
+    for link in manifest.get("links", []):
+        requirement = db.get(AssetRequirement, link.get("requirement"))
+        payload = requirement.payload if requirement is not None else {}
+        asset = db.get(Asset, link.get("id"))
+        links.append({
+            "family": payload.get("family"),
+            "entity_id": payload.get("entity_id"),
+            "critical": bool(payload.get("critical")),
+            # A voice link names the frozen voice profile, not a picture master.
+            "master": asset.id if asset is not None else link.get("id"),
+            "hash": link.get("hash"),
+            "rights": link.get("rights"),
+            "provenance_hash": link.get("provenance_hash"),
+            "asset_metadata_hash": link.get("asset_metadata_hash"),
+        })
+    declared_models = manifest.get("models") or []
+    # Only the models a render may use are part of the render contract.  The
+    # reviewer revisions bring their own models, and swapping a reviewer model
+    # must not look like a changed production contract.
+    models = (
+        [model for model in declared_models if model.get("id") in render_model_ids]
+        if models_known
+        else list(declared_models)
+    )
+    return {
+        "script": manifest.get("script"),
+        "style": manifest.get("style"),
+        "rule": manifest.get("rule"),
+        "models": models,
+        "links": sorted(links, key=lambda item: (str(item["family"]), str(item["entity_id"]), str(item["master"]))),
+        "workflows": sorted(workflows, key=lambda item: str(item["id"])),
+        "style_input_contract": manifest.get("style_input_contract"),
+    }
+
+
+def _plan_for_manifest(db, project_id: str, manifest_hash: str):
+    """The frozen plan whose manifest has this exact hash."""
+    for plan in db.scalars(
+        select(PreProductionPlan).where(PreProductionPlan.project_id == project_id)
+    ).all():
+        manifest = plan.payload.get("manifest")
+        if manifest and graph_hash(manifest) == manifest_hash:
+            return plan
+    return None
+
+
+def revalidate_job_against_current_plan(db, job, *, data_dir=None) -> dict:
+    """Re-bind an already produced job to the current frozen production contract.
+
+    A frozen plan revision replaces the contract, and a job that was created
+    under the previous revision is no longer bound to it.  Media that was
+    already produced under an otherwise identical contract must not be
+    invalidated by that, so this re-validates the produced render against the
+    current contract and re-binds the job to it.
+
+    The re-validation runs the real production gates:
+
+    * the current plan is frozen and the project is production-ready,
+    * the render bindings of the two plan revisions are identical, so the
+      Style Bible, the RulePack, the masters, the models and the H3 workflow
+      the render used are exactly the ones the current plan still names,
+    * the frozen Style Bible of the project is still the one the job used,
+    * the RulePack lock still matches the job's request,
+    * every reference master is still approved, locked and unchanged, and
+    * the shot revision the render used is still the current one.
+
+    Only the reviewer revisions may differ: a new advisory reviewer is a new
+    reviewer, not a new production contract.  Nothing here re-renders, and a
+    job whose media is not produced yet is never re-bound this way.
+    """
+    from shine.models import MediaArtifact, Shot
+    from shine.schemas import RenderRequest
+
+    if job.stale or job.paused:
+        raise HTTPException(409, "PREPRODUCTION_REVALIDATION_JOB_SUPERSEDED")
+    current = current_plan(db, job.project_id)
+    if current is None or current.status != "FROZEN" or not current.payload.get("manifest"):
+        raise HTTPException(409, "PREPRODUCTION_NOT_READY")
+    offline = job.provider == "mock" or bool(current.payload.get("offline"))
+    if not job.artifact_id:
+        raise HTTPException(409, "PREPRODUCTION_REVALIDATION_NEEDS_PRODUCED_MEDIA")
+    artifact = db.get(MediaArtifact, job.artifact_id)
+    if artifact is None or (not offline and artifact.is_mock):
+        raise HTTPException(409, "PREPRODUCTION_REVALIDATION_NEEDS_PRODUCED_MEDIA")
+    if not job.preproduction_manifest_hash:
+        raise HTTPException(409, "PREPRODUCTION_REVALIDATION_NO_OLD_PLAN")
+    previous = _plan_for_manifest(db, job.project_id, job.preproduction_manifest_hash)
+    if previous is None or previous.status != "FROZEN":
+        raise HTTPException(409, "PREPRODUCTION_REVALIDATION_NO_OLD_PLAN")
+    old_bindings = _render_bindings(previous.payload["manifest"], db)
+    new_bindings = _render_bindings(current.payload["manifest"], db)
+    if old_bindings != new_bindings:
+        raise HTTPException(409, "PREPRODUCTION_RENDER_CONTRACT_CHANGED")
+    report = readiness(db, job.project_id, offline=offline, data_dir=data_dir)
+    if report["status"] != "SHOOT_READY":
+        raise HTTPException(409, "PREPRODUCTION_NOT_READY")
+    request = RenderRequest.model_validate(job.request)
+    style = db.get(StyleVersion, job.style_version_id)
+    project = db.get(Project, job.project_id)
+    lock = db.get(ProjectRuleLock, job.project_id)
+    shot = db.get(Shot, job.shot_id)
+    if (
+        not style
+        or not project
+        or project.frozen_style_version_id != style.id
+        or style.sha256 != request.style_hash
+        or not lock
+        or lock.rulepack_id != request.rulepack_id
+        or lock.rulepack_hash != request.rulepack_hash
+        or not shot
+        or shot.revision != job.shot_revision
+        or request.shot_revision != job.shot_revision
+    ):
+        raise HTTPException(409, "PREPRODUCTION_RENDER_CONTRACT_CHANGED")
+    enforce_references(db, job.project_id, job.request, data_dir=data_dir)
+    previous_hash = job.preproduction_manifest_hash
+    new_hash = graph_hash(current.payload["manifest"])
+    job.preproduction_manifest_hash = new_hash
+    return {
+        "previous_manifest_hash": previous_hash,
+        "manifest_hash": new_hash,
+        "previous_plan_id": previous.id,
+        "plan_id": current.id,
+        "render_bindings": old_bindings,
+    }

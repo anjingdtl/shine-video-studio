@@ -26,6 +26,7 @@ from shine.api_subtitles import router as subtitles_router
 from shine.comfyops.runtime_configuration import resolve_runtime
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
+from shine.h3.spoken_language import SPOKEN_LANGUAGES, canonical_spoken_language
 from shine.media.artifacts import safe_asset_path
 from shine.models import (
     AgentArtifact,
@@ -106,6 +107,26 @@ def _session(request: Request):
 
 
 DBSession = Annotated[Session, Depends(_session)]
+
+
+def _canonical_language(value: str) -> str:
+    """The project language in the one form the H3 prompt may use.
+
+    The prompt is written in English and states the spoken language in English,
+    so the language is normalised here.  A name written in another script is
+    refused with a clear message instead of silently breaking the rule pack
+    later, when the job is created.
+    """
+    canonical = canonical_spoken_language(value)
+    if canonical is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Project language must be written in English so it can be stated in the H3 prompt; "
+                f"allowed values are {', '.join(SPOKEN_LANGUAGES)}"
+            ),
+        )
+    return canonical
 
 
 def _project_data(project: Project) -> dict[str, Any]:
@@ -516,7 +537,8 @@ def create_app(
 
     @app.post("/api/v1/projects", status_code=201)
     def create_project(body: CreateProject, db: DBSession) -> dict[str, Any]:
-        project = Project(title=body.title.strip(), description=body.description, language=body.language)
+        project = Project(title=body.title.strip(), description=body.description,
+                          language=_canonical_language(body.language))
         if not project.title:
             raise HTTPException(status_code=422, detail="Project title cannot be blank")
         db.add(project)
@@ -535,6 +557,8 @@ def create_app(
     def update_project_settings(project_id: str, body: ProjectSettings, db: DBSession) -> dict[str, Any]:
         project = require_project(db, project_id)
         updates = body.model_dump(exclude_unset=True, exclude_none=True)
+        if "language" in updates:
+            updates["language"] = _canonical_language(updates["language"])
         for key, value in updates.items():
             setattr(project, key, value)
         add_audit(

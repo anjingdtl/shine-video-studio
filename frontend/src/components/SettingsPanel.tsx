@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Activity, Check, Cpu, Plus, Server, ShieldCheck, Trash2, Wifi, X } from 'lucide-react';
 import type { AgentRoute, Project, ProviderProfile, SystemHealth, SystemStatus, WorkflowProfile } from '../api';
-import { label, statusLabels, workerPhaseLabels } from '../constants';
+import { DIALOGUE_LANGUAGES, label, statusLabels, workerPhaseLabels } from '../constants';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import StorageSettings from './StorageSettings';
 import WorkflowProfileImport from './WorkflowProfileImport';
@@ -82,7 +82,14 @@ export default function SettingsPanel({
               <span><b>允许有界自动返工</b><small>只对临时/提示词/工作流类问题自动重试，硬错误仍转人工。</small></span>
               <input type="checkbox" checked={project.auto_repair_enabled} onChange={(event) => onProjectSettings({ auto_repair_enabled: event.target.checked })} />
             </label>
-            <label className="field-line">叙事语言<input value={project.language} onChange={(event) => onProjectSettings({ language: event.target.value })} /></label>
+            <label className="field-line">叙事语言
+              <select
+                value={DIALOGUE_LANGUAGES.some(item => item.id === project.language) ? project.language : 'Chinese'}
+                onChange={(event) => onProjectSettings({ language: event.target.value })}
+              >
+                {DIALOGUE_LANGUAGES.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
           </> : <div className="empty-inline">创建项目后可配置。</div>}
         </div>
 

@@ -347,6 +347,241 @@ def test_preproduction_missing_blocks_existing_job_endpoint(prep):
     post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=409)
 
 
+def _english_style(client, project):
+    """Freeze the English Style Bible the H3 prompt rules require."""
+    from tests.test_film_crew import ENGLISH_STYLE
+
+    client.put(f"/api/v1/projects/{project}/style/draft", json=ENGLISH_STYLE)
+    grant = post(client, "/preparation/approval-grants",
+                 {"action": "style_freeze", "target_id": project}, operator=True)
+    return post(
+        client,
+        f"/projects/{project}/style/freeze",
+        {**{k: grant[k] for k in ("grant_id", "snapshot")}, "expected_style": ENGLISH_STYLE},
+        operator=True,
+        expected=201,
+    )
+
+
+def test_render_bindings_survive_the_requirement_rows_an_analysis_rewrites(prep):
+    """Every analysis writes new requirement rows; the contract they describe does not change."""
+    from shine.comfyops.models import PreProductionPlan
+    from shine.comfyops.preproduction import _render_bindings
+    from tests.conftest import PNG, upload_asset
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    _english_style(client, project)
+    asset = upload_asset(client, project, content=PNG + b"-prop", filename="prop.png",
+                         role="prop", entity_id="旧怀表")
+    for action in ("approve", "lock"):
+        grant = post(client, "/preparation/approval-grants",
+                     {"action": "asset_" + action, "target_id": asset["id"]}, operator=True)
+        post(client, f"/assets/{asset['id']}/{action}",
+             {k: grant[k] for k in ("grant_id", "snapshot")}
+             | {"offline": True, "evidence": "Isolated test operator decision"},
+             operator=True)
+    doc = client.post(
+        f"/api/v1/projects/{project}/documents",
+        files={"file": ("script.txt", "道具：旧怀表".encode(), "text/plain")},
+    ).json()
+    plan = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    for category in ("H3_REF2VA", "VLM_REVIEW", "ASR"):
+        workflow(client, category)
+    post(client, f"/projects/{project}/rulepack/freeze")
+    approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+    revised = post(client, f"/projects/{project}/preproduction/analyze",
+                   {"document_id": doc["id"], "create_revision": True})
+    approve(client, revised, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+
+    with factory() as db:
+        old_plan = db.get(PreProductionPlan, plan["id"])
+        new_plan = db.get(PreProductionPlan, revised["id"])
+        old_links = old_plan.payload["manifest"].get("links", [])
+        new_links = new_plan.payload["manifest"].get("links", [])
+        old_requirements = {link["requirement"] for link in old_links}
+        new_requirements = {link["requirement"] for link in new_links}
+        old_bindings = _render_bindings(old_plan.payload["manifest"], db)
+        new_bindings = _render_bindings(new_plan.payload["manifest"], db)
+    # The masters are frozen by both revisions, under new requirement rows.
+    assert old_requirements and new_requirements
+    assert old_requirements.isdisjoint(new_requirements)
+    assert old_bindings == new_bindings
+
+
+def test_a_produced_job_can_be_revalidated_against_a_new_plan_revision(prep):
+    """A contract revision must not silently invalidate media that was already produced.
+
+    The two plan revisions name the same render bindings, so the produced shot
+    is re-validated against the current contract and re-bound to it.  Only the
+    advisory reviewer revision differs, and a new reviewer is not a new
+    production contract.
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import WorkflowRevision
+    from shine.models import Job, MediaArtifact
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    style = _english_style(client, project)
+    doc = client.post(
+        f"/api/v1/projects/{project}/documents", files={"file": ("test.txt", b"A rainy street.", "text/plain")}
+    ).json()
+    plan = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    reviewer = workflow(client, category="VLM_REVIEW")
+    for category in ("H3_REF2VA", "ASR"):
+        workflow(client, category)
+    post(client, f"/projects/{project}/rulepack/freeze")
+    frozen = approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+    old_hash = graph_hash(frozen["payload"]["manifest"])
+
+    shot = create_shot(client, project, style["id"], title="Rainy street",
+                       beat="A rainy street at night, empty and quiet.")
+    job = post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)
+    assert job["preproduction_manifest_hash"] == old_hash
+
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        artifact = MediaArtifact(
+            project_id=project, job_id=row.id, artifact_kind="video",
+            storage_path="artifacts/produced.mp4", sha256="d" * 64, byte_size=1,
+            content_type="video/mp4", is_mock=True,
+        )
+        db.add(artifact)
+        db.flush()
+        row.artifact_id = artifact.id
+        row.status = "PASSED"
+
+    # A new plan revision that names a new advisory reviewer.
+    with factory.begin() as db:
+        db.get(WorkflowRevision, reviewer["id"]).status = "DEPRECATED"
+    workflow(client, category="VLM_REVIEW")
+    revised = post(client, f"/projects/{project}/preproduction/analyze",
+                   {"document_id": doc["id"], "create_revision": True})
+    refrozen = approve(client, revised, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+    new_hash = graph_hash(refrozen["payload"]["manifest"])
+    assert new_hash != old_hash
+
+    from shine.comfyops.preproduction import enforce_job, revalidate_job_against_current_plan
+
+    with factory() as db:
+        row = db.get(Job, job["id"])
+        with pytest.raises(HTTPException, match="PREPRODUCTION_OUTDATED"):
+            enforce_job(db, row)
+        result = revalidate_job_against_current_plan(db, row)
+        assert result["previous_manifest_hash"] == old_hash
+        assert result["manifest_hash"] == new_hash
+        assert row.preproduction_manifest_hash == new_hash
+        # The produced media is now bound to the current contract.
+        assert enforce_job(db, row) == new_hash
+
+
+def test_a_produced_job_is_not_rebound_when_the_render_contract_changed(prep):
+    """A different render binding is a different contract; the media stays outdated."""
+    from shine.comfyops.models import WorkflowRevision
+    from shine.models import Job, MediaArtifact
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    style = _english_style(client, project)
+    doc = client.post(
+        f"/api/v1/projects/{project}/documents", files={"file": ("test.txt", b"A rainy street.", "text/plain")}
+    ).json()
+    plan = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    h3 = workflow(client, category="H3_REF2VA")
+    for category in ("VLM_REVIEW", "ASR"):
+        workflow(client, category)
+    post(client, f"/projects/{project}/rulepack/freeze")
+    approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+
+    shot = create_shot(client, project, style["id"], title="Rainy street",
+                       beat="A rainy street at night, empty and quiet.")
+    job = post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        artifact = MediaArtifact(
+            project_id=project, job_id=row.id, artifact_kind="video",
+            storage_path="artifacts/produced.mp4", sha256="e" * 64, byte_size=1,
+            content_type="video/mp4", is_mock=True,
+        )
+        db.add(artifact)
+        db.flush()
+        row.artifact_id = artifact.id
+        row.status = "PASSED"
+
+    # A new revision that names a different H3 capability is a different contract.
+    with factory.begin() as db:
+        db.get(WorkflowRevision, h3["id"]).status = "DEPRECATED"
+    workflow(client, category="H3_REF2VA")
+    revised = post(client, f"/projects/{project}/preproduction/analyze",
+                   {"document_id": doc["id"], "create_revision": True})
+    approve(client, revised, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+
+    from shine.comfyops.preproduction import revalidate_job_against_current_plan
+
+    with factory() as db:
+        row = db.get(Job, job["id"])
+        with pytest.raises(HTTPException, match="PREPRODUCTION_RENDER_CONTRACT_CHANGED"):
+            revalidate_job_against_current_plan(db, row)
+
+
+def test_a_reviewer_model_is_not_part_of_the_render_contract(prep):
+    """Swapping the reviewer's model must not look like a changed production contract.
+
+    The reviewer decides how a produced shot is judged; the model it runs on is
+    not part of what a render may use.  A render model, on the other hand, is.
+    """
+    from shine.comfyops.models import WorkflowRevision
+    from shine.comfyops.preproduction import _render_bindings
+
+    client, factory, _settings = prep
+    project = create_project(client)
+    _english_style(client, project)
+    doc = client.post(
+        f"/api/v1/projects/{project}/documents", files={"file": ("test.txt", b"A rainy street.", "text/plain")}
+    ).json()
+    plan = post(client, f"/projects/{project}/preproduction/analyze", {"document_id": doc["id"]})
+    reviewer = workflow(client, category="VLM_REVIEW")
+    h3 = workflow(client, category="H3_REF2VA")
+    workflow(client, category="ASR")
+    post(client, f"/projects/{project}/rulepack/freeze")
+    frozen = approve(client, plan, "manifest_freeze", f"/projects/{project}/preproduction/freeze")
+    manifest = frozen["payload"]["manifest"]
+
+    def declare(revision_id, model_ids):
+        with factory.begin() as db:
+            row = db.get(WorkflowRevision, revision_id)
+            row.payload = {**row.payload, "model_ids": model_ids}
+
+    declare(h3["id"], ["render-model-a"])
+    declare(reviewer["id"], ["review-model-a"])
+    with factory() as db:
+        first = _render_bindings(
+            {**manifest, "models": [{"id": "render-model-a", "hash": "c" * 64},
+                                    {"id": "review-model-a", "hash": "a" * 64}]}, db,
+        )
+    # Only the render model belongs to the contract.
+    assert [model["id"] for model in first["models"]] == ["render-model-a"]
+
+    # The reviewer now runs on another model.
+    declare(reviewer["id"], ["review-model-b"])
+    with factory() as db:
+        second = _render_bindings(
+            {**manifest, "models": [{"id": "render-model-a", "hash": "c" * 64},
+                                    {"id": "review-model-b", "hash": "b" * 64}]}, db,
+        )
+    assert first == second
+
+    # A different render model is a different contract.
+    declare(h3["id"], ["render-model-c"])
+    with factory() as db:
+        third = _render_bindings(
+            {**manifest, "models": [{"id": "render-model-c", "hash": "d" * 64},
+                                    {"id": "review-model-b", "hash": "b" * 64}]}, db,
+        )
+    assert third != first
+
+
 def test_review_scope_creates_new_plan_and_selects_matching_native_capability(prep, monkeypatch):
     from shine.comfy.workflow import graph_hash
     from shine.comfyops.models import WorkflowRevision

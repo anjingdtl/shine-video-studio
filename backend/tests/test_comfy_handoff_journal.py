@@ -240,6 +240,97 @@ def test_live_renderer_keeps_a_failed_handoff_blocked(handoff, monkeypatch):
         assert db.get(AppSetting, "handoff:" + attempt_id).value["stage"] == "RECONCILE_REQUIRED"
 
 
+def test_a_dead_renderer_releases_the_exclusive_lease_it_left_behind(handoff, monkeypatch):
+    """A lease is a claim on a live process; a process that exited holds nothing.
+
+    The worker died while it owned the GPU, so its exclusive lease blocks every
+    later GPU user even though the renderer it protects has already exited.
+    Only the recorded process identity and a free loopback port may release it.
+    """
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "instance_id": instance_id, "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+
+    assert [finding["lease_id"] for finding in findings] == [lease_id]
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+        # The job itself is untouched: the render is not a pass by inference.
+        assert db.get(Job, job_id).status == "QC_PENDING"
+
+
+def test_a_live_renderer_keeps_its_exclusive_lease(handoff, monkeypatch):
+    """A renderer whose ownership is still provable must never be released by inference."""
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "instance_id": instance_id, "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "7")
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+
+
+def test_a_live_member_of_the_owned_group_keeps_the_exclusive_lease(handoff, monkeypatch):
+    """A renderer whose group still has members keeps the lease it protects.
+
+    A child of the renderer may still hold the model in GPU memory after the
+    process that answered the port has exited.  The exclusive lease may only be
+    released when the whole owned group is empty.
+    """
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "instance_id": instance_id, "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 1)
+
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+
+
+def test_an_unreadable_process_identity_keeps_the_exclusive_lease(handoff, monkeypatch):
+    """Uncertainty is never death: an unreadable identity keeps the lease."""
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "instance_id": instance_id, "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-" + "a" * 32},
+        }))
+
+    def unreadable(pid):
+        raise ValueError("LOCK_OWNER_LIVENESS_UNKNOWN")
+
+    monkeypatch.setattr(handoff_startup, "process_identity", unreadable)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+
+
 def test_advisory_only_handoff_restarts_without_a_review_receipt(handoff):
     """A project that requested no model review still restarts from the stopped GPU state."""
     from types import SimpleNamespace

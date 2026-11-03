@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -22,16 +23,23 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import literal_column, select, text
+from sqlalchemy.exc import OperationalError
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.handoff_memory import evaluate_readiness, probe_memory
 from shine.comfyops.installer import process_identity
 from shine.comfyops.models import ComfyInstance, ResourceLease
-from shine.comfyops.owned_process import OwnedProcessGroup, inspect_named_group
+from shine.comfyops.owned_process import (
+    OwnedProcessGroup,
+    inspect_named_group,
+    named_group_active_processes,
+)
 from shine.comfyops.renderer_supervisor import RendererSupervisor, windows_port_listeners
 from shine.models import AppSetting, Job, utcnow
 from shine.services import add_audit
+
+logger = logging.getLogger(__name__)
 
 STARTUP_PREFIX = "renderer-startup:"
 REVIEW_PREFIX = "review-startup:"
@@ -150,6 +158,118 @@ class ManagedRenderer:
 def _read_startup(db, instance_id, prefix=STARTUP_PREFIX):
     row = db.get(AppSetting, startup_key(instance_id, prefix))
     return row.value if row else {}
+
+
+def startup_record_for_lease(db, lease_id: str) -> dict | None:
+    """The newest managed-startup record that launched the renderer owning a lease.
+
+    A lease can survive a renderer restart, so the newest record is the one
+    that owns the GPU right now.  An older record may name a process that has
+    already exited and must never be used to prove that the GPU is free.
+    """
+    if not lease_id:
+        return None
+    rows = db.scalars(
+        select(AppSetting)
+        .where(AppSetting.key.like(STARTUP_PREFIX + "%"))
+        .order_by(literal_column("app_settings.rowid").desc())
+    ).all()
+    for row in rows:
+        value = row.value if isinstance(row.value, dict) else {}
+        if value.get("lease_id") == lease_id:
+            return dict(value)
+    return None
+
+
+def renderer_is_gone(record: dict) -> bool:
+    """Whether the recorded renderer process has really exited.
+
+    A lease is a claim on a live process.  The claim only holds nothing when
+    three independent facts agree:
+
+    * the recorded process identity is gone (an unreadable identity is
+      uncertainty, never death),
+    * no member of the named owned group is alive any more, and
+    * nothing answers on its loopback port.
+
+    A clock timeout proves none of them: the model may still be resident in
+    GPU memory.
+    """
+    process = record.get("process") or {}
+    pid, birth = process.get("pid"), process.get("birth")
+    if type(pid) is not int or pid <= 0 or not isinstance(birth, str) or not birth:
+        return False
+    try:
+        identity = process_identity(pid)
+    except (OSError, ValueError):
+        # Uncertainty is never interpreted as death.
+        return False
+    if identity == birth:
+        return False  # the recorded renderer is still alive
+    job_name = process.get("job_name")
+    if isinstance(job_name, str) and job_name:
+        try:
+            if named_group_active_processes(job_name) > 0:
+                return False  # a member of the owned group is still alive
+        except (OSError, ValueError):
+            return False
+    port = record.get("port")
+    if not port:
+        return False
+    try:
+        return not windows_port_listeners(int(port))
+    except (OSError, ValueError):
+        return False
+
+
+def release_dead_renderer_lease(db, lease) -> bool:
+    """Release one exclusive lease whose renderer is provably gone."""
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    record = startup_record_for_lease(db, lease.id)
+    if record is None or not renderer_is_gone(record):
+        return False
+    ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    return True
+
+
+def reconcile_dead_renderer_leases(factory) -> list[dict]:
+    """Release the exclusive lease of a renderer that is provably gone.
+
+    A worker that died while it owned the GPU leaves an exclusive lease behind
+    that blocks every later GPU user, even though the renderer it protects has
+    already exited.  Only a renderer whose recorded process has really exited
+    and whose loopback port is free may release its lease; every other lease
+    stays blocked for reconciliation.
+    """
+    findings: list[dict] = []
+    with factory() as db:
+        leases = db.scalars(
+            select(ResourceLease).where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"]))
+        ).all()
+        candidates = [(lease.id, lease.owner, lease.status) for lease in leases]
+    for lease_id, owner, status in candidates:
+        try:
+            with factory.begin() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
+                lease = db.get(ResourceLease, lease_id)
+                if lease is None or lease.status not in {"ACTIVE", "RECONCILE_REQUIRED"}:
+                    continue
+                if not release_dead_renderer_lease(db, lease):
+                    continue
+                job_id = owner.removeprefix("h3:") if owner.startswith("h3:") else None
+                job = db.get(Job, job_id) if job_id else None
+                if job is not None:
+                    add_audit(db, "comfy-worker", "COMFY_DEAD_RENDERER_LEASE_RELEASED", "job", job.id,
+                              {"lease_id": lease_id, "renderer_gone": True, "resubmitted": False},
+                              project_id=job.project_id)
+        except OperationalError:
+            # A momentary writer conflict is not a lost lease: try again on the
+            # next beat instead of killing the resident worker.
+            logger.warning("dead_renderer_lease_reconcile_deferred lease_id=%s", lease_id)
+            continue
+        findings.append({"lease_id": lease_id, "owner": owner, "previous_status": status, "action": "released"})
+    return findings
 
 
 def _write_startup(db, instance_id, value, prefix=STARTUP_PREFIX):

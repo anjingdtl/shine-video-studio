@@ -55,6 +55,39 @@ def review(job_id: str, body: OperatorDecision, actor: Operator, settings: Setti
         raise HTTPException(503, "ComfyUI history unavailable; approval was not recorded") from exc
 
 
+class RevalidateRequest(BaseModel):
+    evidence: str = Field(default="", max_length=200)
+
+
+@router.post("/jobs/{job_id}/preproduction/revalidate")
+def revalidate(job_id: str, body: RevalidateRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """A local user re-binds a produced job to the current frozen contract.
+
+    A frozen plan revision replaces the production contract, and a job that was
+    created under the previous revision is no longer bound to it.  This
+    re-validates the produced render against the current contract and re-binds
+    the job to it.  Nothing is re-rendered.
+    """
+    from shine.api_preparation import locked
+    from shine.comfyops.preproduction import revalidate_job_against_current_plan
+    from shine.models import Job
+
+    locked(db)
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    result = revalidate_job_against_current_plan(db, job, data_dir=settings.data_dir)
+    from shine.services import add_audit
+
+    add_audit(
+        db, actor, "PREPRODUCTION_REVALIDATED", "job", job.id,
+        {**result, "evidence": body.evidence[:200], "render_resubmission": False},
+        project_id=job.project_id,
+    )
+    db.commit()
+    return {"status": job.status, **result}
+
+
 class AbandonRequest(BaseModel):
     evidence: str = Field(default="", max_length=200)
 
