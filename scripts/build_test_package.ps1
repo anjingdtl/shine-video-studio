@@ -198,7 +198,7 @@ $buildInfo = [ordered]@{
         data_dir = '<install_root>\data'
         operator_password = 'not_required_for_personal_desktop'
         ports = 'API 8000 / Web 5173, advanced automatically when busy'
-        browser = 'http://127.0.0.1:<web port>/#setup'
+        browser = 'existing workspace -> /; empty workspace -> /#d/setup'
     }
     known_blockers = @(
         'a full 60.8GB download and a clean Windows install have not been exercised',
@@ -218,7 +218,9 @@ $buildInfo = [ordered]@{
         'the Web workbench has four sections with plain-language navigation and five new-user flow fixes',
         'style freeze compares all seven approved fields and consumes the grant in the same write transaction',
         'concurrent global workflow registrations are protected by a partial unique database index (f150a0020001)',
-        'a stale process record whose PID was recycled by Windows can no longer block the single entry point'
+        'a stale process record whose PID was recycled by Windows can no longer block the single entry point',
+        'the launcher requires a live API, a live page and the recorded listener identity before reporting "already running"',
+        'a package start advances both ports when the defaults are busy, and the dev launcher archives unverifiable records instead of killing unknown processes'
     )
     excluded_from_package = @(
         'models and weights',
