@@ -168,10 +168,12 @@ Autogrow 参考输入族 → 停止渲染器。`generation_verified` 仍为 `fal
   **`final=needs_review`**（`quality_verification: real`）。
 - 咨询评审已按**真实回环路由**入队并执行：`qwen3-vl-4b-bnb4`（VLM）与 `whisper-tiny`（ASR），
   均为 `advisory=true`、`replay=NEVER_AUTOMATIC`，不占渲染器也不占 GPU 租约。
-  **实测结果（如实记录）**：第 1 镜的 VLM 评审 `VLM_TIMEOUT`、ASR 评审 `ASR_UNAVAILABLE`
-  （本机 whisper 审片服务的 `POST /v1/audio/transcriptions` 返回 404），两者都记为
-  `UNAVAILABLE` 咨询证据，**没有阻断**镜头、系列或交付——这正是"咨询评审不在关键路径上"的设计。
-  因此本轮**没有任何模型评审通过**：三道咨询门仍然是 `not_run`。
+  **实测结果（如实记录）**：第 1、2 镜的 VLM 评审均为 `VLM_TIMEOUT`、ASR 评审为
+  `ASR_UNAVAILABLE`（本机 whisper 审片服务的 `POST /v1/audio/transcriptions` 返回 404），
+  记为 `UNAVAILABLE` 咨询证据，**没有阻断**镜头、系列或交付——这正是"咨询评审不在关键路径上"
+  的设计。因此本轮**没有任何模型评审通过**：三道咨询门仍然是 `not_run`。
+  本机的 qwen3-vl-4b 在 768×1344 视频帧上跑带结构化 schema 的评审，超过了评审超时上限；
+  这是**本机算力/时限**的事实，不被写成"评审通过"。
 
 ### 5.4 合成导出
 
@@ -206,7 +208,7 @@ Autogrow 参考输入族 → 停止渲染器。`generation_verified` 仍为 `fal
 
 ## 6. 明确未声明的内容
 
-- **没有声称任何模型评审通过。** 本机的咨询评审在本轮实测为 `VLM_TIMEOUT` 与
+- **没有声称任何模型评审通过。** 本机的咨询评审在本轮实测为 `VLM_TIMEOUT`（两镜）与
   `ASR_UNAVAILABLE`（whisper 审片服务缺少 `/v1/audio/transcriptions`），因此三道咨询门仍是
   `not_run`。`final` 门为 `needs_review`，三个镜头与成片的 `acceptance_status` 保持
   `pending_review`。语义/风格/终审需要人工逐项签署（操作员签署会**追加**一组门禁记录，
@@ -252,8 +254,9 @@ Invoke-RestMethod http://127.0.0.1:8000/api/v1/deliveries/55cca29e-80d2-4558-9da
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
-| 后端全量 | `pytest tests -q` | 见 §9（最终状态） |
+| 后端全量 | `pytest tests -q`（backend/） | **1522 通过 / 1 跳过 / 0 失败 / 0 错误**（exit 0，`.local-acceptance/backend-full-20261104b.log`） |
 | Ruff | `python -m ruff check backend/shine` | All checks passed |
 | 前端测试 | `npm.cmd test`（frontend/） | 16 文件 / **114 用例全通过** |
 | 前端构建 | `npm.cmd run build` | 通过（tsc + vite，1.42s） |
-| 新增回归 | `test_setup_voice_readiness.py`(9) `test_setup_workflow_profiles.py`(4) `test_reference_slot_pruning.py`(4) `test_idle_configuration.py`(6) `test_character_binding.py`(13，含合唱行重键) | 全通过 |
+| 新增回归 | `test_setup_voice_readiness.py`(9) `test_setup_workflow_profiles.py`(4) `test_reference_slot_pruning.py`(4) `test_idle_configuration.py`(6) `test_character_binding.py`(13，含合唱行重键) `test_film_reference_budget.py`(3) | 全通过 |
+| 行尾 | 改动文件全部保持仓库的 LF | 无 CRLF 混入 |
