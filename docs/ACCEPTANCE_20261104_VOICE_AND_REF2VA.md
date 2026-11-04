@@ -168,7 +168,7 @@ Autogrow 参考输入族 → 停止渲染器。`generation_verified` 仍为 `fal
   **`final=needs_review`**（`quality_verification: real`）。
 - 咨询评审已按**真实回环路由**入队并执行：`qwen3-vl-4b-bnb4`（VLM）与 `whisper-tiny`（ASR），
   均为 `advisory=true`、`replay=NEVER_AUTOMATIC`，不占渲染器也不占 GPU 租约。
-  **实测结果（如实记录）**：第 1、2 镜的 VLM 评审均为 `VLM_TIMEOUT`、ASR 评审为
+  **实测结果（如实记录）**：三镜的 VLM 评审全部 `VLM_TIMEOUT`、ASR 评审全部
   `ASR_UNAVAILABLE`（本机 whisper 审片服务的 `POST /v1/audio/transcriptions` 返回 404），
   记为 `UNAVAILABLE` 咨询证据，**没有阻断**镜头、系列或交付——这正是"咨询评审不在关键路径上"
   的设计。因此本轮**没有任何模型评审通过**：三道咨询门仍然是 `not_run`。
@@ -208,8 +208,8 @@ Autogrow 参考输入族 → 停止渲染器。`generation_verified` 仍为 `fal
 
 ## 6. 明确未声明的内容
 
-- **没有声称任何模型评审通过。** 本机的咨询评审在本轮实测为 `VLM_TIMEOUT`（两镜）与
-  `ASR_UNAVAILABLE`（whisper 审片服务缺少 `/v1/audio/transcriptions`），因此三道咨询门仍是
+- **没有声称任何模型评审通过。** 本机的咨询评审在本轮实测为 `VLM_TIMEOUT`（三镜）与
+  `ASR_UNAVAILABLE`（三镜，whisper 审片服务缺少 `/v1/audio/transcriptions`），因此三道咨询门仍是
   `not_run`。`final` 门为 `needs_review`，三个镜头与成片的 `acceptance_status` 保持
   `pending_review`。语义/风格/终审需要人工逐项签署（操作员签署会**追加**一组门禁记录，
   worker 原来那组原样保留），本轮未由人工签署。
