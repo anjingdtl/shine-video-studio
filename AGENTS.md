@@ -333,7 +333,8 @@ Target/Arguments/WorkingDirectory，保留原图标）。不要手写一个指�
 
 ### B. 项目安装包（每次发布必更）
 
-安装包从**已提交的树**构建，工作区脏时脚本会拒绝（`BUILD_INFO` 必须指向真实 commit）：
+安装包从**已提交的树**构建；已跟踪文件有未提交修改时脚本会拒绝（`BUILD_INFO` 必须
+指向真实 commit）。未跟踪的个人文件不会进入包，也不会阻塞构建。
 
 ```powershell
 scripts\build_test_package.ps1 -OutDir releases -Verify

@@ -36,7 +36,10 @@ $packagingRoot = Join-Path $repoRoot 'packaging/windows'
 
 Write-Host '[package] repository:' $repoRoot -ForegroundColor Gray
 
-$dirty = (& git -C $repoRoot status --porcelain) -join ''
+# The package is built from `git ls-files`, so an untracked user file (a script
+# draft, a personal note) is not part of it and must not block a reproducible
+# build. A modified or staged tracked file still does.
+$dirty = (& git -C $repoRoot status --porcelain --untracked-files=no) -join ''
 if ($dirty -and -not $AllowDirty) {
     Write-Host '[package] working tree is dirty; commit first or pass -AllowDirty:' -ForegroundColor Red
     Write-Host $dirty -ForegroundColor Red
