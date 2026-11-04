@@ -206,7 +206,9 @@ $buildInfo = [ordered]@{
         'the M4 60-second, two-person-dialogue acceptance film has not been run',
         'existing real films still require final human review; this build does not promote pending_review to accepted',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
-        'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine'
+        'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
+        'the real MiniMax crew chain has not been rerun against the rewritten crew prompts; the director timing fix is proven by contract tests only',
+        'the release action for local backends is proven on Windows for process and port release; a GPU memory reading before/after is not part of this build'
     )
     closed_in_this_build = @(
         'reviewer routes are created and bound to the actually installed 8B VLM and 0.6B ASR',
@@ -220,7 +222,10 @@ $buildInfo = [ordered]@{
         'concurrent global workflow registrations are protected by a partial unique database index (f150a0020001)',
         'a stale process record whose PID was recycled by Windows can no longer block the single entry point',
         'the launcher requires a live API, a live page and the recorded listener identity before reporting "already running"',
-        'a package start advances both ports when the defaults are busy, and the dev launcher archives unverifiable records instead of killing unknown processes'
+        'a package start advances both ports when the defaults are busy, and the dev launcher archives unverifiable records instead of killing unknown processes',
+        'the five crew roles are served the finished editorial segmentation, so the director copies the timing instead of inventing it',
+        'an ungroupable cut table and a beat count that cannot match the table are refused before any model call',
+        'the workbench closes the ComfyUI and local reviewer processes it started, and the launcher releases leftover backends before a clean start'
     )
     excluded_from_package = @(
         'models and weights',
