@@ -57,6 +57,11 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
         </div>
       </div>
       <div className="upload-stack">
+        <details open={role === 'character' || role === 'voice'}>
+          <summary>可选：角色名称与标签</summary>
+          <label>{role === 'character' ? '人物名称（建议与剧本一致）' : '角色 / 场景名称'}<input value={entityId} placeholder="默认使用文件名；同一人物可填相同名称" onChange={e => setEntityId(e.target.value)} /></label>
+          <label>标签<input value={tags} placeholder="主角, 夜戏, 定妆" onChange={e => setTags(e.target.value)} /></label>
+        </details>
         <div className="upload-row">
           <div><label>素材用途</label>
             <select aria-label="素材用途" value={role} onChange={(event) => setRole(event.target.value)}>
@@ -73,18 +78,18 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
                 event.target.value = '';
                 if (file) {
                   const kind = file.type.startsWith('audio/') || /\.(wav|mp3|flac|m4a|ogg)$/i.test(file.name)
-                    ? 'audio' : file.type.startsWith('video/') || /\.(mp4|mov|webp|mkv)$/i.test(file.name) ? 'video' : 'image';
+                    ? 'audio' : file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(file.name) ? 'video' : 'image';
                   onUpload(file, { kind, role: kind === 'audio' && role === 'character' ? 'voice' : role,
                     entityId: (entityId.trim() || file.name.replace(/\.[^.]+$/, '')).slice(0, 80), tags });
+                  // The name belongs to this file; the next upload must not
+                  // inherit it and silently bind another person's face.
+                  setEntityId('');
+                  setTags('');
                 }
               }}
             />
           </label>
         </div>
-        <details><summary>可选：角色名称与标签</summary>
-          <label>角色 / 场景名称<input value={entityId} placeholder="默认使用文件名；同一人物可填相同名称" onChange={e => setEntityId(e.target.value)} /></label>
-          <label>标签<input value={tags} placeholder="主角, 夜戏, 定妆" onChange={e => setTags(e.target.value)} /></label>
-        </details>
         <span className="upload-hint">支持图片、视频和音频，自动识别类型。仅上传你有权使用的素材。</span>
       </div>
       {pending.length > 0 && <div className="required-action">

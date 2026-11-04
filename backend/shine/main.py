@@ -214,6 +214,7 @@ def _shot_data(db: Session, shot: Shot) -> dict[str, Any]:
                 "asset_id": row.asset_id,
                 "filename": asset.filename if asset else "",
                 "kind": asset.kind if asset else "",
+                "entity_id": asset.entity_id if asset else None,
                 "use_as": row.use_as,
                 "role": row.role,
                 "frame_role": row.frame_role,
@@ -956,6 +957,7 @@ def create_app(
             workflow_profile_id=body.workflow_profile_id,
             self_review_scope=body.self_review_scope,
             basic_review_resolution=body.basic_review_resolution,
+            output=body.output,
         )
         series, job = create_series(
             db, project, shots, body=job_body,

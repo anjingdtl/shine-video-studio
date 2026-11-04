@@ -233,6 +233,36 @@ class BasicReviewResolution(APIModel):
     height: int = Field(strict=True, ge=2, le=8192)
 
 
+class OutputSpec(APIModel):
+    """The video the user asked this run to produce.
+
+    The values follow the pinned H3 acceptance facts: 24 fps, a width and a
+    height that are multiples of 32, and a clip between 4 and 15 seconds.  They
+    only reach the renderer when the chosen workflow profile maps the
+    ``width``/``height`` logical parameters; an unmapped profile is reported as
+    a blocker instead of silently rendering at its own size.  A run may set only
+    the clip length and keep the profile's frame.
+    """
+
+    width: int | None = Field(default=None, strict=True, ge=256, le=2048)
+    height: int | None = Field(default=None, strict=True, ge=256, le=2048)
+    fps: Literal[24] = 24
+    clip_seconds: float | None = Field(default=None, ge=4, le=15)
+
+    @field_validator("width", "height")
+    @classmethod
+    def multiple_of_32(cls, value: int | None) -> int | None:
+        if value is not None and value % 32:
+            raise ValueError("H3 resolution must be a multiple of 32")
+        return value
+
+    @model_validator(mode="after")
+    def size_is_complete(self):
+        if (self.width is None) != (self.height is None):
+            raise ValueError("An output size needs both a width and a height")
+        return self
+
+
 class CreateJob(APIModel):
     shot_id: str
     references: list[AssetReference] | None = Field(default=None, max_length=12)
@@ -243,6 +273,7 @@ class CreateJob(APIModel):
     workflow_profile_id: str | None = None
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
+    output: OutputSpec | None = None
 
     @model_validator(mode="after")
     def basic_scope_needs_resolution(self):
@@ -289,6 +320,8 @@ class CreateProductionSeries(APIModel):
     basic_review_resolution: BasicReviewResolution | None = None
     edit_intent_artifact_id: str | None = None
     """The frozen EditIntentPlan artifact that the automatic delivery inherits."""
+    output: OutputSpec | None = None
+    """The output size and clip length of this run; refused when the profile cannot honour it."""
 
     @model_validator(mode="after")
     def basic_scope_needs_resolution(self):
@@ -390,8 +423,23 @@ class RenderRequest(APIModel):
     workflow_profile_hash: str | None = None
     seed: int | None = Field(default=None, ge=0)
     expected_duration_s: float = Field(ge=4, le=15)
+    output_width: int | None = Field(default=None, ge=256, le=2048)
+    output_height: int | None = Field(default=None, ge=256, le=2048)
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
+
+    @field_validator("output_width", "output_height")
+    @classmethod
+    def output_multiple_of_32(cls, value: int | None) -> int | None:
+        if value is not None and value % 32:
+            raise ValueError("H3 resolution must be a multiple of 32")
+        return value
+
+    @model_validator(mode="after")
+    def output_dimensions_come_together(self) -> RenderRequest:
+        if (self.output_width is None) != (self.output_height is None):
+            raise ValueError("An output size needs both a width and a height")
+        return self
 
     @field_validator("compiled_prompt")
     @classmethod

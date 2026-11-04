@@ -181,3 +181,27 @@ def test_reconcile_lease_outranks_everything(prep, candidate):  # noqa: F811
     assert mode['label'] == '有任务待核对'
     assert mode['action'] == 'check_fix'
     assert '不会自动重试' in mode['detail']
+
+
+
+
+def test_enabled_comfyui_without_saved_setup_is_not_described_as_saved(api):
+    """A brand-new install must not be told its configuration was saved.
+
+    The provider can be enabled by configuration before anything is installed;
+    "已保存真实制作配置" would send the user looking for a configuration that
+    does not exist yet.
+    """
+    from types import SimpleNamespace
+
+    from shine.production_mode import summarize_production_mode
+
+    _client, factory, settings = api
+    with factory() as db:
+        mode = summarize_production_mode(
+            db, settings, effective=SimpleNamespace(render_provider='comfyui'),
+            runtime_error=None, worker_online=False, renderer_online=False,
+        )
+    assert mode['mode'] == 'SETUP_REQUIRED'
+    assert mode['code'] == 'REAL_RUNTIME_NOT_ACTIVATED'
+    assert '还没有保存' in mode['detail']

@@ -182,7 +182,10 @@ def test_prompt_style_and_subject_alias_preserve_original_identity():
     subject = item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="杜万山", role="杜万山")
     compiled = compile_prompt([subject], shot=spec(prompt_style=english))
     assert "Steady medium shots" in compiled.prompt
-    assert "approved subject" in compiled.sections["subject_definitions"]
+    # The H3 prompt is English, so a Chinese name cannot be copied into it;
+    # the person is identified by cast position and the asset keeps its name.
+    assert "the first listed performer" in compiled.sections["subject_definitions"]
+    assert "杜万山" not in compiled.prompt
     assert subject.entity_id == "杜万山"
     assert STYLE.photography_language == "平视中近景，稳定缓推"
 
@@ -238,9 +241,14 @@ def test_ref2va_emits_all_six_official_sections_and_stable_labels():
         "non_diegetic_music",
     ]
     assert compiled.prompt.index("subject_definitions:") < compiled.prompt.index("summary:")
-    assert "<Subject 1> is the approved reference" in compiled.sections["subject_definitions"]
+    assert (
+        "<Subject 1> is the approved, locked reference" in compiled.sections["subject_definitions"]
+    )
     assert compiled.sections["summary"].startswith("[reference generation + audio reference]")
-    assert "<Subject 1> (appears in [Shot 1]): fully_preserved" in compiled.sections["retention_analysis"]
+    assert (
+        "<Subject 1> (the first listed performer in [Shot 1]): fully_preserved"
+        in compiled.sections["retention_analysis"]
+    )
     assert "<Subject 1> (S1) says: <d>[Chinese] 账册在哪儿？</d>" in compiled.sections["detailed_description"]
     assert compiled.labels["<Subject 1>"] == "asset-1"
 
@@ -303,8 +311,14 @@ def test_ref2va_subject_definitions_cite_presentation_picture_slots():
     shot = spec(characters=["CHAR_A"])
     compiled = compile_prompt(manifest, shot=shot)
     definitions = compiled.sections["subject_definitions"]
-    assert "<Subject 1> is the approved reference for character, shown in <Picture 1>," in definitions
-    assert "<Subject 2> is the approved reference for character, shown in <Picture 2>," in definitions
+    assert (
+        "<Subject 1> is the approved, locked reference for the first listed performer (character), "
+        "shown in <Picture 1>;"
+    ) in definitions
+    assert (
+        "<Subject 2> is the approved, locked reference for the second listed performer (character), "
+        "shown in <Picture 2>;"
+    ) in definitions
     assert "<Picture 3> is the keyframe reference for [Shot 1]." in definitions
     assert "<Audio 1> is an approved audio reference." in definitions
 

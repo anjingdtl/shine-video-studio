@@ -560,6 +560,8 @@ class ProductionSeries(Base):
     generation_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     self_review_scope: Mapped[str] = mapped_column(String(16), default="full", nullable=False)
     basic_review_resolution: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    output_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """The width/height/clip length this run renders at; None means the profile default."""
     mock_scenario: Mapped[str] = mapped_column(String(24), default="success", nullable=False)
     shot_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

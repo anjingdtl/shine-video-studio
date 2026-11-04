@@ -24,7 +24,7 @@ from shine.schemas import (
 
 # Pinned official skill material from MiniMax-AI/MiniMax-H3 commit
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
-COMPILER_VERSION = "shine-h3-compiler/1.1.1"
+COMPILER_VERSION = "shine-h3-compiler/1.2.0"
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -278,6 +278,20 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
                     "H3_SPEAKER_REFERENCE_MISSING",
                     f"Speaker {speaker} has no bound subject or picture reference",
                 )
+    # Every person the shot says it shows needs a reference of their own.
+    # Without this check a shot silently renders a character from the text
+    # alone: the model then invents a face or borrows another subject's, which
+    # is exactly the identity drift this pipeline must not hide.
+    if mode == GenerationMode.REF2VA and any(
+        item.use_as == ReferenceUse.SUBJECT for item in ctx.manifest
+    ):
+        for character in ctx.spec.characters:
+            if not _label_for_character(character, ctx.manifest, {}):
+                raise PromptCompilationError(
+                    "H3_CHARACTER_REFERENCE_MISSING",
+                    f"Character {character} appears in this shot but has no bound subject reference",
+                    {"character": character, "characters": ctx.spec.characters},
+                )
 
 
 def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
@@ -304,6 +318,9 @@ def _camera_sentence(spec: ShotSpec) -> str:
 
 def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(_prompt_style(ctx.spec, ctx.style), ctx.spec.style_version_id)]
+    cast = _cast_order(ctx)
+    if cast:
+        parts.append(cast)
     parts.append(ctx.spec.story_beat.strip())
     camera = _camera_sentence(ctx.spec)
     if camera:
@@ -434,18 +451,42 @@ def _image_positions(manifest: list[ReferenceManifestItem]) -> dict[int, int]:
     return positions
 
 
+_ORDINALS = (
+    "first", "second", "third", "fourth", "fifth", "sixth",
+    "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
+)
+
+
+def _ordinal(index: int) -> str:
+    return _ORDINALS[index] if 0 <= index < len(_ORDINALS) else f"number {index + 1}"
+
+
 def _subject_definitions(ctx: _Context) -> str:
     lines: list[str] = []
     positions = _image_positions(ctx.manifest)
+    # The manifest is family-ordered by the server, so the subject sequence is
+    # the sequence the storyboard lists the cast in.  The compiled prompt states
+    # that order explicitly: H3 sees the reference images as one flat sequence,
+    # and "approved subject" alone gives it no way to tell which face belongs to
+    # which described person.
+    subject_index = 0
     for item in ctx.manifest:
         if item.use_as == ReferenceUse.SUBJECT:
-            role = item.role or item.entity_id or "approved subject"
+            role = item.role or item.entity_id or ""
             if re.search(r"[\u3400-\u9fff]", role):
-                role = "approved subject"
+                # The prompt is English; a Chinese name/role cannot be written
+                # outside a quoted visible-text span.  The cast order still
+                # identifies the person deterministically.
+                role = ""
+            identity = f"the {_ordinal(subject_index)} listed performer"
+            if role:
+                identity += f" ({role})"
             lines.append(
-                f"{item.label} is the approved reference for {role}, "
-                f"shown in <Picture {positions[id(item)]}>, derived from the user's locked asset."
+                f"{item.label} is the approved, locked reference for {identity}, "
+                f"shown in <Picture {positions[id(item)]}>; this exact face, hairstyle and build "
+                "must be kept in every frame of this shot."
             )
+            subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
             frame = item.frame_role.value if item.frame_role else "composition"
             lines.append(f"{item.label} is the {frame} reference for [Shot 1].")
@@ -454,6 +495,29 @@ def _subject_definitions(ctx: _Context) -> str:
         else:
             lines.append(f"{item.label} is an approved audio reference.")
     return "\n".join(lines)
+
+
+def _cast_order(ctx: _Context) -> str:
+    """State the one-to-one cast/reference order H3 cannot infer on its own.
+
+    The storyboard lists the people of a shot in a stable order (the directorial
+    plan and the shot bindings share it), and the reference manifest keeps that
+    order.  Saying so is what stops the model from handing one performer's face
+    to another when several subjects appear together.
+    """
+    subjects = [item for item in ctx.manifest if item.use_as == ReferenceUse.SUBJECT]
+    if len(subjects) < 2:
+        return ""
+    cast = ", ".join(
+        f"{item.label} ({_ordinal(index)})" for index, item in enumerate(subjects)
+    )
+    return (
+        "Reference cast order (mandatory): the people of this shot appear in the order they are "
+        f"described, and that order is {cast}. The first described person is {subjects[0].label}, "
+        f"the second is {subjects[1].label}, and so on. Each person keeps exactly their own face, "
+        "hairstyle, age and build from their reference; never swap, merge or borrow a face between "
+        "two referenced subjects."
+    )
 
 
 def _summary(ctx: _Context) -> str:
@@ -471,13 +535,16 @@ def _summary(ctx: _Context) -> str:
 
 def _retention(ctx: _Context) -> str:
     lines: list[str] = []
+    subject_index = 0
     for item in ctx.manifest:
         marker = "reference" if item.use_as == ReferenceUse.AUDIO else "fully_preserved"
         if item.use_as == ReferenceUse.SUBJECT:
-            role = item.role or item.entity_id or "approved subject"
-            if re.search(r"[\u3400-\u9fff]", role):
-                role = "approved subject"
-            lines.append(f"{item.label} (appears in [Shot 1]): {marker} - the {role} identity is retained.")
+            lines.append(
+                f"{item.label} (the {_ordinal(subject_index)} listed performer in [Shot 1]): "
+                f"{marker} - this exact face, hairstyle and build are retained and are never "
+                "replaced by another subject's."
+            )
+            subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
             lines.append(f"{item.label} ([Shot 1] frame): {marker} - the approved frame composition is retained.")
         elif item.use_as == ReferenceUse.VIDEO:

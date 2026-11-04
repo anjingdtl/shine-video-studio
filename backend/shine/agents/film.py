@@ -72,11 +72,12 @@ def asset_context(db: Session, project_id: str) -> list[dict]:
 
 
 # The reference set of a shot is a product decision, not a matter of taste:
-# every shot of a sequence references the character master, one location or
-# picture master and the voice master, plus relevant approved props. The style bible reference and the
-# last-frame master are project-level references; a shot never lists them, so
-# their absence from a shot is BY DESIGN and never a missing reference.
-SHOT_REFERENCE_REQUIRED_ROLES = ("character", "voice")
+# every shot of a sequence references the character masters that appear in it,
+# plus relevant approved props. A location/picture master is recommended, and a
+# voice master is optional: H3 speaks a line natively, so binding a generated
+# voice is an enhancement for a fixed timbre, never a precondition.
+SHOT_REFERENCE_REQUIRED_ROLES = ("character",)
+SHOT_REFERENCE_OPTIONAL_ROLES = ("voice",)
 SHOT_REFERENCE_LOCATION_ROLES = ("scene", "picture")
 SHOT_REFERENCE_EXCLUDED_ROLES = ("style_reference", "last_frame")
 
@@ -116,14 +117,20 @@ def shot_reference_policy(db: Session, project_id: str, plan: dict) -> dict:
         })
     return {
         "policy": {
-            "shot_reference_set": "the character, location and voice masters, plus approved props or other "
-                                  "assets materially depicted in the shot",
+            "shot_reference_set": "the character masters that appear in the shot, plus a location/picture "
+                                  "master and approved props; a voice master is optional and only improves "
+                                  "timbre continuity",
             "required_roles": list(SHOT_REFERENCE_REQUIRED_ROLES),
+            "optional_roles": list(SHOT_REFERENCE_OPTIONAL_ROLES),
             "location_roles": list(SHOT_REFERENCE_LOCATION_ROLES),
             "excluded_from_shot_references": excluded,
             "last_frame_mode": (
                 "a soft relation to the preceding shot: the shot continues from the previous shot's "
                 "last frame. It is not a frame anchor and it needs no reference image."
+            ),
+            "dialogue_voice": (
+                "H3 generates the spoken line from the dialogue block; a bound voice master is an "
+                "optional fixed-timbre reference, never a requirement."
             ),
         },
         "reference_set_status": shots,
@@ -170,7 +177,8 @@ def reference_budget_note(budgets: list[dict]) -> str:
         f"{best['image_slots']} image reference slots and {best['audio_slots']} audio reference slot(s) "
         "per render segment. Keep every shot's asset_ids within this budget: choose the identity-critical "
         "picture masters (the segment's lead performer as the subject image, plus the most continuity-critical "
-        "location or partner images) and the voice master(s) only up to the mapped audio slots. "
+        "location or partner images). A voice master is optional and only uses an audio slot when the "
+        "project really wants that fixed timbre. "
         "A shot whose references exceed the mapped slots blocks the render."
     )
 
@@ -822,11 +830,13 @@ class FilmAgentDispatcher:
                        "Spoken lines live "
                        "exclusively in the beats' dialogue structure and must never appear inside "
                        "visual_description, quoted or not. Every shot of a sequence must reference the "
-                       "approved audio (voice) master in asset_ids so the timbre stays continuous, "
-                       "whether or not that shot speaks. Keep each shot's asset_ids to the working "
-                       "reference set: the character master, one location/picture master and the voice "
-                       "master and every approved prop or other master materially depicted in the shot; "
-                       "never list style or last-frame reference images as shot references, and "
+                       "approved character masters that appear in it. H3 speaks a line natively, so a "
+                       "voice master is optional: include an approved audio (voice) master only when the "
+                       "project wants that exact timbre, and never treat its absence as a missing "
+                       "reference. Keep each shot's asset_ids to the working "
+                       "reference set: the character master, one location/picture master and, optionally, "
+                       "the voice master and every approved prop or other master materially depicted in the "
+                       "shot; never list style or last-frame reference images as shot references, and "
                        "never list an asset twice."
                        + reference_budget_note(context.get("workflow_reference_budget") or [])
                        if role == "director" else "")

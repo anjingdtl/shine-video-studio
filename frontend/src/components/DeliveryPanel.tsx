@@ -160,7 +160,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     </div>}
 
     <p>连续制作完成后，系统会自动整理并装配成片，无需人工填写。下面的手工装配保留给人工修订与补剪。</p>
-    <label htmlFor="delivery-proposal">剪辑方案</label><select id="delivery-proposal" value={selected} onChange={e => {
+    <label htmlFor="delivery-proposal">剪辑方案</label><select id="delivery-proposal" value={selected} disabled={proposals.length === 0} onChange={e => {
       setSelected(e.target.value);
       const proposal = proposals.find(a => a.id === e.target.value);
       setEdl(proposal ? JSON.stringify(proposal.payload_json, null, 2) : '');

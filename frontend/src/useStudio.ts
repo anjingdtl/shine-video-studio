@@ -493,6 +493,20 @@ export function useStudio() {
     });
   }
 
+  /** Map the registered H3 node's own width/height inputs into the profile.
+   *  Only ever adds a mapping the graph itself declares; a graph without a
+   *  size input is refused by the server instead of being guessed. */
+  async function bindStandardParameters(profileId: string) {
+    await withBusy(async () => {
+      const result = await api<WorkflowProfile>(`/workflow-profiles/${profileId}/standard-parameters`, json('POST', {}));
+      await loadSettings(projectId);
+      const mapped = 'width' in result.parameter_map && 'height' in result.parameter_map;
+      report(mapped
+        ? '已把 H3 节点的宽高输入接入画幅设置；下次开始制作即可按你选的分辨率渲染。'
+        : '这个方案没有可接入的宽高输入。', mapped ? 'success' : 'error');
+    });
+  }
+
   return {
     // data
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
@@ -510,6 +524,7 @@ export function useStudio() {
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
+    bindStandardParameters,
     abandonJob,
   };
 }

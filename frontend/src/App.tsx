@@ -1,9 +1,10 @@
 import { SetupPanel } from './components/SetupPanel';
+import DirectorSetupPanel from './components/DirectorSetupPanel';
 import { PreproductionPanel } from './components/PreproductionPanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, BookOpenText, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
-  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, RefreshCw, ShieldCheck,
+  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, RefreshCw, Settings2, ShieldCheck,
   SlidersHorizontal, Sparkles, Users, Video, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -70,20 +71,25 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
   VIEW_GROUPS.map((group) => [group.view, group.title]),
 ) as Record<ViewId, string>;
 
-/** 导演模式：四个页面，按真实项目状态引导。 */
-type DirectorPage = 'projects' | 'assets' | 'produce' | 'deliver';
+/** 导演模式：四个制作页面 + 一个不占流程序号的基础配置页。 */
+type DirectorPage = 'projects' | 'assets' | 'produce' | 'deliver' | 'setup';
 const DIRECTOR_PAGES: Array<{ id: DirectorPage; text: string; icon: LucideIcon; hint: string }> = [
   { id: 'projects', text: '我的作品', icon: FolderKanban, hint: '新建与管理作品' },
   { id: 'assets', text: '素材与风格', icon: Film, hint: '人物 · 场景 · 道具 · 风格' },
   { id: 'produce', text: 'AI导演制作', icon: Clapperboard, hint: '分镜 → 制作 → 进度' },
   { id: 'deliver', text: '成片中心', icon: Video, hint: '看成片 · 确认 · 导出' },
 ];
+const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
+  projects: '我的作品', assets: '素材与风格', produce: 'AI导演制作', deliver: '成片中心', setup: '基础配置',
+};
 
 function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string } {
   const raw = hash.replace(/^#/, '');
   if (raw.startsWith('d/')) {
     const page = raw.slice(2) as DirectorPage;
-    if (DIRECTOR_PAGES.some((item) => item.id === page)) return { ui: 'director', view: 'production', page };
+    if (DIRECTOR_PAGES.some((item) => item.id === page) || page === 'setup') {
+      return { ui: 'director', view: 'production', page };
+    }
     return { ui: 'director', view: 'production', page: 'projects' };
   }
   if (raw.startsWith('v/')) {
@@ -115,7 +121,7 @@ function App() {
     createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
-    abandonJob,
+    bindStandardParameters, abandonJob,
   } = studio;
 
   const [ui, setUi] = useState<'director' | 'expert'>(() => {
@@ -406,7 +412,7 @@ function App() {
           <div className="breadcrumb">
             <span>工作区</span><span className="crumb-slash">/</span>
             {ui === 'director'
-              ? <b>{DIRECTOR_PAGES.find((page) => page.id === directorPage)?.text}</b>
+              ? <b>{DIRECTOR_PAGE_LABELS[directorPage]}</b>
               : <><b>{VIEW_TITLES[view]}</b>{project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}</>}
             {ui === 'director' && project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}
           </div>
@@ -423,6 +429,15 @@ function App() {
             {projects.length > 1 && ui === 'director' && <select className="topbar-project" aria-label="快速切换作品" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
               {projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}
             </select>}
+            {ui === 'director' && <button
+              type="button"
+              className={`setup-entry ${directorPage === 'setup' ? 'active' : ''} ${production && !['READY', 'RUNNING'].includes(production.mode) ? 'needs-setup' : ''}`}
+              title="配置文本模型、安装本机环境、登记生成方案（不需要切换到专业模式）"
+              onClick={() => goToDirectorPage('setup')}
+            >
+              <Settings2 size={13} /><span>基础配置</span>
+              {production && !['READY', 'RUNNING'].includes(production.mode) && <i className="setup-entry-dot" aria-label="还有配置未完成" />}
+            </button>}
             <ModeStatusEntry system={system} onAction={handleModeAction} />
             <button
               type="button"
@@ -442,7 +457,33 @@ function App() {
         <div className="page-wrap">
           {/* ============ 导演模式：普通用户的默认层 ============ */}
           {ui === 'director' && <>
-            {!project && <section className="first-run card">
+            {directorPage === 'setup' && <DirectorSetupPanel
+              project={project}
+              projectId={projectId}
+              projectTitle={projectTitle}
+              setProjectTitle={setProjectTitle}
+              createProject={createProject}
+              system={system}
+              profiles={profiles}
+              routes={routes}
+              workflowProfiles={workflowProfiles}
+              busy={busy}
+              refreshEpoch={dataEpoch}
+              onRefresh={refreshAll}
+              onProjectSettings={updateProjectSettings}
+              onCreateProfile={createProfile}
+              onTestProfile={testProfile}
+              onSetKey={setProfileKey}
+              onDeleteProfile={deleteProfile}
+              onRoute={routeProfile}
+              onTestComfy={testComfy}
+              onRegisterWorkflow={registerWorkflow}
+              onValidateWorkflow={validateWorkflow}
+              onDeleteWorkflow={deleteWorkflow}
+              onBindStandardParameters={bindStandardParameters}
+              onOpenExpert={() => { setUi('expert'); setView('production'); window.history.pushState(null, '', '#v/production/preproduction'); }}
+            />}
+            {directorPage !== 'setup' && !project && <section className="first-run card">
               <div className="first-run-art"><Clapperboard size={30} /></div>
               {projectsLoaded ? <>
                 <h2>创建我的第一部AI短剧</h2>
@@ -451,9 +492,15 @@ function App() {
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
                   <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
                 </div>
+                <div className="first-run-setup">
+                  <b>第一次使用？先花两分钟把机器调好。</b>
+                  <span>配置文本模型、检测/安装本机 ComfyUI 与 H3、登记生成方案——都在导演模式内完成。</span>
+                  <button className="secondary-button" onClick={() => goToDirectorPage('setup')}>
+                    <Settings2 size={13} /> 打开基础配置
+                  </button>
+                </div>
                 <p className="empty-setup-hint">
-                  想先看看本机环境？<button className="text-button" onClick={() => goToExpert('setup', 'setup')}>检查制作环境</button>——不需要先建作品。
-                  制作环境不足也不影响创建作品、导入剧本和整理素材。
+                  制作环境不足也不影响创建作品、导入剧本和整理素材；真正开拍前补上即可。
                 </p>
               </> : <>
                 <h2>{projectsLoadError ? '本机工作区暂时不可用' : '正在读取本机作品'}</h2>
@@ -462,7 +509,7 @@ function App() {
               </>}
             </section>}
 
-            {project && <>
+            {directorPage !== 'setup' && project && <>
               <nav className="director-steps" aria-label="制作流程">
                 {DIRECTOR_PAGES.map((page, index) => {
                   const Icon = page.icon;
@@ -569,6 +616,7 @@ function App() {
                   onStarted={() => refreshAll().catch(() => undefined)}
                   onMessage={report}
                   onModeAction={handleModeAction}
+                  onGoSetup={() => goToDirectorPage('setup')}
                 />
                 <details className="advanced-fold">
                   <summary>单镜头制作与任务明细（高级）</summary>
@@ -820,6 +868,7 @@ function App() {
                   onStarted={() => refreshAll().catch(() => undefined)}
                   onMessage={report}
                   onModeAction={handleModeAction}
+                  onGoSetup={() => goToDirectorPage('setup')}
                 />
 
                 <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> V1.1 DEVELOPMENT</span><span><ShieldCheck size={12} /> 本地数据库 · 素材由你掌控</span></footer>
@@ -847,6 +896,7 @@ function App() {
                   onRegisterWorkflow={registerWorkflow}
                   onValidateWorkflow={validateWorkflow}
                   onDeleteWorkflow={deleteWorkflow}
+                  onBindStandardParameters={bindStandardParameters}
                 />
                 <PreferencesPanel onNavigate={goTo} />
               </div>

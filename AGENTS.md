@@ -254,3 +254,34 @@ Never bundle official full-text guides without redistribution permission. Run
   `backend/tests/test_setup_voice_readiness.py`, `test_setup_workflow_profiles.py`,
   `test_reference_slot_pruning.py`, `test_idle_configuration.py`.
 
+
+## 2026-11-04 director-mode round (setup, output frame, cast identity, optional voice)
+
+- **The director layer owns its own setup page.** `#d/setup` (topbar「基础配置」and the first-run
+  card) renders the same `SetupPanel`, `SettingsPanel` and LLM configuration the expert layer uses;
+  a new user can install/download, configure the text model and register a generation profile
+  without switching layers. Installation plans and generation profiles stay bound to a project, so
+  the page offers an inline "create the first work" step instead of silently creating one.
+- **The output frame is a real render parameter, not a review expectation.** A production series
+  records `output_spec` (width, height, 24 fps, optional clip length). `width`/`height` reach H3 only
+  through an explicit `parameter_map` entry; a profile that does not map them refuses the run with
+  `WORKFLOW_SIZE_NOT_MAPPED` instead of rendering at its own size. The canonical profiles now map
+  `31.inputs.width`/`31.inputs.height`; an older project copy adopts the two keys through the audited
+  standard-parameter migration, and `POST /workflow-profiles/{id}/standard-parameters` adds them only
+  when the registered graph itself declares the inputs.
+- **Clip length is applied to the shot, or refused by name.** A run-level `clip_seconds` revises the
+  selected shots (dialogue must fit, internal cut timestamps must fit) and invalidates their earlier
+  versions; the request never carries a duration different from the compiled shot spec.
+- **The subject slot order follows the cast order of the shot.** The manifest is family-ordered
+  (subjects, pictures, video, audio) and, inside the subject family, ordered by `spec.characters`
+  (`order_bindings_for_cast`, applied at storyboard apply and again at render time for older shots).
+  The compiler states the cast order and forbids face swapping; every listed character without a
+  bound subject reference blocks compilation (`H3_CHARACTER_REFERENCE_MISSING`) instead of rendering
+  an invented face. Headless acceptance on the real project confirmed `<Subject n>` now follows the
+  shot's character order.
+- **A voice master is optional.** H3 speaks a dialogue line natively; the shot reference policy
+  reports `voice` as an optional role, the director prompt no longer requires an audio master, and
+  the setup page presents fixed timbre as an enhancement (2–15 s reference limit unchanged).
+- Evidence: `backend/tests/test_output_spec_and_identity.py`, `test_h3_compiler.py`,
+  `test_bindings.py`, `test_storyboard.py`, `test_production_series.py`,
+  `docs/ACCEPTANCE_20261104_DIRECTOR_MODE.md`.

@@ -126,6 +126,7 @@ export type StyleVersion = {
 export type Binding = {
   id: string; asset_id: string; filename: string; kind: string; use_as: string;
   role: string | null; frame_role: string | null; ordinal: number; sha256: string;
+  entity_id?: string | null;
 };
 
 export type Shot = {
@@ -268,6 +269,14 @@ export type RepairSuggestion = {
 
 export type SystemHealth = { ok: boolean; message: string; h3_nodes?: string[]; node_count?: number };
 
+/** The frame and clip length of a real H3 run; H3 facts: 24 fps, multiples of 32, 4–15 s. */
+export type OutputSpec = {
+  width: number;
+  height: number;
+  fps?: 24;
+  clip_seconds: number | null;
+};
+
 export type ProductionSeriesItem = {
   id: string; shot_id: string; position: number; status: string; job_id: string | null;
   continuity_mode: string; failure_code: string | null; job_status: string | null;
@@ -277,7 +286,7 @@ export type ProductionSeriesItem = {
 export type ProductionSeries = {
   id: string; project_id: string; status: string; provider: string;
   workflow_profile_id: string | null; generation_mode: string | null;
-  self_review_scope: string; shot_count: number; completed_count: number;
+  self_review_scope: string; output_spec: OutputSpec | null; shot_count: number; completed_count: number;
   worker_id: string | null; lease_id: string | null; current_job_id: string | null;
   state_version: number; failure_code: string | null;
   finalization_state: string; finalization_note: string | null;

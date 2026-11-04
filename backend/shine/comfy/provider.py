@@ -382,6 +382,8 @@ class ComfyUIRenderService:
             seed=seed,
             duration_s=request.expected_duration_s,
             references=uploaded,
+            width=request.output_width,
+            height=request.output_height,
         )
         mapped = {key: value for key, value in values.items() if key in profile.parameter_map}
         if "positive_prompt" in profile.parameter_map and not mapped.get("positive_prompt"):

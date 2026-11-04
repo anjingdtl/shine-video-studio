@@ -24,6 +24,8 @@ type Props = {
   onRegisterWorkflow: (payload: Record<string, unknown>) => void;
   onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
+  /** Map the H3 node's own width/height inputs, when the registered graph has them. */
+  onBindStandardParameters?: (profileId: string) => void;
 };
 
 const defaultGraph = '{}';
@@ -31,6 +33,7 @@ const defaultMap = '{}';
 
 export default function SettingsPanel({
   project, onRefresh, workflowProfiles, system, busy, onProjectSettings, onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow,
+  onBindStandardParameters,
 }: Props) {
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188');
   const [comfyResult, setComfyResult] = useState<SystemHealth | null>(null);
@@ -150,17 +153,24 @@ export default function SettingsPanel({
         </div>
         <button className="primary-button" disabled={busy} onClick={registerWorkflow}><Plus size={13} /> 注册工作流</button>
         <div className="workflow-list">
-          {workflowProfiles.map((profile) => (
+          {workflowProfiles.map((profile) => {
+            const sizeMapped = 'width' in (profile.parameter_map ?? {}) && 'height' in (profile.parameter_map ?? {});
+            return (
             <div className="workflow-row" key={profile.id}>
               <div><b>{profile.name}</b><span>{profile.mode} · SHA {profile.graph_sha256.slice(0, 10)}… · {profile.required_nodes.join(', ')}</span></div>
               <details><summary>模型、容量、连续性与验证来源</summary>
                 <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify({ identity: profile.model_identity, parameter_map: profile.parameter_map, validation: profile.validated_against }, null, 2)}</pre>
                 <p>提示：引用槽位超容量或缺映射时，任务会被拦下并提示「参考素材还没接入工作流」；动态槽位关闭；视频传输未验收；硬接续待测试。</p>
               </details>
+              {!sizeMapped && onBindStandardParameters
+                && <button className="small-action" disabled={busy} title="把这个 H3 节点自带的 width/height 输入接入界面画幅设置"
+                  onClick={() => onBindStandardParameters(profile.id)}>补齐宽高参数</button>}
+              {sizeMapped && <span className="workflow-size-ok">宽高可调</span>}
               <button className="small-action" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
               <button className="icon-button tiny" onClick={() => onDeleteWorkflow(profile.id)}><Trash2 size={12} /></button>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>}
     </section>

@@ -356,6 +356,52 @@ def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
     )
 
 
+#: The order in which reference families reach the renderer.  H3 presents all
+#: images in one sequence, so a static workflow profile maps its slots only if
+#: the references arrive in this family order.  The manifest, the slot numbering
+#: and the compiled ``<Picture i>`` indexes all derive from this one constant.
+REFERENCE_FAMILY_ORDER = {"subject": 0, "picture": 1, "video": 2, "audio": 3}
+
+
+def order_bindings_for_cast(
+    bindings: list[ShotBindingInput], characters: list[str], assets: dict[str, Asset],
+) -> list[ShotBindingInput]:
+    """Order references the way the shot describes its cast.
+
+    H3 receives the reference images as one flat sequence, and the compiled
+    prompt tells it that "<Subject 1> is the first described person".  That is
+    only true when the subject slots follow the shot's own character order, not
+    the order the director happened to list the assets in.  Reordering happens
+    at request time, so a shot applied by an older build is fixed as well.
+    """
+    from shine.asset_identity import character_reference_matches
+
+    rank: dict[str, int] = {}
+    for index, name in enumerate(characters):
+        rank.setdefault(name, index)
+
+    def subject_rank(binding: ShotBindingInput) -> int:
+        asset = assets.get(binding.asset_id)
+        if asset is None:
+            return len(rank)
+        for name, index in rank.items():
+            if asset.entity_id == name or character_reference_matches(name, asset.entity_id):
+                return index
+        return len(rank)
+
+    ordered = sorted(
+        bindings,
+        key=lambda item: (
+            REFERENCE_FAMILY_ORDER.get(item.use_as.value, 9),
+            subject_rank(item) if item.use_as.value == "subject" else item.ordinal,
+            item.ordinal,
+        ),
+    )
+    for index, binding in enumerate(ordered):
+        binding.ordinal = index
+    return ordered
+
+
 def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str, Asset]) -> list[ReferenceManifestItem]:
     """Build the deterministic, request-local H3 label manifest.
 
@@ -363,8 +409,17 @@ def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str,
     in request order, so standalone picture labels use the shared image position
     rather than a picture-only counter; subject labels keep their own sequence
     and cite their picture slot inside the compiled prompt.
+
+    The family order is fixed here, not left to the order in which the user
+    happened to bind the assets: the workflow maps ``reference_subject_1`` to
+    the first image input and ``reference_picture_1`` to a later one, so a
+    picture bound before a subject would otherwise make ``<Picture 1>`` point at
+    the wrong file - the render would use somebody else's face.
     """
-    ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
+    ordered = sorted(
+        bindings,
+        key=lambda item: (REFERENCE_FAMILY_ORDER.get(item.use_as.value, 9), item.ordinal, item.asset_id),
+    )
     label_counts = {"subject": 0, "video": 0, "audio": 0}
     image_position = 0
     manifest: list[ReferenceManifestItem] = []
@@ -474,6 +529,10 @@ def make_render_request(
     if not set(spec.required_asset_ids).issubset(assets):
         raise HTTPException(status_code=422, detail="Render references are missing assets required by the shot")
 
+    # The subject slots must follow the cast order the shot's own description
+    # uses; otherwise <Subject 1> can name a different performer than the first
+    # person the prompt describes, and the renderer hands one face to another.
+    bindings = order_bindings_for_cast(bindings, list(spec.characters), assets)
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     manifest = build_reference_manifest(ordered, assets)
 
@@ -516,6 +575,23 @@ def make_render_request(
         workflow_hash = profile.graph_sha256
         from shine.comfy.capabilities import HARD, VIDEO, continuity_capability, profile_metadata
 
+        # A requested output size only reaches the renderer through an explicit
+        # logical mapping.  Refusing here keeps the user's choice honest: the
+        # job either renders at the size they asked for or it does not start.
+        if body.output is not None and body.output.width is not None:
+            unmapped = [
+                name for name in ("width", "height")
+                if name not in (profile.parameter_map or {})
+            ]
+            if unmapped:
+                raise HTTPException(status_code=422, detail={
+                    "code": "WORKFLOW_SIZE_NOT_MAPPED",
+                    "message": "The selected workflow profile cannot apply the requested output size",
+                    "details": {
+                        "missing_parameters": unmapped,
+                        "mapped_parameters": sorted(profile.parameter_map or {}),
+                    },
+                })
         capability = continuity_capability(spec.continuity.mode.value)
         capabilities = profile_metadata(profile.graph, profile.mode, profile.parameter_map, profile.media_transfers)
         if capability and capability not in capabilities["continuity_modes"]:
@@ -566,6 +642,8 @@ def make_render_request(
         rule_version=compiled.rule_version,
         workflow_profile_hash=workflow_hash,
         expected_duration_s=spec.duration_target_s,
+        output_width=body.output.width if body.output else None,
+        output_height=body.output.height if body.output else None,
         self_review_scope=body.self_review_scope,
         basic_review_resolution=body.basic_review_resolution,
     )

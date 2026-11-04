@@ -81,10 +81,19 @@ def summarize_production_mode(db, settings, *, effective, runtime_error, worker_
             "BLOCKED", "真实制作暂不可用", _blocked_detail(error), "check_fix", error,
         )
     elif active is None:
-        if candidate is not None or provider == "comfyui":
+        if candidate is not None:
             mode, label, detail, action, code = (
                 "SETUP_REQUIRED", "真实制作未完成",
                 "已保存真实制作配置，还差验证与激活的最后几步。",
+                "enable_real", "REAL_RUNTIME_NOT_ACTIVATED",
+            )
+        elif provider == "comfyui":
+            # The provider is enabled but no setup was ever saved.  Saying
+            # "配置已保存" here would send a brand-new user looking for a
+            # configuration that does not exist yet.
+            mode, label, detail, action, code = (
+                "SETUP_REQUIRED", "还没有开始配置真实制作",
+                "还没有保存本机生成配置。请在基础配置里检测环境，按提示安装或复用 ComfyUI 与 H3 模型。",
                 "enable_real", "REAL_RUNTIME_NOT_ACTIVATED",
             )
         else:

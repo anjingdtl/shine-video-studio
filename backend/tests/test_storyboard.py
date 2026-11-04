@@ -749,7 +749,13 @@ def test_continuity_reviewer_receives_the_checked_reference_set_policy(studio):
     assert "last_frame" in captured["system"]
 
 
-def test_reference_set_policy_marks_a_shot_without_the_voice_master(studio):
+def test_reference_set_policy_treats_the_voice_master_as_optional(studio):
+    """H3 speaks the line natively: a shot without a voice master is compliant.
+
+    The policy still reports that a voice master is optional, so a person can
+    choose a fixed timbre, but its absence never marks the shot as missing a
+    required reference.
+    """
     client, factory, tmp_path, settings = studio
     project_id, _style, registry = _studio_with_chain(client)
     scene = upload_asset(client, project_id, content=PNG + b"scene2", filename="Street.png",
@@ -772,9 +778,12 @@ def test_reference_set_policy_marks_a_shot_without_the_voice_master(studio):
     client.app.state.mock_llm_responder = respond
     response = _storyboard_request(client, project_id)
     assert response.status_code == 201, response.text
-    statuses = captured["context"]["continuity_policy"]["reference_set_status"]
-    assert statuses and all(row["policy_compliant"] is False for row in statuses)
-    assert all("voice" in row["missing_required_roles"] for row in statuses)
+    policy = captured["context"]["continuity_policy"]
+    assert policy["policy"]["optional_roles"] == ["voice"]
+    assert "voice" not in policy["policy"]["required_roles"]
+    statuses = policy["reference_set_status"]
+    assert statuses and all(row["policy_compliant"] is True for row in statuses)
+    assert all("voice" not in row["missing_required_roles"] for row in statuses)
 
 
 def test_storyboard_guards_style_routes_and_consent(studio):

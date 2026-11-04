@@ -15,10 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-import pytest
-
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.llm_readiness import voice_readiness
 from shine.comfyops.models import ModelPackage
 
 LOCAL = {"X-Shine-Local-Action": "1"}
@@ -61,7 +58,7 @@ def _role_runtime(tmp_path, versions=None):
 
 
 def _write_config(settings, packages, role_runtimes):
-    from shine.voiceops.runtime_config import VoiceRuntimeConfig, RoleRuntime, save_voice_config
+    from shine.voiceops.runtime_config import RoleRuntime, VoiceRuntimeConfig, save_voice_config
 
     config = VoiceRuntimeConfig(
         packages=packages,

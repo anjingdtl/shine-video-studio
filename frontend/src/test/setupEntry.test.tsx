@@ -14,6 +14,9 @@ import { StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub'
 let stub: StudioStub;
 
 beforeEach(() => {
+  // jsdom keeps location.hash across tests; a setup deep link from the
+  // previous case must not decide where the next case starts.
+  window.history.replaceState(null, '', '#');
   stub = new StudioStub(baseRoutes(baseProject({ id: 'proj-1', title: '雾港夜账' })));
 });
 
@@ -56,15 +59,16 @@ describe('空数据库与两层界面入口', () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([]) });
   }
 
-  it('无任何项目：首启卡片出现，制作环境检查无需项目即可进入', async () => {
+  it('无任何项目：首启卡片出现，基础配置在导演模式内即可进入', async () => {
     emptyDatabase();
     const user = userEvent.setup();
     render(<App />);
     // 首次使用体验：明确的第一步，而不是一堆面板。
     expect(await screen.findByText('创建我的第一部AI短剧')).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/给作品起个名字/)).toBeInTheDocument();
-    // 制作环境检查不需要项目，一键直达专业模式的设置板块。
-    await user.click(screen.getByRole('button', { name: '检查制作环境' }));
+    // 新用户不需要切到专业模式：基础配置是导演模式自己的一页。
+    await user.click(screen.getByRole('button', { name: '打开基础配置' }));
+    expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
     expect(screen.getByText(/1 · 环境检查/)).toBeInTheDocument();
   });
@@ -73,7 +77,7 @@ describe('空数据库与两层界面入口', () => {
     emptyDatabase();
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole('button', { name: '检查制作环境' }));
+    await user.click(await screen.findByRole('button', { name: '打开基础配置' }));
     await screen.findByRole('heading', { name: '制作环境' });
     expect(screen.getByText(/计划生成、Profile 登记、配置生成与激活需要先创建一个项目/)).toBeInTheDocument();
   });
@@ -100,6 +104,18 @@ describe('空数据库与两层界面入口', () => {
     expect(screen.getByRole('button', { name: /素材与风格/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /AI导演制作/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /成片中心/ })).toBeInTheDocument();
+  });
+
+  it('基础配置在导演模式内提供安装、模型与可选音色三个入口', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findAllByText('雾港夜账');
+    await user.click(screen.getByRole('button', { name: /基础配置/ }));
+    expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '② 模型与生成方案' }));
+    expect(await screen.findByRole('heading', { name: '模型、ComfyUI 与本机状态' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '③ 固定音色（可选）' }));
+    expect(await screen.findByText(/固定音色是加分项，不是开拍前提/)).toBeInTheDocument();
   });
 
   it('已有项目时默认导演模式；专业模式保留完整四板块', async () => {
@@ -144,7 +160,7 @@ describe('空数据库与两层界面入口', () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('雾港夜账');
+    await screen.findAllByText('雾港夜账');
     await user.click(screen.getByRole('button', { name: /专业模式/ }));
     await user.click(await screen.findByTitle('打开设置板块'));
     expect(await screen.findByText(/本机存储信息暂时不可用/)).toBeInTheDocument();

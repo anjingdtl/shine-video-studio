@@ -374,9 +374,35 @@ def _register_project_profiles(db, project_id: str) -> list[dict]:
             WorkflowProfile.project_id == project_id,
         ))
         if existing:
+            current = dict(existing.parameter_map or {})
+            target = dict(raw['parameter_map'])
+            # A profile registered before the output-size mapping existed only
+            # differs by the two standard keys. Adopting them is a forward
+            # migration of the project's own copy, audited, never a silent edit
+            # of a customized mapping.
+            standard_only = (
+                existing.graph_sha256 == graph_hash(raw['graph'])
+                and existing.mode == raw['mode']
+                and (existing.media_transfers or {}) == (raw.get('media_transfers') or {})
+                and {key: value for key, value in target.items() if key not in ("width", "height")} == current
+                and all(key not in current and target.get(key) for key in ("width", "height"))
+            )
+            if standard_only:
+                from shine.services import add_audit
+
+                existing.parameter_map = target
+                add_audit(
+                    db, "system", "WORKFLOW_PROFILE_STANDARD_PARAMETERS", "workflow_profile",
+                    existing.id,
+                    {"name": name, "added": ["width", "height"], "source": "canonical_profile"},
+                    project_id=project_id,
+                )
+                registered.append({"name": name, "profile_id": existing.id,
+                                   "status": "STANDARD_PARAMETERS_UPDATED"})
+                continue
             if (existing.graph_sha256 != graph_hash(raw['graph'])
-                    or existing.parameter_map != raw['parameter_map']
-                    or existing.media_transfers != raw.get('media_transfers', {})
+                    or current != target
+                    or (existing.media_transfers or {}) != (raw.get('media_transfers') or {})
                     or existing.mode != raw['mode']):
                 raise HTTPException(409, 'PROFILE_CONTENT_CHANGED')
             registered.append({"name": name, "profile_id": existing.id, "status": "ALREADY_REGISTERED"})

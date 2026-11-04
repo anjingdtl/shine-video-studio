@@ -34,7 +34,9 @@
     "seed": "51.inputs.noise_seed",
     "reference_subject_1": "40.inputs.image",
     "reference_picture_1": "41.inputs.image",
-    "reference_audio_1": "61.inputs.audio"
+    "reference_audio_1": "61.inputs.audio",
+    "width": "31.inputs.width",
+    "height": "31.inputs.height"
   },
   "graph": {
     "10": {

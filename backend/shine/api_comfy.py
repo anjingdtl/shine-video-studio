@@ -262,6 +262,58 @@ def validate_managed_workflow_profile(profile_id: str, settings: SettingsDep, db
     return WorkflowProfilePublic.model_validate(_profile_data(profile))
 
 
+@router.post("/workflow-profiles/{profile_id}/standard-parameters", response_model=WorkflowProfilePublic)
+def bind_standard_parameters(profile_id: str, db: DBSession) -> WorkflowProfilePublic:
+    """Map the H3 node's own width/height inputs, on explicit user request.
+
+    The director workbench lets a person choose the output frame.  That choice
+    can only reach the renderer through an explicit ``parameter_map`` entry, and
+    the entry is only added here, when the registered graph itself declares the
+    input.  Nothing is invented and a graph without a size input is refused.
+    """
+    profile = db.get(WorkflowProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Workflow profile not found")
+    graph = profile.graph or {}
+    candidates = [
+        (node_id, node)
+        for node_id, node in graph.items()
+        if isinstance(node, dict)
+        and str(node.get("class_type", "")).startswith("MiniMaxH3")
+        and isinstance(node.get("inputs"), dict)
+        and "width" in node["inputs"]
+        and "height" in node["inputs"]
+    ]
+    if len(candidates) != 1:
+        raise HTTPException(422, {
+            "code": "WORKFLOW_SIZE_INPUT_NOT_FOUND",
+            "message": "The registered graph does not expose exactly one H3 width/height input pair",
+            "details": {"candidates": [node_id for node_id, _node in candidates]},
+        })
+    node_id, _node = candidates[0]
+    parameter_map = dict(profile.parameter_map or {})
+    added: list[str] = []
+    for logical in ("width", "height"):
+        if logical not in parameter_map:
+            parameter_map[logical] = f"{node_id}.inputs.{logical}"
+            added.append(logical)
+    if not added:
+        return WorkflowProfilePublic.model_validate(_profile_data(profile))
+    profile.parameter_map = parameter_map
+    add_audit(
+        db,
+        "user",
+        "WORKFLOW_PROFILE_STANDARD_PARAMETERS",
+        "workflow_profile",
+        profile.id,
+        {"node_id": node_id, "added": added, "parameter_map": sorted(parameter_map)},
+        project_id=profile.project_id,
+    )
+    db.commit()
+    db.refresh(profile)
+    return WorkflowProfilePublic.model_validate(_profile_data(profile))
+
+
 @router.get("/workflow-profiles/{profile_id}")
 def get_workflow_profile(profile_id: str, db: DBSession) -> dict[str, Any]:
     profile = db.get(WorkflowProfile, profile_id)

@@ -97,6 +97,7 @@ def series_public(db, series: ProductionSeries) -> dict[str, Any]:
         "workflow_profile_id": series.workflow_profile_id,
         "generation_mode": series.generation_mode,
         "self_review_scope": series.self_review_scope,
+        "output_spec": series.output_spec,
         "shot_count": series.shot_count,
         "completed_count": series.completed_count,
         "worker_id": series.worker_id,
@@ -143,6 +144,11 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
     resolution = None
     if series.basic_review_resolution:
         resolution = BasicReviewResolution.model_validate(series.basic_review_resolution)
+    output = None
+    if series.output_spec:
+        from shine.schemas import OutputSpec
+
+        output = OutputSpec.model_validate(series.output_spec)
     return CreateJob(
         shot_id=shot.id,
         mock_scenario=MockScenario(series.mock_scenario),
@@ -151,7 +157,52 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
         workflow_profile_id=series.workflow_profile_id,
         self_review_scope=series.self_review_scope,
         basic_review_resolution=resolution,
+        output=output,
     )
+
+
+def _apply_clip_seconds(db, project: Project, shots: list[Shot], clip_seconds: float | None) -> None:
+    """Apply one clip length to the shots of this run, or refuse honestly.
+
+    The length is a real property of the delivered clip: the H3 request must
+    carry the same duration as the shot spec it compiles, so the shot itself is
+    revised.  A shot whose dialogue or internal cut does not fit in the chosen
+    length is refused by name instead of being silently truncated.
+    """
+    import re
+
+    from shine.services import revise_shot_record
+
+    if clip_seconds is None:
+        return
+    for shot in shots:
+        spec = ShotSpec.model_validate(shot.spec)
+        if abs(spec.duration_target_s - clip_seconds) < 1e-6:
+            continue
+        latest_dialogue = max((line.end_s for line in spec.dialogue), default=0.0)
+        if latest_dialogue + 0.2 > clip_seconds:
+            raise HTTPException(422, {
+                "code": "CLIP_TOO_SHORT_FOR_DIALOGUE",
+                "message": f"「{shot.name}」的对白到 {latest_dialogue:.2f} 秒，装不进 {clip_seconds:g} 秒的片段",
+                "details": {"shot_id": shot.id, "shot_name": shot.name,
+                            "dialogue_end_s": latest_dialogue, "clip_seconds": clip_seconds},
+            })
+        cuts = [
+            int(minute) * 60 + float(second)
+            for minute, second in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", spec.story_beat or "")
+        ]
+        if any(cut >= clip_seconds - 0.1 for cut in cuts):
+            raise HTTPException(422, {
+                "code": "CLIP_TOO_SHORT_FOR_CUT",
+                "message": f"「{shot.name}」内部有 {max(cuts):.2f} 秒的剪辑点，装不进 {clip_seconds:g} 秒的片段",
+                "details": {"shot_id": shot.id, "shot_name": shot.name,
+                            "latest_cut_s": max(cuts), "clip_seconds": clip_seconds},
+            })
+        revise_shot_record(
+            db, project, shot,
+            spec=spec.model_copy(update={"duration_target_s": clip_seconds}),
+            actor="user",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +256,10 @@ def create_series(
     if live_shot_ids or live_jobs:
         raise HTTPException(409, "PRODUCTION_SERIES_SHOT_ALREADY_QUEUED")
 
+    # A chosen clip length is applied to the shots before anything is queued,
+    # so the series never mixes a click on "6 秒" with a 4.3-second render.
+    _apply_clip_seconds(db, project, shots, body.output.clip_seconds if body.output else None)
+
     series = ProductionSeries(
         project_id=project.id,
         status="QUEUED",
@@ -215,6 +270,7 @@ def create_series(
         basic_review_resolution=(
             body.basic_review_resolution.model_dump(mode="json") if body.basic_review_resolution else None
         ),
+        output_spec=body.output.model_dump(mode="json") if body.output else None,
         mock_scenario=body.mock_scenario.value,
         shot_count=len(shots),
         completed_count=0,

@@ -34,7 +34,13 @@ from shine.models import (
 )
 from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, ShotSpec, StyleBible
 from shine.security import is_loopback_url
-from shine.services import add_audit, create_shot_record, make_render_request, require_project
+from shine.services import (
+    add_audit,
+    create_shot_record,
+    make_render_request,
+    order_bindings_for_cast,
+    require_project,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["film-crew", "rulebook"])
 
@@ -334,10 +340,10 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             # The H3 presentation numbers images in one sequence, so a static
             # workflow profile can only map the slots if the references arrive
             # in a fixed family order: subjects, then pictures, then the other
-            # media families.  The plan's own order is kept inside a family.
-            bindings.sort(key=lambda item: (_FAMILY_ORDER[item.use_as.value], item.ordinal))
-            for index, binding in enumerate(bindings):
-                binding.ordinal = index
+            # media families.  Inside the subject family the beat's own cast
+            # order decides, so <Subject 1> really is the first described person.
+            ordered_assets = {identity: db.get(Asset, identity) for identity in intent["asset_ids"]}
+            bindings = order_bindings_for_cast(bindings, list(beat["characters"]), ordered_assets)
             shot = create_shot_record(
                 db, project, name=f"{body.name_prefix}-{camera.intent_id}", spec=spec, bindings=bindings
             )
@@ -549,11 +555,6 @@ class StoryboardRequest(APIModel):
 STORYBOARD_CHAIN = (
     "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor",
 )
-
-#: The order in which reference families reach the renderer.  H3 presents all
-#: images in one sequence, so a registered workflow profile can only map its
-#: slots when the references arrive in this family order.
-_FAMILY_ORDER = {"subject": 0, "picture": 1, "video": 2, "audio": 3}
 
 
 def _agent_step_delay_seconds() -> float:

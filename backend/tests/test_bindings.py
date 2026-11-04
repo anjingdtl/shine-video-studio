@@ -78,8 +78,14 @@ def test_mixed_image_bindings_share_presentation_picture_numbering(studio):
     labels = [entry["label"] for entry in job["request"]["reference_manifest"]]
     assert labels == ["<Subject 1>", "<Subject 2>", "<Picture 3>"]
     prompt = client.post(f"/api/v1/shots/{shot['id']}/compile").json()["compiled_prompt"]
-    assert "<Subject 1> is the approved reference for CHAR_A, shown in <Picture 1>," in prompt
-    assert "<Subject 2> is the approved reference for CHAR_B, shown in <Picture 2>," in prompt
+    assert (
+        "<Subject 1> is the approved, locked reference for the first listed performer (CHAR_A), "
+        "shown in <Picture 1>;"
+    ) in prompt
+    assert (
+        "<Subject 2> is the approved, locked reference for the second listed performer (CHAR_B), "
+        "shown in <Picture 2>;"
+    ) in prompt
     assert "<Picture 3> is the keyframe reference for [Shot 1]." in prompt
 
 

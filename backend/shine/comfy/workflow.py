@@ -183,11 +183,15 @@ def generic_h3_parameters(
     seed: int | None,
     duration_s: float,
     references: dict[str, str],
+    width: int | None = None,
+    height: int | None = None,
 ) -> dict[str, Any]:
     """Build logical values for a profile whose parameter_map names these keys.
 
     H3 node-specific keys are intentionally not invented here. A real exported
     H3 API workflow must declare its own mapping during local acceptance.
+    ``width``/``height`` are only supplied when the user asked for a size; the
+    provider refuses a size request that the profile does not map.
     """
     values: dict[str, Any] = {
         "positive_prompt": prompt,
@@ -195,5 +199,8 @@ def generic_h3_parameters(
     }
     if seed is not None:
         values["seed"] = seed
+    if width is not None and height is not None:
+        values["width"] = width
+        values["height"] = height
     values.update(references)
     return values
