@@ -72,7 +72,10 @@ if (Test-Path -LiteralPath $staging) {
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 # --- 1. Copy the committed tree -------------------------------------------
-$excludedPrefixes = @('packaging/', 'docs/evidence/')
+# The package must not offer a development entry point: the root dev launcher
+# expects a checkout with backend/.venv and frontend/node_modules beside it,
+# which an installed copy does not have. Installed users get START_APP.cmd.
+$excludedPrefixes = @('packaging/', 'docs/evidence/', '启动 Shine 工作台.cmd')
 $copied = 0
 $skipped = @()
 $raw = & git -C $repoRoot ls-files -z
