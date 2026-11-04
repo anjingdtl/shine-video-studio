@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, HelpCircle, History, LockKeyhole, LockOpen, ShieldCheck, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, HelpCircle, History, LockKeyhole, LockOpen, Sparkles } from 'lucide-react';
 import { api, json, type Style, type StyleVersion } from '../api';
 import { styleFields } from '../constants';
 import {
@@ -38,7 +38,7 @@ const AI_ERROR_HINTS: Array<[RegExp, string]> = [
   [/FREEZE_PROJECT_RULEPACK_FIRST/, '首次使用 AI 助手前，需要先把官方规则包绑定到本项目（一次性操作）。'],
   [/REMOTE_AGENT_CONSENT_REQUIRED/, '本次请求需要先勾选同意把文本发送给已配置的 LLM 服务商。'],
   [/(LLM_TIMEOUT|LLM_CONNECTION|LLM_SERVER)/, 'AI 助手暂时无法响应；你的草稿未受影响，稍后可重试。'],
-  [/AGENT_ROUTE_MISSING|PROFILE_MISSING|NO_ROUTE/, 'AI 助手尚未完成配置：先在「设置 → 模型与系统」配置并测试模型。'],
+  [/AGENT_ROUTE_MISSING|PROFILE_MISSING|NO_ROUTE/, 'AI 助手尚未完成配置：先在「基础配置 → ② 模型与生成方案」里配置并测试模型。'],
 ];
 
 /** Roles allowed to emit a StyleProposal; the first routed role is used. */
@@ -177,23 +177,37 @@ export default function StylePanel({
     }
   }
 
-  async function enableRulepack() {
+  async function enableRulepack(quiet = false) {
     const packId = rulepacks[0]?.id;
-    if (!packId) { onMessage('官方规则包列表不可用，请稍后重试。', 'error'); return; }
+    if (!packId) { onMessage('官方规则包列表不可用，请稍后重试。', 'error'); return false; }
     try {
       await api(`/projects/${projectId}/rulepack/freeze`, json('POST', { rulepack_id: packId }));
       setRulepackId(packId);
-      onMessage('官方规则包已绑定到本项目（一次性；升级规则包需要代码评审与测试）。');
+      if (!quiet) onMessage('官方规则包已绑定到本项目（一次性；升级规则包需要代码评审与测试）。');
+      return true;
     } catch (error) {
       onMessage(String((error as Error).message), 'error');
+      return false;
     }
+  }
+
+  /** 冻结 = 一次点击完成两件事：先绑定官方规则包（每个作品一次性），再冻结风格。
+   *  两步各自写审计；绑定失败时不冻结，风格内容不受影响。 */
+  async function freezeNow() {
+    if (busy || !canFreeze) return;
+    if (rulepackId === null && rulepacks.length > 0) {
+      const bound = await enableRulepack(true);
+      if (!bound) return;
+      onMessage('官方规则包已绑定，正在冻结风格…');
+    }
+    onFreeze();
   }
 
   return (
     <section className="card section-card" id="style">
       <div className="section-heading">
         <div>
-          <div className="section-kicker">02 / 作品风格</div>
+          <div className="section-kicker">② 定风格</div>
           <h2>作品风格</h2>
           <p>选一套风格，可调整细节；确认冻结后用于新镜头。</p>
         </div>
@@ -280,21 +294,16 @@ export default function StylePanel({
           尚未配置 AI 助手，预设和手工选择照常可用。
           <button type="button" className="text-button" onClick={() => onNavigate('settings')}>去配置 AI 助手</button>
         </p>}
-        {aiConfigured && rulepackId === null && rulepacks.length > 0 && <div className="required-action">
-          <ShieldCheck size={17} className="required-icon" />
-          <div className="required-text">
-            <b>必做：启用官方规则包</b>
-            <small>每个项目都要先绑定一次官方 H3 规则包，五个 Agent 才会按同一套规范工作。绑定后不能再换。</small>
-          </div>
-          <button type="button" className="must-button" onClick={enableRulepack}>启用官方规则包</button>
-        </div>}
+        {aiConfigured && rulepackId === null && rulepacks.length > 0 && <p className="style-ai-empty">
+          本作品还没绑定官方规则包：点下方「批准并冻结」时会一并完成绑定（一次性），不用单独操作。
+        </p>}
         {aiConfigured && rulepackId !== null && <>
           <label className="style-ai-hint">给 AI 的补充说明（可留空）
             <input value={aiHint} maxLength={2000} onChange={(event) => setAiHint(event.target.value)} placeholder="例如：更接近夜戏质感的风格" />
           </label>
           <label className="check-label style-ai-consent">
             <input type="checkbox" checked={aiConsent} onChange={(event) => setAiConsent(event.target.checked)} />
-            <span>我同意把项目设置与补充说明文本发给已配置的 LLM 服务商（不发送素材文件）。</span>
+            <span>我同意把项目设置与补充说明文本发给已配置的 AI 文字服务（不发送素材文件）。</span>
           </label>
           <button type="button" className="secondary-button" disabled={aiBusy} onClick={recommend}>
             <Sparkles size={13} /> {aiBusy ? '正在请求 AI 建议…' : '请求 AI 风格建议'}
@@ -333,16 +342,18 @@ export default function StylePanel({
       </div>}
 
       <div className="section-footer">
-        <span>{currentStyle ? <><Check size={13} /> 当前哈希 {currentStyle.sha256.slice(0, 18)}…</> : '保存后冻结：冻结的就是屏幕上这七项'}</span>
+        <span>{currentStyle ? <><Check size={13} /> 已冻结 V{currentStyle.version}：所有新镜头都按这一版执行</> : '保存后冻结：冻结的就是屏幕上这七项'}</span>
         <div>
           <button className="secondary-button" disabled={busy || !canSave} onClick={onSave}>保存草稿</button>
         </div>
       </div>
       {currentStyle
         ? <div className="section-footer">
-          <span>冻结会生成新版本并写审计；只影响新镜头，旧镜头和历史任务继续用原版本。</span>
+          <span>{rulepackId === null && rulepacks.length > 0
+            ? '本作品还没绑定规则包：这次冻结会一并完成绑定。'
+            : '冻结会生成新版本并写审计；只影响新镜头，旧镜头和历史任务继续用原版本。'}</span>
           <div>
-            <button className="primary-button" disabled={busy || !canFreeze} onClick={onFreeze}>
+            <button className="primary-button" disabled={busy || !canFreeze} onClick={freezeNow}>
               <LockKeyhole size={14} /> 冻结为新版本
             </button>
           </div>
@@ -351,9 +362,11 @@ export default function StylePanel({
           <LockKeyhole size={17} className="required-icon" />
           <div className="required-text">
             <b>必做：冻结这一版风格</b>
-            <small>冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照。</small>
+            <small>{rulepackId === null && rulepacks.length > 0
+              ? '冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照；本作品还没绑定官方规则包，这次冻结会一并完成（一次性）。'
+              : '冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照。'}</small>
           </div>
-          <button className="must-button" disabled={busy || !canFreeze} onClick={onFreeze}>
+          <button className="must-button" disabled={busy || !canFreeze} onClick={freezeNow}>
             <LockKeyhole size={14} /> 批准并冻结
           </button>
         </div>}

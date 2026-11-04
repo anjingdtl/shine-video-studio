@@ -129,6 +129,10 @@ function App() {
     return saved === 'expert' ? 'expert' : 'director';
   });
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
+  const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
+  /** 制作页单任务聚焦：默认自动落在第一个未完成阶段，用户可用阶段条/摘要行切换；
+   *  自动阶段推进时回到正轨。同一时刻只展开当前该做的那一个阶段。 */
+  const [stageOverride, setStageOverride] = useState<'storyboard' | 'produce' | 'monitor' | null>(null);
   const [wizard, setWizard] = useState<null | 'enable' | 'diagnose'>(null);
   const [activeSection, setActiveSection] = useState('overview');
   const [helpOpen, setHelpOpen] = useState(false);
@@ -163,19 +167,35 @@ function App() {
 
   useEffect(() => { window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
-  /** 导演模式的下一步引导：全部由真实项目状态驱动。 */
+  /** 导演模式的全旅程：五步是否完成，全部由真实项目状态驱动，页面与步骤条共用同一份事实。 */
   const deliverableReady = useMemo(
     () => jobs.some((job) => job.status === 'PASSED' && job.video_created),
     [jobs],
   );
-  const guidance = useMemo(() => {
-    if (!project) return { page: 'projects' as DirectorPage, cta: '创建我的第一部AI短剧', hint: '从一个作品开始：给它起个名字就行。' };
-    if (approvedAssets.length === 0) return { page: 'assets' as DirectorPage, cta: '添加素材', hint: '上传人物、场景、道具参考，然后点击「确认使用」。' };
-    if (!currentStyle) return { page: 'assets' as DirectorPage, cta: '确定作品风格', hint: '选好或确认七项风格约定并冻结，之后所有镜头都按它执行。' };
-    if (shots.length === 0) return { page: 'produce' as DirectorPage, cta: 'AI 生成分镜', hint: 'AI 导演会把剧本拆成一个个镜头，你可以逐条修改。' };
-    if (!deliverableReady) return { page: 'produce' as DirectorPage, cta: '开始制作影片', hint: '勾选镜头，点击开始制作；本机自动生成、检查、返工。' };
-    return { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '影片已生成，去成片中心查看、确认并导出。' };
-  }, [project, approvedAssets.length, currentStyle, shots.length, deliverableReady]);
+  const journey = useMemo(() => [
+    { page: 'projects' as DirectorPage, cta: '创建我的第一部AI短剧', hint: '从一个作品开始：给它起个名字就行。', done: !!project },
+    { page: 'assets' as DirectorPage, cta: '添加素材', hint: '上传人物、场景、道具参考，然后点击「确认使用」。', done: approvedAssets.length > 0 },
+    { page: 'assets' as DirectorPage, cta: '确定作品风格', hint: '选好或确认七项风格约定并冻结，之后所有镜头都按它执行。', done: !!currentStyle },
+    { page: 'produce' as DirectorPage, cta: 'AI 生成分镜', hint: 'AI 导演会把剧本拆成一个个镜头，你可以逐条修改。', done: shots.length > 0 },
+    { page: 'produce' as DirectorPage, cta: '开始制作影片', hint: '勾选镜头，点击开始制作；本机自动生成、检查、返工。', done: deliverableReady },
+  ], [project, approvedAssets.length, currentStyle, shots.length, deliverableReady]);
+  /** 第一个未完成的旅程步骤；null 表示成片已生成，只剩查看与导出。 */
+  const nextStep = journey.find((step) => !step.done) ?? null;
+  /** 首页大按钮：有下一步就引导下一步，全部完成则指去成片中心。 */
+  const heroGuidance = nextStep ?? { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '影片已生成，去成片中心查看、确认并导出。' };
+  /** 顶部步骤条的页面级完成态：✓ 只代表该页目标达成，随时可以回来调整。 */
+  const navDone: Record<DirectorPage, boolean> = {
+    projects: !!project,
+    assets: approvedAssets.length > 0 && !!currentStyle,
+    produce: deliverableReady,
+    deliver: deliverableReady,
+    setup: false,
+  };
+  /** 制作页自动聚焦：没镜头→分镜；正在制作→排产（盯进度）；制作结束→看结果。 */
+  const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
+  const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
+  const focusStage = stageOverride ?? autoStage;
+  useEffect(() => { setStageOverride(null); }, [autoStage]);
 
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
@@ -199,6 +219,21 @@ function App() {
     setDirectorPage(page);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
+  }
+
+  /** 进入导演层基础配置，可直达指定分区；普通入口回到①安装与下载。
+   *  导演模式内所有“去配置模型/生成方案”的引导都走这里，不再甩去专业模式。 */
+  function goToDirectorSetup(tab: 'env' | 'models' | 'voice' = 'env') {
+    setSetupFocusTab(tab);
+    setUi('director');
+    setDirectorPage('setup');
+    window.history.pushState(null, '', '#d/setup');
+    window.scrollTo({ top: 0 });
+  }
+
+  /** 制作页内三个阶段的锚点滚动（面板保持挂载，运行中的任务不中断）。 */
+  function scrollToStage(id: string) {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   /** 滚动侦测：板块进入视口上部条带时菜单联动高亮（仅当前视图内的锚点会交叉）。
@@ -433,7 +468,7 @@ function App() {
               type="button"
               className={`setup-entry ${directorPage === 'setup' ? 'active' : ''} ${production && !['READY', 'RUNNING'].includes(production.mode) ? 'needs-setup' : ''}`}
               title="配置文本模型、安装本机环境、登记生成方案（不需要切换到专业模式）"
-              onClick={() => goToDirectorPage('setup')}
+              onClick={() => goToDirectorSetup('env')}
             >
               <Settings2 size={13} /><span>基础配置</span>
               {production && !['READY', 'RUNNING'].includes(production.mode) && <i className="setup-entry-dot" aria-label="还有配置未完成" />}
@@ -458,6 +493,7 @@ function App() {
           {/* ============ 导演模式：普通用户的默认层 ============ */}
           {ui === 'director' && <>
             {directorPage === 'setup' && <DirectorSetupPanel
+              focusTab={setupFocusTab}
               project={project}
               projectId={projectId}
               projectTitle={projectTitle}
@@ -487,7 +523,14 @@ function App() {
               <div className="first-run-art"><Clapperboard size={30} /></div>
               {projectsLoaded ? <>
                 <h2>创建我的第一部AI短剧</h2>
-                <p>只需要三步：建作品、给素材定风格、让AI导演团队排镜头。所有内容都保存在你自己的电脑上。</p>
+                <p>五步走完一部片子，所有内容都保存在你自己的电脑上。现在只需要做第一步：</p>
+                <ol className="first-run-journey" aria-label="制作全旅程">
+                  <li className="now"><b>① 起个名字</b><span>建作品（现在做）</span></li>
+                  <li><b>② 调好机器</b><span>可跳过，开拍前补上</span></li>
+                  <li><b>③ 传素材 · 定风格</b><span>人物 / 场景 / 道具</span></li>
+                  <li><b>④ AI 分镜</b><span>剧本交给 AI 拆镜头</span></li>
+                  <li><b>⑤ 制作 · 导出</b><span>本机生成成片</span></li>
+                </ol>
                 <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
                   <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
@@ -495,7 +538,7 @@ function App() {
                 <div className="first-run-setup">
                   <b>第一次使用？先花两分钟把机器调好。</b>
                   <span>配置文本模型、检测/安装本机 ComfyUI 与 H3、登记生成方案——都在导演模式内完成。</span>
-                  <button className="secondary-button" onClick={() => goToDirectorPage('setup')}>
+                  <button className="secondary-button" onClick={() => goToDirectorSetup('env')}>
                     <Settings2 size={13} /> 打开基础配置
                   </button>
                 </div>
@@ -514,15 +557,18 @@ function App() {
                 {DIRECTOR_PAGES.map((page, index) => {
                   const Icon = page.icon;
                   const active = directorPage === page.id;
-                  const isGuidance = guidance.page === page.id;
+                  const isGuidance = nextStep?.page === page.id;
+                  const stepDone = navDone[page.id];
                   return (
                     <button
                       key={page.id}
                       type="button"
-                      className={`director-step ${active ? 'active' : ''} ${isGuidance ? 'next-up' : ''}`}
+                      className={`director-step ${active ? 'active' : ''} ${isGuidance ? 'next-up' : ''} ${stepDone ? 'is-done' : ''}`}
                       onClick={() => goToDirectorPage(page.id)}
                     >
-                      <span className="director-step-no">{index + 1}</span>
+                      <span className="director-step-no" title={stepDone ? '这一页的目标已完成' : `第 ${index + 1} 步`}>
+                        {stepDone ? <Check size={11} /> : index + 1}
+                      </span>
                       <Icon size={16} />
                       <span className="director-step-text">{page.text}</span>
                       {isGuidance && <em className="director-step-flag">下一步</em>}
@@ -530,6 +576,27 @@ function App() {
                   );
                 })}
               </nav>
+              {directorPage !== 'projects' && (nextStep || directorPage !== 'deliver') && (nextStep ? (
+                <div className="next-step-bar" role="status">
+                  <span className="next-step-tag">下一步</span>
+                  <div className="next-step-text">
+                    <b>{nextStep.cta}</b>
+                    <span>{nextStep.hint}</span>
+                  </div>
+                  <button type="button" className="must-button" onClick={() => goToDirectorPage(nextStep.page)}>
+                    去这一步
+                  </button>
+                </div>
+              ) : (
+                <div className="next-step-bar done" role="status">
+                  <Check size={15} />
+                  <div className="next-step-text">
+                    <b>全部制作步骤已完成</b>
+                    <span>到「成片中心」查看、确认并导出影片。</span>
+                  </div>
+                  <button type="button" className="secondary-button" onClick={() => goToDirectorPage('deliver')}>去看成片</button>
+                </div>
+              ))}
               <DemoRibbon production={production ?? {
                 mode: 'BLOCKED', label: '状态未知', detail: '暂无法确认制作环境。', action: null, code: null,
                 render_provider: 'mock', runtime_status: 'NOT_ACTIVATED', renderer_online: false,
@@ -539,11 +606,11 @@ function App() {
               {directorPage === 'projects' && <div className="director-page">
                 <section className="welcome-row">
                   <div>
-                    <div className="eyebrow"><span className="eyebrow-line" /> 我的作品 <span className="eyebrow-en">MY WORK</span></div>
+                    <div className="eyebrow"><span className="eyebrow-line" /> 我的作品</div>
                     <h1>让好故事，<em>有章可循。</em></h1>
-                    <p>{guidance.hint}</p>
+                    <p>{heroGuidance.hint}</p>
                   </div>
-                  <button className="primary-button big" onClick={() => goToDirectorPage(guidance.page)}>{guidance.cta}</button>
+                  <button className="primary-button big" onClick={() => goToDirectorPage(heroGuidance.page)}>{heroGuidance.cta}</button>
                 </section>
                 <section className="metrics-grid">
                   <div className="metric-card"><div className="metric-top"><span>作品素材</span><div className="metric-icon mint"><Film size={15} /></div></div><div className="metric-value">{assets.length}<small>项</small></div><div className="metric-foot">{approvedAssets.length} 项已确认可用</div></div>
@@ -562,8 +629,8 @@ function App() {
                 <div className="module-guide">
                   <CircleHelp size={13} />
                   <div>
-                    <p><b>四步走完一部片子：</b>① 素材与风格（上传素材、绑定规则包、冻结风格）→ ② AI 导演制作（导入剧本、生成并应用分镜）→ ③ 成片中心（排生产、逐镜审片）→ ④ 下载成片。</p>
-                    <p><b>每一步都有必须点一次的按钮：</b>它们是橙色高亮的，页面上方的指引会告诉你这一步要做什么。</p>
+                    <p><b>五步走完一部片子：</b>建作品 → 传素材、定风格（在「素材与风格」）→ AI 分镜（在「AI导演制作」）→ 勾选镜头开始制作 → 到「成片中心」导出。顶部步骤条会打勾标记已完成的页面。</p>
+                    <p><b>每一步都有必须点一次的按钮：</b>它们是橙色高亮的；不知道做什么时，看页面顶部的「下一步」提示即可。</p>
                   </div>
                 </div>
               </div>}
@@ -588,36 +655,74 @@ function App() {
                   onSave={saveStyle}
                   onFreeze={freezeStyle}
                   onDraftApplied={() => { refreshAll().catch(() => undefined); }}
-                  onNavigate={goTo}
+                  onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
                   onMessage={report}
                 />
               </div>}
 
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
-                <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
-                  backendDisconnected={systemChecked && !apiOnline}
-                  onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
-                {routes.length === 0 && <div className="blocked-callout">
-                  <Sparkles size={15} />
-                  <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
-                  <button type="button" className="text-button" onClick={() => goToExpert('setup', 'settings')}>去配置模型服务</button>
-                </div>}
-                <ProductionSeriesPanel
-                  key={`series-${projectId}`}
-                  projectId={projectId}
-                  shots={shots}
-                  workflowProfiles={workflowProfiles}
-                  system={system}
-                  demoSelected={demoOverride || queueProvider === 'mock'}
-                  onSelectReal={() => setDemoOverride(false)}
-                  busy={busy}
-                  reviewWidth={reviewWidth}
-                  reviewHeight={reviewHeight}
-                  onStarted={() => refreshAll().catch(() => undefined)}
-                  onMessage={report}
-                  onModeAction={handleModeAction}
-                  onGoSetup={() => goToDirectorPage('setup')}
-                />
+                <nav className="produce-stages" aria-label="制作阶段">
+                  {([
+                    { id: 'storyboard', icon: PenLine, label: '① 剧本分镜', done: shots.length > 0 },
+                    { id: 'produce', icon: Video, label: '② 排产制作', done: deliverableReady },
+                    { id: 'monitor', icon: Activity, label: '③ 进度与结果', done: deliverableReady },
+                  ] as const).map((stage) => {
+                    const Icon = stage.icon;
+                    return (
+                      <button type="button" key={stage.id}
+                        className={focusStage === stage.id ? 'active' : ''}
+                        onClick={() => { setStageOverride(stage.id); scrollToStage(stage.id === 'storyboard' ? 'storyboard' : stage.id === 'produce' ? 'production-series' : 'production-monitor'); }}>
+                        <Icon size={13} />{stage.label}
+                        {stage.done && <Check size={12} className="stage-done-mark" />}
+                      </button>
+                    );
+                  })}
+                </nav>
+                <details className="stage-dock" id="storyboard-dock" open={focusStage === 'storyboard'}
+                  onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('storyboard'); }}>
+                  <summary>
+                    {shots.length > 0
+                      ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · 已应用 {shots.length} 镜（点击展开修改）</>
+                      : '① 剧本分镜 · 当前任务'}
+                  </summary>
+                  <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                    backendDisconnected={systemChecked && !apiOnline}
+                    visible={directorPage === 'produce' && focusStage === 'storyboard'}
+                    onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
+                  {routes.length === 0 && <div className="blocked-callout">
+                    <Sparkles size={15} />
+                    <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
+                    <button type="button" className="text-button" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
+                  </div>}
+                </details>
+                <details className="stage-dock" id="series-dock" open={focusStage === 'produce'}
+                  onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('produce'); }}>
+                  <summary>
+                    {makingNow
+                      ? `② 排产制作 · 制作进行中 ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.filter((job) => job.status !== 'CANCELLED').length} 镜（点击查看进度）`
+                      : deliverableReady
+                        ? <><Check size={13} className="stage-done-mark" /> ② 排产制作 · 已出片（点击展开再拍）</>
+                        : '② 排产制作 · 当前任务'}
+                  </summary>
+                  <ProductionSeriesPanel
+                    key={`series-${projectId}`}
+                    projectId={projectId}
+                    shots={shots}
+                    assets={assets}
+                    jobs={jobs}
+                    workflowProfiles={workflowProfiles}
+                    system={system}
+                    demoSelected={demoOverride || queueProvider === 'mock'}
+                    onSelectReal={() => setDemoOverride(false)}
+                    busy={busy}
+                    reviewWidth={reviewWidth}
+                    reviewHeight={reviewHeight}
+                    onStarted={() => refreshAll().catch(() => undefined)}
+                    onMessage={report}
+                    onSaveBindings={saveBindings}
+                    onModeAction={handleModeAction}
+                    onGoSetup={() => goToDirectorSetup('models')}
+                  />
                 <details className="advanced-fold">
                   <summary>单镜头制作与任务明细（高级）</summary>
                   <div className="queue-provider-card card">
@@ -671,20 +776,31 @@ function App() {
                     setPreview={setPreview}
                   />
                 </details>
-                <ProductionPanel
-                  jobs={jobs}
-                  system={system}
-                  busy={busy}
-                  scenario={mockScenario}
-                  setScenario={setMockScenario}
-                  onTogglePause={togglePause}
-                  onLoadQC={loadJobQC}
-                  onLoadGates={loadJobGates}
-                  onSuggest={suggestRepair}
-                  onRepair={applyRepair}
-                  onRecheck={recheckReview}
-                  onAbandon={abandonJob}
-                />
+                </details>
+                <details className="stage-dock" id="production-monitor" open={focusStage === 'monitor'}
+                  onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('monitor'); }}>
+                  <summary>
+                    {jobs.length === 0 ? '③ 进度与结果 · 暂无任务'
+                      : makingNow ? `③ 进度与结果 · 制作中（点击查看）`
+                        : jobs.every((job) => job.status === 'PASSED' || job.status === 'CANCELLED')
+                          ? <><Check size={13} className="stage-done-mark" /> ③ 进度与结果 · 全部完成</>
+                          : `③ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
+                  </summary>
+                  <ProductionPanel
+                    jobs={jobs}
+                    system={system}
+                    busy={busy}
+                    scenario={mockScenario}
+                    setScenario={setMockScenario}
+                    onTogglePause={togglePause}
+                    onLoadQC={loadJobQC}
+                    onLoadGates={loadJobGates}
+                    onSuggest={suggestRepair}
+                    onRepair={applyRepair}
+                    onRecheck={recheckReview}
+                    onAbandon={abandonJob}
+                  />
+                </details>
               </div>
 
               {directorPage === 'deliver' && <div className="director-page" id="deliver">
@@ -778,6 +894,7 @@ function App() {
 
                 <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
                   backendDisconnected={systemChecked && !apiOnline}
+                  visible={view === 'production'}
                   onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
 
                 <TerminologyPanel
@@ -858,6 +975,8 @@ function App() {
                   key={`series-${projectId}`}
                   projectId={projectId}
                   shots={shots}
+                  assets={assets}
+                  jobs={jobs}
                   workflowProfiles={workflowProfiles}
                   system={system}
                   demoSelected={demoOverride || queueProvider === 'mock'}
@@ -867,6 +986,7 @@ function App() {
                   reviewHeight={reviewHeight}
                   onStarted={() => refreshAll().catch(() => undefined)}
                   onMessage={report}
+                  onSaveBindings={saveBindings}
                   onModeAction={handleModeAction}
                   onGoSetup={() => goToDirectorPage('setup')}
                 />
@@ -938,15 +1058,15 @@ function App() {
           <h2>三分钟看懂这个工作台</h2>
           <p className="help-lead">这是一台装在你自己电脑上的「迷你制片厂」：你准备素材和风格，AI 按你的安排一镜一镜生成视频。所有素材、记录都留在本机，不经过云端。</p>
           <div className="help-section">
-            <h3>推荐的顺序</h3>
+            <h3>推荐的顺序（和顶部步骤条一致）</h3>
             <ol className="help-steps">
-              <li><b>建作品</b> — 在「我的作品」创建你的第一部短剧。</li>
-              <li><b>传素材</b> — 「素材与风格」上传人物、场景、道具参考，由你「确认使用」。</li>
-              <li><b>定风格</b> — 选好风格并「冻结」，之后所有镜头都按它执行。</li>
-              <li><b>排分镜</b> — 「AI导演制作」把剧本拆成镜头，可逐条修改。</li>
-              <li><b>制作</b> — 点「开始制作影片」。默认先演示体验；点顶部「启用真实制作」后才会真出片。</li>
-              <li><b>看成片</b> — 「成片中心」播放、确认并导出影片。</li>
+              <li><b>建作品</b> — 「我的作品」起个名字就行。</li>
+              <li><b>调机器</b>（可跳过）— 「基础配置」装本机环境、配文本模型、选生成方案；开拍前补上即可。</li>
+              <li><b>传素材 · 定风格</b> — 「素材与风格」上传人物、场景、道具参考并「确认使用」，再选一套风格「冻结」。</li>
+              <li><b>AI 分镜</b> — 「AI导演制作」把剧本拆成一个个镜头，逐条核对后应用。</li>
+              <li><b>制作 · 导出</b> — 勾选镜头点「开始制作影片」，完成后到「成片中心」播放并导出。</li>
             </ol>
+            <p className="help-note">不知道下一步做什么时，看页面顶部的「下一步」提示条；完成的页面会在步骤条上打勾。</p>
           </div>
           <div className="help-section">
             <h3>演示与真实制作</h3>

@@ -607,7 +607,8 @@ def make_render_request(
         from shine.comfy.provider import validate_declared_transfer_families
 
         try:
-            validate_declared_transfer_families(profile.media_transfers, manifest, assets)
+            validate_declared_transfer_families(profile.media_transfers, manifest, assets,
+                                                 dialogue_free=not spec.dialogue)
         except HTTPException:
             raise
         except Exception as exc:

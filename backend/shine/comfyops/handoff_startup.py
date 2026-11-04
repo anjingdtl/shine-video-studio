@@ -222,12 +222,88 @@ def renderer_is_gone(record: dict) -> bool:
         return False
 
 
+def _release_orphan_h3_lease(db, lease) -> bool:
+    """Release an h3: lease whose managed-startup record was never written.
+
+    A worker that died between acquiring the exclusive lease and writing the
+    startup journal leaves a lease that no record can ever match, which would
+    deadlock every later GPU user.  The orphan proof stays conservative: the
+    owning job is no longer running (or the lease expired), no managed startup
+    record on any instance still names a live process or owned process group,
+    and every managed instance's loopback port is free.  Any uncertainty keeps
+    the lease blocked for reconciliation; nothing is resubmitted.
+    """
+    owner = lease.owner or ""
+    if not owner.startswith("h3:"):
+        return False
+    job = db.get(Job, owner.removeprefix("h3:"))
+    # A handoff reservation proves the renderer handover already began for this
+    # job; its lease belongs to that reconciliation path, not to the orphan
+    # proof, and must stay blocked for reconciliation.
+    if db.get(AppSetting, "handoff-reservation:" + owner.removeprefix("h3:")) is not None:
+        return False
+    if job is not None:
+        # A lease whose job really reached a renderer (an attempt exists, or an
+        # external prompt id was ever recorded) may have loaded models into the
+        # GPU: losing its journal is uncertainty, and it stays blocked.  Only
+        # a lease from a run that never started rendering is a true orphan.
+        if job.provider_job_id or job.attempts:
+            return False
+        job_active = job.status in ("QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING")
+        if job_active and lease.expires_at is not None and lease.expires_at > utcnow():
+            return False
+    for row in db.scalars(select(AppSetting).where(AppSetting.key.like(STARTUP_PREFIX + "%"))).all():
+        value = row.value if isinstance(row.value, dict) else {}
+        process = value.get("process") or {}
+        pid, birth = process.get("pid"), process.get("birth")
+        if type(pid) is int and pid > 0 and isinstance(birth, str) and birth:
+            try:
+                if process_identity(pid) == birth:
+                    return False  # a recorded renderer is still alive
+            except (OSError, ValueError):
+                return False  # an unreadable identity is uncertainty, never death
+        job_name = process.get("job_name")
+        if isinstance(job_name, str) and job_name:
+            try:
+                if named_group_active_processes(job_name) > 0:
+                    return False
+            except (OSError, ValueError):
+                return False
+    for instance in db.scalars(select(ComfyInstance)).all():
+        port = getattr(instance, "port", None)
+        if not port:
+            continue
+        try:
+            if windows_port_listeners(int(port)):
+                return False
+        except (OSError, ValueError):
+            return False
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    if job is not None:
+        add_audit(
+            db,
+            "comfy-worker",
+            "COMFY_ORPHAN_H3_LEASE_RELEASED",
+            "job",
+            job.id,
+            {"lease_id": lease.id, "job_active": False, "port_free": True, "resubmitted": False},
+            project_id=job.project_id,
+        )
+    return True
+
+
 def release_dead_renderer_lease(db, lease) -> bool:
     """Release one exclusive lease whose renderer is provably gone."""
     from shine.comfyops.scheduler import ResourceScheduler
 
     record = startup_record_for_lease(db, lease.id)
-    if record is None or not renderer_is_gone(record):
+    if record is None:
+        # No journal was ever written for this lease: fall back to the
+        # conservative orphan proof instead of deadlocking the GPU ledger.
+        return _release_orphan_h3_lease(db, lease)
+    if not renderer_is_gone(record):
         return False
     ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
     return True

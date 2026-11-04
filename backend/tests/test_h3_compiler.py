@@ -122,6 +122,35 @@ def test_the_prompt_states_the_spoken_language_contract():
     assert "All spoken dialogue must be spoken in Chinese" in compiled.prompt
 
 
+def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
+    """The frozen sound-performance dimension invites speech; in a silent shot
+    it contradicts the no-speech contract and the model invents foreign-language
+    mumbling (observed on the real 2026-11-04 journey run).  A dialogue-free
+    shot must therefore not quote it, while a spoken shot still does.
+    """
+    silent = compile_prompt([])
+    assert "frozen sound rule" not in silent.sections["overall_soundscape"]
+    assert "no spoken dialogue" in silent.sections["overall_soundscape"]
+    assert "Performance and sound: no spoken dialogue in this shot." in silent.prompt
+    assert "普通话自然语速" not in silent.prompt
+
+    spoken = spec(
+        characters=["R01 杜万山"],
+        dialogue=[
+            {"speaker_id": "R01 杜万山", "text": "你来了。", "start_s": 1.0, "end_s": 2.4},
+        ],
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山", role="character"),
+        item("<Picture 2>", ReferenceUse.PICTURE, asset_id="asset-2"),
+    ]
+    voiced = compile_prompt(manifest, shot=spoken)
+    # This fixture carries its own environment line, so the soundscape section
+    # never quotes the sound rule; the frozen dimension itself stays in the
+    # style sentences of the prompt.
+    assert "Performance and sound: 普通话自然语速" in voiced.prompt
+
+
 def test_a_language_written_in_another_script_never_reaches_the_english_prompt():
     """The spoken language is stated in English, whatever the project wrote.
 

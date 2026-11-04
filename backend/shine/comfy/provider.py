@@ -125,13 +125,20 @@ def validate_reference_slots(parameter_map: dict[str, str], manifest) -> list[tu
     return slots
 
 
-def validate_declared_transfer_families(profile_transfers, manifest, assets) -> None:
+def validate_declared_transfer_families(profile_transfers, manifest, assets, *, dialogue_free: bool = False) -> None:
     """A profile that declares a transfer for a media family needs that family.
 
     The workflow graph holds a loader node for every declared family.  Without
     the matching reference that node keeps the graph's own placeholder, and the
     renderer then rejects the prompt long after the person queued the shot.
     A profile that declares no transfer family constrains nothing.
+
+    A dialogue-free shot is exempt from the audio family: an audio reference
+    can only serve spoken lines, the submitted graph prunes the unused audio
+    loader (so no placeholder reaches the renderer), and forcing a human-voice
+    reference onto a silent shot makes H3 treat it as a speech cue even against
+    the no-speech contract — observed as foreign-language muttering on the real
+    2026-11-04 journey run.
     """
     if not profile_transfers:
         return
@@ -145,6 +152,8 @@ def validate_declared_transfer_families(profile_transfers, manifest, assets) -> 
         except Exception:
             continue
     missing = sorted(family for family in profile_transfers if family not in families)
+    if dialogue_free:
+        missing = [family for family in missing if family != "audio"]
     if missing:
         raise ComfyPendingWorkflowMapping(
             "The workflow profile declares media families that this request does not bind",
@@ -366,7 +375,8 @@ class ComfyUIRenderService:
         validate_required_parameters(profile.parameter_map, needs_seed=seed is not None)
         validate_reference_slots(profile.parameter_map, request.reference_manifest)
         validate_declared_transfer_families(
-            self._profile_transfers(profile), request.reference_manifest, assets
+            self._profile_transfers(profile), request.reference_manifest, assets,
+            dialogue_free=not request.shot_spec.dialogue,
         )
         uploaded = self._upload_references(
             request,

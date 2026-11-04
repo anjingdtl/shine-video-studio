@@ -207,10 +207,20 @@ $buildInfo = [ordered]@{
         'existing real films still require final human review; this build does not promote pending_review to accepted',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
-        'the real MiniMax crew chain has not been rerun against the rewritten crew prompts; the director timing fix is proven by contract tests only',
+        'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking was not human-observed inside a render window of this round',
         'the release action for local backends is proven on Windows for process and port release; a GPU memory reading before/after is not part of this build'
     )
     closed_in_this_build = @(
+        'the director mode ships a state-driven five-step journey: page checkmarks, a next-step bar on every page, a first-run journey map and per-stage focus on the production page',
+        'one-click production start: deterministic profile pick, per-shot reference auto-binding from the workflow''s declared slots, auto shot selection, single submit',
+        'a live production progress card with real phase names, shot dots, per-shot and total elapsed seconds; start-blockers hide while production runs',
+        'blocking remedies are inlined: the official rulepack binds together with the style freeze, and per-project workflow registration happens on the production page',
+        'a worker crash between lease acquisition and the startup journal no longer deadlocks the GPU ledger: a conservative orphan-lease proof (dead job, no live recorded process, free managed port) releases it with an audit event',
+        'the real user journey ran end-to-end on the real H3 stack: 2/2 shots passed, auto delivery v1 (18.85 s, 1344x768)',
+        'dialogue-free shots no longer quote the frozen sound-performance dimension nor carry a human-voice reference: the foreign-language muttering is gone (user-confirmed on the re-render)',
+        'delivery orders sort newest-first with a Latest badge and collapsed history',
+        'the installer creates a desktop one-click shortcut on both the fresh-install and the already-installed paths',
+        'three shooting-quality tiers (PDD 8-step / native 20-step / PDD 8-step + upscale) come from the upstream canonical graphs, catalog 1.2.0',
         'reviewer routes are created and bound to the actually installed 8B VLM and 0.6B ASR',
         'L4 readiness is derived from sealed service evidence instead of a hard-coded PENDING',
         'child process TMPDIR no longer falls back to the system drive',

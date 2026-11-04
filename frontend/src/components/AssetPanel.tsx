@@ -43,7 +43,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
     <section className="card section-card" id="assets">
       <div className="section-heading">
         <div>
-          <div className="section-kicker">01 / ASSET REGISTRY</div>
+          <div className="section-kicker">① 素材准备</div>
           <h2>项目素材</h2>
           <p>上传素材，选好用途，再点击「确认使用」。确认后即可用于分镜，素材只保存在本机。</p>
         </div>
@@ -112,8 +112,8 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
             </div>
             <div className="asset-name">
               <b>{asset.filename}</b>
-              <span>
-                {asset.sha256.slice(0, 12)}… · {(asset.byte_size / 1024).toFixed(1)} KB
+              <span title={`校验码 ${asset.sha256.slice(0, 16)}…（用于核对文件未被改动）`}>
+                {(asset.byte_size / 1024).toFixed(1)} KB
                 {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
                 {asset.duration_s ? ` · ${asset.duration_s.toFixed(1)}s` : ''}
               </span>
@@ -126,7 +126,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
                   <option value="">未设角色</option>
                   {roleOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
-                <input value={editEntity} placeholder="实体 ID（人物名）" onChange={(event) => setEditEntity(event.target.value)} />
+                <input value={editEntity} placeholder="人物名称" onChange={(event) => setEditEntity(event.target.value)} />
                 <input value={editTags} placeholder="标签, 逗号分隔" onChange={(event) => setEditTags(event.target.value)} />
                 <button className="text-button" onClick={() => saveEdit(asset.id)}><Check size={12} /> 保存</button>
                 <button className="text-button" onClick={() => setEditingId('')}><X size={12} /> 取消</button>

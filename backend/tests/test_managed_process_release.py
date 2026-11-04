@@ -230,3 +230,57 @@ def test_a_released_startup_is_not_reconciled_again(api, monkeypatch):
     monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "12345")
     findings = handoff_startup.reconcile_managed_startups(factory, None, terminate=lambda name: {})
     assert findings == []
+
+
+def test_an_orphan_h3_lease_without_any_startup_record_is_released_by_conservative_proof(api, monkeypatch):
+    """A worker that died before writing its startup journal must not deadlock the GPU.
+
+    The lease has no record to match, so the orphan proof applies: a dead job,
+    no live recorded renderer process or owned group anywhere, and a free
+    managed port release the ledger entry.  Nothing is resubmitted.
+    """
+    from shine.comfyops import handoff_startup
+    from shine.comfyops.models import ComfyInstance
+
+    client, factory, _settings = api
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    with factory.begin() as db:
+        db.add(ComfyInstance(payload={"name": "shine-h3", "port": 8188, "managed": True},
+                             sha256="x" * 64, status="STOPPED"))
+        lease = ResourceLease(owner="h3:missing-job", budget_mb=16384, exclusive=True,
+                              priority=100, status="RECONCILE_REQUIRED", expires_at=utcnow())
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+    assert findings and findings[0]["action"] == "released"
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
+def test_an_orphan_lease_is_kept_when_any_recorded_renderer_is_still_alive(api, monkeypatch):
+    """One live recorded renderer — even for another lease — blocks the orphan release."""
+    from shine.comfyops import handoff_startup
+
+    client, factory, _settings = api
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "12345")
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    with factory.begin() as db:
+        # A startup record for an unrelated instance whose process is alive.
+        db.add(AppSetting(key="renderer-startup:other", value={
+            "stage": "RUNNING", "instance_id": "other", "lease_id": None,
+            "port": 8199, "process": {"pid": 999, "birth": "12345", "job_name": JOB_NAME},
+            "recorded_at": "2026-11-04T00:00:00",
+        }))
+        lease = ResourceLease(owner="h3:missing-job", budget_mb=16384, exclusive=True,
+                              priority=100, status="RECONCILE_REQUIRED", expires_at=utcnow())
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+    assert findings == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"

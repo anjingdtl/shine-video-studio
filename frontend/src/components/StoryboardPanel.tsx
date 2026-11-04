@@ -69,11 +69,14 @@ const CHAIN_STEPS = ['scriptwriter', 'director', 'cinematographer', 'continuity_
  *  that goes into the prompt, so it stays English. */
 export { DIALOGUE_LANGUAGES };
 
-export default function StoryboardPanel({ projectId, onRefresh, onNavigate, backendDisconnected = false }: {
+export default function StoryboardPanel({ projectId, onRefresh, onNavigate, backendDisconnected = false, visible = true }: {
   backendDisconnected?: boolean;
   projectId: string;
   onRefresh: () => void;
   onNavigate?: (page: string) => void;
+  /** 面板保持挂载（运行中的分镜链不中断），但只在重新可见时重查规则包，
+   *  否则用户按引导去素材页绑定后会带着过期的「未绑定」阻断回来。 */
+  visible?: boolean;
 }) {
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
   const [selectedDoc, setSelectedDoc] = useState('');
@@ -144,13 +147,16 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
 
   // The crew cannot run before the project is bound to the official rule pack.
   // Say so here, with the way out, instead of letting the chain refuse later.
+  // Re-check whenever the panel becomes visible again: the binding usually
+  // happens on another page while this panel stays mounted (hidden).
   useEffect(() => {
+    if (!visible) return;
     let alive = true;
     api<{ rulepack_id: string | null }>(`/projects/${projectId}/rulepack`)
       .then(row => { if (alive) setRulepackId(row.rulepack_id); })
       .catch(() => { if (alive) setRulepackId(undefined); });
     return () => { alive = false; };
-  }, [projectId]);
+  }, [projectId, visible]);
 
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -440,9 +446,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   return <section className="card section-card" id="storyboard">
     <div className="section-heading compact">
       <div>
-        <div className="section-kicker">03 / STORYBOARD</div>
-        <h2>AI 自动分镜（完整剧本驱动）</h2>
-        <p>导入完整剧本后，编剧、导演、摄影、场记、剪辑五个 Agent 按已冻结的风格与规则包顺序真实调用，产出结构化分镜方案；资产缺失会明确阻断，不会自动创建资产。</p>
+        <div className="section-kicker">① 剧本分镜</div>
+        <h2>把剧本交给 AI 拆镜头</h2>
+        <p>导入剧本，AI 剧组（编剧、导演、摄影、场记、剪辑）会按你冻结的风格依次真实工作，产出分镜方案给你核对。缺素材会明确告诉你，不会自动生成替代。</p>
       </div>
       <div className="section-icon plum"><Sparkles size={17} /></div>
     </div>
@@ -450,8 +456,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     <div className="module-guide">
       <HelpCircle size={13} />
       <div>
-        <p><b>这一步要做什么：</b>导入完整剧本 → 勾选同意发送文本 → 点下面的橙色按钮。五个 Agent 会依次真实调用模型。</p>
-        <p><b>会卡在哪里：</b>任何一步失败都只重跑那一步，不用从头再来；剧本人物对不上素材时，先在人物对照里确认「谁是哪张图」。</p>
+        <p><b>这一步要做什么：</b>导入剧本 → 勾选同意发送文本 → 点下面的橙色按钮，然后等 AI 逐个工种完成。</p>
+        <p><b>会卡在哪里：</b>某个工种失败只重跑那一步，不用从头再来；剧本人物对不上素材时，先在「人物对照」里确认谁是哪张图。</p>
       </div>
     </div>
 
@@ -459,7 +465,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <ShieldCheck size={17} className="required-icon" />
       <div className="required-text">
         <b>还差一步：本项目还没绑定官方规则包</b>
-        <small>五个 Agent 都要按同一套官方规范工作，所以没绑定就会在第一步被拒绝。先去「素材与风格」点一次「启用官方规则包」。</small>
+        <small>五个 Agent 都要按同一套官方规范工作，所以没绑定就会在第一步被拒绝。去「素材与风格」点「批准并冻结」风格，冻结时会一并完成绑定，不用单独操作。</small>
       </div>
       {onNavigate && <button className="must-button" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
     </div>}
@@ -484,24 +490,30 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       </label>
     </div>
     <p className="storyboard-language-note">
-      对白语言会写进 H3 提示词：{languageState === 'saved' ? '已保存' : languageState === 'saving' ? '保存中' : '保存失败'}。
-      之后的镜头会要求模型用这个语言说出台词；没有台词的镜头会明确要求不要出现任何人声。
-      已经生成的镜头不会被改写。
+      对白语言（{languageState === 'saved' ? '已保存' : languageState === 'saving' ? '保存中…' : '保存失败，请重选'}）：
+      之后的镜头会按这个语言说出台词；没有台词的镜头不会出现任何人声。已经生成的镜头不会被改写。
     </p>
     {!selectedDoc && (
       <label>粘贴完整剧本文本<textarea rows={6} value={inlineText} onChange={e => {
         setInlineText(e.target.value); setRequiresReconciliation(false); setResult(null);
       }} /></label>
     )}
+    <details className="advanced-inline">
+      <summary>高级：锁定剧情事实 · 读取上次编剧结果</summary>
       <label className="storyboard-facts">锁定剧情事实（每行一条，可选）
         <textarea id="storyboard-facts" rows={3} value={facts} disabled={busy} onChange={e => {
-        setFacts(e.target.value); setRequiresReconciliation(false); setResult(null);
-      }}
-        placeholder={'例如：信封始终未拆封\n账册第十七页缺失'} />
-    </label>
+          setFacts(e.target.value); setRequiresReconciliation(false); setResult(null);
+        }}
+          placeholder={'例如：信封始终未拆封\n账册第十七页缺失'} />
+      </label>
+      {!busy && !binding && <button type="button" disabled={bindingBusy}
+        onClick={() => openBinding('读取本项目最近一次编剧结果，请核对它属于当前选择的剧本。')}>
+        读取已完成的编剧人物对照（不重跑模型）
+      </button>}
+    </details>
     <label className="consent-row">
       <input type="checkbox" checked={consent} disabled={busy} onChange={e => setConsent(e.target.checked)} />
-      <span>我同意把该剧本的文本内容发送给已配置的 LLM 服务商用于分镜（媒体文件不会上传）。</span>
+      <span>我同意把该剧本的文本内容发送给已配置的 AI 文字服务用于分镜（媒体文件不会上传）。</span>
     </label>
     <div className="required-action">
       <Sparkles size={17} className="required-icon" />
@@ -528,10 +540,6 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <button type="button" className="secondary-button" disabled={backendDisconnected || checkingPreviousRun || busy}
         onClick={() => void checkAndResumeDirector(true)}>检查后从头重跑</button>
     </details>}
-    {!busy && !binding && <button type="button" disabled={bindingBusy}
-      onClick={() => openBinding('读取本项目最近一次编剧结果，请核对它属于当前选择的剧本。')}>
-      读取已完成的编剧人物对照（不重跑模型）
-    </button>}
     {pollError && <p role="alert">{pollError}</p>}
     {busy && !progressPaused && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
     {(busy || result || progressRuns.length > 0) && <AgentProgress runs={progressRuns}
@@ -621,7 +629,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
           <div className="required-text">
             <b>导演还未启动：需要同意发送剧本文本</b>
             <label><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
-              同意把当前剧本文本发送给已配置的 LLM 服务商，继续导演（不上传媒体）
+              同意把当前剧本文本发送给已配置的 AI 文字服务，继续导演（不上传媒体）
             </label>
           </div>
         </div>}
@@ -649,11 +657,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             const step = result.steps[name];
             const row = progressRuns.find(run => run.role_id === (name === 'editor_edit_intent' ? 'editor' : name));
             const state = step ? 'done' : row?.status === 'RUNNING' ? 'running' : 'failed';
-            return <div className={`agent-step-row ${state}`} key={name}>
+            return <div className={`agent-step-row ${state}`} key={name}
+              title={step ? `产出编号 ${step.sha256.slice(0, 12)}…` : undefined}>
               {step ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
               <b>{stepLabels[name] ?? name}</b>
               <span>{step ? '已完成' : row?.status === 'RUNNING' ? '进行中' : '未完成'}</span>
-              {step && <span className="step-when">{step.sha256.slice(0, 12)}…</span>}
             </div>;
           })}
         </div>
@@ -687,15 +695,18 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             <p>按剧本原切点计算的参考分组。导演会结合内容和素材确定正式生成段。</p>
           </div>
         </div>}
-        <ol className="storyboard-steps">
-          {Object.entries(result.steps).map(([name, step]) => (
-            <li key={name}>
-              <FileText size={12} />
-              <span>{stepLabels[name] ?? name}</span>
-              <small>{step.kind} · {step.sha256.slice(0, 12)}…</small>
-            </li>
-          ))}
-        </ol>
+        <details className="tech-details">
+          <summary>技术详情：各工种产出编号</summary>
+          <ol className="storyboard-steps">
+            {Object.entries(result.steps).map(([name, step]) => (
+              <li key={name}>
+                <FileText size={12} />
+                <span>{stepLabels[name] ?? name}</span>
+                <small>{step.kind} · {step.sha256.slice(0, 12)}…</small>
+              </li>
+            ))}
+          </ol>
+        </details>
         {result.status === 'NEEDS_REVIEW' && <div className="required-action">
           <div className="required-text">
             <b>分镜有待解决的问题，暂不能应用</b>

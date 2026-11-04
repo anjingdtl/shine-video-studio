@@ -83,13 +83,18 @@ def _language_tag(text: str, project_language: str) -> str:
     return "English"
 
 
-def _style_sentences(style: StyleBible, style_version_id: str) -> str:
+def _style_sentences(style: StyleBible, style_version_id: str, include_sound: bool = True) -> str:
+    sound_clause = (
+        f"Performance and sound: {style.sound_performance}."
+        if include_sound
+        else "Performance and sound: no spoken dialogue in this shot."
+    )
     return (
         "Visual style constraints from the frozen Style Bible "
         f"(version {style_version_id}). Photography language: {style.photography_language}. "
         f"Blocking: {style.shot_blocking}. Color palette: {style.color_palette}. "
         f"Lighting and tone: {style.lighting_tone}. Lens and texture: {style.lens_texture}. "
-        f"Editing rhythm: {style.editing_rhythm}. Performance and sound: {style.sound_performance}."
+        f"Editing rhythm: {style.editing_rhythm}. {sound_clause}"
     )
 
 
@@ -317,7 +322,10 @@ def _camera_sentence(spec: ShotSpec) -> str:
 
 
 def _shot_text(ctx: _Context) -> str:
-    parts: list[str] = ["[Shot 1] " + _style_sentences(_prompt_style(ctx.spec, ctx.style), ctx.spec.style_version_id)]
+    parts: list[str] = ["[Shot 1] " + _style_sentences(
+        _prompt_style(ctx.spec, ctx.style), ctx.spec.style_version_id,
+        include_sound=bool(ctx.spec.dialogue),
+    )]
     cast = _cast_order(ctx)
     if cast:
         parts.append(cast)
@@ -387,10 +395,18 @@ def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "") -
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
     if not environment and not ambience:
-        sentences = [
-            f"Natural room ambience continues throughout the video, shaped by the frozen sound rule: "
-            f"{style.sound_performance}."
-        ]
+        if spec.dialogue:
+            sentences = [
+                f"Natural room ambience continues throughout the video, shaped by the frozen sound rule: "
+                f"{style.sound_performance}."
+            ]
+        else:
+            # The frozen sound-performance dimension describes voices and speech;
+            # in a dialogue-free shot it contradicts the no-speech contract below
+            # and invites the model to invent foreign-language mumbling.
+            sentences = [
+                "Natural room ambience continues throughout the video; this shot has no spoken dialogue."
+            ]
     else:
         pieces = [piece.rstrip(".") + "." for piece in (environment, ambience) if piece]
         sentences = pieces

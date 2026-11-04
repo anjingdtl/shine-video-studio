@@ -36,6 +36,27 @@ try {
     $OutputEncoding = [Text.Encoding]::UTF8
 } catch { }
 
+function New-DesktopShortcut {
+    # 安装到新电脑后，桌面直接出现一键启动入口；目标与 START_APP.cmd 完全一致，
+    # 幂等覆盖：重复安装只更新同一条快捷方式。失败不阻断安装。
+    $packageRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    $targetCmd = Join-Path $packageRoot 'START_APP.cmd'
+    if (-not (Test-Path -LiteralPath $targetCmd)) { return }
+    try {
+        $desktopDir = [Environment]::GetFolderPath('Desktop')
+        $shortcutPath = Join-Path $desktopDir 'Shine 视频工作台.lnk'
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $targetCmd
+        $shortcut.WorkingDirectory = $packageRoot
+        $shortcut.Description = '一键启动 Shine 视频工作台（本地 AI 视频制片）'
+        $shortcut.Save()
+        Write-Host "  已创建桌面快捷方式：$shortcutPath" -ForegroundColor Green
+    } catch {
+        Write-Host "  桌面快捷方式创建失败（不影响安装）：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 function Write-Banner([string]$text) {
     Write-Host ''
     Write-Host ('=' * 66) -ForegroundColor DarkCyan
@@ -335,6 +356,7 @@ if ($alreadyInstalled) {
     Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
     Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
     Write-Host '  停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
+    New-DesktopShortcut
     if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
     exit 0
 }
@@ -384,6 +406,7 @@ if ($installCode -ne 0) {
 # ---- 5. Hand over to the wizard -----------------------------------------
 $webUrl = "http://127.0.0.1:$webPort/#setup"
 Write-Host ''
+New-DesktopShortcut
 Write-Banner '安装完成，已进入新机设置向导'
 Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
 Write-Host "  API 健康页： http://127.0.0.1:$apiPort/health" -ForegroundColor Gray
@@ -393,6 +416,6 @@ Write-Host ''
 Write-Host '  在向导中点击「检测本机环境」，再确认「下载缺项并自动配置」。' -ForegroundColor Gray
 Write-Host '  后续安装、工作流登记和服务检测会自动完成，无需密码。' -ForegroundColor Gray
 Write-Host ''
-Write-Host '  以后再次启动：双击 START_APP.cmd     停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
+Write-Host '  以后再次启动：双击桌面「Shine 视频工作台」或 START_APP.cmd     停止服务：双击 STOP_APP.cmd' -ForegroundColor Gray
 if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
 exit 0

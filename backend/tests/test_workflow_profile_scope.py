@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops import deployment
+from shine.comfyops.deployment import load_default_catalog
 from shine.models import WorkflowProfile, utcnow
 from tests.conftest import create_project, make_studio
 from tests.test_v13_preparation import TOKEN
@@ -62,9 +63,9 @@ def test_second_project_wizard_registration_yields_its_own_usable_profiles(tmp_p
         result_c = _register(client, project_c)
 
         default_names = deployment.load_default_catalog()["workflow_profiles"]
-        assert [row["status"] for row in result_a["profiles"]] == ["REGISTERED", "REGISTERED"]
-        assert [row["status"] for row in result_b["profiles"]] == ["REGISTERED", "REGISTERED"]
-        assert [row["status"] for row in result_c["profiles"]] == ["REGISTERED", "REGISTERED"]
+        assert [row["status"] for row in result_a["profiles"]] == ["REGISTERED"] * len(default_names)
+        assert [row["status"] for row in result_b["profiles"]] == ["REGISTERED"] * len(default_names)
+        assert [row["status"] for row in result_c["profiles"]] == ["REGISTERED"] * len(default_names)
 
         for project in (project_a, project_b, project_c):
             names = _names_of(client, project)
@@ -87,11 +88,12 @@ def test_repeated_registration_on_the_same_project_is_idempotent(tmp_path):
         first = _register(client, project)
         ids_first = [row["profile_id"] for row in first["profiles"]]
         second = _register(client, project)
-        assert [row["status"] for row in second["profiles"]] == ["ALREADY_REGISTERED", "ALREADY_REGISTERED"]
+        expected_catalog = len(load_default_catalog()["workflow_profiles"])
+        assert [row["status"] for row in second["profiles"]] == ["ALREADY_REGISTERED"] * expected_catalog
         assert [row["profile_id"] for row in second["profiles"]] == ids_first
 
         rows = client.get(f"/api/v1/workflow-profiles?project_id={project}").json()
-        assert len(rows) == 2
+        assert len(rows) == expected_catalog
     finally:
         app.state.engine.dispose()
 
@@ -183,7 +185,7 @@ def test_concurrent_registrations_do_not_create_conflicting_copies(tmp_path):
 
         assert set(codes) <= {200, 409}, codes
         rows = client.get(f"/api/v1/workflow-profiles?project_id={project}").json()
-        assert len(rows) == 2, rows
+        assert len(rows) == len(load_default_catalog()["workflow_profiles"]), rows
     finally:
         app.state.engine.dispose()
 

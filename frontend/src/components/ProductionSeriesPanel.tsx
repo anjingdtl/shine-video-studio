@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Clapperboard, Layers, Play, ShieldCheck, Square, Loader2 } from 'lucide-react';
-import { api, json, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
+import { AlertTriangle, Clapperboard, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
+import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
+
+type AutoBinding = { asset_id: string; use_as: string; role: string | null; frame_role: string | null; ordinal: number };
 
 type Props = {
   projectId: string;
   shots: Shot[];
+  assets: Asset[];
+  /** 全局任务数据（3 秒轮询）：进度卡的当前镜百分比来自最新 attempt.progress。 */
+  jobs: Job[];
   workflowProfiles: WorkflowProfile[];
   system: SystemStatus | null;
   busy: boolean;
@@ -15,6 +20,8 @@ type Props = {
   reviewHeight: string;
   onStarted: () => void;
   onMessage: (message: string, kind?: 'success' | 'error') => void;
+  /** 保存某镜的完整引用绑定（一键开拍用它自动补齐场景图/音色等参考）。 */
+  onSaveBindings: (shotId: string, bindings: AutoBinding[]) => Promise<void>;
   /** 模式入口动作：enable_real 打开启用向导，check_fix 打开检查修复。 */
   onModeAction: (action: 'enable_real' | 'check_fix') => void;
   /** 缺生成方案/宽高映射时，引导回基础配置。 */
@@ -55,6 +62,20 @@ const FRAME_PRESETS = [
 
 const CLIP_CHOICES = ['', '4', '5', '6', '8', '10', '12', '15'];
 
+/** 拍摄质量档：按方案名确定性匹配（pdd8=步数加速、upscale=画面放大），
+ *  每档明说耗时代价，用户自己权衡。 */
+type QualityTier = 'fast' | 'native' | 'upscale';
+const QUALITY_TIERS: Array<{ id: QualityTier; label: string; note: string; match: (name: string) => boolean }> = [
+  { id: 'fast', label: '快速 · 8步加速', note: '8 步加速生成，速度最快（默认）', match: (n) => /pdd8/i.test(n) && !/upscale/i.test(n) },
+  { id: 'native', label: '高质量 · 原生20步', note: '原生 20 步生成，画面细节与稳定性更好，耗时约为快速档的 2~3 倍', match: (n) => !/pdd8/i.test(n) && !/upscale/i.test(n) },
+  { id: 'upscale', label: '超清 · 加速+画面放大', note: '8 步加速生成后再高清放大，细节最高；生成+放大两段耗时，整片时间最长', match: (n) => /pdd8/i.test(n) && /upscale/i.test(n) },
+];
+
+function tierOfProfile(name: string): QualityTier | null {
+  if (/portrait|竖屏/i.test(name)) return null; // 竖屏变体不参与一键质量匹配
+  return QUALITY_TIERS.find((tier) => tier.match(name))?.id ?? null;
+}
+
 const FAMILY_ORDER: Record<string, number> = { subject: 0, picture: 1, video: 2, audio: 3 };
 
 /** The reference labels this shot will compile to: the same family order and
@@ -93,9 +114,56 @@ function isMultipleOf32(value: number): boolean {
   return Number.isInteger(value) && value >= 256 && value <= 2048 && value % 32 === 0;
 }
 
+/** 从方案的 parameter_map 读出它声明的参考槽位（如 reference_picture_1 → picture×1）。
+ *  一键开拍按这份声明自动补齐，不会多绑也不会静默缺绑。 */
+function declaredSlots(profile: WorkflowProfile): { subject: number; picture: number; audio: number } {
+  const slots = { subject: 0, picture: 0, audio: 0 };
+  for (const key of Object.keys(profile.parameter_map ?? {})) {
+    const match = key.match(/^reference_(subject|picture|audio)_(\d+)$/);
+    if (match) slots[match[1] as 'subject' | 'picture' | 'audio'] = Math.max(slots[match[1] as 'subject' | 'picture' | 'audio'], Number(match[2]));
+  }
+  return slots;
+}
+
+/** 为一个镜头补齐方案声明的参考槽位：已绑定保留；缺的场景图/音色按已确认素材的
+ *  固定顺序补足；人物主体缺位不自动编造（那是分镜/对照的职责），如实报缺。 */
+function autoAdaptBindings(shot: Shot, profile: WorkflowProfile, assets: Asset[]): { bindings: AutoBinding[]; added: string[]; missing: string[] } {
+  const slots = declaredSlots(profile);
+  // 无对白的镜头不自动绑人声参考：音频参考只服务台词，而且真声样本会被 H3 当作
+  // 语音线索、无视「不要人声」的合同（2026-11-04 实测出现外语呢喃）。提交层会
+  // 剪掉未用的音频装载节点，方案声明 audio 也不再强制。
+  if (!(shot.spec.dialogue ?? []).length) slots.audio = 0;
+  const current = shot.bindings
+    .map((b, index) => ({ asset_id: b.asset_id, use_as: b.use_as, role: b.role ?? null, frame_role: b.frame_role ?? null, ordinal: index }));
+  const used = new Set(current.map((b) => b.asset_id));
+  const count = (family: string) => current.filter((b) => b.use_as === family).length;
+  const added: string[] = [];
+  const missing: string[] = [];
+  const candidates = (family: 'picture' | 'audio') => assets
+    .filter((a) => a.locked && !used.has(a.id) && (family === 'picture'
+      ? a.kind === 'image' && (a.role === 'scene' || a.role === 'prop' || !a.role || a.role === 'character')
+      : a.kind === 'audio'))
+    .sort((x, y) => (x.role === (family === 'picture' ? 'scene' : 'voice') ? -1 : 0) - (y.role === (family === 'picture' ? 'scene' : 'voice') ? -1 : 0) || x.filename.localeCompare(y.filename));
+  for (const family of ['picture', 'audio'] as const) {
+    const pool = candidates(family);
+    let have = count(family);
+    for (let i = 0; have < slots[family] && i < pool.length; i += 1) {
+      const candidate = pool[i];
+      current.push({ asset_id: candidate.id, use_as: family, role: candidate.role ?? null, frame_role: null, ordinal: current.length });
+      used.add(candidate.id);
+      have += 1;
+      added.push(`${shot.name}：${candidate.filename}（${family === 'picture' ? '画面参考' : '音色参考'}）`);
+    }
+    for (; have < slots[family]; have += 1) missing.push(family === 'picture' ? '场景/画面参考图' : '音色参考音频');
+  }
+  const subjectShort = Math.max(0, slots.subject - count('subject'));
+  for (let i = 0; i < subjectShort; i += 1) missing.push(`${shot.name} 的人物主体`);
+  return { bindings: current, added, missing };
+}
+
 export default function ProductionSeriesPanel({
-  projectId, shots, workflowProfiles, system, busy, reviewWidth, reviewHeight,
-  onStarted, onMessage, onModeAction, onGoSetup, demoSelected = false, onSelectReal,
+  projectId, shots, assets, jobs, workflowProfiles, system, busy, reviewWidth, reviewHeight,
+  onStarted, onMessage, onSaveBindings, onModeAction, onGoSetup, demoSelected = false, onSelectReal,
 }: Props) {
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -108,6 +176,26 @@ export default function ProductionSeriesPanel({
   const [customHeight, setCustomHeight] = useState('1344');
   const [clipSeconds, setClipSeconds] = useState('');
   const [working, setWorking] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [quality, setQuality] = useState<QualityTier>('fast');
+
+  /** 一键为本作品登记生成方案：与启用向导第 6 阶段同一组接口（固定工作流登记 +
+   *  运行配置），在本页原地完成，不再让用户跳去基础配置跑整个向导。
+   *  本机服务验证是机器级的，已激活的环境无需按作品重跑。 */
+  async function registerProfiles() {
+    if (registering) return;
+    setRegistering(true);
+    try {
+      await api('/setup/profiles', json('POST', { project_id: projectId }));
+      await api('/setup/configuration', json('POST', { project_id: projectId }));
+      onMessage('本作品的生成方案已登记完成，正在刷新可选项…', 'success');
+      await onStarted();
+    } catch (error) {
+      onMessage(`生成方案登记失败：${String(error)}。可点「检查生成方案」打开向导查看具体原因。`, 'error');
+    } finally {
+      setRegistering(false);
+    }
+  }
 
   const reload = useCallback(async () => {
     const rows = await api<ProductionSeries[]>(`/projects/${projectId}/production-series`);
@@ -132,6 +220,87 @@ export default function ProductionSeriesPanel({
     if (ref2vaProfiles.length === 1 && !profileId) setProfileId(ref2vaProfiles[0].id);
   }, [ref2vaProfiles, profileId]);
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
+
+  /** 制作期间每 5 秒刷新序列本身，进度卡才有最新的分镜状态。 */
+  useEffect(() => {
+    if (!activeSeries) return;
+    const timer = window.setInterval(() => { reload().catch(() => undefined); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeSeries?.id, reload]);
+
+  /** 计时器每秒走一格；起止时间来自服务端（attempt.submit_intent_at / 系列最早 job 的
+   *  created_at），刷新页面也不会清零。 */
+  const [timerTick, setTimerTick] = useState(0);
+  useEffect(() => {
+    if (!activeSeries) return;
+    const timer = window.setInterval(() => setTimerTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSeries?.id]);
+
+  /** 实时进度：总进度按「已完成镜 + 当前镜的 attempt 百分比」计算，阶段名跟随真实状态。 */
+  const liveProgress = useMemo(() => {
+    void timerTick; // 计时显示依赖当前时刻，秒级重渲染由 ticker 驱动
+    if (!activeSeries) return null;
+    const items = activeSeries.items;
+    const total = activeSeries.shot_count || items.length;
+    const completed = items.filter((item) => item.status === 'PASSED').length;
+    const current = items.find((item) => !['PASSED', 'CANCELLED', 'FAILED', 'BLOCKED'].includes(item.status));
+    const job = current?.job_id ? jobs.find((row) => row.id === current.job_id) : undefined;
+    const attempt = job?.attempts.reduce<Job['attempts'][number] | null>((latest, row) =>
+      !latest || row.attempt_no > latest.attempt_no ? row : latest, null);
+    let phase: string;
+    let shotFraction = 0;
+    if (['PAUSED', 'PAUSE_REQUESTED'].includes(activeSeries.status)) {
+      phase = '已暂停';
+    } else if (job?.status === 'SUBMITTING' || attempt?.status === 'SUBMIT_INTENT') {
+      phase = '正在启动本机渲染引擎';
+    } else if (job?.status === 'RUNNING') {
+      if (attempt?.progress != null && attempt.progress > 0) {
+        phase = `正在生成 · ${attempt.progress}%`;
+        shotFraction = attempt.progress / 100;
+      } else {
+        phase = '正在生成（本机渲染中，一段约需几分钟）';
+      }
+    } else if (job?.status === 'QC_PENDING') {
+      phase = '自动质检中';
+    } else if (job?.status === 'NEEDS_REVIEW') {
+      phase = '等待人工复核';
+    } else if (current?.status === 'RUNNING') {
+      phase = '正在生成（本机渲染中，一段约需几分钟）';
+    } else if (current?.status === 'QUEUED') {
+      const anyRendering = jobs.some((row) => ['SUBMITTING', 'RUNNING'].includes(row.status));
+      phase = anyRendering ? '排队等待中（前一镜完成后自动开始）' : '正在启动本机渲染引擎（首次启动约需一两分钟）';
+    } else if (current?.status === 'BLOCKED') {
+      phase = '有镜头需要处理，后续镜头不受影响';
+    } else if (!current && completed < total) {
+      phase = '正在整理成片';
+    } else {
+      phase = '即将完成';
+    }
+    const overall = total > 0 ? Math.min(100, ((completed + shotFraction) / total) * 100) : 0;
+    // 计时：总耗时从本系列最早的任务创建时刻起算；本镜耗时从其最新 attempt 的
+    // 提交意图时刻起算（都是服务端 UTC 时间，刷新不清零）。后端时间戳无时区后缀，
+    // 必须显式按 UTC 解析，否则本地时区（UTC+8）会造成 8 小时偏差。
+    const utcMs = (value: string | null | undefined) => {
+      if (!value) return null;
+      // The API serialises naive UTC datetimes with or without the 'T'
+      // separator and never with a zone suffix; parsing them as local time
+      // inflates the elapsed time by the local UTC offset (8 h here).
+      const normalised = value.includes('T') ? value : value.replace(' ', 'T');
+      const parsed = new Date(normalised.endsWith('Z') ? normalised : normalised + 'Z').getTime();
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const now = Date.now();
+    const seriesJobIds = new Set(items.map((item) => item.job_id).filter(Boolean) as string[]);
+    const seriesJobs = jobs.filter((row) => seriesJobIds.has(row.id));
+    const startCandidates = seriesJobs
+      .map((row) => utcMs(row.created_at)).filter((ms): ms is number => ms != null);
+    const totalStartS = startCandidates.length ? Math.min(...startCandidates) : null;
+    const shotStartS = utcMs(attempt?.submit_intent_at);
+    const totalElapsedS = totalStartS != null ? Math.max(0, Math.floor((now - totalStartS) / 1000)) : null;
+    const shotElapsedS = shotStartS != null ? Math.max(0, Math.floor((now - shotStartS) / 1000)) : null;
+    return { total, completed, current, phase, overall, items, totalElapsedS, shotElapsedS };
+  }, [activeSeries, jobs, timerTick]);
   // A shot that is already being produced must not be queued a second time.
   const busyShotIds = new Set(
     series
@@ -182,11 +351,14 @@ export default function ProductionSeriesPanel({
     setSelected(shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id));
   }
 
-  async function start() {
+  async function start(options?: { shotIds?: string[]; profileOverride?: string }) {
+    const effectiveProfile = options?.profileOverride ?? profileId;
+    const effectiveSelected = options?.shotIds ?? selected;
     if (demoSelected || system?.production_mode?.mode !== 'READY' || working || busy) return;
-    if (!profileId) { onMessage('当前没有可用的生成方案，请先在基础配置里完成登记。', 'error'); return; }
-    if (selected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
-    if (selectedBusy.length > 0) {
+    if (!effectiveProfile) { onMessage('当前没有可用的生成方案，请先在基础配置里完成登记。', 'error'); return; }
+    if (effectiveSelected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
+    const busyInSelection = effectiveSelected.filter((id) => busyShotIds.has(id));
+    if (busyInSelection.length > 0) {
       onMessage('选中的镜头已经在生产队列中，请勿重复提交。', 'error');
       return;
     }
@@ -200,25 +372,25 @@ export default function ProductionSeriesPanel({
     }
     if (clipSeconds) {
       const tooTight = shots
-        .filter((shot) => selected.includes(shot.id))
+        .filter((shot) => effectiveSelected.includes(shot.id))
         .filter((shot) => Math.max(0, ...(shot.spec.dialogue ?? []).map((line) => line.end_s)) + 0.2 > Number(clipSeconds))
         .map((shot) => shot.name);
       if (tooTight.length > 0) {
         onMessage(`这些镜头的对白装不进 ${clipSeconds} 秒：${tooTight.join('、')}。请改回「按分镜计划」或加长片段。`, 'error');
         return;
       }
-      if (!window.confirm(`把选中的 ${selected.length} 个镜头统一改为 ${clipSeconds} 秒？\n这会重新编译这些镜头，已生成的同镜成片会失效。`)) return;
+      if (!window.confirm(`把选中的 ${effectiveSelected.length} 个镜头统一改为 ${clipSeconds} 秒？\n这会重新编译这些镜头，已生成的同镜成片会失效。`)) return;
     }
     setWorking(true);
     try {
       // 按项目镜头顺序提交，不按勾选顺序改变故事顺序。
       const shot_ids = shots
         .map((shot) => shot.id)
-        .filter((id) => selected.includes(id));
+        .filter((id) => effectiveSelected.includes(id));
       const body: Record<string, unknown> = {
         shot_ids,
         provider: 'comfyui',
-        workflow_profile_id: profileId,
+        workflow_profile_id: effectiveProfile,
         self_review_scope: scope,
       };
       if (scope === 'basic') {
@@ -245,6 +417,61 @@ export default function ProductionSeriesPanel({
     }
   }
 
+  /** 一键开拍：自动选方案 → 按方案声明的槽位自动补齐每镜参考 → 自动勾选全部可制作镜头 → 提交。
+   *  用户只点一次；每步自动做了什么都会说明，缺什么就明说，绝不静默跳过。 */
+  async function oneClickStart() {
+    if (working || busy) return;
+    if (demoSelected) { onMessage('当前是演示状态：点上方「切回真实制作」后再一键开拍。', 'error'); return; }
+    if (mode === null) { onMessage('正在确认本机制作环境（约需几秒），稍等两三秒再点一次。', 'error'); return; }
+    if (mode !== 'READY') { onMessage(system?.production_mode?.detail ?? '制作环境未就绪：请先在顶部完成「启用真实制作」。', 'error'); return; }
+    if (activeSeries) { onMessage('已有未结束的生产序列：等它完成，或先在下方处理该序列。', 'error'); return; }
+    // 1) 自动选方案：先按所选拍摄质量档过滤，再优先宽高已接通的标准方案。
+    const tierPool = ref2vaProfiles.filter((p) => tierOfProfile(p.name) === quality);
+    if (tierPool.length === 0) {
+      onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
+      return;
+    }
+    let target = profileId;
+    if (!target || tierOfProfile(ref2vaProfiles.find((p) => p.id === target)?.name ?? '') !== quality) {
+      const sized = tierPool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
+      const pool = sized.length ? sized : tierPool;
+      target = pool[0]?.id ?? '';
+      if (target) setProfileId(target);
+    }
+    const profile = ref2vaProfiles.find((p) => p.id === target);
+    if (!profile) { onMessage('本机还没有可用的生成方案：先点下方「为本作品一键登记生成方案」，或去基础配置完成安装。', 'error'); return; }
+    // 2) 自动勾选全部可制作镜头。
+    const shotIds = shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id);
+    if (shotIds.length === 0) { onMessage('还没有可制作的镜头：先在上方完成并应用分镜。', 'error'); return; }
+    setSelected(shotIds);
+    // 3) 按方案槽位自动补齐参考绑定（场景图/音色等），人物主体缺位如实报缺。
+    const adapted: string[] = [];
+    const missingAll: string[] = [];
+    setWorking(true);
+    try {
+      for (const shot of shots.filter((row) => shotIds.includes(row.id))) {
+        const plan = autoAdaptBindings(shot, profile, assets);
+        adapted.push(...plan.added);
+        missingAll.push(...plan.missing);
+        if (plan.added.length > 0) await onSaveBindings(shot.id, plan.bindings);
+      }
+    } catch (error) {
+      setWorking(false);
+      onMessage(`自动补齐参考时失败：${String(error)}。可在下方高级设置里手工调整后重试。`, 'error');
+      return;
+    }
+    if (missingAll.length > 0) {
+      setWorking(false);
+      onMessage(`自动适配还缺：${[...new Set(missingAll)].join('、')}。到「素材与风格」上传并确认对应素材后，再点一次一键开拍即可。`, 'error');
+      return;
+    }
+    // 4) 提交生产序列（沿用 start 的全部校验）。
+    await start({ shotIds, profileOverride: target });
+    if (adapted.length > 0) {
+      onMessage(`一键开拍已自动绑定 ${adapted.length} 项参考（${adapted.slice(0, 3).join('；')}${adapted.length > 3 ? '…' : ''}），方案「${profile.name}」。`, 'success');
+    }
+  }
+
   async function act(seriesId: string, action: 'cancel' | 'pause' | 'resume') {
     setWorking(true);
     try {
@@ -265,8 +492,8 @@ export default function ProductionSeriesPanel({
     && selectedBusy.length === 0 && !!profileId && sizeValid && !sizeBlocked;
   const blockers = [
     ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜。请先在上方完成 AI 分镜，并点击「应用为正式分镜（人工确认）」将方案加入制作列表。'] : []),
-    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。请点击「选择全部可制作镜头」，或逐个勾选。'] : []),
-    ...(!profileId ? ['还没有选定生成方案。若下拉框里没有方案，请到基础配置登记并验证 H3 工作流。'] : []),
+    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。点上方「一键开拍」会自动勾选全部可制作镜头，无需手工逐个选。'] : []),
+    ...(!profileId ? ['还没有选定生成方案。点下方按钮即可在本页一键登记（来自本机已验证的标准工作流），不用跳去基础配置。'] : []),
     ...(sizeBlocked ? ['当前方案没有宽高映射，不能按你选的画幅渲染。到基础配置点「补齐宽高参数」，或把画幅改回「按方案默认」。'] : []),
     ...(!sizeValid ? ['自定义画幅必须是 256–2048 之间、32 的倍数（H3 规范）。'] : []),
     ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色没有绑定人物参考图；提交会被拦下，避免生成一张不相干的脸。`] : []),
@@ -277,12 +504,17 @@ export default function ProductionSeriesPanel({
     ...(busy || working ? ['正在处理当前操作，请等待完成。'] : []),
   ];
 
+  // 制作已在进行（本面板的序列或任一任务在跑）时，不再解释“为什么不能开始”，
+  // 状态由上方的进度卡负责；这份清单只服务“想开拍但开不了”的时刻。
+  const productionLive = !!activeSeries
+    || jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
+
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">
       <div>
-        <div className="section-kicker">04 / CONTINUOUS PRODUCTION</div>
-        <h2>连续制作影片</h2>
-        <p>先定成片规格，再勾选镜头点「开始制作影片」。本机会连续生成并自动整理成片；文件损坏或规格不符会暂停处理，小模型画面判断和对白识别只作建议，不会卡住后续镜头。</p>
+        <div className="section-kicker">② 排产制作</div>
+        <h2>勾选镜头，开始制作</h2>
+        <p>选好成片规格，勾选镜头点「开始制作影片」，本机会连续生成并自动整理成片。画面和对白的 AI 建议只作参考，不会卡住后续镜头；文件损坏或规格不符才会暂停等你处理。</p>
       </div>
       <div className="section-icon plum"><Layers size={17} /></div>
     </div>
@@ -300,6 +532,73 @@ export default function ProductionSeriesPanel({
       <span>当前选择演示；连续制作只支持真实 H3，演示态不能启动。</span>
       <button type="button" className="text-button" onClick={onSelectReal}>切回真实制作</button>
     </div>}
+
+    <div className="one-click-card">
+      <div className="one-click-main">
+        <Wand2 size={18} className="one-click-icon" />
+        <div className="one-click-text">
+          <b>{shots.length === 0
+            ? '完成分镜后，这里一键开拍'
+            : `一键开拍：自动制作全部 ${shots.filter((shot) => !busyShotIds.has(shot.id)).length} 个镜头`}</b>
+          <small>自动选生成方案、按方案自动补齐场景图与音色参考、自动勾选镜头。高级设置默认已是最优，一般不用打开。</small>
+        </div>
+        <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
+          onClick={() => void oneClickStart()}>
+          {working ? <Loader2 size={15} /> : <Wand2 size={15} />}
+          {working ? '正在自动适配…' : '一键开拍（自动适配）'}
+        </button>
+      </div>
+      <div className="quality-picker" role="radiogroup" aria-label="拍摄质量">
+        {QUALITY_TIERS.map((tier) => {
+          const available = ref2vaProfiles.some((p) => tierOfProfile(p.name) === tier.id);
+          const active = quality === tier.id;
+          return (
+            <button type="button" key={tier.id} role="radio" aria-checked={active}
+              className={`quality-option ${active ? 'active' : ''} ${available ? '' : 'unavailable'}`}
+              title={available ? tier.note : `${tier.note}——本作品还没有该档方案，点下方「一键登记」补齐`}
+              onClick={() => setQuality(tier.id)}>
+              {tier.label}{!available && <em>未登记</em>}
+            </button>
+          );
+        })}
+        <small className="quality-note">{QUALITY_TIERS.find((t) => t.id === quality)?.note}</small>
+      </div>
+    </div>
+
+    {liveProgress && (
+      <div className="series-progress" role="status" aria-label="制作进度">
+        <div className="series-progress-head">
+          <Loader2 size={14} className="spin" />
+          <b>正在制作 · 第 {Math.min(liveProgress.completed + 1, liveProgress.total)}/{liveProgress.total} 镜</b>
+          <span className="series-progress-phase">{liveProgress.phase}</span>
+          {(liveProgress.shotElapsedS != null || liveProgress.totalElapsedS != null) && (
+            <span className="series-progress-timer">
+              本镜 {liveProgress.shotElapsedS != null ? `${liveProgress.shotElapsedS}` : '—'} 秒
+              <i>·</i>
+              总计 {liveProgress.totalElapsedS != null ? `${liveProgress.totalElapsedS}` : '—'} 秒
+            </span>
+          )}
+        </div>
+        <div className="series-progress-bar" aria-hidden="true">
+          <i style={{ width: `${liveProgress.overall}%` }} />
+        </div>
+        <div className="series-progress-shots">
+          {liveProgress.items.map((item, index) => {
+            const name = shots.find((shot) => shot.id === item.shot_id)?.name ?? `镜头 ${index + 1}`;
+            const isCurrent = liveProgress.current?.id === item.id;
+            return <span key={item.id}
+              className={`progress-shot ${item.status.toLowerCase()} ${isCurrent ? 'current' : ''}`}
+              title={`${name} · ${itemText[item.status] ?? item.status}`}>
+              {index + 1}
+            </span>;
+          })}
+          <small>{liveProgress.completed}/{liveProgress.total} 镜完成 · 完成后自动整理成片并出现在「成片中心」</small>
+        </div>
+      </div>
+    )}
+
+    <details className="series-advanced">
+      <summary>高级设置（一般不用改）：方案 · 审片 · 成片规格 · 手工勾选</summary>
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案
@@ -409,23 +708,30 @@ export default function ProductionSeriesPanel({
         <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
         {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
-      <button className="primary-button" disabled={busy || working || !canStart} onClick={start}>
+      <button className="primary-button" disabled={busy || working || !canStart} onClick={() => void start()}>
         {working ? <Loader2 size={14} /> : <Play size={14} />} 开始制作影片（{selected.length} 镜）
       </button>
-      {blockers.length > 0 && <div className="required-action" role="status" aria-label="开始制作前还需完成">
-        <AlertTriangle size={17} className="required-icon" />
-        <div className="required-text">
-          <b>现在为什么不能开始制作</b>
-          <ul>{blockers.map(reason => <li key={reason}>{reason}</li>)}</ul>
-          {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
-        </div>
-        {shots.length === 0 && <button type="button" className="must-button"
-          onClick={() => document.getElementById('storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
-          去完成并应用分镜
-        </button>}
-        {!profileId && <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查生成方案</button>}
-      </div>}
     </div>
+    </details>
+
+    {!productionLive && blockers.length > 0 && <div className="required-action" role="status" aria-label="开始制作前还需完成">
+      <AlertTriangle size={17} className="required-icon" />
+      <div className="required-text">
+        <b>现在为什么不能开始制作</b>
+        <ul>{blockers.map(reason => <li key={reason}>{reason}</li>)}</ul>
+        {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
+      </div>
+      {shots.length === 0 && <button type="button" className="must-button"
+        onClick={() => document.getElementById('storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+        去完成并应用分镜
+      </button>}
+      {!profileId && <>
+        <button type="button" className="must-button" disabled={busy || working || registering} onClick={() => void registerProfiles()}>
+          {registering ? '正在登记生成方案…' : '为本作品一键登记生成方案'}
+        </button>
+        <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查生成方案</button>
+      </>}
+    </div>}
 
     {series.length > 0 && <div className="series-list">
       {series.map((row) => (

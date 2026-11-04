@@ -185,6 +185,7 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'PUT', pattern: /\/api\/v1\/shots\/[^/]+\/bindings$/, respond: () => jsonResponse({}) },
     { method: 'GET', pattern: /\/api\/v1\/film-agents$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/rulepack$/, respond: () => jsonResponse({ rulepack_id: null }) },
+    { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/rulepack\/freeze$/, respond: () => jsonResponse({ rulepack_id: 'shine-h3-rules/1.1.0', status: 'FROZEN' }) },
     { method: 'GET', pattern: /\/api\/v1\/h3-rulebook$/, respond: () => jsonResponse({ packs: [{ id: 'shine-h3-rules/1.1.0' }] }) },
     { method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/agent-routes$/, respond: () => jsonResponse([]) },

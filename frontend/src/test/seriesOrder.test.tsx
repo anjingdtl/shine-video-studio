@@ -47,9 +47,9 @@ describe('Web 发起生产序列（P04）', () => {
     target.scrollIntoView = vi.fn();
     document.body.appendChild(target);
     try {
-      render(<ProductionSeriesPanel projectId="proj-1" shots={[]} workflowProfiles={[]}
+      render(<ProductionSeriesPanel projectId="proj-1" shots={[]} assets={[]} jobs={[]} workflowProfiles={[]}
         system={readySystem} busy={false} reviewWidth="1280" reviewHeight="720"
-        onStarted={() => undefined} onMessage={() => undefined} onModeAction={() => undefined} />);
+        onStarted={() => undefined} onMessage={() => undefined} onSaveBindings={() => Promise.resolve()} onModeAction={() => undefined} />);
       const blockers = screen.getByRole('status', { name: '开始制作前还需完成' });
       expect(blockers).toHaveTextContent('还没有应用分镜，制作列表为 0 镜');
       expect(blockers).toHaveTextContent('还没有选定生成方案');
@@ -66,6 +66,8 @@ describe('Web 发起生产序列（P04）', () => {
       <ProductionSeriesPanel
         projectId="proj-1"
         shots={shots}
+        assets={[]}
+        jobs={[]}
         workflowProfiles={profiles}
         system={readySystem}
         busy={false}
@@ -73,6 +75,7 @@ describe('Web 发起生产序列（P04）', () => {
         reviewHeight="720"
         onStarted={() => undefined}
         onMessage={() => undefined}
+        onSaveBindings={() => Promise.resolve()}
         onModeAction={() => undefined}
       />,
     );
@@ -94,6 +97,8 @@ describe('Web 发起生产序列（P04）', () => {
       <ProductionSeriesPanel
         projectId="proj-1"
         shots={shots}
+        assets={[]}
+        jobs={[]}
         workflowProfiles={profiles}
         system={SYSTEM_STATUS}
         busy={false}
@@ -101,6 +106,7 @@ describe('Web 发起生产序列（P04）', () => {
         reviewHeight="720"
         onStarted={() => undefined}
         onMessage={() => undefined}
+        onSaveBindings={() => Promise.resolve()}
         onModeAction={() => undefined}
       />,
     );
@@ -111,9 +117,9 @@ describe('Web 发起生产序列（P04）', () => {
   });
   it('环境 READY 但用户选择演示，连续制作禁用且不提交真实任务', async () => {
     const selectReal = vi.fn();
-    render(<ProductionSeriesPanel projectId="proj-1" shots={shots} workflowProfiles={profiles}
+    render(<ProductionSeriesPanel projectId="proj-1" shots={shots} assets={[]} jobs={[]} workflowProfiles={profiles}
       system={readySystem} busy={false} reviewWidth="1280" reviewHeight="720" demoSelected
-      onSelectReal={selectReal} onStarted={() => undefined} onMessage={() => undefined} onModeAction={() => undefined} />);
+      onSelectReal={selectReal} onStarted={() => undefined} onMessage={() => undefined} onSaveBindings={() => Promise.resolve()} onModeAction={() => undefined} />);
     await userEvent.click(screen.getByText('选择全部可制作镜头'));
     expect(screen.getByRole('button', { name: /开始制作影片/ })).toBeDisabled();
     expect(stub.callsOf('POST', /production-series$/)).toHaveLength(0);

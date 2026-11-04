@@ -729,9 +729,24 @@ def test_a_dependent_shot_stays_blocked_when_its_source_did_not_pass(api, monkey
 
 
 def test_a_profile_without_the_declared_media_family_is_refused(api):
-    """A profile that declares an audio transfer needs an audio reference."""
+    """A profile that declares an audio transfer needs an audio reference —
+    unless the shot carries no dialogue, where an audio reference can only
+    become a speech cue (foreign-language muttering) against the no-speech
+    contract, and the submitted graph prunes the unused audio loader anyway."""
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    # Give the shot a spoken line: with dialogue the audio family is required.
+    spoken = create_shot(
+        client, project_id, style["id"],
+        title="有声镜头", beat="他说了一句", asset_ids=shots[0]["spec"]["required_asset_ids"],
+        bindings=[
+            {"asset_id": shots[0]["spec"]["required_asset_ids"][0], "use_as": "subject",
+             "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": shots[0]["spec"]["required_asset_ids"][-1], "use_as": "picture", "ordinal": 1},
+        ],
+        characters=["CHAR_A"],
+        dialogue=[{"speaker_id": "CHAR_A", "text": "你来了。", "start_s": 1.0, "end_s": 2.4}],
+    )
     profile = register_workflow_profile(
         client,
         mode="Ref2VA",
@@ -762,11 +777,20 @@ def test_a_profile_without_the_declared_media_family_is_refused(api):
     )
     response = client.post(
         f"/api/v1/projects/{project_id}/jobs",
-        json={"shot_id": shots[0]["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+        json={"shot_id": spoken["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
     )
     assert response.status_code == 422, response.text
     assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" in response.text
     assert "audio" in response.text
+
+    # The dialogue-free twin may queue without any audio reference: the family
+    # exemption keeps silent shots from being forced to carry a human voice.
+    silent_response = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={"shot_id": shots[0]["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+    )
+    assert silent_response.status_code == 201, silent_response.text
+    assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" not in silent_response.text
 
 
 def test_a_production_series_needs_a_real_h3_provider(api):

@@ -349,6 +349,31 @@ Never bundle official full-text guides without redistribution permission. Run
   `test_bindings.py`, `test_storyboard.py`, `test_production_series.py`,
   `docs/ACCEPTANCE_20261104_DIRECTOR_MODE.md`.
 
+## 2026-11-04 导演模式全旅程、一键开拍与语言修复（发版 0.2.0）
+
+- **导演层是状态机驱动的单任务界面**：五步旅程（建作品→备素材→定风格→出分镜→制成片）
+  由真实数据判定，页面级步骤条打勾；制作页按「①剧本分镜 ②排产制作 ③进度与结果」
+  stage-dock 单任务聚焦，非当前阶段折叠为一行摘要；运行中的分镜链保持挂载不中断。
+- **一键开拍（自动适配）是排产区唯一主按钮**：自动选方案 → 按方案 parameter_map 声明的
+  参考槽位确定性补齐每镜绑定（无对白镜头不补人声）→ 自动勾选 → 提交；策略选择全部收进
+  「高级设置」折叠。制作进行中隐藏「为什么不能开始」清单，状态由进度卡负责（阶段名、
+  总进度条、镜头圆点、本镜/总计秒级计时——服务端 UTC 时间戳，解析必须补 Z 后缀）。
+- **拍摄质量三档**（catalog 1.2.0）：快速 pdd8 / 高质量原生 20 步 / 超清 pdd8+放大，
+  全部来自上游既有标准图；缺档标「未登记」，`POST /setup/profiles` 幂等补齐。
+- **无对白镜头的外语呢喃根因是两层的**：①冻结风格「声音表演」维度与禁声合同自相矛盾
+  （H3PromptCompiler 现按镜头有无对白裁剪该维度）；②真人音色参考被 H3 当语音线索——
+  `validate_declared_transfer_families(dialogue_free=…)` 对无对白镜头豁免 audio family，
+  未用音频装载节点由既有 prune_unused_reference_nodes 剪除。历史成片不重写，重新交付对照。
+- **孤儿 H3 租约不再死锁 GPU 台账**：worker 崩在「取得租约后、写启动记录前」时，
+  `_release_orphan_h3_lease` 以保守三证（job 未真实渲染、无活进程记录、受管端口空闲、
+  无 handoff-reservation）释放并写审计；有 attempts/provider_job_id 的租约永远保守。
+- **交付单按时间倒序，最新置顶带「最新」徽标，历史折叠**；版本号均为 v1 不代表新旧。
+- 安装器 `install_once.ps1` 在首次安装与已安装两条成功路径上都会在桌面创建
+  「Shine 视频工作台」快捷方式（指向 START_APP.cmd，幂等覆盖，失败不阻断安装）。
+- 证据：`docs/ACCEPTANCE_20261104_DIRECTOR_JOURNEY_ONE_CLICK.md`（三轮真实出片、
+  语言根因、质量档、孤儿租约）；新增/更新回归见 test_managed_process_release.py、
+  test_h3_compiler.py、test_production_series.py、frontend seriesOrder/managed fixtures。
+
 ## 2026-11-04 启动器与发版规范（每次建设/发布必须执行）
 
 本节是**强制流程**，不是建议。任何会改变启动方式、依赖、端口、数据目录或前端产物的

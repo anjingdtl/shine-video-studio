@@ -924,3 +924,160 @@ html[data-theme='dark'] .setup-needs-project p{color:#a9a68c}
 .upload-stack details{margin-bottom:6px}
 .upload-stack details summary{font-size:9px;color:#8b8d82;cursor:pointer;padding:2px 0 6px}
 .upload-stack details label{display:block;font-size:9px;color:#898b82;margin-bottom:6px}
+
+/* ---- 导演模式（2026-11-04 全旅程优化）：状态感知步骤条 / 下一步条 / 阶段条 / 列表内嵌滚动 ---- */
+
+/* 顶部步骤条：完成页打勾 */
+.director-step.is-done{color:#5d6b45}
+.director-step.is-done .director-step-no{border-color:#9db98a;background:#eef4e6;color:#4e6b3c}
+.director-step.active.is-done .director-step-no{border-color:#b9c39b;background:#fff}
+html[data-theme='dark'] .director-step.is-done{color:#b8c79b}
+html[data-theme='dark'] .director-step.is-done .director-step-no{border-color:#41502f;background:#242a1d;color:#a9c193}
+
+/* 每页顶部的「下一步」提示条：任何页面都能一键去该去的地方 */
+.next-step-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;border:1px solid #d8e2c6;background:#f6f9f0;border-radius:9px;margin:0 0 14px}
+.next-step-bar .next-step-tag{font:9px var(--mono);letter-spacing:1px;color:#4e6b3c;background:#e2eed9;border-radius:8px;padding:3px 8px;flex-shrink:0}
+.next-step-bar .next-step-text{flex:1;min-width:220px}
+.next-step-bar .next-step-text b{display:block;font-size:12px;color:#3f4a33}
+.next-step-bar .next-step-text span{display:block;font-size:10px;color:#7a8470;margin-top:3px;line-height:1.5}
+.next-step-bar .must-button{height:32px;font-size:10.5px;padding:0 13px;flex-shrink:0}
+.next-step-bar.done{border-color:#cfe0c2;background:#f2f7ec}
+.next-step-bar.done>svg{color:#6f8752;flex-shrink:0}
+html[data-theme='dark'] .next-step-bar{border-color:#3f4a32;background:#232a1d}
+html[data-theme='dark'] .next-step-bar .next-step-tag{background:#2c3325;color:#a9c193}
+html[data-theme='dark'] .next-step-bar .next-step-text b{color:#c4d2ae}
+html[data-theme='dark'] .next-step-bar .next-step-text span{color:#8f9186}
+html[data-theme='dark'] .next-step-bar.done{border-color:#41502f}
+
+/* 制作页吸附式阶段条：长页面随时回到三个阶段 */
+.produce-stages{position:sticky;top:0;z-index:5;display:flex;gap:8px;flex-wrap:wrap;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:rgba(253,253,250,.94);backdrop-filter:blur(6px)}
+.produce-stages button{display:inline-flex;align-items:center;gap:6px;border:1px solid #e3e4dc;background:#fff;border-radius:16px;padding:7px 13px;font-size:11px;font-weight:600;color:#6a6b62;cursor:pointer}
+.produce-stages button:hover{border-color:#b6bd9d;color:var(--olive-dark)}
+.produce-stages button.active{border-color:#b9c39b;background:#f1f4e6;color:var(--olive-dark)}
+.stage-done-mark{color:#5d7a4e}
+.produce-stages button:not(.active) .stage-done-mark{color:#7d9464}
+#storyboard,#production-series,#production-monitor{scroll-margin-top:64px}
+/* 阶段收纳：非当前阶段折叠为一行摘要，同一时刻只有一个任务占据页面 */
+.stage-dock{border:1px solid var(--line);border-radius:9px;background:#fff;padding:0}
+.stage-dock>summary{cursor:pointer;padding:11px 14px;font-size:12px;font-weight:600;color:#56584b;list-style:none;display:flex;align-items:center;gap:7px}
+.stage-dock>summary::-webkit-details-marker{display:none}
+.stage-dock>summary::before{content:'▸';color:#a3a49a;font-size:9px}
+.stage-dock[open]>summary::before{content:'▾'}
+.stage-dock[open]>summary{border-bottom:1px solid #f0f0ea;margin-bottom:12px}
+.stage-dock>*:not(summary){margin:0 14px 14px}
+.stage-dock .section-card{margin-bottom:0}
+.stage-dock[open]>.advanced-fold{margin:0 0 4px}
+#produce .advanced-inline{margin:8px 0;border-top:1px dotted #ecebe3;padding-top:7px}
+#produce .advanced-inline summary{cursor:pointer;font-size:10px;color:#98998c}
+html[data-theme='dark'] .stage-dock{background:#24251f;border-color:#3a3b31}
+html[data-theme='dark'] .stage-dock>summary{color:#cdcec0;border-bottom-color:#34352c}
+html[data-theme='dark'] .produce-stages button.active{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
+html[data-theme='dark'] #produce .advanced-inline{border-top-color:#34352c}
+@media (prefers-reduced-motion: reduce){.produce-stages{backdrop-filter:none;background:#fdfdfa}}
+
+/* 首访卡片的迷你全旅程条 */
+.first-run-journey{display:flex;gap:8px;list-style:none;margin:4px 0 8px;padding:0;flex-wrap:wrap;justify-content:center}
+.first-run-journey li{display:flex;flex-direction:column;gap:3px;border:1px dashed #ddd9c4;background:#faf8ee;border-radius:8px;padding:8px 12px;min-width:116px;text-align:left}
+.first-run-journey li.now{border-style:solid;border-color:#b8621d;background:#fff4e4}
+.first-run-journey b{font-size:11px;color:#4f5148}
+.first-run-journey li.now b{color:#8a4a12}
+.first-run-journey span{font-size:9px;color:#8a8671}
+html[data-theme='dark'] .first-run-journey li{background:#2a291d;border-color:#4a442c}
+html[data-theme='dark'] .first-run-journey li.now{background:#33261a;border-color:#8a5a25}
+html[data-theme='dark'] .first-run-journey b{color:#cdcec0}
+html[data-theme='dark'] .first-run-journey li.now b{color:#e3b483}
+
+/* 制作进度卡：总进度条 + 当前镜阶段名，制作期间常驻排产区顶部 */
+.series-progress{border:1px solid #cfd9bb;background:#f7f9f1;border-radius:9px;padding:12px 14px;margin:0 0 12px}
+.series-progress-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.series-progress-head b{font-size:12.5px;color:#3f4a33}
+.series-progress-head .spin{color:#6f8752;flex-shrink:0}
+.series-progress-phase{font-size:11px;color:#5f6b4e;background:#eaf0df;border-radius:12px;padding:3px 10px}
+.series-progress-timer{font:10px var(--mono);color:#6f7a5c;background:#f2f4ea;border:1px solid #e0e4d2;border-radius:12px;padding:3px 10px;display:inline-flex;align-items:center;gap:5px;font-variant-numeric:tabular-nums}
+.series-progress-timer i{font-style:normal;color:#b6bda3}
+.series-progress-bar{height:8px;border-radius:6px;background:#e4e8d8;margin:10px 0 9px;overflow:hidden}
+.series-progress-bar i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#7d9464,#626b47);transition:width .6s ease;min-width:2%}
+.series-progress-shots{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.progress-shot{width:24px;height:24px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font:10px var(--mono);background:#eceae2;color:#8b8d81;border:1px solid transparent}
+.progress-shot.passed{background:#e2eed9;color:#4e6b3c}
+.progress-shot.running{background:#f0e9d5;color:#8a6f2f}
+.progress-shot.failed,.progress-shot.blocked{background:#f3e0d9;color:#a35f4d}
+.progress-shot.cancelled{opacity:.5}
+.progress-shot.current{border-color:#626b47;box-shadow:0 0 0 2px #626b4722}
+.series-progress-shots small{font-size:9px;color:#8b8d81;margin-left:4px}
+html[data-theme='dark'] .series-progress{border-color:#3f4a32;background:#232a1d}
+html[data-theme='dark'] .series-progress-head b{color:#c4d2ae}
+html[data-theme='dark'] .series-progress-phase{background:#2c3325;color:#a9c193}
+html[data-theme='dark'] .series-progress-timer{background:#242a1d;border-color:#3a4230;color:#a9b78e}
+html[data-theme='dark'] .series-progress-bar{background:#343a2b}
+@media (prefers-reduced-motion: reduce){.series-progress-bar i{transition:none}}
+
+/* 一键开拍卡片：归一化的全自动入口，策略细节全部收进下方高级设置 */
+.one-click-card{border:1px solid #c9a96a;background:#fff8ea;border-radius:9px;padding:13px 14px;margin:0 0 12px}
+.one-click-main{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.one-click-icon{color:#b8621d;flex-shrink:0}
+.one-click-text{flex:1;min-width:240px}
+.one-click-text b{display:block;font-size:12.5px;color:#6b3c10;letter-spacing:.2px}
+.one-click-text small{display:block;font-size:10px;color:#96682f;margin-top:4px;line-height:1.55}
+.one-click-card .must-button{height:40px;font-size:12px;padding:0 18px}
+/* 拍摄质量档：三选一 pill，缺档如实标注 */
+.quality-picker{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:11px;padding-top:10px;border-top:1px dashed #e8ddc3}
+.quality-option{display:inline-flex;align-items:center;gap:5px;border:1px solid #e3e4dc;background:#fff;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:600;color:#6a6b62;cursor:pointer}
+.quality-option:hover{border-color:#b6bd9d}
+.quality-option.active{border-color:#b8621d;background:#fff4e4;color:#8a4a12}
+.quality-option.unavailable{opacity:.55}
+.quality-option em{font-style:normal;font:8px var(--mono);color:#9a6a3a;background:#f6ecd9;border-radius:8px;padding:2px 6px}
+.quality-note{flex-basis:100%;font-size:10px;color:#96682f;line-height:1.5}
+html[data-theme='dark'] .quality-picker{border-top-color:#4a4027}
+html[data-theme='dark'] .quality-option{background:#24251f;border-color:#3f4036;color:#c9cac0}
+html[data-theme='dark'] .quality-option.active{border-color:#c9762f;background:#33261a;color:#e3b483}
+html[data-theme='dark'] .quality-note{color:#b99a6b}
+html[data-theme='dark'] .one-click-card{border-color:#5c4423;background:#2b2416}
+html[data-theme='dark'] .one-click-text b{color:#e3b483}
+html[data-theme='dark'] .one-click-text small{color:#b99a6b}
+.series-advanced{border:1px solid var(--line);border-radius:9px;background:#fff;padding:0;margin-bottom:12px}
+.series-advanced summary{cursor:pointer;padding:11px 14px;font-size:11px;font-weight:600;color:#6a6b62;list-style:none;display:flex;align-items:center;gap:6px}
+.series-advanced summary::before{content:'▸';color:#a3a49a;font-size:9px}
+.series-advanced[open] summary::before{content:'▾'}
+.series-advanced[open] summary{margin-bottom:10px}
+.series-advanced > *:not(summary){margin:0 14px 14px}
+html[data-theme='dark'] .series-advanced{background:#24251f;border-color:#3a3b31;color:#c9cac0}
+
+/* 技术详情折叠（工种产出编号等） */
+.tech-details{margin-top:8px;border-top:1px dotted #ecebe3;padding-top:7px}
+.tech-details summary{cursor:pointer;font-size:9px;color:#98998c}
+html[data-theme='dark'] .tech-details{border-top-color:#34352c}
+html[data-theme='dark'] .tech-details summary{color:#8f9186}
+
+/* 列表内嵌滚动：固定可视高度，长列表不再撑爆页面（CTA 按钮都在滚动区外） */
+.asset-list,.shot-list,.series-list,.agent-step-list,.auto-delivery,.delivery-list{overflow-y:auto;padding-right:4px;scrollbar-width:thin;scrollbar-color:#cfcec5 transparent}
+.asset-list{max-height:340px}
+.shot-list{max-height:300px}
+.series-list{max-height:340px}
+.agent-step-list{max-height:240px}
+.auto-delivery{max-height:560px}
+.delivery-list{max-height:640px}
+.auto-delivery .latest{border-color:#cfe0c2;background:#f7faf2}
+.latest-badge{font-style:normal;font:9px var(--mono);color:#fff;background:#626b47;border-radius:8px;padding:2px 8px;margin-left:8px;vertical-align:1px}
+.history-order{border:1px solid var(--line);border-radius:7px;background:#fcfcf9;padding:0;margin-bottom:8px}
+.history-order summary{cursor:pointer;list-style:none;padding:10px 12px}
+.history-order summary::-webkit-details-marker{display:none}
+.history-order summary::before{content:'▸ 历史 ';color:#a3a49a;font-size:9px}
+.history-order[open] summary::before{content:'▾ 历史 '}
+.history-order summary b{font-size:12px}
+.history-order summary p{margin:4px 0 0;font-size:10px;color:#8a8b84}
+.history-order > *:not(summary){margin:0 12px 12px}
+html[data-theme='dark'] .auto-delivery .latest{background:#232a1d;border-color:#3f4a32}
+html[data-theme='dark'] .history-order{background:#24251f;border-color:#3a3b31}
+html[data-theme='dark'] .history-order summary p{color:#8f9186}
+fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollbar-width:thin;scrollbar-color:#cfcec5 transparent}
+.series-block .series-items{max-height:220px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#cfcec5 transparent}
+.asset-list::-webkit-scrollbar,.shot-list::-webkit-scrollbar,.series-list::-webkit-scrollbar,.agent-step-list::-webkit-scrollbar,.auto-delivery::-webkit-scrollbar,.delivery-list::-webkit-scrollbar,fieldset.binding-list::-webkit-scrollbar,.series-block .series-items::-webkit-scrollbar{width:5px}
+.asset-list::-webkit-scrollbar-thumb,.shot-list::-webkit-scrollbar-thumb,.series-list::-webkit-scrollbar-thumb,.agent-step-list::-webkit-scrollbar-thumb,.auto-delivery::-webkit-scrollbar-thumb,.delivery-list::-webkit-scrollbar-thumb,fieldset.binding-list::-webkit-scrollbar-thumb,.series-block .series-items::-webkit-scrollbar-thumb{background:#d4d4cc;border-radius:3px}
+html[data-theme='dark'] .asset-list,html[data-theme='dark'] .shot-list,html[data-theme='dark'] .series-list,html[data-theme='dark'] .agent-step-list,html[data-theme='dark'] .auto-delivery,html[data-theme='dark'] .delivery-list,html[data-theme='dark'] fieldset.binding-list,html[data-theme='dark'] .series-block .series-items{scrollbar-color:#4a4b40 transparent}
+html[data-theme='dark'] .asset-list::-webkit-scrollbar-thumb,html[data-theme='dark'] .shot-list::-webkit-scrollbar-thumb,html[data-theme='dark'] .series-list::-webkit-scrollbar-thumb,html[data-theme='dark'] .agent-step-list::-webkit-scrollbar-thumb,html[data-theme='dark'] .auto-delivery::-webkit-scrollbar-thumb,html[data-theme='dark'] .delivery-list::-webkit-scrollbar-thumb,html[data-theme='dark'] fieldset.binding-list::-webkit-scrollbar-thumb,html[data-theme='dark'] .series-block .series-items::-webkit-scrollbar-thumb{background:#4a4b40}
+@media (max-width:700px){
+  .next-step-bar{align-items:flex-start;flex-direction:column;gap:8px}
+  .produce-stages{top:0;padding:6px 8px}
+  .first-run-journey li{min-width:calc(50% - 8px)}
+}

@@ -15,6 +15,8 @@ type VoiceReadiness = {
 type LlmReadiness = { status: string; roles: Array<{ role: string; profile_name: string | null; code: string | null }> };
 
 type Props = {
+  /** 进入基础配置时直达的分区：导演模式内“去配置模型服务/生成方案”等引导会指到 models。 */
+  focusTab?: Tab;
   project?: Project;
   projectId: string;
   projectTitle: string;
@@ -55,13 +57,14 @@ function roleText(role: { role: string; code: string | null }): string {
  * 同一套接口，导演模式不另造一套能力。
  */
 export default function DirectorSetupPanel({
+  focusTab = 'env',
   project, projectId, projectTitle, setProjectTitle, createProject, system, profiles, routes,
   workflowProfiles, busy, refreshEpoch, onRefresh,
   onProjectSettings, onCreateProfile, onTestProfile, onSetKey, onDeleteProfile, onRoute,
   onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow, onBindStandardParameters,
   onOpenExpert,
 }: Props) {
-  const [tab, setTab] = useState<Tab>('env');
+  const [tab, setTab] = useState<Tab>(focusTab);
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
 
@@ -86,7 +89,7 @@ export default function DirectorSetupPanel({
   return <div className="director-page director-setup" id="director-setup">
     <section className="welcome-row">
       <div>
-        <div className="eyebrow"><span className="eyebrow-line" /> 基础配置 <span className="eyebrow-en">SETUP</span></div>
+        <div className="eyebrow"><span className="eyebrow-line" /> 基础配置</div>
         <h1>先把机器调好，<em>再让 AI 开工。</em></h1>
         <p>这三步不需要专业模式：装好本机环境、配置文本模型、选一个生成方案。任何一步没完成，制作页都会明确告诉你缺什么。</p>
       </div>
@@ -106,7 +109,7 @@ export default function DirectorSetupPanel({
       </div>
       <div className={`setup-status ${profiled.length ? 'ok' : 'pending'}`}>
         <div className="setup-status-icon"><Settings2 size={16} /></div>
-        <div><b>生成方案（H3 工作流）</b><span>{profiled.length ? `${profiled.length} 个 Ref2VA 方案已登记` : '还没有可用的 H3 生成方案'}</span></div>
+        <div><b>生成方案</b><span>{profiled.length ? `${profiled.length} 个生成方案已登记` : '还没有可用的生成方案'}</span></div>
         {profiled.length ? <Check size={15} /> : <AlertTriangle size={15} />}
       </div>
     </section>
@@ -158,7 +161,7 @@ export default function DirectorSetupPanel({
         </div>
         {profiled.length === 0 && <div className="blocked-callout">
           <AlertTriangle size={15} />
-          <span>还没有 Ref2VA 生成方案。先在「安装与下载」完成环境检测，系统会登记并验证本项目的 H3 工作流。</span>
+          <span>还没有生成方案。先在「安装与下载」完成环境检测，系统会自动登记并验证本项目可用的出片方案。</span>
         </div>}
         <div className="workflow-list">
           {profiled.map((profile) => {

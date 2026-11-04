@@ -10,7 +10,7 @@ type DeliveryOrder = {
   id: string; series_id: string; version: number; status: string;
   edl_source: string | null; artifact_id: string | null; sha256?: string;
   attempt_count: number; max_attempts: number; failure_code: string | null;
-  delivered_at: string | null;
+  created_at: string; delivered_at: string | null;
 };
 
 const orderText: Record<string, string> = {
@@ -21,6 +21,14 @@ const orderText: Record<string, string> = {
   BLOCKED: '已阻断（需人工处理）',
   CANCELLED: '已取消',
 };
+
+/** 后端时间戳是无时区的 UTC 字符串：必须显式按 UTC 解析，否则本地时区会错位。 */
+function utcMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const normalised = value.includes('T') ? value : value.replace(' ', 'T');
+  const parsed = new Date(normalised.endsWith('Z') ? normalised : normalised + 'Z').getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 type Props = {
   projectId: string;
@@ -146,17 +154,31 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     {loadError && <p className="failure" role="alert">交付列表读取失败：{loadError}（显示的不是最新数据，可点击「刷新交付列表」重试）</p>}
 
     {orders.length > 0 && <div className="auto-delivery" aria-label="自动交付">
-      {orders.map((order) => <article className="settings-block" key={order.id}>
-        <b>自动交付 v{order.version} · {orderText[order.status] ?? order.status}</b>
-        <p>{order.edl_source === 'frozen_edit_intent' ? '剪辑来源：冻结剪辑意图' : '剪辑来源：默认剪辑规则'}
-          {order.artifact_id && <> · <a href={`${API}/deliveries/${order.artifact_id}/media`} download>下载 MP4</a></>}
-          {order.attempt_count > 0 && <> · 尝试 {order.attempt_count}/{order.max_attempts}</>}
-          {order.failure_code && <span className="failure"> · {label(failureLabels, order.failure_code)}</span>}
-        </p>
-        {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
-        {order.status === 'DELIVERED' && order.artifact_id
-          && <video controls preload="metadata" src={`${API}/deliveries/${order.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />}
-      </article>)}
+      {[...orders].sort((a, b) => (utcMs(b.delivered_at ?? b.created_at) ?? 0) - (utcMs(a.delivered_at ?? a.created_at) ?? 0)).map((order, index) => {
+        const deliveredAt = utcMs(order.delivered_at ?? order.created_at);
+        const timeLabel = deliveredAt != null
+          ? new Date(deliveredAt).toLocaleString('zh-CN', { hour12: false })
+          : null;
+        const head = (
+          <>
+            <b>自动交付 v{order.version} · {orderText[order.status] ?? order.status}{index === 0 && <em className="latest-badge">最新</em>}</b>
+            <p>{timeLabel && <>交付于 {timeLabel} · </>}{order.edl_source === 'frozen_edit_intent' ? '剪辑来源：冻结剪辑意图' : '剪辑来源：默认剪辑规则'}
+              {order.artifact_id && <> · <a href={`${API}/deliveries/${order.artifact_id}/media`} download>下载 MP4</a></>}
+              {order.attempt_count > 0 && <> · 尝试 {order.attempt_count}/{order.max_attempts}</>}
+              {order.failure_code && <span className="failure"> · {label(failureLabels, order.failure_code)}</span>}
+            </p>
+          </>
+        );
+        const body = <>
+          {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
+          {order.status === 'DELIVERED' && order.artifact_id
+            && <video controls preload="metadata" src={`${API}/deliveries/${order.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />}
+        </>;
+        // 最新交付直接展开；历史交付折叠成一行，避免旧样片占据页面误导。
+        return index === 0
+          ? <article className="settings-block latest" key={order.id}>{head}{body}</article>
+          : <details className="history-order" key={order.id}><summary>{head}</summary>{body}</details>;
+      })}
     </div>}
 
     <p>连续制作完成后，系统会自动整理并装配成片，无需人工填写。下面的手工装配保留给人工修订与补剪。</p>
@@ -187,13 +209,15 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     <button disabled={busy || !edl.trim()} onClick={assemble}>{busy ? '正在装配…' : '校验并装配成片（人工修订）'}</button>
     {message && <p role="status">{message}</p>}
     {!loadError && !deliveries.length && !orders.some(o => o.status === 'DELIVERED') && <p>暂无交付成片。</p>}
-    {deliveries.map(row => <article className="settings-block" key={row.artifact_id}>
-      <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
-      <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
-      <video controls preload="metadata" src={`${API}/deliveries/${row.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />
-      <p><a href={`${API}/deliveries/${row.artifact_id}/media`} download>下载 MP4</a></p>
-      <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
-      <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>
-    </article>)}
+    <div className="delivery-list">
+      {deliveries.map(row => <article className="settings-block" key={row.artifact_id}>
+        <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
+        <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
+        <video controls preload="metadata" src={`${API}/deliveries/${row.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />
+        <p><a href={`${API}/deliveries/${row.artifact_id}/media`} download>下载 MP4</a></p>
+        <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
+        <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>
+      </article>)}
+    </div>
   </section>;
 }

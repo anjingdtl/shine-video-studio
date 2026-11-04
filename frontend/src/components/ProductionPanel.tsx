@@ -72,9 +72,9 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
     <div className="card section-card monitor-card">
       <div className="section-heading compact">
         <div>
-          <div className="section-kicker">04 / PRODUCTION MONITOR</div>
-          <h2>生成进度与检查</h2>
-          <p>点开任务可查看生成进度、技术校验和审片建议。画面、风格与对白模型只提供建议；本机未运行或不可用时不会阻止镜头继续制作，视频完整性和规格异常仍会阻止成片整理。</p>
+          <div className="section-kicker">③ 进度与结果</div>
+          <h2>制作进度与结果</h2>
+          <p>点开任务可查看生成进度、技术检查和 AI 审片建议。画面、风格与对白的建议只作参考，不会卡住制作；视频文件损坏或规格不符才会拦下成片。</p>
         </div>
         <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台制作服务在线' : '后台制作服务离线'}</div>
       </div>

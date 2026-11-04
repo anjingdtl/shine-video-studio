@@ -156,9 +156,9 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
     <div className="card section-card storyboard-card" id="shots">
       <div className="section-heading compact">
         <div>
-          <div className="section-kicker">03 / SHOT WORKSPACE</div>
-          <h2>分镜与独立素材绑定</h2>
-          <p>每个镜头独立保存引用；编号由任务级确定性程序重新映射。</p>
+          <div className="section-kicker">高级 · 单镜头编辑</div>
+          <h2>手工新建或修改单个镜头</h2>
+          <p>AI 分镜之外，也可以手工新建镜头、指定用到的素材和对白；下方还能查看现有镜头并调整引用。</p>
         </div>
         <div className="section-icon plum"><Clapperboard size={17} /></div>
       </div>
@@ -312,7 +312,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
       </div>
       {preview && <div className="prompt-preview">
         <div className="prompt-head">
-          <div><b>H3 提示词预览</b><span>生成方式：{label(modeLabels, preview.mode)} · 编译器 {preview.compiler_version} · 指纹 {preview.prompt_sha256.slice(0, 10)}…</span></div>
+          <div><b>H3 提示词预览</b><span title={`提示词校验码 ${preview.prompt_sha256.slice(0, 16)}…`}>生成方式：{label(modeLabels, preview.mode)} · 编译版本 {preview.compiler_version}</span></div>
           <button className="icon-button tiny" onClick={() => setPreview(null)}><X size={13} /></button>
         </div>
         {preview.warnings.length > 0 && <div className="prompt-warnings">{preview.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
