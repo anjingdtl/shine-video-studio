@@ -318,3 +318,29 @@ def test_the_chosen_frame_reaches_the_h3_node_inputs():
     assert submitted["31"]["inputs"]["width"] == 1344
     assert submitted["31"]["inputs"]["height"] == 768
     assert submitted["31"]["inputs"]["prompt"] == "a shot"
+
+
+def test_every_later_shot_of_a_series_reads_the_same_output_spec(api):
+    """The resident Worker builds the next job from the durable series row."""
+    from shine.comfyops.production_series import _create_body
+    from shine.models import ProductionSeries, Shot
+
+    client, factory, _settings = api
+    project_id = create_project(client, "后续镜头规格")
+    style = freeze_style(client, project_id)
+    asset = upload_asset(client, project_id, content=PNG + b"-later", filename="阿德.png",
+                         role="character", entity_id="阿德")
+    approve_lock(client, asset["id"])
+    shot = create_shot(
+        client, project_id, style["id"], title="第二镜", beat="阿德回头。", characters=["阿德"],
+        asset_ids=[asset["id"]],
+        bindings=[{"asset_id": asset["id"], "use_as": "subject", "role": "阿德", "ordinal": 0}],
+    )
+    with factory() as db:
+        series = ProductionSeries(
+            project_id=project_id, provider="comfyui", self_review_scope="full",
+            mock_scenario="success", output_spec={"width": 1344, "height": 768, "fps": 24, "clip_seconds": 6},
+        )
+        body = _create_body(series, db.get(Shot, shot["id"]))
+    assert body.output is not None
+    assert (body.output.width, body.output.height, body.output.clip_seconds) == (1344, 768, 6)

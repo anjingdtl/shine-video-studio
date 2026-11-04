@@ -92,10 +92,10 @@
 
 ## 6. 测试
 
-- 新增 `backend/tests/test_output_spec_and_identity.py`（11 项）：manifest family
+- 新增 `backend/tests/test_output_spec_and_identity.py`（12 项）：manifest family
   顺序、cast order、未绑定角色拒绝、voice 可选、尺寸未映射拒绝、尺寸进入请求、
   时长装不下对白按名拒绝、标准参数只映射真实存在的输入、老方案只补两个标准键、
-  画幅真正写进 H3 节点输入。
+  画幅真正写进 H3 节点输入、后续镜头从序列行读取同一规格。
 - 更新：`test_h3_compiler.py`、`test_bindings.py`、`test_storyboard.py`、
   `test_alembic.py`、`test_migrations_windows.py`、
   `test_global_workflow_name_migration.py`、`test_production_mode.py`。
