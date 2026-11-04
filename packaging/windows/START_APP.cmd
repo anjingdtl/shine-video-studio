@@ -13,9 +13,9 @@ rem Prefer the pinned PowerShell 7 the installer put on PATH; fall back to the
 rem bundled Windows PowerShell so this entry never depends on a missing tool.
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser -AutoPorts
 ) else (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_shine.ps1" -OpenBrowser -AutoPorts
 )
 set "RC=%ERRORLEVEL%"
 echo.

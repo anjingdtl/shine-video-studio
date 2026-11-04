@@ -58,6 +58,12 @@ function Get-EnvValue([string]$Path, [string]$Key) {
 }
 
 function Test-PortFree([int]$Port) {
+    # Ask the OS first: a TcpListener may still bind a port another process
+    # holds when address reuse is permitted, which made the launcher believe a
+    # busy port was free and hand it to start_shine.ps1 (which then failed).
+    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        return $false
+    }
     $listener = $null
     try {
         $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
@@ -85,6 +91,37 @@ function Test-ApiAlive([int]$Port) {
     } catch {
         return $false
     }
+}
+
+function Test-WebAlive([int]$Port) {
+    if (-not $Port) { return $false }
+    try {
+        # A listening socket is not a working page: Vite binds the port before
+        # it serves the first request. Ask for the document itself.
+        $response = Invoke-WebRequest "http://127.0.0.1:$Port/" -TimeoutSec 4 -UseBasicParsing
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500)
+    } catch {
+        return $false
+    }
+}
+
+function Get-PortOwner([int]$Port) {
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($listener) { return [int]$listener.OwningProcess }
+    return 0
+}
+
+function Test-RecordedApiAlive($Record) {
+    # Only the process this record started may count as "our API". A stray
+    # developer server on the same port used to make a dead stack look alive
+    # and sent the browser to an empty web port.
+    $port = [int]$Record.api_port
+    if (-not (Test-ApiAlive $port)) { return $false }
+    $api = @($Record.processes) | Where-Object { $_.name -eq 'api' } | Select-Object -First 1
+    $expected = if ($api -and $api.listener_pid) { [int]$api.listener_pid } else { 0 }
+    if (-not $expected) { return $false }
+    return ((Get-PortOwner $port) -eq $expected)
 }
 
 function Show-Tail([string]$Path, [int]$Lines = 12) {
@@ -127,7 +164,13 @@ $logDir = Join-Path $runDir 'logs'
 if (Test-Path -LiteralPath $manifestPath) {
     $record = $null
     try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
-    if ($record -and (Test-ApiAlive ([int]$record.api_port))) {
+    $recordedApiAlive = $false
+    $recordedWebAlive = $false
+    if ($record) {
+        $recordedApiAlive = Test-RecordedApiAlive $record
+        $recordedWebAlive = Test-WebAlive ([int]$record.web_port)
+    }
+    if ($record -and $recordedApiAlive -and $recordedWebAlive) {
         $url = "http://127.0.0.1:$($record.web_port)/"
         Write-Ok "工作台已在运行（API $($record.api_port) / Web $($record.web_port)）"
         Write-Host "  正在打开：$url" -ForegroundColor Green
@@ -137,7 +180,14 @@ if (Test-Path -LiteralPath $manifestPath) {
         if (-not $KeepOpen) { Start-Sleep -Seconds ([Math]::Max(3, $CloseAfterSeconds)) }
         exit 0
     }
-    Write-Warn '上次运行没有正常退出，正在安全收尾（只结束身份匹配的进程）'
+    if ($record -and ($recordedApiAlive -or $recordedWebAlive)) {
+        # One half of the stack answered while the other did not. Opening the
+        # browser here would show ERR_CONNECTION_REFUSED; stop what this record
+        # owns and start a complete stack again.
+        Write-Warn '上次只启动了一部分服务（API 与网页没有同时在线），正在收尾并重启'
+    } else {
+        Write-Warn '上次运行没有正常退出，正在安全收尾（只结束身份匹配的进程）'
+    }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $backendPython $stopScript --data-dir $dataDir } finally { $ErrorActionPreference = $previous }
@@ -167,11 +217,15 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 
 Write-Step '选择端口'
-$apiPort = Get-FreePort $ApiPort
-$webPort = Get-FreePort ($WebPort + ($apiPort - $ApiPort))
+# PowerShell variable names are case-insensitive: assigning to $apiPort would
+# overwrite the $ApiPort parameter, so keep the requested defaults first.
+$defaultApiPort = $ApiPort
+$defaultWebPort = $WebPort
+$apiPort = Get-FreePort $defaultApiPort
+$webPort = Get-FreePort $defaultWebPort
 if ($webPort -eq $apiPort) { $webPort = Get-FreePort ($apiPort + 1) }
-if ($apiPort -ne $ApiPort -or $webPort -ne $WebPort) {
-    Write-Warn "默认端口被占用，改用 API $apiPort / Web $webPort"
+if ($apiPort -ne $defaultApiPort -or $webPort -ne $defaultWebPort) {
+    Write-Warn "默认端口被占用，已改用 API $apiPort / Web $webPort"
 } else {
     Write-Ok "API $apiPort / Web $webPort"
 }

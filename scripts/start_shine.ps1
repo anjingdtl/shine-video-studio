@@ -12,7 +12,8 @@
     [ValidateRange(1,65535)][int]$ReviewPort = 8116,
     [string]$AdditionalReviewManifest = '',
     [ValidateRange(1,65535)][int]$AdditionalReviewPort = 8117,
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$AutoPorts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,10 +96,96 @@ if (-not $DataDir) {
 $resolvedDataDir = Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue
 $env:SHINE_DATA_DIR = if ($resolvedDataDir) { $resolvedDataDir.Path } else { [System.IO.Path]::GetFullPath($DataDir) }
 New-Item -ItemType Directory -Force -Path $env:SHINE_DATA_DIR | Out-Null
-if (Test-Path (Join-Path $env:SHINE_DATA_DIR 'run/processes.json')) {
-    throw 'This data directory already has a process manifest. Stop or reconcile that stack before restarting.'
+function Get-PortOwner([int]$Port) {
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($listener) { return [int]$listener.OwningProcess }
+    return 0
+}
+
+function Get-FreeShinePort([int]$Start, [int[]]$Exclude = @()) {
+    for ($port = $Start; $port -lt ($Start + 60); $port++) {
+        if ($Exclude -contains $port) { continue }
+        if (-not (Get-PortOwner $port)) { return $port }
+    }
+    throw "No free local port between $Start and $($Start + 59)."
+}
+
+function Test-WebAlive([int]$Port) {
+    if (-not $Port) { return $false }
+    try {
+        $response = Invoke-WebRequest "http://127.0.0.1:$Port/" -TimeoutSec 4 -UseBasicParsing
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500)
+    } catch {
+        return $false
+    }
+}
+
+function Test-RecordedApiAlive($Record) {
+    $port = [int]$Record.api_port
+    if (-not $port) { return $false }
+    try {
+        $health = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 3
+        if (-not $health) { return $false }
+    } catch {
+        return $false
+    }
+    $api = @($Record.processes) | Where-Object { $_.name -eq 'api' } | Select-Object -First 1
+    $expected = if ($api -and $api.listener_pid) { [int]$api.listener_pid } else { 0 }
+    if (-not $expected) { return $false }
+    return ((Get-PortOwner $port) -eq $expected)
+}
+
+$manifestPath = Join-Path $env:SHINE_DATA_DIR 'run/processes.json'
+if (Test-Path $manifestPath) {
+    $record = $null
+    try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
+    $apiAlive = $false
+    $webAlive = $false
+    if ($record) {
+        $apiAlive = Test-RecordedApiAlive $record
+        $webAlive = Test-WebAlive ([int]$record.web_port)
+    }
+    if ($record -and $apiAlive -and $webAlive) {
+        Write-Host "The workbench is already running: http://127.0.0.1:$($record.web_port)/"
+        if ($OpenBrowser) { Start-Process "http://127.0.0.1:$($record.web_port)/" }
+        exit 0
+    }
+    # A half-dead stack must not brick the only start button. Stop what this
+    # record really owns; if its identity cannot be proven, archive the record
+    # and let the port check below decide whether a real conflict remains.
+    Write-Warning 'The previous run did not leave a complete stack; reconciling it first.'
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR } finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $manifestPath)) {
+        $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Move-Item -LiteralPath $manifestPath -Destination $archived -Force
+        Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
+    }
+    if (Test-Path -LiteralPath $manifestPath) {
+        throw 'This data directory still has a process manifest. Stop or reconcile that stack before restarting.'
+    }
 }
 $env:SHINE_RENDER_PROVIDER = $Provider
+
+# Installed copies and the packaged START_APP use -AutoPorts: a busy 8000 must
+# not make the only start button unusable. The chosen ports are printed and
+# recorded, so the browser and the stop command use the same ones.
+if ($AutoPorts) {
+    $resolvedApiPort = if (Get-PortOwner $ApiPort) { Get-FreeShinePort $ApiPort } else { $ApiPort }
+    $reserved = @($resolvedApiPort)
+    if ($startReview) { $reserved += $ReviewPort }
+    if ($AdditionalReviewManifest) { $reserved += $AdditionalReviewPort }
+    $resolvedWebPort = if ((Get-PortOwner $WebPort) -or ($reserved -contains $WebPort)) {
+        Get-FreeShinePort $WebPort $reserved
+    } else { $WebPort }
+    if ($resolvedApiPort -ne $ApiPort -or $resolvedWebPort -ne $WebPort) {
+        Write-Host "Requested ports are busy; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
+    }
+    $ApiPort = $resolvedApiPort
+    $WebPort = $resolvedWebPort
+}
 $env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
 
 if ($Install -or -not (Test-Path $backendEnv)) {
@@ -152,7 +239,10 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
 if (-not $databaseUrl.StartsWith('sqlite:///')) { throw 'The local launcher requires a SQLite database URL.' }
 $env:SHINE_DATABASE_URL = $databaseUrl
-& (Join-Path $PSScriptRoot 'check_environment.ps1')
+$checkPorts = @($ApiPort, $WebPort)
+if ($startReview) { $checkPorts += $ReviewPort }
+if ($AdditionalReviewManifest) { $checkPorts += $AdditionalReviewPort }
+& (Join-Path $PSScriptRoot 'check_environment.ps1') -Ports $checkPorts
 
 Write-Host "Data directory: $env:SHINE_DATA_DIR"
 Write-Host "Database:       $databaseUrl"
@@ -173,13 +263,6 @@ $viteArgs = @(
 )
 
 $started = @()
-
-function Get-PortOwner([int]$Port) {
-    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($listener) { return $listener.OwningProcess }
-    return $null
-}
 
 # A port that is already in use makes the new API die with a bind error while the
 # old server keeps serving, which looks like the new configuration being ignored.
@@ -291,6 +374,22 @@ for ($i = 0; $i -lt 60; $i++) {
 if (-not $webListener) { throw "Web startup failed on port $WebPort" }
 $webEntry.listener_pid = $webListener
 
+# A bound port is not a usable page: wait until Vite answers the document so the
+# browser never opens on ERR_CONNECTION_REFUSED.
+$webReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        $page = Invoke-WebRequest "http://127.0.0.1:$WebPort/" -TimeoutSec 2 -UseBasicParsing
+        if ($page.StatusCode -ge 200 -and $page.StatusCode -lt 500) { $webReady = $true; break }
+    } catch { }
+    if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $webReady) {
+    Get-Content $webEntry.stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    throw "Web did not serve a page on port $WebPort"
+}
+
 # Capture verified birth identities for launchers and all descendants, including
 # the worker's re-executed interpreter (which has no listening socket).
 foreach ($entry in $started) {
@@ -346,6 +445,7 @@ if ($OpenBrowser) {
     # The first installer launch must land in the guided setup, not on a blank
     # project page. Create one local setup project only when the workspace has
     # no project at all; never mutate an existing workspace.
+    $openUrl = "http://127.0.0.1:$WebPort/"
     try {
         $apiBase = "http://127.0.0.1:$ApiPort/api/v1"
         # Invoke-RestMethod turns an empty JSON array into $null, and @($null)
@@ -360,10 +460,13 @@ if ($OpenBrowser) {
             Invoke-RestMethod "$apiBase/projects" -Method Post -ContentType 'application/json; charset=utf-8' `
                 -Body $setupProjectBytes -TimeoutSec 15 | Out-Null
             Write-Host 'Created the guided setup project: 本机安装与联调'
+            # The director layer owns its own setup page; an existing user
+            # keeps landing on the workbench home instead.
+            $openUrl = "http://127.0.0.1:$WebPort/#d/setup"
         }
-        Start-Process "http://127.0.0.1:$WebPort/#setup"
+        Start-Process $openUrl
     } catch {
-        Write-Warning "The workbench started, but the guided browser entry could not be opened: $($_.Exception.Message)"
-        Start-Process "http://127.0.0.1:$WebPort"
+        Write-Warning "The workbench started, but the browser entry could not be opened: $($_.Exception.Message)"
+        Start-Process $openUrl
     }
 }

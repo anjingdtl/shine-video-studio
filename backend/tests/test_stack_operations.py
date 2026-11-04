@@ -173,3 +173,51 @@ def test_launcher_continues_instead_of_bricking_on_an_unreconcilable_record():
     assert "processes.unresolved-" in text, "the launcher must archive the record it cannot reconcile"
     assert "不会盲杀" in text, "the launcher must state that it does not kill unverified processes"
     assert "stop_shine.py" in text, "the launcher must reconcile through the verified stop path"
+
+
+def test_launcher_recognises_a_half_dead_stack_and_the_package_can_move_ports():
+    """The single entry point must never send the browser to a dead web port.
+
+    A stale manifest plus an unrelated process on 8000 used to look like a
+    running workbench because only the API health was checked. The launcher now
+    verifies the recorded listener identity, waits for the page itself, and the
+    packaged start entry can move both ports.
+    """
+    root = Path(__file__).resolve().parents[2]
+    dev = (root / "scripts/start_dev.ps1").read_text(encoding="utf-8-sig")
+    shine = (root / "scripts/start_shine.ps1").read_text(encoding="utf-8-sig")
+    install = (root / "scripts/install_once.ps1").read_text(encoding="utf-8-sig")
+    start_app = (root / "packaging/windows/START_APP.cmd").read_text(encoding="utf-8-sig")
+
+    assert "function Test-WebAlive" in dev
+    assert "function Test-RecordedApiAlive" in dev
+    assert "默认端口被占用" in dev
+    assert "Test-WebAlive" in shine
+    assert "AutoPorts" in shine
+    assert "-AutoPorts" in start_app
+    assert "Get-NetTCPConnection" in install
+    assert (root / "scripts/update_dev_shortcut.ps1").is_file()
+
+
+def test_launcher_recognises_a_half_dead_stack_and_the_package_can_move_ports():
+    """The single entry point must never send the browser to a dead web port.
+
+    A stale manifest plus an unrelated process on 8000 used to look like a
+    running workbench because only the API health was checked. The launcher now
+    verifies the recorded listener identity, waits for the page itself, and the
+    packaged start entry can move both ports.
+    """
+    root = Path(__file__).resolve().parents[2]
+    dev = (root / "scripts/start_dev.ps1").read_text(encoding="utf-8-sig")
+    shine = (root / "scripts/start_shine.ps1").read_text(encoding="utf-8-sig")
+    install = (root / "scripts/install_once.ps1").read_text(encoding="utf-8-sig")
+    start_app = (root / "packaging/windows/START_APP.cmd").read_text(encoding="utf-8-sig")
+
+    assert "function Test-WebAlive" in dev
+    assert "function Test-RecordedApiAlive" in dev
+    assert "默认端口被占用" in dev
+    assert "Test-WebAlive" in shine
+    assert "AutoPorts" in shine
+    assert "-AutoPorts" in start_app
+    assert "Get-NetTCPConnection" in install
+    assert (root / "scripts/update_dev_shortcut.ps1").is_file()

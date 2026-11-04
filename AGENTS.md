@@ -285,3 +285,87 @@ Never bundle official full-text guides without redistribution permission. Run
 - Evidence: `backend/tests/test_output_spec_and_identity.py`, `test_h3_compiler.py`,
   `test_bindings.py`, `test_storyboard.py`, `test_production_series.py`,
   `docs/ACCEPTANCE_20261104_DIRECTOR_MODE.md`.
+
+## 2026-11-04 启动器与发版规范（每次建设/发布必须执行）
+
+本节是**强制流程**，不是建议。任何会改变启动方式、依赖、端口、数据目录或前端产物的
+改动，都必须同时完成「开发机根目录一键启动」和「项目安装包」两条验收链。只改代码、
+不验证入口的提交视为未完成。
+
+### A. 开发机根目录一键启动（每轮必验）
+
+入口只有两个，二者必须指向同一套脚本：
+
+| 入口 | 作用 | 何时更新 |
+| --- | --- | --- |
+| `一键启动 Shine 视频工作台.lnk` | 日常双击 | 仓库路径、PowerShell 7 路径、脚本名/参数、图标变化时 |
+| `启动 Shine 工作台.cmd` | 快捷方式失效时的便携入口 | 脚本名/参数变化时 |
+| `scripts/start_dev.ps1` | 选择端口、收尾旧栈、调用 start_shine | 启动逻辑变化时 |
+| `scripts/start_shine.ps1` | 迁移数据库、启动 API/Worker/Web、写进程记录 | 服务启动逻辑变化时 |
+
+**更新快捷方式**：运行 `scripts\update_dev_shortcut.ps1`（重建 lnk 的
+Target/Arguments/WorkingDirectory，保留原图标）。不要手写一个指向绝对路径的 lnk 后
+就认为完成——脚本参数变了，lnk 也必须重建。
+
+**每轮必须通过的四条验收入口**（至少跑 1、2、4；改端口/记录逻辑时四条全跑）：
+
+1. **干净重启**：先停止旧栈，再双击。API `/health` 返回 200，Web
+   `http://127.0.0.1:<web>/` 返回 200，浏览器落在正确页面：已有作品 → `/`
+   （导演模式首页）；空库 → `/#d/setup`（导演模式基础配置）。
+2. **默认端口被别的进程占用**：保留一个非本栈的监听进程在 8000，双击启动。
+   启动器必须识别「记录里的 API 身份与 8000 上的进程不一致」，不能报「工作台已在运行」；
+   必须自动换到 8001/5174 一类空闲端口，并让浏览器打开实际端口。
+3. **半启动残栈**：只保留 API、杀掉 Web，双击。必须收尾并重启，不能把浏览器送到
+   一个已死的 5173。
+4. **停止**：`stop_shine.py --data-dir <数据目录>` 退出码 0，`processes.json` 消失，
+   端口不再监听；无法核对身份的进程只归档、不盲杀，归档最多保留 5 份。
+
+**启动器硬规则**：
+
+- PowerShell 变量名大小写不敏感：不要写 `$apiPort` 和 `$ApiPort` 两个“不同”变量；
+  参数默认值必须先存到 `$defaultApiPort` 再解析。
+- 判断“端口空闲”必须先查 `Get-NetTCPConnection -State Listen`，再尝试
+  `TcpListener`；只靠绑定会在地址复用时误判。
+- “已在运行”必须同时满足：API `/health` 通、Web 页面 200、且 API 监听 PID 与
+  `processes.json` 记录的 `listener_pid` 一致。只查 API 会把半死栈当成活着。
+- 浏览器只能在 Web 真正返回 200 后打开；只等监听 socket 不够。
+- 永不盲杀身份不明的进程；无法核对就归档记录并继续（唯一入口不能被一条坏记录卡死）。
+
+### B. 项目安装包（每次发布必更）
+
+安装包从**已提交的树**构建，工作区脏时脚本会拒绝（`BUILD_INFO` 必须指向真实 commit）：
+
+```powershell
+scripts\build_test_package.ps1 -OutDir releases -Verify
+```
+
+**每次发布前必须同步的文件/字段**：
+
+- `packaging/windows/START_HERE.md`、`TESTER_CHECKLIST.md`：入口、端口、浏览器落点、
+  已知限制有变化时更新。
+- `packaging/windows/START_APP.cmd`：必须调用 `start_shine.ps1 -OpenBrowser -AutoPorts`，
+  保证 8000 被占用时安装包也能启动。
+- `scripts/build_test_package.ps1` 里的静态字段：`fixed_materials`（组件数/下载体积/
+  安装体积）、`known_blockers`、`closed_in_this_build` 必须与当前事实一致；
+  不复制上一版文案。
+- `scripts/install_once.ps1`：端口探测必须用 `Get-NetTCPConnection` 先行；
+  安装包首次启动与二次双击都必须可用。
+
+**验收**：
+
+- 产出 `releases/ShineVideoStudio-<日期>-<短commit>-win64.zip` 与同名 `.sha256`；
+- `-Verify` 必须通过：解压后入口文件齐全、文件数 = 清单 + 1、逐文件 SHA-256 一致；
+- 保留上一版 zip，不覆盖历史发布；发布页同时上传 zip 与 sha256；
+- 安装包绝不包含：模型权重、生成的视频、SQLite 数据库、`.env`/密钥、
+  `node_modules`/虚拟环境、`docs/evidence`、日志。
+
+### C. 提交与发布顺序
+
+1. 后端 `pytest` 相关批次、`ruff check shine tests`；前端 `tsc --noEmit`、
+   `vitest run`、`npm run build`。
+2. 启动器四条验收（见 A）。
+3. 更新 `AGENTS.md` 与 `docs/` 验收记录。
+4. `git add` 明确路径（不要 `git add -A`），提交，推送 `main`。
+5. 干净树上构建安装包并 `-Verify`，把 zip 与 sha256 放入 `releases/`；
+   需要公开时再创建 GitHub Release 并上传两个资产。
+6. 任何一条没跑通，就在提交说明/交付说明里写明「未验证」，不得口头声称已发布。

@@ -81,6 +81,9 @@ function Get-ShineDiskInventory {
 function Get-GibString([long]$bytes) { return ('{0:N1} GiB' -f ($bytes / 1GB)) }
 
 function Test-ShinePortFree([int]$Port) {
+    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        return $false
+    }
     $listener = $null
     try {
         $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
@@ -279,7 +282,7 @@ $logPath = Join-Path $StorageRoot ('install-log-{0}.txt' -f (Get-Date -Format 'y
 try { Start-Transcript -Path $logPath -Force | Out-Null; $transcript = $logPath } catch { $transcript = $null }
 
 $apiPort = Get-ShineFreePort $defaultApiPort
-$webPort = Get-ShineFreePort ($defaultWebPort + ($apiPort - $defaultApiPort))
+$webPort = Get-ShineFreePort $defaultWebPort
 if ($webPort -eq $apiPort) { $webPort = Get-ShineFreePort ($apiPort + 1) }
 Write-Ok "端口：API $apiPort · Web $webPort"
 

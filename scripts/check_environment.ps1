@@ -1,3 +1,5 @@
+param([int[]]$Ports = @())
+
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
@@ -52,7 +54,12 @@ if (Test-Path $dataDir) {
     Write-Host 'Data directory does not exist yet; startup will create it.'
 }
 
-foreach ($port in @(8000, 5173)) {
+# Only the ports this launch will actually bind matter. Checking the defaults
+# warned about a busy 8000 even when the launcher had already moved the stack to
+# another free port, which made a healthy start look broken.
+$checkPorts = if ($Ports -and $Ports.Count -gt 0) { $Ports } else { @(8000, 5173) }
+foreach ($port in $checkPorts) {
+    if (-not $port) { continue }
     $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($listener) {
         Write-Warning "Port $port is already in use. Stop the other process before starting Shine."
