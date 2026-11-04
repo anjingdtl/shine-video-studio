@@ -9,6 +9,9 @@ from sqlalchemy import literal_column, select
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.assets import FAMILIES, require_rights
 from shine.comfyops.models import (
+    PLAN_PURPOSE_ASSET_PREPARATION,
+    PLAN_PURPOSE_PRODUCTION,
+    PLAN_PURPOSES,
     AssetRequirement,
     CandidateAsset,
     ModelPackage,
@@ -66,7 +69,13 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA", review_scope
         "style_input_contract": "independent-text-v1",
         **({"review_scope": "basic"} if review_scope == "basic" else {}),
     }
-    plan = PreProductionPlan(project_id=project.id, payload=payload, sha256=graph_hash(payload), status="ANALYZED")
+    plan = PreProductionPlan(
+        project_id=project.id,
+        payload=payload,
+        sha256=graph_hash(payload),
+        status="ANALYZED",
+        purpose=PLAN_PURPOSE_PRODUCTION,
+    )
     db.add(plan)
     db.flush()
     ids = {}
@@ -92,22 +101,53 @@ def analyze(db, project, document, extras, h3_category="H3_REF2VA", review_scope
     return plan
 
 
-def current_plan(db, project_id):
-    """Return the newest analysed plan.
+def current_plan_for_purpose(db, project_id, purpose):
+    """Return the newest plan of one purpose.
 
     Two plans written inside one host clock tick can share a timestamp, so the
     row id is only a last resort. The table row id is the real insertion order
     and is used as the tie-break, exactly as elsewhere in this codebase.
     """
+    if purpose not in PLAN_PURPOSES:
+        raise HTTPException(422, "UNKNOWN_PLAN_PURPOSE")
     return db.scalar(
         select(PreProductionPlan)
-        .where(PreProductionPlan.project_id == project_id)
+        .where(PreProductionPlan.project_id == project_id, PreProductionPlan.purpose == purpose)
         .order_by(
             PreProductionPlan.created_at.desc(),
             literal_column("preproduction_plans.rowid").desc(),
         )
         .limit(1)
     )
+
+
+def current_plan(db, project_id):
+    """Return the newest analysed production plan.
+
+    A director-side material-preparation plan shares this table but is not a
+    production contract, so it is never returned here. Freezing, readiness,
+    enforce and every H3 gate read through this selector.
+    """
+    return current_plan_for_purpose(db, project_id, PLAN_PURPOSE_PRODUCTION)
+
+
+def current_material_plan(db, project_id):
+    """Return the newest asset-preparation plan revision."""
+    return current_plan_for_purpose(db, project_id, PLAN_PURPOSE_ASSET_PREPARATION)
+
+
+def require_plan_for_purpose(db, plan_id, purpose):
+    """Fetch a plan by id and prove its purpose before any by-id operation.
+
+    A grant, a freeze or a claim addressed at a production plan id must not be
+    satisfied by a material plan that happens to be newer, and vice versa.
+    """
+    plan = db.get(PreProductionPlan, plan_id)
+    if plan is None:
+        raise HTTPException(404, "PREPRODUCTION_PLAN_NOT_FOUND")
+    if plan.purpose != purpose:
+        raise HTTPException(409, "PREPRODUCTION_PLAN_PURPOSE_MISMATCH")
+    return plan
 
 
 def readiness(db, project_id, *, offline=True, data_dir=None):
@@ -576,9 +616,16 @@ def _render_bindings(manifest: dict, db) -> dict:
 
 
 def _plan_for_manifest(db, project_id: str, manifest_hash: str):
-    """The frozen plan whose manifest has this exact hash."""
+    """The frozen production plan whose manifest has this exact hash.
+
+    A material-preparation plan carries no H3 manifest, and scanning it here
+    would let an asset revision be re-bound as a production contract.
+    """
     for plan in db.scalars(
-        select(PreProductionPlan).where(PreProductionPlan.project_id == project_id)
+        select(PreProductionPlan).where(
+            PreProductionPlan.project_id == project_id,
+            PreProductionPlan.purpose == PLAN_PURPOSE_PRODUCTION,
+        )
     ).all():
         manifest = plan.payload.get("manifest")
         if manifest and graph_hash(manifest) == manifest_hash:

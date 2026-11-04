@@ -1,11 +1,15 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shine.db import Base
 from shine.models import new_id, utcnow
+
+PLAN_PURPOSE_PRODUCTION = "production"
+PLAN_PURPOSE_ASSET_PREPARATION = "asset_preparation"
+PLAN_PURPOSES = (PLAN_PURPOSE_PRODUCTION, PLAN_PURPOSE_ASSET_PREPARATION)
 
 
 class RecordMixin:
@@ -69,6 +73,13 @@ class VoiceRender(ProjectRecordMixin, Base):
 
 class PreProductionPlan(ProjectRecordMixin, Base):
     __tablename__ = "preproduction_plans"
+    # A material-preparation plan is a director-side draft ledger, never a
+    # production contract. Every production selector filters on this column so
+    # a newer asset_preparation row cannot hijack the frozen H3 manifest.
+    purpose: Mapped[str] = mapped_column(
+        String(24), default=PLAN_PURPOSE_PRODUCTION, server_default=PLAN_PURPOSE_PRODUCTION, nullable=False
+    )
+    __table_args__ = (Index("ix_preproduction_plans_project_purpose", "project_id", "purpose"),)
 
 
 class AssetRequirement(ProjectRecordMixin, Base):

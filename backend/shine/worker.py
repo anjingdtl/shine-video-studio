@@ -4008,6 +4008,14 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
     if series is not None:
         return f"series:{series}"
+    from shine.materialprep.execution import run_pending_image_items
+
+    # Material images run after every real H3 series and queued shot, and each
+    # item takes and releases the shared exclusive lease on its own, so video
+    # production keeps priority and a long batch cannot hold the GPU.
+    images = run_pending_image_items(session_factory, settings, worker_id, limit=1)
+    if images:
+        return f"material-image:{images}"
     if settings.render_provider == "comfyui" and not settings.offline_simulation:
         from shine.quality.advisory_queue import run_pending_advisory_reviews
 

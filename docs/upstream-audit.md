@@ -318,3 +318,121 @@ soynlp 0.0.493 的已校验 wheel 自报 License=UNKNOWN。另核验上游 LGPL 
 ## 2026-11-03 分镜交接与制作入口修复
 
 在本仓库 `0aa6246` 的既有 Gateway、FilmAgentDispatcher、人物绑定、React 工作台上修复；没有引入或复用第三方源码，没有变更上游节点、工作流或许可证边界。验证与实机限制见 WORKBENCH_HANDOFF_FIX_20261103.md。
+
+
+## 2026-11-05 Qwen-Image-2.1 文生图（导演 AI 素材准备）
+
+基线 `bff25ad`（分支 `codex/director-ai-material-preparation`）。本节记录本机 AI
+素材准备所使用的上游工作流模板、节点、权重与许可。没有复制任何第三方源码进本仓库，
+没有改动既有 H3 钉点，也没有把权重打进发布包。
+
+### 工作流模板（官方 ComfyUI 文生图模板）
+
+- 来源：<https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image_2_1_t2i.json>
+- 固定 commit：`9fae1041be7ecb53bbd7c06533c80aa038f4af93`（2026-09-30，"Qwen Image 2.1: Update PE settings (#1298)"，
+  经 GitHub commits API 按 path 查询得到，是该文件最近一次变更）
+- 文件：78,494 字节，SHA-256 `5f2b50eeaf27e56a45456681ad5319df1ae51243d9653ac3f92c7dc05d1e1503`
+- 已核验：按固定 commit 取回的字节与 `main` 分支当次取回的字节逐字节相同（`cmp` 通过）。
+  执行仍只认固定 commit，漂移的 `main` URL 仅作发现入口。
+- 格式：**UI 工作流 `version 0.4`，含 1 个 subgraph 实例**（外层节点 `459`，类型
+  `c291ceec-b98f-4751-9d0b-7bc288f27b30`，名称 "Text to Image (Qwen Image 2.1)"）。
+  UI JSON 不能直接提交 `/prompt`；必须展开子图并转成 API 图后再固定 hash。
+- 声明的最终输出节点：外层 `461` `SaveImageAdvanced`（输入 `images` ← 子图输出 `IMAGE` ← 内层 `457` `VAEDecode`）。
+- **必须排除的预览节点**：内层 `472` `PreviewAny`。它只把提示词字符串透传给
+  `TextEncodeQwenImage21.prompt`，不是图片输出；取图只认 `461`，任何"遍历 history 取第一张
+  type=output"的实现都会引入歧义。
+
+### 模板节点与本机可用性（已核验源码存在）
+
+本机既有安装 `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI`，ComfyUI `v0.39.0`，
+git commit `b0b743566f65daafc423b4fea8a2fbda94b3384a`。模板所需节点全部已在该版本
+**核心 `comfy_extras`** 中，无需安装任何自定义节点包，因此不需要为兼容性升级或隔离 H3 环境：
+
+| 节点 | 本机源码文件 | 文件 SHA-256 |
+| --- | --- | --- |
+| `TextEncodeQwenImage21`、`QwenImage21Cache` | `comfy_extras/nodes_qwen.py` | `61a5e27f90bb786cd4f6e76ee86920582ffef2ee3e65cde7b2278c7171c559e8` |
+| `TextGenerate` | `comfy_extras/nodes_textgen.py` | `36f219001683e4227cef164506360859740107ba6f6c09477d6171bccc548d3b` |
+| `SaveImageAdvanced` | `comfy_extras/nodes_images.py` | `7ba09d1d52b34405eb261f7a91b1cd1de37de28ced4f59f077d42d5925d1bd8c` |
+| `ComfySwitchNode` | `comfy_extras/nodes_logic.py` | `e565280ed7afb89c46857ed332f11a45e7dfbf80a94c721fb977b4232d74e4f8` |
+| `ResolutionSelector` | `comfy_extras/nodes_resolution.py` | `32549929a0b774cb3fe3bee3ae9a704a59c1e0952997ee2260617b33749f9292` |
+| `PrimitiveStringMultiline`、`PreviewAny` | `comfy_extras/nodes_primitive.py` | `58c1a304ea206850ab76c8f572afb7d3ebbd405106108b894428ca1150d464d2` |
+| `UNETLoader`、`CLIPLoader`、`VAELoader`、`EmptyLatentImage`、`VAEDecode`、`KSampler` | ComfyUI 核心节点 | 随 `v0.39.0` |
+
+`TextEncodeQwenImage21` 的实机输入（源码 `nodes_qwen.py:111-141`）：`clip`、`prompt`、
+`negative_prompt`、`vae`(可选)、`resolution`(默认 1024，0–4096，步长 32)、`images`
+(Autogrow `image_1..image_16`，可选)。输出 `positive`/`negative`/`latent`。本轮首版为纯文生图，
+不绑定 `images`，因此 `vae` 槽留空（模板中该槽本身未连线）。
+
+### 模板审计出的基线参数（不是猜测，来自模板 widget 值与子图输入顺序的确定映射）
+
+子图 18 个输入按序为 `prompt, switch, thinking, max_length, negative_prompt, cfg, steps,
+width, height, scheduler, scheduler_1, seed, unet_name, clip_name, vae_name, clip_name_1,
+device, dtype_1`；外层 `459` 的 widget 值按同一顺序给出：
+
+| 参数 | 模板值 | 实际落点 |
+| --- | --- | --- |
+| `switch` / `thinking` | `false` / `false` | **提示词扩写（PE）关闭**，`ComfySwitchNode` 取 `on_false`，用户提示词经 `PreviewAny` 原样进入 `TextEncodeQwenImage21.prompt` |
+| `cfg` | `1` | `KSampler.cfg` |
+| `steps` | `25` | `KSampler.steps` |
+| `scheduler`（COMBO） | `euler` | `KSampler.sampler_name`（模板命名与落点错位，已核对连线） |
+| `scheduler_1`（COMBO） | `simple` | `KSampler.scheduler` |
+| `seed` | `447606998181262` | `KSampler.seed`；**48 位**，因此台账 seed 列必须是 BIGINT |
+| `width`/`height` | 由外层 `13` `ResolutionSelector`（`1:1 (Square)`）连到子图 → `EmptyLatentImage` | 1024×1024 |
+| `max_length` | `4096` | `TextGenerate.max_length`（PE 关闭时不生效） |
+| `negative_prompt` | `""` | `TextEncodeQwenImage21.negative_prompt`（图支持独立 negative，可用于 `avoid`） |
+| `device`/`dtype_1` | `auto` / `default` | `QwenImage21Cache` |
+
+PE 默认关闭这一点对本产品是决定性的：服务端用确定性模板追加构图规则，若 PE 打开，
+模型会先改写提示词，确定性就不成立。本轮保持 `switch=false`。
+
+### 权重来源与许可
+
+模板引用的四个文件名**不在** Qwen 官方仓库中，官方仓库发布的是 diffusers 分片格式。
+它们的权威来源是 ComfyUI 官方转换仓库（与本机既有 H3 `int8_convrot` 权重同一发布方
+`Comfy-Org`）：
+
+- 仓库：`Comfy-Org/Qwen-Image-2.1`，固定 revision `aacf31a6d48e707f352ecba714cee0680da3479b`
+- 下表 SHA-256 取自该 revision 的 HF LFS 元数据（LFS `oid` 即文件内容 SHA-256）
+
+| 文件 | 字节 | SHA-256 |
+| --- | --- | --- |
+| `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` |
+| `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` |
+| `text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` | 9,471,072,252 | `9182abae56fe05459840a86d22abd21f972061c92fce032630af680c8c5178d3` |
+| `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
+| **合计** | **26,754,163,364（24.92 GiB）** | |
+
+官方模型仓库（许可与出处，不作为 ComfyUI 单文件权重的来源）：
+
+- `Qwen/Qwen-Image-2.1`，revision `d26bb61231c349cf6b7896fa83353113880e1ba3`，
+  lastModified `2026-09-30T02:14:09Z`，仓库总存储 47,363,299,961 字节，28 个文件
+  （`transformer/`、`text_encoder/`、`vae/` 分片 + processor/scheduler 配置）。
+- 许可证原文已取回核验（7,821 字符）：**"Qwen RESEARCH LICENSE AGREEMENT"，Release Date
+  September 20, 2026**，版权方 Hangzhou Tongyi Laboratory Technology Co., Ltd.
+  - 第 1.i 条："Non-Commercial" shall mean **for research or evaluation purposes only**。
+  - 第 2.a 条：非独占、全球、不可转让、免版税的有限许可。
+  - 第 2.b 条：未经另行取得商业许可**不得用于任何商业目的**（联系 model-business@）。
+  - 第 2.c 条：再分发副本须在 "Notice" 文本中保留归属声明。
+- 本轮用途严格限定为**本地研究与评估**。资产晋升不产生任何商业授权证明，UI 不得宣称
+  商业可用。`Comfy-Org` 转换权重的许可边界按其仓库声明执行，安装前须逐文件复核；
+  转换件的许可证文本尚未单独取回核验，记为 `PENDING_VERIFICATION`。
+
+### 网络事实（影响安装器）
+
+本机**无法访问 `huggingface.co`**（`curl` 返回 `http=000`，连接失败），
+`hf-mirror.com` 可访问并提供同一 LFS 对象（VAE 文件已按上表 SHA-256 完整校验通过）。
+既有 `config/deployment/h3-ref2va-windows-x64.json` 中的 H3 下载 URL 全部指向
+`huggingface.co`；若图片安装计划沿用该主机，在本机会直接失败。安装计划必须显式声明
+可用主机并在下载后逐文件校验 SHA-256，不得因主机不可达就回退到未审计来源。
+
+### 本节验证边界
+
+已核验：模板字节与固定 commit 一致；模板所需节点全部存在于本机 ComfyUI `v0.39.0` 核心源码；
+四个权重文件的权威来源、精确 revision、字节数与 SHA-256；官方许可证原文条款；VAE 文件下载后
+逐字节 SHA-256 与钉点一致。
+
+`PENDING_VERIFICATION`（不得声称已完成）：受管实例的实机 `object_info` 节点校验；UI 模板展开为
+API 图后的图 hash 固定与 `/prompt` 提交验证；三类（角色/场景/道具）真实出图；实际显存占用与
+生成耗时（本机 RTX 5080 16 GB、系统内存 31.7 GB，权重合计 24.92 GiB，必然涉及 offload，
+**未实测前不得给出显存下限数字**）；`Comfy-Org` 转换权重的许可证文本；三个大文件的下载完成与
+逐字节校验。

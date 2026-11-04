@@ -434,6 +434,9 @@ def create_app(
     from shine.api_preparation import router as preparation_router
 
     app.include_router(preparation_router)
+    from shine.api_material import router as material_router
+
+    app.include_router(material_router)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):

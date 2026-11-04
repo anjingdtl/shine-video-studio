@@ -1,0 +1,867 @@
+"""API-side material-preparation service.
+
+Everything here writes durable rows and returns.  No renderer is contacted, no
+model is called and no image is waited for inside an HTTP request: the resident
+Worker owns execution (``shine.materialprep.execution``).
+
+Two invariants drive the whole module:
+
+* **Idempotency is stored, not remembered.**  A confirmation or a batch is found
+  again by its key and request hash, so a double click, a second browser tab or a
+  retried request returns the original row instead of queueing a second GPU run.
+* **A new version never rewrites the old one.**  Re-confirming creates a new plan
+  revision; regenerating creates a new item revision.  Old candidates keep their
+  provenance and are marked stale rather than deleted, because the user may still
+  want to pick one.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from fastapi import HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
+from shine.comfy.workflow import graph_hash
+from shine.comfyops.models import (
+    PLAN_PURPOSE_ASSET_PREPARATION,
+    PLAN_PURPOSE_PRODUCTION,
+    AssetRequirement,
+    CandidateAsset,
+    PreProductionPlan,
+)
+from shine.materialprep.contracts import MaterialConfirmation
+from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
+from shine.materialprep.states import (
+    ATTEMPT_UNKNOWN,
+    EXECUTION_MODE_REAL,
+    ITEM_CANDIDATE_READY,
+    ITEM_FAILED,
+    ITEM_IN_FLIGHT,
+    ITEM_NEEDS_REVIEW,
+    ITEM_QUEUED,
+    ITEM_TERMINAL,
+    OUTCOME_UNKNOWN,
+    PLAN_CONFIRMED,
+    PLAN_DRAFT,
+    PLAN_MATERIALS_READY,
+    PLAN_NEEDS_CLARIFICATION,
+    RUN_CANCEL_REQUESTED,
+    RUN_CANCELLED,
+    RUN_COMPLETED,
+    RUN_NEEDS_REVIEW,
+    RUN_PARTIAL_FAILED,
+    RUN_QUEUED,
+    RUN_RUNNING,
+    RUN_TERMINAL,
+)
+from shine.models import Project, ProjectDocument, utcnow
+from shine.services import add_audit, require_project
+
+RESUMABLE_ITEM_STATES = frozenset({ITEM_FAILED})
+"""What a user may resume.
+
+``NEEDS_REVIEW`` is deliberately absent: an unknown external submission is
+reconciled, never resumed into a second submission.
+"""
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def confirmation_id_for(project_id: str, payload: dict[str, Any]) -> str:
+    return hashlib.sha256(f"{project_id}:{_canonical(payload)}".encode()).hexdigest()
+
+
+# --- plan revisions --------------------------------------------------------
+
+
+def create_draft_plan(db, project: Project, document: ProjectDocument, preparations: list[dict[str, Any]]):
+    """Open a material-preparation plan revision from finished scene analyses."""
+    if document.project_id != project.id:
+        raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
+    payload = {
+        "purpose": PLAN_PURPOSE_ASSET_PREPARATION,
+        "document_id": document.id,
+        "script_hash": document.sha256,
+        "scene_preparations": preparations,
+        "requirements": [],
+        "visual_direction": None,
+        "confirmation": None,
+        "manifest": None,
+    }
+    plan = PreProductionPlan(
+        project_id=project.id,
+        payload=payload,
+        sha256=graph_hash(payload),
+        status=PLAN_DRAFT,
+        purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+    )
+    db.add(plan)
+    db.flush()
+    add_audit(db, "local-user", "MATERIAL_PLAN_DRAFTED", "preproduction_plan", plan.id,
+              {"scenes": len(preparations)}, project_id=project.id)
+    return plan
+
+
+def aggregated_requirements(db, plan: PreProductionPlan) -> dict[str, Any]:
+    """Merge per-scene preparations into one identity-keyed requirement list.
+
+    The server assigns the identity, never the model.  A name that appears under
+    two different descriptions is reported as ambiguous for the user to resolve
+    instead of being merged by string equality.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    for scene in plan.payload.get("scene_preparations") or []:
+        scene_key = scene.get("scene_key")
+        for requirement in scene.get("requirements") or []:
+            family = requirement.get("family")
+            name = (requirement.get("name") or "").strip()
+            if not family or not name:
+                continue
+            key = (family, name)
+            description = (requirement.get("description") or "").strip()
+            entry = merged.setdefault(
+                key,
+                {"family": family, "entity_id": name, "descriptions": [], "scene_keys": [], "questions": []},
+            )
+            if description and description not in entry["descriptions"]:
+                entry["descriptions"].append(description)
+            if scene_key and scene_key not in entry["scene_keys"]:
+                entry["scene_keys"].append(scene_key)
+            for question in requirement.get("questions") or []:
+                if question not in entry["questions"]:
+                    entry["questions"].append(question)
+    for (family, name), entry in merged.items():
+        if len(entry["descriptions"]) > 1:
+            conflicts.append({"family": family, "entity_id": name, "descriptions": entry["descriptions"],
+                              "code": "MATERIAL_IDENTITY_AMBIGUOUS"})
+    open_questions = [
+        question
+        for scene in (plan.payload.get("scene_preparations") or [])
+        for question in scene.get("questions") or []
+    ]
+    return {
+        "requirements": [
+            {
+                "family": family,
+                "entity_id": name,
+                "description": entry["descriptions"][0] if entry["descriptions"] else "",
+                "scene_keys": entry["scene_keys"],
+                "questions": entry["questions"],
+            }
+            for (family, name), entry in sorted(merged.items())
+        ],
+        "conflicts": conflicts,
+        "open_questions": open_questions,
+    }
+
+
+def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict[str, Any]:
+    """Record the human confirmation as a NEW immutable plan revision."""
+    require_project(db, project_id)
+    source = db.get(PreProductionPlan, body.plan_revision_id)
+    if source is None or source.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_PLAN_NOT_FOUND")
+    if source.purpose != PLAN_PURPOSE_ASSET_PREPARATION:
+        raise HTTPException(409, "PREPRODUCTION_PLAN_PURPOSE_MISMATCH")
+
+    snapshot = {"requirements": source.payload.get("requirements") or [],
+                "visual_direction": source.payload.get("visual_direction"),
+                "scene_preparations": source.payload.get("scene_preparations") or []}
+    actual = graph_hash(snapshot)
+    if actual != body.expected_snapshot:
+        # The list the user read is not the list the server holds now.
+        raise HTTPException(409, {"code": "MATERIAL_PLAN_STALE", "actual_snapshot": actual})
+
+    aggregated = aggregated_requirements(db, source)
+    if aggregated["conflicts"]:
+        raise HTTPException(409, {"code": "MATERIAL_IDENTITY_AMBIGUOUS", "conflicts": aggregated["conflicts"]})
+
+    known = {(r["family"], r["entity_id"]) for r in aggregated["requirements"]}
+    decisions: list[dict[str, Any]] = []
+    for decision in body.decisions:
+        row = db.get(AssetRequirement, decision.requirement_id)
+        if row is None or row.project_id != project_id:
+            raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
+        payload = row.payload or {}
+        if (payload.get("family"), payload.get("entity_id")) not in known:
+            raise HTTPException(409, "MATERIAL_PLAN_STALE")
+        decisions.append({
+            "requirement_id": row.id,
+            "family": payload.get("family"),
+            "entity_id": payload.get("entity_id"),
+            "strategy": decision.strategy,
+            "asset_id": decision.asset_id,
+            "brief_note": decision.brief_note,
+        })
+
+    confirmation_payload = {
+        "decisions": decisions,
+        "visual_direction": body.visual_direction.model_dump(mode="json"),
+        "notes": body.notes,
+        "confirmed_by": actor,
+    }
+    confirmation_id = confirmation_id_for(project_id, confirmation_payload)
+    payload = {
+        **source.payload,
+        "requirements": aggregated["requirements"],
+        "visual_direction": body.visual_direction.model_dump(mode="json"),
+        "confirmation": {**confirmation_payload, "confirmation_id": confirmation_id,
+                         "confirmation_hash": graph_hash(confirmation_payload),
+                         "source_plan_revision_id": source.id},
+        "manifest": None,
+    }
+    plan = PreProductionPlan(
+        project_id=project_id,
+        payload=payload,
+        sha256=graph_hash(payload),
+        status=PLAN_CONFIRMED,
+        purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+    )
+    db.add(plan)
+    db.flush()
+    for decision in decisions:
+        row = AssetRequirement(
+            project_id=project_id,
+            plan_id=plan.id,
+            payload={
+                "family": decision["family"],
+                "entity_id": decision["entity_id"],
+                "critical": True,
+                "strategy": decision["strategy"],
+                "bound_asset_id": decision["asset_id"],
+                "brief_note": decision["brief_note"],
+                "source_requirement_id": decision["requirement_id"],
+            },
+            sha256=graph_hash(decision),
+            status="CONFIRMED",
+        )
+        db.add(row)
+    db.flush()
+    add_audit(db, actor, "MATERIAL_PLAN_CONFIRMED", "preproduction_plan", plan.id,
+              {"confirmation_id": confirmation_id, "decisions": len(decisions),
+               "generate": sum(1 for d in decisions if d["strategy"] == "generate")},
+              project_id=project_id)
+    db.commit()
+    return {"plan_revision_id": plan.id, "confirmation_id": confirmation_id,
+            "confirmation_hash": graph_hash(confirmation_payload), "decisions": decisions,
+            "status": plan.status}
+
+
+# --- batches ---------------------------------------------------------------
+
+
+def _next_generation_revision(db, project_id: str, requirement_id: str) -> int:
+    highest = db.scalar(
+        select(func.max(MaterialItem.generation_revision)).where(
+            MaterialItem.project_id == project_id, MaterialItem.requirement_id == requirement_id
+        )
+    )
+    return int(highest or 0) + 1
+
+
+def create_batch(
+    db,
+    project_id: str,
+    *,
+    confirmation_id: str,
+    confirmation_hash: str,
+    requirement_ids: list[str],
+    idempotency_key: str,
+    rights_id: str,
+    kind: str = "production",
+    seeds: dict[str, int] | None = None,
+    briefs: dict[str, dict[str, Any]] | None = None,
+    new_revision: bool = False,
+) -> dict[str, Any]:
+    """Create the durable batch and its items, then return.  Never renders.
+
+    ``new_revision`` is False for an ordinary generate, which always targets
+    revision 1 and is therefore refused when an item already exists.  Only the
+    explicit regenerate route passes True, because silently bumping a revision
+    would let a second browser tab queue a second GPU run for one confirmation.
+    """
+    require_project(db, project_id)
+    plan = _plan_for_confirmation(db, project_id, confirmation_id)
+    if plan.payload["confirmation"]["confirmation_hash"] != confirmation_hash:
+        raise HTTPException(409, "MATERIAL_PLAN_STALE")
+
+    request_payload = {
+        "confirmation_id": confirmation_id,
+        "confirmation_hash": confirmation_hash,
+        "requirement_ids": sorted(requirement_ids),
+        "rights_id": rights_id,
+        "kind": kind,
+        # The brief is part of the request identity: the same idempotency key with
+        # a different appearance description must conflict, not silently reuse the
+        # first batch's image.
+        "briefs": {key: briefs[key] for key in sorted(briefs or {})},
+        "new_revision": new_revision,
+    }
+    request_hash = graph_hash(request_payload)
+
+    existing = db.scalar(
+        select(MaterialRun).where(
+            MaterialRun.project_id == project_id, MaterialRun.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if existing.request_hash != request_hash:
+            raise HTTPException(409, {"code": "IDEMPOTENCY_KEY_CONFLICT", "run_id": existing.id})
+        return {"run_id": existing.id, "status": existing.status, "replayed": True,
+                "items": [public_item(db, i) for i in _items(db, existing.id)]}
+
+    generate_ids = _select_generable(db, plan, requirement_ids)
+    run = MaterialRun(
+        project_id=project_id,
+        plan_id=plan.id,
+        confirmation_id=confirmation_id,
+        confirmation_hash=confirmation_hash,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        mode=EXECUTION_MODE_REAL,
+        status=RUN_QUEUED,
+        payload={"kind": kind, "rights_id": rights_id, "requirement_ids": generate_ids,
+                 "confirmation_snapshot": confirmation_hash},
+        sha256=graph_hash(request_payload),
+    )
+    db.add(run)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raced = db.scalar(
+            select(MaterialRun).where(
+                MaterialRun.project_id == project_id, MaterialRun.idempotency_key == idempotency_key
+            )
+        )
+        if raced is not None and raced.request_hash == request_hash:
+            return {"run_id": raced.id, "status": raced.status, "replayed": True,
+                    "items": [public_item(db, i) for i in _items(db, raced.id)]}
+        raise HTTPException(409, "MATERIAL_BATCH_CONFLICT") from exc
+
+    created, refused = [], []
+    for requirement_id in generate_ids:
+        revision = _next_generation_revision(db, project_id, requirement_id) if new_revision else 1
+        requirement = db.get(AssetRequirement, requirement_id)
+        seed = int((seeds or {}).get(requirement_id, 0))
+        brief = (briefs or {}).get(requirement_id)
+        item = MaterialItem(
+            run_id=run.id,
+            project_id=project_id,
+            requirement_id=requirement_id,
+            generation_revision=revision,
+            status=ITEM_QUEUED,
+            payload={
+                "family": (requirement.payload or {}).get("family"),
+                "entity_id": (requirement.payload or {}).get("entity_id"),
+                "brief_note": (requirement.payload or {}).get("brief_note") or "",
+                "visual_direction": plan.payload.get("visual_direction") or {},
+                "seed": seed,
+                "kind": kind,
+                # A batch without a brief is queued but cannot render yet: the
+                # producer owns the appearance text, and the server refuses to
+                # invent one rather than rendering an unconfirmed look.
+                **({"brief": brief} if brief else {}),
+            },
+            sha256=graph_hash({"requirement_id": requirement_id, "revision": revision, "seed": seed}),
+        )
+        db.add(item)
+        try:
+            db.flush()
+        except IntegrityError:
+            # Another tab already queued this exact requirement revision.
+            db.rollback()
+            refused.append({"requirement_id": requirement_id, "code": "MATERIAL_ITEM_ALREADY_QUEUED"})
+            continue
+        created.append(item.id)
+
+    if not created:
+        db.rollback()
+        raise HTTPException(409, {"code": "MATERIAL_NOTHING_TO_GENERATE", "refused": refused})
+    run.payload = {**run.payload, "item_ids": created, "refused": refused}
+    run.sha256 = graph_hash(run.payload)
+    add_audit(db, "local-user", "MATERIAL_BATCH_CREATED", "material_run", run.id,
+              {"items": len(created), "refused": len(refused), "kind": kind, "mode": EXECUTION_MODE_REAL},
+              project_id=project_id)
+    db.commit()
+    return {"run_id": run.id, "status": run.status, "replayed": False, "items": created, "refused": refused}
+
+
+VALIDATION_BRIEFS: dict[str, dict[str, Any]] = {
+    "character": {
+        "appearance": (
+            "a thirty-year-old woman with short black hair, wearing a plain grey wool coat, "
+            "standing calmly and facing the camera"
+        ),
+        "must_keep": ["complete head inside the frame", "clear unobstructed face"],
+        "avoid": ["second person", "cropped head"],
+    },
+    "scene": {
+        "appearance": (
+            "a rain-wet harbour pier at dusk with wooden bollards and low mist over the water"
+        ),
+        "must_keep": ["no people present"],
+        "avoid": ["any human figure", "silhouette"],
+    },
+    "prop": {
+        "appearance": "a brass pocket watch with an engraved cover, lying open on a flat surface",
+        "must_keep": ["the whole object inside the frame"],
+        "avoid": ["hand", "person holding it"],
+    },
+}
+"""Fixed sample briefs for the three readiness probes.
+
+They are deliberately ordinary so the sample tests the runtime rather than the
+prompt, and deliberately not a real project's material: a validation sample is
+capability evidence, never a candidate the user should promote.
+"""
+
+
+def create_validation_batch(
+    db,
+    project_id: str,
+    *,
+    families: list[str],
+    idempotency_key: str,
+    rights_id: str,
+) -> dict[str, Any]:
+    """Queue one real small-sample render per family through the same Worker path."""
+    require_project(db, project_id)
+    request_payload = {
+        "kind": "validation",
+        "families": sorted(families),
+        "rights_id": rights_id,
+        "confirmation_id": "validation",
+    }
+    request_hash = graph_hash(request_payload)
+    existing = db.scalar(
+        select(MaterialRun).where(
+            MaterialRun.project_id == project_id, MaterialRun.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if existing.request_hash != request_hash:
+            raise HTTPException(409, {"code": "IDEMPOTENCY_KEY_CONFLICT", "run_id": existing.id})
+        return {"run_id": existing.id, "status": existing.status, "replayed": True,
+                "items": [public_item(db, item) for item in _items(db, existing.id)]}
+
+    plan = _validation_plan(db, project_id)
+    run = MaterialRun(
+        project_id=project_id,
+        plan_id=plan.id,
+        confirmation_id="validation",
+        confirmation_hash=request_hash,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        mode=EXECUTION_MODE_REAL,
+        status=RUN_QUEUED,
+        payload={"kind": "validation", "rights_id": rights_id, "families": sorted(families)},
+        sha256=graph_hash(request_payload),
+    )
+    db.add(run)
+    db.flush()
+    created = []
+    for index, family in enumerate(sorted(families)):
+        brief = dict(VALIDATION_BRIEFS[family])
+        item = MaterialItem(
+            run_id=run.id,
+            project_id=project_id,
+            requirement_id=None,
+            generation_revision=1,
+            status=ITEM_QUEUED,
+            payload={
+                "family": family,
+                "entity_id": f"validation-{family}",
+                "brief": {**brief, "schema_version": "1.0", "questions": []},
+                "visual_direction": {},
+                "seed": 1000 + index,
+                "kind": "validation",
+            },
+            sha256=graph_hash({"family": family, "seed": 1000 + index}),
+        )
+        db.add(item)
+        db.flush()
+        created.append(item.id)
+    run.payload = {**run.payload, "item_ids": created}
+    run.sha256 = graph_hash(run.payload)
+    add_audit(db, "local-user", "IMAGE_VALIDATION_BATCH_CREATED", "material_run", run.id,
+              {"families": sorted(families), "mode": EXECUTION_MODE_REAL}, project_id=project_id)
+    db.commit()
+    return {"run_id": run.id, "status": run.status, "replayed": False, "items": created, "refused": []}
+
+
+def _validation_plan(db, project_id: str) -> PreProductionPlan:
+    """The asset-preparation plan a validation batch hangs off.
+
+    A validation run still needs a plan row for provenance, and it must be an
+    ``asset_preparation`` one: a setup probe must never create or become a
+    production contract.
+    """
+    from shine.comfyops.preproduction import current_material_plan
+
+    plan = current_material_plan(db, project_id)
+    if plan is not None:
+        return plan
+    payload = {
+        "purpose": PLAN_PURPOSE_ASSET_PREPARATION,
+        "document_id": None,
+        "script_hash": None,
+        "scene_preparations": [],
+        "requirements": [],
+        "visual_direction": None,
+        "confirmation": {"confirmation_id": "validation", "confirmation_hash": ""},
+        "manifest": None,
+        "validation_only": True,
+    }
+    plan = PreProductionPlan(
+        project_id=project_id,
+        payload=payload,
+        sha256=graph_hash(payload),
+        status=PLAN_DRAFT,
+        purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+    )
+    db.add(plan)
+    db.flush()
+    return plan
+
+
+def _plan_for_confirmation(db, project_id: str, confirmation_id: str) -> PreProductionPlan:
+    for plan in db.scalars(
+        select(PreProductionPlan).where(
+            PreProductionPlan.project_id == project_id,
+            PreProductionPlan.purpose == PLAN_PURPOSE_ASSET_PREPARATION,
+        )
+    ).all():
+        confirmation = (plan.payload or {}).get("confirmation") or {}
+        if confirmation.get("confirmation_id") == confirmation_id:
+            return plan
+    raise HTTPException(404, "MATERIAL_CONFIRMATION_NOT_FOUND")
+
+
+def _select_generable(db, plan: PreProductionPlan, requirement_ids: list[str]) -> list[str]:
+    """Only currently-confirmed ``generate`` items may be queued.
+
+    An item the user marked ``upload`` is a file on its way, not a missing
+    material; generating one would duplicate an upload the user already made.
+    """
+    selected: list[str] = []
+    for requirement_id in requirement_ids:
+        row = db.get(AssetRequirement, requirement_id)
+        if row is None or row.project_id != plan.project_id or row.plan_id != plan.id:
+            raise HTTPException(409, "MATERIAL_PLAN_STALE")
+        strategy = (row.payload or {}).get("strategy")
+        if strategy != "generate":
+            raise HTTPException(409, {"code": "MATERIAL_CONFIRMATION_REQUIRED",
+                                      "requirement_id": requirement_id, "strategy": strategy})
+        selected.append(requirement_id)
+    return sorted(set(selected))
+
+
+# --- recovery actions ------------------------------------------------------
+
+
+def _items(db, run_id: str) -> list[MaterialItem]:
+    return list(db.scalars(select(MaterialItem).where(MaterialItem.run_id == run_id)).all())
+
+
+def request_cancel(db, run_id: str, expected_state_version: int) -> dict[str, Any]:
+    """Ask for a cancel.  Requesting one is not the same as having stopped."""
+    run = _require_run(db, run_id)
+    if run.state_version != expected_state_version:
+        raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
+    if run.status in RUN_TERMINAL:
+        return {"run_id": run.id, "status": run.status, "cancel_requested": run.cancel_requested,
+                "note": "RUN_ALREADY_FINISHED"}
+    stopped = 0
+    for item in _items(db, run.id):
+        if item.status in ITEM_TERMINAL:
+            continue
+        if item.status == ITEM_QUEUED:
+            item.status = "CANCELLED"
+            item.error_code = "RUN_CANCELLED"
+            item.state_version += 1
+            stopped += 1
+    run.cancel_requested = True
+    run.status = RUN_CANCEL_REQUESTED
+    run.state_version += 1
+    add_audit(db, "local-user", "MATERIAL_BATCH_CANCEL_REQUESTED", "material_run", run.id,
+              {"stopped_not_started": stopped}, project_id=run.project_id)
+    db.commit()
+    return {"run_id": run.id, "status": run.status, "cancel_requested": True,
+            "stopped_not_started": stopped,
+            "note": "已停止未开始的项；正在执行的项由 Worker 收尾后核对，不会被全局打断。"}
+
+
+def resume_items(db, run_id: str, item_ids: list[str], expected_state_version: int) -> dict[str, Any]:
+    """Re-queue items that definitely failed.  Unknown outcomes are refused."""
+    run = _require_run(db, run_id)
+    if run.state_version != expected_state_version:
+        raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
+    queued, refused = [], []
+    for item_id in item_ids:
+        item = db.get(MaterialItem, item_id)
+        if item is None or item.run_id != run.id:
+            refused.append({"item_id": item_id, "code": "MATERIAL_ITEM_NOT_FOUND"})
+            continue
+        if item.status in RESUMABLE_ITEM_STATES:
+            unknown = db.scalar(
+                select(MaterialImageAttempt).where(
+                    MaterialImageAttempt.item_id == item.id,
+                    MaterialImageAttempt.external_outcome == OUTCOME_UNKNOWN,
+                )
+            )
+            if unknown is not None:
+                refused.append({"item_id": item_id, "code": "IMAGE_SUBMISSION_OUTCOME_UNKNOWN",
+                                "remediation": "先对账该未知提交；未知结果不能重新提交。"})
+                continue
+            item.status = ITEM_QUEUED
+            item.state_version += 1
+            item.error_code = None
+            queued.append(item_id)
+        else:
+            refused.append({"item_id": item_id, "code": "MATERIAL_ITEM_NOT_RESUMABLE", "status": item.status})
+    if run.status in RUN_TERMINAL or run.status == RUN_CANCEL_REQUESTED:
+        run.status = RUN_QUEUED
+        run.cancel_requested = False
+    run.state_version += 1
+    add_audit(db, "local-user", "MATERIAL_BATCH_RESUMED", "material_run", run.id,
+              {"queued": len(queued), "refused": len(refused)}, project_id=run.project_id)
+    db.commit()
+    return {"run_id": run.id, "queued": queued, "refused": refused, "status": run.status}
+
+
+def reconcile_run(db, run_id: str, expected_state_version: int) -> dict[str, Any]:
+    """Record what is already known.  This never contacts a renderer to resubmit."""
+    run = _require_run(db, run_id)
+    if run.state_version != expected_state_version:
+        raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
+    unknown = []
+    for item in _items(db, run.id):
+        attempts = db.scalars(
+            select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == item.id)
+        ).all()
+        for attempt in attempts:
+            if attempt.external_outcome == OUTCOME_UNKNOWN or attempt.status == ATTEMPT_UNKNOWN:
+                unknown.append({"item_id": item.id, "attempt_id": attempt.id,
+                                "prompt_id": attempt.prompt_id,
+                                "submit_intent_at": attempt.submit_intent_at.isoformat()
+                                if attempt.submit_intent_at else None,
+                                "graph_sha256": attempt.graph_sha256,
+                                "reconcilable": bool(attempt.prompt_id),
+                                "note": ("可用 prompt_id 查询外部队列/历史后采用；查不到不等于未提交。"
+                                         if attempt.prompt_id else
+                                         "无 prompt_id：无法证明未提交，保持 UNKNOWN，不得重新提交。")})
+    add_audit(db, "local-user", "MATERIAL_BATCH_RECONCILED", "material_run", run.id,
+              {"unknown": len(unknown)}, project_id=run.project_id)
+    db.commit()
+    return {"run_id": run.id, "status": run.status, "unknown": unknown,
+            "resubmitted": False,
+            "note": "对账只核对与采用已有结果，不会发起第二次 /prompt 提交。"}
+
+
+def refresh_run_status(db, run_id: str) -> dict[str, Any]:
+    """Recompute the batch status from its items.
+
+    A batch is only ``COMPLETED`` when every item really reached a candidate.  A
+    single unknown externaloutcome keeps the whole batch at ``NEEDS_REVIEW``,
+    because "finished" would hide an unresolved submission.
+    """
+    run = _require_run(db, run_id)
+    items = _items(db, run.id)
+    if not items:
+        return public_run(db, run_id)
+    statuses = [item.status for item in items]
+    if any(item.status == ITEM_NEEDS_REVIEW for item in items):
+        target = RUN_NEEDS_REVIEW
+    elif all(status == ITEM_CANDIDATE_READY for status in statuses):
+        target = RUN_COMPLETED
+    elif all(status in ITEM_TERMINAL for status in statuses):
+        target = RUN_CANCELLED if all(status == "CANCELLED" for status in statuses) else RUN_PARTIAL_FAILED
+    elif any(status in ITEM_IN_FLIGHT or status == ITEM_QUEUED for status in statuses):
+        target = RUN_CANCEL_REQUESTED if run.cancel_requested else RUN_RUNNING
+    else:
+        target = run.status
+    if target != run.status:
+        run.status = target
+        run.state_version += 1
+        db.commit()
+    return public_run(db, run_id)
+
+
+def _require_run(db, run_id: str) -> MaterialRun:
+    run = db.get(MaterialRun, run_id)
+    if run is None:
+        raise HTTPException(404, "MATERIAL_RUN_NOT_FOUND")
+    return run
+
+
+# --- public views ----------------------------------------------------------
+
+
+def public_item(db, item: MaterialItem) -> dict[str, Any]:
+    requirement = db.get(AssetRequirement, item.requirement_id)
+    attempts = db.scalars(
+        select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == item.id)
+        .order_by(MaterialImageAttempt.attempt_no)
+    ).all()
+    candidates = []
+    for attempt in attempts:
+        if not attempt.candidate_id:
+            continue
+        candidate = db.get(CandidateAsset, attempt.candidate_id)
+        if candidate is None:
+            continue
+        candidates.append({
+            "candidate_id": candidate.id,
+            "status": candidate.status,
+            "content_sha256": candidate.payload.get("content_sha256"),
+            "is_mock": bool((candidate.payload.get("provenance") or {}).get("is_mock")),
+            "formal_asset_id": candidate.formal_asset_id,
+            "attempt_no": attempt.attempt_no,
+            "qc": (candidate.payload or {}).get("qc"),
+        })
+    return {
+        "item_id": item.id,
+        "requirement_id": item.requirement_id,
+        "family": (requirement.payload or {}).get("family") if requirement else None,
+        "entity_id": (requirement.payload or {}).get("entity_id") if requirement else None,
+        "generation_revision": item.generation_revision,
+        "status": item.status,
+        "state_version": item.state_version,
+        "error_code": item.error_code,
+        "current_attempt_id": item.current_attempt_id,
+        "heartbeat_at": item.heartbeat_at.isoformat() if item.heartbeat_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "candidates": candidates,
+        "attempts": [{
+            "attempt_id": a.id,
+            "attempt_no": a.attempt_no,
+            "status": a.status,
+            "prompt_id": a.prompt_id,
+            "external_outcome": a.external_outcome,
+            "graph_sha256": a.graph_sha256,
+            "seed": a.seed,
+            "width": a.width,
+            "height": a.height,
+            "output_node_id": a.output_node_id,
+            "runtime_fingerprint": a.runtime_fingerprint,
+            "content_sha256": a.content_sha256,
+            "error_code": a.error_code,
+            "reconciliation_state": a.reconciliation_state,
+            "resubmitted": a.resubmitted,
+            "submit_intent_at": a.submit_intent_at.isoformat() if a.submit_intent_at else None,
+        } for a in attempts],
+    }
+
+
+def public_run(db, run_id: str) -> dict[str, Any]:
+    run = _require_run(db, run_id)
+    items = _items(db, run.id)
+    statuses = [item.status for item in items]
+    return {
+        "run_id": run.id,
+        "project_id": run.project_id,
+        "plan_revision_id": run.plan_id,
+        "confirmation_id": run.confirmation_id,
+        "mode": run.mode,
+        "kind": (run.payload or {}).get("kind"),
+        "status": run.status,
+        "state_version": run.state_version,
+        "cancel_requested": run.cancel_requested,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "counts": {
+            "total": len(items),
+            "candidate_ready": statuses.count(ITEM_CANDIDATE_READY),
+            "failed": statuses.count(ITEM_FAILED),
+            "needs_review": statuses.count(ITEM_NEEDS_REVIEW),
+            "queued": statuses.count(ITEM_QUEUED),
+            "running": sum(1 for s in statuses if s in ITEM_IN_FLIGHT),
+        },
+        "items": [public_item(db, item) for item in items],
+        "allowed_actions": _allowed_actions(run, statuses),
+    }
+
+
+def _allowed_actions(run: MaterialRun, statuses: list[str]) -> list[str]:
+    actions = []
+    if run.status not in RUN_TERMINAL:
+        actions.append("cancel")
+    if any(status == ITEM_FAILED for status in statuses):
+        actions.append("resume")
+    if any(status == ITEM_NEEDS_REVIEW for status in statuses):
+        actions.append("reconcile")
+    if any(status == ITEM_CANDIDATE_READY for status in statuses):
+        actions.append("select_and_promote")
+    actions.append("regenerate")
+    return actions
+
+
+def plan_progress(db, project_id: str) -> dict[str, Any]:
+    """The material page's state: plan, requirements, matches, batches, blockers."""
+    from shine.comfyops.preproduction import current_material_plan
+
+    project = require_project(db, project_id)
+    plan = current_material_plan(db, project_id)
+    if plan is None:
+        return {"project_id": project_id, "stage": "no_plan", "plan_revision_id": None,
+                "requirements": [], "runs": [], "blockers": []}
+    requirements = []
+    for row in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
+        payload = row.payload or {}
+        requirements.append({
+            "requirement_id": row.id,
+            "family": payload.get("family"),
+            "entity_id": payload.get("entity_id"),
+            "strategy": payload.get("strategy"),
+            "status": row.status,
+            "bound_asset_id": payload.get("bound_asset_id"),
+            "brief_note": payload.get("brief_note"),
+            "description": payload.get("description") or "",
+        })
+    runs = [public_run(db, run.id) for run in db.scalars(
+        select(MaterialRun).where(MaterialRun.project_id == project_id)
+        .order_by(MaterialRun.created_at.desc())
+    ).all()]
+    blockers = []
+    if plan.status == PLAN_NEEDS_CLARIFICATION:
+        blockers.append({"code": "MATERIAL_CONFIRMATION_REQUIRED",
+                         "note": "存在待消歧的身份或未回答的问题，先处理再确认清单。"})
+    missing = [r for r in requirements if r["strategy"] == "generate" and not r["bound_asset_id"]]
+    if plan.status == PLAN_MATERIALS_READY and not missing:
+        stage = "materials_ready"
+    elif plan.status == PLAN_CONFIRMED:
+        stage = "select_materials"
+    elif plan.status == PLAN_DRAFT:
+        stage = "confirm_requirements"
+    else:
+        stage = "read_script"
+    return {
+        "project_id": project_id,
+        "project_title": project.title,
+        "stage": stage,
+        "plan_revision_id": plan.id,
+        "plan_status": plan.status,
+        "document_id": plan.payload.get("document_id"),
+        "script_hash": plan.payload.get("script_hash"),
+        "visual_direction": plan.payload.get("visual_direction"),
+        "confirmation": plan.payload.get("confirmation"),
+        "requirements": requirements,
+        "runs": runs,
+        "blockers": blockers,
+        "production_plan_present": bool(
+            db.scalar(select(PreProductionPlan.id).where(
+                PreProductionPlan.project_id == project_id,
+                PreProductionPlan.purpose == PLAN_PURPOSE_PRODUCTION,
+            ).limit(1))
+        ),
+        "generated_at": utcnow().isoformat(),
+    }

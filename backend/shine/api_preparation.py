@@ -27,6 +27,7 @@ from shine.comfyops.installer import TRUSTED_DOWNLOAD_HOSTS, PackageSpec, check_
 from shine.comfyops.inventory import FakeWindowsHostProbe, WindowsHostProbe
 from shine.comfyops.model_calls import TrackedProvider
 from shine.comfyops.models import (
+    PLAN_PURPOSE_PRODUCTION,
     CandidateAsset,
     ComfyInstance,
     EnvironmentSnapshot,
@@ -1551,7 +1552,11 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
         raise HTTPException(409, "PREPRODUCTION_NOT_ANALYZED")
     claim = db.execute(
         update(PreProductionPlan)
-        .where(PreProductionPlan.id == plan.id, PreProductionPlan.status == "ANALYZED")
+        .where(
+            PreProductionPlan.id == plan.id,
+            PreProductionPlan.status == "ANALYZED",
+            PreProductionPlan.purpose == PLAN_PURPOSE_PRODUCTION,
+        )
         .values(status="PREPARING")
     )
     if claim.rowcount != 1:

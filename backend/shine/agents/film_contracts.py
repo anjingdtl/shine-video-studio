@@ -263,7 +263,14 @@ class FilmRunRequest(APIModel):
     brief: str = Field(default="", max_length=20000)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
     input_revision_ids: list[str] = Field(default_factory=list, max_length=100)
-    tool: Literal["propose", "style_proposal", "edit_intent", "continuity_arbitration"] = "propose"
+    tool: Literal[
+        "propose",
+        "style_proposal",
+        "edit_intent",
+        "continuity_arbitration",
+        "script_prepare",
+        "material_image_brief",
+    ] = "propose"
     offline_preview: bool = False
     allow_remote_text: bool = False
     supersedes_artifact_id: str | None = None
@@ -296,8 +303,28 @@ class FilmAgentRegistry:
     @classmethod
     def get(cls, role: str, tool: str = "propose"):
         if role not in cls.roles or tool not in {"propose", "style_proposal", "edit_intent",
-                                                 "continuity_arbitration"}:
+                                                 "continuity_arbitration", "script_prepare",
+                                                 "material_image_brief"}:
             raise ValueError("ROLE_OR_TOOL_DENIED")
+        if tool == "script_prepare":
+            # Pre-production script preparation is a separate, shallower contract
+            # than the formal ScriptBreakdown: no shots, no durations, no asset
+            # ids and no H3 prompt text, and it is allowed before the Style Bible
+            # is frozen.  It can never be presented as a storyboard.
+            if role != "scriptwriter":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            from shine.materialprep.contracts import ScriptPreparation
+
+            return ScriptPreparation, ()
+        if tool == "material_image_brief":
+            # The producer keeps its default ProductionPlan contract.  A second
+            # tool selects a second schema; the default is never globally changed
+            # into an image description.
+            if role != "producer":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            from shine.materialprep.contracts import MaterialImageBrief
+
+            return MaterialImageBrief, ()
         if tool == "style_proposal":
             if role not in {"scriptwriter", "director", "cinematographer", "editor"}:
                 raise ValueError("ROLE_OR_TOOL_DENIED")

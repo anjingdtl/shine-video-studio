@@ -1,0 +1,726 @@
+"""Worker-side execution of one material image item.
+
+This is the durable replacement for the synchronous candidate endpoint.  The API
+never waits on a renderer; it writes rows and returns 202, and everything here
+runs inside the one resident Worker.
+
+The order is the safety property, so it is worth stating once:
+
+1. claim the item with a conditional ``UPDATE`` (status + ``state_version``);
+2. resolve the brief into a deterministic prompt **before** touching the GPU,
+   because the LLM gateway refuses to run while a resource slot is held;
+3. acquire the shared exclusive lease through ``resource_slot``, which is the same
+   ledger H3 uses, so a running series is never preempted and an unreleased lease
+   blocks this item instead of racing it;
+4. persist the submit intent - final graph hash, seed, size, output node, runtime
+   fingerprint - and commit;
+5. call ``/prompt`` **outside** any SQLite writer transaction, with no automatic
+   retry, because the call is not idempotent;
+6. persist the returned ``prompt_id`` immediately;
+7. harvest only the declared output node, verify the bytes, register the
+   candidate and run technical QC;
+8. release the lease and only then move the batch on.
+
+An uncertain submission becomes ``UNKNOWN`` and stays that way.  Reconciliation
+may adopt bytes that are already on disk after verifying them; it never resubmits.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from fastapi import HTTPException
+from sqlalchemy import select, update
+
+from shine.comfy.client import (
+    ComfyPromptRejected,
+    ComfySubmissionUncertain,
+    ComfyUIClient,
+    ComfyUnavailable,
+    ComfyWorkflowError,
+)
+from shine.comfy.workflow import apply_parameters, graph_hash, validate_graph
+from shine.comfyops import assets as candidate_assets
+from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
+from shine.comfyops.scheduler import resource_slot
+from shine.materialprep import image_prompts, qwen_workflow, runtime
+from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
+from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
+from shine.materialprep.states import (
+    ATTEMPT_CANCELLED,
+    ATTEMPT_FAILED,
+    ATTEMPT_OUTPUT_STORED,
+    ATTEMPT_QC_PENDING,
+    ATTEMPT_SUBMIT_INTENT,
+    ATTEMPT_SUBMITTED,
+    ATTEMPT_SUCCEEDED,
+    ATTEMPT_UNKNOWN,
+    EXECUTION_MODE_REAL,
+    ITEM_CANDIDATE_READY,
+    ITEM_CLAIMABLE,
+    ITEM_FAILED,
+    ITEM_NEEDS_REVIEW,
+    ITEM_QUEUED,
+    ITEM_SUBMIT_INTENT,
+    ITEM_TERMINAL,
+    ITEM_WAITING_GPU,
+    OUTCOME_ACKNOWLEDGED,
+    OUTCOME_FAILED,
+    OUTCOME_NOT_SENT,
+    OUTCOME_SUCCEEDED,
+    OUTCOME_UNKNOWN,
+    RECONCILE_REQUIRED,
+)
+from shine.models import Project, utcnow
+from shine.security import require_loopback_url
+from shine.services import add_audit
+
+IMAGE_BUDGET_MB = 12000
+"""Same estimate the existing candidate image slot uses; it is not a measurement."""
+
+IMAGE_LEASE_PRIORITY = 10
+"""Below H3's 100, so video production keeps priority on the shared ledger."""
+
+POLL_INTERVAL_S = 1.0
+POLL_LIMIT = 1800
+CLAIM_SECONDS = 60
+
+
+class ImageExecutionError(RuntimeError):
+    def __init__(self, code: str, **details: Any) -> None:
+        super().__init__(code)
+        self.code = code
+        self.details = details
+
+
+# --- claiming --------------------------------------------------------------
+
+
+def claim_next_item(factory, worker_id: str) -> str | None:
+    """Atomically claim the oldest claimable item.
+
+    Items that already persisted a submit intent are deliberately not claimable:
+    an external submission may be in flight, and re-claiming one would be the
+    shortest path to rendering the same image twice.  Those go through
+    ``reconcile_item`` instead.
+    """
+    with factory() as db:
+        row = db.scalar(
+            select(MaterialItem)
+            .where(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)))
+            .order_by(MaterialItem.created_at, MaterialItem.id)
+            .limit(1)
+        )
+        if row is None:
+            return None
+        item_id, expected = row.id, row.state_version
+        run_cancelled = bool((db.get(MaterialRun, row.run_id) or MaterialRun(cancel_requested=True)).cancel_requested)
+    if run_cancelled:
+        with factory.begin() as db:
+            db.execute(
+                update(MaterialItem)
+                .where(MaterialItem.id == item_id, MaterialItem.state_version == expected)
+                .values(status="CANCELLED", state_version=expected + 1, error_code="RUN_CANCELLED")
+            )
+        return None
+
+    lease_owner = f"image:{item_id}:{worker_id}"
+    with factory.begin() as db:
+        result = db.execute(
+            update(MaterialItem)
+            .where(
+                MaterialItem.id == item_id,
+                MaterialItem.state_version == expected,
+                MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)),
+            )
+            .values(
+                status=ITEM_WAITING_GPU,
+                state_version=expected + 1,
+                worker_id=worker_id,
+                lease_owner=lease_owner,
+                heartbeat_at=utcnow(),
+            )
+        )
+        if result.rowcount != 1:
+            return None
+    return item_id
+
+
+# --- attempt bookkeeping ---------------------------------------------------
+
+
+def _touch_item(factory, item_id: str, expected_version: int, **values) -> int | None:
+    """A conditional item write; returns the new version, or None if the claim is gone.
+
+    ``None`` means another Worker owns this item now. The caller must stop and
+    must not write again, which is how an expired claim is kept harmless.
+    """
+    with factory.begin() as db:
+        result = db.execute(
+            update(MaterialItem)
+            .where(MaterialItem.id == item_id, MaterialItem.state_version == expected_version)
+            .values(state_version=expected_version + 1, **values)
+        )
+        return expected_version + 1 if result.rowcount == 1 else None
+
+
+def _load_context(factory, item_id: str) -> dict[str, Any]:
+    with factory() as db:
+        item = db.get(MaterialItem, item_id)
+        if item is None:
+            raise ImageExecutionError("MATERIAL_ITEM_NOT_FOUND", item_id=item_id)
+        run = db.get(MaterialRun, item.run_id)
+        requirement = db.get(AssetRequirement, item.requirement_id)
+        plan = db.get(PreProductionPlan, run.plan_id) if run else None
+        project = db.get(Project, item.project_id)
+        return {
+            "item_id": item.id,
+            "item_status": item.status,
+            "item_state_version": item.state_version,
+            "item_payload": dict(item.payload or {}),
+            "generation_revision": item.generation_revision,
+            "run_id": run.id if run else None,
+            "run_payload": dict(run.payload or {}) if run else {},
+            "run_mode": run.mode if run else None,
+            "run_status": run.status if run else None,
+            "cancel_requested": bool(run.cancel_requested) if run else True,
+            "requirement_payload": dict(requirement.payload or {}) if requirement else {},
+            "plan_purpose": plan.purpose if plan else None,
+            "project_id": project.id if project else None,
+            "project_title": project.title if project else "",
+        }
+
+
+# --- readiness gate --------------------------------------------------------
+
+
+def resolve_runtime(
+    factory,
+    settings,
+    family: str,
+    *,
+    kind: str,
+    object_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prove the runtime may really render this family, or refuse by name.
+
+    A validation run is allowed one layer lower (``GRAPH_VERIFIED``) because
+    requiring a real sample before the first real sample could never be
+    satisfied.  A production batch is not: it needs a current real sample for its
+    own family.
+    """
+    config = runtime.load_config(settings)
+    if not config.base_url or not config.instance_id:
+        raise ImageExecutionError("IMAGE_RUNTIME_NOT_READY", code_detail="IMAGE_RUNTIME_NOT_BOUND", family=family)
+    base_url = require_loopback_url(
+        config.base_url, allow_remote=bool(getattr(settings, "allow_remote_comfyui", False))
+    )
+    files = runtime.verify_model_files(config)
+    if not files["complete"]:
+        raise ImageExecutionError(
+            "IMAGE_RUNTIME_NOT_READY",
+            code_detail="IMAGE_MODEL_FILES_NOT_VERIFIED",
+            problems=files["problems"],
+            family=family,
+        )
+    if object_info is None:
+        client = ComfyUIClient(base_url, max_retries=0)
+        object_info = client.object_info()
+    graph_report = runtime.verify_graph_against_object_info(object_info)
+    fingerprint = runtime.current_fingerprint(config, graph_report=graph_report)
+    if not graph_report["complete"]:
+        raise ImageExecutionError(
+            "IMAGE_RUNTIME_NOT_READY",
+            code_detail="IMAGE_GRAPH_NOT_VERIFIED",
+            missing_nodes=graph_report["missing_nodes"],
+            missing_inputs=graph_report["missing_inputs"],
+            family=family,
+        )
+    if kind != "validation":
+        with factory() as db:
+            verified = runtime.render_verified_families(db, fingerprint)
+        if family not in verified:
+            raise ImageExecutionError(
+                "IMAGE_RUNTIME_NOT_READY",
+                code_detail="IMAGE_FAMILY_NOT_RENDER_VERIFIED",
+                family=family,
+                remediation="Run the three small-sample validation tasks for this family first.",
+            )
+    return {"config": config, "base_url": base_url, "fingerprint": fingerprint, "graph_report": graph_report}
+
+
+# --- submission ------------------------------------------------------------
+
+
+def _build_graph(config, prompt: image_prompts.ImagePrompt, *, seed: int, width: int, height: int) -> dict[str, Any]:
+    graph = qwen_workflow.base_graph()
+    values = {
+        "prompt": prompt.prompt,
+        "negative_prompt": prompt.negative_prompt,
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "steps": config.steps,
+        "cfg": config.cfg,
+        "sampler_name": config.sampler_name,
+        "scheduler": config.scheduler,
+        "denoise": qwen_workflow.DEFAULT_DENOISE,
+        "resolution": qwen_workflow.DEFAULT_RESOLUTION,
+        "filename_prefix": qwen_workflow.FILENAME_PREFIX,
+    }
+    final = apply_parameters(graph, qwen_workflow.PARAMETER_MAP, values)
+    validate_graph(final, required_nodes=qwen_workflow.REQUIRED_NODES)
+    return final
+
+
+def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
+    payload = context["item_payload"]
+    brief_raw = payload.get("brief")
+    if not brief_raw:
+        raise ImageExecutionError("MATERIAL_BRIEF_MISSING", item_id=context["item_id"])
+    brief = MaterialImageBrief.model_validate(brief_raw)
+    if brief.questions:
+        # An unanswered clarification means the user has not confirmed the look;
+        # rendering it would invent an answer.
+        raise ImageExecutionError(
+            "MATERIAL_BRIEF_NEEDS_CLARIFICATION", questions=brief.questions, item_id=context["item_id"]
+        )
+    direction = MaterialVisualDirection.model_validate(payload.get("visual_direction") or {})
+    requirement = context["requirement_payload"]
+    family = requirement.get("family") or payload.get("family")
+    if family not in image_prompts.COMPOSITION_RULES:
+        raise ImageExecutionError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
+    return image_prompts.compose(
+        family,
+        brief,
+        visual_direction=direction,
+        requirement_name=str(requirement.get("entity_id") or ""),
+    )
+
+
+def _submit_outcome(exc: Exception) -> tuple[str, str, str | None]:
+    """Map a transport failure onto (attempt status, external outcome, error code).
+
+    ``ComfyUnavailable`` is the only branch that proves the request was never
+    delivered, so it is the only one that may be resumed into a new attempt.
+    Everything uncertain stays unknown forever.
+    """
+    if isinstance(exc, ComfyUnavailable):
+        return ATTEMPT_FAILED, OUTCOME_NOT_SENT, "IMAGE_SUBMISSION_NOT_SENT"
+    if isinstance(exc, ComfySubmissionUncertain):
+        return ATTEMPT_UNKNOWN, OUTCOME_UNKNOWN, "IMAGE_SUBMISSION_OUTCOME_UNKNOWN"
+    if isinstance(exc, ComfyPromptRejected):
+        return ATTEMPT_FAILED, OUTCOME_FAILED, "IMAGE_PROMPT_REJECTED"
+    if isinstance(exc, ComfyWorkflowError):
+        return ATTEMPT_FAILED, OUTCOME_FAILED, "IMAGE_WORKFLOW_REJECTED"
+    return ATTEMPT_UNKNOWN, OUTCOME_UNKNOWN, "IMAGE_SUBMISSION_OUTCOME_UNKNOWN"
+
+
+def _poll(client: ComfyUIClient, prompt_id: str) -> dict[str, Any]:
+    for _ in range(POLL_LIMIT):
+        history = client.history(prompt_id)
+        entry = history.get(prompt_id)
+        if entry:
+            status = entry.get("status") or {}
+            if status.get("status_str") == "error":
+                raise ImageExecutionError("IMAGE_EXECUTION_FAILED", prompt_id=prompt_id)
+            if entry.get("outputs"):
+                return entry
+            if status.get("completed"):
+                return entry
+        time.sleep(POLL_INTERVAL_S)
+    raise ImageExecutionError("IMAGE_OUTCOME_RECONCILIATION_REQUIRED", prompt_id=prompt_id)
+
+
+def _harvest(client: ComfyUIClient, history_entry: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    """Download the ONE declared output image."""
+    entry = qwen_workflow.declared_output_slot(history_entry)
+    filename = str(entry["filename"])
+    subfolder = str(entry.get("subfolder") or "")
+    file_type = str(entry.get("type") or "output")
+    if file_type != "output":
+        raise ImageExecutionError(
+            "IMAGE_OUTPUT_NODE_MISMATCH", reason="declared entry is not an output", filename=filename
+        )
+    # filename/subfolder are external data; the storage layer re-derives a safe
+    # digest-addressed path, so nothing here is joined onto the local filesystem.
+    content = client.view(filename, subfolder=subfolder, file_type=file_type)
+    return content, {"filename": filename, "subfolder": subfolder, "type": file_type}
+
+
+def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: str, content: bytes, family: str):
+    """Verify the bytes through the shared candidate ledger and link the attempt."""
+    from shine.comfy.workflow import graph_hash as _hash
+
+    with factory.begin() as db:
+        project = db.get(Project, context["project_id"])
+        requirement = context["requirement_payload"]
+        entity_id = str(requirement.get("entity_id") or context["item_payload"].get("entity_id") or "")
+        rights_id = context["run_payload"].get("rights_id")
+        provenance = {
+            "source": "material_preparation",
+            "is_mock": False,
+            "generator": qwen_workflow.MODEL_FAMILY,
+            "generation_mode": qwen_workflow.GENERATION_MODE,
+            "template_commit": qwen_workflow.TEMPLATE_COMMIT,
+            "model_revision": qwen_workflow.MODEL_REVISION,
+            "run_id": context["run_id"],
+            "item_id": context["item_id"],
+            "attempt_id": attempt_id,
+            "generation_revision": context["generation_revision"],
+            "usage_scope": "LOCAL_RESEARCH_AND_EVALUATION_ONLY",
+            "license": "Qwen RESEARCH LICENSE AGREEMENT (2026-09-20), non-commercial",
+        }
+        row = candidate_assets.create_candidate(
+            db,
+            settings,
+            project,
+            family,
+            entity_id,
+            content,
+            f"material-{family}-{context['item_id'][:8]}.png",
+            rights_id,
+            provenance,
+        )
+        attempt = db.get(MaterialImageAttempt, attempt_id)
+        attempt.candidate_id = row.id
+        attempt.content_sha256 = row.payload["content_sha256"]
+        attempt.byte_size = row.payload["byte_size"]
+        attempt.status = ATTEMPT_OUTPUT_STORED
+        attempt.payload = {
+            **(attempt.payload or {}),
+            "candidate": {"id": row.id, "sha256": row.payload["content_sha256"]},
+        }
+        attempt.sha256 = _hash(attempt.payload)
+        item = db.get(MaterialItem, context["item_id"])
+        item.payload = {**(item.payload or {}), "candidate_id": row.id}
+        item.sha256 = _hash(item.payload)
+        return row.id, row.payload["content_sha256"]
+
+
+def _technical_qc(factory, settings, candidate_id: str) -> dict[str, Any]:
+    """Re-hash the stored bytes and really decode them before anything is offered.
+
+    ``candidate_qc`` calls ``verify_candidate``, which re-reads the file and
+    compares its digest, so bytes changed after persistence are refused here
+    rather than adopted.  Semantic verdicts stay ``PENDING_HUMAN_REVIEW``: a
+    technical pass is never an artistic acceptance.
+    """
+    with factory.begin() as db:
+        row = db.get(candidate_assets.CandidateAsset, candidate_id)
+        qc = candidate_assets.candidate_qc(settings, row)
+        status = row.status
+    return {"qc": qc, "candidate_status": status}
+
+
+# --- the item lifecycle ----------------------------------------------------
+
+
+def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, Any]:
+    """Run one claimed item to a candidate, a definite failure, or UNKNOWN.
+
+    ``item_state_version`` is threaded through every write: a Worker whose claim
+    expired and was taken over by another Worker fails its next conditional
+    update and stops, instead of writing over the new owner's progress.
+    """
+    context = _load_context(factory, item_id)
+    if context["plan_purpose"] != PLAN_PURPOSE_ASSET_PREPARATION:
+        # A material item must belong to a material plan. This is the write-side
+        # twin of the read-side purpose filter.
+        raise ImageExecutionError(
+            "PREPRODUCTION_PLAN_PURPOSE_MISMATCH", item_id=item_id, purpose=str(context["plan_purpose"])
+        )
+    if context["run_mode"] != EXECUTION_MODE_REAL:
+        raise ImageExecutionError("IMAGE_REAL_PROVIDER_REQUIRED", run_mode=str(context["run_mode"]))
+
+    version = context["item_state_version"]
+    if context["cancel_requested"]:
+        _touch_item(factory, item_id, version, status="CANCELLED", error_code="RUN_CANCELLED")
+        return {"item_id": item_id, "status": "CANCELLED"}
+
+    requirement = context["requirement_payload"]
+    family = str(requirement.get("family") or context["item_payload"].get("family") or "")
+    kind = str(context["run_payload"].get("kind") or "production")
+
+    # The brief is composed before the GPU is touched: the gateway refuses to run
+    # while a resource slot is held, and a prompt failure must not burn a lease.
+    try:
+        prompt = _compose_prompt(context)
+        resolved = resolve_runtime(factory, settings, family, kind=kind)
+    except ImageExecutionError as exc:
+        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        _audit(factory, context, "MATERIAL_IMAGE_BLOCKED", {"code": exc.code, **exc.details})
+        return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
+
+    config = resolved["config"]
+    fingerprint = resolved["fingerprint"]
+    seed = int(context["item_payload"].get("seed") or 0)
+    if not 0 <= seed <= qwen_workflow.MAX_SEED:
+        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_SEED_OUT_OF_RANGE")
+        return {"item_id": item_id, "status": ITEM_FAILED, "code": "IMAGE_SEED_OUT_OF_RANGE"}
+    width = int(context["item_payload"].get("width") or config.width)
+    height = int(context["item_payload"].get("height") or config.height)
+    graph = _build_graph(config, prompt, seed=seed, width=width, height=height)
+    graph_sha = graph_hash(graph)
+
+    client = ComfyUIClient(resolved["base_url"], max_retries=0)
+    try:
+        with resource_slot(
+            factory,
+            "IMAGE",
+            IMAGE_BUDGET_MB,
+            release_models=client.free_models,
+            wait_seconds=0,
+        ) as lease_id:
+            return _render_inside_lease(
+                factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint, family, prompt
+            )
+    except HTTPException as exc:
+        code = exc.detail if isinstance(exc.detail, str) else str((exc.detail or {}).get("code", "GPU_UNAVAILABLE"))
+        if code == "GPU_BUSY_RETRY_OR_QUEUE":
+            # Waiting for the GPU is not a failure. Put the item back so a later
+            # pass retries it, and never fail a batch because the ledger is busy.
+            _touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
+            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": "GPU"}
+        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
+        return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
+    except ImageExecutionError as exc:
+        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
+
+
+def _render_inside_lease(factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint,
+                         family, prompt):
+    """Everything that happens while the exclusive lease is held."""
+    item_id = context["item_id"]
+    seed = int(context["item_payload"].get("seed") or 0)
+    width = int(context["item_payload"].get("width") or 0)
+    height = int(context["item_payload"].get("height") or 0)
+
+    attempt_id = _open_attempt(
+        factory,
+        context,
+        lease_id=lease_id,
+        graph_sha=graph_sha,
+        prompt=prompt,
+        seed=seed,
+        width=width,
+        height=height,
+        fingerprint=fingerprint,
+    )
+    next_version = _touch_item(factory, item_id, version, status=ITEM_SUBMIT_INTENT, lease_id=lease_id,
+                               current_attempt_id=attempt_id)
+    if next_version is None:
+        _close_attempt(factory, attempt_id, status=ATTEMPT_CANCELLED, outcome=OUTCOME_NOT_SENT,
+                       error_code="CLAIM_LOST", release_intent=True)
+        return {"item_id": item_id, "status": "CLAIM_LOST", "attempt_id": attempt_id}
+    version = next_version
+
+    # The submit intent is committed. The external call now runs outside any
+    # SQLite writer transaction and is never retried automatically.
+    try:
+        response = client.queue_prompt(graph, extra_data={"shine_kind": "material_image", "shine_attempt": attempt_id})
+    except Exception as exc:  # noqa: BLE001 - _submit_outcome decides recoverability
+        status, outcome, code = _submit_outcome(exc)
+        unknown = outcome == OUTCOME_UNKNOWN
+        item_status = ITEM_NEEDS_REVIEW if unknown else ITEM_FAILED
+        _close_attempt(factory, attempt_id, status=status, outcome=outcome, error_code=code,
+                       details={"error_type": type(exc).__name__}, release_intent=not unknown)
+        _touch_item(factory, item_id, version, status=item_status, error_code=code)
+        _audit(factory, context,
+               "MATERIAL_IMAGE_SUBMISSION_UNCERTAIN" if unknown else "MATERIAL_IMAGE_SUBMISSION_FAILED",
+               {"attempt_id": attempt_id, "code": code})
+        return {"item_id": item_id, "status": item_status, "code": code, "external_outcome": outcome,
+                "attempt_id": attempt_id}
+
+    prompt_id = str(response.get("prompt_id") or "")
+    # Persist the acknowledgement immediately: from here a crash is recoverable by
+    # querying this prompt id, and never by submitting a second time.
+    _close_attempt(factory, attempt_id, status=ATTEMPT_SUBMITTED, outcome=OUTCOME_ACKNOWLEDGED,
+                   prompt_id=prompt_id, keep_intent=True)
+    next_version = _touch_item(factory, item_id, version, status="RUNNING")
+    version = next_version if next_version is not None else version
+    _audit(factory, context, "MATERIAL_IMAGE_SUBMITTED", {"attempt_id": attempt_id, "prompt_id": prompt_id})
+
+    try:
+        history_entry = _poll(client, prompt_id)
+        content, source = _harvest(client, history_entry)
+    except ImageExecutionError as exc:
+        uncertain = exc.code == "IMAGE_OUTCOME_RECONCILIATION_REQUIRED"
+        _close_attempt(factory, attempt_id,
+                       status=ATTEMPT_UNKNOWN if uncertain else ATTEMPT_FAILED,
+                       outcome=OUTCOME_UNKNOWN if uncertain else OUTCOME_FAILED,
+                       error_code=exc.code, details=exc.details, release_intent=not uncertain)
+        _touch_item(factory, item_id, version,
+                    status=ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED, error_code=exc.code)
+        _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN" if uncertain else "MATERIAL_IMAGE_EXECUTION_FAILED",
+               {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": exc.code})
+        return {"item_id": item_id, "status": ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED,
+                "code": exc.code, "prompt_id": prompt_id, "attempt_id": attempt_id}
+
+    candidate_id, content_sha = _register_candidate(factory, settings, context, attempt_id, content, family)
+    _close_attempt(factory, attempt_id, status=ATTEMPT_QC_PENDING, outcome=OUTCOME_SUCCEEDED,
+                   content_sha256=content_sha, keep_intent=True, harvest=source)
+    next_version = _touch_item(factory, item_id, version, status="OUTPUT_STORED")
+    version = next_version if next_version is not None else version
+
+    qc = _technical_qc(factory, settings, candidate_id)
+    passed = qc["candidate_status"] == "READY_FOR_REVIEW"
+    _close_attempt(factory, attempt_id, status=ATTEMPT_SUCCEEDED if passed else ATTEMPT_FAILED,
+                   outcome=OUTCOME_SUCCEEDED if passed else OUTCOME_FAILED,
+                   error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED", qc=qc["qc"], release_intent=True)
+    _touch_item(factory, item_id, version,
+                status=ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+                error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED")
+    _audit(factory, context,
+           "MATERIAL_IMAGE_CANDIDATE_READY" if passed else "MATERIAL_IMAGE_QC_FAILED",
+           {"attempt_id": attempt_id, "candidate_id": candidate_id, "content_sha256": content_sha,
+            "prompt_id": prompt_id, "graph_sha256": graph_sha, "technical": qc["qc"].get("technical"),
+            "semantic": qc["qc"].get("semantic")})
+    return {
+        "item_id": item_id,
+        "status": ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+        "attempt_id": attempt_id,
+        "candidate_id": candidate_id,
+        "content_sha256": content_sha,
+        "prompt_id": prompt_id,
+        "graph_sha256": graph_sha,
+        "runtime_fingerprint": fingerprint,
+    }
+
+
+def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width, height, fingerprint) -> str:
+    """Persist the submit intent and return its attempt id.
+
+    The unique ``active_intent_key`` makes this the atomic guard against a second
+    concurrent submission for the same item: if an unfinished attempt already
+    exists, the insert fails and nothing is submitted.
+    """
+    with factory() as db:
+        existing = db.scalars(
+            select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == context["item_id"])
+        ).all()
+        attempt_no = len(existing) + 1
+    payload = {
+        "prompt_evidence": prompt.as_evidence(),
+        "graph_sha256": graph_sha,
+        "output_node_id": qwen_workflow.OUTPUT_NODE,
+        "output_class_type": qwen_workflow.OUTPUT_CLASS_TYPE,
+        "model_family": qwen_workflow.MODEL_FAMILY,
+        "template_commit": qwen_workflow.TEMPLATE_COMMIT,
+    }
+    with factory.begin() as db:
+        attempt = MaterialImageAttempt(
+            item_id=context["item_id"],
+            run_id=context["run_id"],
+            project_id=context["project_id"],
+            attempt_no=attempt_no,
+            status=ATTEMPT_SUBMIT_INTENT,
+            active_intent_key=f"{context['item_id']}:{attempt_no}",
+            graph_sha256=graph_sha,
+            prompt_template_version=prompt.template_version,
+            prompt_sha256=prompt.sha256,
+            seed=seed,
+            width=width,
+            height=height,
+            output_node_id=qwen_workflow.OUTPUT_NODE,
+            runtime_fingerprint=fingerprint,
+            submit_intent_at=utcnow(),
+            external_outcome=OUTCOME_NOT_SENT,
+            lease_id=lease_id,
+            payload=payload,
+            sha256=graph_hash(payload),
+        )
+        db.add(attempt)
+        db.flush()
+        return attempt.id
+
+
+def _close_attempt(factory, attempt_id: str, *, status: str, outcome: str | None = None,
+                   error_code: str | None = None, prompt_id: str | None = None,
+                   content_sha256: str | None = None, details: dict[str, Any] | None = None,
+                   qc: dict[str, Any] | None = None, harvest: dict[str, Any] | None = None,
+                   release_intent: bool = False, keep_intent: bool = False) -> None:
+    with factory.begin() as db:
+        attempt = db.get(MaterialImageAttempt, attempt_id)
+        if attempt is None:
+            return
+        attempt.status = status
+        if outcome is not None:
+            attempt.external_outcome = outcome
+        if error_code is not None:
+            attempt.error_code = error_code
+        if prompt_id is not None:
+            attempt.prompt_id = prompt_id
+        if content_sha256 is not None:
+            attempt.content_sha256 = content_sha256
+        payload = dict(attempt.payload or {})
+        if details:
+            payload["details"] = {**payload.get("details", {}), **details}
+        if qc:
+            payload["qc"] = qc
+        if harvest:
+            payload["harvest"] = harvest
+        payload.setdefault("history", []).append({"status": status, "outcome": outcome, "at": utcnow().isoformat()})
+        attempt.payload = payload
+        attempt.sha256 = graph_hash(payload)
+        if release_intent and not keep_intent:
+            attempt.active_intent_key = None
+        if outcome == OUTCOME_UNKNOWN:
+            attempt.reconciliation_state = RECONCILE_REQUIRED
+
+
+def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1) -> int:
+    """Claim and execute image items, one lease at a time.
+
+    Each item acquires and releases the exclusive lease on its own, so a long
+    batch cannot starve the H3 queue: after every item the Worker returns to its
+    normal dispatch order and a waiting series goes first.
+    """
+    from shine.materialprep import service
+
+    processed = 0
+    for _ in range(max(1, limit)):
+        item_id = claim_next_item(factory, worker_id)
+        if item_id is None:
+            break
+        try:
+            result = execute_item(factory, settings, item_id, worker_id)
+        except ImageExecutionError as exc:
+            result = {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code}
+            with factory() as db:
+                item = db.get(MaterialItem, item_id)
+                if item is not None and item.status not in ITEM_TERMINAL:
+                    item.status = ITEM_FAILED
+                    item.error_code = exc.code
+                    item.state_version += 1
+                    db.commit()
+        except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the Worker
+            result = {"item_id": item_id, "status": ITEM_NEEDS_REVIEW, "code": type(exc).__name__}
+            with factory.begin() as db:
+                item = db.get(MaterialItem, item_id)
+                if item is not None and item.status not in ITEM_TERMINAL:
+                    # Not FAILED: an unexpected fault mid-render leaves the external
+                    # outcome unproven, so it is reviewed rather than retried.
+                    item.status = ITEM_NEEDS_REVIEW
+                    item.error_code = type(exc).__name__
+                    item.state_version += 1
+        processed += 1
+        with factory() as db:
+            item = db.get(MaterialItem, item_id)
+            if item is not None:
+                service.refresh_run_status(db, item.run_id)
+        if result.get("status") == ITEM_QUEUED:
+            # Still waiting for the GPU; do not spin on it this pass.
+            break
+    return processed
+
+
+def _audit(factory, context, action: str, detail: dict[str, Any]) -> None:
+    try:
+        with factory.begin() as db:
+            add_audit(db, "worker", action, "material_item", context["item_id"], detail,
+                      project_id=context["project_id"])
+    except Exception:  # noqa: BLE001 - an audit write must not abort a render
+        pass
