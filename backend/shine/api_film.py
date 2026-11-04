@@ -832,8 +832,12 @@ def generate_storyboard(
                      if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256), None)
         if task:
             rejection["task_id"] = task.id
-            if task.trace.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE":
-                rejection["rejection_reason_code"] = "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
+            reason = task.trace.get("rejection_reason_code")
+            if reason:
+                # The precise reason the role's answer was refused.  Without it
+                # the operator only sees a generic code and cannot tell a
+                # contract miss from an unrepairable request.
+                rejection["rejection_reason_code"] = reason
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:
                 rejection["external_outcome"] = outcome

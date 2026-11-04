@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ShortcutPath = '',
     [string]$PwshPath = ''
 )

@@ -15,7 +15,7 @@ type StoryboardResult = {
   script_sha256?: string;
   steps: Record<string, Step>;
   missing_characters?: string[];
-  rejections?: Array<{ role: string; code: string; task_id?: string; external_outcome?: string }>;
+  rejections?: Array<{ role: string; code: string; rejection_reason_code?: string; task_id?: string; external_outcome?: string }>;
   continuity_issues?: string[];
   repair_failure?: { role: string; code: string } | null;
   editorial_timing_preview?: {
@@ -274,7 +274,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         // A refused chain states its reason in the panel status, never in a
         // toast that disappears before it is read.
         const rejections = row.rejections ?? [];
-        const reason = rejections.map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.code)}`)
+        const reason = rejections.map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.rejection_reason_code ?? r.code)}`)
           .join('；') || '未知原因';
         const definitelyNotSent = rejections.some(r => r.external_outcome === 'NOT_SENT');
         const taskId = rejections.find(r => r.task_id)?.task_id;
@@ -544,7 +544,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     {result && <div className="storyboard-result">
       {result.status === 'REJECTED' && <div className="blocked-callout">
         <AlertTriangle size={15} />
-        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.code)}`).join('；') || '未知原因'}</span>
+        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.rejection_reason_code ?? r.code)}`).join('；') || '未知原因'}</span>
       </div>}
       {result.status === 'BLOCKED_MISSING_MASTERS' && <div className="blocked-callout">
         <AlertTriangle size={15} />

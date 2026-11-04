@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 STARTUP_PREFIX = "renderer-startup:"
 REVIEW_PREFIX = "review-startup:"
 HANDOFF_PREFIX = "handoff:"
-TERMINAL_STAGES = {"RECONCILE_REQUIRED"}
+TERMINAL_STAGES = {"RECONCILE_REQUIRED", "STOPPED"}
 COMPLETE_STAGES = {"RUNNING"}
 # The renderer is already stopped at these stages, so a failed restart has
 # nothing left to protect once the recorded process and its port are gone.
@@ -670,6 +670,7 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
             if lease and lease.status == "ACTIVE":
                 lease.status = "RECONCILE_REQUIRED"
             _write_startup(db, instance_id, {
+                **current,
                 "stage": "RECONCILE_REQUIRED",
                 "last_confirmed_stage": current.get("stage"),
                 "reason": "COMFY_STARTUP_INTERRUPTED",

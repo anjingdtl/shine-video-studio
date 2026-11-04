@@ -11,6 +11,7 @@ workflow profile defines, exactly as before.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "f160a0010001"

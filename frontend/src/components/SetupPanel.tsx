@@ -54,6 +54,15 @@ type RuntimeState = { status: string; render_provider: string; error: string | n
 type VoiceReadiness = { status: string; voice_master_capable: boolean; voice_clone_capable?: boolean;
   roles: Array<{ role: string; package_id: string | null; status: string | null; code: string | null;
     capability?: string; files_present?: boolean | null; runtime_configured?: boolean }> };
+type ManagedProcess = { kind: 'renderer' | 'review'; id: string | null; stage: string | null;
+  state: string; port: number | null; pid: number | null; lease_status: string | null;
+  job_status: string | null; in_flight?: boolean };
+type ReleaseReport = { stopped: Array<ManagedProcess & { outcome?: string; reason?: string }>;
+  refused: Array<ManagedProcess & { outcome?: string; reason?: string }> };
+
+const MANAGED_STATE_LABELS: Record<string, string> = {
+  RUNNING: '运行中', GONE: '进程已不在', UNVERIFIED: '无法确认归属', STOPPED: '已停止',
+};
 
 const TOOL_LABELS: Record<string, string> = {
   uv: 'uv', node: 'Node.js', npm: 'npm', pwsh: 'PowerShell 7', ffmpeg: 'FFmpeg', ffprobe: 'FFprobe',
@@ -259,6 +268,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   const [plans, setPlans] = useState<PlanRef[]>([]);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
+  const [managed, setManaged] = useState<ManagedProcess[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const projectRef = useRef(projectId);
@@ -308,7 +318,12 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   const loadVoice = useCallback(async () => {
     try { setVoice(await api<VoiceReadiness>('/setup/voice-readiness')); } catch { /* keep prior state */ }
   }, []);
-  const loadStorage = useCallback(async () => {
+  const loadManaged = useCallback(async () => {
+    try {
+      const rows = await api<{ processes: ManagedProcess[] }>('/setup/managed-processes');
+      setManaged(rows.processes ?? []);
+    } catch { /* keep prior state */ }
+  }, []);  const loadStorage = useCallback(async () => {
     try {
       setStorage(await api<DeploymentStorage>('/setup/storage'));
       setNotice((current) => current?.kind === 'bad' ? null : current);
@@ -327,8 +342,8 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   }, [projectId]);
   useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
-  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); void loadVoice(); },
-    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime, loadVoice, refreshEpoch]);
+  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); void loadVoice(); void loadManaged(); },
+    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime, loadVoice, loadManaged, refreshEpoch]);
   useEffect(() => {
     void loadStorage();
     const refresh = () => {
@@ -411,8 +426,27 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
     });
   }
 
-  function activateRuntime() {
-    const candidate = runtime?.candidate;
+  function releaseManagedProcesses() {
+    void run(async () => {
+      // ComfyUI and the local reviewers belong to this workbench: the operator
+      // closes them here and the GPU memory comes back immediately.
+      const report = await api<ReleaseReport>('/setup/managed-processes/release', withJson('POST', {}));
+      await loadManaged();
+      await onRefresh();
+      const stopped = report.stopped?.length ?? 0;
+      const refused = report.refused?.length ?? 0;
+      const busyOnes = (report.refused ?? []).filter(item => item.outcome === 'busy').length;
+      if (busyOnes > 0) {
+        return `已释放 ${stopped} 个后台进程；${busyOnes} 个正在出片，未停止。`;
+      }
+      if (refused > 0) {
+        return `已释放 ${stopped} 个后台进程；${refused} 个无法确认归属，未停止（见下方列表）。`;
+      }
+      return stopped > 0 ? `已关闭 ${stopped} 个后台进程，显存已释放。` : '当前没有需要关闭的本机后台进程。';
+    });
+  }
+
+function activateRuntime() {    const candidate = runtime?.candidate;
     if (!candidate || candidate.project_id !== projectRef.current) return;
     void run(async () => {
       const result = await api<RuntimeState>('/setup/runtime/activate', withJson('POST', {
@@ -852,6 +886,26 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
               {runtime.service_validation.blockers?.length ? ` · ${runtime.service_validation.blockers.join('、')}` : ''}</>}
             {runtime.error && <> · {runtime.error}</>}
           </p>}
+          <div className="settings-block managed-processes">
+            <h3>本机后台进程（ComfyUI / 审片服务）</h3>
+            <p className="module-guide">这些后台由本工作台启动，模型会一直占着显存。不用时可以在这里一键关闭并释放内存；正在出片的进程不会被强行中断。</p>
+            {managed.length === 0 ? <div className="empty-inline">没有记录到本机后台进程。</div> : <div className="worker-row-list">
+              {managed.map(item => (
+                <div className="worker-row" key={`${item.kind}-${item.id ?? item.pid}`}>
+                  <div>
+                    <b>{item.kind === 'renderer' ? 'ComfyUI 生成服务' : '本地审片服务'}</b>
+                    <span>编号 {String(item.id ?? '—').slice(0, 8)}… · {MANAGED_STATE_LABELS[item.state] ?? item.state}
+                      {item.port ? ` · 端口 ${item.port}` : ''}{item.pid ? ` · pid ${item.pid}` : ''}
+                      {item.lease_status ? ` · 占用 ${item.lease_status}` : ''}
+                      {item.job_status ? ` · 镜头 ${item.job_status}` : ''}</span>
+                  </div>
+                </div>
+              ))}
+            </div>}
+            <button className="must-button" disabled={busy} onClick={releaseManagedProcesses}>
+              关闭本机后台并释放显存
+            </button>
+          </div>
           {plans.length > 0 && <div className="setup-plans">
             {plans.map((plan) => (
               <div className="worker-row" key={plan.plan_id}>

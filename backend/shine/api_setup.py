@@ -329,6 +329,28 @@ def runtime_state(settings: SettingsDep, db: DBSession):
     return runtime_report(db, settings)
 
 
+@router.get('/managed-processes')
+def managed_processes(db: DBSession):
+    """The renderers and local reviewers this workbench owns right now."""
+    from shine.comfyops.renderer_release import describe_managed_processes
+    return {"processes": describe_managed_processes(db)}
+
+
+@router.post('/managed-processes/release')
+def release_managed_processes(actor: Operator, db: DBSession):
+    """Stop the owned renderer and reviewers and give the GPU memory back.
+
+    This is the workbench's own "close the backend" action: ComfyUI and the
+    local reviewers are started by this installation, so closing the workbench
+    closes them.  A process that serves a running attempt, or whose ownership
+    cannot be proven, is reported and left alone.
+    """
+    from shine.comfyops.renderer_release import release_managed_processes as release
+    report = release(db, actor=actor, reason="operator_release")
+    db.commit()
+    return report
+
+
 @router.post('/runtime/activate')
 def activate_runtime(body: RuntimeActivationRequest, actor: Operator, settings: SettingsDep, db: DBSession):
     from shine.comfyops.runtime_configuration import activate_runtime as activate

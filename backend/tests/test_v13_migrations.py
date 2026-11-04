@@ -3,6 +3,7 @@ import sqlite3
 from sqlalchemy import inspect
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from shine.db import Base, make_engine, make_session_factory
 from shine.models import Asset, AuditEvent, Job, JobAttempt, Project, QCReport, Shot, StyleVersion, utcnow
 from tests.test_alembic import alembic_config
@@ -101,7 +102,10 @@ def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_pa
         after = {name: db.execute(f'SELECT {columns[name]} FROM "{name}"').fetchall() for name in legacy}
         assert before == after
         assert not db.execute("PRAGMA foreign_key_check").fetchall()
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f150a0030001"
+        # The head moves whenever a migration is added; pinning a revision here
+        # would fail for an unrelated, additive migration.
+        head = ScriptDirectory.from_config(config).get_current_head()
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == head
     engine = make_engine(url)
     inspector = inspect(engine)
     assert set(Base.metadata.tables) <= set(inspector.get_table_names())

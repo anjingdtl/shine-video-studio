@@ -195,6 +195,69 @@ Never bundle official full-text guides without redistribution permission. Run
   backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`. Build the Windows
   package only from the final committed tree with `pwsh -File scripts\build_test_package.ps1`.
 
+## 2026-11-04 renderer lifecycle round (ComfyUI belongs to the workbench)
+
+- **ComfyUI and the local reviewers are started by this installation, so they belong to
+  the workbench, not to the machine.** A renderer that outlives the stack keeps the model
+  resident in GPU memory and blocks the next run. The launcher therefore releases leftover
+  backends before a clean start (`scripts/release_residual_backends.py`, called by
+  `scripts/start_shine.ps1`), and the workbench has one action that closes them:
+  `POST /api/v1/setup/managed-processes/release` plus the「关闭本机后台并释放显存」button
+  in the setup panel.
+- **Ownership is proven twice or the process is not touched.** A managed renderer or reviewer
+  is stopped only when its recorded PID/birth identity and the membership of its named
+  `Local\ShineHandoff-<uuid>` Job Object agree (`shine/comfyops/renderer_release.py`). A
+  renderer that serves a running attempt is never stopped; a process whose ownership cannot
+  be proven is reported as `UNVERIFIED` and left alone. A leftover reviewer that no process
+  record names any more is owned when its command line names this installation's own review
+  script.
+- **The startup record is the only ownership proof; a reconciliation may not drop it.**
+  `reconcile_managed_startups` keeps the process identity, port and lease id when it marks an
+  interrupted startup `RECONCILE_REQUIRED`. A record that loses that identity can neither be
+  released nor matched to its lease, and the renderer becomes unstoppable.
+- **The workbench never claims a renderer that is gone.** A managed record whose process is
+  provably gone is written back as `STOPPED` and its lease is released as reconciled; the
+  `comfy_instances` row follows. Stale `RUNNING_PENDING_HEALTH` rows are history, not a
+  running renderer.
+- Evidence: `docs/ACCEPTANCE_20261104_RENDERER_LIFECYCLE.md`,
+  `backend/tests/test_managed_process_release.py`.
+
+## 2026-11-04 crew prompt round (director chain: EDITORIAL_TIMING_CONFLICT and LLM_FORMAT)
+
+- **The five crew prompts live in `shine/agents/crew_prompts.py`.** They state three things
+  only: the role's authority, the official H3 constraints, and the deterministic numbers the
+  server checks the answer against. Never let a prompt sentence contradict a server check:
+  the 2026-11-04 director failures (`5cb3a8fc`/`170afa21` → `EDITORIAL_TIMING_CONFLICT`,
+  `b6f2bda9`/`31ead07a` → `LLM_FORMAT`) came from a prompt that invited regrouping and a
+  "natural tail" while the server required the cut table exactly.
+- **The segmentation is computed, not negotiated.** `editorial_timing_plan`
+  (`shine/agents/editorial_timing.py`) is the finished answer and is served to the crew in the
+  context; the director prompt writes out every `duration_s` and every cut `start_s` it must
+  copy. A role must never recompute a boundary the server already fixed.
+- **A request no answer can satisfy is refused before the model call.**
+  `EDITORIAL_TIMING_UNGROUPABLE` (the cut table cannot be grouped into 4–15 s segments) and
+  `EDITORIAL_BEAT_COUNT_MISMATCH` (the scriptwriter's beat count cannot match the table) are
+  server-side facts; both are recorded in `trace.editorial_refusal` and returned as
+  `rejection_reason_code`. Never ask a model to solve them.
+- **The grouping search falls back.** The three-segment search stays the primary answer; when
+  it has no solution, a fallback minimises the longest segment and prefers more segments. The
+  pinned 8-shot grouping (4.3 / 5.1 / 5.6 s) must not change.
+- **A refusal must name its reason.** The chain returns `rejection_reason_code` for every
+  rejection and the workbench shows it. `LLM_FORMAT` keeps `provider_schema_path` and
+  `provider_schema_validator` (the field that broke), never provider text.
+- **The official standard is the rule pack, not a style.** Every crew prompt carries the
+  Ref2VA section order (`subject_definitions`, `summary`, `retention_analysis`,
+  `detailed_description`, `overall_soundscape`, `non_diegetic_music`) and the rule ids
+  `H3_ENGLISH` / `H3_TIMING` / `H3_DIALOGUE` / `H3_LIMITS` / `H3_LABELS`. The crew never
+  writes the prompt; `H3PromptCompiler` is the only prompt output path.
+- **A beat lists only the characters that appear in it.** Every listed character becomes a
+  required subject reference, so repeating the whole cast in every beat fills the reference
+  budget that the render needs.
+- Evidence: `docs/ACCEPTANCE_20261104_CREW_PROMPT_REPAIR.md`,
+  `backend/tests/test_crew_prompt_contract.py`. A real-model rerun of the failing script is
+  still outstanding, and a project without a registered workflow profile stays blocked at
+  `PENDING_WORKFLOW_MAPPING`.
+
 ## 2026-11-03 workbench usability round (naming, step gap, resume)
 
 - **`entity_id` is the only join key** between a script character and an uploaded master

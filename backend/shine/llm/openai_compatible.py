@@ -181,7 +181,7 @@ class OpenAICompatibleProvider:
                 raise LLMFormatError(
                     "Model JSON does not match the required schema",
                     details={**response_details, "path": "/".join(str(part) for part in first.path),
-                             "message": first.message},
+                             "validator": first.validator},
                 )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(

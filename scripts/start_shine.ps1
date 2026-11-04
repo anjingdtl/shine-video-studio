@@ -282,6 +282,20 @@ if ($busy) {
     exit 1
 }
 
+# ComfyUI and the local reviewers belong to this workbench. A renderer or a
+# reviewer that outlived an earlier run keeps the model in GPU memory and
+# blocks the next run, so a clean start begins by releasing what is left.
+Write-Host 'Releasing leftover backends of this installation...' -ForegroundColor Gray
+$residualScript = Join-Path $repoRoot 'scripts/release_residual_backends.py'
+if (Test-Path -LiteralPath $residualScript) {
+    $residualArgs = @($residualScript, '--data-dir', $env:SHINE_DATA_DIR, '--review-port', "$ReviewPort")
+    if ($AdditionalReviewManifest) { $residualArgs += @('--review-port', "$AdditionalReviewPort") }
+    & $venvPython @residualArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'A leftover backend could not be released; see the lines above.' -ForegroundColor Yellow
+    }
+}
+
 function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
     $stdout = Join-Path $logDir "$Name.out.log"
     $stderr = Join-Path $logDir "$Name.err.log"
