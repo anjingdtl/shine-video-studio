@@ -2,7 +2,9 @@
 
 - 日期与时区：2026-11-05（北京时间，UTC+8）
 - 分支 / HEAD / 基线差异：`codex/director-ai-material-preparation`，自 `main / bff25ad`（0.2.0）开出；
-  本轮改动尚未提交时的基线差异即本文件所列文件集
+  本轮提交 **`46b2f40`**（27 个文件：8 个既有文件修改、1 个迁移、9 个新模块、2 个新测试文件、
+  3 处 head 断言更新、审计 + ADR + 本进度文件）。工作树除 4 个开工前既有未跟踪文件外干净。
+  **未推送**（推送属于共享状态变更，需用户确认）。
 - 当前阶段与完成判定：**阶段 A 完成；阶段 B 代码与离线验证完成，实机出图待权重下载；
   阶段 C 完成契约接入（工具选择 + 两个运行时提示词），尚未接入真实 LLM 调用链**；
   阶段 D/E 未开始
@@ -117,6 +119,9 @@
 | 降级/升级往返 | `pytest backend/tests/test_migrations_windows.py` | passed（含 downgrade 到 `9f2c4d7a10b3` 再 upgrade head） | 4 处 head 断言已更新为 `f170a0010001` | 无 |
 | 既有回归（定向） | `pytest test_v13_preparation.py test_v13_migrations.py test_timestamp_ordering.py test_native_capabilities.py test_review_input_evidence.py test_style_input_assessment.py` | **240 passed**（exit 0） | 后台任务 `bb4mvdlae` | 无 |
 | 全量后端（A 后） | `pytest backend/tests` | 首轮 4 个迁移测试因 head 断言失败 → 已修正 | `/tmp/fullsuite.log` | 见下 |
+| 全量后端（B/C 后） | `pytest backend/tests` | **PYTEST_EXIT=0**，无 FAILED/ERROR | `/tmp/full2.log` | 无 |
+| 素材 + 分镜链回归 | `pytest test_material_preparation.py test_material_image_jobs.py test_crew_prompt_contract.py test_film_crew.py` | **99 passed**（exit 0） | `/tmp/mat2.log` | 无 |
+| 前端 | — | **NOT_RUN（本轮未改动 `frontend/` 任何文件）** | `git show --stat 46b2f40` | 阶段 D 必须跑 `npm.cmd test` / `tsc -b` / `npm.cmd run build` |
 | Ruff | `ruff check backend/shine backend/alembic backend/tests` | **All checks passed** | — | 无 |
 | 路由注册 | `create_app()` 后枚举 | 12 条 material/image 路由全部注册 | 冒烟脚本输出 | 未做真实 HTTP 端到端 |
 | 真实 LLM | — | **NOT_RUN** | — | 阶段 C 未实现 |
@@ -179,6 +184,11 @@
 3. **API 图尚未对活体 `object_info` 校验**。测试用的是从钉点 ComfyUI v0.39.0 源码读出的
    输入名 fixture；`runtime.verify_graph_against_object_info` 是真实门禁，但需要启动受管实例。
    在此之前不得声称"节点与图已校验"。
+   **本轮刻意没有手工启动 ComfyUI**：AGENTS.md 规定受管渲染器属于工作台，一个由脚本手工拉起、
+   工作台不认识的渲染器会在栈之外常驻显存并阻塞下一次运行，而停止它又需要 PID/birth/命名
+   Job Object 三证。正确路径是走产品自身的受管实例机制（`comfyops/instances.py` +
+   `handoff_startup.py`），本轮预算不足以把它接完，因此留下明确的下一步而不是制造一个
+   工作台无法释放的孤儿渲染器。权重已就位，该步骤现在只差"启动受管实例"这一个动作。
 4. **安装器主机可用性未处理**。审计已记录本机 `huggingface.co` 不可达；
    产品内的图片安装计划若沿用既有钉点主机会失败。本轮只做了本机验收用的下载脚本，
    **没有**改动 `config/deployment/*` 或安装器。
