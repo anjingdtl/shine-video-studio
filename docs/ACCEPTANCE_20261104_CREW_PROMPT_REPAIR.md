@@ -120,7 +120,7 @@ timeline == list(zip(beats, editorial_timing.cut_starts_s))
 
 ## 4. 测试证据
 
-新增 `backend/tests/test_crew_prompt_contract.py`（16 项，全部通过）：
+新增 `backend/tests/test_crew_prompt_contract.py`（13 个用例 / 16 项，全部通过）：
 
 | 用例 | 断言 |
 | --- | --- |
@@ -136,6 +136,11 @@ timeline == list(zip(beats, editorial_timing.cut_starts_s))
 `tests/test_h3_compiler.py`、`tests/test_film_unknown_outcomes.py`、
 `tests/test_character_binding.py`、新增文件全部通过；前端 `npm.cmd test` 115/115、
 `npm.cmd run build` 通过；`ruff check` 通过。
+
+**最终代码状态的完整后端套件**：`pytest tests -q` → **1564 项全部通过、0 失败、exit 0**
+（源码冻结后重跑；中途在回归期间改过被钉住的 `shine/comfyops/handoff_startup.py` 的一次
+中间结果出现过 5 项 `REVIEW_CLIENT_SOURCE_CHANGED`，那是钉住机制按设计生效；固定源码后
+重跑即全绿，该中间结果不计通过）。
 
 ## 5. 仍未解除的真实阻滞（非本轮代码可解）
 

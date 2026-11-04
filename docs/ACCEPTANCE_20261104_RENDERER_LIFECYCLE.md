@@ -111,13 +111,15 @@
 
 ## 5. 测试
 
-- 新增 `backend/tests/test_managed_process_release.py`（8 项，全部通过）：
+- 新增 `backend/tests/test_managed_process_release.py`（10 项，全部通过）：
   已确证消失的渲染器 → 记录 `STOPPED` + 租约释放；正在出片的渲染器 → 拒绝停止；
   归属确证的渲染器 → 停止并释放租约；归属无法证明 → 绝不触碰且租约保持；
   工作台可查询受管进程；本机操作者可一键释放；栈仍在运行时残余清理拒绝动作；
-  中断对账必须保留进程身份。
-- 后端定向批次（剧组 107 项 + 生命周期 8 项 + 新增提示词契约 16 项）全部通过；
+  中断对账必须保留进程身份；不确定记录按物理事实判定；已释放记录不再被对账复活。
+- 后端定向批次（剧组 107 项 + 生命周期 10 项 + 提示词契约 16 项）全部通过；
   前端 `npm.cmd test` 115/115、`npm.cmd run build` 通过；`ruff check .` 全绿。
+- **最终代码状态的完整后端套件**：`pytest tests -q` → **1564 项全部通过、0 失败、exit 0**
+  （源码冻结后重跑）。
 - 顺带修掉 3 项 **HEAD 上就存在**的失败（本轮改动无关，stash 后仍失败）：
   `scripts/update_dev_shortcut.ps1` 非 ASCII 内容缺 UTF-8 BOM（PS 5.1 读成 ANSI 后
   第 31 行解析报错）、`test_v13_migrations.py` 把 alembic head 写死成旧版本号。
