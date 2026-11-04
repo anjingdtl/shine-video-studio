@@ -224,3 +224,33 @@ Never bundle official full-text guides without redistribution permission. Run
 - Evidence: `docs/WORKBENCH_USABILITY_ROUND_20261103.md`,
   `backend/tests/test_character_binding.py`.
 
+## 2026-11-04 round (voice masters, project workflow, continuous production)
+
+- **The setup capability owns the local voice runtime and this project's H3 workflow.**
+  `shine/voiceops/runtime_config.py` holds the configuration (role → verified package, interpreter,
+  overlay); the setup panel writes it and the voice provider reads it, rebuilding the provider when
+  the configuration changes. `GET /setup/voice-readiness` states per role whether the package is
+  hash-verified, declares the capability and has a runtime. `POST /setup/profiles/validate`
+  registers this project's Ref2VA profiles and verifies them on the real renderer.
+- **A hash-verified package advances its registry status.** The install reconcile recorded
+  `MATCHES_PINNED_FILES` but left the package `UNVERIFIED_ORIGIN` forever; it now advances to
+  `FILES_VERIFIED_PENDING_RUNTIME` (files verified ≠ runtime verified) and may re-verify a
+  reconciled attempt without network or deletion.
+- **Only live work blocks a runtime re-validation.** A `NEEDS_REVIEW` series is blocked and
+  unclaimable, so it must not freeze every re-validation of this machine.
+- **A name list is split by every consumer.** A chorus line (`"S1, S2, …"`) is split by
+  `split_character_names` in the binding rewrite, the director's character check, the `ShotSpec`
+  speaker check and the rule pack's dialogue-removal regex — and it stays **one** `<d>` block
+  (the rule pack requires one language-tagged block per original line).
+- **A profile may offer more reference slots than a request binds.** The submitted graph drops the
+  loader of every unused slot (deterministically); otherwise the placeholder file name made
+  ComfyUI reject the whole prompt. The physical slot order follows the manifest order, so the
+  shot bindings are ordered by family (subjects, pictures, video, audio).
+- **A provider injected by the host is the host's to own** and is never replaced by the product.
+- **The local H3 node's Autogrow group carries up to nine reference images**; the workbench's own
+  profiles used two or three. A project whose shots bind more masters needs its own wider profile,
+  built from the real node and validated on the real renderer.
+- Evidence: `docs/ACCEPTANCE_20261104_VOICE_AND_REF2VA.md`,
+  `backend/tests/test_setup_voice_readiness.py`, `test_setup_workflow_profiles.py`,
+  `test_reference_slot_pruning.py`, `test_idle_configuration.py`.
+
