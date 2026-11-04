@@ -26,7 +26,11 @@ from shine.agents.film_contracts import (
     StyleInputAssessment,
     StyleInputWire,
 )
-from shine.asset_identity import canonical_character_name_for_asset_id, resolve_character_asset
+from shine.asset_identity import (
+    canonical_character_name_for_asset_id,
+    resolve_character_asset,
+    split_character_names,
+)
 from shine.h3.rulebook import H3RulebookRegistry, digest
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.context_window import model_context_for_profile
@@ -124,6 +128,51 @@ def shot_reference_policy(db: Session, project_id: str, plan: dict) -> dict:
         },
         "reference_set_status": shots,
     }
+
+
+def workflow_reference_budget(db: Session, project_id: str) -> list[dict]:
+    """The image/audio slot counts of this project's registered H3 workflows.
+
+    The director proposes reference sets before any workflow is chosen for a
+    shot; without the mapped slot counts a plan can promise more references
+    than every registered workflow can carry, which only surfaces as
+    PENDING_WORKFLOW_MAPPING at render time.
+    """
+    budgets = []
+    for profile in db.scalars(
+        select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)
+    ):
+        keys = (profile.parameter_map or {}).keys()
+        budgets.append(
+            {
+                "id": profile.id,
+                "name": profile.name,
+                "validated": bool(profile.validated_against),
+                "image_slots": sum(1 for k in keys if k.startswith(("reference_subject_", "reference_picture_"))),
+                "audio_slots": sum(1 for k in keys if k.startswith("reference_audio_")),
+            }
+        )
+    return budgets
+
+
+def reference_budget_note(budgets: list[dict]) -> str:
+    """Prompt text stating the verified slot budget, or nothing when unverified.
+
+    Only a validated profile bounds the plan: an unregistered or unverified
+    workflow proves nothing about what a render can carry.
+    """
+    usable = [b for b in budgets if b["validated"] and b["image_slots"]]
+    if not usable:
+        return ""
+    best = max(usable, key=lambda b: (b["image_slots"], b["audio_slots"]))
+    return (
+        f" Registered workflow reference budget: the verified workflow '{best['name']}' maps at most "
+        f"{best['image_slots']} image reference slots and {best['audio_slots']} audio reference slot(s) "
+        "per render segment. Keep every shot's asset_ids within this budget: choose the identity-critical "
+        "picture masters (the segment's lead performer as the subject image, plus the most continuity-critical "
+        "location or partner images) and the voice master(s) only up to the mapped audio slots. "
+        "A shot whose references exceed the mapped slots blocks the render."
+    )
 
 
 def eligible_edits(db: Session, project_id: str, *, offline: bool, artifact_root: Path | None = None) -> list[dict]:
@@ -368,12 +417,18 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                 if a["id"] in shot.asset_ids and a["kind"] == "image" and a["role"] == "character"
             ]
             required_characters = [name for beat_id in beat_ids for name in beats[beat_id]["characters"]]
-            required_characters.extend(
-                line["speaker_id"]
-                for beat_id in beat_ids
-                for line in beats[beat_id].get("dialogue", [])
-                if line.get("speaker_id") and line["speaker_id"] not in required_characters
-            )
+            for beat_id in beat_ids:
+                for line in beats[beat_id].get("dialogue", []):
+                    speaker = line.get("speaker_id")
+                    if not speaker:
+                        continue
+                    # A chorus line names several speakers in one field
+                    # ("阿德, 小米").  Every consumer splits a name list the
+                    # same way; a whole-list speaker would otherwise look like
+                    # a character nobody has a master for.
+                    for part in split_character_names(speaker):
+                        if part not in required_characters:
+                            required_characters.append(part)
             if any(resolve_character_asset(name, bound_character_assets) is None for name in required_characters):
                 raise ValueError("CHARACTER_MASTER_BINDING_REQUIRED")
         if timing and (round(elapsed, 3) != timing["total_s"]
@@ -519,6 +574,10 @@ class FilmAgentDispatcher:
             timing = editorial_timing_preview(body.brief)
             if timing:
                 context["editorial_timing"] = timing
+        if role == "director":
+            # The plan's reference sets must fit a workflow the project can
+            # actually render; unverified registrations prove nothing.
+            context["workflow_reference_budget"] = workflow_reference_budget(db, project_id)
         if role == "qc_reviewer":
             context["shot_spec"] = body.shot_spec.model_dump(mode="json")
         if role == "continuity_supervisor":
@@ -769,6 +828,7 @@ class FilmAgentDispatcher:
                        "master and every approved prop or other master materially depicted in the shot; "
                        "never list style or last-frame reference images as shot references, and "
                        "never list an asset twice."
+                       + reference_budget_note(context.get("workflow_reference_budget") or [])
                        if role == "director" else "")
                     + (" Repair the supplied DirectorialPlan using the supplied continuity report and arbitration. "
                        "Produce a revised proposal that follows the frozen style and resolves the identified "

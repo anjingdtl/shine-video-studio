@@ -1013,6 +1013,7 @@ def test_install_reconcile_uncertainty_does_not_consume_grant_or_mutate_files(pr
 
 
 def test_install_reconcile_verified_files_does_not_promote_runtime(prep):
+    """Verified bytes advance the files status; the runtime stays unproven."""
     from shine.comfyops.models import ModelPackage
 
     client, factory, _, root, model, _, identity, decision = failed_package_install(prep)
@@ -1020,10 +1021,57 @@ def test_install_reconcile_verified_files_does_not_promote_runtime(prep):
     (destination / "中文").mkdir(parents=True)
     (destination / "中文/test.bin").write_bytes(b"data")
     result = post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True)
-    assert result["payload"]["reconciliation"]["packages"][0]["files"] == "MATCHES_PINNED_FILES"
+    reconciliation = result["payload"]["reconciliation"]
+    assert reconciliation["packages"][0]["files"] == "MATCHES_PINNED_FILES"
+    # The complete pinned file set was hash-verified in place, so the registry
+    # states that fact.  It still states nothing about the runtime.
+    assert reconciliation["packages_advanced"] == [model["id"]]
+    assert reconciliation["runtime_verified"] is False
+    with factory() as db:
+        assert db.get(ModelPackage, model["id"]).status == "FILES_VERIFIED_PENDING_RUNTIME"
+    assert (destination / "中文/test.bin").read_bytes() == b"data"
+
+
+def test_install_reconcile_absent_files_never_advance_the_package(prep):
+    """A package whose files never arrived keeps its unverified status."""
+    from shine.comfyops.models import ModelPackage
+
+    client, factory, _, root, model, _, identity, decision = failed_package_install(prep)
+    result = post(client, f"/comfyops/install-attempts/{identity}/reconcile", decision, operator=True)
+    reconciliation = result["payload"]["reconciliation"]
+    assert reconciliation["packages"][0]["files"] == "ABSENT"
+    assert reconciliation["packages_advanced"] == []
     with factory() as db:
         assert db.get(ModelPackage, model["id"]).status == "UNVERIFIED_ORIGIN"
+
+
+def test_reconciled_install_can_be_reverified_after_the_files_complete(prep):
+    """A re-verification re-observes the same directory and advances late arrivals."""
+    from shine.comfyops.models import ModelPackage
+
+    client, factory, _, root, model, _, identity, _ = failed_package_install(prep)
+    post(client, f"/comfyops/install-attempts/{identity}/reconcile", _fresh_grant(client, identity), operator=True)
+    with factory() as db:
+        assert db.get(ModelPackage, model["id"]).status == "UNVERIFIED_ORIGIN"
+
+    destination = root / model["payload"]["name"]
+    (destination / "中文").mkdir(parents=True)
+    (destination / "中文/test.bin").write_bytes(b"data")
+    result = post(client, f"/comfyops/install-attempts/{identity}/reconcile",
+                  _fresh_grant(client, identity), operator=True)
+    assert result["payload"]["reconciliation"]["packages_advanced"] == [model["id"]]
+    with factory() as db:
+        assert db.get(ModelPackage, model["id"]).status == "FILES_VERIFIED_PENDING_RUNTIME"
     assert (destination / "中文/test.bin").read_bytes() == b"data"
+
+
+def _fresh_grant(client, identity):
+    grant = post(client, "/preparation/approval-grants", {
+        "action": "install_reconcile", "target_id": identity,
+    }, operator=True)
+    return {k: grant[k] for k in ("grant_id", "snapshot")} | {
+        "evidence": "Explicit test-only re-verification of a reconciled install",
+    }
 
 
 def test_interrupted_install_is_recovered_without_resubmitting(prep):

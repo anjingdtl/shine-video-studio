@@ -847,32 +847,52 @@ def check_provider_mode(provider, mode):
 
 
 def voice_provider(request):
-    if not hasattr(request.app.state, "voice_provider"):
-        import json
-        import os
+    """The local voice provider for this process, rebuilt when its config changes.
 
-        from shine.voiceops.local_sdk import QwenLocalVoiceProvider
+    The setup capability writes the voice runtime configuration, so a cached
+    provider must never outlive the configuration it was built from.  A
+    provider the host injected itself is the host's to own and is never
+    replaced.
+    """
+    from shine.voiceops.runtime_config import load_voice_config
 
-        configured = os.getenv("SHINE_VOICE_SDK_PACKAGES")
-        role_runtimes = os.getenv("SHINE_VOICE_ROLE_RUNTIMES")
-        if role_runtimes and not configured:
-            raise ValueError("VOICE_ROLE_RUNTIME_PACKAGES_REQUIRED")
-        if configured:
-            from shine.voiceops.sdk_runtime import SDKProcessLoader
+    settings = request.app.state.settings
+    config = load_voice_config(settings)
+    routing = config.routing()
+    runtimes = config.runtimes()
+    fingerprint = graph_hash({
+        "packages": routing,
+        "runtimes": {role: spec.model_dump(mode="json") for role, spec in runtimes.items()},
+    })
+    state = request.app.state
+    existing = getattr(state, "voice_provider", None)
+    owned = getattr(state, "voice_provider_fingerprint", None)
+    if existing is not None and owned is None:
+        return existing  # injected by the host: not ours to replace
+    if existing is not None and owned == fingerprint:
+        return existing
+    from shine.voiceops.local_sdk import QwenLocalVoiceProvider
 
-            request.app.state.voice_provider = QwenLocalVoiceProvider(
-                request.app.state.session_factory,
-                request.app.state.settings,
-                json.loads(configured),
-                SDKProcessLoader(json.loads(role_runtimes)) if role_runtimes else None,
-            )
-            return request.app.state.voice_provider
-        request.app.state.voice_provider = (
-            LocalVoiceHTTPProvider(request.app.state.settings.local_voice_url)
-            if request.app.state.settings.local_voice_url
+    if runtimes and not routing:
+        raise ValueError("VOICE_ROLE_RUNTIME_PACKAGES_REQUIRED")
+    if routing:
+        from shine.voiceops.sdk_runtime import SDKProcessLoader
+
+        state.voice_provider = QwenLocalVoiceProvider(
+            request.app.state.session_factory,
+            settings,
+            routing,
+            SDKProcessLoader({role: spec.model_dump(mode="json")
+                              for role, spec in runtimes.items()}) if runtimes else None,
+        )
+    else:
+        state.voice_provider = (
+            LocalVoiceHTTPProvider(settings.local_voice_url)
+            if settings.local_voice_url
             else FakeVoiceProvider()
         )
-    return request.app.state.voice_provider
+    state.voice_provider_fingerprint = fingerprint
+    return state.voice_provider
 
 
 def voice_budget(provider, *methods):

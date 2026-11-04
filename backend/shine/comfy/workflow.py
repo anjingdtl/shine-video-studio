@@ -10,6 +10,52 @@ from shine.comfy.client import ComfyWorkflowError
 
 PATH_PATTERN = re.compile(r"^(\d+)\.inputs\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$")
 
+#: The autogrow groups of the H3 reference node.  An input in one of these
+#: groups carries a reference, so its loader is part of the reference set.
+REFERENCE_INPUT_GROUPS = ("ref_images.", "ref_videos.", "ref_video_audios.", "ref_audios.")
+
+
+def prune_unused_reference_nodes(graph: dict[str, Any], used_loader_nodes: set[str]) -> dict[str, Any]:
+    """Remove the loaders of reference slots this request does not bind.
+
+    A registered profile may offer more slots than one request uses.  The
+    loader node of an unused slot would keep the graph's placeholder file name,
+    and the renderer rejects the prompt because that file does not exist.  The
+    unused loader and the input that pointed at it are therefore removed from
+    the submitted graph - deterministically, and only when nothing else still
+    reads that node.
+    """
+    pruned = copy.deepcopy(graph)
+    dropped_inputs: list[tuple[str, str]] = []
+    for node_id, node in pruned.items():
+        for key, value in (node.get("inputs") or {}).items():
+            if not key.startswith(REFERENCE_INPUT_GROUPS):
+                continue
+            if not (isinstance(value, list) and len(value) >= 2 and isinstance(value[0], str)):
+                continue
+            if value[0] not in pruned or value[0] in used_loader_nodes:
+                continue
+            dropped_inputs.append((node_id, key))
+    if not dropped_inputs:
+        return pruned
+    removed_targets = set()
+    for node_id, key in dropped_inputs:
+        source = (graph[node_id].get("inputs") or {})[key]
+        (pruned[node_id].get("inputs") or {}).pop(key, None)
+        if isinstance(source, list) and source and isinstance(source[0], str):
+            removed_targets.add(source[0])
+    # A loader that nothing reads any more leaves the graph as well.
+    still_used = {
+        value[0]
+        for node in pruned.values()
+        for value in (node.get("inputs") or {}).values()
+        if isinstance(value, list) and len(value) >= 2 and isinstance(value[0], str)
+    }
+    for target in removed_targets:
+        if target not in still_used:
+            pruned.pop(target, None)
+    return pruned
+
 
 def _object_info_known_keys(input_spec: dict[str, Any]) -> set[str]:
     """Input names a live ComfyUI server knows, including autogrow groups.

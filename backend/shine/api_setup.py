@@ -342,9 +342,8 @@ def validate_services(body: ServiceValidationRequest, actor: Operator, settings:
     return run(db, settings, body.project_id, body.recipe_sha256, actor=actor)
 
 
-@router.post("/profiles")
-def profiles(body: ProfileRegistrationRequest, db: DBSession):
-    """Register the two supported Ref2VA workflow profiles for this project.
+def _register_project_profiles(db, project_id: str) -> list[dict]:
+    """Register this project's H3 Ref2VA workflow profiles from the canonical files.
 
     Idempotent per project: the default profiles are project-scoped copies, so
     a second project registers its own usable entries instead of being told
@@ -361,7 +360,7 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
     from shine.models import WorkflowProfile
     from shine.schemas import WorkflowProfileCreate
 
-    deployment._require_project(db, body.project_id)
+    deployment._require_project(db, project_id)
     registered = []
     for name in deployment.load_default_catalog()["workflow_profiles"]:
         from shine.comfy.workflow import graph_hash
@@ -372,7 +371,7 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
         raw = _json.loads(matches[0].read_text(encoding='utf-8'))
         existing = db.scalar(select(WorkflowProfile).where(
             WorkflowProfile.name == name,
-            WorkflowProfile.project_id == body.project_id,
+            WorkflowProfile.project_id == project_id,
         ))
         if existing:
             if (existing.graph_sha256 != graph_hash(raw['graph'])
@@ -383,7 +382,7 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
             registered.append({"name": name, "profile_id": existing.id, "status": "ALREADY_REGISTERED"})
             continue
         request = WorkflowProfileCreate(
-            project_id=body.project_id, name=raw["name"], mode=raw["mode"],
+            project_id=project_id, name=raw["name"], mode=raw["mode"],
             graph=raw["graph"], parameter_map=raw["parameter_map"],
             media_transfers=raw.get("media_transfers"), required_nodes=raw["required_nodes"],
             checkpoint_id=raw.get("checkpoint_id"),
@@ -391,10 +390,154 @@ def profiles(body: ProfileRegistrationRequest, db: DBSession):
         profile = create_workflow_profile(request, db)
         registered.append({"name": name, "profile_id": profile.id, "status": "REGISTERED"})
     db.commit()
-    return {"profiles": registered}
+    return registered
+
+
+@router.post("/profiles")
+def profiles(body: ProfileRegistrationRequest, db: DBSession):
+    """Register the two supported Ref2VA workflow profiles for this project."""
+    return {"profiles": _register_project_profiles(db, body.project_id)}
+
+
+@router.post("/profiles/validate")
+def validate_profiles(body: ProfileRegistrationRequest, settings: SettingsDep, db: DBSession):
+    """Register this project's H3 Ref2VA profiles and verify them on the real renderer.
+
+    Registration alone proves nothing: a profile that names a node or an input
+    the installed renderer does not have only fails at render time.  The
+    managed renderer is started for the check and stopped again, so the result
+    states which nodes and inputs the real installation really offers.  A
+    profile that cannot be validated stays unvalidated; the response reports
+    the reason instead of claiming a pass.
+
+    Every Ref2VA profile of this project is checked, not only the ones this
+    call registered: the project may already carry a wider profile, and the
+    production gate reads the project's own profiles.
+    """
+    from sqlalchemy import select
+
+    from shine.comfyops.service_validation import validate_registered_workflow
+    from shine.models import WorkflowProfile
+
+    registered = _register_project_profiles(db, body.project_id)
+    by_id = {entry["profile_id"]: entry for entry in registered}
+    for profile in db.scalars(
+        select(WorkflowProfile).where(WorkflowProfile.project_id == body.project_id,
+                                       WorkflowProfile.mode == "Ref2VA")
+    ):
+        by_id.setdefault(profile.id, {"name": profile.name, "profile_id": profile.id,
+                                      "status": "ALREADY_REGISTERED"})
+    results = []
+    for profile_id, entry in by_id.items():
+        try:
+            validated = validate_registered_workflow(db, settings, profile_id)
+        except HTTPException as exc:
+            results.append({**entry, "validated": False,
+                            "code": exc.detail if isinstance(exc.detail, str) else "VALIDATION_FAILED",
+                            "validated_against": None})
+            continue
+        results.append({**entry, "validated": True, "code": None,
+                        "validated_against": validated})
+    return {"profiles": results}
 
 
 @router.get('/llm-readiness')
 def text_model_readiness(db: DBSession):
     from shine.comfyops.llm_readiness import llm_readiness
     return llm_readiness(db)
+
+
+@router.get('/voice-readiness')
+def voice_model_readiness(db: DBSession, settings: SettingsDep):
+    """Static voice-capability status for the new-machine setup summary."""
+    from shine.comfyops.llm_readiness import voice_readiness
+    return voice_readiness(db, settings)
+
+
+@router.get('/voice-runtime')
+def voice_runtime(settings: SettingsDep, db: DBSession):
+    """The effective local voice configuration and what it can currently do."""
+    from shine.comfyops.llm_readiness import voice_readiness
+    from shine.voiceops.runtime_config import config_path, load_voice_config
+
+    config = load_voice_config(settings)
+    return {
+        'config_path': str(config_path(settings)),
+        'packages': config.routing(),
+        'role_runtimes': {role: spec.model_dump(mode="json") for role, spec in config.runtimes().items()},
+        'readiness': voice_readiness(db, settings),
+    }
+
+
+class VoiceRuntimeRequest(BaseModel):
+    """Which local package serves which voice role, and how it is executed."""
+
+    model_config = ConfigDict(extra="forbid")
+    packages: dict[str, str] = Field(default_factory=dict)
+    role_runtimes: dict[str, dict] = Field(default_factory=dict)
+
+
+@router.post('/voice-runtime')
+def configure_voice_runtime(body: VoiceRuntimeRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Pin the local voice packages and their interpreters.
+
+    A role may only be routed to a package that is registered, hash-verified
+    and declares the role's capability, and every routed role needs a runtime
+    whose interpreter digest and overlay versions match that package.  The
+    configuration is rejected as a whole: a half-configured voice path would
+    otherwise look ready in the UI and fail on first use.
+    """
+    from shine.comfyops.models import ModelPackage
+    from shine.services import add_audit
+    from shine.voiceops.runtime_config import (
+        VOICE_ROLE_CAPABILITIES,
+        VOICE_ROLES,
+        RoleRuntime,
+        VoiceRuntimeConfig,
+        check_role_runtime,
+        save_voice_config,
+    )
+
+    packages = {role: identity for role, identity in body.packages.items() if role in VOICE_ROLES}
+    unknown = sorted(set(body.packages) - set(VOICE_ROLES))
+    if unknown:
+        raise HTTPException(422, f"VOICE_ROLE_UNKNOWN: {','.join(unknown)}")
+    runtimes: dict[str, RoleRuntime] = {}
+    for role, spec in body.role_runtimes.items():
+        if role not in VOICE_ROLES:
+            raise HTTPException(422, f"VOICE_ROLE_UNKNOWN: {role}")
+        try:
+            runtimes[role] = RoleRuntime.model_validate(spec)
+        except Exception as exc:  # noqa: BLE001 - the pydantic message names the field
+            raise HTTPException(422, f"VOICE_RUNTIME_SPEC_INVALID: {role}") from exc
+
+    for role, identity in packages.items():
+        package = db.get(ModelPackage, identity)
+        if package is None:
+            raise HTTPException(409, f"VOICE_PACKAGE_MISSING: {role}")
+        capability = VOICE_ROLE_CAPABILITIES[role]
+        if capability not in (package.payload.get('capabilities') or []):
+            raise HTTPException(409, f"VOICE_CAPABILITY_MISSING: {role}")
+        if package.status != 'FILES_VERIFIED_PENDING_RUNTIME':
+            raise HTTPException(409, f"VOICE_PACKAGE_NOT_VERIFIED: {role}")
+        if role not in runtimes:
+            raise HTTPException(409, f"VOICE_ROLE_RUNTIME_REQUIRED: {role}")
+        problems = check_role_runtime(role, runtimes[role], package.payload)
+        if problems:
+            raise HTTPException(409, f"{problems[0]}: {role}")
+    for role in runtimes:
+        if role not in packages:
+            raise HTTPException(409, f"VOICE_ROLE_RUNTIME_PACKAGES_REQUIRED: {role}")
+
+    config = VoiceRuntimeConfig(packages=packages, role_runtimes=runtimes)
+    path = save_voice_config(settings, config)
+    add_audit(db, actor, 'VOICE_RUNTIME_CONFIGURED', 'voice_runtime', 'local',
+              {'roles': sorted(packages), 'config_path': str(path)}, project_id=None)
+    db.commit()
+    from shine.comfyops.llm_readiness import voice_readiness
+    return {
+        'config_path': str(path),
+        'packages': config.routing(),
+        'role_runtimes': {role: spec.model_dump(mode="json") for role, spec in config.runtimes().items()},
+        'readiness': voice_readiness(db, settings),
+    }

@@ -230,11 +230,19 @@ def _check_frame_roles(mode: GenerationMode, pictures: list[ReferenceManifestIte
             )
 
 
+def _speakers_of(line: DialogueLine) -> list[str]:
+    """The people a line names; a chorus line names several in one field."""
+    from shine.asset_identity import split_character_names
+
+    return split_character_names(line.speaker_id) or [line.speaker_id]
+
+
 def _speaker_mapping(spec: ShotSpec) -> tuple[dict[str, str], list[str]]:
     order: list[str] = []
     for line in sorted(spec.dialogue, key=lambda item: item.start_s):
-        if line.speaker_id not in order:
-            order.append(line.speaker_id)
+        for speaker in _speakers_of(line):
+            if speaker not in order:
+                order.append(speaker)
     return {speaker: f"S{index + 1}" for index, speaker in enumerate(order)}, order
 
 
@@ -274,11 +282,12 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
 
 def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     language = _language_tag(line.text, ctx.project_language)
-    speaker = ctx.speaker_labels[line.speaker_id]
-    label = _label_for_character(line.speaker_id, ctx.manifest, {})
-    subject = f"{label} ({speaker})" if label else f"The speaker ({speaker})"
+    speakers = _speakers_of(line)
+    labels = [label for label in (_label_for_character(speaker, ctx.manifest, {}) for speaker in speakers) if label]
+    subject = ", ".join(labels) if labels else "The speaker"
+    speaker = ", ".join(ctx.speaker_labels[name] for name in speakers)
     return (
-        f"At {_format_timestamp(line.start_s)}, {subject} says: "
+        f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}) says: "
         f"<d>[{language}] {line.text}</d>"
     )
 

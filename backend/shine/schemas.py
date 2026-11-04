@@ -155,7 +155,13 @@ class ShotSpec(APIModel):
     def dialogue_fits_duration(self) -> ShotSpec:
         if any(line.end_s > self.duration_target_s for line in self.dialogue):
             raise ValueError("dialogue must fit inside the target shot duration")
-        spoken = {line.speaker_id for line in self.dialogue}
+        # A chorus line names several speakers in one field ("S1, S2"); every
+        # person it names has to be listed in the shot's characters.
+        from shine.asset_identity import split_character_names
+
+        spoken: set[str] = set()
+        for line in self.dialogue:
+            spoken.update(split_character_names(line.speaker_id))
         if spoken and not spoken.issubset(set(self.characters)):
             raise ValueError("every dialogue speaker must be listed in characters")
         return self

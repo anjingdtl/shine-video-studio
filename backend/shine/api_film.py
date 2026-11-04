@@ -331,6 +331,13 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "video": "video",
                 }[asset.kind]
                 bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=index))
+            # The H3 presentation numbers images in one sequence, so a static
+            # workflow profile can only map the slots if the references arrive
+            # in a fixed family order: subjects, then pictures, then the other
+            # media families.  The plan's own order is kept inside a family.
+            bindings.sort(key=lambda item: (_FAMILY_ORDER[item.use_as.value], item.ordinal))
+            for index, binding in enumerate(bindings):
+                binding.ordinal = index
             shot = create_shot_record(
                 db, project, name=f"{body.name_prefix}-{camera.intent_id}", spec=spec, bindings=bindings
             )
@@ -542,6 +549,11 @@ class StoryboardRequest(APIModel):
 STORYBOARD_CHAIN = (
     "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor",
 )
+
+#: The order in which reference families reach the renderer.  H3 presents all
+#: images in one sequence, so a registered workflow profile can only map its
+#: slots when the references arrive in this family order.
+_FAMILY_ORDER = {"subject": 0, "picture": 1, "video": 2, "audio": 3}
 
 
 def _agent_step_delay_seconds() -> float:
@@ -1276,7 +1288,14 @@ def character_binding_apply(project_id: str, body: CharacterBindingApply, db: DB
             line = dict(line)
             speaker = line.get("speaker_id")
             if isinstance(speaker, str):
-                line["speaker_id"] = rename.get(speaker.strip(), speaker)
+                # A chorus line can name several speakers in one field
+                # ("S1, S2, S3").  The rename is per label, so the field has to
+                # be split the same way every other consumer splits it; a
+                # whole-list speaker would otherwise keep its placeholders
+                # and block the shot forever.
+                parts = split_character_names(speaker)
+                if parts:
+                    line["speaker_id"] = ", ".join(rename.get(part, part) for part in parts)
             dialogue.append(line)
         beat["dialogue"] = dialogue
         rewritten_beats.append(beat)

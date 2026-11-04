@@ -236,6 +236,59 @@ def test_character_binding_apply_names_the_master_and_rekeys_the_breakdown(studi
     assert client.app.state.session_factory().get(AgentArtifact, breakdown_id) is not None
 
 
+def test_character_binding_apply_renames_every_label_of_a_chorus_line(studio):
+    """A chorus line names several speakers in one field; every label is renamed.
+
+    The rename is per label, so a whole-list speaker that is not split keeps
+    its placeholders - and a shot that still carries "S1, S2" can never find
+    a master.
+    """
+    client, _factory, _tmp_path, _settings = studio
+    project_id, registry = _studio(client, entity_id="001", filename="001.png")
+    second = upload_asset(client, project_id, content=PNG + b"-two", filename="Two.png",
+                          role="character", entity_id="002")
+    approve_lock(client, second["id"])
+
+    def respond(messages, schema):
+        if schema.get("title") == "ScriptBreakdown":
+            return {
+                "locked_story_facts": FACTS,
+                "beats": [
+                    {"id": "B1", "description": "All of them sing together.",
+                     "characters": ["S1", "S2"],
+                     "dialogue": [
+                         {"speaker_id": "S1, S2", "text": "你来了。", "start_s": 1, "end_s": 2},
+                     ]},
+                ],
+            }
+        return _responder(registry, characters=("S1", "S2"))(messages, schema)
+
+    client.app.state.mock_llm_responder = respond
+    chain = client.post(f"/api/v1/projects/{project_id}/storyboard/generate",
+                        json={"text": BRIEF, "allow_remote_text": True, "locked_story_facts": FACTS})
+    assert chain.status_code == 201, chain.text
+    assert chain.json()["status"] != "REJECTED", chain.json()
+    proposal = client.post(f"/api/v1/projects/{project_id}/storyboard/character-binding/proposal",
+                           json={})
+    assert proposal.status_code == 201, proposal.text
+    proposal = proposal.json()
+    breakdown_id = proposal["breakdown_artifact_id"]
+    assert [row["script_name"] for row in proposal["characters"]] == ["S1", "S2"]
+
+    response = client.post(f"/api/v1/projects/{project_id}/storyboard/character-binding/apply",
+                           json={"breakdown_artifact_id": breakdown_id,
+                                 "bindings": [
+                                     {"script_name": "S1", "asset_id": registry["master"], "name": "阿德"},
+                                     {"script_name": "S2", "asset_id": second["id"], "name": "小米"},
+                                 ]})
+    assert response.status_code == 201, response.text
+    artifact = client.app.state.session_factory().get(AgentArtifact, response.json()["artifact_id"])
+    dialogue = artifact.payload_json["beats"][0]["dialogue"]
+    assert dialogue[0]["speaker_id"] == "阿德, 小米"
+    # No placeholder survives the rename.
+    assert "S1" not in artifact.payload_json["beats"][0]["characters"]
+
+
 def test_character_binding_apply_refuses_a_name_that_already_belongs_to_another_master(studio):
     client, _factory, _tmp_path, _settings = studio
     project_id, registry = _studio(client)

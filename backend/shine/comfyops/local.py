@@ -34,18 +34,52 @@ from shine.operator_review import authenticate
 from shine.services import add_audit
 
 
+def advance_verified_package(db, registered):
+    """Promote a package whose complete pinned file set verified in place.
+
+    ``FILES_VERIFIED_PENDING_RUNTIME`` states the proven fact - every file of
+    the package is on disk and hash-matches the pinned upstream digest. It is
+    not a runtime claim: loading the checkpoint is still separate work.
+
+    A package whose files are absent, partial or changed keeps its current
+    status; only a full set of matching files advances it.
+    """
+    if registered.status == "FILES_VERIFIED_PENDING_RUNTIME":
+        return False
+    if registered.status != "UNVERIFIED_ORIGIN":
+        return False
+    registered.status = "FILES_VERIFIED_PENDING_RUNTIME"
+    return True
+
+
 def reconcile_failed_install(db, settings, attempt, actor, decision):
     """Inspect terminal failed packages under their OS locks; never retry or delete.
 
     Unknown journals/partial destinations remain blocked. A human grant records
     the observation, then a separate fresh plan is needed for any installation.
+
+    A package whose complete pinned file set is present and hash-matching is
+    advanced to ``FILES_VERIFIED_PENDING_RUNTIME``: the bytes were really
+    verified against the pinned digests, so the registry must state that. A
+    package whose files are absent keeps its status and still needs a fresh
+    plan.
+
+    Reconciling an already reconciled attempt re-observes the same directories
+    (no network, no deletion) so a package that completed on disk after the
+    first observation can still advance.
     """
     from shine.comfyops import approval
 
     plan = db.get(InstallationPlan, attempt.plan_id)
-    if not plan or attempt.status not in {"FAILED_RECONCILE_REQUIRED", "SUBMIT_INTENT"}:
+    reverify = attempt.status == "RECONCILED_NO_RETRY"
+    if not plan or (
+        not reverify and attempt.status not in {"FAILED_RECONCILE_REQUIRED", "SUBMIT_INTENT"}
+    ):
         raise ValueError("FAILED_INSTALL_ATTEMPT_REQUIRED")
-    if plan.status not in {"NEEDS_REVIEW", "INSTALLING"}:
+    if reverify:
+        if plan.status != "RECONCILED_NO_RETRY":
+            raise ValueError("FAILED_INSTALL_ATTEMPT_REQUIRED")
+    elif plan.status not in {"NEEDS_REVIEW", "INSTALLING"}:
         raise ValueError("FAILED_INSTALL_ATTEMPT_REQUIRED")
     if plan.payload.get("kind") or plan.payload.get("executor") != "LOCAL_ISOLATED" or not plan.payload.get("isolated"):
         raise ValueError("ISOLATED_PACKAGE_PLAN_REQUIRED")
@@ -94,19 +128,33 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
                 ):
                     raise ValueError("INSTALL_DESTINATION_CHANGED")
                 status = "MATCHES_PINNED_FILES"
-            observations.append({"package_id": package["id"], "package_sha256": package["hash"], "files": status})
+            advanced = advance_verified_package(db, registered) if status == "MATCHES_PINNED_FILES" else False
+            observations.append({
+                "package_id": package["id"],
+                "package_sha256": package["hash"],
+                "files": status,
+                "registry_status": registered.status,
+                "registry_advanced": advanced,
+            })
         approval.consume(db, actor, "install_reconcile", attempt, decision.grant_id, decision.snapshot)
         previous_status = attempt.status
         attempt.status = "RECONCILED_NO_RETRY"
+        advanced = [row["package_id"] for row in observations if row["registry_advanced"]]
         attempt.payload = {**attempt.payload, "reconciliation": {
             "actor": actor, "at": str(utcnow()), "evidence": decision.evidence, "packages": observations,
             "previous_status": previous_status, "files_modified": False, "runtime_verified": False,
-            "resubmitted": False,
+            "resubmitted": False, "packages_advanced": advanced,
         }}
         attempt.sha256 = graph_hash(attempt.payload)
         plan.status = "RECONCILED_NO_RETRY"
         add_audit(db, actor, "LOCAL_INSTALL_FAILURE_RECONCILED", "installation_attempt", attempt.id,
                   attempt.payload["reconciliation"], project_id=plan.project_id)
+        if advanced:
+            add_audit(db, actor, "VERIFIED_PACKAGES_ADVANCED", "installation_attempt", attempt.id,
+                      {"packages": advanced,
+                       "status": "FILES_VERIFIED_PENDING_RUNTIME",
+                       "evidence": "pinned file set hash-verified in place; runtime not yet proven"},
+                      project_id=plan.project_id)
         db.commit()
     return attempt
 

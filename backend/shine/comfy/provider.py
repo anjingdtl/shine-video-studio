@@ -27,6 +27,7 @@ from shine.comfy.workflow import (
     apply_parameters,
     generic_h3_parameters,
     graph_hash,
+    prune_unused_reference_nodes,
     validate_against_object_info,
     validate_graph,
 )
@@ -386,6 +387,15 @@ class ComfyUIRenderService:
         if "positive_prompt" in profile.parameter_map and not mapped.get("positive_prompt"):
             raise ComfyUIError("The workflow profile does not accept the compiled H3 prompt")
         prompt = apply_parameters(graph, profile.parameter_map, mapped)
+        # The profile may offer more reference slots than this request binds.
+        # The loader of an unused slot would keep its placeholder file name and
+        # the renderer would reject the prompt, so it leaves the submitted graph.
+        used_loader_nodes = {
+            path.split(".", 1)[0]
+            for logical, path in profile.parameter_map.items()
+            if logical in uploaded
+        }
+        prompt = prune_unused_reference_nodes(prompt, used_loader_nodes)
         return PreparedSubmission(
             prompt=prompt,
             prompt_graph_sha256=graph_hash(prompt),

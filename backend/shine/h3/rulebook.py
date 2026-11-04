@@ -371,8 +371,10 @@ class H3RulebookRegistry:
                 reject("H3_DIALOGUE", "shot_spec.dialogue", "Dialogue changed, missing, or outside duration")
         # Dialogue intervals are validated above. Their timestamps may precede
         # editorial cuts even though the compiler appends dialogue after visuals.
+        # A chorus line credits several speakers in one sentence, so the
+        # sentence may carry more than one reference label.
         visual_timeline = re.sub(
-            r"At \d{2}:\d{2}\.\d{3}, (?:<[^>]+>|The speaker) \([^)]*\) says: <d>.*?</d>",
+            r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\) says: <d>.*?</d>",
             "", text, flags=re.S,
         )
         times = [int(m) * 60 + float(s) for m, s in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", visual_timeline)]

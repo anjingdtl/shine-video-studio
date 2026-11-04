@@ -20,6 +20,10 @@ CANDIDATE_KEY = 'deployment-runtime-candidate'
 ACTIVE_KEY = 'deployment-runtime-active'
 SERVICE_EVIDENCE_KEY = 'deployment-service-validation'
 
+#: The series states that can still hold the GPU or be resumed by a Worker.
+#: NEEDS_REVIEW is deliberately absent: it is a blocked, unclaimable record.
+LIVE_SERIES_STATUSES = ('QUEUED', 'CLAIMED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED', 'RECONCILING')
+
 
 def workflow_contract_sha256(profile: WorkflowProfile) -> str:
     """Identity of everything a live node contract was checked against."""
@@ -222,11 +226,18 @@ def require_idle_configuration(db):
 
     # Only work that can still touch the GPU blocks a re-validation. A
     # NEEDS_REVIEW record with no active lease is an audit trail, not live work.
+    #
+    # The series check therefore asks which series are *live*, not which ones
+    # are not finished: a Worker only claims QUEUED/RUNNING series, and
+    # PAUSED/PAUSE_REQUESTED/RECONCILING are the in-flight states around them.
+    # A NEEDS_REVIEW series is blocked and unclaimable - it holds no lease and
+    # cannot render - so an unrelated project's blocked series must not freeze
+    # the whole workbench.
     if (db.scalar(select(ResourceLease.id).where(ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1))
             or db.scalar(select(Job.id).where(
                 Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
             or db.scalar(select(ProductionSeries.id).where(
-                ProductionSeries.status.not_in(['COMPLETED', 'FAILED', 'CANCELLED'])).limit(1))
+                ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(1))
             or db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(
                 ['SUBMIT_INTENT', 'INSTALLING', 'NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])).limit(1))):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')

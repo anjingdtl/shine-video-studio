@@ -51,6 +51,9 @@ type RuntimeState = { status: string; render_provider: string; error: string | n
   service_validation?: { status: string; blockers?: string[]; validated_at?: string | null;
     node_count?: number | null; workflow_profiles?: string[]; review_models?: Record<string, string> } | null;
 };
+type VoiceReadiness = { status: string; voice_master_capable: boolean; voice_clone_capable?: boolean;
+  roles: Array<{ role: string; package_id: string | null; status: string | null; code: string | null;
+    capability?: string; files_present?: boolean | null; runtime_configured?: boolean }> };
 
 const TOOL_LABELS: Record<string, string> = {
   uv: 'uv', node: 'Node.js', npm: 'npm', pwsh: 'PowerShell 7', ffmpeg: 'FFmpeg', ffprobe: 'FFprobe',
@@ -58,6 +61,48 @@ const TOOL_LABELS: Record<string, string> = {
 const RUNTIME_LABELS: Record<string, string> = {
   ACTIVE: '已激活', NOT_ACTIVATED: '待确认', INVALID_REQUIRES_REVIEW: '配置已变更，需重新核验',
 };
+
+const VOICE_ROLE_LABELS: Record<string, string> = {
+  design: '角色声音设计', base: '声音克隆', asr: '语音转写', align: '强制对齐',
+};
+
+const VOICE_CODE_LABELS: Record<string, string> = {
+  VOICE_PACKAGE_UNROUTED: '未指派模型包',
+  VOICE_PACKAGE_MISSING: '指派的模型包不存在',
+  VOICE_CAPABILITY_MISSING: '模型包缺少该能力',
+  VOICE_PACKAGE_NOT_VERIFIED: '模型文件尚未通过哈希校验',
+  VOICE_ROLE_RUNTIME_UNCONFIGURED: '未配置本机运行环境',
+  VOICE_RUNTIME_PYTHON_NOT_ABSOLUTE: '运行解释器不是绝对路径',
+  VOICE_RUNTIME_PYTHON_MISSING: '运行解释器不存在',
+  VOICE_RUNTIME_PYTHON_CHANGED: '运行解释器哈希已变化',
+  VOICE_RUNTIME_PYTHON_UNREADABLE: '运行解释器无法读取',
+  VOICE_RUNTIME_PACKAGES_DIR_NOT_ABSOLUTE: '依赖目录不是绝对路径',
+  VOICE_RUNTIME_PACKAGES_DIR_MISSING: '依赖目录不存在',
+  VOICE_RUNTIME_VERSIONS_INCOMPLETE: '依赖版本未锁定完整',
+  VOICE_RUNTIME_PACKAGE_MISMATCH: '依赖版本与模型包不匹配',
+  VOICE_PACKAGE_RUNTIME_VERSIONS_UNPINNED: '模型包未锁定运行版本',
+};
+
+/** One honest sentence per blocked voice role: what is missing and what to do. */
+function voiceRoleText(role: { role: string; code: string | null; files_present?: boolean | null }): string {
+  const name = VOICE_ROLE_LABELS[role.role] ?? role.role;
+  if (!role.code) return `${name}：就绪`;
+  const reason = VOICE_CODE_LABELS[role.code] ?? role.code;
+  if (role.code === 'VOICE_PACKAGE_NOT_VERIFIED' && role.files_present === true) {
+    return `${name}：${reason}（文件已在磁盘，需重新核对安装记录以推进状态）`;
+  }
+  return `${name}：${reason}`;
+}
+
+function voiceSummary(voice: VoiceReadiness | null): string {
+  if (!voice) return '读取中';
+  const blocked = voice.roles.filter((row) => row.code !== null);
+  if (!blocked.length) return '本地语音模型就绪（生成/克隆/转写/对齐）';
+  if (voice.voice_master_capable) {
+    return `角色声音可生成（${blocked.map(voiceRoleText).join('；')}）`;
+  }
+  return blocked.map(voiceRoleText).join('；');
+}
 
 function blockerText(blocker: EnvReport['blockers'][number]): string {
   const tool = TOOL_LABELS[blocker.tool ?? ''] ?? blocker.tool ?? '';
@@ -213,6 +258,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [plans, setPlans] = useState<PlanRef[]>([]);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
+  const [voice, setVoice] = useState<VoiceReadiness | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const projectRef = useRef(projectId);
@@ -259,6 +305,9 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
       setNotice((current) => current?.kind === 'bad' ? null : current);
     } catch { say('本机环境状态暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad'); }
   }, [say]);
+  const loadVoice = useCallback(async () => {
+    try { setVoice(await api<VoiceReadiness>('/setup/voice-readiness')); } catch { /* keep prior state */ }
+  }, []);
   const loadStorage = useCallback(async () => {
     try {
       setStorage(await api<DeploymentStorage>('/setup/storage'));
@@ -278,8 +327,8 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   }, [projectId]);
   useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
-  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); },
-    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime, refreshEpoch]);
+  useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); void loadVoice(); },
+    [loadEnvironment, loadCatalog, loadReadiness, loadRuntime, loadVoice, refreshEpoch]);
   useEffect(() => {
     void loadStorage();
     const refresh = () => {
@@ -398,6 +447,24 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
       // pickups on this page update immediately, without a manual reload.
       await onRefresh();
       return result.profiles.map((p) => `${p.name}: ${p.status}`).join('、');
+    });
+  }
+
+  function validateProfiles() {
+    void run(async () => {
+      // Registration alone proves nothing: only the real renderer can say
+      // whether the installed nodes and inputs match this project's graph.
+      const result = await api<{ profiles: Array<{ name: string; status: string; validated: boolean;
+        code: string | null; validated_against: { missing_nodes?: string[]; missing_input_count?: number } | null }> }>(
+        '/setup/profiles/validate', withJson('POST', { project_id: projectRef.current }));
+      await onRefresh(); await loadVoice();
+      const lines = result.profiles.map((p) => {
+        if (!p.validated) return `${p.name}: 验证未通过（${p.code ?? '未知原因'}）`;
+        const missing = p.validated_against?.missing_nodes ?? [];
+        const inputs = p.validated_against?.missing_input_count ?? 0;
+        return `${p.name}: 验证通过（缺节点 ${missing.length} · 缺输入 ${inputs}）`;
+      });
+      return lines.join('、');
     });
   }
 
@@ -606,6 +673,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
             <div className="env-summary-item"><b>安装空间</b><span>{storage ? `${storage.root} · 可用 ${storage.free_gb} GB` : '读取中'}</span></div>
             <div className="env-summary-item"><b>生成服务</b><span>{runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
             <div className="env-summary-item"><b>AI 助手</b><span>在「模型与系统」单独配置；配置 LLM 不代表拥有画面/语音检查能力</span></div>
+            <div className="env-summary-item"><b>语音能力</b><span>{voiceSummary(voice)}</span></div>
             <div className="env-summary-item"><b>真实出片</b><span>只能由真实生产证据更新；Mock/演示不改变它</span></div>
           </div>
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
@@ -767,6 +835,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
             <button className="primary-button" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
+            <button className="secondary-button" disabled={busy || !projectId} onClick={validateProfiles}>验证本项目工作流</button>
             <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
             <button className="secondary-button" disabled={busy || runtime?.candidate?.project_id !== projectId}
               onClick={validateServices}>验证服务与工作流</button>
@@ -775,6 +844,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
           </div>
           {!projectId && <p className="guardrail-note">计划生成、Profile 登记、配置生成与激活需要先创建一个项目（本页下方即可创建）；环境检查、上游可达性与部署清单无需项目。</p>}
           <p className="guardrail-note">验证会短暂启动已安装的 ComfyUI、VLM 和 ASR，读取真实节点/工作流契约并探测审片协议，完成后停止；不加载 H3 权重，也不提交镜头。</p>
+          <p className="guardrail-note">「验证本项目工作流」只登记并核验本项目自己的 H3 Ref2VA Profile，并把结果写回该 Profile；核验只比对真实节点与输入，不代表已经生成过画面。</p>
           {runtime && <p className="guardrail-note setup-runtime-state">运行配置：{RUNTIME_LABELS[runtime.status] ?? runtime.status} · 当前模式：{label(providerLabels, runtime.render_provider)}
             {runtime.candidate?.project_id === projectId && <> · 待确认配方：<code>{runtime.candidate.recipe_sha256}</code></>}
             {runtime.service_validation && <> · 服务契约：{label(serviceStatusLabels, runtime.service_validation.status)}
