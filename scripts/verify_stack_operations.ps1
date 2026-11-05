@@ -10,11 +10,25 @@ try {
     & $start -Provider mock -ApiPort $ApiPort -WebPort $WebPort -DataDir $opsData -NoWorker
     $status = Invoke-RestMethod "http://127.0.0.1:$WebPort/api/v1/system/status"
     if (-not $status.api_online -or $status.worker_online) { throw 'NoWorker / custom proxy failed' }
-    # A second launch must fail and preserve the existing owner manifest.
+    # A second launch must refuse to start a second stack. The refusal is a
+    # friendly no-op ("the workbench is already running"), so the invariant is
+    # asserted directly instead of through an exit code: the owner manifest is
+    # untouched, the same listeners keep serving, and the launcher says it
+    # refused. A second stack here would silently take over the owner's port.
     $manifest = Join-Path $opsData 'run/processes.json'
     $before = (Get-FileHash $manifest).Hash
-    & pwsh -NoProfile -File $start -Provider mock -ApiPort $ApiPort -WebPort $WebPort -DataDir $opsData -NoWorker *> $null
-    if ($LASTEXITCODE -eq 0 -or (Get-FileHash $manifest).Hash -ne $before) { throw 'Duplicate launch was not refused' }
+    $listenersBefore = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object LocalPort -In $ApiPort,$WebPort |
+        ForEach-Object { "$($_.LocalPort):$($_.OwningProcess)" } | Sort-Object)
+    $secondLog = Join-Path $opsData 'second-launch.log'
+    & pwsh -NoProfile -File $start -Provider mock -ApiPort $ApiPort -WebPort $WebPort -DataDir $opsData -NoWorker *> $secondLog
+    if ((Get-FileHash $manifest).Hash -ne $before) { throw 'A refused duplicate launch changed the owner manifest' }
+    $listenersAfter = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object LocalPort -In $ApiPort,$WebPort |
+        ForEach-Object { "$($_.LocalPort):$($_.OwningProcess)" } | Sort-Object)
+    if (Compare-Object $listenersBefore $listenersAfter) { throw 'A refused duplicate launch changed the listeners' }
+    $secondText = Get-Content -LiteralPath $secondLog -Raw -Encoding UTF8
+    if ($secondText -notmatch 'already running') { throw "A duplicate launch did not refuse: $secondText" }
     & $python $stop --data-dir $opsData
     if ($LASTEXITCODE -ne 0) { throw 'NoWorker stop failed' }
     & $start -Provider mock -ApiPort $ApiPort -WebPort $WebPort -DataDir $opsData
