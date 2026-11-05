@@ -480,13 +480,21 @@ def create_app(
         }
 
     def _h3_connected(effective) -> bool:
-        """True only when the configured real renderer answers right now."""
+        """True only when the configured real renderer answers right now.
+
+        The managed renderer is idle-stopped between shots by design, so this
+        probe has to answer fast and once.  With the client's default retries it
+        spent eight seconds on a stopped renderer, and the workbench then
+        showed "production state unavailable" exactly while the machine was
+        healthy and waiting for work.
+        """
         if effective is None or effective.render_provider != "comfyui":
             return False
         try:
             from shine.comfy.client import ComfyUIClient
 
-            client = ComfyUIClient(effective.comfyui_base_url, timeout_s=2.0, trust_env=effective.allow_remote_comfyui)
+            client = ComfyUIClient(effective.comfyui_base_url, timeout_s=0.75, max_retries=0,
+                                   trust_env=effective.allow_remote_comfyui)
             client.system_stats()
             return True
         except Exception:

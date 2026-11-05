@@ -77,6 +77,46 @@ def test_system_status_reports_h3_connected_only_with_a_live_renderer(fake_comfy
             assert dead_client.get("/api/v1/system/status").json()["h3_connected"] is False
 
 
+def test_the_status_probe_answers_once_for_a_stopped_renderer(monkeypatch, tmp_path):
+    """An idle-stopped renderer is normal, so the liveness probe answers once.
+
+    With the client's default retries the status endpoint spent eight seconds
+    on a stopped renderer, and the workbench then showed "production state
+    unavailable" exactly while the machine was healthy and waiting for work.
+    """
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+
+    from shine.comfy.client import ComfyUIClient
+    from shine.config import Settings
+    from shine.db import Base, make_engine
+    from shine.main import create_app
+
+    seen: dict = {}
+    real_client = ComfyUIClient
+
+    def spy(base_url, **kwargs):
+        seen.update(kwargs)
+        return real_client(base_url, **kwargs)
+
+    monkeypatch.setattr("shine.comfy.client.ComfyUIClient", spy)
+
+    db_path = tmp_path / "probe-once.sqlite3"
+    engine = make_engine(f"sqlite:///{db_path.as_posix()}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    settings = dataclasses.replace(
+        Settings.from_env(), render_provider="comfyui", comfyui_base_url="http://127.0.0.1:9"
+    )
+    monkeypatch.setattr(Settings, "from_env", staticmethod(lambda: settings))
+    with TestClient(create_app(database_url=f"sqlite:///{db_path.as_posix()}")) as client:
+        status = client.get("/api/v1/system/status").json()
+    assert status["h3_connected"] is False
+    assert seen.get("max_retries") == 0, "a liveness probe must not retry a stopped renderer"
+    assert float(seen.get("timeout_s", 99)) <= 1.0, "a liveness probe must not hold the status endpoint open"
+
+
 def test_offline_worker_is_reported_from_heartbeat_age(studio):
     client, factory, _root, _settings = studio
     create_project(client)
