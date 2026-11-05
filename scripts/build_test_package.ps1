@@ -206,6 +206,8 @@ $buildInfo = [ordered]@{
         'no real H3 inference through a newly installed managed instance has been demonstrated',
         'the M4 60-second, two-person-dialogue acceptance film has not been run',
         'existing real films still require final human review; this build does not promote pending_review to accepted',
+        'the real material batch stopped honestly at producer clarification questions: candidate promotion, style freeze and art review are the user''s decisions and have not been made',
+        'the published VLM revision is invalidated by design by the closeout-round worker changes; recalibration, plan re-analysis and re-freeze still have to run on the formal project stack',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
         'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking was not human-observed inside a render window of this round',
@@ -240,7 +242,18 @@ $buildInfo = [ordered]@{
         'the director mode can prepare AI material (character, scene, prop) through a pinned Qwen-Image-2.1 workflow: the server splits the script, the producer writes one appearance brief per requirement, and the candidates stay on the ordinary asset ledger until a human promotes them',
         'the three material samples really rendered through the workbench-owned managed renderer on the existing installation: renderer_owned attempts, technical/decode QC pass, RENDER_VERIFIED for character/scene/prop, renderer stopped with GPU back to baseline',
         'the first adoption takes over the read-only detection row of the same identity instead of refusing with INSTANCE_IDENTITY_CHANGED',
-        'the browser acceptance gate (verify_v13_web.py) is green end-to-end, twice in a row, with no API errors'
+        'the browser acceptance gate (verify_v13_web.py) is green end-to-end, twice in a row, with no API errors',
+        'an unknown scene result is never replayed: the second identical prepare returns the original task and the provider is called once (durable input identity, atomic claim)',
+        'source segmentation is lossless: the preamble before the first heading is retained, scenes beyond the span or character budgets keep splitting, and citations may not cross the current input range',
+        'material candidates are chosen one by one from a responsive grid with thumbnails, contain-fit previews, zoom and per-requirement selection; the confirm action only promotes what the user actually selected, and validation samples are never offered as production candidates',
+        'material strategy and existing-asset binding are restored from the authoritative snapshot with explicit asset/version selectors; an explicit asset id, version or hash wins over identity matching and is strictly validated',
+        'remote text providers work through a persisted, scoped consent that the worker verifies; a request flag can no longer grant its own consent',
+        'failed or unknown material items have in-place resume, reconcile and regenerate actions; the worker no longer re-claims a failed item in a loop and a busy worker keeps its heartbeat',
+        'the deliver page shows the real H3 generation segments (editorial cuts inside one segment are not re-take units), with single-segment retake, dependency invalidation, selection and a new delivery revision that never overwrites passed media',
+        'long scripts are produced in steps: a confirmed overall outline, user-chosen production sections, durable worker scheduling with pause/cancel/resume and precise invalidation of changed sections only',
+        'the carry-over between production sections is versioned: a section whose shots all really passed freezes into an immutable end state; a later section queues without user facts only against that verified state, a forged render claim is overwritten on the server, and a superseded end state refuses the run',
+        'the status probe answers once for an idle-stopped renderer, so a healthy machine waiting for work no longer shows production state unavailable',
+        'the image renderer no longer leaves its own marks on the shared H3 instance row, so runtime activation completes after image work'
     )
     excluded_from_package = @(
         'models and weights',
