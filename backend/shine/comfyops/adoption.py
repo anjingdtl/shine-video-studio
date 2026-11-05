@@ -225,18 +225,30 @@ def adopt_existing_installation(
 
     identity = instance_identity("local", port)
     prior = db.get(ComfyInstance, identity)
+    replaced_probe_row = False
     if prior is not None:
         adoption = prior.payload.get("adoption") or {}
-        if (prior.payload.get("adopted") and adoption.get("snapshot") == snapshot
-                and Path(prior.payload.get("root", "")).resolve() == root.resolve()):
-            return {
-                "status": "ALREADY_ADOPTED",
-                "instance_id": prior.id,
-                "installed_h3_bytes": sum(item[3] for item in required),
-                "copied_bytes": 0,
-                "downloaded_bytes": 0,
-            }
-        raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
+        if prior.payload.get("adopted"):
+            if (adoption.get("snapshot") == snapshot
+                    and Path(prior.payload.get("root", "")).resolve() == root.resolve()):
+                return {
+                    "status": "ALREADY_ADOPTED",
+                    "instance_id": prior.id,
+                    "installed_h3_bytes": sum(item[3] for item in required),
+                    "copied_bytes": 0,
+                    "downloaded_bytes": 0,
+                }
+            raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
+        if prior.payload.get("managed") or prior.payload.get("is_mock"):
+            # A managed (or fake) row that was never adopted is a real claim on
+            # this identity; only a read-only detection row may be taken over.
+            raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
+        # The local-mode inventory probe writes an evidence row for the same
+        # deterministic identity before any adoption exists.  Detecting an
+        # installation is exactly what precedes confirming it, so the first
+        # adoption takes that row over instead of blocking the operator on a
+        # row no one ever claimed.
+        replaced_probe_row = True
 
     h3_verified_files = [item for item in verified_files if _verified_key(item) in required]
     review_components = {
@@ -309,7 +321,12 @@ def adopt_existing_installation(
         "plan_sha256": plan.sha256,
     }
     attempt.sha256 = graph_hash(attempt.payload)
-    db.add(ComfyInstance(id=identity, payload=payload, sha256=graph_hash(payload), status="STOPPED"))
+    if prior is not None:
+        prior.payload = payload
+        prior.sha256 = graph_hash(payload)
+        prior.status = "STOPPED"
+    else:
+        db.add(ComfyInstance(id=identity, payload=payload, sha256=graph_hash(payload), status="STOPPED"))
     add_audit(db, actor, "EXISTING_COMFY_INSTALLATION_ADOPTED", "comfy_instance", identity, {
         "snapshot": snapshot,
         "source_revision": adoption["source_revision"],
@@ -320,6 +337,7 @@ def adopt_existing_installation(
         "copied_bytes": 0,
         "downloaded_bytes": 0,
         "user_install_modified": False,
+        "replaced_probe_row": replaced_probe_row,
     }, project_id=project_id)
     db.commit()
     return {
@@ -331,6 +349,7 @@ def adopt_existing_installation(
         "review_model_file_counts": review_counts,
         "review_model_expected_counts": review_components,
         "node_fingerprints": len(node_fingerprints),
+        "replaced_probe_row": replaced_probe_row,
     }
 
 

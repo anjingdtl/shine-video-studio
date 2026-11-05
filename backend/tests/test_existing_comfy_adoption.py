@@ -195,6 +195,80 @@ def test_adopted_identity_ignores_catalog_membership_but_not_missing_h3_files(pr
             db, settings, instance, catalog)
 
 
+def test_adoption_takes_over_a_read_only_detection_row_of_the_same_identity(prep, tmp_path, monkeypatch):
+    client, factory, settings = prep
+    project = create_project(client, "probe row takeover")
+    catalog = deployment.load_default_catalog()
+    root, report, verified_files = _install_fixture(tmp_path, catalog)
+    _seed_verification(factory, catalog, report, verified_files)
+    monkeypatch.setattr(adoption, "inspect", lambda _path, _catalog: report)
+    monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: report)
+
+    # The local-mode inventory probe writes an evidence row for the same
+    # deterministic identity before any adoption happened.  Detection precedes
+    # confirmation, so adopting must take that row over, not refuse it.
+    from shine.comfyops.instances import instance_identity
+
+    probe_identity = instance_identity("local", 8188)
+    probe_payload = {
+        "url": "http://127.0.0.1:8188",
+        "health": "OFFLINE",
+        "identity_key": "local:http://127.0.0.1:8188",
+        "snapshot_id": "probe-evidence",
+    }
+    with factory.begin() as db:
+        db.get(ComfyInstance, probe_identity) or db.add(ComfyInstance(
+            id=probe_identity, payload=probe_payload,
+            sha256=adoption.graph_hash(probe_payload), status="OFFLINE"))
+
+    response = client.post("/api/v1/setup/existing-installations/adopt", headers=HEADERS, json={
+        "project_id": project, "path": str(root), "snapshot": report["snapshot"], "port": 8188,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ADOPTED"
+    assert response.json()["replaced_probe_row"] is True
+    assert response.json()["instance_id"] == probe_identity
+
+    with factory() as db:
+        instances = list(db.scalars(select(ComfyInstance)))
+        assert [row.id for row in instances] == [probe_identity]
+        taken = instances[0]
+        assert taken.payload["adopted"] is True and taken.payload["managed"] is True
+        assert taken.status == "STOPPED"
+
+    repeated = client.post("/api/v1/setup/existing-installations/adopt", headers=HEADERS, json={
+        "project_id": project, "path": str(root), "snapshot": report["snapshot"], "port": 8188,
+    })
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["status"] == "ALREADY_ADOPTED"
+
+
+def test_adoption_still_refuses_a_managed_prior_row_of_the_same_identity(prep, tmp_path, monkeypatch):
+    client, factory, settings = prep
+    project = create_project(client, "managed prior row refusal")
+    catalog = deployment.load_default_catalog()
+    root, report, verified_files = _install_fixture(tmp_path, catalog)
+    _seed_verification(factory, catalog, report, verified_files)
+    monkeypatch.setattr(adoption, "inspect", lambda _path, _catalog: report)
+    monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: report)
+
+    from shine.comfyops.instances import instance_identity
+
+    prior_payload = {"managed": True, "name": "another", "port": 8188, "is_mock": False, "process": None}
+    with factory.begin() as db:
+        db.add(ComfyInstance(id=instance_identity("local", 8188), payload=prior_payload,
+                             sha256=adoption.graph_hash(prior_payload), status="STOPPED"))
+
+    response = client.post("/api/v1/setup/existing-installations/adopt", headers=HEADERS, json={
+        "project_id": project, "path": str(root), "snapshot": report["snapshot"], "port": 8188,
+    })
+    assert response.status_code == 409
+    assert response.json()["detail"] == "INSTANCE_IDENTITY_CHANGED"
+    with factory() as db:
+        row = db.get(ComfyInstance, instance_identity("local", 8188))
+        assert row.payload["name"] == "another" and not row.payload.get("adopted")
+
+
 def test_adopted_node_tree_change_invalidates_installation_evidence(prep, tmp_path, monkeypatch):
     client, factory, settings = prep
     project = create_project(client, "adopted node identity")
