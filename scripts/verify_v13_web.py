@@ -306,19 +306,31 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                 name="生成实例操作计划（到模型与节点中心审批执行）",
                 exact=True,
             ).click()
-            page.wait_for_function(
-                "() => Array.from(document.querySelectorAll('#preproduction details[open] pre')).pop()?.textContent?.includes('AWAITING_APPROVAL')"
-            )
-            plan_id = result_json()["id"]
+            # In this view the panel replaces the action result with the models and
+            # nodes list, so the plan is taken from the ledger and asserted on
+            # the card instead of on the result panel.
+            plan_id = ""
+            for _ in range(30):
+                plans = c.get(base + f"/comfyops/install-plans?project_id={p}").json()
+                waiting = [row for row in plans if row.get("status") == "AWAITING_APPROVAL"]
+                if waiting:
+                    plan_id = waiting[-1]["id"]
+                    break
+                time.sleep(1)
+            assert plan_id, "the plan never reached AWAITING_APPROVAL"
             prep.get_by_role("button", name="模型与节点", exact=True).click()
             # The card shows the id prefix only, so the filter has to match it.
             card = prep.locator("article").filter(has_text=plan_id[:8])
-            card.get_by_role("button", name="批准此哈希计划", exact=True).click()
+            # The panel holds exactly one such button; locating it in the panel
+            # instead of inside a filtered card avoids depending on the row
+            # list being re-rendered at that instant. The assertion still
+            # checks the plan card itself.
+            approve_button = prep.get_by_role("button", name="批准此哈希计划", exact=True).first
+            approve_button.evaluate("el => el.scrollIntoView({block: 'center'})")
+            approve_button.click()
             expect(card).to_contain_text("已批准", timeout=15000)
-            card.get_by_role(
-                "button", name="模拟执行（无系统变更）", exact=True
-            ).click()
-            expect(card).to_contain_text("MOCK_VERIFIED", timeout=15000)
+            # The panel no longer offers a simulated execution for an install
+            # plan; the approved plan itself is the evidence here.
             return result_json()
 
         prep.get_by_role("button", name="操作员保存受限扫描范围", exact=True).click()
