@@ -379,12 +379,12 @@ pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify
 
 | 项 | 结果 |
 | --- | --- |
-| 包 | `releases/ShineVideoStudio-20261105-58f3970-win64.zip`|
-| 大小 | 2,526,539 字节（打包 517 个文件，518 个文件参与校验） |
-| SHA-256 | `ebfe5675733ee64624578bb952bc30e7c53af872280faa9a04fd6e4011fc152c` |
+| 包 | `releases/ShineVideoStudio-20261105-2b6518c-win64.zip`|
+| 大小 | 2,526,959 字节（打包 517 个文件，518 个文件参与校验） |
+| SHA-256 | `dda29c3dd1f786e704e2f9584549d63e1fa636c4fd99bca1033649a0088b8aa6` |
 | 校验 | `Expand-Archive` 后按清单逐文件校验 SHA-256：**518 个文件全部通过** |
 | 上一版 | 保留（releases/ 下 6 个旧包未动，`releases/` 已在 .gitignore，不污染工作树） |
-| 与提交的关系 | 本包构建自 `58f3970`（**产品代码全集**，含出图链路全链测试、启动器闸门修复与浏览器闸门对齐）；其后只有本文件这一条文档提交，不改变包内任何代码 |
+| 与提交的关系 | 本包构建自 `2b6518c`（**产品代码全集**，含出图链路全链测试、启动器闸门修复与浏览器闸门对齐）；其后只有本文件这一条文档提交，不改变包内任何代码 |
 | 包内素材功能 | 已确认包含 13 个 `materialprep` 模块、新增安装目录、两个新前端组件与两份前端测试 |
 
 包内 `BUILD_INFO.json` 如实标注 `status=PARTIAL`、`source_tree=CLEAN_TREE`，并在
