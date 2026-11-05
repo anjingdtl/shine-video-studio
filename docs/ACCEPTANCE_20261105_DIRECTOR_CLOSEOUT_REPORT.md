@@ -175,6 +175,7 @@
 - `AGENTS.md`（本轮新增小节：登记方案必须早于 crew 链、宽槽位方案、遗留渲染器收尾、测试目录要求）
 - `docs/ACCEPTANCE_20261105_DIRECTOR_CLOSEOUT_REPORT.md`（本文档）
 - `docs/HANDOVER_20261105_DELEGATED_MATERIAL_ROUND.md`（上一轮交接，已被本文档接续）
+- `docs/HANDOVER_20261106_DIRECTOR_USABILITY_ROUND.md`（本轮可用性轮交接，含未验证项）
 
 ## 9. 真实 H3 出片（REAL_H3_VERIFIED）
 
