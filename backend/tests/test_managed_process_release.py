@@ -284,3 +284,53 @@ def test_an_orphan_lease_is_kept_when_any_recorded_renderer_is_still_alive(api, 
     assert findings == []
     with factory() as db:
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_an_already_stopped_renderer_still_repairs_its_instance_row(api, monkeypatch):
+    """The image runtime keeps its process in the startup record, not on the
+    shared row, so a stopped renderer leaves no mark to match.  The release
+    path must still write the instance row back to STOPPED -- otherwise the
+    row stays RUNNING_PENDING_HEALTH forever and every later start is refused
+    with IMAGE_RENDERER_INSTANCE_NOT_STOPPED (the live stack hit exactly this
+    after a restart while the image renderer was idle-stopped)."""
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import ComfyInstance
+
+    client, factory, _settings = api
+    _owned(monkeypatch, alive=False, port_busy=False)
+    with factory.begin() as db:
+        payload = {"managed": True, "adopted": True, "port": 8188, "process": None}
+        db.add(ComfyInstance(id="image-inst", status="RUNNING_PENDING_HEALTH",
+                             payload=payload, sha256=graph_hash(payload)))
+        db.add(AppSetting(key="renderer-startup:image:image-inst", value={
+            "stage": "STOPPED", "instance_id": "image-inst", "lease_id": None,
+            "port": 8188, "process": {"pid": 4242, "birth": "12345", "job_name": JOB_NAME},
+            "recorded_at": "2026-11-04T00:00:00",
+        }))
+    response = client.post("/api/v1/setup/managed-processes/release", json={},
+                           headers={"X-Shine-Local-Action": "1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["stopped"][0]["outcome"] == "already_stopped"
+    with factory() as db:
+        assert db.get(ComfyInstance, "image-inst").status == "STOPPED"
+
+
+def test_stop_image_renderer_on_an_already_stopped_record_repairs_the_row(api):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.image_renderer import stop_image_renderer
+    from shine.comfyops.models import ComfyInstance
+
+    client, factory, settings = api
+    with factory.begin() as db:
+        payload = {"managed": True, "port": 8188, "process": None}
+        db.add(ComfyInstance(id="image-inst", status="RUNNING_PENDING_HEALTH",
+                             payload=payload, sha256=graph_hash(payload)))
+        db.add(AppSetting(key="renderer-startup:image:image-inst", value={
+            "stage": "STOPPED", "instance_id": "image-inst", "lease_id": None,
+            "port": 8188, "process": {"pid": 4242, "birth": "12345", "job_name": JOB_NAME},
+            "recorded_at": "2026-11-04T00:00:00",
+        }))
+    result = stop_image_renderer(factory, settings, instance_id="image-inst", actor="local-user")
+    assert result["outcome"] == "already_stopped"
+    with factory() as db:
+        assert db.get(ComfyInstance, "image-inst").status == "STOPPED"

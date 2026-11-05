@@ -409,9 +409,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       await jsonPost(`/projects/${projectId}/material-preparation/regenerate`, {
         requirement_id: item.requirement_id, ...state.confirmation,
         idempotency_key: `regenerate-${requestHash}`,
-        rights_id: rightsId, brief: { ...item.brief, appearance }, seed: item.generation_revision + 1,
+        // The edited description IS the answer to the producer's questions;
+        // re-sending them would only re-trigger the clarification refusal.
+        rights_id: rightsId, brief: { ...item.brief, appearance, questions: [] }, seed: item.generation_revision + 1,
       });
-      setOperationReport('已创建新的生成版本；历史图片保留，需要重新选用。');
+      setOperationReport('已创建新的生成版本；你对澄清问题的回答已并入描述，历史图片保留，需要重新选用。');
     } else {
       const result = await jsonPost<{ note?: string; refused?: unknown[] }>(`/projects/${projectId}/material-preparation/runs/${batch.run_id}/${action}`, {
         expected_state_version: batch.state_version, idempotency_key: `${action}-${item.item_id}-${batch.state_version}`,
@@ -631,6 +633,12 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <small>批次 {row.run_id.slice(0, 8)} · 生成 v{item.generation_revision}</small>
                     <span>{ITEM_STATUS_LABELS[item.status] ?? item.status}</span>
                     {item.error_code && <em>{reasonText(item.error_code)}</em>}
+                    {row.kind === 'production' && !!item.brief?.questions?.length && (
+                      <p className="material-questions" role="alert">
+                        出品人需要澄清：{item.brief.questions.join('；')}。把你的回答写进下面的外观描述（英文），
+                        再点「再生成一版」——重新生成会消费这些问题。
+                      </p>
+                    )}
                     {row.kind === 'production' && item.allowed_actions?.includes('regenerate') && item.brief && <label className="material-field">
                       <span>修改 {item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
                       <textarea value={briefEdits[item.item_id] ?? item.brief.appearance} maxLength={1200}

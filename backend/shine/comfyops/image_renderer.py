@@ -300,6 +300,13 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
     job_name = (record.get("process") or {}).get("job_name")
     if state == "STOPPED":
         _clear_image_marks(factory, instance_id, job_name)
+        # The startup record already proves the renderer is gone; the shared
+        # instance row must follow it, or the next start is refused forever
+        # with IMAGE_RENDERER_INSTANCE_NOT_STOPPED.
+        with factory.begin() as db:
+            row = db.get(ComfyInstance, instance_id)
+            if row is not None and row.status != "STOPPED":
+                row.status = "STOPPED"
         return {"status": "STOPPED", "instance_id": instance_id, "outcome": "already_stopped"}
     if state == "GONE":
         _mark_stopped(factory, instance_id, record)

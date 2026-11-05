@@ -590,3 +590,75 @@ def test_explicit_version_wins_and_missing_or_changed_version_is_never_substitut
     judged = client.post(path, headers=LOCAL_ACTION).json()
     assert not judged["materials_ready"]
     assert next(r for r in judged["requirements"] if r["family"] == "character")["asset_id"] is None
+
+
+def test_regenerate_refuses_a_brief_with_unanswered_questions(api):
+    """The answer to a clarification is written into the appearance text.
+
+    A supplied brief goes straight to the renderer, and the renderer refuses an
+    unanswered clarification, so queueing the questions again would only spend a
+    generation revision to rediscover the same refusal.  The boundary says so
+    immediately instead.
+    """
+    client, factory, _ = api
+    project_id = _project(client)
+    document = _document(client, project_id)
+    analyzed = _analyze(client, project_id, document).json()
+    confirmed = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/confirm",
+        json={
+            "plan_revision_id": analyzed["plan_revision_id"],
+            "expected_snapshot": analyzed["expected_snapshot"],
+            "decisions": [
+                {"requirement_id": requirement["requirement_id"], "strategy": "generate",
+                 "entity_id": requirement["entity_id"]}
+                for requirement in analyzed["requirements"]
+            ],
+            "visual_direction": {"era": "1930年代"},
+        },
+        headers=LOCAL_ACTION,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    confirmation = confirmed.json()
+    rights_id = _approved_rights(factory, project_id)
+    requirement = analyzed["requirements"][0]
+    brief = {
+        "schema_version": "1.0",
+        "appearance": "A worn brass pocket watch on a plain background.",
+        "must_keep": ["The complete watch outline"],
+        "avoid": ["Any person"],
+        "questions": ["Should the lid be open or closed?"],
+    }
+
+    refused = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/regenerate",
+        json={
+            "requirement_id": requirement["requirement_id"],
+            "confirmation_id": confirmation["confirmation_id"],
+            "confirmation_hash": confirmation["confirmation_hash"],
+            "idempotency_key": "unanswered-questions",
+            "rights_id": rights_id,
+            "brief": brief,
+            "seed": 2,
+        },
+        headers=LOCAL_ACTION,
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == "MATERIAL_BRIEF_QUESTIONS_UNANSWERED"
+    assert refused.json()["detail"]["questions"] == brief["questions"]
+
+    answered = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/regenerate",
+        json={
+            "requirement_id": requirement["requirement_id"],
+            "confirmation_id": confirmation["confirmation_id"],
+            "confirmation_hash": confirmation["confirmation_hash"],
+            "idempotency_key": "answered-questions",
+            "rights_id": rights_id,
+            "brief": {**brief, "appearance": brief["appearance"] + " The lid is closed.", "questions": []},
+            "seed": 2,
+        },
+        headers=LOCAL_ACTION,
+    )
+    assert answered.status_code == 202, answered.text
+    assert answered.json()["run_id"], answered.text

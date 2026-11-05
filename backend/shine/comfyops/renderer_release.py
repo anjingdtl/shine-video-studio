@@ -166,16 +166,27 @@ def describe_managed_processes(db) -> list[dict[str, Any]]:
     return described
 
 
-def _mark_instance_stopped(db, job_name: str | None) -> None:
-    if not job_name:
+def _mark_instance_stopped(db, job_name: str | None, instance_id: str | None = None) -> None:
+    """Write the instance row back to STOPPED once its renderer is gone.
+
+    Matching the row's own ``process`` mark is no longer sufficient: the image
+    runtime deliberately keeps its process in its startup record instead of on
+    the shared row, so a stopped image renderer has no mark left to match.  The
+    record's explicit instance id closes that gap; a row matched by job name
+    still loses its stale mark, exactly as before.
+    """
+    if not job_name and not instance_id:
         return
     for row in db.scalars(select(ComfyInstance)).all():
         payload = row.payload if isinstance(row.payload, dict) else {}
         process = payload.get("process") or {}
-        if process.get("job_name") == job_name:
+        by_mark = bool(job_name and process.get("job_name") == job_name)
+        if not by_mark and not (instance_id and row.id == instance_id):
+            continue
+        if by_mark:
             row.payload = {**payload, "process": None}
-            row.status = "STOPPED"
-            db.flush()
+        row.status = "STOPPED"
+        db.flush()
 
 
 def _release_lease(db, lease_id: str | None) -> str | None:
@@ -216,6 +227,10 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
             "lease_status": lease.get("lease_status"),
         }
         if state == "STOPPED":
+            # The startup record is the proof the renderer is gone; the shared
+            # instance row must still follow it, or the next start is refused
+            # with INSTANCE_NOT_STOPPED forever.
+            _mark_instance_stopped(db, facts["job_name"], record.get("instance_id"))
             entry["outcome"] = "already_stopped"
             stopped.append(entry)
             continue
@@ -226,7 +241,7 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
             continue
         if state == "GONE":
             outcome = _release_lease(db, record.get("lease_id"))
-            _mark_instance_stopped(db, facts["job_name"])
+            _mark_instance_stopped(db, facts["job_name"], record.get("instance_id"))
             _write_stopped(db, record)
             entry["outcome"] = outcome or "recorded_stopped"
             stopped.append(entry)
@@ -250,7 +265,7 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
             refused.append(entry)
             continue
         outcome = _release_lease(db, record.get("lease_id"))
-        _mark_instance_stopped(db, facts["job_name"])
+        _mark_instance_stopped(db, facts["job_name"], record.get("instance_id"))
         _write_stopped(db, record)
         entry["outcome"] = "stopped"
         entry["evidence"] = evidence

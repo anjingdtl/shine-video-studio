@@ -1162,3 +1162,7 @@ html[data-theme='dark'] .material-run { background: #232420; color: #e2e3db; }
 /* A verified prior end state is the only carry-over that needs no user facts. */
 .carry-verified { color: #5c7553; font-weight: 600; }
 html[data-theme='dark'] .carry-verified { color: #b7c9a4; }
+
+/* The producer's clarification questions are the user's to answer in prose. */
+.material-questions { margin: 0; padding: 8px 10px; border-radius: 8px; background: #f7f2e4; color: #977d46; font-size: 11px; overflow-wrap: anywhere; }
+html[data-theme='dark'] .material-questions { background: #33301f; color: #cdb26a; }

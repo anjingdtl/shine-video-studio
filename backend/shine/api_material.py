@@ -380,6 +380,14 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
         brief = MaterialImageBrief.model_validate(body.brief).model_dump(mode="json")
     except Exception as exc:
         raise HTTPException(422, {"code": "MATERIAL_BRIEF_INVALID", "detail": str(exc)[:400]}) from exc
+    if brief["questions"]:
+        # A supplied brief goes straight to the renderer, and the renderer
+        # refuses an unanswered clarification.  Queueing it anyway would spend
+        # a generation revision to rediscover the same refusal, so the answer
+        # has to be written into the appearance text here.
+        raise HTTPException(422, {"code": "MATERIAL_BRIEF_QUESTIONS_UNANSWERED",
+                                  "questions": brief["questions"],
+                                  "detail": "把对以下问题的回答写进外观描述后再生成；带未回答问题的描述不会出图。"})
     result = service.create_batch(
         db,
         project_id,

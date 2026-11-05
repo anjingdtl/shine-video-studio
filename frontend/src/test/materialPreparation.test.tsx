@@ -256,3 +256,41 @@ it('验证批次不能混入正式候选选择，来源策略从服务器恢复'
   expect(screen.queryByRole('checkbox', { name: /选择 林知远/ })).toBeNull();
   expect(screen.getByText(/这是能力验证小样/)).toBeTruthy();
 });
+
+it('澄清问题可见，重新生成把回答并入描述并消费问题', async () => {
+  const state = {
+    ...STATE,
+    stage: 'select_materials',
+    runs: [{
+      run_id: 'run-1', status: 'PARTIAL_FAILED', kind: 'production', state_version: 5,
+      counts: { total: 1, candidate_ready: 0, failed: 1, needs_review: 0, queued: 0, running: 0 },
+      allowed_actions: ['cancel'],
+      items: [{
+        item_id: 'item-2', requirement_id: 'req-1', family: 'prop', entity_id: '铜怀表',
+        generation_revision: 1, status: 'FAILED', error_code: 'MATERIAL_BRIEF_NEEDS_CLARIFICATION',
+        allowed_actions: ['resume', 'regenerate'],
+        candidates: [],
+        attempts: [],
+        brief: {
+          schema_version: '1.0', appearance: 'A worn brass pocket watch on a plain background.',
+          must_keep: ['The complete watch outline'], avoid: ['Any person'],
+          questions: ['Should the lid be open or closed?'],
+        },
+      }],
+    }],
+  };
+  stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse(state) });
+  stub.add({ method: 'POST', pattern: /material-preparation\/regenerate$/, respond: () => jsonResponse({ status: 'QUEUED', run_id: 'run-2' }, 202) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByText(/Should the lid be open or closed\?/)).toBeTruthy();
+  expect(screen.getByText(/出品人需要澄清/)).toBeTruthy();
+  const field = await screen.findByLabelText(/修改 铜怀表 的外观描述后生成新版本/);
+  await user.clear(field);
+  await user.type(field, 'A worn brass pocket watch, lid closed, on a plain background.');
+  await user.click(screen.getByRole('button', { name: '再生成一版（保留旧图）' }));
+  await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/regenerate$/)).toHaveLength(1));
+  const body = stub.callsOf('POST', /material-preparation\/regenerate$/)[0].body as { brief: { questions: unknown[]; appearance: string } };
+  expect(body.brief.questions).toEqual([]);
+  expect(body.brief.appearance).toContain('lid closed');
+});
