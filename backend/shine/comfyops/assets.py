@@ -224,9 +224,22 @@ def promote(db, settings, row, actor, decision, *, offline):
     if existing:
         raise HTTPException(409, "ASSET_HASH_ALREADY_REGISTERED")
     media = p.get("media") or {}
+    filename = p["filename"]
+    generated = (p.get("provenance") or {}).get("source") == "material_preparation"
+    if generated and p.get("family") in {"character", "scene", "prop"}:
+        # A generated material carries the entity and its place in the script,
+        # so a person can match the picture to the script and the storyboard.
+        from pathlib import Path
+
+        from shine.materialprep.naming import material_filename
+
+        filename = material_filename(
+            db, row.project_id, p["family"], p["entity_id"],
+            extension=Path(p["filename"]).suffix or ".png",
+        )
     asset = Asset(
         project_id=row.project_id,
-        filename=p["filename"],
+        filename=filename,
         kind=p["kind"],
         content_type=p["content_type"],
         sha256=p["content_sha256"],

@@ -196,7 +196,9 @@ function App() {
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
   const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
   const focusStage = stageOverride ?? autoStage;
-  useEffect(() => { setStageOverride(null); }, [autoStage]);
+  // The person's own stage choice is theirs: it survives a page switch and the
+  // auto advance, and only a new work replaces it.
+  useEffect(() => { setStageOverride(null); }, [projectId]);
 
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
@@ -553,8 +555,8 @@ function App() {
               </>}
             </section>}
 
-            {directorPage !== 'setup' && project && <>
-              <nav className="director-steps" aria-label="制作流程">
+            {project && <>
+              <nav className="director-steps" aria-label="制作流程" hidden={directorPage === 'setup'}>
                 {DIRECTOR_PAGES.map((page, index) => {
                   const Icon = page.icon;
                   const active = directorPage === page.id;
@@ -577,7 +579,7 @@ function App() {
                   );
                 })}
               </nav>
-              {directorPage !== 'projects' && (nextStep || directorPage !== 'deliver') && (nextStep ? (
+              {directorPage !== 'projects' && directorPage !== 'setup' && (nextStep || directorPage !== 'deliver') && (nextStep ? (
                 <div className="next-step-bar" role="status">
                   <span className="next-step-tag">下一步</span>
                   <div className="next-step-text">
@@ -598,11 +600,11 @@ function App() {
                   <button type="button" className="secondary-button" onClick={() => goToDirectorPage('deliver')}>去看成片</button>
                 </div>
               ))}
-              <DemoRibbon production={production ?? {
+              <div hidden={directorPage === 'setup'}><DemoRibbon production={production ?? {
                 mode: 'BLOCKED', label: '状态未知', detail: '暂无法确认制作环境。', action: null, code: null,
                 render_provider: 'mock', runtime_status: 'NOT_ACTIVATED', renderer_online: false,
                 worker_online: false, running_jobs: 0, series_active: 0,
-              }} onEnable={() => setWizard('enable')} />
+              }} onEnable={() => setWizard('enable')} /></div>
 
               {directorPage === 'projects' && <div className="director-page">
                 <section className="welcome-row">
@@ -636,7 +638,7 @@ function App() {
                 </div>
               </div>}
 
-              {directorPage === 'assets' && <div className="director-page" id="assets">
+              <div className="director-page" id="assets" hidden={directorPage !== 'assets'}>
                 <MaterialPreparationPanel
                   key={`material-${projectId}`}
                   projectId={projectId}
@@ -666,7 +668,7 @@ function App() {
                   onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
                   onMessage={report}
                 />
-              </div>}
+              </div>
 
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
                 <nav className="produce-stages" aria-label="制作阶段">
@@ -811,11 +813,11 @@ function App() {
                 </details>
               </div>
 
-              {directorPage === 'deliver' && <div className="director-page" id="deliver">
-                <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active refreshEpoch={dataEpoch} />
-              </div>}
+              <div className="director-page" id="deliver" hidden={directorPage !== 'deliver'}>
+                <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={directorPage === 'deliver'} refreshEpoch={dataEpoch} />
+              </div>
 
-              <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> DIRECTOR WORKBENCH</span><span><ShieldCheck size={12} /> 本地数据库 · 素材由你掌控</span></footer>
+              <footer className="page-footer" hidden={directorPage === 'setup'}><span>SHINE VIDEO STUDIO <i>·</i> DIRECTOR WORKBENCH</span><span><ShieldCheck size={12} /> 本地数据库 · 素材由你掌控</span></footer>
             </>}
           </>}
 

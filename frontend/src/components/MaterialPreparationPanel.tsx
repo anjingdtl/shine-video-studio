@@ -4,6 +4,18 @@ import { ImagePreview } from './ImagePreview';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { API, api, ERROR_CODE_LABELS, type Asset, type StyleVersion } from '../api';
 
+/** Plan and batch states in the words of the page, not the words of the ledger. */
+const PLAN_STATUS_LABELS: Record<string, string> = {
+  DRAFT: '待确认需求',
+  CONFIRMED: '已确认清单',
+  MATERIALS_READY: '素材已齐备',
+  NEEDS_CLARIFICATION: '需要澄清',
+};
+const RUN_STATUS_LABELS: Record<string, string> = {
+  QUEUED: '排队中', RUNNING: '生成中', COMPLETED: '已完成',
+  PARTIAL_FAILED: '部分失败', NEEDS_REVIEW: '待核对', CANCELLED: '已取消',
+};
+
 export type MaterialStrategy = 'reuse_master' | 'upload' | 'generate';
 
 export type MaterialRequirement = {
@@ -124,7 +136,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [briefEdits, setBriefEdits] = useState<Record<string, string>>({});
   const [textScope, setTextScope] = useState<{ scope_hash: string; document_sha256: string; transmission: string; roles: { role: string; configured: boolean; provider?: string; base_url?: string; model?: string; allowed?: boolean }[] } | null>(null);
   const [candidateGroup, setCandidateGroup] = useState('all');
-  const [visibleRuns, setVisibleRuns] = useState(8);
   const [visibleCandidates, setVisibleCandidates] = useState(24);
   const [strategy, setStrategy] = useState<Record<string, MaterialStrategy>>({});
   const [direction, setDirection] = useState({ era: '', palette: '', lighting: '', texture: '', notes: '' });
@@ -134,6 +145,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [promotionReport, setPromotionReport] = useState<{ entity: string; ok: boolean; note: string }[]>([]);
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
+  /** The stage the person has open; null means "follow the server". */
+  const [openStage, setOpenStage] = useState<number | null>(null);
   // The work the user is looking at right now. A response that belongs to the
   // previous work must never be written into the new one.
   const directionDirty = useRef(false);
@@ -181,7 +194,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       .then((result) => { if (current) setTextScope(result); }).catch(() => undefined);
     return () => { current = false; };
   }, [projectId, documentId]);
-  useEffect(() => { setSelected({}); setBriefEdits({}); setOperationReport(''); }, [projectId, state?.plan_revision_id]);
+  useEffect(() => { setSelected({}); setBriefEdits({}); setOperationReport(''); setOpenStage(null); }, [projectId, state?.plan_revision_id]);
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -451,9 +464,57 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     const timer = window.setInterval(() => { void load().catch(() => undefined); }, 5000);
     return () => window.clearInterval(timer);
   }, [running, load]);
+  // The server names four stages.  A finished plan still belongs to "选择素材";
+  // every other value means there is nothing to select yet.
   const stage = state?.stage ?? 'read_script';
-  const stageIndex = stage === 'select_materials' ? 2 : stage === 'confirm_requirements' ? 1 : 0;
+  const stageIndex = stage === 'materials_ready' || stage === 'select_materials' ? 2
+    : stage === 'confirm_requirements' ? 1 : 0;
+  // The person may open any stage and keep it open; the server stage only
+  // decides where the page starts.
+  const shownStage = openStage === null ? stageIndex : openStage;
   const promotable = Object.keys(selected).length > 0;
+  // One dense grid of every candidate, whatever batch produced it: a person
+  // looks at pictures, not at batch folders.  An item without a picture yet
+  // (it failed, or the producer asked a question) still gets a tile, so the
+  // work that needs the person never disappears from the grid.
+  const tiles = runs.flatMap((row) => row.items.flatMap((item) => {
+    const base = {
+      row,
+      item,
+      title: [FAMILY_LABELS[item.family ?? ''] ?? item.family, item.entity_id].filter(Boolean).join(' · ')
+        || '能力验证小样',
+      error: item.error_code ? reasonText(item.error_code) : '',
+      questions: row.kind === 'production' ? (item.brief?.questions ?? []) : [],
+      brief: row.kind === 'production' && item.allowed_actions?.includes('regenerate') ? item.brief ?? null : null,
+      selectable: row.kind === 'production' && !!item.requirement_id
+        && requirements.some((r) => r.requirement_id === item.requirement_id),
+      actions: row.kind === 'production'
+        ? (item.allowed_actions ?? [])
+          .filter((a) => ['resume', 'reconcile', 'regenerate'].includes(a) && (a !== 'regenerate' || item.brief))
+          .map((a) => ({
+            action: a as 'resume' | 'reconcile' | 'regenerate',
+            label: a === 'resume' ? '恢复此项' : a === 'reconcile' ? '核对此项未知结果' : '再生成一版（保留旧图）',
+          }))
+        : [],
+    };
+    const list = item.candidates.length ? item.candidates : [null];
+    return list.map((candidate, index) => ({
+      ...base,
+      candidate,
+      first: index === 0,
+      meta: candidate
+        ? `生成 v${item.generation_revision} · ${candidate.formal_asset_id ? '已晋升'
+          : candidate.status === 'READY_FOR_REVIEW' ? '待人工选用'
+          : (ITEM_STATUS_LABELS[candidate.status] ?? candidate.status)}`
+        : `第 ${item.generation_revision} 版 · 尚未出图`,
+    }));
+  })).filter((tile) => candidateGroup === 'all' || tile.item.family === candidateGroup);
+  const totals = runs.reduce((acc, row) => ({
+    total: acc.total + (row.counts?.total ?? 0),
+    ready: acc.ready + (row.counts?.candidate_ready ?? 0),
+    failed: acc.failed + (row.counts?.failed ?? 0),
+    review: acc.review + (row.counts?.needs_review ?? 0),
+  }), { total: 0, ready: 0, failed: 0, review: 0 });
   return (
     <section className="material-panel" aria-label="AI 素材准备">
       <div className="module-guide">
@@ -479,25 +540,26 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         </div>
       )}
       {styleRows.length > 0 && (
-        <div className="required-action">
-          <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text">
-            <b>影视风格已冻结（版本 {frozenStyle?.version}），素材视觉方向要你亲自对照</b>
-            <small>
-              {styleRows.map((row) => (
-                <span key={row.label}>
-                  {row.label}：素材方向「{row.direction || '未填'}」／已冻结风格「{row.style || '未填'}」
-                </span>
-              ))}
-              两者不一致时，请在下方「影视风格」新建一个版本；已冻结的合同不会被自动修改。
-            </small>
+        <details className="material-stage">
+          <summary>影视风格已冻结（版本 {frozenStyle?.version}）：逐项对照素材视觉方向</summary>
+          <div className="material-stage-body">
+            {styleRows.map((row) => (
+              <p key={row.label}>
+                {row.label}：素材方向「{row.direction || '未填'}」／已冻结风格「{row.style || '未填'}」
+              </p>
+            ))}
+            <p className="material-hint">两者不一致时，请在下方「影视风格」新建一个版本；已冻结的合同不会被自动修改。</p>
           </div>
-        </div>
+        </details>
       )}
       {(state?.blockers ?? []).map((blocker) => (
         <div className="required-action" key={blocker.code}>
           <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text"><b>{blocker.code}</b><small>{blocker.note}</small></div>
+          <div className="required-text">
+            <b>{reasonText(blocker.code)}</b>
+            <small>{blocker.note}</small>
+            <small className="material-code">代码 {blocker.code}</small>
+          </div>
         </div>
       ))}
 
@@ -513,8 +575,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         ))}
       </ol>
 
-      <details className="material-stage" open={stageIndex === 0}>
-        <summary>① 读剧本{state?.plan_status ? ` · ${state.plan_status}` : ''}</summary>
+      <details className="material-stage" open={shownStage === 0}
+        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(0); else if (shownStage === 0) setOpenStage(-1); }}>
+        <summary>① 读剧本{state?.plan_status ? ` · ${PLAN_STATUS_LABELS[state.plan_status] ?? ''}` : ''}</summary>
         <div className="material-stage-body">
           {documents.length === 0 && (
             <p className="material-hint">这个作品还没有剧本文件。先到「AI导演制作」上传剧本，或在上面选择已有文件。</p>
@@ -551,7 +614,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         documentId={documentId} documentHash={documents.find((d) => d.id === documentId)?.sha256 ?? ''}
         styleFrozen={!!frozenStyle} onMaterials={() => { void load(); }} />}
 
-      <details className="material-stage" open={stageIndex === 1}>
+      <details className="material-stage" open={shownStage === 1}
+        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(1); else if (shownStage === 1) setOpenStage(-1); }}>
         <summary>② 确认需求 · {requirements.length} 项</summary>
         <div className="material-stage-body">
           {requirements.length === 0 ? (
@@ -610,76 +674,74 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         </div>
       </details>
 
-      <details className="material-stage" open={stageIndex === 2}>
-        <summary>③ 选择素材 · {runs.length} 个批次</summary>
+      <details className="material-stage" open={shownStage === 2}
+        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(2); else if (shownStage === 2) setOpenStage(-1); }}>
+        <summary>③ 选择素材 · {tiles.length} 项候选</summary>
         <div className="material-stage-body">
           {runs.length === 0 && <p className="material-hint">还没有出图批次。确认清单后，生成的项目会在这里排队。</p>}
-          <label className="material-field"><span>候选素材分组</span><select value={candidateGroup} onChange={(e) => setCandidateGroup(e.target.value)}>
-            <option value="all">全部候选</option><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option>
-          </select></label>
-          {runs.slice(0, visibleRuns).map((row) => (
-            <div className="material-run" key={row.run_id}>
-              <b>{row.kind === 'validation' ? '出图能力验证' : '素材批次'} · {row.status}</b>
-              <small>
-                候选 {row.counts.candidate_ready}/{row.counts.total} · 失败 {row.counts.failed} · 待核对 {row.counts.needs_review}
-              </small>
-              {row.kind === 'validation' && <p className="material-hint">这是能力验证小样，不属于正式素材需求，不能在这里选用。</p>}
-              <div className="media-grid" aria-label={`${row.kind === 'validation' ? '验证小样' : '正式候选'} ${row.run_id}`}>
-                {row.items.filter((item) => candidateGroup === 'all' || item.family === candidateGroup).slice(0, visibleCandidates).map((item) => (
-                  <article className="media-card" key={item.item_id}>
-                    <b>{item.family || item.entity_id
-                      ? [FAMILY_LABELS[item.family ?? ''] ?? item.family, item.entity_id].filter(Boolean).join(' · ')
-                      : '能力验证小样'}</b>
-                    <small>批次 {row.run_id.slice(0, 8)} · 生成 v{item.generation_revision}</small>
-                    <span>{ITEM_STATUS_LABELS[item.status] ?? item.status}</span>
-                    {item.error_code && <em>{reasonText(item.error_code)}</em>}
-                    {row.kind === 'production' && !!item.brief?.questions?.length && (
-                      <p className="material-questions" role="alert">
-                        出品人需要澄清：{item.brief.questions.join('；')}。把你的回答写进下面的外观描述（英文），
-                        再点「再生成一版」——重新生成会消费这些问题。
-                      </p>
-                    )}
-                    {row.kind === 'production' && item.allowed_actions?.includes('regenerate') && item.brief && <label className="material-field">
-                      <span>修改 {item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
-                      <textarea value={briefEdits[item.item_id] ?? item.brief.appearance} maxLength={1200}
-                        onChange={(e) => setBriefEdits({ ...briefEdits, [item.item_id]: e.target.value })} />
-                    </label>}
-                    {row.kind === 'production' && item.allowed_actions?.map((action) =>
-                      ['resume', 'reconcile', 'regenerate'].includes(action) && (action !== 'regenerate' || item.brief) && <button type="button" key={action} disabled={busy}
-                        onClick={() => itemAction(row, item, action as 'resume' | 'reconcile' | 'regenerate')}>
-                        {action === 'resume' ? '恢复此项' : action === 'reconcile' ? '核对此项未知结果' : '再生成一版（保留旧图）'}
-                      </button>)}
-                    {item.candidates.map((candidate) => (
-                      <div key={candidate.candidate_id} className={`material-candidate ${selected[item.requirement_id ?? ''] === candidate.candidate_id ? 'is-selected' : ''}`}>
-                        <ImagePreview thumbnail={`${API}/candidate-assets/${candidate.candidate_id}/thumbnail`}
-                          original={`${API}/candidate-assets/${candidate.candidate_id}/media`}
-                          label={`${item.entity_id} · 生成 v${item.generation_revision} · 尝试 ${candidate.attempt_no}`} />
-                        {candidate.is_mock && <b>离线测试候选，不能用于真实生产</b>}
-                        <small>尝试 {candidate.attempt_no} · {candidate.formal_asset_id ? '已晋升' : candidate.status === 'READY_FOR_REVIEW' ? '待人工选用' : candidate.status}</small>
-                        {row.kind === 'production' && item.requirement_id && requirements.some((r) => r.requirement_id === item.requirement_id) && !candidate.formal_asset_id && <label>
-                          <input type="checkbox" disabled={candidate.status !== 'READY_FOR_REVIEW'} checked={selected[item.requirement_id] === candidate.candidate_id}
-                            aria-label={`选择 ${item.entity_id} 生成v${item.generation_revision} ${candidate.candidate_id}`}
-                            onChange={(event) => setSelected((current) => {
-                              const next = { ...current };
-                              if (event.target.checked) next[item.requirement_id!] = candidate.candidate_id;
-                              else delete next[item.requirement_id!];
-                              return next;
-                            })} />选用此版本
-                        </label>}
-                      </div>
-                    ))}
-                  </article>
-                ))}
-              </div>
-              {row.items.length > visibleCandidates && <button type="button" onClick={() => setVisibleCandidates((n) => n + 24)}>加载更多候选</button>}
-              {row.allowed_actions.includes('cancel') && (
-                <button type="button" className="subtle-button" disabled={busy} onClick={() => cancelRun(row.run_id)}>
-                  停止这个批次
-                </button>
-              )}
+          {tiles.length > 0 && <>
+            <div className="material-toolbar">
+              <label className="material-field"><span>候选素材分组</span><select value={candidateGroup} onChange={(e) => setCandidateGroup(e.target.value)}>
+                <option value="all">全部候选</option><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option>
+              </select></label>
+              <small>已选用 {Object.keys(selected).length} 项 · 候选 {totals.ready}/{totals.total} · 失败 {totals.failed} · 待核对 {totals.review}</small>
             </div>
-          ))}
-          {runs.length > visibleRuns && <button type="button" onClick={() => setVisibleRuns((n) => n + 8)}>加载更多批次</button>}
+            <div className="media-grid material-grid" aria-label="候选素材预览">
+              {tiles.slice(0, visibleCandidates).map((tile) => (
+                <article className="media-card material-tile" key={tile.candidate?.candidate_id ?? tile.item.item_id}>
+                  {tile.candidate
+                    ? <ImagePreview thumbnail={`${API}/candidate-assets/${tile.candidate.candidate_id}/thumbnail`}
+                      original={`${API}/candidate-assets/${tile.candidate.candidate_id}/media`}
+                      label={`${tile.item.entity_id ?? ''} · 生成 v${tile.item.generation_revision}`} />
+                    : <div className="material-tile-empty">尚未出图</div>}
+                  <b>{tile.title}</b>
+                  <small>{tile.meta}</small>
+                  {tile.first && tile.row.kind === 'validation' && <em>这是能力验证小样，不属于正式素材需求，不能在这里选用。</em>}
+                  {tile.candidate?.is_mock && <em>离线测试候选，不能用于真实生产</em>}
+                  {tile.first && tile.error && <em>{tile.error}</em>}
+                  {tile.first && tile.questions.length > 0 && (
+                    <p className="material-questions" role="alert">
+                      出品人需要澄清：{tile.questions.join('；')}。在「修改外观描述」里用英文回答，
+                      再点「再生成一版（保留旧图）」——重新生成会消费这些问题。
+                    </p>
+                  )}
+                  {tile.candidate && tile.selectable && !tile.candidate.formal_asset_id && <label>
+                    <input type="checkbox" disabled={tile.candidate.status !== 'READY_FOR_REVIEW'}
+                      checked={selected[tile.item.requirement_id!] === tile.candidate.candidate_id}
+                      aria-label={`选择 ${tile.item.entity_id} 生成v${tile.item.generation_revision} ${tile.candidate.candidate_id}`}
+                      onChange={(event) => setSelected((current) => {
+                        const next = { ...current };
+                        if (event.target.checked) next[tile.item.requirement_id!] = tile.candidate!.candidate_id;
+                        else delete next[tile.item.requirement_id!];
+                        return next;
+                      })} />选用此版本
+                  </label>}
+                  {tile.first && tile.actions.length > 0 && <div className="material-tile-actions">
+                    {tile.actions.map((action) => <button type="button" key={action.action} disabled={busy}
+                      onClick={() => itemAction(tile.row, tile.item, action.action)}>{action.label}</button>)}
+                  </div>}
+                  {tile.first && tile.brief && <details className="material-tile-brief"><summary>修改外观描述</summary>
+                    <label className="material-field">
+                      <span>修改 {tile.item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
+                      <textarea value={briefEdits[tile.item.item_id] ?? tile.brief.appearance} maxLength={1200}
+                        onChange={(e) => setBriefEdits({ ...briefEdits, [tile.item.item_id]: e.target.value })} />
+                    </label>
+                  </details>}
+                </article>
+              ))}
+            </div>
+            {tiles.length > visibleCandidates && <button type="button" onClick={() => setVisibleCandidates((n) => n + 24)}>加载更多候选</button>}
+            {runs.filter((row) => row.allowed_actions.includes('cancel')).map((row) => (
+              <button type="button" className="subtle-button" key={row.run_id} disabled={busy}
+                onClick={() => cancelRun(row.run_id)}>停止这个批次</button>
+            ))}
+            <details className="material-tech"><summary>批次与技术信息</summary>
+              {runs.map((row) => <p key={row.run_id}>
+                {row.kind === 'validation' ? '出图能力验证' : '素材批次'} · {RUN_STATUS_LABELS[row.status] ?? row.status} ·
+                候选 {row.counts.candidate_ready}/{row.counts.total} · 失败 {row.counts.failed} · 待核对 {row.counts.needs_review} · {row.run_id}
+              </p>)}
+            </details>
+          </>}
           <button type="button" className="must-button" disabled={busy || !promotable} onClick={promoteSelected}>
             确认使用所选素材
           </button>

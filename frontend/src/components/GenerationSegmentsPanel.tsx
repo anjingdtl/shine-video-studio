@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { API, api, json } from '../api';
 
 type Segment = {
@@ -10,6 +10,47 @@ type Segment = {
   replacement_status: string | null; can_select_replacement: boolean;
 };
 type SegmentState = { series_id: string | null; segments: Segment[] };
+
+/** The page speaks in outcomes, not in engine codes. */
+const SEGMENT_STATUS: Record<string, string> = {
+  PASSED: '已通过', RUNNING: '生成中', QUEUED: '排队中', SUBMITTING: '提交中',
+  QC_PENDING: '质检中', REPAIR_PENDING: '返工中', FAILED: '失败',
+  NEEDS_REVIEW: '待人工处理', BLOCKED: '已阻断', CANCELLED: '已取消', STALE: '已失效',
+};
+
+/**
+ * A produced shot as a poster with the real clip behind it.
+ *
+ * The poster is a small derivative the server builds from the produced file;
+ * the clip itself only loads when the person asks for it.  When no poster can
+ * be built the player is shown inline instead, so a missing decoder never
+ * leaves the person with an unexplained empty frame.
+ */
+export function VideoPreview({ poster, video, label }: { poster: string; video: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [posterFailed, setPosterFailed] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const node = dialog.current;
+    if (!open || !node) return;
+    // A runtime without the dialog API still has to show the player.
+    if (typeof node.showModal === 'function') node.showModal();
+    else node.setAttribute('open', '');
+  }, [open]);
+  return <>
+    <button type="button" className="media-preview-button segment-poster" aria-label={`预览 ${label}`} onClick={() => setOpen(true)}>
+      {posterFailed
+        ? <span className="media-preview-unavailable">预览不可用</span>
+        : <img src={poster} alt={label} loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />}
+      {!posterFailed && <span className="segment-poster-play" aria-hidden="true">▶</span>}
+    </button>
+    {open && <dialog ref={dialog} className="media-preview-dialog" aria-label={`预览 ${label}`} onClose={() => setOpen(false)}>
+      <button type="button" onClick={() => { dialog.current?.close(); setOpen(false); }}>关闭预览</button>
+      <video controls autoPlay src={video} style={{ width: '100%', maxHeight: '75vh' }} />
+      <p>{label}</p>
+    </dialog>}
+  </>;
+}
 
 export function LazyVideo({ src, label }: { src: string; label: string }) {
   const [loaded, setLoaded] = useState(false);
@@ -52,31 +93,42 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
   }
   return <section aria-label="H3 生成分段">
     <h3>生成分段</h3>
-    <p>每张卡片对应 H3 一次输出。段内剪辑切点共同生成，不能分别重拍。完整成片在下方。</p>
-    {!state.segments.length && <p>尚无制作系列。选定生产范围并开拍后，这里显示每个生成分段。</p>}
-    <div className="media-grid">
-      {state.segments.map((segment) => <article key={segment.shot_id} className="media-card">
-        <b>生成段 {segment.position} · {segment.duration_s ?? '—'} 秒</b>
-        <p>{segment.story_beat}</p>
-        {segment.editorial_cuts?.length > 0 && <small>段内剪辑范围：{segment.editorial_cuts.map((cut) => `${cut.beat_id ?? '剪辑点'} @ ${cut.start_s ?? 0}s`).join('、')}（整体重拍）</small>}
-        <small>镜头修订 {segment.shot_revision} · job {segment.job_id?.slice(0, 8) ?? '未创建'} · attempt {segment.attempt_no ?? '未开始'}</small>
-        <span>{segment.status}</span>
+    <p>每张卡片是一次 H3 输出。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。完整成片在下方。</p>
+    {!state.segments.length && <p className="material-hint">尚无制作系列。选定生产范围并开拍后，这里显示每个生成分段。</p>}
+    <div className="media-grid segment-grid">
+      {state.segments.map((segment) => <article key={segment.shot_id} className="media-card segment-card">
+        <div className="segment-card-head">
+          <b>生成段 {segment.position} · {segment.duration_s ?? '—'} 秒</b>
+          <span className={`segment-status is-${(segment.status || 'none').toLowerCase()}`}>
+            {SEGMENT_STATUS[segment.status] ?? segment.status}
+          </span>
+        </div>
         {segment.artifact_id && segment.job_id ? <>
-          <LazyVideo key={segment.job_id} src={`${API}/jobs/${segment.job_id}/media`} label={`生成段 ${segment.position} 当前版本`} />
-          <a href={`${API}/jobs/${segment.job_id}/media`} download>下载此段当前版本</a>
-        </> : <p>尚无视频：等待前序通过、生成或质检完成。</p>}
-        {segment.dependent_job_ids.length > 0 && <details><summary>影响 {segment.dependent_job_ids.length} 个真实依赖任务</summary>
+          <VideoPreview poster={`${API}/jobs/${segment.job_id}/thumbnail`}
+            video={`${API}/jobs/${segment.job_id}/media`}
+            label={`生成段 ${segment.position} 当前版本`} />
+          <div className="segment-card-foot">
+            <small>{segment.editorial_cuts?.length ? `段内 ${segment.editorial_cuts.length} 个剪辑点` : '整段一次生成'}</small>
+            <a href={`${API}/jobs/${segment.job_id}/media`} download>下载此段</a>
+          </div>
+        </> : <p className="material-hint">尚无视频：等待前序通过、生成或质检完成。</p>}
+        <details className="segment-detail">
+          <summary>镜头描述</summary>
+          <p>{segment.story_beat}</p>
+          {segment.editorial_cuts?.length > 0 && <small>段内剪辑范围：{segment.editorial_cuts.map((cut) => `${cut.beat_id ?? '剪辑点'} @ ${cut.start_s ?? 0}s`).join('、')}（整体重拍）</small>}
+        </details>
+        <div className="segment-card-actions">
+          <button type="button" disabled={busy || !segment.can_regenerate} onClick={() => act(segment, false)}>重新生成此段</button>
+          {segment.replacement_job_id && <button type="button" disabled={busy || !segment.can_select_replacement} onClick={() => act(segment, true)}>选为当前装配版本</button>}
+        </div>
+        {segment.replacement_job_id && <small className="segment-note">新版本 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}</small>}
+        {segment.blocker && <small className="segment-note">当前不能重复排拍：{segment.replacement_job_id ? '新版本等待完成或选用' : '当前版本未通过、仍在执行或需要核对，请先查看制作进度'}（{segment.blocker}）</small>}
+        {segment.dependent_job_ids.length > 0 && <details className="segment-detail"><summary>影响 {segment.dependent_job_ids.length} 个真实依赖任务</summary>
           <p>选用新版本会使这些后继失效并要求复核，不会自动无限重拍。</p>
-          <ul>{segment.dependent_job_ids.map((id) => <li key={id}>{id}</li>)}</ul>
         </details>}
-        <button type="button" disabled={busy || !segment.can_regenerate} onClick={() => act(segment, false)}>重新生成此段</button>
-        {segment.blocker && <small>当前不能重复排拍：{segment.replacement_job_id ? '新版本等待完成或选用' : '当前版本未通过、仍在执行或需要核对，请先查看制作进度'}（{segment.blocker}）</small>}
-        {segment.replacement_job_id && <div>
-          <b>新版本 · {segment.replacement_status}</b>
-          {segment.replacement_status === 'PASSED' && <LazyVideo key={segment.replacement_job_id} src={`${API}/jobs/${segment.replacement_job_id}/media`} label={`生成段 ${segment.position} 新版本对照`} />}
-          <button type="button" disabled={busy || !segment.can_select_replacement} onClick={() => act(segment, true)}>选为当前装配版本</button>
-          {!segment.can_select_replacement && <small>新版本尚未通过最终门禁，不能装配成已接受成片。</small>}
-        </div>}
+        <details className="segment-detail"><summary>技术信息</summary>
+          <small>镜头修订 {segment.shot_revision} · job {segment.job_id?.slice(0, 8) ?? '未创建'} · attempt {segment.attempt_no ?? '未开始'}</small>
+        </details>
       </article>)}
     </div>
     {message && <p role="status">{message}</p>}

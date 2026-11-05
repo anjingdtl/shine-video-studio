@@ -72,7 +72,7 @@ export default function StylePanel({
   const freshProposalRef = useRef(false);
 
   useEffect(() => {
-    const hasCustom = styleFields.some(([field]) => style[field].trim() && !matchStyleOption(field, style[field]));
+    const hasCustom = styleFields.some(([field]) => String(style[field] ?? '').trim() && !matchStyleOption(field, style[field]));
     if (hasCustom) setDetailsOpen(true);
   }, [style]);
 
@@ -101,7 +101,7 @@ export default function StylePanel({
     ? null
     : STYLE_PROPOSAL_ROLES.map((role) => aiRoles?.find((row) => row.role === role)).find((row) => row && row.profile_id) ?? null;
   const aiConfigured = Boolean(aiRole);
-  const allSevenFilled = styleFields.every(([field]) => style[field].trim().length > 0);
+  const allSevenFilled = styleFields.every(([field]) => String(style[field] ?? '').trim().length > 0);
   // Freezing is a separate confirmation of the current snapshot.  It must stay
   // available after the same content was saved as a draft; only saving needs a
   // draft change to be meaningful.
@@ -114,7 +114,7 @@ export default function StylePanel({
   function applyPreset(presetId: string) {
     const preset = STYLE_PRESETS.find((row) => row.id === presetId);
     if (!preset) return;
-    const hasEdits = styleFields.some(([field]) => style[field].trim() && style[field] !== preset.values[field]);
+    const hasEdits = styleFields.some(([field]) => String(style[field] ?? '').trim() && style[field] !== preset.values[field]);
     if (hasEdits && !window.confirm('当前草稿已有自定义修改，选择整套预设会覆盖这些修改。继续吗？')) return;
     setStyle(() => ({ ...preset.values }));
     setCustomFields(new Set());
@@ -247,8 +247,8 @@ export default function StylePanel({
       {detailsOpen && <div className="style-grid">
         {styleFields.map(([field, label, hint], index) => {
           const matched = matchStyleOption(field, style[field]);
-          const customActive = customFields.has(field) || (!matched && !!style[field].trim());
-          const selectValue = matched?.id ?? (style[field].trim() || customActive ? 'custom' : '');
+          const customActive = customFields.has(field) || (!matched && !!String(style[field] ?? '').trim());
+          const selectValue = matched?.id ?? (String(style[field] ?? '').trim() || customActive ? 'custom' : '');
           return (
             <div className="style-field" key={field}>
               <span><i>0{index + 1}</i>{label}</span>
@@ -277,8 +277,8 @@ export default function StylePanel({
                   }}
                 />
               )}
-              {!customActive && !style[field].trim() && <small className="style-field-hint">{hint}</small>}
-              {!customActive && style[field].trim() && <small className="style-field-hint">{style[field]}</small>}
+              {!customActive && !String(style[field] ?? '').trim() && <small className="style-field-hint">{hint}</small>}
+              {!customActive && String(style[field] ?? '').trim() && <small className="style-field-hint">{style[field]}</small>}
             </div>
           );
         })}

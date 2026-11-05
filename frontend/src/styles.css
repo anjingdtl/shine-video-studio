@@ -833,8 +833,10 @@ html[data-theme='dark'] .agent-step-row.failed{border-color:#55382f;background:#
 html[data-theme='dark'] .agent-step-row.running{border-color:#4a4027;background:#2b2718;color:#c9b98c}
 html[data-theme='dark'] .agent-step-row b{color:#cdcec0}
 
-/* Keep the running crew mounted while another director step is visible. */
-#produce[hidden]{display:none!important}
+/* A hidden page is really hidden.  The crew and the material panels stay mounted
+   while another director step is visible, so their state survives a page switch;
+   the attribute has to win against the page's own display rule. */
+[hidden]{display:none!important}
 .status-led.offline{background:#c15b50;box-shadow:0 0 0 3px #c15b5030}
 fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}
 
@@ -1166,3 +1168,55 @@ html[data-theme='dark'] .carry-verified { color: #b7c9a4; }
 /* The producer's clarification questions are the user's to answer in prose. */
 .material-questions { margin: 0; padding: 8px 10px; border-radius: 8px; background: #f7f2e4; color: #977d46; font-size: 11px; overflow-wrap: anywhere; }
 html[data-theme='dark'] .material-questions { background: #33301f; color: #cdb26a; }
+
+/* The segments grid: one produced shot per tile, the picture first and the
+   engineering text folded away.  A person scans frames here, not paragraphs. */
+.segment-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 264px), 1fr)); }
+.segment-card { gap: 9px; padding: 10px; }
+.segment-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.segment-card-head b { font-size: 12px; }
+.segment-status { font: 9px var(--mono); letter-spacing: .3px; color: #6f7751; background: #eef1e4; border-radius: 20px; padding: 3px 8px; white-space: nowrap; }
+.segment-status.is-passed { color: #5c7553; background: #edf2e8; }
+.segment-status.is-failed, .segment-status.is-blocked, .segment-status.is-needs_review { color: #a35f4d; background: #f6e8e2; }
+.segment-status.is-running, .segment-status.is-submitting, .segment-status.is-qc_pending, .segment-status.is-repair_pending { color: #8a6f2f; background: #f5efe0; }
+.segment-poster { position: relative; display: block; width: 100%; padding: 0; border: 0; background: #11130f; border-radius: 8px; overflow: hidden; cursor: pointer; }
+.segment-poster img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.segment-poster-play { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 19px; text-shadow: 0 1px 8px #0009; opacity: .8; }
+.segment-poster:hover .segment-poster-play, .segment-poster:focus-visible .segment-poster-play { opacity: 1; }
+.segment-inline-video { width: 100%; border-radius: 8px; background: #11130f; }
+.segment-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10px; color: #8a8b84; }
+.segment-card-foot a { font-size: 10px; }
+.segment-card-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.segment-card-actions button { height: 28px; border: 1px solid #e5e6de; background: #fff; border-radius: 5px; padding: 0 9px; font-size: 10px; color: #6d6f64; }
+.segment-card-actions button:hover:not(:disabled) { border-color: #b6bd9d; }
+.segment-detail { font-size: 10px; color: #8a8b84; }
+.segment-detail summary { cursor: pointer; font-size: 10px; color: #8b8d81; }
+.segment-detail p { margin: 6px 0 0; line-height: 1.6; }
+.segment-note { font-size: 9px; color: #a35f4d; }
+.material-tech summary, .material-code { font-size: 9px; color: #a0a198; }
+html[data-theme='dark'] .segment-poster, html[data-theme='dark'] .segment-inline-video { background: #1c1d19; }
+html[data-theme='dark'] .segment-card-actions button { background: #232420; color: #d5d6cd; border-color: #4a4c41; }
+html[data-theme='dark'] .segment-status { background: #2a3025; color: #b7c9a4; }
+
+/* One dense grid of every candidate.  The picture is the tile; the words are
+   a caption under it, and the engineering detail is folded away. */
+.material-toolbar { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.material-toolbar .material-field { display: flex; align-items: center; gap: 8px; }
+.material-toolbar .material-field select { width: auto; min-width: 120px; }
+.material-toolbar small { color: #8a8b84; font-size: 10px; }
+.material-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 172px), 1fr)); gap: 10px; }
+.material-tile { gap: 5px; padding: 8px; }
+.material-tile .media-preview-button img { height: auto; aspect-ratio: 1 / 1; object-fit: contain; }
+.material-tile b { font-size: 11px; line-height: 1.35; }
+.material-tile small { font-size: 9px; color: #92938b; }
+.material-tile em { font-size: 9px; color: #a35f4d; font-style: normal; }
+.material-tile label { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #6f7169; }
+.material-tile-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.material-tile-actions button { height: 26px; border: 1px solid #e5e6de; background: #fff; border-radius: 5px; padding: 0 8px; font-size: 9px; color: #6d6f64; }
+.material-tile-actions button:hover:not(:disabled) { border-color: #b6bd9d; }
+.material-tile-brief summary { cursor: pointer; font-size: 9px; color: #8b8d81; }
+.material-tile-brief .material-field { display: block; margin-top: 5px; }
+.material-tile-brief textarea { min-height: 88px; font-size: 10px; }
+.media-preview-unavailable { display: grid; place-items: center; height: 140px; color: #a0a198; font-size: 10px; background: var(--paper); }
+html[data-theme='dark'] .material-tile-actions button { background: #232420; color: #d5d6cd; border-color: #4a4c41; }
+html[data-theme='dark'] .material-toolbar small { color: #a9aba1; }

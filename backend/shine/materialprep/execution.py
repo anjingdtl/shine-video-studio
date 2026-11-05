@@ -390,6 +390,13 @@ def _harvest(client: ComfyUIClient, history_entry: dict[str, Any]) -> tuple[byte
     return content, {"filename": filename, "subfolder": subfolder, "type": file_type}
 
 
+def _candidate_filename(db, project_id: str, family: str, entity_id: str) -> str:
+    """The file name of one generated material."""
+    from shine.materialprep.naming import material_filename
+
+    return material_filename(db, project_id, family, entity_id)
+
+
 def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: str, content: bytes, family: str):
     """Verify the bytes through the shared candidate ledger and link the attempt."""
     from shine.comfy.workflow import graph_hash as _hash
@@ -421,7 +428,7 @@ def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: 
             family,
             entity_id,
             content,
-            f"material-{family}-{context['item_id'][:8]}.png",
+            _candidate_filename(db, project.id, family, entity_id),
             rights_id,
             provenance,
         )

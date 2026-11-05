@@ -785,12 +785,12 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         <div className="settings-block">
           <h3>1 · 环境检查</h3>
           {!env ? <div className="empty-inline">读取中…</div> : <>
-            <div className="worker-row"><div><b>GPU</b><span>{String(env.gpu.name ?? '—')} · {String(env.gpu.vram_mb ?? '—')} MiB · 驱动 {String(env.gpu.driver_version ?? '—')}</span></div></div>
-            <div className="worker-row"><div><b>内存/磁盘</b><span>{env.ram.ram_mb ?? '—'} MB · 磁盘可用 {env.disk.free_gb} GB（安装目录 {env.deployment_dir?.path ?? env.data_dir.path}）</span></div></div>
-            <div className="worker-row"><div><b>端口 {env.port.port}</b><span>{env.port.status === 'OK' ? '可用' : '被占用'}</span></div></div>
+            <div className="worker-row"><div><b>GPU</b><span>{String(env.gpu?.name ?? '—')} · {String(env.gpu?.vram_mb ?? '—')} MiB · 驱动 {String(env.gpu?.driver_version ?? '—')}</span></div></div>
+            <div className="worker-row"><div><b>内存/磁盘</b><span>{env.ram?.ram_mb ?? '—'} MB · 磁盘可用 {env.disk?.free_gb ?? '—'} GB（安装目录 {env.deployment_dir?.path ?? env.data_dir?.path ?? '—'}）</span></div></div>
+            <div className="worker-row"><div><b>端口 {env.port?.port ?? '—'}</b><span>{env.port?.status === 'OK' ? '可用' : '被占用'}</span></div></div>
             <table className="setup-tools">
               <tbody>
-                {Object.entries(env.tools).map(([name, info]) => (
+                {Object.entries(env.tools ?? {}).map(([name, info]) => (
                   <tr key={name}>
                     <td>{TOOL_LABELS[name] ?? name}</td>
                     <td>{info.present ? info.version : '缺失'}</td>

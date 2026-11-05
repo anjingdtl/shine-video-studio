@@ -958,6 +958,42 @@ def create_app(
             raise HTTPException(status_code=404, detail="Job not found")
         return jsonable_encoder(_job_data(db, job, include_prompt=True))
 
+    def _produced_artifact(job_id: str, db: DBSession) -> MediaArtifact:
+        """The media this job really produced, and nothing else."""
+        job = db.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        if not artifact or artifact.job_id != job.id:
+            raise HTTPException(status_code=404, detail="This job has no produced media yet")
+        return artifact
+
+    @app.get("/api/v1/jobs/{job_id}/media")
+    def job_media(job_id: str, db: DBSession) -> FileResponse:
+        """Serve one produced shot so the workbench can preview it.
+
+        The segments grid needs the real bytes of a produced shot.  The operator
+        route only answers an operator request, so the workbench had no way to
+        play a shot at all.  The bytes are this job's own artifact and are
+        checked against the registered digest before they are served.
+        """
+        artifact = _produced_artifact(job_id, db)
+        path = safe_asset_path(actual_asset_root, artifact.storage_path)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
+        if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
+            raise HTTPException(status_code=409, detail="ARTIFACT_FILE_HASH_MISMATCH")
+        return FileResponse(path, media_type=artifact.content_type, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/jobs/{job_id}/thumbnail")
+    def job_thumbnail(job_id: str, request: Request, db: DBSession):
+        """A poster frame of a produced shot, so the preview grid is visual."""
+        from shine.media.thumbnails import thumbnail
+
+        artifact = _produced_artifact(job_id, db)
+        return thumbnail(safe_asset_path(actual_asset_root, artifact.storage_path), artifact.sha256,
+                         settings.ffmpeg_path, request.headers.get("if-none-match"))
+
     @app.post("/api/v1/projects/{project_id}/production-series", status_code=201)
     def create_production_series(
         project_id: str, body: CreateProductionSeries, request: Request, db: DBSession
