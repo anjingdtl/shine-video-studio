@@ -311,7 +311,8 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             )
             plan_id = result_json()["id"]
             prep.get_by_role("button", name="模型与节点", exact=True).click()
-            card = prep.locator("article").filter(has_text=plan_id)
+            # The card shows the id prefix only, so the filter has to match it.
+            card = prep.locator("article").filter(has_text=plan_id[:8])
             card.get_by_role("button", name="批准此哈希计划", exact=True).click()
             expect(card).to_contain_text("已批准", timeout=15000)
             card.get_by_role(
@@ -377,7 +378,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         href = prep.get_by_role("link", name="下载 SRT").get_attribute("href")
         assert "-->" in c.get(api_base + href).text
         prep.get_by_role("button", name="模型与节点", exact=True).click()
-        failed_card = prep.locator("article").filter(has_text=failed_plan["id"])
+        failed_card = prep.locator("article").filter(has_text=failed_plan["id"][:8])
         failed_card.get_by_role("button", name="查看安装尝试", exact=True).click()
         expect(failed_card).to_contain_text("失败，需人工对账")
         # Fake request mode cannot authorize real filesystem reconciliation.
