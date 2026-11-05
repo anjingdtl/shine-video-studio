@@ -133,11 +133,14 @@ Worker 对失败条目死循环（实测状态版本涨到 1934）、忙碌的 W
 
 ### 6.2 安装包
 
-- 命令：`pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify`，
-  拒绝脏树（本轮从已提交树 `837a929` 构建）。
-- 产物：`releases/ShineVideoStudio-20261105-837a929-win64.zip`，2,682,304 字节，
-  sha256 `d6c037b9f9419b5933f18f9e2e72c1092d5dc975c00acea1cdbb9fb95dd350bd`；
-  Expand-Archive 后逐文件 SHA-256 复核 **549 个文件全部通过**。
+- 命令：`pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify`，拒绝脏树。
+- **最终包（2026-11-05 续建轮，从提交树 `1daa65b` 重建）**：
+  `releases/ShineVideoStudio-20261105-1daa65b-win64.zip`，2,695,273 字节，
+  sha256 `2bfb76ae32b6c2a8b3ecf41245b243de8a6a1d33ddbdd83143ffe2fecc14b138`；
+  Expand-Archive 后逐文件 SHA-256 复核 **550 个文件全部通过**；本包补齐了
+  `closed_in_this_build`/`known_blockers` 与收尾事实的一致性（前一轮包未同步该清单）。
+- 中间包（Codex 轮，提交树 `837a929`）：`releases/ShineVideoStudio-20261105-837a929-win64.zip`，
+  2,682,304 字节，sha256 `d6c037b9f9419b5933f18f9e2e72c1092d5dc975c00acea1cdbb9fb95dd350bd`（549 文件）。
 - 入口：`SETUP.cmd`、`START_APP.cmd`、`STOP_APP.cmd`、`一键安装并启动.cmd`（ASCII 回退）都在包内。
 - 不含：模型/权重、SQLite、密钥、`.env`（只有 `.env.example`）、生成的媒体、evidence、日志；
   旧包全部保留。
@@ -181,5 +184,12 @@ Codex 会话在「重启栈（已成功，19:02）→ 重建安装包（失败/�
      伪造声明被覆盖且被取代状态拒绝、大纲源变更失效派生末状态）；
      前端 `directorContinuation.test.tsx` 新增已验证承接用例（19 文件 135 测试）。
 2. **确认本续建轮无新增 VLM 失效**（见 §7.1）。
-3. 真实链路（素材晋升/风格冻结/艺术评审/H3）仍按 §5/§7 由用户与后续轮完成，
+3. **真实栈重启到新代码并实测探针修复**：`stop_shine.py --data-dir` 干净停止
+   （退出码 0、processes.json 消失）→ `start_shine.ps1`（8133/5193）重启；
+   `/health` 200（0.9 s），`/api/v1/system/status` 200 **1.7 s 返回**（渲染器空闲停用下，
+   修复前约 8 s 并误报「制作状态不可用」），`worker_online=true`、`runtime=ACTIVE`、
+   `mode=READY`、Web 200。
+4. **安装包从最终提交树重建**：`ShineVideoStudio-20261105-1daa65b-win64.zip`（见 §6.2），
+   中断了的后台「Rebuild the package」任务至此闭环；旧包保留。
+5. 真实链路（素材晋升/风格冻结/艺术评审/H3）仍按 §5/§7 由用户与后续轮完成，
    本轮不代用户点击。
