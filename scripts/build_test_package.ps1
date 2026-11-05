@@ -209,7 +209,7 @@ $buildInfo = [ordered]@{
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
         'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking was not human-observed inside a render window of this round',
-        'the release action for local backends is proven on Windows for process and port release; a GPU memory reading before/after is not part of this build'
+        'the H3 renderer release is proven for process and port; a GPU memory before/after reading currently exists only for the image renderer release path'
     )
     closed_in_this_build = @(
         'the director mode ships a state-driven five-step journey: page checkmarks, a next-step bar on every page, a first-run journey map and per-stage focus on the production page',
@@ -237,7 +237,10 @@ $buildInfo = [ordered]@{
         'the five crew roles are served the finished editorial segmentation, so the director copies the timing instead of inventing it',
         'an ungroupable cut table and a beat count that cannot match the table are refused before any model call',
         'the workbench closes the ComfyUI and local reviewer processes it started, and the launcher releases leftover backends before a clean start',
-        'the director mode can prepare AI material (character, scene, prop) through a pinned Qwen-Image-2.1 workflow: the server splits the script, the producer writes one appearance brief per requirement, and the candidates stay on the ordinary asset ledger until a human promotes them'
+        'the director mode can prepare AI material (character, scene, prop) through a pinned Qwen-Image-2.1 workflow: the server splits the script, the producer writes one appearance brief per requirement, and the candidates stay on the ordinary asset ledger until a human promotes them',
+        'the three material samples really rendered through the workbench-owned managed renderer on the existing installation: renderer_owned attempts, technical/decode QC pass, RENDER_VERIFIED for character/scene/prop, renderer stopped with GPU back to baseline',
+        'the first adoption takes over the read-only detection row of the same identity instead of refusing with INSTANCE_IDENTITY_CHANGED',
+        'the browser acceptance gate (verify_v13_web.py) is green end-to-end, twice in a row, with no API errors'
     )
     excluded_from_package = @(
         'models and weights',
