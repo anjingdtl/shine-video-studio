@@ -513,7 +513,9 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             dialog_policy["mode"] = "accept"
             assert "确认用真实模式生成" in dialog_messages[-1]
             assert len(submissions) == (0 if mode == "T2VA" else 1), submissions
-            page.once("dialog", lambda dialog: dialog.accept())
+            # The switchable policy handler above is already back in accept
+            # mode; registering a second accept here would race it for the
+            # same dialog ("already handled").
             with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/projects/{p}/jobs")):
                 queue.click()
             assert submissions[-1]["generation_mode"] == mode
@@ -551,13 +553,20 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         ]
         for path in workflow_paths:
             page.route(path, workflow_request)
+        # The reload above collapsed the panel's advanced <details> section
+        # again; an operator reopens it before switching views, and the nav
+        # buttons live inside that section.
+        prep.get_by_text("展开高级准备").click()
         prep.get_by_role("button", name="工作流能力", exact=True).click()
         prep.get_by_label("操作模式").select_option("local")
         prep.get_by_label("人工核验 / 试听 / 权利证据").fill("Mock UI protocol check only; no real acceptance")
         prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
-        native_draft = prep.locator("article").filter(has_text="ui-native-draft")
-        native_evidence = prep.locator("article").filter(has_text="ui-native-evidence")
-        h3_evidence = prep.locator("article").filter(has_text="ui-h3-evidence")
+        # The card shows only the id prefix, and both native fixtures share the
+        # same first eight characters; the displayed payload.name is the unique
+        # selector the current UI offers.
+        native_draft = prep.locator("article").filter(has_text="Mock native draft")
+        native_evidence = prep.locator("article").filter(has_text="Mock native calibration")
+        h3_evidence = prep.locator("article").filter(has_text="Mock H3 job evidence")
         expect(native_draft.get_by_role("button", name="使用 Fake 节点目录验证", exact=True)).to_have_count(0)
         expect(native_evidence.get_by_role("button", name="Fake HTTP 执行契约", exact=True)).to_have_count(0)
         expect(native_draft.get_by_label("工作流验证实例 ID")).to_have_count(0)
@@ -599,6 +608,10 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             route.fulfill(status=201, json={"scope": "MOCK_UI_NO_MODEL_CALL"})
 
         page.route(critic_url, capture_critic)
+        # The crew panel lives on the expert 'pro' view, a different page from
+        # the preproduction anchor this run is on. Navigate there, then reload
+        # so the panel refetches its roles through the fixture route above.
+        page.goto(f"{ui_base}#v/pro", wait_until="networkidle")
         page.reload(wait_until="networkidle")
         crew = page.locator("#film-crew")
         crew.get_by_label("执行工种").select_option("qc_reviewer")
@@ -661,6 +674,9 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             page.unroute(path)
         for path in [roles_url, lock_url, critic_url]:
             page.unroute(path)
+        # The text-provider settings live on the setup view, not beside the
+        # crew panel.
+        page.goto(f"{ui_base}#v/setup", wait_until="networkidle")
         settings = page.locator("#settings")
         settings.get_by_placeholder("配置名称", exact=True).fill("UI bounded text fixture")
         settings.locator(".provider-form select").first.select_option("openai_compatible")
@@ -674,11 +690,17 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         assert bounded_response.value.json()["generation_options"] == {"max_completion_tokens": 8192, "reasoning_effort": "low"}
         bounded_card = settings.locator(".profile-row").filter(has_text="UI bounded text fixture")
         expect(bounded_card).to_contain_text("输出上限 8192 token")
-        expect(bounded_card).to_contain_text("思考深度 low")
+        # The card shows the labelled effort (constants.reasoningEffortLabels),
+        # and 'low' renders as 低（快）. The API response above already pins the
+        # persisted value exactly.
+        expect(bounded_card).to_contain_text("思考深度：低（快）")
         settings.locator(".provider-form select").first.select_option("anthropic")
         expect(settings.get_by_label("最大输出 token", exact=True)).to_have_count(0)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
+        # Back to the production view: the asset-isolation assertions below
+        # must run against a visible assets section, not a hidden page.
+        page.goto(f"{ui_base}#v/production/assets", wait_until="networkidle")
         page.reload(wait_until="networkidle")
         selector = page.locator("select").first
         selector.select_option(other)
@@ -706,7 +728,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
     styles = c.get(base + f"/projects/{p}/styles").json()
     assets = c.get(base + f"/projects/{p}/assets").json()
     voices = c.get(base + f"/projects/{p}/voice-profiles").json()
-    assert styles[0]["approved_by"] == "v13-browser-test-operator"
+    # The personal-desktop freeze is a same-origin local action: the frontend
+    # always carries the local-action marker and no operator credential, so the
+    # recorded actor is 'local-user' (the operator credential still exists for
+    # the script's own privileged httpx calls above).
+    assert styles[0]["approved_by"] == "local-user"
     assert any(
         a["entity_id"] == "BrowserCharacter" and a["approved"] and a["locked"]
         for a in assets
