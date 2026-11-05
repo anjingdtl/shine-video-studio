@@ -56,7 +56,7 @@
 | --- | --- | --- | --- |
 | R1 | 素材网格 | **已实现**（缩略图、身份/用途、版本、状态、操作、多列 contain、放大、选择、分组、按需加载、窄屏不溢出、深色主题已实看） | 浏览器实看 + `frontend/src/test/simpleAssets.test.tsx` |
 | R2 | 生成分段与单段重生 | **已实现**（H3 一次输出为一段、段内剪辑点不单独重生、旧版本保留、依赖失效、选中后新装配版本与新交付） | `backend/tests/test_generation_segments.py` |
-| R3 | 长剧本总体大纲与分步分镜 | **部分实现**：持久大纲、用户确认、按段选择、Worker 调度、暂停/取消/恢复、精确失效、伪造上下文拒绝均已实现并有后端回归；**连续性事实仍由用户自由文本提供，不是版本化连续性产物** | `backend/tests/test_story_section_run.py`、`test_story_preparation.py` |
+| R3 | 长剧本总体大纲与分步分镜 | **已实现（含版本化连续性）**：持久大纲、用户确认、按段选择、Worker 调度、暂停/取消/恢复、精确失效、伪造上下文拒绝均有后端回归；连续性不再是用户自由文本的替代品——上一段的**已验证末状态**（全部镜头 storyboard 应用且真实渲染被接受后从台账确定性派生）被冻结为不可变 `SectionContinuityState` 工件，作为后段免填承接事实的依据；伪造的 `previous_render_status` 被服务端覆盖，计划所依据的末状态被重拍后按 `STORY_CONTINUITY_SUPERSEDED` 拒绝而不是静默丢事实 | `backend/tests/test_story_section_run.py`、`test_story_preparation.py`、`test_story_continuity.py` |
 
 ## 3. 运行栈恢复（本轮实做）
 
@@ -145,10 +145,41 @@ Worker 对失败条目死循环（实测状态版本涨到 1934）、忙碌的 W
 ## 7. 未完成 / 阻塞
 
 1. **VLM 校准必须重做**：`shine/worker.py` 与 `shine/api_preparation.py` 属于
-   `client_review_identity` 钉住的文件，本轮改动了它们 → 正式项目已发布的 VLM 修订
+   `client_review_identity` 钉住的文件，收尾轮改动了它们 → 正式项目已发布的 VLM 修订
    `03f32432-4c94-4476-8580-e1a14e9fc37f` 按设计失效。
    按 AGENTS.md，真实 H3 验收前需要：真实正负 VLM 校准 → 发布新修订 → 弃用旧修订 →
-   重新分析预制作计划 → 重新冻结。**本轮未执行**（需要那套栈的 VLM 运行环境）。
+   重新分析预制作计划 → 重新冻结。**本轮未执行**：正式项目库（shot `f0173fbe…` /
+   plan `7832906a…`）不在当前工作区任何数据目录中，其 VLM 运行环境（qwen3-vl 服务）
+   也未在运行；2026-11-05 续建轮复核了全部 `*.db` 均无该 shot。本续建轮未改动任何
+   `client_review_identity` 钉住文件（`api_segments.py`/`materialprep/story.py`/
+   `api_story.py` 不在钉住清单内），不产生新的失效。
 2. **真实 H3 成片未跑**：新素材尚未晋升（人做），冻结后的正式分镜与 H3 渲染因此没有真实证据。
-3. **R3 连续性**：现在是用户自由文本，不是从上一段已接受末状态派生的版本化连续性产物。
-4. **本机其它栈**：8000 栈仍指向 11-05 的迁移测试副本，未作为正式栈恢复。
+3. **本机其它栈**：8000 栈曾指向 11-05 的迁移测试副本；续建轮开工时 8000/5173 已无监听，
+   开发入口按 `scripts/start_dev.ps1`（数据目录 `.local-data`）走即可，不作为正式证据栈。
+
+## 8. 2026-11-05 续建轮（ZCode 接续额度中断点）
+
+Codex 会话在「重启栈（已成功，19:02）→ 重建安装包（失败/未完成）」处额度耗尽。
+本续建轮接续完成：
+
+1. **R3 版本化连续性**（上一轮遗留的唯一实现缺口）：
+   - `shine/materialprep/story.py` 新增 `compute_section_continuity` / `freeze_section_continuity`：
+     从台账确定性派生生产段末状态（每镜当前接受的 job/attempt/媒体 sha、人物最后出现、
+     使用的锁定主素材），全部真实接受才 `VERIFIED`，冻结为不可变 `SectionContinuityState`
+     工件；同一生产重复冻结幂等，重拍后派生新版本，旧工件永不改写。
+   - 验收谓词与装配共用一个定义：`api_segments._accepted` 改名 `accepted_job`（同一判断，
+     「上一段真的这样结束」不弱于「这个媒体可以装配」）。
+   - `queue_sections`：上一段末状态已验证时后段免填承接事实（依据进请求身份）；
+     否则仍按 `STORY_CONTINUITY_FACTS_REQUIRED` 要求人工事实。
+   - `verified_production_context`：`previous_render_status` 由服务端重建——验证依据
+     （工件身份 + 实时重算一致）成立才是 `VERIFIED_FROM_PRIOR_SECTION`；调用方伪造值被覆盖；
+     依据失效（重拍已通过）抛 `STORY_CONTINUITY_SUPERSEDED`。
+   - `select_outline_revision`：源变更段的派生末状态一并失效。
+   - 新端点 `GET /story-preparation/outlines/{id}/continuity`（只读）供 UI 展示承接可用性；
+     前端段落卡显示「上一段末状态已验证」/「尚未全部通过」并相应调整承接事实必填性。
+   - 回归：`backend/tests/test_story_continuity.py`（3 个：验证依据取代自由文本且幂等冻结、
+     伪造声明被覆盖且被取代状态拒绝、大纲源变更失效派生末状态）；
+     前端 `directorContinuation.test.tsx` 新增已验证承接用例（19 文件 135 测试）。
+2. **确认本续建轮无新增 VLM 失效**（见 §7.1）。
+3. 真实链路（素材晋升/风格冻结/艺术评审/H3）仍按 §5/§7 由用户与后续轮完成，
+   本轮不代用户点击。

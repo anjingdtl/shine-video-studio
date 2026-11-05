@@ -9,6 +9,9 @@ type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: 
 } };
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
   outline: Outline | null; progress: { stage: string; cursor: number; results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
+type ContinuityInfo = { production_section_id: string; order: number; prior_production_section_id: string | null;
+  verified_prior_available: boolean; prior_production_status: string;
+  own_production: { status: string; missing: { reason?: string }[] } };
 
 export function StoryPreparationPanel({ projectId, documentId, documentHash, styleFrozen, onMaterials }: {
   projectId: string; documentId: string; documentHash: string; styleFrozen: boolean; onMaterials: () => void;
@@ -17,10 +20,19 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
   const [selected, setSelected] = useState<string[]>([]);
   const [facts, setFacts] = useState('');
   const [continuity, setContinuity] = useState<Record<string, string>>({});
+  const [carryover, setCarryover] = useState<Record<string, ContinuityInfo>>({});
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
-    setTasks(await api<StoryTask[]>(`/projects/${projectId}/story-preparation?document_id=${documentId}`));
+    const tasks = await api<StoryTask[]>(`/projects/${projectId}/story-preparation?document_id=${documentId}`);
+    setTasks(tasks);
+    const approved = tasks.find((t) => t.outline?.approved)?.outline;
+    if (!approved) { setCarryover({}); return; }
+    try {
+      const view = await api<{ sections: ContinuityInfo[] }>(
+        `/projects/${projectId}/story-preparation/outlines/${approved.artifact_id}/continuity`);
+      setCarryover(Object.fromEntries(view.sections.map((s) => [s.production_section_id, s])));
+    } catch { /* carry-over availability is derived live; keep the last known view */ }
   }, [projectId, documentId]);
   useEffect(() => { void load().catch(() => undefined); }, [load]);
   const running = tasks.some((t) => ['QUEUED', 'RUNNING'].includes(t.status));
@@ -66,17 +78,28 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         {!outline.approved && <button type="button" disabled={busy || outline.stale || !!outline.payload.questions.length}
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', { expected_sha256: outline.sha256 })))}>确认这版总体大纲</button>}
         <div className="media-grid">
-          {outline.payload.production_sections.map((section) => <article className="media-card" key={section.production_section_id}>
-            <label><input type="checkbox" checked={selected.includes(section.production_section_id)}
-              onChange={(e) => setSelected((old) => e.target.checked ? [...old, section.production_section_id] : old.filter((id) => id !== section.production_section_id))} />
-              {section.order}. {section.title}</label>
-            <small>剧情范围：原文 {section.start_offset}–{section.end_offset}；估计 {section.estimated_duration_s} 秒（字数推算）</small>
-            <span>{outline.approved ? '可选择本次工作范围' : '等待大纲确认'}</span>
-            {section.order > 1 && <label className="material-field"><span>本段承接事实（由你确认，每行一条）</span>
-              <textarea value={continuity[section.production_section_id] ?? ''} rows={2}
-                onChange={(e) => setContinuity({ ...continuity, [section.production_section_id]: e.target.value })} />
-            </label>}
-          </article>)}
+          {outline.payload.production_sections.map((section) => {
+            const carry = carryover[section.production_section_id];
+            const verifiedPrior = carry?.verified_prior_available === true;
+            return <article className="media-card" key={section.production_section_id}>
+              <label><input type="checkbox" checked={selected.includes(section.production_section_id)}
+                onChange={(e) => setSelected((old) => e.target.checked ? [...old, section.production_section_id] : old.filter((id) => id !== section.production_section_id))} />
+                {section.order}. {section.title}</label>
+              <small>剧情范围：原文 {section.start_offset}–{section.end_offset}；估计 {section.estimated_duration_s} 秒（字数推算）</small>
+              <span>{outline.approved ? '可选择本次工作范围' : '等待大纲确认'}</span>
+              {section.order === 1 && <small>首段，无需承接。</small>}
+              {section.order > 1 && (verifiedPrior
+                ? <small className="carry-verified">上一段末状态已验证（来自已通过的成片），本段无需填写承接事实。</small>
+                : <small>上一段末状态未验证（{carry?.prior_production_status === 'PARTIAL' ? '尚未全部通过' : '尚未制作'}），需要你提供承接事实。</small>)}
+              {carry?.own_production.status === 'VERIFIED' && <small>本段成片已全部通过，可作为后段的验证承接。</small>}
+              {section.order > 1 && <label className="material-field"><span>{verifiedPrior
+                ? '补充承接事实（可选；上一段末状态已验证）'
+                : '本段承接事实（由你确认，每行一条）'}</span>
+                <textarea value={continuity[section.production_section_id] ?? ''} rows={2}
+                  onChange={(e) => setContinuity({ ...continuity, [section.production_section_id]: e.target.value })} />
+              </label>}
+            </article>;
+          })}
         </div>
         <button type="button" disabled={busy || !outline.approved || !selected.length} onClick={() => action(async () => {
           await api(`/projects/${projectId}/story-preparation/materials`, json('POST', selectionBody)); onMaterials();

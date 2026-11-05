@@ -56,7 +56,13 @@ def _selection(db, root):
     return dict(row.value) if row else {i.shot_id: i.job_id for i in root.items}
 
 
-def _accepted(db, job, data_dir=None):
+def accepted_job(db, job, data_dir=None):
+    """The one acceptance definition: latest final gate really passed.
+
+    Shared by the assembly selection and the long-script section continuity
+    state, so "the previous section really ended like this" is never a weaker
+    claim than "this media may be assembled".
+    """
     if not job or job.status != "PASSED" or job.stale or job.provider != "comfyui" or not job.artifact_id:
         return False
     final = db.scalar(select(QualityGate).where(QualityGate.job_id == job.id, QualityGate.gate_name == "final")
@@ -167,7 +173,7 @@ def segments(project_id: str, db: DBSession, series_id: str | None = None):
                      "dependent_job_ids": _impact(db, job.id) if job else [],
                      "replacement_job_id": pending.id if pending else None,
                      "replacement_status": pending.status if pending else None,
-                     "can_select_replacement": _accepted(db, pending)})
+                     "can_select_replacement": accepted_job(db, pending)})
     return {"series_id": root.id, "segments": rows}
 
 
@@ -237,7 +243,7 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
     recorded = next((r for r in _records(db, project_id) if r.trace.get("source_job_id") == body.source_job_id
                      and r.trace.get("job_id") == body.replacement_job_id), None)
     data_dir = request.app.state.settings.data_dir
-    if not recorded or not _accepted(db, replacement, data_dir):
+    if not recorded or not accepted_job(db, replacement, data_dir):
         raise HTTPException(409, "GENERATION_REPLACEMENT_NOT_ACCEPTED")
     chosen = _selection(db, root)
     if chosen.get(replacement.shot_id) != body.source_job_id:
@@ -250,7 +256,7 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
         setting.value = chosen
     else:
         db.add(AppSetting(key=key, value=chosen))
-    ready = all(_accepted(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
+    ready = all(accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
     assembly_id = None
     if ready:
         assembled = ProductionSeries(project_id=project_id, status="COMPLETED", provider="comfyui",

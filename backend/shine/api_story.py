@@ -101,6 +101,42 @@ class SectionRequest(APIModel):
     continuity_facts: dict[str, list[str]] = Field(default_factory=dict)
 
 
+@router.get("/projects/{project_id}/story-preparation/outlines/{artifact_id}/continuity")
+def outline_continuity(project_id: str, artifact_id: str, db: DBSession):
+    """Per-section carry-over availability, derived from the real ledger.
+
+    Read-only: a section reports a verified prior end state only when the
+    previous section's shots really are storyboarded, applied and accepted
+    right now.  Freezing happens when a section run is actually queued.
+    """
+    require_project(db, project_id)
+    outline = db.get(AgentArtifact, artifact_id)
+    if outline is None or outline.project_id != project_id or outline.kind != "StoryOutline":
+        raise HTTPException(404, "STORY_OUTLINE_NOT_FOUND")
+    rows = []
+    for section in outline.payload_json["production_sections"]:
+        prior = story.prior_section_of(section, outline.payload_json["production_sections"])
+        live = (story.compute_section_continuity(db, project_id, prior["production_section_id"])
+                if prior else {"status": "NOT_PRODUCED", "missing": ["NO_PRIOR_SECTION"]})
+        frozen = None
+        if prior:
+            candidates = [row for row in db.scalars(select(AgentArtifact).where(
+                AgentArtifact.project_id == project_id, AgentArtifact.kind == story.CONTINUITY_KIND))
+                if row.payload_json.get("production_section_id") == prior["production_section_id"]
+                and not row.stale and row.sha256 == story.digest(live)]
+            frozen = candidates[-1] if candidates else None
+        own = story.compute_section_continuity(db, project_id, section["production_section_id"])
+        rows.append({"production_section_id": section["production_section_id"], "order": section["order"],
+                     "prior_production_section_id": prior["production_section_id"] if prior else None,
+                     "verified_prior_available": live.get("status") == "VERIFIED",
+                     "prior_production_status": live.get("status"),
+                     "prior_continuity": ({"artifact_id": frozen.id, "sha256": frozen.sha256,
+                                            "end_state": frozen.payload_json.get("end_state")}
+                                           if frozen else None),
+                     "own_production": {"status": own["status"], "missing": own["missing"]}})
+    return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256, "sections": rows}
+
+
 @router.post("/projects/{project_id}/story-preparation/materials", status_code=202)
 def section_materials(project_id: str, body: SectionRequest, actor: Operator, db: DBSession):
     from shine.materialprep import service
@@ -152,14 +188,29 @@ def queue_sections(project_id: str, body: SectionRequest, actor: Operator, db: D
     units = []
     for section in sections:
         facts = body.continuity_facts.get(section["production_section_id"], [])
-        if section["order"] > 1 and not facts:
-            raise HTTPException(409, {"code": "STORY_CONTINUITY_FACTS_REQUIRED",
-                                      "production_section_id": section["production_section_id"]})
+        basis = None
+        if section["order"] > 1:
+            prior = story.prior_section_of(section, outline.payload_json["production_sections"])
+            artifact, _live = story.freeze_section_continuity(db, project_id, prior["production_section_id"]) \
+                if prior else (None, None)
+            if artifact:
+                basis = {"basis": "verified_section_state", "continuity_artifact_id": artifact.id,
+                         "continuity_sha256": artifact.sha256,
+                         "prior_production_section_id": prior["production_section_id"]}
+            elif not facts:
+                # Without a verified prior end state the carry-over must come
+                # from the user; inventing the previous section's end state is
+                # never allowed.
+                raise HTTPException(409, {"code": "STORY_CONTINUITY_FACTS_REQUIRED",
+                                          "production_section_id": section["production_section_id"],
+                                          "prior_production_section_id":
+                                              prior["production_section_id"] if prior else None})
         raw = document.text[section["start_offset"]:section["end_offset"]]
         offset = section["start_offset"]
         for fragment in segment_document(raw, max_scene_chars=1800):
             units.append({"production_section_id": section["production_section_id"], "start_offset": offset,
-                          "end_offset": offset + len(fragment.text), "continuity_facts": facts})
+                          "end_offset": offset + len(fragment.text), "continuity_facts": facts,
+                          "continuity": basis or {"basis": "user_supplied_unverified"}})
             offset += len(fragment.text)
     asset_hash = digest(asset_context(db, project_id))
     identity = digest({"tool": story.SECTION_RUN, "outline": outline.sha256, "units": units,

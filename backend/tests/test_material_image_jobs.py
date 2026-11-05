@@ -14,10 +14,9 @@ from __future__ import annotations
 import hashlib
 import os
 
-from pydantic import ValidationError
-
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from shine.comfy.client import (

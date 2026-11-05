@@ -33,6 +33,7 @@ OUTLINE_RUN = "story_outline_run"
 SECTION_RUN = "story_section_run"
 OUTLINE_TOOL = "story_outline_merge"
 VERSION = "story-outline-v1"
+CONTINUITY_KIND = "SectionContinuityState"
 
 
 class OutlinePart(APIModel):
@@ -331,7 +332,8 @@ def _run_section(factory, settings, gateway, task_id, version, worker_id, projec
                 "timeline": outline.payload_json.get("timeline", []),
                 "characters": outline.payload_json.get("characters", []),
                 "continuity_facts": unit.get("continuity_facts", []),
-                "previous_render_status": "NOT_CLAIMED"},
+                "continuity": unit.get("continuity") or {"basis": "user_supplied_unverified"},
+                "previous_render_status": "PENDING_SERVER_VERIFICATION"},
             consent_document_id=document.id, consent_document_sha256=document.sha256,
         ), SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings))), db, gateway)
     if result["status"] != "PROPOSED":
@@ -345,6 +347,127 @@ def _run_section(factory, settings, gateway, task_id, version, worker_id, projec
     state.update(cursor=cursor + 1, failed_role=None, resume_steps={})
     _finish_step(factory, task_id, version, worker_id, state)
     return True
+
+
+def _latest_section_run(db, project_id, production_section_id):
+    """The newest section run that covers this section; its results are the
+    current production (older runs only remain as history)."""
+    rows = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == SECTION_RUN)
+        .order_by(AgentTaskRecord.created_at, AgentTaskRecord.id))
+    return next((row for row in reversed(list(rows))
+                 if any(u.get("production_section_id") == production_section_id
+                        for u in row.trace.get("units", []))), None)
+
+
+def _shot_state(db, project_id, shot_id, position):
+    from shine.api_segments import accepted_job
+    from shine.models import Asset, Job, MediaArtifact, Shot, ShotAssetBinding
+
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        return {"shot_id": shot_id, "position": position, "state": "SHOT_MISSING"}
+    jobs = [j for j in db.scalars(select(Job).where(Job.shot_id == shot_id, Job.stale.is_(False))
+            .order_by(Job.created_at, Job.id))]
+    in_flight = [j.id for j in jobs
+                 if j.status in {"QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING", "NEEDS_REVIEW"}]
+    current = jobs[-1] if jobs else None
+    accepted = bool(current is not None and not in_flight and current.shot_revision == shot.revision
+                    and accepted_job(db, current))
+    media = db.get(MediaArtifact, current.artifact_id) if accepted else None
+    row = {"shot_id": shot_id, "position": position, "name": shot.name,
+           "shot_revision": shot.revision, "characters": list(shot.spec.get("characters", [])),
+           "duration_s": shot.spec.get("duration_target_s"),
+           "job_id": current.id if current else None,
+           "state": "ACCEPTED" if accepted else ("RENDER_IN_FLIGHT" if in_flight else "NOT_ACCEPTED"),
+           "artifact_id": media.id if media else None,
+           "artifact_sha256": media.sha256 if media else None}
+    row["assets"] = sorted({(asset.id, asset.role or "", asset.entity_id or "", asset.sha256)
+                            for binding in db.scalars(select(ShotAssetBinding).where(
+                                ShotAssetBinding.shot_id == shot_id))
+                            if (asset := db.get(Asset, binding.asset_id)) is not None})
+    return row
+
+
+def compute_section_continuity(db, project_id, production_section_id):
+    """Derive what this section's production really ended as, from the ledger.
+
+    A versioned end state exists only when every work unit of the section was
+    storyboarded, applied and accepted under the current shot revisions; a mock
+    render is never acceptance.  The payload is deterministic (no clock), so
+    the same production always hashes to the same continuity identity and any
+    later retake changes the hash.
+    """
+    run = _latest_section_run(db, project_id, production_section_id)
+    if run is None:
+        return {"schema_version": "1.0", "production_section_id": production_section_id,
+                "status": "NOT_PRODUCED", "shots": [], "missing": ["SECTION_RUN_MISSING"]}
+    units = [u for u in run.trace.get("units", []) if u.get("production_section_id") == production_section_id]
+    results = {(r.get("unit") or {}).get("start_offset"): r for r in run.trace.get("results", [])}
+    shots, missing = [], []
+    for unit in units:
+        result = results.get(unit.get("start_offset"))
+        camera = ((result or {}).get("storyboard") or {}).get("steps", {}).get("cinematographer") or {}
+        from shine.models import AppSetting
+
+        receipt = db.get(AppSetting, f"film-apply:{camera.get('artifact_id')}") if camera.get("artifact_id") else None
+        if receipt is None:
+            missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
+            continue
+        for position, shot_id in enumerate(receipt.value.get("shot_ids", [])):
+            shots.append(_shot_state(db, project_id, shot_id, position))
+    missing.extend({"shot_id": s["shot_id"], "reason": s["state"]} for s in shots if s["state"] != "ACCEPTED")
+    verified = bool(shots) and not missing
+    end_state = None
+    if verified:
+        last = shots[-1]
+        last_seen = {}
+        for shot in shots:
+            for name in shot["characters"]:
+                last_seen[name] = shot["shot_id"]
+        assets = sorted(({"asset_id": a, "role": role, "entity_id": entity, "sha256": sha}
+                         for (a, role, entity, sha) in {t for shot in shots for t in shot["assets"]}),
+                        key=lambda a: a["asset_id"])
+        end_state = {"last_shot_id": last["shot_id"], "last_shot_name": last["name"],
+                     "last_artifact_id": last["artifact_id"], "last_artifact_sha256": last["artifact_sha256"],
+                     "characters": list(last["characters"]), "characters_last_seen": last_seen,
+                     "assets_used": assets}
+    for shot in shots:
+        shot.pop("assets", None)
+    return {"schema_version": "1.0", "production_section_id": production_section_id,
+            "status": "VERIFIED" if verified else "PARTIAL", "shots": shots, "missing": missing,
+            "end_state": end_state}
+
+
+def freeze_section_continuity(db, project_id, production_section_id):
+    """Freeze a fully accepted section end state as an immutable artifact.
+
+    Only VERIFIED states become artifacts; a partial production stays a live
+    view.  A later retake derives a different payload and therefore freezes a
+    new version — the previous one is never rewritten.
+    """
+    payload = compute_section_continuity(db, project_id, production_section_id)
+    if payload["status"] != "VERIFIED":
+        return None, payload
+    rows = [row for row in db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == CONTINUITY_KIND))
+        if row.payload_json.get("production_section_id") == production_section_id and not row.stale]
+    current = digest(payload)
+    if rows and max(rows, key=lambda r: r.created_at).sha256 == current:
+        return max(rows, key=lambda r: r.created_at), payload
+    run = _latest_section_run(db, project_id, production_section_id)
+    artifact = AgentArtifact(project_id=project_id, kind=CONTINUITY_KIND, schema_version="1.0",
+        payload_json=payload, sha256=current, producer_role="continuity_derivation",
+        source_task_id=run.id, input_revision_ids=[max(rows, key=lambda r: r.created_at).id] if rows else [])
+    db.add(artifact)
+    db.flush()
+    return artifact, payload
+
+
+def prior_section_of(section, outline_sections):
+    """The section whose end state this section carries over from, if any."""
+    earlier = [s for s in outline_sections if s["order"] < section["order"]]
+    return max(earlier, key=lambda s: s["order"]) if earlier else None
 
 
 def verified_production_context(db, project_id, source_text, supplied):
@@ -373,6 +496,28 @@ def verified_production_context(db, project_id, source_text, supplied):
         if (not current_section or current_section.get("source_sha256") != section.get("source_sha256")
                 or latest.payload_json["locked_facts"] != outline.payload_json["locked_facts"]):
             raise ValueError("STORY_SOURCE_SUPERSEDED")
+    continuity = supplied.get("continuity") or {}
+    if continuity.get("basis") == "verified_section_state":
+        # The run was planned against a specific frozen end state of the prior
+        # section.  If that state no longer recomputes identically (a retake
+        # passed, a shot changed), the plan consumed facts that are no longer
+        # true — refuse instead of silently dropping them.
+        artifact = db.get(AgentArtifact, continuity.get("continuity_artifact_id"))
+        live = compute_section_continuity(db, project_id, continuity.get("prior_production_section_id"))
+        if (not artifact or artifact.project_id != project_id or artifact.kind != CONTINUITY_KIND
+                or artifact.stale or artifact.sha256 != continuity.get("continuity_sha256")
+                or artifact.sha256 != digest(artifact.payload_json)
+                or live.get("status") != "VERIFIED" or digest(live) != artifact.sha256):
+            raise ValueError("STORY_CONTINUITY_SUPERSEDED")
+        previous_render_status, continuity_evidence = "VERIFIED_FROM_PRIOR_SECTION", {
+            "basis": "verified_section_state", "continuity_artifact_id": artifact.id,
+            "continuity_sha256": artifact.sha256,
+            "prior_production_section_id": continuity.get("prior_production_section_id"),
+            "end_state": artifact.payload_json.get("end_state")}
+    else:
+        # User free text remains an explicitly unverified carry-over: it may
+        # guide the crew but is never evidence that a prior render happened.
+        previous_render_status, continuity_evidence = "NOT_CLAIMED", {"basis": "user_supplied_unverified"}
     return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
             "document_id": document.id, "document_sha256": document.sha256,
             "production_section_id": section["production_section_id"], "source_offsets": span,
@@ -380,7 +525,8 @@ def verified_production_context(db, project_id, source_text, supplied):
             "timeline": outline.payload_json.get("timeline", []),
             "characters": outline.payload_json.get("characters", []),
             "continuity_facts": supplied.get("continuity_facts", []),
-            "previous_render_status": "NOT_CLAIMED"}
+            "continuity": continuity_evidence,
+            "previous_render_status": previous_render_status}
 
 
 def select_outline_revision(db, project_id, outline):
@@ -421,6 +567,13 @@ def select_outline_revision(db, project_id, outline):
                         task.status, task.lease_owner, task.lease_expires_at = "QUEUED", None, None
                     elif task.status == "SUCCEEDED":
                         task.status, task.error_code = "NEEDS_REVIEW", "STORY_SOURCE_SUPERSEDED"
+    # A changed section also invalidates the frozen end states derived from it:
+    # a dependent section must not carry over from a section that no longer
+    # exists in this form.
+    for artifact in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project_id, AgentArtifact.kind == CONTINUITY_KIND)):
+        if artifact.payload_json.get("production_section_id") in changed:
+            artifact.stale = True
     if pointer:
         pointer.value = {"artifact_id": outline.id, "sha256": outline.sha256}
     else:
