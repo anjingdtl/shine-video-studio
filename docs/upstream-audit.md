@@ -447,7 +447,13 @@ PE 默认关闭这一点对本产品是决定性的：服务端用确定性模�
 ComfyUI 的 `models/` 并逐文件 SHA-256 校验通过**（VAE、扩散模型、文本编码器，合计 16.10 GiB），
 第四个 PE 编码器按上节判定不需要并已从本机 `models/` 删除。
 
-`PENDING_VERIFICATION`（不得声称已完成）：受管实例的实机 `object_info` 节点校验；UI 模板展开为
-API 图后的图 hash 固定与 `/prompt` 提交验证；三类（角色/场景/道具）真实出图；实际显存占用与
+已用**协议忠实的替身渲染器**验证（`backend/tests/test_material_render_e2e.py`）：本地回环 HTTP 服务按
+ComfyUI 的真实报文形状回答 `/object_info`、`/prompt`、`/history`、`/view`、`/queue`、`/system_stats`，
+工作台用**真实** `ComfyUIClient` 走完全链路——活体节点校验 → 提交意图落库 → `/prompt` → prompt_id 落库 →
+轮询 → 只取声明输出节点 → 字节校验 → 候选登记 → 技术质检 → 第四层就绪证据由台账推导。
+**这一段验证的是工作台侧，替身渲染器不是真机。**
+
+`PENDING_VERIFICATION`（不得声称已完成）：受管实例的实机 `object_info` 节点校验；真机 `/prompt` 提交与
+真机确实产出声明输出节点；三类（角色/场景/道具）真实出图；实际显存占用与
 生成耗时（本机 RTX 5080 16 GB、系统内存 31.7 GB，必需权重合计 16.10 GiB，必然涉及 offload，
 **未实测前不得给出显存下限数字**）；`Comfy-Org` 转换权重的许可证文本。

@@ -157,7 +157,7 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         if item is None:
             raise ImageExecutionError("MATERIAL_ITEM_NOT_FOUND", item_id=item_id)
         run = db.get(MaterialRun, item.run_id)
-        requirement = db.get(AssetRequirement, item.requirement_id)
+        requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
         plan = db.get(PreProductionPlan, run.plan_id) if run else None
         project = db.get(Project, item.project_id)
         return {

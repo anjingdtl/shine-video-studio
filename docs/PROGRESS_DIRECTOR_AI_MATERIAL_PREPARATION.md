@@ -391,6 +391,16 @@ pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify
 `closed_in_this_build` 写明「导演模式可按固定 Qwen-Image-2.1 工作流准备人物/场景/道具素材」，
 在 `known_blockers` 写明「三类小样尚未在全新安装的机器上真实出图」。
 
+### 出图链路已在「协议忠实的替身渲染器」上跑通（真机只差渲染器本身）
+
+新增 `backend/tests/test_material_render_e2e.py`：本地回环 HTTP 服务按 ComfyUI 的真实报文形状回答
+`/object_info`、`/prompt`、`/history`、`/view`、`/queue`、`/system_stats`，工作台用**真实**
+`ComfyUIClient` 走完全链路：绑定运行时 → 活体节点校验（第三层就绪）→ 提交意图落库 → `/prompt` →
+prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 → 候选登记 → 技术质检 → 第四层就绪证据由台账推导。
+
+这条测试证明的是**工作台侧的代码可走**，替身渲染器不是真机：真权重、真节点实现、真机产出声明输出节点、
+显存与耗时仍是 `PENDING_VERIFICATION`（见 `docs/upstream-audit.md`）。
+
 ### 仍未做（不得按已完成计）
 
 1. **真实 Qwen 出图与 live `object_info` 校验**：仍需受管 ComfyUI 实例；权重已就位，但本轮没有启动渲染器。
