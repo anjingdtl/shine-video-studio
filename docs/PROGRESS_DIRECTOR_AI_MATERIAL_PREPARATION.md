@@ -483,3 +483,51 @@ prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 
 3. **人工评审**：构图与美术结论仍无人评审。
 4. **Windows 入口与安装包**：本轮未改依赖与启动配置，未重建安装包。
 5. **源片段校验只覆盖形状与存在性**：尚未校验片段**内容**与需求描述的语义一致性（仍需模型或人工判断）。
+
+
+## 2026-11-05 受管出图渲染器轮（本轮）
+
+完整证据与测试报告见 `docs/ACCEPTANCE_20261105_MANAGED_IMAGE_RENDERER.md`。本轮一句话：
+
+**"出图渲染器"从此是工作台自己拥有的进程，"谁拥有渲染器"写进了台账并决定证据等级；
+浏览器 E2E 闸门最后一段的真实断点已定位并修掉两处。**
+
+### 本轮做了什么
+
+| 项 | 内容 |
+| --- | --- |
+| 新增受管出图渲染器 | `backend/shine/comfyops/image_renderer.py`：意图先落库、PID/birth/Job Object 三证、队列先关闭后放行、实测显存内存准入、记录写在 `renderer-startup:` 前缀下（既有关闭路径可停可释放） |
+| 新增接口 | `POST /setup/image-runtime/start`、`POST /setup/image-runtime/stop`；`GET /setup/image-readiness` 增加 `renderer` 段 |
+| 绑定收紧 | 出图运行时只接受受管实例（`IMAGE_RUNTIME_INSTANCE_NOT_MANAGED`） |
+| 证据分级 | attempt 与候选记录 `renderer_owned`；第四层就绪度只认真实归属的渲染器；未归属渲染器的产出晋升后一律 `offline_only` |
+| 执行顺序 | 先取共享 GPU 租约 → 租约内启动渲染器 → 校验运行时 → 提交；"显卡忙"等待不失败 |
+| 界面 | 「AI 素材出图能力」新增「本机出图渲染器」状态行与启动 / 停止并释放显存两个按钮 |
+| E2E 闸门 | 实例生命周期段改为批准后**执行**假计划；快照恢复改用 attempt id；单镜头提交段对齐当前界面标签与 READY 状态桩；弹窗改由单一可切换策略接管 |
+
+### 本轮验证
+
+| 类别 | 结果 |
+| --- | --- |
+| 定向后端回归（12 个文件） | **136 passed，EXIT=0** |
+| 前端 | **18 文件 / 130 测试通过**；`npm.cmd run build` 成功 |
+| Ruff | **All checks passed** |
+| 全量后端 | **本轮被中止**，不得据此声称全量通过（上一轮基线 1648 例 EXIT=0） |
+| 浏览器 E2E | **仍未转绿**（已修两段，仍有一处待定位） |
+| 真实三类小样 | **NOT_RUN**：受管启动已就位，等一次真实点击 |
+
+### 下一步的精确动作（受管启动真实出图）
+
+1. `POST /setup/existing-installations/inspect` → 取 snapshot；
+2. `POST /setup/existing-installations/verify`（逐字节核验 H3 权重，耗时较长）→
+3. `POST /setup/existing-installations/adopt`（需 `project_id`、path、snapshot、port 8188）→
+4. `POST /setup/configuration`（生成受管配方）→
+5. `POST /setup/image-runtime`（instance_id / base_url / model_root=既有 ComfyUI 的 models）→
+6. `POST /setup/image-runtime/start`（受管启动，队列放行）→
+7. `GET /setup/image-readiness` 看第三层是否变成 `GRAPH_VERIFIED` →
+8. `POST /setup/image-runtime/validate`（需一条已批准的 asset 用途权利记录）→
+9. Worker 取件渲染 → 取回声明输出节点 → 字节校验 → 技术质检 → 第四层由台账推导 →
+10. 收尾：`POST /setup/managed-processes/release` 或 `/setup/image-runtime/stop` 回收显存。
+
+驱动脚本已写好：`.local-acceptance/real_image_validation.py`（每步打印请求与响应，
+可作为证据日志；未纳入 Git，因为 `.local-acceptance/` 被忽略）。
+
