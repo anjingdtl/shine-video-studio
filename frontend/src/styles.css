@@ -728,7 +728,10 @@ html[data-theme='dark'] .edl-visual{background:#22231d;border-color:#3d3e34}
 .advanced-fold > *:not(summary){margin:0 14px 14px}
 .ui-director .sidebar{display:none}
 .ui-director .main-content{margin-left:0}
-@media (max-width:1100px){.director-step .director-step-text{display:none}.director-step{padding:9px 11px}}
+@media (max-width:1100px){.director-step{padding:9px 10px;font-size:12px}}
+/* 窄屏只收起非当前阶段的文字，当前/下一步必须还能读出来 */
+@media (max-width:760px){.director-step .director-step-text{display:none}.director-step{padding:9px 11px}}
+@media (max-width:760px){.director-step.active .director-step-text,.director-step.next-up .director-step-text{display:inline}}
 html[data-theme='dark'] .director-step,html[data-theme='dark'] .advanced-fold,html[data-theme='dark'] .ui-toggle,html[data-theme='dark'] .mode-entry{background:#24251f;border-color:#3a3b31;color:#c9cac0}
 html[data-theme='dark'] .director-step.active{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
 html[data-theme='dark'] .demo-ribbon{background:#2b281c;border-color:#4a4430;color:#cdb87e}
@@ -1298,3 +1301,6 @@ html[data-theme='dark'] .run-badge{background:#2c2d25;color:#b8bab0}
 html[data-theme='dark'] .run-batch{background:#2c2d25;color:#a9ab9d}
 html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episodes>li,html[data-theme='dark'] .run-events li{border-color:#33342c}
 @media(max-width:900px){.run-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.run-ep-media video{width:100%}.run-controls{margin-left:0}}
+
+/* 窄屏按钮不换行，避免「刷新」被拆成两行 */
+.run-card .secondary-button,.run-card .subtle-button,.run-card .must-button{white-space:nowrap}

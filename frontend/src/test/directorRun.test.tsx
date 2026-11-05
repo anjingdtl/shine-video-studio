@@ -95,6 +95,8 @@ describe('导演包阶段', () => {
 
     expect(await screen.findByText('冻结风格已变更，请重新生成导演包')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /启动整部作品生产/ })).toBeNull();
+    // 没有任何分镜时不能生成分集：按钮先禁用，别让人点出一个 422。
+    expect(screen.getByRole('button', { name: /生成分集草案/ })).toBeDisabled();
   });
 });
 
@@ -150,6 +152,8 @@ describe('全片生产阶段', () => {
     const video = document.querySelector('video');
     expect(video?.getAttribute('src')).toBe('/api/v1/deliveries/artifact-1/media');
     expect(screen.getByRole('button', { name: /暂停/ })).toBeInTheDocument();
+    // 演示态必须说清楚后台不会真的开拍，而不是让人一直等。
+    expect(screen.getByText(/当前是演示体验：后台不会真的开拍/)).toBeInTheDocument();
   });
 
   it('还没有运行时明确说明先确认导演包，而不是假装在跑', async () => {

@@ -835,6 +835,7 @@ function App() {
                   key={`package-${projectId}`}
                   projectId={projectId}
                   mode="package"
+                  demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
@@ -846,6 +847,7 @@ function App() {
                   key={`run-${projectId}`}
                   projectId={projectId}
                   mode="run"
+                  demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
@@ -857,6 +859,7 @@ function App() {
                   key={`post-${projectId}`}
                   projectId={projectId}
                   mode="post"
+                  demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}

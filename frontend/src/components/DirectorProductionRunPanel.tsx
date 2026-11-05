@@ -72,12 +72,13 @@ function since(iso: string | null | undefined): string {
 type Props = {
   projectId: string;
   mode: Mode;
+  demo?: boolean;
   workflowProfiles: WorkflowProfile[];
   onMessage: (text: string, kind: 'success' | 'error') => void;
   onRefresh?: () => void;
 };
 
-export function DirectorProductionRunPanel({ projectId, mode, workflowProfiles, onMessage, onRefresh }: Props) {
+export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProfiles, onMessage, onRefresh }: Props) {
   const [journey, setJourney] = useState<Journey | null>(null);
   const [plans, setPlans] = useState<EpisodePlan[]>([]);
   const [packages, setPackages] = useState<DirectorPackage[]>([]);
@@ -92,6 +93,11 @@ export function DirectorProductionRunPanel({ projectId, mode, workflowProfiles, 
   const [episodePage, setEpisodePage] = useState(0);
   const mounted = useRef(true);
 
+  // 没有镜头时服务端会拒绝生成分集；按钮先禁用，别让人点出一个错误。
+  const shotCount = Number(
+    (journey?.stages.find((stage) => stage.id === 'storyboard')?.facts?.['shot_count'] as number | undefined)
+    ?? 0,
+  );
   const latestPlan = plans[0] ?? null;
   const confirmedPlan = plans.find((row) => row.status === 'CONFIRMED') ?? null;
   const latestPackage = packages[0] ?? null;
@@ -235,11 +241,17 @@ export function DirectorProductionRunPanel({ projectId, mode, workflowProfiles, 
                 onChange={(event) => setToleranceSeconds(Number(event.target.value) || 0)} />
               <span>秒</span>
             </label>
-            <button className="secondary-button" disabled={busy !== ''} onClick={derivePlan}>
+            <button className="secondary-button" disabled={busy !== '' || shotCount === 0}
+              title={shotCount === 0 ? '先在「镜头拆解」建立分镜，才有镜头可分集' : '按镜头顺序覆盖全部分镜'}
+              onClick={derivePlan}>
               <Sparkles size={13} /> 生成分集草案
             </button>
           </div>
         </div>
+
+        {shotCount === 0 && !latestPlan && <p className="empty-inline">
+          还没有分镜可拆。先在「镜头拆解」建立镜头，再回来生成分集。
+        </p>}
 
         {latestPlan ? <div className="run-plan-summary">
           <div>
@@ -376,6 +388,11 @@ export function DirectorProductionRunPanel({ projectId, mode, workflowProfiles, 
               disabled={busy !== ''} onClick={() => control('cancel')}><Square size={12} /> 取消</button>}
           </div>
         </div>
+
+        {demo && activeRun && ['QUEUED', 'RUNNING'].includes(activeRun.status) && <div className="blocked-callout">
+          <AlertTriangle size={13} /> 当前是演示体验：后台不会真的开拍，这次运行会一直停在「已排队」。
+          点顶部「启用真实制作」后，常驻 Worker 才会推进它。
+        </div>}
 
         {activeRun.control_reason && <div className="blocked-callout">
           <AlertTriangle size={13} /> 当前原因：{activeRun.control_reason}
