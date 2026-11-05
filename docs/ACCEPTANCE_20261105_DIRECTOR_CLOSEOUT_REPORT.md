@@ -268,19 +268,33 @@
 ## 12. 安装包（Windows 测试包）
 
 - 命令：`pwsh -File scripts\build_test_package.ps1 -OutDir releases -Verify`（拒绝脏树，从提交树构建）。
-- **本轮包**：`releases/ShineVideoStudio-20261105-5d9ebee-win64.zip`，
-  **2,711,083 字节**，sha256
-  `98182bcaa8b0433d19e241986b9cc6cdd634fa79793a18aa4e4eba8fe60ddbda`，
-  来源提交 `5d9ebee`（分支 `codex/director-closeout-20261105`）。
-  Expand-Archive 后逐文件 SHA-256 复核：**552 个文件全部通过**。
-- 打包内容：543 个受跟踪文件，排除 116 个路径；入口脚本在包根。
+- **本轮包（从干净提交树重建，含导演模式可用性轮的全部改动）**：
+  `releases/ShineVideoStudio-20261105-e13da35-win64.zip`，
+  **2,729,943 字节**，sha256
+  `7fd173a0af0139b9acb5a997a56debd4d32d8ee2636a51bf4c195cddcf9e3fc2`，
+  来源提交 `e13da359cd85c33b16a77b8d7e00f5ff5c191108`（`main`，`source_tree=CLEAN_TREE`，
+  `build_id=20261105-e13da35`，`built_at=2026-11-05T23:57:03+08:00`）。
+- **Expand-Archive 后逐文件 SHA-256 复核：556 个文件全部通过**
+  （清单 555 项 + 清单自身 1 项；`-Verify` 由脚本自己执行，退出即通过）。
+  包内 `BUILD_INFO.json` 的 `source_commit` 与 `PACKAGE_MANIFEST.json` 的
+  `source_commit` 均指向 `e13da35…`，`status=TEST_BUILD / PARTIAL`。
+- 打包内容：547 个受跟踪文件（staged 555 文件 / 7,888,721 字节），排除 116 个路径；
+  入口 `一键安装并启动.cmd` / `SETUP.cmd` / `START_APP.cmd` / `STOP_APP.cmd` /
+  `CHECK_ENVIRONMENT.cmd` 均在包根，`START_HERE.md`、`TESTER_CHECKLIST.md` 同在包根。
+- 包内已包含更新后的 §7（`1697 passed`）与 §13/§14。
 - 不含：模型/权重、生成的视频、SQLite、密钥与 `.env`、虚拟环境与 node_modules、
   `docs/evidence`、日志。
-- **旧包全部保留**（含上一轮的 `ShineVideoStudio-20261105-1daa65b-win64.zip`）。
-- `BUILD_INFO.json` 的 `known_blockers` / `closed_in_this_build` 已按本轮事实更新：
-  素材轮已闭合（评审→晋升→冻结→真机出片）、宽槽位方案的来历与边界、
-  遗留渲染器导致首跑失败的处理；同时保留仍然成立的阻塞项
-  （成片终审、VLM 重校准、宽方案未进部署目录）。
+- **旧包全部保留（共 21 个 zip，不覆盖历史发布）**。上一版
+  `releases/ShineVideoStudio-20261105-5d9ebee-win64.zip`（2,711,083 字节，sha256
+  `98182bcaa8b0433d19e241986b9cc6cdd634fa79793a18aa4e4eba8fe60ddbda`，来源 `5d9ebee`，
+  当时复核 552 个文件）**不含本轮（导演模式可用性轮）的界面与命名改动**，
+  只作历史对照；再上一版 `ShineVideoStudio-20261105-1daa65b-win64.zip` 同样保留。
+- `BUILD_INFO.json` 的 `known_blockers` / `closed_in_this_build` 已按本轮事实同步（12 条 / 47 条）：
+  新增四条已闭合项（导演页保持挂载只切 `hidden`、候选密排网格且未出图条目占位、
+  `GET /api/v1/jobs/{job_id}/media` 与 `/thumbnail` 两条真实路由使镜头可播放、
+  素材文件名按剧本场次编号）；阻塞项中 VLM 重校准改为真实原因
+  「正式项目库不在本机、qwen3-vl 未运行，且本构建未动任何钉住文件」，
+  秒级计时器一条去掉「本轮的渲染窗口」这一过期限定。
 
 ## 13. 导演模式可用性轮（2026-11-06，用户反馈的 5 个问题）
 
