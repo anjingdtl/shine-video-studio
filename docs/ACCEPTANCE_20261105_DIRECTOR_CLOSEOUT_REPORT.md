@@ -134,9 +134,9 @@ Worker 对失败条目死循环（实测状态版本涨到 1934）、忙碌的 W
 ### 6.2 安装包
 
 - 命令：`pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify`，
-  拒绝脏树（本轮从已提交树 `cbfbee0` 构建）。
-- 产物：`releases/ShineVideoStudio-20261105-cbfbee0-win64.zip`，2,681,383 字节，
-  sha256 `18a51a74b732bd9a5d806bb70d131fbfc0006767227053bdb473cad411520874`；
+  拒绝脏树（本轮从已提交树 `837a929` 构建）。
+- 产物：`releases/ShineVideoStudio-20261105-837a929-win64.zip`，2,682,304 字节，
+  sha256 `d6c037b9f9419b5933f18f9e2e72c1092d5dc975c00acea1cdbb9fb95dd350bd`；
   Expand-Archive 后逐文件 SHA-256 复核 **549 个文件全部通过**。
 - 入口：`SETUP.cmd`、`START_APP.cmd`、`STOP_APP.cmd`、`一键安装并启动.cmd`（ASCII 回退）都在包内。
 - 不含：模型/权重、SQLite、密钥、`.env`（只有 `.env.example`）、生成的媒体、evidence、日志；
