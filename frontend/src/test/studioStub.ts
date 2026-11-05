@@ -190,5 +190,50 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/agent-routes$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/workflow-profiles/, respond: () => jsonResponse([]) },
+    // 六阶段的完成态来自服务端；基线里是一个“还没开始制作”的真实形状。
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/, respond: () => jsonResponse(EMPTY_JOURNEY) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/, respond: () => jsonResponse({
+      id: 'plan-1', project_id: 'proj-1', version: 1, status: 'DRAFT', target_seconds: 60,
+      tolerance_seconds: 15, sha256: 'b'.repeat(64), source: 'derived',
+      payload: { target_seconds: 60, tolerance_seconds: 15, episodes: [] },
+      created_at: '2026-11-01T00:00:00', confirmed_at: null,
+    }, 201) },
+    { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/, respond: () => jsonResponse({
+      id: 'package-1', project_id: 'proj-1', revision: 1, status: 'DRAFT', stale: false,
+      stale_reason: null, scope_digest: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64),
+      policy_hash: 'e'.repeat(64), episode_count: 0, shot_count: 0, episode_plan: null,
+      script: null, style: null, binding: null, policy: {}, episodes: [],
+      created_at: '2026-11-01T00:00:00', confirmed_at: null,
+    }, 201) },
+    { method: 'GET', pattern: /\/api\/v1\/director-packages\/[^/]+\/readiness$/, respond: () => jsonResponse({
+      package_id: 'package-1', revision: 1, status: 'DRAFT', stale: false,
+      scope_digest: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64),
+      config_fingerprint: 'f'.repeat(64), ready: false, startable: false,
+      blockers: [{ code: 'PACKAGE_NOT_CONFIRMED', message: '导演包尚未确认' }],
+      episode_count: 0, shot_count: 0, checked_at: '2026-11-01T00:00:00Z',
+    }) },
   ];
 }
+
+/** 新建作品、还没有任何物料时的六阶段状态（服务端真实会返回的形状）。 */
+export const EMPTY_JOURNEY = {
+  project_id: 'proj-1',
+  stages: [
+    { id: 'script', label: '创意与剧本', done: false, summary: '还没有剧本',
+      blockers: [{ code: 'SCRIPT_NOT_PREPARED', message: '导入剧本或直接建立分镜后才进入统稿' }], facts: {} },
+    { id: 'materials', label: '剧本统筹与素材', done: false, summary: '分集方案待确认',
+      blockers: [{ code: 'EPISODE_PLAN_NOT_CONFIRMED', message: '分集方案尚未确认' }], facts: {} },
+    { id: 'storyboard', label: '镜头拆解', done: false, summary: '还没有分镜',
+      blockers: [], facts: {} },
+    { id: 'package', label: '导演包', done: false, summary: '尚未生成导演包', blockers: [{ code: 'NO_PACKAGE', message: '尚未生成导演包' }], facts: {} },
+    { id: 'production', label: '视频生产', done: false, summary: '等待导演包', blockers: [], facts: {} },
+    { id: 'post', label: '后期成片', done: false, summary: '还没有整部作品运行', blockers: [], facts: {} },
+  ],
+  next_stage: 'script',
+  package: null,
+  episode_plan: null,
+  run: null,
+};

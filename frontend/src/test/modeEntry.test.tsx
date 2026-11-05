@@ -51,7 +51,7 @@ async function topbarModeEntry(): Promise<HTMLElement> {
 }
 
 async function openSingleShotTools(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: /AI导演制作/ }));
+  await user.click(await screen.findByRole('button', { name: /镜头拆解/ }));
   await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
   await waitFor(() => {
     expect(document.querySelector('.advanced-fold')).not.toBeNull();
@@ -231,7 +231,7 @@ describe('任务提交与模式一致', () => {
     realReadyProject();
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole('button', { name: /AI导演制作/ }));
+    await user.click(await screen.findByRole('button', { name: /镜头拆解/ }));
     expect(await screen.findByText(/AI 分镜能力未就绪/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /去配置模型服务/ })).toBeInTheDocument();
     // 手工分镜入口仍在（高级折叠里的镜头表单）。

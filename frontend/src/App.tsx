@@ -24,6 +24,8 @@ import StoryboardPanel from './components/StoryboardPanel';
 import DeliveryPanel from './components/DeliveryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
+import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
+import { getJourney, type Journey } from './api';
 import StorageSettings from './components/StorageSettings';
 
 type ViewId = 'setup' | 'production' | 'delivery' | 'pro';
@@ -72,23 +74,27 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
   VIEW_GROUPS.map((group) => [group.view, group.title]),
 ) as Record<ViewId, string>;
 
-/** 导演模式：四个制作页面 + 一个不占流程序号的基础配置页。 */
-type DirectorPage = 'projects' | 'assets' | 'produce' | 'deliver' | 'setup';
-const DIRECTOR_PAGES: Array<{ id: DirectorPage; text: string; icon: LucideIcon; hint: string }> = [
-  { id: 'projects', text: '我的作品', icon: FolderKanban, hint: '新建与管理作品' },
-  { id: 'assets', text: '素材与风格', icon: Film, hint: '人物 · 场景 · 道具 · 风格' },
-  { id: 'produce', text: 'AI导演制作', icon: Clapperboard, hint: '分镜 → 制作 → 进度' },
-  { id: 'deliver', text: '成片中心', icon: Video, hint: '看成片 · 确认 · 导出' },
-];
+/** 导演模式：作品入口 + 六阶段制作页 + 不占流程序号的基础配置页。 */
+type DirectorPage = 'projects' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
-  projects: '我的作品', assets: '素材与风格', produce: 'AI导演制作', deliver: '成片中心', setup: '基础配置',
+  projects: '我的作品', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
+  run: '全片生产', deliver: '成片中心', setup: '基础配置',
 };
+/** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
+const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
+  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'assets', hint: '输入想法或导入现成剧本，确认后进入统筹' },
+  { id: 'materials', text: '剧本统筹与素材', icon: Film, page: 'assets', hint: '分集 · 人物场景道具 · 确认主素材 · 冻结风格' },
+  { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜、对白与声音安排' },
+  { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结这次要拍的全部内容与执行政策' },
+  { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完全部分集' },
+  { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
+];
 
 function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string } {
   const raw = hash.replace(/^#/, '');
   if (raw.startsWith('d/')) {
     const page = raw.slice(2) as DirectorPage;
-    if (DIRECTOR_PAGES.some((item) => item.id === page) || page === 'setup') {
+    if (Object.prototype.hasOwnProperty.call(DIRECTOR_PAGE_LABELS, page)) {
       return { ui: 'director', view: 'production', page };
     }
     return { ui: 'director', view: 'production', page: 'projects' };
@@ -168,30 +174,31 @@ function App() {
 
   useEffect(() => { window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
-  /** 导演模式的全旅程：五步是否完成，全部由真实项目状态驱动，页面与步骤条共用同一份事实。 */
-  const deliverableReady = useMemo(
-    () => jobs.some((job) => job.status === 'PASSED' && job.video_created),
-    [jobs],
-  );
-  const journey = useMemo(() => [
-    { page: 'projects' as DirectorPage, cta: '创建我的第一部AI短剧', hint: '从一个作品开始：给它起个名字就行。', done: !!project },
-    { page: 'assets' as DirectorPage, cta: '添加素材', hint: '上传人物、场景、道具参考，然后点击「确认使用」。', done: approvedAssets.length > 0 },
-    { page: 'assets' as DirectorPage, cta: '确定作品风格', hint: '选好或确认七项风格约定并冻结，之后所有镜头都按它执行。', done: !!currentStyle },
-    { page: 'produce' as DirectorPage, cta: 'AI 生成分镜', hint: 'AI 导演会把剧本拆成一个个镜头，你可以逐条修改。', done: shots.length > 0 },
-    { page: 'produce' as DirectorPage, cta: '开始制作影片', hint: '勾选镜头，点击开始制作；本机自动生成、检查、返工。', done: deliverableReady },
-  ], [project, approvedAssets.length, currentStyle, shots.length, deliverableReady]);
-  /** 第一个未完成的旅程步骤；null 表示成片已生成，只剩查看与导出。 */
-  const nextStep = journey.find((step) => !step.done) ?? null;
-  /** 首页大按钮：有下一步就引导下一步，全部完成则指去成片中心。 */
-  const heroGuidance = nextStep ?? { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '影片已生成，去成片中心查看、确认并导出。' };
-  /** 顶部步骤条的页面级完成态：✓ 只代表该页目标达成，随时可以回来调整。 */
-  const navDone: Record<DirectorPage, boolean> = {
-    projects: !!project,
-    assets: approvedAssets.length > 0 && !!currentStyle,
-    produce: deliverableReady,
-    deliver: deliverableReady,
-    setup: false,
-  };
+  /** 六阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
+  const [journey, setJourney] = useState<Journey | null>(null);
+  useEffect(() => {
+    if (!projectId) { setJourney(null); return; }
+    let alive = true;
+    getJourney(projectId)
+      .then((row) => { if (alive) setJourney(row); })
+      .catch(() => { if (alive) setJourney(null); });
+    return () => { alive = false; };
+  }, [projectId, dataEpoch]);
+  const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
+    (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
+  ), [journey]);
+  const stageBlockers: Record<string, number> = useMemo(() => Object.fromEntries(
+    (journey?.stages ?? []).map((stage) => [stage.id, stage.blockers.length]),
+  ), [journey]);
+  /** 生产阶段完成 = 本次范围内每个镜头都有当前有效成片，不是“有一个视频”。 */
+  const deliverableReady = stageDone.production ?? false;
+  /** 第一个未完成的阶段；null 表示六阶段全部完成。 */
+  const nextStage = journey?.next_stage
+    ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
+    : null;
+  const heroGuidance = nextStage
+    ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
+    : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出。' };
   /** 制作页自动聚焦：没镜头→分镜；正在制作→排产（盯进度）；制作结束→看结果。 */
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
   const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
@@ -556,37 +563,47 @@ function App() {
             </section>}
 
             {project && <>
-              <nav className="director-steps" aria-label="制作流程" hidden={directorPage === 'setup'}>
-                {DIRECTOR_PAGES.map((page, index) => {
-                  const Icon = page.icon;
-                  const active = directorPage === page.id;
-                  const isGuidance = nextStep?.page === page.id;
-                  const stepDone = navDone[page.id];
+              <nav className="director-steps six-stage" aria-label="制作六阶段" hidden={directorPage === 'setup'}>
+                {DIRECTOR_STAGES.map((stage) => {
+                  const Icon = stage.icon;
+                  // 一个页面可能承载两个阶段（剧本与素材）：只高亮当前该做的那一个，
+                  // 否则步骤条会同时点亮两格，让人分不清下一步。
+                  const active = stage.id === (nextStage?.page === directorPage
+                    ? nextStage.id
+                    : (DIRECTOR_STAGES.find((row) => row.page === directorPage && !stageDone[row.id])?.id
+                      ?? DIRECTOR_STAGES.find((row) => row.page === directorPage)?.id));
+                  const isGuidance = nextStage?.id === stage.id;
+                  const done = stageDone[stage.id] ?? false;
+                  const blocked = stageBlockers[stage.id] ?? 0;
+                  const stageIndex = DIRECTOR_STAGES.findIndex((row) => row.id === stage.id);
                   return (
                     <button
-                      key={page.id}
+                      key={stage.id}
                       type="button"
-                      className={`director-step ${active ? 'active' : ''} ${isGuidance ? 'next-up' : ''} ${stepDone ? 'is-done' : ''}`}
-                      onClick={() => goToDirectorPage(page.id)}
+                      aria-label={`第 ${stageIndex + 1} 阶段：${stage.text}`}
+                      title={`${stage.hint}${blocked ? ` · ${blocked} 项待处理` : ''}`}
+                      className={`director-step ${active ? 'active' : ''} ${isGuidance ? 'next-up' : ''} ${done ? 'is-done' : ''}`}
+                      onClick={() => goToDirectorPage(stage.page)}
                     >
-                      <span className="director-step-no" title={stepDone ? '这一页的目标已完成' : `第 ${index + 1} 步`}>
-                        {stepDone ? <Check size={11} /> : index + 1}
+                      <span className="director-step-no" title={done ? '这一阶段的目标已完成' : `第 ${stageIndex + 1} 阶段`}>
+                        {done ? <Check size={11} /> : stageIndex + 1}
                       </span>
                       <Icon size={16} />
-                      <span className="director-step-text">{page.text}</span>
+                      <span className="director-step-text">{stage.text}</span>
+                      {blocked > 0 && !done && <em className="director-step-count">{blocked}</em>}
                       {isGuidance && <em className="director-step-flag">下一步</em>}
                     </button>
                   );
                 })}
               </nav>
-              {directorPage !== 'projects' && directorPage !== 'setup' && (nextStep || directorPage !== 'deliver') && (nextStep ? (
+              {directorPage !== 'projects' && directorPage !== 'setup' && journey && (nextStage ? (
                 <div className="next-step-bar" role="status">
                   <span className="next-step-tag">下一步</span>
                   <div className="next-step-text">
-                    <b>{nextStep.cta}</b>
-                    <span>{nextStep.hint}</span>
+                    <b>{nextStage.text}</b>
+                    <span>{nextStage.hint}</span>
                   </div>
-                  <button type="button" className="must-button" onClick={() => goToDirectorPage(nextStep.page)}>
+                  <button type="button" className="must-button" onClick={() => goToDirectorPage(nextStage.page)}>
                     去这一步
                   </button>
                 </div>
@@ -594,8 +611,8 @@ function App() {
                 <div className="next-step-bar done" role="status">
                   <Check size={15} />
                   <div className="next-step-text">
-                    <b>全部制作步骤已完成</b>
-                    <span>到「成片中心」查看、确认并导出影片。</span>
+                    <b>六个阶段全部完成</b>
+                    <span>全部选定分集已交付；艺术验收仍需你自己确认。</span>
                   </div>
                   <button type="button" className="secondary-button" onClick={() => goToDirectorPage('deliver')}>去看成片</button>
                 </div>
@@ -813,7 +830,37 @@ function App() {
                 </details>
               </div>
 
+              <div className="director-page" id="package" hidden={directorPage !== 'package'}>
+                {directorPage === 'package' && <DirectorProductionRunPanel
+                  key={`package-${projectId}`}
+                  projectId={projectId}
+                  mode="package"
+                  workflowProfiles={workflowProfiles}
+                  onMessage={report}
+                  onRefresh={() => refreshAll().catch(() => undefined)}
+                />}
+              </div>
+
+              <div className="director-page" id="run" hidden={directorPage !== 'run'}>
+                {directorPage === 'run' && <DirectorProductionRunPanel
+                  key={`run-${projectId}`}
+                  projectId={projectId}
+                  mode="run"
+                  workflowProfiles={workflowProfiles}
+                  onMessage={report}
+                  onRefresh={() => refreshAll().catch(() => undefined)}
+                />}
+              </div>
+
               <div className="director-page" id="deliver" hidden={directorPage !== 'deliver'}>
+                {directorPage === 'deliver' && <DirectorProductionRunPanel
+                  key={`post-${projectId}`}
+                  projectId={projectId}
+                  mode="post"
+                  workflowProfiles={workflowProfiles}
+                  onMessage={report}
+                  onRefresh={() => refreshAll().catch(() => undefined)}
+                />}
                 <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={directorPage === 'deliver'} refreshEpoch={dataEpoch} />
               </div>
 

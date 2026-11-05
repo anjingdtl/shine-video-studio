@@ -96,14 +96,13 @@ describe('空数据库与两层界面入口', () => {
     });
     await user.type(screen.getByPlaceholderText(/给作品起个名字/), '第一个项目');
     await user.click(screen.getByRole('button', { name: '创建作品' }));
-    // 建项后进入四步导演流程，下一步引导由真实状态驱动。
+    // 建项后进入六阶段导演流程，下一步引导由真实服务端状态驱动。
     await waitFor(() => {
       expect(screen.getAllByText('第一个项目').length).toBeGreaterThan(0);
     });
-    expect(screen.getByRole('button', { name: /我的作品/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /素材与风格/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /AI导演制作/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /成片中心/ })).toBeInTheDocument();
+    for (const stage of ['创意与剧本', '剧本统筹与素材', '镜头拆解', '导演包', '视频生产', '后期成片']) {
+      expect(screen.getByRole('button', { name: new RegExp(stage) })).toBeInTheDocument();
+    }
   });
 
   it('基础配置在导演模式内提供安装、模型与可选音色三个入口', async () => {

@@ -55,7 +55,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /镜头拆解/);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     await fillBeat(user, '雨夜里两人交换账册线索');
     await user.clear(screen.getByLabelText(/时长（4–15 秒）/));
@@ -96,7 +96,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /镜头拆解/);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     await fillBeat(user, '第一次提交的内容');
     await user.clear(screen.getByLabelText(/时长（4–15 秒）/));
@@ -134,7 +134,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /镜头拆解/);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     await fillBeat(user, '慢请求期间的镜头');
     await clickSave(user);
@@ -160,7 +160,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /镜头拆解/);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     await fillBeat(user, '直接命中服务端校验');
     // The client guard only covers 时长 itself; end_s beyond the target
@@ -192,7 +192,7 @@ describe('镜头选择器写入真实 ShotSpec（P01/P02）', () => {
       respond: (_url, init) => jsonResponse({ id: 'shot-new', name: '镜头 1', revision: 1, spec: JSON.parse(String(init?.body)).spec, bindings: [] }, 201),
     });
     render(<App />);
-    await gotoDirectorPage(user, /AI导演制作/);
+    await gotoDirectorPage(user, /镜头拆解/);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     const beat = await screen.findByLabelText(/镜头意图/);
     await waitFor(() => expect(beat).not.toBeDisabled());

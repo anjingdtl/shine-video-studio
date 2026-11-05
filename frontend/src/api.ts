@@ -348,3 +348,147 @@ export type SubtitleTrack = {
   sha256: string; source: string; source_artifact_sha256: string | null;
   created_by: string; created_at: string; updated_at: string;
 };
+
+/* ======================= 导演流程 / 整部作品 ======================= */
+
+export type JourneyStage = {
+  id: 'script' | 'materials' | 'storyboard' | 'package' | 'production' | 'post';
+  label: string;
+  done: boolean;
+  summary: string;
+  blockers: Array<{ code: string; message: string; shot_id?: string; asset_id?: string }>;
+  facts: Record<string, unknown>;
+};
+
+export type Journey = {
+  project_id: string;
+  stages: JourneyStage[];
+  next_stage: string | null;
+  package: { id: string; revision: number; status: string; stale: boolean } | null;
+  episode_plan: { id: string; version: number; episodes: number } | null;
+  run: {
+    id: string; status: string; required_episode_count: number;
+    delivered_episode_count: number;
+    blockers: Array<{ code: string; message: string }>;
+    control_reason: string | null; last_progress_at: string | null;
+  } | null;
+};
+
+export type PlannedEpisode = {
+  episode_id: string; order: number; title: string; shot_ids: string[];
+  planned_seconds: number; boundary_note: string;
+};
+
+export type EpisodePlan = {
+  id: string; project_id: string; version: number; status: string;
+  target_seconds: number; tolerance_seconds: number; sha256: string; source: string;
+  payload: { episodes: PlannedEpisode[]; target_seconds: number; tolerance_seconds: number };
+  created_at: string; confirmed_at: string | null;
+};
+
+export type DirectorPackage = {
+  id: string; project_id: string; revision: number; status: string;
+  stale: boolean; stale_reason: string | null; scope_digest: string; manifest_sha256: string;
+  policy_hash: string; episode_count: number; shot_count: number;
+  episode_plan: { plan_id: string; version: number; sha256: string; target_seconds: number } | null;
+  script: Record<string, unknown> | null;
+  style: { style_version_id: string; version: number; sha256: string } | null;
+  binding: {
+    workflow_profile_id: string; mode: string; graph_sha256: string; checkpoint_id: string;
+    generation_mode: string | null; output: Record<string, unknown>;
+  } | null;
+  policy: Record<string, unknown> | null;
+  episodes: Array<{
+    episode_id: string; position: number; title: string; shot_count: number;
+    planned_seconds: number; manifest_sha256: string;
+  }>;
+  created_at: string; confirmed_at: string | null;
+};
+
+export type PackageReadiness = {
+  package_id: string; revision: number; status: string; stale: boolean;
+  scope_digest: string; manifest_sha256: string; config_fingerprint: string;
+  ready: boolean; startable: boolean;
+  blockers: Array<{ code: string; message: string; shot_id?: string; asset_id?: string }>;
+  episode_count: number; shot_count: number; checked_at: string;
+};
+
+export type RunEpisode = {
+  id: string; episode_id: string; position: number; title: string; status: string;
+  shot_count: number; passed_shot_count: number; planned_seconds: number;
+  actual_seconds: number | null; delivery_order_id: string | null;
+  delivered_artifact_id: string | null; delivered_sha256: string | null;
+  blocker_code: string | null; delivered_at: string | null;
+  batches: Array<{
+    batch_key: string; status: string; series_id: string | null; shot_count: number;
+    failure_code: string | null; dispatched_at: string | null;
+  }>;
+};
+
+export type ProductionRun = {
+  id: string; project_id: string; package_id: string; package_revision: number;
+  manifest_sha256: string; scope_digest: string; status: string; state_version: number;
+  control_reason: string | null; blocker_count: number;
+  scope: { episode_ids: string[]; all_episodes: boolean; shot_count: number };
+  counters: Record<string, number>;
+  progress: {
+    required_episode_count: number; delivered_episode_count: number;
+    producing_episode_count: number; blocked_episode_count: number;
+    batch_count: number; passed_batch_count: number; delivered_seconds: number;
+    passed_shot_count: number;
+  };
+  created_at: string; started_at: string | null; finished_at: string | null;
+  last_progress_at: string | null; heartbeat_at: string | null;
+  episodes?: RunEpisode[];
+  created?: boolean;
+};
+
+export type RunEvent = {
+  id: number; kind: string; message: string; payload: Record<string, unknown>; created_at: string;
+};
+
+export const getJourney = (projectId: string) =>
+  api<Journey>(`/projects/${projectId}/journey`);
+
+export const listEpisodePlans = (projectId: string) =>
+  api<EpisodePlan[]>(`/projects/${projectId}/episode-plans`);
+
+export const createEpisodePlan = (projectId: string, targetSeconds: number, toleranceSeconds: number) =>
+  api<EpisodePlan>(`/projects/${projectId}/episode-plans`,
+    json('POST', { target_seconds: targetSeconds, tolerance_seconds: toleranceSeconds }));
+
+export const confirmEpisodePlan = (projectId: string, version: number, sha256: string) =>
+  api<EpisodePlan>(`/projects/${projectId}/episode-plans/${version}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+export const listDirectorPackages = (projectId: string) =>
+  api<DirectorPackage[]>(`/projects/${projectId}/director-packages`);
+
+export const createDirectorPackage = (
+  projectId: string,
+  body: { workflow_profile_id: string; generation_mode?: string | null; output?: Record<string, unknown> | null;
+    policy?: Record<string, unknown> | null },
+) => api<DirectorPackage>(`/projects/${projectId}/director-packages`, json('POST', body));
+
+export const getPackageReadiness = (packageId: string) =>
+  api<PackageReadiness>(`/director-packages/${packageId}/readiness`);
+
+export const confirmDirectorPackage = (packageId: string, expectedManifest: string) =>
+  api<DirectorPackage>(`/director-packages/${packageId}/confirm`,
+    json('POST', { expected_manifest_sha256: expectedManifest }));
+
+export const listProductionRuns = (projectId: string) =>
+  api<ProductionRun[]>(`/projects/${projectId}/production-runs`);
+
+export const createProductionRun = (projectId: string, body: { package_id: string; episode_ids?: string[] | null }) =>
+  api<ProductionRun>(`/projects/${projectId}/production-runs`, json('POST', body));
+
+export const getProductionRun = (runId: string) =>
+  api<ProductionRun>(`/production-runs/${runId}`);
+
+export const getRunEvents = (runId: string, afterId = 0) =>
+  api<RunEvent[]>(`/production-runs/${runId}/events?after_id=${afterId}&limit=40`);
+
+export const controlProductionRun = (runId: string, action: 'pause' | 'resume' | 'cancel' | 'reconcile') =>
+  api<{ id: string; status: string; state_version?: number | null }>(
+    `/production-runs/${runId}/${action}`, json('POST', {}));

@@ -1220,3 +1220,81 @@ html[data-theme='dark'] .segment-status { background: #2a3025; color: #b7c9a4; }
 .media-preview-unavailable { display: grid; place-items: center; height: 140px; color: #a0a198; font-size: 10px; background: var(--paper); }
 html[data-theme='dark'] .material-tile-actions button { background: #232420; color: #d5d6cd; border-color: #4a4c41; }
 html[data-theme='dark'] .material-toolbar small { color: #a9aba1; }
+
+/* ===== 整部作品：导演包与全片运行 ===== */
+.run-panel{display:flex;flex-direction:column;gap:14px}
+.run-card{padding:19px 20px}
+.run-head-actions{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.run-inline-field{display:flex;align-items:center;gap:6px;font-size:9px;color:#898b82}
+.run-inline-field input{width:64px!important}
+.run-plan-summary{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#f8f8f4;border:1px solid #ecece4;border-radius:8px;padding:11px 12px;margin-bottom:10px}
+.run-plan-summary b,.run-plan-summary span{display:block}
+.run-plan-summary b{font-size:11px}
+.run-plan-summary span{font-size:9px;color:#93948b;margin-top:3px}
+.run-hint{font-size:9px;color:#a0a198}
+.run-episode-plan{list-style:none;margin:0;padding:0;max-height:230px;overflow:auto}
+.run-episode-plan li{display:flex;gap:10px;align-items:flex-start;padding:9px 2px;border-top:1px solid #f0f0ec}
+.run-episode-plan b{font-size:10px;display:block}
+.run-episode-plan span{font-size:9px;color:#93948b;display:block;margin-top:3px}
+.run-episode-plan em{font-size:8px;color:#a89a71;font-style:normal;display:block;margin-top:3px}
+.run-ep-no{height:22px;min-width:22px;border-radius:5px;background:#f0f0e9;color:#7a805f;display:grid;place-items:center;font:9px var(--mono);flex:none}
+.run-binding-row{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding:12px;background:#f8f8f5;border:1px dashed #e3e4db;border-radius:7px}
+.run-binding-row label{font-size:9px;color:#898b82;display:flex;flex-direction:column;gap:5px}
+.run-binding-row select{min-width:230px}
+.run-package{margin-top:13px;border-top:1px solid #f0f0ec;padding-top:12px}
+.run-package-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.run-package-head b{font-size:11px;display:block}
+.run-package-head span{font-size:9px;color:#93948b;display:block;margin-top:3px}
+.run-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0;padding:0}
+.run-facts div{background:#faf9f5;border:1px solid #efeee7;border-radius:7px;padding:8px 9px}
+.run-facts dt{font-size:8px;color:#a0a198;letter-spacing:.6px;text-transform:uppercase}
+.run-facts dd{margin:4px 0 0;font-size:10px;color:#4b4d45}
+.run-readiness{display:flex;align-items:center;gap:7px;font-size:9.5px;border-radius:6px;padding:9px 10px;margin:6px 0 10px}
+.run-readiness.ok{color:#58714f;background:#eef3e9}
+.run-readiness.warn{color:#977d46;background:#f7f2e4}
+.run-readiness.bad{color:#a4655a;background:#f8ece9}
+.run-blockers{list-style:none;margin:0 0 10px;padding:0}
+.run-blockers li{display:flex;align-items:center;gap:7px;font-size:9px;color:#8a7a52;padding:5px 0;border-top:1px solid #f4f2ea}
+.run-blockers code{font:8px var(--mono);color:#a9a294;margin-left:auto}
+.run-summary-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border-bottom:1px solid #f0f0ec;padding-bottom:11px;margin-bottom:6px}
+.run-summary-facts{display:flex;gap:14px;flex-wrap:wrap;font-size:9px;color:#8d8f85}
+.run-summary-facts b{font-size:12px;color:#4c4e45;margin-right:3px}
+.run-summary-facts span{display:flex;align-items:center;gap:4px}
+.run-controls{display:flex;gap:7px;margin-left:auto}
+.run-badge{font-size:9px;border-radius:30px;padding:4px 9px;background:#f0f0e9;color:#7c7e70}
+.run-badge.ok{background:#eef3e9;color:#58714f}
+.run-badge.bad{background:#f8ece9;color:#a4655a}
+.run-badge.busy{background:#eaf0f2;color:#5c7d8c}
+.run-episodes{list-style:none;margin:8px 0 0;padding:0}
+.run-episodes>li{border-top:1px solid #f0f0ec;padding:11px 0}
+.run-ep-head{display:flex;align-items:center;gap:10px}
+.run-ep-head>div{flex:1;min-width:0}
+.run-ep-head b{font-size:10.5px;display:block}
+.run-ep-head span{font-size:9px;color:#93948b;display:block;margin-top:3px}
+.run-batches{display:flex;gap:6px;flex-wrap:wrap;margin:7px 0 0 32px}
+.run-batch{font:8px var(--mono);border-radius:4px;padding:3px 6px;background:#f2f2ea;color:#83856f}
+.run-batch.ok{background:#eef3e9;color:#5b7352}
+.run-batch.busy{background:#eaf0f2;color:#5c7d8c}
+.run-batch.bad{background:#f8ece9;color:#a4655a}
+.run-ep-blocker{display:flex;align-items:center;gap:5px;font-size:8.5px;color:#a4655a;margin:6px 0 0 32px}
+.run-ep-media{margin:9px 0 0 32px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.run-ep-media video{width:220px;border-radius:6px;background:#000}
+.run-ep-media a{font-size:9px;color:#707851}
+.run-pager{display:flex;align-items:center;gap:10px;justify-content:center;font-size:9px;color:#93948b;padding-top:10px}
+.run-events{margin-top:10px}
+.run-events ul{list-style:none;margin:8px 0 0;padding:0;max-height:200px;overflow:auto}
+.run-events li{display:flex;justify-content:space-between;gap:10px;font-size:9px;color:#7d7f74;border-top:1px solid #f4f3ed;padding:6px 0}
+.run-events em{font-style:normal;color:#a8a99f;white-space:nowrap}
+.run-review-list{list-style:none;margin:0;padding:0}
+.run-review-list li{display:flex;align-items:center;gap:8px;font-size:9.5px;color:#7d7f74;border-top:1px solid #f4f3ed;padding:8px 0}
+.run-review-list code{font:8px var(--mono);color:#a8a99f;margin-left:auto}
+.run-busy{display:flex;align-items:center;gap:6px;font-size:9px;color:#8d8f85;padding:6px 2px}
+.spin{animation:shine-spin 1s linear infinite}
+@keyframes shine-spin{to{transform:rotate(360deg)}}
+.subtle-button.danger{color:#a4655a;border-color:#eedfd9}
+html[data-theme='dark'] .run-plan-summary,html[data-theme='dark'] .run-binding-row,html[data-theme='dark'] .run-facts div{background:#26271f;border-color:#3a3b31}
+html[data-theme='dark'] .run-facts dd{color:#d2d4c9}
+html[data-theme='dark'] .run-badge{background:#2c2d25;color:#b8bab0}
+html[data-theme='dark'] .run-batch{background:#2c2d25;color:#a9ab9d}
+html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episodes>li,html[data-theme='dark'] .run-events li{border-color:#33342c}
+@media(max-width:900px){.run-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.run-ep-media video{width:100%}.run-controls{margin-left:0}}

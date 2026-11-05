@@ -62,7 +62,7 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     const textarea = await screen.findByLabelText('摄影语言（自定义）');
     await waitFor(() => {
       expect(textarea).toHaveValue('手持近景，缓慢推近。（未保存的新修改）');
@@ -101,7 +101,7 @@ describe('风格冻结（下拉交互）', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
 
@@ -131,7 +131,7 @@ describe('风格冻结（下拉交互）', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => {
@@ -154,7 +154,7 @@ describe('风格冻结（下拉交互）', () => {
     });
 
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => {
@@ -170,7 +170,7 @@ describe('风格冻结（下拉交互）', () => {
     stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
       respond: () => jsonResponse({ detail: 'STYLE_APPROVAL_CONTENT_CHANGED' }, 409) });
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await screen.findByText(/风格草稿已在其他页面修改/);
@@ -193,7 +193,7 @@ describe('风格冻结（下拉交互）', () => {
     stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
       respond: () => jsonResponse(FROZEN_STYLE) });
     render(<App />);
-    await gotoDirectorPage(user, /素材与风格/);
+    await gotoDirectorPage(user, /剧本统筹与素材/);
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await screen.findByText(/冻结结果与本次确认的风格内容不一致/);
