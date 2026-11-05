@@ -149,6 +149,7 @@ def call_material_agent(
     schema: dict[str, Any],
     contract,
     on_progress=None,
+    before_call=None,
 ) -> AgentCallOutcome:
     """Ask one role for one contract, correcting at most once.
 
@@ -159,6 +160,8 @@ def call_material_agent(
 
     def call(system_prompt: str, user_payload: str):
         with session_factory() as db:
+            if before_call:
+                before_call(db)
             return gateway.complete_for_role(
                 db,
                 role,

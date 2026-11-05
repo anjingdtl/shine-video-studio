@@ -820,6 +820,17 @@ def candidate_media(identity: str, settings: SettingsDep, db: DBSession):
     )
 
 
+@router.get("/candidate-assets/{identity}/thumbnail")
+def candidate_thumbnail(identity: str, request: Request, settings: SettingsDep, db: DBSession):
+    from shine.media.artifacts import safe_asset_path
+    from shine.media.thumbnails import thumbnail
+
+    row = get(db, CandidateAsset, identity)
+    return thumbnail(safe_asset_path(settings.data_dir, row.payload["storage_path"]),
+                     row.payload["content_sha256"], settings.ffmpeg_path,
+                     request.headers.get("if-none-match"))
+
+
 @router.post("/candidate-assets/{identity}/promote")
 def promote_candidate(identity: str, body: Decision, actor: Operator, settings: SettingsDep, db: DBSession):
     locked(db)

@@ -537,3 +537,42 @@ def test_material_prompts_state_their_own_scope_and_no_execution_authority():
     assert "the user owns the final selection and promotion" in brief
     # The three composition contracts the product fixed, stated to the model.
     assert "half-body" in brief and "no person holding it" in brief and "no people" in brief
+
+
+def test_material_controls_replay_receipt_after_refresh_without_second_mutation(api):
+    from shine.materialprep import service
+    _, factory, _ = api
+    with factory.begin() as db:
+        project_id = _project(db)
+        plan = _add_plan(db, project_id, purpose=PLAN_PURPOSE_ASSET_PREPARATION)
+        requirement = _requirement_row(db, project_id, plan.id)
+        run = _run(db, project_id, plan.id)
+        run.status = "FAILED"
+        item = _item(db, run, project_id, requirement.id, status="FAILED")
+        run_id, item_id, version = run.id, item.id, run.state_version
+    with factory() as db:
+        first = service.resume_items(db, run_id, [item_id], version, idempotency_key="refresh-safe")
+    with factory() as db:
+        assert service.resume_items(db, run_id, [item_id], version, idempotency_key="refresh-safe") == first
+        assert db.get(MaterialRun, run_id).state_version == version + 1
+        assert db.get(MaterialItem, item_id).state_version == 1
+    with factory() as db, pytest.raises(HTTPException, match="IDEMPOTENCY_KEY_CONFLICT"):
+        service.resume_items(db, run_id, [], version, idempotency_key="refresh-safe")
+
+
+def test_unknown_item_resume_does_not_requeue_batch(api):
+    from shine.materialprep import service
+    _, factory, _ = api
+    with factory.begin() as db:
+        project_id = _project(db)
+        plan = _add_plan(db, project_id, purpose=PLAN_PURPOSE_ASSET_PREPARATION)
+        requirement = _requirement_row(db, project_id, plan.id)
+        run = _run(db, project_id, plan.id)
+        run.status = "NEEDS_REVIEW"
+        item = _item(db, run, project_id, requirement.id, status="NEEDS_REVIEW")
+        run_id, item_id, version = run.id, item.id, run.state_version
+    with factory() as db:
+        result = service.resume_items(db, run_id, [item_id], version, idempotency_key="unknown-safe")
+        assert result["queued"] == [] and result["refused"]
+        assert db.get(MaterialRun, run_id).status == "NEEDS_REVIEW"
+        assert db.get(MaterialRun, run_id).state_version == version

@@ -472,6 +472,7 @@ def test_the_material_list_is_only_ready_when_every_requirement_is_bound(api):
                         role="prop", entity_id="铜怀表")
     approve_lock(client, prop["id"])
 
+    _bind_uploaded(client, project_id, [asset, prop])
     ready = client.post(
         f"/api/v1/projects/{project_id}/material-preparation/complete", headers=LOCAL_ACTION
     )
@@ -506,6 +507,7 @@ def test_an_offline_only_mock_master_never_counts_as_ready(api):
             row.provenance = {"offline_only": True, "is_mock": True}
         db.commit()
 
+    _bind_uploaded(client, project_id, [asset, prop])
     judged = client.post(
         f"/api/v1/projects/{project_id}/material-preparation/complete", headers=LOCAL_ACTION
     ).json()
@@ -539,8 +541,52 @@ def test_a_tampered_master_file_is_not_ready(api):
     target = safe_asset_path(settings.data_dir, storage_path)
     target.write_bytes(b"tampered")
 
+    _bind_uploaded(client, project_id, [asset, prop])
     judged = client.post(
         f"/api/v1/projects/{project_id}/material-preparation/complete", headers=LOCAL_ACTION
     ).json()
     assert judged["materials_ready"] is False, judged
     assert any(entry["reason"] == "ASSET_HASH_CHANGED" for entry in judged["missing"]), judged
+
+
+def _bind_uploaded(client, project_id, assets):
+    state = client.get(f"/api/v1/projects/{project_id}/material-preparation").json()
+    response = client.post(f"/api/v1/projects/{project_id}/material-preparation/confirm", json={
+        "plan_revision_id": state["plan_revision_id"], "expected_snapshot": state["expected_snapshot"],
+        "decisions": [{"requirement_id": r["requirement_id"], "entity_id": r["entity_id"],
+                       "strategy": "reuse_master", "asset_id": next(
+                           a["id"] for a in assets if a["entity_id"] == r["entity_id"])}
+                      for r in state["requirements"]], "visual_direction": {},
+    }, headers=LOCAL_ACTION)
+    assert response.status_code == 200, response.text
+
+
+def test_explicit_version_wins_and_missing_or_changed_version_is_never_substituted(api):
+    from shine.models import Asset
+    from tests.conftest import PNG, approve_lock, upload_asset
+
+    client, factory, _ = api
+    project_id = _project(client)
+    doc = _document(client, project_id)
+    analyzed = _analyze(client, project_id, doc).json()
+    _confirm_material(client, project_id, analyzed)
+    first = upload_asset(client, project_id, PNG + b"first", "old.png", role="character", entity_id="林知远")
+    chosen = upload_asset(client, project_id, PNG + b"chosen", "chosen.png", role="character", entity_id="林知远")
+    prop = upload_asset(client, project_id, PNG + b"prop", "prop.png", role="prop", entity_id="铜怀表")
+    for asset in (first, chosen, prop):
+        approve_lock(client, asset["id"])
+    _bind_uploaded(client, project_id, [chosen, prop])
+    path = f"/api/v1/projects/{project_id}/material-preparation/complete"
+    judged = client.post(path, headers=LOCAL_ACTION).json()
+    assert judged["materials_ready"]
+    assert next(r for r in judged["requirements"] if r["family"] == "character")["asset_id"] == chosen["id"]
+    with factory.begin() as db:
+        db.get(Asset, chosen["id"]).sha256 = "f" * 64
+    judged = client.post(path, headers=LOCAL_ACTION).json()
+    assert not judged["materials_ready"]
+    assert any(r["reason"] == "ASSET_HASH_CHANGED" for r in judged["missing"])
+    with factory.begin() as db:
+        db.get(Asset, chosen["id"]).locked = False
+    judged = client.post(path, headers=LOCAL_ACTION).json()
+    assert not judged["materials_ready"]
+    assert next(r for r in judged["requirements"] if r["family"] == "character")["asset_id"] is None

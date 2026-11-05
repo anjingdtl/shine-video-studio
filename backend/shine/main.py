@@ -437,6 +437,12 @@ def create_app(
     from shine.api_material import router as material_router
 
     app.include_router(material_router)
+    from shine.api_segments import router as segments_router
+
+    app.include_router(segments_router)
+    from shine.api_story import router as story_router
+
+    app.include_router(story_router)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):
@@ -666,6 +672,16 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Asset file is missing on disk")
         return FileResponse(path, media_type=asset.content_type, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/assets/{asset_id}/thumbnail")
+    def asset_thumbnail(asset_id: str, request: Request, db: DBSession):
+        from shine.media.thumbnails import thumbnail
+
+        asset = db.get(Asset, asset_id)
+        if not asset:
+            raise HTTPException(404, "Asset not found")
+        return thumbnail(safe_asset_path(actual_asset_root, asset.storage_path), asset.sha256,
+                         settings.ffmpeg_path, request.headers.get("if-none-match"))
 
     @app.patch("/api/v1/assets/{asset_id}/metadata")
     def update_asset_metadata(asset_id: str, body: AssetMetadataUpdate, db: DBSession) -> dict[str, Any]:

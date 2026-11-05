@@ -1131,3 +1131,30 @@ html[data-theme='dark'] .material-requirement-list b,.material-run b{color:#cdce
 html[data-theme='dark'] .material-field select,.material-field input{border-color:#3b3d2f;background:#22231d;color:#cdcec0}
 html[data-theme='dark'] .material-direction{border-color:#454a33}
 html[data-theme='dark'] .material-candidate{border-color:#454a33;background:#2b2d24;color:#cdcec0}
+
+/* Material previews preserve the full source and never alter H3 slot order. */
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr)); gap: 12px; min-width: 0; }
+.media-grid .media-card { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; min-width: 0; border: 1px solid var(--line); border-radius: 10px; }
+.media-card > *, .media-card .asset-name { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.media-card select, .media-card input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.media-preview-button { display: block; padding: 0; width: 100%; border: 0; background: transparent; cursor: zoom-in; }
+.media-preview-button img { display: block; width: 100%; height: 160px; object-fit: contain; background: var(--paper); }
+.media-card .asset-type-wrap { width: 100%; height: auto; }
+.material-candidate { display: flex; flex-direction: column; gap: 6px; padding: 6px; }
+.material-candidate.is-selected { outline: 3px solid var(--accent, #7568e7); border-radius: 8px; }
+.media-preview-dialog { width: min(94vw, 1100px); max-height: 92vh; padding: 16px; background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; }
+.media-preview-dialog::backdrop { background: #000b; }
+.media-preview-dialog img { display: block; width: 100%; max-height: 75vh; object-fit: contain; }
+.media-preview-button:focus-visible, .media-card input:focus-visible { outline: 3px solid var(--accent, #7568e7); outline-offset: 3px; }
+@media(max-width:900px) {
+  .topbar { height: auto; min-height: 58px; flex-wrap: wrap; gap: 8px; padding: 10px 16px; }
+  .top-actions { flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%; }
+  .top-actions > * { max-width: 100%; }
+}
+html[data-theme='dark'] .media-card, html[data-theme='dark'] .media-preview-dialog {
+  background: #232420; color: #e2e3db; border-color: #515347;
+}
+html[data-theme='dark'] .media-preview-button img { background: #2a2b23; }
+
+.material-run { background: var(--paper); color: var(--ink); }
+html[data-theme='dark'] .material-run { background: #232420; color: #e2e3db; }

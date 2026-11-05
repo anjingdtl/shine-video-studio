@@ -275,6 +275,9 @@ class FilmRunRequest(APIModel):
     allow_remote_text: bool = False
     supersedes_artifact_id: str | None = None
     shot_spec: ShotSpec | None = None
+    production_context: dict | None = None
+    consent_document_id: str | None = None
+    consent_document_sha256: str | None = None
 
 
 class ComfyOpsProposal(APIModel):

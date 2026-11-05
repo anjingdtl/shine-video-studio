@@ -46,7 +46,7 @@ const STATE = {
           candidates: [
             {
               candidate_id: 'cand-1',
-              status: 'PENDING_HUMAN_APPROVAL',
+              status: 'READY_FOR_REVIEW',
               content_sha256: 'b'.repeat(64),
               is_mock: false,
               formal_asset_id: null,
@@ -64,6 +64,7 @@ const STATE = {
 function routes() {
   return [
     { method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse(STATE) },
+    { method: 'GET', pattern: /projects\/p[12]\/assets$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /projects\/p1\/documents$/, respond: () => jsonResponse([{ id: 'doc-1', filename: '剧本.txt', sha256: 'a'.repeat(64) }]) },
     { method: 'GET', pattern: /projects\/p2\/material-preparation$/, respond: () => jsonResponse({ ...STATE, project_id: 'p2', requirements: [], runs: [] }) },
     { method: 'GET', pattern: /projects\/p2\/documents$/, respond: () => jsonResponse([]) },
@@ -140,6 +141,7 @@ it('批量晋升逐项显示结果，不会整体宣称成功', async () => {
   const user = userEvent.setup();
   render(<MaterialPreparationPanel projectId="p1" />);
   await screen.findAllByText(/林知远/);
+  await user.click(screen.getByRole('checkbox', { name: /选择 林知远/ }));
   await user.click(screen.getByRole('button', { name: '确认使用所选素材' }));
   const report = await screen.findByText(/APPROVAL_REQUIRED_OR_REPLAYED/);
   expect(report).toBeTruthy();
@@ -151,6 +153,7 @@ it('素材是否齐备由服务端判定，界面只如实显示未绑定项', a
   const user = userEvent.setup();
   render(<MaterialPreparationPanel projectId="p1" />);
   await screen.findAllByText(/林知远/);
+  await user.click(screen.getByRole('checkbox', { name: /选择 林知远/ }));
   await user.click(screen.getByRole('button', { name: '确认使用所选素材' }));
   expect(await screen.findByText(/还没有绑定有效的主素材/)).toBeTruthy();
   expect(screen.queryByText(/素材齐备/)).toBeNull();
@@ -223,4 +226,33 @@ it('冻结风格与素材视觉方向并排展示，是否一致由用户判断'
   expect(await screen.findByText(/影视风格已冻结（版本 3）/)).toBeTruthy();
   expect(screen.getByText(/色调：素材方向「青灰」／已冻结风格「暖色调」/)).toBeTruthy();
   expect(screen.getByText(/请在下方「影视风格」新建一个版本/)).toBeTruthy();
+});
+
+
+it('没有逐项选图时不能申请晋升授权，只晋升明确选中的版本', async () => {
+  const state = structuredClone(STATE);
+  state.runs[0].items[0].candidates.push({ ...state.runs[0].items[0].candidates[0], candidate_id: 'cand-2', attempt_no: 2 });
+  stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse(state) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  await screen.findAllByText(/林知远/);
+  expect(screen.getByRole('button', { name: '确认使用所选素材' })).toBeDisabled();
+  expect(stub.callsOf('POST', /approval-grants$/)).toHaveLength(0);
+  await user.click(screen.getByRole('checkbox', { name: /cand-2/ }));
+  await user.click(screen.getByRole('button', { name: '确认使用所选素材' }));
+  await waitFor(() => expect(stub.callsOf('POST', /approval-grants$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /approval-grants$/)[0].body).toMatchObject({ target_id: 'cand-2' });
+  expect(stub.callsOf('POST', /cand-1\/promote$/)).toHaveLength(0);
+});
+
+it('验证批次不能混入正式候选选择，来源策略从服务器恢复', async () => {
+  const state = structuredClone(STATE);
+  state.runs[0].kind = 'validation';
+  state.requirements[0].strategy = 'upload';
+  stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse(state) });
+  render(<MaterialPreparationPanel projectId="p1" />);
+  await screen.findAllByText(/林知远/);
+  expect(screen.getByLabelText('素材来源')).toHaveValue('upload');
+  expect(screen.queryByRole('checkbox', { name: /选择 林知远/ })).toBeNull();
+  expect(screen.getByText(/这是能力验证小样/)).toBeTruthy();
 });

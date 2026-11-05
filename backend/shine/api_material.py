@@ -61,6 +61,11 @@ class ResumeBody(StateVersionBody):
     item_ids: list[str] = Field(min_length=1, max_length=200)
 
 
+class ReconcileBody(StateVersionBody):
+    """A reconcile may be limited to the items the operator named."""
+    item_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
 class RegenerateBody(APIModel):
     requirement_id: str
     confirmation_id: str = Field(min_length=64, max_length=64)
@@ -197,6 +202,68 @@ class PrepareScenesBody(APIModel):
     expected_document_hash: str = Field(min_length=64, max_length=64)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
     allow_remote_text: bool = False
+    replace_unknown_task_id: str | None = None
+    replacement_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class TextConsentBody(APIModel):
+    document_id: str
+    expected_document_hash: str = Field(min_length=64, max_length=64)
+    expected_scope_hash: str = Field(min_length=64, max_length=64)
+    granted: bool
+
+
+def _text_scope(db, gateway, project_id, document):
+    from shine.h3.rulebook import digest
+    from shine.llm.base import LLMError
+    from shine.materialprep import text_consent
+
+    roles = []
+    for role in ("scriptwriter", "producer", "director", "cinematographer", "continuity_supervisor", "editor"):
+        try:
+            profile = gateway.profile_for_role(db, role)
+        except LLMError:
+            roles.append({"role": role, "configured": False})
+            continue
+        roles.append({"role": role, "configured": True, "provider": profile.name,
+                      "base_url": profile.base_url, "model": profile.model,
+                      "fingerprint": text_consent.fingerprint(profile),
+                      "allowed": text_consent.allowed(db, project_id, document, role, profile)})
+    scope = {"document_id": document.id, "document_sha256": document.sha256,
+             "roles": [{k: v for k, v in r.items() if k != "allowed"} for r in roles]}
+    return {**scope, "roles": roles, "scope_hash": digest(scope),
+            "transmission": "仅当前任务必要剧本文字、锁定事实和视觉方向；不发送素材字节。"}
+
+
+@router.get("/projects/{project_id}/material-preparation/text-consent/{document_id}")
+def text_consent_scope(project_id: str, document_id: str, db: DBSession,
+                       gateway: Annotated[LLMGateway, Depends(llm_gateway)]):
+    from shine.models import ProjectDocument
+
+    document = db.get(ProjectDocument, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    return _text_scope(db, gateway, project_id, document)
+
+
+@router.post("/projects/{project_id}/material-preparation/text-consent")
+def decide_text_consent(project_id: str, body: TextConsentBody, actor: Operator, db: DBSession,
+                        gateway: Annotated[LLMGateway, Depends(llm_gateway)]):
+    from shine.materialprep import text_consent
+    from shine.models import ProjectDocument
+
+    document = db.get(ProjectDocument, body.document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    scope = _text_scope(db, gateway, project_id, document)
+    if document.sha256 != body.expected_document_hash or scope["scope_hash"] != body.expected_scope_hash:
+        raise HTTPException(409, "MATERIAL_TEXT_CONSENT_SCOPE_CHANGED")
+    for row in scope["roles"]:
+        if row["configured"]:
+            profile = gateway.profile_for_role(db, row["role"])
+            text_consent.decide(db, project_id, document, row["role"], profile, body.granted)
+    db.commit()
+    return _text_scope(db, gateway, project_id, document)
 
 
 @router.post("/projects/{project_id}/material-preparation/scenes/prepare")
@@ -225,6 +292,11 @@ def prepare_material_scenes(
         raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
     if document.sha256 != body.expected_document_hash:
         raise HTTPException(409, {"code": "MATERIAL_DOCUMENT_STALE", "actual": document.sha256})
+    if len(document.text or "") > 4000:
+        raise HTTPException(409, {"code": "STORY_DURABLE_OUTLINE_REQUIRED",
+                                  "message": "这份剧本太长，一次性分析会丢掉细节。请改用「总体大纲与生产段落」："
+                                             "后台提取并归并全剧大纲，你确认后只为你勾选的段落准备正式分镜。",
+                                  "note": "长剧本请使用后台总体大纲任务，再选择生产段落。"})
     result = scenes.prepare_scenes(
         gateway,
         request.app.state.session_factory,
@@ -232,6 +304,8 @@ def prepare_material_scenes(
         document,
         locked_story_facts=body.locked_story_facts,
         allow_remote_text=body.allow_remote_text,
+        replace_unknown_task_id=body.replace_unknown_task_id,
+        replacement_key=body.replacement_key,
     )
     if result.get("error_code"):
         raise HTTPException(409, result)
@@ -270,19 +344,23 @@ def run_detail(project_id: str, run_id: str, db: DBSession):
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/cancel", status_code=202)
 def cancel_run(project_id: str, run_id: str, body: StateVersionBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
-    return {"status": "accepted", **service.request_cancel(db, run_id, body.expected_state_version)}
+    return {"status": "accepted", **service.request_cancel(db, run_id, body.expected_state_version,
+                                                    idempotency_key=body.idempotency_key)}
 
 
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/reconcile", status_code=202)
-def reconcile_run(project_id: str, run_id: str, body: StateVersionBody, actor: Operator, db: DBSession):
+def reconcile_run(project_id: str, run_id: str, body: ReconcileBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
-    return {"status": "accepted", **service.reconcile_run(db, run_id, body.expected_state_version)}
+    return {"status": "accepted", **service.reconcile_run(db, run_id, body.expected_state_version,
+                                                   idempotency_key=body.idempotency_key,
+                                                   item_ids=body.item_ids or None)}
 
 
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/resume", status_code=202)
 def resume_run(project_id: str, run_id: str, body: ResumeBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
-    return {"status": "accepted", **service.resume_items(db, run_id, body.item_ids, body.expected_state_version)}
+    return {"status": "accepted", **service.resume_items(db, run_id, body.item_ids, body.expected_state_version,
+                                                  idempotency_key=body.idempotency_key)}
 
 
 @router.post("/projects/{project_id}/material-preparation/regenerate", status_code=202)

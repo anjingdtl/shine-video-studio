@@ -23,7 +23,7 @@ from shine.llm.base import LLMTimeout
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import brief, image_prompts
 from shine.materialprep.models import MaterialItem, MaterialRun
-from shine.models import AgentArtifact, AgentTaskRecord
+from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument
 
 BRIEF_ANSWER = {
     "schema_version": "1.0",
@@ -68,10 +68,14 @@ def _responder(monkeypatch, handler) -> list:
 
 
 def _item(db, project_id: str, *, description: str = "三十岁上下，长风衣。"):
+    document = ProjectDocument(project_id=project_id, filename="script.txt", content_type="text/plain",
+                               sha256=graph_hash({"text": description}), source_format="txt", text=description)
+    db.add(document)
+    db.flush()
     plan_payload = {
         "purpose": PLAN_PURPOSE_ASSET_PREPARATION,
-        "document_id": "doc",
-        "script_hash": "h",
+        "document_id": document.id,
+        "script_hash": document.sha256,
         "request_hash": "rq",
         "scene_preparations": [
             {

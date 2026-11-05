@@ -549,6 +549,9 @@ class StoryboardRequest(APIModel):
     ] | None = None
     resume_steps: dict[str, str] = Field(default_factory=dict, max_length=8)
     replace_interrupted_task_id: str | None = Field(default=None, max_length=36)
+    production_context: dict | None = None
+    consent_document_id: str | None = None
+    consent_document_sha256: str | None = None
 
 
 # The crew order.  The chain and the resume request both walk this list.
@@ -626,6 +629,9 @@ def generate_storyboard(
     else:
         raise HTTPException(422, "STORYBOARD_SCRIPT_REQUIRED")
 
+    if body.production_context is not None:
+        from shine.materialprep.story import verified_production_context
+        body.production_context = verified_production_context(db, project_id, script_text, body.production_context)
     needed_roles = STORYBOARD_CHAIN
     routes = {}
     for role in needed_roles:
@@ -642,6 +648,7 @@ def generate_storyboard(
         "project_id": project_id,
         "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
         "locked_story_facts": body.locked_story_facts,
+        **({"production_context": body.production_context} if body.production_context is not None else {}),
         "style_version_id": project.frozen_style_version_id,
         "approved_asset_manifest": asset_context(db, project_id),
         "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
@@ -782,6 +789,9 @@ def generate_storyboard(
 
     def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
+        if body.production_context is not None:
+            kwargs.update(production_context=body.production_context, consent_document_id=body.consent_document_id,
+                          consent_document_sha256=body.consent_document_sha256)
         last: ValueError | LLMError | None = None
         repair_visual_language = False
         for attempt in range(1, attempts + 1):

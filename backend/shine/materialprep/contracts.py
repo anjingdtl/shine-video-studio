@@ -20,9 +20,10 @@ change what the user confirmed.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import re
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, ValidationInfo, field_validator
 
 from shine.schemas import APIModel
 
@@ -50,6 +51,9 @@ class ScriptPreparationRequirement(APIModel):
     description: str = Field(default="", max_length=600)
     source_span_ids: list[_SpanId] = Field(default_factory=list, max_length=8)
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=4)
+
+
+_CJK = re.compile(r"[\u3400-\u9fff]")
 
 
 class ScriptPreparation(APIModel):
@@ -80,6 +84,27 @@ class MaterialImageBrief(APIModel):
     must_keep: list[_KeepItem] = Field(default_factory=list, max_length=12)
     avoid: list[_KeepItem] = Field(default_factory=list, max_length=12)
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=6)
+
+    @field_validator("appearance", "must_keep", "avoid")
+    @classmethod
+    def _english_prose_only(cls, value: Any, info: ValidationInfo) -> Any:
+        """The prompt prose is English; a Chinese fragment is a contract failure.
+
+        The prompt composer refuses a mixed-script prompt, and the producer is
+        the only one who can fix its own answer.  Validating here means the
+        answer is corrected once, by the model that wrote it, instead of
+        reaching the renderer and being refused there.  The requirement text
+        itself stays in the script language.
+        """
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            text = getattr(item, "text", item)
+            if isinstance(text, str) and _CJK.search(text):
+                raise ValueError(
+                    f"{info.field_name} must be written in English visual prose; "
+                    "do not repeat the Chinese requirement name inside it"
+                )
+        return value
 
 
 class MaterialVisualDirection(APIModel):

@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import replace
 from datetime import timedelta
@@ -3961,8 +3962,21 @@ def run_configured_series_once(
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.comfyops.runtime_configuration import resolve_runtime
 
-    with session_factory() as runtime_db:
-        current = resolve_runtime(runtime_db, settings)
+    try:
+        with session_factory() as runtime_db:
+            current = resolve_runtime(runtime_db, settings)
+    except HTTPException as exc:
+        if not str(exc.detail).startswith("ACTIVE_RUNTIME_"):
+            raise
+        # Text preparation does not use or validate the video runtime. Keep its
+        # durable queue available without bypassing any H3 activation guard.
+        from shine.materialprep.story import run_pending_story_task
+
+        if run_pending_story_task(session_factory, settings, worker_id,
+                                  heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                                 phase="story_preparation")):
+            return "story-preparation"
+        raise
     if current != settings:
         # No inherited client may point at an old port after activation. Use a
         # scoped client for this iteration, keeping explicit injected clients
@@ -4009,6 +4023,12 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     if series is not None:
         return f"series:{series}"
     from shine.materialprep.execution import run_pending_image_items
+    from shine.materialprep.story import run_pending_story_task
+
+    if run_pending_story_task(session_factory, settings, worker_id,
+                              heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                             phase="story_preparation")):
+        return "story-preparation"
 
     # Material images run after every real H3 series and queued shot, and each
     # item takes and releases the shared exclusive lease on its own, so video
@@ -4041,6 +4061,21 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
 
 
+def _keep_heartbeat(session_factory, worker_id: str, stop: threading.Event, interval: float = 10.0) -> None:
+    """Keep the Worker's liveness signal alive while a long task runs.
+
+    A busy Worker is not an absent one.  The tick writes its own heartbeat when
+    it is idle, but a render can hold the tick for minutes, and a workbench
+    that reports an offline Worker during a render cannot tell a running
+    Worker from a dead one.
+    """
+    while not stop.wait(interval):
+        try:
+            heartbeat(session_factory, worker_id, status="online")
+        except Exception as exc:  # noqa: BLE001 - the liveness thread must never die
+            logger.warning('worker_heartbeat_deferred error=%s', type(exc).__name__)
+
+
 def serve(poll_seconds: float = 0.5) -> None:
     settings = Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -4053,6 +4088,15 @@ def serve(poll_seconds: float = 0.5) -> None:
 
         comfy_client = _renderer_client(settings)
     heartbeat(session_factory, worker_id, status="online", phase="starting")
+    # A long render holds the Worker inside one tick for minutes.  The liveness
+    # signal must keep flowing while it works, otherwise the workbench reports
+    # "the background service is offline" exactly when the Worker is busy
+    # producing something.
+    stop_beat = threading.Event()
+    beat_thread = threading.Thread(
+        target=_keep_heartbeat, args=(session_factory, worker_id, stop_beat),
+        name="shine-worker-heartbeat", daemon=True)
+    beat_thread.start()
     try:
         while True:
             try:
@@ -4074,7 +4118,11 @@ def serve(poll_seconds: float = 0.5) -> None:
             if claimed is None:
                 heartbeat(session_factory, worker_id, status="online", phase="idle")
                 time.sleep(poll_seconds)
+            else:
+                # Busy is not idle: the heartbeat still has to be written.
+                heartbeat(session_factory, worker_id, status="online", phase=claimed)
     except KeyboardInterrupt:
+        stop_beat.set()
         heartbeat(session_factory, worker_id, status="stopped", phase="stopped")
 
 

@@ -505,8 +505,13 @@ class ProjectRuleLock(Base):
 
 class AgentTaskRecord(Base):
     __tablename__ = "agent_task_records"
+    __table_args__ = (Index("uq_agent_task_request_identity", "request_identity", unique=True),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     role_id: Mapped[str] = mapped_column(String(48), nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -521,6 +526,19 @@ class AgentTaskRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trace: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class MaterialTextConsent(Base):
+    __tablename__ = "material_text_consents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(ForeignKey("project_documents.id"), nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(48), nullable=False)
+    provider_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    granted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class AgentArtifact(Base):

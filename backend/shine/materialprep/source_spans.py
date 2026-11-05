@@ -31,6 +31,7 @@ HEADING = re.compile(
 
 MAX_SCENE_CHARS = 4000
 MAX_SPANS_PER_SCENE = 200
+MAX_SPAN_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,12 @@ class SourceSpan:
     id: str
     scene_key: str
     text: str
+    start_offset: int = 0
+    end_offset: int = 0
 
     def as_public(self) -> dict[str, Any]:
-        return {"id": self.id, "scene_key": self.scene_key, "text": self.text}
+        return {"id": self.id, "scene_key": self.scene_key, "text": self.text,
+                "start_offset": self.start_offset, "end_offset": self.end_offset}
 
 
 @dataclass(frozen=True)
@@ -63,50 +67,59 @@ class Scene:
         }
 
 
-def _paragraph_blocks(lines: list[str]) -> list[tuple[list[str], str]]:
-    """Chunk a document without headings into readable scene-sized blocks."""
-    blocks: list[tuple[list[str], str]] = []
-    current: list[str] = []
-    size = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        if current and size + len(line) > MAX_SCENE_CHARS:
-            blocks.append((current, current[0].strip()[:80]))
-            current = []
-            size = 0
-        current.append(line)
-        size += len(line) + 1
-    if current:
-        blocks.append((current, current[0].strip()[:80]))
-    return blocks
+def segment_document(text: str, *, max_scene_chars: int = MAX_SCENE_CHARS) -> list[Scene]:
+    """Partition all original bytes-as-text, including whitespace and preamble.
 
-
-def segment_document(text: str) -> list[Scene]:
-    """Split a script into numbered scenes with a citable span catalogue."""
-    lines = (text or "").splitlines()
-    starts = [index for index, line in enumerate(lines) if line.strip() and HEADING.match(line)]
-    if starts:
-        blocks: list[tuple[list[str], str]] = []
-        for position, start in enumerate(starts):
-            end = starts[position + 1] if position + 1 < len(starts) else len(lines)
-            block = lines[start:end]
-            blocks.append((block, block[0].strip()[:80]))
-    else:
-        blocks = _paragraph_blocks(lines)
+    Offsets are Python Unicode character offsets into the immutable document.
+    Every chunk is bounded, even a single line or a heading scene; reaching the
+    span limit starts another chunk instead of dropping the tail.
+    """
+    if max_scene_chars < 1:
+        raise ValueError("max_scene_chars must be positive")
+    if not text or not text.strip():
+        return []
+    lines = list(re.finditer(r"[^\n]*\n|[^\n]+$", text))
+    headings = [line.start() for line in lines if HEADING.match(line.group())]
+    boundaries = sorted({0, *headings, len(text)})
     scenes: list[Scene] = []
-    for number, (block, title) in enumerate(blocks, start=1):
-        key = f"S{number}"
-        spans: list[SourceSpan] = []
-        for line in block:
-            if not line.strip():
-                continue
-            if len(spans) >= MAX_SPANS_PER_SCENE:
-                break
-            spans.append(SourceSpan(id=f"{key}#p{len(spans) + 1}", scene_key=key, text=line.strip()))
-        body = "\n".join(line.strip() for line in block if line.strip())
-        scenes.append(Scene(key=key, title=title, text=body, spans=tuple(spans)))
+    for start, end in zip(boundaries, boundaries[1:], strict=False):
+        cursor = start
+        while cursor < end:
+            chunk_end = cursor
+            fragments: list[tuple[int, int]] = []
+            while chunk_end < end and len(fragments) < MAX_SPANS_PER_SCENE:
+                remaining = max_scene_chars - (chunk_end - cursor)
+                if remaining <= 0:
+                    break
+                newline = text.find("\n", chunk_end, end)
+                line_end = newline + 1 if newline >= 0 else end
+                stop = min(line_end, chunk_end + remaining, chunk_end + MAX_SPAN_CHARS)
+                fragments.append((chunk_end, stop))
+                chunk_end = stop
+            key = f"S{len(scenes) + 1}"
+            spans = tuple(SourceSpan(
+                id=f"{key}#p{i}", scene_key=key, text=text[left:right],
+                start_offset=left, end_offset=right,
+            ) for i, (left, right) in enumerate(fragments, 1))
+            body = text[cursor:chunk_end]
+            title = next((line.strip()[:80] for line in body.splitlines() if line.strip()), "空白来源")
+            scenes.append(Scene(key=key, title=title, text=body, spans=spans))
+            cursor = chunk_end
     return scenes
+
+
+def spans_for_scene_key(scenes: list[Scene], key: str) -> set[str] | None:
+    """Resolve a budgeted fragment only inside its original source scene."""
+    for scene in scenes:
+        if key == scene.key:
+            return {span.id for span in scene.spans}
+        match = re.fullmatch(re.escape(scene.key) + r"@(\d+)-(\d+)", key)
+        if match:
+            left, right = map(int, match.groups())
+            spans = [s for s in scene.spans if s.start_offset >= left and s.end_offset <= right]
+            if spans and spans[0].start_offset == left and spans[-1].end_offset == right:
+                return {span.id for span in spans}
+    return None
 
 
 def span_catalogue(scenes: list[Scene]) -> list[dict[str, Any]]:

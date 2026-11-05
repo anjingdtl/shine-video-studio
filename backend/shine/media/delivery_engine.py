@@ -74,6 +74,14 @@ def enqueue_auto_delivery(db: Session, series: ProductionSeries) -> DeliveryOrde
     second order; a different version (rework, subtitle change) does.
     """
     from shine.media.delivery_models import DeliveryOrder
+    from shine.models import AgentTaskRecord
+
+    # A re-take is evidence awaiting an explicit assembly selection. Do not
+    # silently publish a one-segment film when its isolated series completes.
+    retakes = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == series.project_id, AgentTaskRecord.role_id == "segment_regenerate"))
+    if any(row.trace.get("series_id") == series.id for row in retakes):
+        return None
 
     items = list(series.items)
     if not items:

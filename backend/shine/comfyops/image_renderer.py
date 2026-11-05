@@ -28,7 +28,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.handoff_memory import evaluate_readiness, probe_memory
@@ -208,13 +208,14 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str) -> 
         with factory.begin() as db:
             db.execute(text("BEGIN IMMEDIATE"))
             instance = db.get(ComfyInstance, instance_id)
-            instance.payload = {
-                **instance.payload,
-                "process": process,
-                "url": f"http://127.0.0.1:{port}",
-                "purpose": "image",
-            }
-            instance.sha256 = graph_hash(instance.payload)
+            # The image renderer and the H3 renderer share ONE adopted instance
+            # row, and the active runtime identity records that row's digest.
+            # Writing the image process into it changed the digest, so the
+            # runtime identity no longer matched and the Worker reported
+            # ACTIVE_RUNTIME_CONFIGURATION_CHANGED after every image render.
+            # The image runtime keeps its process, port and listener in its own
+            # durable startup record; the shared row is left as the installer
+            # left it.
             instance.status = "RUNNING_PENDING_HEALTH"
             row = db.get(AppSetting, key)
             row.value = {**row.value, "stage": "RUNNING", "process": process, "listener": listener}
@@ -259,6 +260,30 @@ def ensure_image_renderer(factory, settings, *, instance_id: str) -> dict[str, A
     return {**result, "reused": False}
 
 
+def _clear_image_marks(factory, instance_id: str, job_name: str | None = None) -> bool:
+    """Restore the instance row to the shape the installation evidence states.
+
+    An earlier revision of the image renderer wrote its own marks onto the
+    shared H3 instance row.  The one-time repair takes them back, including a
+    process entry this runtime started, so the row matches the installation
+    attempt again and the H3 activation can compare it.
+    """
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        row = db.get(ComfyInstance, instance_id)
+        if row is None or not isinstance(row.payload, dict):
+            return False
+        cleaned = _without_image_marks(row.payload)
+        process = cleaned.get("process") or {}
+        if job_name and process.get("job_name") == job_name:
+            cleaned = {**cleaned, "process": None}
+        if cleaned == row.payload:
+            return False
+        row.payload = cleaned
+        row.sha256 = graph_hash(cleaned)
+        return True
+
+
 def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> dict[str, Any]:
     """Stop the managed image renderer and give the GPU memory back.
 
@@ -272,10 +297,13 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
     if not record:
         return {"status": "NOT_STARTED", "instance_id": instance_id}
     state = managed_process_state(record)
+    job_name = (record.get("process") or {}).get("job_name")
     if state == "STOPPED":
+        _clear_image_marks(factory, instance_id, job_name)
         return {"status": "STOPPED", "instance_id": instance_id, "outcome": "already_stopped"}
     if state == "GONE":
         _mark_stopped(factory, instance_id, record)
+        _clear_image_marks(factory, instance_id, job_name)
         return {"status": "STOPPED", "instance_id": instance_id, "outcome": "recorded_stopped"}
     if state != "RUNNING":
         raise HTTPException(409, {
@@ -283,7 +311,6 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
             "detail": "记录里的进程身份无法证明属于本工作台，因此没有停止它。",
             "state": state,
         })
-    job_name = (record.get("process") or {}).get("job_name")
     evidence = terminate_named_group(job_name, timeout=20)
     if evidence.get("active_processes") != 0:
         raise HTTPException(409, {
@@ -294,18 +321,32 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
     return {"status": "STOPPED", "instance_id": instance_id, "outcome": "stopped", "evidence": evidence}
 
 
+def _without_image_marks(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop the image-only marks from the shared instance row.
+
+    The image runtime and the H3 runtime share one adopted instance.  While it
+    runs, the image renderer marks the row; those marks are not part of the
+    installation evidence.  Leaving them behind would make the H3 activation
+    compare the row against the installation attempt and refuse forever, with
+    a blocker that names neither cause.
+    """
+    if payload.get("purpose") != "image":
+        return payload
+    cleaned = {key: value for key, value in payload.items() if key not in {"purpose", "url"}}
+    return cleaned
+
+
 def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str = "worker") -> None:
     job_name = (record.get("process") or {}).get("job_name")
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
-        if job_name:
-            for row in db.scalars(select(ComfyInstance)).all():
-                payload = row.payload if isinstance(row.payload, dict) else {}
-                process = payload.get("process") or {}
-                if process.get("job_name") == job_name:
-                    row.payload = {**payload, "process": None}
-                    row.sha256 = graph_hash(row.payload)
-                    row.status = "STOPPED"
+        # Only the status changes.  The shared row's payload belongs to the
+        # installation evidence and the active runtime identity: the image
+        # runtime keeps its own process in its startup record, so the row keeps
+        # the digest the installer recorded.
+        row = db.get(ComfyInstance, instance_id)
+        if row is not None:
+            row.status = "STOPPED"
         row = db.get(AppSetting, image_startup_key(instance_id))
         if row is not None:
             value = dict(row.value) if isinstance(row.value, dict) else {}

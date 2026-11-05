@@ -1,0 +1,428 @@
+"""Long-document work units on AgentTaskRecord and the resident Worker.
+
+Production sections are source ranges (chapters/scene groups). They are never
+H3 generation segments. Model subcalls have their own durable input identity;
+an expired orchestration claim cannot authorise replay of an unknown subcall.
+"""
+
+import hashlib
+import logging
+from contextlib import contextmanager
+from datetime import timedelta
+from threading import Event, Thread
+from types import SimpleNamespace
+from typing import Annotated, Literal
+from uuid import NAMESPACE_URL, uuid5
+
+from fastapi import HTTPException
+from pydantic import Field
+from sqlalchemy import or_, select, text, update
+from sqlalchemy.exc import OperationalError
+
+from shine.h3.rulebook import digest
+from shine.llm.gateway import LLMGateway
+from shine.llm.secrets import SecretStore
+from shine.materialprep import scenes, text_consent
+from shine.materialprep.agent_call import budget_report, call_material_agent
+from shine.materialprep.source_spans import HEADING, segment_document
+from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
+from shine.schemas import APIModel
+from shine.services import add_audit
+
+OUTLINE_RUN = "story_outline_run"
+SECTION_RUN = "story_section_run"
+OUTLINE_TOOL = "story_outline_merge"
+VERSION = "story-outline-v1"
+
+
+class OutlinePart(APIModel):
+    schema_version: Literal["1.0"] = "1.0"
+    summary: str = Field(min_length=1, max_length=1200)
+    story_line: list[Annotated[str, Field(max_length=300)]] = Field(max_length=12)
+    timeline: list[Annotated[str, Field(max_length=300)]] = Field(max_length=16)
+    relationships: list[Annotated[str, Field(max_length=300)]] = Field(max_length=24)
+    questions: list[Annotated[str, Field(max_length=300)]] = Field(max_length=12)
+
+
+def source_sections(project_id, document):
+    import re
+
+    source = document.text or ""
+    boundaries = [0]
+    titles = {}
+    for line in re.finditer(r"[^\n]*\n|[^\n]+$", source):
+        if HEADING.match(line.group()) or re.match(r"\s*第[^\n]{1,20}[章节回卷]", line.group()):
+            boundaries.append(line.start())
+            titles[line.start()] = line.group().strip()[:100]
+    boundaries = sorted({*boundaries, len(source)})
+    return [{"production_section_id": str(uuid5(NAMESPACE_URL,
+                f"shine:{project_id}:{titles.get(left, 'preamble')}:"
+                f"{sum(titles.get(other, 'preamble') == titles.get(left, 'preamble')
+                       for other in boundaries[:index])}")),
+             "order": index + 1, "title": titles.get(left, "前言与人物设定" if left == 0 else "生产段落"),
+             "source_sha256": hashlib.sha256(source[left:right].encode()).hexdigest(),
+             "start_offset": left, "end_offset": right,
+             "estimated_duration_s": round((right - left) / 5, 1),
+             "estimate_basis": "原文字数/5，仅供规划，不是 H3 时长或实测",
+             "status": "OUTLINE_CONFIRMATION_REQUIRED"}
+            for index, (left, right) in enumerate(zip(boundaries, boundaries[1:], strict=False)) if right > left]
+
+
+def queue_outline(db, project_id, document, gateway, facts):
+    profile = gateway.profile_for_role(db, "scriptwriter")
+    fingerprint = text_consent.fingerprint(profile)
+    identity = digest({"project": project_id, "document": document.id, "hash": document.sha256,
+                       "facts": facts, "profile": fingerprint, "tool": OUTLINE_RUN, "version": VERSION})
+    old = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.request_identity == identity))
+    if old:
+        return old
+    row = AgentTaskRecord(project_id=project_id, role_id=OUTLINE_RUN, request_identity=identity,
+        input_hash=identity, asset_manifest_hash=identity, rulepack_id=VERSION, rulepack_hash=digest(VERSION),
+        model_profile_id=profile.id, model_id=profile.model, schema_version="1.0", status="QUEUED",
+        trace={"document_id": document.id, "document_sha256": document.sha256, "locked_facts": facts,
+               "provider_fingerprint": fingerprint, "stage": "EXTRACT", "cursor": 0,
+               "leaf_artifact_ids": [], "level": 0, "level_inputs": [], "level_outputs": [],
+               "production_sections": source_sections(project_id, document), "automatic_replay": False})
+    db.add(row)
+    db.flush()
+    add_audit(db, "local-user", "STORY_OUTLINE_QUEUED", "agent_task", row.id,
+              {"document_sha256": document.sha256}, project_id=project_id)
+    return row
+
+
+def _merge(factory, gateway, project_id, document, ids, facts):
+    with factory() as db:
+        profile = gateway.profile_for_role(db, "scriptwriter")
+        nodes = [db.get(AgentArtifact, key) for key in ids]
+        if any(n is None or n.project_id != project_id or n.sha256 != digest(n.payload_json) for n in nodes):
+            return {"status": "FAILED", "error_code": "STORY_SOURCE_ARTIFACT_CHANGED"}
+        context = {"parts": [{"summary": n.payload_json.get("summary"),
+                    "timeline": n.payload_json.get("timeline", []),
+                    "relationships": n.payload_json.get("relationships", []),
+                    "characters": [r.get("name") for r in n.payload_json.get("requirements", [])
+                                   if r.get("family") == "character"]} for n in nodes],
+                   "locked_facts": facts}
+        schema = OutlinePart.model_json_schema()
+        system = ("Merge only these source-backed outline parts in their order. Preserve chronology, conflicts, "
+                  "relationships and locked facts; report uncertainty as questions. Do not invent scenes, "
+                  "dialogue, asset IDs, production completion or H3 prompts. Return the declared shallow JSON.")
+        budget = budget_report(context, schema, system, gateway.config_for(profile))
+        if not budget["fits"]:
+            return {"status": "FAILED", "error_code": "LLM_CONTEXT_BUDGET_EXCEEDED", "budget": budget}
+        fingerprint = text_consent.fingerprint(profile)
+    identity = digest({"tool": OUTLINE_TOOL, "version": VERSION, "project": project_id,
+                       "document": document.sha256, "inputs": ids, "context": context, "provider": fingerprint})
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        old = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.request_identity == identity))
+        if old:
+            artifact = db.scalar(select(AgentArtifact).where(AgentArtifact.source_task_id == old.id))
+            return {"status": old.status, "task_id": old.id, "artifact_id": artifact.id if artifact else None}
+        task = AgentTaskRecord(project_id=project_id, role_id="scriptwriter", input_hash=identity,
+            request_identity=identity, asset_manifest_hash=identity, rulepack_id=VERSION, rulepack_hash=digest(VERSION),
+            model_profile_id=profile.id, model_id=profile.model, schema_version="1.0", status="RUNNING",
+            trace={"tool": OUTLINE_TOOL, "document_id": document.id, "document_sha256": document.sha256,
+                   "external_outcome": "UNKNOWN", "budget": budget, "automatic_replay": False})
+        db.add(task)
+        db.flush()
+        task_id = task.id
+    result = call_material_agent(gateway, factory, "scriptwriter", system=system, context=context, schema=schema,
+        contract=OutlinePart, before_call=text_consent.guard(project_id, document.id, document.sha256,
+                                                            "scriptwriter", fingerprint, gateway))
+    with factory.begin() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        if not result.ok:
+            task.status = "NEEDS_REVIEW" if result.uncertain else "FAILED"
+            task.error_code = result.error_code
+            task.trace = {**task.trace, "external_outcome": "UNKNOWN" if result.uncertain else "NOT_SENT"}
+            return {"status": task.status, "task_id": task.id, "error_code": task.error_code}
+        payload = OutlinePart.model_validate(result.parsed).model_dump(mode="json")
+        artifact = AgentArtifact(project_id=project_id, kind="StoryOutlinePart", schema_version="1.0",
+            payload_json=payload, sha256=digest(payload), producer_role="scriptwriter", source_task_id=task_id,
+            input_revision_ids=ids)
+        db.add(artifact)
+        db.flush()
+        task.status = "SUCCEEDED"
+        task.trace = {**task.trace, "external_outcome": "SUCCEEDED", "output_hash": artifact.sha256}
+        return {"status": "SUCCEEDED", "task_id": task_id, "artifact_id": artifact.id}
+
+
+def _finish_step(factory, task_id, version, worker_id, trace, status="QUEUED", error=None):
+    with factory.begin() as db:
+        changed = db.execute(update(AgentTaskRecord).where(
+            AgentTaskRecord.id == task_id, AgentTaskRecord.state_version == version,
+            AgentTaskRecord.lease_owner == worker_id, AgentTaskRecord.status == "RUNNING",
+        ).values(trace=trace, status=status, error_code=error, lease_owner=None, lease_expires_at=None,
+                 state_version=version + 1)).rowcount
+        return bool(changed)
+
+
+@contextmanager
+def _renew_story_claim(factory, task_id, version, worker_id, heartbeat_fn=None, interval=10):
+    """Renew only this fenced claim; a pause or changed owner ends renewal."""
+    stop = Event()
+
+    def renew():
+        try:
+            with factory.begin() as db:
+                changed = db.execute(update(AgentTaskRecord).where(
+                    AgentTaskRecord.id == task_id, AgentTaskRecord.state_version == version,
+                    AgentTaskRecord.lease_owner == worker_id, AgentTaskRecord.status == "RUNNING",
+                ).values(lease_expires_at=utcnow() + timedelta(minutes=30))).rowcount
+            if not changed:
+                stop.set()
+                return
+            if heartbeat_fn:
+                heartbeat_fn()
+        except OperationalError:
+            # A busy SQLite writer does not prove the claim was lost.
+            logging.getLogger(__name__).warning("story_heartbeat_deferred database_busy")
+
+    def loop():
+        while not stop.wait(interval):
+            renew()
+
+    renew()
+    thread = Thread(target=loop, name="shine-story-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):
+    """One durable unit per tick, with no database writer held over a model call."""
+    gateway = gateway or LLMGateway(SecretStore(settings.secret_store_dir or settings.data_dir / "secrets"))
+    now = utcnow()
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        row = db.scalar(select(AgentTaskRecord).where(
+            AgentTaskRecord.role_id.in_([OUTLINE_RUN, SECTION_RUN]),
+            or_(AgentTaskRecord.status == "QUEUED",
+                (AgentTaskRecord.status == "RUNNING") & (AgentTaskRecord.lease_expires_at <= now)),
+        ).order_by(AgentTaskRecord.created_at).limit(1))
+        if row is None:
+            return False
+        row.status = "RUNNING"
+        row.lease_owner = worker_id
+        row.lease_expires_at = now + timedelta(minutes=30)
+        row.state_version += 1
+        task_id, version, project_id, role = row.id, row.state_version, row.project_id, row.role_id
+        state = dict(row.trace)
+        document = db.get(ProjectDocument, state["document_id"])
+    with _renew_story_claim(factory, task_id, version, worker_id, heartbeat_fn):
+        if document is None or document.project_id != project_id or document.sha256 != state["document_sha256"]:
+            _finish_step(factory, task_id, version, worker_id, state, "FAILED", "STORY_DOCUMENT_CHANGED")
+            return True
+        try:
+            if role == SECTION_RUN:
+                return _run_section(factory, settings, gateway, task_id, version, worker_id,
+                                     project_id, document, state)
+            profile = None
+            with factory() as db:
+                profile = gateway.profile_for_role(db, "scriptwriter")
+                if text_consent.fingerprint(profile) != state["provider_fingerprint"]:
+                    raise HTTPException(409, "STORY_PROVIDER_CHANGED")
+            source = segment_document(document.text)
+            if state["stage"] == "EXTRACT" and state["cursor"] < len(source):
+                current = source[state["cursor"]]
+                result = scenes.prepare_scenes(gateway, factory, project_id, document,
+                    locked_story_facts=state["locked_facts"], scene_keys=[current.key])
+                successful = {"PREPARED", "REUSED"}
+                if result.get("error_code") or any(s["status"] not in successful for s in result["scenes"]):
+                    state["blocked_subtasks"] = result.get("scenes", [])
+                    _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW",
+                                 result.get("error_code") or "STORY_EXTRACTION_NEEDS_REVIEW")
+                    return True
+                state["leaf_artifact_ids"] = [*state["leaf_artifact_ids"],
+                                               *(s["artifact_id"] for s in result["scenes"])]
+                state["cursor"] += 1
+            elif state["stage"] == "EXTRACT":
+                state.update(stage="MERGE", cursor=0, level_inputs=state["leaf_artifact_ids"], level_outputs=[])
+            elif state["stage"] == "MERGE" and state["cursor"] < len(state["level_inputs"]):
+                ids = state["level_inputs"][state["cursor"]:state["cursor"] + 3]
+                merged = _merge(factory, gateway, project_id, document, ids, state["locked_facts"])
+                if merged["status"] != "SUCCEEDED":
+                    state["blocked_subtasks"] = [merged]
+                    _finish_step(factory, task_id, version, worker_id, state,
+                                 "NEEDS_REVIEW" if merged["status"] in {"RUNNING", "NEEDS_REVIEW"} else "FAILED",
+                                 merged.get("error_code", "STORY_MERGE_NEEDS_REVIEW"))
+                    return True
+                state["level_outputs"] = [*state["level_outputs"], merged["artifact_id"]]
+                state["cursor"] += len(ids)
+            elif state["stage"] == "MERGE" and len(state["level_outputs"]) > 1:
+                state.update(level=state["level"] + 1, cursor=0, level_inputs=state["level_outputs"], level_outputs=[])
+            else:
+                with factory.begin() as db:
+                    # Control/version fencing also guards publication of the final artifact.
+                    owner = db.get(AgentTaskRecord, task_id)
+                    if owner.state_version != version or owner.lease_owner != worker_id or owner.status != "RUNNING":
+                        return True
+                    final = db.get(AgentArtifact, state["level_outputs"][0])
+                    leaves = [db.get(AgentArtifact, key) for key in state["leaf_artifact_ids"]]
+                    names = sorted({r["name"] for leaf in leaves for r in leaf.payload_json.get("requirements", [])
+                                    if r.get("family") == "character"})
+                    payload = {**final.payload_json, "document_id": document.id, "document_sha256": document.sha256,
+                        "original_text_sha256": hashlib.sha256(document.text.encode()).hexdigest(),
+                        "offset_unit": "unicode_codepoint",
+                        "production_sections": state["production_sections"],
+                        "characters": [{"name": name, "entity_id": name,
+                                        "stable_identity": str(uuid5(NAMESPACE_URL,
+                                                                     f"shine:{project_id}:character:{name}"))}
+                                       for name in names],
+                        "source_locked_facts": [{"scene_key": leaf.payload_json["scene_key"],
+                                                 "locked_facts": leaf.payload_json.get("locked_facts", []),
+                                                 "artifact_id": leaf.id} for leaf in leaves],
+                        "locked_facts": state["locked_facts"], "leaf_artifact_ids": state["leaf_artifact_ids"],
+                        "continuity_status": "PLANNING_ONLY_NO_PREVIOUS_RENDER_CLAIM"}
+                    outline = AgentArtifact(project_id=project_id, kind="StoryOutline", schema_version="1.0",
+                        payload_json=payload, sha256=digest(payload), producer_role="scriptwriter",
+                        source_task_id=task_id, input_revision_ids=[final.id, *state["leaf_artifact_ids"]])
+                    db.add(outline)
+                    db.flush()
+                    owner.trace = {**state, "stage": "AWAITING_OUTLINE_CONFIRMATION", "outline_artifact_id": outline.id}
+                    owner.status, owner.lease_owner, owner.lease_expires_at = "SUCCEEDED", None, None
+                    owner.state_version += 1
+                return True
+            _finish_step(factory, task_id, version, worker_id, state)
+        except Exception as exc:  # keep the orchestration intent; child UNKNOWN is never replayed
+            code = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else type(exc).__name__
+            _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW", str(code)[:64])
+        return True
+
+
+def _run_section(factory, settings, gateway, task_id, version, worker_id, project_id, document, state):
+    from shine.agents.film import asset_context
+    from shine.api_film import StoryboardRequest, generate_storyboard
+    from shine.models import Project
+
+    cursor = state.get("cursor", 0)
+    units = state["units"]
+    if cursor >= len(units):
+        _finish_step(factory, task_id, version, worker_id, state,
+                     "NEEDS_REVIEW" if state.get("invalidated_section_ids") else "SUCCEEDED")
+        return True
+    unit = units[cursor]
+    if unit["production_section_id"] in state.get("invalidated_section_ids", []):
+        state["cursor"] = cursor + 1
+        _finish_step(factory, task_id, version, worker_id, state)
+        return True
+    with factory() as db:
+        project = db.get(Project, project_id)
+        if (project.frozen_style_version_id != state["style_version_id"]
+                or digest(asset_context(db, project_id)) != state["asset_manifest_hash"]):
+            raise HTTPException(409, "STORY_FROZEN_CONTRACT_CHANGED")
+        outline = db.get(AgentArtifact, state["outline_artifact_id"])
+        if not outline or not outline.approved_at or outline.stale or outline.sha256 != state["outline_sha256"]:
+            raise HTTPException(409, "STORY_OUTLINE_NOT_CONFIRMED")
+        for role in ("scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"):
+            profile = gateway.profile_for_role(db, role)
+            if not text_consent.allowed(db, project_id, document, role, profile):
+                raise HTTPException(409, "REMOTE_AGENT_CONSENT_REQUIRED")
+        result = generate_storyboard(project_id, StoryboardRequest(
+            text=document.text[unit["start_offset"]:unit["end_offset"]],
+            locked_story_facts=state["locked_facts"], allow_remote_text=True,
+            start_role=state.get("failed_role"), resume_steps=state.get("resume_steps", {}),
+            production_context={"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+                "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                "story_line": outline.payload_json.get("story_line", []),
+                "timeline": outline.payload_json.get("timeline", []),
+                "characters": outline.payload_json.get("characters", []),
+                "continuity_facts": unit.get("continuity_facts", []),
+                "previous_render_status": "NOT_CLAIMED"},
+            consent_document_id=document.id, consent_document_sha256=document.sha256,
+        ), SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings))), db, gateway)
+    if result["status"] != "PROPOSED":
+        # The existing chain returns its own successful role artifacts. Resume
+        # from the failed role only; unknown tasks retain the chain's guard.
+        state.update(failed_role=result.get("failed_role"), resume_steps=result.get("resume_steps", {}),
+                     blocked_result=result)
+        _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW", result["status"])
+        return True
+    state["results"] = [*state.get("results", []), {"unit": unit, "storyboard": result}]
+    state.update(cursor=cursor + 1, failed_role=None, resume_steps={})
+    _finish_step(factory, task_id, version, worker_id, state)
+    return True
+
+
+def verified_production_context(db, project_id, source_text, supplied):
+    """Rebuild approved context; never trust a caller's outline or source range."""
+    outline = db.get(AgentArtifact, supplied.get("outline_artifact_id"))
+    if (not outline or outline.project_id != project_id or outline.kind != "StoryOutline"
+            or not outline.approved_at or outline.stale or outline.sha256 != supplied.get("outline_sha256")
+            or outline.sha256 != digest(outline.payload_json)):
+        raise ValueError("STORY_OUTLINE_NOT_CONFIRMED")
+    document = db.get(ProjectDocument, outline.payload_json["document_id"])
+    section = next((s for s in outline.payload_json["production_sections"]
+                    if s["production_section_id"] == supplied.get("production_section_id")), None)
+    span = supplied.get("source_offsets") or {}
+    left, right = span.get("start_offset"), span.get("end_offset")
+    if (document is None or document.sha256 != outline.payload_json["document_sha256"] or section is None
+            or type(left) is not int or type(right) is not int
+            or not section["start_offset"] <= left < right <= section["end_offset"]
+            or source_text.strip() != document.text[left:right].strip()):
+        raise ValueError("STORY_SOURCE_RANGE_INVALID")
+    from shine.models import AppSetting
+    current = db.get(AppSetting, f"current-story-outline:{project_id}")
+    latest = db.get(AgentArtifact, current.value.get("artifact_id")) if current else None
+    if latest and latest.id != outline.id:
+        current_section = next((s for s in latest.payload_json["production_sections"]
+                                if s["production_section_id"] == section["production_section_id"]), None)
+        if (not current_section or current_section.get("source_sha256") != section.get("source_sha256")
+                or latest.payload_json["locked_facts"] != outline.payload_json["locked_facts"]):
+            raise ValueError("STORY_SOURCE_SUPERSEDED")
+    return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+            "document_id": document.id, "document_sha256": document.sha256,
+            "production_section_id": section["production_section_id"], "source_offsets": span,
+            "story_line": outline.payload_json.get("story_line", []),
+            "timeline": outline.payload_json.get("timeline", []),
+            "characters": outline.payload_json.get("characters", []),
+            "continuity_facts": supplied.get("continuity_facts", []),
+            "previous_render_status": "NOT_CLAIMED"}
+
+
+def select_outline_revision(db, project_id, outline):
+    """Invalidate changed source sections and their actual job dependants only."""
+    from shine.models import AppSetting, Job
+    from shine.services import mark_stale_descendants
+
+    key = f"current-story-outline:{project_id}"
+    pointer = db.get(AppSetting, key)
+    prior = db.get(AgentArtifact, pointer.value.get("artifact_id")) if pointer else None
+    changed = set()
+    if prior and prior.id != outline.id:
+        new_sections = {s["production_section_id"]: s for s in outline.payload_json["production_sections"]}
+        facts_changed = prior.payload_json["locked_facts"] != outline.payload_json["locked_facts"]
+        changed = {s["production_section_id"] for s in prior.payload_json["production_sections"]
+                   if facts_changed or s["production_section_id"] not in new_sections
+                   or s.get("source_sha256") != new_sections[s["production_section_id"]].get("source_sha256")}
+        rows = list(db.scalars(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project_id)))
+        for task in rows:
+            context = task.trace.get("production_context") or {}
+            if context.get("production_section_id") in changed:
+                artifacts = db.scalars(select(AgentArtifact).where(AgentArtifact.source_task_id == task.id))
+                for artifact in artifacts:
+                    artifact.stale = True
+                    receipt = db.get(AppSetting, f"film-apply:{artifact.id}")
+                    if receipt:
+                        jobs = list(db.scalars(select(Job).where(Job.shot_id.in_(receipt.value.get("shot_ids", [])))))
+                        ids = [job.id for job in jobs]
+                        for job in jobs:
+                            job.stale, job.failure_code = True, "STORY_SOURCE_SUPERSEDED"
+                        mark_stale_descendants(db, ids, project_id=project_id)
+            if task.role_id == SECTION_RUN:
+                affected = sorted({u["production_section_id"] for u in task.trace.get("units", [])} & changed)
+                if affected:
+                    task.trace = {**task.trace, "invalidated_section_ids": affected}
+                    task.state_version += 1
+                    if task.status == "RUNNING":
+                        task.status, task.lease_owner, task.lease_expires_at = "QUEUED", None, None
+                    elif task.status == "SUCCEEDED":
+                        task.status, task.error_code = "NEEDS_REVIEW", "STORY_SOURCE_SUPERSEDED"
+    if pointer:
+        pointer.value = {"artifact_id": outline.id, "sha256": outline.sha256}
+    else:
+        db.add(AppSetting(key=key, value={"artifact_id": outline.id, "sha256": outline.sha256}))
+    return sorted(changed)

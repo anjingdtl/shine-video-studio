@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { HelpCircle } from 'lucide-react';
 import { API, api, json, type Job } from '../api';
 import { failureLabels, label } from '../constants';
+import GenerationSegmentsPanel, { LazyVideo } from './GenerationSegmentsPanel';
 
 type Proposal = { id: string; kind: string; stale: boolean; created_at?: string; payload_json: Record<string, unknown> };
 type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string;
@@ -77,7 +78,8 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     setLoadError('');
     setProposals(artifacts.filter(a => a.kind === 'EditDecisionList' && !a.stale));
     setDeliveries(rows);
-    setOrders(orderRows);
+    setOrders(orderRows.filter((row, index, all) => !row.artifact_id
+      || all.findIndex((other) => other.artifact_id === row.artifact_id) === index));
     setSeriesActive(seriesRows.some(row => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status)));
   }, [projectId]);
 
@@ -153,6 +155,8 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
 
     {loadError && <p className="failure" role="alert">交付列表读取失败：{loadError}（显示的不是最新数据，可点击「刷新交付列表」重试）</p>}
 
+    <GenerationSegmentsPanel key={projectId} projectId={projectId} fingerprint={`${jobFingerprint}:${refreshEpoch}`} />
+
     {orders.length > 0 && <div className="auto-delivery" aria-label="自动交付">
       {[...orders].sort((a, b) => (utcMs(b.delivered_at ?? b.created_at) ?? 0) - (utcMs(a.delivered_at ?? a.created_at) ?? 0)).map((order, index) => {
         const deliveredAt = utcMs(order.delivered_at ?? order.created_at);
@@ -172,7 +176,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         const body = <>
           {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
           {order.status === 'DELIVERED' && order.artifact_id
-            && <video controls preload="metadata" src={`${API}/deliveries/${order.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />}
+            && <LazyVideo src={`${API}/deliveries/${order.artifact_id}/media`} label={`完整成片 v${order.version}`} />}
         </>;
         // 最新交付直接展开；历史交付折叠成一行，避免旧样片占据页面误导。
         return index === 0
@@ -210,14 +214,14 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     {message && <p role="status">{message}</p>}
     {!loadError && !deliveries.length && !orders.some(o => o.status === 'DELIVERED') && <p>暂无交付成片。</p>}
     <div className="delivery-list">
-      {deliveries.map(row => <article className="settings-block" key={row.artifact_id}>
+      {deliveries.filter(row => !orders.some(order => order.artifact_id === row.artifact_id)).map(row => <details className="settings-block" key={row.artifact_id}><summary>成片历史 · {row.created_at}</summary><article>
         <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
         <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
-        <video controls preload="metadata" src={`${API}/deliveries/${row.artifact_id}/media`} style={{ width: '100%', maxHeight: 480 }} />
+        <LazyVideo src={`${API}/deliveries/${row.artifact_id}/media`} label="完整成片历史版本" />
         <p><a href={`${API}/deliveries/${row.artifact_id}/media`} download>下载 MP4</a></p>
         <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
         <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>
-      </article>)}
+      </article></details>)}
     </div>
   </section>;
 }

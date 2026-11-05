@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Clock3, Film, HelpCircle, LockKeyhole, Pencil, Upload, X } from 'lucide-react';
 import { API, type Asset } from '../api';
+import { ImagePreview } from './ImagePreview';
 import { roleLabels, roleOptions } from '../constants';
 
 type Props = {
@@ -19,7 +20,13 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
   const [editRole, setEditRole] = useState('');
   const [editEntity, setEditEntity] = useState('');
   const [editTags, setEditTags] = useState('');
-  const [thumbFailed, setThumbFailed] = useState<Record<string, boolean>>({});
+  const [group, setGroup] = useState('all');
+  const [visible, setVisible] = useState(24);
+  const [selection, setSelection] = useState<string[]>([]);
+  const projectId = assets[0]?.project_id;
+  useEffect(() => { setSelection([]); setVisible(24); }, [projectId]);
+  const shown = assets.filter((a) => group === 'all' || a.role === group);
+
 
   const pending = assets.filter(asset => !asset.locked);
 
@@ -95,23 +102,26 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
       {pending.length > 0 && <div className="required-action">
         <LockKeyhole size={17} className="required-icon" />
         <div className="required-text">
-          <b>必做：确认使用 {pending.length} 项素材</b>
+          <b>有 {pending.length} 项上传素材待你选择</b>
           <small>确认会固定素材版本，AI 不能替你确认或替换。确认后这张素材才能被分镜引用。</small>
         </div>
-        <button className="must-button" disabled={busy}
-          onClick={() => onConfirm(pending.map(asset => asset.id))}>确认使用全部待确认素材</button>
+        <button className="must-button" disabled={busy || !selection.length}
+          onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>
       </div>}
-      <div className="asset-list">
-        {assets.length === 0 ? <div className="empty-inline">尚无素材。请只上传你提供且有权使用的素材。</div> : assets.map((asset) => (
-          <div className="asset-row" key={asset.id}>
+      <label className="material-field"><span>素材分组</span><select value={group} onChange={(e) => { setGroup(e.target.value); setVisible(24); }}>
+        <option value="all">全部素材</option><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option><option value="voice">声音</option>
+      </select></label>
+      <div className="asset-list media-grid">
+        {assets.length === 0 ? <div className="empty-inline">尚无素材。请只上传你提供且有权使用的素材。</div> : shown.slice(0, visible).map((asset) => (
+          <div className="asset-row media-card" key={asset.id}>
             <div className="asset-type-wrap">
-              {asset.kind === 'image' && !thumbFailed[asset.id]
-                ? <img className="asset-thumb" src={`${API}/assets/${asset.id}/media`} alt={asset.filename}
-                  onError={() => setThumbFailed(current => ({ ...current, [asset.id]: true }))} />
-                : <div className={`asset-type ${asset.kind}`}>{asset.kind === 'image' ? 'IMG' : asset.kind === 'audio' ? 'AUD' : 'VID'}</div>}
+              {asset.kind === 'image'
+                ? <ImagePreview thumbnail={`${API}/assets/${asset.id}/thumbnail`} original={`${API}/assets/${asset.id}/media`} label={asset.filename} />
+                : <div className={`asset-type ${asset.kind}`}>{asset.kind === 'audio' ? 'AUD' : 'VID'}</div>}
+
             </div>
             <div className="asset-name">
-              <b>{asset.filename}</b>
+              <b>{asset.filename}</b><small>版本 {asset.sha256.slice(0, 8)}</small>
               <span title={`校验码 ${asset.sha256.slice(0, 16)}…（用于核对文件未被改动）`}>
                 {(asset.byte_size / 1024).toFixed(1)} KB
                 {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
@@ -136,11 +146,14 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
               {asset.locked ? <span className="pill approved"><LockKeyhole size={12} />可用于分镜</span>
                 : <span className="pill pending"><Clock3 size={12} />待你确认</span>}
             </div>
+            {!asset.locked && <label><input type="checkbox" aria-label={`选择上传素材 ${asset.filename}`} checked={selection.includes(asset.id)}
+              onChange={(e) => setSelection((old) => e.target.checked ? [...old, asset.id] : old.filter((id) => id !== asset.id))} />选择</label>}
             {!asset.locked && <button className="text-button" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
-            <button className="icon-button tiny" title="编辑元数据" onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
+            <button className="icon-button tiny" title="编辑元数据" aria-label={`编辑 ${asset.filename} 元数据`} onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
           </div>
         ))}
       </div>
+      {shown.length > visible && <button type="button" onClick={() => setVisible((n) => n + 24)}>加载更多素材</button>}
       <div className="guardrail-note"><LockKeyhole size={13} /><span>确认会固定素材版本；AI 无法替你确认或替换。需要修改用途时，可点击右侧编辑。</span></div>
     </section>
   );

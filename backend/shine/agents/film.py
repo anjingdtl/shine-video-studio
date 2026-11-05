@@ -606,6 +606,10 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if body.production_context is not None:
+            from shine.materialprep.story import verified_production_context
+            context["production_context"] = verified_production_context(
+                db, project_id, body.brief, body.production_context)
         refusal: dict | None = None
         if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
             timing = editorial_timing_preview(body.brief)
@@ -772,6 +776,8 @@ class FilmAgentDispatcher:
                 "remote_text_consent": body.allow_remote_text,
                 "is_mock": profile.kind == "mock",
                 "input_revision_ids": body.input_revision_ids,
+                **({"production_context": context["production_context"]}
+                   if body.production_context is not None else {}),
                 "schema": contract.__name__,
                 "review_contract_sha256": contract_hash,
                 "model_context": {
@@ -833,6 +839,12 @@ class FilmAgentDispatcher:
                 # match it.  The run is refused with the real reason instead
                 # of spending a model call on a plan the server would reject.
                 raise ValueError(refusal["code"])
+            if body.consent_document_id or body.production_context is not None:
+                from shine.materialprep import text_consent
+                source = context.get("production_context") or {}
+                text_consent.guard(project_id, source.get("document_id") or body.consent_document_id,
+                                   source.get("document_sha256") or body.consent_document_sha256,
+                                   role, text_consent.fingerprint(profile), self.gateway)(db)
             response = self.gateway.complete_for_role(
                 db,
                 role,
@@ -849,6 +861,9 @@ class FilmAgentDispatcher:
                           "is_mock": bool(task.trace.get("is_mock") or response.raw_meta.get("is_mock")
                                           or response.raw_meta.get("mock"))}
             db.commit()  # A returned response is durable evidence even if the contract rejects it.
+            if body.production_context is not None:
+                db.expire_all()
+                verified_production_context(db, project_id, body.brief, body.production_context)
             response_data = response.parsed
             if (contract is ScriptBreakdown and isinstance(response_data, dict)
                     and "locked_story_facts" not in response_data):

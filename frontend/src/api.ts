@@ -19,6 +19,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: '本机还有未核对或未结束的任务，暂时不能重新验证或启用运行配置。请先处理「有任务待核对」的镜头任务，或取消未完成的生产系列，再重试。',
   GENERATE_RUNTIME_CONFIGURATION_FIRST: '还没有为本机生成运行配置。请先在「制作环境」完成一次准备，再验证工作流。',
   STOP_OWNED_INSTANCE_BEFORE_VALIDATION: '本机渲染器仍在运行。请先停止受管实例，再验证工作流节点。',
+  STORY_DURABLE_OUTLINE_REQUIRED: '这份剧本太长，一次性分析会丢掉细节。请改用「总体大纲与生产段落」：后台提取并归并全剧大纲，你确认后只为你勾选的段落准备正式分镜。',
   ACTIVE_RUNTIME_CONFIGURATION_CHANGED: '本机运行配置已经变化。请重新加载工作台后再验证。',
   FAILED_INSTALL_ATTEMPT_REQUIRED: '这条安装记录已经结束或不在可整理状态。请刷新安装列表后查看最新状态。',
   INSTALL_ATTEMPT_ACTIVE: '本机还有另一项安装正在执行。请等它结束或失败后再整理这一项。',

@@ -37,7 +37,7 @@ from shine.comfyops.models import (
 )
 from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
-from shine.materialprep.source_spans import known_span_ids, segment_document, unknown_span_ids
+from shine.materialprep.source_spans import known_span_ids, segment_document, spans_for_scene_key, unknown_span_ids
 from shine.materialprep.states import (
     ATTEMPT_UNKNOWN,
     EXECUTION_MODE_REAL,
@@ -214,13 +214,14 @@ def create_draft_plan(
     known_scene_keys = {scene.key for scene in document_scenes}
     for preparation in scenes:
         scene_key = preparation.get("scene_key")
-        if scene_key not in known_scene_keys:
+        scene_spans = spans_for_scene_key(document_scenes, scene_key)
+        if scene_spans is None:
             raise HTTPException(
                 422,
                 {"code": "MATERIAL_SCENE_KEY_UNKNOWN", "scene_key": scene_key,
                  "known_scene_keys": sorted(known_scene_keys)},
             )
-        invented = unknown_span_ids(preparation, known_spans)
+        invented = unknown_span_ids(preparation, scene_spans)
         if invented:
             raise HTTPException(
                 422,
@@ -343,7 +344,17 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         requirement_payload = row.payload or {}
         if (requirement_payload.get("family"), requirement_payload.get("entity_id")) not in known:
             raise HTTPException(409, "MATERIAL_PLAN_STALE")
+        from shine.models import Asset
+
+        selected = db.get(Asset, decision.asset_id) if decision.asset_id else None
+        if decision.asset_id and (selected is None or selected.project_id != project_id
+                                  or selected.role != requirement_payload.get("family")
+                                  or selected.entity_id != requirement_payload.get("entity_id")):
+            raise HTTPException(409, "ASSET_IDENTITY_MISMATCH")
+        if decision.strategy == "reuse_master" and selected is None:
+            raise HTTPException(422, "MATERIAL_EXPLICIT_ASSET_REQUIRED")
         decisions.append({
+            "bound_asset_sha256": selected.sha256 if selected else None,
             "requirement_id": row.id,
             "family": requirement_payload.get("family"),
             "entity_id": requirement_payload.get("entity_id"),
@@ -387,6 +398,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
             **(row.payload or {}),
             "strategy": decision["strategy"],
             "bound_asset_id": decision["asset_id"],
+            "bound_asset_sha256": decision["bound_asset_sha256"],
             "brief_note": decision["brief_note"],
             "source_plan_revision_id": source.id,
             "confirmed_by": actor,
@@ -475,6 +487,18 @@ def create_batch(
     require_rights(db, project_id, rights_id)
 
     generate_ids = _select_generable(db, plan, requirement_ids)
+    if new_revision:
+        # Fence allocation before computing the next revision. A second tab
+        # cannot turn a duplicate click into another legitimate generation.
+        from sqlalchemy import update
+        db.execute(update(PreProductionPlan).where(PreProductionPlan.id == plan.id).values(sha256=plan.sha256))
+        busy = db.scalar(select(MaterialItem).where(
+            MaterialItem.project_id == project_id, MaterialItem.requirement_id.in_(generate_ids),
+            MaterialItem.status.in_([*ITEM_IN_FLIGHT, ITEM_NEEDS_REVIEW, ITEM_QUEUED]),
+        ))
+        if busy is not None:
+            raise HTTPException(409, {"code": "MATERIAL_REVISION_IN_FLIGHT", "item_id": busy.id,
+                                      "status": busy.status})
     run = MaterialRun(
         project_id=project_id,
         plan_id=plan.id,
@@ -729,8 +753,37 @@ def _items(db, run_id: str) -> list[MaterialItem]:
     return list(db.scalars(select(MaterialItem).where(MaterialItem.run_id == run_id)).all())
 
 
-def request_cancel(db, run_id: str, expected_state_version: int) -> dict[str, Any]:
+def _control_receipt(db, action, run_id, version, idempotency_key, item_ids=None):
+    from sqlalchemy import text
+
+    from shine.models import AppSetting
+
+    # One SQLite writer serialises operator controls across processes too.
+    if not db.connection().connection.driver_connection.in_transaction:
+        db.execute(text("BEGIN IMMEDIATE"))
+    db.flush()
+    db.expire_all()
+    key = "mat-ctrl:" + graph_hash({"action": action, "run_id": run_id, "key": idempotency_key})
+    request_hash = graph_hash({"action": action, "run_id": run_id, "version": version, "items": item_ids or []})
+    receipt = db.get(AppSetting, key) if idempotency_key else None
+    if receipt and receipt.value["request_hash"] != request_hash:
+        raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
+    return key if idempotency_key else None, request_hash, receipt.value["result"] if receipt else None
+
+
+def _save_control(db, key, request_hash, result):
+    from shine.models import AppSetting
+    if key:
+        db.add(AppSetting(key=key, value={"request_hash": request_hash, "result": result}))
+    db.commit()
+    return result
+
+
+def request_cancel(db, run_id: str, expected_state_version: int, *, idempotency_key="") -> dict[str, Any]:
     """Ask for a cancel.  Requesting one is not the same as having stopped."""
+    key, request_hash, prior = _control_receipt(db, "cancel", run_id, expected_state_version, idempotency_key)
+    if prior is not None:
+        return prior
     run = _require_run(db, run_id)
     if run.state_version != expected_state_version:
         raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
@@ -751,14 +804,18 @@ def request_cancel(db, run_id: str, expected_state_version: int) -> dict[str, An
     run.state_version += 1
     add_audit(db, "local-user", "MATERIAL_BATCH_CANCEL_REQUESTED", "material_run", run.id,
               {"stopped_not_started": stopped}, project_id=run.project_id)
-    db.commit()
-    return {"run_id": run.id, "status": run.status, "cancel_requested": True,
+    result = {"run_id": run.id, "status": run.status, "cancel_requested": True,
             "stopped_not_started": stopped,
             "note": "已停止未开始的项；正在执行的项由 Worker 收尾后核对，不会被全局打断。"}
+    return _save_control(db, key, request_hash, result)
 
 
-def resume_items(db, run_id: str, item_ids: list[str], expected_state_version: int) -> dict[str, Any]:
+def resume_items(db, run_id: str, item_ids: list[str], expected_state_version: int,
+                 *, idempotency_key="") -> dict[str, Any]:
     """Re-queue items that definitely failed.  Unknown outcomes are refused."""
+    key, request_hash, prior = _control_receipt(db, "resume", run_id, expected_state_version, idempotency_key, item_ids)
+    if prior is not None:
+        return prior
     run = _require_run(db, run_id)
     if run.state_version != expected_state_version:
         raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
@@ -785,23 +842,37 @@ def resume_items(db, run_id: str, item_ids: list[str], expected_state_version: i
             queued.append(item_id)
         else:
             refused.append({"item_id": item_id, "code": "MATERIAL_ITEM_NOT_RESUMABLE", "status": item.status})
-    if run.status in RUN_TERMINAL or run.status == RUN_CANCEL_REQUESTED:
-        run.status = RUN_QUEUED
-        run.cancel_requested = False
-    run.state_version += 1
+    if queued:
+        if run.status in RUN_TERMINAL or run.status == RUN_CANCEL_REQUESTED:
+            run.status = RUN_QUEUED
+            run.cancel_requested = False
+        run.state_version += 1
     add_audit(db, "local-user", "MATERIAL_BATCH_RESUMED", "material_run", run.id,
               {"queued": len(queued), "refused": len(refused)}, project_id=run.project_id)
-    db.commit()
-    return {"run_id": run.id, "queued": queued, "refused": refused, "status": run.status}
+    return _save_control(db, key, request_hash,
+                         {"run_id": run.id, "queued": queued, "refused": refused, "status": run.status})
 
 
-def reconcile_run(db, run_id: str, expected_state_version: int) -> dict[str, Any]:
-    """Record what is already known.  This never contacts a renderer to resubmit."""
+def reconcile_run(db, run_id: str, expected_state_version: int, *, idempotency_key="",
+                 item_ids: list[str] | None = None) -> dict[str, Any]:
+    """Record what is already known.  This never contacts a renderer to resubmit.
+
+    The operator may reconcile one item of a batch.  Without that, a single
+    "check this one" click would silently widen to every unknown item of the
+    run, which is more than the action promised.
+    """
+    key, request_hash, prior = _control_receipt(db, "reconcile", run_id, expected_state_version,
+                                                idempotency_key, item_ids)
+    if prior is not None:
+        return prior
     run = _require_run(db, run_id)
     if run.state_version != expected_state_version:
         raise HTTPException(409, {"code": "MATERIAL_RUN_STATE_STALE", "state_version": run.state_version})
     unknown = []
+    wanted = set(item_ids or [])
     for item in _items(db, run.id):
+        if wanted and item.id not in wanted:
+            continue
         attempts = db.scalars(
             select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == item.id)
         ).all()
@@ -818,10 +889,10 @@ def reconcile_run(db, run_id: str, expected_state_version: int) -> dict[str, Any
                                          "无 prompt_id：无法证明未提交，保持 UNKNOWN，不得重新提交。")})
     add_audit(db, "local-user", "MATERIAL_BATCH_RECONCILED", "material_run", run.id,
               {"unknown": len(unknown)}, project_id=run.project_id)
-    db.commit()
-    return {"run_id": run.id, "status": run.status, "unknown": unknown,
+    result = {"run_id": run.id, "status": run.status, "unknown": unknown,
             "resubmitted": False,
             "note": "对账只核对与采用已有结果，不会发起第二次 /prompt 提交。"}
+    return _save_control(db, key, request_hash, result)
 
 
 def refresh_run_status(db, run_id: str) -> dict[str, Any]:
@@ -898,6 +969,11 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
         "heartbeat_at": item.heartbeat_at.isoformat() if item.heartbeat_at else None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "brief": (item.payload or {}).get("brief"),
+        "allowed_actions": (["resume"] if item.status == ITEM_FAILED else
+                            ["reconcile"] if item.status == ITEM_NEEDS_REVIEW else []) +
+                           (["regenerate"] if item.status in {ITEM_CANDIDATE_READY, ITEM_FAILED, "CANCELLED"}
+                            and not any(a.external_outcome == OUTCOME_UNKNOWN for a in attempts) else []),
         "candidates": candidates,
         "attempts": [{
             "attempt_id": a.id,
@@ -1003,15 +1079,17 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         entity_id = payload.get("entity_id")
         critical = bool(payload.get("critical", True))
         bound = payload.get("bound_asset_id")
-        match = next((a for a in assets if a.role == family and a.entity_id == entity_id), None)
-        if match is None and bound:
-            match = next((a for a in assets if a.id == bound), None)
+        # An explicit selection is authority. Never substitute another version
+        # just because it has the same entity name, including when it is missing.
+        match = next((a for a in assets if a.id == bound), None) if bound else None
         reason: str | None = None
         if match is None:
             reason = "ASSET_OR_VOICE_MISSING"
         else:
             if match.role != family or match.entity_id != entity_id:
                 reason = "ASSET_IDENTITY_MISMATCH"
+            if payload.get("bound_asset_sha256") and payload["bound_asset_sha256"] != match.sha256:
+                reason = "ASSET_HASH_CHANGED"
             provenance = match.provenance or {}
             if provenance.get("offline_only", False) or provenance.get("is_mock", False):
                 reason = "MOCK_ASSET_NOT_PRODUCTION"

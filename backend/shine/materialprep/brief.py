@@ -29,6 +29,7 @@ from shine.h3.rulebook import digest
 from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
+from shine.materialprep import text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent, pace_provider_call
 from shine.materialprep.contracts import MaterialImageBrief
 from shine.materialprep.image_prompts import template_evidence
@@ -41,7 +42,6 @@ from shine.materialprep.states import (
     ITEM_NEEDS_REVIEW,
 )
 from shine.models import AgentArtifact, AgentTaskRecord, Project, utcnow
-from shine.security import is_loopback_url
 from shine.services import add_audit
 
 BRIEF_ROLE = "producer"
@@ -109,6 +109,9 @@ def build_context(
         "rules": [
             "Write appearance, must_keep and avoid in English visual prose.",
             "The requirement text stays in the original script language; only the appearance prose is English.",
+            "Never repeat the requirement name inside the appearance prose: describe the subject "
+            "in English words instead. A Chinese name inside the English prose is a refused prompt, "
+            "not a style choice.",
             "Add no new plot fact and change no confirmed identity.",
             "Put a missing fact that affects the picture into questions instead of deciding it yourself.",
         ],
@@ -146,6 +149,8 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
                 if fact not in locked_facts:
                     locked_facts.append(fact)
         return {
+            "document_id": (plan.payload or {}).get("document_id") if plan else None,
+            "document_sha256": (plan.payload or {}).get("script_hash") if plan else None,
             "item_id": item.id,
             "requirement_id": item.requirement_id,
             "project_id": item.project_id,
@@ -197,7 +202,9 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         except LLMError as exc:
             return _refuse(factory, item_id, version, "LLM_NOT_CONFIGURED",
                            detail={"role": BRIEF_ROLE, "code": exc.code})
-        if profile.kind != "mock" and not is_loopback_url(profile.base_url):
+        from shine.models import ProjectDocument
+        document = db.get(ProjectDocument, data["document_id"]) if data["document_id"] else None
+        if not text_consent.allowed(db, data["project_id"], document, BRIEF_ROLE, profile):
             # The Worker path carries no per-request consent, and the brief
             # carries script text. A remote provider needs an explicit consent
             # that only an operator action can give.
@@ -263,6 +270,9 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         schema=schema,
         contract=BRIEF_CONTRACT,
         on_progress=record_progress,
+        before_call=text_consent.guard(data["project_id"], data["document_id"], data["document_sha256"],
+                                       BRIEF_ROLE, text_consent.fingerprint(profile), gateway)
+        if data["document_id"] else None,
     )
     if not outcome.ok:
         status = ITEM_NEEDS_REVIEW if outcome.uncertain else ITEM_FAILED

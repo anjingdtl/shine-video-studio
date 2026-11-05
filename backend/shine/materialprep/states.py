@@ -47,10 +47,15 @@ ITEM_TERMINAL = frozenset({ITEM_CANDIDATE_READY, ITEM_FAILED, ITEM_NEEDS_REVIEW,
 unknown external outcome stays recorded forever and is never resubmitted.
 """
 
-ITEM_CLAIMABLE = frozenset({ITEM_QUEUED, ITEM_BRIEF_READY, ITEM_WAITING_GPU, ITEM_FAILED})
+ITEM_CLAIMABLE = frozenset({ITEM_QUEUED, ITEM_BRIEF_READY, ITEM_WAITING_GPU})
 """States a Worker may claim.  ``SUBMIT_INTENT``/``RUNNING`` are excluded: an
 item that already persisted a submit intent is reconciled, never re-claimed
-into a second external submission."""
+into a second external submission.
+
+``FAILED`` is excluded as well.  A failed item is terminal for scheduling: it
+waits for the operator to resume or regenerate it.  When a failed item stayed
+claimable, the Worker re-claimed it in a tight loop, which burned the CPU,
+starved the heartbeat and kept every other queued item from ever running."""
 
 ITEM_IN_FLIGHT = frozenset(
     {
