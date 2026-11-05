@@ -81,9 +81,10 @@
 > 驱动脚本在本机 `.local-acceptance/real_image_validation.py`（被 gitignore，克隆后没有；
 > 步骤已完整写在上一步里，可自行重建）。
 
-**先决条件**：现在跑着的工作台（API 8133 / Web 5193，数据目录 `.local-acceptance/live-browser`）
-是**本轮提交之前**启动的，**没有** `/setup/image-runtime/start` 与 `/stop`。
-必须先用新代码重启：
+**先决条件**：本轮收尾时工作台已用新代码重启过（API 8133 / Web 5193，
+数据目录 `.local-acceptance/live-browser`；`/setup/image-runtime/start` 与 `/stop` 已在路由表里；
+`production_mode` = `SETUP_REQUIRED / REAL_RUNTIME_NOT_ACTIVATED`，渲染器未启动）。
+如果它已经不在跑，用下面的命令按同样的参数起：
 
 ```powershell
 backend/.venv/Scripts/python.exe scripts/stop_shine.py --data-dir .local-acceptance/live-browser
