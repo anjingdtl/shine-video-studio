@@ -244,8 +244,20 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         # The workbench asks for a native confirmation before it fixes an asset
         # version. Playwright dismisses dialogs by default, which would silently
-        # turn the user's click into a cancellation.
-        page.on("dialog", lambda dialog: dialog.accept())
+        # turn the user's click into a cancellation.  One switchable handler owns
+        # every dialog: a second handler cannot dismiss a dialog that the first
+        # one already handled, so the cancellation path needs the same policy.
+        dialog_policy = {"mode": "accept"}
+        dialog_messages = []
+
+        def handle_dialog(dialog):
+            dialog_messages.append(dialog.message)
+            if dialog_policy["mode"] == "dismiss":
+                dialog.dismiss()
+            else:
+                dialog.accept()
+
+        page.on("dialog", handle_dialog)
         failures = []
         page.on(
             "response",
@@ -334,9 +346,25 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             approve_button.wait_for(state="attached", timeout=30000)
             approve_button.click()
             expect(card).to_contain_text("已批准", timeout=15000)
+            approved = result_json()
+            if approved.get("payload", {}).get("kind") == "INSTANCE_LIFECYCLE":
+                # A lifecycle step only becomes effective once it is executed:
+                # the next step acts on the instance row that the execution
+                # creates.  The Fake executor copies fixture bytes inside the
+                # isolated test directory and never touches this machine.
+                with page.expect_response(
+                    lambda response: response.request.method == "POST"
+                    and response.url.endswith("/execute"),
+                    timeout=30000,
+                ) as execution_response:
+                    card.get_by_role(
+                        "button", name="演练执行（不改动系统）", exact=True
+                    ).click()
+                attempt = execution_response.value.json()
+                assert attempt.get("status") in {"COMPLETED", "SNAPSHOT"}, attempt
             # The panel no longer offers a simulated execution for an install
             # plan; the approved plan itself is the evidence here.
-            return result_json()
+            return approved
 
         prep.get_by_role("button", name="操作员保存受限扫描范围", exact=True).click()
         page.wait_for_function(
@@ -361,7 +389,15 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         lifecycle("START")
         lifecycle("STOP")
         saved = lifecycle("SNAPSHOT")
-        lifecycle("RESTORE", saved["id"])
+        # RESTORE restores a snapshot attempt, not a plan: the id has to come
+        # from the attempts of the executed snapshot plan.
+        snapshot_attempts = c.get(
+            base + f"/comfyops/install-plans/{saved['id']}/attempts"
+        ).json()
+        snapshot_attempt = next(
+            row["id"] for row in snapshot_attempts if row["status"] == "SNAPSHOT"
+        )
+        lifecycle("RESTORE", snapshot_attempt)
         prep.get_by_role("button", name="环境中心", exact=True).click()
         prep.get_by_label("受管实例 ID", exact=True).fill(managed_id)
         prep.get_by_role("button", name="核验实例健康与队列", exact=True).click()
@@ -443,22 +479,39 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                 route.continue_()
 
         page.route(f"**/api/v1/projects/{p}/jobs", capture_submission)
+
+        def ready_status(route):
+            # The real-generation controls only unlock when the backend says the
+            # machine may render for real.  The status is a UI fixture here and
+            # the job POST is intercepted, so nothing is ever rendered.
+            response = route.fetch()
+            body = response.json()
+            body["production_mode"] = {
+                "mode": "READY", "label": "真实制作已就绪", "detail": "", "action": None,
+                "code": None, "render_provider": "comfyui", "runtime_status": "ACTIVE",
+                "renderer_online": True, "worker_online": True, "running_jobs": 0, "series_active": 0,
+            }
+            route.fulfill(json=body)
+
+        page.route("**/api/v1/system/status", ready_status)
         page.reload(wait_until="networkidle")
         page.locator("select").first.select_option(p)
-        page.get_by_label("提交方式").select_option("comfyui")
-        # The default basic self-review scope checks the expected output size, so
-        # the workbench only offers the real-generation confirmation once the
+        production = page.locator("#production")
+        production.get_by_label("生成方式").select_option("comfyui")
+        # The basic self-review scope checks the expected output size, so the
+        # workbench only offers the real-generation confirmation once the
         # operator declares the width and height. Fill them exactly as an
         # operator would before expecting the confirmation dialog.
-        page.get_by_label("预期输出宽度").fill("768")
-        page.get_by_label("预期输出高度").fill("1344")
-        queue = page.get_by_role("button", name="加入队列", exact=True).first
-        messages = []
+        production.get_by_label("审片建议（可选）").select_option("basic")
+        production.get_by_label("预期画面宽度").fill("768")
+        production.get_by_label("预期画面高度").fill("1344")
+        queue = production.get_by_role("button", name="加入队列", exact=True).first
         for mode in ("T2VA", "Ref2VA"):
-            page.get_by_label("真实工作流 Profile").select_option(f"ui-only-{mode}")
-            page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
+            production.get_by_label("生成模板").select_option(f"ui-only-{mode}")
+            dialog_policy["mode"] = "dismiss"
             queue.click()
-            assert f"提交真实 {mode} 生成" in messages[-1]
+            dialog_policy["mode"] = "accept"
+            assert "确认用真实模式生成" in dialog_messages[-1]
             assert len(submissions) == (0 if mode == "T2VA" else 1), submissions
             page.once("dialog", lambda dialog: dialog.accept())
             with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/projects/{p}/jobs")):
@@ -466,7 +519,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             assert submissions[-1]["generation_mode"] == mode
             assert submissions[-1]["workflow_profile_id"] == f"ui-only-{mode}"
         assert c.get(base + f"/projects/{p}/jobs").json() == [], "UI routing probe must create no backend jobs"
-        page.get_by_label("提交方式").select_option("mock")
+        production.get_by_label("生成方式").select_option("mock")
         # Hold an old project's asset response until a different project has
         # finished loading. A late callback must not replace the new selection.
         # Protocol-only UI fixtures. These requests never become real capabilities or jobs.
@@ -588,13 +641,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(abandon_button).to_be_disabled()
         crew.get_by_label("远端响应对账凭据").fill(TEST_CREDENTIAL)
         crew.get_by_label("远端响应对账说明").fill("Mock UI protocol only; no model invocation or quality approval")
-        page.once("dialog", lambda dialog: dialog.dismiss())
+        dialog_policy["mode"] = "dismiss"
         abandon_button.click()
+        dialog_policy["mode"] = "accept"
         assert not abandonment_calls and not abandonment_grants
         expect(crew.get_by_label("远端响应对账凭据")).to_have_value("")
         crew.get_by_label("远端响应对账凭据").fill(TEST_CREDENTIAL)
         crew.get_by_label("远端响应对账说明").fill("Mock UI protocol only; no model invocation or quality approval")
-        page.once("dialog", lambda dialog: dialog.accept())
         with page.expect_response(lambda response: response.url.endswith("/abandon-remote-response")):
             abandon_button.click()
         page.wait_for_load_state("networkidle")
