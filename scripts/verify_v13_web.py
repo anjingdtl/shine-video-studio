@@ -242,6 +242,10 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             args=["--no-sandbox", "--disable-gpu"],
         )
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        # The workbench asks for a native confirmation before it fixes an asset
+        # version. Playwright dismisses dialogs by default, which would silently
+        # turn the user's click into a cancellation.
+        page.on("dialog", lambda dialog: dialog.accept())
         failures = []
         page.on(
             "response",
@@ -251,27 +255,31 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         )
         page.goto(ui_base, wait_until="networkidle")
         page.locator("select").first.select_option(p)
-        page.get_by_label("V1.3 风格冻结操作员凭据（仅当前页面内存）").fill(
-            TEST_CREDENTIAL
-        )
+        # The director journey gives the style and master panels their own page
+        # and keeps the pre-production panel in the expert layer. The script
+        # navigates the way a user does instead of assuming one flat page.
+        page.goto(f"{ui_base}#d/assets", wait_until="networkidle")
+        page.reload(wait_until="networkidle")
+        # The personal-desktop build approves with the same-origin CSRF marker
+        # and no operator password, so the style panel has no credential field.
         page.locator("#style").get_by_role(
             "button", name="批准并冻结", exact=True
         ).click()
         expect(page.locator("#style")).to_contain_text("已冻结 V1", timeout=15000)
         masters = page.locator("#assets")
-        masters.get_by_label("主资产审批凭据").fill(TEST_CREDENTIAL)
-        masters.get_by_label("主资产核验依据").fill(
-            "Explicit isolated browser master review"
-        )
         master = masters.locator(".asset-row").filter(
             has_text="isolated-browser-upload.png"
         )
-        master.get_by_role("button", name="批准", exact=True).click()
-        expect(master).to_contain_text("已批准", timeout=15000)
-        master.get_by_role("button", name="锁定", exact=True).click()
-        expect(master).to_contain_text("已锁定", timeout=15000)
+        # The personal-desktop build confirms a master in one action; the
+        # separate approve and lock buttons are gone.
+        master.get_by_role("button", name="确认使用", exact=True).click()
+        expect(master).to_contain_text("可用于分镜", timeout=15000)
+        # The pre-production panel lives in the expert layer.
+        page.goto(f"{ui_base}#v/production/preproduction", wait_until="networkidle")
+        page.reload(wait_until="networkidle")
         prep = page.locator("#preproduction")
-        prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
+        # The evidence field lives in a collapsed advanced section.
+        prep.get_by_text("展开高级准备").click()
         prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
             "Explicit isolated browser lifecycle approval"
         )
@@ -299,13 +307,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                 exact=True,
             ).click()
             page.wait_for_function(
-                "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('AWAITING_APPROVAL')"
+                "() => Array.from(document.querySelectorAll('#preproduction details[open] pre')).pop()?.textContent?.includes('AWAITING_APPROVAL')"
             )
             plan_id = result_json()["id"]
             prep.get_by_role("button", name="模型与节点", exact=True).click()
             card = prep.locator("article").filter(has_text=plan_id)
             card.get_by_role("button", name="批准此哈希计划", exact=True).click()
-            expect(card).to_contain_text("APPROVED", timeout=15000)
+            expect(card).to_contain_text("已批准", timeout=15000)
             card.get_by_role(
                 "button", name="模拟执行（无系统变更）", exact=True
             ).click()
@@ -314,7 +322,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
 
         prep.get_by_role("button", name="操作员保存受限扫描范围", exact=True).click()
         page.wait_for_function(
-            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('configuration_hash')"
+            "() => Array.from(document.querySelectorAll('#preproduction details[open] pre')).pop()?.textContent?.includes('configuration_hash')"
         )
         assert result_json()["roots"] == [] and result_json()["ports"] == []
         prep.get_by_role("button", name="模型与节点", exact=True).click()
@@ -326,7 +334,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             {"name": "main.py", "mimeType": "text/x-python", "buffer": source_bytes}
         )
         page.wait_for_function(
-            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('USER_OFFLINE_IMPORT')"
+            "() => Array.from(document.querySelectorAll('#preproduction details[open] pre')).pop()?.textContent?.includes('USER_OFFLINE_IMPORT')"
         )
         assert result_json()["sha256"] == hashlib.sha256(source_bytes).hexdigest()
 
@@ -340,29 +348,28 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         prep.get_by_label("受管实例 ID", exact=True).fill(managed_id)
         prep.get_by_role("button", name="核验实例健康与队列", exact=True).click()
         page.wait_for_function(
-            "() => document.querySelector('#preproduction details[open] pre')?.textContent?.includes('ONLINE')"
+            "() => Array.from(document.querySelectorAll('#preproduction details[open] pre')).pop()?.textContent?.includes('ONLINE')"
         )
         assert result_json()["is_mock"] is True
         prep.get_by_role("button", name="全资产工厂", exact=True).click()
-        prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
         prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
             "Explicit isolated browser QA fixture review"
         )
         card = prep.locator("article").filter(has_text="BrowserCharacter")
-        expect(card).to_contain_text("READY_FOR_REVIEW")
+        expect(card).to_contain_text("待人工复核")
         prep.get_by_label("操作模式").select_option("local")
         prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
-        expect(card).to_contain_text("READY_FOR_REVIEW")
+        expect(card).to_contain_text("待人工复核")
         # Merely selecting local mode cannot relabel the existing Fake candidate.
         assert asset["payload"]["provenance"]["is_mock"]
         prep.get_by_label("操作模式").select_option("fake")
         card.get_by_role("button", name="按选定模式人工晋升", exact=True).click()
-        expect(card).to_contain_text("PROMOTED", timeout=15000)
+        expect(card).to_contain_text("已转正", timeout=15000)
         prep.get_by_role("button", name="Voice Studio", exact=True).click()
         vcard = prep.locator("article").filter(has_text="BrowserVoice")
-        expect(vcard).to_contain_text("PREVIEW")
+        expect(vcard).to_contain_text("待试听确认")
         vcard.get_by_role("button", name="操作员确认试听并冻结", exact=True).click()
-        expect(vcard).to_contain_text("FROZEN", timeout=15000)
+        expect(vcard).to_contain_text("已冻结", timeout=15000)
         vcard.get_by_role(
             "button", name="生成对白 / ASR / 逐字对齐 / SRT / ASS", exact=True
         ).click()
@@ -372,13 +379,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         prep.get_by_role("button", name="模型与节点", exact=True).click()
         failed_card = prep.locator("article").filter(has_text=failed_plan["id"])
         failed_card.get_by_role("button", name="查看安装尝试", exact=True).click()
-        expect(failed_card).to_contain_text("FAILED_RECONCILE_REQUIRED")
+        expect(failed_card).to_contain_text("失败，需人工对账")
         # Fake request mode cannot authorize real filesystem reconciliation.
         expect(failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True)).to_be_disabled()
         prep.get_by_label("操作模式").select_option("local")
         prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
         failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True).click()
-        expect(failed_card).to_contain_text("RECONCILED_NO_RETRY", timeout=15000)
+        expect(failed_card).to_contain_text("已对账收尾", timeout=15000)
         expect(failed_card).to_contain_text("继续安装须新建并批准计划")
         prep.get_by_label("安装磁盘预算（字节，须核对空间）").fill("100")
         with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/comfyops/install-plans")) as fresh_response:
@@ -463,7 +470,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         def workflow_request(route):
             data = route.request.post_data_json
             workflow_checks.append({"path": route.request.url.split("/api/v1")[-1], "body": data})
-            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            assert route.request.headers.get("x-shine-local-action") == "1"
             route.fulfill(json={"status": "MOCK_VERIFIED", "is_mock": True, "no_backend_execution": True})
 
         workflow_paths = [
@@ -475,7 +482,6 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             page.route(path, workflow_request)
         prep.get_by_role("button", name="工作流能力", exact=True).click()
         prep.get_by_label("操作模式").select_option("local")
-        prep.get_by_label("操作员凭据", exact=True).fill(TEST_CREDENTIAL)
         prep.get_by_label("人工核验 / 试听 / 权利证据").fill("Mock UI protocol check only; no real acceptance")
         prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
         native_draft = prep.locator("article").filter(has_text="ui-native-draft")
@@ -546,13 +552,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
 
         def capture_text_grant(route):
             abandonment_grants.append(route.request.post_data_json)
-            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            assert route.request.headers.get("x-shine-local-action") == "1"
             assert route.request.headers.get("content-type") == "application/json"
             route.fulfill(json={"grant_id": "ui-text-only-grant", "snapshot": "a" * 64})
 
         def capture_abandonment(route):
             abandonment_calls.append(route.request.post_data_json)
-            assert route.request.headers.get("authorization") == "Bearer " + TEST_CREDENTIAL
+            assert route.request.headers.get("x-shine-local-action") == "1"
             assert route.request.headers.get("content-type") == "application/json"
             route.fulfill(json={"status": "ABANDONED", "external_outcome": "UNKNOWN", "automatic_replay": False})
 
