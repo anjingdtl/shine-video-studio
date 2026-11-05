@@ -363,6 +363,34 @@ PE 提示词扩写编码器因 `switch=false` 且分支惰性求值而永不被�
 从 `PENDING_VERIFICATION` 移出；同时补记安装器的**逐字节镜像回退**（`hf-mirror.com` 是受信主机，
 字节仍按钉死哈希校验），说明新的图片安装目录为何仍可使用 `huggingface.co` 作为权威来源地址。
 
+### 本轮提交与安装包（阶段 E 的可离线部分）
+
+**提交**：`e1c420a` `feat(material): finish the director AI material journey`（28 个文件，+4552/−172）。
+分支实况更正：`main` 与 `origin/main` 本轮开始时同在 `5c4842f`，本地分支
+`codex/director-ai-material-preparation` 也指向该点；本轮提交落在 **main**（沿用本仓库既有做法：
+前两轮同系列提交也在 main）。**未推送**——推送是共享状态变更，按本文件约定需用户确认。
+用户原有的 4 个未跟踪文件（`.zcode/` 与 3 份 docs）**未纳入提交、未删除、未覆盖**。
+
+**安装包**（从已提交树构建并验证）：
+
+```powershell
+pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify
+```
+
+| 项 | 结果 |
+| --- | --- |
+| 包 | `releases/ShineVideoStudio-20261105-e1c420a-win64.zip` |
+| 大小 | 2,518,111 字节（打包 516 个文件 / 7,362,130 字节） |
+| SHA-256 | `30e9e1814c96dc858b12464b95e1724d73c6fa4f4596ded70d6d373e46c69be6` |
+| 校验 | `Expand-Archive` 后按清单逐文件校验 SHA-256：**517 个文件全部通过** |
+| 上一版 | 保留（releases/ 下 6 个旧包未动，`releases/` 已在 .gitignore，不污染工作树） |
+| 与提交的关系 | 本包构建自 `e1c420a`（**产品代码全集**）；其后只有本文件这一条文档提交，不改变包内任何代码 |
+| 包内素材功能 | 已确认包含 13 个 `materialprep` 模块、新增安装目录、两个新前端组件与两份前端测试 |
+
+包内 `BUILD_INFO.json` 如实标注 `status=PARTIAL`、`source_tree=CLEAN_TREE`，并在
+`closed_in_this_build` 写明「导演模式可按固定 Qwen-Image-2.1 工作流准备人物/场景/道具素材」，
+在 `known_blockers` 写明「三类小样尚未在全新安装的机器上真实出图」。
+
 ### 仍未做（不得按已完成计）
 
 1. **真实 Qwen 出图与 live `object_info` 校验**：仍需受管 ComfyUI 实例；权重已就位，但本轮没有启动渲染器。
