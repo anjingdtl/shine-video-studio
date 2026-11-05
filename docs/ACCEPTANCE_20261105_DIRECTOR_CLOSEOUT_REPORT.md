@@ -251,3 +251,20 @@
 3. **宽方案未进部署目录**：`local-h3-ref2va-pdd8-6img` 只是本项目的方案，
    没有进入 `config/deployment/h3-ref2va-windows-x64.json` 的标准目录，
    因此**别的项目**若要绑 6 张参考图，需要各自再走一次「从真实节点建 + 真实校验」。
+
+## 12. 安装包（Windows 测试包）
+
+- 命令：`pwsh -File scripts\build_test_package.ps1 -OutDir releases -Verify`（拒绝脏树，从提交树构建）。
+- **本轮包**：`releases/ShineVideoStudio-20261105-5d9ebee-win64.zip`，
+  **2,711,083 字节**，sha256
+  `98182bcaa8b0433d19e241986b9cc6cdd634fa79793a18aa4e4eba8fe60ddbda`，
+  来源提交 `5d9ebee`（分支 `codex/director-closeout-20261105`）。
+  Expand-Archive 后逐文件 SHA-256 复核：**552 个文件全部通过**。
+- 打包内容：543 个受跟踪文件，排除 116 个路径；入口脚本在包根。
+- 不含：模型/权重、生成的视频、SQLite、密钥与 `.env`、虚拟环境与 node_modules、
+  `docs/evidence`、日志。
+- **旧包全部保留**（含上一轮的 `ShineVideoStudio-20261105-1daa65b-win64.zip`）。
+- `BUILD_INFO.json` 的 `known_blockers` / `closed_in_this_build` 已按本轮事实更新：
+  素材轮已闭合（评审→晋升→冻结→真机出片）、宽槽位方案的来历与边界、
+  遗留渲染器导致首跑失败的处理；同时保留仍然成立的阻塞项
+  （成片终审、VLM 重校准、宽方案未进部署目录）。
