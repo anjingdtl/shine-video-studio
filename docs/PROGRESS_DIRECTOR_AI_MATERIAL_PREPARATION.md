@@ -531,3 +531,29 @@ prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 
 驱动脚本已写好：`.local-acceptance/real_image_validation.py`（每步打印请求与响应，
 可作为证据日志；未纳入 Git，因为 `.local-acceptance/` 被忽略）。
 
+## 2026-11-05 真实三类小样出图轮（本轮）
+
+完整证据见 `docs/ACCEPTANCE_20261105_REAL_IMAGE_VALIDATION.md`。本轮一句话：
+
+**受管路径真实三类小样全链走通：收编 → 配方 → 绑定 → 受管启动 → GRAPH_VERIFIED →
+真实渲染 → 三类 RENDER_VERIFIED → 停渲染器回收显存；顺带修掉"探测行挡死收编"的
+P0 缺陷与浏览器 E2E 闸门最后一段。**
+
+### 本轮结果
+
+| 项 | 结果 |
+| --- | --- |
+| 真实 Qwen 出图（角色/场景/道具） | **REAL_QWEN_VERIFIED**：run `8289c72e…` COMPLETED，3/3 candidate_ready，`renderer_owned=true`，technical/decode pass，三类第四层 RENDER_VERIFIED |
+| 受管渲染器生命周期 | start（pid 30636，命名 Job Object）→ 队列先关后放行 → stop `active_processes=0`，GPU 回基线（1738/16303 MiB），无孤儿 |
+| 探测行挡死收编（新发现 P0 缺陷） | 已修复（`abf8600`）：未收编、非受管探测行由首次收编接管（`replaced_probe_row=true` 留痕）；受管 prior 仍拒 |
+| 浏览器 E2E 闸门 | **转绿**（`1778ef0`）：按当前界面重写最后一段，连续两轮 `MOCK_VERIFIED` / EXIT=0 / `api_errors: []` |
+| 全量后端 | EXIT=0，无 FAILED/ERROR |
+| Ruff / Alembic / 前端 | All checks passed / head `f170a0010001` 无漂移 / 130 测试 + build 通过 |
+
+### 仍待人工（不得按已完成计）
+
+1. 候选小样的选用与晋升（`READY_FOR_REVIEW`，构图与美术由用户评审）。
+2. 真实 H3 引用新素材（需先有人工晋升的主素材）。
+3. 正式素材批次的出品人 brief 链未在本轮改动（验证批次不受影响）。
+
+

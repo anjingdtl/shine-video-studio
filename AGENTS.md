@@ -480,4 +480,30 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   而不是留下一条假的待对账。
 - 浏览器 E2E 闸门（`scripts/verify_v13_web.py`）的实例生命周期段现在**执行**假实例计划：
   只批准不执行就不会产生实例行，下一步生命周期计划就会因"外部实例受保护"而失败。
-  弹窗由一个可切换策略的处理函数统一接管（第二个处理函数无法再处理已被处理的弹窗）。
+  弹窗由一个可切换策略的处理函数统一接管（第二个处理函数无法再处理已被处理的弹窗；
+  不要再注册第二个弹窗处理函数与它竞争同一个弹窗）。
+
+## 2026-11-05 真实三类小样出图轮（本轮新增）
+
+- **检测先于收编，探测行不挡收编**。本地模式的只读检测会为同一确定性身份
+  （`local:http://127.0.0.1:<port>`）先写一条**未收编、非受管**的证据实例行；
+  首次收编（`adopt_existing_installation`）现在**接管**这一行（响应与审计记
+  `replaced_probe_row=true`），而不是 409 `INSTANCE_IDENTITY_CHANGED`。
+  已收编但快照/根不符、或 prior 行本身是受管行的，仍然拒绝。
+- **真实出图验收只认这一条链**：取配置哈希（签发授权前）→ scope → inspect → verify →
+  adopt → configuration → image-runtime 绑定 → `/setup/image-runtime/start` 受管启动 →
+  `image-readiness` 到第三层 `GRAPH_VERIFIED` → `/setup/image-runtime/validate`
+  （需已批准 asset 权利记录）→ Worker 渲染 → 台账第四层 `RENDER_VERIFIED` →
+  `/setup/image-runtime/stop` 回收显存。写操作带 `x-shine-local-action: 1`。
+  真机证据见 `docs/ACCEPTANCE_20261105_REAL_IMAGE_VALIDATION.md`：
+  run `8289c72e…` 三类全 CANDIDATE_READY、`renderer_owned=true`、technical/decode pass、
+  GPU 回基线、无孤儿渲染器。
+- **语义 QC 如实挂起**。验证小样的 QC 里 `semantic=PENDING_HUMAN_REVIEW` 是正确状态：
+  技术质检可自动判定，构图/美术/像不像只能由用户评审；不得把 `READY_FOR_REVIEW`
+  的候选写成已被接受。
+- **浏览器闸门按当前界面导航**：`#preproduction` 的高级区在 reload 后会重新折叠；
+  卡片只显示 8 位 id 前缀（两个 native fixture 同前缀，按显示的 `payload.name` 选卡）；
+  crew 面板在 `#v/pro`、文本模型设置在 `#v/setup`、素材断言须在可见的 production 页跑；
+  个人桌面路径下风格冻结 actor 是 `local-user`（前端 `api()` 恒带本地动作标记），
+  思考深度按中文标签渲染（low → 低（快））。
+
