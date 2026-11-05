@@ -569,3 +569,32 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   这样按文件名排序就等于按剧本顺序，人、道具、场景在剧本与分镜之间对得上。
   规则写在 `shine/materialprep/naming.py`，出图与晋升两处都用它；
   没有对应条目的手工素材保留人自己的文件名。
+
+## 2026-11-06 导演包与整部作品持续生产（本轮新增）
+
+- **导演包是身份快照，不是物料副本**。`director_package_versions`（根）+ `director_package_episodes`（分集）
+  只保存已有对象的 id / revision / hash（剧本、分集、镜头、素材、风格、工作流、制片准备、政策）。
+  包不能批准素材、冻结风格、应用专业提案；确认只能由用户动作完成。
+  根 manifest 只放范围、政策、绑定身份与每集清单 hash，**不得把整部长剧塞进一个 JSON 字段**。
+- **`ready` 与 `startable` 是两件事**。`ready` = 内容可满足；`startable` = 已确认且未失效。
+  风格重冻、工作流图变更、制片准备变更、镜头 revision 变更必须在就绪检查里变成明确 blocker，
+  不能静默沿用旧结论，也不能把“一次成功生产”当成永久资格。
+- **运行层不是第二个调度器**。`ProductionRun` 只在 Worker 同一个 tick 里做一件短事：
+  决定哪个批次可领取。每次推进最多创建一个 `ProductionSeries`（有 live series 时不再派发），
+  GPU 租约、renderer、job/attempt 全部仍在 series 机制里，Run 不持有整部作品期限的锁。
+  `_advance_production_runs` 在 mock / offline / 无受管运行配置时返回 0：跑不了真实 H3 的机器不得凭空派发。
+  运行层的任何异常都不得杀死 Worker 主循环。
+- **一批不是一集**。属于某个 Run 批次的 series **不再自动发布自己的纪录片**（`enqueue_auto_delivery` 返回 `None`）；
+  分集交付由 run episode 订单负责，跨多个 series 生成一条有序 EDL。重复发布就是重复交付。
+- **交付范围靠列而不是靠 NULL 判重**。`delivery_orders` 有 `scope_kind/scope_id/input_digest`，
+  分集用部分唯一索引 `(scope_kind, scope_id, version) WHERE scope_id IS NOT NULL`；
+  旧的 `(series_id, version)` 唯一性必须保留，旧行 scope 回填为 `series`。
+- **分层装配，不放大单次上限**。`EditDecisionList` 的 100 项合同不变；
+  `DeliveryAssembler.assemble(page_size=100)` 先折页再拼总片，每层 `-c copy`，源片段只编码一次。
+- **一个页面可能承载两个阶段**（剧本与素材）。步骤条只高亮“当前该做的那一个”，
+  且六阶段完成态只能来自 `GET /projects/{id}/journey`；没有服务端状态时**不得**显示“全部完成”。
+- **推荐只读、只算、不承诺**。`comfyops/recommendation.py` 读 `config/deployment` 的已审计组合，
+  多卡显存不相加，未实测的组合只能是 `estimated`；目录里的整数 GiB 内存门槛要用
+  `effective_floor_mb`（减 1 GiB）读取，否则推荐会比安装器更严——这就是“三套结论”。
+- **迁移 head 现在是 `f180a0010001`**。`delivery_orders` 的列变更走 `batch_alter_table`（SQLite 表重建），
+  旧库升级需验证历史订单行、两条唯一约束与 `alembic check` 无 drift。
