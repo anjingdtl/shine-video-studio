@@ -206,7 +206,8 @@ $buildInfo = [ordered]@{
         'no real H3 inference through a newly installed managed instance has been demonstrated',
         'the M4 60-second, two-person-dialogue acceptance film has not been run',
         'existing real films still require final human review; this build does not promote pending_review to accepted',
-        'the real material batch stopped honestly at producer clarification questions: candidate promotion, style freeze and art review are the user''s decisions and have not been made',
+        'the delegated material round on the existing installation is closed (candidates reviewed and promoted, the Style Bible and the official rule pack frozen, three shots really rendered and delivered); what stays open is the final human review of that film and the VLM recalibration below',
+        'the six-image Ref2VA profile that carried the clock-shop shot is project-local: it is not part of the deployment catalog, so another project that binds more than two picture references still needs its own wider profile, built from the real node and validated on the real renderer',
         'the published VLM revision is invalidated by design by the closeout-round worker changes; recalibration, plan re-analysis and re-freeze still have to run on the formal project stack',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
@@ -253,7 +254,10 @@ $buildInfo = [ordered]@{
         'long scripts are produced in steps: a confirmed overall outline, user-chosen production sections, durable worker scheduling with pause/cancel/resume and precise invalidation of changed sections only',
         'the carry-over between production sections is versioned: a section whose shots all really passed freezes into an immutable end state; a later section queues without user facts only against that verified state, a forged render claim is overwritten on the server, and a superseded end state refuses the run',
         'the status probe answers once for an idle-stopped renderer, so a healthy machine waiting for work no longer shows production state unavailable',
-        'the image renderer no longer leaves its own marks on the shared H3 instance row, so runtime activation completes after image work'
+        'the image renderer no longer leaves its own marks on the shared H3 instance row, so runtime activation completes after image work',
+        'a delegated material round ran end-to-end on the real H3 stack: 12 reviewed candidates promoted to real masters, materials_ready judged by the server, the Style Bible and the official rule pack frozen, the five-role crew chain planning three shots, and 3/3 shots really rendered (real technical QC, real decode) into one delivered cut of 22.60 s at 1344x768',
+        'a project-local Ref2VA profile with one subject plus five picture slots, built from the canonical pdd8 graph on the real node COMFY_AUTOGROW_V3 image group (max=9) and validated against the live renderer, so a shot really carries every approved master it binds',
+        'a real run no longer fails because a leftover managed renderer still owns the port: the release action stops it with Job Object ownership proof, the attempt that never reached a renderer is closed without resubmission, and the GPU lease is released only after the renderer is provably gone'
     )
     excluded_from_package = @(
         'models and weights',
