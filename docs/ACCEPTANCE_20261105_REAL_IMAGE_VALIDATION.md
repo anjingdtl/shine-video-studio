@@ -42,6 +42,10 @@
   字节+SHA-256 校验入库，`is_mock=false`。
 - QC：`technical=pass`、`decode=pass`（每帧解码无错）、`semantic=PENDING_HUMAN_REVIEW`（如实挂起）。
 - 三类就绪层：**RENDER_VERIFIED（第四层）**，`can_generate=true`，证据 attempt id 即上表。
+- **第四层的展示绑定活体图验证**：渲染器停止后 `image-readiness` 如实回落到 `FILES_VERIFIED`
+  （图未活体验证、当下也不能出图）；台账证据不丢——复证一轮 start → readiness → stop：
+  重启后三类**立即回显 `RENDER_VERIFIED`**（指纹与 attempt 记录一致），再停止又是
+  `active_processes=0`、GPU 2127/16303 MiB。第二轮 start/stop 同时证明受管生命周期可重复。
 - 图片文件为真 PNG（1024×1024 RGBA）；角色小样另做了一次视觉核验（写实半身定妆照、无崩坏），
   采样件留在 `.local-acceptance/evidence_{character,scene,prop}_sample.png`（不入库）。
 
