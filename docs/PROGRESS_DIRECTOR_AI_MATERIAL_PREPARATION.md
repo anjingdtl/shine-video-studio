@@ -379,12 +379,12 @@ pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify
 
 | 项 | 结果 |
 | --- | --- |
-| 包 | `releases/ShineVideoStudio-20261105-e1c420a-win64.zip` |
-| 大小 | 2,518,111 字节（打包 516 个文件 / 7,362,130 字节） |
-| SHA-256 | `30e9e1814c96dc858b12464b95e1724d73c6fa4f4596ded70d6d373e46c69be6` |
-| 校验 | `Expand-Archive` 后按清单逐文件校验 SHA-256：**517 个文件全部通过** |
+| 包 | `releases/ShineVideoStudio-20261105-6b46bee-win64.zip` |
+| 大小 | 2,523,212 字节（打包 517 个文件 / 7,375,135 字节） |
+| SHA-256 | `b0e2bcc3d7a7b2518af1a5ec2bca29165c0c698b63ca58e237a7c9b834b27ddd` |
+| 校验 | `Expand-Archive` 后按清单逐文件校验 SHA-256：**518 个文件全部通过** |
 | 上一版 | 保留（releases/ 下 6 个旧包未动，`releases/` 已在 .gitignore，不污染工作树） |
-| 与提交的关系 | 本包构建自 `e1c420a`（**产品代码全集**）；其后只有本文件这一条文档提交，不改变包内任何代码 |
+| 与提交的关系 | 本包构建自 `6b46bee`（**产品代码全集**，含出图链路全链测试）；其后只有本文件这一条文档提交，不改变包内任何代码 |
 | 包内素材功能 | 已确认包含 13 个 `materialprep` 模块、新增安装目录、两个新前端组件与两份前端测试 |
 
 包内 `BUILD_INFO.json` 如实标注 `status=PARTIAL`、`source_tree=CLEAN_TREE`，并在
