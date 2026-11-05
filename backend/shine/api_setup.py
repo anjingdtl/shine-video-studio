@@ -72,6 +72,12 @@ class StorageRequest(BaseModel):
     allow_system_drive: bool = False
 
 
+class RecommendationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    purposes: list[str] | None = Field(default=None, max_length=4)
+    reuse_installed: bool = True
+
+
 class ExistingInstallationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     path: str = Field(min_length=1, max_length=1024)
@@ -255,6 +261,32 @@ def environment(settings: SettingsDep):
     return {**report, "blockers": setup_blockers(report),
             "advisory_reviews": deployment.advisory_review_readiness(settings),
             "bootstrap": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1"}
+
+
+@router.post("/deployment-recommendations")
+def deployment_recommendations(body: RecommendationRequest, settings: SettingsDep, db: DBSession):
+    """Recommend audited deploy combinations for this machine.
+
+    Read-only: detection never loads a weight, starts a renderer or installs a
+    package.  A combination without local measurement is reported as estimated,
+    never as verified.
+    """
+    from shine.comfyops.host_env import probe_host_environment
+    from shine.comfyops.recommendation import recommend
+    from shine.models import AppSetting
+
+    try:
+        env = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
+        record = db.get(AppSetting, "deployment_validation")
+        validation = dict(record.value or {}) if record else {}
+        return recommend(
+            env,
+            purposes=body.purposes,
+            validation=validation,
+            reuse_root=settings.comfyops_dir if body.reuse_installed else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 @router.get("/connectivity")

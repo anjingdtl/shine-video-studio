@@ -221,7 +221,16 @@ class DeliveryAssembler:
         subtitle_ass: str | None = None,
         subtitle_sha256: str | None = None,
         reuse_existing: bool = False,
+        page_size: int = 100,
     ) -> AssembledDelivery:
+        """Render one reel from an ordered clip list.
+
+        ``page_size`` bounds how many normalised segments one concat pass sees:
+        a long episode is first folded into page reels and the pages are then
+        concatenated.  Every level is a stream copy, so a source clip is still
+        encoded exactly once, and the ordered clip list — not the page layout —
+        remains the authority on the result.
+        """
         if not clips:
             raise DeliveryError(400, "DELIVERY_EMPTY_EDIT")
         if not shutil.which(self.ffmpeg_path):
@@ -262,32 +271,49 @@ class DeliveryAssembler:
                 )
                 segments.append(target)
 
-            listing = work / "concat.txt"
             # Absolute POSIX paths: FFmpeg resolves the concat list entries
             # against its own working directory, not against this process.
-            listing.write_text(
-                "\n".join(f"file '{segment.resolve().as_posix()}'" for segment in segments) + "\n",
-                encoding="utf-8",
-            )
-            reel = work / "delivery.mp4"
-            self._run(
-                [
-                    self.ffmpeg_path,
-                    "-nostdin",
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(listing),
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    str(reel),
-                ]
-            )
+            def concat(paths: list[Path], target: Path, name: str) -> Path:
+                page_listing = work / f"{name}.txt"
+                page_listing.write_text(
+                    "\n".join(f"file '{segment.resolve().as_posix()}'" for segment in paths) + "\n",
+                    encoding="utf-8",
+                )
+                self._run(
+                    [
+                        self.ffmpeg_path,
+                        "-nostdin",
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(page_listing),
+                        "-c",
+                        "copy",
+                        "-movflags",
+                        "+faststart",
+                        str(target),
+                    ]
+                )
+                return target
+
+            pages: list[Path] = []
+            bound = max(1, int(page_size))
+            if len(segments) > bound:
+                for index in range(0, len(segments), bound):
+                    pages.append(
+                        concat(
+                            segments[index:index + bound],
+                            work / f"page{index // bound:04d}.mp4",
+                            f"page{index // bound:04d}",
+                        )
+                    )
+                sources = pages
+            else:
+                sources = segments
+            reel = concat(sources, work / "delivery.mp4", "concat")
             final = reel
             if subtitle_ass:
                 # The subtitles are composited here, at the very end.  The
@@ -393,6 +419,7 @@ class DeliveryAssembler:
                 "duration_s": probe.duration_s,
                 "review_state": review_state,
                 "ffmpeg": shutil.which(self.ffmpeg_path),
+                "assembly_pages": len(pages) if len(segments) > max(1, int(page_size)) else 1,
                 **({"subtitles_sha256": subtitle_sha256, "subtitles_composited": True}
                    if subtitle_ass else {"subtitles_composited": False}),
             },

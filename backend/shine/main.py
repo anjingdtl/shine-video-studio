@@ -443,6 +443,9 @@ def create_app(
     from shine.api_story import router as story_router
 
     app.include_router(story_router)
+    from shine.api_director import router as director_router
+
+    app.include_router(director_router)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):

@@ -3987,6 +3987,30 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     return _run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
 
 
+def _advance_production_runs(session_factory, worker_id: str, *, settings) -> int:
+    """One short whole-film run step inside the resident Worker's own loop.
+
+    The run layer never gets a second controller: this is the same tick that
+    drives series, deliveries and the ordinary queue, and it only decides which
+    batch may become claimable.  It is skipped entirely when real H3 cannot be
+    run right now, so a run never dispatches work this machine cannot finish.
+    """
+    if settings.render_provider != "comfyui" or settings.offline_simulation:
+        return 0
+    try:
+        if _managed_recipe(settings) is None:
+            return 0
+    except HTTPException:
+        return 0
+    from shine.production.runner import advance_runs
+
+    try:
+        return advance_runs(session_factory, worker_id=worker_id, settings=settings, limit=1)
+    except Exception as exc:  # noqa: BLE001 - the run layer is not the Worker's liveness
+        logger.warning("production_run_step_failed error=%s", type(exc).__name__)
+        return 0
+
+
 def _run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.quality.runtime import configured_reviewers
 
@@ -4005,6 +4029,9 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
     if recovered:
         return "reconciled"
+    advanced = _advance_production_runs(session_factory, worker_id, settings=settings)
+    if advanced:
+        return f"run:{advanced}"
     from shine.media.delivery_engine import run_pending_deliveries
 
     delivered = run_pending_deliveries(

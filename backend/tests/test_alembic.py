@@ -9,6 +9,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
+HEAD_REVISION = "f180a0010001"
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -98,7 +100,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
         assert "generation_options" in provider_columns
         series_columns = {row[1] for row in connection.execute("PRAGMA table_info(production_series)")}
         assert "output_spec" in series_columns
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "f170a0030001"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
     finally:
         connection.close()
 

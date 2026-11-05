@@ -75,6 +75,15 @@ def enqueue_auto_delivery(db: Session, series: ProductionSeries) -> DeliveryOrde
     """
     from shine.media.delivery_models import DeliveryOrder
     from shine.models import AgentTaskRecord
+    from shine.production.models import ProductionRunBatch
+
+    # A series that belongs to a whole-film run is one *batch*, not the
+    # episode: publishing its reel as "the film" would release the same episode
+    # several times.  The run's episode order owns that delivery instead.
+    if db.scalars(
+        select(ProductionRunBatch.id).where(ProductionRunBatch.series_id == series.id)
+    ).first() is not None:
+        return None
 
     # A re-take is evidence awaiting an explicit assembly selection. Do not
     # silently publish a one-segment film when its isolated series completes.
@@ -249,10 +258,13 @@ def _order_public(order: DeliveryOrder) -> dict[str, Any]:
         "id": order.id,
         "project_id": order.project_id,
         "series_id": order.series_id,
+        "scope_kind": order.scope_kind,
+        "scope_id": order.scope_id,
         "origin": order.origin,
         "version": order.version,
         "status": order.status,
         "shots_digest": order.shots_digest,
+        "input_digest": order.input_digest,
         "edl_source": order.edl_source,
         "edl_payload": order.edl_payload,
         "edit_rules": order.edit_rules,
@@ -583,7 +595,7 @@ def run_pending_deliveries(session_factory, *, settings, asset_root: Path, worke
     cutoff = utcnow() - timedelta(seconds=ASSEMBLY_LEASE_SECONDS)
     with session_factory() as db:
         runnable = db.execute(
-            select(DeliveryOrder.id, DeliveryOrder.state_version)
+            select(DeliveryOrder.id, DeliveryOrder.state_version, DeliveryOrder.scope_kind)
             .where(or_(
                 DeliveryOrder.status == "PENDING",
                 and_(DeliveryOrder.status == "ASSEMBLING", DeliveryOrder.updated_at <= cutoff),
@@ -591,10 +603,17 @@ def run_pending_deliveries(session_factory, *, settings, asset_root: Path, worke
             .order_by(DeliveryOrder.updated_at, DeliveryOrder.id)
             .limit(64)
         ).all()
-    for order_id, seen_version in runnable:
-        run_delivery_order(
-            session_factory, order_id, settings=settings, asset_root=asset_root, worker_id=worker_id
-        )
+    for order_id, seen_version, scope_kind in runnable:
+        if scope_kind == "episode":
+            from shine.production.episode_delivery import run_episode_delivery
+
+            run_episode_delivery(
+                session_factory, order_id, settings=settings, asset_root=asset_root, worker_id=worker_id
+            )
+        else:
+            run_delivery_order(
+                session_factory, order_id, settings=settings, asset_root=asset_root, worker_id=worker_id
+            )
         with session_factory() as db:
             current = db.get(DeliveryOrder, order_id)
         if current is not None and current.state_version != seen_version:
