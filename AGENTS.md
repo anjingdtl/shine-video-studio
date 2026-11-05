@@ -507,3 +507,37 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   个人桌面路径下风格冻结 actor 是 `local-user`（前端 `api()` 恒带本地动作标记），
   思考深度按中文标签渲染（low → 低（快））。
 
+## 2026-11-05 受托素材轮 → 正式出片（导演模式，本轮新增）
+
+- **登记生成方案必须早于 crew 链**。导演在排参考集之前需要知道本项目
+  已登记方案映射了几个图像槽位（`workflow_reference_budget` → 参考预算提示）。
+  项目没有登记任何方案时，这个事实是空的，导演就会按剧本需要承诺超过任何方案能带的参考数
+  （实测：钟表铺一镜 6 张），提交时才以 `PENDING_WORKFLOW_MAPPING` 拦下。
+  顺序是：**登记方案 → 在真实渲染器上校验 → 再跑 crew 链 → 再排产**。
+- **绑定更多主素材的项目要自己的宽方案**。真实节点 `MiniMaxH3ReferenceToVideo` 的
+  `ref_images` 是 `COMFY_AUTOGROW_V3`，**max=9**（`ref_audios` max=3）。
+  宽方案从规范方案派生：在节点 31 上补 `ref_images.ref_image_N` 与对应 `LoadImage` 节点，
+  `parameter_map` 增加 `reference_picture_N`；然后**必须在真实渲染器上校验**
+  （`POST /api/v1/workflow-profiles/{id}/validate` → `missing_nodes=[]`、`missing_inputs=[]`），
+  未校验的方案不算数。宽方案是**项目自己的**方案，不改部署目录、不改标准方案的槽位声明。
+  实测：宽方案下 6 张参考（人物 + 5 张道具/场景）真实出现在同一画面里。
+- **声明了却没有的媒体族会被拦**。带 `-1aud` 的标准方案声明了 audio 传输族；
+  有对白而没有音色主素材的镜头会被 `validate_declared_transfer_families` 判为
+  「声明了却没绑定」。H3 原生朗读台词，音色主素材是可选的，因此**没有音色的项目要用
+  只声明 image 传输族的方案**，而不是给方案补一个假的音频槽。
+- **真实出产前先收遗留后台**。上一轮遗留的受管渲染器仍占着 8188 时，
+  本轮 Worker 自己的受管渲染器起不来，任务在**提交前**就以 `WORKER_EXCEPTION` 失败。
+  收尾用受管动作：`POST /api/v1/setup/managed-processes/release`（归属由命名 Job Object 证明）。
+  提交前失败**不是不确定提交**（无 `provider_job_id`、`prompt_graph_sha256` 为空），
+  可以 `POST /api/v1/operator/jobs/{id}/abandon` 结案（`resubmitted=false`）后重开序列；
+  GPU 租约要等渲染器被证明消失后才由 `reconcile_dead_renderer_leases` 释放。
+- **候选评审直接读本地图**。外部视觉工具对部分图 30s 超时且并发必超时；
+  候选图下载到本地后逐张读图目检，并把本地文件的 sha256 与服务端登记的
+  `content_sha256` 比对（12/12 一致），评审结论与注记写进晋升的 `evidence`。
+- **后端测试必须在仓库根运行**。`backend/tests` 里的测试按相对路径解析仓库根脚本
+  （如 `scripts/managed_comfy_bootstrap.py`），在 `backend/` 目录里跑 pytest 会让
+  `test_image_managed_renderer.py` 误报失败。正确命令：
+  `backend\\.venv\\Scripts\\python.exe -m pytest backend/tests -q`（在仓库根）。
+- **语义验收门如实挂起**。本机没有可用的 VLM/ASR 审片模型时，三镜都是
+  `PASSED` 且 `acceptance_status=pending_review`、`acceptance_final_gate=needs_review`：
+  技术质检与解码是真实的，构图/美术/对白只能由人看，最终验收门不得假装通过。
