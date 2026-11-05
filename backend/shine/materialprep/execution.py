@@ -30,6 +30,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
@@ -261,6 +262,59 @@ def _build_graph(config, prompt: image_prompts.ImagePrompt, *, seed: int, width:
     return final
 
 
+def _renderer_answers(base_url: str) -> bool:
+    """Is the renderer still there?  Used to tell "nothing is loaded" from
+    "the release could not be confirmed"."""
+    try:
+        httpx.get(f"{base_url}/system_stats", timeout=3.0)
+    except Exception:  # noqa: BLE001 - an unreachable renderer holds no model
+        return False
+    return True
+
+
+def _ensure_renderer(factory, settings, family: str) -> dict[str, Any]:
+    """The renderer that serves the image runtime is started by this workbench.
+
+    A renderer that a script started would keep the weights resident in GPU
+    memory and could not be released afterwards, so the Worker starts the
+    managed one itself and proves that this installation owns it.  The start
+    happens before the lease is taken: the memory admission inside the start
+    refuses a renderer while another one still holds the GPU.
+
+    Whether this installation really owns the renderer is recorded with the
+    attempt.  A renderer that the workbench does not own may still produce
+    bytes, but those bytes are never counted as real verification.
+    """
+    from shine.comfyops.image_renderer import ensure_image_renderer
+    from shine.comfyops.models import ComfyInstance
+
+    config = runtime.load_config(settings)
+    if not config.instance_id:
+        raise ImageExecutionError(
+            "IMAGE_RUNTIME_NOT_READY", code_detail="IMAGE_RUNTIME_NOT_BOUND", family=family
+        )
+    with factory() as db:
+        instance = db.get(ComfyInstance, config.instance_id)
+    owned = bool(
+        instance is not None
+        and instance.payload.get("managed")
+        and not instance.payload.get("is_mock")
+    )
+    if owned:
+        try:
+            ensure_image_renderer(factory, settings, instance_id=config.instance_id)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str((exc.detail or {}).get("code", ""))
+            raise ImageExecutionError(
+                "IMAGE_RENDERER_UNAVAILABLE", code_detail=detail or "IMAGE_RENDERER_UNAVAILABLE", family=family
+            ) from exc
+    return {
+        "renderer_owned": owned,
+        "renderer_base_url": config.base_url,
+        "renderer_instance_id": config.instance_id,
+    }
+
+
 def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
     payload = context["item_payload"]
     brief_raw = payload.get("brief")
@@ -348,6 +402,7 @@ def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: 
         provenance = {
             "source": "material_preparation",
             "is_mock": False,
+            "renderer_owned": bool((context.get("renderer") or {}).get("renderer_owned")),
             "generator": qwen_workflow.MODEL_FAMILY,
             "generation_mode": qwen_workflow.GENERATION_MODE,
             "template_commit": qwen_workflow.TEMPLATE_COMMIT,
@@ -448,34 +503,59 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
     # while a resource slot is held, and a prompt failure must not burn a lease.
     try:
         prompt = _compose_prompt(context)
-        resolved = resolve_runtime(factory, settings, family, kind=kind)
     except ImageExecutionError as exc:
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
         _audit(factory, context, "MATERIAL_IMAGE_BLOCKED", {"code": exc.code, **exc.details})
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 
-    config = resolved["config"]
-    fingerprint = resolved["fingerprint"]
     seed = int(context["item_payload"].get("seed") or 0)
     if not 0 <= seed <= qwen_workflow.MAX_SEED:
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_SEED_OUT_OF_RANGE")
         return {"item_id": item_id, "status": ITEM_FAILED, "code": "IMAGE_SEED_OUT_OF_RANGE"}
-    width = int(context["item_payload"].get("width") or config.width)
-    height = int(context["item_payload"].get("height") or config.height)
-    graph = _build_graph(config, prompt, seed=seed, width=width, height=height)
-    graph_sha = graph_hash(graph)
 
-    client = ComfyUIClient(resolved["base_url"], max_retries=0)
+    clients: dict[str, Any] = {}
+
+    def release_models() -> None:
+        """Free the renderer's models, or prove that there is nothing to free.
+
+        A renderer that is gone holds no model in GPU memory, so its release is
+        confirmed.  A renderer that still answers but cannot confirm is the
+        uncertain case, and the ledger has to reconcile it.
+        """
+        client = clients.get("client")
+        if client is None:
+            return
+        try:
+            client.free_models()
+        except Exception:
+            if _renderer_answers(client.base_url):
+                raise
+
     try:
+        # The lease comes first: the renderer is started while the GPU is
+        # exclusively ours, so it can never race a running video series, and a
+        # busy ledger makes the item wait instead of failing.
         with resource_slot(
             factory,
             "IMAGE",
             IMAGE_BUDGET_MB,
-            release_models=client.free_models,
+            release_models=release_models,
             wait_seconds=0,
         ) as lease_id:
+            renderer = _ensure_renderer(factory, settings, family)
+            context["renderer"] = renderer
+            resolved = resolve_runtime(factory, settings, family, kind=kind)
+            config = resolved["config"]
+            fingerprint = resolved["fingerprint"]
+            width = int(context["item_payload"].get("width") or config.width)
+            height = int(context["item_payload"].get("height") or config.height)
+            graph = _build_graph(config, prompt, seed=seed, width=width, height=height)
+            graph_sha = graph_hash(graph)
+            client = ComfyUIClient(resolved["base_url"], max_retries=0)
+            clients["client"] = client
             return _render_inside_lease(
-                factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint, family, prompt
+                factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint, family, prompt,
+                renderer,
             )
     except HTTPException as exc:
         code = exc.detail if isinstance(exc.detail, str) else str((exc.detail or {}).get("code", "GPU_UNAVAILABLE"))
@@ -492,7 +572,7 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
 
 
 def _render_inside_lease(factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint,
-                         family, prompt):
+                         family, prompt, renderer):
     """Everything that happens while the exclusive lease is held."""
     item_id = context["item_id"]
     seed = int(context["item_payload"].get("seed") or 0)
@@ -509,6 +589,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
         width=width,
         height=height,
         fingerprint=fingerprint,
+        renderer=renderer,
     )
     next_version = touch_item(factory, item_id, version, status=ITEM_SUBMIT_INTENT, lease_id=lease_id,
                                current_attempt_id=attempt_id)
@@ -591,7 +672,8 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     }
 
 
-def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width, height, fingerprint) -> str:
+def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width, height, fingerprint,
+                  renderer) -> str:
     """Persist the submit intent and return its attempt id.
 
     The unique ``active_intent_key`` makes this the atomic guard against a second
@@ -610,6 +692,12 @@ def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width,
         "output_class_type": qwen_workflow.OUTPUT_CLASS_TYPE,
         "model_family": qwen_workflow.MODEL_FAMILY,
         "template_commit": qwen_workflow.TEMPLATE_COMMIT,
+        # Whether this installation really owns the renderer that produced the
+        # bytes.  A stand-in renderer may prove the chain, but its output is
+        # never counted as real verification.
+        "renderer_owned": bool((renderer or {}).get("renderer_owned")),
+        "renderer_base_url": str((renderer or {}).get("renderer_base_url") or ""),
+        "renderer_instance_id": str((renderer or {}).get("renderer_instance_id") or ""),
     }
     with factory.begin() as db:
         attempt = MaterialImageAttempt(

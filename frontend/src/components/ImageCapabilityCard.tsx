@@ -8,10 +8,19 @@ export type ImageFamilyReadiness = {
   can_generate: boolean;
 };
 
+export type ImageRendererState = {
+  state: string;
+  instance_id: string;
+  port: number | null;
+  pid: number | null;
+  stage?: string;
+};
+
 export type ImageReadiness = {
   configured: boolean;
   layer: string;
   families: Record<string, ImageFamilyReadiness>;
+  renderer: ImageRendererState;
   fingerprint: string;
   config_revision: number;
   config_digest: string;
@@ -48,6 +57,15 @@ const FAMILY_LABELS: Record<string, string> = {
 
 const IMAGE_CATALOG = 'qwen-image-2.1-windows-x64';
 const IMAGE_COMPONENTS = ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 'qwen-image-2.1-vae'];
+
+const RENDERER_LABELS: Record<string, string> = {
+  NOT_BOUND: '未绑定',
+  NOT_STARTED: '未启动',
+  RUNNING: '运行中',
+  GONE: '已退出',
+  STOPPED: '已停止',
+  UNVERIFIED: '无法确认归属',
+};
 
 const BLOCKER_LABELS: Record<string, string> = {
   IMAGE_RUNTIME_NOT_BOUND: '还没有绑定本机的受管渲染器，AI 不能出图。绑定后即可登记并验证三类小样。',
@@ -121,6 +139,36 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     }
   };
 
+  const startRenderer = async () => {
+    setWorking(true);
+    setProblem(null);
+    setNote(null);
+    try {
+      const result = await jsonPost<{ base_url: string }>('/setup/image-runtime/start', {});
+      setNote(`本机出图渲染器已启动（${result.base_url}）。它属于本工作台，完成后可以用下面的按钮关闭并释放显存。`);
+      await load();
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const stopRenderer = async () => {
+    setWorking(true);
+    setProblem(null);
+    setNote(null);
+    try {
+      await jsonPost('/setup/image-runtime/stop', {});
+      setNote('本机出图渲染器已停止，显存已释放。');
+      await load();
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const validate = async () => {
     setWorking(true);
     setProblem(null);
@@ -142,6 +190,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     }
   };
   const families = Object.entries(state?.families ?? {});
+  const rendererState = state?.renderer?.state ?? 'NOT_STARTED';
   const generatable = families.filter(([, row]) => row.can_generate).map(([name]) => FAMILY_LABELS[name] ?? name);
   const gigabytes = state ? (state.upstream.required_bytes / 1024 ** 3).toFixed(2) : '—';
 
@@ -163,6 +212,14 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
             <span>{state ? (LAYER_LABELS[state.layer] ?? state.layer) : '正在检查'}</span>
           </div>
           {state?.configured ? <Check size={15} /> : <AlertTriangle size={15} />}
+        </div>
+        <div className={`setup-status ${rendererState === 'RUNNING' ? 'ok' : 'pending'}`}>
+          <div className="setup-status-icon"><ImageIcon size={16} /></div>
+          <div>
+            <b>本机出图渲染器</b>
+            <span>{state ? (RENDERER_LABELS[rendererState] ?? rendererState) : '正在检查'}</span>
+          </div>
+          {rendererState === 'RUNNING' ? <Check size={15} /> : <CircleDashed size={15} />}
         </div>
         <div className={`setup-status ${generatable.length === 3 ? 'ok' : 'pending'}`}>
           <div className="setup-status-icon"><Check size={16} /></div>
@@ -227,6 +284,14 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
       )}
       <button type="button" className="subtle-button" disabled={working || busy} onClick={registerInstall}>
         登记出图权重安装计划
+      </button>
+      <button type="button" className="subtle-button" disabled={working || busy || !state?.configured}
+        onClick={startRenderer}>
+        {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 启动本机出图渲染器
+      </button>
+      <button type="button" className="subtle-button" disabled={working || busy || rendererState !== 'RUNNING'}
+        onClick={stopRenderer}>
+        停止出图渲染器并释放显存
       </button>
       <button type="button" className="must-button" disabled={working || busy || !state?.configured} onClick={validate}>
         {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 验证三类真实小样

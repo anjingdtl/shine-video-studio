@@ -377,6 +377,14 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     instance = db.get(ComfyInstance, body.instance_id)
     if instance is None:
         raise HTTPException(404, "COMFY_INSTANCE_NOT_FOUND")
+    if not instance.payload.get("managed"):
+        # The image runtime may only bind an instance this installation
+        # manages: a renderer the workbench cannot prove it owns would keep
+        # the weights resident and could never be released again.
+        raise HTTPException(409, {
+            "code": "IMAGE_RUNTIME_INSTANCE_NOT_MANAGED",
+            "detail": "出图运行时只能绑定本工作台受管的实例。",
+        })
     base_url = require_loopback_url(body.base_url, allow_remote=bool(settings.allow_remote_comfyui))
     current = runtime.load_config(settings)
     if body.expected_config_revision and current.config_revision != body.expected_config_revision:
@@ -397,6 +405,36 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     db.commit()
     return {"config_revision": config.config_revision, "digest": runtime.config_digest(settings),
             "readiness": runtime.readiness(db, settings)}
+
+
+@router.post("/setup/image-runtime/start")
+def start_image_runtime_renderer(request: Request, actor: Operator, settings: SettingsDep):
+    """Start the managed renderer that serves the bound image runtime.
+
+    ComfyUI belongs to the workbench: a renderer that a script started would
+    keep the weights resident in GPU memory and could not be released later.
+    The renderer is started here, inside a named owned group, so the workbench
+    can prove that it owns it and can stop it again.
+    """
+    from shine.comfyops.image_renderer import start_image_renderer
+
+    config = runtime.load_config(settings)
+    if not config.instance_id or not config.base_url:
+        raise HTTPException(409, {"code": "IMAGE_RUNTIME_NOT_BOUND", "detail": "IMAGE_RUNTIME_NOT_BOUND"})
+    factory = request.app.state.session_factory
+    return start_image_renderer(factory, settings, instance_id=config.instance_id, actor=actor)
+
+
+@router.post("/setup/image-runtime/stop")
+def stop_image_runtime_renderer(request: Request, actor: Operator, settings: SettingsDep):
+    """Stop the managed image renderer and give the GPU memory back."""
+    from shine.comfyops.image_renderer import stop_image_renderer
+
+    config = runtime.load_config(settings)
+    if not config.instance_id:
+        return {"status": "NOT_STARTED", "instance_id": ""}
+    factory = request.app.state.session_factory
+    return stop_image_renderer(factory, settings, instance_id=config.instance_id, actor=actor)
 
 
 @router.post("/setup/image-runtime/validate", status_code=202)

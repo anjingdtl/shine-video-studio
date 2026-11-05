@@ -56,6 +56,12 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   MOCK_ASSET_NOT_PRODUCTION: '这一项绑定的是模拟素材，真实制作不能使用它。',
   MATERIAL_PLAN_NOT_CONFIRMED: '清单还没有确认，先确认清单再判定素材是否齐备。',
   MATERIAL_REQUIREMENT_UNBOUND: '还有必需项没有绑定有效主素材。',
+  IMAGE_RENDERER_RECIPE_MISSING: '还没有为本机生成受管运行配置，出图渲染器无法启动。请先到基础配置完成本机环境登记。',
+  IMAGE_RENDERER_RECIPE_MISMATCH: '出图运行时绑定的实例与本机受管运行配置不是同一个实例，请重新绑定。',
+  IMAGE_RENDERER_INSTANCE_NOT_MANAGED: '出图运行时只能绑定本工作台受管的实例，请先完成受管实例绑定。',
+  IMAGE_RENDERER_MEMORY_INSUFFICIENT: '本机显存或内存不够运行出图渲染器，请先释放其它占显存的进程。',
+  IMAGE_RENDERER_OWNERSHIP_UNVERIFIED: '记录里的渲染器进程身份无法证明属于本工作台，因此没有停止它。',
+  IMAGE_RENDERER_UNAVAILABLE: '本机出图渲染器没有起来，无法出图。请先在基础配置里启动它。',
 };
 
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw

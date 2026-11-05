@@ -209,7 +209,12 @@ def promote(db, settings, row, actor, decision, *, offline):
         row.sha256 = graph_hash(row.payload)
         p = row.payload
     mock = p["provenance"].get("is_mock", False)
-    if mock and not offline:
+    # Bytes that came from a renderer this installation does not own are not a
+    # real render either.  They may be promoted for offline rehearsal, but the
+    # master they become stays offline-only and can never count as a verified
+    # production material.
+    unowned_renderer = p["provenance"].get("renderer_owned", True) is False
+    if (mock or unowned_renderer) and not offline:
         raise HTTPException(409, "MOCK_REQUIRES_OFFLINE_APPROVAL")
     if p["kind"] == "text":
         # Subtitles live in the same candidate ledger; they are not H3 media references.
@@ -237,7 +242,7 @@ def promote(db, settings, row, actor, decision, *, offline):
             **p["provenance"],
             "candidate_id": row.id,
             "rights_id": p["rights_id"],
-            "offline_only": mock or offline,
+            "offline_only": mock or unowned_renderer or offline,
         },
         approved=True,
         locked=True,
@@ -255,7 +260,7 @@ def promote(db, settings, row, actor, decision, *, offline):
         "CANDIDATE_PROMOTED",
         "asset",
         asset.id,
-        {"candidate_id": row.id, "offline_only": mock or offline},
+        {"candidate_id": row.id, "offline_only": mock or unowned_renderer or offline},
         project_id=row.project_id,
     )
     return asset

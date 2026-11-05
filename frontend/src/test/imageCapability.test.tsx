@@ -14,6 +14,7 @@ const READY = {
     scene: { layer: 'GRAPH_VERIFIED', evidence_attempt_id: null, can_generate: false },
     prop: { layer: 'GRAPH_VERIFIED', evidence_attempt_id: null, can_generate: false },
   },
+  renderer: { state: 'NOT_STARTED', instance_id: 'i1', port: 8188, pid: null },
   fingerprint: 'f'.repeat(64),
   config_revision: 2,
   config_digest: 'c'.repeat(64),
@@ -51,6 +52,8 @@ function routes(readiness: unknown) {
   return [
     { method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse(readiness) },
     { method: 'POST', pattern: /setup\/image-runtime\/validate$/, respond: () => jsonResponse({ run_id: 'run-9' }) },
+    { method: 'POST', pattern: /setup\/image-runtime\/start$/, respond: () => jsonResponse({ status: 'RUNNING', base_url: 'http://127.0.0.1:8188' }) },
+    { method: 'POST', pattern: /setup\/image-runtime\/stop$/, respond: () => jsonResponse({ status: 'STOPPED' }) },
     { method: 'POST', pattern: /preparation\/rights$/, respond: () => jsonResponse({ id: 'rights-1' }) },
     { method: 'POST', pattern: /preparation\/rights\/rights-1\/approve$/, respond: () => jsonResponse({ id: 'rights-1' }) },
     { method: 'POST', pattern: /preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }) },
@@ -98,6 +101,20 @@ it('验证三类小样会先登记研究用途授权，再排队真实渲染', a
     families: ['character', 'scene', 'prop'],
     rights_id: 'rights-1',
   });
+});
+
+it('出图渲染器由工作台启动和停止，停止按钮只在运行中可用', async () => {
+  stub = new StudioStub(routes(READY));
+  const user = userEvent.setup();
+  render(<ImageCapabilityCard projectId="p1" busy={false} />);
+  await screen.findByText('角色');
+  expect(screen.getByText('本机出图渲染器')).toBeTruthy();
+  expect(screen.getByText('未启动')).toBeTruthy();
+  const stop = screen.getByRole('button', { name: '停止出图渲染器并释放显存' }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(true);
+  await user.click(screen.getByRole('button', { name: /启动本机出图渲染器/ }));
+  expect(await screen.findByText(/本机出图渲染器已启动/)).toBeTruthy();
+  expect(stub.callsOf('POST', /setup\/image-runtime\/start$/)).toHaveLength(1);
 });
 
 it('可以登记出图权重安装计划，并展示下载量、占用与目标盘', async () => {

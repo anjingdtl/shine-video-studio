@@ -233,6 +233,10 @@ def test_the_image_path_submits_harvests_and_registers_a_candidate(api, tmp_path
             assert candidate is not None
             assert candidate.payload["content_sha256"] == hashlib.sha256(IMAGE_BYTES).hexdigest()
             assert candidate.payload["qc"]["technical"] == "pass"
-            # The fourth readiness layer is derived from the ledger, not a flag.
+            # The stand-in renderer is not owned by this installation, so its
+            # bytes prove the chain and nothing more: the fourth readiness
+            # layer stays closed for every family.
+            assert attempt.payload["renderer_owned"] is False
+            assert candidate.payload["provenance"]["renderer_owned"] is False
             report = runtime.readiness(db, settings, object_info=object_info_fixture())
-        assert report["families"]["character"]["can_generate"] is True, report
+        assert report["families"]["character"]["can_generate"] is False, report

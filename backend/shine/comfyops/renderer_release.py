@@ -52,6 +52,21 @@ def _records(db, prefix: str) -> list[dict[str, Any]]:
     return found
 
 
+def live_process_facts(record: dict[str, Any]) -> dict[str, Any]:
+    """The physical facts about one recorded process, for other owners.
+
+    A renderer this installation started may be owned by a different subsystem
+    (the image runtime, for example).  Both need the same proof: the recorded
+    PID/birth identity and the membership of the named owned group.
+    """
+    return _live_facts(record)
+
+
+def managed_process_state(record: dict[str, Any]) -> str:
+    """RUNNING / UNVERIFIED / GONE / STOPPED for one recorded process."""
+    return _state_of(record, _live_facts(record))
+
+
 def managed_processes(db) -> list[dict[str, Any]]:
     """Every managed renderer and review service this installation recorded."""
     records = _records(db, RENDERER_PREFIX) + _records(db, REVIEW_PREFIX)

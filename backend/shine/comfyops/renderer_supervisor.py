@@ -166,6 +166,16 @@ class RendererSupervisor:
         self._drain = {"owner": owner, "history_path": path, "history_sha256": digest}
         return dict(self._drain)
 
+    def resume(self):
+        """Open the queue for a submission this installation owns.
+
+        A renderer starts closed.  Only the owner of the owned group may open
+        it, and only after the adapter proved its own identity, so a renderer
+        that does not belong to this installation never accepts a prompt.
+        """
+        owner = self._control("GET", "/shine-handoff/status", "drained")
+        return self._control("POST", "/shine-handoff/resume", "accepting", owner)
+
     def stop_after_drain(self):
         """Stop only the verified owned group after rechecking the archive and drain."""
         if self._drain is None:

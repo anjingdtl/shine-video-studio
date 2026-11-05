@@ -236,9 +236,10 @@ def render_verified_families(db, fingerprint: str) -> dict[str, str]:
     """Families with a real successful sample under this exact fingerprint.
 
     The evidence is the ledger itself: a SUCCEEDED image attempt whose recorded
-    runtime fingerprint still matches, whose candidate is not a mock, and whose
-    run was a validation run.  Nothing here trusts a status string written by
-    anything other than the Worker that really produced the bytes.
+    runtime fingerprint still matches, whose candidate is not a mock, whose run
+    was a validation run, and whose renderer was one this installation owns.
+    A stand-in renderer may prove that the chain works; its bytes are never
+    counted as real verification.
     """
     from sqlalchemy import select
 
@@ -254,6 +255,8 @@ def render_verified_families(db, fingerprint: str) -> dict[str, str]:
     for attempt in attempts:
         if not attempt.candidate_id:
             continue
+        if (attempt.payload or {}).get("renderer_owned") is not True:
+            continue
         item = db.get(MaterialItem, attempt.item_id)
         run = db.get(MaterialRun, attempt.run_id)
         if item is None or run is None:
@@ -264,6 +267,20 @@ def render_verified_families(db, fingerprint: str) -> dict[str, str]:
         if family in FAMILIES and family not in verified:
             verified[family] = attempt.id
     return verified
+
+
+def _renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
+    """The state of the managed renderer that would serve this runtime.
+
+    The renderer is the workbench's own process: it is started here, proved to
+    be ours, and released again by the same path that closes the rest of the
+    local backends.
+    """
+    if not instance_id:
+        return {"state": "NOT_BOUND", "instance_id": "", "port": None, "pid": None}
+    from shine.comfyops.image_renderer import image_renderer_state
+
+    return image_renderer_state(db, settings, instance_id)
 
 
 def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -294,6 +311,7 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
             layer = LAYER_GRAPH_VERIFIED
 
     verified = render_verified_families(db, fingerprint) if layer == LAYER_GRAPH_VERIFIED else {}
+    renderer = _renderer_state(db, settings, config.instance_id)
     families = {
         family: {
             "layer": LAYER_RENDER_VERIFIED if family in verified else layer,
@@ -306,6 +324,7 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         "configured": configured,
         "layer": layer,
         "families": families,
+        "renderer": renderer,
         "fingerprint": fingerprint,
         "config_revision": config.config_revision,
         "config_digest": config_digest(settings),
