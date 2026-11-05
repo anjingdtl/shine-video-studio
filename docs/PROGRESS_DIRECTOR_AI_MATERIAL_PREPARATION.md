@@ -431,6 +431,32 @@ prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 
 | 前端：`npm run build` | ✓ 成功（`npm ci` 未跑：会重装 node_modules） |
 | web-e2e：Playwright 浏览器流程 | **仍未转绿**（已推进到最后一步）：已按当前界面修正导航、原生弹窗、已删除的凭据字段、单按钮确认、中文状态标签、结果访问器一致性、卡片 id 前缀过滤、面板级批准按钮定位、删除界面已不存在的「模拟执行」按钮、并改为直接捕获界面点击产生的 API 响应来取计划 id。最后一步的机制已定位：**面板生成的实例计划在「模型与节点」视图里没有渲染成可批准卡片**（该视图按 project_id 过滤计划行，而 instance-plans 请求体不含项目字段）——需核对实例计划的归属与状态，可能同时是产品缺口 |
 
+### 内置浏览器真实验证（本轮新增）
+
+用产品自己的启动器把**本轮代码**起在独立端口（API 8133 / Web 5193，mock provider，独立数据目录，
+不触碰你既有的 8000/5173），再用内置浏览器真实打开并核对两块新界面：
+
+| 界面 | 实测结果 |
+| --- | --- |
+| 「素材与风格」页的素材准备面板 | **渲染正确**：三阶段（① 读剧本 / ② 确认需求 · 0 项 / ③ 选择素材 · 0 个批次）、文字模型不占显卡的说明、剧本下拉与「分析剧本」主按钮、折叠阶段的计数，全部按预期显示 |
+| 「基础配置」的出图能力卡 | **渲染正确**：出图运行时「未配置」、可生成类别「还没有类别通过真实出图验证」、角色/场景/道具三行「未配置」、阻塞原因「还没有绑定本机的受管渲染器，AI 不能出图。绑定后即可登记并验证三类小样。」、固定模板 `9fae1041be7e…` 与模型 `aacf31a6d48e…` 钉点、权重约 16.10 GiB、研究用途限制、「登记出图权重安装计划」与「验证三类真实小样」两个按钮（未绑定时正确禁用） |
+
+### 下一步的精确动作：受管渲染器（已获授权）
+
+真实检测在 mock 模式下是模拟的（`FakeWindowsHostProbe`），必须切到 local 模式并由操作员保存
+扫描白名单，流程与 `scripts/verify_v13_web.py` 的前段一致：
+
+1. `/comfyops/execution-context` 取当前配置哈希 → 操作员保存受限扫描范围（白名单）。
+2. 「操作模式」切到 local 并勾选核对确认 → `POST /comfyops/inventory/refresh`（mode=local）做**只读检测**，
+   识别既有安装 `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI`。
+3. 收编该既有安装（`adopt_existing_installation` → `status_origin=USER_CONFIRMED_EXISTING_INSTALLATION`），
+   产生受管实例行。
+4. 绑定出图运行时：`POST /api/v1/setup/image-runtime`（instance_id / base_url /
+   model_root=既有 ComfyUI 的 models 目录 / expected_config_revision）。
+5. 排三类真实小样：`POST /api/v1/setup/image-runtime/validate`（需一条已批准的 asset 用途权利记录）。
+6. Worker 取件渲染 → 取回声明输出节点 → 字节校验 → 技术质检 → 第四层就绪由台账推导。
+7. 收尾：用工作台自带的释放路径关闭受管实例并回收显存。
+
 ### 仍未做（不得按已完成计）
 
 1. **真实 Qwen 出图与 live `object_info` 校验**：仍需受管 ComfyUI 实例；权重已就位，但本轮没有启动渲染器。
