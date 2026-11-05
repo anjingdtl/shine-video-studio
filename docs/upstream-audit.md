@@ -394,13 +394,24 @@ PE 默认关闭这一点对本产品是决定性的：服务端用确定性模�
 - 仓库：`Comfy-Org/Qwen-Image-2.1`，固定 revision `aacf31a6d48e707f352ecba714cee0680da3479b`
 - 下表 SHA-256 取自该 revision 的 HF LFS 元数据（LFS `oid` 即文件内容 SHA-256）
 
-| 文件 | 字节 | SHA-256 |
-| --- | --- | --- |
-| `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` |
-| `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` |
-| `text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` | 9,471,072,252 | `9182abae56fe05459840a86d22abd21f972061c92fce032630af680c8c5178d3` |
-| `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
-| **合计** | **26,754,163,364（24.92 GiB）** | |
+| 文件 | 字节 | SHA-256 | 是否必需 |
+| --- | --- | --- | --- |
+| `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` | 必需 |
+| `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` | 必需 |
+| `text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` | 9,471,072,252 | `9182abae56fe05459840a86d22abd21f972061c92fce032630af680c8c5178d3` | **不需要** |
+| `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` | 必需 |
+| **必需合计** | **17,283,091,112（16.10 GiB）** | | |
+
+**第四个文件（提示词扩写编码器）本产品不安装**：模板出厂 `switch=false`，而 `ComfySwitchNode`
+的两个分支都是 `lazy=True`，`check_lazy_status` 只在开关为真时才请求 `on_true`。
+既然 PE 关闭（见上节，本产品的确定性模板要求它关闭），该分支永不被求值，API 图里也没有它。
+留下这份 9.47 GB 权重只会让 ComfyUI 把它列为可选模型并可能被误选，而且本机那份下载不完整
+（9,370,058,752 / 9,471,072,252），故已从 `models/` 删除。上表的「不需要」一行保留它的
+字节数与 SHA-256，作为该 revision 的事实记录，不是安装清单。
+
+产品侧的安装清单是 `config/deployment/qwen-image-2.1-windows-x64.json`（3 个必需权重，
+逐文件钉死 SHA-256 与字节数，标注研究用途），走既有受控安装路径；
+`backend/tests/test_image_installation_catalog.py` 锁住「目录与工作流钉点逐字节一致」。
 
 官方模型仓库（许可与出处，不作为 ComfyUI 单文件权重的来源）：
 
@@ -421,18 +432,22 @@ PE 默认关闭这一点对本产品是决定性的：服务端用确定性模�
 
 本机**无法访问 `huggingface.co`**（`curl` 返回 `http=000`，连接失败），
 `hf-mirror.com` 可访问并提供同一 LFS 对象（VAE 文件已按上表 SHA-256 完整校验通过）。
-既有 `config/deployment/h3-ref2va-windows-x64.json` 中的 H3 下载 URL 全部指向
-`huggingface.co`；若图片安装计划沿用该主机，在本机会直接失败。安装计划必须显式声明
-可用主机并在下载后逐文件校验 SHA-256，不得因主机不可达就回退到未审计来源。
+
+安装器本身已具备**逐字节镜像回退**：`installer.mirror_url()` 把 `huggingface.co/<owner>/<repo>/resolve/<rev>/<path>`
+改写为同源的 `hf-mirror.com` 地址，`hf-mirror.com` 与 `cas-bridge.xethub.hf.co` 都在
+`TRUSTED_DOWNLOAD_HOSTS` 内，回退只允许跟随这两个主机，**每个字节仍按钉死的 SHA-256 与字节数校验**。
+因此新的图片安装目录 `config/deployment/qwen-image-2.1-windows-x64.json` 可以继续使用
+`huggingface.co` 作为权威来源地址：主站可达时直连，不可达时走镜像，且镜像给出不同字节会**响亮失败**
+而不是被接受。既有 `config/deployment/h3-ref2va-windows-x64.json` 同样适用该回退。
 
 ### 本节验证边界
 
 已核验：模板字节与固定 commit 一致；模板所需节点全部存在于本机 ComfyUI `v0.39.0` 核心源码；
-四个权重文件的权威来源、精确 revision、字节数与 SHA-256；官方许可证原文条款；VAE 文件下载后
-逐字节 SHA-256 与钉点一致。
+四个权重文件的权威来源、精确 revision、字节数与 SHA-256；官方许可证原文条款；**三个必需权重已下载到本机
+ComfyUI 的 `models/` 并逐文件 SHA-256 校验通过**（VAE、扩散模型、文本编码器，合计 16.10 GiB），
+第四个 PE 编码器按上节判定不需要并已从本机 `models/` 删除。
 
 `PENDING_VERIFICATION`（不得声称已完成）：受管实例的实机 `object_info` 节点校验；UI 模板展开为
 API 图后的图 hash 固定与 `/prompt` 提交验证；三类（角色/场景/道具）真实出图；实际显存占用与
-生成耗时（本机 RTX 5080 16 GB、系统内存 31.7 GB，权重合计 24.92 GiB，必然涉及 offload，
-**未实测前不得给出显存下限数字**）；`Comfy-Org` 转换权重的许可证文本；三个大文件的下载完成与
-逐字节校验。
+生成耗时（本机 RTX 5080 16 GB、系统内存 31.7 GB，必需权重合计 16.10 GiB，必然涉及 offload，
+**未实测前不得给出显存下限数字**）；`Comfy-Org` 转换权重的许可证文本。

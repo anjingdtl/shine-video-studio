@@ -14,14 +14,15 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
-from shine.api_common import DBSession, app_settings
+from shine.api_common import DBSession, app_settings, llm_gateway
 from shine.api_operator import Operator
 from shine.config import Settings
+from shine.llm.gateway import LLMGateway
 from shine.materialprep import runtime, service
-from shine.materialprep.contracts import MaterialConfirmation
+from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
 from shine.materialprep.states import EXECUTION_MODE_REAL
 from shine.schemas import APIModel
 
@@ -34,7 +35,11 @@ class AnalyzeBody(APIModel):
     document_id: str
     expected_document_hash: str = Field(min_length=64, max_length=64)
     idempotency_key: str = Field(min_length=1, max_length=128)
-    scene_preparations: list[dict] = Field(default_factory=list, max_length=400)
+    # The scene answers are the published ScriptPreparation contract, not free
+    # dictionaries. A family outside character/scene/prop or an unknown field is
+    # refused here instead of travelling into the plan payload and from there
+    # into an image prompt.
+    scene_preparations: list[ScriptPreparation] = Field(default_factory=list, max_length=400)
 
 
 class GenerateBody(APIModel):
@@ -83,7 +88,7 @@ class ValidateBody(APIModel):
 
 
 @router.post("/projects/{project_id}/material-preparation/analyze", status_code=202)
-def analyze_material(project_id: str, body: AnalyzeBody, db: DBSession):
+def analyze_material(project_id: str, body: AnalyzeBody, actor: Operator, db: DBSession):
     """Open a material-preparation plan revision from finished scene analyses.
 
     The scene analyses themselves are Agent tasks created by the crew route; this
@@ -100,26 +105,137 @@ def analyze_material(project_id: str, body: AnalyzeBody, db: DBSession):
         raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
     if document.sha256 != body.expected_document_hash:
         raise HTTPException(409, {"code": "MATERIAL_DOCUMENT_STALE", "actual": document.sha256})
-    plan = service.create_draft_plan(db, project, document, body.scene_preparations)
+    plan, replayed = service.create_draft_plan(
+        db,
+        project,
+        document,
+        [scene.model_dump(mode="json") for scene in body.scene_preparations],
+        actor=actor,
+    )
     aggregated = service.aggregated_requirements(db, plan)
-    plan.payload = {**plan.payload, "requirements": aggregated["requirements"]}
-    from shine.comfy.workflow import graph_hash
-
-    plan.sha256 = graph_hash(plan.payload)
     db.commit()
     return {
         "status": "accepted",
+        "replayed": replayed,
         "plan_revision_id": plan.id,
         "purpose": plan.purpose,
         "requirements": aggregated["requirements"],
         "conflicts": aggregated["conflicts"],
         "open_questions": aggregated["open_questions"],
+        # The hash a confirmation has to quote. The server publishes it so the
+        # page never has to reproduce the server's canonicalisation.
+        "expected_snapshot": service.confirmation_snapshot_hash(plan),
+        # The server's own segmentation: the scenes it will accept and the
+        # fragments an answer is allowed to cite.
+        "source_scenes": plan.payload.get("source_scenes") or [],
+        "source_span_ids": plan.payload.get("source_span_ids") or [],
     }
 
 
 @router.get("/projects/{project_id}/material-preparation")
-def material_progress(project_id: str, db: DBSession):
-    return service.plan_progress(db, project_id)
+def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
+    return service.plan_progress(db, project_id, data_dir=settings.data_dir)
+
+
+@router.post("/projects/{project_id}/material-preparation/complete")
+def complete_materials(project_id: str, actor: Operator, db: DBSession, settings: SettingsDep):
+    """Judge the material completion condition and record the outcome.
+
+    The material list is only ready when every required requirement is bound to
+    a current master of this project that is approved, locked, of the right
+    family and identity, still hashes to its registered digest and carries an
+    approved licence.  The judgement comes back with the items that are still
+    open and the reason for each, so the page never claims a completion it
+    cannot prove.
+    """
+    from shine.comfyops.preproduction import current_material_plan
+    from shine.services import add_audit, require_project
+
+    require_project(db, project_id)
+    evaluation = service.evaluate_materials(db, project_id, data_dir=settings.data_dir)
+    plan = current_material_plan(db, project_id)
+    if plan is not None and evaluation["materials_ready"] and plan.status != "MATERIALS_READY":
+        plan.status = "MATERIALS_READY"
+        add_audit(db, actor, "MATERIALS_READY", "preproduction_plan", plan.id,
+                  {"requirements": len(evaluation["requirements"])}, project_id=project_id)
+        db.commit()
+    add_audit(db, actor, "MATERIAL_COMPLETION_JUDGED", "preproduction_plan",
+              plan.id if plan is not None else "none",
+              {"materials_ready": evaluation["materials_ready"],
+               "missing": len(evaluation["missing"])}, project_id=project_id)
+    db.commit()
+    return evaluation
+
+
+@router.get("/projects/{project_id}/material-preparation/scenes")
+def material_scenes(project_id: str, document_id: str, db: DBSession):
+    """The server's own segmentation of one script document.
+
+    The scene numbering and the citable fragments are server facts.  The page
+    shows them so the user can see which scene is being prepared, and an agent
+    answer can only cite a fragment that is on this list.
+    """
+    from shine.materialprep.source_spans import segment_document
+    from shine.models import ProjectDocument
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    document = db.get(ProjectDocument, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    scenes = segment_document(document.text or "")
+    return {
+        "document_id": document.id,
+        "document_sha256": document.sha256,
+        "scenes": [scene.as_public() for scene in scenes],
+        "span_ids": [span.id for scene in scenes for span in scene.spans],
+    }
+
+
+class PrepareScenesBody(APIModel):
+    document_id: str
+    expected_document_hash: str = Field(min_length=64, max_length=64)
+    locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
+    allow_remote_text: bool = False
+
+
+@router.post("/projects/{project_id}/material-preparation/scenes/prepare")
+def prepare_material_scenes(
+    project_id: str,
+    body: PrepareScenesBody,
+    request: Request,
+    actor: Operator,
+    db: DBSession,
+    gateway: Annotated[LLMGateway, Depends(llm_gateway)],
+):
+    """Run the pre-production scriptwriter over every scene of one document.
+
+    The server owns the segmentation, the numbering and the citation
+    catalogue.  Each scene is one real routed call; a scene that fails is
+    reported with its reason and the other scenes still run, because a long
+    script must not lose the scenes that did work.
+    """
+    from shine.materialprep import scenes
+    from shine.models import ProjectDocument
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    document = db.get(ProjectDocument, body.document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    if document.sha256 != body.expected_document_hash:
+        raise HTTPException(409, {"code": "MATERIAL_DOCUMENT_STALE", "actual": document.sha256})
+    result = scenes.prepare_scenes(
+        gateway,
+        request.app.state.session_factory,
+        project_id,
+        document,
+        locked_story_facts=body.locked_story_facts,
+        allow_remote_text=body.allow_remote_text,
+    )
+    if result.get("error_code"):
+        raise HTTPException(409, result)
+    return result
 
 
 @router.post("/projects/{project_id}/material-preparation/confirm")
@@ -128,7 +244,7 @@ def confirm_material(project_id: str, body: MaterialConfirmation, actor: Operato
 
 
 @router.post("/projects/{project_id}/material-preparation/generate", status_code=202)
-def generate_material(project_id: str, body: GenerateBody, db: DBSession):
+def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: DBSession):
     """Queue a real batch.  Returns immediately; the Worker renders it."""
     result = service.create_batch(
         db,
@@ -152,25 +268,25 @@ def run_detail(project_id: str, run_id: str, db: DBSession):
 
 
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/cancel", status_code=202)
-def cancel_run(project_id: str, run_id: str, body: StateVersionBody, db: DBSession):
+def cancel_run(project_id: str, run_id: str, body: StateVersionBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
     return {"status": "accepted", **service.request_cancel(db, run_id, body.expected_state_version)}
 
 
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/reconcile", status_code=202)
-def reconcile_run(project_id: str, run_id: str, body: StateVersionBody, db: DBSession):
+def reconcile_run(project_id: str, run_id: str, body: StateVersionBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
     return {"status": "accepted", **service.reconcile_run(db, run_id, body.expected_state_version)}
 
 
 @router.post("/projects/{project_id}/material-preparation/runs/{run_id}/resume", status_code=202)
-def resume_run(project_id: str, run_id: str, body: ResumeBody, db: DBSession):
+def resume_run(project_id: str, run_id: str, body: ResumeBody, actor: Operator, db: DBSession):
     _require_ownership(db, project_id, run_id)
     return {"status": "accepted", **service.resume_items(db, run_id, body.item_ids, body.expected_state_version)}
 
 
 @router.post("/projects/{project_id}/material-preparation/regenerate", status_code=202)
-def regenerate_requirement(project_id: str, body: RegenerateBody, db: DBSession):
+def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operator, db: DBSession):
     """Generate another version of one requirement, keeping the old candidates.
 
     This is a new generation revision with its own brief and seed, not a cleared
@@ -216,8 +332,38 @@ def _require_ownership(db, project_id: str, run_id: str) -> None:
 
 @router.get("/setup/image-readiness")
 def image_readiness(db: DBSession, settings: SettingsDep):
-    """Four-layer readiness per family.  Layer four is the only one that renders."""
-    return runtime.readiness(db, settings)
+    """Four-layer readiness per family.  Layer four is the only one that renders.
+
+    The node layer is checked against the live renderer when the bound instance
+    answers.  The probe is a read-only GET with a short timeout: a renderer that
+    is down must not turn the setup card into a hanging request, it only means
+    the node layer stays unproven.
+    """
+    config = runtime.load_config(settings)
+    return runtime.readiness(db, settings, object_info=_probe_object_info(config, settings))
+
+
+def _probe_object_info(config, settings) -> dict | None:
+    """Ask the bound renderer what it declares, without waiting on it."""
+    if not (config.base_url and config.instance_id):
+        return None
+    import httpx
+
+    from shine.security import require_loopback_url
+
+    try:
+        base_url = require_loopback_url(
+            config.base_url, allow_remote=bool(getattr(settings, "allow_remote_comfyui", False))
+        )
+    except HTTPException:
+        return None
+    try:
+        response = httpx.get(f"{base_url}/object_info", timeout=3.0)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - an unreachable renderer only leaves a layer unproven
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 @router.post("/setup/image-runtime")
@@ -254,7 +400,7 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
 
 
 @router.post("/setup/image-runtime/validate", status_code=202)
-def validate_image_runtime(body: ValidateBody, db: DBSession, settings: SettingsDep):
+def validate_image_runtime(body: ValidateBody, actor: Operator, db: DBSession, settings: SettingsDep):
     """Queue the three real small-sample renders through the same Worker queue.
 
     A validation batch is allowed at ``GRAPH_VERIFIED``; that is what breaks the

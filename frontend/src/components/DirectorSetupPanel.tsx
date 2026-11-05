@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Mic, Settings2, Sparkles, Wand2 } from 'lucide-react';
 import { api, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupPanel } from './SetupPanel';
+import { ImageCapabilityCard } from './ImageCapabilityCard';
 import SettingsPanel from './SettingsPanel';
 
 type Tab = 'env' | 'models' | 'voice';
@@ -141,6 +142,7 @@ export default function DirectorSetupPanel({
         </div>
       </div>
       <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch} />
+      <ImageCapabilityCard projectId={projectId} busy={busy} />
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">

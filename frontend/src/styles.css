@@ -1081,3 +1081,53 @@ html[data-theme='dark'] .asset-list::-webkit-scrollbar-thumb,html[data-theme='da
   .produce-stages{top:0;padding:6px 8px}
   .first-run-journey li{min-width:calc(50% - 8px)}
 }
+
+/* --- director: AI material preparation ------------------------------------ */
+.image-capability{margin-top:14px}
+.image-status-grid{margin:0 0 11px}
+.image-family-list{list-style:none;padding:0;margin:8px 0 11px}
+.image-family-list li{display:flex;gap:9px;align-items:center;padding:5px 0;border-bottom:1px solid #eef0e4;font-size:10px;color:#56584b}
+.image-family-list li span:first-child{flex:0 0 46px;color:#7e8072}
+.image-capability-foot{display:flex;flex-direction:column;gap:3px;margin:9px 0 11px;font-size:9px;color:#8b8d7e;line-height:1.6}
+.material-panel{border:1px solid #e3e6d2;border-radius:9px;background:#fdfdf8;padding:13px 14px;margin:12px 0}
+.material-stages{display:flex;gap:7px;list-style:none;padding:0;margin:10px 0 12px;flex-wrap:wrap}
+.material-stages li{border:1px solid #d9ddc4;border-radius:6px;background:#fff;padding:5px 10px;font-size:10px;color:#7e8072}
+.material-stages li.now{border-color:#b8621d;background:#fff4e4;color:#8a4a12;font-weight:600}
+.material-stages li.done{border-color:#cbd6a8;background:#f6f8ec;color:#6b6f57}
+.material-stage{border:1px solid #e6e8d8;border-radius:8px;background:#fff;margin-bottom:9px}
+.material-stage>summary{cursor:pointer;padding:9px 12px;font-size:10.5px;color:#56584b;font-weight:600}
+.material-stage-body{padding:0 12px 12px}
+.material-hint{font-size:9.5px;color:#7e8072;line-height:1.7;margin:4px 0 9px}
+.material-step-report{font-size:9.5px;color:#56584b;margin:4px 0;line-height:1.6}
+.material-field{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:10px;color:#56584b}
+.material-field>span{flex:0 0 92px;color:#7e8072}
+.material-field select,.material-field input{flex:1;min-width:0;height:30px;border:1px solid #d9ddc4;border-radius:6px;padding:0 8px;font-size:10px;background:#fff;color:#3d3f37}
+.material-requirement-list{list-style:none;padding:0;margin:6px 0 10px}
+.material-requirement-list li{border:1px solid #e6e8d8;border-radius:7px;padding:9px 11px;margin-bottom:8px;background:#fcfcf8}
+.material-requirement-list b{display:block;font-size:10.5px;color:#3d3f37}
+.material-requirement-list small{display:block;font-size:9px;color:#8b8d7e;margin:3px 0 6px;line-height:1.6}
+.material-direction{border:1px dashed #d3d8bb;border-radius:7px;padding:9px 11px;margin:8px 0 11px}
+.material-direction legend{font-size:9.5px;color:#7e8072;padding:0 4px}
+.material-scene-list{list-style:none;padding:0;margin:9px 0 0;font-size:9.5px;color:#7e8072}
+.material-scene-list li{display:flex;gap:9px;align-items:center;padding:4px 0;border-bottom:1px solid #eef0e4}
+.material-scene-list em{color:#a4571a;font-style:normal}
+.material-run{border:1px solid #e6e8d8;border-radius:7px;padding:9px 11px;margin-bottom:9px;background:#fcfcf8}
+.material-run b{display:block;font-size:10.5px;color:#3d3f37}
+.material-run small{display:block;font-size:9px;color:#8b8d7e;margin:3px 0 6px}
+.material-run ul{list-style:none;padding:0;margin:0;font-size:9.5px;color:#56584b}
+.material-run li{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid #eef0e4}
+.material-run em{color:#a4571a;font-style:normal}
+.material-candidate{border:1px solid #d9ddc4;border-radius:5px;padding:2px 7px;background:#f6f8ec;font-size:9px}
+.material-promotion-report{list-style:none;padding:0;margin:8px 0 0;font-size:9.5px}
+.material-promotion-report li{display:flex;gap:9px;align-items:center;padding:4px 0;border-bottom:1px solid #eef0e4}
+.material-promotion-report li.failed span:last-child{color:#a4571a}
+html[data-theme='dark'] .material-panel{border-color:#3b3d2f;background:#20211b}
+html[data-theme='dark'] .material-stage{border-color:#3b3d2f;background:#25261f}
+html[data-theme='dark'] .material-stage>summary{color:#cdcec0}
+html[data-theme='dark'] .material-stages li{border-color:#3b3d2f;background:#25261f;color:#a9aa9c}
+html[data-theme='dark'] .material-stages li.now{border-color:#8a5a25;background:#33261a;color:#e3b483}
+html[data-theme='dark'] .material-requirement-list li,.material-run{border-color:#3b3d2f;background:#22231d}
+html[data-theme='dark'] .material-requirement-list b,.material-run b{color:#cdcec0}
+html[data-theme='dark'] .material-field select,.material-field input{border-color:#3b3d2f;background:#22231d;color:#cdcec0}
+html[data-theme='dark'] .material-direction{border-color:#454a33}
+html[data-theme='dark'] .material-candidate{border-color:#454a33;background:#2b2d24;color:#cdcec0}

@@ -202,6 +202,7 @@ $buildInfo = [ordered]@{
     }
     known_blockers = @(
         'a full 60.8GB download and a clean Windows install have not been exercised',
+        'the three Qwen-Image-2.1 material samples have not been rendered on a newly installed machine; their weights install through their own pinned catalog',
         'no real H3 inference through a newly installed managed instance has been demonstrated',
         'the M4 60-second, two-person-dialogue acceptance film has not been run',
         'existing real films still require final human review; this build does not promote pending_review to accepted',
@@ -235,7 +236,8 @@ $buildInfo = [ordered]@{
         'a package start advances both ports when the defaults are busy, and the dev launcher archives unverifiable records instead of killing unknown processes',
         'the five crew roles are served the finished editorial segmentation, so the director copies the timing instead of inventing it',
         'an ungroupable cut table and a beat count that cannot match the table are refused before any model call',
-        'the workbench closes the ComfyUI and local reviewer processes it started, and the launcher releases leftover backends before a clean start'
+        'the workbench closes the ComfyUI and local reviewer processes it started, and the launcher releases leftover backends before a clean start',
+        'the director mode can prepare AI material (character, scene, prop) through a pinned Qwen-Image-2.1 workflow: the server splits the script, the producer writes one appearance brief per requirement, and the candidates stay on the ordinary asset ledger until a human promotes them'
     )
     excluded_from_package = @(
         'models and weights',

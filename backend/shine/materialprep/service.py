@@ -22,10 +22,12 @@ import json
 from typing import Any
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from shine.comfy.workflow import graph_hash
+from shine.comfyops.assets import require_rights
 from shine.comfyops.models import (
     PLAN_PURPOSE_ASSET_PREPARATION,
     PLAN_PURPOSE_PRODUCTION,
@@ -33,8 +35,9 @@ from shine.comfyops.models import (
     CandidateAsset,
     PreProductionPlan,
 )
-from shine.materialprep.contracts import MaterialConfirmation
+from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
+from shine.materialprep.source_spans import known_span_ids, segment_document, unknown_span_ids
 from shine.materialprep.states import (
     ATTEMPT_UNKNOWN,
     EXECUTION_MODE_REAL,
@@ -80,44 +83,34 @@ def confirmation_id_for(project_id: str, payload: dict[str, Any]) -> str:
 # --- plan revisions --------------------------------------------------------
 
 
-def create_draft_plan(db, project: Project, document: ProjectDocument, preparations: list[dict[str, Any]]):
-    """Open a material-preparation plan revision from finished scene analyses."""
-    if document.project_id != project.id:
-        raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
-    payload = {
-        "purpose": PLAN_PURPOSE_ASSET_PREPARATION,
-        "document_id": document.id,
-        "script_hash": document.sha256,
-        "scene_preparations": preparations,
-        "requirements": [],
-        "visual_direction": None,
-        "confirmation": None,
-        "manifest": None,
-    }
-    plan = PreProductionPlan(
-        project_id=project.id,
-        payload=payload,
-        sha256=graph_hash(payload),
-        status=PLAN_DRAFT,
-        purpose=PLAN_PURPOSE_ASSET_PREPARATION,
-    )
-    db.add(plan)
-    db.flush()
-    add_audit(db, "local-user", "MATERIAL_PLAN_DRAFTED", "preproduction_plan", plan.id,
-              {"scenes": len(preparations)}, project_id=project.id)
-    return plan
+def _validated_scene(scene: dict[str, Any]) -> dict[str, Any]:
+    """Enforce the published ScriptPreparation contract at the boundary.
+
+    The scene answer is what the whole requirement list is built from. An
+    unknown family or an extra field would otherwise be carried into the plan
+    payload and from there into an image prompt, so the refusal happens here
+    with a name the caller can act on.
+    """
+    try:
+        prepared = ScriptPreparation.model_validate(scene)
+    except ValidationError as exc:
+        raise HTTPException(
+            422,
+            {"code": "MATERIAL_SCENE_PREPARATION_INVALID", "detail": str(exc)[:400]},
+        ) from exc
+    return prepared.model_dump(mode="json")
 
 
-def aggregated_requirements(db, plan: PreProductionPlan) -> dict[str, Any]:
+def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge per-scene preparations into one identity-keyed requirement list.
 
-    The server assigns the identity, never the model.  A name that appears under
+    The server assigns the identity, never the model. A name that appears under
     two different descriptions is reported as ambiguous for the user to resolve
     instead of being merged by string equality.
     """
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     conflicts: list[dict[str, Any]] = []
-    for scene in plan.payload.get("scene_preparations") or []:
+    for scene in scenes:
         scene_key = scene.get("scene_key")
         for requirement in scene.get("requirements") or []:
             family = requirement.get("family")
@@ -143,7 +136,7 @@ def aggregated_requirements(db, plan: PreProductionPlan) -> dict[str, Any]:
                               "code": "MATERIAL_IDENTITY_AMBIGUOUS"})
     open_questions = [
         question
-        for scene in (plan.payload.get("scene_preparations") or [])
+        for scene in scenes
         for question in scene.get("questions") or []
     ]
     return {
@@ -162,6 +155,164 @@ def aggregated_requirements(db, plan: PreProductionPlan) -> dict[str, Any]:
     }
 
 
+def _persist_requirements(
+    db, project_id: str, plan_id: str, requirements: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give every aggregated requirement a row and a stable id.
+
+    The id is what the director page shows, what the confirmation quotes and
+    what the generation batch references, so it has to exist before the user
+    confirms anything. Without it the journey stops at "confirm the list": the
+    page has nothing to send back.
+    """
+    stored: list[dict[str, Any]] = []
+    for requirement in requirements:
+        row = AssetRequirement(
+            project_id=project_id,
+            plan_id=plan_id,
+            payload={
+                **requirement,
+                "critical": True,
+                "strategy": None,
+                "bound_asset_id": None,
+                "brief_note": "",
+                "source_plan_revision_id": plan_id,
+            },
+            sha256=graph_hash(requirement),
+            status="PROPOSED",
+        )
+        db.add(row)
+        db.flush()
+        stored.append({**requirement, "requirement_id": row.id})
+    return stored
+
+
+def create_draft_plan(
+    db,
+    project: Project,
+    document: ProjectDocument,
+    preparations: list[dict[str, Any]],
+    *,
+    actor: str = "local-user",
+) -> tuple[PreProductionPlan, bool]:
+    """Open (or reuse) the material-preparation plan revision for this analysis.
+
+    The same script analysed twice must not produce two draft revisions. The
+    newer one would become the current material plan and silently drop the
+    decisions the user already confirmed, so an identical analysis reuses the
+    revision that is already current. The second value says whether it was a
+    reuse.
+    """
+    if document.project_id != project.id:
+        raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
+    scenes = [_validated_scene(scene) for scene in preparations]
+    # The server owns the segmentation and the citation catalogue.  A scene
+    # answer that cites a fragment the server never handed out is refused by
+    # name: a silently dropped citation turns a fact into an uncited one.
+    document_scenes = segment_document(document.text or "")
+    known_spans = known_span_ids(document_scenes)
+    known_scene_keys = {scene.key for scene in document_scenes}
+    for preparation in scenes:
+        scene_key = preparation.get("scene_key")
+        if scene_key not in known_scene_keys:
+            raise HTTPException(
+                422,
+                {"code": "MATERIAL_SCENE_KEY_UNKNOWN", "scene_key": scene_key,
+                 "known_scene_keys": sorted(known_scene_keys)},
+            )
+        invented = unknown_span_ids(preparation, known_spans)
+        if invented:
+            raise HTTPException(
+                422,
+                {"code": "MATERIAL_SOURCE_SPAN_UNKNOWN", "span_ids": invented,
+                 "scene_key": scene_key},
+            )
+    request_hash = graph_hash({
+        "document_id": document.id,
+        "script_hash": document.sha256,
+        "scenes": scenes,
+    })
+    from shine.comfyops.preproduction import current_material_plan
+
+    current = current_material_plan(db, project.id)
+    if current is not None and (current.payload or {}).get("request_hash") == request_hash:
+        return current, True
+    aggregated = aggregate_requirements(scenes)
+    draft_payload = {
+        "purpose": PLAN_PURPOSE_ASSET_PREPARATION,
+        "document_id": document.id,
+        "script_hash": document.sha256,
+        "request_hash": request_hash,
+        "scene_preparations": scenes,
+        "source_scenes": [scene.key for scene in document_scenes],
+        "source_span_ids": sorted(known_spans),
+        "requirements": [],
+        "conflicts": aggregated["conflicts"],
+        "visual_direction": None,
+        "confirmation": None,
+        "manifest": None,
+    }
+    plan = PreProductionPlan(
+        project_id=project.id,
+        payload=draft_payload,
+        sha256=graph_hash(draft_payload),
+        status=PLAN_DRAFT,
+        purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+    )
+    db.add(plan)
+    db.flush()
+    payload = {
+        **draft_payload,
+        "requirements": _persist_requirements(db, project.id, plan.id, aggregated["requirements"]),
+    }
+    plan.payload = payload
+    plan.sha256 = graph_hash(payload)
+    db.flush()
+    add_audit(db, actor, "MATERIAL_PLAN_DRAFTED", "preproduction_plan", plan.id,
+              {"scenes": len(scenes), "requirements": len(payload["requirements"])}, project_id=project.id)
+    return plan, False
+
+
+def aggregated_requirements(db, plan: PreProductionPlan) -> dict[str, Any]:
+    """The stored requirement list of one plan revision, with its identities.
+
+    The ids come from the ledger, so the page can quote exactly what the server
+    holds. The conflicts and open questions are recomputed from the scene
+    answers, which are the facts they were derived from.
+    """
+    payload = plan.payload or {}
+    requirements = payload.get("requirements") or []
+    recomputed = aggregate_requirements(payload.get("scene_preparations") or [])
+    conflicts = payload.get("conflicts")
+    if conflicts is None:
+        conflicts = recomputed["conflicts"]
+    return {
+        "requirements": requirements,
+        "conflicts": conflicts,
+        "open_questions": recomputed["open_questions"],
+    }
+
+
+def confirmation_snapshot(plan: PreProductionPlan) -> dict[str, Any]:
+    """The exact state a confirmation is allowed to be made against."""
+    payload = plan.payload or {}
+    return {
+        "requirements": payload.get("requirements") or [],
+        "visual_direction": payload.get("visual_direction"),
+        "scene_preparations": payload.get("scene_preparations") or [],
+    }
+
+
+def confirmation_snapshot_hash(plan: PreProductionPlan) -> str:
+    """The hash the client quotes back in a confirmation.
+
+    The server publishes it. A client that had to recompute it would depend on
+    this module's private canonicalisation, and a contract nobody can compute
+    is a contract everybody fails.
+    """
+    return graph_hash(confirmation_snapshot(plan))
+
+
 def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict[str, Any]:
     """Record the human confirmation as a NEW immutable plan revision."""
     require_project(db, project_id)
@@ -171,10 +322,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
     if source.purpose != PLAN_PURPOSE_ASSET_PREPARATION:
         raise HTTPException(409, "PREPRODUCTION_PLAN_PURPOSE_MISMATCH")
 
-    snapshot = {"requirements": source.payload.get("requirements") or [],
-                "visual_direction": source.payload.get("visual_direction"),
-                "scene_preparations": source.payload.get("scene_preparations") or []}
-    actual = graph_hash(snapshot)
+    actual = confirmation_snapshot_hash(source)
     if actual != body.expected_snapshot:
         # The list the user read is not the list the server holds now.
         raise HTTPException(409, {"code": "MATERIAL_PLAN_STALE", "actual_snapshot": actual})
@@ -189,13 +337,16 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         row = db.get(AssetRequirement, decision.requirement_id)
         if row is None or row.project_id != project_id:
             raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
-        payload = row.payload or {}
-        if (payload.get("family"), payload.get("entity_id")) not in known:
+        if row.plan_id != source.id:
+            # The decision belongs to another revision of this plan.
+            raise HTTPException(409, {"code": "MATERIAL_PLAN_STALE", "requirement_id": row.id})
+        requirement_payload = row.payload or {}
+        if (requirement_payload.get("family"), requirement_payload.get("entity_id")) not in known:
             raise HTTPException(409, "MATERIAL_PLAN_STALE")
         decisions.append({
             "requirement_id": row.id,
-            "family": payload.get("family"),
-            "entity_id": payload.get("entity_id"),
+            "family": requirement_payload.get("family"),
+            "entity_id": requirement_payload.get("entity_id"),
             "strategy": decision.strategy,
             "asset_id": decision.asset_id,
             "brief_note": decision.brief_note,
@@ -227,22 +378,21 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
     db.add(plan)
     db.flush()
     for decision in decisions:
-        row = AssetRequirement(
-            project_id=project_id,
-            plan_id=plan.id,
-            payload={
-                "family": decision["family"],
-                "entity_id": decision["entity_id"],
-                "critical": True,
-                "strategy": decision["strategy"],
-                "bound_asset_id": decision["asset_id"],
-                "brief_note": decision["brief_note"],
-                "source_requirement_id": decision["requirement_id"],
-            },
-            sha256=graph_hash(decision),
-            status="CONFIRMED",
-        )
-        db.add(row)
+        row = db.get(AssetRequirement, decision["requirement_id"])
+        # The requirement keeps its identity across the revision: the page
+        # quotes the id it was shown and the batch references the same id.
+        # Only its owning revision and its decision move forward.
+        row.plan_id = plan.id
+        row.payload = {
+            **(row.payload or {}),
+            "strategy": decision["strategy"],
+            "bound_asset_id": decision["asset_id"],
+            "brief_note": decision["brief_note"],
+            "source_plan_revision_id": source.id,
+            "confirmed_by": actor,
+        }
+        row.sha256 = graph_hash(row.payload)
+        row.status = "CONFIRMED"
     db.flush()
     add_audit(db, actor, "MATERIAL_PLAN_CONFIRMED", "preproduction_plan", plan.id,
               {"confirmation_id": confirmation_id, "decisions": len(decisions),
@@ -316,6 +466,13 @@ def create_batch(
             raise HTTPException(409, {"code": "IDEMPOTENCY_KEY_CONFLICT", "run_id": existing.id})
         return {"run_id": existing.id, "status": existing.status, "replayed": True,
                 "items": [public_item(db, i) for i in _items(db, existing.id)]}
+
+    # The licence is checked at the point where a batch is really created. A
+    # batch spends a GPU render, and a render that may not become a candidate is
+    # a wasted render, so an unapproved licence must not reach the renderer.
+    # A replayed request creates nothing and therefore keeps its original
+    # answer: the same key with the same request hash returns the original run.
+    require_rights(db, project_id, rights_id)
 
     generate_ids = _select_generable(db, plan, requirement_ids)
     run = MaterialRun(
@@ -434,6 +591,7 @@ def create_validation_batch(
 ) -> dict[str, Any]:
     """Queue one real small-sample render per family through the same Worker path."""
     require_project(db, project_id)
+    require_rights(db, project_id, rights_id)
     request_payload = {
         "kind": "validation",
         "families": sorted(families),
@@ -805,7 +963,93 @@ def _allowed_actions(run: MaterialRun, statuses: list[str]) -> list[str]:
     return actions
 
 
-def plan_progress(db, project_id: str) -> dict[str, Any]:
+def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
+    """The material completion condition.
+
+    Every required requirement of the current confirmed material plan must be
+    bound to a current master of this project that is approved and locked, has
+    the right family and identity, still hashes to its registered digest and
+    carries an approved licence.  A real project may not bind an offline-only
+    mock master.
+
+    The judgement is the same shape as the production readiness gate, so a
+    reason code means the same thing in both places.
+    """
+    from shine.comfyops.models import RightsRecord
+    from shine.comfyops.preproduction import current_material_plan
+    from shine.models import Asset
+
+    plan = current_material_plan(db, project_id)
+    if plan is None or plan.status not in {PLAN_CONFIRMED, PLAN_MATERIALS_READY}:
+        return {"materials_ready": False, "requirements": [], "missing": [],
+                "reason": "MATERIAL_PLAN_NOT_CONFIRMED"}
+
+    assets = db.scalars(
+        select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.approved.is_(True),
+            Asset.locked.is_(True),
+        )
+    ).all()
+    rows = db.scalars(
+        select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)
+    ).all()
+
+    judged: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.payload or {}
+        family = payload.get("family")
+        entity_id = payload.get("entity_id")
+        critical = bool(payload.get("critical", True))
+        bound = payload.get("bound_asset_id")
+        match = next((a for a in assets if a.role == family and a.entity_id == entity_id), None)
+        if match is None and bound:
+            match = next((a for a in assets if a.id == bound), None)
+        reason: str | None = None
+        if match is None:
+            reason = "ASSET_OR_VOICE_MISSING"
+        else:
+            if match.role != family or match.entity_id != entity_id:
+                reason = "ASSET_IDENTITY_MISMATCH"
+            provenance = match.provenance or {}
+            if provenance.get("offline_only", False) or provenance.get("is_mock", False):
+                reason = "MOCK_ASSET_NOT_PRODUCTION"
+            rights_id = provenance.get("rights_id")
+            if rights_id:
+                rights = db.get(RightsRecord, rights_id)
+                if not rights or rights.status != "APPROVED":
+                    reason = "LICENSE_NOT_APPROVED"
+            if data_dir:
+                from shine.media.artifacts import safe_asset_path
+
+                try:
+                    media = safe_asset_path(data_dir, match.storage_path).read_bytes()
+                    if hashlib.sha256(media).hexdigest() != match.sha256:
+                        reason = "ASSET_HASH_CHANGED"
+                except OSError:
+                    reason = "ASSET_FILE_MISSING"
+        satisfied = match is not None and reason is None
+        entry = {
+            "requirement_id": row.id,
+            "family": family,
+            "entity_id": entity_id,
+            "asset_id": match.id if match is not None else None,
+            "status": "SATISFIED" if satisfied else "MISSING",
+            "reason": reason,
+        }
+        judged.append(entry)
+        if critical and not satisfied:
+            missing.append(entry)
+
+    return {
+        "materials_ready": bool(judged) and not missing,
+        "requirements": judged,
+        "missing": missing,
+        "reason": None if not missing else "MATERIAL_REQUIREMENT_UNBOUND",
+    }
+
+def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
     """The material page's state: plan, requirements, matches, batches, blockers."""
     from shine.comfyops.preproduction import current_material_plan
 
@@ -835,8 +1079,16 @@ def plan_progress(db, project_id: str) -> dict[str, Any]:
     if plan.status == PLAN_NEEDS_CLARIFICATION:
         blockers.append({"code": "MATERIAL_CONFIRMATION_REQUIRED",
                          "note": "存在待消歧的身份或未回答的问题，先处理再确认清单。"})
-    missing = [r for r in requirements if r["strategy"] == "generate" and not r["bound_asset_id"]]
-    if plan.status == PLAN_MATERIALS_READY and not missing:
+    # The completion condition is judged, not remembered: the page tells the
+    # truth about what is still unbound even if a status was written earlier.
+    evaluation = evaluate_materials(db, project_id, data_dir=data_dir)
+    for entry in evaluation["missing"]:
+        blockers.append({
+            "code": entry["reason"] or "MATERIAL_REQUIREMENT_UNBOUND",
+            "requirement_id": entry["requirement_id"],
+            "note": f"{entry['family']} · {entry['entity_id']} 还没有绑定有效主素材（{entry['reason']}）。",
+        })
+    if evaluation["materials_ready"]:
         stage = "materials_ready"
     elif plan.status == PLAN_CONFIRMED:
         stage = "select_materials"
@@ -854,9 +1106,14 @@ def plan_progress(db, project_id: str) -> dict[str, Any]:
         "script_hash": plan.payload.get("script_hash"),
         "visual_direction": plan.payload.get("visual_direction"),
         "confirmation": plan.payload.get("confirmation"),
+        # The hash a confirmation has to quote. The server publishes it so a
+        # client never has to reproduce this module's canonicalisation.
+        "expected_snapshot": confirmation_snapshot_hash(plan),
         "requirements": requirements,
         "runs": runs,
         "blockers": blockers,
+        "materials_ready": evaluation["materials_ready"],
+        "material_evaluation": evaluation,
         "production_plan_present": bool(
             db.scalar(select(PreProductionPlan.id).where(
                 PreProductionPlan.project_id == project_id,

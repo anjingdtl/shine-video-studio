@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from shine.materialprep import qwen_workflow
 from shine.materialprep.image_prompts import template_evidence
+from shine.models import utcnow
 
 CONFIG_FILENAME = "image-runtime.json"
 
@@ -67,6 +68,11 @@ class ImageRuntimeConfig(BaseModel):
     width: int = qwen_workflow.DEFAULT_RESOLUTION
     height: int = qwen_workflow.DEFAULT_RESOLUTION
     model_files: list[dict[str, Any]] = Field(default_factory=list)
+    # Digests of the model files as they were last verified, with the size and
+    # modification time they were verified at. The weights here are 16 GiB, so
+    # re-hashing them on every readiness read would make the setup card and the
+    # Worker unusable. A changed size or a touched file is re-hashed.
+    verified_files: list[dict[str, Any]] = Field(default_factory=list)
     bound_at: str = ""
 
 
@@ -108,10 +114,14 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
 
     A file that is present but wrong is worse than a missing one: it would render
     something the audit does not describe.  Hashing multi-GB files is expensive,
-    so the caller caches the result inside the readiness evidence.
+    so a digest that was already computed for the current size and modification
+    time is reused.  The reuse is reported as such: a cached record carries
+    "cached": true and the time it was verified, and any change of size or
+    modification time forces a real re-hash.
     """
     root = Path(config.model_root) if config.model_root else None
     entries = config.model_files or [dict(entry) for entry in qwen_workflow.MODEL_FILES]
+    cached = {entry.get("filename"): entry for entry in (config.verified_files or [])}
     checked, problems = [], []
     for entry in entries:
         if not entry.get("required", True):
@@ -126,19 +136,62 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
         if not path.is_file():
             problems.append({**record, "code": "IMAGE_MODEL_FILE_MISSING", "path_present": False})
         else:
-            actual = path.stat().st_size
-            if entry.get("bytes") and actual != entry["bytes"]:
-                problems.append({**record, "code": "IMAGE_MODEL_SIZE_MISMATCH", "actual_bytes": actual})
+            stat = path.stat()
+            if entry.get("bytes") and stat.st_size != entry["bytes"]:
+                problems.append({**record, "code": "IMAGE_MODEL_SIZE_MISMATCH", "actual_bytes": stat.st_size})
             else:
-                digest = hashlib.sha256()
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                record["actual_sha256"] = digest.hexdigest()
+                previous = cached.get(filename)
+                reusable = (
+                    previous
+                    and previous.get("sha256")
+                    and previous.get("size") == stat.st_size
+                    and previous.get("mtime_ns") == stat.st_mtime_ns
+                )
+                if reusable:
+                    record["actual_sha256"] = previous["sha256"]
+                    record["cached"] = True
+                    record["verified_at"] = previous.get("verified_at")
+                else:
+                    digest = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    record["actual_sha256"] = digest.hexdigest()
+                    record["cached"] = False
+                    record["verified_at"] = utcnow().isoformat()
+                    record["size"] = stat.st_size
+                    record["mtime_ns"] = stat.st_mtime_ns
                 if entry.get("sha256") and record["actual_sha256"] != entry["sha256"]:
                     problems.append({**record, "code": "IMAGE_MODEL_HASH_MISMATCH"})
         checked.append(record)
     return {"files": checked, "problems": problems, "complete": not problems}
+
+
+def persist_verification(settings, config: ImageRuntimeConfig, result: dict[str, Any]) -> None:
+    """Store the digests that were just computed, so the next read is cheap.
+
+    Only a real hash is stored.  A cached record keeps the size and modification
+    time it was taken at, so a changed file is detected and re-hashed instead of
+    being trusted.
+    """
+    fresh = [
+        {
+            "filename": record.get("filename"),
+            "sha256": record.get("actual_sha256"),
+            "size": record.get("size"),
+            "mtime_ns": record.get("mtime_ns"),
+            "verified_at": record.get("verified_at"),
+        }
+        for record in (result.get("files") or [])
+        if record.get("actual_sha256") and not record.get("cached")
+    ]
+    if not fresh:
+        return
+    merged = {entry.get("filename"): entry for entry in (config.verified_files or [])}
+    for entry in fresh:
+        merged[entry["filename"]] = entry
+    config.verified_files = list(merged.values())
+    save_config(settings, config)
 
 
 def verify_graph_against_object_info(object_info: dict[str, Any]) -> dict[str, Any]:
@@ -218,6 +271,9 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
     config = load_config(settings)
     configured = bool(config.base_url and config.instance_id)
     files = verify_model_files(config) if config.model_root else {"files": [], "problems": [], "complete": False}
+    if config.model_root:
+        # Store what was just hashed, so the next read does not hash 16 GiB again.
+        persist_verification(settings, config, files)
     graph_report = verify_graph_against_object_info(object_info) if object_info else None
     fingerprint = current_fingerprint(config, graph_report=graph_report)
 

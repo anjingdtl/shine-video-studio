@@ -79,6 +79,7 @@ class ImagePrompt:
     negative_prompt: str
     template_version: str
     sha256: str
+    subject_omitted: str | None = None
 
     def as_evidence(self) -> dict[str, Any]:
         return {
@@ -86,6 +87,7 @@ class ImagePrompt:
             "prompt_sha256": self.sha256,
             "prompt_chars": len(self.prompt),
             "negative_chars": len(self.negative_prompt),
+            **({"subject_omitted": self.subject_omitted} if self.subject_omitted else {}),
         }
 
 
@@ -149,7 +151,18 @@ def compose(
         if cleaned:
             direction_parts.append(f"{label}: {cleaned}")
 
-    subject = _require_prompt_language(requirement_name, field="requirement_name") if requirement_name else ""
+    subject = ""
+    subject_omitted: str | None = None
+    if requirement_name:
+        if _CJK.search(requirement_name):
+            # The script name is a source identity, not prompt prose.  It stays
+            # on the requirement the user reads, and the producer's appearance
+            # text carries the identity into the picture.  The omission is
+            # recorded in the evidence, never applied silently: a prompt that
+            # refused a Chinese name would fail every Chinese script.
+            subject_omitted = "not_prompt_language"
+        else:
+            subject = requirement_name.strip()
     positive = _join(
         [
             COMPOSITION_RULES[family],
@@ -187,6 +200,7 @@ def compose(
         negative_prompt=negative,
         template_version=PROMPT_TEMPLATE_VERSION,
         sha256=digest,
+        subject_omitted=subject_omitted,
     )
 
 

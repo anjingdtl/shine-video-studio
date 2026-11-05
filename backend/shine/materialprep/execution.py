@@ -44,8 +44,9 @@ from shine.comfy.workflow import apply_parameters, graph_hash, validate_graph
 from shine.comfyops import assets as candidate_assets
 from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
 from shine.comfyops.scheduler import resource_slot
-from shine.materialprep import image_prompts, qwen_workflow, runtime
+from shine.materialprep import brief, image_prompts, qwen_workflow, runtime
 from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
+from shine.materialprep.ledger import touch_item
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
 from shine.materialprep.states import (
     ATTEMPT_CANCELLED,
@@ -150,21 +151,6 @@ def claim_next_item(factory, worker_id: str) -> str | None:
 # --- attempt bookkeeping ---------------------------------------------------
 
 
-def _touch_item(factory, item_id: str, expected_version: int, **values) -> int | None:
-    """A conditional item write; returns the new version, or None if the claim is gone.
-
-    ``None`` means another Worker owns this item now. The caller must stop and
-    must not write again, which is how an expired claim is kept harmless.
-    """
-    with factory.begin() as db:
-        result = db.execute(
-            update(MaterialItem)
-            .where(MaterialItem.id == item_id, MaterialItem.state_version == expected_version)
-            .values(state_version=expected_version + 1, **values)
-        )
-        return expected_version + 1 if result.rowcount == 1 else None
-
-
 def _load_context(factory, item_id: str) -> dict[str, Any]:
     with factory() as db:
         item = db.get(MaterialItem, item_id)
@@ -217,6 +203,7 @@ def resolve_runtime(
         config.base_url, allow_remote=bool(getattr(settings, "allow_remote_comfyui", False))
     )
     files = runtime.verify_model_files(config)
+    runtime.persist_verification(settings, config, files)
     if not files["complete"]:
         raise ImageExecutionError(
             "IMAGE_RUNTIME_NOT_READY",
@@ -436,20 +423,34 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
 
     version = context["item_state_version"]
     if context["cancel_requested"]:
-        _touch_item(factory, item_id, version, status="CANCELLED", error_code="RUN_CANCELLED")
+        touch_item(factory, item_id, version, status="CANCELLED", error_code="RUN_CANCELLED")
         return {"item_id": item_id, "status": "CANCELLED"}
 
     requirement = context["requirement_payload"]
     family = str(requirement.get("family") or context["item_payload"].get("family") or "")
     kind = str(context["run_payload"].get("kind") or "production")
 
-    # The brief is composed before the GPU is touched: the gateway refuses to run
+    # The producer's brief comes first: the appearance text is the producer's
+    # authority, and the call happens before the GPU lease is taken because the
+    # gateway refuses to run a text model while a resource slot is held.
+    brief_result = brief.ensure_brief(factory, settings, item_id, worker_id, version=version)
+    if brief_result.get("state_version") is None:
+        return {"item_id": item_id, "status": "CLAIM_LOST", "code": "CLAIM_LOST"}
+    version = brief_result["state_version"]
+    if not brief_result.get("ready"):
+        return {"item_id": item_id, "status": brief_result.get("status"),
+                "code": brief_result.get("code")}
+
+    # The composition reads the brief the item now carries.
+    context["item_payload"] = {**context["item_payload"], "brief": brief_result.get("brief")}
+
+    # The prompt is composed before the GPU is touched: the gateway refuses to run
     # while a resource slot is held, and a prompt failure must not burn a lease.
     try:
         prompt = _compose_prompt(context)
         resolved = resolve_runtime(factory, settings, family, kind=kind)
     except ImageExecutionError as exc:
-        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
         _audit(factory, context, "MATERIAL_IMAGE_BLOCKED", {"code": exc.code, **exc.details})
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 
@@ -457,7 +458,7 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
     fingerprint = resolved["fingerprint"]
     seed = int(context["item_payload"].get("seed") or 0)
     if not 0 <= seed <= qwen_workflow.MAX_SEED:
-        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_SEED_OUT_OF_RANGE")
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_SEED_OUT_OF_RANGE")
         return {"item_id": item_id, "status": ITEM_FAILED, "code": "IMAGE_SEED_OUT_OF_RANGE"}
     width = int(context["item_payload"].get("width") or config.width)
     height = int(context["item_payload"].get("height") or config.height)
@@ -481,12 +482,12 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
         if code == "GPU_BUSY_RETRY_OR_QUEUE":
             # Waiting for the GPU is not a failure. Put the item back so a later
             # pass retries it, and never fail a batch because the ledger is busy.
-            _touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
+            touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
             return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": "GPU"}
-        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
     except ImageExecutionError as exc:
-        _touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 
 
@@ -509,7 +510,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
         height=height,
         fingerprint=fingerprint,
     )
-    next_version = _touch_item(factory, item_id, version, status=ITEM_SUBMIT_INTENT, lease_id=lease_id,
+    next_version = touch_item(factory, item_id, version, status=ITEM_SUBMIT_INTENT, lease_id=lease_id,
                                current_attempt_id=attempt_id)
     if next_version is None:
         _close_attempt(factory, attempt_id, status=ATTEMPT_CANCELLED, outcome=OUTCOME_NOT_SENT,
@@ -527,7 +528,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
         item_status = ITEM_NEEDS_REVIEW if unknown else ITEM_FAILED
         _close_attempt(factory, attempt_id, status=status, outcome=outcome, error_code=code,
                        details={"error_type": type(exc).__name__}, release_intent=not unknown)
-        _touch_item(factory, item_id, version, status=item_status, error_code=code)
+        touch_item(factory, item_id, version, status=item_status, error_code=code)
         _audit(factory, context,
                "MATERIAL_IMAGE_SUBMISSION_UNCERTAIN" if unknown else "MATERIAL_IMAGE_SUBMISSION_FAILED",
                {"attempt_id": attempt_id, "code": code})
@@ -539,7 +540,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     # querying this prompt id, and never by submitting a second time.
     _close_attempt(factory, attempt_id, status=ATTEMPT_SUBMITTED, outcome=OUTCOME_ACKNOWLEDGED,
                    prompt_id=prompt_id, keep_intent=True)
-    next_version = _touch_item(factory, item_id, version, status="RUNNING")
+    next_version = touch_item(factory, item_id, version, status="RUNNING")
     version = next_version if next_version is not None else version
     _audit(factory, context, "MATERIAL_IMAGE_SUBMITTED", {"attempt_id": attempt_id, "prompt_id": prompt_id})
 
@@ -552,7 +553,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
                        status=ATTEMPT_UNKNOWN if uncertain else ATTEMPT_FAILED,
                        outcome=OUTCOME_UNKNOWN if uncertain else OUTCOME_FAILED,
                        error_code=exc.code, details=exc.details, release_intent=not uncertain)
-        _touch_item(factory, item_id, version,
+        touch_item(factory, item_id, version,
                     status=ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED, error_code=exc.code)
         _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN" if uncertain else "MATERIAL_IMAGE_EXECUTION_FAILED",
                {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": exc.code})
@@ -562,7 +563,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     candidate_id, content_sha = _register_candidate(factory, settings, context, attempt_id, content, family)
     _close_attempt(factory, attempt_id, status=ATTEMPT_QC_PENDING, outcome=OUTCOME_SUCCEEDED,
                    content_sha256=content_sha, keep_intent=True, harvest=source)
-    next_version = _touch_item(factory, item_id, version, status="OUTPUT_STORED")
+    next_version = touch_item(factory, item_id, version, status="OUTPUT_STORED")
     version = next_version if next_version is not None else version
 
     qc = _technical_qc(factory, settings, candidate_id)
@@ -570,7 +571,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     _close_attempt(factory, attempt_id, status=ATTEMPT_SUCCEEDED if passed else ATTEMPT_FAILED,
                    outcome=OUTCOME_SUCCEEDED if passed else OUTCOME_FAILED,
                    error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED", qc=qc["qc"], release_intent=True)
-    _touch_item(factory, item_id, version,
+    touch_item(factory, item_id, version,
                 status=ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
                 error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED")
     _audit(factory, context,

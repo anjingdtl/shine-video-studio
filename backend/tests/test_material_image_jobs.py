@@ -11,6 +11,9 @@ PENDING_VERIFICATION until the renderer has really been queried.
 
 from __future__ import annotations
 
+import hashlib
+import os
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -23,7 +26,7 @@ from shine.comfy.client import (
 )
 from shine.comfy.workflow import graph_hash, validate_against_object_info, validate_graph
 from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
-from shine.materialprep import image_prompts, qwen_workflow, runtime
+from shine.materialprep import image_prompts, qwen_workflow, runtime, service
 from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
 from shine.materialprep.execution import _submit_outcome
 from shine.materialprep.models import MaterialRun
@@ -255,6 +258,56 @@ def test_readiness_starts_unconfigured_and_never_claims_a_family(api):
     assert report["upstream"]["template_commit"] == qwen_workflow.TEMPLATE_COMMIT
 
 
+def test_a_verified_weight_is_not_hashed_again_until_it_changes(api, tmp_path):
+    """The weights are 16 GiB, so an unchanged file keeps its verified digest.
+
+    A second readiness read must not hash everything again, and a touched file
+    must be hashed again and caught.
+    """
+    _, factory, settings = api
+    root = tmp_path / "models"
+    (root / "diffusion_models").mkdir(parents=True)
+    weight = root / "diffusion_models" / "model.safetensors"
+    weight.write_bytes(b"payload")
+    entries = [{
+        "role": "diffusion",
+        "folder": "diffusion_models",
+        "filename": "model.safetensors",
+        "bytes": 7,
+        "sha256": hashlib.sha256(b"payload").hexdigest(),
+        "required": True,
+    }]
+    config = runtime.ImageRuntimeConfig(
+        config_revision=1,
+        instance_id="instance",
+        base_url="http://127.0.0.1:8188",
+        model_root=str(root),
+        model_files=entries,
+    )
+
+    first = runtime.verify_model_files(config)
+    assert first["complete"] is True
+    assert first["files"][0]["cached"] is False
+    runtime.persist_verification(settings, config, first)
+
+    stored = runtime.load_config(settings)
+    assert stored.verified_files, "the verified digest was not persisted"
+    second = runtime.verify_model_files(stored)
+    assert second["complete"] is True
+    assert second["files"][0]["cached"] is True
+    assert second["files"][0]["actual_sha256"] == entries[0]["sha256"]
+
+    # Same size, different bytes: the file was touched, so it is hashed again
+    # and the difference is caught.
+    stat = weight.stat()
+    weight.write_bytes(b"payloaX")
+    os.utime(weight, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+    third = runtime.verify_model_files(stored)
+    assert third["files"][0]["cached"] is False
+    assert third["complete"] is False
+    assert any(problem["code"] == "IMAGE_MODEL_HASH_MISMATCH" for problem in third["problems"])
+
+
 def test_graph_verification_reports_a_missing_node_rather_than_passing():
     info = object_info_fixture()
     del info["QwenImage21Cache"]
@@ -264,6 +317,37 @@ def test_graph_verification_reports_a_missing_node_rather_than_passing():
 
 
 # --- batch idempotency -----------------------------------------------------
+
+
+def _rights_id(db, project_id: str) -> str:
+    """An approved asset-scope licence.
+
+    A generation batch is refused without one, exactly like the existing
+    candidate path, so the batch tests have to carry a real record.
+    """
+    from sqlalchemy import select
+
+    from shine.comfyops.models import RightsRecord
+
+    existing = db.scalar(
+        select(RightsRecord).where(
+            RightsRecord.project_id == project_id,
+            RightsRecord.status == "APPROVED",
+        )
+    )
+    if existing is not None:
+        return existing.id
+    payload = {"scope": "asset", "license_id": "local-research", "purpose": "material preparation"}
+    row = RightsRecord(project_id=project_id, status="APPROVED", payload=payload, sha256=graph_hash(payload))
+    db.add(row)
+    db.flush()
+    return row.id
+
+
+def _batch(db, project_id, **kwargs):
+    """create_batch with the approved licence the batch gate requires."""
+    kwargs.setdefault("rights_id", _rights_id(db, project_id))
+    return service.create_batch(db, project_id, **kwargs)
 
 
 def _setup(db, project_id):
@@ -282,20 +366,18 @@ def _setup(db, project_id):
 
 
 def test_same_idempotency_key_and_hash_returns_the_original_batch(api):
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
         _, requirement = _setup(db, project_id)
         db.commit()
         requirement_id = requirement.id
-        first = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+        first = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement_id], idempotency_key="k")
     assert first["replayed"] is False
     with factory() as db:
-        again = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+        again = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement_id], idempotency_key="k")
     assert again["replayed"] is True
     assert again["run_id"] == first["run_id"]
     with factory() as db:
@@ -303,19 +385,17 @@ def test_same_idempotency_key_and_hash_returns_the_original_batch(api):
 
 
 def test_same_key_with_a_different_payload_is_a_conflict(api):
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
         _, requirement = _setup(db, project_id)
         db.commit()
         requirement_id = requirement.id
-        service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                             requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+        _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                             requirement_ids=[requirement_id], idempotency_key="k")
     with factory() as db:
         with pytest.raises(HTTPException) as excinfo:
-            service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+            _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
                                  requirement_ids=[requirement_id], idempotency_key="k", rights_id="other-rights")
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail["code"] == "IDEMPOTENCY_KEY_CONFLICT"
@@ -323,28 +403,24 @@ def test_same_key_with_a_different_payload_is_a_conflict(api):
 
 def test_a_second_key_cannot_queue_the_same_requirement_revision(api):
     """Two tabs, two keys, one confirmed revision: the ledger refuses the second."""
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
         _, requirement = _setup(db, project_id)
         db.commit()
         requirement_id = requirement.id
-        service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                             requirement_ids=[requirement_id], idempotency_key="tab-a", rights_id="")
+        _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                             requirement_ids=[requirement_id], idempotency_key="tab-a")
     with factory() as db:
         with pytest.raises(HTTPException) as excinfo:
-            service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                 requirement_ids=[requirement_id], idempotency_key="tab-b", rights_id="")
+            _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                 requirement_ids=[requirement_id], idempotency_key="tab-b")
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail["code"] == "MATERIAL_NOTHING_TO_GENERATE"
 
 
 def test_an_upload_strategy_item_is_not_regenerated(api):
     """A file on its way is not a missing material."""
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
@@ -353,8 +429,8 @@ def test_an_upload_strategy_item_is_not_regenerated(api):
         db.commit()
         requirement_id = requirement.id
         with pytest.raises(HTTPException) as excinfo:
-            service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                 requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+            _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                 requirement_ids=[requirement_id], idempotency_key="k")
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail["code"] == "MATERIAL_CONFIRMATION_REQUIRED"
 
@@ -363,7 +439,6 @@ def test_resume_refuses_an_item_carrying_an_unknown_submission(api):
     """Definite failures may resume; an unknown external outcome may not."""
     from sqlalchemy import select as sa_select
 
-    from shine.materialprep import service
     from shine.materialprep.models import MaterialImageAttempt, MaterialItem
 
     client, factory, _ = api
@@ -372,8 +447,8 @@ def test_resume_refuses_an_item_carrying_an_unknown_submission(api):
         _, requirement = _setup(db, project_id)
         db.commit()
         requirement_id = requirement.id
-        batch = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+        batch = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement_id], idempotency_key="k")
         run_id = batch["run_id"]
         item = db.scalar(sa_select(MaterialItem).where(MaterialItem.run_id == run_id))
         item.status = "FAILED"
@@ -393,7 +468,6 @@ def test_resume_refuses_an_item_carrying_an_unknown_submission(api):
 def test_resume_allows_a_definite_failure(api):
     from sqlalchemy import select as sa_select
 
-    from shine.materialprep import service
     from shine.materialprep.models import MaterialImageAttempt, MaterialItem
 
     client, factory, _ = api
@@ -402,8 +476,8 @@ def test_resume_allows_a_definite_failure(api):
         _, requirement = _setup(db, project_id)
         db.commit()
         requirement_id = requirement.id
-        batch = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement_id], idempotency_key="k", rights_id="")
+        batch = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement_id], idempotency_key="k")
         run_id = batch["run_id"]
         item = db.scalar(sa_select(MaterialItem).where(MaterialItem.run_id == run_id))
         item.status = "FAILED"
@@ -419,15 +493,13 @@ def test_resume_allows_a_definite_failure(api):
 
 
 def test_cancel_with_a_stale_state_version_is_refused(api):
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
         _, requirement = _setup(db, project_id)
         db.commit()
-        batch = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement.id], idempotency_key="k", rights_id="")
+        batch = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement.id], idempotency_key="k")
         with pytest.raises(HTTPException) as excinfo:
             service.request_cancel(db, batch["run_id"], 999)
     assert excinfo.value.status_code == 409
@@ -435,15 +507,13 @@ def test_cancel_with_a_stale_state_version_is_refused(api):
 
 
 def test_reconcile_never_marks_something_resubmitted(api):
-    from shine.materialprep import service
-
     client, factory, _ = api
     project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
     with factory() as db:
         _, requirement = _setup(db, project_id)
         db.commit()
-        batch = service.create_batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
-                                     requirement_ids=[requirement.id], idempotency_key="k", rights_id="")
+        batch = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                                     requirement_ids=[requirement.id], idempotency_key="k")
         version = db.get(MaterialRun, batch["run_id"]).state_version
         result = service.reconcile_run(db, batch["run_id"], version)
     assert result["resubmitted"] is False
@@ -477,3 +547,115 @@ def test_item_uniqueness_survives_a_direct_double_insert(api):
                                 sha256=graph_hash(item_payload)))
             db.commit()
         db.rollback()
+
+
+def test_a_stale_claim_cannot_write_over_the_new_owner(api):
+    """The conditional write is what makes an expired claim harmless."""
+    from shine.materialprep.ledger import touch_item
+    from shine.materialprep.models import MaterialItem
+
+    client, factory, _ = api
+    project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
+    with factory() as db:
+        _, requirement = _setup(db, project_id)
+        db.commit()
+        requirement_id = requirement.id
+    with factory() as db:
+        batch = _batch(db, project_id, confirmation_id="c" * 64, confirmation_hash="d" * 64,
+                       requirement_ids=[requirement_id], idempotency_key="stale-claim")
+        item_id = batch["items"][0]
+    with factory() as db:
+        item = db.get(MaterialItem, item_id)
+        claimed = item.state_version
+        # Another worker took the item over and moved it on.
+        item.state_version = claimed + 1
+        db.commit()
+        assert touch_item(factory, item_id, claimed, status="FAILED") is None
+        assert touch_item(factory, item_id, claimed + 1, status="FAILED") == claimed + 2
+
+
+def test_an_image_item_waits_for_a_running_video_lease(api, monkeypatch):
+    """The shared ledger: an image batch never preempts a running video series."""
+    from datetime import timedelta
+
+    from shine.comfyops.models import ResourceLease
+    from shine.materialprep import execution, runtime
+    from shine.materialprep.models import MaterialItem
+    from shine.models import utcnow
+
+    client, factory, settings = api
+    project_id = client.post("/api/v1/projects", json={"title": "素材"}).json()["id"]
+    with factory() as db:
+        plan, requirement = _setup(db, project_id)
+        run_payload = {"kind": "production", "rights_id": "r"}
+        run = MaterialRun(
+            project_id=project_id,
+            plan_id=plan.id,
+            confirmation_id="c" * 64,
+            confirmation_hash="d" * 64,
+            idempotency_key="lease-wait",
+            request_hash="rq",
+            mode="real",
+            status="RUNNING",
+            payload=run_payload,
+            sha256=graph_hash(run_payload),
+        )
+        db.add(run)
+        db.flush()
+        brief = {
+            "schema_version": "1.0",
+            "appearance": "a man in his thirties with short black hair",
+            "must_keep": [],
+            "avoid": [],
+            "questions": [],
+        }
+        item_payload = {
+            "family": "character",
+            "entity_id": "林知远",
+            "visual_direction": {},
+            "seed": 1,
+            "kind": "production",
+            "brief": brief,
+        }
+        item = MaterialItem(
+            run_id=run.id,
+            project_id=project_id,
+            requirement_id=requirement.id,
+            generation_revision=1,
+            status="QUEUED",
+            payload=item_payload,
+            sha256=graph_hash(item_payload),
+        )
+        db.add(item)
+        db.flush()
+        item_id = item.id
+        db.commit()
+        lease = ResourceLease(
+            owner="h3:series-1",
+            gpu="gpu-0",
+            budget_mb=20000,
+            exclusive=True,
+            priority=100,
+            status="ACTIVE",
+            heartbeat_at=utcnow(),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+        db.add(lease)
+        db.commit()
+
+    config = runtime.ImageRuntimeConfig()
+    monkeypatch.setattr(execution, "resolve_runtime", lambda *args, **kwargs: {
+        "config": config,
+        "base_url": "http://127.0.0.1:8188",
+        "fingerprint": "f" * 64,
+        "graph_report": {"complete": True},
+    })
+
+    result = execution.execute_item(factory, settings, item_id, "worker-1")
+
+    assert result["status"] == "QUEUED", result
+    assert result["waiting"] == "GPU"
+    with factory() as db:
+        row = db.get(MaterialItem, item_id)
+        assert row.status == "QUEUED"
+        assert row.lease_id is None

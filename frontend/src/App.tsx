@@ -12,6 +12,7 @@ import { useStudio } from './useStudio';
 import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
 import { RealProductionWizard } from './components/RealProductionWizard';
 import AssetPanel from './components/AssetPanel';
+import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
 import StylePanel from './components/StylePanel';
 import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
@@ -636,6 +637,13 @@ function App() {
               </div>}
 
               {directorPage === 'assets' && <div className="director-page" id="assets">
+                <MaterialPreparationPanel
+                  key={`material-${projectId}`}
+                  projectId={projectId}
+                  onMessage={report}
+                  frozenStyle={currentStyle}
+                  onPromoted={() => { refreshAll().catch(() => undefined); }}
+                />
                 <AssetPanel
                   assets={assets}
                   busy={busy}

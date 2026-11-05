@@ -5,9 +5,10 @@
   本轮提交 **`46b2f40`**（27 个文件：8 个既有文件修改、1 个迁移、9 个新模块、2 个新测试文件、
   3 处 head 断言更新、审计 + ADR + 本进度文件）。工作树除 4 个开工前既有未跟踪文件外干净。
   **未推送**（推送属于共享状态变更，需用户确认）。
-- 当前阶段与完成判定：**阶段 A 完成；阶段 B 代码与离线验证完成，实机出图待权重下载；
+- 当前阶段与完成判定：**阶段 A 完成；阶段 B 代码与离线验证完成，实机出图仍未跑；
   阶段 C 完成契约接入（工具选择 + 两个运行时提示词），尚未接入真实 LLM 调用链**；
-  阶段 D/E 未开始
+  阶段 D/E 未开始。**2026-11-05 对抗性复核：查出 7 项缺陷并全部修复，其中 3 项使导演链根本走不通；
+  详见 `docs/ADVERSARIAL_REVIEW_MATERIAL_PREPARATION_20261105.md`。整体仍为 PARTIAL / NOT ACCEPTED。**
 - 用户既有修改和保留文件：`.zcode/`、`docs/DIRECTOR_AI_MATERIAL_PREPARATION_PLAN_20261104.md`、
   `docs/LOCAL_AGENT_MATERIAL_PREPARATION_PROMPT_20261104.md`、`docs/H3_MV_MANSIONS_15S_T2VA_SCRIPT.md`
   均为开工前既有的未跟踪文件，**未删除、未覆盖、未纳入提交**
@@ -221,3 +222,151 @@ UNKNOWN 不重放"规则。
 `REAL_QWEN_VERIFIED`、`REAL_H3_VERIFIED`、`HUMAN_REVIEW`、`WINDOWS_AND_PACKAGE`
 全部 `NOT_RUN`，阶段 C/D 未开始。不得把"路由返回 202""离线测试通过""模板与权重钉点已核验"
 当成导演 UI 实机验收。
+
+## 2026-11-05 对抗性复核轮（本次）
+
+复核对象是本计划（`docs/DIRECTOR_AI_MATERIAL_PREPARATION_PLAN_20261104.md`）的建设完成度，
+方法是**不复用既有测试的结论**，而是先用真实 HTTP 驱动导演全链，复现缺陷后再改代码。
+既有测试（`test_material_preparation.py` / `test_material_image_jobs.py`）全部自己造行、直接调服务函数，
+**没有一条走过 HTTP 流程**，所以它们对"用户能不能真的走完这条链"没有任何约束力——
+这正是断链能通过全量回归的原因。
+
+### 结论
+
+**本轮建设未完成：阶段 A 完成；B 代码与离线验证完成但真实出图未跑；C 仅契约接入；D/E 未开始。**
+整体 **PARTIAL / NOT ACCEPTED**，与上一轮结论一致，且现在有了 HTTP 层面的证据。
+
+### 查出并修复的 7 项缺陷
+
+| 编号 | 级别 | 缺陷 | 修复 |
+| --- | --- | --- | --- |
+| D1 | P0 | 导演链在"确认清单"处断裂：需求无 id、草稿期无需求行，首次确认必然 404 | 草稿期落需求行并分配稳定 id；确认时就地更新并前移修订，id 跨修订不变 |
+| D2 | P0 | 确认快照从未被发布，客户端算不出来 → 任何确认都判 `MATERIAL_PLAN_STALE` | 服务端统一口径并由 `analyze` / `plan_progress` 发布 `expected_snapshot` |
+| D3 | P0 | `scene_preparations` 是裸 `list[dict]`，契约未在边界生效（`family="voice"`、多余字段全部放行） | 类型化为 `list[ScriptPreparation]`，服务层二次校验，非法输入 422 |
+| D4 | P1 | 许可证在 GPU 渲染**之后**才检查（`create_batch` 从不调用 `require_rights`） | 在真正创建批次前校验；幂等重放不新建故不重复校验 |
+| D5 | P1 | 七个写路由绕过 CSRF/Origin 边界（`Operator` 依赖只有 `confirm` 挂了） | 统一挂 `Operator`：loopback + 同源 + `x-shine-local-action: 1` → `local-user`，无需密码 |
+| D6 | P2 | 权重校验每次重算 16.10 GiB；就绪路由永远报不出 `GRAPH_VERIFIED` | 按 size+mtime 缓存摘要（变更即重算，命中标记 `cached`）；就绪路由加 3 秒只读 `object_info` 探测 |
+| D7 | P1 | 重复分析新建草稿计划并顶掉已确认的当前计划，用户确认的决定在页面上消失 | 按内容哈希复用当前修订，返回 `replayed: true` |
+
+完整证据、修复细节与剩余缺口见 `docs/ADVERSARIAL_REVIEW_MATERIAL_PREPARATION_20261105.md`。
+
+### 本轮改动的文件
+
+- `backend/shine/materialprep/service.py`、`backend/shine/api_material.py`、
+  `backend/shine/materialprep/runtime.py`、`backend/shine/materialprep/execution.py`
+- `backend/tests/test_material_director_flow.py`（新增，5 条 HTTP 全链回归：修复前 5 红，修复后 5 绿）
+- `backend/tests/test_material_image_jobs.py`（10 处批次调用补真实的已批准 rights 记录）
+- `docs/ADVERSARIAL_REVIEW_MATERIAL_PREPARATION_20261105.md`（新增）
+
+**无新增迁移**：本轮只改行为与既有表的行归属，未改表结构，Alembic head 仍为 `f170a0010001`。
+
+### 本轮验证
+
+| 类别 | 命令 | 结果 |
+| --- | --- | --- |
+| 导演链（新增） | `pytest backend/tests/test_material_director_flow.py` | 5 passed（修复前 5 failed） |
+| 素材 + 分镜链 | `pytest test_material_preparation.py test_material_image_jobs.py test_material_director_flow.py test_crew_prompt_contract.py test_film_crew.py` | passed |
+| 全量后端 | `pytest backend/tests` | 见本文件末尾「全量回归结果」 |
+| Ruff | `ruff check backend/shine backend/alembic backend/tests` | All checks passed |
+| 前端 | `npm.cmd run build`（含 `tsc -b`）/ `npm.cmd test`（frontend/） | build 成功；16 个测试文件 / 115 个测试全部通过（本轮未改前端文件，只做树健康度确认） |
+| Alembic | `alembic heads` / `upgrade head` / `check`（隔离 `SHINE_DATA_DIR=.local-acceptance/materialprep-adversarial`） | head `f170a0010001`；No new upgrade operations detected |
+
+迁移验证**未在用户正式库上执行**，正式库仍停在 `f160a0010001`。
+
+### 全量回归结果
+
+- `pytest backend/tests`：共 **1624** 个用例，**EXIT=0**，跑满 100%，无 FAILED/ERROR（1 个 skip）。
+- 日志：`.local-acceptance/full3.log`、退出码 `.local-acceptance/full3.exit.txt`。
+- 说明：本环境的 pytest 终端摘要在 `-q --no-header` 下会丢掉最后一行计数，
+  因此用例数由 `--collect-only` 单独统计，结论以**退出码**为准。
+- 修复前的对照：全量回归对本次缺陷**无感知**——既有测试全部自己造行、直接调服务函数，
+  没有一条走 HTTP 流程，所以"导演链走不通"能在全绿下存活。
+
+## 2026-11-05 续建轮：阶段 C 落地 + 阶段 D 首版
+
+上一轮复核列出的缺口里，**阶段 C（真实 LLM 调用链）与阶段 D（导演界面）在本轮补上**，
+并顺带修掉复核中发现的第 8 项缺陷（中文角色名会让图片提示词必然被拒）。
+
+### 本轮补上的缺口
+
+| 缺口 | 本轮实现 | 关键文件 |
+| --- | --- | --- |
+| 出品人 brief 没有真实调用链（正式批次恒为 `MATERIAL_BRIEF_MISSING`） | Worker 在**取 GPU 租约之前**真实调用 `producer` 角色 + `material_image_brief` 契约；预算预检、一次定向修正、UNKNOWN 不重放 | `backend/shine/materialprep/brief.py`、`agent_call.py` |
+| 前期编剧没有服务端分场调度 | 服务端切分剧本并按场调度 `scriptwriter` + `script_prepare`；每场一份持久产物，重复请求复用；单场失败不中断其余场 | `backend/shine/materialprep/scenes.py` |
+| 源片段没有服务端校验 | 服务端拥有切分与引用目录；模型引用不存在的片段 → `MATERIAL_SOURCE_SPAN_UNKNOWN`（422）；场号不存在 → `MATERIAL_SCENE_KEY_UNKNOWN` | `backend/shine/materialprep/source_spans.py` |
+| 导演界面没有素材流程 | 「素材与风格」页新增三阶段面板：读剧本 / 确认需求 / 选择素材；含逐项来源选择、视觉方向、批次进度、候选晋升与可读原因 | `frontend/src/components/MaterialPreparationPanel.tsx` |
+| **素材完成条件根本没有实现**（`MATERIALS_READY` 只被读、从不被写） | 新增完成判定：每一项必需需求都必须绑定**本项目、已批准并锁定、族类与身份相符、文件哈希未变、授权已批准**的主资产；`offline_only` 模拟素材一律不算。服务端判定并回写，未绑定项带原因逐条返回 | `backend/shine/materialprep/service.py`（`evaluate_materials`）、`api_material.py`（`/material-preparation/complete`） |
+| **基础配置里没有出图能力卡**（四层就绪度对用户不可见） | 新增 `ImageCapabilityCard`：按角色/场景/道具显示四层就绪度、阻塞原因、固定模板与模型钉点、权重占用与研究用途限制，并可登记三类真实小样验证 | `frontend/src/components/ImageCapabilityCard.tsx` |
+| **出图权重没有产品内安装登记**（此前只能靠一次性脚本下载） | 新增固定安装目录 `config/deployment/qwen-image-2.1-windows-x64.json`（3 个权重，逐文件 SHA-256/大小钉死、研究用途），走既有受控安装路径（计划→批准→执行→逐文件校验） | `config/deployment/qwen-image-2.1-windows-x64.json` |
+| D8：中文角色名必然被拒 | 剧本名留在需求上，提示词只接受提示词语言，省略写进证据 | `backend/shine/materialprep/image_prompts.py` |
+
+### 新增 API
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET /projects/{id}/material-preparation/scenes?document_id=` | 发布服务端切分出的场次与可引用片段目录 |
+| `POST /projects/{id}/material-preparation/complete` | 判定素材完成条件，回写计划状态并返回未绑定项与原因 |
+| `POST /projects/{id}/material-preparation/scenes/prepare` | 服务端按场调用前期编剧，逐场返回结果与失败原因 |
+
+### 本轮新增测试
+
+- `backend/tests/test_image_installation_catalog.py`（3 条）：安装目录与工作流钉点**逐字节一致**、只允许研究用途、产品能生成真实安装计划。
+- `frontend/src/test/imageCapability.test.tsx`（4 条）：四层就绪度如实显示、未绑定时不排队、验证小样先登记授权、安装计划展示下载量/占用/目标盘。
+- `backend/tests/test_material_brief.py`（7 条）：出品人写 brief、一次定向修正、二次失败具名拒绝、
+  超预算在调用前拒绝、远端 provider 无授权拒绝、UNKNOWN 不重放、中文剧本名不破坏提示词。
+- `backend/tests/test_material_scenes.py`（3 条）：逐场准备与复用、编造片段被拒、单场失败不中断其余场。
+- `backend/tests/test_material_director_flow.py`（13 条）：HTTP 全链 + 身份歧义、跨项目、空分析、源片段校验、
+  **素材完成判定（未绑定 / 模拟素材 / 文件被篡改）**。
+- `backend/tests/test_material_image_jobs.py`：过期 claim 不能覆盖新属主；**视频租约占用期间图片任务等待而不是失败**（共享资源账本的互斥）。
+- `frontend/src/test/materialPreparation.test.tsx`（10 条）：刷新不重提、切作品状态隔离、**旧作品的在途响应不写入新作品**、
+  错误原因可见、停止批次带状态版本、重新挂载只重新查询、**批量晋升逐项显示结果**（不整体宣称成功）、
+  **素材是否齐备由服务端判定并如实显示**、**确认清单与排队出图分别显示结果**、**冻结风格与素材视觉方向并排对照**。
+
+### 本轮验证
+
+| 类别 | 结果 |
+| --- | --- |
+| 素材后端套件（material_preparation / image_jobs / director_flow / brief / scenes / film_crew / crew_prompt） | **全部通过** |
+| 前端 | `npm.cmd test`：**17 个测试文件 / 119 个测试通过**（新增 1 文件 4 条）；`npm.cmd run build`（含 `tsc -b`）成功 |
+| Ruff | `backend/shine` 与 `backend/tests` 全部通过 |
+| 全量后端 | `pytest backend/tests`：**1647 个用例，EXIT=0**（日志 `.local-acceptance/full9.log`、退出码 `.local-acceptance/full9.exit.txt`） |
+
+### 本轮全量回归结果
+
+- `pytest backend/tests`：共 **1647** 个用例，**EXIT=0**，无 FAILED/ERROR。
+- `ruff check backend/shine backend/alembic backend/tests`：**All checks passed**。
+- `alembic heads` → `f170a0010001`；`alembic check` → **No new upgrade operations detected**（隔离 `SHINE_DATA_DIR`）。
+- `npm.cmd test` → **18 个测试文件 / 129 个测试通过**；`npm.cmd run build`（含 `tsc -b`）成功。
+- 本轮**未新增迁移**：只改行为与既有表的行归属。
+
+### 本轮新增的接口与状态
+
+- `POST /projects/{id}/material-preparation/complete`：判定素材完成条件并回写计划状态。
+- 计划状态新增 **`MATERIALS_READY`** 的真实写入路径（此前只被读、从不被写）。
+- 提供者调用间隔统一到 `SHINE_AGENT_STEP_DELAY_MS`：分场调度与出品人 brief 共用同一口径
+  （`materialprep/agent_call.py` 的 `pace_provider_call()`）。
+
+### 补齐计划 §3.1 / §3.3 / §3.4 的界面要求
+
+- **§3.4「旧请求响应不能写入新作品状态」**：面板现在带作品归属守卫，切换作品后旧作品的在途响应会被丢弃。
+- **§3.1「确认成功不意味着批次一定创建成功」**：确认清单与排队出图**分别显示结果**；没有需要生成的项时，
+  按钮文案改为「确认清单并继续」。
+- **§3.3「冻结后的 Style Bible 若与素材视觉方向冲突，展示差异」**：面板把已确认的素材视觉方向与已冻结风格的
+  对应字段并排展示，并明确「不一致时新建一个风格版本，已冻结的合同不会被自动修改」——
+  是否一致由用户判断，服务器不替用户下结论。
+
+### 本轮把上游审计与实现对齐
+
+`docs/upstream-audit.md` 此前说「四个权重、24.92 GiB」，而产品实际只装三个必需权重（16.10 GiB）：
+PE 提示词扩写编码器因 `switch=false` 且分支惰性求值而永不被调用，本机那份下载还不完整，已删除。
+审计现已标明每个文件**是否必需**、必需合计 16.10 GiB，并把三个必需权重「已下载并逐字节校验通过」
+从 `PENDING_VERIFICATION` 移出；同时补记安装器的**逐字节镜像回退**（`hf-mirror.com` 是受信主机，
+字节仍按钉死哈希校验），说明新的图片安装目录为何仍可使用 `huggingface.co` 作为权威来源地址。
+
+### 仍未做（不得按已完成计）
+
+1. **真实 Qwen 出图与 live `object_info` 校验**：仍需受管 ComfyUI 实例；权重已就位，但本轮没有启动渲染器。
+2. **真实 H3 引用新素材**：需要人工晋升后的真实主素材，本轮没有真实候选，因此没有真实 H3 证据。
+3. **人工评审**：构图与美术结论仍无人评审。
+4. **Windows 入口与安装包**：本轮未改依赖与启动配置，未重建安装包。
+5. **源片段校验只覆盖形状与存在性**：尚未校验片段**内容**与需求描述的语义一致性（仍需模型或人工判断）。
