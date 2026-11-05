@@ -441,14 +441,33 @@ prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 
 | 「素材与风格」页的素材准备面板 | **渲染正确**：三阶段（① 读剧本 / ② 确认需求 · 0 项 / ③ 选择素材 · 0 个批次）、文字模型不占显卡的说明、剧本下拉与「分析剧本」主按钮、折叠阶段的计数，全部按预期显示 |
 | 「基础配置」的出图能力卡 | **渲染正确**：出图运行时「未配置」、可生成类别「还没有类别通过真实出图验证」、角色/场景/道具三行「未配置」、阻塞原因「还没有绑定本机的受管渲染器，AI 不能出图。绑定后即可登记并验证三类小样。」、固定模板 `9fae1041be7e…` 与模型 `aacf31a6d48e…` 钉点、权重约 16.10 GiB、研究用途限制、「登记出图权重安装计划」与「验证三类真实小样」两个按钮（未绑定时正确禁用） |
 
+### 真实本机检测已跑通（2026-11-05，受管渲染器第一步）
+
+用产品自己的检测接口对**本机真实环境**做了只读检测（非模拟）：
+
+| 项 | 实测值 |
+| --- | --- |
+| 探针 | `WindowsHostProbe`，`is_mock=false` |
+| 操作系统 | Windows-11-10.0.26200-SP0 |
+| Python | 3.12.13（uv 管理） |
+| GPU | **NVIDIA GeForce RTX 5080，16303 MiB 总量，15030 MiB 空闲** |
+| 既有安装 | `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI` 存在，模型树逐个枚举（H3 侧 clip/lora/vae 等） |
+| 渲染器实例 | `http://127.0.0.1:8188` → **OFFLINE**（ComfyUI 未启动，system_stats/object_info/queue/history 均 unavailable） |
+
+前置条件：管理员扫描白名单由环境变量给出
+`SHINE_COMFY_PROBE_ROOTS=["F:\\AIGC2026\\ComfyUI_Mie_2026_V8.0_Base\\ComfyUI"]`、
+`SHINE_COMFY_PROBE_PORTS=[8188]`；操作员范围只能**缩小**管理员白名单
+（`POST /comfyops/scope` 需要 `scope_configure` 授权并带 context；
+本次因配置哈希在签发授权后变化而返回 `PLAN_HASH_CHANGED`，需重读哈希后重试）。
+
 ### 下一步的精确动作：受管渲染器（已获授权）
 
 真实检测在 mock 模式下是模拟的（`FakeWindowsHostProbe`），必须切到 local 模式并由操作员保存
 扫描白名单，流程与 `scripts/verify_v13_web.py` 的前段一致：
 
 1. `/comfyops/execution-context` 取当前配置哈希 → 操作员保存受限扫描范围（白名单）。
-2. 「操作模式」切到 local 并勾选核对确认 → `POST /comfyops/inventory/refresh`（mode=local）做**只读检测**，
-   识别既有安装 `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI`。
+2. 「操作模式」切到 local 并勾选核对确认 → `POST /comfyops/inventory/refresh`（mode=local）做**只读检测** ✓ **本轮已完成**，
+   实测识别到既有安装与 RTX 5080（详见上一节）。
 3. 收编该既有安装（`adopt_existing_installation` → `status_origin=USER_CONFIRMED_EXISTING_INSTALLATION`），
    产生受管实例行。
 4. 绑定出图运行时：`POST /api/v1/setup/image-runtime`（instance_id / base_url /
