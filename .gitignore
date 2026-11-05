@@ -87,3 +87,7 @@ Desktop.ini
 
 # Local agent workspace notes (never shipped in a package)
 .workbuddy/
+# Local agent scratch space (plans/, tmp/). It changes on every session, so it
+# must never enter history: an untracked-but-not-ignored directory keeps the
+# working tree permanently dirty and hides real changes during review.
+.zcode/
