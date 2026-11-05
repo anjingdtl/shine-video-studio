@@ -208,10 +208,10 @@ $buildInfo = [ordered]@{
         'existing real films still require final human review; this build does not promote pending_review to accepted',
         'the delegated material round on the existing installation is closed (candidates reviewed and promoted, the Style Bible and the official rule pack frozen, three shots really rendered and delivered); what stays open is the final human review of that film and the VLM recalibration below',
         'the six-image Ref2VA profile that carried the clock-shop shot is project-local: it is not part of the deployment catalog, so another project that binds more than two picture references still needs its own wider profile, built from the real node and validated on the real renderer',
-        'the published VLM revision is invalidated by design by the closeout-round worker changes; recalibration, plan re-analysis and re-freeze still have to run on the formal project stack',
+        'VLM recalibration stays blocked: the formal project database is not on this machine and its qwen3-vl runtime is not running; this build changes none of the client-review pinned files, so it neither invalidates nor replaces the published revision',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
-        'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking was not human-observed inside a render window of this round',
+        'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking has not been human-observed inside a real render window',
         'the H3 renderer release is proven for process and port; a GPU memory before/after reading currently exists only for the image renderer release path'
     )
     closed_in_this_build = @(
@@ -257,7 +257,11 @@ $buildInfo = [ordered]@{
         'the image renderer no longer leaves its own marks on the shared H3 instance row, so runtime activation completes after image work',
         'a delegated material round ran end-to-end on the real H3 stack: 12 reviewed candidates promoted to real masters, materials_ready judged by the server, the Style Bible and the official rule pack frozen, the five-role crew chain planning three shots, and 3/3 shots really rendered (real technical QC, real decode) into one delivered cut of 22.60 s at 1344x768',
         'a project-local Ref2VA profile with one subject plus five picture slots, built from the canonical pdd8 graph on the real node COMFY_AUTOGROW_V3 image group (max=9) and validated against the live renderer, so a shot really carries every approved master it binds',
-        'a real run no longer fails because a leftover managed renderer still owns the port: the release action stops it with Job Object ownership proof, the attempt that never reached a renderer is closed without resubmission, and the GPU lease is released only after the renderer is provably gone'
+        'a real run no longer fails because a leftover managed renderer still owns the port: the release action stops it with Job Object ownership proof, the attempt that never reached a renderer is closed without resubmission, and the GPU lease is released only after the renderer is provably gone',
+        'the three director pages stay mounted and only toggle `hidden`, so switching pages keeps the expanded material stage, the selected candidate and an open shot preview; the `[hidden]` rule is global, so a page style can no longer render a hidden panel',
+        'material candidates are one dense grid instead of one row per batch, an entry with no image yet still occupies a cell (a pending clarification no longer disappears from the grid), and batch/attempt detail folds into a collapsible block',
+        'a produced shot really plays in the workbench: `GET /api/v1/jobs/{job_id}/media` serves that job''s own artifact and `GET /api/v1/jobs/{job_id}/thumbnail` its poster frame, both digest-checked; the segment grid shows posters and opens a player',
+        'generated material files are named `{nn}-{entity}.png`, numbered by the scene in which the entity first appears in the script, so sorting by file name follows the script and the storyboard; hand-uploaded material keeps its own file name'
     )
     excluded_from_package = @(
         'models and weights',

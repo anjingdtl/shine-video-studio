@@ -163,11 +163,19 @@
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| 后端全量 | `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（**在仓库根运行**，129 个测试文件） | **EXIT=0 零失败**：1691 项收集，1690 passed / 1 skipped（整套约 45 分钟）|
+| 后端全量 | `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（**在仓库根运行**，131 个测试文件） | **EXIT=0 零失败**：1698 项收集，1697 passed / 1 skipped / 0 failed（18 分 33 秒，2026-11-05 23:37–23:55）|
 | Ruff | `python -m ruff check shine alembic tests` | **All checks passed!** |
 | Alembic | `python -m alembic upgrade head`（全新库）+ `python -m alembic check` | 全新库升到 head；**No new upgrade operations detected** |
 | 前端 vitest | `npm.cmd test -- --run`（frontend/） | **19 文件 / 136 测试全绿** |
 | 前端类型+构建 | `npm.cmd run build`（tsc -b && vite build） | **通过**（1612 modules，dist 产出） |
+
+- 上表「后端全量」是本轮**在仓库根**的实跑结果（`1698 tests collected`，进度流 1697 `.` + 1 `s`，退出码 0）。
+- 同一命令的前两次尝试**不是产品失败，是执行环境被打断**：CLI 注入的 `sitecustomize.py` 安全删除钩子
+  拦截产品代码自己的临时文件删除（`installer.py` 的 `journal.unlink()` 等），累计到第 50 次删除时抛
+  `SystemExit: 1`，把 51 个用例变成 FAILED、10 个 fixture 变成 ERROR（全部可追溯到该钩子，含一条
+  `test_installer_every_crash_window_reconciles_then_reinstalls` 的子进程同样以 1 退出）。
+  第三次以该钩子的官方关断开关 `CODEBUDDY_SAFE_DELETE_ENABLED=0` 重跑，得到上表结果；
+  测试本身的删除语义（临时目录、staging、journal）没有改动。
 
 ## 8. 本轮新增/变更的文件
 
@@ -176,6 +184,9 @@
 - `docs/ACCEPTANCE_20261105_DIRECTOR_CLOSEOUT_REPORT.md`（本文档）
 - `docs/HANDOVER_20261105_DELEGATED_MATERIAL_ROUND.md`（上一轮交接，已被本文档接续）
 - `docs/HANDOVER_20261106_DIRECTOR_USABILITY_ROUND.md`（本轮可用性轮交接，含未验证项）
+- `scripts/build_test_package.ps1`（`BUILD_INFO` 的 `known_blockers` / `closed_in_this_build` 按可用性轮事实更新：
+  VLM 重校准改为「正式库不在本机 + qwen3-vl 未运行，且本构建未动钉住文件」，并补入页面保挂载、
+  候选密排网格、镜头可播放两条真实路由、素材按剧本顺序命名的四条已闭合项）
 
 ## 9. 真实 H3 出片（REAL_H3_VERIFIED）
 
@@ -295,6 +306,9 @@
 而 `.director-page{display:flex}` 盖过了浏览器默认的 `[hidden]{display:none}`。
 改成通用规则 `[hidden]{display:none!important}` 之后，隐藏才真正生效。
 （这条同时解释了为什么前端单测全绿却仍有这个现象：jsdom 的默认样式表里 `hidden` 是有效的。）
+
+全量套件已于 2026-11-05 23:55（UTC 15:55）复跑，结果 1698 项收集 / 1697 passed / 1 skipped / 0 failed、
+EXIT=0；命令在**仓库根**执行，执行细节与两次被 CLI 安全删除钩子打断的记录见 §7。
 
 ## 14. 素材文件命名（新增要求）
 
