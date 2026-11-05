@@ -301,23 +301,26 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             prep.get_by_label(
                 "隔离实例操作（CREATE / INSTALL_NODE / BIND_MODELS / START / STOP / SNAPSHOT / RESTORE / ROLLBACK）"
             ).fill(json.dumps(operation))
-            prep.get_by_role(
-                "button",
-                name="生成实例操作计划（到模型与节点中心审批执行）",
-                exact=True,
-            ).click()
-            # In this view the panel replaces the action result with the models and
-            # nodes list, so the plan is taken from the ledger and asserted on
-            # the card instead of on the result panel.
-            plan_id = ""
-            for _ in range(30):
+            # The plan id comes from the response the click produced.  In this
+            # view the panel replaces the action result with the models and
+            # nodes list, so the result panel cannot be the source of it.
+            with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.endswith("/comfyops/instance-plans"),
+                timeout=30000,
+            ) as plan_response:
+                prep.get_by_role(
+                    "button",
+                    name="生成实例操作计划（到模型与节点中心审批执行）",
+                    exact=True,
+                ).click()
+            plan_payload = plan_response.value.json()
+            plan_id = plan_payload.get("id") or plan_payload.get("plan_id") or ""
+            if not plan_id:
                 plans = c.get(base + f"/comfyops/install-plans?project_id={p}").json()
-                waiting = [row for row in plans if row.get("status") == "AWAITING_APPROVAL"]
-                if waiting:
-                    plan_id = waiting[-1]["id"]
-                    break
-                time.sleep(1)
-            assert plan_id, "the plan never reached AWAITING_APPROVAL"
+                newest = sorted(plans, key=lambda row: row.get("created_at") or "")
+                plan_id = newest[-1]["id"] if newest else ""
+            assert plan_id, "the instance plan has no id"
             prep.get_by_role("button", name="模型与节点", exact=True).click()
             # The card shows the id prefix only, so the filter has to match it.
             card = prep.locator("article").filter(has_text=plan_id[:8])
@@ -326,7 +329,9 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             # list being re-rendered at that instant. The assertion still
             # checks the plan card itself.
             approve_button = prep.get_by_role("button", name="批准此哈希计划", exact=True).first
-            approve_button.evaluate("el => el.scrollIntoView({block: 'center'})")
+            # The row list is re-rendered while the panel reloads, so the button
+            # is waited for rather than assumed to be in the DOM.
+            approve_button.wait_for(state="attached", timeout=30000)
             approve_button.click()
             expect(card).to_contain_text("已批准", timeout=15000)
             # The panel no longer offers a simulated execution for an install
