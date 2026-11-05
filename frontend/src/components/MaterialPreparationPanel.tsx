@@ -632,7 +632,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <span>{ITEM_STATUS_LABELS[item.status] ?? item.status}</span>
                     {item.error_code && <em>{reasonText(item.error_code)}</em>}
                     {row.kind === 'production' && item.allowed_actions?.includes('regenerate') && item.brief && <label className="material-field">
-                      <span>修改 {item.entity_id} 的外观描述后生成新版本</span>
+                      <span>修改 {item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
                       <textarea value={briefEdits[item.item_id] ?? item.brief.appearance} maxLength={1200}
                         onChange={(e) => setBriefEdits({ ...briefEdits, [item.item_id]: e.target.value })} />
                     </label>}

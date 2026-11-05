@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import os
 
+from pydantic import ValidationError
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -192,8 +194,23 @@ def test_avoid_becomes_the_negative_prompt_and_never_the_positive():
 
 
 def test_cjk_appearance_is_refused_not_translated():
+    """A Chinese appearance never reaches the prompt.
+
+    The producer's contract refuses it first, so the model that wrote it gets
+    its one correction instead of the render being refused later.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        MaterialImageBrief.model_validate({
+            "appearance": "三十岁女性，灰色羊毛外套",
+            "must_keep": [],
+            "avoid": [],
+            "questions": [],
+        })
+    assert "English visual prose" in str(excinfo.value)
+    # The composer keeps the same rule for the text it composes itself.
     with pytest.raises(image_prompts.ImagePromptError) as excinfo:
-        image_prompts.compose("character", _brief(appearance="三十岁女性，灰色羊毛外套"))
+        image_prompts.compose("character", _brief(),
+                              visual_direction=MaterialVisualDirection(era="当代"))
     assert excinfo.value.code == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
 
 

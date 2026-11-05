@@ -121,11 +121,26 @@ Worker 对失败条目死循环（实测状态版本涨到 1934）、忙碌的 W
 
 ## 6. Windows 入口与安装包
 
-- 开发入口 `启动 Shine 工作台.cmd`：纯 ASCII（753 字节），双击走 `scripts/start_dev.ps1`；
-  端口占用时自动换端口，重复启动只重开浏览器，失败时保留窗口。
-- 安装包：`pwsh -File scripts/build_test_package.ps1 -OutDir <dir> -Verify`，
-  只从已提交的树取文件（`git ls-files`），带 `BUILD_INFO.json` 与逐文件 `PACKAGE_MANIFEST.json`，
-  不含模型、数据库、密钥、evidence、日志。
+### 6.1 开发入口（本轮实跑）
+
+- `启动 Shine 工作台.cmd`：纯 ASCII（753 字节），双击走 `scripts/start_dev.ps1` → `scripts/start_shine.ps1`。
+- 实跑结果（独立数据目录 `.local-data`，不影响验收栈）：
+  `GET /health` → `{"status":"ok","service":"shine-api","render_provider":"comfyui"}`；
+  `/system/status` → `worker_online=true`、`pending_jobs=0`；Web `GET /` → **200**。
+- 停止：`scripts/stop_shine.py --data-dir <dir>` 干净停掉 API / Worker / Web 全部进程。
+- 开工时 8000/5173 上还挂着一个**半启动残栈**（11-04 的旧代码 API + Vite，父进程已消失、
+  进程记录停在 11-02）。本轮按其命令行证明归属后停掉，端口交给开发入口。
+
+### 6.2 安装包
+
+- 命令：`pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify`，
+  拒绝脏树（本轮从已提交树 `cbfbee0` 构建）。
+- 产物：`releases/ShineVideoStudio-20261105-cbfbee0-win64.zip`，2,681,383 字节，
+  sha256 `18a51a74b732bd9a5d806bb70d131fbfc0006767227053bdb473cad411520874`；
+  Expand-Archive 后逐文件 SHA-256 复核 **549 个文件全部通过**。
+- 入口：`SETUP.cmd`、`START_APP.cmd`、`STOP_APP.cmd`、`一键安装并启动.cmd`（ASCII 回退）都在包内。
+- 不含：模型/权重、SQLite、密钥、`.env`（只有 `.env.example`）、生成的媒体、evidence、日志；
+  旧包全部保留。
 
 ## 7. 未完成 / 阻塞
 

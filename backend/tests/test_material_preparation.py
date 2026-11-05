@@ -234,13 +234,23 @@ def _requirement() -> dict:
 def test_material_image_brief_carries_no_execution_authority():
     brief = MaterialImageBrief.model_validate(
         {
+            "appearance": "a man in his thirties, short hair, a long dark wool coat.",
+            "must_keep": ["1930s tailoring"],
+            "avoid": ["a modern sports watch"],
+            "questions": [],
+        }
+    )
+    assert brief.must_keep == ["1930s tailoring"]
+    # The prose that reaches the prompt is English: a Chinese appearance is a
+    # contract refusal, not something the composer silently passes through.
+    with pytest.raises(ValidationError) as excinfo:
+        MaterialImageBrief.model_validate({
             "appearance": "三十岁上下男性，短发，深灰长风衣，羊毛质地。",
             "must_keep": ["1930年代剪裁"],
             "avoid": ["现代运动腕表"],
             "questions": [],
-        }
-    )
-    assert brief.must_keep == ["1930年代剪裁"]
+        })
+    assert "English visual prose" in str(excinfo.value)
     for forbidden in (
         {"appearance": "x", "seed": 7},
         {"appearance": "x", "workflow": "qwen"},
