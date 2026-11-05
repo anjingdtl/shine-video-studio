@@ -417,6 +417,20 @@ prompt_id 立即落库 → 轮询 → 只取声明输出节点 → 字节校验 
 本轮把断言改为直接校验真正的不变量：**属主清单哈希不变、监听端口与属主进程不变、启动器明确
 输出「已在运行」**（比退出码代理更强，也不与启动器有意行为冲突）。
 
+### CI 闸门对照表（仓库对「全 Pass」的定义 vs 本地实测）
+
+| CI 闸门 | 本地实测 |
+| --- | --- |
+| `uv sync --project backend --locked` | ✓ Resolved 42 / Checked 41 |
+| `pytest backend/tests`（Windows） | ✓ **1648 例，EXIT=0** |
+| `ruff check backend/shine backend/alembic backend/tests` | ✓ All checks passed |
+| `alembic upgrade head`（全新库） | ✓ 升到 `f170a0010001`，无漂移 |
+| Windows：本地工作台 + health 端点（8123，mock） | ✓ `health: ok`、`status: mock api_online=True`，并顺带验证新接口 `/setup/image-readiness` 返回 `NOT_CONFIGURED` |
+| Windows：`verify_local_stack.ps1 -ApiPort 8127` | ✓ PASS（建作品 → 冻结风格 v1 → 建镜头 → mock 作业 PASSED → 审计 7 条；未生成视频） |
+| Windows：`verify_stack_operations.ps1` | ✓ PASS（本轮修复了它过时的断言） |
+| 前端：`npm run build` | ✓ 成功（`npm ci` 未跑：会重装 node_modules） |
+| web-e2e：Playwright 浏览器流程 | **仍未转绿**：脚本已按当前界面对齐十一处假设（导航、原生弹窗、已删除的凭据字段、单按钮确认、中文状态标签、结果访问器），能跑完导演层并进入制片准备流程，但在「批准此哈希计划」一步超时 |
+
 ### 仍未做（不得按已完成计）
 
 1. **真实 Qwen 出图与 live `object_info` 校验**：仍需受管 ComfyUI 实例；权重已就位，但本轮没有启动渲染器。
