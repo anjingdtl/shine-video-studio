@@ -164,7 +164,10 @@ pwsh -NoProfile -File scripts\build_test_package.ps1 -OutDir releases -Verify
 
 ### 5.1 真实用户旅程的浏览器复核（隔离实例，新代码）
 
-隔离数据目录 `.local-acceptance/closeout-v3-20261106/web-data`，隔离 API 8152 / Web 5212，迁移 head `f180b0010001` 且 `alembic check` 无漂移。**原 8133/5193 栈全程未动**（PID 12168 / 26676 复核仍在监听）。
+隔离数据目录 `.local-acceptance/closeout-v3-20261106/web-data`，隔离 API 8152 / Web 5212，迁移 head `f180b0010001` 且 `alembic check` 无漂移。
+**复核期间原 8133/5193 栈未被本轮触碰**（当时 PID 12168 / 26676 仍在监听）；它随后自行退出，
+本轮用既定入口 `scripts\start_dev.ps1` 重启为 API 8000 / Web 5173，现在跑的是已提交的修复代码
+（详见 6.3 节）。
 
 | 旅程 | 观察 | 结论 |
 | --- | --- | --- |
@@ -210,7 +213,15 @@ pwsh -NoProfile -File scripts\build_test_package.ps1 -OutDir releases -Verify
 - HEAD：`b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`（`b2c0733` 代码 + `b58d9a3` 安装包同步），分支 `main`，
   **已提交并推送**到 `origin/main`（0 ahead / 0 behind），工作树干净。
 - schema：`f180b0010001`（与迁移 head 一致，`alembic check` 无漂移）。
-- 进程：本轮自己启动的隔离服务（API 34296 / Web 32064 / Worker 30180→14912 / 挂起端点 15552）**全部按身份核对后停止**；原 8133（PID 12168）与 5193（PID 26676）**未重启、未停机、未迁移**。
+- 进程：本轮自己启动的隔离服务（API 34296 / Web 32064 / Worker 30180→14912 / 挂起端点 15552）**全部按身份核对后停止**。
+- **原有 8133/5193 栈的现状（如实记录）**：15:07 时仍在运行（API PID 12168 / Web PID 26676），15:26 复核时已不在。本轮
+  的两个收尾脚本都按 **PID + 命令行双重核对**执行，实际停止的只有本轮的 14912 / 15552 / 34296 / 32064；
+  孤儿清理脚本匹配 0 个进程。该窗口内 Windows 事件日志中唯一的应用崩溃是 `AweSun.exe` 16.8.0.33445
+  （Oray 向日葵远程控制代理），与本项目无关；本轮**没有**触碰这两个 PID，也无法断定其退出原因。
+- **本轮随后用既定入口重启了开发机栈**：`scripts\start_dev.ps1`（即根目录 `启动 Shine 工作台.cmd` 所调用的脚本），
+  15:38:14 拉起 **API 8000 / Web 5173**，health 200、schema `f180b0010001` 已是最新、页面 200。
+  重启后运行的是**已提交的修复代码**（此前 8133 那套跑的是修复前的旧后端）。
+  证据：`.local-acceptance/closeout-v3-20261106/dev-launcher-restart-evidence.txt`。
 - 数据库：正式库、个人素材、通过版本、冻结合同、候选资产与历史审计**未触碰**；本轮所有测试库均为隔离目录。
 
 ## 7. 剩余阻塞与下一步

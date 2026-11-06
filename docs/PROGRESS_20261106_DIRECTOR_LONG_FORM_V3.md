@@ -109,7 +109,9 @@
 ### 5. 浏览器实证（隔离实例，新代码）
 
 隔离数据目录 `.local-acceptance/closeout-v3-20261106/web-data`，隔离 API 8152 / Web 5212，
-迁移 head `f180b0010001` 且 `alembic check` 无漂移。**原 8133/5193 栈全程未动**。
+迁移 head `f180b0010001` 且 `alembic check` 无漂移。
+**复核期间原 8133/5193 栈未被本轮触碰**；它随后自行退出（详见 6.3 节），本轮用既定入口
+`scripts\start_dev.ps1` 重启为 API 8000 / Web 5173，现在跑的是已提交的修复代码。
 
 - 真实 Worker 持有请求时被**受控终止**（PID/命令行/创建时间已证）→ 租约到期 →
   **重启的 Worker** 把任务收敛为 `NEEDS_REVIEW / CREATIVE_SCRIPT_OUTCOME_UNKNOWN`。
