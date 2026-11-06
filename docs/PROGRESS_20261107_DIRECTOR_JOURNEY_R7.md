@@ -143,6 +143,11 @@ materialize v2 → 导演包（宽方案、1024×576）→ confirm → productio
 - 不对以上 artifact 执行低层单独 `apply-camera`：`section_storyboard_shot_ids` 先从最新 section run 的 `trace.results` 取 cinematographer artifact，再找对应 `film-apply` receipt。三条 section run 的 `results` 均为空；只写低层 receipt 仍不会进入分集，反而会造出未关联镜头。现有 section `reconcile` 也只处理 `blocked_subtasks`；三条父任务该字段为空，无法采用这些 Film 子任务产物。
 - 本次检查只读 SQLite 与源码，没有修改任务、发起模型请求或创建镜头；分集仍被 orders 18–20 阻断。
 
+### 7.3.2 Provider 侧对账能力复核（目标恢复后的只读检查）
+
+- 官方 MiniMax ChatCompletion v2 文档把 `id` 定义为响应字段；三条超时调用均未收到响应，所以台账没有 response id 可据此定位。官方 Token Plan 页面/API 提供套餐剩余额度，不是单次 ChatCompletion 请求历史。当前公开资料未找到按客户端身份查询同步请求结果的接口；这不证明 MiniMax 内部不存在客服/控制台记录，只说明本机现有证据无法通过公开接口完成逐请求核对。资料：[ChatCompletion v2](https://platform.minimaxi.com/document/%E5%AF%B9%E8%AF%9D?key=36954880539f4e2ab8b13067)、[Token Plan 用量](https://platform.minimaxi.com/subscribe/coding-plan?code=H2y7yU1UUd&source=link)。
+- 当前 Windows 窗口枚举只有 Codex；Chrome/360 浏览器没有运行窗口。未启动浏览器、未登录控制台、未读取或输出 API key，也未发起额度查询或生成请求。仍无新的 provider 侧证据改变订单 18–20 的 `UNKNOWN`。
+
 ### 7.4 materialize 与整片 Run
 
 - `POST /api/v1/projects/3707a9ed-eced-435b-b69a-0b1ecdd5f146/episode-plans/1/materialize` 返回 409 `EPISODE_SECTION_NOT_STORYBOARDED`，明确列出 `ep-04` 的三个 `section_id`：`05916709-6f6b-5a0a-a754-324a4cf8ebd1`、`a68e9f18-7771-56a5-bd5d-9e6f480669ad`、`6a4ecc4a-5c6a-5849-abdf-ef2b4f3186da`，原因均为 `STORYBOARD_NOT_APPLIED`。没有创建 v2；台账仍只有已确认的 plan v1 `ef996d7a-94a5-4867-a4b4-566c05f287b9`。
