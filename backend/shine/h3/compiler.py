@@ -349,7 +349,18 @@ def _shot_text(ctx: _Context) -> str:
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
         parts.append(_dialogue_sentence(ctx, line))
     continuity = ctx.spec.continuity
-    if continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
+    continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
+    if continuation:
+        if continuity.mode == ContinuityMode.LAST_FRAME:
+            parts.append(f"Use {continuation.label}, the preceding shot's final frame, as a soft visual reference "
+                         "for the opening composition.")
+        elif continuity.mode == ContinuityMode.HARD_FRAME_ANCHOR:
+            parts.append(f"Use {continuation.label}, the preceding shot's final frame, as the opening frame.")
+        elif continuity.mode == ContinuityMode.VIDEO_REFERENCE:
+            parts.append(f"Continue the motion and framing in {continuation.label}, the source shot's video.")
+        elif continuity.mode == ContinuityMode.AUDIO_REFERENCE:
+            parts.append(f"Continue the sound bed in {continuation.label}, the source shot's audio.")
+    elif continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
         parts.append(
             f"The opening composition continues seamlessly from the approved final frame of shot "
             f"{continuity.previous_shot_id}."

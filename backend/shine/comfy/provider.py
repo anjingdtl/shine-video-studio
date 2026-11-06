@@ -227,12 +227,25 @@ class ComfyUIRenderService:
         project_id: str | None,
     ) -> bytes:
         """Re-check the master asset right before it leaves the machine."""
-        if not asset.approved:
+        from shine.media.continuity import ContinuityReference
+
+        derived = isinstance(asset, ContinuityReference)
+        if derived and item.role != "continuity_derivative":
+            raise ComfyReferenceError("A derived continuity reference has an invalid manifest role")
+        if derived:
+            source = asset.provenance["source"]
+            source_path = safe_asset_path(self.asset_root, source["storage_path"])
+            if not source_path.is_file():
+                raise ComfyReferenceError("The continuity source is missing")
+            with source_path.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != source["sha256"]:
+                    raise ComfyReferenceError("The continuity source changed after derivation")
+        if not derived and not asset.approved:
             raise ComfyReferenceError(
                 "A reference asset is not approved by the user",
                 details={"asset_id": asset.id, "label": item.label},
             )
-        if not asset.locked:
+        if not derived and not asset.locked:
             raise ComfyReferenceError(
                 "A reference asset is not locked by the user",
                 details={"asset_id": asset.id, "label": item.label},
@@ -242,7 +255,8 @@ class ComfyUIRenderService:
                 "A reference asset belongs to another project",
                 details={"asset_id": asset.id, "label": item.label},
             )
-        if asset.sha256 != item.sha256:
+        if (asset.sha256 != item.sha256 or asset.storage_path != item.storage_key
+                or asset.content_type != item.content_type):
             raise ComfyReferenceError(
                 "The reference manifest hash does not match the current master asset",
                 details={"asset_id": asset.id, "label": item.label},

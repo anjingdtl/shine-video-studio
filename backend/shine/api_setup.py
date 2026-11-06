@@ -347,8 +347,17 @@ def next_instance_plan(body: InstanceChainRequest, settings: SettingsDep, db: DB
 
 @router.post("/configuration")
 def configuration(body: ConfigurationRequest, actor: Operator, settings: SettingsDep, db: DBSession):
-    return deployment.generate_configuration(db, settings, body.project_id,
-                                             instance_name=body.instance_name, port=body.port)
+    from shine.comfyops.review_runtime import prepare_review_runtime
+    from shine.comfyops.runtime_configuration import require_idle_configuration
+    from shine.services import require_project
+
+    require_project(db, body.project_id)
+    require_idle_configuration(db)
+    db.rollback()  # Wheel verification and extraction do not hold a SQLite transaction.
+    runtime = prepare_review_runtime(settings, deployment.load_default_catalog())
+    result = deployment.generate_configuration(db, settings, body.project_id,
+                                               instance_name=body.instance_name, port=body.port)
+    return {**result, "review_runtime_preparation": runtime}
 
 
 @router.get("/readiness")

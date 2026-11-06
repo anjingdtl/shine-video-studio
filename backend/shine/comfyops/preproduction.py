@@ -429,6 +429,38 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
     return graph_hash(frozen)
 
 
+def _enforce_continuity_reference(db, project_id, request, ref, *, data_dir=None):
+    """A derived continuity reference must still name the source it came from.
+
+    The derivative is not a master asset, so the approval ledger does not
+    apply to it.  What must hold is its lineage: the same project, the same
+    source job, the same mode, the same bytes.
+    """
+    from shine.media.continuity import load_continuity_reference
+
+    continuity = request.shot_spec.continuity
+    if continuity.mode.value == "cut" or not continuity.previous_job_id:
+        raise HTTPException(409, "PREPRODUCTION_CONTINUITY_INVALID")
+    try:
+        derived = load_continuity_reference(
+            db, project_id, ref.asset_id, continuity.previous_job_id, continuity.mode.value,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, "PREPRODUCTION_CONTINUITY_OUTDATED") from exc
+    if (
+        derived.sha256 != ref.sha256
+        or derived.storage_path != ref.storage_key
+        or derived.content_type != ref.content_type
+    ):
+        raise HTTPException(409, "PREPRODUCTION_CONTINUITY_OUTDATED")
+    if data_dir:
+        from shine.media.artifacts import safe_asset_path
+
+        path = safe_asset_path(data_dir, derived.storage_path)
+        if not path.is_file() or path.stat().st_size != derived.byte_size:
+            raise HTTPException(409, "PREPRODUCTION_CONTINUITY_BYTES_MISSING")
+
+
 def enforce_references(db, project_id, render_request, *, data_dir=None, expected_manifest_hash=None):
     from shine.models import Shot, ShotAssetBinding
     from shine.schemas import RenderRequest
@@ -484,13 +516,21 @@ def enforce_references(db, project_id, render_request, *, data_dir=None, expecte
     def binding_key(row):
         return (row.asset_id, str(row.use_as), row.role, str(row.frame_role) if row.frame_role else None, row.ordinal)
 
+    # A continuity derivative is a technical, provenance-bound artifact of a
+    # source job.  It is not a user-approved master: it is not a shot binding
+    # and it is not in the frozen link list, so it is checked against its own
+    # source identity instead of against the approval ledger.
+    derivatives = [r for r in request.reference_manifest if r.role == "continuity_derivative"]
+    masters = [r for r in request.reference_manifest if r.role != "continuity_derivative"]
     bound = {binding_key(b) for b in db.scalars(select(ShotAssetBinding).where(ShotAssetBinding.shot_id == shot.id))}
     if (
-        bound != {binding_key(r) for r in request.reference_manifest}
+        bound != {binding_key(r) for r in masters}
         or not set(request.shot_spec.required_asset_ids) <= actual
     ):
         raise HTTPException(409, "PREPRODUCTION_BINDINGS_CHANGED")
-    for ref in request.reference_manifest:
+    for ref in derivatives:
+        _enforce_continuity_reference(db, project_id, request, ref, data_dir=data_dir)
+    for ref in masters:
         asset = db.get(Asset, ref.asset_id)
         if ref.asset_id not in allowed or allowed[ref.asset_id] != ref.sha256:
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_NOT_FROZEN")

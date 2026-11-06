@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from shine.asset_identity import character_reference_matches
 from shine.comfy.client import ComfyError, ComfySubmissionUncertain, ComfyUIClient, ComfyUIError
-from shine.comfy.media import ComfyPendingWorkflowMapping
+from shine.comfy.media import ComfyPendingWorkflowMapping, ComfyReferenceError
 from shine.comfy.provider import ComfyResult, ComfySubmission, ComfyUIRenderService
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
@@ -1993,6 +1993,33 @@ def _load_comfy_context(
         asset.id: asset
         for asset in db.scalars(select(Asset).where(Asset.id.in_([item.asset_id for item in manifest]))).all()
     }
+    # A continuity derivative is not an Asset: it is a derived, provenance-bound
+    # artifact of a source job.  It is loaded under its own identity and is
+    # never mistaken for a user-approved master.
+    for item in manifest:
+        if item.asset_id in assets:
+            continue
+        if item.role != "continuity_derivative":
+            raise ComfyReferenceError(
+                "A manifest reference is missing from the local asset registry",
+                details={"label": item.label, "asset_id": item.asset_id},
+            )
+        from shine.media.continuity import load_continuity_reference
+
+        continuity = request.shot_spec.continuity
+        if continuity.mode.value == "cut" or not continuity.previous_job_id:
+            raise ComfyReferenceError(
+                "A continuity reference has no bound source job",
+                details={"label": item.label, "asset_id": item.asset_id},
+            )
+        try:
+            assets[item.asset_id] = load_continuity_reference(
+                db, job.project_id, item.asset_id, continuity.previous_job_id, continuity.mode.value,
+            )
+        except ValueError as exc:
+            raise ComfyReferenceError(
+                str(exc), details={"label": item.label, "asset_id": item.asset_id},
+            ) from exc
     project = db.get(Project, job.project_id)
     policy = QualityPolicy.from_dict(project.quality_policy if project else None)
     language = project.language if project else "Chinese"
@@ -3974,28 +4001,53 @@ def run_configured_series_once(
     return "queue"
 
 
+#: How many consecutive ticks the text-only queues may own before the
+#: real H3 queue is served again.  A long outline must not starve a render.
+TEXT_PREPARATION_BURST = 3
+_text_preparation_ticks = 0
+
+
+def _advance_text_preparation(session_factory, settings, worker_id) -> bool:
+    """Advance the durable text queues; they never touch the video runtime.
+
+    The script and long-story queues are text-only work.  They used to be
+    reachable only through the "the video runtime is not active" branch, so a
+    workbench with a valid, activated runtime never advanced them and the
+    outline sat at its first unit forever.  They are bounded here so that a
+    long outline cannot starve real H3 work.
+    """
+    global _text_preparation_ticks
+    from shine.director.creative import run_pending_creative_task
+    from shine.materialprep.story import run_pending_story_task
+
+    if run_pending_creative_task(session_factory, settings, worker_id,
+                                 heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                                phase="creative_script")):
+        _text_preparation_ticks += 1
+        return True
+    if run_pending_story_task(session_factory, settings, worker_id,
+                              heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                             phase="story_preparation")):
+        _text_preparation_ticks += 1
+        return True
+    _text_preparation_ticks = 0
+    return False
+
+
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.comfyops.runtime_configuration import resolve_runtime
 
+    # Text preparation is durable work that does not use or validate the video
+    # runtime.  It is bounded so that a long outline cannot starve the H3 queue.
+    if _text_preparation_ticks < TEXT_PREPARATION_BURST and _advance_text_preparation(
+            session_factory, settings, worker_id):
+        return "text-preparation"
     try:
         with session_factory() as runtime_db:
             current = resolve_runtime(runtime_db, settings)
     except HTTPException as exc:
         if not str(exc.detail).startswith("ACTIVE_RUNTIME_"):
             raise
-        # Text preparation does not use or validate the video runtime. Keep its
-        # durable queue available without bypassing any H3 activation guard.
-        from shine.director.creative import run_pending_creative_task
-        from shine.materialprep.story import run_pending_story_task
-
-        if run_pending_creative_task(session_factory, settings, worker_id,
-                                     heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
-                                                                    phase="creative_script")):
-            return "creative-script"
-        if run_pending_story_task(session_factory, settings, worker_id,
-                                  heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
-                                                                 phase="story_preparation")):
-            return "story-preparation"
         raise
     if current != settings:
         # No inherited client may point at an old port after activation. Use a

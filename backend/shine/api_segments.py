@@ -213,14 +213,26 @@ def regenerate(project_id: str, shot_id: str, body: SegmentAction, actor: Operat
     ), settings=resolve_runtime(db, request.app.state.settings), offline=request.app.state.settings.offline_simulation)
     binding_keys = ("style_version_id", "style_hash", "rulepack_id", "rulepack_hash", "prompt_skill_hash",
                     "workflow_profile_hash", "model_checkpoint_id", "reference_manifest", "shot_spec")
-    if any(source.request.get(k) != job.request.get(k) for k in binding_keys):
-        raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
-    job.request_revision = source.request_revision + 1
-    payload = {"source_job_id": source.id, "job_id": job.id, "series_id": series.id,
+    if job is not None:
+        if any(source.request.get(k) != job.request.get(k) for k in binding_keys):
+            raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
+        job.request_revision = source.request_revision + 1
+    else:
+        # A retake of a continuation shot waits for its source media, so the
+        # Worker creates the job.  The masters it will use are compared here.
+        source_masters = [r for r in (source.request.get("reference_manifest") or [])
+                          if r.get("role") != "continuity_derivative"]
+        if {(r.get("asset_id"), r.get("use_as")) for r in source_masters} != {
+            (row.asset_id, row.use_as) for row in shot.bindings
+        }:
+            raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
+    payload = {"source_job_id": source.id, "job_id": job.id if job else None,
+               "pending_job": job is None, "series_id": series.id,
                "shot_revision": shot.revision, "dependent_job_ids": _impact(db, source.id),
                "automatic_assembly": False}
     _record(db, project_id, ROLE, identity, payload)
-    add_audit(db, actor, "GENERATION_SEGMENT_RETAKE_REQUESTED", "job", job.id, payload, project_id=project_id)
+    add_audit(db, actor, "GENERATION_SEGMENT_RETAKE_REQUESTED", "job",
+               job.id if job else series.id, payload, project_id=project_id)
     db.commit()
     return {**payload, "replayed": False}
 

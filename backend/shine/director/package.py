@@ -46,6 +46,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "auto_repair": True,
     "max_repairs_per_shot": 2,
     "batch_shot_limit": 6,
+    "split_continuity": True,
     "stop_on_blocker": False,
     "deliver_partial_episode": False,
 }

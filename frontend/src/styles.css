@@ -1131,6 +1131,10 @@ html[data-theme='dark'] .script-entry-b{border-top-color:#3b3d2f}
 .material-run{border:1px solid #e6e8d8;border-radius:7px;padding:9px 11px;margin-bottom:9px;background:#fcfcf8}
 .material-run b{display:block;font-size:10.5px;color:#3d3f37}
 .material-run small{display:block;font-size:9px;color:#8b8d7e;margin:3px 0 6px}
+.run-progress{margin:6px 0 7px}
+.run-progress-track{height:6px;border-radius:3px;background:#e8ead9;overflow:hidden;border:1px solid #e2e4d2}
+.run-progress-track span{display:block;height:100%;background:linear-gradient(90deg,#6f8f4f,#a4571a);transition:width .4s ease}
+.run-progress small{margin:4px 0 0;font-size:9px;color:#8b8d7e}
 .material-run ul{list-style:none;padding:0;margin:0;font-size:9.5px;color:#56584b}
 .material-run li{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid #eef0e4}
 .material-run em{color:#a4571a;font-style:normal}

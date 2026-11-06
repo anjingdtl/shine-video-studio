@@ -52,11 +52,49 @@ def queue_outline(project_id: str, body: OutlineRequest, actor: Operator, db: DB
     return {"task_id": row.id, "status": row.status, "state_version": row.state_version}
 
 
+def _task_summary(row):
+    """What the person is actually waiting for, in numbers they can read.
+
+    The trace keeps the raw cursor; the person needs "done of total" and the
+    stage in words.  Nothing here guesses: the totals come from the units the
+    task actually owns.
+    """
+    trace = row.trace or {}
+    stage = trace.get("stage")
+    if row.role_id == story.SECTION_RUN:
+        label = "逐段生成分镜"
+        total = len(trace.get("units") or [])
+        done = len(trace.get("results") or [])
+    elif stage == "EXTRACT":
+        label = "逐场提取剧情要点"
+        total = int(trace.get("segment_total") or 0)
+        done = int(trace.get("cursor") or 0)
+    elif stage == "MERGE":
+        label = f"归并大纲（第 {int(trace.get('level') or 0) + 1} 层）"
+        total = len(trace.get("level_inputs") or [])
+        done = int(trace.get("cursor") or 0)
+    elif stage == "AWAITING_OUTLINE_CONFIRMATION":
+        label = "等待你确认大纲"
+        total = done = 1
+    else:
+        label = "准备中"
+        total = done = 0
+    percent = 100 if total and done >= total else (int(done * 100 / total) if total else 0)
+    expired = bool(row.lease_expires_at) and row.lease_expires_at <= utcnow()
+    remaining = None
+    if row.lease_expires_at:
+        remaining = max(0, int((row.lease_expires_at - utcnow()).total_seconds()))
+    return {"stage": stage or "", "label": label, "done": done, "total": total, "percent": percent,
+            "lease_expires_at": row.lease_expires_at.isoformat() if row.lease_expires_at else None,
+            "lease_remaining_s": remaining,
+            "awaiting_reclaim": row.status == "RUNNING" and expired}
+
+
 def public_task(db, row):
     trace = row.trace
     outline = db.get(AgentArtifact, trace.get("outline_artifact_id")) if trace.get("outline_artifact_id") else None
     return {"task_id": row.id, "role": row.role_id, "status": row.status, "state_version": row.state_version,
-            "error_code": row.error_code, "progress": trace,
+            "error_code": row.error_code, "progress": trace, "summary": _task_summary(row),
             "outline": {"artifact_id": outline.id, "sha256": outline.sha256, "payload": outline.payload_json,
                         "approved": bool(outline.approved_at), "stale": outline.stale} if outline else None}
 

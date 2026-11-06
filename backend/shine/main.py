@@ -1090,7 +1090,8 @@ def create_app(
             )
         add_audit(
             db, "user", "PRODUCTION_SERIES_CREATED", "production_series", series.id,
-            {"shot_count": len(shots), "first_job_id": job.id,
+            {"shot_count": len(shots), "first_job_id": job.id if job else None,
+             "deferred_first_shot": job is None,
              "workflow_profile_id": series.workflow_profile_id},
             project_id=project.id,
         )

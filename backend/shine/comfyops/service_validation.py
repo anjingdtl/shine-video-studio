@@ -63,6 +63,15 @@ def _json_get(url: str, *, timeout: float = 30.0, headers: dict | None = None) -
     with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         response = client.get(url, headers=headers or {})
     if response.status_code != 200:
+        if response.status_code == 503:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            if isinstance(detail, str) and detail in {
+                "REVIEW_EXECUTOR_IMPORT_FAILED:ImportError", "ISOLATED_SUPERVISOR_SOURCE_CHANGED",
+            }:
+                raise HTTPException(409, detail)
         raise HTTPException(409, f"SERVICE_VALIDATION_HTTP_{response.status_code}")
     try:
         body = response.json()
@@ -84,6 +93,10 @@ def _wait_json(url: str, *, timeout_s: float, predicate, headers: dict | None = 
                 return body
             last_error = "SERVICE_VALIDATION_UNEXPECTED_HEALTH"
         except HTTPException as exc:
+            if isinstance(exc.detail, str) and exc.detail in {
+                "REVIEW_EXECUTOR_IMPORT_FAILED:ImportError", "ISOLATED_SUPERVISOR_SOURCE_CHANGED",
+            }:
+                raise
             last_error = str(exc.detail)
         except (httpx.HTTPError, OSError) as exc:
             last_error = type(exc).__name__

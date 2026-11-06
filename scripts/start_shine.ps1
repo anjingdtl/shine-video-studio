@@ -95,6 +95,9 @@ if (-not $DataDir) {
 }
 $resolvedDataDir = Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue
 $env:SHINE_DATA_DIR = if ($resolvedDataDir) { $resolvedDataDir.Path } else { [System.IO.Path]::GetFullPath($DataDir) }
+# The API, the Worker and the Web write their diagnostics to log files; a
+# block-buffered pipe would hide a stall until the process ends.
+$env:PYTHONUNBUFFERED = '1'
 New-Item -ItemType Directory -Force -Path $env:SHINE_DATA_DIR | Out-Null
 function Get-PortOwner([int]$Port) {
     $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |

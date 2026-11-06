@@ -30,6 +30,9 @@ from shine.schemas import APIModel
 from shine.services import add_audit
 
 OUTLINE_RUN = "story_outline_run"
+#: How long a claimed unit may go without a renewal before another Worker may
+#: take it over.  The renewal thread keeps this alive during a model call.
+STORY_CLAIM_SECONDS = 120
 SECTION_RUN = "story_section_run"
 OUTLINE_TOOL = "story_outline_merge"
 VERSION = "story-outline-v1"
@@ -202,13 +205,21 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
         row = db.scalar(select(AgentTaskRecord).where(
             AgentTaskRecord.role_id.in_([OUTLINE_RUN, SECTION_RUN]),
             or_(AgentTaskRecord.status == "QUEUED",
-                (AgentTaskRecord.status == "RUNNING") & (AgentTaskRecord.lease_expires_at <= now)),
+                (AgentTaskRecord.status == "RUNNING") & (
+                    AgentTaskRecord.lease_expires_at.is_(None)
+                    | (AgentTaskRecord.lease_expires_at <= now)
+                )),
         ).order_by(AgentTaskRecord.created_at).limit(1))
         if row is None:
             return False
         row.status = "RUNNING"
         row.lease_owner = worker_id
-        row.lease_expires_at = now + timedelta(minutes=30)
+        # A unit is renewed every few seconds while the model call runs, so the
+        # lease only has to survive a lost worker.  Thirty minutes left a person
+        # watching a stalled outline with no visible progress; two minutes
+        # makes the task recoverable while the renewal still protects a running
+        # unit (a lost owner is fenced out by the state version).
+        row.lease_expires_at = now + timedelta(seconds=STORY_CLAIM_SECONDS)
         row.state_version += 1
         task_id, version, project_id, role = row.id, row.state_version, row.project_id, row.role_id
         state = dict(row.trace)
@@ -227,6 +238,10 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 if text_consent.fingerprint(profile) != state["provider_fingerprint"]:
                     raise HTTPException(409, "STORY_PROVIDER_CHANGED")
             source = segment_document(document.text)
+            # The number of source units is part of the progress the person
+            # waits for; it is recorded once and reused after a restart.
+            if state.get("segment_total") != len(source):
+                state["segment_total"] = len(source)
             if state["stage"] == "EXTRACT" and state["cursor"] < len(source):
                 current = source[state["cursor"]]
                 result = scenes.prepare_scenes(gateway, factory, project_id, document,

@@ -39,6 +39,14 @@ class PackagePolicyContract(APIModel):
     auto_repair: bool = True
     max_repairs_per_shot: int = Field(default=2, ge=0, le=MAX_REPAIRS_PER_SHOT, strict=True)
     batch_shot_limit: int = Field(default=6, ge=1, le=MAX_BATCH_SHOT_LIMIT, strict=True)
+    split_continuity: bool = Field(
+        default=True,
+        description=(
+            "May a batch boundary fall inside a continuity chain?  When true the "
+            "next series binds the earlier series' verified source media; when "
+            "false a chain always stays inside one series."
+        ),
+    )
     max_wall_seconds: int = Field(default=0, ge=0, le=31_536_000, strict=True)
     min_free_gb: float = Field(default=0.0, ge=0.0, le=100_000.0)
     stop_on_blocker: bool = False

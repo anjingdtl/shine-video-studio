@@ -90,12 +90,14 @@ class RunBlocked(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _batch_plan(episode: DirectorPackageEpisode, *, batch_shot_limit: int) -> list[dict[str, Any]]:
+def _batch_plan(
+    episode: DirectorPackageEpisode, *, batch_shot_limit: int, split_continuity: bool = False,
+) -> list[dict[str, Any]]:
     """Split one episode's ordered shots into dispatchable batches.
 
-    A batch boundary may only fall before a shot that does not continue the
-    previous one: a dependent shot has to live in the same series as its source,
-    otherwise the series would have to re-derive a continuity it cannot see.
+    Legacy runs retain their original chain-preserving grouping.  The opt-in
+    split is for runs that can bind an earlier series' verified source media;
+    persisting that choice on the run prevents a restart from changing its plan.
     """
     manifest = episode_manifest(episode)
     shots = manifest.get("shots", [])
@@ -134,7 +136,7 @@ def _batch_plan(episode: DirectorPackageEpisode, *, batch_shot_limit: int) -> li
         if last:
             break
         next_shot = shots[index + 1]
-        if next_shot.get("continuity_mode") != "cut":
+        if not split_continuity and next_shot.get("continuity_mode") != "cut":
             continue
         if len(current) >= limit:
             close()
@@ -455,7 +457,7 @@ def _create_series_for_batch(
 ) -> ProductionSeries:
     from shine.comfyops.production_series import create_series
     from shine.models import Project
-    from shine.schemas import CreateJob, GenerationMode, OutputSpec, RenderProvider
+    from shine.schemas import CreateJob, GenerationMode, OutputSpec, RenderProvider, ShotSpec
 
     package = db.get(DirectorPackageVersion, run.package_id)
     manifest = package.manifest if package else {}
@@ -497,8 +499,14 @@ def _create_series_for_batch(
         max_semantic_retries=_policy_retries(policy),
         auto_repair=bool(policy.get("auto_repair", True)),
     )
+    # A batch that opens with a continuation cannot create its first job
+    # here: the source media belongs to an earlier series or episode, and the
+    # Worker - which owns the lease and the renderer - resolves it and
+    # derives the reference outside the write transaction.
+    defer_first = ShotSpec.model_validate(in_order[0].spec).continuity.mode.value != "cut"
     try:
-        series, _job = create_series(db, project, in_order, body=body, settings=settings, offline=False)
+        series, _job = create_series(db, project, in_order, body=body, settings=settings, offline=False,
+                                     defer_first=defer_first)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else (exc.detail or {}).get("code", "")
         raise RunBlocked("BATCH_DISPATCH_REFUSED", str(detail)[:200]) from None
@@ -541,8 +549,11 @@ def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> Produc
                {"code": blocker["code"]})
         db.flush()
         return None
-    limit = int((package.manifest.get("policy") or {}).get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or
-                DEFAULT_BATCH_SHOT_LIMIT)
+    policy = package.manifest.get("policy") or {}
+    limit = int(policy.get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or DEFAULT_BATCH_SHOT_LIMIT)
+    # The production strategy is frozen with the package: a restart may not
+    # regroup the shots of a run that is already under way.
+    split_continuity = bool(policy.get("split_continuity", False))
     package_episode_rows = {row.episode_id: row for row in package_episodes(db, package.id)}
 
     for episode in episodes:
@@ -557,7 +568,7 @@ def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> Produc
         source_episode = package_episode_rows.get(episode.episode_id)
         if source_episode is None:
             raise RunBlocked("EPISODE_NOT_IN_PACKAGE", episode.episode_id)
-        planned = _batch_plan(source_episode, batch_shot_limit=limit)
+        planned = _batch_plan(source_episode, batch_shot_limit=limit, split_continuity=split_continuity)
         done_keys = {batch.batch_key for batch in existing}
         remaining = [row for row in planned if row["batch_key"] not in done_keys]
         if not remaining:
@@ -632,9 +643,13 @@ def _ensure_episode_delivery(
                    if row.episode_id == episode.episode_id), None)
     if source is None:
         return None, False
-    limit = int((package.manifest.get("policy") or {}).get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or
-                DEFAULT_BATCH_SHOT_LIMIT)
-    planned_keys = {row["batch_key"] for row in _batch_plan(source, batch_shot_limit=limit)}
+    policy = package.manifest.get("policy") or {}
+    limit = int(policy.get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or DEFAULT_BATCH_SHOT_LIMIT)
+    split_continuity = bool(policy.get("split_continuity", False))
+    planned_keys = {
+        row["batch_key"]
+        for row in _batch_plan(source, batch_shot_limit=limit, split_continuity=split_continuity)
+    }
     existing_keys = {batch.batch_key for batch in batches}
     if (planned_keys - existing_keys) or any(batch.status != "PASSED" for batch in batches):
         return None, False

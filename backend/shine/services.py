@@ -484,6 +484,8 @@ def make_render_request(
     body: CreateJob,
     *,
     spec: ShotSpec | None = None,
+    continuity_artifact_id: str | None = None,
+    offline: bool = False,
 ) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
@@ -533,6 +535,47 @@ def make_render_request(
     # uses; otherwise <Subject 1> can name a different performer than the first
     # person the prompt describes, and the renderer hands one face to another.
     bindings = order_bindings_for_cast(bindings, list(spec.characters), assets)
+    if spec.continuity.mode.value != "cut" and body.provider == RenderProvider.COMFYUI and not offline:
+        from shine.media.continuity import find_continuity_artifact, load_continuity_reference
+
+        mode = spec.continuity.mode.value
+        source_job_id = spec.continuity.previous_job_id
+        if not source_job_id:
+            raise HTTPException(409, "CONTINUITY_SOURCE_REQUIRED")
+        artifact_id = continuity_artifact_id
+        if artifact_id is None:
+            # A repair or a resumed Worker reuses the derivative that already
+            # exists for this source; it never derives a second copy of the
+            # same bytes, and it never renders without a real reference.
+            existing = find_continuity_artifact(
+                db, project.id, source_job_id, mode,
+                start_s=spec.continuity.reference_start_s,
+                end_s=spec.continuity.reference_end_s,
+            )
+            if existing is None:
+                raise HTTPException(409, "CONTINUITY_DERIVATIVE_REQUIRED")
+            artifact_id = existing.id
+        try:
+            ref = load_continuity_reference(db, project.id, artifact_id, source_job_id, mode)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        lineage = ref.provenance
+        for field, key in ((spec.continuity.reference_start_s, "start_s"),
+                           (spec.continuity.reference_end_s, "end_s")):
+            if field is not None and field != lineage.get(key):
+                raise HTTPException(409, "CONTINUITY_REFERENCE_WINDOW_CHANGED")
+        family = {"last_frame": "picture", "hard_frame_anchor": "picture",
+                  "video_reference": "video", "audio_reference": "audio"}.get(mode)
+        if not family:
+            raise HTTPException(409, "CONTINUITY_MODE_UNSUPPORTED")
+        if len(bindings) >= 12:
+            raise HTTPException(422, "CONTINUITY_REFERENCE_LIMIT_EXCEEDED")
+        assets[ref.id] = ref
+        bindings.append(ShotBindingInput(
+            asset_id=ref.id, use_as=family, role="continuity_derivative",
+            frame_role="first_frame" if mode == "hard_frame_anchor" else None,
+            ordinal=len(bindings),
+        ))
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     manifest = build_reference_manifest(ordered, assets)
 
@@ -794,6 +837,7 @@ def create_render_job(
     offline: bool = False,
     spec: ShotSpec | None = None,
     depends_on: list[str] | None = None,
+    continuity_artifact_id: str | None = None,
 ) -> tuple[Job, dict[str, Any]]:
     """Create one render job for a shot, with every production gate applied.
 
@@ -818,7 +862,9 @@ def create_render_job(
             dependency_ids.append(previous_job_id)
         dependency_kinds[previous_job_id] = continuity_kind
 
-    request_data, _assets, compiler_meta = make_render_request(db, project, shot, body, spec=spec)
+    request_data, _assets, compiler_meta = make_render_request(
+        db, project, shot, body, spec=spec, continuity_artifact_id=continuity_artifact_id, offline=offline,
+    )
     if body.provider == RenderProvider.COMFYUI:
         from shine.quality.input_assessment import assessment_for_request
 

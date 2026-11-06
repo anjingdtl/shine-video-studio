@@ -1692,6 +1692,9 @@
       "usage": "research"
     },
     {
+      "capabilities": [
+        "VLM_REVIEW"
+      ],
       "component_id": "qwen3-vl-8b-fp8",
       "dependencies": [
         "comfy-runtime-wheels"
@@ -1837,11 +1840,16 @@
       "origin_repo": "Qwen/Qwen3-VL-8B-Instruct-FP8",
       "origin_revision": "9cdc6310a8cb770ce18efaf4e9935334512aee45",
       "revision": "9cdc6310a8cb",
+      "resource_mb": 8000,
+      "resource_measurement": "ESTIMATED",
       "role": "VLM",
       "status": "READY",
       "usage": "research"
     },
     {
+      "capabilities": [
+        "ASR"
+      ],
       "component_id": "qwen3-asr-0.6b",
       "dependencies": [],
       "depends_on_wheels": true,
@@ -1955,6 +1963,8 @@
       "origin_repo": "Qwen/Qwen3-ASR-0.6B",
       "origin_revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
       "revision": "5eb144179a02",
+      "resource_mb": 4000,
+      "resource_measurement": "ESTIMATED",
       "role": "ASR",
       "status": "READY",
       "usage": "research"

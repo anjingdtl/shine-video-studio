@@ -309,6 +309,7 @@ def test_a_continuity_shot_binds_the_real_previous_job(api, monkeypatch):
         recipe={"renderer": {"instance_id": "i"}},
         review_configs={"VLM": {}},
         semantic_reviewer=object(),
+        offline=True,  # This test supplies synthetic job IDs, not real render artifacts.
     )
     assert result["status"] == "COMPLETED"
     with factory() as db:

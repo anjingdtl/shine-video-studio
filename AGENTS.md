@@ -667,3 +667,35 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   分级验收 `docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_V3_20261106.md`、
   测试报告 `docs/TEST_REPORT_20261106_DIRECTOR_LONG_FORM_V3.md`；
   证据目录 `.local-acceptance/closeout-v3-20261106/`（Git 忽略，不进安装包）。
+
+## 2026-11-06 跨批次续接轮（跨 series 真实媒体续接 + 部署目录缺陷修复）
+
+- **续接必须是真实媒体，不是提示词里的一句话**。`last_frame` / `hard_frame_anchor` /
+  `video_reference` / `audio_reference` 各自派生一份带 lineage 的派生物
+  （`shine/media/continuity.py`）：来源 job 必须 PASSED、未失效、shot revision 未变，
+  attempt 与 artifact 的 sha/字节数一致。派生物**不是**用户批准的主素材：它不进人工绑定集合、
+  不进冻结清单的 links，而是按 lineage 校验；上传前还要重新核验**源文件字节**，源被改动即拒绝。
+- **Worker 拥有派生物**：`worker._load_comfy_context` 按 `role=continuity_derivative` 装载
+  `MediaArtifact`；`preproduction.enforce_references` 把派生物与主素材分开校验。
+  派生动作一律在**写事务之外**（FFmpeg），提交前重查来源。
+- **跨批次调度必须冻结**。导演包策略新增 `split_continuity`（默认开）：批次边界可以落在连续性链上，
+  下一个 series 绑定上一个 series 已验证的来源媒体。策略随包冻结，重启不得改变计划。
+  以续接开场的批次**不立即建 job**，由 Worker 在拿到租约后解析真实来源并派生引用。
+- **来源解析顺序固定**：同 series 前序镜 → 本 Run 自有已通过的 job（可跨集）→ 声明的 previous_job_id →
+  项目台账里该镜最近一次**真实通过**的 job。更新的其他生产 job 不得被采用。
+- **部署目录必须能声明审片模型的能力与显存预算**。`CatalogComponent` 增加
+  `capabilities` / `resource_mb` / `resource_measurement`，`_catalog_package_spec()` 透传；
+  目录里 `qwen3-vl-8b-fp8 → ['VLM_REVIEW'], 8000 MiB, ESTIMATED`，
+  `qwen3-asr-0.6b → ['ASR'], 4000 MiB, ESTIMATED`（本机基线，不是实测峰值）。
+  否则安装出来的模型包 `capabilities=[]`，**原生 VLM/ASR 能力永远无法发布**。
+  `register_catalog_packages()` 允许"文件逐字节相同、只有声明变化"的升级并写审计；文件变了仍然拒绝。
+- **目录变化会让运行时身份变化**：服务验证证据随即失效，必须按
+  `configuration → services/validate → runtime/activate` 重跑，不得跳过。
+- **ASR 的 Python ABI 问题单独记录**：本机 ComfyUI 内嵌 Python 3.13.11，已固定的 `nagisa` wheel 是
+  cp312，`qwen_asr` 导入失败。ASR 是 advisory，不阻断 H3、不改变门禁强度，也**不得伪报 READY**；
+  但它使"同时钉住 VLM 与 ASR 的生产计划"在本机被 `CAPABILITY_MISSING` 硬阻断。
+- 回归：`test_continuity_media.py`、`test_cross_series_source.py`、`test_cross_series_continuity.py`（新增）、
+  `test_production_series.py`、`test_director_worker_integration.py`。
+  证据：`docs/ACCEPTANCE_20261106_CROSS_SERIES_CONTINUITY.md`。
+  **改动 `worker.py` / `preproduction.py` 后仍必须重新做真实正负校准**；本轮因本机 8B 推理未在
+  验收窗口内结束而未完成新 revision，旧 revision 不得复用，也不得据此声称已重新校准。

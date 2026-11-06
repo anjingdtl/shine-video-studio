@@ -68,6 +68,15 @@ class CatalogComponent(BaseModel):
     destination_family: str | None = None
     dependencies: list[str] = Field(default_factory=list)
     role: str | None = None
+    #: What this component can be used for once it is installed.  A review
+    #: model without its capability can never be bound to a native revision.
+    capabilities: list[str] = Field(default_factory=list, max_length=30)
+    #: The admission budget this component declares, in MiB.  It must be at
+    #: least the local baseline for the role it serves.
+    resource_mb: int | None = Field(default=None, ge=0)
+    #: ``UNKNOWN`` means nothing was measured; ``ESTIMATED`` is a declared
+    #: baseline, ``KNOWN`` a measured one.
+    resource_measurement: str = Field(default="UNKNOWN", pattern=r"^(UNKNOWN|ESTIMATED|KNOWN)$")
     depends_on_wheels: bool = False
     files: list[CatalogFile] = Field(min_length=1, max_length=256)
     status: Literal["READY", "BLOCKED"] = "READY"
@@ -173,6 +182,9 @@ def _catalog_package_spec(component: dict, dependency_map: dict) -> PackageSpec:
         usage=component["usage"],
         license_url=component.get("license_url", ""),
         family=component.get("destination_family") or component.get("role") or "UNSPECIFIED",
+        capabilities=list(component.get("capabilities") or []),
+        resource_mb=component.get("resource_mb"),
+        resource_measurement=component.get("resource_measurement", "UNKNOWN"),
         files=files,
         dependencies=dependency_map,
         runtime_versions={"python": "3.12"},
@@ -182,6 +194,39 @@ def _catalog_package_spec(component: dict, dependency_map: dict) -> PackageSpec:
 
 def _package_class(kind: str):
     return ModelPackage if kind == "model" else NodePackage
+
+
+def _pinned_files(payload: dict) -> list[tuple[str, str, int]]:
+    """The file identity of a package payload, independent of its declaration."""
+    return sorted(
+        (str(f.get("relative_path", "")), str(f.get("sha256", "")), int(f.get("size", 0)))
+        for f in (payload.get("files") or [])
+    )
+
+
+#: The declaration fields that may change without a new content identity.
+#: Everything else - revision, licence, usage, dependencies, the pinned files -
+#: is content: a different value there is a different component.
+DECLARATION_FIELDS = ("capabilities", "resource_mb", "resource_measurement")
+
+
+def _declaration_delta(previous: dict, current: dict) -> list[str]:
+    """The declaration keys that changed while the pinned files stayed the same."""
+    return sorted(
+        key for key in set(previous) | set(current)
+        if key in DECLARATION_FIELDS and previous.get(key) != current.get(key)
+    )
+
+
+def _declaration_only_change(previous: dict, current: dict) -> bool:
+    """True when the change is a declaration, not a content change."""
+    if _pinned_files(previous) != _pinned_files(current):
+        return False
+    return all(
+        previous.get(key) == current.get(key)
+        for key in set(previous) | set(current)
+        if key not in DECLARATION_FIELDS
+    )
 
 
 def register_catalog_packages(db, catalog: dict, requested: list[str]) -> dict:
@@ -209,7 +254,20 @@ def register_catalog_packages(db, catalog: dict, requested: list[str]) -> dict:
         )
         if existing is not None:
             if graph_hash(existing.payload) != identity:
-                raise HTTPException(409, "CATALOG_COMPONENT_CHANGED")
+                if not _declaration_only_change(existing.payload, payload):
+                    raise HTTPException(409, "CATALOG_COMPONENT_CHANGED")
+                # The pinned files are byte-identical and only the declaration
+                # changed (the capability and the declared admission budget).
+                # The verified files stay verified and the package gains the
+                # new declaration under a new identity.
+                previous = existing.payload
+                changed = _declaration_delta(previous, payload)
+                existing.payload = payload
+                existing.sha256 = identity
+                add_audit(db, "comfyops", "PACKAGE_DECLARATION_UPDATED", "package", existing.id,
+                          {"component": component_id, "changed": changed,
+                           "previous_sha256": graph_hash(previous), "sha256": identity},
+                          project_id=None)
             rows[component_id] = existing
             continue
         cls = _package_class(spec.kind)

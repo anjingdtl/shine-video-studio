@@ -222,13 +222,19 @@ def create_series(
     body: CreateJob,
     settings,
     offline: bool = False,
-) -> tuple[ProductionSeries, Job]:
+    defer_first: bool = False,
+) -> tuple[ProductionSeries, Job | None]:
     """Create one production series and queue its first shot.
 
     The series records the whole shot order up front, so the resident Worker
     knows what the run is even if the process that created it disappears.  Only
     the first shot is queued here: a dependent shot may only be created after
     its source job really passed, which is the Worker's job, not the API's.
+
+    A series that *opens* with a continuation has no source media yet: the
+    source belongs to an earlier series or an earlier episode.  Its first job
+    is therefore created by the Worker, which owns the lease, resolves the
+    real source job and derives the reference outside the write transaction.
     """
     from shine.services import create_render_job
 
@@ -301,6 +307,12 @@ def create_series(
 
     first_shot = shots[0]
     first_spec = ShotSpec.model_validate(first_shot.spec)
+    if first_spec.continuity.mode.value != "cut":
+        # The continuation source is not bound yet; the Worker binds it to the
+        # job that really produced it and derives the reference it needs.
+        defer_first = True
+    if defer_first:
+        return series, None
     job, _meta = create_render_job(
         db, project, first_shot, body, settings=settings, offline=offline, spec=first_spec,
     )
@@ -586,6 +598,72 @@ def _item_is_done(item: ProductionSeriesItem, job: Job | None) -> bool:
     return job.status == "PASSED" and not job.stale
 
 
+def _source_item(db, item: ProductionSeriesItem, items: list[ProductionSeriesItem]):
+    """Resolve declared earlier shots without substituting an unrelated take."""
+    shot = db.get(Shot, item.shot_id)
+    if shot is None:
+        return None
+    spec = ShotSpec.model_validate(shot.spec)
+    earlier = [row for row in items if row.position < item.position]
+    if spec.continuity.previous_shot_id:
+        return next((row for row in earlier if row.shot_id == spec.continuity.previous_shot_id), None)
+    return next((row for row in earlier if row.position == item.position - 1), None)
+
+
+def _run_source_job(db, series: ProductionSeries, shot: Shot) -> Job | None:
+    """Resolve a prior shot only through the owning run's own completed items."""
+    from shine.production.models import ProductionRunBatch, ProductionRunEpisode
+    from shine.production.runner import run_owned_passed_jobs
+
+    batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.series_id == series.id))
+    if batch is None:
+        return None
+    episodes = list(db.scalars(
+        select(ProductionRunEpisode).where(ProductionRunEpisode.run_id == batch.run_id)
+        .order_by(ProductionRunEpisode.position)
+    ))
+    ordered = [shot_id for episode in episodes for shot_id in episode.shot_ids]
+    if ordered.count(shot.id) != 1:
+        raise HTTPException(409, "CONTINUITY_RUN_SHOT_AMBIGUOUS")
+    position = ordered.index(shot.id)
+    spec = ShotSpec.model_validate(shot.spec)
+    source_shot_id = spec.continuity.previous_shot_id or (ordered[position - 1] if position else None)
+    if not source_shot_id or source_shot_id not in ordered[:position]:
+        raise HTTPException(409, "CONTINUITY_RUN_SOURCE_NOT_PRIOR")
+    source = run_owned_passed_jobs(db, batch.run_id, episodes).get(source_shot_id)
+    if source is None:
+        raise HTTPException(409, "CONTINUITY_RUN_SOURCE_NOT_PASSED")
+    if spec.continuity.previous_job_id and spec.continuity.previous_job_id != source.id:
+        raise HTTPException(409, "PRODUCTION_SERIES_SOURCE_MISMATCH")
+    return source
+
+
+def _resolve_item_source(db, series: ProductionSeries, item: ProductionSeriesItem, shot: Shot) -> Job:
+    spec = ShotSpec.model_validate(shot.spec)
+    previous_item = _source_item(db, item, _items(db, series.id))
+    source = db.get(Job, previous_item.job_id) if previous_item and previous_item.job_id else None
+    if source is None:
+        source = _run_source_job(db, series, shot)
+    if source is None and spec.continuity.previous_job_id:
+        source = db.get(Job, spec.continuity.previous_job_id)
+    if source is None:
+        # A series that is not owned by a production run resolves its source
+        # from the project ledger: the last job that really produced the
+        # declared previous shot.  It is never a guess and never a mock.
+        from shine.media.continuity import continuity_source_job
+
+        try:
+            source = continuity_source_job(db, series.project_id, spec)
+        except ValueError:
+            source = None
+    if source is None or source.project_id != series.project_id or source.status != "PASSED" or source.stale:
+        raise HTTPException(409, "PRODUCTION_SERIES_SOURCE_NOT_PASSED")
+    if ((spec.continuity.previous_shot_id and spec.continuity.previous_shot_id != source.shot_id)
+            or (spec.continuity.previous_job_id and spec.continuity.previous_job_id != source.id)):
+        raise HTTPException(409, "PRODUCTION_SERIES_SOURCE_MISMATCH")
+    return source
+
+
 def _next_runnable_item(db, series_id: str) -> tuple[ProductionSeriesItem | None, Job | None]:
     """The first item of the series that can still run.
 
@@ -594,7 +672,6 @@ def _next_runnable_item(db, series_id: str) -> tuple[ProductionSeriesItem | None
     judgement about one shot must not stop the whole production.
     """
     items = _items(db, series_id)
-    by_position = {item.position: item for item in items}
     for item in items:
         job = db.get(Job, item.job_id) if item.job_id else None
         if _item_is_done(item, job):
@@ -604,7 +681,7 @@ def _next_runnable_item(db, series_id: str) -> tuple[ProductionSeriesItem | None
             item.failure_code = job.failure_code or "SERIES_SHOT_NEEDS_REVIEW"
             continue
         if item.continuity_mode != "cut":
-            previous = by_position.get(item.position - 1)
+            previous = _source_item(db, item, items)
             if previous is not None:
                 source = db.get(Job, previous.job_id) if previous.job_id else None
                 if source is None or source.status != "PASSED" or source.stale:
@@ -644,6 +721,33 @@ def _create_item_job(session_factory, series_id: str, item_id: str, *, settings,
     """
     from shine.services import create_render_job
 
+    source_id = None
+    derivative_id = None
+    with session_factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        shot = db.get(Shot, item.shot_id) if item else None
+        if series is None or item is None or shot is None:
+            raise HTTPException(409, "PRODUCTION_SERIES_ITEM_MISSING")
+        if item.job_id:
+            return item.job_id
+        project_id = series.project_id
+        if item.continuity_mode != "cut":
+            source = _resolve_item_source(db, series, item, shot)
+            source_id = source.id
+            spec = ShotSpec.model_validate(shot.spec)
+            mode = spec.continuity.mode.value
+            start_s, end_s = spec.continuity.reference_start_s, spec.continuity.reference_end_s
+    if source_id and not offline:
+        from shine.media.continuity import prepare_continuity_artifact
+
+        try:
+            derivative_id = prepare_continuity_artifact(
+                session_factory, settings, project_id, source_id, mode, start_s=start_s, end_s=end_s,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         item = db.get(ProductionSeriesItem, item_id)
@@ -655,24 +759,19 @@ def _create_item_job(session_factory, series_id: str, item_id: str, *, settings,
         shot = db.get(Shot, item.shot_id)
         if project is None or shot is None:
             raise HTTPException(409, "PRODUCTION_SERIES_ITEM_MISSING")
-        items = _items(db, series.id)
-        position = item.position
-        previous_item = next((row for row in items if row.position == position - 1), None)
         previous_job_id = None
         previous_shot_id = None
-        if previous_item is not None and item.continuity_mode != "cut":
-            # A dependent shot may only consume a source job that really passed.
-            if not previous_item.job_id:
-                raise HTTPException(409, "PRODUCTION_SERIES_ORDER_VIOLATION")
-            previous_job = db.get(Job, previous_item.job_id)
-            if previous_job is None or previous_job.status != "PASSED" or previous_job.stale:
-                raise HTTPException(409, "PRODUCTION_SERIES_SOURCE_NOT_PASSED")
+        if item.continuity_mode != "cut":
+            previous_job = _resolve_item_source(db, series, item, shot)
+            if previous_job.id != source_id:
+                raise HTTPException(409, "PRODUCTION_SERIES_SOURCE_CHANGED")
             previous_job_id = previous_job.id
-            previous_shot_id = previous_item.shot_id
+            previous_shot_id = previous_job.shot_id
         spec = _effective_spec(shot, previous_job_id=previous_job_id, previous_shot_id=previous_shot_id)
         body = _create_body(series, shot)
         job, _meta = create_render_job(
             db, project, shot, body, settings=settings, offline=offline, spec=spec,
+            continuity_artifact_id=derivative_id,
         )
         item.job_id = job.id
         item.status = "QUEUED"

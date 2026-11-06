@@ -7,8 +7,15 @@ type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: 
   characters: { name: string; entity_id: string; stable_identity: string }[];
   questions: string[]; production_sections: Section[];
 } };
+type TaskSummary = { stage: string; label: string; done: number; total: number; percent: number;
+  lease_expires_at: string | null; awaiting_reclaim: boolean; lease_remaining_s: number | null };
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
-  outline: Outline | null; progress: { stage: string; cursor: number; results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
+  outline: Outline | null; summary?: TaskSummary;
+  progress: { stage: string; cursor: number; results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
+const TASK_STATUS_LABELS: Record<string, string> = {
+  QUEUED: '排队中', RUNNING: '进行中', SUCCEEDED: '已完成', NEEDS_REVIEW: '需要你处理',
+  FAILED: '失败', PAUSED: '已暂停', CANCELLED: '已取消',
+};
 type ContinuityInfo = { production_section_id: string; order: number; prior_production_section_id: string | null;
   verified_prior_available: boolean; prior_production_status: string;
   own_production: { status: string; missing: { reason?: string }[] } };
@@ -62,7 +69,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
       <button type="button" disabled={busy || !documentId} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
         document_id: documentId, expected_document_hash: documentHash, locked_facts: facts.split('\n').map((s) => s.trim()).filter(Boolean),
       })))}>后台提取并归并总体大纲</button>
-      {outlineTask && <p>大纲任务 {outlineTask.task_id.slice(0, 8)} · {outlineTask.status} · {outlineTask.progress.stage} · 已处理 {outlineTask.progress.cursor} 个当前层单元</p>}
+      {outlineTask && <p>大纲任务 {outlineTask.task_id.slice(0, 8)} · {TASK_STATUS_LABELS[outlineTask.status] ?? outlineTask.status} · {outlineTask.summary?.label ?? outlineTask.progress.stage} · 已完成 {outlineTask.summary?.done ?? outlineTask.progress.cursor}/{outlineTask.summary?.total ?? '?'}（{outlineTask.summary?.percent ?? 0}%）</p>}
       <p>关闭页面后由常驻 Worker 继续；刷新只查询进度。未知模型结果只核对，不自动重发。</p>
       {outline && <>
         <b>大纲版本 {outline.artifact_id.slice(0, 8)} · {outline.approved ? '你已确认' : '待你审阅'}</b>
@@ -110,7 +117,14 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         {!styleFrozen && <small>正式分镜还需你先确认素材并冻结风格。</small>}
       </>}
       {tasks.map((task) => <div key={task.task_id} className="material-run">
-        <b>{task.role === 'story_section_run' ? '分步分镜' : '总体大纲'} · {task.status}</b>
+        <b>{task.role === 'story_section_run' ? '分步分镜' : '总体大纲'} · {TASK_STATUS_LABELS[task.status] ?? task.status}</b>
+        {task.summary && (task.summary.total > 0 || ['QUEUED', 'RUNNING'].includes(task.status)) && <div className="run-progress">
+          <div className="run-progress-track"><span style={{ width: `${task.summary.percent}%` }} /></div>
+          <small>{task.summary.label} · 已完成 {task.summary.done}/{task.summary.total || '?'}（{task.summary.percent}%）</small>
+          {task.summary.awaiting_reclaim && <small>上一次推进被中断；Worker 已接管或即将接管并继续，不会重复提交模型请求。</small>}
+          {!task.summary.awaiting_reclaim && task.summary.lease_remaining_s !== null && task.summary.lease_remaining_s > 0
+            && <small>Worker 正在推进（本次接管有效期还剩约 {Math.ceil(task.summary.lease_remaining_s / 60)} 分钟）</small>}
+        </div>}
         {task.error_code && <p>需要处理：{task.error_code}。核对原任务后再恢复，未知结果不会自动重发。</p>}
         {['QUEUED', 'RUNNING'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/pause`, json('POST', { expected_state_version: task.state_version })))}>暂停任务</button>}
         {['PAUSED', 'FAILED', 'NEEDS_REVIEW'].includes(task.status) && <>
