@@ -1,6 +1,6 @@
 # 测试报告：全片持续生产收尾修复 V3 轮（2026-11-06）
 
-- 被测对象：`main / 3f2705396c32c266b912a729f0c7a06ffd6b86c3` + 本轮未提交改动（见第 6 节）。
+- 被测对象：`main / 3f2705396c32c266b912a729f0c7a06ffd6b86c3` + 本轮改动，现已提交为 `b2c0733` / `b58d9a3`（见第 6 节）。
 - 关联文档：`docs/PROGRESS_20261106_DIRECTOR_LONG_FORM_V3.md`、
   `docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_V3_20261106.md`。
 - 执行环境：Windows，项目 Python 3.12 虚拟环境 `backend\.venv`，仓库根目录执行。
@@ -20,7 +20,8 @@
 | 隔离新库 `alembic check` | **No new upgrade operations detected** | **0** |
 
 **未执行（NOT_RUN）**：真实 H3 出片、真实多集无人值守交付、8h/24h 长时生产、人工艺术验收、
-Windows 安装包构建与安装。详见第 5 节。
+以及 Windows 安装包在**干净机器上的实际安装与安装后联调**（包本身已构建并通过 `-Verify`，见 2.6 节）。
+详见第 5 节。
 
 ## 2. 命令与原始结果
 
@@ -115,6 +116,26 @@ backend\.venv\Scripts\python.exe -m alembic -c backend/alembic.ini upgrade head 
 backend\.venv\Scripts\python.exe -m alembic -c backend/alembic.ini check         # EXIT=0, No new upgrade operations detected
 ```
 
+### 2.6 Windows 测试包（构建并校验）
+
+```powershell
+pwsh -NoProfile -File scripts\build_test_package.ps1 -OutDir releases -Verify
+# copied 591 tracked files, skipped 116 excluded paths
+# staged 599 files, 8648892 bytes
+# verified 600 files by SHA-256 after Expand-Archive        EXIT=0
+```
+
+| 项 | 值 |
+| --- | --- |
+| 包 | `releases/ShineVideoStudio-20261106-b58d9a3-win64.zip`（3 015 520 字节） |
+| SHA-256 | `095479a8f42cded1f16446d1311f62b813d5f41add749ba40c6767ec154bb9d1`（`.sha256` 旁文件与重算值三方一致） |
+| BUILD_INFO | `source_commit = b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`，`source_tree = CLEAN_TREE`，`production_ready = false` |
+| 禁入内容 | 数据库 0、模型权重 0、验收证据 0、虚拟环境/`node_modules` 0、生成媒体 0；唯一 `.env` 匹配是受版本控制的 `.env.example` 模板 |
+| 历史保留 | `releases/` 共 22 个 zip，上一版未被覆盖 |
+| 编码 | `scripts/build_test_package.ps1` UTF-8 带 BOM；`packaging/windows/*.cmd` 五个入口文件纯 ASCII |
+
+**未执行**：干净 Windows 机器上的实际安装、60.8 GB 下载与安装后真实 H3 联调。
+
 ## 3. 本轮新增回归的覆盖内容
 
 ### 3.1 `backend/tests/test_director_worker_scheduling.py`（7 条）
@@ -181,8 +202,8 @@ GPU 独占准入仍走产品自己的 `ResourceScheduler`，FFmpeg 装配是真�
 - **8 小时 / 24 小时持续生产（NOT_RUN）**：不得以等待、暂停或空等凑时长；活跃运行时长与成片时长
   须分别报告。
 - **人工艺术验收（HUMAN_REVIEW，NOT_RUN）**：技术通过不等于艺术通过。
-- **Windows 安装包构建与安装（NOT_RUN）**：只能从**已授权的最终提交**且干净的树用
-  `scripts\build_test_package.ps1 -Verify` 构建。
+- **Windows 安装包的干净机安装与安装后联调（NOT_RUN）**：包已从**已提交且干净的树** `b58d9a3` 构建并通过
+  `-Verify`（逐文件 SHA-256 复核 600 个文件）；**干净机实际安装、60.8 GB 下载与安装后真实 H3 联调仍未执行**。
 - **VLM 能力重新校准（BLOCKED，按设计）**：本轮改动了被 `client_review_identity` 钉住的
   `backend/shine/worker.py`，旧 revision 与被冻结计划按设计失效；真实生产验收前必须重新执行真实
   正负校准、发布新 revision、弃用旧 revision、重新分析并**人工重新冻结**计划，旧证据不得复用。
@@ -190,15 +211,19 @@ GPU 独占准入仍走产品自己的 `ResourceScheduler`，FFmpeg 装配是真�
 
 ## 6. 被测树的最终状态
 
-- HEAD `3f2705396c32c266b912a729f0c7a06ffd6b86c3`，分支 `main`。
+- HEAD `b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`，分支 `main`，**已提交并推送**到 `origin/main`
+  （0 ahead / 0 behind），工作树干净。
+  - `b2c0733` `fix(director): stop the run layer from starving its own executors`
+  - `b58d9a3` `chore(packaging): sync the tester hand-off with the V3 closeout round`
 - schema `f180b0010001`（与迁移 head 一致）。
-- 改动文件（提交前）：
-  `AGENTS.md`、`backend/shine/director/creative.py`、`backend/shine/production/runner.py`、
+- 提交内容：`AGENTS.md`、`backend/shine/director/creative.py`、`backend/shine/production/runner.py`、
   `backend/shine/worker.py`、`backend/tests/test_director_long_form.py`、
   `frontend/src/api.ts`、`frontend/src/components/ScriptEntryPanel.tsx`；
   新增 `backend/tests/test_creative_script_task_lifecycle.py`、
   `backend/tests/test_director_worker_integration.py`、
-  `backend/tests/test_director_worker_scheduling.py`，以及 `docs/` 下的本轮三份文档。
+  `backend/tests/test_director_worker_scheduling.py`，以及 `docs/` 下的本轮文档；
+  安装包同步提交另含 `packaging/windows/START_HERE.md`、
+  `packaging/windows/TESTER_CHECKLIST.md`、`scripts/build_test_package.ps1`。
 - 新增正式回归文件 SHA-256：
   `test_director_worker_integration.py` = `dd920d404a0c59144e67f102ae1cb9590fa925795e3e5ba9c3d49077c2c30d42`；
   `test_director_worker_scheduling.py` = `c441c9a06b8e1b2ee705303fd8818fccf8e419e4e51f00e2d84323ed072f6c95`；

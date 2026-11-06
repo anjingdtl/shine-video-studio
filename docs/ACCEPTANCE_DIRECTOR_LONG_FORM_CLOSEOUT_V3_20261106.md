@@ -11,7 +11,7 @@
 
 - **两个 P1 已修复**：上轮新增的 3 条独立集成反例从 **3 failed** 变为 **3 passed**；前轮 18 条反例保持 **18 passed**（原始探针文件未改动，SHA-256 已重新核对）。
 - **整链缺口已补**：新增一条**只由常驻 Worker 调度入口驱动**的整链回归——Web/API 确认导演包 → Run 派发 → series 领取与逐镜拍摄 → 各批次通过 → 分集交付入队 → 真实 FFmpeg 逐集装配 → Run 完成。测试不手工调用 `advance_run`、不手工把 job/series 标为 PASSED、不手工补交付。
-- **仍不能宣称整体验收通过**：真实 H3 出片、真实多集无人值守交付、8h/24h 长时生产、人工艺术验收与 Windows 安装包验收本轮**均未执行**（NOT_RUN）。详见第 5 节的分级结论。
+- **仍不能宣称整体验收通过**：真实 H3 出片、真实多集无人值守交付、8h/24h 长时生产、人工艺术验收本轮**均未执行**（NOT_RUN）。Windows 测试包已从**已提交且干净的树**构建并通过 `-Verify`，但**未在干净机器上安装**。详见第 5 节的分级结论。
 - **一个必须公开的后果**：本轮改动了 `backend/shine/worker.py`，该文件在 `client_review_identity` 的钉住清单内。按既有规则，旧 VLM revision 与被冻结计划**按设计失效**，不能作为当前代码的真实生产证据。
 
 ## 2. P1-A：全片推进饿死拍摄与装配执行器
@@ -125,6 +125,30 @@
 运行中改动被钉文件按设计使身份失效。最终套件在**无并发改动**下重跑，全绿。该对照日志保留在
 `backend-full.log` / `backend-full.xml`，便于复验者自行判断。
 
+### 4.4 Windows 测试包（构建并校验通过）
+
+从**已提交且干净的树** `b58d9a3` 构建（`source_tree = CLEAN_TREE`）。该提交是本轮代码与安装包同步的提交；其后仅追加了记录本包证据的文档提交，不改产品代码：
+
+```powershell
+pwsh -NoProfile -File scripts\build_test_package.ps1 -OutDir releases -Verify
+# BUILD_EXIT=0
+# copied 591 tracked files, skipped 116 excluded paths; staged 599 files, 8648892 bytes
+# verified 600 files by SHA-256 after Expand-Archive
+```
+
+| 项 | 值 |
+| --- | --- |
+| 包 | `releases/ShineVideoStudio-20261106-b58d9a3-win64.zip`（3 015 520 字节） |
+| SHA-256 | `095479a8f42cded1f16446d1311f62b813d5f41add749ba40c6767ec154bb9d1`（与 `.sha256` 旁文件及重算值三方一致） |
+| BUILD_INFO | `source_commit = b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`，`source_tree = CLEAN_TREE`，`channel = TEST_BUILD`，`status = PARTIAL`，`production_ready = false` |
+| 禁入内容复核 | 数据库 0、模型权重 0、验收证据 0、虚拟环境/`node_modules` 0、生成媒体 0；唯一的 `.env` 匹配是受版本控制的 `.env.example` 模板（无任何真实凭据） |
+| 历史保留 | `releases/` 现有 22 个 zip，**上一版未被覆盖** |
+| 编码 | `scripts/build_test_package.ps1` 为 UTF-8 **带 BOM**；`packaging/windows/*.cmd` 五个入口文件均为**纯 ASCII** |
+
+安装包的 `known_blockers` 与 `closed_in_this_build` 静态字段已同步为本轮事实：审片重校准**因 `worker.py` 变更而变为必需且尚未完成**、真实多集无人值守交付与 8h/24h 未执行，以及本轮真正关闭的三项。
+
+**仍未执行**：干净 Windows 机器上的实际安装、60.8 GB 下载、安装后真实 H3 联调。
+
 ## 5. 分级验收结论
 
 | 层级 | 状态 | 依据 |
@@ -136,7 +160,7 @@
 | `REAL_H3_VERIFIED` | **NOT_RUN** | 本轮**没有**一次真实 MiniMax-H3 出片。本机真实渲染链需要受管 ComfyUI 实例与 H3 权重，本轮未获新增授权、未下载 |
 | `LONG_RUN_VERIFIED` | **NOT_RUN** | 8 小时 / 24 小时真实持续生产**未执行**。没有任何脚本用等待或暂停凑时长 |
 | `HUMAN_REVIEW` | **NOT_RUN** | 未做人工艺术验收；技术通过不等于艺术通过 |
-| `WINDOWS_PACKAGE` | **NOT_RUN** | 工作树未提交，按规则不从脏树构建安装包 |
+| `WINDOWS_PACKAGE` | **构建并校验通过；安装未跑** | 从已提交且干净的树 `b58d9a3` 构建，`-Verify` 逐文件 SHA-256 复核 600 个文件；**干净机安装与安装后联调本轮未执行** |
 
 ### 5.1 真实用户旅程的浏览器复核（隔离实例，新代码）
 
@@ -183,7 +207,8 @@
 
 ### 6.3 最终现场
 
-- HEAD：`3f2705396c32c266b912a729f0c7a06ffd6b86c3`，分支 `main`，**未提交、未推送**。
+- HEAD：`b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`（`b2c0733` 代码 + `b58d9a3` 安装包同步），分支 `main`，
+  **已提交并推送**到 `origin/main`（0 ahead / 0 behind），工作树干净。
 - schema：`f180b0010001`（与迁移 head 一致，`alembic check` 无漂移）。
 - 进程：本轮自己启动的隔离服务（API 34296 / Web 32064 / Worker 30180→14912 / 挂起端点 15552）**全部按身份核对后停止**；原 8133（PID 12168）与 5193（PID 26676）**未重启、未停机、未迁移**。
 - 数据库：正式库、个人素材、通过版本、冻结合同、候选资产与历史审计**未触碰**；本轮所有测试库均为隔离目录。
@@ -194,14 +219,14 @@
 2. **8h / 24h 长时生产（NOT_RUN）**：必须在有足够真实工作量时实跑，不得以等待、暂停或空等凑时长；活跃运行时长与成片时长分别报告。
 3. **VLM 能力重新校准（BLOCKED，按设计）**：`worker.py` 变更使旧 revision 与被冻结计划失效。真实生产验收前必须重新执行**真实正负校准**、发布新 revision、弃用旧 revision、重新分析并**人工重新冻结**计划；旧证据不得复用。
 4. **人工艺术验收（NOT_RUN）**：技术通过不等于艺术通过；需人工集中审阅跨集身份、服装、对白、连续性、字幕与剪辑。
-5. **Windows 安装包（NOT_RUN）**：只能从已授权的**最终提交**且干净的树用 `scripts\build_test_package.ps1 -Verify` 构建。
-6. **未提交/未推送**：本轮无提交授权。请审阅 diff 后决定提交范围与时机。
+5. **Windows 安装包的干净机安装与安装后联调（NOT_RUN）**：包本身已从已提交且干净的树 `b58d9a3` 构建并通过 `-Verify`（见 4.4 节），但**在干净 Windows 机器上的实际安装、60.8 GB 下载与安装后真实 H3 联调仍未执行**。
+6. **提交与推送（本轮已按用户指示完成）**：`b2c0733`（代码、测试、报告）与 `b58d9a3`（安装包静态字段与测试者文档同步）已推送到 `main`；远端 `main` = `b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`。
 
 ### 7.1 下一次独立验收的最短启动步骤
 
 ```powershell
 # 0) 基线核对
-git -C F:\ClaudeWorkSpace\projects\shine-video-studio rev-parse HEAD   # 期望 3f2705396c32c266b912a729f0c7a06ffd6b86c3
+git -C F:\ClaudeWorkSpace\projects\shine-video-studio rev-parse HEAD   # 期望含 b2c0733 / b58d9a3 的 main 顶端（基线 3f27053 已是上一轮）
 
 # 1) 独立反例（原文件不得修改）
 backend\.venv\Scripts\python.exe -m pytest .local-acceptance/longform-recheck-20261106/test_recheck.py -q

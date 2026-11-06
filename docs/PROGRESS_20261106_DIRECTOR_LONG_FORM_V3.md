@@ -17,7 +17,7 @@
 - 新增**只由常驻 Worker 调度入口驱动**的整链回归：3 集 / 6 批次 / 6 镜 → 逐集真实 FFmpeg 装配 →
   Run COMPLETED。
 - **仍不能宣称整体验收通过**：真实 H3 出片、真实多集无人值守交付、8h/24h 长时生产、
-  人工艺术验收、Windows 安装包均为 **NOT_RUN**。
+  人工艺术验收均为 **NOT_RUN**；Windows 测试包已从**已提交且干净的树**构建并通过 `-Verify`，但**干净机安装未跑**。
 - **一个必须公开的后果**：本轮改动了 `backend/shine/worker.py`，该文件在 `client_review_identity` 的
   钉住清单内 → 旧 VLM revision 与被冻结计划**按设计失效**，不能作为当前代码的真实生产证据。
 
@@ -126,8 +126,8 @@
    真实生产验收前必须重新执行**真实正负校准**、发布新 revision、弃用旧 revision、重新分析并
    **人工重新冻结**计划；旧证据不得复用。
 4. **人工艺术验收（NOT_RUN）**：技术通过不等于艺术通过。
-5. **Windows 安装包（NOT_RUN）**：只能从**已授权的最终提交**且干净的树用
-   `scripts\build_test_package.ps1 -Verify` 构建。
+5. **Windows 安装包的干净机安装与安装后联调（NOT_RUN）**：包已构建并通过 `-Verify`，
+   干净机实际安装与安装后真实 H3 联调仍未执行。
 6. **跨 series 任意媒体续接仍未实现**（沿用上轮已披露的边界）。首版保留"连续链不跨批"策略，
    超出单链资源/时长边界时具名阻塞，不偷偷切断依赖。本轮未扩建，也未用它做任何宣传。
 
@@ -150,6 +150,10 @@
   `backend/tests/test_director_worker_integration.py`（1 条）。
 - 本轮分级验收报告：`docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_V3_20261106.md`。
 - 本轮测试报告：`docs/TEST_REPORT_20261106_DIRECTOR_LONG_FORM_V3.md`。
+- Windows 测试包：`releases/ShineVideoStudio-20261106-b58d9a3-win64.zip`
+  SHA-256 `095479a8f42cded1f16446d1311f62b813d5f41add749ba40c6767ec154bb9d1`，
+  `-Verify` 逐文件 SHA-256 复核 600 个文件通过；`releases/` 被 Git 忽略，**不进入版本库**，
+  上一版 zip 未被覆盖（现共 22 个）。
 
 ## 本轮代码与文档变更
 
@@ -169,6 +173,22 @@
   `backend/tests/test_director_worker_integration.py`。
 - 更新 `backend/tests/test_director_long_form.py` 的运行层断言（返回值由整数改为具名摘要，
   **行为不变**：mock 主机与无受管方案时依然不派发任何批次）。
+
+**安装包同步（提交 `b58d9a3`）**
+
+- `scripts/build_test_package.ps1` — `known_blockers` 与 `closed_in_this_build` 静态字段同步为
+  本轮事实：审片重校准因 `worker.py` 变更而**变为必需且尚未完成**、真实多集无人值守交付与
+  8h/24h 未执行；以及本轮真正关闭的三项。
+- `packaging/windows/START_HERE.md` — 新增本轮更新小节，并修正已知限制段落。
+- `packaging/windows/TESTER_CHECKLIST.md` — 新增两条可实机验证项：整片运行真正推进并逐集只交付一次；
+  故意中断执行者后创意任务进入「待核对」而不是一直「生成中」。
+
+**提交与推送**
+
+- `b2c0733` `fix(director): stop the run layer from starving its own executors`
+- `b58d9a3` `chore(packaging): sync the tester hand-off with the V3 closeout round`
+- 两者均已推送到 `origin/main`；远端 `main` = `b58d9a3e06eb2a62b7f6756a9c98da91aa3f43f0`，
+  0 ahead / 0 behind，工作树干净。
 
 **前端**
 
