@@ -208,13 +208,18 @@ $buildInfo = [ordered]@{
         'existing real films still require final human review; this build does not promote pending_review to accepted',
         'the delegated material round on the existing installation is closed (candidates reviewed and promoted, the Style Bible and the official rule pack frozen, three shots really rendered and delivered); what stays open is the final human review of that film and the VLM recalibration below',
         'the six-image Ref2VA profile that carried the clock-shop shot is project-local: it is not part of the deployment catalog, so another project that binds more than two picture references still needs its own wider profile, built from the real node and validated on the real renderer',
-        'VLM recalibration stays blocked: the formal project database is not on this machine and its qwen3-vl runtime is not running; this build changes none of the client-review pinned files, so it neither invalidates nor replaces the published revision',
+        'VLM recalibration is now REQUIRED and still not done: this build changes backend/shine/worker.py, which client_review_identity pins, so the published VLM revision and the frozen preproduction plan are invalid by design; a real positive/negative calibration, a new revision, the deprecation of the old one and a manual re-freeze of a newly analysed plan must happen before any real production acceptance (the formal project database is not on this machine and its qwen3-vl runtime is not running)',
+        'no real H3 multi-episode unattended delivery has been run: this build closes the run-layer scheduling starvation and the creative-task lease defect offline, but a real three-episode, multi-batch run started from the Web is still outstanding',
+        'no 8 hour or 24 hour continuous production has been run; waiting, sleeping and pausing never count as active production time',
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
         'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking has not been human-observed inside a real render window',
         'the H3 renderer release is proven for process and port; a GPU memory before/after reading currently exists only for the image renderer release path'
     )
     closed_in_this_build = @(
+        'the whole-film run layer no longer starves its own executors: it separates "inspected" from "really changed", a reused pending delivery order is not new work, a run that only checked yields the tick to the series, the episode assembly and the ordinary queue, and several runs take turns instead of one starving the others',
+        'the brief-to-script task carries a renewable lease and a durable stage: an expired claim is reconciled instead of being left RUNNING under a dead owner, an unknown outcome is never replayed, a stored answer is reused instead of paid for twice, and every write-back is fenced by status, owner and state version',
+        'a whole-film integration regression now runs through the resident Worker scheduling entry: three episodes, six batches and six shots, assembled with real FFmpeg; only the render boundary is substituted',
         'the director mode ships a state-driven five-step journey: page checkmarks, a next-step bar on every page, a first-run journey map and per-stage focus on the production page',
         'one-click production start: deterministic profile pick, per-shot reference auto-binding from the workflow''s declared slots, auto shot selection, single submit',
         'a live production progress card with real phase names, shot dots, per-shot and total elapsed seconds; start-blockers hide while production runs',
