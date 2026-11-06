@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from shine.director.contracts import (
     EpisodePlanPayload,
+    PackagePolicyContract,
     continuity_mode,
     digest_of,
     planned_seconds,
@@ -145,6 +146,28 @@ def latest_confirmed_plan(db: Session, project_id: str) -> DirectorEpisodePlan |
     ).first()
 
 
+def validate_policy(policy: dict[str, Any] | None) -> PackagePolicyContract:
+    """Validate a package policy at the boundary where it enters a freeze.
+
+    An immutable package must not be able to freeze a policy it can never
+    execute: unknown keys, wrong types and out-of-range values are refused
+    here with a readable reason, not discovered by the Worker mid-run.
+    """
+    from pydantic import ValidationError
+
+    try:
+        return PackagePolicyContract.model_validate(policy or {})
+    except ValidationError as exc:
+        problems = []
+        for error in exc.errors():
+            location = ".".join(str(part) for part in error.get("loc", ()))
+            problems.append(f"{location or 'policy'}: {error.get('msg', 'invalid')}")
+        raise HTTPException(422, {
+            "code": "DIRECTOR_PACKAGE_POLICY_INVALID",
+            "problems": problems[:20],
+        }) from exc
+
+
 def latest_package(db: Session, project_id: str) -> DirectorPackageVersion | None:
     return db.scalars(
         select(DirectorPackageVersion)
@@ -178,7 +201,18 @@ def build_package(
         raise HTTPException(422, "DIRECTOR_PACKAGE_REQUIRES_SHOTS")
     by_id = {shot.id: shot for shot in shots}
     plan_payload = EpisodePlanPayload.model_validate(plan.payload)
-    problems = validate_episode_coverage(plan_payload, by_id.keys())
+    if plan_payload.mode == "sections":
+        # A script-first plan names its scope by sections; it may only be
+        # packaged once every episode was materialised into the shots its
+        # sections really produced.  Shots outside the scope are not part of
+        # this production, so only unknown or missing plan shots are refused.
+        if not plan_payload.materialized():
+            raise HTTPException(409, {"code": "EPISODE_PLAN_NOT_MATERIALIZED",
+                                      "message": "分集方案中的场次尚未全部拆成镜头"})
+        unknown = [shot_id for shot_id in plan_payload.shot_order() if shot_id not in by_id]
+        problems = (["PLAN_REFERENCES_UNKNOWN_SHOTS:" + ",".join(unknown)[:400]] if unknown else [])
+    else:
+        problems = validate_episode_coverage(plan_payload, by_id.keys())
     if problems:
         raise HTTPException(409, {"code": "DIRECTOR_EPISODE_PLAN_STALE", "problems": problems})
 
@@ -199,7 +233,7 @@ def build_package(
         "output": output or {},
         "validated_against": profile.validated_against or {},
     }
-    resolved_policy = {**DEFAULT_POLICY, **(policy or {})}
+    resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
 
     revision = (db.scalars(
         select(DirectorPackageVersion.revision)
@@ -211,16 +245,19 @@ def build_package(
     episodes: list[dict[str, Any]] = []
     for planned in plan_payload.episodes:
         manifest_shots = [_shot_manifest(db, by_id[shot_id]) for shot_id in planned.shot_ids]
-        episodes.append(
-            {
-                "episode_id": planned.episode_id,
-                "position": planned.order,
-                "title": planned.title,
-                "planned_seconds": planned.planned_seconds,
-                "boundary_note": planned.boundary_note,
-                "shots": manifest_shots,
-            }
-        )
+        episode_entry: dict[str, Any] = {
+            "episode_id": planned.episode_id,
+            "position": planned.order,
+            "title": planned.title,
+            "planned_seconds": planned.planned_seconds,
+            "boundary_note": planned.boundary_note,
+            "shots": manifest_shots,
+        }
+        if planned.section_ids:
+            # The script range this episode covers: source section -> episode
+            # -> shots, so coverage can be audited back to the original text.
+            episode_entry["section_ids"] = list(planned.section_ids)
+        episodes.append(episode_entry)
 
     root = {
         "schema_version": PACKAGE_SCHEMA_VERSION,
@@ -308,6 +345,21 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
         blockers.append(_blocker("PACKAGE_STALE", package.stale_reason or "导演包已失效"))
     if package.status == "DRAFT":
         blockers.append(_blocker("PACKAGE_NOT_CONFIRMED", "导演包尚未确认"))
+
+    # Integrity of the frozen content itself.  The pinned hashes are the whole
+    # point of an immutable package: a root manifest whose bytes no longer
+    # hash to the pinned value — whatever wrote it — is not the contract the
+    # user confirmed, and the policy/scope hashes must agree with it too.
+    if digest_of(manifest) != package.manifest_sha256:
+        blockers.append(_blocker("PACKAGE_MANIFEST_TAMPERED",
+                                 "导演包根清单与固定哈希不一致，拒绝执行"))
+    else:
+        if package.scope_digest != manifest.get("scope_digest"):
+            blockers.append(_blocker("PACKAGE_SCOPE_TAMPERED",
+                                     "导演包范围摘要与根清单不一致，拒绝执行"))
+        if package.policy_hash != digest_of(manifest.get("policy") or {}):
+            blockers.append(_blocker("PACKAGE_POLICY_TAMPERED",
+                                     "导演包政策摘要与根清单不一致，拒绝执行"))
 
     style = manifest.get("style")
     if not style:

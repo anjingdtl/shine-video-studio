@@ -108,3 +108,30 @@ npx.cmd vitest run --no-file-parallelism   # 19 files / 136 tests passed
 ## 7. 下一项可执行动作
 
 在本机具备授权与磁盘条件后：迁移验收库 → 启动 API 与 Worker（同一代码版本）→ 在 Web 里确认分集方案与导演包 → 用 2–3 个镜头的合成镜头集跑一次真实 H3 小样，然后才能进入 3 集自动生产与 8 小时持续运行验收。
+
+## 8. 收尾修复轮（2026-11-06 深夜，分支 codex/longform-closeout-20261106）
+
+以第二次独立验收的 18 条反例为入口，完成状态/身份正确性与主需求闭环；细节与证据见
+[收尾验收报告](ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_20261106.md)。要点：
+
+- **F01–F08 全部修复**：本 Run 产物归属（`run_owned_passed_jobs`）与计划完整范围；暂停/预算传播到子
+  series（`control_reason` 记录暂停主体，resume 只恢复本 Run 暂停的）；预算分支 CAS fencing（陈旧对象不能
+  复活取消终态）；根 manifest/scope/policy 三哈希校验 + 每次派发重跑 readiness；政策类型化（strict+forbid，
+  API 422）并落到每个 job；NEEDS_REVIEW 汇总与公开恢复路径（reconcile/resume）；取消两段式
+  （CANCEL_REQUESTED→外部工作落定→CANCELLED）；心跳与真实进展分离。独立反例 18/18 转绿并迁入
+  `backend/tests/test_director_long_form_regressions.py`（24 项）。
+- **G01 双入口**：`director/creative.py`（版本化 CreativeBrief→确认→creative_script_run 任务，远程文字同意、
+  UNKNOWN 不重放→生成普通剧本文档进同一大纲链路）+ 第一阶段 `ScriptEntryPanel`（想法通栏输入 + 导入上传）。
+- **G02 先分集**：sections 模式分集计划（按已确认大纲场次）→ `materialize` 落到各场已应用分镜的镜头 →
+  导演包冻结记录 `section_ids` 血缘；按镜头分组保留为兼容入口。
+- **G03 机器推荐**：`DeploymentRecommendationCard` 真机检测→完整组合推荐（要求/下载/复用/证据等级/具名
+  阻塞/可跳过生图），交给既有安装计划逐项确认。
+- **G04 后期合同**：`EpisodePostContract`（入出点+字幕版本，音频混音按名拒绝）→ EDL 应用并对照实测媒体
+  校验；字幕钉哈希、超长时码拒绝；修订=新交付版本、旧版保留、不重跑 H3。
+- **T01–T04**：装配 `AssemblyHeartbeat`（活跃装配不被跨租期抢占、失联可收回、迟到回写被拒）；连续链不跨批
+  （边界证明）；`/health` 暴露 schema 身份 + 前端 `SchemaNotice`；journey loading/error/ready 三态与旧文案清理。
+- **回归**：后端全量 1768/0/1 既有跳过；ruff 通过；新库与旧库副本迁移到 `f180b0010001`（正式库副本 48 表
+  2074 行零变化）；前端 21 文件 148 测试 + build 通过；隔离栈真实 Web 验收（双入口、分集门控、上传、
+  真机推荐）完成。
+- **未运行（如实）**：真实生图/H3 小样、3 集多批次自动交付、8h/24h 长时与人工艺术验收；跨 series 媒体
+  续接为已声明首版边界。改动未提交/未打包（等待授权）。

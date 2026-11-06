@@ -396,6 +396,88 @@ def _write_back(db: Session, order_id: str, claim: DeliveryClaim, values: dict[s
     return result.rowcount == 1
 
 
+ASSEMBLY_HEARTBEAT_SECONDS = 60
+
+
+def renew_assembly_claim(session_factory, order_id: str, claim: DeliveryClaim) -> bool | None:
+    """Refresh a running assembly's lease without changing its claim token.
+
+    Only the owning claim may renew it, and only while the order is still
+    ASSEMBLING.  ``state_version`` is deliberately left alone: the claim token
+    stays valid for the final write-back.  Returns ``None`` when SQLite was busy
+    — that defers to the next beat, it is not a lost claim.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        with session_factory.begin() as db:
+            result = db.execute(
+                update(DeliveryOrder)
+                .where(
+                    DeliveryOrder.id == order_id,
+                    DeliveryOrder.worker_id == claim.owner,
+                    DeliveryOrder.state_version == claim.version,
+                    DeliveryOrder.status == "ASSEMBLING",
+                )
+                .values(updated_at=utcnow())
+                .execution_options(synchronize_session=False)
+            )
+            return result.rowcount == 1
+    except OperationalError as exc:
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return None
+        raise
+
+
+class AssemblyHeartbeat:
+    """Keep a long assembly's claim alive while FFmpeg is still working.
+
+    The reclaim rule hands an ASSEMBLING order to another worker once its
+    ``updated_at`` is older than the lease.  A multi-hour episode is not a dead
+    worker: the heartbeat proves life, so a second worker never starts a
+    parallel FFmpeg run on the same order.  A worker that really died stops
+    beating and the order becomes reclaimable again.
+    """
+
+    def __init__(self, session_factory, order_id: str, claim: DeliveryClaim, *,
+                 interval: float = ASSEMBLY_HEARTBEAT_SECONDS):
+        from threading import Event
+
+        self.session_factory, self.order_id, self.claim = session_factory, order_id, claim
+        self.interval = interval
+        self.lost = False
+        self._stop = Event()
+        self._thread = None
+
+    def beat(self) -> bool | None:
+        return renew_assembly_claim(self.session_factory, self.order_id, self.claim)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                outcome = self.beat()
+            except Exception:  # noqa: BLE001 - the beat must never kill the assembly
+                logger.warning("assembly_heartbeat_failed order_id=%s", self.order_id)
+                continue
+            if outcome is False:
+                # The claim moved on: the final write-back will be refused by
+                # the claim token, so this worker only stops renewing.
+                self.lost = True
+                return
+
+    def __enter__(self) -> AssemblyHeartbeat:
+        from threading import Thread
+
+        self._thread = Thread(target=self._run, name=f"assembly-heartbeat-{self.order_id[:8]}", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
 def _order_status_now(db: Session, order_id: str) -> str:
     """The authoritative status after a lost write-back, for honest reporting."""
     row = db.get(DeliveryOrder, order_id)
@@ -470,7 +552,7 @@ def run_delivery_order(
                 )
                 for clip in edl["clips"]
             ]
-        with session_factory() as work_db:
+        with session_factory() as work_db, AssemblyHeartbeat(session_factory, order_id, claim):
             result = assembler.assemble(
                 work_db,
                 project_id,

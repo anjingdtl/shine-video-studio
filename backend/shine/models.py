@@ -243,6 +243,10 @@ class Job(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     semantic_retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_semantic_retries: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    auto_repair: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """Job-level auto-repair override.  ``None`` follows the project default;
+    a frozen director package pins it so its run's repair policy is the one
+    that executes, whatever the project default later becomes."""
     last_repair_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     request_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     pending_repair_context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -589,6 +593,13 @@ class ProductionSeries(Base):
     current_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    control_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    """Who asked for a pause/cancel: run-level control paths record their
+    reason here so a resume only undoes the pauses that path caused."""
+    max_semantic_retries: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """Frozen repair budget of the owning whole-film run, if any."""
+    auto_repair: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """Frozen auto-repair flag of the owning whole-film run, if any."""
     finalization_state: Mapped[str] = mapped_column(String(24), default="NONE", nullable=False)
     finalization_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     renderer_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

@@ -63,6 +63,24 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   IMAGE_RENDERER_MEMORY_INSUFFICIENT: '本机显存或内存不够运行出图渲染器，请先释放其它占显存的进程。',
   IMAGE_RENDERER_OWNERSHIP_UNVERIFIED: '记录里的渲染器进程身份无法证明属于本工作台，因此没有停止它。',
   IMAGE_RENDERER_UNAVAILABLE: '本机出图渲染器没有起来，无法出图。请先在基础配置里启动它。',
+  CREATIVE_BRIEF_INVALID: '创意简报还缺内容或有字段超出范围，请按提示修改后再保存。',
+  CREATIVE_BRIEF_NOT_CONFIRMED: '先确认这一版创意简报，才能据此生成剧本。',
+  CREATIVE_BRIEF_CHANGED: '创意简报在你确认前又改过，请看最新一版后再确认。',
+  CREATIVE_BRIEF_STALE: '这一版创意简报已失效，请保存新的一版。',
+  CREATIVE_SCRIPT_ROLE_NOT_CONFIGURED: '还没有给「编剧」角色配置文本模型。请先到基础配置里配置文本模型。',
+  SCRIPT_OUTLINE_NOT_CONFIRMED: '先确认剧本大纲，再按剧本分集。',
+  SCRIPT_OUTLINE_HAS_NO_SECTIONS: '已确认的大纲里没有可分的场次，请重新整理大纲。',
+  EPISODE_SECTION_NOT_STORYBOARDED: '还有场次没有拆成镜头。请先为这些场次生成并应用分镜，再把分集落到镜头上。',
+  EPISODE_PLAN_NOT_MATERIALIZED: '分集方案里的场次还没有全部落到镜头上，先点「把分集落到镜头」。',
+  EPISODE_PLAN_NOT_SCRIPT_FIRST: '这份分集方案是按镜头分组的，不需要再落到镜头。',
+  EPISODE_PLAN_COVERAGE_INVALID: '分集方案没有恰好覆盖全部内容（有遗漏、重复或已变化），请重新生成分集。',
+  DIRECTOR_PACKAGE_POLICY_INVALID: '执行政策里有无法执行的值（类型错误或超出范围），请修改后再生成导演包。',
+  PACKAGE_MANIFEST_TAMPERED: '导演包的固定内容与哈希不一致，已拒绝执行。请重新生成并确认导演包。',
+  WORKFLOW_PROFILE_CHANGED: '生成方案在导演包确认后被修改，已停止派发新批次。请重新生成并确认导演包。',
+  EPISODE_POST_CONTRACT_INVALID: '剪辑/字幕合同不合法，请检查入出点和字幕版本。',
+  EDIT_CUT_SHOT_NOT_IN_EPISODE: '剪辑合同里有不属于这一集的镜头。',
+  EPISODE_SUBTITLE_NOT_APPROVED: '选择的字幕版本不存在或尚未批准。',
+  EPISODE_ASSEMBLY_IN_PROGRESS: '这一集正在装配，等它结束后再修改剪辑合同。',
 };
 
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw
@@ -376,13 +394,18 @@ export type Journey = {
 
 export type PlannedEpisode = {
   episode_id: string; order: number; title: string; shot_ids: string[];
+  section_ids?: string[];
   planned_seconds: number; boundary_note: string;
 };
 
 export type EpisodePlan = {
   id: string; project_id: string; version: number; status: string;
   target_seconds: number; tolerance_seconds: number; sha256: string; source: string;
-  payload: { episodes: PlannedEpisode[]; target_seconds: number; tolerance_seconds: number };
+  payload: {
+    episodes: PlannedEpisode[]; target_seconds: number; tolerance_seconds: number;
+    mode?: 'shots' | 'sections';
+    source?: { outline_artifact_id?: string; outline_sha256?: string };
+  };
   created_at: string; confirmed_at: string | null;
 };
 
@@ -416,6 +439,9 @@ export type PackageReadiness = {
 export type RunEpisode = {
   id: string; episode_id: string; position: number; title: string; status: string;
   shot_count: number; passed_shot_count: number; planned_seconds: number;
+  shot_ids?: string[];
+  post_contract?: { cuts?: Array<{ shot_id: string; in_s: number; out_s: number }>;
+    subtitle_revision?: number | null; subtitle_sha256?: string } | null;
   actual_seconds: number | null; delivery_order_id: string | null;
   delivered_artifact_id: string | null; delivered_sha256: string | null;
   blocker_code: string | null; delivered_at: string | null;
@@ -453,9 +479,14 @@ export const getJourney = (projectId: string) =>
 export const listEpisodePlans = (projectId: string) =>
   api<EpisodePlan[]>(`/projects/${projectId}/episode-plans`);
 
-export const createEpisodePlan = (projectId: string, targetSeconds: number, toleranceSeconds: number) =>
+export const createEpisodePlan = (
+  projectId: string, targetSeconds: number, toleranceSeconds: number, mode?: 'shots' | 'sections',
+) =>
   api<EpisodePlan>(`/projects/${projectId}/episode-plans`,
-    json('POST', { target_seconds: targetSeconds, tolerance_seconds: toleranceSeconds }));
+    json('POST', { target_seconds: targetSeconds, tolerance_seconds: toleranceSeconds, ...(mode ? { mode } : {}) }));
+
+export const materializeEpisodePlan = (projectId: string, version: number) =>
+  api<EpisodePlan>(`/projects/${projectId}/episode-plans/${version}/materialize`, json('POST', {}));
 
 export const confirmEpisodePlan = (projectId: string, version: number, sha256: string) =>
   api<EpisodePlan>(`/projects/${projectId}/episode-plans/${version}/confirm`,
@@ -492,3 +523,91 @@ export const getRunEvents = (runId: string, afterId = 0) =>
 export const controlProductionRun = (runId: string, action: 'pause' | 'resume' | 'cancel' | 'reconcile') =>
   api<{ id: string; status: string; state_version?: number | null }>(
     `/production-runs/${runId}/${action}`, json('POST', {}));
+
+export type EpisodePostContract = {
+  cuts?: Array<{ shot_id: string; in_s: number; out_s: number }>;
+  subtitle_revision?: number | null;
+};
+
+export const setEpisodePostContract = (runId: string, episodeId: string, body: EpisodePostContract) =>
+  api<{ episode_id: string; post_contract: Record<string, unknown> | null; delivery_order_id: string | null;
+    status: string }>(`/production-runs/${runId}/episodes/${episodeId}/post-contract`, json('PUT', body));
+
+/* ======================= 入口：想法 / 导入 ======================= */
+
+export type CreativeBriefPayload = {
+  idea: string;
+  genre?: string; audience?: string; theme?: string; core_conflict?: string; ending_direction?: string;
+  language?: string; aspect_ratio?: string; episode_count_hint?: number | null;
+  target_seconds_per_episode?: number; tolerance_seconds?: number;
+  locked_facts?: string[]; forbidden_changes?: string[]; visual_direction?: string;
+};
+
+export type CreativeBrief = {
+  id: string; version: number; payload: CreativeBriefPayload & { version: number };
+  sha256: string; confirmed: boolean; stale: boolean; created_at: string; confirmed_at: string | null;
+  script_task: {
+    id: string; status: string; error_code: string | null; document_id: string | null;
+    document_sha256: string | null; external_outcome: string | null; created_at: string;
+  } | null;
+  task_id?: string;
+};
+
+export type ScriptDocument = {
+  id: string; project_id: string; filename: string; content_type: string; sha256: string;
+  source_format: string; created_at: string; text_preview?: string; text_length?: number;
+};
+
+export const listCreativeBriefs = (projectId: string) =>
+  api<CreativeBrief[]>(`/projects/${projectId}/creative-briefs`);
+
+export const saveCreativeBrief = (projectId: string, body: CreativeBriefPayload) =>
+  api<CreativeBrief>(`/projects/${projectId}/creative-briefs`, json('POST', body));
+
+export const confirmCreativeBrief = (projectId: string, briefId: string, sha256: string) =>
+  api<CreativeBrief>(`/projects/${projectId}/creative-briefs/${briefId}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+export const generateScriptFromBrief = (projectId: string, briefId: string, remoteTextConsent: boolean) =>
+  api<CreativeBrief>(`/projects/${projectId}/creative-briefs/${briefId}/generate-script`,
+    json('POST', { remote_text_consent: remoteTextConsent }));
+
+export const listScriptDocuments = (projectId: string) =>
+  api<ScriptDocument[]>(`/projects/${projectId}/documents`);
+
+export function uploadScriptDocument(projectId: string, file: File) {
+  const form = new FormData();
+  form.append('file', file);
+  return api<ScriptDocument>(`/projects/${projectId}/documents`, { method: 'POST', body: form });
+}
+
+/* ======================= 新机部署组合推荐 ======================= */
+
+export type DeploymentOption = {
+  purpose: 'h3_video' | 'image_prep' | string;
+  label: string;
+  skippable: boolean;
+  catalog_id?: string;
+  catalog_version?: string;
+  status: 'SUPPORTED' | 'BLOCKED' | 'UNAVAILABLE' | string;
+  requirements?: { os?: string; gpu_vendor?: string; min_vram_mb?: number; min_ram_mb?: number;
+    min_disk_gb?: number; total_bytes?: number };
+  total_bytes?: number; reuse_bytes?: number; download_bytes?: number;
+  blockers: Array<{ code: string; required?: number; actual?: number; detail?: string }>;
+  warnings?: Array<{ code: string; detail?: string }>;
+  evidence?: { level: string; verified: boolean; detail?: string; measured_at?: string;
+    peak_vram_mb?: number; peak_ram_mb?: number; duration_s?: number };
+  verified?: boolean;
+};
+
+export type DeploymentRecommendation = {
+  recommended: DeploymentOption[];
+  blocked: DeploymentOption[];
+  options: DeploymentOption[];
+  host: { gpu?: string | null; vram_mb?: number | null; ram_mb?: number | null; free_gb?: number | null };
+  notes: string[];
+};
+
+export const getDeploymentRecommendation = (reuseInstalled = true) =>
+  api<DeploymentRecommendation>('/setup/deployment-recommendations',
+    json('POST', { reuse_installed: reuseInstalled }));

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Mic, Settings2, Sparkles, Wand2 } from 'lucide-react';
 import { api, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupPanel } from './SetupPanel';
+import { DeploymentRecommendationCard, type DeploymentChoice } from './DeploymentRecommendationCard';
 import { ImageCapabilityCard } from './ImageCapabilityCard';
 import SettingsPanel from './SettingsPanel';
 
@@ -66,6 +67,8 @@ export default function DirectorSetupPanel({
   onOpenExpert,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
+  /** 推荐卡片里的用途选择：只决定下方显示哪些安装计划，不替你下载任何东西。 */
+  const [deploymentChoice, setDeploymentChoice] = useState<DeploymentChoice>({ h3_video: true, image_prep: true });
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
 
@@ -141,8 +144,11 @@ export default function DirectorSetupPanel({
           <p><b>已经装过：</b>可以复用现有目录，系统会核对固定版本文件，不会重复下载，也不会覆盖你的自定义节点。</p>
         </div>
       </div>
+      <DeploymentRecommendationCard onChoice={setDeploymentChoice} />
       <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch} />
-      <ImageCapabilityCard projectId={projectId} busy={busy} />
+      {deploymentChoice.image_prep
+        ? <ImageCapabilityCard projectId={projectId} busy={busy} />
+        : <p className="run-hint">你选择了不安装生图组合：素材全部自行上传即可，正式视频生产不受影响。需要时可在上方重新勾选。</p>}
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">

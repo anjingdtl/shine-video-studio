@@ -21,6 +21,28 @@ MAX_EPISODES = 200
 MAX_SHOTS_PER_EPISODE = 400
 DEFAULT_TARGET_SECONDS = 60
 DEFAULT_TOLERANCE_SECONDS = 15
+MAX_REPAIRS_PER_SHOT = 20
+MAX_BATCH_SHOT_LIMIT = 50
+
+
+class PackagePolicyContract(APIModel):
+    """The typed, versioned execution policy a director package freezes.
+
+    Strict types and an explicit upper bound on every number: a package that
+    cannot say what it allows can never be executed honestly.  Unknown keys are
+    refused, not silently ignored — a frozen contract has no room for fields
+    nobody reads.
+    """
+
+    model_config = {**APIModel.model_config, "extra": "forbid"}
+
+    auto_repair: bool = True
+    max_repairs_per_shot: int = Field(default=2, ge=0, le=MAX_REPAIRS_PER_SHOT, strict=True)
+    batch_shot_limit: int = Field(default=6, ge=1, le=MAX_BATCH_SHOT_LIMIT, strict=True)
+    max_wall_seconds: int = Field(default=0, ge=0, le=31_536_000, strict=True)
+    min_free_gb: float = Field(default=0.0, ge=0.0, le=100_000.0)
+    stop_on_blocker: bool = False
+    deliver_partial_episode: bool = False
 
 
 def canonical_json(payload: Any) -> str:
@@ -33,12 +55,19 @@ def digest_of(payload: Any) -> str:
 
 
 class PlannedEpisode(APIModel):
-    """One episode boundary: an ordered, contiguous run of confirmed shots."""
+    """One episode boundary: an ordered, contiguous run of script or shot units.
+
+    A *section* plan (script first) names the script sections an episode
+    covers and has no shots yet; once each section was storyboarded the plan is
+    materialised into the shots those sections really produced.  A *shot* plan
+    (the compatible entry for hand-built shot lists) names shots directly.
+    """
 
     episode_id: str = Field(min_length=1, max_length=80)
     order: int = Field(ge=1, le=MAX_EPISODES)
     title: str = Field(default="", max_length=200)
-    shot_ids: list[str] = Field(min_length=1, max_length=MAX_SHOTS_PER_EPISODE)
+    shot_ids: list[str] = Field(default_factory=list, max_length=MAX_SHOTS_PER_EPISODE)
+    section_ids: list[str] = Field(default_factory=list, max_length=MAX_SHOTS_PER_EPISODE)
     planned_seconds: float = Field(gt=0, allow_inf_nan=False)
     boundary_note: str = Field(default="", max_length=500)
 
@@ -46,17 +75,20 @@ class PlannedEpisode(APIModel):
 class EpisodePlanPayload(APIModel):
     """The episode plan of one project revision.
 
-    ``covered`` is the authoritative coverage map: every confirmed shot must
-    appear exactly once.  A repeated shot (a recap) has to be declared, and an
+    ``covered`` is the authoritative coverage map: every confirmed unit must
+    appear exactly once.  A repeated unit (a recap) has to be declared, and an
     undeclared repeat is a hard validation error rather than a silent duplicate
     render.
     """
 
     schema_version: str = Field(default="1.0", max_length=8)
+    mode: str = Field(default="shots", pattern="^(shots|sections)$")
     target_seconds: int = Field(ge=8, le=3600)
     tolerance_seconds: int = Field(default=DEFAULT_TOLERANCE_SECONDS, ge=0, le=900)
     episodes: list[PlannedEpisode] = Field(min_length=1, max_length=MAX_EPISODES)
     allowed_repeats: list[str] = Field(default_factory=list, max_length=200)
+    source: dict[str, Any] = Field(default_factory=dict)
+    """For a section plan: the outline artifact id/hash the sections came from."""
 
     @model_validator(mode="after")
     def contiguous_and_complete(self) -> EpisodePlanPayload:
@@ -66,6 +98,21 @@ class EpisodePlanPayload(APIModel):
         ids = [episode.episode_id for episode in self.episodes]
         if len(set(ids)) != len(ids):
             raise ValueError("EPISODE_ID_REPEATED")
+        if self.mode == "sections":
+            seen_sections: list[str] = []
+            for episode in self.episodes:
+                if not episode.section_ids:
+                    raise ValueError(f"EPISODE_HAS_NO_SECTIONS:{episode.episode_id}")
+                if len(set(episode.section_ids)) != len(episode.section_ids):
+                    raise ValueError(f"EPISODE_REPEATS_A_SECTION:{episode.episode_id}")
+                seen_sections.extend(episode.section_ids)
+            repeated_sections = {sid for sid in seen_sections if seen_sections.count(sid) > 1}
+            if repeated_sections - set(self.allowed_repeats):
+                raise ValueError("SECTION_COVERED_TWICE:" + ",".join(sorted(repeated_sections))[:400])
+        else:
+            for episode in self.episodes:
+                if not episode.shot_ids:
+                    raise ValueError(f"EPISODE_HAS_NO_SHOTS:{episode.episode_id}")
         seen: list[str] = []
         for episode in self.episodes:
             if len(set(episode.shot_ids)) != len(episode.shot_ids):
@@ -79,6 +126,13 @@ class EpisodePlanPayload(APIModel):
 
     def shot_order(self) -> list[str]:
         return [shot_id for episode in self.episodes for shot_id in episode.shot_ids]
+
+    def section_order(self) -> list[str]:
+        return [section_id for episode in self.episodes for section_id in episode.section_ids]
+
+    def materialized(self) -> bool:
+        """Whether every episode already names the shots it will produce."""
+        return all(episode.shot_ids for episode in self.episodes)
 
 
 def shot_order(shots: Iterable[Any]) -> list[Any]:
@@ -180,6 +234,94 @@ def derive_episode_plan(
         episodes=episodes,
         allowed_repeats=[],
     )
+
+
+def derive_episode_plan_from_sections(
+    sections: list[dict[str, Any]],
+    *,
+    target_seconds: int = DEFAULT_TARGET_SECONDS,
+    tolerance_seconds: int = DEFAULT_TOLERANCE_SECONDS,
+    source: dict[str, Any] | None = None,
+    title_prefix: str = "第{n}集",
+) -> EpisodePlanPayload:
+    """Plan episodes from the confirmed script *before* any shot exists.
+
+    The units are the outline's production sections in script order, each with
+    its estimated narrative duration.  A boundary only ever falls between whole
+    sections, so a scene — and every line of dialogue in it — stays inside one
+    episode.  When one section alone is longer than the target the episode says
+    so; nothing is cut to make a number.  The estimate is a planning value: the
+    real duration is measured from the delivered reel.
+    """
+    ordered = sorted(sections, key=lambda row: int(row.get("order") or 0))
+    if not ordered:
+        raise ValueError("EPISODE_PLAN_REQUIRES_SECTIONS")
+    low = max(1, target_seconds - tolerance_seconds)
+    high = target_seconds + tolerance_seconds
+    episodes: list[PlannedEpisode] = []
+    current: list[dict[str, Any]] = []
+    total = 0.0
+
+    def close(note: str) -> None:
+        nonlocal current, total
+        if not current:
+            return
+        episodes.append(PlannedEpisode(
+            episode_id=f"ep-{len(episodes) + 1:02d}",
+            order=len(episodes) + 1,
+            title=title_prefix.format(n=len(episodes) + 1),
+            shot_ids=[],
+            section_ids=[str(row["production_section_id"]) for row in current],
+            planned_seconds=round(max(total, 1.0), 3),
+            boundary_note=note,
+        ))
+        current = []
+        total = 0.0
+
+    for index, section in enumerate(ordered):
+        seconds = float(section.get("estimated_duration_s") or 0.0)
+        if current and total + seconds > high and total >= low:
+            close("section_boundary_at_target")
+        current.append(section)
+        total += seconds
+        if index == len(ordered) - 1:
+            break
+        if total >= target_seconds:
+            close("section_boundary_at_target")
+    close("final_episode")
+    if len(episodes) > MAX_EPISODES:
+        raise ValueError("EPISODE_PLAN_EXCEEDS_MAX_EPISODES")
+    for episode in episodes:
+        if episode.planned_seconds > high:
+            episode.boundary_note = (
+                (episode.boundary_note + "; " if episode.boundary_note else "")
+                + f"planned {episode.planned_seconds:.1f}s exceeds {high}s: one scene is longer than the target"
+            )
+    return EpisodePlanPayload(
+        mode="sections",
+        target_seconds=target_seconds,
+        tolerance_seconds=tolerance_seconds,
+        episodes=episodes,
+        allowed_repeats=[],
+        source=source or {},
+    )
+
+
+def validate_section_coverage(payload: EpisodePlanPayload, section_ids: Iterable[str]) -> list[str]:
+    """Coverage problems of a section plan against the confirmed outline sections."""
+    confirmed = list(section_ids)
+    planned = payload.section_order()
+    problems: list[str] = []
+    missing = [sid for sid in confirmed if sid not in set(planned)]
+    unknown = sorted(set(planned) - set(confirmed))
+    if missing:
+        problems.append("SECTIONS_NOT_COVERED:" + ",".join(missing)[:400])
+    if unknown:
+        problems.append("PLAN_REFERENCES_UNKNOWN_SECTIONS:" + ",".join(unknown)[:400])
+    order = [sid for sid in confirmed if sid in set(planned)]
+    if [sid for sid in planned if sid in set(confirmed)] != order:
+        problems.append("SECTIONS_OUT_OF_SCRIPT_ORDER")
+    return problems
 
 
 def validate_episode_coverage(payload: EpisodePlanPayload, confirmed_shot_ids: Iterable[str]) -> list[str]:

@@ -13,6 +13,8 @@ import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
 import { RealProductionWizard } from './components/RealProductionWizard';
 import AssetPanel from './components/AssetPanel';
 import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
+import { ScriptEntryPanel } from './components/ScriptEntryPanel';
+import { SchemaNotice } from './components/SchemaNotice';
 import StylePanel from './components/StylePanel';
 import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
@@ -176,14 +178,27 @@ function App() {
 
   /** 六阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
+  /** 读取状态与结果分开：读不到进度 ≠ 全部完成，失败必须如实显示并可重试。 */
+  const [journeyState, setJourneyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [journeyError, setJourneyError] = useState('');
+  const [journeyRetry, setJourneyRetry] = useState(0);
+  const [documentsVersion, setDocumentsVersion] = useState(0);
   useEffect(() => {
-    if (!projectId) { setJourney(null); return; }
+    if (!projectId) { setJourney(null); setJourneyState('idle'); return; }
     let alive = true;
+    // Switching works never shows the previous work's stages while loading.
+    setJourney((current) => (current && current.project_id === projectId ? current : null));
+    setJourneyState('loading');
     getJourney(projectId)
-      .then((row) => { if (alive) setJourney(row); })
-      .catch(() => { if (alive) setJourney(null); });
+      .then((row) => { if (alive) { setJourney(row); setJourneyState('ready'); setJourneyError(''); } })
+      .catch((error) => {
+        if (!alive) return;
+        setJourney(null);
+        setJourneyState('error');
+        setJourneyError(error instanceof Error ? error.message : String(error));
+      });
     return () => { alive = false; };
-  }, [projectId, dataEpoch]);
+  }, [projectId, dataEpoch, journeyRetry]);
   const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
   ), [journey]);
@@ -196,9 +211,13 @@ function App() {
   const nextStage = journey?.next_stage
     ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
     : null;
-  const heroGuidance = nextStage
-    ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
-    : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出。' };
+  const heroGuidance = journeyState !== 'ready' || !journey
+    ? (journeyState === 'error'
+      ? { page: 'projects' as DirectorPage, cta: '重新读取进度', hint: `暂时读不到这部作品的进度（${journeyError || '服务未响应'}）。这不代表已经完成，请重试。` }
+      : { page: 'projects' as DirectorPage, cta: '正在读取进度…', hint: '正在从本机服务读取这部作品六个阶段的真实状态。' })
+    : nextStage
+      ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
+      : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出；艺术验收仍需你确认。' };
   /** 制作页自动聚焦：没镜头→分镜；正在制作→排产（盯进度）；制作结束→看结果。 */
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
   const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
@@ -529,17 +548,19 @@ function App() {
               onBindStandardParameters={bindStandardParameters}
               onOpenExpert={() => { setUi('expert'); setView('production'); window.history.pushState(null, '', '#v/production/preproduction'); }}
             />}
+            <SchemaNotice />
             {directorPage !== 'setup' && !project && <section className="first-run card">
               <div className="first-run-art"><Clapperboard size={30} /></div>
               {projectsLoaded ? <>
                 <h2>创建我的第一部AI短剧</h2>
-                <p>五步走完一部片子，所有内容都保存在你自己的电脑上。现在只需要做第一步：</p>
+                <p>建好作品后按六个阶段推进，所有内容都保存在你自己的电脑上。现在只需要先起个名字：</p>
                 <ol className="first-run-journey" aria-label="制作全旅程">
-                  <li className="now"><b>① 起个名字</b><span>建作品（现在做）</span></li>
-                  <li><b>② 调好机器</b><span>可跳过，开拍前补上</span></li>
-                  <li><b>③ 传素材 · 定风格</b><span>人物 / 场景 / 道具</span></li>
-                  <li><b>④ AI 分镜</b><span>剧本交给 AI 拆镜头</span></li>
-                  <li><b>⑤ 制作 · 导出</b><span>本机生成成片</span></li>
+                  <li className="now"><b>① 创意与剧本</b><span>输入想法，或导入现成剧本</span></li>
+                  <li><b>② 统筹与素材</b><span>先分集，再定素材与风格</span></li>
+                  <li><b>③ 镜头拆解</b><span>逐场拆成可拍的镜头</span></li>
+                  <li><b>④ 导演包</b><span>确认范围与执行政策</span></li>
+                  <li><b>⑤ 视频生产</b><span>一次启动，持续生产</span></li>
+                  <li><b>⑥ 后期成片</b><span>逐集剪辑与交付</span></li>
                 </ol>
                 <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
@@ -630,7 +651,8 @@ function App() {
                     <h1>让好故事，<em>有章可循。</em></h1>
                     <p>{heroGuidance.hint}</p>
                   </div>
-                  <button className="primary-button big" onClick={() => goToDirectorPage(heroGuidance.page)}>{heroGuidance.cta}</button>
+                  <button className="primary-button big" disabled={journeyState === 'loading' && !journey}
+                    onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>{heroGuidance.cta}</button>
                 </section>
                 <section className="metrics-grid">
                   <div className="metric-card"><div className="metric-top"><span>作品素材</span><div className="metric-icon mint"><Film size={15} /></div></div><div className="metric-value">{assets.length}<small>项</small></div><div className="metric-foot">{approvedAssets.length} 项已确认可用</div></div>
@@ -649,16 +671,23 @@ function App() {
                 <div className="module-guide">
                   <CircleHelp size={13} />
                   <div>
-                    <p><b>五步走完一部片子：</b>建作品 → 传素材、定风格（在「素材与风格」）→ AI 分镜（在「AI导演制作」）→ 勾选镜头开始制作 → 到「成片中心」导出。顶部步骤条会打勾标记已完成的页面。</p>
+                    <p><b>六个阶段做完一部作品：</b>创意与剧本（想法或导入）→ 剧本统筹先分集、再定素材与风格 → 镜头拆解 → 确认导演包 → 一次启动全片生产 → 逐集后期交付。顶部步骤条只按服务端真实状态打勾。</p>
                     <p><b>每一步都有必须点一次的按钮：</b>它们是橙色高亮的；不知道做什么时，看页面顶部的「下一步」提示即可。</p>
                   </div>
                 </div>
               </div>}
 
               <div className="director-page" id="assets" hidden={directorPage !== 'assets'}>
+                <ScriptEntryPanel
+                  key={`script-entry-${projectId}`}
+                  projectId={projectId}
+                  onMessage={report}
+                  onDocumentReady={() => { setDocumentsVersion((n) => n + 1); }}
+                />
                 <MaterialPreparationPanel
                   key={`material-${projectId}`}
                   projectId={projectId}
+                  documentsVersion={documentsVersion}
                   onMessage={report}
                   frozenStyle={currentStyle}
                   onPromoted={() => { refreshAll().catch(() => undefined); }}

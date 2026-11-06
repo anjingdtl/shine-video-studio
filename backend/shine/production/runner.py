@@ -5,6 +5,17 @@ submits a render itself: it decides which *batch* may become claimable, creates
 exactly one ``ProductionSeries`` for it, and then reads back what that series
 really produced.  Every step is idempotent, so a crash between "series created"
 and "batch remembered" cannot queue the same shots twice.
+
+Ownership rules that this module enforces:
+
+* An episode may only be assembled from jobs that *this run's own series items*
+  produced.  A newer passed job elsewhere in the project is someone else's
+  product and never fills a gap in this run.
+* A run only completes when every required batch of every selected episode was
+  planned, dispatched, passed and delivered — a partially dispatched plan is
+  unfinished work, not a completed film.
+* Every state write is fenced: a stale in-memory run object can never revive a
+  run that another session already cancelled, paused or completed.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ from shine.models import (
     Job,
     MediaArtifact,
     ProductionSeries,
+    ProductionSeriesItem,
     Shot,
     WorkflowProfile,
     utcnow,
@@ -52,6 +64,16 @@ The resident Worker claims a single series, so creating more than one is pure
 speculation and would only widen the window in which two series compete for the
 same GPU.  The next beat creates the next batch.
 """
+
+# The control reasons a *run* may pause its own child series.  Resume only
+# undoes these: a series paused directly by its own control path stays paused
+# until that path releases it.
+RUN_PAUSE_REASONS = {"USER_PAUSED", "BUDGET_EXHAUSTED", "STORAGE_LOW", "TIME_WINDOW"}
+
+# Job statuses whose external outcome may still be unknown or in flight.
+INFLIGHT_JOB_STATUSES = ("SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING")
+
+ADVANCEABLE_RUN_STATUSES = ("QUEUED", "RUNNING", "CANCEL_REQUESTED")
 
 
 class RunBlocked(Exception):
@@ -281,7 +303,9 @@ def _live_series(db: Session, run_id: str) -> ProductionSeries | None:
         .join(ProductionSeries, ProductionSeries.id == ProductionRunBatch.series_id)
         .where(
             ProductionRunBatch.run_id == run_id,
-            ProductionSeries.status.in_(["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED"]),
+            ProductionSeries.status.in_([
+                "QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "CANCEL_REQUESTED",
+            ]),
         )
     ).first()
     return db.get(ProductionSeries, batch.series_id) if batch and batch.series_id else None
@@ -301,34 +325,120 @@ def _sync_batch_from_series(db: Session, batch: ProductionRunBatch) -> bool:
             batch.completed_at = series.finished_at or utcnow()
             batch.failure_code = None
             changed = True
-    elif series.status in {"FAILED", "CANCELLED"}:
+    elif series.status in {"FAILED", "CANCELLED", "NEEDS_REVIEW"}:
+        # A series that needs a human decision blocks its batch: the run must
+        # surface that blocker instead of spinning on a batch that will never
+        # advance by itself.
         if batch.status != "BLOCKED":
             batch.status = "BLOCKED"
             batch.failure_code = series.failure_code or f"SERIES_{series.status}"
             changed = True
-    elif series.status in {"RUNNING", "PAUSE_REQUESTED", "PAUSED"}:
+    elif series.status in {"RUNNING", "PAUSE_REQUESTED"}:
         if batch.status != "RUNNING":
             batch.status = "RUNNING"
             changed = True
+    # ``PAUSED`` and ``CANCEL_REQUESTED`` are control states, not progress: the
+    # batch keeps whatever it had, so a paused run does not look like work.
     return changed
 
 
-def _current_passed_jobs(db: Session, shot_ids: list[str]) -> dict[str, Job]:
-    if not shot_ids:
+def run_owned_passed_jobs(
+    db: Session,
+    run_id: str,
+    episodes: list[ProductionRunEpisode] | None = None,
+) -> dict[str, Job]:
+    """Map ``shot_id`` to the passed job *this run's own series items* produced.
+
+    The only jobs that may fill an episode of this run are the ones reachable
+    from ``episode -> batch -> series -> item -> job``.  A newer passed job that
+    no series item of this run owns (an unrelated take, a manual render, a later
+    project job) is somebody else's product and is never selected here.
+    """
+    if episodes is None:
+        episodes = _episode_rows(db, run_id)
+    if not episodes:
         return {}
-    shots = {shot.id: shot for shot in db.scalars(select(Shot).where(Shot.id.in_(shot_ids))).all()}
-    jobs = db.scalars(
-        select(Job)
-        .where(Job.shot_id.in_(shot_ids), Job.status == "PASSED", Job.stale.is_(False))
-        .order_by(Job.created_at)
+    episode_ids = [episode.episode_id for episode in episodes]
+    rows = db.execute(
+        select(ProductionRunBatch, ProductionSeriesItem)
+        .join(ProductionSeriesItem,
+              ProductionSeriesItem.series_id == ProductionRunBatch.series_id)
+        .where(
+            ProductionRunBatch.run_id == run_id,
+            ProductionRunBatch.episode_id.in_(episode_ids),
+            ProductionRunBatch.series_id.isnot(None),
+        )
+        .order_by(ProductionRunBatch.position, ProductionSeriesItem.position)
     ).all()
+    shot_revisions = {
+        shot.id: shot.revision
+        for shot in db.scalars(
+            select(Shot).where(
+                Shot.id.in_({item.shot_id for _batch, item in rows} or {"-"})
+            )
+        ).all()
+    }
     passed: dict[str, Job] = {}
-    for job in jobs:
-        shot = shots.get(job.shot_id)
-        if shot is None or shot.revision != job.shot_revision or not job.artifact_id:
+    for _batch, item in rows:
+        if not item.job_id or item.status != "PASSED":
             continue
-        passed[job.shot_id] = job
+        job = db.get(Job, item.job_id)
+        if job is None or job.status != "PASSED" or job.stale or not job.artifact_id:
+            continue
+        if shot_revisions.get(item.shot_id) != job.shot_revision:
+            continue
+        # First item wins: with the ordered query it is the earliest batch that
+        # produced this shot inside this run.
+        passed.setdefault(item.shot_id, job)
     return passed
+
+
+def _series_has_inflight_work(db: Session, series: ProductionSeries | None) -> bool:
+    """Whether external work may still be in flight for this series.
+
+    A terminal series is settled.  A running / pause-finishing / reconciling
+    series owns live work by definition.  A cancel-requested series whose owner
+    is still alive waits for that owner; once the owner is gone it is settled
+    exactly when no submitted job remains.  A queued or paused series may still
+    hold a submitted job; a NEEDS_REVIEW series is only settled once its
+    resources were really released.
+    """
+    if series is None or series.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+        return False
+    if series.status in {"RUNNING", "PAUSE_REQUESTED", "RECONCILING"}:
+        return True
+    if series.status == "CANCEL_REQUESTED":
+        owner_alive = bool(
+            series.worker_id
+            and series.lease_expires_at is not None
+            and series.lease_expires_at > utcnow()
+        )
+        if owner_alive:
+            return True
+        # The owner is gone; only a still-submitted job keeps it unsettled.
+        for job_id in db.scalars(
+            select(ProductionSeriesItem.job_id).where(
+                ProductionSeriesItem.series_id == series.id,
+                ProductionSeriesItem.job_id.isnot(None),
+            )
+        ).all():
+            job = db.get(Job, job_id)
+            if job is not None and job.status in INFLIGHT_JOB_STATUSES:
+                return True
+        return False
+    if series.status == "NEEDS_REVIEW":
+        return series.finalization_state != "RELEASED"
+    job_ids = db.scalars(
+        select(ProductionSeriesItem.job_id).where(
+            ProductionSeriesItem.series_id == series.id,
+            ProductionSeriesItem.job_id.isnot(None),
+        )
+    ).all()
+    for job_id in job_ids:
+        job = db.get(Job, job_id)
+        if job is not None and job.status in INFLIGHT_JOB_STATUSES:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +460,7 @@ def _create_series_for_batch(
     package = db.get(DirectorPackageVersion, run.package_id)
     manifest = package.manifest if package else {}
     binding = manifest.get("binding") or {}
+    policy = manifest.get("policy") or {}
     profile = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
     if profile is None:
         raise RunBlocked("WORKFLOW_PROFILE_MISSING")
@@ -381,6 +492,10 @@ def _create_series_for_batch(
         generation_mode=mode,
         output=output,
         self_review_scope="full",
+        # The frozen package policy reaches every job of this series — the
+        # project default must not quietly widen a run's repair budget.
+        max_semantic_retries=_policy_retries(policy),
+        auto_repair=bool(policy.get("auto_repair", True)),
     )
     try:
         series, _job = create_series(db, project, in_order, body=body, settings=settings, offline=False)
@@ -388,6 +503,14 @@ def _create_series_for_batch(
         detail = exc.detail if isinstance(exc.detail, str) else (exc.detail or {}).get("code", "")
         raise RunBlocked("BATCH_DISPATCH_REFUSED", str(detail)[:200]) from None
     return series
+
+
+def _policy_retries(policy: dict[str, Any]) -> int:
+    """The semantic-retry budget a frozen policy grants, normalised at freeze time."""
+    try:
+        return max(0, min(20, int(policy.get("max_repairs_per_shot", 2))))
+    except (TypeError, ValueError):
+        return 2
 
 
 def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> ProductionRunBatch | None:
@@ -403,6 +526,21 @@ def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> Produc
     package = db.get(DirectorPackageVersion, run.package_id)
     if package is None:
         raise RunBlocked("PACKAGE_MISSING")
+    # Package confirmation is not a permanent start licence: every dispatch
+    # re-verifies the frozen identities, so a workflow/style/preproduction
+    # change under a confirmed package blocks the next batch with its reason.
+    readiness = package_readiness(db, package)
+    if not readiness["startable"]:
+        blocker = readiness["blockers"][0] if readiness["blockers"] else {"code": "PACKAGE_NOT_STARTABLE"}
+        for episode in episodes:
+            if episode.status not in {"DELIVERED", "BLOCKED"}:
+                episode.status = "BLOCKED"
+                episode.blocker_code = blocker["code"]
+        _event(db, run, "RUN_PACKAGE_NOT_STARTABLE",
+               f"导演包不再可启动：{blocker['code']}，需重新生成并确认导演包",
+               {"code": blocker["code"]})
+        db.flush()
+        return None
     limit = int((package.manifest.get("policy") or {}).get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or
                 DEFAULT_BATCH_SHOT_LIMIT)
     package_episode_rows = {row.episode_id: row for row in package_episodes(db, package.id)}
@@ -467,14 +605,31 @@ def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> Produc
 
 
 def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: ProductionRunEpisode) -> str | None:
-    """Create the per-episode delivery order once all its batches really passed."""
+    """Create the per-episode delivery order once its *whole plan* really passed."""
     from shine.media.delivery_models import DeliveryOrder
     from shine.production.episode_delivery import episode_input_digest
 
-    batches = [b for b in _batch_rows(db, run.id) if b.episode_id == episode.episode_id]
-    if not batches or any(batch.status != "PASSED" for batch in batches):
+    package = db.get(DirectorPackageVersion, run.package_id)
+    if package is None:
         return None
-    passed = _current_passed_jobs(db, episode.shot_ids)
+    batches = [b for b in _batch_rows(db, run.id) if b.episode_id == episode.episode_id]
+
+    # 1. The complete planned batch set must exist and have passed.  Batches
+    #    that were never dispatched are unfinished work, not history.
+    source = next((row for row in package_episodes(db, package.id)
+                   if row.episode_id == episode.episode_id), None)
+    if source is None:
+        return None
+    limit = int((package.manifest.get("policy") or {}).get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or
+                DEFAULT_BATCH_SHOT_LIMIT)
+    planned_keys = {row["batch_key"] for row in _batch_plan(source, batch_shot_limit=limit)}
+    existing_keys = {batch.batch_key for batch in batches}
+    if (planned_keys - existing_keys) or any(batch.status != "PASSED" for batch in batches):
+        return None
+
+    # 2. Every shot must have a passed job that this run's own series items
+    #    produced.  An unrelated passed job never completes this run.
+    passed = run_owned_passed_jobs(db, run.id, [episode])
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
         return None
@@ -486,12 +641,24 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
         )
     ).all()
     for order in existing:
-        if order.status in {"PENDING", "ASSEMBLING"}:
+        if order.status == "ASSEMBLING":
+            # A running assembly is never cancelled mid-file; a revision waits
+            # for it and becomes the next version afterwards.
             episode.delivery_order_id = order.id
             return order.id
+        if order.status == "PENDING":
+            if order.input_digest == digest:
+                episode.delivery_order_id = order.id
+                return order.id
+            # Queued for an earlier contract and not started: supersede it.
+            order.status = "CANCELLED"
+            order.failure_code = "POST_CONTRACT_REVISED"
+            order.state_version += 1
+            continue
         if order.status == "DELIVERED" and order.input_digest == digest:
             episode.delivery_order_id = order.id
             return order.id
+    contract = episode.post_contract or {}
     order = DeliveryOrder(
         project_id=run.project_id,
         series_id=None,
@@ -502,6 +669,8 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
         status="PENDING",
         input_digest=digest,
         shots_digest=digest,
+        subtitle_revision=contract.get("subtitle_revision"),
+        subtitle_sha256=contract.get("subtitle_sha256"),
     )
     db.add(order)
     db.flush()
@@ -535,6 +704,29 @@ def _sync_episode_delivery(db: Session, run: ProductionRun, episode: ProductionR
         episode.status = "BLOCKED"
         episode.blocker_code = order.failure_code or "EPISODE_DELIVERY_FAILED"
         changed = True
+    return changed
+
+
+def _unblock_resolved_episodes(db: Session, run: ProductionRun) -> int:
+    """Re-open episodes whose batches no longer block them.
+
+    A blocker that a reconciliation resolved (a series that later completed, an
+    operator decision) must not leave its episode blocked forever; the normal
+    advance flow re-derives delivery from the real rows.
+    """
+    batches = _batch_rows(db, run.id)
+    changed = 0
+    for episode in _episode_rows(db, run.id):
+        if episode.status != "BLOCKED":
+            continue
+        episode_batches = [batch for batch in batches if batch.episode_id == episode.episode_id]
+        if not episode_batches:
+            continue
+        if any(batch.status == "BLOCKED" for batch in episode_batches):
+            continue
+        episode.status = "PRODUCING"
+        episode.blocker_code = None
+        changed += 1
     return changed
 
 
@@ -574,6 +766,117 @@ def _claim_run(db: Session, run: ProductionRun, worker_id: str) -> bool:
     return result.rowcount == 1
 
 
+def _fenced_pause(db: Session, run: ProductionRun, reason: str) -> bool:
+    """Pause the run through a conditional UPDATE; a stale object can never win.
+
+    The budget and storage guards run *before* the claim, on whatever run object
+    the caller handed in — which may be arbitrarily old.  Only a conditional
+    update against the row's current version may change the state, so a session
+    that still remembers a live run cannot revive one that was cancelled or
+    completed meanwhile.
+    """
+    result = db.execute(
+        update(ProductionRun)
+        .where(
+            ProductionRun.id == run.id,
+            ProductionRun.state_version == run.state_version,
+            ProductionRun.status.in_(["QUEUED", "RUNNING"]),
+        )
+        .values(
+            status="PAUSED",
+            control_reason=reason,
+            claim_owner=None,
+            claim_expires_at=None,
+            state_version=ProductionRun.state_version + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        # Somebody else already decided this run.  Discard every pending
+        # change the stale object may carry and leave the decision alone.
+        db.rollback()
+        return False
+    _pause_child_series(db, run.id, reason)
+    _event(db, run, "RUN_PAUSED", _pause_message(reason))
+    db.flush()
+    return True
+
+
+def _pause_message(reason: str) -> str:
+    if reason == "BUDGET_EXHAUSTED":
+        return "生产预算已用尽，等待人工确认是否继续"
+    if reason == "STORAGE_LOW":
+        return "磁盘空间低于预留，暂停新提交"
+    return "运行暂停：不再安排新的片段，当前片段等待安全落盘"
+
+
+def _pause_child_series(db: Session, run_id: str, reason: str) -> bool:
+    """Propagate a run-level pause into the child series.
+
+    A queued series has nothing in flight and pauses immediately.  A running
+    series owns external work and only *requests* the pause; its worker moves it
+    to PAUSED once the current shot reached a safe boundary.  Returns whether
+    any child still has work in flight.
+    """
+    live = False
+    for batch in _batch_rows(db, run_id):
+        if not batch.series_id:
+            continue
+        series = db.get(ProductionSeries, batch.series_id)
+        if series is None or series.status in {"COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW"}:
+            continue
+        if series.status in {"RUNNING", "PAUSE_REQUESTED"}:
+            if series.status != "PAUSE_REQUESTED":
+                series.state_version += 1
+            series.status = "PAUSE_REQUESTED"
+            series.control_reason = series.control_reason or reason
+            live = True
+        elif series.status == "QUEUED":
+            series.status = "PAUSED"
+            series.control_reason = reason
+            series.state_version += 1
+        elif series.status == "PAUSED":
+            series.control_reason = series.control_reason or reason
+    return live
+
+
+def _finalize_cancel(db: Session, run: ProductionRun, *, actor: str = "user") -> None:
+    """Complete a cancellation whose external work has settled."""
+    from shine.comfyops.production_series import cancel_series_in_session
+    from shine.media.delivery_models import DeliveryOrder
+
+    for batch in _batch_rows(db, run.id):
+        if not batch.series_id:
+            continue
+        series = db.get(ProductionSeries, batch.series_id)
+        if series is None:
+            continue
+        if _series_has_inflight_work(db, series):
+            return  # not settled yet; a later beat finalises
+        if series.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            cancel_series_in_session(db, series.id, reason="RUN_CANCELLED")
+    for episode in _episode_rows(db, run.id):
+        if not episode.delivery_order_id:
+            continue
+        order = db.get(DeliveryOrder, episode.delivery_order_id)
+        if order is not None and order.status == "PENDING":
+            order.status = "CANCELLED"
+            order.failure_code = "RUN_CANCELLED"
+            order.state_version += 1
+    run.status = "CANCELLED"
+    run.control_reason = run.control_reason or "USER_CANCELLED"
+    run.finished_at = utcnow()
+    run.claim_owner = None
+    run.claim_expires_at = None
+    _event(db, run, "RUN_CANCELLED", "取消收尾完成：已产出数据全部保留")
+    db.flush()
+    from shine.services import add_audit
+
+    add_audit(db, actor, "PRODUCTION_RUN_CANCELLED", "production_run", run.id,
+              {"delivered_episodes": (run.counters or {}).get("delivered_episode_count", 0)},
+              project_id=run.project_id)
+
+
 def advance_run(
     db: Session,
     run: ProductionRun,
@@ -582,17 +885,34 @@ def advance_run(
     settings,
 ) -> dict[str, Any]:
     """One bounded advance step.  Safe to call repeatedly and concurrently."""
-    if run.status not in {"QUEUED", "RUNNING"}:
+    if run.status not in ADVANCEABLE_RUN_STATUSES:
         return {"run_id": run.id, "status": run.status, "action": "skipped"}
+
+    if run.status == "CANCEL_REQUESTED":
+        # The cancellation is waiting for its external work to settle.  This
+        # beat only reconciles; it never starts anything new.
+        if not _claim_run(db, run, worker_id):
+            return {"run_id": run.id, "status": run.status, "action": "claimed_elsewhere"}
+        for batch in _batch_rows(db, run.id):
+            _sync_batch_from_series(db, batch)
+        inflight = any(
+            _series_has_inflight_work(db, db.get(ProductionSeries, batch.series_id))
+            for batch in _batch_rows(db, run.id) if batch.series_id
+        )
+        if not inflight:
+            _finalize_cancel(db, run, actor=worker_id)
+            return {"run_id": run.id, "status": run.status, "action": "cancelled"}
+        db.flush()
+        return {"run_id": run.id, "status": run.status, "action": "cancel_reconciling"}
 
     budget = run.budget or {}
     if run.started_at and budget.get("max_wall_seconds"):
         elapsed = (utcnow() - run.started_at).total_seconds()
         if elapsed > float(budget["max_wall_seconds"]):
-            _control(run, "PAUSED", "BUDGET_EXHAUSTED")
-            _event(db, run, "RUN_PAUSED", "生产预算已用尽，等待人工确认是否继续")
-            db.flush()
-            return {"run_id": run.id, "status": run.status, "action": "paused"}
+            if not _fenced_pause(db, run, "BUDGET_EXHAUSTED"):
+                return {"run_id": run.id, "status": db.get(ProductionRun, run.id).status
+                        if db.get(ProductionRun, run.id) else "GONE", "action": "skipped_stale"}
+            return {"run_id": run.id, "status": "PAUSED", "action": "paused"}
 
     min_free = float(budget.get("min_free_gb") or 0)
     if min_free:
@@ -603,14 +923,18 @@ def advance_run(
         except OSError:
             free_gb = None
         if free_gb is not None and free_gb < min_free:
-            _control(run, "PAUSED", "STORAGE_LOW")
-            _event(db, run, "RUN_PAUSED", f"磁盘剩余 {free_gb:.1f} GB 低于预留，暂停新提交")
-            db.flush()
-            return {"run_id": run.id, "status": run.status, "action": "paused"}
+            if not _fenced_pause(db, run, "STORAGE_LOW"):
+                return {"run_id": run.id, "status": db.get(ProductionRun, run.id).status
+                        if db.get(ProductionRun, run.id) else "GONE", "action": "skipped_stale"}
+            return {"run_id": run.id, "status": "PAUSED", "action": "paused"}
 
     if not _claim_run(db, run, worker_id):
         return {"run_id": run.id, "status": run.status, "action": "claimed_elsewhere"}
+    # The claim bumped state_version in SQL; re-read it so the ORM writes below
+    # extend the claimed version instead of clobbering a newer one.
+    db.refresh(run)
 
+    status_before = run.status
     actions: list[str] = []
     for batch in _batch_rows(db, run.id):
         if _sync_batch_from_series(db, batch):
@@ -619,7 +943,8 @@ def advance_run(
     # A batch that its own series could not finish blocks *its* episode, and
     # only that episode: every other episode keeps running.  A blocked batch is
     # never retried automatically — the operator decides.
-    for batch in _batch_rows(db, run.id):
+    batches = _batch_rows(db, run.id)
+    for batch in batches:
         if batch.status != "BLOCKED":
             continue
         episode = db.get(ProductionRunEpisode, batch.episode_row_id)
@@ -627,6 +952,8 @@ def advance_run(
             episode.status = "BLOCKED"
             episode.blocker_code = batch.failure_code or "BATCH_BLOCKED"
             actions.append("episode_blocked")
+    if _unblock_resolved_episodes(db, run):
+        actions.append("episode_unblocked")
 
     episodes = _episode_rows(db, run.id)
     for episode in episodes:
@@ -656,7 +983,6 @@ def advance_run(
         "passed_batch_count": len([batch for batch in batches if batch.status == "PASSED"]),
         "delivered_seconds": round(sum(episode.actual_seconds or 0.0 for episode in delivered), 3),
     }
-    run.last_progress_at = utcnow()
 
     unfinished = [episode for episode in episodes if episode.status not in {"DELIVERED", "BLOCKED"}]
     if not unfinished and not blocked_episodes:
@@ -673,6 +999,10 @@ def advance_run(
                f"{len(blocked_episodes)} 集有未解决阻塞，其余可运行部分已推进完毕")
     else:
         run.status = "RUNNING"
+    # Real progress only: a beat that changed nothing must not move the
+    # progress clock, or waiting would look like work.
+    if actions or run.status != status_before:
+        run.last_progress_at = utcnow()
     run.state_version += 1
     db.flush()
     return {"run_id": run.id, "status": run.status, "action": "advanced", "changes": sorted(set(actions))}
@@ -683,7 +1013,7 @@ def advance_runs(session_factory, *, worker_id: str, settings, limit: int = 1) -
     with session_factory() as db:
         candidates = db.execute(
             select(ProductionRun.id)
-            .where(ProductionRun.status.in_(["QUEUED", "RUNNING"]))
+            .where(ProductionRun.status.in_(ADVANCEABLE_RUN_STATUSES))
             .order_by(ProductionRun.created_at)
             .limit(max(1, limit))
         ).all()
@@ -695,7 +1025,7 @@ def advance_runs(session_factory, *, worker_id: str, settings, limit: int = 1) -
                 if run is None:
                     continue
                 result = advance_run(db, run, worker_id=worker_id, settings=settings)
-            if result.get("action") in {"advanced", "paused"}:
+            if result.get("action") in {"advanced", "paused", "cancelled", "cancel_reconciling"}:
                 advanced += 1
         except Exception as exc:  # noqa: BLE001 - one bad run must not stop the loop
             logger.warning("production_run_advance_failed run_id=%s error=%s", run_id, type(exc).__name__)
@@ -722,10 +1052,14 @@ def pause_run(session_factory, run_id: str, *, worker_id: str = "user", expected
             return "STATE_VERSION_CONFLICT"
         if run.status in {"COMPLETED", "CANCELLED", "FAILED"}:
             return run.status
-        if run.status == "PAUSED":
+        if run.status in {"PAUSED", "PAUSE_REQUESTED"}:
             return run.status
-        _control(run, "PAUSED", "USER_PAUSED")
-        _event(db, run, "RUN_PAUSED", "用户暂停：不再安排新的片段，当前片段等待安全落盘")
+        live = _pause_child_series(db, run.id, "USER_PAUSED")
+        status = "PAUSE_REQUESTED" if live else "PAUSED"
+        _control(run, status, "USER_PAUSED")
+        _event(db, run, "RUN_PAUSED",
+               "用户暂停：不再安排新的片段，当前片段等待安全落盘" if status == "PAUSE_REQUESTED"
+               else "用户暂停：已到安全边界")
         db.flush()
         return run.status
 
@@ -737,8 +1071,55 @@ def resume_run(session_factory, run_id: str, *, expected_version: int | None = N
             return "GONE"
         if expected_version is not None and run.state_version != expected_version:
             return "STATE_VERSION_CONFLICT"
-        if run.status != "PAUSED":
+        if run.status not in {"PAUSED", "PAUSE_REQUESTED", "NEEDS_REVIEW"}:
             return run.status
+
+        # Re-read what really happened while the run stood still: a blocker
+        # that a reconciliation resolved may make the run runnable again.
+        for batch in _batch_rows(db, run.id):
+            _sync_batch_from_series(db, batch)
+        _unblock_resolved_episodes(db, run)
+        for episode in _episode_rows(db, run.id):
+            _sync_episode_delivery(db, run, episode)
+
+        if run.status == "NEEDS_REVIEW":
+            episodes = _episode_rows(db, run.id)
+            batches = _batch_rows(db, run.id)
+            still_blocked = (any(episode.status == "BLOCKED" for episode in episodes)
+                             or any(batch.status == "BLOCKED" for batch in batches))
+            if still_blocked:
+                return "NEEDS_REVIEW"
+            _control(run, "RUNNING", None)
+            _event(db, run, "RUN_RESUMED", "阻塞已解除，恢复生产")
+            db.flush()
+            return run.status
+
+        # Resume only the children this run paused: a series paused by its own
+        # control path keeps its pause until that path releases it.
+        from shine.models import ProductionSeries as _Series
+
+        for batch in _batch_rows(db, run.id):
+            if not batch.series_id:
+                continue
+            series = db.get(_Series, batch.series_id)
+            if series is None or series.control_reason not in RUN_PAUSE_REASONS:
+                continue
+            owner_alive = bool(
+                series.worker_id
+                and series.lease_expires_at is not None
+                and series.lease_expires_at > utcnow()
+            )
+            if series.status == "PAUSED":
+                series.status = "RUNNING" if owner_alive else "QUEUED"
+                if not owner_alive:
+                    series.worker_id = None
+                    series.lease_expires_at = None
+            elif series.status == "PAUSE_REQUESTED":
+                series.status = "RUNNING"
+            else:
+                continue
+            series.control_reason = None
+            series.state_version += 1
         _control(run, "RUNNING", None)
         _event(db, run, "RUN_RESUMED", "用户恢复生产")
         db.flush()
@@ -746,7 +1127,13 @@ def resume_run(session_factory, run_id: str, *, expected_version: int | None = N
 
 
 def cancel_run(session_factory, run_id: str, *, actor: str = "user", expected_version: int | None = None) -> str:
-    """Cancel without deleting anything and without touching foreign resources."""
+    """Cancel without deleting anything and without touching foreign resources.
+
+    Cancellation is a two-step protocol, not a fiat: series that still own
+    external work are asked to stop and the run stays ``CANCEL_REQUESTED``
+    until that work settled and was reconciled.  Only then does the run reach
+    its terminal ``CANCELLED`` state.
+    """
     from shine.comfyops.production_series import cancel_series_in_session
     from shine.media.delivery_models import DeliveryOrder
 
@@ -756,11 +1143,26 @@ def cancel_run(session_factory, run_id: str, *, actor: str = "user", expected_ve
             return "GONE"
         if expected_version is not None and run.state_version != expected_version:
             return "STATE_VERSION_CONFLICT"
-        if run.status in {"CANCELLED", "COMPLETED"}:
+        if run.status in {"CANCELLED", "COMPLETED", "FAILED"}:
             return run.status
+        inflight = False
         for batch in _batch_rows(db, run.id):
-            if batch.series_id:
-                cancel_series_in_session(db, batch.series_id, reason="RUN_CANCELLED")
+            if not batch.series_id:
+                continue
+            series = db.get(ProductionSeries, batch.series_id)
+            if series is None:
+                continue
+            if _series_has_inflight_work(db, series):
+                inflight = True
+                if series.status in {"RUNNING", "PAUSE_REQUESTED", "QUEUED", "PAUSED"}:
+                    # The owner observes this between shots: it finishes the
+                    # current submission, releases the renderer and then the
+                    # series reaches CANCELLED — never a blind stop.
+                    if series.status != "CANCEL_REQUESTED":
+                        series.status = "CANCEL_REQUESTED"
+                        series.state_version += 1
+            elif series.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                cancel_series_in_session(db, series.id, reason="RUN_CANCELLED")
         for episode in _episode_rows(db, run.id):
             if not episode.delivery_order_id:
                 continue
@@ -769,16 +1171,93 @@ def cancel_run(session_factory, run_id: str, *, actor: str = "user", expected_ve
                 order.status = "CANCELLED"
                 order.failure_code = "RUN_CANCELLED"
                 order.state_version += 1
+        if inflight:
+            _control(run, "CANCEL_REQUESTED", "USER_CANCELLED")
+            _event(db, run, "RUN_CANCEL_REQUESTED",
+                   "用户取消：等待已提交片段与受管资源收尾，产物全部保留")
+            db.flush()
+            return run.status
         _control(run, "CANCELLED", "USER_CANCELLED")
         run.finished_at = utcnow()
+        run.claim_owner = None
+        run.claim_expires_at = None
         _event(db, run, "RUN_CANCELLED", "用户取消：已产出数据全部保留")
         db.flush()
         from shine.services import add_audit
 
         add_audit(db, actor, "PRODUCTION_RUN_CANCELLED", "production_run", run.id,
-                  {"delivered_episodes": run.counters.get("delivered_episode_count", 0)},
+                  {"delivered_episodes": (run.counters or {}).get("delivered_episode_count", 0)},
                   project_id=run.project_id)
         return run.status
+
+
+def set_episode_post_contract(
+    session_factory,
+    run_id: str,
+    episode_id: str,
+    body: dict[str, Any] | None,
+    *,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Revise one episode's cut/subtitle contract; re-assemble, never re-render.
+
+    The contract is validated against the episode (its own shots, an approved
+    subtitle revision) and pinned.  When the episode's takes are complete a new
+    delivery version is queued from the *same* run-owned takes; an assembly
+    already running is not interrupted.
+    """
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.production.episode_delivery import normalized_post_contract
+
+    with session_factory.begin() as db:
+        run = db.get(ProductionRun, run_id)
+        if run is None:
+            raise HTTPException(404, "PRODUCTION_RUN_NOT_FOUND")
+        episode = db.scalars(
+            select(ProductionRunEpisode).where(
+                ProductionRunEpisode.run_id == run_id,
+                ProductionRunEpisode.episode_id == episode_id,
+            )
+        ).first()
+        if episode is None:
+            raise HTTPException(404, "PRODUCTION_RUN_EPISODE_NOT_FOUND")
+        if run.status in {"CANCELLED", "CANCEL_REQUESTED", "FAILED"}:
+            raise HTTPException(409, f"PRODUCTION_RUN_{run.status}")
+        assembling = db.scalars(
+            select(DeliveryOrder).where(
+                DeliveryOrder.scope_kind == "episode",
+                DeliveryOrder.scope_id == episode.id,
+                DeliveryOrder.status == "ASSEMBLING",
+            )
+        ).first()
+        if assembling is not None:
+            raise HTTPException(409, "EPISODE_ASSEMBLY_IN_PROGRESS")
+        contract = normalized_post_contract(db, episode, body)
+        previous = episode.post_contract
+        episode.post_contract = contract
+        db.flush()
+        order_id = None
+        if episode.status in {"DELIVERED", "DELIVERING", "PRODUCING", "PLANNED"}:
+            order_id = _ensure_episode_delivery(db, run, episode)
+        _event(db, run, "EPISODE_POST_CONTRACT_REVISED",
+               f"{episode.title or episode.episode_id} 更新剪辑/字幕合同；只重装配，不重拍",
+               {"episode_id": episode.episode_id, "order_id": order_id})
+        from shine.services import add_audit
+
+        add_audit(db, actor, "EPISODE_POST_CONTRACT_REVISED", "production_run_episode", episode.id,
+                  {"previous": previous, "contract": contract, "order_id": order_id},
+                  project_id=run.project_id)
+        return {"episode_id": episode.episode_id, "post_contract": contract,
+                "delivery_order_id": order_id, "status": episode.status}
+
+
+def _undelivered(episode: ProductionRunEpisode) -> bool:
+    """An episode that never published a reel and is not a recorded blocker.
+
+    A revision of an already-delivered reel that is being re-assembled still
+    has its published version, so it does not reopen a completed run.
+    """
+    return episode.status not in {"DELIVERED", "BLOCKED"} and not episode.delivered_artifact_id
 
 
 def reconcile_run(session_factory, run_id: str, *, worker_id: str = "user") -> dict[str, Any]:
@@ -792,8 +1271,32 @@ def reconcile_run(session_factory, run_id: str, *, worker_id: str = "user") -> d
             if _sync_batch_from_series(db, batch):
                 synced += 1
         for episode in _episode_rows(db, run.id):
+            if episode.status == "BLOCKED":
+                pass  # handled by _unblock_resolved_episodes below
+        synced += _unblock_resolved_episodes(db, run)
+        for episode in _episode_rows(db, run.id):
             if _sync_episode_delivery(db, run, episode):
                 synced += 1
+
+        episodes = _episode_rows(db, run.id)
+        batches = _batch_rows(db, run.id)
+        if run.status == "NEEDS_REVIEW" and not any(
+                episode.status == "BLOCKED" for episode in episodes) and not any(
+                batch.status == "BLOCKED" for batch in batches):
+            _control(run, "QUEUED", None)
+            _event(db, run, "RUN_UNBLOCKED", "阻塞已解除，运行回到可推进状态")
+        elif run.status == "COMPLETED" and any(_undelivered(episode) for episode in episodes):
+            # A completion merged before its episodes were decided is wrong, not
+            # history: correct it explicitly and keep the event trail.
+            _control(run, "NEEDS_REVIEW", "COMPLETION_CORRECTED")
+            _event(db, run, "RUN_COMPLETION_CORRECTED",
+                   "存在未交付的必需集，此前的完成结论被纠正为待复核")
+            from shine.services import add_audit
+
+            add_audit(db, worker_id, "PRODUCTION_RUN_COMPLETION_CORRECTED", "production_run", run.id,
+                      {"undelivered_episodes": [
+                          episode.episode_id for episode in episodes if _undelivered(episode)]},
+                      project_id=run.project_id)
         run.counters = {
             **dict(run.counters or {}),
             "reconciled_at": utcnow().isoformat() + "Z",
@@ -830,8 +1333,7 @@ def episode_public(
 ) -> list[dict[str, Any]]:
     """Public shape of a bounded set of episodes, with their batches."""
     batches = _batch_rows(db, run.id) if episodes else []
-    shot_ids = [shot_id for episode in episodes for shot_id in episode.shot_ids]
-    passed = _current_passed_jobs(db, shot_ids)
+    passed = run_owned_passed_jobs(db, run.id, episodes)
     return [
         {
             "id": episode.id,
@@ -840,6 +1342,8 @@ def episode_public(
             "title": episode.title,
             "status": episode.status,
             "shot_count": len(episode.shot_ids),
+            "shot_ids": list(episode.shot_ids),
+            "post_contract": episode.post_contract,
             "passed_shot_count": len([shot_id for shot_id in episode.shot_ids if shot_id in passed]),
             "planned_seconds": episode.planned_seconds,
             "actual_seconds": episode.actual_seconds,
@@ -867,8 +1371,7 @@ def episode_public(
 def run_public(db: Session, run: ProductionRun, *, include_episodes: bool = True) -> dict[str, Any]:
     episodes = _episode_rows(db, run.id)
     batches = _batch_rows(db, run.id)
-    all_shots = [shot_id for episode in episodes for shot_id in episode.shot_ids]
-    passed = _current_passed_jobs(db, all_shots)
+    passed = run_owned_passed_jobs(db, run.id, episodes)
     payload: dict[str, Any] = {
         "id": run.id,
         "project_id": run.project_id,

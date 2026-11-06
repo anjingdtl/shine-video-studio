@@ -1107,6 +1107,18 @@ html[data-theme='dark'] .asset-list::-webkit-scrollbar-thumb,html[data-theme='da
 .material-field{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:10px;color:#56584b}
 .material-field>span{flex:0 0 92px;color:#7e8072}
 .material-field select,.material-field input{flex:1;min-width:0;height:30px;border:1px solid #d9ddc4;border-radius:6px;padding:0 8px;font-size:10px;background:#fff;color:#3d3f37}
+/* ① 创意与剧本：想法输入占满整张卡片的一行，标签在上、输入框通栏，便于写较长的想法 */
+.script-entry-grid{display:grid;grid-template-columns:1fr;gap:16px}
+.script-entry-a,.script-entry-b{min-width:0}
+.script-entry h3{margin:0 0 6px;font-size:13px}
+.script-entry-field{display:flex;flex-direction:column;gap:6px;margin:8px 0;font-size:11px;color:#56584b}
+.script-entry-field>span{color:#7e8072}
+.script-entry-field textarea{width:100%;box-sizing:border-box;min-height:112px;resize:vertical;border:1px solid #d9ddc4;border-radius:8px;padding:10px 12px;font:inherit;font-size:13px;line-height:1.6;background:#fff;color:#3d3f37}
+.script-entry-field textarea.compact{min-height:64px}
+.script-entry-field textarea:focus{outline:none;border-color:#b9bf8f;box-shadow:0 0 0 2px rgba(185,191,143,.25)}
+.script-entry-b{border-top:1px dashed #e2e5d0;padding-top:14px}
+html[data-theme='dark'] .script-entry-field textarea{border-color:#3b3d2f;background:#22231d;color:#cdcec0}
+html[data-theme='dark'] .script-entry-b{border-top-color:#3b3d2f}
 .material-requirement-list{list-style:none;padding:0;margin:6px 0 10px}
 .material-requirement-list li{border:1px solid #e6e8d8;border-radius:7px;padding:9px 11px;margin-bottom:8px;background:#fcfcf8}
 .material-requirement-list b{display:block;font-size:10.5px;color:#3d3f37}

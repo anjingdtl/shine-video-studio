@@ -17,12 +17,14 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
 from shine.media.delivery_engine import (
     ASSEMBLY_LEASE_SECONDS,
+    AssemblyHeartbeat,
     DeliveryBlock,
     DeliveryClaim,
     _write_back,
@@ -30,10 +32,90 @@ from shine.media.delivery_engine import (
 from shine.media.delivery_models import DeliveryOrder
 from shine.models import Job, MediaArtifact, SubtitleTrack, utcnow
 from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode
+from shine.schemas import APIModel
 from shine.security import sha256_bytes
 
-EPISODE_RULES_VERSION = "run-episode-cuts-v1"
+EPISODE_RULES_VERSION = "run-episode-cuts-v2"
 EPISODE_PAGE_SIZE = 100
+MIN_CUT_SECONDS = 0.5
+
+
+class EpisodeCut(APIModel):
+    """One confirmed cut: which part of a take this episode really uses."""
+
+    shot_id: str = Field(min_length=1, max_length=36)
+    in_s: float = Field(ge=0, le=600, allow_inf_nan=False)
+    out_s: float = Field(gt=0, le=600, allow_inf_nan=False)
+
+
+class EpisodePostContract(APIModel):
+    """The post-production contract of one episode.
+
+    It only ever changes how already-produced takes are assembled — cut points
+    and the subtitle layer — so a revision is a new delivery version and never
+    a new render.  Audio mixing is not implemented by this build's assembler,
+    so asking for it is refused by name instead of being silently ignored.
+    """
+
+    schema_version: str = Field(default="1.0", pattern="^1\\.0$")
+    cuts: list[EpisodeCut] = Field(default_factory=list, max_length=400)
+    subtitle_revision: int | None = Field(default=None, ge=1)
+    audio_gain_db: float | None = Field(default=None, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def coherent(self) -> EpisodePostContract:
+        if self.audio_gain_db is not None:
+            raise ValueError("EDIT_AUDIO_NOT_SUPPORTED")
+        seen: set[str] = set()
+        for cut in self.cuts:
+            if cut.shot_id in seen:
+                raise ValueError(f"EDIT_CUT_REPEATED:{cut.shot_id}")
+            seen.add(cut.shot_id)
+            if cut.out_s - cut.in_s < MIN_CUT_SECONDS:
+                raise ValueError(f"EDIT_CUT_TOO_SHORT:{cut.shot_id}")
+        return self
+
+
+def normalized_post_contract(
+    db: Session, episode: ProductionRunEpisode, body: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Validate a contract against this episode and pin its subtitle identity."""
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    if not body:
+        return None
+    try:
+        contract = EpisodePostContract.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(422, {
+            "code": "EPISODE_POST_CONTRACT_INVALID",
+            "problems": [str(error.get("msg", ""))[:200] for error in exc.errors()][:20],
+        }) from exc
+    foreign = [cut.shot_id for cut in contract.cuts if cut.shot_id not in episode.shot_ids]
+    if foreign:
+        raise HTTPException(422, {"code": "EDIT_CUT_SHOT_NOT_IN_EPISODE", "shot_ids": foreign[:20]})
+    pinned: dict[str, Any] = contract.model_dump(mode="json")
+    pinned.pop("audio_gain_db", None)
+    if contract.subtitle_revision is not None:
+        track = db.scalar(
+            select(SubtitleTrack).where(
+                SubtitleTrack.project_id == episode.project_id,
+                SubtitleTrack.revision == contract.subtitle_revision,
+            )
+        )
+        if track is None or track.status != "APPROVED":
+            raise HTTPException(409, "EPISODE_SUBTITLE_NOT_APPROVED")
+        pinned["subtitle_sha256"] = track.sha256
+    return pinned
+
+
+def post_contract_digest(episode: ProductionRunEpisode) -> str | None:
+    return (
+        hashlib.sha256(json.dumps(episode.post_contract, ensure_ascii=False, sort_keys=True)
+                       .encode("utf-8")).hexdigest()
+        if episode.post_contract else None
+    )
 
 
 def episode_input_digest(
@@ -46,13 +128,19 @@ def episode_input_digest(
 
     It is built from the plan order plus the real passed artifacts and their
     hashes, so a re-take, a re-cut or a re-ordered plan each produce a different
-    version and never silently overwrite a published reel.
+    version and never silently overwrite a published reel.  Only jobs this
+    run's own series items produced are part of the identity: an unrelated
+    newer take never re-identifies somebody else's reel.
     """
-    passed = _passed_jobs(db, episode.shot_ids)
+    from shine.production.runner import run_owned_passed_jobs
+
+    passed = run_owned_passed_jobs(db, run.id, [episode])
     payload = {
         "run_id": run.id,
         "episode_id": episode.episode_id,
         "manifest_sha256": episode.manifest_sha256,
+        # A cut or subtitle revision is a new delivery identity of the same takes.
+        "post_contract": post_contract_digest(episode),
         "batches": [
             [batch.batch_key, batch.input_digest, batch.series_id]
             for batch in sorted(batches, key=lambda row: row.batch_key)
@@ -70,6 +158,12 @@ def episode_input_digest(
 
 
 def _passed_jobs(db: Session, shot_ids: list[str]) -> dict[str, Job]:
+    """The passed jobs of these shots, newest first by creation order.
+
+    Kept only for callers that have no run scope of their own.  Whole-film
+    episodes must NOT use this: a job that no series item of the owning run
+    points at is somebody else's product (see ``run_owned_passed_jobs``).
+    """
     from shine.models import Shot
 
     if not shot_ids:
@@ -108,11 +202,14 @@ def build_episode_edl(
     if run is None:
         raise DeliveryBlock("EPISODE_RUN_MISSING")
 
-    passed = _passed_jobs(db, episode.shot_ids)
+    from shine.production.runner import run_owned_passed_jobs
+
+    passed = run_owned_passed_jobs(db, run.id, [episode])
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
         raise DeliveryBlock("EPISODE_SHOT_NOT_PASSED")
 
+    cuts = {cut["shot_id"]: cut for cut in (episode.post_contract or {}).get("cuts", [])}
     clips: list[dict[str, Any]] = []
     for position, shot_id in enumerate(episode.shot_ids):
         job = passed[shot_id]
@@ -135,16 +232,28 @@ def build_episode_edl(
         info = probe_file(path, ffprobe_path=ffprobe_path, ffmpeg_path=ffmpeg_path)
         if info.duration_s is None:
             raise DeliveryBlock("EPISODE_SOURCE_DURATION_UNKNOWN")
+        duration = round(info.duration_s, 3)
+        cut = cuts.get(shot_id)
+        if cut is not None:
+            # A confirmed cut must fit the real take: the contract is checked
+            # against the measured media, never trusted as a number on paper.
+            if cut["out_s"] > duration + 0.05 or cut["in_s"] >= cut["out_s"]:
+                raise DeliveryBlock("EPISODE_CUT_OUTSIDE_TAKE")
+            in_s, out_s = round(cut["in_s"], 3), round(min(cut["out_s"], duration), 3)
+            reason = f"{episode.episode_id} 第 {position + 1} 镜：按确认的剪辑合同取 {in_s}–{out_s}s"
+        else:
+            in_s, out_s = 0.0, duration
+            reason = f"{episode.episode_id} 第 {position + 1} 镜：当前通过的真实产物，整条使用"
         clips.append(
             {
                 "job_id": job.id,
                 "attempt_id": attempt.id,
                 "artifact_id": artifact.id,
                 "shot_id": shot_id,
-                "in_s": 0.0,
-                "out_s": round(info.duration_s, 3),
+                "in_s": in_s,
+                "out_s": out_s,
                 "transition": "CUT",
-                "reason": f"{episode.episode_id} 第 {position + 1} 镜：当前通过的真实产物，整条使用",
+                "reason": reason,
             }
         )
     if not clips:
@@ -153,10 +262,12 @@ def build_episode_edl(
         "rules_version": EPISODE_RULES_VERSION,
         "order": "production_run_episodes.shot_ids",
         "transition": "CUT",
-        "in_s": 0.0,
-        "out_s": "full_take",
+        "cut_source": "post_contract" if cuts else "full_take",
+        "post_contract_sha256": post_contract_digest(episode),
+        "subtitle_revision": (episode.post_contract or {}).get("subtitle_revision"),
         "episode_id": episode.episode_id,
         "planned_seconds": episode.planned_seconds,
+        "edited_seconds": round(sum(clip["out_s"] - clip["in_s"] for clip in clips), 3),
     }
     return {"schema_version": "1.1", "clips": clips}, "run_episode_plan", rules
 
@@ -261,6 +372,16 @@ def run_episode_delivery(
                 )
                 if track is None or track.status != "APPROVED":
                     raise DeliveryBlock("EPISODE_SUBTITLE_NOT_APPROVED")
+                if order.subtitle_sha256 and track.sha256 != order.subtitle_sha256:
+                    # The order pinned one subtitle identity; a different text
+                    # under the same revision number is not what was confirmed.
+                    raise DeliveryBlock("EPISODE_SUBTITLE_CHANGED")
+                edited = float(rules.get("edited_seconds") or 0.0)
+                last_cue = max((float(cue.get("end_s") or 0.0) for cue in (track.cues or [])), default=0.0)
+                if last_cue > edited + 0.05:
+                    # Cues timed for a longer cut would burn lines over the
+                    # wrong pictures or past the end; refuse instead.
+                    raise DeliveryBlock("EPISODE_SUBTITLE_EXCEEDS_CUT")
                 subtitle_ass = track.ass
                 subtitle_sha256 = track.sha256
             clips = [
@@ -273,7 +394,7 @@ def run_episode_delivery(
                 )
                 for clip in edl["clips"]
             ]
-        with session_factory() as work_db:
+        with session_factory() as work_db, AssemblyHeartbeat(session_factory, order_id, claim):
             result = assembler.assemble(
                 work_db,
                 project_id,

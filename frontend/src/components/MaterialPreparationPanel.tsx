@@ -119,12 +119,14 @@ function reasonText(code: string | null | undefined): string {
   return ERROR_CODE_LABELS[code] ?? `这一步没有完成（${code}）。请到专业设置查看专业日志。`;
 }
 
-function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle }: {
+function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onPromoted?: () => void;
   /** The frozen Style Bible, when there is one. */
   frozenStyle?: StyleVersion | null;
+  /** Bumped when a script was imported or generated, so the list reloads. */
+  documentsVersion?: number;
 }) {
   const [state, setState] = useState<MaterialState | null>(null);
   const [documents, setDocuments] = useState<{ id: string; filename: string; sha256: string }[]>([]);
@@ -194,6 +196,19 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       .then((result) => { if (current) setTextScope(result); }).catch(() => undefined);
     return () => { current = false; };
   }, [projectId, documentId]);
+  // A newly imported or generated script (the list is newest first): reload
+  // and select it, so the person continues with the script just provided.
+  useEffect(() => {
+    if (!documentsVersion) return;
+    const requested = projectId;
+    api<{ id: string; filename: string; sha256: string }[]>(`/projects/${requested}/documents`)
+      .then((docs) => {
+        if (activeProject.current !== requested) return;
+        setDocuments(docs);
+        if (docs[0]) setDocumentId(docs[0].id);
+      })
+      .catch(() => undefined);
+  }, [documentsVersion, projectId]);
   useEffect(() => { setSelected({}); setBriefEdits({}); setOperationReport(''); setOpenStage(null); }, [projectId, state?.plan_revision_id]);
 
   const run = async (action: () => Promise<void>) => {
@@ -580,7 +595,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         <summary>① 读剧本{state?.plan_status ? ` · ${PLAN_STATUS_LABELS[state.plan_status] ?? ''}` : ''}</summary>
         <div className="material-stage-body">
           {documents.length === 0 && (
-            <p className="material-hint">这个作品还没有剧本文件。先到「AI导演制作」上传剧本，或在上面选择已有文件。</p>
+            <p className="material-hint">这个作品还没有剧本文件。请在本页上方「创意与剧本」里输入想法生成剧本，或导入现成剧本。</p>
           )}
           <label className="material-field">
             <span>剧本文件</span>

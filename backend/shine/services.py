@@ -855,6 +855,10 @@ def create_render_job(
         generation_mode=request_data.generation_mode.value,
         workflow_profile_id=body.workflow_profile_id,
         compiled_prompt_sha256=request_data.prompt_sha256,
+        max_semantic_retries=(
+            body.max_semantic_retries if body.max_semantic_retries is not None else 2
+        ),
+        auto_repair=body.auto_repair,
     )
     db.add(job)
     db.flush()

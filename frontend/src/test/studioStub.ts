@@ -173,6 +173,10 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/terminology$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/subtitles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/documents$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/creative-briefs$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/api\/v1\/setup\/deployment-recommendations$/, respond: () => jsonResponse({
+      recommended: [], blocked: [], options: [], host: { gpu: null, vram_mb: null, ram_mb: null, free_gb: null }, notes: [],
+    }) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/candidate-assets$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/voice-profiles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-series$/, respond: () => jsonResponse([]) },

@@ -238,7 +238,7 @@ export function useStudio() {
     await withBusy(async () => {
       const created = await api<Project>('/projects', json('POST', { title: projectTitle.trim(), description: '' }));
       setProjectTitle(''); setProjects((rows) => [created, ...rows]); setProjectId(created.id);
-      report('作品已建好。下一步：添加素材并确认，然后冻结风格。');
+      report('作品已建好。下一步：在「创意与剧本」输入想法或导入剧本。');
     });
   }
 

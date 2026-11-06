@@ -7,7 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-HEAD_REVISION = "f180a0010001"
+HEAD_REVISION = "f180b0010001"
 
 
 def alembic_config(db_path: Path) -> Config:

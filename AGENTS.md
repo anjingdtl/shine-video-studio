@@ -598,3 +598,31 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `effective_floor_mb`（减 1 GiB）读取，否则推荐会比安装器更严——这就是“三套结论”。
 - **迁移 head 现在是 `f180a0010001`**。`delivery_orders` 的列变更走 `batch_alter_table`（SQLite 表重建），
   旧库升级需验证历史订单行、两条唯一约束与 `alembic check` 无 drift。
+
+## 2026-11-06 收尾修复轮（状态身份正确性与主需求闭环）
+
+- **分集产物只认本 Run 的 series item**：`run_owned_passed_jobs`（episode→batch→series→item→job）是分集
+  EDL/摘要/进度的唯一来源；全局"最新通过 job"永不入选。交付前置条件是**计划内全部批次**已创建且 PASSED
+  ——批次没派发就是未完成，不是历史。已误标 COMPLETED 的 Run 由 `reconcile_run` 纠正为 NEEDS_REVIEW
+  （保留事件与审计），不静默改写。
+- **Run 控制必须到达子 series**：暂停/预算/存储走 `_pause_child_series`（QUEUED→PAUSED、RUNNING→
+  PAUSE_REQUESTED），series.control_reason 记录暂停主体，resume 只恢复本 Run 暂停的；`claim_series`
+  拒绝领取属于非活跃 Run 的 series。取消是两段式：有在途外部工作→CANCEL_REQUESTED，外部工作落定后由
+  beat/对账收尾成 CANCELLED。预算/存储分支是条件 UPDATE（fencing），陈旧对象不能复活终态。
+- **冻结包三哈希 + 派发复核**：package_readiness 校验根 manifest/scope/policy 哈希；每次批次派发重跑
+  readiness，不可启动→具名阻塞，包确认不是永久启动资格。政策是 strict 类型化合同（extra=forbid），
+  并经 series 落到每个 job（`max_semantic_retries`/`auto_repair` 覆盖项目默认）。
+- **双入口一条链路**：`director/creative.py` 的 CreativeBrief 是版本化 AgentArtifact（人工创作留痕）；
+  生成剧本是持久任务（远程文字需一次性同意并钉 provider 指纹；UNKNOWN→NEEDS_REVIEW 不重放），产物是
+  普通 ProjectDocument，走既有大纲链路。分集先按剧本场次（sections 模式），`materialize` 只认各场
+  **已应用**分镜的镜头；按镜头分组是兼容入口。
+- **分集后期合同修订不重拍**：`EpisodePostContract`（入出点+字幕版本；音频混音按名拒绝）进 input_digest；
+  修订=新交付版本、旧版保留、Job 数不变；字幕钉 revision+sha 且时码不得超出剪辑长度；装配中的订单不打断。
+  长装配有 `AssemblyHeartbeat`：活跃装配不被跨租期抢占，失联可收回，迟到回写被 claim token 拒绝。
+- **部署组合推荐是真机只读检测**：前端推荐卡片调 `/setup/deployment-recommendations`，展示要求/下载/
+  复用/证据等级/具名阻塞；未实测组合只标 estimated，不写成已验证。
+- **`/health` 暴露 schema 身份**（schema_revision/head/up_to_date，读不到=unknown）；前端 SchemaNotice 在
+  库落后于程序时提示重启升级，旧栈 404 不再被当成"功能不存在"。
+- 回归入口：`backend/tests/test_director_long_form_regressions.py`（18 条独立反例迁入 + 暂停/取消/纠正/
+  T01/T02）、`test_director_entries_and_post.py`（双入口/先分集/后期合同）、`test_schema_identity.py`；
+  迁移 head 为 `f180b0010001`。证据：`docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_20261106.md`。

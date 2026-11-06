@@ -389,6 +389,34 @@ def _shot_state(db, project_id, shot_id, position):
     return row
 
 
+def section_storyboard_shot_ids(db, project_id, production_section_id):
+    """The shots the newest applied storyboard of one section really created.
+
+    Read from the section run's own results and the apply receipts the
+    storyboard apply wrote, so an episode plan materialises to exactly the
+    shots the person applied for that section — never to shots that merely
+    exist in the project.  Returns ``{"shot_ids": [...], "missing": [...]}``.
+    """
+    from shine.models import AppSetting
+
+    run = _latest_section_run(db, project_id, production_section_id)
+    if run is None:
+        return {"shot_ids": [], "missing": [{"reason": "SECTION_RUN_MISSING"}]}
+    units = [u for u in run.trace.get("units", []) if u.get("production_section_id") == production_section_id]
+    results = {(r.get("unit") or {}).get("start_offset"): r for r in run.trace.get("results", [])}
+    shot_ids: list[str] = []
+    missing: list[dict] = []
+    for unit in units:
+        result = results.get(unit.get("start_offset"))
+        camera = ((result or {}).get("storyboard") or {}).get("steps", {}).get("cinematographer") or {}
+        receipt = db.get(AppSetting, f"film-apply:{camera.get('artifact_id')}") if camera.get("artifact_id") else None
+        if receipt is None:
+            missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
+            continue
+        shot_ids.extend(str(shot_id) for shot_id in receipt.value.get("shot_ids", []))
+    return {"shot_ids": shot_ids, "missing": missing}
+
+
 def compute_section_continuity(db, project_id, production_section_id):
     """Derive what this section's production really ended as, from the ledger.
 

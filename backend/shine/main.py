@@ -394,6 +394,25 @@ async def _lifespan(app: FastAPI):
     app.state.engine.dispose()
 
 
+_SCHEMA_HEAD: list[str | None] = []
+
+
+def _code_schema_head() -> str | None:
+    """The Alembic head this code ships with, read once from its own scripts."""
+    if not _SCHEMA_HEAD:
+        try:
+            from alembic.config import Config
+            from alembic.script import ScriptDirectory
+
+            ini = Path(__file__).resolve().parents[1] / "alembic.ini"
+            config = Config(str(ini))
+            config.set_main_option("script_location", str(ini.parent / "alembic"))
+            _SCHEMA_HEAD.append(ScriptDirectory.from_config(config).get_current_head())
+        except Exception:  # noqa: BLE001 - unknown is reported as unknown
+            _SCHEMA_HEAD.append(None)
+    return _SCHEMA_HEAD[0]
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -469,7 +488,7 @@ def create_app(
         return await call_next(request)
 
     @app.get("/health")
-    def health(db: DBSession) -> dict[str, str | bool]:
+    def health(db: DBSession) -> dict[str, str | bool | None]:
         from shine.comfyops.runtime_configuration import runtime_report
         runtime = runtime_report(db, settings)
         return {
@@ -480,6 +499,27 @@ def create_app(
             # /api/v1/system/status so health stays answerable without I/O.
             "h3_connected": False,
             "connection_probe": "not_run_use_system_status",
+            **_schema_identity(db),
+        }
+
+    def _schema_identity(db) -> dict[str, str | bool | None]:
+        """Which schema revision this database is at versus what this code expects.
+
+        A stack that kept running old code, or a database that was never
+        upgraded, otherwise looks healthy while the new routes 404 or a column
+        is missing.  Unknown stays unknown: it is never reported as up to date.
+        """
+        from sqlalchemy import text as sql_text
+
+        try:
+            current = db.execute(sql_text("SELECT version_num FROM alembic_version")).scalar()
+        except Exception:  # noqa: BLE001 - a missing table is an answer, not a crash
+            current = None
+        head = _code_schema_head()
+        return {
+            "schema_revision": current,
+            "schema_head": head,
+            "schema_up_to_date": (current == head) if (current and head) else None,
         }
 
     def _h3_connected(effective) -> bool:

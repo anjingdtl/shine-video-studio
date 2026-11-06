@@ -114,6 +114,12 @@ class ProductionRunEpisode(Base):
     shot_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="PLANNED", nullable=False)
     blocker_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    post_contract: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """The confirmed post-production contract (cut points, subtitle revision).
+
+    ``None`` is the default cut: every take in plan order, full length, no
+    subtitles.  A revision creates a new delivery version; it never re-renders.
+    """
     delivery_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     delivered_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     delivered_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)

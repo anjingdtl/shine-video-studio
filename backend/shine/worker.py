@@ -643,6 +643,18 @@ def _build_repair_revision(
     return None
 
 
+def _effective_auto_repair(job: Job, project: Any) -> bool:
+    """The auto-repair flag that really governs this job.
+
+    A job created under a frozen director package carries the package's own
+    flag; only jobs without one follow the project default, so a run that froze
+    ``auto_repair=false`` never picks the project's later ``true`` up again.
+    """
+    if job.auto_repair is not None:
+        return bool(job.auto_repair)
+    return bool(project is not None and project.auto_repair_enabled)
+
+
 def _auto_repair(
     db: Session,
     job: Job,
@@ -1924,7 +1936,7 @@ def _run_mock_job(
                 attempt,
                 report=report,
                 failure_code=exc.code,
-                project_auto_enabled=bool(project and project.auto_repair_enabled),
+                project_auto_enabled=_effective_auto_repair(job, project),
                 worker_id=worker_id,
             )
         return job_id
@@ -2472,7 +2484,7 @@ def _finalize_comfy_attempt(
                 attempt,
                 report=fused,
                 failure_code="QC_FAILED",
-                project_auto_enabled=bool(project and project.auto_repair_enabled),
+                project_auto_enabled=_effective_auto_repair(job, project),
                 worker_id=worker_id,
                 project_language=language,
             )
@@ -3970,8 +3982,13 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
             raise
         # Text preparation does not use or validate the video runtime. Keep its
         # durable queue available without bypassing any H3 activation guard.
+        from shine.director.creative import run_pending_creative_task
         from shine.materialprep.story import run_pending_story_task
 
+        if run_pending_creative_task(session_factory, settings, worker_id,
+                                     heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                                    phase="creative_script")):
+            return "creative-script"
         if run_pending_story_task(session_factory, settings, worker_id,
                                   heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
                                                                  phase="story_preparation")):
@@ -4049,9 +4066,14 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
     if series is not None:
         return f"series:{series}"
+    from shine.director.creative import run_pending_creative_task
     from shine.materialprep.execution import run_pending_image_items
     from shine.materialprep.story import run_pending_story_task
 
+    if run_pending_creative_task(session_factory, settings, worker_id,
+                                 heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
+                                                                phase="creative_script")):
+        return "creative-script"
     if run_pending_story_task(session_factory, settings, worker_id,
                               heartbeat_fn=lambda: heartbeat(session_factory, worker_id,
                                                              phase="story_preparation")):

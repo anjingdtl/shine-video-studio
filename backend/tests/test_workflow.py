@@ -121,12 +121,18 @@ def worker_for(studio):
 
 def test_health_and_production_gate_requires_explicit_style_freeze(studio):
     client, _factory, _root = studio
+    from shine.main import _code_schema_head
+
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "shine-api",
         "render_provider": "mock",
         "h3_connected": False,
         "connection_probe": "not_run_use_system_status",
+        # The model-built test database has no Alembic revision: unknown, never "current".
+        "schema_revision": None,
+        "schema_head": _code_schema_head(),
+        "schema_up_to_date": None,
     }
     project_id = create_project(client)
     response = client.post(f"/api/v1/projects/{project_id}/style/freeze")

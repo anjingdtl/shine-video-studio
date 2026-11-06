@@ -101,23 +101,44 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
 
     stages: list[dict[str, Any]] = []
 
+    from shine.director.creative import brief_rows
+
+    briefs = brief_rows(db, project_id)
+    brief = briefs[0] if briefs else None
+
     # ① 创意与剧本: a confirmed outline, or an explicitly authored shot list.
+    #    An idea (creative brief) alone is not a script: it is the entry that
+    #    produces one, so the stage reports it without lighting up.
     script_done = bool(outline and outline.approved_at) or bool(shots)
+    if outline and outline.approved_at:
+        script_summary = f"大纲已确认（{outline.sha256[:8]}）"
+    elif shots:
+        script_summary = f"已手工建立 {len(shots)} 个分镜"
+    elif outline:
+        script_summary = "剧本大纲待确认"
+    elif document:
+        script_summary = f"已有剧本「{document.filename}」，待整理大纲"
+    elif brief and brief.approved_at:
+        script_summary = "创意简报已确认，等待生成剧本"
+    elif brief:
+        script_summary = "创意简报待确认"
+    else:
+        script_summary = "还没有剧本：输入想法或导入现成剧本"
     stages.append({
         "id": "script",
         "label": "创意与剧本",
         "done": script_done,
-        "summary": (
-            f"大纲已确认（{outline.sha256[:8]}）" if outline and outline.approved_at
-            else (f"已手工建立 {len(shots)} 个分镜" if shots else "还没有剧本")
-        ),
+        "summary": script_summary,
         "blockers": [] if script_done else [{"code": "SCRIPT_NOT_PREPARED",
-                                            "message": "导入剧本或直接建立分镜后才进入统稿"}],
+                                            "message": "输入想法生成剧本，或导入现成剧本并确认大纲"}],
         "facts": {
             "document_id": document.id if document else None,
             "document_sha256": document.sha256 if document else None,
+            "document_source": document.source_format if document else None,
             "outline_artifact_id": outline.id if outline else None,
             "outline_confirmed": bool(outline and outline.approved_at),
+            "brief_id": brief.id if brief else None,
+            "brief_confirmed": bool(brief and brief.approved_at),
         },
     })
 
@@ -162,7 +183,16 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     })
 
     # ③ 镜头拆解: every planned shot exists and its own requirements are bound.
+    #    A script-first plan is only storyboarded once it was materialised into
+    #    the shots its sections produced; until then the stage names the gap.
     shot_blockers: list[dict[str, Any]] = []
+    plan_mode = (plan.payload or {}).get("mode", "shots") if plan is not None else None
+    plan_materialized = bool(plan is not None and all(
+        episode.get("shot_ids") for episode in (plan.payload or {}).get("episodes", [])
+    ))
+    if plan is not None and plan_mode == "sections" and not plan_materialized:
+        shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
+                              "message": "按剧本分好的集还没有全部拆成镜头"})
     planned_shot_ids = plan_shot_order(plan) if plan is not None else [shot.id for shot in shots]
     by_id = {shot.id: shot for shot in shots}
     for shot_id in planned_shot_ids:
@@ -177,10 +207,11 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     stages.append({
         "id": "storyboard",
         "label": "镜头拆解",
-        "done": bool(shots) and not shot_blockers,
+        "done": bool(shots) and bool(planned_shot_ids) and not shot_blockers,
         "summary": f"{len(shots)} 个镜头" if shots else "还没有分镜",
         "blockers": shot_blockers,
-        "facts": {"shot_count": len(shots), "planned_shot_count": len(planned_shot_ids)},
+        "facts": {"shot_count": len(shots), "planned_shot_count": len(planned_shot_ids),
+                  "plan_mode": plan_mode, "plan_materialized": plan_materialized},
     })
 
     # ④ 导演包: a confirmed, non-stale package that is really startable now.

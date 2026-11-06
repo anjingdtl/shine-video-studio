@@ -274,6 +274,11 @@ class CreateJob(APIModel):
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
     output: OutputSpec | None = None
+    # Repair policy of the contract that owns this job.  ``None`` keeps the
+    # project default; a frozen director package sets both explicitly so the
+    # jobs of its run never inherit a later project-level change.
+    max_semantic_retries: int | None = Field(default=None, ge=0, le=20)
+    auto_repair: bool | None = None
 
     @model_validator(mode="after")
     def basic_scope_needs_resolution(self):

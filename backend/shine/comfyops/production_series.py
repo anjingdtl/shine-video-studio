@@ -158,6 +158,10 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
         self_review_scope=series.self_review_scope,
         basic_review_resolution=resolution,
         output=output,
+        # The frozen repair policy of the run that owns this series reaches
+        # every job, including the dependent shots the Worker queues later.
+        max_semantic_retries=series.max_semantic_retries,
+        auto_repair=series.auto_repair,
     )
 
 
@@ -272,6 +276,8 @@ def create_series(
         ),
         output_spec=body.output.model_dump(mode="json") if body.output else None,
         mock_scenario=body.mock_scenario.value,
+        max_semantic_retries=body.max_semantic_retries,
+        auto_repair=body.auto_repair,
         shot_count=len(shots),
         completed_count=0,
         finalization_state="NONE",
@@ -335,6 +341,27 @@ def _series_lease_is_alive(db, series: ProductionSeries, now) -> bool:
     return lease.status == "ACTIVE" and lease.expires_at is not None and lease.expires_at > now
 
 
+def _series_run_is_active(db, series: ProductionSeries) -> bool:
+    """Whether the whole-film run that owns this series still wants it to run.
+
+    A series dispatched by a run is an instrument of that run: while the run is
+    paused, cancelling or otherwise not producing, its series must not be
+    claimed behind the run's back.  A series without a run batch (the ordinary
+    single-series workflow) is always its own authority.
+    """
+    from shine.production.models import ProductionRun, ProductionRunBatch
+
+    owner = db.scalars(
+        select(ProductionRun.status)
+        .join(ProductionRunBatch, ProductionRunBatch.run_id == ProductionRun.id)
+        .where(ProductionRunBatch.series_id == series.id)
+        .limit(1)
+    ).first()
+    if owner is None:
+        return True
+    return owner in ("QUEUED", "RUNNING")
+
+
 def claim_series(session_factory, worker_id: str, *, lease_seconds: int = SERIES_LEASE_SECONDS):
     """Atomically take ownership of one claimable series.
 
@@ -365,7 +392,9 @@ def claim_series(session_factory, worker_id: str, *, lease_seconds: int = SERIES
         ).all()
         target = next(
             (row for row in rows
-             if _series_is_stale(row, now) and not _series_lease_is_alive(db, row, now)),
+             if _series_is_stale(row, now)
+             and not _series_lease_is_alive(db, row, now)
+             and _series_run_is_active(db, row)),
             None,
         )
         if target is None:
@@ -408,7 +437,7 @@ def renew_series(session_factory, series_id: str, worker_id: str, *, lease_secon
         series = db.get(ProductionSeries, series_id)
         if series is None or series.worker_id != worker_id:
             return False
-        if series.status not in {"RUNNING", "PAUSE_REQUESTED"}:
+        if series.status not in {"RUNNING", "PAUSE_REQUESTED", "CANCEL_REQUESTED"}:
             return False
         series.heartbeat_at = now
         series.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -835,11 +864,26 @@ def run_production_series(
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)
         _sync_items(db, series)
+        if series is not None and series.status == "CANCEL_REQUESTED":
+            # The run asked for a cancellation.  The current submission has
+            # settled and the managed loop released the renderer, so the series
+            # reaches its terminal cancellation now — never a blind stop above.
+            for item in _items(db, series_id):
+                if item.status in {"PENDING", "QUEUED"}:
+                    item.status = "CANCELLED"
+                    item.failure_code = "RUN_CANCELLED"
+                    job = db.get(Job, item.job_id) if item.job_id else None
+                    if job is not None and job.status == "QUEUED":
+                        job.stale = True
+            _set_series_state(db, series_id, worker_id, status="CANCELLED", failure_code="RUN_CANCELLED")
+            cancel_orders_for_series(db, series_id)
+            return {"status": "CANCELLED", "shots": shots}
         if series is not None and series.status == "PAUSE_REQUESTED":
             # The user asked for a pause.  The finished shots stay, the rest of
             # the series stays claimable, and the renderer and the lease are
             # released by the managed loop.
             _set_series_state(db, series_id, worker_id, status="PAUSED", failure_code=None)
+            series.control_reason = series.control_reason or "USER_PAUSED"
             return {"status": "PAUSED", "shots": shots}
         item, job = _next_runnable_item(db, series_id)
         blocked = [row for row in _items(db, series_id) if row.status == "BLOCKED"]

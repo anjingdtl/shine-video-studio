@@ -6,10 +6,11 @@ import {
 import {
   API, ApiError, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
-  listDirectorPackages, listEpisodePlans, listProductionRuns,
+  listDirectorPackages, listEpisodePlans, listProductionRuns, materializeEpisodePlan,
   type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness, type ProductionRun,
   type RunEvent, type WorkflowProfile,
 } from '../api';
+import { EpisodePostEditor } from './EpisodePostEditor';
 
 type Mode = 'package' | 'run' | 'post';
 
@@ -93,13 +94,24 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
   const [episodePage, setEpisodePage] = useState(0);
   const mounted = useRef(true);
 
-  // 没有镜头时服务端会拒绝生成分集；按钮先禁用，别让人点出一个错误。
+  // 剧本统筹先分集：大纲确认后即可按场次分集，不需要先有镜头；
+  // 已手工建好的镜头列表仍可用兼容入口按镜头分组。
   const shotCount = Number(
     (journey?.stages.find((stage) => stage.id === 'storyboard')?.facts?.['shot_count'] as number | undefined)
     ?? 0,
   );
+  const outlineConfirmed = Boolean(
+    journey?.stages.find((stage) => stage.id === 'script')?.facts?.['outline_confirmed'],
+  );
+  const [planEntry, setPlanEntry] = useState<'sections' | 'shots'>('sections');
+  const planMode: 'sections' | 'shots' = outlineConfirmed
+    ? (shotCount > 0 ? planEntry : 'sections')
+    : 'shots';
+  const canPlan = planMode === 'sections' ? outlineConfirmed : shotCount > 0;
   const latestPlan = plans[0] ?? null;
   const confirmedPlan = plans.find((row) => row.status === 'CONFIRMED') ?? null;
+  const latestPlanIsSections = latestPlan?.payload.mode === 'sections';
+  const latestPlanMaterialized = !!latestPlan && latestPlan.payload.episodes.every((row) => row.shot_ids.length > 0);
   const latestPackage = packages[0] ?? null;
   const activeRun = run;
 
@@ -169,8 +181,13 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
     }
   }
 
-  const derivePlan = () => act('plan', () => createEpisodePlan(projectId, targetSeconds, toleranceSeconds),
-    '已生成分集方案草案，请核对后确认');
+  const derivePlan = () => act('plan', () => createEpisodePlan(projectId, targetSeconds, toleranceSeconds, planMode),
+    planMode === 'sections' ? '已按剧本场次生成分集草案，请核对后确认' : '已按镜头生成分集草案，请核对后确认');
+  const materializePlan = () => {
+    if (!latestPlan) return;
+    return act('plan-materialize', () => materializeEpisodePlan(projectId, latestPlan.version),
+      '分集已落到各场次实际拆出的镜头，请核对后确认这一版');
+  };
   const confirmPlan = () => {
     if (!latestPlan) return;
     return act('plan-confirm', () => confirmEpisodePlan(projectId, latestPlan.version, latestPlan.sha256),
@@ -228,9 +245,15 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div>
             <div className="section-kicker">① 分集方案</div>
             <h2>每集大约多长，由你定</h2>
-            <p>分集只在镜头之间切，不会把一场戏或一句对白拦腰截断；超长的一集会如实标注原因。</p>
+            <p>先按已确认剧本的场次分集，再逐集拆镜头：分集只在场次之间切，不会把一场戏或一句对白拦腰截断；超长的一集会如实标注原因。</p>
           </div>
           <div className="run-head-actions">
+            {outlineConfirmed && shotCount > 0 && <label className="run-inline-field">分集依据
+              <select value={planEntry} onChange={(event) => setPlanEntry(event.target.value as 'sections' | 'shots')}>
+                <option value="sections">按剧本场次（推荐）</option>
+                <option value="shots">按已有镜头分组（兼容）</option>
+              </select>
+            </label>}
             <label className="run-inline-field">每集目标
               <input type="number" min={8} max={3600} value={targetSeconds}
                 onChange={(event) => setTargetSeconds(Number(event.target.value) || 60)} />
@@ -241,38 +264,46 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
                 onChange={(event) => setToleranceSeconds(Number(event.target.value) || 0)} />
               <span>秒</span>
             </label>
-            <button className="secondary-button" disabled={busy !== '' || shotCount === 0}
-              title={shotCount === 0 ? '先在「镜头拆解」建立分镜，才有镜头可分集' : '按镜头顺序覆盖全部分镜'}
+            <button className="secondary-button" disabled={busy !== '' || !canPlan}
+              title={canPlan ? (planMode === 'sections' ? '按已确认剧本的场次分集，每场恰好一次' : '按镜头顺序覆盖全部分镜')
+                : '先在「创意与剧本」确认剧本大纲'}
               onClick={derivePlan}>
               <Sparkles size={13} /> 生成分集草案
             </button>
           </div>
         </div>
 
-        {shotCount === 0 && !latestPlan && <p className="empty-inline">
-          还没有分镜可拆。先在「镜头拆解」建立镜头，再回来生成分集。
+        {!canPlan && !latestPlan && <p className="empty-inline">
+          还没有已确认的剧本大纲。先在「创意与剧本」输入想法或导入剧本，并确认大纲，再回来按场次分集。
         </p>}
 
         {latestPlan ? <div className="run-plan-summary">
           <div>
-            <b>第 {latestPlan.version} 版 · {latestPlan.payload.episodes.length} 集</b>
+            <b>第 {latestPlan.version} 版 · {latestPlan.payload.episodes.length} 集
+              {latestPlanIsSections ? ' · 按剧本场次' : ' · 按镜头'}</b>
             <span>{statusText(latestPlan.status)} · 目标 {latestPlan.payload.target_seconds} 秒
               ± {latestPlan.payload.tolerance_seconds} 秒 · {latestPlan.sha256.slice(0, 8)}</span>
           </div>
           {latestPlan.status !== 'CONFIRMED' && <button className="must-button" disabled={busy !== ''} onClick={confirmPlan}>
             <Check size={13} /> 确认分集方案
           </button>}
+          {latestPlanIsSections && !latestPlanMaterialized && <button className="secondary-button" disabled={busy !== ''}
+            title="各场次在「镜头拆解」应用分镜后，把每集落到它们真实拆出的镜头"
+            onClick={materializePlan}>
+            把分集落到镜头
+          </button>}
           {confirmedPlan && confirmedPlan.version !== latestPlan.version && <span className="run-hint">
             当前确认的是第 {confirmedPlan.version} 版；这一版确认后会取代它。
           </span>}
-        </div> : <p className="empty-inline">还没有分集方案。先生成草案——它会按镜头顺序覆盖全部镜头，不重不漏。</p>}
+        </div> : canPlan && <p className="empty-inline">还没有分集方案。先生成草案——它会覆盖全部场次（或全部镜头），不重不漏。</p>}
 
         {latestPlan && <ol className="run-episode-plan">
           {latestPlan.payload.episodes.map((episode) => <li key={episode.episode_id}>
             <span className="run-ep-no">{episode.order}</span>
             <div>
               <b>{episode.title}</b>
-              <span>{episode.shot_ids.length} 镜 · 计划 {seconds(episode.planned_seconds)}</span>
+              <span>{latestPlanIsSections ? `${episode.section_ids?.length ?? 0} 场 · ` : ''}
+                {episode.shot_ids.length ? `${episode.shot_ids.length} 镜` : '待拆镜头'} · 计划 {seconds(episode.planned_seconds)}</span>
               {episode.boundary_note && <em>{episode.boundary_note}</em>}
             </div>
           </li>)}
@@ -461,6 +492,8 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
             <Video size={12} />
             <span>{episode.title || episode.episode_id} · {seconds(episode.actual_seconds)} · 待你确认</span>
             <code>{episode.delivered_sha256?.slice(0, 10)}</code>
+            {mode === 'post' && <EpisodePostEditor runId={activeRun.id} episode={episode}
+              onDone={(text, kind) => { onMessage(text, kind); if (kind === 'success') load().catch(() => undefined); }} />}
           </li>)}
         </ul>
       </section>}
