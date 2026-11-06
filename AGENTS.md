@@ -740,3 +740,31 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 证据：`docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md`；
   回归：`backend/tests/test_story_preparation.py`（含 4 条新反例）、
   `backend/tests/test_advisory_queue.py`（审片释放失败不终止 Worker）。
+
+## 2026-11-07 第 7 轮（场景底图全量入库 + 两处导演提示词缺陷修复）
+
+- **无剪辑表场景的导演提示词必须禁止 same-beat cuts**：`validate_output` 要求每个 cut 窗口
+  覆盖所涉 beat 的全部台词，而旧提示词从未约束无 `editorial_timing_plan` 时的 cuts，模型把
+  一个 beat 剪成 2.5/4.2/6.5/8.5s 的碎片，`EDITORIAL_TIMING_CONFLICT` 永远不可自愈（S3 连续
+  4 次，抓包实证）。修复：无剪辑表时"一 beat 一 shot、禁用 cuts、cut 只折叠更晚的 beat"。
+  无声场景能通过不构成反证——它们只是没有台词。
+- **台词说话方=必须绑定的人物**：服务器把 dialogue speaker 计入 required_characters，
+  旧提示词只要求"出场人物"。修复：说话方即使从不露面，其已批准主素材也必须出现在该片段
+  `asset_ids`（S8 三次 `CHARACTER_MASTER_BINDING_REQUIRED` 实证）。
+  以上两处回归都在 `backend/tests/test_crew_prompt_contract.py`；真实链以 S3/S8
+  "修前连败、修后一次过"验证。证据：`docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md`。
+- **仅声音的说话实体**（如念名单的"广播"）产品未建模：`_character_coverage` 按人物名解析
+  必然 409。本轮把该实体按 character 家族建单场素材计划（视觉=舱壁铜质号角喇叭特写），
+  promote 为 entity_id=`广播` 的主素材，如实地满足"说话方必须可绑定"的门禁。
+- **多人物/多参考项目要宽方案并真实校验**：本项目注册了已提交的
+  `config/workflows/ref2va-pdd8-6img.json`（1 subject + 5 picture，image-only 传输族），
+  真实渲染器 `live_object_info` 校验 `missing_nodes=[]`。第二人物按既有语义绑成 picture
+  参考是合法答案（真实镜头 96c6d395 已验证）。
+- 台账进度（数据目录 `.local-acceptance/live-browser`）：主素材 39（26 场景底图 + 6 人物 +
+  原有 7），orders 1–8/10/11 共 30 镜头已应用；订单 9 卡在 apply-camera 422
+  （`ShotSpec` 校验错，日志截断了字段名，camera artifact `529c502d`），12–21 未跑。
+  接手细节与逐条处理见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §5。
+- **候选评审口径**：候选图逐一与台账 `content_sha256` 比对（32/32 一致）+ VLM 目检；
+  拼版自绘编号不是水印、码头系缆桩不是人影——复核原图再下结论，不要把拼版标注当缺陷。
+- 本轮未改 `worker.py`/`preproduction.py`，不触发 `client_review_identity` 重校准义务；
+  VLM 正负校准仍未做，不得声称已校准。

@@ -279,7 +279,10 @@ def crew_prompt(
             parts.append(reference_budget_note)
         parts.append(
             "List the character masters of a shot in the order the shot's beats list their "
-            "characters, so the compiled prompt states the cast order of that segment."
+            "characters, so the compiled prompt states the cast order of that segment. "
+            "A dialogue speaker owns its line even when it never appears on screen: the approved "
+            "character master of EVERY speaker whose line a segment contains must be in that "
+            "segment's asset_ids, exactly as for a visible character."
         )
         if repair_director:
             parts.append(
@@ -334,7 +337,12 @@ def crew_prompt(
             parts.append(
                 "Set each shot's duration_s long enough to contain the latest dialogue end_s in its beat "
                 "plus a short natural tail. Dialogue timecodes are local to each beat, not cumulative. "
-                "Do not shorten a shot below its spoken dialogue."
+                "Do not shorten a shot below its spoken dialogue. "
+                "Without an editorial_timing_plan, use exactly one shot per beat, in beat order, and "
+                "return no cuts at all: a cut folds a LATER beat into the same render segment, so never "
+                "cut back to the segment's own opening beat and never address one beat twice. Cutting a "
+                "single beat into fragments gives its dialogue a window shorter than the line, which the "
+                "server rejects."
             )
     if role == "continuity_supervisor":
         parts.append(

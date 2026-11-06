@@ -225,6 +225,10 @@ def test_without_a_cut_table_the_director_may_still_give_a_dialogue_a_tail():
     prompt = crew_prompt("director", tool="propose")
     assert "plus a short natural tail" in prompt
     assert "A shot's duration_s is fixed by the plan" not in prompt
+    # Without a computed plan the model previously fragmented one beat into
+    # several same-beat cuts, which the dialogue-window check always rejects.
+    assert "use exactly one shot per beat, in beat order, and return no cuts at all" in prompt
+    assert "never address one beat twice" in prompt
 
 
 def test_the_director_prompt_states_the_official_reference_rules():
@@ -232,6 +236,9 @@ def test_the_director_prompt_states_the_official_reference_rules():
     assert "approved prop or other master materially depicted" in prompt
     assert "shots[].cuts[].visual_description" in prompt
     assert "never list style or last-frame reference images as shot references" in prompt
+    # The server treats a dialogue speaker as a required bound character even
+    # when it never appears on screen; the prompt must say the same thing.
+    assert "master of EVERY speaker whose line a segment contains" in prompt
 
 
 # --- the chain --------------------------------------------------------------------
