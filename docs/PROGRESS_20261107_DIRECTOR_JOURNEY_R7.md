@@ -132,6 +132,7 @@ materialize v2 → 导演包（宽方案、1024×576）→ confirm → productio
 
 - 三条子任务都没有 `request_identity`、provider task id、HTTP status、provider code 或 `received_result_sha256`；`automatic_replay=false`。订单 18/19/20 的父任务经过最多 3 次受限 resume 后仍然 `NEEDS_REVIEW`，没有可应用的 camera artifact。
 - 因无法取得 provider 侧结果，本轮通过产品路由 `POST /api/v1/projects/{P}/film-runs/{task_id}/abandon-remote-response`，每次先签发一次性 `model_reconcile` grant；由受托 `local-user` 写明证据后，三个子任务均返回 `ABANDONED / external_outcome=UNKNOWN / automatic_replay=false`。这是放弃丢失响应的审计动作，不代表证明未发送或成功，也没有重发请求。
+- 后续只读复核 SQLite：三条记录仍均为 `ABANDONED`、`LLM_TIMEOUT`、`external_outcome=UNKNOWN`，`phase=WAITING_PROVIDER`，无 response id/hash。`WAITING_PROVIDER` 在 `provider.complete(...)` 前立即持久化；OpenAI-compatible transport 对 `LLM_TIMEOUT` 的映射是超时但未收到回复并标记 `UNKNOWN`，而连接建立前失败才会标记 `NOT_SENT`。因此不能用该 phase 推导 `NOT_SENT_PROVEN`；现有局部 reconciliation 逻辑也把 `WAITING_PROVIDER` 排除在 pre-request phases 外。没有可采信的新证据改变三段状态。
 - 不得通过改 continuity fact 另建近似任务来绕过这三条 UNKNOWN。只有服务端/提供方能给出可信 reconciliation 证据，或将来出现能证明 `NOT_SENT_PROVEN` 的新证据，才可继续相应段落。
 
 ### 7.4 materialize 与整片 Run
