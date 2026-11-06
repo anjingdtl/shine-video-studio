@@ -262,3 +262,33 @@ def test_no_reviewer_route_is_recorded_as_unavailable_not_faked(passed_job):
         assert all(task.trace.get("outcome") == "unavailable" for task in tasks)
         job = db.get(Job, passed_job["job_id"])
         assert job.status == "PASSED"
+
+
+class UnreleasableVLM(FakeVLM):
+    """A reviewer that answers but whose weights cannot be released."""
+
+    def release_models(self):
+        raise ConnectionError("review service is gone")
+
+
+def test_an_unreleasable_reviewer_is_recorded_and_never_stops_the_worker(passed_job, monkeypatch):
+    from shine.quality import advisory_queue
+
+    # The physical probe is not the subject here: the audit write is.
+    monkeypatch.setattr(advisory_queue, "_physical_memory_ready", lambda _gpu: True)
+    _enqueue(passed_job)
+    processed = run_pending_advisory_reviews(
+        passed_job["factory"], "test-worker", settings=passed_job["settings"],
+        semantic_reviewer=UnreleasableVLM(), asr_reviewer=None, limit=1,
+    )
+    assert processed >= 1
+    from shine.models import AuditEvent
+
+    with passed_job["factory"]() as db:
+        rows = db.query(AuditEvent).filter(
+            AuditEvent.event_type == "ADVISORY_REVIEW_RELEASE_FALLBACK").all()
+        assert rows, "the fallback must be recorded"
+        for row in rows:
+            # A null entity id used to abort the whole tick with a NOT NULL error.
+            assert row.entity_id
+            assert row.payload["errors"]

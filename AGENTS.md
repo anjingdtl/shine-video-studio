@@ -699,3 +699,44 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   证据：`docs/ACCEPTANCE_20261106_CROSS_SERIES_CONTINUITY.md`。
   **改动 `worker.py` / `preproduction.py` 后仍必须重新做真实正负校准**；本轮因本机 8B 推理未在
   验收窗口内结束而未完成新 revision，旧 revision 不得复用，也不得据此声称已重新校准。
+
+## 2026-11-06 接手轮（导演模式解阻 + 本机真实 H3 出片）
+
+- **本地调用不得继承宿主代理**。本机 `HTTP_PROXY` 指向一个会替 `/health` 返回 404 的代理，
+  而 `LocalReviewRelease.release_models()` 与审片客户端都继承了它：前者使"模型已释放"的
+  证明永远不成立（租约因此永久阻塞），后者会把一次长推理交给代理。凡是**已证明为环回**的
+  端点一律 `trust_env=False`；远端审片仍走宿主代理。证据与复现见
+  `docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md` §2.1。
+- **中断的子调用必须能被证据判死**。`reconcile` 不再是空操作：产物已落库 → 采用；子调用停在
+  `PREPARING / WAITING_RESOURCE / PREPARING_PROVIDER`（网关在真正调用前才写
+  `WAITING_PROVIDER`）→ 判 `NOT_SENT_PROVEN`，注销为 `SUPERSEDED` 并**释放唯一的
+  `request_identity`**（否则新请求 `IntegrityError`）；可能已发出 → `UNCONFIRMABLE`，保持阻塞。
+  `FAILED`（有回答但被合同拒绝）走有上限的 `FAILED_RETRY_ALLOWED`（每场 2 次）。
+  注销的行是历史，不是答案：`prepare_scenes` 的复用查询必须排除 `SUPERSEDED`。
+- **有疑问的大纲需要用户决定，而不是无限重生成**。`confirm` 接受
+  `acknowledge_questions_sha256`（由 `GET story-preparation` 提供，绑定当前问题列表）；
+  没有它或与当前问题不符仍然 409。确认审计记录 `questions_acknowledged`，artifact 的
+  payload/sha256 不改写。悬疑剧本里"问题"是创作意图，不是缺陷。
+- **方案的参考槽位是有限资源**：`local-h3-ref2va-pdd8-2img-1aud` 只有 1 个 `reference_subject`
+  与 1 个 `reference_picture` 槽。两个人物时第二个必须绑成 `picture`（编译器同样为它生成
+  `<Picture n>` 标签），否则 `PENDING_WORKFLOW_MAPPING`。多人物镜头要用更宽的方案。
+- **中文 Style Bible 不能直接进 H3 提示词**：手工镜头必须自带英文 `prompt_style`
+  （七维转写），否则 `H3_ENGLISH` 在提交前拒绝。分镜链产出的镜头本来就有英文 `prompt_style`。
+- **启动阶段失败的 H3 租约会死锁**：`release_dead_renderer_lease` 对有 attempt 的任务保守拒绝，
+  而 `operator/jobs/{id}/abandon` 要求 `H3_LEASE_STILL_ACTIVE` 先解除。当前唯一出口是重启
+  工作台触发启动对账（本轮实测有效）。修这个死锁时不得放宽"有外部提交就必须对账"的前提。
+- **素材计划无法跨场合并同一人物**：同一人物在不同场有不同外观描述时，
+  `MATERIAL_IDENTITY_AMBIGUOUS` 直接拒绝整份计划，而产品没有"合并同一人物"的用户动作。
+  可用的收敛方式：只对**单场**建计划（导演模式"准备所选段落的素材清单"即此语义），
+  或让场次准备产出统一名字。
+- 本轮真实出片（唯一一镜）：job `aa8baa09…`，prompt `72738f4e…`，artifact
+  `92b862e6…`（1024×576 / 24fps / 158 帧 / 6.583 s / h264+AAC），`ffmpeg -f null -` 解码 0 错，
+  technical `passed`、final `needs_review`、`acceptance_status=pending_review`。
+  **不是** 20 段成片，也**不是**验收通过。
+- **审计写入必须有真实实体**：审片释放失败的 `ADVISORY_REVIEW_RELEASE_FALLBACK` 曾把
+  `entity_id` 传 `None`，`NOT NULL` 直接终止 Worker 主循环（出片完成后一秒后台"卡死"、
+  显卡空闲）。任何 worker 路径里的审计/记账写入都必须挂在一个存在的 id 上，并且
+  自身失败不得结束这一拍。
+- 证据：`docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md`；
+  回归：`backend/tests/test_story_preparation.py`（含 4 条新反例）、
+  `backend/tests/test_advisory_queue.py`（审片释放失败不终止 Worker）。

@@ -796,8 +796,10 @@ def run_pending_advisory_reviews(factory, worker_id: str, *, settings, semantic_
                     pass
         used_kinds: set[str] = set()
         release, release_errors = _release_callback(reviewers, used_kinds, gpu_uuid)
+        lease_id = None
         try:
             with resource_slot(factory, "review", budget, release_models=release) as _lease_id:
+                lease_id = _lease_id
                 processed += _review_one(factory, settings, task_id, reviewers, used_kinds)
                 # Continue the batch only while no H3 work is waiting and the
                 # same reviewer process can be reused without reloading weights.
@@ -813,11 +815,18 @@ def run_pending_advisory_reviews(factory, worker_id: str, *, settings, semantic_
             _defer_task(factory, task_id, type(exc).__name__)
             break
         if release_errors:
-            with factory.begin() as db:
-                add_audit(
-                    db, "comfy-worker", "ADVISORY_REVIEW_RELEASE_FALLBACK", "resource_lease",
-                    None, {"errors": release_errors[:4]},
-                )
+            # An advisory reviewer that cannot release its weights is evidence,
+            # not a reason to stop the Worker: this write used to pass a null
+            # entity id, which aborted the whole tick (and the Worker) with a
+            # NOT NULL constraint right after a shot had rendered.
+            try:
+                with factory.begin() as db:
+                    add_audit(
+                        db, "comfy-worker", "ADVISORY_REVIEW_RELEASE_FALLBACK", "agent_task",
+                        task_id, {"errors": release_errors[:4], "lease_id": lease_id},
+                    )
+            except Exception:  # noqa: BLE001 - recording the failure must not fail the tick
+                pass
         # If the same physical reviewer process is not needed for another
         # queued item, release its weights before returning to H3 production.
         with factory() as db:

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, json } from '../api';
 
 type Section = { production_section_id: string; order: number; title: string; start_offset: number; end_offset: number; estimated_duration_s: number };
-type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: boolean; payload: {
+type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: boolean; questions_sha256?: string | null; payload: {
   summary: string; story_line: string[]; timeline: string[]; relationships: string[]; locked_facts: string[];
   characters: { name: string; entity_id: string; stable_identity: string }[];
   questions: string[]; production_sections: Section[];
@@ -11,7 +11,27 @@ type TaskSummary = { stage: string; label: string; done: number; total: number; 
   lease_expires_at: string | null; awaiting_reclaim: boolean; lease_remaining_s: number | null };
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
   outline: Outline | null; summary?: TaskSummary;
-  progress: { stage: string; cursor: number; results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
+  progress: { stage: string; cursor: number; blocked_subtasks?: { status?: string; reconciliation?: string }[];
+    reconciliation?: { checked_at: string; outcomes: { subtask_id: string | null; outcome: string; last_phase?: string | null }[] };
+    results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
+
+// A block is only decided when the reconciliation gave it an outcome: a
+// subcall that may already have reached the provider keeps waiting for the
+// person, and the system never asks again on its own.
+const UNDECIDED = new Set(['RUNNING', 'NEEDS_REVIEW', 'FAILED']);
+const resumable = (blocked?: { status?: string }[]) => (blocked ?? []).every((item) => !UNDECIDED.has(item?.status ?? ''));
+const RECONCILE_LABELS: Record<string, string> = {
+  RESULT_ADOPTED: '已有产物，直接采用',
+  NOT_SENT_PROVEN: '可证明从未发出，已注销该次请求',
+  UNCONFIRMABLE: '可能已经发出、结果未知，需要你决定是否明确重发',
+  NO_SUBCALL: '没有可核对的子请求',
+  SUBTASK_RECORD_MISSING: '子任务记录已不存在',
+};
+function reconciliationNote(view?: StoryTask['progress']['reconciliation']) {
+  if (!view?.outcomes?.length) return '';
+  const lines = view.outcomes.map((item) => RECONCILE_LABELS[item.outcome] ?? item.outcome);
+  return `核对结果：${lines.join('；')}。`;
+}
 const TASK_STATUS_LABELS: Record<string, string> = {
   QUEUED: '排队中', RUNNING: '进行中', SUCCEEDED: '已完成', NEEDS_REVIEW: '需要你处理',
   FAILED: '失败', PAUSED: '已暂停', CANCELLED: '已取消',
@@ -81,9 +101,17 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           <ul>{outline.payload.locked_facts.map((f, i) => <li key={i}>{f}</li>)}</ul>
           <p>摘要不替代原文；下面每段固定原文 Unicode 偏移，正式分镜读取对应原文。</p>
         </details>
-        {outline.payload.questions.length > 0 && <p role="alert">仍有待确认事实：{outline.payload.questions.join('；')}。补充锁定事实后重新生成大纲。</p>}
+        {outline.payload.questions.length > 0 && <div role="alert">
+          <p>仍有待确认事实：{outline.payload.questions.join('；')}。</p>
+          <p>补充锁定事实后重新生成大纲；如果这些疑问是你有意保留的悬念（悬疑剧本常见），可以按当前设定确认，确认记录会写下你接受的全部疑问。</p>
+        </div>}
         {!outline.approved && <button type="button" disabled={busy || outline.stale || !!outline.payload.questions.length}
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', { expected_sha256: outline.sha256 })))}>确认这版总体大纲</button>}
+        {!outline.approved && !!outline.payload.questions.length && <button type="button" className="must-button"
+          disabled={busy || outline.stale || !outline.questions_sha256}
+          onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', {
+            expected_sha256: outline.sha256, acknowledge_questions_sha256: outline.questions_sha256,
+          })))}>按当前设定确认（这些疑问保留为悬念）</button>}
         <div className="media-grid">
           {outline.payload.production_sections.map((section) => {
             const carry = carryover[section.production_section_id];
@@ -126,10 +154,12 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
             && <small>Worker 正在推进（本次接管有效期还剩约 {Math.ceil(task.summary.lease_remaining_s / 60)} 分钟）</small>}
         </div>}
         {task.error_code && <p>需要处理：{task.error_code}。核对原任务后再恢复，未知结果不会自动重发。</p>}
+        {reconciliationNote(task.progress.reconciliation) && <p className="run-reconcile">{reconciliationNote(task.progress.reconciliation)}</p>}
         {['QUEUED', 'RUNNING'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/pause`, json('POST', { expected_state_version: task.state_version })))}>暂停任务</button>}
         {['PAUSED', 'FAILED', 'NEEDS_REVIEW'].includes(task.status) && <>
           <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/reconcile`, json('POST', { expected_state_version: task.state_version })))}>核对已有结果</button>
-          <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
+          <button type="button" disabled={busy || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
+          {!resumable(task.progress.blocked_subtasks) && <small>有子任务可能已经发出、结果未知：只能由你明确重发这一场，系统不会自行重发。</small>}
         </>}
         {!['SUCCEEDED', 'CANCELLED'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/cancel`, json('POST', { expected_state_version: task.state_version })))}>取消后续工作</button>}
         {task.progress.results?.map((result, i) => <div key={i}>

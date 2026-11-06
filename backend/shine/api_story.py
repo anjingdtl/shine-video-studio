@@ -93,10 +93,17 @@ def _task_summary(row):
 def public_task(db, row):
     trace = row.trace
     outline = db.get(AgentArtifact, trace.get("outline_artifact_id")) if trace.get("outline_artifact_id") else None
+    questions = list(outline.payload_json.get("questions") or []) if outline else []
     return {"task_id": row.id, "role": row.role_id, "status": row.status, "state_version": row.state_version,
             "error_code": row.error_code, "progress": trace, "summary": _task_summary(row),
             "outline": {"artifact_id": outline.id, "sha256": outline.sha256, "payload": outline.payload_json,
-                        "approved": bool(outline.approved_at), "stale": outline.stale} if outline else None}
+                        "approved": bool(outline.approved_at), "stale": outline.stale,
+                        # What the person is acknowledging, so the workbench can
+                        # offer an explicit confirmation instead of an endless
+                        # "add more facts" loop on a script that is deliberately
+                        # ambiguous.
+                        "questions_sha256": digest({"artifact": outline.id, "questions": questions})
+                        if questions else None} if outline else None}
 
 
 @router.get("/projects/{project_id}/story-preparation")
@@ -110,6 +117,12 @@ def preparation_state(project_id: str, db: DBSession, document_id: str | None = 
 
 class OutlineApproval(APIModel):
     expected_sha256: str = Field(min_length=64, max_length=64)
+    #: A script may legitimately keep an ambiguity (a mystery whose answer is
+    #: the point).  The gate still refuses a silent confirmation, but the person
+    #: who wrote the script can state, once, which open questions are intended:
+    #: the acknowledgement names the exact question list it was given for, and
+    #: the confirmed artifact records it.
+    acknowledge_questions_sha256: str | None = Field(default=None, min_length=64, max_length=64)
 
 
 @router.post("/projects/{project_id}/story-preparation/outlines/{artifact_id}/confirm")
@@ -119,15 +132,21 @@ def confirm_outline(project_id: str, artifact_id: str, body: OutlineApproval, ac
             or row.sha256 != body.expected_sha256 or row.sha256 != digest(row.payload_json)):
         raise HTTPException(409, "STORY_OUTLINE_CHANGED")
     _document(db, project_id, row.payload_json["document_id"], row.payload_json["document_sha256"])
-    if row.payload_json.get("questions"):
-        raise HTTPException(409, "STORY_OUTLINE_QUESTIONS_REQUIRE_FACTS")
+    questions = list(row.payload_json.get("questions") or [])
+    if questions:
+        expected = digest({"artifact": row.id, "questions": questions})
+        if body.acknowledge_questions_sha256 != expected:
+            raise HTTPException(409, "STORY_OUTLINE_QUESTIONS_REQUIRE_FACTS")
     was_approved = bool(row.approved_at)
     if not was_approved:
         row.approved_by, row.approved_at = actor, utcnow()
     changed = story.select_outline_revision(db, project_id, row)
     if changed or not was_approved:
         add_audit(db, actor, "STORY_OUTLINE_CONFIRMED", "agent_artifact", row.id,
-                  {"sha256": row.sha256, "invalidated_section_ids": changed}, project_id=project_id)
+                  {"sha256": row.sha256, "invalidated_section_ids": changed,
+                   # The artifact payload is immutable and stays checked against
+                   # its own digest, so the accepted ambiguity is recorded here.
+                   "questions_acknowledged": questions or None}, project_id=project_id)
     db.commit()
     return {"artifact_id": row.id, "approved": True}
 
@@ -288,13 +307,27 @@ def control(project_id: str, task_id: str, action: str, body: TaskControl, actor
         raise HTTPException(409, "STORY_TASK_STATE_CHANGED")
     blocked = row.trace.get("blocked_subtasks", [])
     if action == "reconcile":
-        return {**public_task(db, row), "resubmitted": False,
-                "note": "查询现有子任务与产物；没有外部查询凭据的 UNKNOWN 保持待核对，不重发。"}
+        if row.status == "RUNNING" and row.lease_expires_at and row.lease_expires_at > utcnow():
+            raise HTTPException(409, "STORY_TASK_STILL_RUNNING")
+        result = story.reconcile_blocked_subtasks(db, row, actor)
+        db.commit()
+        return {**public_task(db, row), "resubmitted": False, "reconciliation": result,
+                "note": "按证据核对每个阻塞子任务：已落库的产物直接采用；能证明请求从未发出的子任务"
+                        "标记为未发送并注销；可能已发出的保持待核对，绝不自动重发。"}
     if action == "resume" and any(s.get("status") in {"RUNNING", "NEEDS_REVIEW"} for s in blocked):
         raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_RECONCILIATION_REQUIRED")
     if row.status in {"SUCCEEDED", "CANCELLED"}:
         return public_task(db, row)
     row.status = {"pause": "PAUSED", "cancel": "CANCELLED", "resume": "QUEUED"}[action]
+    if action in {"resume", "pause"}:
+        # The last failure belongs to the run that ended, not to this one; a
+        # resumed task that still shows "需要处理：IntegrityError" reads like it
+        # is broken while it is queued again.
+        row.error_code = None
+    if action == "resume":
+        # The blocks were decided by the reconciliation above; keeping them
+        # would make the next successful step report the old reason again.
+        row.trace = {**row.trace, "blocked_subtasks": []}
     row.state_version += 1
     row.lease_owner, row.lease_expires_at = None, None
     add_audit(db, actor, f"STORY_TASK_{action.upper()}", "agent_task", row.id, project_id=project_id)

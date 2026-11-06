@@ -22,7 +22,7 @@ from shine.schemas import (
     StyleBible,
     StyleInputCheck,
 )
-from shine.security import require_loopback_url
+from shine.security import is_loopback_url, require_loopback_url
 
 
 class ReceivedReviewError(ValueError):
@@ -390,7 +390,13 @@ class OpenAICompatibleVisionReviewer:
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "shine_visual_review", "strict": True, "schema": schema,
             }}
-        with httpx.Client(timeout=self.config.timeout_s, trust_env="X-Shine-Handoff-Token" not in headers) as client:
+        # A loopback reviewer is reached directly.  Handing a local review
+        # request to the host's HTTP proxy made a real 8B review hang for over
+        # an hour on this machine: the proxy accepted the connection and never
+        # completed the long constrained-decoding request.  Remote reviewers
+        # keep the environment proxy, because that is often the only route out.
+        trust_proxy = "X-Shine-Handoff-Token" not in headers and not is_loopback_url(self.config.base_url)
+        with httpx.Client(timeout=self.config.timeout_s, trust_env=trust_proxy) as client:
             response = client.post(self._endpoint(), headers=headers, json=payload)
         if response.status_code >= 400:
             if response_protocol and response.status_code < 500:
@@ -520,7 +526,11 @@ class LocalReviewRelease:
         headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
         # An unavailable cleanup must promptly retain the resource lease for
         # reconciliation; waiting another full inference timeout proves nothing.
-        with httpx.Client(timeout=min(self.config.timeout_s, 30.0), follow_redirects=False) as client:
+        # The endpoint is proven loopback above, so the host's HTTP proxy must
+        # never be consulted for this proof: a proxy that answers 404 for
+        # ``/health`` would report a resident model as unreleasable.
+        with httpx.Client(timeout=min(self.config.timeout_s, 30.0), follow_redirects=False,
+                          trust_env=False) as client:
             response = client.post(endpoint + "/free", headers=headers, json={"unload_models": True})
             response.raise_for_status()
             proof = response.json()
@@ -596,7 +606,8 @@ class OpenAICompatibleASRReviewer:
         form: dict[str, str] = {"model": self.config.model, "response_format": "verbose_json"}
         if context:
             form["prompt"] = context
-        with httpx.Client(timeout=self.config.timeout_s, trust_env="X-Shine-Handoff-Token" not in headers) as client:
+        trust_proxy = "X-Shine-Handoff-Token" not in headers and not is_loopback_url(self.config.base_url)
+        with httpx.Client(timeout=self.config.timeout_s, trust_env=trust_proxy) as client:
             with path.open("rb") as handle:
                 response = client.post(
                     self._endpoint(),

@@ -101,7 +101,8 @@ def prepare_scenes(
         if replace_unknown_task_id or replacement_key:
             old = db.get(AgentTaskRecord, replace_unknown_task_id) if replace_unknown_task_id else None
             if (not old or not replacement_key or old.project_id != project_id or old.role_id != SCRIPTWRITER_ROLE
-                    or old.trace.get("document_sha256") != document.sha256 or old.status != "NEEDS_REVIEW"
+                    or old.trace.get("document_sha256") != document.sha256
+                    or old.status not in {"RUNNING", "NEEDS_REVIEW"}
                     or old.trace.get("external_outcome") != "UNKNOWN"):
                 return {"error_code": "MATERIAL_REPLACEMENT_NOT_ALLOWED", "scenes": [], "preparations": []}
         try:
@@ -175,7 +176,8 @@ def prepare_scenes(
                 if (source is not None and source.project_id == project_id
                         and source.trace.get("document_sha256") == document.sha256
                         and source.trace.get("scene_key") == scene.key):
-                    if (source.status != "NEEDS_REVIEW" or source.trace.get("external_outcome") != "UNKNOWN"
+                    if (source.status not in {"RUNNING", "NEEDS_REVIEW"}
+                            or source.trace.get("external_outcome") != "UNKNOWN"
                             or not replacement_key):
                         results.append({"scene_key": scene.key, "status": "REFUSED",
                                         "error_code": "MATERIAL_REPLACEMENT_NOT_ALLOWED"})
@@ -205,6 +207,10 @@ def prepare_scenes(
                 AgentTaskRecord.project_id == project_id,
                 AgentTaskRecord.role_id == SCRIPTWRITER_ROLE,
                 AgentTaskRecord.rulepack_id == RULEPACK_ID,
+                # A retired row (a call that provably never left this machine)
+                # is history, not an answer: asking the same scene again must
+                # create a new request instead of reusing the dead identity.
+                AgentTaskRecord.status != "SUPERSEDED",
                 AgentTaskRecord.input_hash.in_([input_hash] if source_task_id else [input_hash, legacy_hash]),
             ).order_by(AgentTaskRecord.created_at, AgentTaskRecord.id))
             if existing is None and not source_task_id:
@@ -257,6 +263,15 @@ def prepare_scenes(
             if source_task_id:
                 add_audit(db, "local-user", "MATERIAL_UNKNOWN_EXPLICITLY_REPLACED", "agent_task", task_id,
                           {"source_task_id": source_task_id, "old_outcome": "UNKNOWN"}, project_id=project_id)
+                # The retired identity must never be reused as an answer or keep
+                # blocking its parent: the outcome stays UNKNOWN (it may have
+                # been sent), the request is superseded by this explicit one.
+                source_row = db.get(AgentTaskRecord, source_task_id)
+                if source_row is not None:
+                    source_row.status = "SUPERSEDED"
+                    source_row.lease_owner, source_row.lease_expires_at = None, None
+                    source_row.trace = {**source_row.trace, "superseded_by": task_id,
+                                        "superseded_reason": "EXPLICIT_USER_REPLACEMENT"}
 
         def record_progress(phase: str, task_id: str = task_id) -> None:
             with db_factory.begin() as db:

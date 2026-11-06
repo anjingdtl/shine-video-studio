@@ -161,6 +161,147 @@ def _finish_step(factory, task_id, version, worker_id, trace, status="QUEUED", e
         return bool(changed)
 
 
+#: A material subcall records ``WAITING_PROVIDER`` immediately before it opens
+#: the provider request (see ``LLMGateway.complete_for_role``), so a subtask
+#: still parked in an earlier phase provably never sent anything.  That is the
+#: only case in which asking the same scene again is not a replay of an
+#: unknown call.
+PRE_REQUEST_PHASES = ("PREPARING", None, "WAITING_RESOURCE", "PREPARING_PROVIDER")
+
+#: A reconciled blocking subcall keeps blocking while its status stays one of
+#: these; anything else has a decided outcome and no longer waits on a call.
+UNDECIDED_BLOCK_STATUSES = ("RUNNING", "NEEDS_REVIEW", "FAILED")
+
+#: How many times a decided-failed scene subcall may be asked again before a
+#: person has to look at it.  Each retry is a new request with its own identity.
+MAX_SUBTASK_RETRIES = 2
+
+
+def reconcile_blocked_subtasks(db, row, actor="local-user"):
+    """Decide what really happened to every blocking subcall, never resend it.
+
+    Three honest outcomes per subcall:
+
+    ``RESULT_ADOPTED``
+        A persisted, non-stale artifact exists and the parent may keep it.
+    ``NOT_SENT_PROVEN``
+        The subcall stopped before the provider request was opened, so no
+        answer exists and none was ever bought.  The row is retired as
+        ``SUPERSEDED`` so the parent may ask again with its own identity.
+    ``UNCONFIRMABLE``
+        The request may have been sent.  The block stays; only an explicit
+        user replacement may create a new call, and the old row survives.
+    """
+    blocked = list((row.trace or {}).get("blocked_subtasks") or [])
+    resolved: list[dict] = []
+    outcomes: list[dict] = []
+    for entry in blocked:
+        if not isinstance(entry, dict) or not entry.get("task_id"):
+            resolved.append({**entry, "status": "NOT_SENT", "reconciliation": "NO_SUBCALL"})
+            outcomes.append({"subtask_id": None, "outcome": "NO_SUBCALL"})
+            continue
+        subtask_id = entry["task_id"]
+        sub = db.get(AgentTaskRecord, subtask_id)
+        if sub is None or sub.project_id != row.project_id:
+            resolved.append({**entry, "status": "NOT_SENT", "reconciliation": "SUBTASK_RECORD_MISSING"})
+            outcomes.append({"subtask_id": subtask_id, "outcome": "SUBTASK_RECORD_MISSING"})
+            continue
+        trace = sub.trace or {}
+        artifact = db.scalar(select(AgentArtifact).where(
+            AgentArtifact.source_task_id == sub.id, AgentArtifact.stale.is_(False)))
+        if artifact is not None and (sub.status == "SUCCEEDED" or trace.get("external_outcome") == "SUCCEEDED"):
+            resolved.append({**entry, "status": "REUSED", "artifact_id": artifact.id,
+                             "reconciliation": "RESULT_ADOPTED"})
+            outcomes.append({"subtask_id": sub.id, "outcome": "RESULT_ADOPTED",
+                             "artifact_id": artifact.id})
+            continue
+        phase = trace.get("phase")
+        if (artifact is None and phase in PRE_REQUEST_PHASES
+                and sub.status in {"RUNNING", "NEEDS_REVIEW"}
+                and trace.get("external_outcome") in {None, "UNKNOWN"}):
+            sub.status = "SUPERSEDED"
+            sub.error_code = None
+            sub.lease_owner, sub.lease_expires_at = None, None
+            # The request identity was never consumed by a provider, so it must
+            # not keep the unique claim: a later request for this scene has to
+            # be able to take that identity again.  The old value stays in the
+            # trace as history.
+            previous_identity = sub.request_identity
+            sub.request_identity = None
+            sub.trace = {**trace, "external_outcome": "NOT_SENT",
+                         "previous_request_identity": previous_identity,
+                         "reconciliation": {"outcome": "NOT_SENT_PROVEN", "last_phase": phase,
+                                            "checked_at": utcnow().isoformat()}}
+            resolved.append({**entry, "status": "NOT_SENT", "reconciliation": "NOT_SENT_PROVEN"})
+            outcomes.append({"subtask_id": sub.id, "outcome": "NOT_SENT_PROVEN", "last_phase": phase})
+            continue
+        # A subcall that answered and was rejected has a decided outcome: the
+        # request is finished, nothing usable came back, and asking again is a
+        # new request rather than a replay of an unknown one.  It is still
+        # bounded, so a scene the model can never satisfy stops and waits for a
+        # person instead of burning calls.
+        failed = sub.status in {"FAILED", "REJECTED"} and trace.get("external_outcome") != "UNKNOWN"
+        if failed and artifact is None:
+            counts = dict((row.trace or {}).get("subtask_retries") or {})
+            scene_key = entry.get("scene_key") or sub.id
+            used = int(counts.get(scene_key, 0))
+            if used >= MAX_SUBTASK_RETRIES:
+                resolved.append({**entry, "reconciliation": "RETRIES_EXHAUSTED"})
+                outcomes.append({"subtask_id": sub.id, "outcome": "RETRIES_EXHAUSTED",
+                                 "attempts": used, "error_code": sub.error_code})
+                continue
+            counts[scene_key] = used + 1
+            previous_identity = sub.request_identity
+            sub.status = "SUPERSEDED"
+            sub.request_identity = None
+            sub.lease_owner, sub.lease_expires_at = None, None
+            sub.trace = {**trace, "previous_request_identity": previous_identity,
+                         "reconciliation": {"outcome": "FAILED_RETRY_ALLOWED",
+                                            "attempt": used + 1, "error_code": sub.error_code,
+                                            "checked_at": utcnow().isoformat()}}
+            resolved.append({**entry, "status": "RETRY", "reconciliation": "FAILED_RETRY_ALLOWED"})
+            outcomes.append({"subtask_id": sub.id, "outcome": "FAILED_RETRY_ALLOWED",
+                             "attempt": used + 1, "error_code": sub.error_code})
+            row.trace = {**row.trace, "subtask_retries": counts}
+            continue
+        resolved.append({**entry, "reconciliation": "UNCONFIRMABLE"})
+        outcomes.append({"subtask_id": sub.id, "outcome": "UNCONFIRMABLE", "status": sub.status,
+                         "last_phase": phase, "external_outcome": trace.get("external_outcome")})
+    row.trace = {**row.trace, "blocked_subtasks": resolved,
+                 "reconciliation": {"checked_at": utcnow().isoformat(), "outcomes": outcomes}}
+    released = _release_retired_identities(db, row.project_id)
+    add_audit(db, actor, "STORY_SUBTASKS_RECONCILED", "agent_task", row.id,
+              {"outcomes": outcomes, "identities_released": released}, project_id=row.project_id)
+    return {"outcomes": outcomes,
+            "resumable": all(item.get("status") not in UNDECIDED_BLOCK_STATUSES for item in resolved),
+            "unconfirmable": [item for item in outcomes if item.get("outcome") == "UNCONFIRMABLE"],
+            "identities_released": released}
+
+
+def _release_retired_identities(db, project_id) -> list[str]:
+    """A call that provably never left must not keep its unique identity claim.
+
+    Retiring the row is not enough: the identity is what a later request for the
+    same scene needs, and it is unique per project.  The original value stays in
+    the trace, so the history still shows which identity was retired.
+    """
+    rows = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.status == "SUPERSEDED",
+        AgentTaskRecord.request_identity.is_not(None),
+    )).all()
+    released = []
+    for retired in rows:
+        trace = retired.trace or {}
+        outcome = (trace.get("reconciliation") or {}).get("outcome")
+        if trace.get("external_outcome") != "NOT_SENT" and outcome != "NOT_SENT_PROVEN":
+            continue
+        retired.trace = {**trace, "previous_request_identity": retired.request_identity}
+        retired.request_identity = None
+        released.append(retired.id)
+    return released
+
+
 @contextmanager
 def _renew_story_claim(factory, task_id, version, worker_id, heartbeat_fn=None, interval=10):
     """Renew only this fenced claim; a pause or changed owner ends renewal."""
