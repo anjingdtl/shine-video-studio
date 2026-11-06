@@ -135,6 +135,14 @@ materialize v2 → 导演包（宽方案、1024×576）→ confirm → productio
 - 后续只读复核 SQLite：三条记录仍均为 `ABANDONED`、`LLM_TIMEOUT`、`external_outcome=UNKNOWN`，`phase=WAITING_PROVIDER`，无 response id/hash。`WAITING_PROVIDER` 在 `provider.complete(...)` 前立即持久化；OpenAI-compatible transport 对 `LLM_TIMEOUT` 的映射是超时但未收到回复并标记 `UNKNOWN`，而连接建立前失败才会标记 `NOT_SENT`。因此不能用该 phase 推导 `NOT_SENT_PROVEN`；现有局部 reconciliation 逻辑也把 `WAITING_PROVIDER` 排除在 pre-request phases 外。没有可采信的新证据改变三段状态。
 - 不得通过改 continuity fact 另建近似任务来绕过这三条 UNKNOWN。只有服务端/提供方能给出可信 reconciliation 证据，或将来出现能证明 `NOT_SENT_PROVEN` 的新证据，才可继续相应段落。
 
+### 7.3.1 恢复路径复核（目标恢复后的只读检查）
+
+- 订单 18 留有成功的 ScriptBreakdown `4b86d9cf…`、DirectorialPlan `f6fef69a…`、CameraPlan `3f04072d…` 和 ContinuityReport `c6cc89e9…`；但场记报告是 `needs_review` 且含 2 个 issues，没有匹配的裁定产物。`apply-camera` 按现有 API 合同需要对应 arbitration 释放这些冲突，不能直接应用；剪辑子任务 `f1022cae…` 仍 UNKNOWN。
+- 订单 19 只留有 ScriptBreakdown `cfd143c4…`；导演子任务 `4d53e72f…` 在产出 DirectorialPlan 前超时，因此无摄影方案或场记报告可应用。
+- 订单 20 的修复后 CameraPlan `3823d61d…` 与 ContinuityReport `ec0c428b…` 完整且 `proceed_to_preflight`，但修复后 editor 子任务 `b95be68d…` UNKNOWN。早先 EditIntentPlan `3c040ff3…` 的输入仍是修复前的 Director/Camera/Continuity artifacts，不能冒充当前链的剪辑结果。
+- 不对以上 artifact 执行低层单独 `apply-camera`：`section_storyboard_shot_ids` 先从最新 section run 的 `trace.results` 取 cinematographer artifact，再找对应 `film-apply` receipt。三条 section run 的 `results` 均为空；只写低层 receipt 仍不会进入分集，反而会造出未关联镜头。现有 section `reconcile` 也只处理 `blocked_subtasks`；三条父任务该字段为空，无法采用这些 Film 子任务产物。
+- 本次检查只读 SQLite 与源码，没有修改任务、发起模型请求或创建镜头；分集仍被 orders 18–20 阻断。
+
 ### 7.4 materialize 与整片 Run
 
 - `POST /api/v1/projects/3707a9ed-eced-435b-b69a-0b1ecdd5f146/episode-plans/1/materialize` 返回 409 `EPISODE_SECTION_NOT_STORYBOARDED`，明确列出 `ep-04` 的三个 `section_id`：`05916709-6f6b-5a0a-a754-324a4cf8ebd1`、`a68e9f18-7771-56a5-bd5d-9e6f480669ad`、`6a4ecc4a-5c6a-5849-abdf-ef2b4f3186da`，原因均为 `STORYBOARD_NOT_APPLIED`。没有创建 v2；台账仍只有已确认的 plan v1 `ef996d7a-94a5-4867-a4b4-566c05f287b9`。
