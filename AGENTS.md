@@ -760,11 +760,19 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `config/workflows/ref2va-pdd8-6img.json`（1 subject + 5 picture，image-only 传输族），
   真实渲染器 `live_object_info` 校验 `missing_nodes=[]`。第二人物按既有语义绑成 picture
   参考是合法答案（真实镜头 96c6d395 已验证）。
-- 台账进度（数据目录 `.local-acceptance/live-browser`）：主素材 39（26 场景底图 + 6 人物 +
-  原有 7），orders 1–8/10/11 共 30 镜头已应用；订单 9 卡在 apply-camera 422
-  （`ShotSpec` 校验错，日志截断了字段名，camera artifact `529c502d`），12–21 未跑。
-  接手细节与逐条处理见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §5。
+- R7 接手时台账快照（数据目录 `.local-acceptance/live-browser`）：主素材 39（26 场景底图 + 6 人物 +
+  原有 7）；当时订单 9 卡在 apply-camera 422（camera artifact `529c502d`），12–21 未跑。
+  R7 快照见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §1–§6；第 8 轮续跑后的权威结果见 §7。
 - **候选评审口径**：候选图逐一与台账 `content_sha256` 比对（32/32 一致）+ VLM 目检；
   拼版自绘编号不是水印、码头系缆桩不是人影——复核原图再下结论，不要把拼版标注当缺陷。
 - 本轮未改 `worker.py`/`preproduction.py`，不触发 `client_review_identity` 重校准义务；
   VLM 正负校准仍未做，不得声称已校准。
+
+## 2026-11-07 第 8 轮真实续跑（订单 9–21）
+
+- 第 8 轮使用真实 MiniMax 五角色链与产品 `apply-camera`。订单 9 根因由本地同构 ShotSpec 重建确认：dialogue `speaker_id=广播` 未列入 `characters`，因为旧 continuity fact 说它不是出场人物。受托 `local-user` 改一条事实生成新 task 后成功应用 3 镜；旧 artifacts 保留。
+- orders 12–17、21 已按单段真实运行并应用（新增 22 镜；加订单 9 的 3 镜，共 25 镜）。orders 12 和 14 的 `LOCKED_FACTS_CHANGED` 按产品路径 resume 后成功。详见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7.2。
+- orders 18、19、20 的子任务分别以 `LLM_TIMEOUT` / `external_outcome=UNKNOWN` 结束；没有 provider request id、HTTP 状态或 response hash。产品 `abandon-remote-response` 只可把这些丢失响应审计为 `ABANDONED`，仍是 `UNKNOWN` 且 `automatic_replay=false`。本轮由所有者委托的 `local-user` 通过一次性 `model_reconcile` grant 完成三条放弃动作；没有重发，也不得改输入另建近似任务绕过 UNKNOWN。
+- `POST /episode-plans/1/materialize` 因 `EPISODE_SECTION_NOT_STORYBOARDED` 返回 409，明确列出 orders 18–20 的三个 pending section；只有确认所有段均已应用后才能 materialize、confirm v2、建 DirectorPackage 和 ProductionRun。当前 `/journey` 为 54 project shots / 0 planned shots；本轮没有新 H3 attempt。台账保留上轮唯一真实 job `aa8baa09-0c1f-4627-a874-193a1a3647e1`（`PASSED`、`quality_verification=real`，artifact SHA-256 `92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190`、`last_qc_result=needs_review`），不代表整片完成或 accepted。
+- 本轮没有改源代码或 `worker.py` / `preproduction.py`，R7 pytest/Ruff 报告仍是旧证据；VLM 正负校准继续未完成。H3 renderer 未启动。工作台按 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 停止，端口 8000/5173/8188 均已验证无监听。
+- 本轮完整续跑及真实边界见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7 与 `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §5。

@@ -1,10 +1,11 @@
-# 进度：导演模式全旅程第 7 轮（2026-11-07 凌晨，接手轮）
+# 进度：导演模式全旅程（第 7 轮接手基线 / 第 8 轮续跑，2026-11-07）
 
-一句话：**26 张场景底图 + 6 个人物主素材全部真实出图并晋升；
-21 个生产段落中 10 个已分镜并应用（含第 1 场共 30 个镜头）；
-剩余 11 段的已知阻塞都在本文档里，含两个已修复的真实提示词缺陷。**
+第 7 轮交接快照：**26 张场景底图 + 6 个人物主素材真实出图并晋升；10 个生产段落已分镜。**
+第 8 轮续跑现状：**21 段中 18 段已有已应用分镜；`GET /journey` 读到 54 个项目镜头。订单 18–20 的同步 MiniMax 调用结果为 `UNKNOWN`，分集 materialize 仍被这三段阻断；本轮没有创建导演包、ProductionRun 或 H3 视频。** 当前事实与证据见 §7。
 
 数据目录不变：`.local-acceptance\live-browser`（项目 `3707a9ed…`《夜航船 真实长片 20261106》）。
+
+> §1–6 记录第 7 轮交接时的材料、规则和旧接手点；当前续跑结果以 §7 和服务端台账为准。
 
 ---
 
@@ -30,10 +31,19 @@
 | 6 | S5 停摆的怀表 | S06-* ×3 | ✅ 应用 |
 | 7 | S6 表盖内侧 | S07-* ×3 | ✅ 应用 |
 | 8 | S7 失踪名单 | S08-* ×3 | ✅ 应用 |
-| 9 | S8 最后一个名字 | （camera `529c502d` 链 SUCCEEDED） | ❌ apply-camera 422，见 §5.1 |
+| 9 | S8 最后一个名字 | S09-* ×3 | ✅ 第 8 轮新 task 应用（§7.1） |
 | 10 | S9 十年前的名单 | S10-* ×4 | ✅ 应用 |
 | 11 | S10 暴雨中的约定 | S11-* ×1 | ✅ 应用 |
-| 12–21 | S11–S20 | 未跑 | 顺序执行即可（§5.2） |
+| 12 | S11 | S12-* ×4 | ✅ 第 8 轮应用（§7.2） |
+| 13 | S12 | S13-* ×3 | ✅ 第 8 轮应用（§7.2） |
+| 14 | S13 | S14-* ×1 | ✅ 第 8 轮应用；1 次 resume（§7.2） |
+| 15 | S14 | S15-* ×4 | ✅ 第 8 轮应用（§7.2） |
+| 16 | S15 | S16-* ×3 | ✅ 第 8 轮应用（§7.2） |
+| 17 | S16 | S17-* ×3 | ✅ 第 8 轮应用（§7.2） |
+| 18 | S17 | 无 | ⛔ editor `LLM_TIMEOUT` / `UNKNOWN`，未应用（§7.3） |
+| 19 | S18 | 无 | ⛔ director `LLM_TIMEOUT` / `UNKNOWN`，未应用（§7.3） |
+| 20 | S19 | 无 | ⛔ editor `LLM_TIMEOUT` / `UNKNOWN`，未应用（§7.3） |
+| 21 | S20 | S21-* ×4 | ✅ 第 8 轮应用（§7.2） |
 
 另有上一轮遗留：E00 建立镜头、S16 手工镜头（rev2，唯一真实 H3 成片 job `aa8baa09`）。
 
@@ -66,14 +76,14 @@ S7/S8 的剧本把"广播"写成念名单的说话方，`_character_coverage` �
 
 ## 5. 接手点（下一步从这里开始）
 
-### 5.1 订单 9（S8）：apply-camera 422 待解
+### 5.1（第 7 轮记录）订单 9（S8）：apply-camera 422（已于 §7.1 解决）
 
 - 链已 SUCCEEDED（任务 `31c64d81`），camera artifact `529c502d-010d-4692-8ca2-f31862b4946c`。
 - `api.err.log`：`apply_camera_rejected artifact=529c502d reason=1 validation error for ShotSpec`（pydantic 细节被日志截断）。
 - 复现：直接重调 `POST /film-artifacts/529c502d…/apply-camera`（幂等），或按 apply_camera 的构造逻辑在本地重建 ShotSpec 打全 ValidationError。优先怀疑 cut 台词时间重排（`start_s/end_s` 装配分支）。
 - 若是模型产出非法 cut 时间：重跑该段（换一条 continuity fact 文本即新任务身份）通常即可。
 
-### 5.2 订单 12–21：直接顺序执行
+### 5.2（第 7 轮计划）订单 12–21：逐单执行；当前结果见 §7.2–§7.3
 
 - 用 `.local-acceptance/r7/storyboard.py <order>`（驱动：queue→等链→REJECTED 自动 resume≤3→apply-camera；facts 在 `facts2.py`，已含 12–21）。
 - S12（订单 14）4 人物 + 场景 = 5 参考图，宽方案 6 槽足够；说话方绑定规则已修，`广播` 不在 S12 出现。
@@ -83,9 +93,51 @@ S7/S8 的剧本把"广播"写成念名单的说话方，`_character_coverage` �
 
 1. 同一人物跨场别名（老周/老周（周远山）/周远山（老周））没有合并动作；本轮通过 fresh run 自然规避。
 2. `broadcast 类"仅声音实体"`没有正式建模；本轮用 character 家族的号角喇叭图满足绑定门（§3.3）。
-3. 订单 9 的 ShotSpec 校验错误细节被日志截断（日志只打 str(exc) 首行）。
+3. `apply-camera` API 仍只返回泛化的 `FILM_HANDOFF_REJECTED`，日志只记录 `ValidationError` 首行；本次通过本地同构重建 `ShotSpec` 找到说话方遗漏（§7.1），尚未改造产品日志细节。
 
 ## 6. 之后的主链（不变）
 
 materialize v2 → 导演包（宽方案、1024×576）→ confirm → production-runs 整部 Run（无人值守）→ 拼接交付核对。
 每镜验收口径不变：artifact sha + ffprobe + `ffmpeg -f null -` 解码 0 错 + EDL 顺序 + 交付单；`pending_review` 不许写成 accepted。
+
+## 7. 第 8 轮续跑结果（2026-11-07）
+
+### 7.1 订单 9：根因复现与修复
+
+- 按原 camera artifact `529c502d-010d-4692-8ca2-f31862b4946c` 重调 `apply-camera`，API 返回 422 `FILM_HANDOFF_REJECTED`。
+- 从数据库只读重建 `apply_camera` 的 `ShotSpec` 输入，两镜均完整复现校验错误：`every dialogue speaker must be listed in characters`。这不是 cut 时间错误：对白 speaker 是 `广播`，但这份旧 run 的 continuity fact 明确写了“不是出场人物”，ScriptBreakdown 因而只把 `老周` 放入 characters。
+- 保留旧 run/旧 artifacts；通过受托 `local-user` 改一条 continuity fact，明确“画外声 `广播` 仍须列入 characters 并绑定 `entity_id=广播` 的已批准主素材，画面仍只拍老周”，创建新任务 `46468f92-fbdf-4462-8059-7379fcf002a3`。任务 `SUCCEEDED`，新 CameraPlan `d1e1bf7e-ca43-4104-a770-ca44e4b085c0`，`apply-camera=200`，入账 3 镜：`ae391caf…`、`dfc321b6…`、`6f123b83…`。
+
+### 7.2 第 8 轮新增应用镜头
+
+| 订单 | section task | CameraPlan | 镜头数 / 结果 |
+| --- | --- | --- | --- |
+| 12 | `4e744e3e-d640-4e7e-8c1b-44079d574db1` | `d789850a-6957-47de-b98c-95bcf84bffb5` | 4，`apply-camera=200`；scriptwriter `LOCKED_FACTS_CHANGED` 后 resume 1 次，数据库终态 `SUCCEEDED` |
+| 13 | `be09582f-febb-4bc1-9384-12f0be30de78` | `6b4fc06b-079f-4e01-8647-0c2071fcd468` | 3，`apply-camera=200` |
+| 14 | `327790e1-dbf4-469a-b26d-ef96b6977c15` | `0b1f8179-b31f-4c95-882a-af49606dd0e4` | 1，`apply-camera=200`；scriptwriter `LOCKED_FACTS_CHANGED` 后 resume 1 次，数据库终态 `SUCCEEDED` |
+| 15 | `11fd64ae-da82-4414-8673-6b0cf73fc141` | `3171cf62-2dd9-4f7f-b8d6-e32271ef4c14` | 4，`apply-camera=200` |
+| 16 | `bbf53393-f15b-4e43-8a1d-6afe45a8c5c8` | `cf85bbb3-5616-46ea-ad6d-398650b7eba3` | 3，`apply-camera=200` |
+| 17 | `c61b2126-4362-497a-b506-bf2f55b262c9` | `2ee0fa66-e644-475d-b1f5-01fffa5dfbda` | 3，`apply-camera=200` |
+| 21 | `8cec31e8-2601-4565-b920-b9ce89262c7c` | `4ea13c39-184f-4fa0-abca-79afdaec094f` | 4，`apply-camera=200` |
+
+以上新增 25 镜；最终 `GET /api/v1/projects/{P}/journey` 当前读到 54 个项目镜头。所有这些新增素材仍只是分镜，不是 H3 视频。
+
+### 7.3 订单 18–20：外部结果 UNKNOWN，必须停在门禁
+
+| 订单 | section task | 子任务 | 角色 | 最终状态 |
+| --- | --- | --- | --- | --- |
+| 18 | `354dc1f1-07b0-4297-89d4-7f7fb673b776` | `f1022cae-2257-409f-988b-a200f54c6734` | editor | `NEEDS_REVIEW / LLM_TIMEOUT / external_outcome=UNKNOWN` |
+| 19 | `3fd6676b-e611-4962-8f84-ac460d16aa59` | `4d53e72f-fd11-4de6-9c70-0c25fe514253` | director | `NEEDS_REVIEW / LLM_TIMEOUT / external_outcome=UNKNOWN` |
+| 20 | `b83d7f9f-85de-49d2-a2c8-4063278d0151` | `b95be68d-e3e0-43a4-acfb-5acb32ec3f3b` | editor | `NEEDS_REVIEW / LLM_TIMEOUT / external_outcome=UNKNOWN` |
+
+- 三条子任务都没有 `request_identity`、provider task id、HTTP status、provider code 或 `received_result_sha256`；`automatic_replay=false`。订单 18/19/20 的父任务经过最多 3 次受限 resume 后仍然 `NEEDS_REVIEW`，没有可应用的 camera artifact。
+- 因无法取得 provider 侧结果，本轮通过产品路由 `POST /api/v1/projects/{P}/film-runs/{task_id}/abandon-remote-response`，每次先签发一次性 `model_reconcile` grant；由受托 `local-user` 写明证据后，三个子任务均返回 `ABANDONED / external_outcome=UNKNOWN / automatic_replay=false`。这是放弃丢失响应的审计动作，不代表证明未发送或成功，也没有重发请求。
+- 不得通过改 continuity fact 另建近似任务来绕过这三条 UNKNOWN。只有服务端/提供方能给出可信 reconciliation 证据，或将来出现能证明 `NOT_SENT_PROVEN` 的新证据，才可继续相应段落。
+
+### 7.4 materialize 与整片 Run
+
+- `POST /api/v1/projects/3707a9ed-eced-435b-b69a-0b1ecdd5f146/episode-plans/1/materialize` 返回 409 `EPISODE_SECTION_NOT_STORYBOARDED`，明确列出 `ep-04` 的三个 `section_id`：`05916709-6f6b-5a0a-a754-324a4cf8ebd1`、`a68e9f18-7771-56a5-bd5d-9e6f480669ad`、`6a4ecc4a-5c6a-5849-abdf-ef2b4f3186da`，原因均为 `STORYBOARD_NOT_APPLIED`。没有创建 v2；台账仍只有已确认的 plan v1 `ef996d7a-94a5-4867-a4b4-566c05f287b9`。
+- `GET /journey`：54 个项目镜头、`planned_shot_count=0`、`plan_materialized=false`，阻塞 `EPISODE_PLAN_NOT_MATERIALIZED`。因此本轮没有建导演包、没有确认 v2、没有创建 production run、没有新 H3 渲染或交付单。项目仍保留上一轮唯一真实 H3 产物：job `aa8baa09-0c1f-4627-a874-193a1a3647e1` 为 `PASSED`、`quality_verification=real`，artifact SHA-256 `92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190`（2,049,538 bytes），`last_qc_result=needs_review`；它不是整片 Run 或 accepted 证据。
+- 无活动资源租约，8188 没有 renderer listener；本轮通过 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 关闭 API/Worker/Web，随后验证 8000/5173/8188 均无监听。
+- 本轮未改源代码、`worker.py` 或 `preproduction.py`；R7 的全量 pytest/Ruff 结果仍是第 7 轮旧证据，本轮未重新运行测试。VLM 正负校准仍未完成，不能把任何新镜头写成 accepted。
+- 详细本机证据保存在 Git 忽略目录 `.local-acceptance/r7/`：`order9_apply_reproduction.json`、`storyboard_order9_repair.jsonl`、`storyboard_runs.jsonl`、`order18_remote_reconciliation.json`、`order19_remote_reconciliation.json`、`order20_remote_reconciliation.json`、`final_snapshot.json`。
