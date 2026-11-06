@@ -20,11 +20,15 @@ replayed: the task goes to NEEDS_REVIEW.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from datetime import timedelta
+from threading import Event, Thread
 from typing import Any
 
 from fastapi import HTTPException
 from pydantic import Field
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from shine.director.contracts import digest_of
@@ -157,17 +161,42 @@ def confirm_brief(db: Session, artifact: AgentArtifact, *, actor: str,
     return artifact
 
 
+CREATIVE_NEXT_STEPS = {
+    "QUEUED": "已排队，常驻 Worker 会接着处理；关闭页面不会中断后台工作。",
+    "RUNNING": "Worker 正在生成剧本。",
+    "SUCCEEDED": "剧本已写入文档，可在「总体大纲」继续统筹。",
+    "FAILED": "生成失败。确认原因后可重新发起一次生成。",
+    "NEEDS_REVIEW": "这次请求的结果需要人工核对：不会自动重发。",
+}
+
+
 def _task_public(task: AgentTaskRecord | None) -> dict[str, Any] | None:
+    """What the workbench shows about one brief→script task.
+
+    The person must be able to tell "still working" from "the worker was lost
+    and this needs checking" from "it failed", and must be told what to do
+    next.  A task that is merely running is never the end of the story.
+    """
     if task is None:
         return None
     trace = task.trace or {}
+    status = task.status
+    stage = trace.get("stage") or STAGE_DRAFT
+    next_step = CREATIVE_NEXT_STEPS.get(status, "")
+    if status == "RUNNING" and stage == STAGE_SENDING:
+        next_step = ("请求已经发出，正在等待结果。若 Worker 中断，结果需要人工核对，不会自动重发。")
+    elif status == "RUNNING" and stage == STAGE_RESPONSE:
+        next_step = "结果已保存，正在写入文档。"
     return {
         "id": task.id,
-        "status": task.status,
+        "status": status,
+        "stage": stage,
         "error_code": task.error_code,
         "document_id": trace.get("document_id"),
         "document_sha256": trace.get("document_sha256"),
         "external_outcome": trace.get("external_outcome"),
+        "reconciliation": trace.get("reconciliation"),
+        "next_step": next_step,
         "created_at": task.created_at.isoformat() + "Z",
     }
 
@@ -310,7 +339,40 @@ def _script_prompt(brief_payload: dict[str, Any], project: Project) -> tuple[str
     return system, context
 
 
-def _consent_guard(task_id: str, expected_fingerprint: str, gateway):
+CREATIVE_LEASE_MINUTES = 30
+"""How long one worker's claim on a brief→script task stays valid."""
+
+STAGE_DRAFT = "DRAFT"
+"""No request was sent: the task is provably un-started and may be sent."""
+
+STAGE_SENDING = "SENDING"
+"""The send intent is durable.  If the worker dies here the request may or may
+not have reached the provider, so the outcome is *unknown* and never replayed."""
+
+STAGE_RESPONSE = "RESPONSE"
+"""The provider answered and the answer is durable.  The document has not been
+written yet, so the stored answer is reused instead of paying for a second
+model call."""
+
+STAGE_DOCUMENT = "DOCUMENT"
+"""The script document is in the database; the task only has to be closed."""
+
+DRAFT_KIND = "CreativeScriptDraft"
+"""The durable answer of the scriptwriter, before it becomes a document."""
+
+
+class _FenceLost(Exception):
+    """The task is no longer owned by this worker; nothing may be written."""
+
+
+def _consent_guard(task_id: str, expected_fingerprint: str, gateway, *,
+                   version: int | None = None, worker_id: str | None = None):
+    """Check consent, the provider route and this worker's ownership.
+
+    The check runs immediately before the request leaves the machine.  A task
+    whose lease was taken over must never reach the provider, and a changed
+    route must be refused rather than silently switching provider.
+    """
     from shine.materialprep import text_consent
 
     def verify(db):
@@ -323,7 +385,270 @@ def _consent_guard(task_id: str, expected_fingerprint: str, gateway):
                 "Text consent missing or the route changed since the request",
                 details={"external_outcome": "NOT_SENT"},
             )
+        if version is not None and worker_id is not None:
+            if (task.state_version != version or task.lease_owner != worker_id
+                    or task.status != "RUNNING"):
+                # The lease expired or another worker took over while the
+                # request was being prepared: this worker sends nothing.
+                raise text_consent.TextConsentRequired(
+                    "This task is no longer owned by this worker",
+                    details={"external_outcome": "NOT_SENT", "code": "CREATIVE_TASK_NOT_OWNED"},
+                )
     return verify
+
+
+def _claim_creative_task(session_factory, worker_id: str):
+    """Take one queued or expired brief→script task.
+
+    An expired claim means *this needs checking*, not *the request was never
+    sent*.  A task whose send intent is durable is reconciled, never replayed.
+    The claim itself is a conditional UPDATE on the task's own version, so two
+    workers can never both own the same script.
+    """
+    now = utcnow()
+    for _ in range(3):
+        with session_factory() as db:
+            task = db.scalars(
+                select(AgentTaskRecord)
+                .where(
+                    AgentTaskRecord.role_id == SCRIPT_TASK_ROLE_ID,
+                    or_(
+                        AgentTaskRecord.status == "QUEUED",
+                        (AgentTaskRecord.status == "RUNNING") & (
+                            AgentTaskRecord.lease_expires_at.is_(None)
+                            | (AgentTaskRecord.lease_expires_at <= now)
+                        ),
+                    ),
+                )
+                .order_by(AgentTaskRecord.created_at)
+                .limit(1)
+            ).first()
+            if task is None:
+                return None
+            task_id, version = task.id, task.state_version
+            trace = dict(task.trace or {})
+            # The stable request identity travels with the stage so a
+            # reconciled task can be traced back to the exact request.
+            trace["request_identity"] = task.request_identity
+        with session_factory.begin() as db:
+            claimed = db.execute(
+                update(AgentTaskRecord)
+                .where(
+                    AgentTaskRecord.id == task_id,
+                    AgentTaskRecord.state_version == version,
+                    or_(
+                        AgentTaskRecord.status == "QUEUED",
+                        (AgentTaskRecord.status == "RUNNING") & (
+                            AgentTaskRecord.lease_expires_at.is_(None)
+                            | (AgentTaskRecord.lease_expires_at <= now)
+                        ),
+                    ),
+                )
+                .values(status="RUNNING", lease_owner=worker_id,
+                        lease_expires_at=now + timedelta(minutes=CREATIVE_LEASE_MINUTES),
+                        state_version=AgentTaskRecord.state_version + 1)
+                .execution_options(synchronize_session=False)
+            )
+            if claimed.rowcount == 1:
+                return task_id, version + 1, trace
+    return None
+
+
+@contextmanager
+def _renew_creative_claim(session_factory, task_id, version, worker_id, heartbeat_fn=None, interval=10):
+    """Renew only this fenced claim; a changed owner or version ends renewal."""
+    stop = Event()
+
+    def renew():
+        try:
+            with session_factory.begin() as db:
+                changed = db.execute(update(AgentTaskRecord).where(
+                    AgentTaskRecord.id == task_id,
+                    AgentTaskRecord.state_version == version,
+                    AgentTaskRecord.lease_owner == worker_id,
+                    AgentTaskRecord.status == "RUNNING",
+                ).values(lease_expires_at=utcnow() + timedelta(minutes=CREATIVE_LEASE_MINUTES))).rowcount
+            if not changed:
+                stop.set()
+                return
+            if heartbeat_fn:
+                heartbeat_fn()
+        except OperationalError:
+            # A busy SQLite writer does not prove the claim was lost.
+            logger.warning("creative_heartbeat_deferred database_busy")
+
+    def loop():
+        while not stop.wait(interval):
+            renew()
+
+    renew()
+    thread = Thread(target=loop, name="shine-creative-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+def _finish_task(session_factory, task_id, version, worker_id, trace,
+                 status: str = "QUEUED", error: str | None = None) -> bool:
+    """Close a task under the full fence: status, owner and version must match.
+
+    A worker whose lease was taken over cannot write back: the conditional
+    UPDATE matches nothing and the task keeps the new owner's decision.
+    """
+    with session_factory.begin() as db:
+        changed = db.execute(update(AgentTaskRecord).where(
+            AgentTaskRecord.id == task_id,
+            AgentTaskRecord.state_version == version,
+            AgentTaskRecord.lease_owner == worker_id,
+            AgentTaskRecord.status == "RUNNING",
+        ).values(trace=trace, status=status, error_code=error,
+                 lease_owner=None, lease_expires_at=None,
+                 state_version=version + 1)).rowcount
+        return bool(changed)
+
+
+def _persist_send_intent(session_factory, task_id, version, worker_id, trace) -> dict[str, Any] | None:
+    """Record the intent to send *before* the external call happens.
+
+    A worker that dies after this point leaves an unknown outcome, never a
+    silent replay.  The task version is not bumped: it identifies the claim,
+    and the fence keeps working for the whole claim.
+    """
+    updated = {**trace, "stage": STAGE_SENDING, "external_outcome": "SENDING",
+               "sent_at": utcnow().isoformat() + "Z",
+               "request_identity": trace.get("request_identity")}
+    with session_factory.begin() as db:
+        changed = db.execute(update(AgentTaskRecord).where(
+            AgentTaskRecord.id == task_id,
+            AgentTaskRecord.state_version == version,
+            AgentTaskRecord.lease_owner == worker_id,
+            AgentTaskRecord.status == "RUNNING",
+        ).values(trace=updated)).rowcount
+    return updated if changed == 1 else None
+
+
+def _persist_response(session_factory, task_id, version, worker_id, trace, draft, outcome) -> dict[str, Any] | None:
+    """Store the provider's answer durably before any document is written.
+
+    The answer is a versioned artifact, so a crash between "the model answered"
+    and "the document exists" costs no second model call: the next worker
+    reuses the stored answer.
+    """
+    payload = {"title": draft.title, "script_text": draft.script_text}
+    try:
+        with session_factory.begin() as db:
+            row = db.get(AgentTaskRecord, task_id)
+            if row is None:
+                return None
+            artifact = AgentArtifact(
+                project_id=row.project_id,
+                kind=DRAFT_KIND,
+                schema_version="1.0",
+                payload_json=payload,
+                sha256=digest_of(payload),
+                producer_role=SCRIPT_AGENT_ROLE,
+                source_task_id=task_id,
+                input_revision_ids=[trace["brief_artifact_id"]] if trace.get("brief_artifact_id") else [],
+            )
+            db.add(artifact)
+            db.flush()
+            updated = {**trace, "stage": STAGE_RESPONSE,
+                       "draft_artifact_id": artifact.id,
+                       "draft_sha256": artifact.sha256,
+                       "correction_used": bool(outcome.correction_used),
+                       "external_outcome": "COMPLETED"}
+            changed = db.execute(update(AgentTaskRecord).where(
+                AgentTaskRecord.id == task_id,
+                AgentTaskRecord.state_version == version,
+                AgentTaskRecord.lease_owner == worker_id,
+                AgentTaskRecord.status == "RUNNING",
+            ).values(trace=updated)).rowcount
+            if changed != 1:
+                raise _FenceLost()
+    except _FenceLost:
+        return None
+    return updated
+
+
+def _write_script_document(session_factory, task_id, version, worker_id, trace) -> bool:
+    """Write the script document exactly once, under the full task fence.
+
+    The document and the task's terminal state commit together, so a task can
+    never claim success without a document and a document can never be written
+    twice.  A worker whose lease was taken over writes nothing at all.
+    """
+    from shine.security import sha256_bytes
+    from shine.services import add_audit
+
+    artifact_id = trace.get("draft_artifact_id")
+    try:
+        with session_factory.begin() as db:
+            row = db.get(AgentTaskRecord, task_id)
+            if row is None:
+                return False
+            draft = db.get(AgentArtifact, artifact_id) if artifact_id else None
+            if draft is None:
+                changed = db.execute(update(AgentTaskRecord).where(
+                    AgentTaskRecord.id == task_id,
+                    AgentTaskRecord.state_version == version,
+                    AgentTaskRecord.lease_owner == worker_id,
+                    AgentTaskRecord.status == "RUNNING",
+                ).values(status="FAILED", error_code="CREATIVE_DRAFT_MISSING",
+                         trace={**trace, "external_outcome": "COMPLETED"},
+                         lease_owner=None, lease_expires_at=None,
+                         state_version=version + 1)).rowcount
+                return bool(changed)
+            payload = draft.payload_json or {}
+            title = str(payload.get("title") or "").strip()[:60]
+            body = str(payload.get("script_text") or "").strip()
+            brief = db.get(AgentArtifact, trace.get("brief_artifact_id") or "")
+            existing_id = trace.get("document_id") or ""
+            document = db.get(ProjectDocument, existing_id) if existing_id else None
+            if document is None:
+                document = ProjectDocument(
+                    project_id=row.project_id,
+                    filename=f"{title or '创意剧本'}-创意版.txt",
+                    content_type="text/plain",
+                    sha256=sha256_bytes(body.encode("utf-8")),
+                    source_format="idea",
+                    text=body,
+                    parsed={
+                        "provenance": "creative_brief",
+                        "brief_artifact_id": brief.id if brief else None,
+                        "brief_sha256": brief.sha256 if brief else None,
+                        "task_id": row.id,
+                        "contract_version": SCRIPT_CONTRACT_VERSION,
+                        "correction_used": bool(trace.get("correction_used")),
+                    },
+                )
+                db.add(document)
+                db.flush()
+            changed = db.execute(update(AgentTaskRecord).where(
+                AgentTaskRecord.id == task_id,
+                AgentTaskRecord.state_version == version,
+                AgentTaskRecord.lease_owner == worker_id,
+                AgentTaskRecord.status == "RUNNING",
+            ).values(status="SUCCEEDED", error_code=None,
+                     trace={**trace, "stage": STAGE_DOCUMENT,
+                            "document_id": document.id,
+                            "document_sha256": document.sha256,
+                            "external_outcome": "COMPLETED"},
+                     lease_owner=None, lease_expires_at=None,
+                     state_version=version + 1)).rowcount
+            if changed != 1:
+                raise _FenceLost()
+            add_audit(db, "worker", "CREATIVE_SCRIPT_WRITTEN", "project_document", document.id,
+                      {"brief_artifact_id": brief.id if brief else None,
+                       "sha256": document.sha256, "chars": len(body)},
+                      project_id=row.project_id)
+    except _FenceLost:
+        # The lease was taken over: this worker writes nothing, so the task
+        # cannot be revived and no duplicate document can appear.
+        return False
+    return True
 
 
 def run_pending_creative_task(session_factory, settings, worker_id: str, *,
@@ -332,98 +657,87 @@ def run_pending_creative_task(session_factory, settings, worker_id: str, *,
 
     The claim is a conditional UPDATE on the task's own version, so two workers
     can never both write the script.  Returns whether a task was handled.
+
+    The durable stage decides what a reclaimed task means:
+
+    * ``DRAFT``    — nothing was sent; the request may still be sent.
+    * ``SENDING``  — the send intent is durable; the outcome is unknown, so
+      the task goes to review and is never replayed.
+    * ``RESPONSE`` — the answer is durable; it is reused, not re-bought.
+    * ``DOCUMENT`` — the script is in the database; the task is just closed.
     """
     from shine.materialprep.agent_call import call_material_agent
-    from shine.security import sha256_bytes
 
-    with session_factory() as db:
-        task = db.scalars(
-            select(AgentTaskRecord)
-            .where(AgentTaskRecord.role_id == SCRIPT_TASK_ROLE_ID, AgentTaskRecord.status == "QUEUED")
-            .order_by(AgentTaskRecord.created_at)
-            .limit(1)
-        ).first()
-        if task is None:
-            return False
-        task_id, version = task.id, task.state_version
-    with session_factory.begin() as db:
-        claimed = db.execute(
-            update(AgentTaskRecord)
-            .where(AgentTaskRecord.id == task_id,
-                   AgentTaskRecord.status == "QUEUED",
-                   AgentTaskRecord.state_version == version)
-            .values(status="RUNNING", lease_owner=worker_id,
-                    state_version=AgentTaskRecord.state_version + 1)
-            .execution_options(synchronize_session=False)
-        )
-        if claimed.rowcount != 1:
-            return False
+    claimed = _claim_creative_task(session_factory, worker_id)
+    if claimed is None:
+        return False
+    task_id, version, trace = claimed
 
-    def finish(status: str, error_code: str | None, **trace_updates) -> None:
-        with session_factory.begin() as db:
-            row = db.get(AgentTaskRecord, task_id)
-            row.status = status
-            row.error_code = error_code
-            row.trace = {**(row.trace or {}), **trace_updates}
-            row.state_version += 1
+    with _renew_creative_claim(session_factory, task_id, version, worker_id, heartbeat_fn):
+        stage = trace.get("stage") or STAGE_DRAFT
 
-    with session_factory() as db:
-        task = db.get(AgentTaskRecord, task_id)
-        trace = dict(task.trace or {})
-        brief = db.get(AgentArtifact, trace.get("brief_artifact_id") or "")
-        project = db.get(Project, task.project_id)
-        if (brief is None or brief.stale or not brief.approved_at
-                or brief.sha256 != trace.get("brief_sha256") or project is None):
-            finish("FAILED", "CREATIVE_BRIEF_CHANGED", external_outcome="NOT_SENT")
+        # The document is already written: only the task has to close.
+        if stage == STAGE_DOCUMENT and trace.get("document_id"):
+            _finish_task(session_factory, task_id, version, worker_id,
+                         {**trace, "stage": STAGE_DOCUMENT, "external_outcome": "COMPLETED"},
+                         "SUCCEEDED")
             return True
-        system, context = _script_prompt(brief.payload_json or {}, project)
-    if heartbeat_fn is not None:
-        heartbeat_fn()
-    gateway = gateway or _gateway(settings)
-    outcome = call_material_agent(
-        gateway, session_factory, SCRIPT_AGENT_ROLE,
-        system=system, context=context, schema=SCRIPT_SCHEMA, contract=ScriptDraft,
-        before_call=_consent_guard(task_id, trace.get("provider_fingerprint") or "", gateway),
-    )
-    if not outcome.ok:
-        # An uncertain outcome may already have reached the provider: it goes
-        # to review and is never replayed under a new request.
-        finish("NEEDS_REVIEW" if outcome.uncertain else "FAILED",
-               (outcome.error_code or "CREATIVE_SCRIPT_FAILED")[:64],
-               external_outcome="UNKNOWN" if outcome.uncertain else "NOT_SENT",
-               automatic_replay=False)
-        return True
-    draft = ScriptDraft.model_validate(outcome.parsed)
-    text = draft.script_text.strip()
-    with session_factory.begin() as db:
-        row = db.get(AgentTaskRecord, task_id)
-        brief = db.get(AgentArtifact, row.trace.get("brief_artifact_id"))
-        document = ProjectDocument(
-            project_id=row.project_id,
-            filename=f"{draft.title.strip()[:60] or '创意剧本'}-创意版.txt",
-            content_type="text/plain",
-            sha256=sha256_bytes(text.encode("utf-8")),
-            source_format="idea",
-            text=text,
-            parsed={
-                "provenance": "creative_brief",
-                "brief_artifact_id": brief.id,
-                "brief_sha256": brief.sha256,
-                "task_id": row.id,
-                "contract_version": SCRIPT_CONTRACT_VERSION,
-                "correction_used": outcome.correction_used,
-            },
-        )
-        db.add(document)
-        db.flush()
-        row.status = "SUCCEEDED"
-        row.error_code = None
-        row.trace = {**row.trace, "document_id": document.id, "document_sha256": document.sha256,
-                     "external_outcome": "COMPLETED"}
-        row.state_version += 1
-        from shine.services import add_audit
 
-        add_audit(db, "worker", "CREATIVE_SCRIPT_WRITTEN", "project_document", document.id,
-                  {"brief_artifact_id": brief.id, "sha256": document.sha256,
-                   "chars": len(text)}, project_id=row.project_id)
-    return True
+        # A durable answer is reused; the model is never called a second time.
+        if stage == STAGE_RESPONSE and trace.get("draft_artifact_id"):
+            return _write_script_document(session_factory, task_id, version, worker_id, trace)
+
+        # The send intent is durable: the outcome may already have reached the
+        # provider.  It is reconciled, never replayed under a new identity.
+        if stage == STAGE_SENDING:
+            _finish_task(session_factory, task_id, version, worker_id,
+                         {**trace, "stage": STAGE_SENDING, "external_outcome": "UNKNOWN",
+                          "reconciliation": "SEND_OUTCOME_UNKNOWN",
+                          "automatic_replay": False},
+                         "NEEDS_REVIEW", "CREATIVE_SCRIPT_OUTCOME_UNKNOWN")
+            return True
+
+        with session_factory() as db:
+            task = db.get(AgentTaskRecord, task_id)
+            brief = db.get(AgentArtifact, trace.get("brief_artifact_id") or "")
+            project = db.get(Project, task.project_id) if task else None
+            if (task is None or brief is None or brief.stale or not brief.approved_at
+                    or brief.sha256 != trace.get("brief_sha256") or project is None):
+                _finish_task(session_factory, task_id, version, worker_id,
+                             {**trace, "external_outcome": "NOT_SENT"},
+                             "FAILED", "CREATIVE_BRIEF_CHANGED")
+                return True
+            system, context = _script_prompt(brief.payload_json or {}, project)
+        if heartbeat_fn is not None:
+            heartbeat_fn()
+        gateway = gateway or _gateway(settings)
+
+        # The send intent is durable BEFORE the external call.  A worker that
+        # dies here leaves an unknown outcome, never a silent replay.
+        sending = _persist_send_intent(session_factory, task_id, version, worker_id, trace)
+        if sending is None:
+            return True
+        outcome = call_material_agent(
+            gateway, session_factory, SCRIPT_AGENT_ROLE,
+            system=system, context=context, schema=SCRIPT_SCHEMA, contract=ScriptDraft,
+            before_call=_consent_guard(task_id, trace.get("provider_fingerprint") or "", gateway,
+                                       version=version, worker_id=worker_id),
+        )
+        if not outcome.ok:
+            if outcome.error_code == "CREATIVE_TASK_NOT_OWNED":
+                # A newer owner took over: this worker writes nothing.
+                return True
+            # An uncertain outcome may already have reached the provider: it
+            # goes to review and is never replayed under a new request.
+            _finish_task(session_factory, task_id, version, worker_id,
+                         {**sending,
+                          "external_outcome": "UNKNOWN" if outcome.uncertain else "NOT_SENT",
+                          "automatic_replay": False},
+                         "NEEDS_REVIEW" if outcome.uncertain else "FAILED",
+                         (outcome.error_code or "CREATIVE_SCRIPT_FAILED")[:64])
+            return True
+        draft = ScriptDraft.model_validate(outcome.parsed)
+        stored = _persist_response(session_factory, task_id, version, worker_id, sending, draft, outcome)
+        if stored is None:
+            return True
+        return _write_script_document(session_factory, task_id, version, worker_id, stored)

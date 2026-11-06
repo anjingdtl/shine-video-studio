@@ -604,14 +604,26 @@ def _dispatch_next_batch(db: Session, run: ProductionRun, *, settings) -> Produc
 # ---------------------------------------------------------------------------
 
 
-def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: ProductionRunEpisode) -> str | None:
-    """Create the per-episode delivery order once its *whole plan* really passed."""
+def _ensure_episode_delivery(
+    db: Session,
+    run: ProductionRun,
+    episode: ProductionRunEpisode,
+) -> tuple[str | None, bool]:
+    """Create the per-episode delivery order once its *whole plan* really passed.
+
+    The second element says whether this call *created* the order.  Finding an
+    order that already exists is a check, not new work: an order that is
+    already PENDING, ASSEMBLING or DELIVERED is reported back to the caller so
+    the run keeps pointing at it, but it must never be counted as progress.
+    Re-reporting the same pending order every beat is what made the assembly
+    executor look permanently starved.
+    """
     from shine.media.delivery_models import DeliveryOrder
     from shine.production.episode_delivery import episode_input_digest
 
     package = db.get(DirectorPackageVersion, run.package_id)
     if package is None:
-        return None
+        return None, False
     batches = [b for b in _batch_rows(db, run.id) if b.episode_id == episode.episode_id]
 
     # 1. The complete planned batch set must exist and have passed.  Batches
@@ -619,20 +631,20 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
     source = next((row for row in package_episodes(db, package.id)
                    if row.episode_id == episode.episode_id), None)
     if source is None:
-        return None
+        return None, False
     limit = int((package.manifest.get("policy") or {}).get("batch_shot_limit", DEFAULT_BATCH_SHOT_LIMIT) or
                 DEFAULT_BATCH_SHOT_LIMIT)
     planned_keys = {row["batch_key"] for row in _batch_plan(source, batch_shot_limit=limit)}
     existing_keys = {batch.batch_key for batch in batches}
     if (planned_keys - existing_keys) or any(batch.status != "PASSED" for batch in batches):
-        return None
+        return None, False
 
     # 2. Every shot must have a passed job that this run's own series items
     #    produced.  An unrelated passed job never completes this run.
     passed = run_owned_passed_jobs(db, run.id, [episode])
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
-        return None
+        return None, False
     digest = episode_input_digest(db, run, episode, batches)
     existing = db.scalars(
         select(DeliveryOrder).where(
@@ -645,11 +657,11 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
             # A running assembly is never cancelled mid-file; a revision waits
             # for it and becomes the next version afterwards.
             episode.delivery_order_id = order.id
-            return order.id
+            return order.id, False
         if order.status == "PENDING":
             if order.input_digest == digest:
                 episode.delivery_order_id = order.id
-                return order.id
+                return order.id, False
             # Queued for an earlier contract and not started: supersede it.
             order.status = "CANCELLED"
             order.failure_code = "POST_CONTRACT_REVISED"
@@ -657,7 +669,7 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
             continue
         if order.status == "DELIVERED" and order.input_digest == digest:
             episode.delivery_order_id = order.id
-            return order.id
+            return order.id, False
     contract = episode.post_contract or {}
     order = DeliveryOrder(
         project_id=run.project_id,
@@ -678,7 +690,7 @@ def _ensure_episode_delivery(db: Session, run: ProductionRun, episode: Productio
     episode.status = "DELIVERING"
     _event(db, run, "EPISODE_DELIVERY_QUEUED", f"{episode.title or episode.episode_id} 开始逐集装配",
            {"episode_id": episode.episode_id, "order_id": order.id})
-    return order.id
+    return order.id, True
 
 
 def _sync_episode_delivery(db: Session, run: ProductionRun, episode: ProductionRunEpisode) -> bool:
@@ -936,6 +948,7 @@ def advance_run(
 
     status_before = run.status
     actions: list[str] = []
+    observations: list[str] = []
     for batch in _batch_rows(db, run.id):
         if _sync_batch_from_series(db, batch):
             actions.append("batch_sync")
@@ -962,8 +975,14 @@ def advance_run(
 
     for episode in episodes:
         if episode.status in {"PLANNED", "PRODUCING", "DELIVERING"}:
-            if _ensure_episode_delivery(db, run, episode):
+            order_id, created = _ensure_episode_delivery(db, run, episode)
+            if created:
                 actions.append("episode_queued")
+            elif order_id:
+                # An order that already exists is a *check*, not new work.  The
+                # assembly executor still owns it, so re-reporting it here would
+                # make every beat look like progress and starve that executor.
+                observations.append("episode_delivery_pending")
 
     dispatched = _dispatch_next_batch(db, run, settings=settings)
     if dispatched is not None:
@@ -1001,23 +1020,69 @@ def advance_run(
         run.status = "RUNNING"
     # Real progress only: a beat that changed nothing must not move the
     # progress clock, or waiting would look like work.
-    if actions or run.status != status_before:
+    progressed = bool(actions) or run.status != status_before
+    if progressed:
         run.last_progress_at = utcnow()
     run.state_version += 1
     db.flush()
-    return {"run_id": run.id, "status": run.status, "action": "advanced", "changes": sorted(set(actions))}
+    # "checked" is not "advanced".  A beat that only inspected the run and
+    # found nothing to do must hand the turn to the Worker's other
+    # executors, or the run's own series and its episode assemblies never
+    # get a chance to run.
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "action": "advanced" if progressed else "waiting",
+        "changes": sorted(set(actions)),
+        "observed": sorted(set(observations)),
+    }
 
 
-def advance_runs(session_factory, *, worker_id: str, settings, limit: int = 1) -> int:
+class RunAdvanceSummary:
+    """What one scheduler beat did with the whole-film run layer.
+
+    ``checked`` counts the runs that were inspected; ``progressed`` counts only
+    the ones whose durable state really changed.  The Worker decides whether
+    the run layer has earned the tick from the second number: a run that only
+    looked at its own state must not keep the series, the episode assembly or
+    the ordinary queue from running.
+    """
+
+    __slots__ = ("checked", "progressed", "dispatched", "queued")
+
+    def __init__(self, checked: int = 0, progressed: int = 0,
+                 dispatched: int = 0, queued: int = 0) -> None:
+        self.checked = checked
+        self.progressed = progressed
+        self.dispatched = dispatched
+        self.queued = queued
+
+    def __bool__(self) -> bool:
+        return bool(self.progressed)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (f"RunAdvanceSummary(checked={self.checked}, progressed={self.progressed}, "
+                f"dispatched={self.dispatched}, queued={self.queued})")
+
+
+def advance_runs(session_factory, *, worker_id: str, settings, limit: int = 1) -> RunAdvanceSummary:
     """Drive at most ``limit`` runnable runs in one scheduler beat."""
     with session_factory() as db:
         candidates = db.execute(
             select(ProductionRun.id)
             .where(ProductionRun.status.in_(ADVANCEABLE_RUN_STATUSES))
-            .order_by(ProductionRun.created_at)
+            # Fairness: the run that was advanced longest ago goes first, so a
+            # run with a long queue cannot starve the other runs.  ``updated_at``
+            # moves on every advance because the run's own state version
+            # changes, which makes this a true rotation rather than a
+            # first-come-first-served queue that always picks the same row.
+            .order_by(ProductionRun.updated_at.asc(), ProductionRun.created_at.asc())
             .limit(max(1, limit))
         ).all()
-    advanced = 0
+    checked = 0
+    progressed = 0
+    dispatched = 0
+    queued = 0
     for (run_id,) in candidates:
         try:
             with session_factory.begin() as db:
@@ -1025,11 +1090,16 @@ def advance_runs(session_factory, *, worker_id: str, settings, limit: int = 1) -
                 if run is None:
                     continue
                 result = advance_run(db, run, worker_id=worker_id, settings=settings)
+            checked += 1
+            changes = set(result.get("changes") or ())
+            dispatched += 1 if "batch_dispatched" in changes else 0
+            queued += 1 if "episode_queued" in changes else 0
             if result.get("action") in {"advanced", "paused", "cancelled", "cancel_reconciling"}:
-                advanced += 1
+                progressed += 1
         except Exception as exc:  # noqa: BLE001 - one bad run must not stop the loop
             logger.warning("production_run_advance_failed run_id=%s error=%s", run_id, type(exc).__name__)
-    return advanced
+    return RunAdvanceSummary(checked=checked, progressed=progressed,
+                              dispatched=dispatched, queued=queued)
 
 
 # ---------------------------------------------------------------------------
@@ -1238,7 +1308,7 @@ def set_episode_post_contract(
         db.flush()
         order_id = None
         if episode.status in {"DELIVERED", "DELIVERING", "PRODUCING", "PLANNED"}:
-            order_id = _ensure_episode_delivery(db, run, episode)
+            order_id, _created = _ensure_episode_delivery(db, run, episode)
         _event(db, run, "EPISODE_POST_CONTRACT_REVISED",
                f"{episode.title or episode.episode_id} 更新剪辑/字幕合同；只重装配，不重拍",
                {"episode_id": episode.episode_id, "order_id": order_id})

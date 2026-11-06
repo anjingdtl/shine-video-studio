@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -42,6 +42,9 @@ from shine.models import (
     utcnow,
 )
 from shine.providers import MockH3Provider, MockSubmission, ProviderFailure, SubmissionUncertain
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from shine.production.runner import RunAdvanceSummary
 from shine.quality.gates import (
     STATUS_FAILED,
     STATUS_NOT_APPLICABLE,
@@ -4004,28 +4007,34 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     return _run_configured_once(session_factory, provider, worker_id, settings=settings, comfy_client=comfy_client)
 
 
-def _advance_production_runs(session_factory, worker_id: str, *, settings) -> int:
+def _advance_production_runs(session_factory, worker_id: str, *, settings) -> RunAdvanceSummary:
     """One short whole-film run step inside the resident Worker's own loop.
 
     The run layer never gets a second controller: this is the same tick that
     drives series, deliveries and the ordinary queue, and it only decides which
     batch may become claimable.  It is skipped entirely when real H3 cannot be
     run right now, so a run never dispatches work this machine cannot finish.
+
+    The result separates "inspected" from "really changed".  A run that only
+    checked its own state has not earned the tick, so the Worker keeps going
+    and the run's own series, its episode assemblies and the ordinary queue
+    still get their turn.
     """
+    from shine.production.runner import RunAdvanceSummary, advance_runs
+
     if settings.render_provider != "comfyui" or settings.offline_simulation:
-        return 0
+        return RunAdvanceSummary()
     try:
         if _managed_recipe(settings) is None:
-            return 0
+            return RunAdvanceSummary()
     except HTTPException:
-        return 0
-    from shine.production.runner import advance_runs
+        return RunAdvanceSummary()
 
     try:
         return advance_runs(session_factory, worker_id=worker_id, settings=settings, limit=1)
     except Exception as exc:  # noqa: BLE001 - the run layer is not the Worker's liveness
         logger.warning("production_run_step_failed error=%s", type(exc).__name__)
-        return 0
+        return RunAdvanceSummary()
 
 
 def _run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
@@ -4046,9 +4055,13 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     )
     if recovered:
         return "reconciled"
-    advanced = _advance_production_runs(session_factory, worker_id, settings=settings)
-    if advanced:
-        return f"run:{advanced}"
+    run_step = _advance_production_runs(session_factory, worker_id, settings=settings)
+    if run_step.progressed:
+        # Only a run that really changed something owns the tick.  A run that
+        # merely inspected its state falls through, so the series executor, the
+        # episode assembly and the ordinary queue are never starved by a run
+        # that keeps reporting the same pending work as if it were progress.
+        return f"run:{run_step.progressed}"
     from shine.media.delivery_engine import run_pending_deliveries
 
     delivered = run_pending_deliveries(

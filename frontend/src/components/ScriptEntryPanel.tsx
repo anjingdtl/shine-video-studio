@@ -141,6 +141,9 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
             剧本任务：{TASK_STATUS_LABELS[latest.script_task.status] ?? latest.script_task.status}
             {latest.script_task.error_code ? ` · ${latest.script_task.error_code}` : ''}
           </p>}
+          {latest.script_task?.next_step && <p className="brief-task">
+            下一步：{latest.script_task.next_step}
+          </p>}
           {latest.script_task?.status === 'NEEDS_REVIEW' && <p className="must-note">
             这次调用的结果不确定，只核对、不自动重发。请到专业设置查看任务日志后再决定。
           </p>}

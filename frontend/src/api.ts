@@ -547,8 +547,10 @@ export type CreativeBrief = {
   id: string; version: number; payload: CreativeBriefPayload & { version: number };
   sha256: string; confirmed: boolean; stale: boolean; created_at: string; confirmed_at: string | null;
   script_task: {
-    id: string; status: string; error_code: string | null; document_id: string | null;
-    document_sha256: string | null; external_outcome: string | null; created_at: string;
+    id: string; status: string; stage?: string | null; error_code: string | null;
+    document_id: string | null;
+    document_sha256: string | null; external_outcome: string | null;
+    reconciliation?: string | null; next_step?: string | null; created_at: string;
   } | null;
   task_id?: string;
 };

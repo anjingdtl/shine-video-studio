@@ -626,3 +626,44 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 回归入口：`backend/tests/test_director_long_form_regressions.py`（18 条独立反例迁入 + 暂停/取消/纠正/
   T01/T02）、`test_director_entries_and_post.py`（双入口/先分集/后期合同）、`test_schema_identity.py`；
   迁移 head 为 `f180b0010001`。证据：`docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_20261106.md`。
+
+## 2026-11-06 收尾修复 V3 轮（调度公平性与创意任务租约）
+
+- **检查过 ≠ 有进展**。`advance_run` 必须区分四件事：**检查过**（`observations`）、**真实状态变化**
+  （`actions`）、**新工作入队**（`batch_dispatched` / `episode_queued`）、**复用已有待执行单**
+  （`episode_delivery_pending`）。只有真实变化才算 `progressed`，且只有真实变化才移动
+  `last_progress_at`。没有真实变化时 `action="waiting"`，**这一拍必须让给下游执行器**。
+  复用一份已存在的 PENDING/ASSEMBLING/DELIVERED 交付单**永远不是**新工作。
+- **运行层不得独占 tick**。`_advance_production_runs` 返回 `RunAdvanceSummary(checked, progressed,
+  dispatched, queued)`；`_run_configured_once` 只有在 `progressed` 时才 `return "run:N"`。
+  否则它必须继续走交付执行器、series 执行器、普通队列。
+- **多个 Run 之间要公平**。`advance_runs` 按 `updated_at ASC, created_at ASC` 轮转（每次推进都会
+  刷新 `updated_at`），不能用 `created_at` 先到先服务——那会让最老的 Run 永远排在最前。
+- **创意剧本任务是带租约的持久工作单元**。领取写 `lease_expires_at`（30 分钟）并由
+  `_renew_creative_claim()` 续租；领取范围含 QUEUED 与 **RUNNING 且租约已过期**（`lease_expires_at
+  IS NULL` 的历史孤儿同样算过期）。**过期表示"需要核对"，不表示"请求没发出"。**
+- **创意任务的阶段机是权威进度**（`trace.stage`）：`DRAFT`（可证明未发出→可发）、`SENDING`
+  （发送意图已落库→**不重放**，进 NEEDS_REVIEW）、`RESPONSE`（回答已落库为 `CreativeScriptDraft`
+  产物→**复用回答写文档，不再买第二次模型调用**）、`DOCUMENT`（文档已入库→只收敛状态，绝不写第二份）。
+  发送意图与稳定请求身份必须在**外部调用之前**落库。
+- **创意任务的写回全项 fencing**：成功与失败都走条件 UPDATE（`state_version` + `lease_owner` +
+  `status`）。租约失效的旧 owner 迟到写回被拒绝：不得覆盖终态、不得复活已终结任务、不得创建
+  重复 ProjectDocument。文档与任务终态在**同一事务**提交。
+- **前端必须显示中断、核对、失败与下一步**（`stage` / `reconciliation` / `next_step`），不能一直显示
+  "生成中"。Worker 丢失后任务必须离开 RUNNING，否则用户会永远等待。
+- **整链回归必须走真实 Worker 调度入口**：`backend/tests/test_director_worker_integration.py` 用
+  `worker.run_configured_once()` 驱动 3 集 / 6 批次 / 6 镜直到 Run COMPLETED，不手工调用
+  `advance_run`、不手工把 job/series 标为 PASSED、不手工补交付。**被替换的只有渲染边界**
+  （物理 ComfyUI 进程与 H3 推理），GPU 独占准入仍走 `ResourceScheduler`，FFmpeg 装配是真实的。
+  证据等级只到 OFFLINE_VERIFIED。
+- **改了 `worker.py` 就必须重做 VLM 校准**：`client_review_identity` 钉住 `worker.py`，改动按设计
+  使旧 VLM revision 与被冻结计划失效。真实生产验收前必须重新真实正负校准、发布新 revision、
+  弃用旧 revision、重新分析并人工重新冻结计划；旧证据不得复用。**跑测试期间也不要改被钉住的
+  文件**——`REVIEW_CLIENT_SOURCE_CHANGED_SINCE_LOAD` 会让整片原生 VLM 用例变红。
+- 回归入口：`backend/tests/test_director_worker_scheduling.py`（7 条）、`test_creative_script_task_lifecycle.py`
+  （7 条）、`test_director_worker_integration.py`（1 条）；原 18 条反例与上轮 3 条新反例的原始探针
+  文件保持不变、独立可复跑。
+- 本轮文档：进度 `docs/PROGRESS_20261106_DIRECTOR_LONG_FORM_V3.md`、
+  分级验收 `docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_V3_20261106.md`、
+  测试报告 `docs/TEST_REPORT_20261106_DIRECTOR_LONG_FORM_V3.md`；
+  证据目录 `.local-acceptance/closeout-v3-20261106/`（Git 忽略，不进安装包）。

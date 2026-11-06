@@ -710,17 +710,22 @@ def test_the_worker_never_dispatches_a_run_it_cannot_really_render(api, monkeypa
     run = client.post(f"/api/v1/projects/{studio['project']}/production-runs",
                       json={"package_id": package["id"]}, headers=LOCAL).json()
 
-    assert _advance_production_runs(
-        factory, "test-worker", settings=replace(settings, render_provider="mock")) == 0
+    # The run layer reports what it really did: a host that cannot render
+    # dispatches nothing, and a host that can dispatches exactly one batch.
+    blocked = _advance_production_runs(
+        factory, "test-worker", settings=replace(settings, render_provider="mock"))
+    assert (blocked.checked, blocked.progressed, blocked.dispatched) == (0, 0, 0)
     monkeypatch.setattr("shine.worker._managed_recipe", lambda _settings: None)
-    assert _advance_production_runs(
-        factory, "test-worker", settings=replace(settings, render_provider="comfyui")) == 0
+    blocked = _advance_production_runs(
+        factory, "test-worker", settings=replace(settings, render_provider="comfyui"))
+    assert (blocked.checked, blocked.progressed, blocked.dispatched) == (0, 0, 0)
     with factory() as db:
         assert db.scalars(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"])).all() == []
 
     monkeypatch.setattr("shine.worker._managed_recipe", lambda _settings: {"renderer": {"instance_id": "i"}})
-    assert _advance_production_runs(
-        factory, "test-worker", settings=replace(settings, render_provider="comfyui")) == 1
+    stepped = _advance_production_runs(
+        factory, "test-worker", settings=replace(settings, render_provider="comfyui"))
+    assert (stepped.checked, stepped.progressed, stepped.dispatched) == (1, 1, 1)
     with factory() as db:
         batches = db.scalars(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"])).all()
     assert len(batches) == 1
