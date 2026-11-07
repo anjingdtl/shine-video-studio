@@ -28,7 +28,14 @@ async function detect(user: ReturnType<typeof userEvent.setup>) {
 function automaticRoutes(failValidation = false) {
   stub.add({ method: 'POST', pattern: /setup\/install-plan$/, respond: () => jsonResponse({ plan_id: 'download', sha256: 'p', status: 'AWAITING_APPROVAL' }) });
   stub.add({ method: 'POST', pattern: /install-plans\/.*\/approve$/, respond: () => jsonResponse({ sha256: 'p' }) });
-  stub.add({ method: 'POST', pattern: /install-plans\/download\/execute$/, respond: () => jsonResponse({ status: 'FILES_VERIFIED' }) });
+  stub.add({ method: 'POST', pattern: /install-plans\/download\/execute$/, respond: () => jsonResponse({
+    attempt_id: 'attempt-download', status: 'QUEUED', stage: 'QUEUED', plan_hash: 'p',
+  }) });
+  stub.add({ method: 'GET', pattern: /installation-attempts\/attempt-download$/, respond: () => jsonResponse({
+    attempt_id: 'attempt-download', plan_id: 'download', stage: 'FILES_VERIFIED_PENDING_RUNTIME',
+    status: 'FILES_VERIFIED_PENDING_RUNTIME', confirmed_bytes: 4, total_bytes: 4, speed_bps: 0,
+    retry_count: 0, cancel_requested: false, pause_requested: false, terminal: true, resumable: false,
+  }) });
   let next = 0;
   stub.add({ method: 'POST', pattern: /setup\/next-instance-plan$/, respond: () => jsonResponse(next++ === 0
     ? { complete: false, plan_id: 'instance', sha256: 'p', status: 'AWAITING_APPROVAL', action: 'CREATE' }
@@ -249,6 +256,11 @@ describe('本机环境简化流程', () => {
     let finish: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
     stub.add({ method: 'POST', pattern: /install-plans\/download\/execute$/, respond: () =>
       new Promise(resolve => { finish = resolve; }) });
+    stub.add({ method: 'GET', pattern: /installation-attempts\//, respond: () => jsonResponse({
+      attempt_id: 'attempt-download', plan_id: 'download', stage: 'QUEUED', status: 'QUEUED',
+      confirmed_bytes: 0, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
+      pause_requested: false, terminal: false, resumable: true,
+    }) });
     const user = userEvent.setup();
     const view = render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);

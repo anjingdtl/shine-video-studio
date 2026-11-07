@@ -13,6 +13,7 @@ from shine.llm.base import (
     ChatMessage,
     LLMAuthError,
     LLMCapabilityError,
+    LLMCatalogError,
     LLMConnectionError,
     LLMError,
     LLMFormatError,
@@ -25,24 +26,35 @@ from shine.llm.base import (
     parse_json_object,
 )
 from shine.llm.context_window import model_context_from_capabilities
+from shine.llm.transport import build_client
+
+
+def _api_root(base_url: str) -> str:
+    """The API root of a base URL.
+
+    The chat endpoint and the model catalog must be derived from the same
+    root, otherwise a base URL that already points at one of them produces a
+    catalog URL that cannot exist.
+    """
+    base = base_url.rstrip("/")
+    for suffix in ("/chat/completions", "/models"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
 
 
 def _chat_url(base_url: str) -> str:
-    base = base_url.rstrip("/")
-    if base.endswith("/chat/completions"):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+    root = _api_root(base_url)
+    if root.endswith("/v1"):
+        return f"{root}/chat/completions"
+    return f"{root}/v1/chat/completions"
 
 
 def _models_url(base_url: str) -> str:
-    base = base_url.rstrip("/")
-    if base.endswith("/models"):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/models"
-    return f"{base}/v1/models"
+    root = _api_root(base_url)
+    if root.endswith("/v1"):
+        return f"{root}/models"
+    return f"{root}/v1/models"
 
 
 class OpenAICompatibleProvider:
@@ -62,7 +74,7 @@ class OpenAICompatibleProvider:
         attempts = max(0, self.config.max_retries) + 1
         for attempt in range(attempts):
             try:
-                with httpx.Client(timeout=self.config.timeout_s, follow_redirects=True) as client:
+                with build_client(url, self.config.timeout_s) as client:
                     response = client.request(method, url, headers=self._headers(), json=payload)
             except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
                 # The connection was never established, so the provider never
@@ -150,7 +162,13 @@ class OpenAICompatibleProvider:
         try:
             body = response.json()
         except json.JSONDecodeError as exc:
-            raise LLMFormatError("Provider returned a non-JSON response") from exc
+            # The provider answered; the body was unusable.  The status is the
+            # durable evidence that a response really arrived.
+            raise LLMFormatError("Provider returned a non-JSON response",
+                                 details={"status": response.status_code}) from exc
+        if not isinstance(body, dict):
+            raise LLMFormatError("Provider returned a malformed completion",
+                                 details={"status": response.status_code})
         base_resp = body.get("base_resp")
         provider_code = base_resp.get("status_code") if isinstance(base_resp, dict) else None
         response_details = {"status": response.status_code}
@@ -195,15 +213,52 @@ class OpenAICompatibleProvider:
         )
 
     def detect_capabilities(self) -> dict[str, Any]:
-        response = self._request("GET", _models_url(self.config.base_url))
+        """Read the model catalog and report what it can actually prove.
+
+        Every failure mode of a catalog endpoint - a login page, an empty
+        directory, a JSON array, a missing key - is rejected here.  The
+        configured model is only "listed" when the catalog names that exact
+        identifier; no case-insensitive guessing is allowed.
+        """
+        url = _models_url(self.config.base_url)
+        try:
+            response = self._request("GET", url)
+        except LLMModelNotFound as exc:
+            raise LLMCatalogError(
+                "Provider does not expose a model catalog",
+                details={**exc.details, "reachable": True, "auth_ok": True, "catalog_ok": False},
+            ) from exc
         try:
             body = response.json()
-        except json.JSONDecodeError:
-            body = {}
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMCatalogError(
+                "Provider returned a non-JSON model catalog",
+                details={"reachable": True, "auth_ok": True, "catalog_ok": False,
+                         "http_status": response.status_code},
+            ) from exc
+        if not isinstance(body, dict):
+            raise LLMCatalogError(
+                "Provider model catalog is not a JSON object",
+                details={"reachable": True, "auth_ok": True, "catalog_ok": False,
+                         "http_status": response.status_code},
+            )
+        data = body.get("data") if "data" in body else body.get("models")
+        if data is None:
+            raise LLMCatalogError(
+                "Provider model catalog has no model list",
+                details={"reachable": True, "auth_ok": True, "catalog_ok": False,
+                         "http_status": response.status_code},
+            )
+        if not isinstance(data, list):
+            raise LLMCatalogError(
+                "Provider model catalog is not a list of models",
+                details={"reachable": True, "auth_ok": True, "catalog_ok": False,
+                         "http_status": response.status_code},
+            )
         models = []
         model_metadata = []
-        for item in body.get("data") or []:
-            if isinstance(item, dict) and item.get("id"):
+        for item in data:
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
                 model_id = str(item["id"])
                 models.append(model_id)
                 declared = {"id": model_id}
@@ -226,8 +281,13 @@ class OpenAICompatibleProvider:
             review = {"review_response_protocol": protocol, "review_decoder_sha256": decoder}
         result = {
             "available": True,
+            "reachable": True,
+            "auth_ok": True,
+            "catalog_ok": True,
             "models": models[:200],
-            "model_listed": (not models) or self.config.model in models,
+            # An empty catalog cannot confirm the configured model, and a
+            # catalog that does not name it exactly cannot confirm it either.
+            "model_listed": bool(models) and self.config.model in models,
             "json_mode": "assumed",
             "vision": None,
             "tools": None,

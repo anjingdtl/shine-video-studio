@@ -1327,3 +1327,31 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 
 /* 窄屏按钮不换行，避免「刷新」被拆成两行 */
 .run-card .secondary-button,.run-card .subtle-button,.run-card .must-button{white-space:nowrap}
+
+/* ---- 新建作品 / 新建项目：进入一部新作品的动作，必须一眼看见 ----
+   沿用本页的橄榄绿实心主按钮语言（与「查看成片」同一套），只是更大一号，
+   让它不再被同行的作品切换器吃掉。按钮文案保持不变，脚本与无障碍名称不受影响。 */
+.new-project-button{
+  height:38px;
+  padding:0 18px;
+  border-radius:6px;
+  border:1px solid #626b47;
+  background:#626b47;
+  color:#fff;
+  font-size:12px;
+  font-weight:600;
+  letter-spacing:.2px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  white-space:nowrap;
+  transition:background .15s ease,transform .15s ease,box-shadow .15s ease;
+}
+.new-project-button:hover:not(:disabled){background:#4e5736;transform:translateY(-1px);box-shadow:0 3px 10px #4e573626}
+.new-project-button:active:not(:disabled){transform:translateY(0);box-shadow:none}
+.new-project-button:focus-visible{outline:none;box-shadow:0 0 0 3px #9ea98455}
+.new-project-button svg{stroke-width:2.4}
+.new-project-inline{width:190px!important;height:38px;font-size:11px!important}
+@media(max-width:700px){.new-project-inline{width:auto!important;flex:1}.new-project-button{flex:1;justify-content:center}}
+@media(prefers-reduced-motion:reduce){.new-project-button{transition:none}.new-project-button:hover:not(:disabled){transform:none}}

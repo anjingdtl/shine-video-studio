@@ -88,16 +88,23 @@ def test_install_plan_via_setup_endpoint(prep):
         def install(self, spec):
             return {"status": "AVAILABLE", "files": [f.model_dump() for f in spec.files]}
 
+    import os
+
+    if os.name != "nt":
+        pytest.skip("the local package executor only runs on the authorized Windows host")
     from unittest import mock
-    with mock.patch.object(
-        __import__("shine.comfyops.installer", fromlist=["LocalInstaller"]),
-        "LocalInstaller",
-        lambda root, downloader: AvailableInstaller(),
-    ):
-        with mock.patch.dict("os.environ", {"SHINE_ENABLE_LOCAL_EXECUTION": "1"}):
-            exec_result = post(client, f"/comfyops/install-plans/{plan_id}/execute",
-                               {"plan_hash": plan["sha256"], "executor": "local"}, operator=True)
-    assert exec_result["status"] == "FILES_VERIFIED"
+    with mock.patch.dict("os.environ", {"SHINE_ENABLE_LOCAL_EXECUTION": "1"}):
+        exec_result = post(client, f"/comfyops/install-plans/{plan_id}/execute",
+                           {"plan_hash": plan["sha256"], "executor": "local"}, operator=True,
+                           expected=(200, 202))
+    # The installation is a persistent task: the API queues the attempt, the
+    # Worker executes it, and the browser re-attaches by attempt id.
+    assert exec_result["status"] == "QUEUED" and exec_result["attempt_id"]
+    from shine.comfyops.installation_worker import run_attempt
+    with mock.patch("shine.comfyops.installation_worker.local_execution_enabled", lambda: True):
+        stage = run_attempt(factory, "test-worker", exec_result["attempt_id"], settings=settings,
+                            installer=AvailableInstaller())
+    assert stage == "FILES_VERIFIED_PENDING_RUNTIME"
     # Packages carry the catalog identity; re-planning stays idempotent.
     again = post(client, "/setup/install-plan", body)
     assert again["status"] == "AWAITING_APPROVAL"

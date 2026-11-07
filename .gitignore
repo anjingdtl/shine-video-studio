@@ -91,3 +91,6 @@ Desktop.ini
 # must never enter history: an untracked-but-not-ignored directory keeps the
 # working tree permanently dirty and hides real changes during review.
 .zcode/
+
+# Personal material dropped by external agent tools; never enter the repo
+.codex-attachments/

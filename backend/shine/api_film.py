@@ -45,6 +45,11 @@ from shine.services import (
 
 router = APIRouter(prefix="/api/v1", tags=["film-crew", "rulebook"])
 
+#: How many times one agent task may be released for a fresh request after the
+#: provider answered without a usable answer.  The budget keeps a role the
+#: model can never satisfy from burning calls.
+MAX_RECONCILE_ATTEMPTS = 2
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +92,14 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
     if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
         raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
 
+    decided = (task.trace.get("reconciliation") or {}).get("outcome")
+    if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}:
+        # Reconciling twice must never turn a released task back into an
+        # unconfirmable one.
+        return {"outcome": decided, "task_id": task.id, "state_version": task.state_version,
+                "resubmittable": decided != "RESULT_ADOPTED",
+                "note": "这一项已经核对过，结论不变。"}
+
     artifact = db.scalar(select(AgentArtifact).where(
         AgentArtifact.source_task_id == task.id, AgentArtifact.stale.is_(False),
     ))
@@ -122,6 +135,41 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
         db.commit()
         return {"outcome": "NOT_SENT_PROVEN", "task_id": task.id,
                 "state_version": task.state_version, "resubmittable": True}
+
+    # The provider answered and produced no usable answer: a refusal (wrong
+    # key, unknown model, rate limit) or an answer that broke the contract.
+    # The request is finished, so no answer exists that a second request
+    # could duplicate.  This is not "not sent" and it is not "unknown", and
+    # the retry stays bounded.
+    if (task.status in {"REJECTED", "FAILED"}
+            and task.trace.get("external_outcome") == "RESPONSE_RECEIVED"):
+        attempts = int((task.trace.get("reconciliation") or {}).get("attempt", 0))
+        if attempts >= MAX_RECONCILE_ATTEMPTS:
+            add_audit(db, actor, "FILM_AGENT_RETRIES_EXHAUSTED", "agent_task", task.id,
+                      {"attempts": attempts, "external_calls": 0, "resubmittable": False})
+            db.commit()
+            return {"outcome": "RETRIES_EXHAUSTED", "task_id": task.id,
+                    "state_version": task.state_version, "resubmittable": False,
+                    "note": "这一项已经重试到上限；请修改输入后重新提交，或取消本次任务。"}
+        previous_identity = task.request_identity
+        task.status = "SUPERSEDED"
+        task.error_code = None
+        task.request_identity = None
+        task.lease_owner, task.lease_expires_at = None, None
+        task.state_version += 1
+        task.trace = {**task.trace, "reconciliation": {
+            "outcome": "RESPONSE_RECEIVED_NO_ANSWER", "attempt": attempts + 1,
+            "error_code": task.error_code, "response_status": task.trace.get("response_status"),
+            "previous_request_identity": previous_identity, "checked_at": utcnow().isoformat(),
+        }}
+        add_audit(db, actor, "FILM_AGENT_RESPONSE_RECEIVED_NO_ANSWER", "agent_task", task.id,
+                  {"previous_request_identity": previous_identity, "attempt": attempts + 1,
+                   "response_status": task.trace.get("response_status"),
+                   "resubmittable": True, "external_calls": 0})
+        db.commit()
+        return {"outcome": "RESPONSE_RECEIVED_NO_ANSWER", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": True,
+                "note": "服务商已经答复但没有可用结果；再次提交时会创建一次新的模型请求。"}
 
     external_outcome = task.trace.get("external_outcome") or "UNKNOWN"
     add_audit(db, actor, "FILM_AGENT_RECONCILIATION_UNCONFIRMABLE", "agent_task", task.id,

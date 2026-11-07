@@ -1,6 +1,6 @@
 """Upstream reachability for the fixed deployment materials.
 
-A 60.8 GB download is the longest and most failure-prone step a new machine
+The fixed materials are the longest and most failure-prone step a new machine
 runs. Checking the four hosts it depends on takes seconds and turns a mid-flight
 failure into a named blocker the operator can act on (proxy, VPN, firewall).
 
@@ -94,7 +94,7 @@ def probe_upstreams(*, client=None, timeout: float = 8.0) -> dict:
         "guidance": [
             "BLOCKED 表示这台机器建立不了到该主机的 HTTPS 连接（DNS/代理/防火墙/证书）。",
             "先在本机浏览器打开对应站点；企业代理或 VPN 要在启动服务前设成系统代理。",
-            "只有全部 OK 或 PARTIAL 时，才适合开始 60.8 GB 的下载。",
+            "只有全部 OK 或 PARTIAL 时，才适合开始固定物料的下载。",
         ],
     }
 

@@ -153,6 +153,10 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/setup\/environment$/, respond: () => jsonResponse(ENV_REPORT) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/existing-installations$/, respond: () => jsonResponse({ installations: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/catalog$/, respond: () => jsonResponse(CATALOG) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/variant-recommendations$/, respond: () => jsonResponse({
+      tier: 'standard', host: { gpu: null, vram_mb: null, ram_mb: null, free_gb: null },
+      recommended: [], candidates: [], blocked: [], notes: [],
+    }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/readiness$/, respond: () => jsonResponse(READINESS) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/runtime$/, respond: () => jsonResponse(RUNTIME) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/storage$/, respond: () => jsonResponse(STORAGE) },

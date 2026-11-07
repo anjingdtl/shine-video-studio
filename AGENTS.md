@@ -7,7 +7,7 @@ Before editing code, read in order:
 3. [V1.1 影视专业 Agent 与 H3 官方规范中心](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
 4. Existing source, tests, docs, and current Git history.
 
-**Repository already exists:** `anjingdtl/shine-video-studio`, private, default branch `main`. Do not attempt to create another repository or overwrite existing work. Codex is used for development only; it must **not** become a runtime dependency.
+**Repository already exists:** `anjingdtl/shine-video-studio`, **public**, default branch `main`. Do not attempt to create another repository or overwrite existing work. Codex is used for development only; it must **not** become a runtime dependency.
 
 ## Product invariants
 - Local MiniMax-H3 through ComfyUI is the only official video-generation execution path. Mock adapters are for development/testing, never presented as real video.
@@ -878,3 +878,94 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - Keep the underlying delivery file content-addressed and immutable. A display-name change must not
   rename storage paths, modify bytes, or bypass SHA/size/decode or pending-review gates.
 - The Director 「生成分段」 view follows the newest `ProductionRun`'s confirmed episode and shot order across all of its `ProductionRunBatch` series; it must not present only the newest batch as the whole run. Each shot keeps its source batch `series_id`, so retake selection still writes through that batch's existing assembly gate. Show at most 6 shot cards per page. A passed but unsatisfactory shot can be explicitly retaken, with the old artifact preserved and a newly passed replacement explicitly selected. A historical `NEEDS_REVIEW` mapping failure stops blocking only when all attempt/audit/renderer-activation evidence proves no external submission; the explicit retake action records `ExternalJobReconciliation.result=NOT_SENT_PROVEN` before scheduling a new job. Other failed, `NEEDS_REVIEW`, or `UNKNOWN` work stays blocked until its original outcome is reconciled.
+
+## 2026-11-07 新用户全旅程修复：LLM P0、模型调用外部结果分类与 12GB 低端机候选
+
+- 本轮依据 `docs/NEW_USER_JOURNEY_REPAIR_PLAN_20261107.md` 实施阶段 A（LLM P0）、阶段 C
+  （硬件资格与变体清单）、阶段 D（图形化安装外壳与官方权重核实）；阶段 B（安装持久化与续传）
+  另行实施。实施证据见 `docs/NEW_USER_JOURNEY_REPAIR_IMPLEMENTATION_20261107.md`。
+- **模型调用外部结果必须分类，不得一律压成 UNKNOWN**：`agent_call.classify_external_outcome()`
+  区分三种事实——`NOT_SENT`（根本没发出请求：本地配置错误、拒绝同意、发送前传输失败）、
+  `RESPONSE_RECEIVED`（服务商已答复：4xx 拒绝没有答案，2xx 答复不可用）、`UNKNOWN`（可能已
+  答复但答复丢失：5xx、超时、发送后连接中断）。分类依据是 Provider 层已经记录的 HTTP 状态，
+  不做猜测；`response_status` 随 trace 落盘作为可核对证据。
+- **`UNKNOWN` 门禁保持不变**：可能已发出的请求仍然不重发、不替代、不释放身份，核对结论仍是
+  `UNCONFIRMABLE`，恢复仍是 409。`RESPONSE_RECEIVED` 是**另一个**结论：请求已结束、不存在
+  可被重复购买的答案，因此允许在 `MAX_SUBTASK_RETRIES` 预算内释放一次并重新提问；记录的是
+  `RESPONSE_RECEIVED_NO_ANSWER`，**不是** `NOT_SENT_PROVEN`，不得据此声称“未发出”。
+- **核对结论必须幂等**：已判定的块在重复核对时保持原结论，不得被覆盖回 `UNCONFIRMABLE`；
+  后端 `resumable` 判定与恢复门禁必须是同一套规则，界面不得给出服务端必然拒绝的按钮。
+- **官方权重事实（A 级，2026-11-07 核实 revision `54472221d27c695fca9621b0c3ed52f06c4af707`）**：
+  `Comfy-Org/MiniMax-H3` 全部 39 个文件中**不存在** W4/AWQ/GPTQ/INT4 的 DiT，唯一 4bit 文件是
+  文本编码器 `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`。官方最小 DiT 是
+  `minimax_h3_ref2va_pruned_w6a8.safetensors`（15,983,746,636 B /
+  `ece96bbbce76670ec782de84acc888fd9d9b210bd2ab97c1957b39896734f9f1`），官方 INT8 ConvRot
+  视频 VAE 为 2,811,065,184 B。官方**未公布**任何显存/内存门槛，12GB 显卡能否运行属于待核；
+  候选变体 `acceptance_status` 只能是 `CANDIDATE`，不得进入默认生产推荐。
+- 面向用户的 W4 ConvRot 需求登记为**显式未钉住的候选槽位**（`source: THIRD_PARTY_UNVERIFIED`、
+  全部 pin 为 `unknown`、`acceptance_status: BLOCKED`），并列出钉住它所需的可信来源、revision、
+  size、SHA-256、许可证原文与显存实测来源。**不得编造** URL、体积、哈希或许可证结论。
+
+## 2026-11-08 导演链路阻滞：死亡 worker 的子任务与「按状态复用任务」
+
+- **场景子任务必须能被识别为「worker 已死」**。`materialprep/scenes.py` 的单场子任务此前
+  **完全没有租约**，worker 带着请求死在半路时，行永远停在 `RUNNING`，与「正在跑」无法区分：
+  界面显示假进行中，而该场再也不能被重新请求，整条大纲就停在那里。现在子任务以
+  `created_at` 超过 `SCENE_DEAD_AFTER_SECONDS`（900s，超过服务商超时上限）判定为死亡，
+  并按最后一个 phase 决定：
+  - phase 在 `PRE_REQUEST_PHASES`（`PREPARING`/`WAITING_RESOURCE`/`PREPARING_PROVIDER`）
+    → 可证明请求从未发出，写入 `NOT_SENT_PROVEN`、退休该行并释放身份，**以新请求重问这一场**；
+  - phase 已到 `WAITING_PROVIDER` 或更晚 → 结果仍未知，**不退休、不重发**，保留身份等人核对，
+    并在结果里带 `dead_worker`/`outcome_unknown`，界面不再显示「运行中」。
+  - 同一场最多自动退休 `MAX_SCENE_DEAD_RETRIES`（2）次，超过即停并等人，避免无限重试。
+- **任务复用必须看状态，不能只看身份**。`story.queue_outline` 之前按 `request_identity` 无条件
+  复用旧任务，于是**已取消或已失败的大纲任务被永远原样返回**：用户点多少次「后台提取并归并
+  总体大纲」都拿不回可推进的任务。现在只有 `REUSABLE_TASK_STATUSES`
+  （`QUEUED/RUNNING/PAUSED/NEEDS_REVIEW/SUCCEEDED`）的旧任务会被复用；其余尝试保留身份作为
+  历史，新尝试使用带 `attempt` 的新身份（base identity 记录在 trace 里，所有尝试都能被找到）。
+  归并子调用（`_merge`）同样处理死亡 worker。
+- **已取消的任务仍可「核对已有结果」**：核对只读证据、不发 Provider 请求，因此允许对
+  `CANCELLED` 任务执行，让用户能释放可证明未发出的身份；`CANCELLED` 任务不提供「恢复未完成工作」。
+- 以上都不放松 UNKNOWN 门禁：可能已发出的请求仍然不重发、不替代、不释放身份，核对结论仍是
+  `UNCONFIRMABLE`，恢复仍是 409。
+- 验收：`backend/tests/test_scene_dead_worker.py`（3 项）与 `backend/tests/test_story_outline_unblock.py`
+  （4 项）、`frontend/src/test/storyOutlineUnblock.test.tsx`（4 项）。
+
+## 2026-11-08 用户授权的未知子任务一次性重发 + 连续模型调用间隔控制
+
+- **（覆盖 2026-11-07 的「不得因用户授权创建替代 task」）** `external_outcome=UNKNOWN` 的子任务，
+  在**用户显式确认**后允许**一次**新的模型请求：
+  - 入口：`POST /projects/{id}/story-preparation/tasks/{task_id}/resend-unknown`；`expected_state_version`
+    绑定用户看到的状态，`evidence` 记录用户的确认说明。
+  - 只在用户点「明确重发这一场」并确认后发生；系统**绝不自动**发起，核对（reconcile）仍然只读证据。
+  - 旧任务退休时记录的原因必须写 `USER_AUTHORIZED_NEW_REQUEST`，**不得**写 `NOT_SENT_PROVEN`：
+    旧请求的结果仍然未知，它只是被用户明确覆盖的一条未知事实。
+  - 每一场最多一次（`MAX_UNKNOWN_RESENDS = 1`），第二次同一场被拒（`STORY_UNKNOWN_RESEND_ALREADY_USED`）；
+    审计事件 `STORY_UNKNOWN_SUBTASK_RESEND_AUTHORIZED` 记录旧身份、证据与「允许一次新请求」。
+  - 其余门禁不变：UNKNOWN 仍不会被自动重放或自动替代，身份在未被用户覆盖前不会释放。
+- **调用间隔控制收归唯一入口**：`agent_call.call_material_agent` 现在在**每次** Provider 调用前调用
+  `pace_provider_call()`（`SHINE_AGENT_STEP_DELAY_MS`，默认 1200ms）。此前只有 brief 路径调用它，
+  而**逐场大纲每场是一个任务步，跨步之间没有任何间隔**——21 场连续调用会共用同一条连接与同一个
+  限流，失败的表现正是「卡住」。`scenes.prepare_scenes` 里那次重复 sleep 已移除，间隔只有一个口径。
+  逐场调用保持**串行**：一次一个任务步，不并发、不并行扇出。
+- 验收：`backend/tests/test_story_unknown_resend.py`（3 项）、`backend/tests/test_scene_dead_worker.py`
+  （3 项）、`frontend/src/test/storyOutlineUnblock.test.tsx`（5 项）。
+
+## 2026-11-08 公开仓库的主分支推送限制（仅仓库所有者可推送）
+
+- **远端仓是公开仓库**（`visibility: public`），但 **`main` 只允许仓库所有者 `anjingdtl` 更新**。
+  约束由仓库 Ruleset `main-owner-only-push`（id `26763523`）执行：`update` 规则作用于
+  `refs/heads/main`，bypass 白名单只有一条 —— `RepositoryRole` admin（`actor_id=5`，
+  `bypass_mode=always`）。本仓库目前只有 `anjingdtl` 一个 admin（协作者 API 实测），
+  因此「admin 角色」即「所有者本人」。
+- **不要用 classic 分支保护的用户级限制来做这件事**：GitHub 对个人账户仓库直接拒绝
+  （`Only organization repositories can have users and team restrictions`），Ruleset 是
+  个人仓库可用的等价机制。若将来要按**人**授权，必须先把仓库迁到 Organization。
+- **所有者仍可直接推 `main`、仍可合并 PR**（bypass 为 `always`）；**其他分支不受限制**，
+  feature branch + PR 的工作流照旧可用。外部贡献者只能走 fork + PR，且只有所有者能合并
+  （合并同样会写 `main`）。
+- **被拒的推送是正确结果，不是故障**：不要为了让推送通过而删除 ruleset、删掉 bypass
+  白名单或改用 `--force`。Ruleset 同时挡住了 force push 与 `main` 删除。
+- 验收：临时清空 bypass 白名单后做了一次**真实**推送，服务端返回
+  `GH013: Cannot update this protected ref`，远端 `main` sha 未变（零污染）；恢复白名单后
+  所有者推送非 `main` 分支成功。证据见 `docs/BRANCH_PROTECTION.md`。

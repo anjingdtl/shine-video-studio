@@ -113,7 +113,7 @@ import os, sys
 from pathlib import Path
 from shine.comfyops.installer import LocalInstaller, PackageSpec
 class FakeDownloader:
-    def download(self, *args):
+    def download(self, *args, **kwargs):
         os._exit(23)
 spec = PackageSpec(name="crashed", kind="model", revision="v1", license_id="TEST", usage="research",
     files=[dict(url="https://example.com/f", relative_path="f", size=1, sha256="a"*64)])
@@ -205,7 +205,7 @@ source = root / "synthetic-source"
 source.write_bytes(b"new")
 class FakeDownloader:
     valid = staticmethod(ControlledDownloader.valid)
-    def download(self, *args):
+    def download(self, *args, **kwargs):
         return source
 spec = PackageSpec(name="model", kind="model", revision="v1", license_id="TEST", usage="research",
     files=[dict(url="https://example.com/f", relative_path="f", size=3,

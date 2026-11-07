@@ -250,7 +250,7 @@ def test_secret_store_never_writes_plaintext(tmp_path):
     profile_id = str(uuid.uuid4())
     reference = store.store(profile_id, "sk-super-secret-value")
     assert store.load(reference) == "sk-super-secret-value"
-    stored = (tmp_path / "secrets" / f"{profile_id}.secret").read_bytes()
+    stored = (tmp_path / "secrets" / reference.split(":", 1)[1]).read_bytes()
     assert b"sk-super-secret-value" not in stored
     assert reference.split(":", 1)[0] in {"dpapi", "file"}
     store.delete(reference)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
@@ -22,6 +23,17 @@ from shine.llm.mock import MockLLMProvider, Responder
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, ProviderProfile
+
+#: The generation probe is fixed, synthetic and empty of project material.
+#: It carries no script, no asset, no character image and no voice: it only
+#: proves that the configured provider can answer with structured JSON.
+GENERATION_PROBE_SYSTEM = "You are a connectivity probe. Answer with one JSON object only."
+GENERATION_PROBE_USER = 'Answer with one JSON object: {"ok": true}'
+GENERATION_PROBE_SCHEMA = {
+    "type": "object",
+    "required": ["ok"],
+    "properties": {"ok": {"type": "boolean"}},
+}
 
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
@@ -184,6 +196,74 @@ class LLMGateway:
         if profile.kind in {"openai_compatible", "ollama"} and capabilities.get("model_listed") is False:
             capabilities["warning"] = "The configured model was not listed by the provider"
         return capabilities
+
+    def test_generation(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:
+        """Run one minimal structured generation against the configured provider.
+
+        The probe proves the generation endpoint, the model id, the
+        authentication and the structured-output path.  It never claims
+        anything about the quality of an answer.
+        """
+        if profile.kind == "mock":
+            return {
+                "generation_ok": False,
+                "structured_output_ok": None,
+                "mock": True,
+                "model": None,
+                "model_matches_config": None,
+                "latency_ms": None,
+                "error_code": "LLM_MOCK_PROVIDER",
+                "message": "A mock provider is not a generation acceptance",
+            }
+        started = time.perf_counter()
+        try:
+            config = agent_output_config(self.config_for(profile))
+            provider = self.provider_factory(config, self.mock_responder)
+            response = provider.complete(
+                [
+                    ChatMessage("system", GENERATION_PROBE_SYSTEM),
+                    ChatMessage("user", GENERATION_PROBE_USER),
+                ],
+                schema=GENERATION_PROBE_SCHEMA,
+                json_mode=True,
+            )
+        except LLMError as exc:
+            return {
+                "generation_ok": False,
+                "structured_output_ok": False,
+                "mock": False,
+                "model": None,
+                "model_matches_config": None,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "error_code": exc.code,
+                "message": str(exc),
+            }
+        except Exception as exc:  # noqa: BLE001 - no provider failure may escape unclassified
+            return {
+                "generation_ok": False,
+                "structured_output_ok": False,
+                "mock": False,
+                "model": None,
+                "model_matches_config": None,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "error_code": "LLM_ERROR",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+        is_mock = bool(response.raw_meta.get("is_mock"))
+        return {
+            "generation_ok": not is_mock,
+            "structured_output_ok": response.parsed is not None,
+            "mock": is_mock,
+            "model": response.model,
+            "model_matches_config": response.model == config.model,
+            "latency_ms": response.latency_ms,
+            "error_code": "LLM_MOCK_PROVIDER" if is_mock else None,
+            "message": (
+                "A mock provider is not a generation acceptance"
+                if is_mock
+                else "Generation and structured output succeeded"
+            ),
+        }
 
 
 class GatewayStructuredModel:

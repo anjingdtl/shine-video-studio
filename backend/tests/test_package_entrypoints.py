@@ -110,6 +110,30 @@ def _run_ps(script_path: Path, timeout=120):
     )
 
 
+def test_the_single_entry_opens_the_graphic_wizard_and_keeps_the_console_recovery_path():
+    """One entry file, two ways in: the wizard, and the console installer."""
+    setup = (PACKAGING / "SETUP.cmd").read_text(encoding="utf-8")
+    assert "scripts\\setup_wizard.ps1" in setup
+    assert "scripts\\install_once.ps1" in setup
+    wizard_path = SCRIPTS / "setup_wizard.ps1"
+    assert wizard_path.is_file()
+    raw = wizard_path.read_bytes()
+    assert raw.startswith(UTF8_BOM), "the wizard has Chinese text and needs a BOM"
+    wizard = raw.decode("utf-8-sig")
+    # The wizard drives the existing installer; it never becomes a second
+    # implementation of the installation rules.
+    assert "install_once.ps1" in wizard
+    assert "Invoke-ConsoleInstaller" in wizard
+    assert "-Console" in wizard
+    # The wizard reports the installer's own output and never a measured
+    # percentage it did not measure.
+    assert "RedirectStandardOutput" in wizard
+    assert "Style = 'Marquee'" in wizard
+    # It never asks for administrator rights and never claims to fetch weights.
+    assert "RunAs" not in wizard
+    assert "requireAdministrator" not in wizard
+    assert "Invoke-ConsoleInstaller" in wizard
+
 def test_generated_operator_password_is_reused_and_hashed_into_env(tmp_path):
     """One-click installs must not depend on a human inventing a 16+ char secret."""
     credential = tmp_path / "secrets" / "operator-credentials.txt"

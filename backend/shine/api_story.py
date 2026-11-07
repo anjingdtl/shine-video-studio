@@ -296,6 +296,37 @@ class TaskControl(APIModel):
     subtask_id: str | None = Field(default=None, max_length=36)
 
 
+class ResendUnknownBody(APIModel):
+    """One person's explicit decision to ask an unknown scene again."""
+
+    expected_state_version: int = Field(ge=0)
+    subtask_id: str = Field(min_length=1, max_length=36)
+    evidence: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/projects/{project_id}/story-preparation/tasks/{task_id}/resend-unknown")
+def resend_unknown_subtask(project_id: str, task_id: str, body: ResendUnknownBody,
+                           actor: Operator, db: DBSession):
+    """Ask one unknown scene again, because a person decided to.
+
+    The old request may still own an answer upstream, so this never happens
+    by itself: the person confirms, the decision is audited with the evidence
+    they gave, and the scene is asked exactly once more.  The old task is
+    never recorded as "not sent" - it stays in the ledger as an unknown result
+    that a person overrode.
+    """
+    db.execute(text("BEGIN IMMEDIATE"))
+    row = db.get(AgentTaskRecord, task_id)
+    if not row or row.project_id != project_id or row.role_id not in {story.OUTLINE_RUN, story.SECTION_RUN}:
+        raise HTTPException(404, "STORY_TASK_NOT_FOUND")
+    if row.state_version != body.expected_state_version:
+        raise HTTPException(409, "STORY_TASK_STATE_CHANGED")
+    decision = story.authorize_unknown_resend(db, row, body.subtask_id, actor, body.evidence)
+    db.commit()
+    return {**public_task(db, row), "resubmitted": False, "decision": decision,
+            "note": "已登记你的确认：这一场会以一次新的模型请求重问；旧请求的结果仍然未知，不会被自动采用。"}
+
+
 @router.post("/projects/{project_id}/story-preparation/tasks/{task_id}/{action}")
 def control(project_id: str, task_id: str, action: str, body: TaskControl, actor: Operator, db: DBSession):
     db.execute(text("BEGIN IMMEDIATE"))

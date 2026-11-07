@@ -4037,6 +4037,20 @@ def _advance_text_preparation(session_factory, settings, worker_id) -> bool:
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     from shine.comfyops.runtime_configuration import resolve_runtime
 
+    # A setup-type installation is durable work that does not need the video
+    # runtime: the new-machine flow installs the renderer before any runtime
+    # exists.  It is served before the other queues so a long film run never
+    # starves the installer.
+    try:
+        from shine.comfyops.installation_worker import run_pending_installation
+
+        installation = run_pending_installation(session_factory, worker_id, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - the installation queue must not kill the tick
+        logger.warning("installation_step_failed error=%s", type(exc).__name__)
+        installation = None
+    if installation:
+        return f"installation:{installation}"
+
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.
     if _text_preparation_ticks < TEXT_PREPARATION_BURST and _advance_text_preparation(

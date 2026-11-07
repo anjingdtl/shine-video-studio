@@ -159,38 +159,68 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
     return attempt
 
 
-def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
-    with factory() as db:
-        db.execute(text("BEGIN IMMEDIATE"))
-        plan = db.get(InstallationPlan, plan_id)
+def validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED"):
+    """Every check an approved plan must pass before an attempt is queued.
+
+    The approval hash, the single-use grant and the pinned package digests are
+    re-verified here, so an attempt may never execute content that the human
+    did not approve.
+    """
+    plan = db.get(InstallationPlan, plan_id)
+    if (
+        not plan
+        or plan.status != "APPROVED"
+        or plan.sha256 != plan_hash
+        or graph_hash(plan.payload) != plan_hash
+        or plan.payload.get("approved_by") != actor
+    ):
+        raise ValueError("INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
+    if plan.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
+        raise ValueError("USE_INSTANCE_LIFECYCLE_OR_BACKUP_EXECUTOR")
+    if datetime.fromisoformat(plan.payload.get("execute_before", "2000-01-01")) <= utcnow():
+        raise ValueError("INSTALL_APPROVAL_EXPIRED")
+    if plan.payload.get("executor") != executor:
+        raise ValueError("LOCAL_PLAN_REQUIRED" if executor == "LOCAL_ISOLATED" else "FAKE_EXECUTOR_REQUIRED")
+    if executor == "LOCAL_ISOLATED" and not plan.payload.get("isolated"):
+        raise ValueError("LOCAL_PLAN_REQUIRED")
+    for package in plan.payload["packages"]:
+        cls = ModelPackage if package["spec"]["kind"] == "model" else NodePackage
+        row = db.get(cls, package["id"])
         if (
-            not plan
-            or plan.status != "APPROVED"
-            or plan.sha256 != plan_hash
-            or graph_hash(plan.payload) != plan_hash
-            or plan.payload.get("approved_by") != actor
+            not row or row.sha256 != package["hash"]
+            or graph_hash(row.payload) != package["hash"] or graph_hash(package["spec"]) != package["hash"]
         ):
-            raise ValueError("INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
-        if plan.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
-            raise ValueError("USE_INSTANCE_LIFECYCLE_OR_BACKUP_EXECUTOR")
-        if datetime.fromisoformat(plan.payload.get("execute_before", "2000-01-01")) <= utcnow():
-            raise ValueError("INSTALL_APPROVAL_EXPIRED")
-        if not plan.payload.get("isolated") or plan.payload.get("executor") != "LOCAL_ISOLATED":
-            raise ValueError("LOCAL_PLAN_REQUIRED")
-        for package in plan.payload["packages"]:
-            cls = ModelPackage if package["spec"]["kind"] == "model" else NodePackage
-            row = db.get(cls, package["id"])
-            if (
-                not row or row.sha256 != package["hash"]
-                or graph_hash(row.payload) != package["hash"] or graph_hash(package["spec"]) != package["hash"]
-            ):
-                raise ValueError("PLAN_HASH_CHANGED")
+            raise ValueError("PLAN_HASH_CHANGED")
+    if executor == "LOCAL_ISOLATED":
         from shine.comfyops.storage import disk_info, require_storage
         selected_root = require_storage(settings)
         if plan.payload.get('storage_root', str(selected_root)) != str(selected_root):
             raise ValueError('DEPLOYMENT_STORAGE_CHANGED_RECREATE_PLAN')
         if disk_info(selected_root)['free_bytes'] < plan.payload.get("disk_required", 0):
             raise ValueError("INSUFFICIENT_DISK")
+    return plan
+
+
+def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED") -> str:
+    """Queue the persistent attempt.  Nothing is downloaded in this request.
+
+    The Worker claims the attempt afterwards, writes its stage and its
+    confirmed bytes, and the browser re-attaches by the returned attempt id.
+    """
+    from shine.comfyops.installation import queue_attempt
+
+    with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        plan = validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor)
+        attempt = queue_attempt(db, plan, plan_hash, actor)
+        attempt_id = attempt.id
+    return attempt_id
+
+
+def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):
+    with factory() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        plan = validate_approved_plan(db, settings, plan_id, plan_hash, actor)
         plan.status = "INSTALLING"
         attempt = InstallationAttempt(
             plan_id=plan.id,

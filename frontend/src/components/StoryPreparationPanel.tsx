@@ -11,7 +11,9 @@ type TaskSummary = { stage: string; label: string; done: number; total: number; 
   lease_expires_at: string | null; awaiting_reclaim: boolean; lease_remaining_s: number | null };
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
   outline: Outline | null; summary?: TaskSummary;
-  progress: { stage: string; cursor: number; blocked_subtasks?: { status?: string; reconciliation?: string }[];
+  progress: { stage: string; cursor: number;
+    blocked_subtasks?: { status?: string; reconciliation?: string; scene_key?: string; error_code?: string;
+      dead_worker?: boolean; outcome_unknown?: boolean; task_id?: string }[];
     blocked_result?: { rejections?: { role?: string; task_id?: string; code?: string; external_outcome?: string }[] };
     reconciliation?: { checked_at: string; outcomes: { subtask_id: string | null; outcome: string; last_phase?: string | null }[] };
     results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
@@ -20,11 +22,18 @@ type StoryTask = { task_id: string; role: string; status: string; state_version:
 // subcall that may already have reached the provider keeps waiting for the
 // person, and the system never asks again on its own.
 const UNDECIDED = new Set(['RUNNING', 'NEEDS_REVIEW', 'FAILED']);
-const resumable = (blocked?: { status?: string }[]) => (blocked ?? []).every((item) => !UNDECIDED.has(item?.status ?? ''));
+// A block whose reconciliation ended in one of these is still binding: the
+// server refuses to resume it, so the button must not pretend otherwise.
+const UNRESOLVED = new Set(['UNCONFIRMABLE', 'RETRIES_EXHAUSTED']);
+const resumable = (blocked?: { status?: string; reconciliation?: string }[]) =>
+  (blocked ?? []).every((item) => !UNDECIDED.has(item?.status ?? '')
+    && !UNRESOLVED.has(item?.reconciliation ?? ''));
 const RECONCILE_LABELS: Record<string, string> = {
   RESULT_ADOPTED: '已有产物，直接采用',
   NOT_SENT_PROVEN: '可证明从未发出，已注销该次请求',
-  UNCONFIRMABLE: '可能已经发出、结果未知，需要你决定是否明确重发',
+  RESPONSE_RECEIVED_NO_ANSWER: '服务商已经答复但没有可用结果，可以重新尝试一次',
+  UNCONFIRMABLE: '结果未知，系统不会用同一请求重发',
+  RETRIES_EXHAUSTED: '已经重试到上限，需要修改输入或取消',
   NO_SUBCALL: '没有可核对的子请求',
   SUBTASK_RECORD_MISSING: '子任务记录已不存在',
 };
@@ -158,16 +167,33 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           {!task.summary.awaiting_reclaim && task.summary.lease_remaining_s !== null && task.summary.lease_remaining_s > 0
             && <small>Worker 正在推进（本次接管有效期还剩约 {Math.ceil(task.summary.lease_remaining_s / 60)} 分钟）</small>}
         </div>}
-        {task.error_code && <p>需要处理：{task.error_code}。核对原任务后再恢复，未知结果不会自动重发。</p>}
+        {task.error_code && <p>需要处理：{task.error_code}。先点「核对已有结果」：服务商已答复但没有可用结果的子任务会被释放，可以重新尝试；结果未知的不会自动重发。</p>}
+        {!!task.progress.blocked_subtasks?.length && <small>阻塞的子任务：{task.progress.blocked_subtasks.map((item) => [item.scene_key, item.error_code].filter(Boolean).join(' ')).join('；')}</small>}
+        {task.progress.blocked_subtasks?.some((item) => item.dead_worker) && (
+          <small>上一次推进被中断（Worker 已退出）：可证明从未发出的请求会释放并重问；结果未知的不会自动重发，请核对原任务。</small>
+        )}
+        {task.progress.blocked_subtasks?.map((item) => (
+          item.task_id && UNDECIDED.has(item.status ?? '') && !item.reconciliation ? (
+            <button key={item.task_id} type="button" className="text-button" disabled={busy}
+              onClick={() => {
+                const which = item.scene_key ? '「' + item.scene_key + '」' : '这一场';
+                if (!window.confirm(which + '的旧请求可能仍有答案，可能多花一次模型调用。确认以一次新的请求重问？')) return;
+                void action(() => api('/projects/' + projectId + '/story-preparation/tasks/' + task.task_id + '/resend-unknown',
+                  json('POST', { expected_state_version: task.state_version, subtask_id: item.task_id,
+                    evidence: '用户确认对结果未知的子任务发起一次新请求' })));
+              }}>明确重发这一场</button>
+          ) : null
+        ))}
         {reconciliationNote(task.progress.reconciliation) && <p className="run-reconcile">{reconciliationNote(task.progress.reconciliation)}</p>}
         {['QUEUED', 'RUNNING'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/pause`, json('POST', { expected_state_version: task.state_version })))}>暂停任务</button>}
-        {['PAUSED', 'FAILED', 'NEEDS_REVIEW'].includes(task.status) && <>
+        {['PAUSED', 'FAILED', 'NEEDS_REVIEW', 'CANCELLED'].includes(task.status) && <>
           <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/reconcile`, json('POST', { expected_state_version: task.state_version })))}>核对已有结果</button>
-          <button type="button" disabled={busy || !!rejection || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
+          {['PAUSED', 'FAILED', 'NEEDS_REVIEW'].includes(task.status) && <button type="button" disabled={busy || !!rejection || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>}
           {rejection && <>
             <small>原 {rejection.role} 调用仍为 UNKNOWN。只能核对原任务；在没有未发送证明前不会创建新请求。</small>
           </>}
-          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务可能已经发出、结果未知：只核对原任务；系统不会创建替代请求。</small>}
+          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务的模型结果未知：只核对原任务，系统不会用同一请求重发。若核对后仍无法继续，请修改剧本后重新导入并重新提取，或取消本任务。</small>}
+          {task.status === 'CANCELLED' && <small>本任务已取消：仍可核对原任务，释放可证明从未发出的请求，然后重新提取。</small>}
         </>}
         {!['SUCCEEDED', 'CANCELLED'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/cancel`, json('POST', { expected_state_version: task.state_version })))}>取消后续工作</button>}
         {task.progress.results?.map((result, i) => <div key={i}>

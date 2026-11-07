@@ -58,6 +58,18 @@ class LLMCapabilityError(LLMError):
     code = "LLM_CAPABILITY"
 
 
+class LLMCatalogError(LLMError):
+    """The provider answered, but its model catalog is unusable as evidence.
+
+    A login page, an empty directory, a JSON array, or any other shape that
+    cannot name the configured model must never be reported as "the model was
+    confirmed".  The caller can tell the difference between "the service is
+    unreachable" and "the service answered with something we cannot trust".
+    """
+
+    code = "LLM_CATALOG_INVALID"
+
+
 @dataclass(frozen=True)
 class ChatMessage:
     role: str

@@ -9,6 +9,7 @@ import httpx
 from shine.llm.base import (
     ChatMessage,
     LLMAuthError,
+    LLMCatalogError,
     LLMConnectionError,
     LLMError,
     LLMFormatError,
@@ -19,6 +20,7 @@ from shine.llm.base import (
     ProviderConfig,
     parse_json_object,
 )
+from shine.llm.transport import build_client
 
 
 class AnthropicMessagesProvider:
@@ -43,7 +45,7 @@ class AnthropicMessagesProvider:
         attempts = max(0, self.config.max_retries) + 1
         for attempt in range(attempts):
             try:
-                with httpx.Client(timeout=self.config.timeout_s) as client:
+                with build_client(self._url(), self.config.timeout_s) as client:
                     response = client.post(self._url(), headers=self._headers(), json=payload)
             except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
                 # The connection was never established, so the provider never
@@ -124,7 +126,10 @@ class AnthropicMessagesProvider:
         blocks = body.get("content") or []
         text = "".join(block.get("text", "") for block in blocks if isinstance(block, dict))
         if not text.strip():
-            raise LLMFormatError("Anthropic returned an empty completion")
+            # The provider answered; the body was unusable.  The status is the
+            # durable evidence that a response really arrived.
+            raise LLMFormatError("Anthropic returned an empty completion",
+                                 details={"status": response.status_code})
         parsed = parse_json_object(text) if json_mode else None
         return LLMResponse(
             text=text,
@@ -139,16 +144,47 @@ class AnthropicMessagesProvider:
     def detect_capabilities(self) -> dict[str, Any]:
         base = self.config.base_url.rstrip("/")
         url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-        with httpx.Client(timeout=self.config.timeout_s) as client:
-            response = client.get(url, headers=self._headers())
+        try:
+            with build_client(url, self.config.timeout_s) as client:
+                response = client.get(url, headers=self._headers())
+        except httpx.TimeoutException as exc:
+            raise LLMTimeout("Anthropic capability probe timed out", details={
+                "error": type(exc).__name__, "external_outcome": "UNKNOWN",
+            }) from None
+        except httpx.HTTPError as exc:
+            raise LLMConnectionError("Anthropic capability probe failed", details={
+                "error": type(exc).__name__, "external_outcome": "UNKNOWN",
+            }) from None
+        if response.status_code in {401, 403}:
+            raise LLMAuthError("Anthropic rejected the API key", details={"status": response.status_code})
         if response.status_code >= 400:
-            raise LLMError("Anthropic capability probe failed", details={"status": response.status_code})
-        body = response.json()
-        models = [str(item["id"]) for item in body.get("data") or [] if isinstance(item, dict) and item.get("id")]
+            raise LLMCatalogError("Anthropic capability probe failed", details={
+                "status": response.status_code, "reachable": True, "auth_ok": True, "catalog_ok": False,
+            })
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMCatalogError("Anthropic returned a non-JSON model catalog", details={
+                "reachable": True, "auth_ok": True, "catalog_ok": False,
+            }) from exc
+        if not isinstance(body, dict):
+            raise LLMCatalogError("Anthropic model catalog is not a JSON object", details={
+                "reachable": True, "auth_ok": True, "catalog_ok": False,
+            })
+        data = body.get("data") if "data" in body else body.get("models")
+        if not isinstance(data, list):
+            raise LLMCatalogError("Anthropic model catalog has no model list", details={
+                "reachable": True, "auth_ok": True, "catalog_ok": False,
+            })
+        models = [str(item["id"]) for item in data if isinstance(item, dict) and item.get("id")]
         return {
             "available": True,
+            "reachable": True,
+            "auth_ok": True,
+            "catalog_ok": True,
             "models": models,
-            "model_listed": (not models) or self.config.model in models,
+            # Only an exact match confirms the configured model.
+            "model_listed": bool(models) and self.config.model in models,
             "json_mode": "prompt-enforced",
             "vision": True,
             "tools": True,

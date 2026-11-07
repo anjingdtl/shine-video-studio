@@ -114,6 +114,38 @@ function Get-FreeShinePort([int]$Start, [int[]]$Exclude = @()) {
     throw "No free local port between $Start and $($Start + 59)."
 }
 
+$receiptPath = Join-Path $env:SHINE_DATA_DIR 'run/receipts.json'
+
+function Get-FileFingerprint([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    try { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower() } catch { return '' }
+}
+
+function Get-ShineReceipts {
+    if (-not (Test-Path -LiteralPath $receiptPath)) { return $null }
+    try { return Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+}
+
+function Save-ShineReceipt([string]$Name, [hashtable]$Data) {
+    # A success receipt replaces "the directory exists" as the proof that a
+    # step really finished.
+    $receipts = Get-ShineReceipts
+    if (-not $receipts) { $receipts = New-Object psobject }
+    $entry = [ordered]@{ at = (Get-Date).ToString('o') }
+    foreach ($key in $Data.Keys) { $entry[$key] = $Data[$key] }
+    $receipts | Add-Member -NotePropertyName $Name -NotePropertyValue ([pscustomobject]$entry) -Force
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $receiptPath) | Out-Null
+    $receipts | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $receiptPath -Encoding utf8
+}
+
+function Test-ShineReceipt([string]$Name, [string]$Fingerprint) {
+    $receipts = Get-ShineReceipts
+    if (-not $receipts) { return $false }
+    $entry = $receipts.$Name
+    if (-not $entry) { return $false }
+    return ([string]$entry.fingerprint -eq $Fingerprint)
+}
+
 function Test-WebAlive([int]$Port) {
     if (-not $Port) { return $false }
     try {
@@ -139,17 +171,45 @@ function Test-RecordedApiAlive($Record) {
     return ((Get-PortOwner $port) -eq $expected)
 }
 
+function Test-RecordedProcessAlive($Entry) {
+    # The recorded pid is only trusted together with its recorded birth.
+    if (-not $Entry -or -not $Entry.pid) { return $false }
+    $process = Get-Process -Id ([int]$Entry.pid) -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    if ($Entry.start_time) { return ($process.StartTime.ToString('o') -eq $Entry.start_time) }
+    return $true
+}
+
+function Test-RecordedWorkerAlive($Record) {
+    $worker = @($Record.processes) | Where-Object { $_.name -eq 'worker' } | Select-Object -First 1
+    if (-not $worker) { return $true }  # the stack was started without a worker
+    return (Test-RecordedProcessAlive $worker)
+}
+
+function Test-RecordedWebAlive($Record) {
+    # A bound port is not enough: the recorded listener must still own it.
+    $port = [int]$Record.web_port
+    if (-not $port) { return $false }
+    $web = @($Record.processes) | Where-Object { $_.name -eq 'web' } | Select-Object -First 1
+    $expected = if ($web -and $web.listener_pid) { [int]$web.listener_pid } else { 0 }
+    if (-not $expected) { return $false }
+    if ((Get-PortOwner $port) -ne $expected) { return $false }
+    return (Test-WebAlive $port)
+}
+
 $manifestPath = Join-Path $env:SHINE_DATA_DIR 'run/processes.json'
 if (Test-Path $manifestPath) {
     $record = $null
     try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
     $apiAlive = $false
     $webAlive = $false
+    $workerAlive = $false
     if ($record) {
         $apiAlive = Test-RecordedApiAlive $record
-        $webAlive = Test-WebAlive ([int]$record.web_port)
+        $webAlive = Test-RecordedWebAlive $record
+        $workerAlive = Test-RecordedWorkerAlive $record
     }
-    if ($record -and $apiAlive -and $webAlive) {
+    if ($record -and $apiAlive -and $webAlive -and $workerAlive) {
         Write-Host "The workbench is already running: http://127.0.0.1:$($record.web_port)/"
         if ($OpenBrowser) { Start-Process "http://127.0.0.1:$($record.web_port)/" }
         exit 0
@@ -157,7 +217,11 @@ if (Test-Path $manifestPath) {
     # A half-dead stack must not brick the only start button. Stop what this
     # record really owns; if its identity cannot be proven, archive the record
     # and let the port check below decide whether a real conflict remains.
-    Write-Warning 'The previous run did not leave a complete stack; reconciling it first.'
+    $missing = @()
+    if (-not $apiAlive) { $missing += 'API' }
+    if (-not $webAlive) { $missing += 'Web' }
+    if (-not $workerAlive) { $missing += 'Worker' }
+    Write-Warning ("The previous run did not leave a complete stack (missing: " + ($missing -join ', ') + '); reconciling it first.')
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR } finally { $ErrorActionPreference = $previous }
@@ -191,12 +255,18 @@ if ($AutoPorts) {
 }
 $env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
 
-if ($Install -or -not (Test-Path $backendEnv)) {
+$backendLock = Join-Path $repoRoot 'backend/uv.lock'
+$backendFingerprint = Get-FileFingerprint $backendLock
+if ($Install -or -not (Test-Path $backendEnv) -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
     Invoke-Native 'Python dependency installation' {
         & uv sync --project (Join-Path $repoRoot 'backend') --locked
     }
+    Save-ShineReceipt 'backend_dependencies' @{ fingerprint = $backendFingerprint; command = 'uv sync --locked' }
 }
-if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules'))) {
+$frontendLock = Join-Path $repoRoot 'frontend/package-lock.json'
+$frontendFingerprint = Get-FileFingerprint $frontendLock
+if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules')) -or
+    -not (Test-ShineReceipt 'frontend_dependencies' $frontendFingerprint)) {
     $frontendInstallRoot = Join-Path $repoRoot 'frontend'
     if ($env:SHINE_BOOTSTRAP_ROOT) {
         $frontendInstallRoot = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'app/frontend'
@@ -230,6 +300,7 @@ if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules')))
     Invoke-Native 'Frontend dependency installation' {
         & npm --prefix $frontendInstallRoot ci --fetch-retries=4 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000 --fetch-timeout=300000
     }
+    Save-ShineReceipt 'frontend_dependencies' @{ fingerprint = $frontendFingerprint; command = 'npm ci' }
 }
 
 $runDir = Join-Path $env:SHINE_DATA_DIR 'run'
@@ -255,6 +326,11 @@ Invoke-Native 'Database migration' {
     & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
 }
 Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+Save-ShineReceipt 'database_migration' @{
+    fingerprint = Get-FileFingerprint $migrationLog
+    database = $databaseUrl
+    command = 'alembic upgrade head'
+}
 
 $uvicornArgs = @(
     '-m', 'uvicorn', 'shine.main:app',
@@ -433,6 +509,14 @@ $manifestPath = Join-Path $runDir 'processes.json'
     additional_review_port = if ($AdditionalReviewManifest) { $AdditionalReviewPort } else { $null }
     processes = $started
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
+# The stack is only healthy when the API, the Web and the Worker are all up.
+Save-ShineReceipt 'service_health' @{
+    fingerprint = (Get-FileFingerprint $manifestPath)
+    api_port = $ApiPort
+    web_port = $WebPort
+    worker = (-not $NoWorker)
+    command = 'start_shine'
+}
 } catch {
     # Roll back only still-owned launcher trees created during this invocation.
     foreach ($entry in $started) {

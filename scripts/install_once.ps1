@@ -57,6 +57,18 @@ function New-DesktopShortcut {
     }
 }
 
+function Get-ShineReceipt([string]$Path, [string]$Name) {
+    # A success receipt replaces "the directory exists" as the proof that a
+    # step really finished.
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        return $content.$Name
+    } catch {
+        return $null
+    }
+}
+
 function Write-Banner([string]$text) {
     Write-Host ''
     Write-Host ('=' * 66) -ForegroundColor DarkCyan
@@ -264,7 +276,7 @@ if (-not $StorageRoot) {
         }
         Write-Host ''
         Write-Host '  处理办法：清空一个非系统盘，或挂载一块新盘后重新双击安装。' -ForegroundColor Yellow
-        Write-Host '  本项目需要下载约 60.8 GB 固定物料，安装峰值约 174 GB，不会写入 C 盘。' -ForegroundColor Yellow
+        Write-Host '  本项目固定物料完整目录约 60.8 GB（默认生产组件约 48.3 GB，可选审片组件另计），安装峰值约 174 GB，不会写入 C 盘。' -ForegroundColor Yellow
         exit 11
     }
     $chosen = $candidates[0]
@@ -324,8 +336,34 @@ if (-not $pwshPath) {
     $shim = Join-Path $StorageRoot 'bin/pwsh.cmd'
     if (Test-Path -LiteralPath $shim) { $pwshPath = $shim }
 }
+# The install is only complete when every step left a success receipt.
+# A directory that merely exists is not a receipt: a half-finished dependency
+# install must be repaired, not accepted.
+$toolchainReceiptPath = Join-Path $StorageRoot 'run/toolchain.json'
+$toolchainOk = $false
+if (Test-Path -LiteralPath $toolchainReceiptPath) {
+    try {
+        $toolchain = Get-Content -LiteralPath $toolchainReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $toolchainOk = (@($toolchain.blockers).Count -eq 0 -and @($toolchain.installed).Count -gt 0)
+    } catch { $toolchainOk = $false }
+}
+$receiptsPath = Join-Path $recordedData 'run/receipts.json'
+$backendReceipt = Get-ShineReceipt $receiptsPath 'backend_dependencies'
+$frontendReceipt = Get-ShineReceipt $receiptsPath 'frontend_dependencies'
+$migrationReceipt = Get-ShineReceipt $receiptsPath 'database_migration'
 $alreadyInstalled = $pwshPath -and
-    (Test-Path -LiteralPath $backendPython) -and (Test-Path -LiteralPath $frontendModules)
+    (Test-Path -LiteralPath $backendPython) -and (Test-Path -LiteralPath $frontendModules) -and
+    $toolchainOk -and $backendReceipt -and $frontendReceipt -and $migrationReceipt
+if (-not $alreadyInstalled) {
+    $missing = @()
+    if (-not $toolchainOk) { $missing += '工具链' }
+    if (-not $backendReceipt) { $missing += '后端依赖' }
+    if (-not $frontendReceipt) { $missing += '前端依赖' }
+    if (-not $migrationReceipt) { $missing += '数据库迁移' }
+    if ($missing.Count -gt 0) {
+        Write-Warn ("缺少成功回执，将重新安装这些步骤：" + ($missing -join '、'))
+    }
+}
 
 if ($alreadyInstalled) {
     # A second double-click must not reinstall dependencies. start_shine only
@@ -403,7 +441,23 @@ if ($installCode -ne 0) {
     exit $installCode
 }
 
-# ---- 5. Hand over to the wizard -----------------------------------------
+# ---- 5. Service health receipt -----------------------------------------
+$healthOk = $false
+try {
+    $health = Invoke-RestMethod "http://127.0.0.1:$apiPort/health" -TimeoutSec 15
+    $healthOk = [bool]$health
+} catch {
+    $healthOk = $false
+}
+if (-not $healthOk) {
+    Write-Fail '服务健康检查没有通过：安装按未完成处理，请查看日志后再运行一次。'
+    Write-Host "  日志目录：$(Join-Path $recordedData 'run/logs')" -ForegroundColor Gray
+    if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
+    exit 15
+}
+Write-Ok '服务健康检查通过（API 已响应）。'
+
+# ---- 6. Hand over to the wizard -----------------------------------------
 $webUrl = "http://127.0.0.1:$webPort/#setup"
 Write-Host ''
 New-DesktopShortcut

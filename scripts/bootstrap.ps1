@@ -89,22 +89,44 @@ function Get-CommandResult([string]$tool, [string[]]$argv) {
     return @{ Present = $true; Version = (Get-ToolVersion $out); Source = $cmd.Source }
 }
 
-function Get-RemoteFile([string]$Url, [string]$Destination) {
+function Get-RemoteFile([string]$Url, [string]$Destination, [long]$ExpectedSize = 0) {
     # A bare Windows may not ship curl.exe (older Win10 builds, Server images).
     # curl is preferred because it pins no .NET TLS default; the fallback sets
     # TLS 1.2 explicitly and stays usable without any installed tool.
+    #
+    # The bytes land in a .part file first.  curl continues it with a byte
+    # range; when the server refuses the range the partial file is dropped and
+    # the download starts over, so a full response is never appended to bytes
+    # that are already on disk.
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if ($curl) {
-        & curl.exe -sS -L --retry 3 --retry-delay 2 --connect-timeout 30 -o $Destination $Url
-        if ($LASTEXITCODE -eq 0) { return }
+        $part = $Destination + '.part'
+        $resume = $true
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if ($resume) {
+                & curl.exe -sS -L --retry 3 --retry-delay 2 --connect-timeout 30 -C - -o $part $Url
+            } else {
+                & curl.exe -sS -L --retry 3 --retry-delay 2 --connect-timeout 30 -o $part $Url
+            }
+            if ($LASTEXITCODE -eq 0) {
+                Move-Item -LiteralPath $part -Destination $Destination -Force
+                return
+            }
+            $resume = $false
+            if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
+            if ($attempt -ge 3) { break }
+        }
         throw "download failed (curl exit $LASTEXITCODE)"
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $previousProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
+    $part = $Destination + '.part'
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 900
+        Invoke-WebRequest -Uri $Url -OutFile $part -UseBasicParsing -TimeoutSec 900
+        Move-Item -LiteralPath $part -Destination $Destination -Force
     } catch {
+        if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
         throw "download failed ($($_.Exception.Message))"
     } finally {
         $ProgressPreference = $previousProgress
@@ -136,22 +158,46 @@ function Install-Tool([string]$name, $entry) {
             if (-not $found) { $missing += $leaf }
         }
         if ($missing.Count -gt 0) {
-            throw "Pinned tool directory exists but is incomplete ($($missing -join ', ')); reconcile the previous installation."
+            # An interrupted earlier run left an incomplete directory.  It is
+            # preserved, never deleted, and the pinned tool is installed again
+            # from the verified archive.
+            $orphan = $toolDir + '.incomplete-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            Move-Item -LiteralPath $toolDir -Destination $orphan -Force
+            Write-Host "[bootstrap] preserved the incomplete $name directory at $orphan"
+        } else {
+            Write-Host "[bootstrap] reusing $name $($entry.version) at $toolDir"
+            return $toolDir
         }
-        Write-Host "[bootstrap] reusing $name $($entry.version) at $toolDir"
-        return $toolDir
     }
     $cache = Join-Path $env:TEMP "shine-bootstrap-cache"
     New-Item -ItemType Directory -Force -Path $cache | Out-Null
     $archive = Join-Path $cache ($name + ".zip")
     Write-Host "[bootstrap] downloading $name $($entry.version)"
-    Get-RemoteFile $url $archive
+    Get-RemoteFile $url $archive $expectedSize
     $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $sha256.ToLower()) { throw "sha256 mismatch for $name" }
     if ((Get-Item $archive).Length -ne $expectedSize) { throw "size mismatch for $name" }
     Write-Host "[bootstrap] sha256 verified for $name"
-    New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
-    Expand-Archive -Path $archive -DestinationPath $toolDir -Force
+    # Extract into a staging directory.  The final directory only appears
+    # after every pinned entry file is really inside it.
+    $staging = $toolDir + '.staging'
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    Expand-Archive -Path $archive -DestinationPath $staging -Force
+    $missing = @()
+    foreach ($leafEntry in $entry.entries) {
+        $leaf = Split-Path -Leaf $leafEntry
+        $found = Get-ChildItem $staging -Recurse -Filter $leaf -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $found) { $missing += $leaf }
+    }
+    if ($missing.Count -gt 0) {
+        throw "Pinned tool archive is incomplete ($($missing -join ', '))."
+    }
+    if (Test-Path -LiteralPath $toolDir) {
+        $previous = $toolDir + '.previous-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+        Move-Item -LiteralPath $toolDir -Destination $previous -Force
+    }
+    Move-Item -LiteralPath $staging -Destination $toolDir -Force
     return $toolDir
 }
 
@@ -230,6 +276,20 @@ foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
         (-not $result.Present -or -not (Test-VersionAtFloor $result.Version $floors[$name]))) {
         $report.blockers += @{ name = $name; status = "unavailable_after_install" }
     }
+}
+# A success receipt for the toolchain.  The next start reads it instead
+# of assuming that an existing directory means a complete installation.
+if ($StorageRoot) {
+    $receiptDir = Join-Path $StorageRoot 'run'
+    New-Item -ItemType Directory -Force -Path $receiptDir | Out-Null
+    [ordered]@{
+        recorded_at = (Get-Date).ToString('o')
+        manifest = [IO.Path]::GetFullPath($ToolsManifest)
+        manifest_sha256 = (Get-FileHash -LiteralPath $ToolsManifest -Algorithm SHA256).Hash.ToLower()
+        tools = @($report.tools | ForEach-Object { $_.name })
+        installed = @($report.installed | ForEach-Object { $_.name })
+        blockers = @($report.blockers | ForEach-Object { $_.name })
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $receiptDir 'toolchain.json') -Encoding utf8
 }
 $report | ConvertTo-Json -Depth 5
 if ($report.blockers.Count -gt 0) { exit 1 }

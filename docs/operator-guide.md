@@ -165,7 +165,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8100/api/v1/provider-profi
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8100/api/v1/provider-profiles/{id}/test'
-# {"ok": true, "message": "Connection succeeded"}
+# {"ok": true, "message": "连接检查通过：服务可达且模型目录列出了配置的 Model ID"}
 ```
 
 角色路由通过 `agent_routes` 表管理，12 个角色（scriptwriter、director、
@@ -175,8 +175,10 @@ script_planner、shot_planner、repair_planner、qc_reviewer）都指向该档�
 
 ### 3.3 两个已知现象
 
-- 能力探测会提示 `model_listed: false`：配置里写的是小写 `MiniMax-M3.1-flash`，服务商
-  返回的模型表里是 `MiniMax-M3.1-Flash`。连接本身是成功的。
+- 模型目录里没有配置的 Model ID 时，连接测试会**判定为未通过**（稳定错误码
+  `LLM_MODEL_NOT_LISTED`），但同时保留 `reachable: true`，界面会列出服务商返回的候选
+  Model ID。系统不做未经授权的大小写模糊匹配：请把配置里的 Model ID 改成服务商返回的
+  写法（例如 `MiniMax-M3.1-Flash`），再测一次。连接本身是成功的。
 - 剧组的角色如果返回 `LLM_FORMAT`，说明模型输出没满足该角色的结构化契约（HTTP 422）。
   这不是环境坏了；先看返回内容与 schema 的差异。
 

@@ -13,32 +13,90 @@ TEXT_ROLES = ('script_planner', 'shot_planner', 'scriptwriter', 'director', 'cin
 #: voice master without a clone source.
 VOICE_ROLES_REQUIRED_FOR_MASTERS = ('design',)
 
+#: The states one text role can be in.  A connection check and a generation
+#: check are two different facts and never collapse into one.
+READINESS_UNCONFIGURED = 'UNCONFIGURED'
+READINESS_CONNECTION_READY = 'CONNECTION_READY'
+READINESS_GENERATION_READY = 'GENERATION_READY'
+READINESS_BLOCKED = 'BLOCKED'
+READINESS_STALE = 'STALE'
+
 
 def profile_identity(profile):
     return graph_hash({key: getattr(profile, key) for key in
                        ('kind', 'base_url', 'model', 'enabled', 'api_key_ref', 'generation_options')})
 
 
+def generation_evidence(profile) -> dict:
+    """The recorded generation check of a profile, if there is one."""
+    if profile is None:
+        return {}
+    capabilities = profile.capabilities or {}
+    evidence = capabilities.get('generation')
+    return evidence if isinstance(evidence, dict) else {}
+
+
 def llm_readiness(db):
+    """Report what the text roles have actually proved.
+
+    The connection gate keeps its meaning - the provider answered and the
+    configured model was listed.  The generation gate is separate: a role
+    that only passed the connection check is CONNECTION_READY, never
+    GENERATION_READY.
+    """
     routes = {row.role: row for row in db.scalars(select(AgentRoute))}
     rows = []
     for role in TEXT_ROLES:
         route = routes.get(role)
         profile = db.get(ProviderProfile, route.provider_profile_id) if route else None
         code = None
+        generation_code = None
+        readiness = READINESS_UNCONFIGURED
         if profile is None:
             code = 'LLM_ROUTE_REQUIRED'
         elif profile.kind == 'mock' or profile.capabilities.get('mock') or profile.capabilities.get('is_mock'):
             code = 'REAL_LLM_PROVIDER_REQUIRED'
+            readiness = READINESS_BLOCKED
         elif not profile.enabled or not profile.model.strip():
             code = 'LLM_PROFILE_DISABLED_OR_MODEL_MISSING'
-        elif (not profile.capabilities.get('available') or profile.capabilities.get('model_listed') is False
-              or profile.capabilities.get('setup_config_sha256') != profile_identity(profile)):
+            readiness = READINESS_BLOCKED
+        elif (not profile.capabilities.get('available')
+              or profile.capabilities.get('model_listed') is False):
             code = 'LLM_CONNECTION_TEST_REQUIRED'
+            readiness = READINESS_BLOCKED
+        elif profile.capabilities.get('setup_config_sha256') != profile_identity(profile):
+            # The evidence belongs to an older configuration.
+            code = 'LLM_CONNECTION_TEST_REQUIRED'
+            readiness = READINESS_STALE
+        else:
+            evidence = generation_evidence(profile)
+            if evidence.get('generation_ok') and evidence.get('config_sha256') == profile_identity(profile):
+                readiness = READINESS_GENERATION_READY
+            else:
+                readiness = READINESS_CONNECTION_READY
+                generation_code = 'LLM_GENERATION_TEST_REQUIRED'
         rows.append({'role': role, 'profile_id': profile.id if profile else None,
-                     'profile_name': profile.name if profile else None, 'code': code})
-    return {'status': 'READY' if all(row['code'] is None for row in rows) else 'BLOCKED',
-            'roles': rows, 'verification': 'CONNECTION_ONLY_NOT_GENERATION'}
+                     'profile_name': profile.name if profile else None, 'code': code,
+                     'generation_code': generation_code, 'readiness_status': readiness})
+    status = 'READY' if all(row['code'] is None for row in rows) else 'BLOCKED'
+    if status == 'BLOCKED':
+        generation_status = 'BLOCKED'
+    elif all(row['readiness_status'] == READINESS_GENERATION_READY for row in rows):
+        generation_status = 'GENERATION_READY'
+    else:
+        generation_status = 'CONNECTION_READY'
+    return {
+        'status': status,
+        'roles': rows,
+        'verification': 'CONNECTION_ONLY_NOT_GENERATION',
+        'generation_verification': (
+            'GENERATION_TESTED_NOT_QUALITY_ACCEPTANCE'
+            if generation_status == 'GENERATION_READY'
+            else 'GENERATION_TEST_NOT_RUN'
+        ),
+        'generation_status': generation_status,
+        'text_agent_ready': generation_status == 'GENERATION_READY',
+    }
 
 
 def voice_readiness(db, settings=None):
@@ -49,11 +107,11 @@ def voice_readiness(db, settings=None):
 
     1. the role is routed to a registered local package,
     2. that package's files were hash-verified against their pinned digests
-       (``FILES_VERIFIED_PENDING_RUNTIME``) and it declares the capability,
+       (`FILES_VERIFIED_PENDING_RUNTIME`) and it declares the capability,
     3. the role's interpreter/overlay runtime is configured and matches the
        package's pinned runtime versions.
 
-    ``voice_master_capable`` is the minimum needed to generate and freeze a
+    `voice_master_capable` is the minimum needed to generate and freeze a
     voice master (the design model); clone/dialogue roles are reported
     separately so a partially installed runtime is never shown as fully ready.
     """

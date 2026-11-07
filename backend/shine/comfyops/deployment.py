@@ -94,6 +94,13 @@ class DeploymentCatalog(BaseModel):
     components: list[CatalogComponent] = Field(min_length=1)
     review_runtime_wheels: list[str] = Field(default_factory=list)
     workflow_profiles: list[str] = Field(default_factory=list)
+    #: Profiles that are registered but not part of the default ready set.
+    #: A profile whose weights or nodes are not closed stays here until the
+    #: gap is filled and it has passed a real acceptance.
+    deferred_workflow_profiles: list[dict] = Field(default_factory=list)
+    #: The variant manifest whose thresholds and acceptance status govern
+    #: this catalog.  It is the single source of the admission floors.
+    variant_id: str | None = None
     dependency_policy: dict = Field(default_factory=dict)
     total_bytes: int = Field(ge=0)
 
@@ -196,6 +203,108 @@ def _package_class(kind: str):
     return ModelPackage if kind == "model" else NodePackage
 
 
+#: The component groups the download confirmation screen talks about.  The
+#: optional advisory reviewers are never part of the default production
+#: download, so the two are never written as one "total".
+COMPONENT_GROUP_PRODUCTION = "default_production"
+COMPONENT_GROUP_OPTIONAL_REVIEW = "optional_review"
+COMPONENT_GROUP_MODEL = "model"
+
+
+def component_groups(catalog: dict) -> dict:
+    """Split a catalog into the default production parts and the optional ones.
+
+    The model group is the weight bytes on their own: it is the number the
+    user compares between variants, and it is always smaller than the whole
+    catalog because the runtime (ComfyUI source, wheels, nodes) is not a
+    weight.
+    """
+    production: list[str] = []
+    optional: list[str] = []
+    models: list[str] = []
+    for component in catalog.get("components", []):
+        if component.get("kind") == "review-model" or component.get("role") in {"VLM", "ASR"}:
+            optional.append(component["component_id"])
+        else:
+            production.append(component["component_id"])
+        if component.get("kind") == "model":
+            models.append(component["component_id"])
+    return {
+        COMPONENT_GROUP_PRODUCTION: production,
+        COMPONENT_GROUP_OPTIONAL_REVIEW: optional,
+        COMPONENT_GROUP_MODEL: models,
+    }
+
+
+def _component_bytes(catalog: dict, component_ids) -> int:
+    wanted = set(component_ids or [])
+    return sum(
+        int(file.get("size") or 0)
+        for component in catalog.get("components", [])
+        if component.get("component_id") in wanted
+        for file in component.get("files", [])
+    )
+
+
+def download_breakdown(catalog: dict, requested: list[str] | None = None,
+                       *, disk_free_bytes: int | None = None) -> dict:
+    """The download size of a selection, split by component group.
+
+    There is no single hard-coded "total": the complete catalog, the default
+    production components and the optional advisory components are three
+    different numbers, and the selected set is a fourth one.
+    """
+    groups = component_groups(catalog)
+    production_bytes = _component_bytes(catalog, groups[COMPONENT_GROUP_PRODUCTION])
+    optional_bytes = _component_bytes(catalog, groups[COMPONENT_GROUP_OPTIONAL_REVIEW])
+    model_bytes = _component_bytes(catalog, groups[COMPONENT_GROUP_MODEL])
+    selected = list(requested) if requested is not None else list(groups[COMPONENT_GROUP_PRODUCTION])
+    selected_bytes = _component_bytes(catalog, selected)
+    complete = int(catalog.get("total_bytes") or (production_bytes + optional_bytes))
+    breakdown = {
+        "complete_catalog_bytes": complete,
+        "default_production_bytes": production_bytes,
+        "optional_review_bytes": optional_bytes,
+        "model_bytes": model_bytes,
+        "runtime_bytes": max(0, production_bytes - model_bytes),
+        "selected_bytes": selected_bytes,
+        "selected_components": sorted(selected),
+        "optional_review_components": sorted(groups[COMPONENT_GROUP_OPTIONAL_REVIEW]),
+        "model_components": sorted(groups[COMPONENT_GROUP_MODEL]),
+    }
+    if disk_free_bytes is not None:
+        breakdown["free_bytes"] = int(disk_free_bytes)
+        breakdown["free_after_bytes"] = int(disk_free_bytes) - selected_bytes
+    return breakdown
+
+
+def default_variant_requirements() -> dict:
+    """The admission thresholds of the default production variant."""
+    from shine.comfyops.variants import default_variant_id, load_variant_manifest, variant_requirements
+
+    try:
+        return variant_requirements(load_variant_manifest(default_variant_id()))
+    except (OSError, ValueError, FileNotFoundError):
+        return {}
+
+
+def resolve_variant(catalog: dict, requested: list[str]) -> dict | None:
+    """The variant a plan installs, or None when the plan is component-only.
+
+    A plan binds a variant when it carries that variant's checkpoint
+    components.  A candidate variant is never bound automatically: its files
+    live in their own catalog and it is never part of the default download.
+    """
+    from shine.comfyops.variants import list_variant_manifests
+
+    wanted = set(requested or [])
+    for manifest in list_variant_manifests():
+        required = set(manifest.get("required_component_ids") or [])
+        if required and required <= wanted:
+            return manifest
+    return None
+
+
 def _pinned_files(payload: dict) -> list[tuple[str, str, int]]:
     """The file identity of a package payload, independent of its declaration."""
     return sorted(
@@ -281,11 +390,17 @@ def register_catalog_packages(db, catalog: dict, requested: list[str]) -> dict:
 
 
 def create_install_plan(db, settings: Settings, catalog: dict, requested: list[str],
-                        project_id: str, disk_free: int) -> InstallationPlan:
+                        project_id: str, disk_free: int, *,
+                        variant: dict | None = None,
+                        qualification: dict | None = None) -> InstallationPlan:
     """Assemble a LOCAL_ISOLATED install plan from the pinned catalog.
 
     Reuses the same payload contract as the manual /comfyops/install-plans path,
     so approval and execution remain the existing controlled endpoints.
+
+    The variant and its host qualification are recorded in the plan payload:
+    a plan that installs a production variant always says which variant it
+    installs and what the host was measured to be.
     """
     _require_project(db, project_id)
     from shine.comfyops.storage import disk_info, require_storage
@@ -322,6 +437,13 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
         "risks": ["THIRD_PARTY_CODE" if p["spec"]["kind"] in {"node", "source", "wheel"}
                   else "MODEL_LICENSE" for p in packages],
         "deployment": {"catalog_id": catalog["catalog_id"], "catalog_version": catalog["catalog_version"]},
+        "variant": {
+            "variant_id": (variant or {}).get("variant_id"),
+            "acceptance_status": (variant or {}).get("acceptance_status"),
+            "auto_download_allowed": bool((variant or {}).get("auto_download_allowed", False)),
+        } if variant else None,
+        "qualification": qualification,
+        "download_breakdown": download_breakdown(catalog, requested),
     }
     row = InstallationPlan(
         project_id=project_id, payload=payload, sha256=graph_hash(payload), status="AWAITING_APPROVAL"
@@ -615,6 +737,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "--fast", "fp16_accumulation",
         "--disable-all-custom-nodes", "--whitelist-custom-nodes", *whitelist,
     ])
+    requirements = default_variant_requirements()
     renderer = {
         "instance_id": instance.id,
         "installation": {"id": instance.id, "sha256": instance.sha256},
@@ -627,8 +750,11 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "adapter_sha256": adapter_identity,
         "gpu_uuid": gpu["uuid"],
         "port": int(payload["port"]),
-        "min_ram_mb": 8192,
-        "min_vram_mb": 12000,
+        # The production start measures the *available* memory of this one
+        # card.  Its floors come from the variant manifest, so the renderer
+        # admission and the deployment recommendation cannot disagree.
+        "min_ram_mb": int(requirements.get("min_free_ram_mb") or 8192),
+        "min_vram_mb": int(requirements.get("min_free_vram_mb") or 12000),
         "argv": argv,
         "pinned_files": [
             "{python}", "{root}" + SEP + "main.py", "{adapter_dir}" + SEP + "__init__.py",

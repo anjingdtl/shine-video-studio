@@ -46,7 +46,10 @@ def prep(api, fake_deployment_host):
 
 def post(client, path, body=None, *, operator=False, expected=200):
     r = client.post("/api/v1" + path, json=body or {}, headers=HEADERS if operator else {})
-    assert r.status_code == expected, r.text
+    # The installation queue answers 202: the attempt is persistent and the
+    # Worker runs it afterwards.
+    allowed = expected if isinstance(expected, tuple | list | set) else (expected,)
+    assert r.status_code in allowed, r.text
     return r.json()
 
 
@@ -142,7 +145,7 @@ def package(client, **extra):
 
 
 def test_inventory_install_and_workflow_offline(prep):
-    client, _, _ = prep
+    client, factory, settings = prep
     project = create_project(client)
     snapshot = post(client, "/comfyops/inventory/refresh")
     assert snapshot["payload"]["is_mock"] and snapshot["status"] == "MOCK_VERIFIED"
@@ -161,9 +164,15 @@ def test_inventory_install_and_workflow_offline(prep):
         expected=409,
     )
     execution = post(
-        client, f"/comfyops/install-plans/{plan['id']}/execute", {"plan_hash": approved["sha256"]}, operator=True
+        client, f"/comfyops/install-plans/{plan['id']}/execute", {"plan_hash": approved["sha256"]},
+        operator=True, expected=(200, 202),
     )
     assert execution["payload"]["system_changes"] is False
+    # The Worker executes the queued attempt.  The mock drill only changes the
+    # ledger; it never touches the machine.
+    from shine.comfyops.installation_worker import run_pending_installation
+
+    assert run_pending_installation(factory, "v13-test-worker", settings=settings) == "MOCK_VERIFIED"
     post(
         client,
         f"/comfyops/install-plans/{plan['id']}/execute",

@@ -1,0 +1,285 @@
+{
+  "manifest_version": "1",
+  "variant_id": "h3-ref2va-int8-convrot",
+  "model_family": "MiniMax-H3",
+  "generation_mode": "Ref2VA",
+  "title": "H3 Ref2VA INT8 ConvRot（当前生产基线）",
+  "label": "Ref2VA INT8 ConvRot",
+  "summary": "部署目录钉定的 Ref2VA INT8 ConvRot 组合：INT8 DiT + NVFP4/AWQ 文本编码器 + FP16 视频 VAE + FP32 音频 VAE + 8 步 PDD + 真实人物 LoRA。它是本仓库唯一有真机镜头证据的变体；其结论不外推到其它量化或其它生成模式。",
+  "precision": "INT8 ConvRot",
+  "quantization": "W8A8 (INT8 ConvRot)",
+  "acceptance_status": "SUPPORTED",
+  "default_recommended": true,
+  "auto_download_allowed": true,
+  "source": "OFFICIAL_PINNED",
+  "tier": "standard",
+  "preference": 10,
+  "catalog_id": "h3-ref2va-windows-x64",
+  "checkpoint_id": "Minimax-H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+  "required_component_ids": [
+    "minimax-h3-diffusion",
+    "minimax-h3-text-encoder",
+    "minimax-h3-vae"
+  ],
+  "install_component_ids": [
+    "comfyui",
+    "comfy-runtime-wheels",
+    "ComfyUI-KJNodes",
+    "comfyui-videohelpersuite",
+    "ComfyUI-MiniMax-H3-PDD-Acc",
+    "ComfyUI-SolAttn_triton",
+    "Comfyui_Minimax_h3_latent_Upscaler",
+    "minimax-h3-diffusion",
+    "minimax-h3-text-encoder",
+    "minimax-h3-vae",
+    "minimax-h3-lora",
+    "minimax-h3-pdd"
+  ],
+  "files": [
+    {
+      "role": "dit",
+      "component_id": "minimax-h3-diffusion",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "relative_path": "Minimax-H3/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "size": 20970379616,
+      "sha256": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/e5eb578a89295337b8ff433a035929ce0279e0b6/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    },
+    {
+      "role": "text_encoder",
+      "component_id": "minimax-h3-text-encoder",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "relative_path": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size": 15687142551,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/e5eb578a89295337b8ff433a035929ce0279e0b6/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    },
+    {
+      "role": "video_vae",
+      "component_id": "minimax-h3-vae",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "relative_path": "MiniMax-H3(1)/minimax_h3_video_vae_fp16.safetensors",
+      "size": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/e5eb578a89295337b8ff433a035929ce0279e0b6/vae/minimax_h3_video_vae_fp16.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    },
+    {
+      "role": "audio_vae",
+      "component_id": "minimax-h3-vae",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+      "relative_path": "MiniMax-H3(1)/minimax_h3_audio_vae_fp32.safetensors",
+      "size": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/e5eb578a89295337b8ff433a035929ce0279e0b6/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    },
+    {
+      "role": "pdd",
+      "component_id": "minimax-h3-pdd",
+      "repository": "alibaba-pai/MiniMax-H3-Acc-LoRAs",
+      "revision": "335001fb9e5455d68a0caa18ec2e319072150328",
+      "relative_path": "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+      "size": 1372450680,
+      "sha256": "111c82e669f6e20e628228172edf39395f1a9fc3ad049793895e542c0f55b18c",
+      "url": "https://huggingface.co/alibaba-pai/MiniMax-H3-Acc-LoRAs/resolve/335001fb9e5455d68a0caa18ec2e319072150328/MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    },
+    {
+      "role": "lora",
+      "component_id": "minimax-h3-lora",
+      "repository": "fal/MiniMax-H3-Realism-People-LoRA",
+      "revision": "039cc8579d7aa357a882d7f4111b25da4f72dccc",
+      "relative_path": "Minimax-H3/h3-realism-people-t2v-i2v-r2v.safetensors",
+      "size": 131229656,
+      "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+      "url": "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA/resolve/039cc8579d7aa357a882d7f4111b25da4f72dccc/h3-realism-people-t2v-i2v-r2v.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "config/deployment/_upstream-pins/models.json（2026-10-31 读取上游元数据后钉定）",
+        "verified_on": "2026-10-31",
+        "level": "PINNED_PROJECT_FACT",
+        "note": "固定仓库、固定 revision、固定 size 与 SHA-256；安装器按这三个值校验每一个字节。"
+      }
+    }
+  ],
+  "runtime": {
+    "python": "3.12",
+    "torch": "2.7.1+cu128（wheel 已在 config/deployment/_upstream-pins/wheels.json 钉定）",
+    "cuda": "cu128 wheel 通道；实际 CUDA 运行时版本待隔离环境安装后复核",
+    "nodes": [
+      "ComfyUI-KJNodes@ab72eda7ffad6280422d71ab7d54d3fb87c0ba18",
+      "comfyui-videohelpersuite@4d907bee61e92c2e65af3bd6383a4e4d356126d1",
+      "ComfyUI-MiniMax-H3-PDD-Acc@311a65dd53832d8a5f8177a9d5fb923c09e35a90",
+      "ComfyUI-SolAttn_triton@26d816ebd4f1e43a2c6e4d4759be3137f10a7a73"
+    ]
+  },
+  "architecture_requirements": {
+    "cuda_compute_capability": "unknown",
+    "torch_arch_list": "unknown",
+    "gpu_arch": "unknown"
+  },
+  "requirements": {
+    "os": "windows-x64",
+    "arch": "x64",
+    "gpu_vendor": "nvidia",
+    "min_vram_mb": 15360,
+    "min_ram_mb": 32768,
+    "min_commit_mb": 40960,
+    "min_disk_gb": 180,
+    "min_free_vram_mb": 12000,
+    "min_free_ram_mb": 8192,
+    "estimated_or_measured": {
+      "min_vram_mb": "estimated",
+      "min_ram_mb": "estimated",
+      "min_commit_mb": "estimated",
+      "min_disk_gb": "estimated",
+      "min_free_vram_mb": "estimated",
+      "min_free_ram_mb": "estimated"
+    }
+  },
+  "workflow_profile_ids": [
+    "local-h3-ref2va-pdd8-2img-1aud",
+    "local-h3-ref2va-pdd8-2img-1aud-portrait",
+    "local-h3-ref2va-2img-1aud"
+  ],
+  "graph_sha256": {
+    "local-h3-ref2va-pdd8-2img-1aud": "ea979fba2d3ad02493ee28d7126a624ca8afde06b1895a0e81a6bd50a193ca64",
+    "local-h3-ref2va-pdd8-2img-1aud-portrait": "d6178d8640e480fd40e795d509b34a920d25e7285b8cdb29c9a50fbe4be0c924",
+    "local-h3-ref2va-2img-1aud": "7d86f7b6d994b0b38cc379a4fe0268f68776c4a43e80fb0f7651a3005f57dcd6",
+    "local-h3-ref2va-2img": "6f7a5fb19c548ca945f8a2169e05c836d7c06f03466cf2b893b3be599505d112"
+  },
+  "compatibility": {
+    "pdd": {
+      "status": "VERIFIED",
+      "component_id": "minimax-h3-pdd",
+      "note": "8 步 PDD 与本变体在真机镜头上一起跑过。"
+    },
+    "lora": {
+      "status": "VERIFIED",
+      "component_id": "minimax-h3-lora",
+      "note": "真实人物 LoRA 与本变体在真机镜头上一起跑过。"
+    },
+    "video_vae": {
+      "status": "VERIFIED",
+      "component_id": "minimax-h3-vae",
+      "note": "FP16 视频 VAE + FP32 音频 VAE 为本变体的固定搭配。"
+    },
+    "text_encoder": {
+      "status": "VERIFIED",
+      "component_id": "minimax-h3-text-encoder",
+      "note": "NVFP4/AWQ 文本编码器为本变体的固定搭配。"
+    }
+  },
+  "acceptance": {
+    "status": "SUPPORTED",
+    "machine": "验收机：Windows 11 x64，NVIDIA GeForce RTX 5080（nvidia-smi 实测总显存 16303 MiB、驱动 621.01，2026-11-07）",
+    "parameters": {
+      "generation_mode": "Ref2VA",
+      "output": "1024x576 @ 24fps",
+      "workflow_profile_ids": [
+        "local-h3-ref2va-pdd8-2img-1aud",
+        "local-h3-ref2va-pdd8-2img-1aud-portrait",
+        "local-h3-ref2va-2img-1aud"
+      ]
+    },
+    "peak_resources": {
+      "vram_mb": "15400-15840（整机 WDDM 口径；收尾后回落到约 1300 MiB）",
+      "ram_mb": "unknown"
+    },
+    "artifacts": [
+      "真实 H3 镜头 job aa8baa09-0c1f-4627-a874-193a1a3647e1，artifact sha256 92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190",
+      "第 9 轮整部 Run：64/64 非 mock H3 镜头 PASSED、12/12 批次 PASSED、4/4 集 DELIVERED（台账见进度文档 §9）"
+    ],
+    "evidence_links": [
+      "docs/LOCAL_ALL_PASS_FINAL_REPORT.md",
+      "docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md",
+      "docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md"
+    ],
+    "measured_at": "2026-10-30"
+  },
+  "unknown_fields": [
+    {
+      "field": "architecture_requirements.cuda_compute_capability",
+      "reason": "官方页面与本仓库记录都没有给出 INT8 ConvRot 的最低 CUDA 算力；本机实测值为 12.0，但不能外推成门槛。"
+    },
+    {
+      "field": "architecture_requirements.torch_arch_list",
+      "reason": "torch arch list 必须在隔离环境安装 torch 之后复核；安装前的任何列表都是猜测。"
+    },
+    {
+      "field": "architecture_requirements.gpu_arch",
+      "reason": "官方没有公布这一量化组合的目标 GPU 架构。"
+    },
+    {
+      "field": "acceptance.peak_resources.ram_mb",
+      "reason": "现有验收记录只留了整机峰值显存，没有留下渲染期峰值内存的实测值。"
+    }
+  ]
+}

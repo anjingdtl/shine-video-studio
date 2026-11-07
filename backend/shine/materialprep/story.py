@@ -72,26 +72,100 @@ def source_sections(project_id, document):
             for index, (left, right) in enumerate(zip(boundaries, boundaries[1:], strict=False)) if right > left]
 
 
+#: A queued task may only be handed back when it can still move - or when
+#: it already produced the answer.  A cancelled or failed attempt can never
+#: continue, so returning it would make the button a dead end.
+REUSABLE_TASK_STATUSES = ("QUEUED", "RUNNING", "PAUSED", "NEEDS_REVIEW", "SUCCEEDED")
+
+
 def queue_outline(db, project_id, document, gateway, facts):
     profile = gateway.profile_for_role(db, "scriptwriter")
     fingerprint = text_consent.fingerprint(profile)
-    identity = digest({"project": project_id, "document": document.id, "hash": document.sha256,
-                       "facts": facts, "profile": fingerprint, "tool": OUTLINE_RUN, "version": VERSION})
-    old = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.request_identity == identity))
-    if old:
-        return old
+    base = {"project": project_id, "document": document.id, "hash": document.sha256,
+            "facts": facts, "profile": fingerprint, "tool": OUTLINE_RUN, "version": VERSION}
+    base_identity = digest(base)
+    # Every attempt of this document is found, not only the first one: the
+    # base identity travels in the trace of each attempt.
+    attempts = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == OUTLINE_RUN,
+        or_(AgentTaskRecord.input_hash == base_identity,
+            AgentTaskRecord.trace["base_identity"].as_string() == base_identity),
+    ).order_by(AgentTaskRecord.created_at.desc())).all()
+    for old in attempts:
+        if old.status in REUSABLE_TASK_STATUSES:
+            return old
+    # Every earlier attempt was cancelled or failed: none of them can move
+    # again.  The next attempt gets its own identity, so the button hands back
+    # work that can actually continue and the old identity stays as history.
+    identity = digest({**base, "attempt": len(attempts) + 1})
     row = AgentTaskRecord(project_id=project_id, role_id=OUTLINE_RUN, request_identity=identity,
         input_hash=identity, asset_manifest_hash=identity, rulepack_id=VERSION, rulepack_hash=digest(VERSION),
         model_profile_id=profile.id, model_id=profile.model, schema_version="1.0", status="QUEUED",
         trace={"document_id": document.id, "document_sha256": document.sha256, "locked_facts": facts,
                "provider_fingerprint": fingerprint, "stage": "EXTRACT", "cursor": 0,
                "leaf_artifact_ids": [], "level": 0, "level_inputs": [], "level_outputs": [],
-               "production_sections": source_sections(project_id, document), "automatic_replay": False})
+               "production_sections": source_sections(project_id, document), "automatic_replay": False,
+               "base_identity": base_identity})
     db.add(row)
     db.flush()
     add_audit(db, "local-user", "STORY_OUTLINE_QUEUED", "agent_task", row.id,
               {"document_sha256": document.sha256}, project_id=project_id)
     return row
+
+
+#: How often one scene may be asked again after a person explicitly
+#: confirmed that an unknown result may be retried.
+MAX_UNKNOWN_RESENDS = 1
+
+
+def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str) -> dict:
+    """Let one person ask one unknown scene again, on the record.
+
+    The old request may still own an answer upstream, so this never happens
+    automatically: a person confirms, the decision is audited, and the scene
+    is asked exactly once more.  The old task is retired with the honest
+    reason - the answer is unknown and a person decided to ask again - and it
+    is never recorded as "not sent".
+    """
+    blocked = list((row.trace or {}).get("blocked_subtasks") or [])
+    entry = next((item for item in blocked
+                  if isinstance(item, dict) and item.get("task_id") == subtask_id), None)
+    if entry is None:
+        raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_FOUND")
+    sub = db.get(AgentTaskRecord, subtask_id)
+    if sub is None or sub.project_id != row.project_id:
+        raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_FOUND")
+    # One resend per scene: a scene must not be able to burn a series of calls.
+    used = len([other for other in db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == row.project_id,
+        AgentTaskRecord.role_id == "scriptwriter",
+        AgentTaskRecord.input_hash == sub.input_hash,
+    )).all() if ((other.trace or {}).get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"])
+    if used >= MAX_UNKNOWN_RESENDS:
+        raise HTTPException(409, "STORY_UNKNOWN_RESEND_ALREADY_USED")
+    previous_identity = sub.request_identity
+    sub.status = "SUPERSEDED"
+    sub.request_identity = None
+    sub.lease_owner, sub.lease_expires_at = None, None
+    sub.state_version += 1
+    sub.trace = {**(sub.trace or {}), "previous_request_identity": previous_identity,
+                 "reconciliation": {"outcome": "USER_AUTHORIZED_NEW_REQUEST", "attempt": used + 1,
+                                    "authorized_by": actor, "evidence": evidence,
+                                    "checked_at": utcnow().isoformat()}}
+    add_audit(db, actor, "STORY_UNKNOWN_SUBTASK_RESEND_AUTHORIZED", "agent_task", sub.id,
+              {"scene_key": entry.get("scene_key"), "previous_request_identity": previous_identity,
+               "external_outcome": sub.trace.get("external_outcome"), "evidence": evidence,
+               "new_request_allowed": True, "automatic_replay": False},
+              project_id=row.project_id)
+    resolved = [{**item, "status": "RETRY_AUTHORIZED",
+                 "reconciliation": "USER_AUTHORIZED_NEW_REQUEST"}
+                if item.get("task_id") == subtask_id else item for item in blocked]
+    row.trace = {**row.trace, "blocked_subtasks": resolved}
+    row.state_version += 1
+    return {"subtask_id": subtask_id, "scene_key": entry.get("scene_key"),
+            "previous_request_identity": previous_identity, "attempt": used + 1,
+            "resend_allowed": True}
 
 
 def _merge(factory, gateway, project_id, document, ids, facts):
@@ -121,7 +195,12 @@ def _merge(factory, gateway, project_id, document, ids, facts):
         old = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.request_identity == identity))
         if old:
             artifact = db.scalar(select(AgentArtifact).where(AgentArtifact.source_task_id == old.id))
-            return {"status": old.status, "task_id": old.id, "artifact_id": artifact.id if artifact else None}
+            # A merge whose worker died before the request was opened owns no
+            # answer: the identity is released and the merge is asked again.
+            if scenes.is_dead_scene_task(old) and scenes.retire_dead_scene_task(db, old, "outline-merge"):
+                old = None
+            else:
+                return {"status": old.status, "task_id": old.id, "artifact_id": artifact.id if artifact else None}
         task = AgentTaskRecord(project_id=project_id, role_id="scriptwriter", input_hash=identity,
             request_identity=identity, asset_manifest_hash=identity, rulepack_id=VERSION, rulepack_hash=digest(VERSION),
             model_profile_id=profile.id, model_id=profile.model, schema_version="1.0", status="RUNNING",
@@ -217,7 +296,15 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         ]
     resolved: list[dict] = []
     outcomes: list[dict] = []
+    decided_outcomes = {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}
     for entry in blocked:
+        # A block that was already decided keeps its verdict.  Reconciling a
+        # second time must never turn a released block back into an
+        # unconfirmable one - that is how a task became impossible to resume.
+        if isinstance(entry, dict) and entry.get("reconciliation") in decided_outcomes:
+            resolved.append(entry)
+            outcomes.append({"subtask_id": entry.get("task_id"), "outcome": entry.get("reconciliation")})
+            continue
         if not isinstance(entry, dict) or not entry.get("task_id"):
             resolved.append({**entry, "status": "NOT_SENT", "reconciliation": "NO_SUBCALL"})
             outcomes.append({"subtask_id": None, "outcome": "NO_SUBCALL"})
@@ -262,6 +349,41 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         # new request rather than a replay of an unknown one.  It is still
         # bounded, so a scene the model can never satisfy stops and waits for a
         # person instead of burning calls.
+        # The provider answered and produced no usable answer: a refusal
+        # (wrong key, unknown model, rate limit) or an answer that broke the
+        # contract.  The request is finished, so there is no answer that a
+        # second request could duplicate.  This is neither "not sent" nor
+        # "unknown" - the record keeps saying exactly what happened - and the
+        # retry stays bounded, so a scene the model can never satisfy stops
+        # and waits for a person instead of burning calls.
+        answered = (sub.status in {"FAILED", "REJECTED"}
+                    and trace.get("external_outcome") == "RESPONSE_RECEIVED")
+        if answered and artifact is None:
+            counts = dict((row.trace or {}).get("subtask_retries") or {})
+            scene_key = entry.get("scene_key") or sub.id
+            used = int(counts.get(scene_key, 0))
+            if used >= MAX_SUBTASK_RETRIES:
+                resolved.append({**entry, "status": "REJECTED", "reconciliation": "RETRIES_EXHAUSTED"})
+                outcomes.append({"subtask_id": sub.id, "outcome": "RETRIES_EXHAUSTED",
+                                 "attempts": used, "error_code": sub.error_code})
+                continue
+            counts[scene_key] = used + 1
+            previous_identity = sub.request_identity
+            sub.status = "SUPERSEDED"
+            sub.request_identity = None
+            sub.lease_owner, sub.lease_expires_at = None, None
+            sub.trace = {**trace, "previous_request_identity": previous_identity,
+                         "reconciliation": {"outcome": "RESPONSE_RECEIVED_NO_ANSWER",
+                                            "attempt": used + 1, "error_code": sub.error_code,
+                                            "response_status": trace.get("response_status"),
+                                            "checked_at": utcnow().isoformat()}}
+            resolved.append({**entry, "status": "REJECTED",
+                             "reconciliation": "RESPONSE_RECEIVED_NO_ANSWER"})
+            outcomes.append({"subtask_id": sub.id, "outcome": "RESPONSE_RECEIVED_NO_ANSWER",
+                             "attempt": used + 1, "error_code": sub.error_code,
+                             "response_status": trace.get("response_status")})
+            row.trace = {**row.trace, "subtask_retries": counts}
+            continue
         failed = sub.status in {"FAILED", "REJECTED"} and trace.get("external_outcome") == "NOT_SENT"
         if failed and artifact is None:
             counts = dict((row.trace or {}).get("subtask_retries") or {})
@@ -295,7 +417,13 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
     add_audit(db, actor, "STORY_SUBTASKS_RECONCILED", "agent_task", row.id,
               {"outcomes": outcomes, "identities_released": released}, project_id=row.project_id)
     return {"outcomes": outcomes,
-            "resumable": all(item.get("status") not in UNDECIDED_BLOCK_STATUSES for item in resolved),
+            # The verdict must match the resume guard exactly, otherwise the
+            # interface offers a button the server will refuse.
+            "resumable": all(
+                item.get("status") not in UNDECIDED_BLOCK_STATUSES
+                and item.get("reconciliation") not in {"UNCONFIRMABLE", "RETRIES_EXHAUSTED"}
+                for item in resolved
+            ),
             "unconfirmable": [item for item in outcomes if item.get("outcome") == "UNCONFIRMABLE"],
             "identities_released": released}
 
@@ -316,7 +444,8 @@ def _release_retired_identities(db, project_id) -> list[str]:
     for retired in rows:
         trace = retired.trace or {}
         outcome = (trace.get("reconciliation") or {}).get("outcome")
-        if trace.get("external_outcome") != "NOT_SENT" and outcome != "NOT_SENT_PROVEN":
+        if (trace.get("external_outcome") != "NOT_SENT"
+                and outcome not in {"NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}):
             continue
         retired.trace = {**trace, "previous_request_identity": retired.request_identity}
         retired.request_identity = None

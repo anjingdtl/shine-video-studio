@@ -15,23 +15,34 @@ scriptwriter answers ONE numbered scene at a time:
 from __future__ import annotations
 
 import hashlib
-import time
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from shine.agents.crew_prompts import script_prepare_prompt
 from shine.h3.rulebook import digest
 from shine.llm.base import LLMError
 from shine.materialprep import text_consent
-from shine.materialprep.agent_call import budget_report, call_material_agent, step_delay_seconds
+from shine.materialprep.agent_call import budget_report, call_material_agent
 from shine.materialprep.contracts import ScriptPreparation
 from shine.materialprep.source_spans import Scene, known_span_ids, segment_document, unknown_span_ids
-from shine.models import AgentArtifact, AgentTaskRecord
+from shine.models import AgentArtifact, AgentTaskRecord, utcnow
 from shine.services import add_audit
 
 SCRIPTWRITER_ROLE = "scriptwriter"
 RULEPACK_ID = "material-script-prepare"
+
+#: The phases that prove the provider request was never opened.  A scene
+#: subcall that stopped here owns no answer, so the identity may be released.
+PRE_REQUEST_PHASES = ("PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER")
+
+#: A scene subcall is bounded by the provider timeout, and the profile allows
+#: at most 600 s.  A scene task that is still RUNNING long after that cannot
+#: have a live worker behind it: the worker died with the request in flight.
+SCENE_DEAD_AFTER_SECONDS = 900
+
+#: How often one scene may be retired and asked again after a dead worker.
+MAX_SCENE_DEAD_RETRIES = 2
 
 
 def _overlapping_source(previous: str, current: str) -> bool:
@@ -70,6 +81,56 @@ def build_scene_context(
             "Never create shots, durations, asset ids or H3 prompt text.",
         ],
     }
+
+
+def is_dead_scene_task(task: AgentTaskRecord) -> bool:
+    """True when a RUNNING scene task has no live worker behind it.
+
+    A worker that dies with the request in flight leaves the row RUNNING
+    forever.  Treating that as "still running" is the false progress signal
+    that makes a whole outline look stuck.
+    """
+    if task.status != "RUNNING":
+        return False
+    age = (utcnow() - task.created_at).total_seconds()
+    return age > SCENE_DEAD_AFTER_SECONDS
+
+
+def retire_dead_scene_task(db, task: AgentTaskRecord, scene_key: str) -> bool:
+    """Retire a scene task whose worker died before the request was opened.
+
+    The evidence is durable: the task is still RUNNING long after the provider
+    timeout could have elapsed, and its last phase is before the gateway
+    opened the request.  Nothing was ever sent, so the identity is released
+    and the scene may be asked again - exactly what NOT_SENT_PROVEN means.
+    A request that may already have reached the provider is never retired
+    here; it stays unknown and waits for a person.
+    """
+    trace = task.trace or {}
+    phase = trace.get("phase")
+    if phase not in PRE_REQUEST_PHASES or trace.get("external_outcome") not in {None, "UNKNOWN"}:
+        return False
+    used = int(db.scalar(select(func.count()).select_from(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == task.project_id,
+        AgentTaskRecord.role_id == SCRIPTWRITER_ROLE,
+        AgentTaskRecord.input_hash == task.input_hash,
+        AgentTaskRecord.status == "SUPERSEDED",
+    )) or 0)
+    if used >= MAX_SCENE_DEAD_RETRIES:
+        return False
+    previous_identity = task.request_identity
+    task.status = "SUPERSEDED"
+    task.request_identity = None
+    task.lease_owner, task.lease_expires_at = None, None
+    task.state_version += 1
+    task.trace = {**trace, "external_outcome": "NOT_SENT", "previous_request_identity": previous_identity,
+                  "reconciliation": {"outcome": "NOT_SENT_PROVEN", "last_phase": phase,
+                                     "attempt": used + 1, "checked_at": utcnow().isoformat()}}
+    add_audit(db, "local-user", "MATERIAL_SCENE_DEAD_WORKER_NOT_SENT_PROVEN", "agent_task", task.id,
+              {"scene_key": scene_key, "last_phase": phase,
+               "previous_request_identity": previous_identity, "external_calls": 0},
+              project_id=task.project_id)
+    return True
 
 
 def prepare_scenes(
@@ -155,9 +216,10 @@ def prepare_scenes(
     results: list[dict[str, Any]] = []
     preparations: list[dict[str, Any]] = []
 
-    for index, scene in enumerate(scenes):
-        if index:
-            time.sleep(step_delay_seconds())
+    for scene in scenes:
+        # The gap between two provider calls is owned by
+        # agent_call.pace_provider_call(); a second sleep here would double it
+        # and would still miss the calls that happen in separate task steps.
         context = build_scene_context(scene=scene, locked_story_facts=facts)
         input_hash = digest({
             "document_sha256": document.sha256,
@@ -215,13 +277,26 @@ def prepare_scenes(
                                     "task_id": existing.id, "preparation": artifact.payload_json,
                                     "artifact_id": artifact.id, "state_version": existing.state_version})
                     preparations.append(artifact.payload_json)
+                    continue
+                # A scene task whose worker died is not "still running": decide it.
+                # If it provably never opened the request, the identity is
+                # released and the scene is asked again with a new request.
+                dead = is_dead_scene_task(existing)
+                if dead and retire_dead_scene_task(db, existing, scene.key):
+                    existing = None
                 else:
-                    results.append({"scene_key": scene.key, "status": existing.status,
-                                    "task_id": existing.id, "error_code": existing.error_code,
-                                    "state_version": existing.state_version,
-                                    "external_outcome": existing.trace.get("external_outcome"),
-                                    "automatic_replay": False})
-                continue
+                    entry = {"scene_key": scene.key, "status": existing.status,
+                             "task_id": existing.id, "error_code": existing.error_code,
+                             "state_version": existing.state_version,
+                             "external_outcome": existing.trace.get("external_outcome"),
+                             "automatic_replay": False}
+                    if dead:
+                        # The worker is gone.  Say so instead of pretending the
+                        # scene is still running.
+                        entry["dead_worker"] = True
+                        entry["outcome_unknown"] = existing.trace.get("external_outcome") == "UNKNOWN"
+                    results.append(entry)
+                    continue
             task = AgentTaskRecord(
                 request_identity=input_hash,
                 project_id=project_id, role_id=SCRIPTWRITER_ROLE, input_hash=input_hash,
@@ -272,6 +347,7 @@ def prepare_scenes(
                                  "correction_count": 1 if outcome.correction_used else 0,
                                  "schema_errors": outcome.schema_errors,
                                  "external_outcome": external_outcome,
+                                 "response_status": outcome.details.get("response_status"),
                                  "automatic_replay": False}
             with db_factory() as db:
                 failed_task = db.get(AgentTaskRecord, task_id)

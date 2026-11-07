@@ -31,6 +31,9 @@ class InstallPlanRequest(BaseModel):
     components: list[str] = Field(min_length=1, max_length=14)
     project_id: str
     disk_free: int = Field(ge=0)
+    #: The variant this plan installs.  It is normally derived from the
+    #: requested components; naming it makes the binding explicit.
+    variant_id: str | None = None
 
 
 class InstanceChainRequest(BaseModel):
@@ -289,9 +292,30 @@ def deployment_recommendations(body: RecommendationRequest, settings: SettingsDe
         raise HTTPException(422, str(exc)) from None
 
 
+@router.get("/variant-recommendations")
+def variant_recommendations(settings: SettingsDep):
+    """Which H3 variant fits this machine - as a candidate, never as a promise.
+
+    Read-only.  A variant that has not passed a real acceptance is reported
+    with its acceptance status, its evidence gaps and the fact that a human
+    has to acknowledge it; it is never reported as production ready.
+    """
+    from shine.comfyops.host_env import probe_host_facts
+    from shine.comfyops.recommendation import recommend_variants
+
+    env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
+    return recommend_variants(env)
+
+
 @router.get("/connectivity")
 def connectivity():
-    """Read-only upstream reachability for the fixed 60.8 GB deployment."""
+    """Read-only upstream reachability for the deployment materials.
+
+    The download size is not a fixed number: it depends on the selected
+    variant and on the components of the plan, so the confirmation screen
+    shows the complete catalog, the default production components and the
+    optional advisory components as three separate sizes.
+    """
     from shine.comfyops.connectivity import connectivity_blockers, probe_upstreams
 
     report = probe_upstreams()
@@ -306,7 +330,13 @@ def catalog_summary():
         "catalog_version": raw["catalog_version"],
         "generated": raw["generated"],
         "platform": raw["platform"],
+        "variant_id": raw.get("variant_id"),
         "total_bytes": raw["total_bytes"],
+        # The three sizes are different numbers and are never written as one
+        # hard-coded total: the complete catalog, the default production
+        # components and the optional advisory components.
+        "download_breakdown": deployment.download_breakdown(raw),
+        "deferred_workflow_profiles": raw.get("deferred_workflow_profiles", []),
         "components": [
             {
                 "component_id": c["component_id"], "kind": c["kind"], "revision": c["revision"],
@@ -322,14 +352,54 @@ def catalog_summary():
 
 @router.post("/install-plan")
 def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession):
+    """Create an install plan - after the server re-checked the hardware.
+
+    The browser may hide a button, but the button is not the gate: the
+    server runs the same qualification again for every plan, so a request
+    that skips the user interface is refused in exactly the same way.
+    """
+    from shine.comfyops import variants as variant_manifests
+    from shine.comfyops.host_env import probe_host_facts
+
     raw = deployment.load_deployment_catalog(body.catalog)
     valid_ids = {c["component_id"] for c in raw["components"]}
     if not set(body.components) <= valid_ids:
         raise HTTPException(422, "CATALOG_COMPONENT_UNKNOWN")
-    plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free)
+    variant = deployment.resolve_variant(raw, body.components)
+    if body.variant_id:
+        try:
+            variant = variant_manifests.load_variant_manifest(body.variant_id)
+        except (OSError, ValueError, FileNotFoundError):
+            raise HTTPException(422, "VARIANT_MANIFEST_UNKNOWN") from None
+    qualification = None
+    if variant is not None:
+        env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
+        qualification = variant_manifests.qualify(variant_manifests.variant_requirements(variant), env)
+        if not variant.get("auto_download_allowed"):
+            raise HTTPException(409, {
+                "code": "VARIANT_NOT_DOWNLOADABLE",
+                "message": "这个变体还没有进入自动安装路径；它的验收状态是 "
+                           + str(variant.get("acceptance_status")) + "。",
+                "variant_id": variant.get("variant_id"),
+                "acceptance_status": variant.get("acceptance_status"),
+            })
+        if qualification["status"] != variant_manifests.STATUS_SUPPORTED:
+            raise HTTPException(409, {
+                "code": "HOST_NOT_QUALIFIED",
+                "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
+                "variant_id": variant.get("variant_id"),
+                "status": qualification["status"],
+                "blockers": qualification["blockers"],
+                "unknowns": qualification["unknowns"],
+            })
+    plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free,
+                                          variant=variant, qualification=qualification)
     return {"plan_id": plan.id, "sha256": plan.sha256, "status": plan.status,
             "download_bytes": plan.payload["download_bytes"], "disk_required": plan.payload["disk_required"],
-            "packages": [p["id"] for p in plan.payload["packages"]]}
+            "packages": [p["id"] for p in plan.payload["packages"]],
+            "variant_id": (variant or {}).get("variant_id"),
+            "qualification": qualification,
+            "download_breakdown": plan.payload.get("download_breakdown")}
 
 
 @router.post("/instance-chain", deprecated=True)

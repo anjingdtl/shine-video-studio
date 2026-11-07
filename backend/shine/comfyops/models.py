@@ -47,6 +47,26 @@ class InstallationPlan(ProjectRecordMixin, Base):
 class InstallationAttempt(RecordMixin, Base):
     __tablename__ = "installation_attempts"
     plan_id: Mapped[str] = mapped_column(ForeignKey("installation_plans.id"), index=True)
+    # --- durable progress of an asynchronous installation attempt ------------
+    # The installation is a persistent task, not one long HTTP request.  The
+    # stage vocabulary is the honest one: files on disk are not a runtime, and
+    # an uncertain outcome is reconciled instead of replayed.  ``confirmed_bytes``
+    # is written from the ``.part`` file that is really on disk, never from a
+    # client-side estimate.
+    stage: Mapped[str | None] = mapped_column(String(40), default=None, index=True)
+    confirmed_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    speed_bps: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_component: Mapped[str | None] = mapped_column(String(120), default=None)
+    current_file: Mapped[str | None] = mapped_column(String(255), default=None)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    error_message: Mapped[str | None] = mapped_column(String(500), default=None)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    lease_owner: Mapped[str | None] = mapped_column(String(64), default=None)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class WorkflowRevision(RecordMixin, Base):

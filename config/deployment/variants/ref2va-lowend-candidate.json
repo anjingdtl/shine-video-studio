@@ -1,0 +1,267 @@
+{
+  "manifest_version": "1",
+  "variant_id": "ref2va-lowend-candidate",
+  "model_family": "MiniMax-H3",
+  "generation_mode": "Ref2VA",
+  "title": "H3 Ref2VA 低端机候选（w6a8 DiT + INT8 ConvRot VAE）",
+  "label": "Ref2VA 低端机候选",
+  "summary": "面向 12GB 级显卡的候选组合，全部文件来自官方 Comfy-Org/MiniMax-H3 仓库的固定 revision 并已钉住 URL / size / SHA-256：pruned_w6a8 DiT + INT8 ConvRot 视频 VAE + NVFP4/AWQ 文本编码器，另有一个可关闭的 4 步 turbo LoRA（PDD-free 用）。官方页面没有公布这一组合的显存/内存门槛，也没有给出与本工作流的兼容说明，所以它是 CANDIDATE：需要人确认后才会进入下载与真机验收，且在真机验收之前永远不是 SUPPORTED。",
+  "precision": "unknown",
+  "quantization": "W6A8 DiT + INT8 ConvRot VAE（官方文件命名；组合后的实际精度以真机验收为准）",
+  "acceptance_status": "CANDIDATE",
+  "default_recommended": false,
+  "auto_download_allowed": false,
+  "source": "OFFICIAL_PINNED",
+  "tier": "lowend_12gb",
+  "preference": 6,
+  "required_inputs": [],
+  "catalog_id": "h3-ref2va-lowend-candidate-windows-x64",
+  "checkpoint_id": "unknown",
+  "required_component_ids": [],
+  "install_component_ids": [],
+  "files": [
+    {
+      "role": "dit",
+      "component_id": "minimax-h3-diffusion-w6a8",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "diffusion_models/minimax_h3_ref2va_pruned_w6a8.safetensors",
+      "size": 15983746636,
+      "sha256": "ece96bbbce76670ec782de84acc888fd9d9b210bd2ab97c1957b39896734f9f1",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/diffusion_models/minimax_h3_ref2va_pruned_w6a8.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 DiT（Ref2VA，pruned_w6a8）。文件名沿用同一仓库同一目录下已钉定 INT8 文件的命名规则（minimax_h3_ref2va_pruned_<quant>.safetensors）；字节数与 SHA-256 由上游目录核实。"
+      }
+    },
+    {
+      "role": "video_vae",
+      "component_id": "minimax-h3-vae-int8",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "size": 2811065184,
+      "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 INT8 ConvRot 视频 VAE。"
+      }
+    },
+    {
+      "role": "text_encoder",
+      "component_id": "minimax-h3-text-encoder-nvfp4",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size": 15687142551,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 NVFP4/AWQ 文本编码器；与当前 INT8 基线同一文件、同一 SHA-256，避免同时改变过多变量。"
+      }
+    },
+    {
+      "role": "lora",
+      "component_id": "minimax-h3-turbo-4step",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 4 步 turbo LoRA，作为低端机候选的 PDD-free 风格件；默认不启用。"
+      }
+    }
+  ],
+  "runtime": {
+    "python": "3.12",
+    "torch": "2.7.1+cu128（与基线同一套 wheel）",
+    "cuda": "cu128 wheel 通道；实际 CUDA 运行时版本待隔离环境安装后复核",
+    "nodes": []
+  },
+  "architecture_requirements": {
+    "cuda_compute_capability": "unknown",
+    "torch_arch_list": "unknown",
+    "gpu_arch": "unknown"
+  },
+  "requirements": {
+    "os": "windows-x64",
+    "arch": "x64",
+    "gpu_vendor": "nvidia",
+    "min_vram_mb": "unknown",
+    "min_ram_mb": "unknown",
+    "min_commit_mb": "unknown",
+    "min_disk_gb": "unknown",
+    "min_free_vram_mb": "unknown",
+    "min_free_ram_mb": "unknown",
+    "min_cuda_compute_capability": "unknown",
+    "estimated_or_measured": {}
+  },
+  "workflow_profile_ids": [
+    "local-h3-ref2va-lowend-pdd-free-2img"
+  ],
+  "graph_sha256": {},
+  "compatibility": {
+    "pdd": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "低端机候选默认不启用 PDD；官方页面没有说明 w6a8 能否与 8 步 PDD 组合。"
+    },
+    "lora": {
+      "status": "unknown",
+      "component_id": "minimax-h3-turbo-4step",
+      "note": "4 步 turbo LoRA 尚未与这一量化组合一起验证过。"
+    },
+    "video_vae": {
+      "status": "unknown",
+      "component_id": "minimax-h3-vae-int8",
+      "note": "INT8 ConvRot 视频 VAE 尚未与本工作流的采样节点一起验证过。"
+    },
+    "text_encoder": {
+      "status": "unknown",
+      "component_id": "minimax-h3-text-encoder-nvfp4",
+      "note": "文本编码器文件与基线相同，但整套组合仍需整体验收。"
+    }
+  },
+  "acceptance": {
+    "status": "unknown",
+    "machine": "unknown",
+    "parameters": "unknown",
+    "peak_resources": "unknown",
+    "artifacts": "unknown",
+    "evidence_links": [
+      "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/diffusion_models"
+    ],
+    "measured_at": "unknown"
+  },
+  "unknown_fields": [
+    {
+      "field": "acceptance.artifacts",
+      "reason": "候选变体没有真机验收，没有产物。"
+    },
+    {
+      "field": "acceptance.machine",
+      "reason": "候选变体没有真机验收，没有验收机。"
+    },
+    {
+      "field": "acceptance.measured_at",
+      "reason": "候选变体没有真机验收，没有验收时间。"
+    },
+    {
+      "field": "acceptance.parameters",
+      "reason": "候选变体没有真机验收，没有验收参数。"
+    },
+    {
+      "field": "acceptance.peak_resources",
+      "reason": "候选变体没有真机验收，没有资源峰值记录。"
+    },
+    {
+      "field": "acceptance.status",
+      "reason": "候选变体没有真机验收，验收状态只能是 CANDIDATE。"
+    },
+    {
+      "field": "architecture_requirements.cuda_compute_capability",
+      "reason": "官方页面未给出 w6a8 的最低 CUDA 算力。"
+    },
+    {
+      "field": "architecture_requirements.gpu_arch",
+      "reason": "官方没有公布这一量化组合的目标 GPU 架构。"
+    },
+    {
+      "field": "architecture_requirements.torch_arch_list",
+      "reason": "torch arch list 必须在隔离环境安装 torch 之后复核。"
+    },
+    {
+      "field": "checkpoint_id",
+      "reason": "checkpoint 身份要等这一变体拥有独立工作流图并被钉定后才能写下来。"
+    },
+    {
+      "field": "compatibility.lora.status",
+      "reason": "官方页面没有给出这一组合的兼容说明；必须在本工作流里逐项重新验证。"
+    },
+    {
+      "field": "compatibility.pdd.component_id",
+      "reason": "官方页面没有给出这一组合的兼容说明；必须在本工作流里逐项重新验证。"
+    },
+    {
+      "field": "compatibility.pdd.status",
+      "reason": "官方页面没有给出这一组合的兼容说明；必须在本工作流里逐项重新验证。"
+    },
+    {
+      "field": "compatibility.text_encoder.status",
+      "reason": "官方页面没有给出这一组合的兼容说明；必须在本工作流里逐项重新验证。"
+    },
+    {
+      "field": "compatibility.video_vae.status",
+      "reason": "官方页面没有给出这一组合的兼容说明；必须在本工作流里逐项重新验证。"
+    },
+    {
+      "field": "precision",
+      "reason": "组合后的实际精度（量化对画面与音频的影响）必须由真机镜头与人工比较得出。"
+    },
+    {
+      "field": "requirements.min_commit_mb",
+      "reason": "官方页面没有公布提交内存门槛；没有实测就不能写门槛。"
+    },
+    {
+      "field": "requirements.min_cuda_compute_capability",
+      "reason": "官方页面未给出最低算力门槛；未知即不得判为支持。"
+    },
+    {
+      "field": "requirements.min_disk_gb",
+      "reason": "候选变体的完整目录体积要等独立目录登记后才有确定值。"
+    },
+    {
+      "field": "requirements.min_free_ram_mb",
+      "reason": "候选变体没有真机渲染，渲染期可用内存门槛未知。"
+    },
+    {
+      "field": "requirements.min_free_vram_mb",
+      "reason": "候选变体没有真机渲染，渲染期可用显存门槛未知。"
+    },
+    {
+      "field": "requirements.min_ram_mb",
+      "reason": "官方页面没有公布内存门槛；没有实测就不能写门槛。"
+    },
+    {
+      "field": "requirements.min_vram_mb",
+      "reason": "官方页面没有公布 w6a8 组合的显存门槛；w6a8 DiT 本体 15.98 GB 已经超过 12 GB 显存，真实可行性属于待核。"
+    }
+  ]
+}

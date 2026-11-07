@@ -191,7 +191,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 **自动安装内容**：Shine 自身依赖（uv sync/npm ci）、隔离 ComfyUI 实例（固定 commit b0b74356）、
 154 个哈希锁定的 Windows 发行包、5 个节点包、H3 Ref2VA INT8 模型栈（UNet/文本编码器/双 VAE/LoRA/PDD），
 以及本地 VLM/ASR 审片模型（Qwen3-VL-8B-FP8 / Qwen3-ASR-0.6B）。清单明细见
-`config/deployment/h3-ref2va-windows-x64.json`（14 组件，60.8GB）。
+`config/deployment/h3-ref2va-windows-x64.json`（14 组件；完整目录 60.8GB，默认生产组件 48.3GB，可选审片组件另计 12.5GB）。
 
 **必须的人工作业**：每张安装/实例计划的一次性批准；LLM provider 凭据录入（DPAPI/0600 本机存储）；
 主资产上传与人工晋升；音色/风格冻结；审片 needs_review 的人工裁决与异常对账。

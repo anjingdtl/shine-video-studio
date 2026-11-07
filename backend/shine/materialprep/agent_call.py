@@ -81,19 +81,37 @@ def step_delay_seconds() -> float:
 
 
 _LAST_CALL_AT: float | None = None
+"""Completion time of the last provider call, or ``None`` before the first.
+
+The anchor is the *completion* of the previous call, not the moment pacing
+started: a call issued right after pacing would otherwise eat into the gap,
+and on Windows ``time.sleep`` may wake slightly early, so the next call could
+start measurably before the requested gap has passed.
+"""
 
 
 def pace_provider_call() -> None:
-    """Keep a real gap between two provider calls in this process."""
+    """Keep a real gap between two provider calls in this process.
+
+    The gap is measured from the previous call's completion and enforced
+    against a monotonic deadline, so an early wake cannot shorten it.
+    """
     global _LAST_CALL_AT
     delay = step_delay_seconds()
     if delay <= 0:
         return
-    now = time.monotonic()
     if _LAST_CALL_AT is not None:
-        wait = delay - (now - _LAST_CALL_AT)
-        if wait > 0:
-            time.sleep(wait)
+        deadline = _LAST_CALL_AT + delay
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(remaining)
+
+
+def note_provider_call_finished() -> None:
+    """Record when the provider call actually finished, as the pacing anchor."""
+    global _LAST_CALL_AT
     _LAST_CALL_AT = time.monotonic()
 
 
@@ -138,6 +156,35 @@ def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt
     }
 
 
+def classify_external_outcome(exc: LLMError) -> str:
+    """Name what the provider actually did, without guessing.
+
+    * NOT_SENT: no provider request was ever opened - a local configuration
+      error, a refused consent, or a transport failure before the request
+      left this machine.
+    * RESPONSE_RECEIVED: the provider answered.  A 4xx refusal carries no
+      answer at all; a 2xx answer that broke the contract arrived but is
+      unusable.
+    * UNKNOWN: the provider may have answered and the answer was lost (a
+      timeout, a 5xx, a connection that broke after the request).
+
+    The distinction matters: a request that produced no answer can be asked
+    again, while an unknown outcome may still own an answer upstream and must
+    never be replayed.
+    """
+    recorded = exc.details.get("external_outcome")
+    if recorded in {"NOT_SENT", "UNKNOWN"}:
+        return recorded
+    if exc.code in {"LLM_NOT_CONFIGURED", "LLM_CAPABILITY"}:
+        # The provider was never asked.
+        return "NOT_SENT"
+    status = exc.details.get("status")
+    if isinstance(status, int) and not isinstance(status, bool) and status < 500:
+        # The provider answered: a refusal (4xx) or an unusable answer (2xx).
+        return "RESPONSE_RECEIVED"
+    return "UNKNOWN"
+
+
 def call_material_agent(
     gateway,
     session_factory,
@@ -158,29 +205,38 @@ def call_material_agent(
     """
 
     def call(system_prompt: str, user_payload: str):
-        with session_factory() as db:
-            if before_call:
-                before_call(db)
-            return gateway.complete_for_role(
-                db,
-                role,
-                system=system_prompt,
-                user=user_payload,
-                schema=schema,
-                on_progress=on_progress,
-            )
+        # One gap before every provider call, in one place.  A long outline
+        # makes one call per scene; two calls back to back share the provider
+        # connection and the rate limit, and that is how a run of scenes ends
+        # in a rate-limit failure that looks like a stall.
+        pace_provider_call()
+        try:
+            with session_factory() as db:
+                if before_call:
+                    before_call(db)
+                return gateway.complete_for_role(
+                    db,
+                    role,
+                    system=system_prompt,
+                    user=user_payload,
+                    schema=schema,
+                    on_progress=on_progress,
+                )
+        finally:
+            # The anchor is the call's completion, so the gap to the next call
+            # is measured from the real boundary, not from the pacing entry.
+            note_provider_call_finished()
 
     try:
         response = call(system, json.dumps(context, ensure_ascii=False))
     except LLMError as exc:
-        external_outcome = exc.details.get("external_outcome")
-        if external_outcome not in {"NOT_SENT", "UNKNOWN"}:
-            external_outcome = "UNKNOWN"
+        external_outcome = classify_external_outcome(exc)
         uncertain = external_outcome == "UNKNOWN"
         return AgentCallOutcome(
             error_code=exc.code,
             uncertain=uncertain,
-            details={"error_type": type(exc).__name__, "external_outcome": external_outcome},
+            details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
+                     "response_status": exc.details.get("status")},
         )
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
         # The request may already have reached the provider, so the outcome is
@@ -206,15 +262,15 @@ def call_material_agent(
         contract.model_validate(corrected.parsed)
         return AgentCallOutcome(parsed=corrected.parsed, correction_used=True, schema_errors=errors)
     except LLMError as second:
-        second_outcome = second.details.get("external_outcome")
-        external_outcome = "UNKNOWN" if second_outcome == "UNKNOWN" or second_outcome is None else "RESPONSE_RECEIVED"
+        external_outcome = classify_external_outcome(second)
         uncertain = external_outcome == "UNKNOWN"
         return AgentCallOutcome(
             error_code=second.code,
             uncertain=uncertain,
             correction_used=True,
             schema_errors=errors,
-            details={"error_type": type(second).__name__, "external_outcome": external_outcome},
+            details={"error_type": type(second).__name__, "external_outcome": external_outcome,
+                     "response_status": second.details.get("status")},
         )
     except ValidationError:
         return AgentCallOutcome(

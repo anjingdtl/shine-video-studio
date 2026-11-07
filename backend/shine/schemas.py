@@ -608,6 +608,8 @@ class ProviderProfilePublic(APIModel):
     base_url: str
     model: str
     has_api_key: bool
+    # not_set | stored | missing | unreadable - never the key itself.
+    secret_status: str = "not_set"
     capabilities: dict[str, Any]
     generation_options: TextGenerationOptions = Field(default_factory=TextGenerationOptions)
     timeout_s: float
@@ -619,11 +621,27 @@ class ProviderProfilePublic(APIModel):
 
 
 class ProviderTestResult(APIModel):
+    """The evidence of one provider check.
+
+    The connection fields and the generation fields are separate facts: a
+    reachable provider with a listed model is not a generation acceptance.
+    """
+
     ok: bool
+    level: str = "connection"
+    reachable: bool | None = None
+    auth_ok: bool | None = None
+    catalog_ok: bool | None = None
+    model_listed: bool | None = None
+    generation_ok: bool | None = None
+    structured_output_ok: bool | None = None
+    model: str | None = None
     latency_ms: int | None = None
     error_code: str | None = None
     message: str = ""
     capabilities: dict[str, Any] = Field(default_factory=dict)
+    checked_config_sha256: str | None = None
+    checked_at: datetime | None = None
 
 
 class AgentRole(StrEnum):
@@ -652,6 +670,13 @@ class AgentRoutePublic(APIModel):
     role: str
     provider_profile_id: str
     profile_name: str
+
+
+class AgentRouteBulkUpdate(APIModel):
+    """Bind a set of text roles to one provider profile in a single commit."""
+
+    provider_profile_id: str = Field(min_length=1)
+    roles: list[AgentRole] = Field(min_length=1, max_length=32)
 
 
 # ---------------------------------------------------------------------------

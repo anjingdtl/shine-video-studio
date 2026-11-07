@@ -1,0 +1,386 @@
+{
+  "manifest_version": "1",
+  "variant_id": "ref2va-nvfp4-lowend",
+  "model_family": "MiniMax-H3",
+  "generation_mode": "Ref2VA",
+  "title": "H3 Ref2VA NVFP4（第三方量化，低端机候选）",
+  "label": "Ref2VA NVFP4",
+  "summary": "面向 12GB 级显卡的第三方量化候选：Ref2VA 的 block-scaled NVFP4 DiT（DmitryDB/MiniMax-H3-ComfyUI-Quants，revision 06aba481…，11,663,443,448 B）配官方 NVFP4/AWQ 文本编码器、官方 INT8 ConvRot 视频 VAE、官方 FP32 音频 VAE，以及官方 4 步 turbo LoRA。发布方声明这是 stock ComfyUI fused-QKV / 时间表布局，不需要自定义节点或 ComfyUI 核心补丁。但发布方自己的分档表只覆盖 8–12GB 的 RTX 50/Blackwell，并且声明没有做过完整生成运行；Ada 架构的 12GB 卡（例如 RTX 4070S）不在其覆盖范围内。因此它是 CANDIDATE：文件身份已钉点，真机验收为零，任何情况下都不会被报成 SUPPORTED。",
+  "precision": "unknown",
+  "quantization": "NVFP4（block-scaled，发布方声明不是 AWQ）；组合后的实际精度待核",
+  "acceptance_status": "CANDIDATE",
+  "default_recommended": false,
+  "auto_download_allowed": false,
+  "source": "THIRD_PARTY_PINNED",
+  "tier": "lowend_12gb",
+  "preference": 1,
+  "required_inputs": [],
+  "catalog_id": "h3-ref2va-nvfp4-lowend-windows-x64",
+  "checkpoint_id": "Minimax-H3-Quants\\MiniMax-H3_Ref2VA-NVFP4.safetensors",
+  "required_component_ids": [],
+  "install_component_ids": [],
+  "files": [
+    {
+      "role": "dit",
+      "component_id": "minimax-h3-ref2va-nvfp4",
+      "repository": "DmitryDB/MiniMax-H3-ComfyUI-Quants",
+      "revision": "06aba4816457400d1dcb12ffd77e37499c8116b1",
+      "relative_path": "Minimax-H3-Quants/MiniMax-H3_Ref2VA-NVFP4.safetensors",
+      "size": 11663443448,
+      "sha256": "f970a8a32ded2b4b72f68a624244f8e39d488b1fe0992b9de7133b400dbc95e2",
+      "url": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/resolve/06aba4816457400d1dcb12ffd77e37499c8116b1/Ref2VA/MiniMax-H3_Ref2VA-NVFP4.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license-agreement",
+        "url": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/blob/06aba4816457400d1dcb12ffd77e37499c8116b1/LICENSE",
+        "conditions": "该仓库声明自己的权重是 MiniMax H3 的修改衍生件（转成 ComfyUI 布局、选择性量化、AdaLN 时间表压缩），不是 MiniMax 或 ComfyOrg 官方发布，也未获其背书；适用 MiniMax H3 社区许可证。仓库内的 NOTICE 一并适用。",
+        "jurisdiction_note": "由用户与法务按所在辖区判断；本清单只登记来源、条件与复核提示，不下“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/tree/06aba4816457400d1dcb12ffd77e37499c8116b1（revision 06aba4816457400d1dcb12ffd77e37499c8116b1，2026-08-05）",
+        "verified_on": "2026-11-07",
+        "level": "A_THIRD_PARTY_REVISION_LISTING",
+        "note": "第三方仓库该 revision 的 tree API 核实：文件存在、字节数与 LFS oid 逐个核对。仓库自带的 Ref2VA/SHA256SUMS 对 NVFP4 / NVFP4-HQ / INT8 三个文件与 tree API 的 oid 一致；该校验和文件本身有两处笔误，以 tree API 的 oid 为准。"
+      }
+    },
+    {
+      "role": "text_encoder",
+      "component_id": "minimax-h3-text-encoder-nvfp4",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size": 15687142551,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 NVFP4/AWQ 文本编码器；与基线同一文件、同一 SHA-256，避免同时改变过多变量。"
+      }
+    },
+    {
+      "role": "video_vae",
+      "component_id": "minimax-h3-vae-int8",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "MiniMax-H3(1)/minimax_h3_video_vae_int8_convrot.safetensors",
+      "size": 2811065184,
+      "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 INT8 ConvRot 视频 VAE。"
+      }
+    },
+    {
+      "role": "audio_vae",
+      "component_id": "minimax-h3-audio-vae-fp32",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "MiniMax-H3(1)/minimax_h3_audio_vae_fp32.safetensors",
+      "size": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 FP32 音频 VAE；与基线同一文件。"
+      }
+    },
+    {
+      "role": "lora",
+      "component_id": "minimax-h3-turbo-4step",
+      "repository": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "relative_path": "Minimax-H3/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "license": {
+        "id": "minimax-h3-community-license",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "conditions": "社区许可证：以 MiniMaxAI/MiniMax-H3 的 LICENSE 原文为准（含用途、用户规模、再分发与商用条件）。本清单只登记来源与条件，不复制也不改写条款。",
+        "jurisdiction_note": "能否用于你的用途由你所在辖区的法规与上游条款共同决定；涉及商用请以原文为准并咨询法务。本清单不做“可商用/不可商用”的结论。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main（revision 54472221d27c695fca9621b0c3ed52f06c4af707，lastModified 2026-11-02，全量 39 个文件核查）",
+        "verified_on": "2026-11-02",
+        "level": "A_OFFICIAL_REVISION_LISTING",
+        "note": "官方 4 步 turbo LoRA（1,956,193,000 B，约 1.96GB）；接入时采样步数必须设为 4。"
+      }
+    },
+    {
+      "role": "lora",
+      "component_id": "minimax-h3-turbo-4step-rank21",
+      "repository": "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI",
+      "revision": "bb2bc497cbaca89dadd0bcf1856eed4f8275be20",
+      "relative_path": "Minimax-H3-Turbo-Lora/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors",
+      "size": 326935264,
+      "sha256": "2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0",
+      "url": "https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/resolve/bb2bc497cbaca89dadd0bcf1856eed4f8275be20/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors",
+      "license": {
+        "id": "apache-2.0",
+        "url": "https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/blob/bb2bc497cbaca89dadd0bcf1856eed4f8275be20/LICENSE",
+        "conditions": "该 LoRA 仓库声明为 Apache-2.0，与 MiniMax H3 社区许可证不同，必须分别标注。",
+        "jurisdiction_note": "由用户与法务按所在辖区判断；本清单只登记来源、条件与复核提示。"
+      },
+      "evidence": {
+        "source": "https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/bb2bc497cbaca89dadd0bcf1856eed4f8275be20",
+        "verified_on": "2026-11-07",
+        "level": "A_THIRD_PARTY_REVISION_LISTING",
+        "note": "rank-21 重算版 turbo LoRA（326,935,264 B），许可证为 Apache-2.0，与 H3 社区许可证不同。只作为可选备选登记，不是用户所说的 1.96GB 那个文件。"
+      }
+    }
+  ],
+  "runtime": {
+    "python": "3.12",
+    "torch": "2.7.1+cu128（与基线同一套 wheel）",
+    "cuda": "cu128 wheel 通道；实际 CUDA 运行时版本待隔离环境安装后复核",
+    "nodes": []
+  },
+  "architecture_requirements": {
+    "cuda_compute_capability": "unknown",
+    "torch_arch_list": "unknown",
+    "gpu_arch": "unknown"
+  },
+  "requirements": {
+    "os": "windows-x64",
+    "arch": "x64",
+    "gpu_vendor": "nvidia",
+    "min_vram_mb": "unknown",
+    "min_ram_mb": "unknown",
+    "min_commit_mb": "unknown",
+    "min_disk_gb": "unknown",
+    "min_free_vram_mb": "unknown",
+    "min_free_ram_mb": "unknown",
+    "min_cuda_compute_capability": "unknown",
+    "estimated_or_measured": {}
+  },
+  "workflow_profile_ids": [
+    "local-h3-ref2va-nvfp4-turbo-4step-2img"
+  ],
+  "graph_sha256": {
+    "local-h3-ref2va-nvfp4-turbo-4step-2img": "c85cec42129a7b28408a50e0900af967e242107ea53281447e93bd31232a6ba4"
+  },
+  "compatibility": {
+    "pdd": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "本变体的方案默认不启用 PDD；发布方没有说明 NVFP4 与 8 步 PDD 的组合。"
+    },
+    "lora": {
+      "status": "unknown",
+      "component_id": "minimax-h3-turbo-4step",
+      "note": "官方 4 步 turbo LoRA 与第三方 NVFP4 DiT 的组合没有任何证据；接入时采样步数必须是 4。"
+    },
+    "video_vae": {
+      "status": "unknown",
+      "component_id": "minimax-h3-vae-int8",
+      "note": "官方 INT8 ConvRot 视频 VAE 与第三方 NVFP4 DiT 的组合没有任何证据。"
+    },
+    "text_encoder": {
+      "status": "unknown",
+      "component_id": "minimax-h3-text-encoder-nvfp4",
+      "note": "文本编码器文件与基线相同，但整套组合仍需整体验收。"
+    }
+  },
+  "acceptance": {
+    "status": "unknown",
+    "machine": "unknown",
+    "parameters": "unknown",
+    "peak_resources": "unknown",
+    "artifacts": "unknown",
+    "evidence_links": [
+      "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/tree/06aba4816457400d1dcb12ffd77e37499c8116b1"
+    ],
+    "measured_at": "unknown"
+  },
+  "known_evidence_gaps": [
+    {
+      "code": "PUBLISHER_TABLE_ADA_NOT_COVERED",
+      "text": "发布方自己的分档表把 NVFP4 放在 8–12 GB 的 RTX 50/Blackwell 档；Ada 架构的 12GB 卡（例如 RTX 4070S）不在其覆盖范围内，属待核。"
+    },
+    {
+      "code": "NO_FULL_GENERATION_RUN",
+      "text": "发布方声明没有在 RTX 5090 上做过完整生成运行；本项目也没有任何真机运行记录。"
+    },
+    {
+      "code": "CHECKPOINT_SIZE_IS_NOT_PEAK_VRAM",
+      "text": "发布方声明 checkpoint 体积不等于整条工作流的峰值显存；这一组合的真实峰值显存仍然未知。"
+    },
+    {
+      "code": "THIRD_PARTY_DERIVATIVE_NOT_OFFICIAL",
+      "text": "该 DiT 是第三方修改衍生件，不是 MiniMax 或 ComfyOrg 官方发布，也未获其背书。"
+    },
+    {
+      "code": "QUANTIZATION_NOT_AWQ",
+      "text": "发布方声明这里是 block-scaled NVFP4，不是 AWQ；不要把它与官方文本编码器的 NVFP4/AWQ 混为一谈。"
+    },
+    {
+      "code": "NODE_CONTRACT_NOT_VERIFIED_HERE",
+      "text": "发布方声明不需要自定义节点或 ComfyUI 核心补丁，但本项目仍必须在真实渲染器上做 live object_info 节点与输入契约验证（发布方用的是 ComfyUI commit 14b05228，与本项目固定的节点集不一定相同）。"
+    }
+  ],
+  "runtime_requirements": [
+    {
+      "requirement": "ComfyUI 必须以 --lowvram 运行",
+      "source": "发布方 README（DmitryDB/MiniMax-H3-ComfyUI-Quants）与用户说明",
+      "is_project_measurement": false,
+      "note": "本项目未实测。发布方说明 fused-QKV 布局需要低显存路径。"
+    },
+    {
+      "requirement": "至少 32 GB 内存",
+      "source": "用户说明",
+      "is_project_measurement": false,
+      "note": "本项目未实测。本项目 INT8 基线的内存门槛同样是 32768 MB。"
+    }
+  ],
+  "third_party_claims": [
+    {
+      "claim": "NVFP4 运行在 8–12 GB 的 RTX 50/Blackwell 上",
+      "source": "DmitryDB/MiniMax-H3-ComfyUI-Quants README",
+      "verified_on": "2026-11-07",
+      "is_project_measurement": false,
+      "note": "第三方声明。发布方同时写明：RTX 50 的分档是按架构给的，没有在 RTX 5090 上做过完整生成运行。"
+    },
+    {
+      "claim": "INT8 ConvRot / Lite / HQ 列在 24 GB 的 RTX 30/40 档",
+      "source": "DmitryDB/MiniMax-H3-ComfyUI-Quants README",
+      "verified_on": "2026-11-07",
+      "is_project_measurement": false,
+      "note": "第三方声明。发布方自己的表里 Ada（40 系）属于 24 GB 档。"
+    },
+    {
+      "claim": "这里的 NVFP4 是 block-scaled NVFP4，不是 AWQ",
+      "source": "DmitryDB/MiniMax-H3-ComfyUI-Quants README",
+      "verified_on": "2026-11-07",
+      "is_project_measurement": false,
+      "note": "第三方声明。与官方文本编码器的 NVFP4/AWQ 是两回事。"
+    },
+    {
+      "claim": "checkpoint 体积不是整条工作流的峰值显存",
+      "source": "DmitryDB/MiniMax-H3-ComfyUI-Quants README",
+      "verified_on": "2026-11-07",
+      "is_project_measurement": false,
+      "note": "第三方声明。因此本清单不据此推导显存门槛。"
+    },
+    {
+      "claim": "不需要自定义节点或 ComfyUI 核心补丁，其测试用 ComfyUI commit 14b05228",
+      "source": "DmitryDB/MiniMax-H3-ComfyUI-Quants README",
+      "verified_on": "2026-11-07",
+      "is_project_measurement": false,
+      "note": "第三方声明。本项目仍必须在真实渲染器上验证节点与输入契约。"
+    }
+  ],
+  "unknown_fields": [
+    {
+      "field": "acceptance.artifacts",
+      "reason": "候选变体没有真机验收，没有产物。"
+    },
+    {
+      "field": "acceptance.machine",
+      "reason": "候选变体没有真机验收，没有验收机。"
+    },
+    {
+      "field": "acceptance.measured_at",
+      "reason": "候选变体没有真机验收，没有验收时间。"
+    },
+    {
+      "field": "acceptance.parameters",
+      "reason": "候选变体没有真机验收，没有验收参数。"
+    },
+    {
+      "field": "acceptance.peak_resources",
+      "reason": "候选变体没有真机验收，没有资源峰值记录。"
+    },
+    {
+      "field": "acceptance.status",
+      "reason": "候选变体没有真机验收，验收状态只能是 CANDIDATE。"
+    },
+    {
+      "field": "architecture_requirements.cuda_compute_capability",
+      "reason": "没有来源给出这一组合的最低 CUDA 算力。"
+    },
+    {
+      "field": "architecture_requirements.gpu_arch",
+      "reason": "没有来源公布这一组合的目标 GPU 架构。"
+    },
+    {
+      "field": "architecture_requirements.torch_arch_list",
+      "reason": "torch arch list 必须在隔离环境安装 torch 之后复核。"
+    },
+    {
+      "field": "compatibility.lora.status",
+      "reason": "第三方量化文件与本工作流的这一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.pdd.component_id",
+      "reason": "第三方量化文件与本工作流的这一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.pdd.status",
+      "reason": "第三方量化文件与本工作流的这一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.text_encoder.status",
+      "reason": "第三方量化文件与本工作流的这一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.video_vae.status",
+      "reason": "第三方量化文件与本工作流的这一项组合都没有任何证据。"
+    },
+    {
+      "field": "precision",
+      "reason": "第三方量化文件的实际精度与数值行为没有核实；组合后的画面与音频影响必须由真机镜头与人工比较得出。"
+    },
+    {
+      "field": "requirements.min_commit_mb",
+      "reason": "没有来源给出提交内存门槛。"
+    },
+    {
+      "field": "requirements.min_cuda_compute_capability",
+      "reason": "没有来源给出最低算力门槛；未知即不得判为支持。"
+    },
+    {
+      "field": "requirements.min_disk_gb",
+      "reason": "候选变体的完整目录体积要等独立目录登记后才有确定值。"
+    },
+    {
+      "field": "requirements.min_free_ram_mb",
+      "reason": "候选变体没有真机渲染，渲染期可用内存门槛未知。"
+    },
+    {
+      "field": "requirements.min_free_vram_mb",
+      "reason": "候选变体没有真机渲染，渲染期可用显存门槛未知。"
+    },
+    {
+      "field": "requirements.min_ram_mb",
+      "reason": "只有用户说明的 32GB，没有实测值可作为门槛。"
+    },
+    {
+      "field": "requirements.min_vram_mb",
+      "reason": "官方与发布方都没有给出可采用的显存门槛；发布方只给了自己的分档表，而且明确说 checkpoint 体积不等于峰值显存。"
+    }
+  ]
+}

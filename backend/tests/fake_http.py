@@ -41,6 +41,14 @@ class FakeOpenAIServer(_BaseServer):
         self.response_content: str = json.dumps({"ok": True, "value": "mock"})
         self.required_key = "test-key"
         self.server_error_times = 0
+        # When set, the model catalog answers with this payload verbatim.
+        # It covers the catalog shapes a provider may return that must never
+        # be read as "the configured model was confirmed".
+        self.models_payload: Any = None
+        self.models_status: int = 200
+        self.models_content_type: str = "application/json"
+        # Forces the chat endpoint to answer with a specific status.
+        self.chat_status: int | None = None
         super().__init__()
 
     def _handler(self):
@@ -53,10 +61,23 @@ class FakeOpenAIServer(_BaseServer):
             def _authorized(self) -> bool:
                 return outer.required_key in (self.headers.get("Authorization") or "")
 
-            def _json(self, status: int, payload: dict[str, Any]) -> None:
+            def _json(self, status: int, payload: Any) -> None:
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _raw(self, status: int, payload: Any, content_type: str) -> None:
+                if isinstance(payload, bytes):
+                    body = payload
+                elif isinstance(payload, str):
+                    body = payload.encode("utf-8")
+                else:
+                    body = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -69,6 +90,11 @@ class FakeOpenAIServer(_BaseServer):
                 if self.path.startswith("/v1/models"):
                     if not self._authorized():
                         self._json(401, {"error": "unauthorized"})
+                        return
+                    if outer.models_payload is not None or outer.models_status != 200:
+                        payload = (outer.models_payload if outer.models_payload is not None
+                                   else {"error": "forced catalog status"})
+                        self._raw(outer.models_status, payload, outer.models_content_type)
                         return
                     self._json(200, {"data": [{"id": "test-model"}, {"id": "other-model"}]})
                     return
@@ -87,6 +113,9 @@ class FakeOpenAIServer(_BaseServer):
                     return
                 if not self._authorized():
                     self._json(401, {"error": "unauthorized"})
+                    return
+                if outer.chat_status is not None:
+                    self._json(outer.chat_status, {"error": "forced status"})
                     return
                 if outer.mode == "status_500" and outer.server_error_times > 0:
                     outer.server_error_times -= 1

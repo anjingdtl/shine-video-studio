@@ -1,0 +1,306 @@
+{
+  "manifest_version": "1",
+  "variant_id": "ref2va-w4-convrot",
+  "model_family": "MiniMax-H3",
+  "generation_mode": "Ref2VA",
+  "title": "MiniMax-H3 Ref2VA W4 ConvRot（用户点名，第三方未核实槽位）",
+  "label": "Ref2VA W4 ConvRot",
+  "summary": "用户点名要用的 MiniMax-H3_Ref2VA-W4-ConvRot.safetensors 在已核实的两个仓库里都不存在：DmitryDB/MiniMax-H3-ComfyUI-Quants（revision 06aba4816457400d1dcb12ffd77e37499c8116b1）的 Ref2VA/ 只有 INT8-ConvRot / -HQ / -Lite / NVFP4 / NVFP4-HQ 五个文件，没有 W4 权重，也没有 -Offload 变体；官方 Comfy-Org/MiniMax-H3 也没有任何 W4/AWQ/GPTQ/INT4/NF4 的 DiT。因此这里登记的是一个显式未钉住的槽位：它不是可下载的文件，也不进入任何推荐或下载路径；它的存在性、哈希、体积与许可证都还没有核实。",
+  "precision": "unknown",
+  "quantization": "W4 ConvRot（用户点名；官方仓库没有对应文件）",
+  "acceptance_status": "BLOCKED",
+  "default_recommended": false,
+  "auto_download_allowed": false,
+  "source": "THIRD_PARTY_UNVERIFIED",
+  "tier": "lowend_12gb",
+  "preference": 7,
+  "required_inputs": [
+    {
+      "id": "TRUSTED_REPOSITORY_URL",
+      "requirement": "可信仓库 URL",
+      "detail": "第三方仓库的可访问地址与发布者身份；未提供前无法核实任何字节。"
+    },
+    {
+      "id": "PINNED_REVISION",
+      "requirement": "固定 revision",
+      "detail": "必须是不可变的 commit / revision，而不是会移动的分支或 main。"
+    },
+    {
+      "id": "EXACT_FILE_NAME",
+      "requirement": "确切文件名",
+      "detail": "用户点名的文件名是 MiniMax-H3_Ref2VA-W4-ConvRot.safetensors，但它在哪个目录、是否带哈希后缀都还没有核实。"
+    },
+    {
+      "id": "EXACT_SIZE",
+      "requirement": "确切 size",
+      "detail": "字节数必须来自上游元数据或本地实测，不得估算。"
+    },
+    {
+      "id": "SHA256",
+      "requirement": "SHA-256",
+      "detail": "文件内容摘要；没有它就无法进入部署目录的钉点格式。"
+    },
+    {
+      "id": "LICENSE_TEXT",
+      "requirement": "许可证原文与适用条件",
+      "detail": "许可证全文、适用条件（用途、用户规模、再分发、商用），以及与 MiniMax-H3 社区许可证的关系。"
+    },
+    {
+      "id": "REQUIRED_NODE_VERSIONS",
+      "requirement": "所需节点版本",
+      "detail": "该量化组合需要的 ComfyUI 节点与版本，以及它与本工作流采样节点的接口约定。"
+    },
+    {
+      "id": "MEASURED_RESOURCE_FLOORS",
+      "requirement": "显存/内存门槛的实测来源",
+      "detail": "必须来自真机最小镜头的实测记录（机器、参数、峰值显存/内存），而不是官方页面的体积数字或推断。"
+    }
+  ],
+  "catalog_id": "unknown",
+  "checkpoint_id": "unknown",
+  "required_component_ids": [],
+  "install_component_ids": [],
+  "files": [
+    {
+      "role": "dit",
+      "component_id": "unknown",
+      "repository": "unknown",
+      "revision": "unknown",
+      "relative_path": "unknown",
+      "size": "unknown",
+      "sha256": "unknown",
+      "url": "unknown",
+      "license": {
+        "id": "unknown",
+        "url": "unknown",
+        "conditions": "unknown",
+        "jurisdiction_note": "许可证未知，任何使用结论都不能给；必须先取得许可证原文与适用条件，并按你所在辖区的法规与上游条款判断，必要时咨询法务。"
+      },
+      "evidence": {
+        "source": "THIRD_PARTY_UNVERIFIED",
+        "verified_on": "2026-11-07",
+        "level": "UNVERIFIED_USER_NAMED",
+        "note": "用户点名的文件名：MiniMax-H3_Ref2VA-W4-ConvRot.safetensors。已核实：DmitryDB/MiniMax-H3-ComfyUI-Quants （revision 06aba4816457400d1dcb12ffd77e37499c8116b1，2026-08-05）的 Ref2VA/ 目录只有 5 个文件（INT8-ConvRot / -HQ / -Lite / NVFP4 / NVFP4-HQ），既没有 W4 权重，也没有 -Offload 变体；官方 Comfy-Org/MiniMax-H3 同样没有 W4/AWQ/GPTQ/INT4/NF4 的 DiT。离用户描述的“约 10.8GB”最近的真实文件是 Ref2VA/MiniMax-H3_Ref2VA-NVFP4.safetensors，它已作为独立的 CANDIDATE 变体 ref2va-nvfp4-lowend 登记。本槽位仍然没有任何仓库 URL、revision、体积、SHA-256 与许可证，因此不可下载、不可推荐、不可验收。"
+      }
+    }
+  ],
+  "runtime": {
+    "python": "unknown",
+    "torch": "unknown",
+    "cuda": "unknown",
+    "nodes": []
+  },
+  "architecture_requirements": {
+    "cuda_compute_capability": "unknown",
+    "torch_arch_list": "unknown",
+    "gpu_arch": "unknown"
+  },
+  "requirements": {
+    "os": "windows-x64",
+    "arch": "x64",
+    "gpu_vendor": "nvidia",
+    "min_vram_mb": "unknown",
+    "min_ram_mb": "unknown",
+    "min_commit_mb": "unknown",
+    "min_disk_gb": "unknown",
+    "min_free_vram_mb": "unknown",
+    "min_free_ram_mb": "unknown",
+    "min_cuda_compute_capability": "unknown",
+    "estimated_or_measured": {}
+  },
+  "workflow_profile_ids": [],
+  "graph_sha256": {},
+  "compatibility": {
+    "pdd": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "第三方量化文件与 PDD 的组合没有任何证据。"
+    },
+    "lora": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "第三方量化文件与风格 LoRA 的组合没有任何证据。"
+    },
+    "video_vae": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "第三方量化文件与视频 VAE 的组合没有任何证据。"
+    },
+    "text_encoder": {
+      "status": "unknown",
+      "component_id": "unknown",
+      "note": "第三方量化文件与文本编码器的组合没有任何证据。"
+    }
+  },
+  "acceptance": {
+    "status": "unknown",
+    "machine": "unknown",
+    "parameters": "unknown",
+    "peak_resources": "unknown",
+    "artifacts": "unknown",
+    "evidence_links": [],
+    "measured_at": "unknown"
+  },
+  "unknown_fields": [
+    {
+      "field": "acceptance.artifacts",
+      "reason": "第三方槽位没有真机验收，没有产物。"
+    },
+    {
+      "field": "acceptance.machine",
+      "reason": "第三方槽位没有真机验收，没有验收机。"
+    },
+    {
+      "field": "acceptance.measured_at",
+      "reason": "第三方槽位没有真机验收，没有验收时间。"
+    },
+    {
+      "field": "acceptance.parameters",
+      "reason": "第三方槽位没有真机验收，没有验收参数。"
+    },
+    {
+      "field": "acceptance.peak_resources",
+      "reason": "第三方槽位没有真机验收，没有资源峰值记录。"
+    },
+    {
+      "field": "acceptance.status",
+      "reason": "第三方槽位没有真机验收，验收状态只能是 BLOCKED。"
+    },
+    {
+      "field": "architecture_requirements.cuda_compute_capability",
+      "reason": "没有任何来源给出这一组合的最低 CUDA 算力。"
+    },
+    {
+      "field": "architecture_requirements.gpu_arch",
+      "reason": "没有来源公布这一组合的目标 GPU 架构。"
+    },
+    {
+      "field": "architecture_requirements.torch_arch_list",
+      "reason": "torch arch list 必须在隔离环境安装 torch 之后复核。"
+    },
+    {
+      "field": "catalog_id",
+      "reason": "第三方文件没有被钉点，无法进入任何部署目录。"
+    },
+    {
+      "field": "checkpoint_id",
+      "reason": "checkpoint 身份要等文件被钉定并生成独立工作流图后才能写下来。"
+    },
+    {
+      "field": "compatibility.lora.component_id",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.lora.status",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.pdd.component_id",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.pdd.status",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.text_encoder.component_id",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.text_encoder.status",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.video_vae.component_id",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "compatibility.video_vae.status",
+      "reason": "第三方文件与本工作流的每一项组合都没有任何证据。"
+    },
+    {
+      "field": "files[0].component_id",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].license.conditions",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].license.id",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].license.url",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].relative_path",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].repository",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].revision",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].sha256",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].size",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "files[0].url",
+      "reason": "第三方文件没有仓库 URL、revision、文件名、体积、SHA-256 与许可证，全部未核实。"
+    },
+    {
+      "field": "precision",
+      "reason": "第三方量化文件的实际精度与数值行为没有核实。"
+    },
+    {
+      "field": "requirements.min_commit_mb",
+      "reason": "没有来源给出提交内存门槛。"
+    },
+    {
+      "field": "requirements.min_cuda_compute_capability",
+      "reason": "没有来源给出最低算力门槛；未知即不得判为支持。"
+    },
+    {
+      "field": "requirements.min_disk_gb",
+      "reason": "文件体积未知，目录体积无法计算。"
+    },
+    {
+      "field": "requirements.min_free_ram_mb",
+      "reason": "没有真机渲染，渲染期可用内存门槛未知。"
+    },
+    {
+      "field": "requirements.min_free_vram_mb",
+      "reason": "没有真机渲染，渲染期可用显存门槛未知。"
+    },
+    {
+      "field": "requirements.min_ram_mb",
+      "reason": "没有来源给出内存门槛。"
+    },
+    {
+      "field": "requirements.min_vram_mb",
+      "reason": "没有来源给出显存门槛；官方页面也没有（W4 文件不在官方仓库）。"
+    },
+    {
+      "field": "runtime.cuda",
+      "reason": "第三方组合没有自己的隔离运行环境，torch/CUDA 组合待安装后复核。"
+    },
+    {
+      "field": "runtime.python",
+      "reason": "第三方组合没有自己的隔离运行环境。"
+    },
+    {
+      "field": "runtime.torch",
+      "reason": "第三方组合没有自己的隔离运行环境，torch/CUDA 组合待安装后复核。"
+    }
+  ]
+}

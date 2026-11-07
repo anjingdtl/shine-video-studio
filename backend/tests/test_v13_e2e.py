@@ -50,7 +50,12 @@ def test_v13_full_preproduction_to_fake_h3_advisory_review_and_archive(prep, fak
         client, "/comfyops/install-plans", {"project_id": project, "package_ids": [model["id"]], "disk_free": 1000}
     )
     install = approve(client, install, "install", f"/comfyops/install-plans/{install['id']}/approve")
-    post(client, f"/comfyops/install-plans/{install['id']}/execute", {"plan_hash": install["sha256"]}, operator=True)
+    post(client, f"/comfyops/install-plans/{install['id']}/execute", {"plan_hash": install["sha256"]},
+         operator=True, expected=(200, 202))
+    # The Worker executes the queued attempt; the mock drill changes no file.
+    from shine.comfyops.installation_worker import run_pending_installation
+
+    run_pending_installation(factory, "v13-test-worker", settings=settings)
     # The same production adapters create/configure an isolated instance with
     # exact offline bytes. Fake commands never execute third-party code in cloud.
     from shine.comfyops.candidate_quality import FakeCandidateReviewer

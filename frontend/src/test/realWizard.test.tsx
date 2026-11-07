@@ -20,8 +20,14 @@ function fullPath() {
   route('POST', 'setup/install-plan', { plan_id: 'install', sha256: 'old', status: 'AWAITING_APPROVAL' });
   route('POST', 'install-plans/install/approve', { sha256: 'approved-install' });
   stub.add({ method: 'POST', pattern: /install-plans\/install\/execute$/, respond: () => {
-    installed = true; return jsonResponse({ status: 'FILES_VERIFIED' });
+    installed = true;
+    return jsonResponse({ attempt_id: 'attempt-install', status: 'QUEUED', stage: 'QUEUED', plan_hash: 'approved-install' });
   } });
+  stub.add({ method: 'GET', pattern: /installation-attempts\/attempt-install$/, respond: () => jsonResponse({
+    attempt_id: 'attempt-install', plan_id: 'install', stage: 'FILES_VERIFIED_PENDING_RUNTIME',
+    status: 'FILES_VERIFIED_PENDING_RUNTIME', confirmed_bytes: 4, total_bytes: 4, speed_bps: 0, retry_count: 0,
+    cancel_requested: false, pause_requested: false, terminal: true, resumable: false,
+  }) });
   let next = 0;
   stub.add({ method: 'POST', pattern: /setup\/next-instance-plan$/, respond: () => jsonResponse(next++ === 0
     ? { complete: false, plan_id: 'instance', sha256: 'old-instance', status: 'AWAITING_APPROVAL' }
@@ -116,7 +122,7 @@ it('关闭或切换作品后不继续发起后续副作用', async () => {
   const view = show();
   await waitFor(() => expect(stub.callsOf('POST', /install-plans\/install\/execute$/)).toHaveLength(1));
   view.rerender(<RealProductionWizard mode="enable" projectId="proj-2" {...callbacks} />);
-  finish(jsonResponse({ status: 'FILES_VERIFIED' }));
+  finish(jsonResponse({ attempt_id: 'attempt-install', status: 'QUEUED', stage: 'QUEUED', plan_hash: 'approved-install' }));
   await new Promise(resolve => setTimeout(resolve, 25));
   expect(stub.callsOf('POST', /next-instance-plan$/)).toHaveLength(0);
   expect(callbacks.onRefresh).not.toHaveBeenCalled();

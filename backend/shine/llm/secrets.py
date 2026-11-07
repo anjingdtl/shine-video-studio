@@ -5,12 +5,23 @@ import ctypes
 import os
 import platform
 import re
+import uuid
 from ctypes import wintypes
 from pathlib import Path
 
 from shine.llm.base import LLMNotConfigured
 
 _PROFILE_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
+#: A secret file name is either the legacy "<profile id>.secret" or the
+#: versioned "<profile id>.<version>.secret".  Nothing else may be loaded or
+#: deleted through a stored reference.
+_SECRET_NAME = re.compile(r"^[0-9a-fA-F-]{36}(\.[0-9a-f]{32})?\.secret$")
+
+#: Public secret states.  The key body is never part of any API response.
+SECRET_NOT_SET = "not_set"
+SECRET_STORED = "stored"
+SECRET_MISSING = "missing"
+SECRET_UNREADABLE = "unreadable"
 
 
 class SecureStoreUnavailable(LLMNotConfigured):
@@ -82,27 +93,40 @@ class SecretStore:
 
     Windows uses DPAPI (user-scoped). Other platforms fall back to a 0600 file
     and report that storage mode explicitly so operators can audit it.
+
+    Every write creates a *new version* of the secret file instead of
+    overwriting the current one.  A key rotation can therefore be prepared
+    first and switched over in the database afterwards: if the database commit
+    fails, the previous key file is still on disk and still usable.
     """
 
     def __init__(self, root: Path):
         self.root = root
         self.mode = "dpapi" if platform.system() == "Windows" else "file-0600"
 
-    def _path(self, profile_id: str) -> Path:
-        if not _PROFILE_ID.match(profile_id):
-            raise SecureStoreUnavailable("Invalid provider profile id")
-        return self.root / f"{profile_id}.secret"
+    def _path_for_name(self, name: str) -> Path:
+        if not _SECRET_NAME.match(name):
+            raise SecureStoreUnavailable("Unsupported secret reference")
+        return self.root / name
 
     def store(self, profile_id: str, secret: str) -> str:
+        """Write a new secret version and return its reference.
+
+        The previous version is deliberately left untouched.  The caller
+        decides when the old version may be removed.
+        """
         if not secret:
             raise SecureStoreUnavailable("Empty provider key")
-        path = self._path(profile_id)
+        if not _PROFILE_ID.match(profile_id):
+            raise SecureStoreUnavailable("Invalid provider profile id")
+        name = f"{profile_id}.{uuid.uuid4().hex}.secret"
+        path = self._path_for_name(name)
         raw = secret.encode("utf-8")
         if self.mode == "dpapi":
             _write_private(path, _dpapi_wrap(raw))
-            return f"dpapi:{path.name}"
+            return f"dpapi:{name}"
         _write_private(path, base64.b64encode(raw))
-        return f"file:{path.name}"
+        return f"file:{name}"
 
     def load(self, ref: str | None) -> str | None:
         if not ref:
@@ -115,7 +139,7 @@ class SecretStore:
             return value
         if scheme not in {"dpapi", "file"} or not name:
             raise SecureStoreUnavailable("Unsupported secret reference")
-        path = self.root / name
+        path = self._path_for_name(name)
         if not path.is_file():
             raise LLMNotConfigured("The configured provider key is no longer available")
         raw = path.read_bytes()
@@ -125,9 +149,34 @@ class SecretStore:
             return _dpapi_unwrap(raw).decode("utf-8")
         return base64.b64decode(raw).decode("utf-8")
 
+    def verify(self, ref: str | None, secret: str) -> bool:
+        """Read the stored secret back and compare it with the written value."""
+        try:
+            return self.load(ref) == secret
+        except Exception:
+            return False
+
+    def status(self, ref: str | None) -> str:
+        """A public state for the key without ever exposing the key itself."""
+        if not ref:
+            return SECRET_NOT_SET
+        scheme, _, name = ref.partition(":")
+        if scheme == "env":
+            return SECRET_STORED if os.getenv(name) else SECRET_MISSING
+        if scheme not in {"dpapi", "file"} or not name or not _SECRET_NAME.match(name):
+            return SECRET_UNREADABLE
+        path = self.root / name
+        if not path.is_file():
+            return SECRET_MISSING
+        try:
+            self.load(ref)
+        except Exception:
+            return SECRET_UNREADABLE
+        return SECRET_STORED
+
     def delete(self, ref: str | None) -> None:
         if not ref:
             return
         scheme, _, name = ref.partition(":")
-        if scheme in {"dpapi", "file"} and name:
+        if scheme in {"dpapi", "file"} and name and _SECRET_NAME.match(name):
             (self.root / name).unlink(missing_ok=True)

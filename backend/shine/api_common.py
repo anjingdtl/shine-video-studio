@@ -37,7 +37,7 @@ def llm_gateway(request: Request, secrets: Annotated[SecretStore, Depends(secret
     return LLMGateway(secrets, mock_responder=getattr(request.app.state, "mock_llm_responder", None))
 
 
-def public_profile(profile: ProviderProfile) -> ProviderProfilePublic:
+def public_profile(profile: ProviderProfile, *, secret_status: str = "not_set") -> ProviderProfilePublic:
     return ProviderProfilePublic(
         id=profile.id,
         name=profile.name,
@@ -45,6 +45,7 @@ def public_profile(profile: ProviderProfile) -> ProviderProfilePublic:
         base_url=profile.base_url,
         model=profile.model,
         has_api_key=bool(profile.api_key_ref),
+        secret_status=secret_status,
         capabilities=profile.capabilities or {},
         generation_options=profile.generation_options or {},
         timeout_s=profile.timeout_s,

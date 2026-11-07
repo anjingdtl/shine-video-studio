@@ -27,6 +27,11 @@ from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
 from shine.materialprep.states import EXECUTION_MODE_REAL
 from shine.schemas import APIModel
 
+#: How many times one scene may be released for a fresh request after the
+#: provider answered without a usable answer.  The budget keeps a scene the
+#: model can never satisfy from burning calls.
+MAX_RECONCILE_ATTEMPTS = 2
+
 router = APIRouter(prefix="/api/v1", tags=["director material preparation"])
 
 SettingsDep = Annotated[Settings, Depends(app_settings)]
@@ -341,6 +346,14 @@ def reconcile_material_scene(project_id: str, task_id: str, body: ReconcileScene
     if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
         raise HTTPException(409, "MATERIAL_SCENE_TASK_STILL_RUNNING")
 
+    decided = (task.trace.get("reconciliation") or {}).get("outcome")
+    if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}:
+        # Reconciling twice must never turn a released scene back into an
+        # unconfirmable one.
+        return {"outcome": decided, "task_id": task.id, "state_version": task.state_version,
+                "resubmittable": decided != "RESULT_ADOPTED",
+                "note": "这一场已经核对过，结论不变。"}
+
     artifact = db.scalar(select(AgentArtifact).where(
         AgentArtifact.source_task_id == task.id,
         AgentArtifact.kind == "ScriptPreparation",
@@ -388,6 +401,44 @@ def reconcile_material_scene(project_id: str, task_id: str, body: ReconcileScene
         return {"outcome": "NOT_SENT_PROVEN", "task_id": task.id,
                 "state_version": task.state_version, "resubmittable": True,
                 "note": "原请求已证明未发出；再次分析时才会创建新的模型请求。"}
+
+    # The provider answered and produced no usable answer: a refusal (wrong
+    # key, unknown model, rate limit) or an answer that broke the contract.
+    # The request is finished, so no answer exists that a second request
+    # could duplicate.  This is not "not sent" and it is not "unknown", and
+    # the retry stays bounded so a scene the model can never satisfy stops
+    # and waits for a person instead of burning calls.
+    if (task.status in {"FAILED", "REJECTED"}
+            and task.trace.get("external_outcome") == "RESPONSE_RECEIVED"):
+        attempts = int((task.trace.get("reconciliation") or {}).get("attempt", 0))
+        if attempts >= MAX_RECONCILE_ATTEMPTS:
+            add_audit(db, actor, "MATERIAL_SCENE_RETRIES_EXHAUSTED", "agent_task", task.id,
+                      {"attempts": attempts, "external_calls": 0, "resubmittable": False},
+                      project_id=project_id)
+            db.commit()
+            return {"outcome": "RETRIES_EXHAUSTED", "task_id": task.id,
+                    "state_version": task.state_version, "resubmittable": False,
+                    "note": "这一场已经重试到上限；请修改剧本后重新导入，或取消本次分析。"}
+        previous_identity = task.request_identity
+        task.status = "SUPERSEDED"
+        task.error_code = None
+        task.request_identity = None
+        task.lease_owner, task.lease_expires_at = None, None
+        task.state_version += 1
+        task.trace = {**task.trace, "reconciliation": {
+            "outcome": "RESPONSE_RECEIVED_NO_ANSWER", "attempt": attempts + 1,
+            "error_code": task.error_code, "response_status": task.trace.get("response_status"),
+            "previous_request_identity": previous_identity, "checked_at": utcnow().isoformat(),
+        }}
+        add_audit(db, actor, "MATERIAL_SCENE_RESPONSE_RECEIVED_NO_ANSWER", "agent_task", task.id,
+                  {"previous_request_identity": previous_identity, "attempt": attempts + 1,
+                   "response_status": task.trace.get("response_status"),
+                   "resubmittable": True, "external_calls": 0},
+                  project_id=project_id)
+        db.commit()
+        return {"outcome": "RESPONSE_RECEIVED_NO_ANSWER", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": True,
+                "note": "服务商已经答复但没有可用结果；再次分析时会创建一次新的模型请求。"}
 
     external_outcome = task.trace.get("external_outcome") or "UNKNOWN"
     add_audit(db, actor, "MATERIAL_SCENE_RECONCILIATION_UNCONFIRMABLE", "agent_task", task.id,

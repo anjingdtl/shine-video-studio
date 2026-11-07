@@ -15,6 +15,49 @@ from shine.main import create_app
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
 
 
+def qualified_hardware() -> dict:
+    """The hardware sections of a host that meets the default variant's floors."""
+    return {
+        'gpus': [{'index': '0', 'uuid': 'GPU-FIXTURE', 'name': 'Contract Fixture GPU',
+                  'driver_version': '0.0', 'vram_total_mb': 16384, 'vram_used_mb': 0,
+                  'vram_free_mb': 16384, 'selected': True}],
+        'gpu': {'status': 'OK', 'index': '0', 'uuid': 'GPU-FIXTURE',
+                'name': 'Contract Fixture GPU', 'driver_version': '0.0', 'vram_mb': 16384,
+                'vram_total_mb': 16384, 'vram_used_mb': 0, 'vram_free_mb': 16384},
+        'cuda': {'status': 'OK', 'compute_capability': '8.6', 'compute_capability_source': 'fixture',
+                 'torch': {'status': 'UNKNOWN', 'reason': 'FIXTURE',
+                           'pinned_wheel': 'torch 2.7.1+cu128', 'version': None,
+                           'cuda_build': None, 'arch_list': None}},
+        'ram': {'status': 'OK', 'ram_mb': 65536, 'ram_available_mb': 65536, 'at_floor': True},
+        'commit': {'status': 'OK', 'commit_total_mb': 131072, 'commit_available_mb': 131072,
+                   'page_file_status': 'PAGE_FILE_PRESENT', 'page_file_headroom_mb': 65536},
+    }
+
+
+def qualified_host_facts(*args, **kwargs) -> dict:
+    """A synthetic host that meets the default variant's admission thresholds.
+
+    The server re-checks the hardware for every install plan.  A contract
+    fixture has no real GPU, so it declares a capable host explicitly instead
+    of letting the gate fail for the wrong reason.  This is a fixture, not
+    product evidence: nothing here proves that H3 runs anywhere.
+    """
+    return {
+        **qualified_hardware(),
+        'platform': {'system': 'Windows', 'release': '11', 'version': '10.0.26200',
+                     'machine': 'AMD64', 'arch': 'x64', 'is_windows': True, 'is_x64': True,
+                     'windows_build': '10.0.26200'},
+        'disk': {'status': 'OK', 'free_bytes': 10 ** 15, 'total_bytes': 10 ** 15,
+                 'free_gb': round(10 ** 15 / 1024 ** 3, 2), 'path': 'fixture',
+                 'at_floor': True, 'runtime_floor_gb': 5},
+        'paths': {'data_dir': {'path': 'fixture', 'status': 'OK', 'writable': True},
+                  'deployment_dir': {'path': 'fixture', 'status': 'OK', 'writable': True},
+                  'issues': []},
+        'evidence': {'probed_at': '2026-01-01T00:00:00Z', 'failures': [], 'sources': {},
+                     'selected_gpu_uuid': 'GPU-FIXTURE', 'multi_gpu_memory_is_summed': False},
+    }
+
+
 @pytest.fixture
 def fake_deployment_host(monkeypatch):
     """Contract fixtures have a non-system volume with ample simulated capacity.
@@ -22,11 +65,23 @@ def fake_deployment_host(monkeypatch):
     No multi-GB inputs are downloaded here. Physical capacity/drive-policy
     cases override these ports explicitly; real installation acceptance is separate.
     """
-    from shine.comfyops import storage
+    from shine.comfyops import host_env, storage
     monkeypatch.setattr(storage, 'on_system_drive', lambda _: False)
     monkeypatch.setattr(storage, 'disk_info', lambda _: {
         'free_bytes': 10**15, 'total_bytes': 10**15, 'free_gb': round(10**15 / 1024**3, 2),
     })
+    # The server re-checks the hardware for every install plan.  A contract
+    # fixture has no real GPU, so the hardware sections are declared while
+    # the real paths and disk of the fixture stay untouched.
+    probed = host_env.probe_host_facts
+
+    def declared_host_facts(*args, **kwargs):
+        facts = probed(*args, **kwargs)
+        facts.update(qualified_hardware())
+        facts['evidence'] = {**(facts.get('evidence') or {}), 'failures': []}
+        return facts
+
+    monkeypatch.setattr(host_env, 'probe_host_facts', declared_host_facts)
 
 COMFY_GRAPH = {
     "1": {

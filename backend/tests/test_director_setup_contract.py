@@ -70,7 +70,9 @@ def test_shipped_service_uses_real_install_contract(prep, monkeypatch):
     monkeypatch.setattr('shine.comfyops.installer.LocalInstaller', lambda *args: IsolatedInstaller())
     plan = install_plan(prep)
     result, requests = bridge(client, plan)
-    assert result['status'] == 'FILES_VERIFIED'
+    # The installation is a persistent task: the shipped TypeScript queues it
+    # and re-attaches by attempt id instead of waiting inside one request.
+    assert result['status'] == 'QUEUED' and result['attempt_id']
     assert [r['url'].split('/')[-1] for r in requests] == ['execution-context', 'approval-grants', 'approve', 'execute']
     assert requests[1]['body']['action'] == 'install'
     assert set(requests[2]['body']) == {'grant_id', 'snapshot', 'evidence'}

@@ -27,7 +27,9 @@ def _write_recipe(settings, tmp_path, *, instance_id="managed-instance", port=81
 
     root = tmp_path / "comfy-root"
     root.mkdir(parents=True, exist_ok=True)
-    bootstrap = Path("scripts/managed_comfy_bootstrap.py").resolve()
+    # The repository's own pinned adapter, located from the repository root
+    # and not from the current working directory.
+    bootstrap = Path(__file__).resolve().parents[2] / "scripts" / "managed_comfy_bootstrap.py"
     assert bootstrap.is_file()
     recipe = {
         "renderer": {

@@ -179,6 +179,12 @@ $buildInfo = [ordered]@{
         packages = 154
         download_bytes = 60804054569
         download_gib_approx = 56.6
+        # The complete catalog, the default production components and the
+        # optional advisory components are three different numbers.
+        default_production_bytes = 48317862339
+        default_production_gib_approx = 45.0
+        optional_review_bytes = 12486192230
+        optional_review_gib_approx = 11.6
         install_required_bytes = 173663952354
         install_required_gib_approx = 161.7
         recommended_free_gib = 180

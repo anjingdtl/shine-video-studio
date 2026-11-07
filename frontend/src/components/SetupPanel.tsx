@@ -2,7 +2,19 @@ import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
-import { approveAndExecuteSetupPlan } from '../setupExecution';
+import { VariantRecommendationCard } from './VariantRecommendation';
+import {
+  approveAndExecuteSetupPlan,
+  cancelInstallationAttempt,
+  fetchInstallationAttempt,
+  isQueuedInstallation,
+  pauseInstallationAttempt,
+  rememberInstallationAttempt,
+  resumeInstallationAttempt,
+  storedInstallationAttempt,
+  waitForInstallationAttempt,
+} from '../setupExecution';
+import type { InstallationAttemptView, SetupExecutionResult } from '../setupExecution';
 import { label, prepRowLabels, providerLabels, serviceStatusLabels } from '../constants';
 import type { DeploymentStorage } from './StorageSettings';
 
@@ -38,6 +50,13 @@ type CatalogComponent = {
 type CatalogSummary = {
   catalog_id: string; catalog_version: string; generated: string;
   platform: Record<string, unknown>; total_bytes: number; components: CatalogComponent[];
+  // The complete catalog, the default production components and the optional
+  // advisory components are three different numbers; none of them is a
+  // hard-coded total.
+  download_breakdown?: {
+    complete_catalog_bytes: number; default_production_bytes: number; optional_review_bytes: number;
+    optional_review_components: string[]; model_bytes: number; runtime_bytes: number; selected_bytes?: number;
+  };
 };
 type PlanRef = { plan_id: string; sha256: string; kind: string; action?: string; tier?: string; status: string };
 type UpstreamRow = { id: string; label: string; host: string; status: string;
@@ -60,6 +79,21 @@ type ManagedProcess = { kind: 'renderer' | 'review'; id: string | null; stage: s
 type ReleaseReport = { stopped: Array<ManagedProcess & { outcome?: string; reason?: string }>;
   refused: Array<ManagedProcess & { outcome?: string; reason?: string }> };
 
+const INSTALL_STAGE_LABELS: Record<string, string> = {
+  QUEUED: '已排队',
+  DOWNLOADING: '下载中',
+  RETRY_WAIT: '等待重试',
+  VERIFYING: '校验文件',
+  INSTALLING: '安装中',
+  FILES_VERIFIED_PENDING_RUNTIME: '文件已校验（运行时尚未验证）',
+  VALIDATING_RUNTIME_CONTRACT: '校验运行契约',
+  RUNTIME_CONTRACT_READY: '运行契约已就绪',
+  PAUSED: '已暂停',
+  CANCELLED: '已取消',
+  FAILED_RETRYABLE: '失败（可重试）',
+  NEEDS_REVIEW: '需要对账',
+  MOCK_VERIFIED: '演练完成（未改动系统）',
+};
 const MANAGED_STATE_LABELS: Record<string, string> = {
   RUNNING: '运行中', GONE: '进程已不在', UNVERIFIED: '无法确认归属', STOPPED: '已停止',
 };
@@ -266,6 +300,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [plans, setPlans] = useState<PlanRef[]>([]);
+  const [attempt, setAttempt] = useState<InstallationAttemptView | null>(null);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
   const [managed, setManaged] = useState<ManagedProcess[]>([]);
@@ -336,10 +371,33 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
       payload: { kind?: string; deployment?: unknown; operation?: { action?: string } } }>>(
       `/comfyops/install-plans?project_id=${selected}`);
     if (projectRef.current !== selected) return;
-    setPlans(rows.filter(row => row.payload.deployment || row.payload.kind === 'INSTANCE_LIFECYCLE')
+    const next = rows.filter(row => row.payload.deployment || row.payload.kind === 'INSTANCE_LIFECYCLE')
       .map(row => ({ plan_id: row.id, sha256: row.sha256, status: row.status,
-        kind: row.payload.kind ?? 'INSTALL', action: row.payload.operation?.action })));
+        kind: row.payload.kind ?? 'INSTALL', action: row.payload.operation?.action }));
+    setPlans(next);
+    // A reopened page re-attaches to the attempt it remembers instead of
+    // starting a second installation.
+    for (const plan of next) {
+      const stored = storedInstallationAttempt(plan.plan_id);
+      if (!stored) continue;
+      try {
+        const view = await fetchInstallationAttempt(stored);
+        if (projectRef.current !== selected) return;
+        setAttempt(view);
+      } catch {
+        rememberInstallationAttempt(plan.plan_id, stored);
+      }
+    }
   }, [projectId]);
+  const attemptId = attempt?.attempt_id ?? '';
+  const attemptFinished = attempt?.terminal ?? true;
+  useEffect(() => {
+    if (!attemptId || attemptFinished) return;
+    const timer = window.setInterval(() => {
+      void fetchInstallationAttempt(attemptId).then(setAttempt).catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [attemptId, attemptFinished]);
   useEffect(() => { setPlans([]); void loadPlans().catch(error => say(String(error), 'bad')); }, [loadPlans, say]);
 
   useEffect(() => { void loadEnvironment(); void loadCatalog(); void loadReadiness(); void loadRuntime(); void loadVoice(); void loadManaged(); },
@@ -354,12 +412,54 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
     return () => window.removeEventListener('shine-storage-changed', refresh);
   }, [loadStorage, loadPlans, loadEnvironment, loadReadiness, say, refreshEpoch]);
 
-  async function approveAndExecute(plan: PlanRef, label: string): Promise<void> {
+  async function approveAndExecute(plan: PlanRef, label: string): Promise<SetupExecutionResult> {
     const selected = projectRef.current;
-    const exec = await approveAndExecuteSetupPlan(plan, () => {
+    const result = await approveAndExecuteSetupPlan(plan, () => {
       if (!mounted.current || projectRef.current !== selected) throw new Error('作品已切换，操作已停止。已提交的操作请查看尝试记录。');
+    }, { wait: false });
+    if (!isQueuedInstallation(result)) {
+      say(`${label} 执行完成：${result.status}`);
+      return result;
+    }
+    const queued = result;
+    rememberInstallationAttempt(plan.plan_id, queued.attempt_id);
+    setAttempt({
+      attempt_id: queued.attempt_id,
+      plan_id: plan.plan_id,
+      plan_hash: queued.plan_hash,
+      stage: 'QUEUED',
+      status: 'QUEUED',
+      confirmed_bytes: 0,
+      total_bytes: 0,
+      speed_bps: 0,
+      retry_count: 0,
+      cancel_requested: false,
+      pause_requested: false,
+      terminal: false,
+      resumable: true,
     });
-    say(`${label} 执行完成：${JSON.stringify(exec).slice(0, 120)}`);
+    say(`${label} 已排队（尝试 ${queued.attempt_id.slice(0, 8)}…）。进度、暂停和取消在下方「安装进度」里。`);
+    return queued;
+  }
+
+  async function attemptAction(action: 'pause' | 'resume' | 'cancel'): Promise<void> {
+    if (!attempt) return;
+    setBusy(true);
+    try {
+      const view = action === 'pause' ? await pauseInstallationAttempt(attempt.attempt_id)
+        : action === 'resume' ? await resumeInstallationAttempt(attempt.attempt_id)
+          : await cancelInstallationAttempt(attempt.attempt_id);
+      setAttempt(view);
+      say(action === 'cancel'
+        ? '已请求取消：服务器会在安全点停下。已下载的字节和已校验的模型都保留，不会重下。'
+        : action === 'pause'
+          ? '已请求暂停：服务器会在安全点停下，已确认的字节保留。'
+          : '已继续：从已确认的字节接着下载。');
+    } catch (error) {
+      say((error as Error).message, 'bad');
+    } finally {
+      setBusy(false);
+    }
   }
 
   function createInstallPlan() {
@@ -641,7 +741,14 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             components: productionComponents.map(component => component.component_id), project_id: selected, disk_free: storage.free_bytes,
           }));
           ensureCurrent();
-          await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');
+          const queued = await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');
+          ensureCurrent();
+          if (isQueuedInstallation(queued)) {
+            // The install is a persistent task now: the automatic chain waits
+            // for its real stage instead of assuming it already finished.
+            await waitForInstallationAttempt(queued.attempt_id, view => setAttempt(view));
+            ensureCurrent();
+          }
         }
         let complete = false;
         for (let step = 0; step < 8; step += 1) {
@@ -712,6 +819,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           </div>
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
           <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '工作台尚未配置就绪；这不代表本机没有安装 ComfyUI 或模型。'}</p>}
+          <VariantRecommendationCard />
           <h3>本机已有模型</h3>
           <p className="env-model-note">画面检查和语音转写只提供建议；缺失时留待人工复核，不阻断 H3 出片。默认安装只准备 H3 所需组件，不会自动下载 ASR/VLM 审片模型。</p>
           <div className="env-model-grid">
@@ -810,7 +918,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
 
         <div className="settings-block">
           <h3>1b · 上游可达性（下载前必查）</h3>
-          {!connectivity ? <div className="empty-inline">尚未检查。下载 60.8 GB 之前请先检查一次。</div> : <>
+          {!connectivity ? <div className="empty-inline">尚未检查。下载固定物料之前请先检查一次。</div> : <>
             <p className="guardrail-note">
               {connectivity.checked_at} · 结论 <b>{label(serviceStatusLabels, connectivity.status)}</b>
             </p>
@@ -844,6 +952,13 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             <p className="route-row">
               {catalog.catalog_id} v{catalog.catalog_version}（{catalog.generated}）· 总量 {fmtBytes(catalog.total_bytes)}
             </p>
+            {catalog.download_breakdown && <p className="guardrail-note">
+              完整目录 {fmtBytes(catalog.download_breakdown.complete_catalog_bytes)}
+              {' '}· 默认生产组件 {fmtBytes(catalog.download_breakdown.default_production_bytes)}
+              {' '}· 可选审片组件 {fmtBytes(catalog.download_breakdown.optional_review_bytes)}
+              {catalog.download_breakdown.optional_review_components.length > 0
+                && '（' + catalog.download_breakdown.optional_review_components.join('、') + '，不自动下载）'}
+            </p>}
             <div className="setup-components">
               {catalog.components.map((component) => (
                 <div className="worker-row" key={component.component_id}>
@@ -918,6 +1033,33 @@ function activateRuntime() {    const candidate = runtime?.candidate;
                     : null}
               </div>
             ))}
+          </div>}
+          {attempt && <div className="setup-plans">
+            <div className="worker-row">
+              <div>
+                <b>安装进度 · {INSTALL_STAGE_LABELS[attempt.stage] ?? attempt.stage}</b>
+                <span>尝试 {attempt.attempt_id.slice(0, 8)}… · {fmtBytes(attempt.confirmed_bytes)} / {fmtBytes(attempt.total_bytes)}
+                  {attempt.speed_bps ? ' · ' + fmtBytes(attempt.speed_bps) + '/秒' : ''}
+                  {attempt.current_component ? ' · 组件 ' + attempt.current_component : ''}
+                  {attempt.current_file ? ' · 文件 ' + attempt.current_file : ''}
+                  {attempt.retry_count ? ' · 重试 ' + attempt.retry_count : ''}
+                  {attempt.heartbeat_at ? ' · 心跳 ' + attempt.heartbeat_at : ''}</span>
+                {attempt.error_code
+                  ? <span>错误 {attempt.error_code}：{attempt.error_message ?? ''}</span>
+                  : <span className="guardrail-note">字节数来自服务器实际落盘的下载文件；关闭页面只会停止观察，不会停止下载。</span>}
+              </div>
+              <div className="worker-row-actions">
+                {!attempt.terminal && !attempt.pause_requested
+                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('pause')}>暂停</button>
+                  : null}
+                {(attempt.pause_requested || attempt.stage === 'PAUSED' || attempt.stage === 'FAILED_RETRYABLE')
+                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('resume')}>继续</button>
+                  : null}
+                {!attempt.terminal
+                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('cancel')}>取消</button>
+                  : null}
+              </div>
+            </div>
           </div>}
           <p className="guardrail-note">安装计划与实例链计划共用既有端点；未批准或哈希变化会直接拒绝。</p>
         </div>

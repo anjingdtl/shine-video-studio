@@ -26,7 +26,10 @@ try {
     return new Response(JSON.stringify(response.body), { status: response.status });
   };
   const { approveAndExecuteSetupPlan } = await import(pathToFileURL(path.join(temp, 'setupExecution.mjs')));
-  const result = await approveAndExecuteSetupPlan(JSON.parse(process.argv[2]));
+  // The contract is the queueing contract: the shipped code returns the queued
+  // attempt and the resident Worker executes it.  Waiting for a terminal
+  // stage here would block on a worker this harness does not run.
+  const result = await approveAndExecuteSetupPlan(JSON.parse(process.argv[2]), () => undefined, { wait: false });
   process.stdout.write(JSON.stringify({ result }) + '\n');
 } catch (error) {
   process.stdout.write(JSON.stringify({ error: String(error) }) + '\n');

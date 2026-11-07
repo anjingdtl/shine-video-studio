@@ -349,34 +349,41 @@ class Execute(Strict):
     executor: Literal["fake", "local"] = "fake"
 
 
-@router.post("/comfyops/install-plans/{identity}/execute")
+@router.post("/comfyops/install-plans/{identity}/execute", status_code=202)
 def execute_install(
     identity: str, body: Execute, actor: Operator, request: Request, settings: SettingsDep, db: DBSession
 ):
-    locked(db)
+    """Queue the installation and answer with its attempt id.
+
+    The installation is a persistent task: the resident Worker executes it and
+    the browser re-attaches by attempt id.  Nothing is downloaded inside this
+    request, so a slow or interrupted download never loses the attempt.
+    """
+    from shine.comfyops.local import queue_install_attempt
+
     row = get(db, InstallationPlan, identity)
     if row.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
         raise HTTPException(409, "USE_INSTANCE_LIFECYCLE_EXECUTOR")
     if body.executor == "local":
         import os
 
-        from shine.comfyops.installer import ControlledDownloader, HTTPTransport, LocalInstaller
-        from shine.comfyops.local import execute_approved
-
         if os.name != "nt" or os.getenv("SHINE_ENABLE_LOCAL_EXECUTION") != "1":
             raise HTTPException(409, "LOCAL_EXECUTOR_UNAVAILABLE")
         db.rollback()
-        installer = LocalInstaller(
-            settings.comfyops_dir / "isolated-packages",
-            ControlledDownloader(TRUSTED_DOWNLOAD_HOSTS, HTTPTransport()),
-        )
         try:
-            attempt_id = execute_approved(
-                request.app.state.session_factory, settings, identity, body.plan_hash, actor, installer
+            attempt_id = queue_install_attempt(
+                request.app.state.session_factory,
+                settings,
+                identity,
+                body.plan_hash,
+                actor,
+                "LOCAL_ISOLATED",
             )
         except (ValueError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
-        return public(get(db, InstallationAttempt, attempt_id))
+        with request.app.state.session_factory() as attempt_db:
+            queued = attempt_db.get(InstallationAttempt, attempt_id)
+            return _queued_response(queued, body.plan_hash)
     if row.status != "APPROVED" or row.sha256 != body.plan_hash or graph_hash(row.payload) != row.sha256:
         raise HTTPException(409, "INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
     if row.payload.get("executor") != "FAKE_ONLY":
@@ -388,28 +395,118 @@ def execute_install(
         installed = get(db, cls, package["id"])
         if installed.sha256 != package["hash"]:
             raise HTTPException(409, "PLAN_HASH_CHANGED")
-        installed.status = "MOCK_AVAILABLE"
-    attempt = save(
-        db,
-        InstallationAttempt,
-        {
-            "stages": ["STAGING", "INSTALLING", "VERIFYING", "MOCK_AVAILABLE"],
-            "is_mock": True,
-            "system_changes": False,
-            "plan_hash": row.sha256,
-        },
-        "MOCK_VERIFIED",
-        plan_id=row.id,
-    )
-    row.status = "MOCK_AVAILABLE"
-    audit(db, actor, "INSTALL_FAKE_EXECUTED", row)
+    locked(db)
+    from shine.comfyops.installation import queue_attempt
+
+    try:
+        attempt = queue_attempt(
+            db,
+            row,
+            row.sha256,
+            actor,
+            extra={
+                "stages": ["STAGING", "INSTALLING", "VERIFYING", "MOCK_AVAILABLE"],
+                "is_mock": True,
+                "system_changes": False,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(db, actor, "INSTALL_FAKE_QUEUED", row)
     db.commit()
-    return public(attempt)
+    return _queued_response(attempt, row.sha256)
+
+
+@router.post("/comfyops/install-plans/{identity}/precheck")
+def precheck_install_plan(identity: str, actor: Operator, db: DBSession):
+    """Check every real source of the plan with one light Range request.
+
+    The answer names the source, whether it can be continued and whether it
+    blocks the install.  "DEGRADED" is never presented as "everything passed".
+    """
+    from shine.comfyops.installation_precheck import PlanPrecheck
+
+    row = get(db, InstallationPlan, identity)
+    if row.payload.get("kind") in {"INSTANCE_LIFECYCLE", "INSTANCE_BACKUP"}:
+        raise HTTPException(409, "USE_INSTANCE_LIFECYCLE_EXECUTOR")
+    return PlanPrecheck().check(row.payload)
+
+
+def _queued_response(attempt, plan_hash: str) -> dict:
+    """The answer of a queued installation: the attempt id is the truth."""
+    return {
+        "attempt_id": attempt.id,
+        "status": "QUEUED",
+        "stage": "QUEUED",
+        "plan_hash": plan_hash,
+        "payload": attempt.payload,
+    }
+
+
+def _attempt_view(db, identity: str) -> dict:
+    from shine.comfyops import installation
+
+    row = get(db, InstallationAttempt, identity)
+    return {**public(row), **installation.attempt_view(row)}
+
+
+@router.get("/comfyops/installation-attempts/{identity}")
+def installation_attempt(identity: str, db: DBSession):
+    """The re-attachable truth about one installation attempt."""
+    return _attempt_view(db, identity)
 
 
 @router.get("/comfyops/install-attempts/{identity}")
 def attempt(identity: str, db: DBSession):
-    return public(get(db, InstallationAttempt, identity))
+    return _attempt_view(db, identity)
+
+
+@router.post("/comfyops/installation-attempts/{identity}/pause")
+def pause_installation_attempt(identity: str, actor: Operator, db: DBSession):
+    """Ask the Worker to stop at the next safe point."""
+    from shine.comfyops import installation
+
+    locked(db)
+    row = get(db, InstallationAttempt, identity)
+    try:
+        installation.request_pause(db, row)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(db, actor, "INSTALL_ATTEMPT_PAUSE_REQUESTED", row)
+    db.commit()
+    return _attempt_view(db, identity)
+
+
+@router.post("/comfyops/installation-attempts/{identity}/resume")
+def resume_installation_attempt(identity: str, actor: Operator, db: DBSession):
+    """Continue a paused attempt from its confirmed bytes."""
+    from shine.comfyops import installation
+
+    locked(db)
+    row = get(db, InstallationAttempt, identity)
+    try:
+        installation.request_resume(db, row)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(db, actor, "INSTALL_ATTEMPT_RESUME_REQUESTED", row)
+    db.commit()
+    return _attempt_view(db, identity)
+
+
+@router.post("/comfyops/installation-attempts/{identity}/cancel")
+def cancel_installation_attempt(identity: str, actor: Operator, db: DBSession):
+    """Cancel the attempt.  Only this explicit request stops the download."""
+    from shine.comfyops import installation
+
+    locked(db)
+    row = get(db, InstallationAttempt, identity)
+    try:
+        installation.request_cancel(db, row)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(db, actor, "INSTALL_ATTEMPT_CANCEL_REQUESTED", row)
+    db.commit()
+    return _attempt_view(db, identity)
 
 
 @router.post("/comfyops/install-attempts/{identity}/reconcile")

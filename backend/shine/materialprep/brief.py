@@ -30,7 +30,7 @@ from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import text_consent
-from shine.materialprep.agent_call import budget_report, call_material_agent, pace_provider_call
+from shine.materialprep.agent_call import budget_report, call_material_agent
 from shine.materialprep.contracts import MaterialImageBrief
 from shine.materialprep.image_prompts import template_evidence
 from shine.materialprep.ledger import touch_item
@@ -256,10 +256,6 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
             row = db.get(AgentTaskRecord, task_id)
             if row is not None:
                 row.trace = {**row.trace, "phase": phase, "phase_started_at": utcnow().isoformat()}
-
-    # A real gap between two provider calls, the same convention the crew
-    # chain uses.  A batch of items must not hammer the provider.
-    pace_provider_call()
 
     outcome = call_material_agent(
         gateway,

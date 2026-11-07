@@ -539,13 +539,15 @@ PDD8 档案（`config/workflows/ref2va-pdd8-2img.json`，25 个节点）的固�
 | 端点 | `https://api.minimax.cn/v1`（操作员授权的本地测试端点） |
 | 模型 | `MiniMax-M3.1-flash` |
 | 密钥存储 | Windows DPAPI 秘密存储（`secret_storage: dpapi`） |
-| 连接测试 | `{"ok": true, "message": "Connection succeeded"}` |
+| 连接测试 | `{"ok": true, "message": "连接检查通过：服务可达且模型目录列出了配置的 Model ID"}` |
 
 能力探测返回 `available: true`，并列出服务商模型表：
 `MiniMax-M3.1-Flash`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、`MiniMax-M2.1`、
-`MiniMax-M2` 等。探测同时标注 `model_listed: false` 与
-`"warning": "The configured model was not listed by the provider"` —— 配置里写的是小写
-拼写 `MiniMax-M3.1-flash`，服务商返回的是 `MiniMax-M3.1-Flash`。连接本身成功。
+`MiniMax-M2` 等。配置里写的是小写拼写 `MiniMax-M3.1-flash`，服务商返回的是
+`MiniMax-M3.1-Flash`，因此目录探测的结论是 `model_listed: false`。按当前契约，
+这会让连接测试判定为未通过（`error_code: LLM_MODEL_NOT_LISTED`，`reachable: true`），
+工作台会列出候选 Model ID 供明确选择；系统不做未经授权的大小写模糊匹配。把配置里的
+Model ID 改成服务商返回的写法后再测一次即可。连接本身成功。
 
 12 个 Agent 角色全部路由到该档案：`scriptwriter`、`director`、`cinematographer`、
 `editor`、`continuity_supervisor`、`sound_director`、`producer`、`comfyops`、

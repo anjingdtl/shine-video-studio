@@ -4,8 +4,8 @@ import { PreproductionPanel } from './components/PreproductionPanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, BookOpenText, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
-  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, RefreshCw, Settings2, ShieldCheck,
-  SlidersHorizontal, Sparkles, Users, Video, X,
+  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, Plus, RefreshCw, Settings2,
+  ShieldCheck, SlidersHorizontal, Sparkles, Users, Video, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useStudio } from './useStudio';
@@ -691,7 +691,7 @@ function App() {
                   <select aria-label="切换作品" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}</select>
                   <div className="selector-divider" />
                   <input className="new-project-inline" value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="新作品名称" />
-                  <button className="subtle-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建作品</button>
+                  <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={createProject}><Plus size={15} aria-hidden="true" />新建作品</button>
                 </section>
                 <div className="module-guide">
                   <CircleHelp size={13} />
@@ -978,7 +978,7 @@ function App() {
                   <select aria-label="切换项目" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}</select>
                   <div className="selector-divider" />
                   <input className="new-project-inline" value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="新项目名称" />
-                  <button className="subtle-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
+                  <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={createProject}><Plus size={15} aria-hidden="true" />新建项目</button>
                 </section>
 
                 <section className="metrics-grid">

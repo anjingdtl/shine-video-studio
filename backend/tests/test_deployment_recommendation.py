@@ -1,11 +1,14 @@
 """Deployment recommendation: the rules must be honest, not optimistic.
 
-A recommendation never promises that a combination runs, never adds VRAM across
-cards, and never replaces a blocked H3 combination with another model.  These
-tests pin those three behaviours plus the reuse estimate and the evidence level.
+A recommendation never promises that a combination runs, never adds VRAM
+across cards, and never replaces a blocked H3 combination with another model.
+The verdict has three values: SUPPORTED, BLOCKED and UNKNOWN - and an
+unreadable fact (GPU, RAM, commit, CUDA) is UNKNOWN, never SUPPORTED.
 """
 
 from __future__ import annotations
+
+import copy
 
 import pytest
 
@@ -16,9 +19,11 @@ CATALOG = {
     "catalog_version": "1.0",
     "platform": {
         "os": "windows-x64",
+        "arch": "x64",
         "gpu_vendor": "nvidia",
         "min_vram_mb": 15360,
         "min_ram_mb": 32768,
+        "min_commit_mb": 40960,
         "min_disk_gb": 180,
     },
     "components": [
@@ -30,11 +35,22 @@ CATALOG = {
 }
 
 
-def _env(*, vram: int = 16303, ram: int = 65536, free_gb: float = 400.0, gpu_status: str = "OK") -> dict:
+def _env(*, vram: int = 16303, ram: int = 65536, free_gb: float = 400.0, gpu_status: str = "OK",
+        commit: int = 131072, cuda: str = "8.6", system: str = "Windows", machine: str = "AMD64") -> dict:
     return {
-        "platform": {"system": "Windows", "machine": "AMD64"},
-        "gpu": {"status": gpu_status, "name": "GeForce RTX 5080", "vram_mb": vram},
-        "ram": {"status": "OK", "ram_mb": ram},
+        "platform": {"system": system, "machine": machine},
+        "gpus": ([{
+            "index": "0", "uuid": "GPU-ONE", "name": "GeForce RTX 5080", "driver_version": "1.0",
+            "vram_total_mb": vram, "vram_used_mb": 0, "vram_free_mb": vram, "selected": True,
+        }] if gpu_status == "OK" else []),
+        "gpu": ({"status": gpu_status, "name": "GeForce RTX 5080", "vram_mb": vram,
+                 "vram_total_mb": vram, "vram_free_mb": vram}
+                if gpu_status == "OK" else {"status": gpu_status, "reason": "NVIDIA_DRIVER_UNAVAILABLE"}),
+        "cuda": ({"status": "OK", "compute_capability": cuda} if cuda
+                 else {"status": "UNKNOWN", "reason": "CUDA_COMPUTE_CAPABILITY_UNKNOWN"}),
+        "ram": {"status": "OK", "ram_mb": ram, "ram_available_mb": ram // 2},
+        "commit": {"status": "OK", "commit_total_mb": commit, "commit_available_mb": commit // 2,
+                   "page_file_status": "PAGE_FILE_PRESENT"},
         "disk": {"status": "OK", "free_gb": free_gb},
     }
 
@@ -60,11 +76,61 @@ def test_insufficient_vram_blocks_and_says_the_real_numbers():
     assert "不会自动相加" in blocker["message"]
 
 
-def test_an_unidentified_gpu_is_a_warning_not_a_blocker():
+def test_an_unidentified_gpu_is_unknown_and_never_supported():
     result = evaluate(CATALOG, _env(gpu_status="DETECTION_FAILED"))
-    assert result["status"] == "SUPPORTED"
-    assert [row["code"] for row in result["warnings"]] == ["GPU_NOT_IDENTIFIED"]
+    assert result["status"] == "UNKNOWN"
+    assert result["status"] != "SUPPORTED"
+    assert [row["code"] for row in result["unknowns"]] == ["GPU_NOT_IDENTIFIED"]
     assert result["blockers"] == []
+
+
+def test_an_unreadable_ram_is_unknown_and_never_supported():
+    env = _env()
+    env["ram"] = {"status": "BLOCKED", "reason": "RAM_UNAVAILABLE"}
+    result = evaluate(CATALOG, env)
+    assert result["status"] == "UNKNOWN"
+    assert "RAM_UNKNOWN" in [row["code"] for row in result["unknowns"]]
+
+
+def test_an_unreadable_commit_is_unknown_and_never_supported():
+    env = _env()
+    env["commit"] = {"status": "BLOCKED", "reason": "COMMIT_UNAVAILABLE"}
+    result = evaluate(CATALOG, env)
+    assert result["status"] == "UNKNOWN"
+    assert "COMMIT_UNKNOWN" in [row["code"] for row in result["unknowns"]]
+
+
+def test_an_unknown_cuda_is_unknown_and_never_supported():
+    result = evaluate(CATALOG, _env(cuda=""))
+    assert result["status"] == "UNKNOWN"
+    assert "CUDA_UNKNOWN" in [row["code"] for row in result["unknowns"]]
+
+
+def test_a_non_windows_host_is_blocked():
+    result = evaluate(CATALOG, _env(system="Linux", machine="x86_64"))
+    assert result["status"] == "BLOCKED"
+    assert "OS_UNSUPPORTED" in [row["code"] for row in result["blockers"]]
+
+
+def test_a_non_x64_host_is_blocked():
+    result = evaluate(CATALOG, _env(machine="ARM64"))
+    assert result["status"] == "BLOCKED"
+    assert "ARCH_UNSUPPORTED" in [row["code"] for row in result["blockers"]]
+
+
+def test_two_cards_are_never_added_up():
+    env = _env()
+    env["gpus"] = [
+        {"index": "0", "uuid": "GPU-ONE", "name": "Small", "driver_version": "1",
+         "vram_total_mb": 8192, "vram_used_mb": 0, "vram_free_mb": 8192, "selected": True},
+        {"index": "1", "uuid": "GPU-TWO", "name": "Big", "driver_version": "1",
+         "vram_total_mb": 24576, "vram_used_mb": 0, "vram_free_mb": 24576, "selected": False},
+    ]
+    env["gpu"] = {"status": "OK", "name": "Small", "vram_mb": 8192, "vram_total_mb": 8192,
+                  "vram_free_mb": 8192}
+    result = evaluate(CATALOG, env)
+    assert result["status"] == "BLOCKED"
+    assert result["blockers"][0]["actual"] == 8192
 
 
 def test_an_existing_file_of_the_same_size_reduces_the_download(tmp_path):
@@ -93,6 +159,14 @@ def test_low_disk_blocks_before_anything_is_downloaded():
     assert [row["code"] for row in result["blockers"]] == ["DISK_INSUFFICIENT"]
 
 
+def test_a_low_commit_limit_blocks_with_the_real_numbers():
+    result = evaluate(CATALOG, _env(commit=20000))
+    blocker = result["blockers"][0]
+    assert blocker["code"] == "COMMIT_INSUFFICIENT"
+    assert blocker["required"] == 40960
+    assert blocker["actual"] == 20000
+
+
 def test_low_memory_blocks_and_reports_the_host_amount():
     result = evaluate(CATALOG, _env(ram=16000))
     assert [row["code"] for row in result["blockers"]] == ["RAM_INSUFFICIENT"]
@@ -112,7 +186,7 @@ def test_recommend_defaults_to_the_two_audited_product_choices():
     assert purposes == ["h3_video", "image_prep"]
     for option in report["options"]:
         assert option["catalog_id"]
-        assert option["status"] in {"SUPPORTED", "BLOCKED", "UNAVAILABLE"}
+        assert option["status"] in {"SUPPORTED", "BLOCKED", "UNKNOWN", "UNAVAILABLE"}
     assert report["host"]["vram_mb"] == 16303
     assert any("estimated" in note for note in report["notes"])
 
@@ -120,3 +194,15 @@ def test_recommend_defaults_to_the_two_audited_product_choices():
 def test_an_unknown_purpose_is_refused_instead_of_ignored():
     with pytest.raises(ValueError, match="UNKNOWN_DEPLOYMENT_PURPOSE"):
         recommend(_env(), purposes=["h3_video", "some_other_video_model"])
+
+
+def test_the_recommendation_never_adds_two_cards_together():
+    env = copy.deepcopy(_env())
+    env["gpus"].append({
+        "index": "1", "uuid": "GPU-TWO", "name": "Second", "driver_version": "1",
+        "vram_total_mb": 24576, "vram_used_mb": 0, "vram_free_mb": 24576, "selected": False,
+    })
+    result = evaluate(CATALOG, env)
+    assert result["status"] == "SUPPORTED"
+    assert result["gpus_considered"] == 1
+    assert result["selected_gpu"]["uuid"] == "GPU-ONE"

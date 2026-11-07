@@ -10,10 +10,13 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
+import time
 import zipfile
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -208,11 +211,45 @@ class DownloadStreamInterrupted(ValueError):
     """A fixed inbound GET stopped; only verified byte-range continuation is safe."""
 
 
+class DownloadRetryable(ValueError):
+    """The server asked for a bounded wait; the same immutable bytes may be asked again."""
+
+    def __init__(self, status: int, retry_after: float | None = None):
+        super().__init__(f"DOWNLOAD_RETRYABLE:{status}")
+        self.status = status
+        self.retry_after = retry_after
+
+
+class InstallationInterrupted(ValueError):
+    """The operator paused or cancelled; the install stops at a safe point."""
+
+
+#: A server answer that asks for a bounded wait instead of a permanent refusal.
+RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+#: A Retry-After header is honoured, but never without an upper bound.
+MAX_RETRY_AFTER_SECONDS = 60.0
+BASE_BACKOFF_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 30.0
+
+
+def _retry_after_seconds(response) -> float | None:
+    """The Retry-After of a retryable answer, or None when it is unusable."""
+    value = response.headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class HTTPTransport:
     @contextmanager
     def stream(self, url, offset, *, end=None):
-        # Retry only connection establishment for this immutable GET, before any
-        # response bytes. Never replay an installation attempt or a partial body.
+        # Retry only connection establishment and the response headers for this
+        # immutable GET, before any response body byte is consumed.  A body that
+        # stops halfway is never replayed here: the caller continues from the
+        # confirmed bytes with a new Range.
         headers = {"Range": f"bytes={offset}-{end if end is not None else ''}"} if offset or end is not None else {}
         if end is not None:
             headers["Accept-Encoding"] = "identity"
@@ -224,7 +261,11 @@ class HTTPTransport:
                         follow_redirects=False, timeout=httpx.Timeout(30, read=120),
                     ))
                     break
-                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                    # The request never produced a body byte, so asking again is
+                    # safe.  A protocol error is not retried: the peer speaks a
+                    # different protocol and repeating the request would only
+                    # hide that.
                     if attempt == 2:
                         raise ValueError(f"DOWNLOAD_CONNECTION_FAILED:{type(exc).__name__}") from None
                 except httpx.HTTPError as exc:
@@ -275,8 +316,13 @@ class ControlledDownloader:
     # Once the primary origin is proven unreachable, later files in the same
     # installation skip the repeated connect timeouts and try the mirror directly.
     primary_unreachable: bool = False
+    # The wait before a retryable answer is asked again, and the jitter source.
+    # Both are injectable so the production algorithm is testable without
+    # spending real seconds.
+    sleep: Callable[[float], None] = time.sleep
+    jitter: Callable[[], float] = random.random
 
-    def download(self, spec: PackageFile, cache: Path):
+    def download(self, spec: PackageFile, cache: Path, *, progress=None):
         check_url(spec.url, self.hosts)
         if spec.size > self.max_bytes:
             raise ValueError("DOWNLOAD_BUDGET_EXCEEDED")
@@ -291,54 +337,86 @@ class ControlledDownloader:
         partial = cache / (spec.sha256 + ".part")
         if partial.exists() and partial.stat().st_size >= spec.size and not self.valid(partial, spec):
             partial.unlink()
-        interruptions = 0
+        candidates = self._candidates(spec)
+        candidate_index = 0
+        retries = 0
         while not partial.exists() or partial.stat().st_size < spec.size:
             try:
-                self._transfer(spec, partial)
+                self._transfer(spec, partial, candidates, candidate_index, progress=progress)
+            except DownloadRetryable as exc:
+                # The server asked for a bounded wait.  The pinned bytes are
+                # immutable, so the same request may be asked again later.
+                retries += 1
+                if retries >= self.max_stream_attempts:
+                    raise ValueError(f"DOWNLOAD_HTTP_REJECTED:{exc.status}") from None
+                self.sleep(self._backoff(retries, exc.retry_after))
             except DownloadStreamInterrupted:
-                interruptions += 1
-                if interruptions >= self.max_stream_attempts:
+                retries += 1
+                if retries >= self.max_stream_attempts:
                     # A disconnected response may already contain the entire
                     # immutable file; only exact size AND hash can establish it.
                     if partial.exists() and self.valid(partial, spec):
                         break
                     raise
+                # A broken transfer continues from the confirmed bytes against
+                # the next candidate; the mirror serves the same pinned bytes
+                # and the primary may be tried again after the mirror failed.
+                candidate_index = (candidate_index + 1) % len(candidates)
+            except ValueError as exc:
+                if not str(exc).startswith("DOWNLOAD_CONNECTION_FAILED"):
+                    raise
+                retries += 1
+                if candidates[candidate_index][0] == "primary":
+                    self.primary_unreachable = True
+                if candidate_index + 1 >= len(candidates) or retries >= self.max_stream_attempts:
+                    raise
+                candidate_index += 1
             else:
                 # Reset only after a complete, range/length-checked segment.
                 # Each success completes the next fixed block, bounding requests
                 # by 3 * (ceil(file_size / segment_bytes) + 1).
-                interruptions = 0
+                retries = 0
         if not self.valid(partial, spec):
             partial.unlink(missing_ok=True)
             raise ValueError("FILE_CHECKSUM_FAILED")
         os.replace(partial, final)
         return final
 
-    @contextmanager
-    def _open(self, spec: PackageFile, offset, end):
-        """Open the pinned URL, then try the mirror after a connect failure.
+    def _candidates(self, spec: PackageFile):
+        """The transport candidates of one pinned file, primary origin first.
 
-        Only connection establishment may fall back: no byte is replayed and the
-        mirror response is still subjected to the exact size/hash verification.
+        The mirror is only a transport alternative for the same pinned bytes:
+        the size and the sha256 still decide whether the result is acceptable.
         """
+        candidates = []
         mirror = mirror_url(spec.url)
-        if self.primary_unreachable and mirror is not None and urlsplit(mirror).hostname in self.hosts:
-            with self._stream_mirror(mirror, offset, end) as response:
-                yield response
-            return
-        try:
+        mirror_allowed = mirror is not None and urlsplit(mirror).hostname in self.hosts
+        if not (self.primary_unreachable and mirror_allowed):
+            candidates.append(("primary", spec.url))
+        if mirror_allowed:
+            candidates.append(("mirror", mirror))
+        return candidates
+
+    def _backoff(self, attempt: int, retry_after: float | None) -> float:
+        """Exponential backoff with jitter, honouring a capped Retry-After."""
+        if retry_after is not None:
+            return max(0.0, min(float(retry_after), MAX_RETRY_AFTER_SECONDS))
+        delay = min(BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
+        return delay * (0.5 + self.jitter() / 2)
+
+    @contextmanager
+    def _open(self, spec: PackageFile, url: str, offset, end):
+        """Open one candidate URL for the pinned file.
+
+        Only the transport differs between candidates; every response is still
+        subjected to the exact range, size and hash verification.
+        """
+        if url == spec.url:
             with self._open_primary(spec, offset, end) as response:
                 yield response
             return
-        except ValueError as exc:
-            if not str(exc).startswith("DOWNLOAD_CONNECTION_FAILED"):
-                raise
-            primary_error = exc
-        if mirror is None or urlsplit(mirror).hostname not in self.hosts:
-            raise primary_error
-        self.primary_unreachable = True
-        logger.warning("installer_mirror_fallback file=%s host=%s", spec.relative_path, urlsplit(mirror).hostname)
-        with self._stream_mirror(mirror, offset, end) as response:
+        logger.warning("installer_mirror_fallback file=%s host=%s", spec.relative_path, urlsplit(url).hostname)
+        with self._stream_mirror(url, offset, end) as response:
             yield response
 
     @contextmanager
@@ -373,7 +451,7 @@ class ControlledDownloader:
             return approved_stream(spec, offset)
         return self.transport.stream(spec.url, offset)
 
-    def _transfer(self, spec: PackageFile, partial: Path):
+    def _transfer(self, spec: PackageFile, partial: Path, candidates, candidate_index, *, progress=None):
         offset = partial.stat().st_size if partial.exists() else 0
         if offset >= spec.size:
             partial.unlink()
@@ -383,7 +461,10 @@ class ControlledDownloader:
             min((offset // self.segment_bytes + 1) * self.segment_bytes, spec.size) - 1
             if range_stream and spec.size > self.segment_bytes else None
         )
-        with self._open(spec, offset, end) as response:
+        url = candidates[candidate_index][1]
+        with self._open(spec, url, offset, end) as response:
+            if response.status_code in RETRYABLE_STATUS:
+                raise DownloadRetryable(response.status_code, _retry_after_seconds(response))
             if response.status_code not in {200, 206}:
                 raise ValueError("DOWNLOAD_HTTP_REJECTED")
             if response.status_code == 206:
@@ -391,9 +472,13 @@ class ControlledDownloader:
                 if response.headers.get("content-range") != expected:
                     raise ValueError("INVALID_RESUME_RANGE")
             else:
-                offset = 0  # Server ignored Range; safely restart rather than append.
+                # The server ignored the Range header.  The whole file is
+                # rewritten instead of appending a full response to bytes that
+                # are already on disk.
+                offset = 0
                 end = None
             expected_size = spec.size if end is None else end + 1
+            reported = offset
             with partial.open("ab" if offset else "wb") as output:
                 size = offset
                 for chunk in response.iter_bytes():
@@ -403,8 +488,13 @@ class ControlledDownloader:
                         partial.unlink(missing_ok=True)
                         raise ValueError("DOWNLOAD_SIZE_EXCEEDED")
                     output.write(chunk)
+                    if progress is not None and size - reported >= 4 * 1024**2:
+                        reported = size
+                        progress(partial.stat().st_size)
                 output.flush()
                 os.fsync(output.fileno())
+            if progress is not None:
+                progress(partial.stat().st_size)
             if size != expected_size:
                 partial.unlink(missing_ok=True)
                 raise ValueError("DOWNLOAD_SEGMENT_SIZE_MISMATCH" if end is not None else "FILE_CHECKSUM_FAILED")
@@ -584,12 +674,20 @@ def exclusive_file_lock(path):
 class LocalInstaller:
     """Durable isolated package swap; every crash window has an exclusive recovery path."""
 
-    def __init__(self, root: Path, downloader: ControlledDownloader, checkpoint=None):
+    def __init__(self, root: Path, downloader: ControlledDownloader, checkpoint=None, *,
+                 progress=None, should_stop=None):
         self.root, self.downloader = root.resolve(), downloader
         self.checkpoint = checkpoint or (lambda phase: None)
+        # The progress callback receives the bytes that are really on disk.
+        self.progress = progress or (lambda component, relative_path, confirmed, total: None)
+        # The stop callback is asked between files; it returns a reason to stop
+        # at that safe point, or None to continue.
+        self.should_stop = should_stop or (lambda: None)
+        self._current_component = None
 
     def install(self, spec: PackageSpec):
         self.root.mkdir(parents=True, exist_ok=True)
+        self._current_component = spec.name
         destination = safe_target(self.root, spec.name)
         stage = safe_target(self.root, spec.name + ".staging")
         backup = safe_target(self.root, spec.name + ".rollback")
@@ -609,7 +707,16 @@ class LocalInstaller:
                 record("DOWNLOADING")
                 stage.mkdir()
                 for file in spec.files:
-                    source = self.downloader.download(file, self.root / ".cache")
+                    reason = self.should_stop()
+                    if reason:
+                        # A safe point between files: the reusable .part files
+                        # and the already verified files are kept.
+                        raise InstallationInterrupted(reason)
+                    source = self.downloader.download(
+                        file,
+                        self.root / ".cache",
+                        progress=lambda confirmed, pinned=file: self._emit(pinned, confirmed),
+                    )
                     target = safe_target(stage, file.relative_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
@@ -639,6 +746,10 @@ class LocalInstaller:
             except Exception:
                 self._recover(spec.name)
                 raise
+
+    def _emit(self, file, confirmed: int) -> None:
+        """Report the bytes that are really on disk for one pinned file."""
+        self.progress(self._current_component, file.relative_path, int(confirmed or 0), file.size)
 
     def _recover(self, name):
         destination = safe_target(self.root, name)

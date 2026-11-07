@@ -296,6 +296,22 @@ export type ProviderProfile = {
   has_api_key: boolean; capabilities: Record<string, unknown>; timeout_s: number;
   max_retries: number; temperature: number; enabled: boolean; created_at: string; updated_at: string;
   generation_options?: { max_completion_tokens?: number | null; reasoning_effort?: string | null };
+  /** not_set | stored | missing | unreadable - never the key itself. */
+  secret_status?: string;
+};
+
+/** The evidence of one provider check.
+ *
+ *  The connection fields and the generation fields are separate facts: a
+ *  reachable provider with a listed model is not a generation acceptance. */
+export type ProviderTestResult = {
+  ok: boolean; level: string;
+  reachable: boolean | null; auth_ok: boolean | null; catalog_ok: boolean | null;
+  model_listed: boolean | null; generation_ok: boolean | null; structured_output_ok: boolean | null;
+  model: string | null; latency_ms: number | null;
+  error_code: string | null; message: string;
+  capabilities: Record<string, unknown>;
+  checked_config_sha256: string | null; checked_at: string | null;
 };
 
 export type AgentRoute = { role: string; provider_profile_id: string; profile_name: string };
