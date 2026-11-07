@@ -556,6 +556,8 @@ class FilmAgentDispatcher:
         replace_interrupted_task_id: str | None = None,
         repair_director: bool = False,
     ) -> AgentArtifact:
+        if replace_interrupted_task_id is not None:
+            raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
         contract, required = FilmAgentRegistry.get(role, body.tool)
         project = require_project(db, project_id)
         if body.tool != "style_proposal" and not project.frozen_style_version_id:
@@ -725,7 +727,9 @@ class FilmAgentDispatcher:
                               or bounded_config.generation_options.get("max_tokens"))
         if bounded_config.kind == "anthropic":
             agent_output_limit = min(4096, bounded_config.max_output_tokens or 4096)
-        context_payload_utf8_bytes = len(json.dumps(model_context, ensure_ascii=False).encode("utf-8"))
+        context_payload_utf8_bytes = len(
+            json.dumps(model_context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
         # Claim the request while holding SQLite's writer lock, then release it
         # with the durable intent before any network call. Concurrent identical
         # requests cannot both pass the guard. A busy local writer (heartbeats,
@@ -740,28 +744,9 @@ class FilmAgentDispatcher:
                 if "database is locked" not in str(exc).lower() or attempt == 4:
                     raise
                 time.sleep(0.4 * (attempt + 1))
-        replacement_key = None
-        if replace_interrupted_task_id:
-            from shine.comfyops.models import ResourceLease
-
-            old = db.get(AgentTaskRecord, replace_interrupted_task_id)
-            replacement_key = f"film-replacement:{replace_interrupted_task_id}"
-            if (not old or old.project_id != project_id or old.role_id != role or old.status != "ABANDONED"
-                    or old.trace.get("local_interruption_verified") is not True
-                    or old.trace.get("external_outcome") != "UNKNOWN"
-                    or old.trace.get("is_mock") is not False
-                    or old.trace.get("automatic_replay") is not False
-                    or old.trace.get("received_result_sha256") is not None
-                    or db.scalar(select(AgentArtifact.id).where(AgentArtifact.source_task_id == old.id))
-                    or not storyboard_request_sha256
-                    or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256
-                    or old.trace.get("input_revision_ids") != body.input_revision_ids
-                    or db.get(AppSetting, replacement_key)
-                    or db.scalar(select(ResourceLease.id).where(ResourceLease.status != "RELEASED").limit(1))):
-                raise ValueError("AGENT_REPLACEMENT_NOT_AVAILABLE")
         guard_request(db, project_id, role, digest(context), profile,
                       text_hash=digest(model_context) if role == "qc_reviewer" else None,
-                      contract_hash=contract_hash, replace_interrupted_task_id=replace_interrupted_task_id)
+                      contract_hash=contract_hash)
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,
@@ -776,6 +761,7 @@ class FilmAgentDispatcher:
             status="RUNNING",
             trace={
                 "tool": body.tool,
+                "phase": "PREPARING",
                 "offline_preview": body.offline_preview,
                 "remote_text_consent": body.allow_remote_text,
                 "is_mock": profile.kind == "mock",
@@ -804,12 +790,6 @@ class FilmAgentDispatcher:
             },
         )
         db.add(task)
-        if replacement_key:
-            db.flush()
-            db.add(AppSetting(key=replacement_key, value={"replacement_task_id": task.id}))
-            add_audit(db, "local-user", "FILM_INTERRUPTED_TASK_REPLACED", "agent_task", task.id,
-                      {"previous_task_id": replace_interrupted_task_id, "external_outcome": "UNKNOWN"},
-                      project_id=project_id)
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
         if body.tool == "continuity_arbitration":
             system_prompt = arbiter_prompt()
@@ -853,7 +833,7 @@ class FilmAgentDispatcher:
                 db,
                 role,
                 system=system_prompt,
-                user=json.dumps(model_context, ensure_ascii=False),
+                user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
                 schema=wire_contract.model_json_schema(),
                 on_progress=record_progress,
             )
@@ -948,11 +928,22 @@ class FilmAgentDispatcher:
                 exc.details.get("external_outcome")
                 if isinstance(exc, LLMError) else None
             )
+            phase = task.trace.get("phase")
             if (isinstance(exc, LLMError) and exc.code in UNKNOWN_CODES
                     and external_outcome != "NOT_SENT"):
                 external_outcome = "UNKNOWN"
+            elif external_outcome not in {"NOT_SENT", "UNKNOWN", "RESPONSE_RECEIVED"}:
+                if (task.trace.get("received_result_sha256")
+                        or phase == "VALIDATING_RESULT"
+                        or isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int)):
+                    external_outcome = "RESPONSE_RECEIVED"
+                elif phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}:
+                    external_outcome = "NOT_SENT"
+                else:
+                    external_outcome = "UNKNOWN"
             uncertain = external_outcome == "UNKNOWN" and not task.trace.get("is_mock")
             task.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
+            task.state_version += 1
             # Never persist provider text, prompts or exception strings that can contain secrets.
             task.error_code = exc.code if isinstance(exc, LLMError) else "CONTRACT_OR_POLICY_REJECTED"
             diagnostic = ("schema_validation" if isinstance(exc, ValidationError) else
@@ -969,8 +960,7 @@ class FilmAgentDispatcher:
                               "provider_schema_validator": exc.details["validator"]}
                              if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
                              and isinstance(exc.details.get("path"), str) else {}),
-                          **({"external_outcome": external_outcome}
-                             if external_outcome in {"NOT_SENT", "UNKNOWN"} else {}),
+                          "external_outcome": external_outcome,
                           "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
             raise ValueError(task.error_code) from None
@@ -982,7 +972,7 @@ class FilmAgentDispatcher:
             # advances to WAITING_PROVIDER after the local resource slot has
             # been admitted and pre-call release has completed.  A failure
             # before that durable boundary cannot have reached the provider.
-            pre_request = phase in {None, "PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
+            pre_request = phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
             unknown = (not pre_request and not task.trace.get("is_mock")
                        and not task.trace.get("received_result_sha256"))
             if pre_request:
@@ -991,6 +981,7 @@ class FilmAgentDispatcher:
                     detail if isinstance(detail, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", detail) else None
                 )
                 task.status = "REJECTED"
+                task.state_version += 1
                 task.error_code = "AGENT_PRE_REQUEST_FAILED"
                 task.trace = {**task.trace, "automatic_replay": False,
                               "diagnostic_category": "pre_request_resource",
@@ -999,6 +990,7 @@ class FilmAgentDispatcher:
                               **({"pre_request_error_code": safe_detail} if safe_detail else {})}
             else:
                 task.status = "NEEDS_REVIEW" if unknown else "FAILED"
+                task.state_version += 1
                 task.error_code = "AGENT_CALL_FAILED"
                 task.trace = {**task.trace, "automatic_replay": False,
                               **({"external_outcome": "UNKNOWN"} if unknown else {})}

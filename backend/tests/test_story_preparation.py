@@ -321,7 +321,7 @@ def test_outline_questions_need_an_explicit_acknowledgement(api, monkeypatch):
             db.get(AgentArtifact, view["artifact_id"]).payload_json)
 
 
-def test_decided_failure_of_a_scene_is_retried_with_a_bound(api, monkeypatch):
+def test_only_not_sent_proven_scene_failure_is_retried_with_a_bound(api, monkeypatch):
     client, factory, project, doc, task_id, stuck_id = _blocked_outline(api, monkeypatch, "FAILED")
     with factory.begin() as db:
         stuck = db.get(AgentTaskRecord, stuck_id)
@@ -337,7 +337,7 @@ def test_decided_failure_of_a_scene_is_retried_with_a_bound(api, monkeypatch):
     checked = client.post(f"/api/v1/projects/{project}/story-preparation/tasks/{task_id}/reconcile", json={
         "expected_state_version": version}, headers=LOCAL).json()
     outcome = checked["reconciliation"]["outcomes"][0]
-    assert outcome["outcome"] == "FAILED_RETRY_ALLOWED" and outcome["attempt"] == 1
+    assert outcome["outcome"] == "NOT_SENT_PROVEN" and outcome["attempt"] == 1
     assert checked["reconciliation"]["resumable"] is True
     # The bound is per scene: after the budget a person has to look at it.
     for attempt in (2, 3):
@@ -346,7 +346,7 @@ def test_decided_failure_of_a_scene_is_retried_with_a_bound(api, monkeypatch):
         result = client.post(f"/api/v1/projects/{project}/story-preparation/tasks/{task_id}/reconcile", json={
             "expected_state_version": again}, headers=LOCAL).json()
         if attempt == 2:
-            assert result["reconciliation"]["outcomes"][0]["outcome"] == "FAILED_RETRY_ALLOWED"
+            assert result["reconciliation"]["outcomes"][0]["outcome"] == "NOT_SENT_PROVEN"
         else:
             assert result["reconciliation"]["outcomes"][0]["outcome"] == "RETRIES_EXHAUSTED"
             assert result["reconciliation"]["resumable"] is False

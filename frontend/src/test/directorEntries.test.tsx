@@ -51,6 +51,57 @@ describe('journey 读取状态', () => {
     expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
     expect(screen.queryByText(/六个阶段全部完成/)).toBeNull();
   });
+
+  it('导演页按确认计划范围显示镜头数，历史任务不会混入本次 Run', async () => {
+    const stages = EMPTY_JOURNEY.stages.map((stage) => {
+      if (stage.id === 'storyboard') return {
+        ...stage, done: true, summary: '64 个计划内镜头（项目共 70 个）',
+        facts: { shot_count: 70, planned_shot_count: 64,
+          planned_shot_ids: Array.from({ length: 64 }, (_, index) => `shot-${index + 1}`) }, blockers: [],
+      };
+      if (stage.id === 'production') return {
+        ...stage, done: true, summary: '64 / 64 镜已通过',
+        facts: { passed_shot_count: 64, scope_shot_count: 64 }, blockers: [],
+      };
+      if (stage.id === 'package' || stage.id === 'post') return { ...stage, done: true, blockers: [] };
+      return stage;
+    });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/,
+      respond: () => jsonResponse({
+        ...EMPTY_JOURNEY, stages, next_stage: null,
+        run: { id: 'run-1', status: 'COMPLETED', required_episode_count: 4,
+          delivered_episode_count: 4, blockers: [], control_reason: null, last_progress_at: null },
+      }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/shots$/,
+      respond: () => jsonResponse(Array.from({ length: 70 }, (_, index) => ({
+        id: `shot-${index + 1}`, project_id: 'proj-1', name: `镜头 ${index + 1}`, revision: 1,
+        spec: { characters: [], duration_target_s: 6 }, bindings: [],
+      }))) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/jobs$/,
+      respond: () => jsonResponse(Array.from({ length: 72 }, (_, index) => ({
+        id: `job-${index + 1}`, project_id: 'proj-1', shot_id: `shot-${index + 1}`,
+        shot_name: `镜头 ${index + 1}`, shot_revision: 1,
+        status: index < 65 ? 'PASSED' : index < 68 ? 'BLOCKED' : 'FAILED',
+        state_version: 1, provider: 'comfyui', simulated: false, video_created: index < 65,
+        paused: false, stale: false, failure_code: null, provider_job_id: null,
+        semantic_retries: 0, max_semantic_retries: 2, style_version_id: 'style-1',
+        generation_mode: null, workflow_profile_id: null, compiled_prompt_sha256: null,
+        artifact_id: null, last_qc_result: null, last_repair_plan: null,
+        request: { reference_manifest: [] }, attempts: [], repairs: [],
+        created_at: '2026-11-07T00:00:00Z', updated_at: '2026-11-07T00:00:00Z',
+      }))) });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 3 阶段：镜头拆解/);
+
+    expect(await screen.findByText(/已应用 64 个计划镜头（项目共 70 镜）/)).toBeInTheDocument();
+    expect(screen.getByText('一键开拍：自动制作全部 64 个镜头')).toBeInTheDocument();
+    expect(screen.queryByText('一键开拍：自动制作全部 70 个镜头')).toBeNull();
+    expect(screen.getByText('③ 进度与结果 · 64/64 个计划镜头已通过')).toBeInTheDocument();
+    expect(screen.getByText(/本次确认范围：64 镜，64\/64 个计划镜头已通过/)).toBeInTheDocument();
+    expect(screen.queryByText(/65\/72 完成/)).toBeNull();
+  });
 });
 
 describe('① 创意与剧本 双入口', () => {

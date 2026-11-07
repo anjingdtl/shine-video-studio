@@ -13,7 +13,10 @@ from shine.h3.rulebook import digest
 from shine.models import (
     AgentTaskRecord,
     AppSetting,
+    AuditEvent,
+    ExternalJobReconciliation,
     Job,
+    JobAttempt,
     JobDependency,
     MediaArtifact,
     ProductionSeries,
@@ -22,6 +25,7 @@ from shine.models import (
     Shot,
     utcnow,
 )
+from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode
 from shine.schemas import APIModel, CreateJob, RenderRequest
 from shine.services import add_audit, mark_stale_descendants, require_project
 
@@ -97,6 +101,38 @@ def _impact(db, source_job_id):
     return sorted(seen)
 
 
+def _proven_pre_submit_mapping_failure(db, job):
+    """A mapping rejection is ignorable only with the same proof used by Run recovery."""
+    if (job.status != "NEEDS_REVIEW" or job.provider != "comfyui"
+            or job.failure_code != "PENDING_WORKFLOW_MAPPING" or job.artifact_id or job.provider_job_id):
+        return False
+    attempts = list(db.scalars(select(JobAttempt).where(JobAttempt.job_id == job.id)).all())
+    if not attempts or any(
+        attempt.status != "FAILED" or attempt.failure_code != "PENDING_WORKFLOW_MAPPING"
+        or attempt.provider_job_id or attempt.submit_ack_at or attempt.prompt_graph_sha256
+        or attempt.output_path or attempt.output_sha256 or attempt.output_bytes
+        or db.get(AppSetting, "renderer-activation:" + attempt.id) is not None
+        for attempt in attempts
+    ):
+        return False
+    mapping_proof = db.scalar(select(AuditEvent.id).where(
+        AuditEvent.project_id == job.project_id,
+        AuditEvent.entity_type == "job",
+        AuditEvent.entity_id == job.id,
+        AuditEvent.event_type == "COMFY_WORKFLOW_MAPPING_PENDING",
+    ).limit(1))
+    submitted = db.scalar(select(AuditEvent.id).where(
+        AuditEvent.project_id == job.project_id,
+        AuditEvent.entity_type == "job",
+        AuditEvent.entity_id == job.id,
+        AuditEvent.event_type == "COMFY_SUBMIT_INTENT",
+    ).limit(1))
+    artifact = db.scalar(select(MediaArtifact.id).where(MediaArtifact.job_id == job.id).limit(1))
+    leases = list(db.scalars(select(ResourceLease).where(ResourceLease.owner == "h3:" + job.id)).all())
+    return bool(mapping_proof and not submitted and not artifact
+                and all(lease.status in {"RELEASED", "WAITING"} for lease in leases))
+
+
 def _blocker(db, job, shot):
     if not job:
         return "GENERATION_NOT_STARTED"
@@ -104,9 +140,13 @@ def _blocker(db, job, shot):
         return "SHOT_REVISION_REPLACED"
     if job.status != "PASSED":
         return "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
-    if db.scalar(select(Job.id).where(Job.shot_id == job.shot_id, Job.id != job.id,
-                    Job.status.in_(["QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING", "NEEDS_REVIEW"]),
-                    Job.stale.is_(False))):
+    unresolved = db.scalars(select(Job).where(
+        Job.shot_id == job.shot_id,
+        Job.id != job.id,
+        Job.status.in_(["QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING", "NEEDS_REVIEW"]),
+        Job.stale.is_(False),
+    )).all()
+    if any(not _proven_pre_submit_mapping_failure(db, candidate) for candidate in unresolved):
         return "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
     if db.scalar(select(ResourceLease.id).where(ResourceLease.status == "RECONCILE_REQUIRED")):
         return "GPU_LEASE_RECONCILIATION_REQUIRED"
@@ -141,40 +181,100 @@ def _editorial_cuts(db, shot_id):
     return []
 
 
+def _segment_row(db, project_id, shot_id, position, *, root=None, episode_position=None,
+                 episode_title=None, batch_status=None):
+    shot = db.get(Shot, shot_id)
+    item = next((row for row in root.items if row.shot_id == shot_id), None) if root else None
+    chosen = _selection(db, root) if root else {}
+    job = db.get(Job, chosen.get(shot_id)) if chosen.get(shot_id) else None
+    records = _records(db, project_id)
+    replacement = next((r for r in records if job and r.trace.get("source_job_id") == job.id), None)
+    pending = db.get(Job, replacement.trace["job_id"]) if replacement and replacement.trace.get("job_id") else None
+    attempt = max(job.attempts, key=lambda a: a.attempt_no, default=None) if job else None
+    spec = job.request.get("shot_spec", {}) if job else (shot.spec if shot else {})
+    reason = _blocker(db, job, shot) if job else ("GENERATION_NOT_STARTED" if shot else "SHOT_NOT_FOUND")
+    if replacement:
+        reason = "RETAKE_AWAITS_SELECTION_OR_REVIEW"
+    return {
+        "shot_id": shot_id,
+        "position": position,
+        "episode_position": episode_position,
+        "episode_title": episode_title,
+        "series_id": root.id if root else None,
+        "story_beat": spec.get("story_beat"),
+        "duration_s": spec.get("duration_target_s"),
+        "editorial_cuts": _editorial_cuts(db, shot_id),
+        "shot_revision": shot.revision if shot else None,
+        "job_id": job.id if job else None,
+        "attempt_no": attempt.attempt_no if attempt else None,
+        "status": job.status if job else (item.status if item else batch_status or "PLANNED"),
+        "artifact_id": job.artifact_id if job else None,
+        "blocker": reason,
+        "can_regenerate": reason is None,
+        "dependent_job_ids": _impact(db, job.id) if job else [],
+        "replacement_job_id": pending.id if pending else None,
+        "replacement_status": pending.status if pending else None,
+        "can_select_replacement": accepted_job(db, pending),
+    }
+
+
+def _run_segments(db, run):
+    episodes = list(db.scalars(select(ProductionRunEpisode).where(
+        ProductionRunEpisode.run_id == run.id).order_by(ProductionRunEpisode.position)).all())
+    batches = list(db.scalars(select(ProductionRunBatch).where(
+        ProductionRunBatch.run_id == run.id).order_by(ProductionRunBatch.position)).all())
+    batch_for_shot = {}
+    for batch in batches:
+        for shot_id in batch.shot_ids:
+            batch_for_shot.setdefault(shot_id, batch)
+    series_by_id = {series.id: series for series in db.scalars(select(ProductionSeries).where(
+        ProductionSeries.id.in_([batch.series_id for batch in batches if batch.series_id]))).all()}
+
+    rows = []
+    for episode_position, episode in enumerate(episodes, start=1):
+        for shot_id in episode.shot_ids:
+            batch = batch_for_shot.get(shot_id)
+            root = series_by_id.get(batch.series_id) if batch and batch.series_id else None
+            rows.append(_segment_row(db, run.project_id, shot_id, len(rows) + 1, root=root,
+                episode_position=episode_position, episode_title=episode.title,
+                batch_status=batch.status if batch else ("QUEUED" if run.status in {
+                    "QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED", "RECONCILING"} else "PLANNED")))
+    return rows
+
+
 @router.get("/projects/{project_id}/generation-segments")
-def segments(project_id: str, db: DBSession, series_id: str | None = None):
+def segments(project_id: str, db: DBSession, series_id: str | None = None, run_id: str | None = None):
     require_project(db, project_id)
+    if series_id:
+        try:
+            root = _root(db, project_id, series_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return {"series_id": None, "run_id": None, "segments": []}
+            raise
+        rows = [_segment_row(db, project_id, item.shot_id, item.position + 1, root=root,
+                             batch_status=item.status) for item in root.items]
+        return {"series_id": root.id, "run_id": None, "segments": rows}
+
+    if run_id:
+        run = db.get(ProductionRun, run_id)
+        if not run or run.project_id != project_id:
+            raise HTTPException(404, "PRODUCTION_RUN_NOT_FOUND")
+    else:
+        run = db.scalars(select(ProductionRun).where(ProductionRun.project_id == project_id)
+                         .order_by(ProductionRun.created_at.desc()).limit(1)).first()
+    if run:
+        return {"series_id": None, "run_id": run.id, "segments": _run_segments(db, run)}
+
     try:
-        root = _root(db, project_id, series_id)
+        root = _root(db, project_id)
     except HTTPException as exc:
         if exc.status_code == 404:
-            return {"series_id": None, "segments": []}
+            return {"series_id": None, "run_id": None, "segments": []}
         raise
-    chosen = _selection(db, root)
-    records = _records(db, project_id)
-    rows = []
-    for item in root.items:
-        shot = db.get(Shot, item.shot_id)
-        job = db.get(Job, chosen.get(item.shot_id)) if chosen.get(item.shot_id) else None
-        replacement = next((r for r in records if job and r.trace.get("source_job_id") == job.id), None)
-        pending = db.get(Job, replacement.trace["job_id"]) if replacement else None
-        attempt = max(job.attempts, key=lambda a: a.attempt_no, default=None) if job else None
-        spec = job.request.get("shot_spec", {}) if job else (shot.spec if shot else {})
-        reason = _blocker(db, job, shot)
-        if replacement:
-            reason = "RETAKE_AWAITS_SELECTION_OR_REVIEW"
-        rows.append({"shot_id": item.shot_id, "position": item.position + 1,
-                     "story_beat": spec.get("story_beat"), "duration_s": spec.get("duration_target_s"),
-                     "editorial_cuts": _editorial_cuts(db, item.shot_id),
-                     "shot_revision": shot.revision if shot else None,
-                     "job_id": job.id if job else None, "attempt_no": attempt.attempt_no if attempt else None,
-                     "status": job.status if job else item.status, "artifact_id": job.artifact_id if job else None,
-                     "blocker": reason, "can_regenerate": reason is None,
-                     "dependent_job_ids": _impact(db, job.id) if job else [],
-                     "replacement_job_id": pending.id if pending else None,
-                     "replacement_status": pending.status if pending else None,
-                     "can_select_replacement": accepted_job(db, pending)})
-    return {"series_id": root.id, "segments": rows}
+    rows = [_segment_row(db, project_id, item.shot_id, item.position + 1, root=root,
+                         batch_status=item.status) for item in root.items]
+    return {"series_id": root.id, "run_id": None, "segments": rows}
 
 
 def _record(db, project_id, role, identity, payload):
@@ -204,6 +304,38 @@ def regenerate(project_id: str, shot_id: str, body: SegmentAction, actor: Operat
     reason = _blocker(db, source, shot)
     if reason:
         raise HTTPException(409, reason)
+    prior_unresolved = db.scalars(select(Job).where(
+        Job.shot_id == shot_id,
+        Job.id != source.id,
+        Job.status.in_(["QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING", "NEEDS_REVIEW"]),
+        Job.stale.is_(False),
+    )).all()
+    for historical in prior_unresolved:
+        if not _proven_pre_submit_mapping_failure(db, historical):
+            continue
+        reconciled = db.scalar(select(ExternalJobReconciliation.id).where(
+            ExternalJobReconciliation.job_id == historical.id,
+            ExternalJobReconciliation.result == "NOT_SENT_PROVEN",
+        ).limit(1))
+        if reconciled:
+            continue
+        evidence = {
+            "failure_code": "PENDING_WORKFLOW_MAPPING",
+            "attempt_ids": [attempt.id for attempt in historical.attempts],
+            "mapping_event": "COMFY_WORKFLOW_MAPPING_PENDING",
+            "comfy_submit_intent": False,
+            "external_submission": "NOT_SENT_PROVEN",
+            "resubmitted": False,
+        }
+        db.add(ExternalJobReconciliation(
+            job_id=historical.id,
+            provider_job_id=None,
+            action="pre_submit_workflow_mapping",
+            result="NOT_SENT_PROVEN",
+            evidence=evidence,
+        ))
+        add_audit(db, actor, "JOB_EXTERNAL_OUTCOME_NOT_SENT_PROVEN", "job", historical.id,
+                  evidence, project_id=project_id)
     spec = RenderRequest.model_validate(source.request)
     output = {"width": spec.output_width, "height": spec.output_height, "fps": 24} if spec.output_width else None
     series, job = create_series(db, project, [shot], body=CreateJob(

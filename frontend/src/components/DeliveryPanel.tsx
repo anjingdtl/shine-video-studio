@@ -116,6 +116,27 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     || (order.status === 'DELIVERED' && order.delivered_at
       && Date.now() - new Date(order.delivered_at).getTime() < 120000));
 
+  const deliveredJobIds = new Set(deliveries.flatMap((delivery) =>
+    (delivery.provenance.clips ?? [])
+      .filter((clip): clip is { job_id: string } => !!clip && typeof clip === 'object'
+        && 'job_id' in clip && typeof clip.job_id === 'string')
+      .map((clip) => clip.job_id)));
+  const deliveredJobs = jobs.filter((job) => deliveredJobIds.has(job.id));
+  const latestAsrReview = (job: Job) => (job.advisory_reviews ?? [])
+    .filter((review) => review.kind === 'ASR'
+      && (!job.artifact_id || review.artifact_id === job.artifact_id))
+    .at(-1);
+  const asrReviewByJob = new Map(deliveredJobs.map((job) => [job.id, latestAsrReview(job)]));
+  const asrUnavailableCount = [...asrReviewByJob.values()].filter((review) =>
+    review?.status === 'UNAVAILABLE').length;
+  const asrRouteMissingCount = [...asrReviewByJob.values()].filter((review) =>
+    review?.error_code === 'ASR_ROUTE_NOT_CONFIGURED').length;
+  const asrMissingCount = [...asrReviewByJob.values()].filter((review) => !review).length;
+  const asrUnverifiedCount = [...asrReviewByJob.values()].filter((review) =>
+    !review || review.status !== 'COMPLETED' || review.is_mock !== false || !review.outcome).length;
+  const asrFlaggedCount = [...asrReviewByJob.values()].filter((review) =>
+    review?.status === 'COMPLETED' && review.is_mock === false && review.outcome !== 'passed').length;
+
   useEffect(() => {
     if (seriesActive || !deliveredRecently) return;
     const timer = window.setInterval(() => { reload().catch(() => undefined); }, 5000);
@@ -152,6 +173,13 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         <p><b>还没出现成片？</b>说明镜头还没全部通过——回到上一步看「生成进度与检查」里卡住的镜头。</p>
       </div>
     </div>
+
+    {(asrUnverifiedCount > 0 || asrFlaggedCount > 0) && <div className="blocked-callout" role="status" aria-label="音频语言核对未完成">
+      <HelpCircle size={15} />
+      <span>
+        音频语言/禁声核对未完整：{asrUnverifiedCount} 个交付镜头没有可用的真实 ASR 结论（{asrUnavailableCount} 个 ASR 不可用，其中 {asrRouteMissingCount} 个未配置语音识别路由；{asrMissingCount} 个没有 ASR 记录）；{asrFlaggedCount > 0 && `另有 ${asrFlaggedCount} 个镜头的 ASR 结果需复核；` }技术音轨可解码不代表对白或旁白语言正确。请播放成片人工核对。此提示不改变现有交付文件或验收状态。
+      </span>
+    </div>}
 
     {loadError && <p className="failure" role="alert">交付列表读取失败：{loadError}（显示的不是最新数据，可点击「刷新交付列表」重试）</p>}
 

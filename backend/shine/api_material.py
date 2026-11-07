@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
+from sqlalchemy import select
 
 from shine.api_common import DBSession, app_settings, llm_gateway
 from shine.api_operator import Operator
@@ -206,6 +207,10 @@ class PrepareScenesBody(APIModel):
     replacement_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class ReconcileSceneBody(APIModel):
+    expected_state_version: int = Field(ge=0)
+
+
 class TextConsentBody(APIModel):
     document_id: str
     expected_document_hash: str = Field(min_length=64, max_length=64)
@@ -292,6 +297,8 @@ def prepare_material_scenes(
         raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
     if document.sha256 != body.expected_document_hash:
         raise HTTPException(409, {"code": "MATERIAL_DOCUMENT_STALE", "actual": document.sha256})
+    if body.replace_unknown_task_id or body.replacement_key:
+        raise HTTPException(409, "MATERIAL_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     if len(document.text or "") > 4000:
         raise HTTPException(409, {"code": "STORY_DURABLE_OUTLINE_REQUIRED",
                                   "message": "这份剧本太长，一次性分析会丢掉细节。请改用「总体大纲与生产段落」："
@@ -310,6 +317,86 @@ def prepare_material_scenes(
     if result.get("error_code"):
         raise HTTPException(409, result)
     return result
+
+
+@router.post("/projects/{project_id}/material-preparation/scenes/{task_id}/reconcile")
+def reconcile_material_scene(project_id: str, task_id: str, body: ReconcileSceneBody,
+                             actor: Operator, db: DBSession):
+    """Inspect one scene task and release it only with explicit not-sent proof.
+
+    This endpoint never contacts the text provider. An UNKNOWN result remains
+    attached to its original task identity and cannot be replaced here.
+    """
+    from shine.h3.rulebook import digest
+    from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
+    from shine.services import add_audit, require_project
+
+    require_project(db, project_id)
+    task = db.get(AgentTaskRecord, task_id)
+    if (task is None or task.project_id != project_id or task.role_id != "scriptwriter"
+            or task.trace.get("tool") != "script_prepare"):
+        raise HTTPException(404, "MATERIAL_SCENE_TASK_NOT_FOUND")
+    if task.state_version != body.expected_state_version:
+        raise HTTPException(409, "MATERIAL_SCENE_TASK_STATE_CHANGED")
+    if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
+        raise HTTPException(409, "MATERIAL_SCENE_TASK_STILL_RUNNING")
+
+    artifact = db.scalar(select(AgentArtifact).where(
+        AgentArtifact.source_task_id == task.id,
+        AgentArtifact.kind == "ScriptPreparation",
+        AgentArtifact.stale.is_(False),
+    ))
+    document = db.get(ProjectDocument, task.trace.get("document_id"))
+    artifact_matches = bool(
+        artifact and artifact.project_id == project_id and artifact.producer_role == "scriptwriter"
+        and artifact.sha256 == digest(artifact.payload_json)
+        and task.trace.get("output_hash") == artifact.sha256
+        and artifact.payload_json.get("scene_key") == task.trace.get("scene_key")
+        and document and document.project_id == project_id
+        and document.sha256 == task.trace.get("document_sha256")
+    )
+    if artifact_matches:
+        task.status = "SUCCEEDED"
+        task.error_code = None
+        task.state_version += 1
+        task.trace = {**task.trace, "external_outcome": "SUCCEEDED",
+                      "reconciliation": {"outcome": "RESULT_ADOPTED", "artifact_id": artifact.id,
+                                         "checked_at": utcnow().isoformat()}}
+        add_audit(db, actor, "MATERIAL_SCENE_RESULT_ADOPTED", "agent_task", task.id,
+                  {"artifact_id": artifact.id, "artifact_sha256": artifact.sha256,
+                   "external_calls": 0}, project_id=project_id)
+        db.commit()
+        return {"outcome": "RESULT_ADOPTED", "task_id": task.id, "artifact_id": artifact.id,
+                "artifact_sha256": artifact.sha256, "resubmittable": False}
+
+    if (task.status in {"FAILED", "REJECTED"}
+            and task.trace.get("external_outcome") == "NOT_SENT"):
+        previous_identity = task.request_identity
+        task.status = "SUPERSEDED"
+        task.error_code = None
+        task.request_identity = None
+        task.lease_owner, task.lease_expires_at = None, None
+        task.state_version += 1
+        task.trace = {**task.trace, "reconciliation": {
+            "outcome": "NOT_SENT_PROVEN", "previous_request_identity": previous_identity,
+            "checked_at": utcnow().isoformat(),
+        }}
+        add_audit(db, actor, "MATERIAL_SCENE_NOT_SENT_PROVEN", "agent_task", task.id,
+                  {"previous_request_identity": previous_identity, "resubmittable": True,
+                   "external_calls": 0}, project_id=project_id)
+        db.commit()
+        return {"outcome": "NOT_SENT_PROVEN", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": True,
+                "note": "原请求已证明未发出；再次分析时才会创建新的模型请求。"}
+
+    external_outcome = task.trace.get("external_outcome") or "UNKNOWN"
+    add_audit(db, actor, "MATERIAL_SCENE_RECONCILIATION_UNCONFIRMABLE", "agent_task", task.id,
+              {"external_outcome": external_outcome, "status": task.status,
+               "external_calls": 0, "resubmittable": False}, project_id=project_id)
+    db.commit()
+    return {"outcome": "UNCONFIRMABLE", "task_id": task.id, "state_version": task.state_version,
+            "external_outcome": external_outcome, "resubmittable": False,
+            "note": "没有结果或未发送证据；保留原 UNKNOWN，不能创建替代请求。"}
 
 
 @router.post("/projects/{project_id}/material-preparation/confirm")

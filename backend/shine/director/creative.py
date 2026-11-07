@@ -727,13 +727,15 @@ def run_pending_creative_task(session_factory, settings, worker_id: str, *,
             if outcome.error_code == "CREATIVE_TASK_NOT_OWNED":
                 # A newer owner took over: this worker writes nothing.
                 return True
-            # An uncertain outcome may already have reached the provider: it
-            # goes to review and is never replayed under a new request.
+            external_outcome = outcome.details.get("external_outcome", "UNKNOWN")
+            uncertain = outcome.uncertain or external_outcome == "UNKNOWN"
+            # Only a provider transport proof of NOT_SENT permits another
+            # request. A received but invalid answer is not a replay grant.
             _finish_task(session_factory, task_id, version, worker_id,
                          {**sending,
-                          "external_outcome": "UNKNOWN" if outcome.uncertain else "NOT_SENT",
+                          "external_outcome": external_outcome,
                           "automatic_replay": False},
-                         "NEEDS_REVIEW" if outcome.uncertain else "FAILED",
+                         "NEEDS_REVIEW" if uncertain else "FAILED",
                          (outcome.error_code or "CREATIVE_SCRIPT_FAILED")[:64])
             return True
         draft = ScriptDraft.model_validate(outcome.parsed)

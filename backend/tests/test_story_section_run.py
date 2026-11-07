@@ -22,7 +22,7 @@ from sqlalchemy import select
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import story
-from shine.models import AgentArtifact, AgentTaskRecord, AppSetting, AuditEvent
+from shine.models import AgentArtifact, AgentTaskRecord, AuditEvent
 from tests.test_film_crew import FACTS, prepare
 from tests.test_material_scenes import _responder as scene_responder
 
@@ -180,7 +180,7 @@ def test_only_the_selected_section_is_produced_and_the_context_is_verified(api, 
             story.verified_production_context(db, project_id, real.text, forged_range)
 
 
-def test_unknown_section_role_requires_explicit_audited_replacement(api, monkeypatch):
+def test_unknown_section_role_cannot_be_replaced_without_not_sent_proof(api, monkeypatch):
     client, factory, settings = api
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
     project_id, master_id, document = _studio(client, CHAPTER_ONE)
@@ -249,28 +249,20 @@ def test_unknown_section_role_requires_explicit_audited_replacement(api, monkeyp
     replaced = client.post(
         f"/api/v1/projects/{project_id}/story-preparation/tasks/{parent_id}/replace-unknown",
         json={"expected_state_version": expected_state_version, "subtask_id": unknown_id}, headers=LOCAL)
-    assert replaced.status_code == 200, replaced.text
-    assert replaced.json()["status"] == "QUEUED"
-    assert replaced.json()["replacement_authorization"]["actor"] == "local-user"
-    calls_before_replacement = len(seen)
-    assert story.run_pending_story_task(factory, settings, "section-worker", gateway=gateway)
-    assert [entry["title"] for entry in seen[calls_before_replacement:]] == ["EditIntentPlan"]
-    assert story.run_pending_story_task(factory, settings, "section-worker", gateway=gateway)
+    assert replaced.status_code == 409, replaced.text
+    assert replaced.json()["detail"] == "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"
+    assert len(seen) == calls_before_resume
     with factory() as db:
         parent = db.get(AgentTaskRecord, parent_id)
         unknown = db.get(AgentTaskRecord, unknown_id)
-        assert parent.status == "SUCCEEDED", parent.trace.get("blocked_result")
-        assert parent.trace["results"][0]["storyboard"]["status"] == "PROPOSED"
+        assert parent.status == "NEEDS_REVIEW"
         assert unknown.status == "ABANDONED"
         assert unknown.trace["external_outcome"] == "UNKNOWN"
         assert unknown.trace["automatic_replay"] is False
-        authorization = db.scalar(select(AuditEvent).where(
+        replacement = db.scalar(select(AuditEvent).where(
             AuditEvent.entity_id == parent_id,
             AuditEvent.event_type == "STORY_UNKNOWN_SUBTASK_REPLACED"))
-        assert authorization is not None and authorization.actor == "local-user"
-        replacement = db.get(AgentTaskRecord, db.get(AppSetting, f"film-replacement:{unknown_id}").value[
-            "replacement_task_id"])
-        assert replacement is not None and replacement.status == "SUCCEEDED"
+        assert replacement is None
 
 
 def test_section_reconcile_proves_waiting_resource_failure_was_not_sent(api, monkeypatch):

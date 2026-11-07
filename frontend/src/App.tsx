@@ -27,7 +27,7 @@ import DeliveryPanel from './components/DeliveryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
-import { getJourney, type Journey } from './api';
+import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
 
 type ViewId = 'setup' | 'production' | 'delivery' | 'pro';
@@ -109,6 +109,11 @@ function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; p
   const anchorView = ANCHOR_VIEW[raw];
   if (anchorView) return { ui: 'expert', view: anchorView, page: 'produce', anchor: raw };
   return { ui: 'director', view: 'production', page: 'projects' };
+}
+
+function journeyCount(stage: JourneyStage | undefined, key: string): number | null {
+  const value = stage?.facts[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /** 启动时恢复显示偏好（主题 / 字号缩放 / 界面层级）。 */
@@ -207,6 +212,26 @@ function App() {
   ), [journey]);
   /** 生产阶段完成 = 本次范围内每个镜头都有当前有效成片，不是“有一个视频”。 */
   const deliverableReady = stageDone.production ?? false;
+  const storyboardStage = journey?.stages.find((stage) => stage.id === 'storyboard');
+  const productionStage = journey?.stages.find((stage) => stage.id === 'production');
+  const projectShotCount = journeyCount(storyboardStage, 'shot_count') ?? shots.length;
+  const plannedShotCount = journeyCount(storyboardStage, 'planned_shot_count') ?? projectShotCount;
+  const plannedShotIds = Array.isArray(storyboardStage?.facts.planned_shot_ids)
+    && storyboardStage.facts.planned_shot_ids.every((id): id is string => typeof id === 'string')
+    ? storyboardStage.facts.planned_shot_ids
+    : null;
+  const productionShots = plannedShotIds
+    ? shots.filter((shot) => plannedShotIds.includes(shot.id))
+    : shots;
+  const scopeShotCount = journeyCount(productionStage, 'scope_shot_count');
+  const passedScopeCount = journeyCount(productionStage, 'passed_shot_count');
+  const hasProductionScope = scopeShotCount !== null && scopeShotCount > 0;
+  const storyboardScopeLabel = plannedShotCount !== projectShotCount
+    ? `已应用 ${plannedShotCount} 个计划镜头（项目共 ${projectShotCount} 镜）`
+    : `已应用 ${plannedShotCount} 镜`;
+  const productionScopeLabel = hasProductionScope && passedScopeCount !== null
+    ? `${passedScopeCount}/${scopeShotCount} 个计划镜头已通过`
+    : null;
   /** 第一个未完成的阶段；null 表示六阶段全部完成。 */
   const nextStage = journey?.next_stage
     ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
@@ -719,7 +744,7 @@ function App() {
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
                 <nav className="produce-stages" aria-label="制作阶段">
                   {([
-                    { id: 'storyboard', icon: PenLine, label: '① 剧本分镜', done: shots.length > 0 },
+                    { id: 'storyboard', icon: PenLine, label: '① 剧本分镜', done: stageDone.storyboard ?? shots.length > 0 },
                     { id: 'produce', icon: Video, label: '② 排产制作', done: deliverableReady },
                     { id: 'monitor', icon: Activity, label: '③ 进度与结果', done: deliverableReady },
                   ] as const).map((stage) => {
@@ -738,7 +763,7 @@ function App() {
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('storyboard'); }}>
                   <summary>
                     {shots.length > 0
-                      ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · 已应用 {shots.length} 镜（点击展开修改）</>
+                      ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · {storyboardScopeLabel}（点击展开修改）</>
                       : '① 剧本分镜 · 当前任务'}
                   </summary>
                   <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
@@ -757,13 +782,13 @@ function App() {
                     {makingNow
                       ? `② 排产制作 · 制作进行中 ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.filter((job) => job.status !== 'CANCELLED').length} 镜（点击查看进度）`
                       : deliverableReady
-                        ? <><Check size={13} className="stage-done-mark" /> ② 排产制作 · 已出片（点击展开再拍）</>
+                        ? <><Check size={13} className="stage-done-mark" /> ② 排产制作 · {productionScopeLabel ? `本次 ${productionScopeLabel}` : '已出片'}（点击展开再拍）</>
                         : '② 排产制作 · 当前任务'}
                   </summary>
                   <ProductionSeriesPanel
                     key={`series-${projectId}`}
                     projectId={projectId}
-                    shots={shots}
+                    shots={productionShots}
                     assets={assets}
                     jobs={jobs}
                     workflowProfiles={workflowProfiles}
@@ -779,6 +804,9 @@ function App() {
                     onModeAction={handleModeAction}
                     onGoSetup={() => goToDirectorSetup('models')}
                   />
+                  {plannedShotCount !== projectShotCount && <p className="empty-inline">
+                    当前制作列表仅包含已确认分集中的 {plannedShotCount} 镜；项目另有 {Math.max(0, projectShotCount - plannedShotCount)} 镜不属于本次计划。
+                  </p>}
                 <details className="advanced-fold">
                   <summary>单镜头制作与任务明细（高级）</summary>
                   <div className="queue-provider-card card">
@@ -836,12 +864,17 @@ function App() {
                 <details className="stage-dock" id="production-monitor" open={focusStage === 'monitor'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('monitor'); }}>
                   <summary>
-                    {jobs.length === 0 ? '③ 进度与结果 · 暂无任务'
+                    {productionScopeLabel
+                      ? `③ 进度与结果 · ${productionScopeLabel}`
+                      : jobs.length === 0 ? '③ 进度与结果 · 暂无任务'
                       : makingNow ? `③ 进度与结果 · 制作中（点击查看）`
                         : jobs.every((job) => job.status === 'PASSED' || job.status === 'CANCELLED')
                           ? <><Check size={13} className="stage-done-mark" /> ③ 进度与结果 · 全部完成</>
                           : `③ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
                   </summary>
+                  {productionScopeLabel && <div className="empty-inline">
+                    本次确认范围：{scopeShotCount} 镜，{productionScopeLabel}。以下服务统计与任务列表包含工作台/项目历史记录及本次范围外镜头；本次成片状态以“全片生产”和“成片中心”为准。
+                  </div>}
                   <ProductionPanel
                     jobs={jobs}
                     system={system}

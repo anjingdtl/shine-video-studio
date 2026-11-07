@@ -45,6 +45,45 @@ async function expectOrderVisible(timeout = 3000) {
 }
 
 describe('新交付订单自动出现在页面', () => {
+  it('ASR 不可用或未运行时明确提示交付音频尚未完整核对', async () => {
+    const unavailableJob = {
+        id: 'job-1', project_id: 'proj-1', shot_id: 'shot-1', shot_name: '无对白镜头', shot_revision: 1,
+        status: 'PASSED', state_version: 1, provider: 'comfyui', simulated: false,
+        video_created: true, paused: false, stale: false, failure_code: null, provider_job_id: null,
+        semantic_retries: 0, max_semantic_retries: 2, style_version_id: 'style-1',
+        generation_mode: 'Ref2VA', workflow_profile_id: 'profile-1', compiled_prompt_sha256: null,
+        artifact_id: 'shot-artifact-1', last_qc_result: 'passed', last_repair_plan: null,
+        request: { reference_manifest: [] }, attempts: [], repairs: [],
+        advisory_reviews: [{ id: 'asr-1', kind: 'ASR', status: 'UNAVAILABLE',
+          error_code: 'ASR_ROUTE_NOT_CONFIGURED', model_id: 'UNCONFIGURED', artifact_id: 'shot-artifact-1',
+          artifact_sha256: 'a'.repeat(64), job_id: 'job-1', started_at: null, finished_at: null,
+          outcome: 'unavailable', is_mock: null }],
+        created_at: '2026-11-07T00:00:00Z', updated_at: '2026-11-07T00:00:00Z',
+    };
+    const unreviewedJob = { ...unavailableJob, id: 'job-2', shot_id: 'shot-2', shot_name: '没有 ASR 记录',
+      artifact_id: 'shot-artifact-2', advisory_reviews: [] };
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/jobs$/,
+      respond: () => jsonResponse([unavailableJob, unreviewedJob]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/deliveries$/,
+      respond: () => jsonResponse([{
+        artifact_id: 'delivery-1', sha256: 'b'.repeat(64), byte_size: 1024,
+        created_at: '2026-11-07T00:01:00Z',
+        provenance: { review_state: 'pending_review', duration_s: 6,
+          clips: [{ job_id: 'job-1', in_s: 0, out_s: 3 }, { job_id: 'job-2', in_s: 0, out_s: 3 }] },
+      }]) });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /后期成片/);
+
+    expect(await screen.findByRole('status', { name: '音频语言核对未完成' })).toHaveTextContent(
+      '音频语言/禁声核对未完整：2 个交付镜头没有可用的真实 ASR 结论（1 个 ASR 不可用，其中 1 个未配置语音识别路由；1 个没有 ASR 记录）',
+    );
+    expect(screen.getByRole('status', { name: '音频语言核对未完成' })).toHaveTextContent(
+      '技术音轨可解码不代表对白或旁白语言正确',
+    );
+  });
+
   it('初始为空；全局刷新按钮（刷新全部数据）后合成订单出现', async () => {
     const user = userEvent.setup();
     render(<App />);

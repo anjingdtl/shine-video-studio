@@ -95,7 +95,7 @@ def test_t2va_uses_the_three_official_fields_in_order():
 
 
 def test_the_prompt_states_the_spoken_language_contract():
-    """The prompt says which voice to use, and says when there is no voice.
+    """The prompt limits speech to the exact scripted lines and specifies silence.
 
     The whole prompt is written in English.  Without an explicit instruction the
     model invents English speech, and it invents speech at all in a silent shot.
@@ -115,11 +115,11 @@ def test_the_prompt_states_the_spoken_language_contract():
     ]
     compiled = compile_prompt(manifest, shot=spoken)
     soundscape = compiled.sections["overall_soundscape"]
-    assert "All spoken dialogue must be spoken in Chinese" in soundscape
+    assert "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese" in soundscape
     assert "<d>[Chinese] 你来了。</d>" in compiled.prompt
     # The spoken-language instruction is English prose: the H3 rulebook only
     # forbids CJK outside the dialogue itself.
-    assert "All spoken dialogue must be spoken in Chinese" in compiled.prompt
+    assert "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese" in compiled.prompt
 
 
 def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
@@ -128,10 +128,16 @@ def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
     mumbling (observed on the real 2026-11-04 journey run).  A dialogue-free
     shot must therefore not quote it, while a spoken shot still does.
     """
-    silent = compile_prompt([])
+    continuity = "When Shen Yan says 'time will stop tonight', the night finally ends."
+    silent = compile_prompt([], shot=spec(
+        locked_story_facts=[continuity], prompt_story_facts=[continuity],
+    ))
     assert "frozen sound rule" not in silent.sections["overall_soundscape"]
     assert "no spoken dialogue" in silent.sections["overall_soundscape"]
     assert "Performance and sound: no spoken dialogue in this shot." in silent.prompt
+    assert "Story continuity facts below are background context only" in silent.prompt
+    assert "they are not dialogue and must never be spoken, narrated or performed as voice-over" in silent.prompt
+    assert "mentioned in story facts or visual descriptions is context only, not an audio instruction" in silent.prompt
     assert "普通话自然语速" not in silent.prompt
 
     spoken = spec(
@@ -173,8 +179,10 @@ def test_a_language_written_in_another_script_never_reaches_the_english_prompt()
     compiled = compile_prompt(manifest, shot=spoken, project_language="中文")
     soundscape = compiled.sections["overall_soundscape"]
     contract = (
-        "All spoken dialogue must be spoken in Chinese, matching the original line text "
-        "exactly; no other spoken language may appear."
+        "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese, matching "
+        "the original line text exactly; no other language, unscripted speech, narration, voice-over, "
+        "background chatter, whispering or extra words may appear. Any voice or reading described in "
+        "the story facts or visual description refers only to these exact lines."
     )
     assert contract in soundscape
     # The contract itself is English prose, and the raw project value never
@@ -195,7 +203,8 @@ def test_chinese_locked_facts_require_and_use_explicit_english_prompt_translatio
     original = ["怀表停在十二点"]
     shot = spec(locked_story_facts=original, prompt_story_facts=["The watch is stopped at twelve."])
     compiled = compile_prompt([], shot=shot)
-    assert "Locked story fact: The watch is stopped at twelve." in compiled.prompt
+    assert "Story continuity facts below are background context only" in compiled.prompt
+    assert "The watch is stopped at twelve." in compiled.prompt
     assert original == shot.locked_story_facts
     with pytest.raises(PromptCompilationError) as error:
         compile_prompt([], shot=spec(locked_story_facts=original))

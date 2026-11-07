@@ -134,7 +134,7 @@ def _storyboard_request(client, project_id, **overrides):
     return client.post(f"/api/v1/projects/{project_id}/storyboard/generate", json=payload)
 
 
-def test_verified_interrupted_director_replacement_is_explicit_and_single_use(studio):
+def test_verified_interrupted_director_unknown_cannot_be_replaced(studio):
     client, factory, *_ = studio
     project_id, _, registry = _studio_with_chain(client)
     responder = _responder(registry)
@@ -166,27 +166,14 @@ def test_verified_interrupted_director_replacement_is_explicit_and_single_use(st
     blocked = _storyboard_request(client, project_id, **args).json()
     assert blocked["rejections"][0]["code"] == "AGENT_REQUEST_REPLAY_BLOCKED"
     assert calls == []
-    responder = _with_conflict(responder)
     replacement = _storyboard_request(client, project_id, replace_interrupted_task_id=old_id, **args)
-    assert replacement.json()["status"] == "PROPOSED", replacement.text
-    assert calls == ["DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan", "ContinuityArbitration"]
-    calls.clear()
-    duplicate = _storyboard_request(client, project_id, replace_interrupted_task_id=old_id, **args)
-    assert duplicate.json()["status"] == "PROPOSED", duplicate.text
-    assert calls == ["CameraPlan", "ContinuityReport", "EditIntentPlan", "ContinuityArbitration"]
-    assert (duplicate.json()["steps"]["director"]["artifact_id"]
-            == replacement.json()["steps"]["director"]["artifact_id"])
-    calls.clear()
-    arbitration_resume = _storyboard_request(client, project_id, start_role="director_arbitration",
-                                              resume_steps=replacement.json()["resume_steps"])
-    assert arbitration_resume.json()["status"] == "PROPOSED", arbitration_resume.text
-    assert calls == ["ContinuityArbitration"]
-    calls.clear()
-    with factory.begin() as db:
-        db.get(AgentArtifact, replacement.json()["steps"]["director"]["artifact_id"]).stale = True
-    invalid = _storyboard_request(client, project_id, **args)
-    assert invalid.json()["status"] == "REJECTED"
+    assert replacement.status_code == 409, replacement.text
+    assert replacement.json()["detail"] == "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"
     assert calls == []
+    with factory() as db:
+        old = db.get(AgentTaskRecord, old_id)
+        assert old.status == "ABANDONED"
+        assert old.trace["external_outcome"] == "UNKNOWN"
 
 
 @pytest.mark.parametrize(("duration", "language_retry"), [(4.3, False), (4.4, False), (4.3, True)])

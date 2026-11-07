@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from shine.llm.base import LLMConnectionError, LLMTimeout
-from shine.models import AgentTaskRecord, utcnow
+from shine.models import AgentTaskRecord, AuditEvent, utcnow
 from tests.test_style_input_assessment import setup_inputs
 from tests.test_v13_preparation import HEADERS, post, prep  # noqa: F401
 
@@ -39,7 +39,7 @@ def uncertain(prep, monkeypatch, *, local=False, failure=None):  # noqa: F811
     return client, factory, project, task_id, path, body, calls
 
 
-def test_connect_failure_known_not_sent_is_retryable_by_user_without_reconciliation(prep, monkeypatch):  # noqa: F811
+def test_connect_failure_can_be_retried_only_after_not_sent_reconciliation(prep, monkeypatch):  # noqa: F811
     def not_sent():
         return LLMConnectionError("connection refused", details={"external_outcome": "NOT_SENT"})
 
@@ -51,6 +51,19 @@ def test_connect_failure_known_not_sent_is_retryable_by_user_without_reconciliat
         assert task.status == "REJECTED"
         assert task.trace["external_outcome"] == "NOT_SENT"
         assert task.trace["automatic_replay"] is False
+        version = task.state_version
+    proof = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                        json={"expected_state_version": version},
+                        headers={"x-shine-local-action": "1"})
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["outcome"] == "NOT_SENT_PROVEN"
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "SUPERSEDED"
+        assert task.trace["reconciliation"]["outcome"] == "NOT_SENT_PROVEN"
+        audit = db.scalar(select(AuditEvent).where(
+            AuditEvent.entity_id == task_id, AuditEvent.event_type == "FILM_AGENT_NOT_SENT_PROVEN"))
+        assert audit is not None and audit.actor == "local-user"
     repeated = client.post(path, json=body)
     assert repeated.status_code == 422
     with factory() as db:
@@ -161,20 +174,28 @@ def test_explicit_remote_abandon_is_authenticated_bounded_and_never_infers(prep,
             assert task.trace["local_model_unload_claimed"] is False
             assert task.trace["local_interruption_verified"] is True
             assert db.get(ApprovalGrant, grant["grant_id"]).used
+            version = task.state_version
+        inspected = client.post(f"/api/v1/projects/{project}/film-runs/{task_id}/reconcile", json={
+            "expected_state_version": version,
+        }, headers={"x-shine-local-action": "1"})
+        assert inspected.status_code == 200, inspected.text
+        assert inspected.json()["outcome"] == "UNCONFIRMABLE"
+        assert inspected.json()["external_outcome"] == "UNKNOWN"
+        assert inspected.json()["resubmittable"] is False
         repeat = client.post(path, json=body)
         assert repeat.status_code == 422
-        assert repeat.json()["detail"] == "AGENT_REQUEST_REPLAY_BLOCKED"
+        assert repeat.json()["detail"] == "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"
         alias = client.post("/api/v1/provider-profiles", json={
             "name": "same-wire-new-profile-id", "kind": "openai_compatible", "model": "fixture-only",
             "base_url": "https://text.example/v1",
             "generation_options": {"max_completion_tokens": 8192, "reasoning_effort": "low"},
         }).json()
         client.put("/api/v1/agent-routes", json={"role": "qc_reviewer", "provider_profile_id": alias["id"]})
-        assert client.post(path, json=body).json()["detail"] == "AGENT_REQUEST_REPLAY_BLOCKED"
+        assert client.post(path, json=body).json()["detail"] == "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"
     assert len(calls) == 1
 
 
-def test_schema_change_cannot_evade_unreconciled_outcome_but_is_new_after_abandon(prep, monkeypatch):  # noqa: F811
+def test_schema_change_cannot_evade_unknown_outcome_after_abandon(prep, monkeypatch):  # noqa: F811
     from shine.agents.execution import guard_request
     from shine.models import ProviderProfile
 
@@ -193,8 +214,9 @@ def test_schema_change_cannot_evade_unreconciled_outcome_but_is_new_after_abando
     assert result.status_code == 200
     with factory() as db:
         task = db.get(AgentTaskRecord, task_id)
-        guard_request(db, project, task.role_id, task.input_hash, db.get(ProviderProfile, task.model_profile_id),
-                      text_hash=task.trace["text_input_sha256"], contract_hash="f" * 64)
+        with pytest.raises(ValueError, match="AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"):
+            guard_request(db, project, task.role_id, task.input_hash, db.get(ProviderProfile, task.model_profile_id),
+                          text_hash=task.trace["text_input_sha256"], contract_hash="f" * 64)
 
 
 def test_concurrent_identical_requests_create_only_one_model_intent(prep, monkeypatch):  # noqa: F811

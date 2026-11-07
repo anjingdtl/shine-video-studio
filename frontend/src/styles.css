@@ -1193,6 +1193,11 @@ html[data-theme='dark'] .material-questions { background: #33301f; color: #cdb26
 /* The segments grid: one produced shot per tile, the picture first and the
    engineering text folded away.  A person scans frames here, not paragraphs. */
 .segment-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 264px), 1fr)); }
+.segment-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0; color: #898b82; font-size: 10px; }
+.segment-pagination > div { display: flex; gap: 6px; }
+.segment-pagination button { min-height: 28px; border: 1px solid #e5e6de; border-radius: 5px; padding: 0 10px; background: #fff; color: #6d6f64; font-size: 10px; }
+.segment-pagination button:disabled { opacity: .45; cursor: default; }
+html[data-theme='dark'] .segment-pagination button { background: #232420; color: #d5d6cd; border-color: #4a4c41; }
 .segment-card { gap: 9px; padding: 10px; }
 .segment-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .segment-card-head b { font-size: 12px; }

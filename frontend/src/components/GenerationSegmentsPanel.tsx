@@ -4,12 +4,14 @@ import { API, api, json } from '../api';
 type Segment = {
   shot_id: string; position: number; story_beat: string; duration_s: number;
   shot_revision: number; job_id: string | null; attempt_no: number | null;
+  series_id?: string | null; episode_position?: number | null; episode_title?: string | null;
   status: string; artifact_id: string | null; blocker: string | null; can_regenerate: boolean;
   editorial_cuts: { beat_id?: string; start_s?: number }[];
   dependent_job_ids: string[]; replacement_job_id: string | null;
   replacement_status: string | null; can_select_replacement: boolean;
 };
-type SegmentState = { series_id: string | null; segments: Segment[] };
+type SegmentState = { series_id: string | null; run_id?: string | null; segments: Segment[] };
+const PAGE_SIZE = 6;
 
 /** The page speaks in outcomes, not in engine codes. */
 const SEGMENT_STATUS: Record<string, string> = {
@@ -59,14 +61,21 @@ export function LazyVideo({ src, label }: { src: string; label: string }) {
 }
 
 export default function GenerationSegmentsPanel({ projectId, fingerprint }: { projectId: string; fingerprint: string }) {
-  const [state, setState] = useState<SegmentState>({ series_id: null, segments: [] });
+  const [state, setState] = useState<SegmentState>({ series_id: null, run_id: null, segments: [] });
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState(0);
   const reload = useCallback(async () => {
     const result = await api<SegmentState>(`/projects/${projectId}/generation-segments`);
     setState(result);
   }, [projectId]);
   useEffect(() => { void reload().catch((e) => setMessage(String(e))); }, [reload, fingerprint]);
+  useEffect(() => { setPage(0); }, [projectId, fingerprint, state.run_id]);
+  const pageCount = Math.max(1, Math.ceil(state.segments.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleSegments = state.segments.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const firstVisible = state.segments.length ? currentPage * PAGE_SIZE + 1 : 0;
+  const lastVisible = Math.min((currentPage + 1) * PAGE_SIZE, state.segments.length);
   const pending = state.segments.some((s) => s.replacement_status && ['QUEUED', 'RUNNING', 'QC_PENDING'].includes(s.replacement_status));
   useEffect(() => {
     if (!pending) return;
@@ -77,7 +86,9 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
     setBusy(true); setMessage('');
     try {
       if (select) {
-        await api(`/projects/${projectId}/generation-segments/${state.series_id}/select`, json('POST', {
+        const sourceSeriesId = segment.series_id ?? state.series_id;
+        if (!sourceSeriesId) throw new Error('找不到此镜头所属的制作批次，暂不能选用新版本。');
+        await api(`/projects/${projectId}/generation-segments/${sourceSeriesId}/select`, json('POST', {
           source_job_id: segment.job_id, replacement_job_id: segment.replacement_job_id,
         }));
         setMessage('已记录当前装配版本。独立段保持原版本；有依赖的后段须复核，通过后才能装配新成片。');
@@ -93,12 +104,20 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
   }
   return <section aria-label="H3 生成分段">
     <h3>生成分段</h3>
-    <p>每张卡片是一次 H3 输出。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。完整成片在下方。</p>
+    <p>每张卡片是一次 H3 输出。当前作品共 {state.segments.length} 镜，每页最多显示 {PAGE_SIZE} 镜。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。</p>
+    <p>已通过镜头发现画面或声音问题，可点「重新生成此段」排入新的串行制作；旧版本保留。新版本通过质检后，再点「选为当前装配版本」。失败、待核对或租约未对账的镜头，先到「生成进度与检查」查看原任务和错误原因；UNKNOWN 任务只能核对，不能直接重发。</p>
     {!state.segments.length && <p className="material-hint">尚无制作系列。选定生产范围并开拍后，这里显示每个生成分段。</p>}
+    {state.segments.length > PAGE_SIZE && <nav className="segment-pagination" aria-label="生成分段分页">
+      <span>第 {currentPage + 1} / {pageCount} 页 · 显示 {firstVisible}–{lastVisible} / {state.segments.length} 镜</span>
+      <div>
+        <button type="button" disabled={currentPage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button>
+        <button type="button" disabled={currentPage + 1 >= pageCount} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button>
+      </div>
+    </nav>}
     <div className="media-grid segment-grid">
-      {state.segments.map((segment) => <article key={segment.shot_id} className="media-card segment-card">
+      {visibleSegments.map((segment) => <article key={segment.shot_id} className="media-card segment-card">
         <div className="segment-card-head">
-          <b>生成段 {segment.position} · {segment.duration_s ?? '—'} 秒</b>
+          <b>{segment.episode_position ? `第 ${segment.episode_position} 集 · ` : ''}{`第 ${segment.position} 镜 · ${segment.duration_s ?? '—'} 秒`}</b>
           <span className={`segment-status is-${(segment.status || 'none').toLowerCase()}`}>
             {SEGMENT_STATUS[segment.status] ?? segment.status}
           </span>

@@ -126,19 +126,30 @@ def _merge(factory, gateway, project_id, document, ids, facts):
             request_identity=identity, asset_manifest_hash=identity, rulepack_id=VERSION, rulepack_hash=digest(VERSION),
             model_profile_id=profile.id, model_id=profile.model, schema_version="1.0", status="RUNNING",
             trace={"tool": OUTLINE_TOOL, "document_id": document.id, "document_sha256": document.sha256,
-                   "external_outcome": "UNKNOWN", "budget": budget, "automatic_replay": False})
+                   "phase": "PREPARING", "external_outcome": "UNKNOWN",
+                   "budget": budget, "automatic_replay": False})
         db.add(task)
         db.flush()
         task_id = task.id
+    def record_progress(phase: str) -> None:
+        with factory.begin() as db:
+            task = db.get(AgentTaskRecord, task_id)
+            if task is not None:
+                task.trace = {**task.trace, "phase": phase}
+
     result = call_material_agent(gateway, factory, "scriptwriter", system=system, context=context, schema=schema,
-        contract=OutlinePart, before_call=text_consent.guard(project_id, document.id, document.sha256,
-                                                            "scriptwriter", fingerprint, gateway))
+        contract=OutlinePart, on_progress=record_progress,
+        before_call=text_consent.guard(project_id, document.id, document.sha256,
+                                       "scriptwriter", fingerprint, gateway))
     with factory.begin() as db:
         task = db.get(AgentTaskRecord, task_id)
         if not result.ok:
-            task.status = "NEEDS_REVIEW" if result.uncertain else "FAILED"
+            external_outcome = result.details.get("external_outcome", "UNKNOWN")
+            uncertain = result.uncertain or external_outcome == "UNKNOWN"
+            task.status = "NEEDS_REVIEW" if uncertain else "FAILED"
             task.error_code = result.error_code
-            task.trace = {**task.trace, "external_outcome": "UNKNOWN" if result.uncertain else "NOT_SENT"}
+            task.state_version += 1
+            task.trace = {**task.trace, "phase": "FAILED", "external_outcome": external_outcome}
             return {"status": task.status, "task_id": task.id, "error_code": task.error_code}
         payload = OutlinePart.model_validate(result.parsed).model_dump(mode="json")
         artifact = AgentArtifact(project_id=project_id, kind="StoryOutlinePart", schema_version="1.0",
@@ -162,18 +173,17 @@ def _finish_step(factory, task_id, version, worker_id, trace, status="QUEUED", e
 
 
 #: A material subcall records ``WAITING_PROVIDER`` immediately before it opens
-#: the provider request (see ``LLMGateway.complete_for_role``), so a subtask
-#: still parked in an earlier phase provably never sent anything.  That is the
-#: only case in which asking the same scene again is not a replay of an
-#: unknown call.
-PRE_REQUEST_PHASES = ("PREPARING", None, "WAITING_RESOURCE", "PREPARING_PROVIDER")
+#: the provider request (see ``LLMGateway.complete_for_role``). Only a durable
+#: earlier phase or provider transport evidence of NOT_SENT can authorize a
+#: fresh request. A missing phase is not proof.
+PRE_REQUEST_PHASES = ("PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER")
 
 #: A reconciled blocking subcall keeps blocking while its status stays one of
 #: these; anything else has a decided outcome and no longer waits on a call.
 UNDECIDED_BLOCK_STATUSES = ("RUNNING", "NEEDS_REVIEW", "FAILED")
 
-#: How many times a decided-failed scene subcall may be asked again before a
-#: person has to look at it.  Each retry is a new request with its own identity.
+#: How many provider-proven not-sent scene subcalls may be retried before a
+#: person has to look at the resource failure. Each retry gets a new identity.
 MAX_SUBTASK_RETRIES = 2
 
 
@@ -189,8 +199,8 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         answer exists and none was ever bought.  The row is retired as
         ``SUPERSEDED`` so the parent may ask again with its own identity.
     ``UNCONFIRMABLE``
-        The request may have been sent.  The block stays; only an explicit
-        user replacement may create a new call, and the old row survives.
+        The request may have been sent or returned an unusable answer. The
+        block stays and the original task identity is preserved.
     """
     trace = row.trace or {}
     blocked = list(trace.get("blocked_subtasks") or [])
@@ -252,7 +262,7 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         # new request rather than a replay of an unknown one.  It is still
         # bounded, so a scene the model can never satisfy stops and waits for a
         # person instead of burning calls.
-        failed = sub.status in {"FAILED", "REJECTED"} and trace.get("external_outcome") != "UNKNOWN"
+        failed = sub.status in {"FAILED", "REJECTED"} and trace.get("external_outcome") == "NOT_SENT"
         if failed and artifact is None:
             counts = dict((row.trace or {}).get("subtask_retries") or {})
             scene_key = entry.get("scene_key") or sub.id
@@ -268,11 +278,11 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
             sub.request_identity = None
             sub.lease_owner, sub.lease_expires_at = None, None
             sub.trace = {**trace, "previous_request_identity": previous_identity,
-                         "reconciliation": {"outcome": "FAILED_RETRY_ALLOWED",
+                         "reconciliation": {"outcome": "NOT_SENT_PROVEN",
                                             "attempt": used + 1, "error_code": sub.error_code,
                                             "checked_at": utcnow().isoformat()}}
-            resolved.append({**entry, "status": "RETRY", "reconciliation": "FAILED_RETRY_ALLOWED"})
-            outcomes.append({"subtask_id": sub.id, "outcome": "FAILED_RETRY_ALLOWED",
+            resolved.append({**entry, "status": "NOT_SENT", "reconciliation": "NOT_SENT_PROVEN"})
+            outcomes.append({"subtask_id": sub.id, "outcome": "NOT_SENT_PROVEN",
                              "attempt": used + 1, "error_code": sub.error_code})
             row.trace = {**row.trace, "subtask_retries": counts}
             continue

@@ -19,7 +19,7 @@ it('三段网格只为明确点击的第二段请求重拍，播放器按需加�
   ]);
   const user = userEvent.setup();
   const view = render(<GenerationSegmentsPanel projectId="p1" fingerprint="a" />);
-  await screen.findByText('生成段 2 · 5 秒');
+  await screen.findByText('第 2 镜 · 5 秒');
   expect(view.container.querySelectorAll('video')).toHaveLength(0);
   await user.click(screen.getByRole('button', { name: '预览 生成段 2 当前版本' }));
   expect(view.container.querySelector('video')).toHaveAttribute('src', '/api/v1/jobs/job-2/media');
@@ -27,6 +27,38 @@ it('三段网格只为明确点击的第二段请求重拍，播放器按需加�
   await waitFor(() => expect(stub.callsOf('POST', /regenerate$/)).toHaveLength(1));
   expect(stub.callsOf('POST', /regenerate$/)[0].body).toMatchObject({ source_job_id: 'job-2', expected_shot_revision: 1 });
   expect(stub.callsOf('POST', /shot-[13]\/regenerate$/)).toHaveLength(0);
+});
+
+it('64 镜按每页 6 镜分页，末页也能定位最后 4 镜', async () => {
+  const segments = Array.from({ length: 64 }, (_, index) => ({
+    shot_id: `shot-${index + 1}`, position: index + 1, episode_position: Math.floor(index / 16) + 1,
+    episode_title: `第${Math.floor(index / 16) + 1}集`, story_beat: `剧情${index + 1}`,
+    duration_s: 5, shot_revision: 1, job_id: `job-${index + 1}`, attempt_no: 1,
+    series_id: `series-${Math.floor(index / 6) + 1}`, status: 'PASSED', artifact_id: `a-${index + 1}`,
+    blocker: null, can_regenerate: true, dependent_job_ids: [], replacement_job_id: null,
+    replacement_status: null, can_select_replacement: false, editorial_cuts: [],
+  }));
+  stub = new StudioStub([
+    { method: 'GET', pattern: /generation-segments$/, respond: () => jsonResponse({
+      series_id: null, run_id: 'run-64', segments,
+    }) },
+  ]);
+  const user = userEvent.setup();
+  const view = render(<GenerationSegmentsPanel projectId="p1" fingerprint="a" />);
+  await screen.findByText('第 1 / 11 页 · 显示 1–6 / 64 镜');
+  expect(screen.getByText(/当前作品共 64 镜/)).toBeInTheDocument();
+  expect(view.container.querySelectorAll('.segment-card')).toHaveLength(6);
+  await user.click(screen.getByRole('button', { name: '下一页' }));
+  await screen.findByText('第 2 / 11 页 · 显示 7–12 / 64 镜');
+  expect(screen.getByText(/第 7 镜 · 5 秒/)).toBeInTheDocument();
+  expect(view.container.querySelectorAll('.segment-card')).toHaveLength(6);
+  for (let index = 0; index < 9; index += 1) {
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+  }
+  await screen.findByText('第 11 / 11 页 · 显示 61–64 / 64 镜');
+  expect(screen.getByText(/第 64 镜 · 5 秒/)).toBeInTheDocument();
+  expect(view.container.querySelectorAll('.segment-card')).toHaveLength(4);
+  expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled();
 });
 
 it('已确认大纲仍不默认全选，只为勾选的生产段落排正式分镜', async () => {
@@ -93,12 +125,11 @@ it('上一段末状态已验证时，后段免填承接事实即可排正式分�
   expect(JSON.stringify(stub.callsOf('POST', /sections$/)[0].body)).toContain('"continuity_facts":{}');
 });
 
-it('UNKNOWN 分场子任务必须由用户明确替代，恢复按钮不会重放', async () => {
+it('UNKNOWN 分场子任务只可核对，替代请求和恢复均被阻止', async () => {
   const outline = { artifact_id: 'outline-1', sha256: 'a'.repeat(64), approved: true, stale: false,
     payload: { summary: '主线', story_line: ['开端'], timeline: [], relationships: [], locked_facts: [], characters: [], questions: [],
       production_sections: [{ production_section_id: 'section-1', order: 1, title: '章节1',
         start_offset: 0, end_offset: 100, estimated_duration_s: 20 }] } };
-  const replacementPosts: Array<{ url: string; body: unknown }> = [];
   stub = new StudioStub([
     { method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([
       { task_id: 'section-task', role: 'story_section_run', status: 'NEEDS_REVIEW', state_version: 7,
@@ -110,17 +141,12 @@ it('UNKNOWN 分场子任务必须由用户明确替代，恢复按钮不会重�
       outline_sha256: 'a'.repeat(64), sections: [{ production_section_id: 'section-1', order: 1,
         prior_production_section_id: null, verified_prior_available: false, prior_production_status: 'NOT_PRODUCED',
         own_production: { status: 'NOT_PRODUCED', missing: [] } }] }) },
-    { method: 'POST', pattern: /story-preparation\/tasks\/section-task\/replace-unknown$/, respond: (url, init) => {
-      replacementPosts.push({ url, body: JSON.parse(String(init?.body)) });
-      return jsonResponse({ task_id: 'section-task', status: 'QUEUED' });
-    } },
   ]);
-  const user = userEvent.setup();
   render(<StoryPreparationPanel projectId="p1" documentId="doc-1" documentHash={'b'.repeat(64)} styleFrozen onMaterials={() => undefined} />);
-  expect(await screen.findByText('原 editor 调用仍记为 UNKNOWN。明确替代会保留旧记录，并新建一个独立任务身份。')).toBeInTheDocument();
+  expect(await screen.findByText('原 editor 调用仍为 UNKNOWN。只能核对原任务；在没有未发送证明前不会创建新请求。')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '恢复未完成工作' })).toBeDisabled();
-  await user.click(screen.getByRole('button', { name: '明确替代该角色（保留旧 UNKNOWN）' }));
-  await waitFor(() => expect(replacementPosts).toHaveLength(1));
-  expect(replacementPosts[0].body).toEqual({ expected_state_version: 7, subtask_id: 'unknown-editor' });
+  expect(screen.getByRole('button', { name: '核对已有结果' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: /替代该角色/ })).not.toBeInTheDocument();
   expect(stub.callsOf('POST', /\/resume$/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /replace-unknown$/)).toHaveLength(0);
 });

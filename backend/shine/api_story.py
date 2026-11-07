@@ -14,7 +14,7 @@ from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import story
 from shine.materialprep.source_spans import segment_document
-from shine.models import AgentArtifact, AgentTaskRecord, AppSetting, ProjectDocument, utcnow
+from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit, require_project
 
@@ -296,65 +296,6 @@ class TaskControl(APIModel):
     subtask_id: str | None = Field(default=None, max_length=36)
 
 
-def _replacement_resume_steps(db, project_id: str, old: AgentTaskRecord) -> dict[str, str]:
-    """Recover and validate the exact successful prefix before a replaceable role."""
-    role = old.role_id
-    if role not in {"director", "editor"}:
-        raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_ROLE_UNSUPPORTED")
-    prior_roles = ["scriptwriter"] if role == "director" else [
-        "scriptwriter", "director", "cinematographer", "continuity_supervisor",
-    ]
-    expected_kinds = {
-        "scriptwriter": "ScriptBreakdown", "director": "DirectorialPlan",
-        "cinematographer": "CameraPlan", "continuity_supervisor": "ContinuityReport",
-        "editor": "EditIntentPlan",
-    }
-    input_ids = list(old.trace.get("input_revision_ids") or [])
-    if len(input_ids) != len(prior_roles):
-        raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_LINEAGE_INVALID")
-    rows: dict[str, AgentArtifact] = {}
-    for previous_role, artifact_id in zip(prior_roles, input_ids, strict=True):
-        artifact = db.get(AgentArtifact, artifact_id)
-        source = db.get(AgentTaskRecord, artifact.source_task_id) if artifact else None
-        if (not artifact or artifact.project_id != project_id or artifact.stale
-                or artifact.kind != expected_kinds[previous_role]
-                or artifact.sha256 != digest(artifact.payload_json)
-                or not source or source.project_id != project_id or source.role_id != previous_role
-                or source.status != "SUCCEEDED"
-                or source.trace.get("storyboard_request_sha256") != old.trace.get("storyboard_request_sha256")
-                or source.trace.get("output_hash") != artifact.sha256
-                or source.trace.get("input_revision_ids") != artifact.input_revision_ids):
-            raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_LINEAGE_INVALID")
-        if previous_role == "scriptwriter" and artifact.input_revision_ids:
-            raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_LINEAGE_INVALID")
-        rows[previous_role] = artifact
-
-    scriptwriter = rows["scriptwriter"]
-    if role == "editor":
-        director = rows["director"]
-        camera = rows["cinematographer"]
-        continuity = rows["continuity_supervisor"]
-        director_inputs = list(director.input_revision_ids or [])
-        valid_director_inputs = director_inputs == [scriptwriter.id]
-        if len(director_inputs) == 5 and director_inputs[0] == scriptwriter.id:
-            repair_inputs = [db.get(AgentArtifact, artifact_id) for artifact_id in director_inputs]
-            valid_director_inputs = (
-                [item.kind for item in repair_inputs if item] == [
-                    "ScriptBreakdown", "DirectorialPlan", "CameraPlan", "ContinuityReport", "ContinuityArbitration",
-                ]
-                and all(item and item.project_id == project_id and not item.stale
-                        and item.sha256 == digest(item.payload_json) for item in repair_inputs)
-            )
-        if (not valid_director_inputs
-                or camera.input_revision_ids != [scriptwriter.id, director.id]
-                or continuity.input_revision_ids != [scriptwriter.id, director.id, camera.id]
-                or input_ids != [scriptwriter.id, director.id, camera.id, continuity.id]):
-            raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_LINEAGE_INVALID")
-    elif list(old.trace.get("input_revision_ids") or []) != [scriptwriter.id]:
-        raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_LINEAGE_INVALID")
-    return {role: rows[role].id for role in prior_roles}
-
-
 @router.post("/projects/{project_id}/story-preparation/tasks/{task_id}/{action}")
 def control(project_id: str, task_id: str, action: str, body: TaskControl, actor: Operator, db: DBSession):
     db.execute(text("BEGIN IMMEDIATE"))
@@ -363,92 +304,10 @@ def control(project_id: str, task_id: str, action: str, body: TaskControl, actor
         raise HTTPException(404, "STORY_TASK_NOT_FOUND")
     if action not in {"pause", "cancel", "resume", "reconcile", "replace-unknown"}:
         raise HTTPException(422, "STORY_ACTION_UNKNOWN")
+    if action == "replace-unknown":
+        raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     if row.state_version != body.expected_state_version:
         raise HTTPException(409, "STORY_TASK_STATE_CHANGED")
-    if action == "replace-unknown":
-        from shine.agents.execution import UNKNOWN_CODES
-        from shine.comfyops.models import ResourceLease
-
-        state = dict(row.trace or {})
-        if row.role_id != story.SECTION_RUN or row.status != "NEEDS_REVIEW":
-            raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_NOT_AVAILABLE")
-        if row.lease_expires_at and row.lease_expires_at > utcnow():
-            raise HTTPException(409, "STORY_TASK_STILL_RUNNING")
-        if not body.subtask_id:
-            raise HTTPException(422, "STORY_UNKNOWN_SUBTASK_REQUIRED")
-        blocked_result = state.get("blocked_result") or {}
-        rejections = blocked_result.get("rejections") or []
-        if not any(item.get("task_id") == body.subtask_id for item in rejections if isinstance(item, dict)):
-            raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_BLOCKING")
-        old = db.get(AgentTaskRecord, body.subtask_id)
-        old_trace = old.trace or {} if old else {}
-        if (not old or old.project_id != project_id or old.role_id not in {"director", "editor"}
-                or old.status != "ABANDONED" or old.error_code not in UNKNOWN_CODES
-                or old_trace.get("external_outcome") != "UNKNOWN"
-                or old_trace.get("local_interruption_verified") is not True
-                or old_trace.get("automatic_replay") is not False or old_trace.get("is_mock") is not False
-                or not old_trace.get("storyboard_request_sha256")
-                or old_trace.get("received_result_sha256") is not None
-                or db.scalar(select(AgentArtifact.id).where(AgentArtifact.source_task_id == old.id))
-                or db.get(AppSetting, f"film-replacement:{old.id}") is not None):
-            raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_REPLACEABLE")
-        cursor = int(state.get("cursor") or 0)
-        units = state.get("units") or []
-        if cursor >= len(units):
-            raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_CONTEXT_MISSING")
-        unit = units[cursor]
-        production_context = old_trace.get("production_context") or {}
-        source_offsets = production_context.get("source_offsets") or {}
-        if (production_context.get("outline_artifact_id") != state.get("outline_artifact_id")
-                or production_context.get("outline_sha256") != state.get("outline_sha256")
-                or production_context.get("document_id") != state.get("document_id")
-                or production_context.get("document_sha256") != state.get("document_sha256")
-                or production_context.get("production_section_id") != unit.get("production_section_id")
-                or source_offsets != unit):
-            raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_CONTEXT_MISMATCH")
-        outline = db.get(AgentArtifact, state.get("outline_artifact_id"))
-        if (not outline or outline.project_id != project_id or outline.kind != "StoryOutline"
-                or not outline.approved_at or outline.stale
-                or outline.sha256 != state.get("outline_sha256") or outline.sha256 != digest(outline.payload_json)):
-            raise HTTPException(409, "STORY_OUTLINE_NOT_CONFIRMED")
-        document = _document(db, project_id, state.get("document_id"), state.get("document_sha256"))
-        project = require_project(db, project_id)
-        if (project.frozen_style_version_id != state.get("style_version_id")
-                or digest(asset_context(db, project_id)) != state.get("asset_manifest_hash")):
-            raise HTTPException(409, "STORY_FROZEN_CONTRACT_CHANGED")
-        if db.scalar(select(ResourceLease.id).where(ResourceLease.status != "RELEASED").limit(1)):
-            raise HTTPException(409, "STORY_UNKNOWN_REPLACEMENT_RESOURCE_ACTIVE")
-        resume_steps = _replacement_resume_steps(db, project_id, old)
-        state["last_blocked_result"] = blocked_result
-        state.pop("blocked_result", None)
-        state.update(
-            failed_role=old.role_id,
-            resume_steps=resume_steps,
-            replace_interrupted_task_id=old.id,
-            replacement_authorization={
-                "actor": actor,
-                "authorized_at": utcnow().isoformat(),
-                "previous_task_id": old.id,
-                "previous_external_outcome": "UNKNOWN",
-                "automatic_replay": False,
-                "document_id": document.id,
-                "outline_artifact_id": outline.id,
-                "production_section_id": unit.get("production_section_id"),
-                "storyboard_request_sha256": old_trace["storyboard_request_sha256"],
-                "resume_artifact_ids": resume_steps,
-            },
-        )
-        row.trace = state
-        row.status, row.error_code = "QUEUED", None
-        row.state_version += 1
-        row.lease_owner, row.lease_expires_at = None, None
-        add_audit(db, actor, "STORY_UNKNOWN_SUBTASK_REPLACED", "agent_task", row.id,
-                  {"previous_task_id": old.id, "role": old.role_id, "external_outcome": "UNKNOWN",
-                   "old_task_preserved": True, "automatic_replay": False,
-                   "storyboard_request_sha256": old_trace["storyboard_request_sha256"],
-                   "resume_artifact_ids": resume_steps}, project_id=project_id)
-        db.commit()
-        return {**public_task(db, row), "replacement_authorization": state["replacement_authorization"]}
     blocked = row.trace.get("blocked_subtasks", [])
     if action == "reconcile":
         if row.status == "RUNNING" and row.lease_expires_at and row.lease_expires_at > utcnow():

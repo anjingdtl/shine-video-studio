@@ -128,6 +128,29 @@ it('服务器拒绝时给出可读原因，而不是只显示错误码', async (
   expect(await screen.findByText(/还没有给这个角色配置模型服务/)).toBeTruthy();
 });
 
+it('UNKNOWN 分场只核对原任务，不显示替代请求入口', async () => {
+  stub.add({ method: 'POST', pattern: /material-preparation\/scenes\/prepare$/, respond: () => jsonResponse({
+    preparations: [], scenes: [{ scene_key: 'S1', status: 'NEEDS_REVIEW', task_id: 'scene-task',
+      state_version: 4, external_outcome: 'UNKNOWN' }],
+  }) });
+  stub.add({ method: 'POST', pattern: /material-preparation\/scenes\/scene-task\/reconcile$/, respond: () => jsonResponse({
+    outcome: 'UNCONFIRMABLE', external_outcome: 'UNKNOWN', resubmittable: false,
+  }) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  await screen.findAllByText(/林知远/);
+  await user.selectOptions(await screen.findByLabelText('剧本文件'), 'doc-1');
+  await user.click(screen.getByRole('button', { name: /分析剧本/ }));
+  const inspect = await screen.findByRole('button', { name: '核对已有结果' });
+  expect(screen.queryByRole('button', { name: /重新请求此场/ })).toBeNull();
+  await user.click(inspect);
+  await waitFor(() => expect(stub.callsOf('POST', /scenes\/scene-task\/reconcile$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /scenes\/scene-task\/reconcile$/)[0].body).toEqual({ expected_state_version: 4 });
+  expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /replace_unknown|replacement_key/)).toHaveLength(0);
+  expect(await screen.findByText(/仍为 UNKNOWN；原任务保留，不会创建新请求/)).toBeTruthy();
+});
+
 it('停止批次带上服务端给的状态版本', async () => {
   const user = userEvent.setup();
   render(<MaterialPreparationPanel projectId="p1" />);

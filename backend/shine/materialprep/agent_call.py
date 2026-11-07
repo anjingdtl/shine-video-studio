@@ -25,7 +25,6 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from shine.agents.execution import UNKNOWN_CODES
 from shine.llm.base import LLMError
 
 CONTEXT_MARGIN_TOKENS = 512
@@ -174,11 +173,14 @@ def call_material_agent(
     try:
         response = call(system, json.dumps(context, ensure_ascii=False))
     except LLMError as exc:
-        uncertain = exc.code in UNKNOWN_CODES and exc.details.get("external_outcome") != "NOT_SENT"
+        external_outcome = exc.details.get("external_outcome")
+        if external_outcome not in {"NOT_SENT", "UNKNOWN"}:
+            external_outcome = "UNKNOWN"
+        uncertain = external_outcome == "UNKNOWN"
         return AgentCallOutcome(
             error_code=exc.code,
             uncertain=uncertain,
-            details={"error_type": type(exc).__name__},
+            details={"error_type": type(exc).__name__, "external_outcome": external_outcome},
         )
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
         # The request may already have reached the provider, so the outcome is
@@ -186,7 +188,7 @@ def call_material_agent(
         return AgentCallOutcome(
             error_code="LLM_PROVIDER_FAULT",
             uncertain=True,
-            details={"error_type": type(exc).__name__},
+            details={"error_type": type(exc).__name__, "external_outcome": "UNKNOWN"},
         )
 
     try:
@@ -204,19 +206,22 @@ def call_material_agent(
         contract.model_validate(corrected.parsed)
         return AgentCallOutcome(parsed=corrected.parsed, correction_used=True, schema_errors=errors)
     except LLMError as second:
-        uncertain = second.code in UNKNOWN_CODES and second.details.get("external_outcome") != "NOT_SENT"
+        second_outcome = second.details.get("external_outcome")
+        external_outcome = "UNKNOWN" if second_outcome == "UNKNOWN" or second_outcome is None else "RESPONSE_RECEIVED"
+        uncertain = external_outcome == "UNKNOWN"
         return AgentCallOutcome(
             error_code=second.code,
             uncertain=uncertain,
             correction_used=True,
             schema_errors=errors,
-            details={"error_type": type(second).__name__},
+            details={"error_type": type(second).__name__, "external_outcome": external_outcome},
         )
     except ValidationError:
         return AgentCallOutcome(
             error_code="SCHEMA_VALIDATION_FAILED",
             correction_used=True,
             schema_errors=errors,
+            details={"external_outcome": "RESPONSE_RECEIVED"},
         )
     except Exception as second:  # noqa: BLE001 - an unexpected fault stays unknown
         return AgentCallOutcome(
@@ -224,5 +229,5 @@ def call_material_agent(
             uncertain=True,
             correction_used=True,
             schema_errors=errors,
-            details={"error_type": type(second).__name__},
+            details={"error_type": type(second).__name__, "external_outcome": "UNKNOWN"},
         )

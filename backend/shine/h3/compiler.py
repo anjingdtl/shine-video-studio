@@ -24,7 +24,7 @@ from shine.schemas import (
 
 # Pinned official skill material from MiniMax-AI/MiniMax-H3 commit
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
-COMPILER_VERSION = "shine-h3-compiler/1.2.0"
+COMPILER_VERSION = "shine-h3-compiler/1.2.1"
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -344,8 +344,12 @@ def _shot_text(ctx: _Context) -> str:
             raise PromptCompilationError("H3_LOCKED_FACT_TRANSLATION_REQUIRED",
                                          "Chinese locked facts require corresponding English prompt translations")
         facts = translated
-    for fact in facts:
-        parts.append(f"Locked story fact: {fact}.")
+    if facts:
+        continuity_notes = " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
+        parts.append(
+            "Story continuity facts below are background context only; they are not dialogue and must "
+            "never be spoken, narrated or performed as voice-over: " + continuity_notes
+        )
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
         parts.append(_dialogue_sentence(ctx, line))
     continuity = ctx.spec.continuity
@@ -387,17 +391,20 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str) -> str:
     pack rejects CJK outside the dialogue tags, so a project setting written in
     another script may never be copied into the prompt.
     """
+    if not spec.dialogue:
+        return (
+            "There is no spoken dialogue in this shot: do not produce speech, narration, voice-over, "
+            "whispering, mumbling, singing, humming or vocal sounds of any kind. Any speech or voice "
+            "mentioned in story facts or visual descriptions is context only, not an audio instruction."
+        )
     language = (project_language or "").strip()
     if not language:
         return ""
-    if not spec.dialogue:
-        return (
-            "There is no spoken dialogue in this shot: do not produce speech, voice-over or "
-            "vocal sounds of any kind."
-        )
     return (
-        f"All spoken dialogue must be spoken in {language}, matching the original line text "
-        "exactly; no other spoken language may appear."
+        f"Only the explicitly tagged dialogue lines in this shot may be spoken in {language}, matching "
+        "the original line text exactly; no other language, unscripted speech, narration, voice-over, "
+        "background chatter, whispering or extra words may appear. Any voice or reading described in "
+        "the story facts or visual description refers only to these exact lines."
     )
 
 

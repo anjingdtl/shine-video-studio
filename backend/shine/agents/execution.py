@@ -46,20 +46,28 @@ def rejection_reason(exc):
 
 def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, contract_hash=None,
                   replace_interrupted_task_id=None):
+    if replace_interrupted_task_id is not None:
+        raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     rows = db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == role,
     ))
     for row in rows:
-        if row.id == replace_interrupted_task_id and row.status == "ABANDONED":
-            continue  # The dispatcher has checked and consumed the explicit replacement.
         same = (row.trace.get("text_input_sha256") == text_hash if text_hash else row.input_hash == input_hash)
         if not same:
             continue
+        if row.status in {"REJECTED", "FAILED", "ABANDONED"} and row.trace.get("is_mock") is not True:
+            if (row.trace.get("reconciliation") or {}).get("outcome") == "NOT_SENT_PROVEN":
+                continue
+            external_outcome = row.trace.get("external_outcome")
+            if external_outcome == "UNKNOWN":
+                raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
+            if external_outcome == "NOT_SENT":
+                raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
+            if external_outcome == "RESPONSE_RECEIVED":
+                raise ValueError("AGENT_RESPONSE_RECEIVED_NO_REPLAY")
+            raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
         old_contract = row.trace.get("review_contract_sha256")
-        if row.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"} or (
-            row.status == "REJECTED" and row.error_code in UNKNOWN_CODES
-            and row.trace.get("external_outcome") != "NOT_SENT" and row.trace.get("is_mock") is not True
-        ):
+        if row.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}:
             raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
         binding = row.trace.get("review_provider") or {}
         same_provider = (
@@ -92,6 +100,7 @@ def abandon_remote_response(db, row, actor, grant_id, snapshot, evidence):
     approval.consume(db, actor, "model_reconcile", row, grant_id, snapshot)
     previous = row.status
     row.status = "ABANDONED"
+    row.state_version += 1
     # The local wait is verifiably over: no resource lease is active (guard
     # above) and the task is no longer running. Record it so the single-use
     # replacement path can engage without an out-of-band database edit.

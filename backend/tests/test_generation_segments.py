@@ -1,7 +1,10 @@
 """Scheduling/media-identity fixtures, not real H3 acceptance."""
 import hashlib
 
+from shine.director.models import DirectorPackageVersion
 from shine.models import (
+    AuditEvent,
+    ExternalJobReconciliation,
     Job,
     JobAttempt,
     JobDependency,
@@ -11,6 +14,7 @@ from shine.models import (
     QualityGate,
     utcnow,
 )
+from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode
 from tests.conftest import create_job
 from tests.test_production_series import _register_ref2va_profile, _studio_with_shots
 
@@ -101,6 +105,53 @@ def test_only_second_segment_is_requeued_and_selection_creates_new_delivery(api)
         assert db.get(ProductionSeries, root).items[1].job_id == jobs[1]["id"]
 
 
+def _add_prior_needs_review_job(factory, project, source_job_id, *, proven):
+    with factory.begin() as db:
+        source = db.get(Job, source_job_id)
+        blocker = Job(project_id=project, shot_id=source.shot_id, shot_revision=source.shot_revision,
+            style_version_id=source.style_version_id, request=dict(source.request),
+            idempotency_key=("c" if proven else "d") * 64, status="NEEDS_REVIEW", provider="comfyui",
+            failure_code="PENDING_WORKFLOW_MAPPING" if proven else "EXTERNAL_OUTCOME_UNKNOWN",
+            provider_job_id=None if proven else "remote-task-unknown")
+        db.add(blocker)
+        db.flush()
+        attempt = JobAttempt(job_id=blocker.id, attempt_no=1, request_fingerprint="e" * 64,
+            status="FAILED" if proven else "NEEDS_REVIEW", failure_code="PENDING_WORKFLOW_MAPPING" if proven
+                else "EXTERNAL_OUTCOME_UNKNOWN", lease_owner="historical-worker", lease_expires_at=utcnow(),
+            provider_job_id=None if proven else "remote-task-unknown")
+        db.add(attempt)
+        if proven:
+            db.add(AuditEvent(project_id=project, actor="worker", event_type="COMFY_WORKFLOW_MAPPING_PENDING",
+                entity_type="job", entity_id=blocker.id, payload={"external_submission": "NOT_SENT_PROVEN"}))
+        return blocker.id
+
+
+def test_proven_pre_submit_mapping_failure_does_not_block_safe_retake(api):
+    client, factory, project, shots, jobs, _, _ = _three(api)
+    historical_id = _add_prior_needs_review_job(factory, project, jobs[1]["id"], proven=True)
+    response = client.post(f"/api/v1/projects/{project}/generation-segments/{shots[1]['id']}/regenerate", json={
+        "source_job_id": jobs[1]["id"], "expected_shot_revision": 1,
+    }, headers=LOCAL)
+    assert response.status_code == 202, response.text
+    with factory() as db:
+        proof = db.query(ExternalJobReconciliation).filter_by(job_id=historical_id).one()
+        assert proof.result == "NOT_SENT_PROVEN"
+        assert proof.evidence["external_submission"] == "NOT_SENT_PROVEN"
+        assert proof.evidence["resubmitted"] is False
+
+
+def test_unresolved_unknown_attempt_still_blocks_segment_retake(api):
+    client, factory, project, shots, jobs, _, _ = _three(api)
+    historical_id = _add_prior_needs_review_job(factory, project, jobs[1]["id"], proven=False)
+    response = client.post(f"/api/v1/projects/{project}/generation-segments/{shots[1]['id']}/regenerate", json={
+        "source_job_id": jobs[1]["id"], "expected_shot_revision": 1,
+    }, headers=LOCAL)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
+    with factory() as db:
+        assert db.query(ExternalJobReconciliation).filter_by(job_id=historical_id).count() == 0
+
+
 def test_real_dependency_is_reported_then_invalidated_without_replaying(api):
     client, factory, project, shots, jobs, hashes, root = _three(api)
     with factory.begin() as db:
@@ -119,3 +170,52 @@ def test_real_dependency_is_reported_then_invalidated_without_replaying(api):
         assert db.get(Job, jobs[2]["id"]).stale
         assert not db.get(Job, jobs[0]["id"]).stale
         assert db.query(Job).count() == 4
+
+
+def test_generation_segments_follow_latest_run_across_batch_series(api):
+    client, factory, project, shots, jobs, _, first_series = _three(api)
+    with factory.begin() as db:
+        package = DirectorPackageVersion(project_id=project, revision=1, status="CONFIRMED", manifest={},
+            scope_digest="a" * 64, manifest_sha256="b" * 64, policy_hash="c" * 64,
+            episode_count=2, shot_count=3)
+        db.add(package)
+        db.flush()
+        run = ProductionRun(project_id=project, package_id=package.id, package_revision=1,
+            manifest_sha256=package.manifest_sha256, scope_digest=package.scope_digest,
+            policy_hash=package.policy_hash, scope={"shot_count": 3}, budget={}, counters={},
+            status="COMPLETED", idempotency_key="test-latest-run", request_hash="d" * 64)
+        db.add(run)
+        db.flush()
+        first_episode = ProductionRunEpisode(run_id=run.id, project_id=project, episode_id="ep-01",
+            position=0, title="第一集", manifest_sha256="e" * 64,
+            shot_ids=[shots[0]["id"], shots[1]["id"]], status="DELIVERED")
+        second_episode = ProductionRunEpisode(run_id=run.id, project_id=project, episode_id="ep-02",
+            position=1, title="第二集", manifest_sha256="f" * 64,
+            shot_ids=[shots[2]["id"]], status="DELIVERED")
+        db.add_all([first_episode, second_episode])
+        second_series = ProductionSeries(project_id=project, status="COMPLETED", provider="comfyui",
+            shot_count=1, completed_count=1, finalization_state="RELEASED")
+        db.add(second_series)
+        db.flush()
+        db.add(ProductionSeriesItem(series_id=second_series.id, position=0, shot_id=shots[2]["id"],
+            job_id=jobs[2]["id"], status="PASSED", continuity_mode="independent"))
+        db.add_all([
+            ProductionRunBatch(run_id=run.id, episode_row_id=first_episode.id, episode_id="ep-01",
+                batch_key="ep-01-1", position=0, input_digest="1" * 64,
+                shot_ids=[shots[0]["id"], shots[1]["id"]], status="PASSED", series_id=first_series),
+            ProductionRunBatch(run_id=run.id, episode_row_id=second_episode.id, episode_id="ep-02",
+                batch_key="ep-02-1", position=1, input_digest="2" * 64,
+                shot_ids=[shots[2]["id"]], status="PASSED", series_id=second_series.id),
+        ])
+        run_id = run.id
+
+    response = client.get(f"/api/v1/projects/{project}/generation-segments")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["run_id"] == run_id
+    assert result["series_id"] is None
+    assert [row["position"] for row in result["segments"]] == [1, 2, 3]
+    assert [row["episode_position"] for row in result["segments"]] == [1, 1, 2]
+    assert [row["episode_title"] for row in result["segments"]] == ["第一集", "第一集", "第二集"]
+    assert [row["series_id"] for row in result["segments"]] == [first_series, first_series, second_series.id]
+    assert [row["job_id"] for row in result["segments"]] == [job["id"] for job in jobs]

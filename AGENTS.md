@@ -711,7 +711,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `PREPARING / WAITING_RESOURCE / PREPARING_PROVIDER`（网关在真正调用前才写
   `WAITING_PROVIDER`）→ 判 `NOT_SENT_PROVEN`，注销为 `SUPERSEDED` 并**释放唯一的
   `request_identity`**（否则新请求 `IntegrityError`）；可能已发出 → `UNCONFIRMABLE`，保持阻塞。
-  `FAILED`（有回答但被合同拒绝）走有上限的 `FAILED_RETRY_ALLOWED`（每场 2 次）。
+  `FAILED`（有回答但被合同拒绝）不得新建重请求。只有持久化的 pre-provider 阶段证据或
+  provider transport 明确 `NOT_SENT`，并写入 `NOT_SENT_PROVEN` reconciliation 后，才可释放旧
+  request identity 并重新请求。
   注销的行是历史，不是答案：`prepare_scenes` 的复用查询必须排除 `SUPERSEDED`。
 - **有疑问的大纲需要用户决定，而不是无限重生成**。`confirm` 接受
   `acknowledge_questions_sha256`（由 `GET story-preparation` 提供，绑定当前问题列表）；
@@ -772,7 +774,7 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 
 - 第 8 轮使用真实 MiniMax 五角色链与产品 `apply-camera`。订单 9 根因由本地同构 ShotSpec 重建确认：dialogue `speaker_id=广播` 未列入 `characters`，因为旧 continuity fact 说它不是出场人物。受托 `local-user` 改一条事实生成新 task 后成功应用 3 镜；旧 artifacts 保留。
 - orders 12–17、21 已按单段真实运行并应用（新增 22 镜；加订单 9 的 3 镜，共 25 镜）。orders 12 和 14 的 `LOCKED_FACTS_CHANGED` 按产品路径 resume 后成功。详见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7.2。
-- orders 18、19、20 的子任务分别以 `LLM_TIMEOUT` / `external_outcome=UNKNOWN` 结束；没有 provider request id、HTTP 状态或 response hash。产品 `abandon-remote-response` 只可把这些丢失响应审计为 `ABANDONED`，仍是 `UNKNOWN` 且 `automatic_replay=false`。本轮由所有者委托的 `local-user` 通过一次性 `model_reconcile` grant 完成三条放弃动作；没有重发，也不得改输入另建近似任务绕过 UNKNOWN。
+- orders 18、19、20 的子任务分别以 `LLM_TIMEOUT` / `external_outcome=UNKNOWN` 结束；没有 provider request id、HTTP 状态或 response hash。产品 `abandon-remote-response` 把丢失响应审计为 `ABANDONED`，仍是 `UNKNOWN` 且 `automatic_replay=false`。本节早先写的“没有重发”后来被同一台账中的三条 `STORY_UNKNOWN_SUBTASK_REPLACED` 事件证伪：旧 UI 允许创建新 task identity；事件与修复见本文件 §10 及进度 §10。不得把保留旧行或 `automatic_replay=false` 当作未重请求的证明。
 - `POST /episode-plans/1/materialize` 因 `EPISODE_SECTION_NOT_STORYBOARDED` 返回 409，明确列出 orders 18–20 的三个 pending section；只有确认所有段均已应用后才能 materialize、confirm v2、建 DirectorPackage 和 ProductionRun。当前 `/journey` 为 54 project shots / 0 planned shots；本轮没有新 H3 attempt。台账保留上轮唯一真实 job `aa8baa09-0c1f-4627-a874-193a1a3647e1`（`PASSED`、`quality_verification=real`，artifact SHA-256 `92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190`、`last_qc_result=needs_review`），不代表整片完成或 accepted。
 - 本轮没有改源代码或 `worker.py` / `preproduction.py`，R7 pytest/Ruff 报告仍是旧证据；VLM 正负校准继续未完成。H3 renderer 未启动。工作台按 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 停止，端口 8000/5173/8188 均已验证无监听。
 - 本轮完整续跑及真实边界见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7 与 `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §5。
@@ -805,3 +807,74 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   ACTIVE 超时仍阻塞、异步 `/free` 超过旧 3 秒仍能被确认、预检失败不重复 unload、safe resume
   留在 QUEUED、reconcile 清除 stale RUNNING batch。改动未涉及 `worker.py` / `preproduction.py`；
   VLM calibration 仍未完成，不能声称已校准。
+
+## 2026-11-07 第 9 轮（64 镜 / 4 集真实 Run 收尾）
+
+- 项目 `3707a9ed-eced-435b-b69a-0b1ecdd5f146` 的 episode plan v2
+  `0af55b3b-a628-48eb-a3fd-34f8bb326dd4`（SHA-256
+  `2e856030014f8f126239409bbed7b7f076fc23f349acb9509a399d0950428a6b`）来自
+  `script_sections_materialized`，由所有者授权委托的 `local-user` 确认。整部 Run
+  `e2da69c8-5b28-45b4-83e8-102b7c09a997` 终态 `COMPLETED`：64/64 非 mock H3 镜头
+  `PASSED`、12/12 批次 `PASSED`、4/4 集 `DELIVERED`、0 blocker、0 active series、
+  0 live resource lease。逐镜 SHA/字节、H.264 1024×576@24fps `ffprobe`、全文件
+  `ffmpeg -f null -` exit 0 均通过。逐镜证据在本机忽略目录
+  `.local-acceptance/r7/final_run_verification_20261107.json`。
+- 每集 EDL clip order、delivery order 与 run episode manifest 对齐；每个 EDL payload
+  的台账原文 SHA-256、输入 digest、成片 artifact SHA-256 / 时长见
+  `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §9。
+- 实际内置浏览器显示 4/4 集交付、64/64 镜完成；打开 ep-04 预览后加载出真实画面。
+  UI 仍将每集显示为「待你确认」，因此这是生产与确定性技术交付完成，不是人工艺术验收；
+  `pending_review` 没有改成 `accepted`。VLM 正负 calibration 未执行。
+- Advisory 队列已排空：ASR 29 条 `UNAVAILABLE`（未配置）、VLM 68 条 `UNAVAILABLE`
+  （reviewer 路由无法提供），不会阻塞确定性生产。
+- MiniMax M3.1 Flash agent 输入及 JSON schema 使用紧凑 JSON；无显式 output budget 时
+  默认 `max_completion_tokens=16384`，并对该模型施加同值 ceiling；不裁剪上下文/事实。
+  MiniMax 官方调试台将 M3.1 Flash 标为 1M context，示例请求使用 16,384 completion
+  tokens。该值是保守输出预算，不是 context 上限。历史订单 18–20 没有 provider
+  response/body/id 持久化，`UNKNOWN` 不能证明 context overflow。审计显示三个旧 UNKNOWN 子调用
+  后续曾通过显式替换创建新 task 并成功；这是旧产品入口允许的行为，但违反 no-resend 门禁，
+  现已在 API 与 UI 禁止，并在后续 §10 如实记录。
+- 根因、实跑摘要及验收边界见进度 §9 / 测试报告 §7。该轮不等于用户的艺术验收。
+
+## 2026-11-07 UNKNOWN 请求身份安全补充（覆盖此前显式替换规则）
+
+- `external_outcome=UNKNOWN` 只允许核对原 task、采用身份链完整的已落库 artifact，或保持
+  `UNCONFIRMABLE`；不得因用户授权、一次性 grant、旧任务仍保留或 `automatic_replay=false`
+  而创建替代 task。只有 durable 证据证明请求未送达，并写入 `NOT_SENT_PROVEN` 后才可再请求。
+- 只有明确 transport `NOT_SENT` 或可证明停在 gateway 的 `WAITING_PROVIDER` 之前，才能生成
+  `NOT_SENT_PROVEN`。无 phase、超时、模型已返回但合同拒绝、HTTP 错误状态不自动等价于未发送。
+  没有充分证据保持原状态并阻塞。
+- 导演分段、整剧分镜、直接 FilmAgentDispatcher 与单场素材分析都执行此规则。旧 API
+  `replace-unknown` / `replace_interrupted_task_id` / `replace_unknown_task_id` 返回拒绝；单场素材
+  UI 提供“核对已有结果”，它不发起 provider 请求。对已证明未发送的单场任务，核对仅解除
+  identity 并提示用户单独执行下一次分析；不会自动重试。
+- 2026-11-07 台账中有三次历史 `STORY_UNKNOWN_SUBTASK_REPLACED`，actor=`local-user`，旧 task
+  仍 `UNKNOWN/ABANDONED`，其新 task 已成功；三次都违反了本规则。该事实不可回滚或改写；64 镜
+  技术交付证据仍成立，但本轮不得声称整段旅程完全遵守 UNKNOWN 门禁或已获艺术验收。详见
+  `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §10。
+- 若修改 `worker.py` / `preproduction.py`，仍按上文 `client_review_identity` 规则重做真实
+  positive/negative calibration；本补丁未修改这两个文件。
+
+## 2026-11-07 导演阶段严格使用确认分集范围
+
+- `/journey` 的 storyboard `planned_shot_ids` 是当前 confirmed episode plan 的权威镜头顺序；
+  无 confirmed plan 时才按原兼容语义使用项目全部 shot。导演模式排产候选只允许使用此范围，
+  不得用 project shot 总数代替本次计划数。全项目 `ShotPanel` 和任务审计仍保留历史记录。
+- 导演 stage-dock 的通过数使用 journey 的 `passed_shot_count/scope_shot_count`；若任务页展示
+  全项目 job 历史，必须清楚说明其包含计划外旧镜头，不能用其通过/失败总数冒充当前 ProductionRun。
+- 修订没有改变已确认计划、Run、生成物或技术/人工质量门禁。64 镜、4 集的全片输出证据和本次
+  UI 根因修复见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §9–§11 与
+  `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §7.5–§7.7；人工艺术确认仍保留给用户。
+
+## 2026-11-07 H3 spoken-audio contract
+
+- Locked story facts may mention dialogue that belongs to another shot. The H3 compiler labels them as background continuity context, never as material to speak or narrate. Dialogue-free shots always carry a silence contract even when project language is unset; dialogue shots allow only their explicitly tagged lines in the project language.
+- ASR advisory review covers every shot in `basic` or `full` self-review scope, including dialogue-free shots. Recognized speech in a dialogue-free shot, or ASR text beyond the explicitly scripted lines, is uncertain advisory evidence only; it never becomes a deterministic production failure. An absent, mock, pending, or unavailable ASR result must be visible at delivery and cannot be presented as language verification.
+- FFprobe and decode establish technical audio presence/integrity only. They do not establish spoken language or silence. Existing artifacts are never rewritten or silently re-accepted after an audio prompt/reviewer change.
+- Episode delivery downloads use the verified project title plus the episode's ordinal within its
+  run in the HTTP `Content-Disposition` filename (for example `项目名-第1集.mp4`). Windows-invalid
+  filename characters are replaced and the project-title portion is bounded. Later revisions may
+  add `-vN`; generic non-episode deliveries use `项目名-成片.mp4`.
+- Keep the underlying delivery file content-addressed and immutable. A display-name change must not
+  rename storage paths, modify bytes, or bypass SHA/size/decode or pending-review gates.
+- The Director 「生成分段」 view follows the newest `ProductionRun`'s confirmed episode and shot order across all of its `ProductionRunBatch` series; it must not present only the newest batch as the whole run. Each shot keeps its source batch `series_id`, so retake selection still writes through that batch's existing assembly gate. Show at most 6 shot cards per page. A passed but unsatisfactory shot can be explicitly retaken, with the old artifact preserved and a newly passed replacement explicitly selected. A historical `NEEDS_REVIEW` mapping failure stops blocking only when all attempt/audit/renderer-activation evidence proves no external submission; the explicit retake action records `ExternalJobReconciliation.result=NOT_SENT_PROVEN` before scheduling a new job. Other failed, `NEEDS_REVIEW`, or `UNKNOWN` work stays blocked until its original outcome is reconciled.

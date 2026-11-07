@@ -102,6 +102,22 @@ def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, mo
     assert original.generation_options == options
 
 
+@pytest.mark.parametrize("model", ["MiniMax-M3.1-Flash", "MiniMax-M3-1-Flash"])
+def test_minimax_m31_flash_uses_bounded_default_output_budget(fake_openai, model):
+    original = config(fake_openai, model=model, generation_options={"reasoning_effort": "medium"})
+    bounded = agent_output_config(original)
+    assert bounded.generation_options == {
+        "reasoning_effort": "medium", "max_completion_tokens": 16_384,
+    }
+
+
+def test_minimax_m31_flash_never_expands_an_explicit_output_budget(fake_openai):
+    original = config(
+        fake_openai, model="MiniMax-M3.1-Flash", generation_options={"max_completion_tokens": 100_000},
+    )
+    assert agent_output_config(original).generation_options["max_completion_tokens"] == 16_384
+
+
 def test_schema_mismatch_malformed_json_and_auth_errors_are_classified(fake_openai):
     fake_openai.response_content = json.dumps({"wrong": 1})
     provider = OpenAICompatibleProvider(config(fake_openai))

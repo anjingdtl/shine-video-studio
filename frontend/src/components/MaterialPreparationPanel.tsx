@@ -143,7 +143,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [direction, setDirection] = useState({ era: '', palette: '', lighting: '', texture: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [sceneReport, setSceneReport] = useState<{ scene_key: string; status: string; error_code?: string; task_id?: string; external_outcome?: string }[]>([]);
+  const [sceneReport, setSceneReport] = useState<{ scene_key: string; status: string; error_code?: string;
+    task_id?: string; state_version?: number; external_outcome?: string }[]>([]);
   const [promotionReport, setPromotionReport] = useState<{ entity: string; ok: boolean; note: string }[]>([]);
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
@@ -245,7 +246,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (!document) throw new Error('先导入或选择一份剧本文件，再分析剧本。');
     const prepared = await jsonPost<{
       preparations: unknown[];
-      scenes: { scene_key: string; status: string; error_code?: string; task_id?: string; external_outcome?: string }[];
+      scenes: { scene_key: string; status: string; error_code?: string; task_id?: string;
+        state_version?: number; external_outcome?: string }[];
     }>(`/projects/${projectId}/material-preparation/scenes/prepare`, {
       document_id: document.id,
       expected_document_hash: document.sha256,
@@ -260,24 +262,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     await load();
   });
 
-  // An unknown external result is kept, never silently resent.  The user can
-  // deliberately ask for this one scene again; that is an explicit new
-  // request with its own audit trail, and the old unknown row survives it.
-  const replaceUnknownScene = (scene: { scene_key: string; task_id?: string }) => run(async () => {
-    const document = documents.find((row) => row.id === documentId);
-    if (!document) throw new Error('先导入或选择一份剧本文件，再分析剧本。');
-    if (!scene.task_id) throw new Error('这一场没有可核对的未知任务。');
-    const prepared = await jsonPost<{
-      preparations: unknown[];
-      scenes: { scene_key: string; status: string; error_code?: string; task_id?: string; external_outcome?: string }[];
-    }>(`/projects/${projectId}/material-preparation/scenes/prepare`, {
-      document_id: document.id,
-      expected_document_hash: document.sha256,
-      replace_unknown_task_id: scene.task_id,
-      replacement_key: `scene-replace-${scene.task_id}`,
-    });
-    setSceneReport(prepared.scenes);
-    setOperationReport(`场 ${scene.scene_key} 已按你的明确请求重新提交；原来的未知任务记录保留在台账里。`);
+  const reconcileUnknownScene = (scene: { scene_key: string; task_id?: string; state_version?: number }) => run(async () => {
+    if (!scene.task_id || scene.state_version === undefined) throw new Error('这一场缺少可核对的任务版本。');
+    const result = await jsonPost<{ outcome: string; external_outcome?: string; resubmittable: boolean }>(
+      `/projects/${projectId}/material-preparation/scenes/${scene.task_id}/reconcile`,
+      { expected_state_version: scene.state_version },
+    );
+    setOperationReport(result.outcome === 'NOT_SENT_PROVEN'
+      ? `场 ${scene.scene_key} 已证明原请求未发出；如需继续，请单独点击「分析剧本」。`
+      : result.outcome === 'RESULT_ADOPTED'
+        ? `场 ${scene.scene_key} 的已落库结果已核对并采用。`
+        : `场 ${scene.scene_key} 仍为 ${result.external_outcome ?? 'UNKNOWN'}；原任务保留，不会创建新请求。`);
+    setSceneReport((old) => old.map((item) => item.task_id === scene.task_id
+      ? { ...item, status: result.outcome, external_outcome: result.external_outcome ?? item.external_outcome }
+      : item));
     await load();
   });
 
@@ -616,8 +614,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   <span>{scene.scene_key}</span>
                   <span>{scene.status === 'PREPARED' || scene.status === 'REUSED' ? '已拆解' : scene.status}</span>
                   {scene.error_code && <em>{reasonText(scene.error_code)}</em>}
-                  {scene.status === 'NEEDS_REVIEW' && scene.task_id && <button type="button" className="text-button"
-                    disabled={busy} onClick={() => replaceUnknownScene(scene)}>核对后重新请求此场</button>}
+                  {(scene.status === 'NEEDS_REVIEW'
+                    || ['UNKNOWN', 'NOT_SENT'].includes(scene.external_outcome ?? '')) && scene.task_id
+                    && <button type="button" className="text-button"
+                      disabled={busy || scene.state_version === undefined}
+                      onClick={() => reconcileUnknownScene(scene)}>核对已有结果</button>}
                 </li>
               ))}
             </ul>

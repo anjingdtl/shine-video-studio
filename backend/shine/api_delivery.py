@@ -8,6 +8,7 @@ and every segment stays traceable to the artifact it came from.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,7 +22,7 @@ from shine.api_common import DBSession, app_settings
 from shine.config import Settings
 from shine.media.artifacts import safe_asset_path
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
-from shine.models import MediaArtifact, SubtitleTrack
+from shine.models import MediaArtifact, Project, SubtitleTrack
 from shine.security import sha256_bytes
 from shine.services import add_audit, require_project
 
@@ -220,4 +221,56 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
         raise HTTPException(status_code=404, detail="Delivery file is missing on disk")
     if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
         raise HTTPException(status_code=409, detail="DELIVERY_FILE_HASH_MISMATCH")
-    return FileResponse(path, media_type=artifact.content_type, filename=path.name)
+    return FileResponse(
+        path,
+        media_type=artifact.content_type,
+        filename=_delivery_download_filename(db, artifact),
+    )
+
+
+def _delivery_download_filename(db: DBSession, artifact: MediaArtifact) -> str:
+    """Give downloads a project/episode name while keeping storage content-addressed."""
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.production.models import ProductionRunEpisode
+
+    project = db.get(Project, artifact.project_id)
+    title = project.title if project else "项目"
+    title = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "-", title)
+    title = re.sub(r"\s+", " ", title).strip(" .-")[:140].rstrip(" .-") or "项目"
+
+    order = db.scalar(
+        select(DeliveryOrder)
+        .where(
+            DeliveryOrder.project_id == artifact.project_id,
+            DeliveryOrder.artifact_id == artifact.id,
+        )
+        .order_by(DeliveryOrder.version.desc())
+        .limit(1)
+    )
+    episode = None
+    version = 1
+    if order is not None:
+        version = order.version
+        if order.scope_kind == "episode" and order.scope_id:
+            episode = db.get(ProductionRunEpisode, order.scope_id)
+    if episode is None:
+        episode = db.scalar(
+            select(ProductionRunEpisode).where(
+                ProductionRunEpisode.project_id == artifact.project_id,
+                ProductionRunEpisode.delivered_artifact_id == artifact.id,
+            )
+        )
+
+    if episode is not None:
+        sibling_ids = db.scalars(
+            select(ProductionRunEpisode.id)
+            .where(ProductionRunEpisode.run_id == episode.run_id)
+            .order_by(ProductionRunEpisode.position, ProductionRunEpisode.id)
+        ).all()
+        episode_number = sibling_ids.index(episode.id) + 1
+        suffix = f"-第{episode_number}集"
+    else:
+        suffix = "-成片"
+    if version > 1:
+        suffix += f"-v{version}"
+    return f"{title}{suffix}.mp4"

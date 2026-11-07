@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from shine.agents import character_binding
 from shine.agents.editorial_timing import editorial_timing_preview
+from shine.agents.execution import UNKNOWN_CODES
 from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
@@ -53,6 +54,10 @@ class AbandonRemoteResponse(APIModel):
     evidence: str = Field(min_length=1, max_length=2000)
 
 
+class ReconcileFilmTask(APIModel):
+    expected_state_version: int = Field(ge=0)
+
+
 @router.post("/projects/{project_id}/film-runs/{task_id}/abandon-remote-response")
 def abandon_remote(project_id: str, task_id: str, body: AbandonRemoteResponse, actor: Operator, db: DBSession):
     from shine.agents.execution import abandon_remote_response
@@ -63,6 +68,68 @@ def abandon_remote(project_id: str, task_id: str, body: AbandonRemoteResponse, a
     if not row or row.project_id != project_id:
         raise HTTPException(404, "Agent task not found for project")
     return abandon_remote_response(db, row, actor, body.grant_id, body.snapshot, body.evidence)
+
+
+@router.post("/projects/{project_id}/film-runs/{task_id}/reconcile")
+def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
+                        actor: Operator, db: DBSession):
+    """Inspect a film-agent result without contacting the provider."""
+    from shine.h3.rulebook import digest
+    from shine.models import AgentArtifact
+    from shine.services import add_audit
+
+    require_project(db, project_id)
+    task = db.get(AgentTaskRecord, task_id)
+    if not task or task.project_id != project_id or task.role_id not in FilmAgentRegistry.roles:
+        raise HTTPException(404, "FILM_AGENT_TASK_NOT_FOUND")
+    if task.state_version != body.expected_state_version:
+        raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
+    if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
+        raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
+
+    artifact = db.scalar(select(AgentArtifact).where(
+        AgentArtifact.source_task_id == task.id, AgentArtifact.stale.is_(False),
+    ))
+    if (artifact and artifact.project_id == project_id
+            and artifact.sha256 == digest(artifact.payload_json)
+            and task.trace.get("output_hash") == artifact.sha256):
+        if task.status != "SUCCEEDED":
+            task.status = "SUCCEEDED"
+            task.error_code = None
+            task.state_version += 1
+            task.trace = {**task.trace, "reconciliation": {
+                "outcome": "RESULT_ADOPTED", "artifact_id": artifact.id,
+                "checked_at": utcnow().isoformat(),
+            }}
+            add_audit(db, actor, "FILM_AGENT_RESULT_ADOPTED", "agent_task", task.id,
+                      {"artifact_id": artifact.id, "artifact_sha256": artifact.sha256,
+                       "external_calls": 0}, project_id=project_id)
+            db.commit()
+        return {"outcome": "RESULT_ADOPTED", "task_id": task.id, "artifact_id": artifact.id,
+                "artifact_sha256": artifact.sha256, "resubmittable": False}
+
+    if (task.status in {"REJECTED", "FAILED"}
+            and task.trace.get("external_outcome") == "NOT_SENT"):
+        task.status = "SUPERSEDED"
+        task.error_code = None
+        task.state_version += 1
+        task.trace = {**task.trace, "reconciliation": {
+            "outcome": "NOT_SENT_PROVEN", "checked_at": utcnow().isoformat(),
+        }}
+        add_audit(db, actor, "FILM_AGENT_NOT_SENT_PROVEN", "agent_task", task.id,
+                  {"role": task.role_id, "resubmittable": True, "external_calls": 0},
+                  project_id=project_id)
+        db.commit()
+        return {"outcome": "NOT_SENT_PROVEN", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": True}
+
+    external_outcome = task.trace.get("external_outcome") or "UNKNOWN"
+    add_audit(db, actor, "FILM_AGENT_RECONCILIATION_UNCONFIRMABLE", "agent_task", task.id,
+              {"status": task.status, "external_outcome": external_outcome,
+               "resubmittable": False, "external_calls": 0}, project_id=project_id)
+    db.commit()
+    return {"outcome": "UNCONFIRMABLE", "task_id": task.id, "state_version": task.state_version,
+            "external_outcome": external_outcome, "resubmittable": False}
 
 
 def _registry(request: Request):
@@ -202,6 +269,7 @@ def runs(project_id: str, db: DBSession):
             "model_id": r.model_id,
             "status": r.status,
             "error_code": r.error_code,
+            "state_version": r.state_version,
             "trace": r.trace,
             "created_at": r.created_at,
         }
@@ -616,6 +684,9 @@ def generate_storyboard(
     """
     import hashlib
 
+    if body.replace_interrupted_task_id:
+        raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
+
     project = require_project(db, project_id)
     if not project.frozen_style_version_id:
         raise HTTPException(409, "STORYBOARD_STYLE_NOT_FROZEN")
@@ -653,20 +724,6 @@ def generate_storyboard(
         "approved_asset_manifest": asset_context(db, project_id),
         "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
     })
-    from shine.agents.execution import UNKNOWN_CODES
-
-    if body.replace_interrupted_task_id:
-        old = db.get(AgentTaskRecord, body.replace_interrupted_task_id)
-        if (body.start_role not in {"director", "editor"} or not old or old.project_id != project_id
-                or old.role_id != body.start_role
-                or old.status != "ABANDONED" or old.trace.get("local_interruption_verified") is not True
-                or old.trace.get("external_outcome") != "UNKNOWN" or old.trace.get("is_mock") is not False
-                or old.trace.get("automatic_replay") is not False
-                or old.trace.get("received_result_sha256") is not None
-                or db.scalar(select(AgentArtifact.id).where(AgentArtifact.source_task_id == old.id))
-                or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256):
-            raise HTTPException(409, "AGENT_REPLACEMENT_NOT_AVAILABLE")
-
     recovered_director = None
     recovered_editor = None
     for prior in db.scalars(select(AgentTaskRecord).where(
@@ -675,8 +732,9 @@ def generate_storyboard(
     )):
         if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
             continue
-        # A single-use replacement may already have succeeded before a later
-        # role failed. Reuse only its exact, intact result; never send it again.
+        # A historical replacement result may be adopted after its successful
+        # response was durably recorded. This path only reads the artifact and
+        # never authorizes another provider request.
         receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
         replacement = db.get(AgentTaskRecord, receipt.value.get("replacement_task_id")) if receipt else None
         writer_id = (body.resume_steps or {}).get("scriptwriter")
@@ -714,9 +772,8 @@ def generate_storyboard(
                 raise HTTPException(409, "STORYBOARD_RECOVERY_AMBIGUOUS")
             recovered_director = candidate
             continue
-        # An editor UNKNOWN may be explicitly replaced once. If a later role
-        # fails, keep using that exact replacement only when its artifact is
-        # still intact and is the editor input selected by this resume request.
+        # Reuse an already-recorded editor result from a historical run only
+        # when its artifact and input lineage are still intact.
         if (body.start_role and body.start_role != "scriptwriter" and prior.role_id == "editor"
                 and prior.status == "ABANDONED" and prior.trace.get("local_interruption_verified") is True
                 and prior.trace.get("external_outcome") == "UNKNOWN"):
@@ -730,8 +787,7 @@ def generate_storyboard(
             selected_editor_id = (body.resume_steps or {}).get("editor_edit_intent")
             valid_editor = bool(
                 editor_replacement and editor_artifact
-                and (selected_editor_id == editor_artifact.id
-                     or body.start_role == "editor" and body.replace_interrupted_task_id == prior.id)
+                and selected_editor_id == editor_artifact.id
                 and editor_replacement.project_id == project_id and editor_replacement.role_id == "editor"
                 and editor_replacement.status == "SUCCEEDED"
                 and editor_replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
@@ -745,8 +801,6 @@ def generate_storyboard(
             if valid_editor:
                 recovered_editor = editor_artifact
                 continue
-        if prior.id == body.replace_interrupted_task_id:
-            continue
         unresolved = (
             prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
             or prior.status == "REJECTED" and prior.error_code in UNKNOWN_CODES
@@ -764,9 +818,8 @@ def generate_storyboard(
                 "missing_characters": [],
                 "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id}],
                 "failed_role": prior.role_id,
-                # Keep the already validated resume selection in the section
-                # run. The previous version lost it on this early return,
-                # making an explicit UNKNOWN replacement impossible to bind.
+                # Keep the validated resume selection so reconciliation can
+                # inspect the original task without changing its identity.
                 "resume_steps": dict(body.resume_steps or {}),
             }
 

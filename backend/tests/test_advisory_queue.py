@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,10 +15,12 @@ from shine.quality.advisory_queue import (
     ROLE_ASR,
     ROLE_VLM,
     enqueue_advisory_reviews,
+    requested_kinds,
     run_pending_advisory_reviews,
+    unexpected_speech_finding,
 )
 from shine.quality.gates import QualityPolicy
-from shine.quality.semantic import SemanticReviewResult, Transcript
+from shine.quality.semantic import SemanticReviewResult, Transcript, TranscriptSegment
 from shine.schemas import RenderRequest
 from tests.conftest import (
     create_project,
@@ -29,6 +32,37 @@ from tests.conftest import (
 )
 
 DIALOGUE = [{"speaker_id": "林岚", "text": "你终于来了。", "start_s": 0.4, "end_s": 2.4}]
+
+
+def test_dialogue_free_shots_are_checked_for_unexpected_asr_speech():
+    silent_request = SimpleNamespace(
+        self_review_scope="basic",
+        shot_spec=SimpleNamespace(dialogue=[], characters=[]),
+    )
+    assert requested_kinds(silent_request) == ["ASR"]
+
+    transcript = Transcript(
+        text="unintelligible speech",
+        segments=[TranscriptSegment(start_s=1.25, end_s=2.5, text="unintelligible speech")],
+        is_mock=False,
+        model="test-asr",
+    )
+    finding = unexpected_speech_finding(silent_request.shot_spec, transcript)
+    assert finding is not None
+    assert finding.code == "UNEXPECTED_SPEECH_IN_DIALOGUE_FREE_SHOT"
+    assert finding.severity == "uncertain"
+    assert finding.evidence_time_s == 1.25
+    assert unexpected_speech_finding(silent_request.shot_spec, Transcript(text="", is_mock=False)) is None
+
+    dialogue_request = SimpleNamespace(dialogue=DIALOGUE)
+    assert unexpected_speech_finding(dialogue_request, transcript) is None
+    scripted = Transcript(text="你终于来了。", is_mock=False)
+    assert unexpected_speech_finding(dialogue_request, scripted) is None
+    extra = Transcript(text="你终于来了。strange voice", is_mock=False)
+    extra_finding = unexpected_speech_finding(dialogue_request, extra)
+    assert extra_finding is not None
+    assert extra_finding.code == "UNSCRIPTED_SPEECH_IN_DIALOGUE_SHOT"
+    assert extra_finding.severity == "uncertain"
 
 
 class FakeVLM:

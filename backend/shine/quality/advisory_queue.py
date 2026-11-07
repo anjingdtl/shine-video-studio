@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -85,9 +86,54 @@ def requested_kinds(request: RenderRequest) -> list[str]:
         kinds.append("VLM")
     elif request.self_review_scope == "basic" and request.shot_spec.characters:
         kinds.append("VLM")
-    if request.shot_spec.dialogue and request.self_review_scope in {"basic", "full"}:
+    # ASR must also inspect dialogue-free shots: it can expose speech that
+    # violates the explicit silence contract. This remains advisory evidence.
+    if request.self_review_scope in {"basic", "full"}:
         kinds.append("ASR")
     return kinds
+
+
+def unexpected_speech_finding(shot_spec, transcript):
+    """Return non-blocking evidence when ASR hears unscripted speech."""
+    if transcript is None or not str(transcript.text or "").strip():
+        return None
+    from shine.schemas import SemanticFinding
+
+    first_segment = next((segment for segment in transcript.segments if segment.text.strip()), None)
+    if shot_spec.dialogue:
+        def normalize(value):
+            return re.sub(r"[\s，。！？、,.!?：:；;]", "", value).lower()
+
+        def dialogue_field(line, name, default=None):
+            return line.get(name, default) if isinstance(line, dict) else getattr(line, name, default)
+
+        spoken = normalize(transcript.text)
+        cursor = 0
+        extra_speech = False
+        for line in sorted(shot_spec.dialogue, key=lambda item: float(dialogue_field(item, "start_s", 0) or 0)):
+            expected = normalize(str(dialogue_field(line, "text", "") or ""))
+            if not expected:
+                continue
+            position = spoken.find(expected, cursor)
+            if position < 0:
+                return None  # missing or altered lines have their own ASR findings
+            extra_speech = extra_speech or position > cursor
+            cursor = position + len(expected)
+        if not extra_speech and cursor >= len(spoken):
+            return None
+        code = "UNSCRIPTED_SPEECH_IN_DIALOGUE_SHOT"
+        message = "ASR returned speech beyond the scripted dialogue; verify it because recognition is probabilistic."
+    else:
+        code = "UNEXPECTED_SPEECH_IN_DIALOGUE_FREE_SHOT"
+        message = "ASR returned speech for a dialogue-free shot; verify the audio because recognition is probabilistic."
+    return SemanticFinding(
+        code=code,
+        category="audio",
+        severity="uncertain",
+        confidence=0.6,
+        message=message,
+        evidence_time_s=first_segment.start_s if first_segment else None,
+    )
 
 
 def enqueue_advisory_reviews(db, job: Job, attempt: JobAttempt, artifact: MediaArtifact | None,
@@ -710,6 +756,10 @@ def _review_one(factory, settings, task_id: str, reviewers, used_kinds: set[str]
         return 1
 
     request = context["request"]
+    if kind == "ASR":
+        finding = unexpected_speech_finding(request.shot_spec, transcript)
+        if finding is not None:
+            transcript_findings = [*(transcript_findings or []), finding]
     gates, fused = evaluate_gates(
         policy=context["policy"],
         shot_spec=request.shot_spec,

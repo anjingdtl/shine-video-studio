@@ -165,13 +165,9 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/reconcile`, json('POST', { expected_state_version: task.state_version })))}>核对已有结果</button>
           <button type="button" disabled={busy || !!rejection || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
           {rejection && <>
-            <small>原 {rejection.role} 调用仍记为 UNKNOWN。明确替代会保留旧记录，并新建一个独立任务身份。</small>
-            <button type="button" className="must-button" disabled={busy} onClick={() => action(() => api(
-              `/projects/${projectId}/story-preparation/tasks/${task.task_id}/replace-unknown`,
-              json('POST', { expected_state_version: task.state_version, subtask_id: rejection.task_id }),
-            ))}>明确替代该角色（保留旧 UNKNOWN）</button>
+            <small>原 {rejection.role} 调用仍为 UNKNOWN。只能核对原任务；在没有未发送证明前不会创建新请求。</small>
           </>}
-          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务可能已经发出、结果未知：先核对或由你明确替代该角色；系统不会自行重发。</small>}
+          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务可能已经发出、结果未知：只核对原任务；系统不会创建替代请求。</small>}
         </>}
         {!['SUCCEEDED', 'CANCELLED'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/cancel`, json('POST', { expected_state_version: task.state_version })))}>取消后续工作</button>}
         {task.progress.results?.map((result, i) => <div key={i}>

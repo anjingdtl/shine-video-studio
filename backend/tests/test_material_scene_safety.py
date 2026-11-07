@@ -15,7 +15,7 @@ def setup_scene(api, monkeypatch, script="场景一：房间\n阿德：出发。
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
     project = client.post("/api/v1/projects", json={"title": "safety"}).json()["id"]
     profile = client.post("/api/v1/provider-profiles", json={
-        "name": "safety-writer", "kind": "mock", "model": "writer"}).json()["id"]
+        "name": f"safety-writer-{project[:8]}", "kind": "mock", "model": "writer"}).json()["id"]
     client.put("/api/v1/agent-routes", json={"role": "scriptwriter", "provider_profile_id": profile})
     doc = client.post(f"/api/v1/projects/{project}/documents", files={
         "file": ("script.txt", script.encode(), "text/plain")}).json()
@@ -108,7 +108,7 @@ def test_answer_cannot_cite_another_scene(api, monkeypatch, forgery):
 
 
 
-def test_explicit_replacement_preserves_unknown_and_is_idempotent(api, monkeypatch):
+def test_unknown_scene_replacement_is_refused_and_original_remains_blocked(api, monkeypatch):
     client, factory, project, doc = setup_scene(api, monkeypatch)
     calls = []
     def lost(*args):
@@ -118,14 +118,72 @@ def test_explicit_replacement_preserves_unknown_and_is_idempotent(api, monkeypat
     _prepare(client, project, doc)
     original = _prepare(client, project, doc).json()["scenes"][0]["task_id"]
     replacement = {"replace_unknown_task_id": original, "replacement_key": "explicit-new-request"}
-    _prepare(client, project, doc, **replacement)
-    _prepare(client, project, doc, **replacement)
-    assert len(calls) == 2
+    rejected = _prepare(client, project, doc, **replacement)
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "MATERIAL_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION"
+    assert len(calls) == 1
     with factory() as db:
         tasks = list(db.scalars(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project)))
-        assert len(tasks) == 2
+        assert len(tasks) == 1
         assert db.get(AgentTaskRecord, original).trace["external_outcome"] == "UNKNOWN"
-        assert sum(t.trace.get("replaces_unknown_task_id") == original for t in tasks) == 1
+        assert db.get(AgentTaskRecord, original).status == "NEEDS_REVIEW"
+
+
+def test_scene_reconcile_keeps_unknown_and_releases_only_provider_proven_not_sent(api, monkeypatch):
+    from shine.llm.base import LLMConnectionError
+
+    client, factory, project, doc = setup_scene(api, monkeypatch)
+    calls = []
+
+    def lost(*args):
+        calls.append("unknown")
+        raise TimeoutError("response lost")
+
+    client.app.state.mock_llm_responder = lost
+    unknown_scene = _prepare(client, project, doc).json()["scenes"][0]
+    unknown_id = unknown_scene["task_id"]
+    unknown = client.post(
+        f"/api/v1/projects/{project}/material-preparation/scenes/{unknown_id}/reconcile",
+        json={"expected_state_version": unknown_scene["state_version"]},
+        headers={"x-shine-local-action": "1"},
+    )
+    assert unknown.status_code == 200, unknown.text
+    assert unknown.json()["outcome"] == "UNCONFIRMABLE"
+    assert unknown.json()["external_outcome"] == "UNKNOWN"
+    assert unknown.json()["resubmittable"] is False
+    still_unknown = _prepare(client, project, doc).json()["scenes"][0]
+    assert still_unknown["task_id"] == unknown_id
+    assert still_unknown["external_outcome"] == "UNKNOWN"
+    assert len(calls) == 1
+
+    other_client, other_factory, other_project, other_doc = setup_scene(api, monkeypatch)
+    def not_sent(*args):
+        calls.append("not-sent")
+        raise LLMConnectionError("connection not established", details={"external_outcome": "NOT_SENT"})
+
+    other_client.app.state.mock_llm_responder = not_sent
+    not_sent_scene = _prepare(other_client, other_project, other_doc).json()["scenes"][0]
+    assert not_sent_scene["external_outcome"] == "NOT_SENT"
+    proof = other_client.post(
+        f"/api/v1/projects/{other_project}/material-preparation/scenes/{not_sent_scene['task_id']}/reconcile",
+        json={"expected_state_version": not_sent_scene["state_version"]},
+        headers={"x-shine-local-action": "1"},
+    )
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["outcome"] == "NOT_SENT_PROVEN"
+    assert proof.json()["resubmittable"] is True
+
+    other_client.app.state.mock_llm_responder = _responder
+    retried = _prepare(other_client, other_project, other_doc).json()["scenes"][0]
+    assert retried["status"] == "PREPARED"
+    assert retried["task_id"] != not_sent_scene["task_id"]
+    assert calls == ["unknown", "not-sent"]
+    with other_factory() as db:
+        old = db.get(AgentTaskRecord, not_sent_scene["task_id"])
+        assert old.status == "SUPERSEDED"
+        assert old.trace["reconciliation"]["outcome"] == "NOT_SENT_PROVEN"
+        assert len(list(db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == other_project)))) == 2
 
 
 def test_long_scene_fits_real_context_budget_without_losing_source(api, monkeypatch):

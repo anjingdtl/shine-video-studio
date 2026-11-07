@@ -81,6 +81,9 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     package = latest_package(db, project_id)
     ready = package_readiness(db, package) if package is not None else None
     passed = _passed_shots(db, project_id)
+    planned_shot_ids = plan_shot_order(plan) if plan is not None else [shot.id for shot in shots]
+    by_id = {shot.id: shot for shot in shots}
+    scoped_shots = [by_id[shot_id] for shot_id in planned_shot_ids if shot_id in by_id]
 
     from shine.models import AgentArtifact, ProjectDocument
 
@@ -149,7 +152,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         material_blockers.append({"code": "EPISODE_PLAN_NOT_CONFIRMED", "message": "分集方案尚未确认"})
     if style is None:
         material_blockers.append({"code": "STYLE_NOT_FROZEN", "message": "风格尚未冻结"})
-    for shot in shots:
+    for shot in scoped_shots:
         spec = None
         try:
             spec = ShotSpec.model_validate(shot.spec)
@@ -193,8 +196,6 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     if plan is not None and plan_mode == "sections" and not plan_materialized:
         shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
                               "message": "按剧本分好的集还没有全部拆成镜头"})
-    planned_shot_ids = plan_shot_order(plan) if plan is not None else [shot.id for shot in shots]
-    by_id = {shot.id: shot for shot in shots}
     for shot_id in planned_shot_ids:
         shot = by_id.get(shot_id)
         if shot is None:
@@ -204,13 +205,17 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         for problem in _shot_problems(db, shot):
             shot_blockers.append({"code": problem, "message": f"镜头「{shot.name}」需要补齐",
                                   "shot_id": shot.id})
+    storyboard_summary = f"{len(planned_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
+    if plan is not None and len(shots) != len(planned_shot_ids):
+        storyboard_summary += f"（项目共 {len(shots)} 个）"
     stages.append({
         "id": "storyboard",
         "label": "镜头拆解",
         "done": bool(shots) and bool(planned_shot_ids) and not shot_blockers,
-        "summary": f"{len(shots)} 个镜头" if shots else "还没有分镜",
+        "summary": storyboard_summary if shots or planned_shot_ids else "还没有分镜",
         "blockers": shot_blockers,
         "facts": {"shot_count": len(shots), "planned_shot_count": len(planned_shot_ids),
+                  "planned_shot_ids": planned_shot_ids,
                   "plan_mode": plan_mode, "plan_materialized": plan_materialized},
     })
 
@@ -238,6 +243,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     # ⑤ 视频生产: every shot in the confirmed scope has a current passed take.
     production_blockers: list[dict[str, Any]] = []
     scope_shots = planned_shot_ids
+    passed_scope_count = sum(shot_id in passed for shot_id in scope_shots)
     for shot_id in scope_shots:
         if shot_id not in passed:
             shot = by_id.get(shot_id)
@@ -250,9 +256,9 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         "id": "production",
         "label": "视频生产",
         "done": bool(scope_shots) and not production_blockers,
-        "summary": f"{len(passed)} / {len(scope_shots)} 镜已通过" if scope_shots else "等待导演包",
+        "summary": f"{passed_scope_count} / {len(scope_shots)} 镜已通过" if scope_shots else "等待导演包",
         "blockers": production_blockers,
-        "facts": {"passed_shot_count": len(passed), "scope_shot_count": len(scope_shots)},
+        "facts": {"passed_shot_count": passed_scope_count, "scope_shot_count": len(scope_shots)},
     })
 
     # ⑥ 后期成片: every required episode really has a delivered reel.

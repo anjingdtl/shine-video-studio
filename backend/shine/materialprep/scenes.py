@@ -95,16 +95,12 @@ def prepare_scenes(
     if scene_keys is not None:
         scenes = [scene for scene in scenes if scene.key in scene_keys]
     facts = list(locked_story_facts or [])
+    if replace_unknown_task_id or replacement_key:
+        return {"error_code": "MATERIAL_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION",
+                "scenes": [], "preparations": []}
 
     refusal: dict[str, Any] = {}
     with db_factory() as db:
-        if replace_unknown_task_id or replacement_key:
-            old = db.get(AgentTaskRecord, replace_unknown_task_id) if replace_unknown_task_id else None
-            if (not old or not replacement_key or old.project_id != project_id or old.role_id != SCRIPTWRITER_ROLE
-                    or old.trace.get("document_sha256") != document.sha256
-                    or old.status not in {"RUNNING", "NEEDS_REVIEW"}
-                    or old.trace.get("external_outcome") != "UNKNOWN"):
-                return {"error_code": "MATERIAL_REPLACEMENT_NOT_ALLOWED", "scenes": [], "preparations": []}
         try:
             profile = gateway.profile_for_role(db, SCRIPTWRITER_ROLE)
         except LLMError as exc:
@@ -169,22 +165,6 @@ def prepare_scenes(
             "profile": profile.id,
             "model": profile.model,
         })
-        source_task_id = None
-        if replace_unknown_task_id:
-            with db_factory() as db:
-                source = db.get(AgentTaskRecord, replace_unknown_task_id)
-                if (source is not None and source.project_id == project_id
-                        and source.trace.get("document_sha256") == document.sha256
-                        and source.trace.get("scene_key") == scene.key):
-                    if (source.status not in {"RUNNING", "NEEDS_REVIEW"}
-                            or source.trace.get("external_outcome") != "UNKNOWN"
-                            or not replacement_key):
-                        results.append({"scene_key": scene.key, "status": "REFUSED",
-                                        "error_code": "MATERIAL_REPLACEMENT_NOT_ALLOWED"})
-                        continue
-                    source_task_id = source.id
-                    input_hash = digest({"input": input_hash, "replaces_unknown": source.id,
-                                         "explicit_request": replacement_key})
         legacy_hash = input_hash
         input_hash = digest({
             "project_id": project_id, "document_id": document.id,
@@ -211,9 +191,9 @@ def prepare_scenes(
                 # is history, not an answer: asking the same scene again must
                 # create a new request instead of reusing the dead identity.
                 AgentTaskRecord.status != "SUPERSEDED",
-                AgentTaskRecord.input_hash.in_([input_hash] if source_task_id else [input_hash, legacy_hash]),
+                AgentTaskRecord.input_hash.in_([input_hash, legacy_hash]),
             ).order_by(AgentTaskRecord.created_at, AgentTaskRecord.id))
-            if existing is None and not source_task_id:
+            if existing is None:
                 # Old tasks predate offset-bearing contexts and request_identity.
                 # Their UNKNOWN must survive a prompt/segmentation upgrade too.
                 prior = db.scalars(select(AgentTaskRecord).where(
@@ -233,11 +213,12 @@ def prepare_scenes(
                 if existing.status == "SUCCEEDED" and artifact is not None:
                     results.append({"scene_key": scene.key, "status": "REUSED",
                                     "task_id": existing.id, "preparation": artifact.payload_json,
-                                    "artifact_id": artifact.id})
+                                    "artifact_id": artifact.id, "state_version": existing.state_version})
                     preparations.append(artifact.payload_json)
                 else:
                     results.append({"scene_key": scene.key, "status": existing.status,
                                     "task_id": existing.id, "error_code": existing.error_code,
+                                    "state_version": existing.state_version,
                                     "external_outcome": existing.trace.get("external_outcome"),
                                     "automatic_replay": False})
                 continue
@@ -254,24 +235,9 @@ def prepare_scenes(
                        "is_mock": profile.kind == "mock", "phase": "PREPARING",
                        "external_outcome": "UNKNOWN", "automatic_replay": False},
             )
-            if source_task_id:
-                task.trace = {**task.trace, "replaces_unknown_task_id": source_task_id,
-                              "explicit_replacement_key": replacement_key}
             db.add(task)
             db.flush()
             task_id = task.id
-            if source_task_id:
-                add_audit(db, "local-user", "MATERIAL_UNKNOWN_EXPLICITLY_REPLACED", "agent_task", task_id,
-                          {"source_task_id": source_task_id, "old_outcome": "UNKNOWN"}, project_id=project_id)
-                # The retired identity must never be reused as an answer or keep
-                # blocking its parent: the outcome stays UNKNOWN (it may have
-                # been sent), the request is superseded by this explicit one.
-                source_row = db.get(AgentTaskRecord, source_task_id)
-                if source_row is not None:
-                    source_row.status = "SUPERSEDED"
-                    source_row.lease_owner, source_row.lease_expires_at = None, None
-                    source_row.trace = {**source_row.trace, "superseded_by": task_id,
-                                        "superseded_reason": "EXPLICIT_USER_REPLACEMENT"}
 
         def record_progress(phase: str, task_id: str = task_id) -> None:
             with db_factory.begin() as db:
@@ -292,20 +258,27 @@ def prepare_scenes(
                                            text_consent.fingerprint(profile), gateway),
         )
         if not outcome.ok:
-            status = "NEEDS_REVIEW" if outcome.uncertain else "FAILED"
+            external_outcome = outcome.details.get("external_outcome", "UNKNOWN")
+            uncertain = outcome.uncertain or external_outcome == "UNKNOWN"
+            status = "NEEDS_REVIEW" if uncertain else "FAILED"
             with db_factory.begin() as db:
                 row = db.get(AgentTaskRecord, task_id)
                 if row is not None:
-                    row.status = "NEEDS_REVIEW" if outcome.uncertain else "REJECTED"
+                    row.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
                     row.error_code = outcome.error_code
+                    row.state_version += 1
                     row.trace = {**row.trace,
                                  "phase": "FAILED",
                                  "correction_count": 1 if outcome.correction_used else 0,
                                  "schema_errors": outcome.schema_errors,
-                                 "external_outcome": "UNKNOWN" if outcome.uncertain else "NOT_SENT",
+                                 "external_outcome": external_outcome,
                                  "automatic_replay": False}
-            results.append({"scene_key": scene.key, "status": status,
-                            "error_code": outcome.error_code})
+            with db_factory() as db:
+                failed_task = db.get(AgentTaskRecord, task_id)
+                failed_state_version = failed_task.state_version if failed_task else 0
+            results.append({"scene_key": scene.key, "status": status, "task_id": task_id,
+                            "state_version": failed_state_version, "error_code": outcome.error_code,
+                            "external_outcome": external_outcome})
             continue
 
         preparation = ScriptPreparation.model_validate(outcome.parsed).model_dump(mode="json")
@@ -318,10 +291,15 @@ def prepare_scenes(
                 if row is not None:
                     row.status = "REJECTED"
                     row.error_code = code
+                    row.state_version += 1
                     row.trace = {**row.trace, "phase": "REJECTED",
+                                 "external_outcome": "RESPONSE_RECEIVED",
                                  "invented_span_ids": invented, "automatic_replay": False}
-            results.append({"scene_key": scene.key, "status": "FAILED",
-                            "error_code": code,
+            with db_factory() as db:
+                rejected_task = db.get(AgentTaskRecord, task_id)
+                rejected_state_version = rejected_task.state_version if rejected_task else 0
+            results.append({"scene_key": scene.key, "status": "FAILED", "task_id": task_id,
+                            "state_version": rejected_state_version, "error_code": code,
                             "span_ids": invented})
             continue
 
@@ -341,13 +319,18 @@ def prepare_scenes(
             artifact_id = artifact.id
             row = db.get(AgentTaskRecord, task_id)
             row.status = "SUCCEEDED"
+            row.state_version += 1
             row.trace = {**row.trace, "phase": "SUCCEEDED", "output_hash": artifact.sha256,
                          "schema_valid": True, "external_outcome": "SUCCEEDED",
                          "correction_count": 1 if outcome.correction_used else 0}
             add_audit(db, "local-user", "MATERIAL_SCENE_PREPARED", "agent_artifact", artifact_id,
                       {"scene_key": scene.key, "document_sha256": document.sha256},
                       project_id=project_id)
-        results.append({"scene_key": scene.key, "status": "PREPARED",
+        with db_factory() as db:
+            succeeded_task = db.get(AgentTaskRecord, task_id)
+            succeeded_state_version = succeeded_task.state_version if succeeded_task else 0
+        results.append({"scene_key": scene.key, "status": "PREPARED", "task_id": task_id,
+                        "state_version": succeeded_state_version,
                         "preparation": preparation, "artifact_id": artifact_id})
         preparations.append(preparation)
 

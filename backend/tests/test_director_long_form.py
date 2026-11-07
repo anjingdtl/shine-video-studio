@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 from dataclasses import dataclass
+from urllib.parse import unquote
 from uuid import uuid4
 
 import pytest
@@ -554,6 +555,9 @@ def test_the_episode_is_assembled_from_two_series_and_the_run_completes(api):
         assert len(artifact.provenance["clips"]) == 2
     media = client.get(f"/api/v1/deliveries/{episode['delivered_artifact_id']}/media")
     assert media.status_code == 200
+    disposition = media.headers["content-disposition"]
+    assert "filename*=utf-8''" in disposition
+    assert unquote(disposition.split("filename*=utf-8''", 1)[1]) == "整部作品-第1集.mp4"
     assert len(media.content) == artifact.byte_size
 
 
@@ -661,6 +665,30 @@ def test_the_journey_reads_stage_completion_from_the_ledger(api):
     assert stages["package"]["done"] is True
     assert stages["production"]["done"] is False
     assert journey["next_stage"] == "production"
+
+
+def test_journey_counts_only_confirmed_plan_shots_not_other_passed_project_shots(api):
+    client, factory, settings = api
+    studio = _studio(client, shots=2)
+    _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
+    _confirm_package(client, package["id"])
+
+    extra = create_shot(
+        client, studio["project"], studio["style"]["id"], title="未纳入本次计划的旧镜头",
+        beat="旧镜头不属于本次确认范围", asset_ids=[studio["subject"]["id"]],
+        bindings=[{"asset_id": studio["subject"]["id"], "use_as": "subject",
+                   "role": "CHAR_A", "ordinal": 0}],
+    )
+    for shot in [*studio["shots"], extra]:
+        _seed_passed_job(factory, settings, studio["project"], shot["id"], studio["style"]["id"])
+
+    journey = client.get(f"/api/v1/projects/{studio['project']}/journey").json()
+    stages = {stage["id"]: stage for stage in journey["stages"]}
+    assert stages["storyboard"]["summary"] == "2 个计划内镜头（项目共 3 个）"
+    assert stages["storyboard"]["facts"]["planned_shot_ids"] == [shot["id"] for shot in studio["shots"]]
+    assert stages["production"]["summary"] == "2 / 2 镜已通过"
+    assert stages["production"]["facts"] == {"passed_shot_count": 2, "scope_shot_count": 2}
+    assert stages["production"]["done"] is True
 
 
 def test_a_plan_for_shots_that_do_not_exist_is_refused(api):

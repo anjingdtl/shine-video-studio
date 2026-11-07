@@ -275,17 +275,20 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         if data["document_id"] else None,
     )
     if not outcome.ok:
-        status = ITEM_NEEDS_REVIEW if outcome.uncertain else ITEM_FAILED
+        external_outcome = outcome.details.get("external_outcome", "UNKNOWN")
+        uncertain = outcome.uncertain or external_outcome == "UNKNOWN"
+        status = ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED
         with factory.begin() as db:
             row = db.get(AgentTaskRecord, task_id)
             if row is not None:
-                row.status = "NEEDS_REVIEW" if outcome.uncertain else "REJECTED"
+                row.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
                 row.error_code = outcome.error_code
+                row.state_version += 1
                 row.trace = {**row.trace,
                              "phase": "FAILED",
                              "correction_count": 1 if outcome.correction_used else 0,
                              "schema_errors": outcome.schema_errors,
-                             "external_outcome": "UNKNOWN" if outcome.uncertain else "NOT_SENT",
+                             "external_outcome": external_outcome,
                              "automatic_replay": False}
         new_version = touch_item(factory, item_id, version, status=status, error_code=outcome.error_code)
         return {"status": status, "code": outcome.error_code, "state_version": new_version,

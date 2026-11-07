@@ -26,7 +26,13 @@ from shine.models import AgentRoute, ProviderProfile
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
-    limits = [100_000]
+    model = config.model.casefold().replace("_", "-")
+    # MiniMax's official M3.1 Flash console example uses 16,384 completion
+    # tokens while advertising a 1M context. Use that as a conservative agent
+    # output budget, not as a claim about the model maximum or a diagnosis of
+    # prior timeouts. Typed agent replies do not need the generic 100k ceiling.
+    default_limit = 16_384 if model in {"minimax-m3.1-flash", "minimax-m3-1-flash"} else 100_000
+    limits = [default_limit]
     configured = config.generation_options.get("max_completion_tokens")
     if configured:
         limits.append(configured)
@@ -139,7 +145,7 @@ class LLMGateway:
                 f"{user}\n\n"
                 "Return one JSON object and nothing else. It must validate against "
                 "this JSON schema:\n"
-                f"{json.dumps(schema, ensure_ascii=False, indent=1)}"
+                f"{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
             )
         from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
         from shine.db import make_session_factory
