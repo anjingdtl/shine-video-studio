@@ -868,7 +868,8 @@ def confirm_scene_script(db, project_id: str, artifact_id: str, expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_SHA_MISMATCH")
-    volume_id = str(artifact.payload_json.get("volume_id"))
+    refs = artifact.payload_json.get("source_refs") or {}
+    volume_id = str(refs.get("volume_id"))
     section_id = str(artifact.payload_json.get("section_id"))
     key = _pointer_key(project_id, f"scene-script:{volume_id}:{section_id}")
     row = AppSetting(key=key, value={"artifact_id": artifact.id, "sha256": artifact.sha256})
@@ -908,7 +909,8 @@ def edit_scene_script(db, project_id: str, artifact_id: str, new_text: str, note
     )
     db.add(artifact)
     db.flush()
-    volume_id = str(old.payload_json.get("volume_id"))
+    refs = old.payload_json.get("source_refs") or {}
+    volume_id = str(refs.get("volume_id"))
     section_id = str(old.payload_json.get("section_id"))
     key = _pointer_key(project_id, f"scene-script:{volume_id}:{section_id}")
     pointer = db.get(AppSetting, key)

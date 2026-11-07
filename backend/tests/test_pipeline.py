@@ -6,8 +6,14 @@ script starts unconfirmed; the volume plan covers the master completely.
 """
 from __future__ import annotations
 
+import pytest
+
 from shine.director import pipeline
-from shine.models import AgentArtifact, AppSetting, ProjectDocument
+from shine.director.pipeline import _authoring_task
+from shine.h3.rulebook import digest
+from shine.llm.gateway import LLMGateway
+from shine.llm.secrets import SecretStore
+from shine.models import AgentArtifact, AgentTaskRecord, AppSetting, ProjectDocument, utcnow
 from tests.conftest import create_project
 
 LOCAL = {"x-shine-local-action": "1"}
@@ -42,11 +48,11 @@ def _outline_artifact(db, project_id, doc, sections):
         "leaf_artifact_ids": [],
         "continuity_status": {"basis": "user_supplied_unverified"},
     }
-    from shine.h3.rulebook import digest
+    task_id = _authoring_task(db, project_id, "story_outline_run", {"fixture": True})
     a = AgentArtifact(project_id=project_id, kind="StoryOutline", schema_version="1.0",
                       payload_json=payload, sha256=digest(payload),
                       producer_role="story_outline_run", approved_by="local-user",
-                      approved_at="2026-11-08T00:00:00Z")
+                      approved_at=utcnow(), source_task_id=task_id)
     db.add(a)
     db.flush()
     db.merge(AppSetting(key=f"current-story-outline:{project_id}",
@@ -91,3 +97,156 @@ def test_long_novel_groups_by_budget_at_section_boundaries(api):
         assert volumes[-1]["end_offset"] == len(doc.text)
         covered = sum(v["char_count"] for v in volumes)
         assert covered == len(doc.text)
+
+
+def _route_mock(client, role: str) -> None:
+    """Create a mock provider profile and route it to the role."""
+    profile = client.post("/api/v1/provider-profiles", json={"name": f"m-{role}", "kind": "mock", "model": "mm"})
+    assert profile.status_code == 201, profile.text
+    route = client.put("/api/v1/agent-routes", json={"role": role, "provider_profile_id": profile.json()["id"]})
+    assert route.status_code == 200, route.text
+
+
+def test_bible_requires_confirmed_plan_and_outline(api):
+    client, factory, settings = api
+    pid = create_project(client, "蓝图前")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    doc = _make_doc(factory, pid, "第一章\n内容。")
+    from shine.llm.secrets import SecretStore
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=lambda m, s: {})
+    with factory.begin() as db:
+        doc2 = db.get(ProjectDocument, doc.id)
+        pipeline.plan_volumes(db, pid, doc2)
+        db.commit()
+    with factory() as db:
+        from sqlalchemy import select as _select
+        plan = db.scalars(_select(AgentArtifact).where(
+            AgentArtifact.project_id == pid,
+            AgentArtifact.kind == pipeline.VOLUME_PLAN_KIND)).all()[-1]
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        db.commit()
+    with factory.begin() as db:
+        with pytest.raises(ValueError) as err:
+            pipeline.queue_bible(db, pid, gw)
+    assert "PIPELINE_OUTLINE_NOT_CONFIRMED" in str(err.value)
+
+
+def _bible_responder():
+    """A mock answer for the bible role."""
+    def responder(messages, schema):
+        return {
+            "schema_version": "1.0",
+            "mainline": "渔村少年成长为船长的故事",
+            "characters": [{"name": "德明", "identity": "渔民之子", "arc_summary": "成长为船长"}],
+            "world": "东南沿海渔村",
+            "timeline": ["少年出海", "风暴", "归来"],
+            "foreshadowing": ["祖传罗盘"],
+            "locked_facts": ["德明是渔民之子"],
+            "open_questions": [],
+            "ending_direction": "归航",
+        }
+    return responder
+
+
+def test_bible_task_runs_and_confirms(api):
+    client, factory, settings = api
+    pid = create_project(client, "蓝图")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    text = "第一章 出海\n德明出海了。\n第二章 归来\n德明回来了。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+    with factory.begin() as db:
+        db.commit()
+    with factory() as db:
+        gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_bible_responder())
+        task = pipeline.queue_bible(db, pid, gw)
+        db.commit()
+        task_id = task.id
+    ran = pipeline.run_pending_pipeline_task(factory, settings, "w1", gw)
+    assert ran is True
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "SUCCEEDED", task.trace
+        assert task.trace.get("usage") is not None
+        bible = pipeline.current_bible(db, pid)
+        assert bible is None  # not confirmed yet
+    with factory.begin() as db:
+        artifact = db.get(AgentArtifact, db.get(AgentTaskRecord, task_id).trace["artifact_id"])
+        pipeline.confirm_bible(db, pid, artifact.id, artifact.sha256)
+    with factory() as db:
+        assert pipeline.current_bible(db, pid) is not None
+
+
+def _scene_responder(scene_text: str = "德明：我要出海。"):
+    def responder(messages, schema):
+        return {
+            "scene_key": "S1", "section_id": "sec-1", "title": "出海",
+            "text": scene_text, "characters": ["德明"],
+            "dialogue": [{"speaker": "德明", "line": "我要出海。"}],
+            "estimated_seconds": 30,
+            "source_refs": {}, "continuity_in": "德明在码头",
+            "continuity_out": "德明登船离开",
+            "questions": [],
+        }
+    return responder
+
+
+def test_scene_script_runs_confirms_and_edits(api):
+    client, factory, settings = api
+    pid = create_project(client, "剧本")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    text = "第一章 出海\n德明出海了。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bible_payload = {
+            "schema_version": "1.0", "mainline": "渔村少年的成长",
+            "characters": [{"name": "德明", "identity": "渔民之子", "arc_summary": "成长"}],
+            "world": "渔村", "timeline": ["出海"], "foreshadowing": [],
+            "locked_facts": ["德明是渔民之子"], "open_questions": [], "ending_direction": "归航",
+        }
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {"fixture": True})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bible_payload, sha256=digest(bible_payload),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    with factory() as db:
+        gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_scene_responder())
+        tasks = pipeline.queue_scene_scripts(db, pid, plan.payload_json["volumes"][0]["volume_id"], gw)
+        db.commit()
+        assert len(tasks) == 1, tasks
+    ran = pipeline.run_pending_pipeline_task(factory, settings, "w1", gw)
+    assert ran is True
+    from sqlalchemy import select as _sel
+    with factory() as db:
+        task = db.scalars(_sel(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE)).all()[-1]
+        assert task.status == "SUCCEEDED", task.trace
+        artifact = db.get(AgentArtifact, task.trace["artifact_id"])
+        assert artifact.payload_json["text"].startswith("德明：")
+    with factory.begin() as db:
+        pipeline.confirm_scene_script(db, pid, artifact.id, artifact.sha256)
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        assert pipeline.current_scene_script(db, pid, volume_id, artifact.payload_json["section_id"]) is not None
+    with factory.begin() as db:
+        edited = pipeline.edit_scene_script(db, pid, artifact.id, "德明：风浪更大。")
+        assert edited.approved_at is None
+    with factory() as db:
+        assert pipeline.current_scene_script(db, pid, volume_id, artifact.payload_json["section_id"]) is None

@@ -659,6 +659,8 @@ class AgentRole(StrEnum):
     QC_REVIEWER = "qc_reviewer"
     VLM_REVIEWER = "vlm_reviewer"
     ASR_REVIEWER = "asr_reviewer"
+    FOUR_STAGE_BIBLE = "four_stage_bible_run"
+    FOUR_STAGE_SCENE_SCRIPT = "four_stage_scene_script_run"
 
 
 class AgentRouteUpdate(APIModel):
