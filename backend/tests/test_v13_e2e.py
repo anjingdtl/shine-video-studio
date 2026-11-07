@@ -193,6 +193,7 @@ def test_v13_full_preproduction_to_fake_h3_advisory_review_and_archive(prep, fak
     assert (
         client.put(
             f"/api/v1/shots/{shot}/bindings",
+            headers={"X-Shine-Local-Action": "1"},
             json={
                 "bindings": [
                     {"asset_id": formal["character"], "use_as": "subject", "ordinal": 0},

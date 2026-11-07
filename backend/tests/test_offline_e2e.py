@@ -258,6 +258,7 @@ def test_offline_production_end_to_end(api, fake_comfy, tmp_path):
     for shot in (first, second):
         response = client.put(
             f"/api/v1/shots/{shot['id']}/bindings",
+            headers={"X-Shine-Local-Action": "1"},
             json={"bindings": bindings_for(shot)},
         )
         assert response.status_code == 200, response.text

@@ -92,3 +92,35 @@ it('上一段末状态已验证时，后段免填承接事实即可排正式分�
   });
   expect(JSON.stringify(stub.callsOf('POST', /sections$/)[0].body)).toContain('"continuity_facts":{}');
 });
+
+it('UNKNOWN 分场子任务必须由用户明确替代，恢复按钮不会重放', async () => {
+  const outline = { artifact_id: 'outline-1', sha256: 'a'.repeat(64), approved: true, stale: false,
+    payload: { summary: '主线', story_line: ['开端'], timeline: [], relationships: [], locked_facts: [], characters: [], questions: [],
+      production_sections: [{ production_section_id: 'section-1', order: 1, title: '章节1',
+        start_offset: 0, end_offset: 100, estimated_duration_s: 20 }] } };
+  const replacementPosts: Array<{ url: string; body: unknown }> = [];
+  stub = new StudioStub([
+    { method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([
+      { task_id: 'section-task', role: 'story_section_run', status: 'NEEDS_REVIEW', state_version: 7,
+        error_code: 'REJECTED', outline, progress: { stage: 'STORYBOARD', cursor: 0, blocked_subtasks: [],
+          blocked_result: { rejections: [{ role: 'editor', task_id: 'unknown-editor',
+            code: 'AGENT_REQUEST_REPLAY_BLOCKED' }] } } },
+    ]) },
+    { method: 'GET', pattern: /outlines\/outline-1\/continuity$/, respond: () => jsonResponse({ outline_artifact_id: 'outline-1',
+      outline_sha256: 'a'.repeat(64), sections: [{ production_section_id: 'section-1', order: 1,
+        prior_production_section_id: null, verified_prior_available: false, prior_production_status: 'NOT_PRODUCED',
+        own_production: { status: 'NOT_PRODUCED', missing: [] } }] }) },
+    { method: 'POST', pattern: /story-preparation\/tasks\/section-task\/replace-unknown$/, respond: (url, init) => {
+      replacementPosts.push({ url, body: JSON.parse(String(init?.body)) });
+      return jsonResponse({ task_id: 'section-task', status: 'QUEUED' });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryPreparationPanel projectId="p1" documentId="doc-1" documentHash={'b'.repeat(64)} styleFrozen onMaterials={() => undefined} />);
+  expect(await screen.findByText('原 editor 调用仍记为 UNKNOWN。明确替代会保留旧记录，并新建一个独立任务身份。')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '恢复未完成工作' })).toBeDisabled();
+  await user.click(screen.getByRole('button', { name: '明确替代该角色（保留旧 UNKNOWN）' }));
+  await waitFor(() => expect(replacementPosts).toHaveLength(1));
+  expect(replacementPosts[0].body).toEqual({ expected_state_version: 7, subtask_id: 'unknown-editor' });
+  expect(stub.callsOf('POST', /\/resume$/)).toHaveLength(0);
+});

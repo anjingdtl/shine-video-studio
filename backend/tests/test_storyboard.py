@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import select
 
 from shine.agents.editorial_timing import editorial_timing_preview
+from shine.llm.base import LLMTimeout
 from shine.models import AgentArtifact, AgentTaskRecord
 from tests.conftest import PNG, approve_lock, create_project, upload_asset
 from tests.test_film_crew import BRIEF, FACTS, prepare
@@ -139,20 +140,28 @@ def test_verified_interrupted_director_replacement_is_explicit_and_single_use(st
     responder = _responder(registry)
     calls = []
 
-    def respond(messages, schema):
+    def interrupted(messages, schema):
         calls.append(schema["title"])
+        if schema["title"] == "DirectorialPlan":
+            raise LLMTimeout("simulated lost provider response", details={"external_outcome": "UNKNOWN"})
         return responder(messages, schema)
 
-    client.app.state.mock_llm_responder = respond
+    client.app.state.mock_llm_responder = interrupted
     first = _storyboard_request(client, project_id).json()
-    scriptwriter = first["steps"]["scriptwriter"]["artifact_id"]
+    assert first["status"] == "REJECTED"
+    scriptwriter = first["resume_steps"]["scriptwriter"]
     with factory.begin() as db:
         old = db.scalar(select(AgentTaskRecord).where(
             AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == "director"))
         old_id = old.id
         old.status = "ABANDONED"
-        old.trace = {**old.trace, "is_mock": False, "external_outcome": "UNKNOWN", "local_interruption_verified": True}
+        old.error_code = "LLM_TIMEOUT"
+        old.trace = {**old.trace, "is_mock": False, "external_outcome": "UNKNOWN",
+                     "automatic_replay": False, "local_interruption_verified": True,
+                     "local_interruption_evidence": {"reason": "simulated verified local interruption"}}
     calls.clear()
+    client.app.state.mock_llm_responder = lambda messages, schema: (
+        calls.append(schema["title"]) or responder(messages, schema))
     args = {"start_role": "director", "resume_steps": {"scriptwriter": scriptwriter}}
     blocked = _storyboard_request(client, project_id, **args).json()
     assert blocked["rejections"][0]["code"] == "AGENT_REQUEST_REPLAY_BLOCKED"

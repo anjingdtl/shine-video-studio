@@ -657,12 +657,18 @@ def generate_storyboard(
 
     if body.replace_interrupted_task_id:
         old = db.get(AgentTaskRecord, body.replace_interrupted_task_id)
-        if (body.start_role != "director" or not old or old.project_id != project_id or old.role_id != "director"
+        if (body.start_role not in {"director", "editor"} or not old or old.project_id != project_id
+                or old.role_id != body.start_role
                 or old.status != "ABANDONED" or old.trace.get("local_interruption_verified") is not True
+                or old.trace.get("external_outcome") != "UNKNOWN" or old.trace.get("is_mock") is not False
+                or old.trace.get("automatic_replay") is not False
+                or old.trace.get("received_result_sha256") is not None
+                or db.scalar(select(AgentArtifact.id).where(AgentArtifact.source_task_id == old.id))
                 or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256):
             raise HTTPException(409, "AGENT_REPLACEMENT_NOT_AVAILABLE")
 
     recovered_director = None
+    recovered_editor = None
     for prior in db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
         AgentTaskRecord.role_id.in_(needed_roles),
@@ -708,6 +714,37 @@ def generate_storyboard(
                 raise HTTPException(409, "STORYBOARD_RECOVERY_AMBIGUOUS")
             recovered_director = candidate
             continue
+        # An editor UNKNOWN may be explicitly replaced once. If a later role
+        # fails, keep using that exact replacement only when its artifact is
+        # still intact and is the editor input selected by this resume request.
+        if (body.start_role and body.start_role != "scriptwriter" and prior.role_id == "editor"
+                and prior.status == "ABANDONED" and prior.trace.get("local_interruption_verified") is True
+                and prior.trace.get("external_outcome") == "UNKNOWN"):
+            editor_receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
+            editor_replacement = (db.get(AgentTaskRecord, editor_receipt.value.get("replacement_task_id"))
+                                  if editor_receipt else None)
+            editor_artifact = db.scalar(select(AgentArtifact).where(
+                AgentArtifact.source_task_id == editor_replacement.id,
+                AgentArtifact.kind == "EditIntentPlan",
+            )) if editor_replacement else None
+            selected_editor_id = (body.resume_steps or {}).get("editor_edit_intent")
+            valid_editor = bool(
+                editor_replacement and editor_artifact
+                and (selected_editor_id == editor_artifact.id
+                     or body.start_role == "editor" and body.replace_interrupted_task_id == prior.id)
+                and editor_replacement.project_id == project_id and editor_replacement.role_id == "editor"
+                and editor_replacement.status == "SUCCEEDED"
+                and editor_replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+                and editor_replacement.trace.get("input_revision_ids") == prior.trace.get("input_revision_ids")
+                and editor_artifact.project_id == project_id and not editor_artifact.stale
+                and editor_artifact.producer_role == "editor"
+                and editor_artifact.input_revision_ids == prior.trace.get("input_revision_ids")
+                and editor_artifact.sha256 == digest(editor_artifact.payload_json)
+                and editor_replacement.trace.get("output_hash") == editor_artifact.sha256
+            )
+            if valid_editor:
+                recovered_editor = editor_artifact
+                continue
         if prior.id == body.replace_interrupted_task_id:
             continue
         unresolved = (
@@ -726,6 +763,11 @@ def generate_storyboard(
                 "steps": {},
                 "missing_characters": [],
                 "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id}],
+                "failed_role": prior.role_id,
+                # Keep the already validated resume selection in the section
+                # run. The previous version lost it on this early return,
+                # making an explicit UNKNOWN replacement impossible to bind.
+                "resume_steps": dict(body.resume_steps or {}),
             }
 
     dispatcher = FilmAgentDispatcher(gateway, request.app.state.settings.data_dir)
@@ -783,6 +825,9 @@ def generate_storyboard(
     if recovered_director and start_role == "director":
         steps["director"] = {"artifact_id": recovered_director.id, "kind": recovered_director.kind,
                              "sha256": recovered_director.sha256}
+    if recovered_editor and start_role == "editor":
+        steps["editor_edit_intent"] = {"artifact_id": recovered_editor.id, "kind": recovered_editor.kind,
+                                       "sha256": recovered_editor.sha256}
 
     delay = _agent_step_delay_seconds()
     calls_in_request = 0
@@ -810,7 +855,7 @@ def generate_storyboard(
                     repair_visual_language=repair_visual_language,
                     repair_director=repair_director,
                     replace_interrupted_task_id=(body.replace_interrupted_task_id
-                        if role == "director" and not repair_director
+                        if role == body.start_role and role in {"director", "editor"} and not repair_director
                         and kwargs.get("tool") != "continuity_arbitration" else None),
                 )
                 return {"artifact_id": artifact.id, "kind": artifact.kind,

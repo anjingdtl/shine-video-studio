@@ -15,6 +15,8 @@ CURRENT_RESOURCE = ContextVar("shine_resource_lease", default=None)
 
 
 class ResourceScheduler:
+    WAITING_LEASE_TTL_SECONDS = 60
+
     def __init__(self, capacity_mb=16384):
         self.capacity_mb = capacity_mb  # ESTIMATED until a local probe supplies measured capacity.
 
@@ -23,6 +25,16 @@ class ResourceScheduler:
             raise HTTPException(409, "VRAM_BUDGET_EXCEEDED")
         existing = db.scalar(select(ResourceLease).where(ResourceLease.owner == owner))
         if existing:
+            # A caller that is still actively asking for admission refreshes
+            # its waiting lease. An owner that stopped polling naturally ages
+            # out instead of reserving a permanent place in front of every
+            # later serial model stage.
+            if existing.status == "WAITING":
+                now = utcnow()
+                if existing.expires_at <= now:
+                    existing.created_at = now
+                existing.heartbeat_at = now
+                existing.expires_at = now + timedelta(seconds=self.WAITING_LEASE_TTL_SECONDS)
             return existing
         lease = ResourceLease(
             owner=owner,
@@ -30,7 +42,7 @@ class ResourceScheduler:
             exclusive=True,
             priority=priority,
             status="WAITING",
-            expires_at=utcnow() + timedelta(seconds=60),
+            expires_at=utcnow() + timedelta(seconds=self.WAITING_LEASE_TTL_SECONDS),
         )
         db.add(lease)
         db.flush()
@@ -41,14 +53,27 @@ class ResourceScheduler:
         db.execute(text("BEGIN IMMEDIATE"))
         now = utcnow()
         rows = db.scalars(select(ResourceLease).order_by(ResourceLease.created_at, ResourceLease.id)).all()
+        candidate = next((x for x in rows if x.id == lease_id), None)
         for row in rows:
             if row.status == "ACTIVE" and row.expires_at <= now:
                 row.status = "RECONCILE_REQUIRED"
+            elif row.status == "WAITING" and row.expires_at <= now and row.id != lease_id:
+                # WAITING never owns a model process or external request. Its
+                # expiry only means no live caller is maintaining this queue
+                # position; re-admission by that owner will create a fresh
+                # queue intent. Active/expired leases remain reconciliation
+                # blockers above.
+                row.status = "RELEASED"
+        if candidate and candidate.status == "WAITING" and candidate.expires_at <= now:
+            # The current caller proves this request is live. It can renew its
+            # own expired waiting position, with a fresh age, before ordering.
+            candidate.created_at = now
+            candidate.heartbeat_at = now
+            candidate.expires_at = now + timedelta(seconds=self.WAITING_LEASE_TTL_SECONDS)
         active = [x for x in rows if x.status in {"ACTIVE", "RECONCILE_REQUIRED"}]
         waiting = [x for x in rows if x.status == "WAITING"]
         # Aging prevents starvation while H3 starts with higher priority.
         waiting.sort(key=lambda x: (-x.priority - int((now - x.created_at).total_seconds() / 30), x.created_at, x.id))
-        candidate = next((x for x in rows if x.id == lease_id), None)
         if not candidate or candidate.status != "WAITING" or not waiting or waiting[0].id != lease_id:
             db.commit()
             return False
@@ -131,38 +156,55 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None, wait_seconds
     thread = Thread(target=pulse, name="shine-resource-heartbeat", daemon=True)
     thread.start()
     resource_token = CURRENT_RESOURCE.set(identity)
+    slot_ready = False
     try:
         if on_acquired:
             on_acquired(identity)
         if release_models is not None:
             release_models()
         gc.collect()
+        slot_ready = True
+        if heartbeat_errors:
+            raise HTTPException(409, "RESOURCE_LEASE_LOST_RECONCILE_REQUIRED")
         yield identity
         if heartbeat_errors:
             raise HTTPException(409, "RESOURCE_LEASE_LOST_RECONCILE_REQUIRED")
     finally:
         try:
-            if release_models is not None:
-                release_models()
-            gc.collect()
-        except Exception:
-            with factory.begin() as db:
-                db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
-            raise
-        else:
-            stopped.set()
-            thread.join(timeout=2)
-            requires_reconciliation = False
-            with factory.begin() as db:
-                lease = db.get(ResourceLease, identity)
-                if (heartbeat_errors or thread.is_alive() or lease.status != "ACTIVE"
-                        or lease.expires_at <= utcnow()):
-                    lease.status = "RECONCILE_REQUIRED"
-                    requires_reconciliation = True
+            if not slot_ready:
+                # A preflight release did not complete, so do not issue a second
+                # unload request immediately from this finally block. Preserve the
+                # lease for explicit reconciliation instead of extending a failed
+                # boundary by another full timeout window.
+                stopped.set()
+                thread.join(timeout=2)
+                with factory.begin() as db:
+                    lease = db.get(ResourceLease, identity)
+                    if lease is not None and lease.status == "ACTIVE":
+                        lease.status = "RECONCILE_REQUIRED"
+            else:
+                try:
+                    if release_models is not None:
+                        release_models()
+                    gc.collect()
+                except Exception:
+                    with factory.begin() as db:
+                        db.get(ResourceLease, identity).status = "RECONCILE_REQUIRED"
+                    raise
                 else:
-                    scheduler.release(db, identity, owner)
-            if requires_reconciliation:
-                raise HTTPException(409, "MODEL_RELEASE_RECONCILIATION_REQUIRED")
+                    stopped.set()
+                    thread.join(timeout=2)
+                    requires_reconciliation = False
+                    with factory.begin() as db:
+                        lease = db.get(ResourceLease, identity)
+                        if (heartbeat_errors or thread.is_alive() or lease.status != "ACTIVE"
+                                or lease.expires_at <= utcnow()):
+                            lease.status = "RECONCILE_REQUIRED"
+                            requires_reconciliation = True
+                        else:
+                            scheduler.release(db, identity, owner)
+                    if requires_reconciliation:
+                        raise HTTPException(409, "MODEL_RELEASE_RECONCILIATION_REQUIRED")
         finally:
             CURRENT_RESOURCE.reset(resource_token)
             stopped.set()

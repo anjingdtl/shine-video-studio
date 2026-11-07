@@ -776,3 +776,32 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - `POST /episode-plans/1/materialize` 因 `EPISODE_SECTION_NOT_STORYBOARDED` 返回 409，明确列出 orders 18–20 的三个 pending section；只有确认所有段均已应用后才能 materialize、confirm v2、建 DirectorPackage 和 ProductionRun。当前 `/journey` 为 54 project shots / 0 planned shots；本轮没有新 H3 attempt。台账保留上轮唯一真实 job `aa8baa09-0c1f-4627-a874-193a1a3647e1`（`PASSED`、`quality_verification=real`，artifact SHA-256 `92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190`、`last_qc_result=needs_review`），不代表整片完成或 accepted。
 - 本轮没有改源代码或 `worker.py` / `preproduction.py`，R7 pytest/Ruff 报告仍是旧证据；VLM 正负校准继续未完成。H3 renderer 未启动。工作台按 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 停止，端口 8000/5173/8188 均已验证无监听。
 - 本轮完整续跑及真实边界见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7 与 `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §5。
+
+## 2026-11-07 串行模型资源与全片续跑收尾
+
+- **所有本机模型阶段共享一张全局资源租约表，严格串行**。`ResourceScheduler.admit`
+  即使账面显存预算可并排，也只允许一个 `ACTIVE`；过期 `ACTIVE` 必须转
+  `RECONCILE_REQUIRED`，不能按超时当成资源已释放。
+- **无人续租的 WAITING 预约要有限期**。`WAITING_LEASE_TTL_SECONDS=60`；真实排队方在
+  `enqueue` 时续租，已过期且不是当前活跃请求的 WAITING 行可以置为 `RELEASED`（它从未持有
+  renderer/provider side effect）。当前请求若在等待期间过期，可在 `admit` 中续自己的位置；
+  任何别人的过期 WAITING 都不能被冒认成活跃。这样旧 H3 队列项不会永久挡住后续 MiniMax
+  资源请求。
+- **Comfy `/free` 是异步卸载请求，HTTP 200 不是释放证明**。`ComfyUIClient.free_models()`
+  最多等 120 秒、每 0.5 秒轮询；只有 Comfy 队列 running/pending 均为空，且 `/system_stats`
+  证明 live CUDA tensor ≤512 MiB（ComfyUI <0.39 按旧字段要求 torch pool 为 0），才能归还
+  lease。读取不可用、格式未知或超时一律 fail closed；再由 reconciliation 处理，禁止再发第二次
+  `/free`，也禁止用固定睡眠代替释放证据。空闲 allocator cache 不等于 live model memory。
+- **真实 H3 的串行单位是 production series**：同一 series 内的 shots 通过 idle keeper 续用同一
+  renderer/租约，不在每镜之间卸载；series 完结时只停止经 PID/birth + Job Object 证明归本安装
+  所有的 renderer，且确认端口释放后，租约和 series 状态才一起提交。下一 series 此后才可开机，
+  不可把 per-shot 续用改成并发或未经证明的释放。
+- **恢复队列的 UI 状态跟实际领取状态一致**。safe pre-submit recovery 只将 series/batch 设为
+  `QUEUED`，由唯一 resident Worker 领取、取得资源租约后再变 `RUNNING`；reconcile 也将无 worker
+  claim 的 `QUEUED` series 同步回 batch，避免若干待领取批次残留成“同时拍摄中”。`UNKNOWN`、有
+  provider id/attempt/artifact 或活动租约的请求仍不得重开。
+- 根因与真实证据见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §8、测试与限制见
+  `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §6。新增回归覆盖：旧 WAITING 不再饿死队列、
+  ACTIVE 超时仍阻塞、异步 `/free` 超过旧 3 秒仍能被确认、预检失败不重复 unload、safe resume
+  留在 QUEUED、reconcile 清除 stale RUNNING batch。改动未涉及 `worker.py` / `preproduction.py`；
+  VLM calibration 仍未完成，不能声称已校准。

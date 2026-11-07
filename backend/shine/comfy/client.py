@@ -81,6 +81,9 @@ class ComfyUIClient:
     # A resident MiniMax-H3 checkpoint moves this value by more than ten
     # gigabytes, so the threshold has a very wide margin on both sides.
     MAX_LIVE_TENSOR_BYTES = 512 * 1024 * 1024
+    DEFAULT_MODEL_RELEASE_TIMEOUT_S = 120.0
+    DEFAULT_MODEL_RELEASE_POLL_INTERVAL_S = 0.5
+
     def __init__(
         self,
         base_url: str,
@@ -90,21 +93,32 @@ class ComfyUIClient:
         client_id: str = "shine",
         transport: httpx.BaseTransport | None = None,
         trust_env: bool = True,
+        model_release_timeout_s: float = DEFAULT_MODEL_RELEASE_TIMEOUT_S,
+        model_release_poll_interval_s: float = DEFAULT_MODEL_RELEASE_POLL_INTERVAL_S,
     ):
+        if not math.isfinite(model_release_timeout_s) or model_release_timeout_s < 0:
+            raise ValueError("MODEL_RELEASE_TIMEOUT_INVALID")
+        if not math.isfinite(model_release_poll_interval_s) or model_release_poll_interval_s <= 0:
+            raise ValueError("MODEL_RELEASE_POLL_INTERVAL_INVALID")
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.client_id = client_id
         self._transport = transport
         self.trust_env = trust_env
+        self.model_release_timeout_s = model_release_timeout_s
+        self.model_release_poll_interval_s = model_release_poll_interval_s
 
     def _client(self) -> httpx.Client:
         kwargs: dict[str, Any] = {"timeout": self.timeout_s, "transport": self._transport, "trust_env": self.trust_env}
         return httpx.Client(**kwargs)
 
-    def _get(self, path: str, *, timeout: float | None = None) -> httpx.Response:
+    def _get(
+        self, path: str, *, timeout: float | None = None, max_retries: int | None = None,
+    ) -> httpx.Response:
         last: ComfyError | None = None
-        for attempt in range(self.max_retries + 1):
+        retries = self.max_retries if max_retries is None else max_retries
+        for attempt in range(retries + 1):
             try:
                 with self._client() as client:
                     response = client.get(f"{self.base_url}{path}", timeout=timeout or self.timeout_s)
@@ -122,18 +136,18 @@ class ComfyUIClient:
                         f"ComfyUI rejected GET {path}",
                         details={"status": response.status_code, "body": response.text[:300]},
                     )
-            if attempt < self.max_retries:
+            if attempt < retries:
                 time.sleep(min(1.5, 0.2 * (2**attempt)))
         raise last or ComfyUnavailable("ComfyUI request failed")
 
-    def system_stats(self) -> dict[str, Any]:
-        return self._get("/system_stats").json()
+    def system_stats(self, *, timeout_s: float | None = None, max_retries: int | None = None) -> dict[str, Any]:
+        return self._get("/system_stats", timeout=timeout_s, max_retries=max_retries).json()
 
     def object_info(self) -> dict[str, Any]:
         return self._get("/object_info", timeout=max(self.timeout_s, 30)).json()
 
-    def queue(self) -> dict[str, Any]:
-        return self._get("/queue").json()
+    def queue(self, *, timeout_s: float | None = None, max_retries: int | None = None) -> dict[str, Any]:
+        return self._get("/queue", timeout=timeout_s, max_retries=max_retries).json()
 
     def history(self, prompt_id: str | None = None) -> dict[str, Any]:
         path = "/history" if prompt_id is None else f"/history/{prompt_id}"
@@ -152,13 +166,31 @@ class ComfyUIClient:
         # /free acknowledges a queued unload flag, not completed unloading.
         # Confirm this process has no live CUDA tensor allocation before releasing
         # the shared lease. Cached-but-free allocator memory is allowed.
-        for _ in range(30):
-            queue = self.queue()
-            stats = self.system_stats()
-            if self._queue_known(queue) and not queue["queue_running"] and not queue["queue_pending"]:
-                if self._release_confirmed(stats):
-                    return
-            time.sleep(0.1)
+        deadline = time.monotonic() + self.model_release_timeout_s
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            request_timeout = max(0.01, min(self.timeout_s, remaining))
+            try:
+                # These reads are safe to retry at the next poll. Keep each
+                # network call bounded by the remaining release window so a
+                # slow renderer cannot silently extend the worker's lease.
+                queue = self.queue(timeout_s=request_timeout, max_retries=0)
+                remaining = deadline - time.monotonic()
+                if self._queue_known(queue) and not queue["queue_running"] and not queue["queue_pending"] \
+                        and remaining > 0:
+                    stats = self.system_stats(
+                        timeout_s=max(0.01, min(self.timeout_s, remaining)), max_retries=0,
+                    )
+                    if self._release_confirmed(stats):
+                        return
+            except (ComfyError, ValueError):
+                # An unavailable/invalid reading is not release evidence.
+                # Continue only within this bounded wait; expiry still fails
+                # closed and leaves the resource lease for reconciliation.
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(self.model_release_poll_interval_s, remaining))
         raise ComfyUIError("MODEL_RELEASE_UNCONFIRMED")
 
     @staticmethod

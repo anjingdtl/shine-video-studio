@@ -155,3 +155,28 @@ materialize v2 → 导演包（宽方案、1024×576）→ confirm → productio
 - 无活动资源租约，8188 没有 renderer listener；本轮通过 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 关闭 API/Worker/Web，随后验证 8000/5173/8188 均无监听。
 - 本轮未改源代码、`worker.py` 或 `preproduction.py`；R7 的全量 pytest/Ruff 结果仍是第 7 轮旧证据，本轮未重新运行测试。VLM 正负校准仍未完成，不能把任何新镜头写成 accepted。
 - 详细本机证据保存在 Git 忽略目录 `.local-acceptance/r7/`：`order9_apply_reproduction.json`、`storyboard_order9_repair.jsonl`、`storyboard_runs.jsonl`、`order18_remote_reconciliation.json`、`order19_remote_reconciliation.json`、`order20_remote_reconciliation.json`、`final_snapshot.json`。
+
+## 8. 串行资源根因修复与浏览器续跑（2026-11-07）
+
+### 8.1 根因与修复
+
+1. **过期 WAITING 永不出队**：`ResourceScheduler.enqueue()` 初始只给预约 60 秒，原 `admit()` 只把过期 ACTIVE 改成 `RECONCILE_REQUIRED`，不处理过期 WAITING。现场 3 个老 H3 reservation（`609b9cb1…`、`919aeacc…`、`0087e36e…`）因此能长期挡住 MiniMax/其他资源请求；其中一条 Agent 子任务停在 `WAITING_RESOURCE`，持久化阶段证明尚未到 `WAITING_PROVIDER`，没有 provider id/response，约 35KB 的输入也不是 context overflow 证据。修复后，仍活跃的排队方由 `enqueue()` 续租；无人维护且到期的 WAITING（从未拿到模型/外部请求）被释放；当前调用只能续自己的预约。过期 ACTIVE 仍进 reconciliation，绝不按超时放行。
+2. **卸载确认窗口过短**：`/free` 的 200 只是接受异步卸载请求。旧实现只轮询约 3 秒，慢卸载会让 lease 进入 `RECONCILE_REQUIRED` 并挡住整条串行队列。现在最长等待 120 秒、0.5 秒轮询；只有 Comfy 队列为空且 live CUDA tensor allocation 确认低于 512 MiB（旧版 Comfy 需 torch pool 归零）才释放。不可读/超时仍 fail closed；模型预检失败不重复发第二次 unload。
+3. **safe resume 把排队显示成并行生产**：恢复逻辑一次恢复多个无外部提交的 series，却把每个 child 都写成 `RUNNING`；Worker 随后只领取一个，其余回到 `QUEUED`，而 run-batch 的旧 `RUNNING` 又不随 series 回退，UI 遂显示多个“拍摄中”。恢复现改写为 `QUEUED`，唯一 Worker 领取后才进入 `RUNNING`；reconcile 与 API read model 都按真实 series 状态显示，任何阶段只应有一个 series/资源 lease。
+
+**不加无证据的固定冷却睡眠**：serial handoff 等待真实释放信号；H3 同一 series 内按产品合同复用同一个 renderer/租约，不在每镜之间卸载；series 边界停止被证明归本机所有的 renderer 并确认端口已释放，租约和 series 终态同事务提交。不得改成未经证明的释放。
+
+### 8.2 本地用户代行与真实运行证据
+
+- 按所有者授权，由 Agent 以 `local-user` 代行为订单/运行继续与无副作用的安全恢复操作。实时 SQLite 中恢复事件 `PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT` 的 actor=`local-user`，payload 明确 `external_submission=NOT_SENT_PROVEN`、`old_job_preserved=true`；没有重发带有外部身份/UNKNOWN 的请求。
+- 使用内置浏览器进入 `http://127.0.0.1:5173/#d/run`，拟人点击「继续安全可恢复批次」，页面 toast「已恢复生产」，从有阻塞转为进行中。点击后的 run 是 `e2da69c8-5b28-45b4-83e8-102b7c09a997`；UI 随后读到 17/64 镜通过、2/6 批次已通过、0/4 集已交付。
+- 后续只读库快照（2026-11-07 05:25 UTC）：Run=`RUNNING`、18/64 个 series items 已 `PASSED`、3/6 batches `PASSED`、已交付 0/4；恰有 1 个 `ACTIVE` H3 lease（owner `h3:609b9cb1-d798-4d5a-a87a-c3aed8acf841`）和 1 个 `SUBMITTING` job。其余等待 series=`QUEUED`，没有第二条 active lease/并行 H3 提交。Run 仍在进行，不能称作整片完成。
+- 对当时 17 个已落盘视频逐一重算磁盘 SHA-256，并与 artifact/attempt output SHA、字节数核对；逐个 `ffprobe`：H.264、1024×576、约 24fps；逐个 `ffmpeg -f null -`：退出码 0、无解码错误。17/17 均真实（非 mock）；其中最后一个当时处于 `RUNNING` 的 job 有已落盘视频但尚未终态，不能据此计作通过镜头。后续快照到 18 镜通过后，新落盘镜头仍待同一验收循环复核。还没有 episode EDL/交付单证据。
+- 05:29 UTC 再读库并全量复核本 Run 已有的 19 个 artifact：19/19 的文件 SHA 同时等于台账 artifact SHA 与 attempt `output_sha256`，字节数一致，均为非 mock H.264 / 1024×576 / 约 24fps，`ffmpeg -f null -` 全部 exit 0 且 stderr 为空。逐镜记录写入 Git 忽略证据 `.local-acceptance/r7/serial_run_artifact_verification_20261107.json`。当时 Run=`RUNNING`、19/64 镜通过、3/6 批次通过、交付 0/4；1 个 ACTIVE lease（`h3:a6191258-5b74-448c-9734-2b1325483386`）、1 个带 provider id 的 `RUNNING` H3 job，其余 series 排队。新提交会推进，当前数字是时间点快照而非终态。
+- 工作台仍由旧进程运行以保护正在执行的 H3 handoff；源码里的 safe resume/read-model 状态修正尚未在该进程中热载入。因此仍观察到 ep-02-b02/ep-04-b01 的 batch 行残留“进行中”，但它们的 series 实际 `QUEUED` 且资源租约只有一条。待当前 series 到安全边界再按官方栈脚本重启，重读真实状态；不要中途杀进程或释放租约。
+
+### 8.3 验证边界
+
+- 全量 `backend/tests` 在首批串行资源修复后跑完，exit 0、1 skip、0 failed（有 Starlette deprecation 与既有 SAWarning）；后续针对 batch queue/read-model 修正重跑 `test_director_long_form_regressions.py` 与 `test_production_series.py`，均 exit 0；最终 read-model 断言版再次跑 `test_director_long_form_regressions.py`，exit 0；Ruff 修改文件全绿。
+- 本机前端 `npm.cmd test -- --run` 150 passed、21 files；`npm.cmd run build` exit 0（仅 Vite >500kB chunk warning）。浏览器验收是实际 UI 点击，不把 API-only 或测试结果冒充 UI 验收。
+- 当前作品仍未完成：后续有 46 个以上 shots 待生成/验证，delivery 0/4；订单 18–20 的旧 MiniMax `external_outcome=UNKNOWN` 不因套餐额度而重发。VLM 正负校准仍未做；`pending_review` 不得写成 accepted。最终每镜 artifact/SHA/ffprobe/decode、EDL 顺序、交付单必须在 Run 结束后再次全量核验。

@@ -31,7 +31,10 @@ from sqlalchemy import select, text
 from shine.comfyops.models import ResourceLease
 from shine.media.delivery_engine import DeliveryBlock, cancel_orders_for_series, enqueue_auto_delivery
 from shine.models import (
+    AuditEvent,
     Job,
+    JobAttempt,
+    MediaArtifact,
     ProductionSeries,
     ProductionSeriesItem,
     Project,
@@ -1015,6 +1018,32 @@ def _after_shot(session_factory, series_id: str, worker_id: str, job_id: str) ->
         _sync_items(db, series)
         series.current_job_id = job_id
         series.state_version += 1
+        job = db.get(Job, job_id)
+        if job is None or job.status != "PASSED" or job.stale:
+            return
+
+        # The run card derives passed shots from the ledger, so its progress
+        # clock must advance when a real shot passes even though its six-shot
+        # batch is still running. Otherwise the UI says "no recent progress"
+        # while the counter visibly increases.
+        from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEvent
+
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.series_id == series.id))
+        run = db.get(ProductionRun, batch.run_id) if batch else None
+        if run is None or run.status not in {"QUEUED", "RUNNING"}:
+            return
+        now = utcnow()
+        run.last_progress_at = now
+        run.state_version += 1
+        db.add(ProductionRunEvent(
+            run_id=run.id,
+            project_id=run.project_id,
+            kind="SHOT_PASSED",
+            message="真实制作镜头已通过生产门禁",
+            payload={"batch_key": batch.batch_key, "series_id": series.id,
+                     "shot_id": job.shot_id, "job_id": job.id},
+            created_at=now,
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -1374,7 +1403,9 @@ def reconcile_abandoned_series(session_factory) -> int:
     return changed
 
 
-def cancel_series_in_session(db, series_id: str, *, reason: str = "SERIES_CANCELLED") -> str:
+def cancel_series_in_session(
+    db, series_id: str, *, reason: str = "SERIES_CANCELLED", actor: str = "user",
+) -> str:
     """Cancel a series inside an open session.
 
     A series that already renders cannot be cancelled by fiat: its external
@@ -1387,6 +1418,10 @@ def cancel_series_in_session(db, series_id: str, *, reason: str = "SERIES_CANCEL
         raise HTTPException(404, "Production series not found")
     if series.status in {"COMPLETED", "FAILED", "CANCELLED"}:
         return series.status
+    from shine.production.runner import _series_has_inflight_work
+
+    if _series_has_inflight_work(db, series):
+        raise HTTPException(409, "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED")
     series.status = "CANCELLED"
     series.failure_code = reason
     series.finished_at = utcnow()
@@ -1397,9 +1432,43 @@ def cancel_series_in_session(db, series_id: str, *, reason: str = "SERIES_CANCEL
             item.failure_code = reason
             # A cancelled item's queued job must not stay claimable: the series
             # owns it, so the ordinary queue would otherwise render it alone.
-            job = db.get(Job, item.job_id) if item.job_id else None
-            if job is not None and job.status == "QUEUED":
-                job.stale = True
+        job = db.get(Job, item.job_id) if item.job_id else None
+        if job is not None and job.status == "QUEUED":
+            job.stale = True
+            # A WAITING reservation has never acquired the GPU. Release it
+            # only when the queued job's ledger proves there was no external
+            # submit intent, attempt, prompt id or persisted artifact. This
+            # clears cancelled pre-submit work from the serial queue without
+            # inferring that any active model was unloaded.
+            lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job.id))
+            submit_intent = db.scalar(select(AuditEvent.id).where(
+                AuditEvent.project_id == series.project_id,
+                AuditEvent.entity_type == "job",
+                AuditEvent.entity_id == job.id,
+                AuditEvent.event_type == "COMFY_SUBMIT_INTENT",
+            ).limit(1))
+            attempt = db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1))
+            artifact = db.scalar(select(MediaArtifact.id).where(MediaArtifact.job_id == job.id).limit(1))
+            not_sent_proven = (
+                lease is not None and lease.status == "WAITING"
+                and job.provider == "comfyui" and not job.lease_owner and not job.lease_expires_at
+                and not job.provider_job_id and not job.artifact_id
+                and attempt is None and artifact is None and submit_intent is None
+            )
+            if not_sent_proven:
+                from shine.comfyops.scheduler import ResourceScheduler
+
+                ResourceScheduler().release(db, lease.id, lease.owner)
+                lease.expires_at = utcnow()
+                from shine.services import add_audit
+
+                add_audit(
+                    db, actor, "RESOURCE_LEASE_RELEASED_PRE_SUBMIT", "resource_lease", lease.id,
+                    {"owner_job_id": job.id, "series_id": series.id,
+                     "external_submission": "NOT_SENT_PROVEN", "attempt_count": 0,
+                     "reason": reason, "gpu_was_acquired": False},
+                    project_id=series.project_id,
+                )
     cancel_orders_for_series(db, series.id)
     return series.status
 

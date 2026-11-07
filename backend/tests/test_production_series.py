@@ -410,8 +410,19 @@ def test_cancelling_a_series_stops_its_unfinished_shots(api):
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
     profile = _register_ref2va_profile(client)
     client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    from shine.comfyops.scheduler import ResourceScheduler
 
-    response = client.post(f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel")
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        assert item.job_id
+        lease = ResourceScheduler().enqueue(db, "h3:" + item.job_id, 16384, True, 100)
+        lease_id = lease.id
+
+    response = client.post(
+        f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel",
+        headers={"x-shine-local-action": "1"},
+    )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "CANCELLED"
     with factory() as db:
@@ -421,6 +432,8 @@ def test_cancelling_a_series_stops_its_unfinished_shots(api):
             )
         ).all()
         assert all(item.status == "CANCELLED" for item in items)
+        lease = db.get(ResourceLease, lease_id)
+        assert lease.status == "RELEASED"
 
 
 def _series_id(factory, project_id) -> str:
@@ -1102,7 +1115,19 @@ def test_a_cancelled_series_keeps_its_outcome(api):
     series = ps.claim_series(factory, "worker-alive")
     assert series is not None
 
-    cancelled = client.post(f"/api/v1/production-series/{series.id}/cancel")
+    refused = client.post(
+        f"/api/v1/production-series/{series.id}/cancel",
+        headers={"x-shine-local-action": "1"},
+    )
+    assert refused.status_code == 409
+
+    with factory.begin() as db:
+        ps._set_series_state(db, series.id, "worker-alive", status="NEEDS_REVIEW",
+                             failure_code="SERIES_INCOMPLETE", finalization_state="RELEASED")
+    cancelled = client.post(
+        f"/api/v1/production-series/{series.id}/cancel",
+        headers={"x-shine-local-action": "1"},
+    )
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["status"] == "CANCELLED"
 

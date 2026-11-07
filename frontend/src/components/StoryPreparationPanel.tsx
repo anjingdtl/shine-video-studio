@@ -12,6 +12,7 @@ type TaskSummary = { stage: string; label: string; done: number; total: number; 
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
   outline: Outline | null; summary?: TaskSummary;
   progress: { stage: string; cursor: number; blocked_subtasks?: { status?: string; reconciliation?: string }[];
+    blocked_result?: { rejections?: { role?: string; task_id?: string; code?: string; external_outcome?: string }[] };
     reconciliation?: { checked_at: string; outcomes: { subtask_id: string | null; outcome: string; last_phase?: string | null }[] };
     results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
 
@@ -144,7 +145,11 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/sections`, json('POST', selectionBody)))}>为所选生产段落生成正式分镜</button>
         {!styleFrozen && <small>正式分镜还需你先确认素材并冻结风格。</small>}
       </>}
-      {tasks.map((task) => <div key={task.task_id} className="material-run">
+      {tasks.map((task) => {
+        const rejection = task.progress.blocked_result?.rejections?.find((item) => item.task_id
+          && ['director', 'editor'].includes(item.role ?? '')
+          && ['AGENT_REQUEST_REPLAY_BLOCKED', 'AGENT_REQUEST_RECONCILIATION_REQUIRED'].includes(item.code ?? ''));
+        return <div key={task.task_id} className="material-run">
         <b>{task.role === 'story_section_run' ? '分步分镜' : '总体大纲'} · {TASK_STATUS_LABELS[task.status] ?? task.status}</b>
         {task.summary && (task.summary.total > 0 || ['QUEUED', 'RUNNING'].includes(task.status)) && <div className="run-progress">
           <div className="run-progress-track"><span style={{ width: `${task.summary.percent}%` }} /></div>
@@ -158,8 +163,15 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         {['QUEUED', 'RUNNING'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/pause`, json('POST', { expected_state_version: task.state_version })))}>暂停任务</button>}
         {['PAUSED', 'FAILED', 'NEEDS_REVIEW'].includes(task.status) && <>
           <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/reconcile`, json('POST', { expected_state_version: task.state_version })))}>核对已有结果</button>
-          <button type="button" disabled={busy || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
-          {!resumable(task.progress.blocked_subtasks) && <small>有子任务可能已经发出、结果未知：只能由你明确重发这一场，系统不会自行重发。</small>}
+          <button type="button" disabled={busy || !!rejection || !resumable(task.progress.blocked_subtasks)} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/resume`, json('POST', { expected_state_version: task.state_version })))}>恢复未完成工作</button>
+          {rejection && <>
+            <small>原 {rejection.role} 调用仍记为 UNKNOWN。明确替代会保留旧记录，并新建一个独立任务身份。</small>
+            <button type="button" className="must-button" disabled={busy} onClick={() => action(() => api(
+              `/projects/${projectId}/story-preparation/tasks/${task.task_id}/replace-unknown`,
+              json('POST', { expected_state_version: task.state_version, subtask_id: rejection.task_id }),
+            ))}>明确替代该角色（保留旧 UNKNOWN）</button>
+          </>}
+          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务可能已经发出、结果未知：先核对或由你明确替代该角色；系统不会自行重发。</small>}
         </>}
         {!['SUCCEEDED', 'CANCELLED'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/cancel`, json('POST', { expected_state_version: task.state_version })))}>取消后续工作</button>}
         {task.progress.results?.map((result, i) => <div key={i}>
@@ -170,7 +182,8 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
             name_prefix: `段落-${result.unit.production_section_id.slice(0, 8)}-${i + 1}`,
           })))}>审阅后应用本单元分镜</button>
         </div>)}
-      </div>)}
+      </div>;
+      })}
       {message && <p role="status">{message}</p>}
     </div>
   </details>;

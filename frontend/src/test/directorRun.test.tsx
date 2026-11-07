@@ -156,6 +156,50 @@ describe('全片生产阶段', () => {
     expect(screen.getByText(/当前是演示体验：后台不会真的开拍/)).toBeInTheDocument();
   });
 
+  it('待人工处理时，用户可从界面尝试安全续跑现有批次，不会新建 Run', async () => {
+    let status = 'NEEDS_REVIEW';
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
+      respond: () => jsonResponse([{ id: 'run-1', status }]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1$/,
+      respond: () => jsonResponse({
+        id: 'run-1', project_id: 'proj-1', package_id: 'package-1', package_revision: 3,
+        manifest_sha256: 'd'.repeat(64), scope_digest: 'c'.repeat(64), status,
+        state_version: 7, control_reason: 'SERIES_EXECUTION_FAILED:HTTPException', blocker_count: 1,
+        scope: { episode_ids: ['ep-01'], all_episodes: true, shot_count: 6 }, counters: {},
+        progress: { required_episode_count: 1, delivered_episode_count: 0, producing_episode_count: 0,
+          blocked_episode_count: 1, batch_count: 1, passed_batch_count: 0, delivered_seconds: 0,
+          passed_shot_count: 0 },
+        created_at: '2026-11-01T00:05:00Z', started_at: '2026-11-01T00:05:01Z',
+        finished_at: null, last_progress_at: new Date().toISOString(), heartbeat_at: null,
+        episodes: [{ id: 're-1', episode_id: 'ep-01', position: 1, title: '第1集', status: 'BLOCKED',
+          shot_count: 6, passed_shot_count: 0, planned_seconds: 30, actual_seconds: null,
+          delivery_order_id: null, delivered_artifact_id: null, delivered_sha256: null,
+          blocker_code: 'SERIES_EXECUTION_FAILED:HTTPException', delivered_at: null,
+          batches: [{ batch_key: 'ep-01-b01', status: 'BLOCKED', series_id: 'series-1',
+            shot_count: 6, failure_code: 'SERIES_EXECUTION_FAILED:HTTPException', dispatched_at: null }] }],
+      }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1\/events$/,
+      respond: () => jsonResponse([]) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/production-runs\/run-1\/resume$/,
+      respond: () => {
+        status = 'RUNNING';
+        return jsonResponse({ id: 'run-1', status }, 202);
+      } });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 5 阶段：视频生产/);
+
+    expect(await screen.findByRole('button', { name: /继续安全可恢复批次/ })).toBeInTheDocument();
+    expect(screen.getByText(/无法证明安全的批次继续保留在待处理状态/)).toBeInTheDocument();
+    expect(stub.callsOf('POST', /\/production-runs\/run-1\/resume$/)).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: /继续安全可恢复批次/ }));
+
+    await waitFor(() => expect(stub.callsOf('POST', /\/production-runs\/run-1\/resume$/)).toHaveLength(1));
+    expect(await screen.findByText('进行中')).toBeInTheDocument();
+    expect(stub.callsOf('POST', /\/projects\/proj-1\/production-runs$/)).toHaveLength(0);
+  });
+
   it('还没有运行时明确说明先确认导演包，而不是假装在跑', async () => {
     const user = userEvent.setup();
     render(<App />);

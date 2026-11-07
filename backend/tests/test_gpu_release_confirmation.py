@@ -29,7 +29,7 @@ def test_release_is_confirmed_when_the_model_is_gone(fake_comfy):
     fake_comfy.comfyui_version = "0.39.0"
     fake_comfy.torch_vram_total = 67108864
     fake_comfy.torch_vram_free = 49017344
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
     client.free_models()
 
 
@@ -38,7 +38,7 @@ def test_release_is_refused_while_a_model_is_resident(fake_comfy):
     fake_comfy.comfyui_version = "0.39.0"
     fake_comfy.torch_vram_total = 20 * 1024 * 1024 * 1024
     fake_comfy.torch_vram_free = 4 * 1024 * 1024 * 1024
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
     with pytest.raises(ComfyUIError):
         client.free_models()
 
@@ -47,7 +47,7 @@ def test_release_is_refused_for_a_loaded_model_with_a_gigabyte_of_live_tensors(f
     fake_comfy.comfyui_version = "0.39.0"
     fake_comfy.torch_vram_total = 20 * 1024 * 1024 * 1024
     fake_comfy.torch_vram_free = 19 * 1024 * 1024 * 1024
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
     with pytest.raises(ComfyUIError):
         client.free_models()
 
@@ -57,7 +57,7 @@ def test_release_is_refused_for_an_older_server_that_still_reserves_torch_memory
     fake_comfy.comfyui_version = "0.38.0"
     fake_comfy.torch_vram_total = 1024
     fake_comfy.torch_vram_free = 0
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
     with pytest.raises(ComfyUIError):
         client.free_models()
     fake_comfy.torch_vram_total = 0
@@ -68,7 +68,7 @@ def test_release_is_refused_when_the_reading_is_unknown(fake_comfy):
     """An unknown memory reading must keep the block, not fake a release."""
     fake_comfy.torch_vram_total = 67108864
     fake_comfy.torch_vram_free = 67108864
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
     fake_comfy.torch_vram_total = None
     fake_comfy.torch_vram_free = None
     with pytest.raises(ComfyUIError):
@@ -114,7 +114,6 @@ def test_unknown_queue_never_initiates_unload(queue):
 def test_unknown_queue_after_unload_never_confirms_release(monkeypatch):
     import httpx
 
-    monkeypatch.setattr("shine.comfy.client.time.sleep", lambda _: None)
     reads = 0
 
     def handle(request):
@@ -126,6 +125,30 @@ def test_unknown_queue_after_unload_never_confirms_release(monkeypatch):
             return httpx.Response(200, json={"devices": [{"torch_vram_total": 0, "torch_vram_free": 0}]})
         return httpx.Response(200, json={})
 
-    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0)
+    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0,
+                           model_release_timeout_s=0.05, model_release_poll_interval_s=0.01)
     with pytest.raises(ComfyUIError, match="MODEL_RELEASE_UNCONFIRMED"):
         client.free_models()
+
+
+def test_release_waits_longer_than_three_seconds_for_confirmed_unload(monkeypatch):
+    import httpx
+
+    clock = [0.0]
+    monkeypatch.setattr("shine.comfy.client.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("shine.comfy.client.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    client = ComfyUIClient(
+        "http://127.0.0.1:1", transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+        max_retries=0, model_release_timeout_s=5, model_release_poll_interval_s=0.25,
+    )
+    monkeypatch.setattr(client, "queue", lambda **_kwargs: {"queue_running": [], "queue_pending": []})
+    monkeypatch.setattr(
+        client, "system_stats",
+        lambda **_kwargs: {"system": {"comfyui_version": "0.39.0"}, "devices": [
+            {"torch_vram_total": 20 * 1024 * 1024 * 1024, "torch_vram_free": 0}
+            if clock[0] < 3.5 else {"torch_vram_total": 0, "torch_vram_free": 0}
+        ]},
+    )
+
+    client.free_models()
+    assert clock[0] >= 3.5

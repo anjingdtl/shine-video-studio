@@ -649,7 +649,7 @@ def _control_route(request: Request, run_id: str, action: str, actor: str, db: D
     if action == "pause":
         status = run_engine.pause_run(factory, run_id, worker_id=actor)
     elif action == "resume":
-        status = run_engine.resume_run(factory, run_id)
+        status = run_engine.resume_run(factory, run_id, actor=actor)
     elif action == "cancel":
         status = run_engine.cancel_run(factory, run_id, actor=actor)
     else:

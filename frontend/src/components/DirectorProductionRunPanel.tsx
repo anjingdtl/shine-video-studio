@@ -413,8 +413,13 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
               disabled={busy !== ''} onClick={() => control('pause')}><Pause size={12} /> 暂停</button>}
             {activeRun.status === 'PAUSED' && <button className="subtle-button"
               disabled={busy !== ''} onClick={() => control('resume')}><Play size={12} /> 继续</button>}
-            {activeRun.status === 'NEEDS_REVIEW' && <button className="secondary-button"
-              disabled={busy !== ''} onClick={() => control('reconcile')}><RefreshCw size={12} /> 核对真实结果</button>}
+            {activeRun.status === 'NEEDS_REVIEW' && <>
+              <button className="secondary-button" disabled={busy !== ''}
+                onClick={() => control('reconcile')}><RefreshCw size={12} /> 核对真实结果</button>
+              <button className="subtle-button" disabled={busy !== ''}
+                title="只恢复服务端能够证明尚未提交到 H3 的批次；其他阻塞保持待处理"
+                onClick={() => control('resume')}><Play size={12} /> 继续安全可恢复批次</button>
+            </>}
             {!['COMPLETED', 'CANCELLED'].includes(activeRun.status) && <button className="subtle-button danger"
               disabled={busy !== ''} onClick={() => control('cancel')}><Square size={12} /> 取消</button>}
           </div>
@@ -429,6 +434,10 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <AlertTriangle size={13} /> 当前原因：{activeRun.control_reason}
           {activeRun.status === 'PAUSED' && '（不会自动恢复，需要你点继续）'}
         </div>}
+
+        {activeRun.status === 'NEEDS_REVIEW' && <p className="run-hint">
+          续跑会逐项验证提交记录、冻结方案和素材身份；无法证明安全的批次继续保留在待处理状态。
+        </p>}
 
         <ol className="run-episodes">
           {(activeRun.episodes ?? []).slice(episodePage * 8, episodePage * 8 + 8).map((episode) => <li key={episode.id}>

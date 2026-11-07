@@ -340,6 +340,7 @@ def test_worker_rejects_changed_bindings_before_provider(prep):
     job = post(client, f"/projects/{project}/jobs", {"shot_id": shot["id"]}, expected=201)
     response = client.put(
         f"/api/v1/shots/{shot['id']}/bindings",
+        headers={"X-Shine-Local-Action": "1"},
         json={
             "bindings": [
                 {"asset_id": row["formal_asset_id"], "use_as": "picture", "ordinal": 0},

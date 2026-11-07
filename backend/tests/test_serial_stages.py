@@ -57,6 +57,48 @@ def test_resource_admission_order_does_not_depend_on_wall_clock(api, monkeypatch
     assert second_epoch["lease_id"] == second_id
 
 
+def test_expired_waiting_reservation_does_not_starve_a_live_serial_stage(api):
+    from datetime import timedelta
+
+    from shine.models import utcnow
+
+    _, factory, _ = api
+    scheduler = ResourceScheduler()
+    with factory.begin() as db:
+        stale = scheduler.enqueue(db, "h3:orphaned-series-job", 16384, True, 100)
+        live = scheduler.enqueue(db, "agent:current-request", 1, True, 10)
+        stale_id, live_id = stale.id, live.id
+        stale.expires_at = utcnow() - timedelta(seconds=1)
+
+    with factory() as db:
+        assert scheduler.admit(db, live_id)
+    with factory() as db:
+        assert db.get(ResourceLease, stale_id).status == "RELEASED"
+        assert db.get(ResourceLease, live_id).status == "ACTIVE"
+
+
+def test_expired_active_lease_still_blocks_until_reconciliation(api):
+    from datetime import timedelta
+
+    from shine.models import utcnow
+
+    _, factory, _ = api
+    scheduler = ResourceScheduler()
+    with factory.begin() as db:
+        active = scheduler.enqueue(db, "h3:expired-active-renderer", 16384, True, 100)
+        waiting = scheduler.enqueue(db, "agent:waiting-stage", 1, True, 10)
+        active_id, waiting_id = active.id, waiting.id
+    with factory() as db:
+        assert scheduler.admit(db, active_id)
+    with factory.begin() as db:
+        db.get(ResourceLease, active_id).expires_at = utcnow() - timedelta(seconds=1)
+    with factory() as db:
+        assert not scheduler.admit(db, waiting_id)
+    with factory() as db:
+        assert db.get(ResourceLease, active_id).status == "RECONCILE_REQUIRED"
+        assert db.get(ResourceLease, waiting_id).status == "WAITING"
+
+
 def test_preflight_and_postflight_release_hold_the_slot(api):
     _, factory, _ = api
     events = []
@@ -74,6 +116,24 @@ def test_preflight_and_postflight_release_hold_the_slot(api):
     assert events == ["released", "inference", "released"]
     with resource_slot(factory, "ASR", 4000):
         pass
+
+
+def test_preflight_release_failure_is_not_retried_and_keeps_reconciliation_block(api):
+    _, factory, _ = api
+    calls = []
+
+    def failed_release():
+        calls.append("release")
+        raise RuntimeError("MODEL_RELEASE_UNCONFIRMED")
+
+    with pytest.raises(RuntimeError, match="MODEL_RELEASE_UNCONFIRMED"):
+        with resource_slot(factory, "VLM", 8000, release_models=failed_release):
+            pytest.fail("Inference must not start while preflight release is unconfirmed")
+
+    assert calls == ["release"]
+    with factory() as db:
+        lease = db.scalar(select(ResourceLease))
+        assert lease.status == "RECONCILE_REQUIRED"
 
 
 def test_expired_stage_lease_requires_reconciliation_even_if_cleanup_succeeds(api):

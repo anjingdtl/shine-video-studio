@@ -300,7 +300,8 @@ def test_unload_ack_is_not_release_proof_without_observed_memory(monkeypatch):
             return httpx.Response(200, json={"devices": [{"torch_vram_total": allocation[0], "torch_vram_free": 0}]})
         return httpx.Response(200, json={})
 
-    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0)
+    client = ComfyUIClient("http://127.0.0.1:1", transport=httpx.MockTransport(handle), max_retries=0,
+                           model_release_timeout_s=0.05, model_release_poll_interval_s=0.01)
     with pytest.raises(ComfyUIError, match="MODEL_RELEASE_UNCONFIRMED"):
         client.free_models()
     allocation[0] = 0

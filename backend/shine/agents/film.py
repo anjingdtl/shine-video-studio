@@ -749,6 +749,10 @@ class FilmAgentDispatcher:
             if (not old or old.project_id != project_id or old.role_id != role or old.status != "ABANDONED"
                     or old.trace.get("local_interruption_verified") is not True
                     or old.trace.get("external_outcome") != "UNKNOWN"
+                    or old.trace.get("is_mock") is not False
+                    or old.trace.get("automatic_replay") is not False
+                    or old.trace.get("received_result_sha256") is not None
+                    or db.scalar(select(AgentArtifact.id).where(AgentArtifact.source_task_id == old.id))
                     or not storyboard_request_sha256
                     or old.trace.get("storyboard_request_sha256") != storyboard_request_sha256
                     or old.trace.get("input_revision_ids") != body.input_revision_ids
@@ -970,13 +974,33 @@ class FilmAgentDispatcher:
                           "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
             raise ValueError(task.error_code) from None
-        except Exception:
+        except Exception as exc:
             db.rollback()
             task = db.get(AgentTaskRecord, task.id)
-            unknown = not task.trace.get("is_mock") and not task.trace.get("received_result_sha256")
-            task.status = "NEEDS_REVIEW" if unknown else "FAILED"
-            task.error_code = "AGENT_CALL_FAILED"
-            task.trace = {**task.trace, "automatic_replay": False,
-                          **({"external_outcome": "UNKNOWN"} if unknown else {})}
+            phase = task.trace.get("phase")
+            # The gateway persists WAITING_RESOURCE before queuing and only
+            # advances to WAITING_PROVIDER after the local resource slot has
+            # been admitted and pre-call release has completed.  A failure
+            # before that durable boundary cannot have reached the provider.
+            pre_request = phase in {None, "PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
+            unknown = (not pre_request and not task.trace.get("is_mock")
+                       and not task.trace.get("received_result_sha256"))
+            if pre_request:
+                detail = getattr(exc, "detail", None)
+                safe_detail = (
+                    detail if isinstance(detail, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", detail) else None
+                )
+                task.status = "REJECTED"
+                task.error_code = "AGENT_PRE_REQUEST_FAILED"
+                task.trace = {**task.trace, "automatic_replay": False,
+                              "diagnostic_category": "pre_request_resource",
+                              "external_outcome": "NOT_SENT",
+                              "rejection_reason_code": task.error_code,
+                              **({"pre_request_error_code": safe_detail} if safe_detail else {})}
+            else:
+                task.status = "NEEDS_REVIEW" if unknown else "FAILED"
+                task.error_code = "AGENT_CALL_FAILED"
+                task.trace = {**task.trace, "automatic_replay": False,
+                              **({"external_outcome": "UNKNOWN"} if unknown else {})}
             db.commit()
-            raise ValueError("AGENT_CALL_FAILED") from None
+            raise ValueError(task.error_code) from None

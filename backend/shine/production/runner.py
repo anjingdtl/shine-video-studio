@@ -29,6 +29,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from shine.comfyops.models import ResourceLease
 from shine.director.contracts import digest_of
 from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
 from shine.director.package import (
@@ -37,7 +38,10 @@ from shine.director.package import (
     package_readiness,
 )
 from shine.models import (
+    AppSetting,
+    AuditEvent,
     Job,
+    JobAttempt,
     MediaArtifact,
     ProductionSeries,
     ProductionSeriesItem,
@@ -335,6 +339,16 @@ def _sync_batch_from_series(db: Session, batch: ProductionRunBatch) -> bool:
             batch.status = "BLOCKED"
             batch.failure_code = series.failure_code or f"SERIES_{series.status}"
             changed = True
+    elif series.status == "QUEUED":
+        # A recovered or abandoned series has no worker claim yet. Keep its
+        # batch in the visible queue instead of leaving a stale RUNNING label
+        # from its previous owner. The run and episode may remain active while
+        # this batch waits for the single series worker.
+        if batch.status != "QUEUED":
+            batch.status = "QUEUED"
+            batch.failure_code = None
+            batch.completed_at = None
+            changed = True
     elif series.status in {"RUNNING", "PAUSE_REQUESTED"}:
         if batch.status != "RUNNING":
             batch.status = "RUNNING"
@@ -395,19 +409,52 @@ def run_owned_passed_jobs(
     return passed
 
 
+def _series_has_unreconciled_submission(db: Session, series: ProductionSeries) -> bool:
+    """Whether an unfinished item still has a possible external H3 request."""
+    items = db.scalars(select(ProductionSeriesItem).where(
+        ProductionSeriesItem.series_id == series.id,
+    )).all()
+    for item in items:
+        if item.status in {"PASSED", "CANCELLED"}:
+            continue
+        job = db.get(Job, item.job_id) if item.job_id else None
+        if job is None:
+            continue
+        if (job.status in INFLIGHT_JOB_STATUSES or job.lease_owner or job.lease_expires_at
+                or job.provider_job_id):
+            return True
+        if db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1)):
+            return True
+        if db.scalar(select(AuditEvent.id).where(
+            AuditEvent.project_id == series.project_id,
+            AuditEvent.entity_type == "job",
+            AuditEvent.entity_id == job.id,
+            AuditEvent.event_type == "COMFY_SUBMIT_INTENT",
+        ).limit(1)):
+            return True
+    return False
+
+
 def _series_has_inflight_work(db: Session, series: ProductionSeries | None) -> bool:
     """Whether external work may still be in flight for this series.
 
     A terminal series is settled.  A running / pause-finishing / reconciling
     series owns live work by definition.  A cancel-requested series whose owner
     is still alive waits for that owner; once the owner is gone it is settled
-    exactly when no submitted job remains.  A queued or paused series may still
-    hold a submitted job; a NEEDS_REVIEW series is only settled once its
-    resources were really released.
+    exactly when no submitted job remains. A NEEDS_REVIEW series with a live
+    renderer or unreconciled submit stays blocked. If it never acquired a
+    renderer and only has queued, attempt-free jobs, it is settled and its
+    WAITING reservations can be retired as NOT_SENT_PROVEN on cancellation.
     """
     if series is None or series.status in {"COMPLETED", "FAILED", "CANCELLED"}:
         return False
     if series.status in {"RUNNING", "PAUSE_REQUESTED", "RECONCILING"}:
+        return True
+    if series.lease_id:
+        lease = db.get(ResourceLease, series.lease_id)
+        if lease is None or lease.status != "RELEASED":
+            return True
+    if series.renderer_identity and series.finalization_state != "RELEASED":
         return True
     if series.status == "CANCEL_REQUESTED":
         owner_alive = bool(
@@ -417,30 +464,12 @@ def _series_has_inflight_work(db: Session, series: ProductionSeries | None) -> b
         )
         if owner_alive:
             return True
-        # The owner is gone; only a still-submitted job keeps it unsettled.
-        for job_id in db.scalars(
-            select(ProductionSeriesItem.job_id).where(
-                ProductionSeriesItem.series_id == series.id,
-                ProductionSeriesItem.job_id.isnot(None),
-            )
-        ).all():
-            job = db.get(Job, job_id)
-            if job is not None and job.status in INFLIGHT_JOB_STATUSES:
-                return True
-        return False
+        return _series_has_unreconciled_submission(db, series)
     if series.status == "NEEDS_REVIEW":
-        return series.finalization_state != "RELEASED"
-    job_ids = db.scalars(
-        select(ProductionSeriesItem.job_id).where(
-            ProductionSeriesItem.series_id == series.id,
-            ProductionSeriesItem.job_id.isnot(None),
-        )
-    ).all()
-    for job_id in job_ids:
-        job = db.get(Job, job_id)
-        if job is not None and job.status in INFLIGHT_JOB_STATUSES:
+        if series.finalization_state not in {"NONE", "RELEASED"}:
             return True
-    return False
+        return _series_has_unreconciled_submission(db, series)
+    return _series_has_unreconciled_submission(db, series)
 
 
 # ---------------------------------------------------------------------------
@@ -881,7 +910,7 @@ def _finalize_cancel(db: Session, run: ProductionRun, *, actor: str = "user") ->
         if _series_has_inflight_work(db, series):
             return  # not settled yet; a later beat finalises
         if series.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
-            cancel_series_in_session(db, series.id, reason="RUN_CANCELLED")
+            cancel_series_in_session(db, series.id, reason="RUN_CANCELLED", actor=actor)
     for episode in _episode_rows(db, run.id):
         if not episode.delivery_order_id:
             continue
@@ -1149,7 +1178,280 @@ def pause_run(session_factory, run_id: str, *, worker_id: str = "user", expected
         return run.status
 
 
-def resume_run(session_factory, run_id: str, *, expected_version: int | None = None) -> str:
+def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: str) -> int:
+    """Reopen only run series whose failed item is proven not to have reached H3.
+
+    This is intentionally narrower than retrying a failed render. A workflow
+    slot rejection before graph preparation can be replaced only after the
+    current shot bindings now fit the run's frozen profile. A series that
+    could not obtain the shared GPU lease can continue only when its first
+    queued job has no attempt. Any graph hash, provider id, acknowledgement,
+    artifact, active lease, or unknown failure keeps the blocker intact.
+    """
+    from shine.comfy.client import ComfyError
+    from shine.comfy.provider import validate_declared_transfer_families, validate_reference_slots
+    from shine.comfyops.models import ResourceLease
+    from shine.models import Asset
+    from shine.schemas import ShotSpec
+    from shine.services import manifest_from_shot_bindings
+
+    recovered = 0
+    package = db.get(DirectorPackageVersion, run.package_id)
+    if package is None or not package_readiness(db, package)["startable"]:
+        return 0
+    pinned_shots = {
+        shot.get("shot_id"): shot
+        for episode in package_episodes(db, package.id)
+        for shot in episode_manifest(episode).get("shots", [])
+    }
+    binding_pin = (package.manifest or {}).get("binding") or {}
+
+    # A superseded request was explicitly proven unsent when its immutable
+    # snapshot was preserved. Its old scheduler reservation must not retain a
+    # place ahead of the replacement forever; WAITING means it never owned the
+    # renderer, so reconciling this reservation has no external side effect.
+    superseded_events = db.scalars(select(AuditEvent).where(
+        AuditEvent.project_id == run.project_id,
+        AuditEvent.event_type == "RUN_JOB_SUPERSEDED_PRE_SUBMIT",
+    )).all()
+    for event in superseded_events:
+        proof = event.payload if isinstance(event.payload, dict) else {}
+        if proof.get("external_submission") != "NOT_SENT_PROVEN" or proof.get("attempt_count") != 0:
+            continue
+        job = db.get(Job, event.entity_id)
+        if (job is None or job.project_id != run.project_id or not job.stale
+                or job.status != "NEEDS_REVIEW" or job.failure_code != "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
+                or job.provider_job_id or job.artifact_id
+                or db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1))):
+            continue
+        lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job.id))
+        if lease is None or lease.status != "WAITING":
+            continue
+        lease.status = "RELEASED"
+        lease.expires_at = utcnow()
+        from shine.services import add_audit
+
+        add_audit(
+            db, actor, "RESOURCE_LEASE_RELEASED_PRE_SUBMIT", "resource_lease", lease.id,
+            {"owner_job_id": job.id, "external_submission": "NOT_SENT_PROVEN",
+             "basis_event_id": event.id},
+            project_id=run.project_id,
+        )
+
+    def current_bindings_are_safe(shot: Shot, profile: WorkflowProfile, manifest) -> bool:
+        """Allow slot recategorization only for the same pinned, locked masters."""
+        if (profile.mode != binding_pin.get("mode")
+                or (profile.parameter_map or {}) != (binding_pin.get("parameter_map") or {})
+                or (profile.media_transfers or {}) != (binding_pin.get("media_transfers") or {})):
+            return False
+        pinned_shot = pinned_shots.get(shot.id)
+        pinned_bindings = {
+            str(row.get("asset_id")): row for row in (pinned_shot or {}).get("bindings", [])
+        }
+        current_assets = {row.asset_id: db.get(Asset, row.asset_id) for row in manifest}
+        if not pinned_bindings or set(pinned_bindings) != set(current_assets) or any(
+            asset is None or not asset.approved or not asset.locked
+            or asset.sha256 != pinned_bindings[asset_id].get("sha256")
+            for asset_id, asset in current_assets.items()
+        ):
+            return False
+        try:
+            validate_reference_slots(profile.parameter_map, manifest)
+            spec = ShotSpec.model_validate(shot.spec)
+            validate_declared_transfer_families(
+                profile.media_transfers or {}, manifest, current_assets, dialogue_free=not bool(spec.dialogue),
+            )
+        except (ComfyError, HTTPException, ValueError):
+            return False
+        return True
+
+    for batch in _batch_rows(db, run.id):
+        if batch.status != "BLOCKED" or not batch.series_id:
+            continue
+        series = db.get(ProductionSeries, batch.series_id)
+        if series is None or series.status != "NEEDS_REVIEW":
+            continue
+        if series.worker_id and series.lease_expires_at and series.lease_expires_at > utcnow():
+            continue
+        if series.lease_id:
+            held = db.get(ResourceLease, series.lease_id)
+            if held is None or held.status != "RELEASED":
+                continue
+        if db.scalar(select(ResourceLease.id).where(
+            ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"]),
+        ).limit(1)):
+            continue
+
+        items = list(db.scalars(
+            select(ProductionSeriesItem)
+            .where(ProductionSeriesItem.series_id == series.id)
+            .order_by(ProductionSeriesItem.position)
+        ).all())
+        if not items:
+            continue
+
+        recovery_kind: str | None = None
+        old_job_id: str | None = None
+        current_item: ProductionSeriesItem | None = None
+        current_job: Job | None = None
+
+        if series.failure_code == "SERIES_EXECUTION_FAILED:HTTPException":
+            blocked = next((item for item in items if item.status == "BLOCKED"), None)
+            job = db.get(Job, blocked.job_id) if blocked and blocked.job_id else None
+            if not blocked or not job or job.provider != "comfyui" or job.status != "NEEDS_REVIEW" \
+                    or job.failure_code != "PENDING_WORKFLOW_MAPPING" or job.artifact_id or job.provider_job_id:
+                continue
+            attempts = list(db.scalars(
+                select(JobAttempt).where(JobAttempt.job_id == job.id).order_by(JobAttempt.attempt_no)
+            ).all())
+            if not attempts or any(
+                attempt.status != "FAILED" or attempt.failure_code != "PENDING_WORKFLOW_MAPPING"
+                or attempt.provider_job_id or attempt.submit_ack_at or attempt.prompt_graph_sha256
+                or attempt.output_sha256 or attempt.output_bytes
+                or db.get(AppSetting, "renderer-activation:" + attempt.id) is not None
+                for attempt in attempts
+            ):
+                continue
+            has_pre_submit_proof = db.scalar(select(AuditEvent.id).where(
+                AuditEvent.project_id == run.project_id,
+                AuditEvent.entity_type == "job",
+                AuditEvent.entity_id == job.id,
+                AuditEvent.event_type == "COMFY_WORKFLOW_MAPPING_PENDING",
+            ).limit(1))
+            submitted = db.scalar(select(AuditEvent.id).where(
+                AuditEvent.project_id == run.project_id,
+                AuditEvent.entity_type == "job",
+                AuditEvent.entity_id == job.id,
+                AuditEvent.event_type == "COMFY_SUBMIT_INTENT",
+            ).limit(1))
+            if not has_pre_submit_proof or submitted or db.scalar(
+                select(MediaArtifact.id).where(MediaArtifact.job_id == job.id).limit(1)
+            ):
+                continue
+
+            shot = db.get(Shot, blocked.shot_id)
+            profile = db.get(WorkflowProfile, series.workflow_profile_id or "")
+            if shot is None or profile is None or job.shot_revision != shot.revision:
+                continue
+            manifest = manifest_from_shot_bindings(db, shot)
+            if not current_bindings_are_safe(shot, profile, manifest):
+                continue
+            previous_manifest = list((job.request or {}).get("reference_manifest") or [])
+            current_manifest = [row.model_dump(mode="json") for row in manifest]
+            if not previous_manifest or digest_of(previous_manifest) == digest_of(current_manifest):
+                continue
+            recovery_kind = "PENDING_WORKFLOW_MAPPING_PROVEN_BEFORE_SUBMIT"
+            old_job_id = job.id
+            current_item = blocked
+            current_job = None
+
+        elif series.failure_code == "SERIES_INCOMPLETE":
+            current_item = next((item for item in items if item.status not in {"PASSED", "CANCELLED"}), None)
+            current_job = db.get(Job, current_item.job_id) if current_item and current_item.job_id else None
+            if not current_item or not current_job or current_job.status != "QUEUED" \
+                    or current_job.provider != "comfyui" or current_job.paused or current_job.stale \
+                    or current_job.artifact_id or current_job.provider_job_id \
+                    or db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == current_job.id).limit(1)):
+                continue
+            waiting = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + current_job.id))
+            if waiting is not None and waiting.status not in {"WAITING", "RELEASED"}:
+                continue
+            shot = db.get(Shot, current_item.shot_id)
+            profile = db.get(WorkflowProfile, series.workflow_profile_id or "")
+            if shot is None or profile is None or current_job.shot_revision != shot.revision:
+                continue
+            manifest = manifest_from_shot_bindings(db, shot)
+            if not current_bindings_are_safe(shot, profile, manifest):
+                continue
+            previous_manifest = list((current_job.request or {}).get("reference_manifest") or [])
+            current_manifest = [row.model_dump(mode="json") for row in manifest]
+            if not previous_manifest:
+                continue
+            if digest_of(previous_manifest) == digest_of(current_manifest):
+                recovery_kind = "QUEUED_JOB_WITHOUT_ATTEMPT"
+            else:
+                # A queued job is an immutable request snapshot. Preserve it as
+                # stale history and let the Worker create a new job from the
+                # current bindings; no attempt means no external submission.
+                current_job.stale = True
+                current_job.failure_code = "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
+                current_job.status = "NEEDS_REVIEW"
+                current_job.state_version += 1
+                recovery_kind = "QUEUED_JOB_REPLACED_PRE_SUBMIT_BINDINGS_CHANGED"
+            old_job_id = current_job.id
+        else:
+            continue
+
+        if recovery_kind in {
+            "PENDING_WORKFLOW_MAPPING_PROVEN_BEFORE_SUBMIT",
+            "QUEUED_JOB_REPLACED_PRE_SUBMIT_BINDINGS_CHANGED",
+        }:
+            # The old failed job and attempt stay as immutable history. The
+            # series creates a new job from the now-correct shot bindings.
+            old_lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + old_job_id))
+            if old_lease is not None and old_lease.status == "WAITING":
+                old_lease.status = "RELEASED"
+                old_lease.expires_at = utcnow()
+                from shine.services import add_audit
+
+                add_audit(
+                    db, actor, "RESOURCE_LEASE_RELEASED_PRE_SUBMIT", "resource_lease", old_lease.id,
+                    {"owner_job_id": old_job_id, "external_submission": "NOT_SENT_PROVEN",
+                     "recovery_kind": recovery_kind},
+                    project_id=run.project_id,
+                )
+            current_item.job_id = None
+            current_item.status = "PENDING"
+            current_item.failure_code = None
+            series.current_item_id = None
+            series.current_job_id = None
+        else:
+            current_item.status = "QUEUED"
+            current_item.failure_code = None
+            series.current_item_id = current_item.id
+            series.current_job_id = current_job.id
+
+        # Safe continuation only reopens durable queue state. The resident
+        # Worker claims one series at a time and alone promotes it to RUNNING
+        # after it owns the series lease.
+        series.status = "QUEUED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.heartbeat_at = None
+        series.lease_id = None
+        series.failure_code = None
+        series.finished_at = None
+        series.control_reason = None
+        series.state_version += 1
+        batch.status = "QUEUED"
+        batch.failure_code = None
+        episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+        if episode is not None:
+            episode.status = "PRODUCING"
+            episode.blocker_code = None
+        from shine.services import add_audit
+
+        add_audit(
+            db, actor, "PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT", "production_series", series.id,
+            {"run_id": run.id, "batch_key": batch.batch_key, "recovery_kind": recovery_kind,
+             "previous_job_id": old_job_id, "external_submission": "NOT_SENT_PROVEN",
+             "old_job_preserved": True},
+            project_id=run.project_id,
+        )
+        if recovery_kind == "QUEUED_JOB_REPLACED_PRE_SUBMIT_BINDINGS_CHANGED":
+            add_audit(
+                db, actor, "RUN_JOB_SUPERSEDED_PRE_SUBMIT", "job", old_job_id,
+                {"series_id": series.id, "replacement_manifest_sha256": digest_of(current_manifest),
+                 "external_submission": "NOT_SENT_PROVEN", "attempt_count": 0,
+                 "job_preserved": True},
+                project_id=run.project_id,
+            )
+        recovered += 1
+    return recovered
+
+
+def resume_run(session_factory, run_id: str, *, actor: str = "user",
+               expected_version: int | None = None) -> str:
     with session_factory.begin() as db:
         run = db.get(ProductionRun, run_id)
         if run is None:
@@ -1158,6 +1460,10 @@ def resume_run(session_factory, run_id: str, *, expected_version: int | None = N
             return "STATE_VERSION_CONFLICT"
         if run.status not in {"PAUSED", "PAUSE_REQUESTED", "NEEDS_REVIEW"}:
             return run.status
+
+        recovered = 0
+        if run.status == "NEEDS_REVIEW":
+            recovered = _resume_safe_pre_submit_series(db, run, actor=actor)
 
         # Re-read what really happened while the run stood still: a blocker
         # that a reconciliation resolved may make the run runnable again.
@@ -1172,10 +1478,12 @@ def resume_run(session_factory, run_id: str, *, expected_version: int | None = N
             batches = _batch_rows(db, run.id)
             still_blocked = (any(episode.status == "BLOCKED" for episode in episodes)
                              or any(batch.status == "BLOCKED" for batch in batches))
-            if still_blocked:
+            if still_blocked and not recovered:
                 return "NEEDS_REVIEW"
             _control(run, "RUNNING", None)
-            _event(db, run, "RUN_RESUMED", "阻塞已解除，恢复生产")
+            message = (f"已核验并恢复 {recovered} 个未提交的制作序列；其他阻塞保持原状"
+                       if still_blocked else "阻塞已解除，恢复生产")
+            _event(db, run, "RUN_RESUMED", message, {"recovered_pre_submit_series": recovered})
             db.flush()
             return run.status
 
@@ -1247,7 +1555,7 @@ def cancel_run(session_factory, run_id: str, *, actor: str = "user", expected_ve
                         series.status = "CANCEL_REQUESTED"
                         series.state_version += 1
             elif series.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
-                cancel_series_in_session(db, series.id, reason="RUN_CANCELLED")
+                cancel_series_in_session(db, series.id, reason="RUN_CANCELLED", actor=actor)
         for episode in _episode_rows(db, run.id):
             if not episode.delivery_order_id:
                 continue
@@ -1440,7 +1748,7 @@ def episode_public(
             "batches": [
                 {
                     "batch_key": batch.batch_key,
-                    "status": batch.status,
+                    "status": _batch_public_status(db, batch),
                     "series_id": batch.series_id,
                     "shot_count": len(batch.shot_ids),
                     "failure_code": batch.failure_code,
@@ -1451,6 +1759,29 @@ def episode_public(
         }
         for episode in episodes
     ]
+
+
+def _batch_public_status(db: Session, batch: ProductionRunBatch) -> str:
+    """Expose the current series state even before a reconciliation beat.
+
+    A requeued series may still have a historical RUNNING batch row until the
+    next worker reconciliation. The read model must not present queued work as
+    concurrently shooting while the single resident worker is busy elsewhere.
+    """
+    if not batch.series_id:
+        return batch.status
+    series = db.get(ProductionSeries, batch.series_id)
+    if series is None:
+        return batch.status
+    if series.status == "QUEUED":
+        return "QUEUED"
+    if series.status in {"RUNNING", "PAUSE_REQUESTED"}:
+        return "RUNNING"
+    if series.status == "COMPLETED":
+        return "PASSED"
+    if series.status in {"FAILED", "CANCELLED", "NEEDS_REVIEW"}:
+        return "BLOCKED"
+    return batch.status
 
 
 def run_public(db: Session, run: ProductionRun, *, include_episodes: bool = True) -> dict[str, Any]:

@@ -31,22 +31,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 import pytest
 from sqlalchemy import select
 
+from shine.comfyops.models import ResourceLease
 from shine.director.contracts import digest_of
 from shine.director.models import DirectorPackageVersion
 from shine.director.package import package_readiness
 from shine.media.delivery_models import DeliveryOrder
-from shine.models import Job, ProductionSeries, Project, WorkflowProfile, utcnow
+from shine.models import (
+    AuditEvent,
+    Job,
+    JobAttempt,
+    ProductionSeries,
+    ProductionSeriesItem,
+    Project,
+    WorkflowProfile,
+    utcnow,
+)
 from shine.production import runner
 from shine.production.episode_delivery import build_episode_edl
-from shine.production.models import ProductionRun, ProductionRunBatch
+from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode, ProductionRunEvent
 from tests.test_director_long_form import (
     LOCAL,
+    PNG,
     _advance,
     _complete_dispatched_series,
     _confirm_package,
     _plan_and_package,
     _seed_passed_job,
     _studio,
+    approve_lock,
+    register_workflow_profile,
+    upload_asset,
 )
 
 
@@ -183,6 +197,37 @@ def test_r5_idle_advance_must_not_change_real_progress_time(api):
     assert first==second, 'No batch or output changed, but the real-progress timestamp advanced'
 
 
+def test_passed_series_shot_updates_run_progress_clock(api):
+    client, factory, settings = api
+    studio, package, run = start(api, shots=1, batch_limit=1)
+    _advance(factory, settings, run["id"])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        job = db.get(Job, item.job_id)
+        series_id, job_id, shot_id = series.id, job.id, job.shot_id
+        series.status = "RUNNING"
+        series.worker_id = "worker-progress-test"
+        job.status = "PASSED"
+        job.stale = False
+        run_row = db.get(ProductionRun, run["id"])
+        previous = utcnow() - timedelta(minutes=5)
+        run_row.last_progress_at = previous
+
+    from shine.comfyops.production_series import _after_shot
+
+    _after_shot(factory, series_id, "worker-progress-test", job_id)
+    with factory() as db:
+        run_row = db.get(ProductionRun, run["id"])
+        event = db.scalars(select(ProductionRunEvent).where(
+            ProductionRunEvent.run_id == run["id"],
+            ProductionRunEvent.kind == "SHOT_PASSED",
+        )).first()
+        assert run_row.last_progress_at is not None and run_row.last_progress_at > previous
+        assert event and event.payload["shot_id"] == shot_id
+
+
 def test_r2_budget_pause_must_propagate_to_queued_series(api):
     client, factory, settings = api
     studio, package, run=start(api,policy={'max_wall_seconds':1})
@@ -233,6 +278,56 @@ def test_r5_cancel_must_wait_for_submitted_job_reconciliation(api):
             'Run is terminal CANCELLED while submitted work remains RUNNING and unreconciled')
 
 
+def test_r5_cancel_releases_only_a_settled_pre_submit_waiting_reservation(api):
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    client, factory, settings = api
+    studio, package, run = start(api, shots=1, batch_limit=1)
+    _advance(factory, settings, run["id"])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+        ))
+        job = db.get(Job, item.job_id)
+        lease = ResourceScheduler().enqueue(db, f"h3:{job.id}", 16384, True, 100)
+        assert job.status == "QUEUED" and not job.provider_job_id and not job.artifact_id
+        assert not job.lease_owner and not job.lease_expires_at
+        assert lease is not None and lease.status == "WAITING"
+        assert not db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1))
+        series_id, item_id, job_id, lease_id = series.id, item.id, job.id, lease.id
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+        series.finalization_state = "NONE"
+        series.lease_id = None
+        series.renderer_identity = None
+
+    with factory() as db:
+        assert not runner._series_has_inflight_work(db, db.get(ProductionSeries, series_id))
+    cancelled = client.post(f"/api/v1/production-runs/{run['id']}/cancel", headers=LOCAL)
+    assert cancelled.status_code == 202, cancelled.text
+    assert cancelled.json()["status"] == "CANCELLED"
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        job = db.get(Job, job_id)
+        lease = db.get(ResourceLease, lease_id)
+        run_row = db.get(ProductionRun, run["id"])
+        release_audit = db.scalar(select(AuditEvent).where(
+            AuditEvent.entity_id == lease.id,
+            AuditEvent.event_type == "RESOURCE_LEASE_RELEASED_PRE_SUBMIT",
+        ))
+        assert run_row.status == "CANCELLED"
+        assert series.status == "CANCELLED"
+        assert item.status == "CANCELLED"
+        assert job.stale is True and job.status == "QUEUED"
+        assert lease.status == "RELEASED"
+        assert release_audit is not None and release_audit.actor == "local-user"
+        assert release_audit.payload["external_submission"] == "NOT_SENT_PROVEN"
+        assert release_audit.payload["gpu_was_acquired"] is False
+
+
 def test_r2_stale_budget_tick_must_not_overwrite_user_cancellation(api):
     client, factory, settings = api
     studio, package, run=start(api,policy={'max_wall_seconds':1})
@@ -266,6 +361,379 @@ def test_r5_resolved_blocker_must_have_supported_resume_path(api):
         row=db.get(ProductionRun,run['id'])
         assert row.status in {'QUEUED','RUNNING'}, (
             'Resolved batch remains stuck in NEEDS_REVIEW after public reconcile/resume')
+
+
+def _mark_pre_submit_mapping_failure(factory, run_id, *, external_identity=False):
+    """Persist the exact ledger shape created by a failed workflow-map check."""
+    with factory.begin() as db:
+        run = db.get(ProductionRun, run_id)
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run_id))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+        ).order_by(ProductionSeriesItem.position))
+        job = db.get(Job, item.job_id)
+        job.status = "NEEDS_REVIEW"
+        job.failure_code = "PENDING_WORKFLOW_MAPPING"
+        item.status = "BLOCKED"
+        item.failure_code = "PENDING_WORKFLOW_MAPPING"
+        batch.status = "BLOCKED"
+        batch.failure_code = "SERIES_EXECUTION_FAILED:HTTPException"
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_EXECUTION_FAILED:HTTPException"
+        series.finalization_state = "RELEASED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.lease_id = None
+        run.status = "NEEDS_REVIEW"
+        run.control_reason = "SERIES_EXECUTION_FAILED:HTTPException"
+        episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+        episode.status = "BLOCKED"
+        episode.blocker_code = "SERIES_EXECUTION_FAILED:HTTPException"
+        attempt = JobAttempt(
+            job_id=job.id,
+            attempt_no=1,
+            request_fingerprint=digest_of(job.request),
+            status="FAILED" if not external_identity else "NEEDS_REVIEW",
+            lease_owner="test-worker",
+            lease_expires_at=utcnow(),
+            failure_code="PENDING_WORKFLOW_MAPPING",
+            provider_job_id="unknown-external-id" if external_identity else None,
+            submit_ack_at=utcnow() if external_identity else None,
+        )
+        db.add(attempt)
+        db.add(AuditEvent(
+            project_id=run.project_id,
+            actor="worker",
+            event_type="COMFY_WORKFLOW_MAPPING_PENDING",
+            entity_type="job",
+            entity_id=job.id,
+            payload={"stage": "prepare", "external_submission": "NOT_SENT_PROVEN"},
+        ))
+        if external_identity:
+            db.add(AuditEvent(
+                project_id=run.project_id,
+                actor="worker",
+                event_type="COMFY_SUBMIT_INTENT",
+                entity_type="job",
+                entity_id=job.id,
+                payload={"external_submission": "UNKNOWN"},
+            ))
+        db.flush()
+        return item.shot_id, item.id, job.id, series.id, attempt.id
+
+
+def _start_subject_picture_mapping_run(api):
+    """Use a declared synthetic profile with two subject and one picture slots."""
+    client, factory, settings = api
+    studio = _studio(client, shots=1)
+    second_subject = upload_asset(
+        client, studio["project"], content=PNG + b"-second", filename="第二角色.png",
+    )
+    approve_lock(client, second_subject["id"])
+    shot_id = studio["shots"][0]["id"]
+    response = client.put(
+        f"/api/v1/shots/{shot_id}/bindings",
+        headers=LOCAL,
+        json={"bindings": [
+            {"asset_id": studio["subject"]["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": second_subject["id"], "use_as": "subject", "role": "CHAR_B", "ordinal": 1},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    studio["second_subject"] = second_subject
+    graph = {
+        "1": {"class_type": "H3BaseSampler", "inputs": {
+            "positive_prompt": "", "seed": 0, "duration": 6.0,
+            "reference_subject_1": "", "reference_subject_2": "", "reference_picture_1": "",
+        }},
+        "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},
+    }
+    parameter_map = {
+        "positive_prompt": "1.inputs.positive_prompt",
+        "seed": "1.inputs.seed",
+        "duration": "1.inputs.duration",
+        "reference_subject_1": "1.inputs.reference_subject_1",
+        "reference_subject_2": "1.inputs.reference_subject_2",
+        "reference_picture_1": "1.inputs.reference_picture_1",
+    }
+    studio["profile"] = register_workflow_profile(
+        client, name="resume-recovery-subject-picture", mode="Ref2VA",
+        graph=graph, parameter_map=parameter_map,
+    )
+    _, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
+    _confirm_package(client, package["id"])
+    response = client.post(
+        f"/api/v1/projects/{studio['project']}/production-runs",
+        json={"package_id": package["id"]}, headers=LOCAL,
+    )
+    assert response.status_code == 201, response.text
+    return studio, package, response.json()
+
+
+def test_reconcile_tracks_queued_series_instead_of_stale_running_batch(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        batch.status = "RUNNING"
+        series.status = "QUEUED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        assert runner._batch_public_status(db, batch) == "QUEUED"
+        episode = runner.episode_public(
+            db, db.get(ProductionRun, run["id"]), runner._episode_rows(db, run["id"]),
+        )[0]
+        assert episode["batches"][0]["status"] == "QUEUED"
+        assert runner._sync_batch_from_series(db, batch)
+        assert batch.status == "QUEUED"
+        assert batch.failure_code is None
+
+    with factory() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        assert batch.status == "QUEUED"
+
+
+def test_resume_recovers_only_proven_pre_submit_mapping_failure_as_local_user(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+    shot_id, item_id, old_job_id, series_id, attempt_id = _mark_pre_submit_mapping_failure(
+        factory, run["id"],
+    )
+
+    response = client.put(
+        f"/api/v1/shots/{shot_id}/bindings",
+        headers=LOCAL,
+        json={"bindings": [
+            {"asset_id": studio["subject"]["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": studio["second_subject"]["id"], "use_as": "picture", "role": "CHAR_B", "ordinal": 1},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+
+    assert runner.resume_run(factory, run["id"], actor="local-user") == "RUNNING"
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        old_job = db.get(Job, old_job_id)
+        attempt = db.get(JobAttempt, attempt_id)
+        events = db.scalars(select(AuditEvent).where(
+            AuditEvent.entity_type == "production_series",
+            AuditEvent.entity_id == series_id,
+            AuditEvent.event_type == "PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT",
+        )).all()
+        binding_audit = db.scalars(select(AuditEvent).where(
+            AuditEvent.entity_type == "shot",
+            AuditEvent.entity_id == shot_id,
+            AuditEvent.event_type == "SHOT_BINDINGS_UPDATED",
+        ).order_by(AuditEvent.created_at.desc())).first()
+        batch = db.scalar(select(ProductionRunBatch).where(
+            ProductionRunBatch.series_id == series_id,
+        ))
+        assert series.status == "QUEUED" and series.failure_code is None
+        assert batch.status == "QUEUED"
+        assert item.status == "PENDING" and item.job_id is None
+        assert old_job.status == "NEEDS_REVIEW" and old_job.failure_code == "PENDING_WORKFLOW_MAPPING"
+        assert attempt.status == "FAILED" and attempt.provider_job_id is None
+        assert events and events[-1].actor == "local-user"
+        assert events[-1].payload["external_submission"] == "NOT_SENT_PROVEN"
+        assert binding_audit and binding_audit.actor == "local-user"
+
+
+def test_resume_does_not_reopen_mapping_failure_with_external_identity(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+    shot_id, item_id, old_job_id, series_id, attempt_id = _mark_pre_submit_mapping_failure(
+        factory, run["id"], external_identity=True,
+    )
+
+    response = client.put(
+        f"/api/v1/shots/{shot_id}/bindings",
+        headers=LOCAL,
+        json={"bindings": [
+            {"asset_id": studio["subject"]["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": studio["second_subject"]["id"], "use_as": "picture", "role": "CHAR_B", "ordinal": 1},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+
+    assert runner.resume_run(factory, run["id"], actor="local-user") == "NEEDS_REVIEW"
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        attempt = db.get(JobAttempt, attempt_id)
+        assert series.status == "NEEDS_REVIEW"
+        assert item.status == "BLOCKED" and item.job_id == old_job_id
+        assert attempt.provider_job_id == "unknown-external-id"
+        assert not db.scalars(select(AuditEvent).where(
+            AuditEvent.entity_type == "production_series",
+            AuditEvent.entity_id == series_id,
+            AuditEvent.event_type == "PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT",
+        )).first()
+
+
+def test_resume_requeues_only_series_incomplete_job_without_attempt(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+        ).order_by(ProductionSeriesItem.position))
+        job = db.get(Job, item.job_id)
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+        series.finalization_state = "RELEASED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.lease_id = None
+        batch.status = "BLOCKED"
+        batch.failure_code = "SERIES_INCOMPLETE"
+        episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+        episode.status = "BLOCKED"
+        episode.blocker_code = "SERIES_INCOMPLETE"
+        db.get(ProductionRun, run["id"]).status = "NEEDS_REVIEW"
+        assert job.status == "QUEUED" and not job.attempts
+        series_id, item_id, job_id = series.id, item.id, job.id
+
+    assert runner.resume_run(factory, run["id"], actor="local-user") == "RUNNING"
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        job = db.get(Job, job_id)
+        event = db.scalars(select(AuditEvent).where(
+            AuditEvent.entity_type == "production_series",
+            AuditEvent.entity_id == series_id,
+            AuditEvent.event_type == "PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT",
+        )).first()
+        assert series.status == "QUEUED" and series.failure_code is None
+        assert db.get(ProductionRunBatch, batch.id).status == "QUEUED"
+        assert item.status == "QUEUED" and item.job_id == job_id
+        assert job.status == "QUEUED" and not job.attempts
+        assert event and event.actor == "local-user"
+        assert event.payload["external_submission"] == "NOT_SENT_PROVEN"
+
+
+def test_resume_supersedes_changed_queued_request_without_attempt(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+        ).order_by(ProductionSeriesItem.position))
+        job = db.get(Job, item.job_id)
+        lease = ResourceLease(
+            owner="h3:" + job.id, budget_mb=16384, exclusive=True, priority=100,
+            status="WAITING", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+        series.finalization_state = "RELEASED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.lease_id = None
+        batch.status = "BLOCKED"
+        batch.failure_code = "SERIES_INCOMPLETE"
+        episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+        episode.status = "BLOCKED"
+        episode.blocker_code = "SERIES_INCOMPLETE"
+        db.get(ProductionRun, run["id"]).status = "NEEDS_REVIEW"
+        shot_id, series_id, item_id, old_job_id = item.shot_id, series.id, item.id, job.id
+        assert job.status == "QUEUED" and not job.attempts
+
+    response = client.put(
+        f"/api/v1/shots/{shot_id}/bindings",
+        headers=LOCAL,
+        json={"bindings": [
+            {"asset_id": studio["subject"]["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": studio["second_subject"]["id"], "use_as": "picture", "role": "CHAR_B", "ordinal": 1},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+
+    assert runner.resume_run(factory, run["id"], actor="local-user") == "RUNNING"
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        item = db.get(ProductionSeriesItem, item_id)
+        old_job = db.get(Job, old_job_id)
+        superseded = db.scalars(select(AuditEvent).where(
+            AuditEvent.entity_type == "job",
+            AuditEvent.entity_id == old_job_id,
+            AuditEvent.event_type == "RUN_JOB_SUPERSEDED_PRE_SUBMIT",
+        )).first()
+        assert series.status == "QUEUED"
+        assert db.get(ProductionRunBatch, batch.id).status == "QUEUED"
+        assert item.status == "PENDING" and item.job_id is None
+        assert old_job.status == "NEEDS_REVIEW" and old_job.stale
+        assert old_job.failure_code == "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
+        assert not old_job.attempts and old_job.artifact_id is None and old_job.provider_job_id is None
+        assert db.get(ResourceLease, lease.id).status == "RELEASED"
+        assert superseded and superseded.actor == "local-user"
+        assert superseded.payload["external_submission"] == "NOT_SENT_PROVEN"
+
+
+def test_resume_releases_prior_proven_superseded_waiting_lease(api):
+    client, factory, settings = api
+    studio, package, run = _start_subject_picture_mapping_run(api)
+    _advance(factory, settings, run["id"])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run["id"]))
+        series = db.get(ProductionSeries, batch.series_id)
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+        ).order_by(ProductionSeriesItem.position))
+        job = db.get(Job, item.job_id)
+        job.status = "NEEDS_REVIEW"
+        job.stale = True
+        job.failure_code = "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
+        lease = ResourceLease(
+            owner="h3:" + job.id, budget_mb=16384, exclusive=True, priority=100,
+            status="WAITING", expires_at=utcnow() + timedelta(seconds=60),
+        )
+        db.add(lease)
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+        series.finalization_state = "RELEASED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.lease_id = None
+        batch.status = "BLOCKED"
+        batch.failure_code = "SERIES_INCOMPLETE"
+        episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+        episode.status = "BLOCKED"
+        episode.blocker_code = "SERIES_INCOMPLETE"
+        db.get(ProductionRun, run["id"]).status = "NEEDS_REVIEW"
+        series_id, job_id = series.id, job.id
+        from shine.services import add_audit
+
+        add_audit(db, "local-user", "RUN_JOB_SUPERSEDED_PRE_SUBMIT", "job", job.id,
+                  {"external_submission": "NOT_SENT_PROVEN", "attempt_count": 0,
+                   "job_preserved": True}, project_id=studio["project"])
+
+    assert runner.resume_run(factory, run["id"], actor="local-user") == "NEEDS_REVIEW"
+    with factory() as db:
+        lease_row = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+        released = db.scalars(select(AuditEvent).where(
+            AuditEvent.project_id == studio["project"],
+            AuditEvent.entity_type == "resource_lease",
+            AuditEvent.entity_id == lease_row.id,
+            AuditEvent.event_type == "RESOURCE_LEASE_RELEASED_PRE_SUBMIT",
+        )).first()
+        assert lease_row.status == "RELEASED"
+        assert released and released.actor == "local-user"
+        assert released.payload["owner_job_id"] == job_id
+        assert db.get(ProductionSeries, series_id).status == "NEEDS_REVIEW"
 
 
 @pytest.mark.parametrize('bad_policy', [

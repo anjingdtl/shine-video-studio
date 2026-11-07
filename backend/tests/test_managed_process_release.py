@@ -41,13 +41,15 @@ def _lease(db, *, owner="h3:job-1", status="ACTIVE"):
 
 
 def _owned(monkeypatch, *, alive=True, owned=True, members=1, port_busy=True):
-    monkeypatch.setattr(release, "process_identity", lambda pid: "12345" if alive else None)
-    monkeypatch.setattr(release, "inspect_named_group", lambda name, pid, birth: owned)
-    monkeypatch.setattr(release, "named_group_active_processes", lambda name: members)
+    physical = {"alive": alive, "owned": owned, "members": members, "port_busy": port_busy}
+    monkeypatch.setattr(release, "process_identity", lambda pid: "12345" if physical["alive"] else None)
+    monkeypatch.setattr(release, "inspect_named_group", lambda name, pid, birth: physical["owned"])
+    monkeypatch.setattr(release, "named_group_active_processes", lambda name: physical["members"])
     monkeypatch.setattr(
         release, "windows_port_listeners",
-        lambda port: [("127.0.0.1", 4242)] if port_busy else [],
+        lambda port: [("127.0.0.1", 4242)] if physical["port_busy"] else [],
     )
+    return physical
 
 
 def test_a_renderer_that_is_provably_gone_is_recorded_stopped_and_its_lease_released(api, monkeypatch):
@@ -88,11 +90,12 @@ def test_a_renderer_that_serves_a_running_attempt_is_never_stopped(api, monkeypa
 
 def test_an_owned_renderer_is_stopped_and_its_lease_released(api, monkeypatch):
     client, factory, _settings = api
-    _owned(monkeypatch)
+    physical = _owned(monkeypatch)
     terminated: list[str] = []
 
     def terminate(name, *, timeout=10):
         terminated.append(name)
+        physical.update(alive=False, members=0, port_busy=False)
         return {"job_name": name, "active_processes": 0, "total_processes": 3}
 
     monkeypatch.setattr(release, "terminate_named_group", terminate)
@@ -141,11 +144,13 @@ def test_the_workbench_reports_the_managed_processes_it_owns(api, monkeypatch):
 
 def test_the_operator_can_release_the_backends_from_the_workbench(api, monkeypatch):
     client, factory, _settings = api
-    _owned(monkeypatch)
-    monkeypatch.setattr(
-        release, "terminate_named_group",
-        lambda name, *, timeout=10: {"job_name": name, "active_processes": 0, "total_processes": 1},
-    )
+    physical = _owned(monkeypatch)
+
+    def terminate(name, *, timeout=10):
+        physical.update(alive=False, members=0, port_busy=False)
+        return {"job_name": name, "active_processes": 0, "total_processes": 1}
+
+    monkeypatch.setattr(release, "terminate_named_group", terminate)
     with factory.begin() as db:
         lease = _lease(db)
         _record(db, lease_id=lease.id)
@@ -334,3 +339,200 @@ def test_stop_image_renderer_on_an_already_stopped_record_repairs_the_row(api):
     assert result["outcome"] == "already_stopped"
     with factory() as db:
         assert db.get(ComfyInstance, "image-inst").status == "STOPPED"
+
+
+def _restarted_handoff_fixture(api, monkeypatch, *, submit_intent=False):
+    from uuid import uuid4
+
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import ComfyInstance
+    from shine.models import AuditEvent, JobAttempt
+    from tests.conftest import create_job, create_project, create_shot, freeze_style
+
+    client, factory, _settings = api
+    project_id = create_project(client, "handoff restart release")
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"])
+    prior_job = create_job(client, project_id, shot["id"])
+    blocked_job = create_job(client, project_id, shot["id"])
+    old_attempt_id = str(uuid4())
+    instance_id = "renderer-restarted"
+    old_lease_id = None
+    new_lease_id = None
+    old_process = {"pid": 4242, "birth": "12345", "job_name": JOB_NAME}
+    restarted_process = {"pid": 4343, "birth": "67890", "job_name": JOB_NAME.replace("a" * 32, "b" * 32)}
+    installation = {"id": "installation-1", "sha256": "c" * 64, "attempt_id": "install-attempt-1"}
+    startup_id = "startup-id-1"
+    current_payload = {
+        "managed": True,
+        "is_mock": False,
+        "url": "http://127.0.0.1:8188",
+        "port": 8188,
+        "process": restarted_process,
+        "startup_id": startup_id,
+        "installation": installation,
+    }
+    restarted_sha256 = graph_hash(current_payload)
+    worker_pid = 7000
+    worker_birth = "worker-birth-1"
+    physical = {"alive": True, "members": 1, "port_busy": True}
+
+    def identity(pid):
+        if pid == restarted_process["pid"]:
+            return restarted_process["birth"] if physical["alive"] else None
+        if pid == old_process["pid"]:
+            return None
+        return None
+
+    monkeypatch.setattr(release, "process_identity", identity)
+    monkeypatch.setattr(release, "inspect_named_group", lambda name, pid, birth: name == restarted_process["job_name"])
+    monkeypatch.setattr(release, "named_group_active_processes", lambda _name: physical["members"])
+    monkeypatch.setattr(release, "windows_port_listeners",
+                        lambda _port: [("127.0.0.1", restarted_process["pid"])] if physical["port_busy"] else [])
+
+    with factory.begin() as db:
+        prior = db.get(Job, prior_job["id"])
+        prior.provider = "comfyui"
+        prior.status = "PASSED"
+        target = db.get(Job, blocked_job["id"])
+        target.provider = "comfyui"
+        target.status = "NEEDS_REVIEW"
+        target.failure_code = "PENDING_WORKFLOW_MAPPING"
+        target.lease_owner = None
+        target.lease_expires_at = None
+        old_lease = _lease(db, owner="h3:" + prior.id, status="RELEASED")
+        new_lease = _lease(db, owner="h3:" + target.id, status="RECONCILE_REQUIRED")
+        old_lease_id, new_lease_id = old_lease.id, new_lease.id
+        db.add(JobAttempt(
+            job_id=target.id,
+            attempt_no=1,
+            request_fingerprint="f" * 64,
+            status="FAILED",
+            failure_code="PENDING_WORKFLOW_MAPPING",
+            lease_owner="worker-1",
+            lease_expires_at=utcnow(),
+        ))
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING",
+            "instance_id": instance_id,
+            "startup_id": startup_id,
+            "lease_id": old_lease.id,
+            "instance_sha256": "d" * 64,
+            "installation": installation,
+            "port": 8188,
+            "process": old_process,
+            "recorded_at": "2026-11-07T00:00:00",
+        }))
+        db.add(ComfyInstance(id=instance_id, payload=current_payload, sha256=restarted_sha256,
+                             status="RUNNING_PENDING_HEALTH"))
+        db.add(AppSetting(key="handoff:" + old_attempt_id, value={
+            "stage": "RESTARTED",
+            "job_id": prior.id,
+            "attempt_id": old_attempt_id,
+            "resource_id": old_lease.id,
+            "instance_id": instance_id,
+            "instance_sha256": "d" * 64,
+            "restarted_instance_sha256": restarted_sha256,
+            "process": old_process,
+            "worker_pid": worker_pid,
+            "worker_birth": worker_birth,
+            "evidence": {
+                "STOPPED": {"pid": old_process["pid"], "active_processes": 0},
+                "RESTARTED": {"process": restarted_process},
+            },
+        }))
+        db.add(AppSetting(key="handoff-reservation:" + target.id, value={
+            "stage": "RECONCILE_REQUIRED",
+            "reason": "MANAGED_RUN_INCOMPLETE",
+            "old_job_id": prior.id,
+            "old_attempt_id": old_attempt_id,
+            "old_lease_id": old_lease.id,
+            "job_id": target.id,
+            "lease_id": new_lease.id,
+            "instance_id": instance_id,
+            "worker_pid": worker_pid,
+            "worker_birth": worker_birth,
+        }))
+        db.add(AuditEvent(project_id=project_id, actor="comfy-worker",
+                          event_type="COMFY_WORKFLOW_MAPPING_PENDING", entity_type="job",
+                          entity_id=target.id, payload={"details": {"reason": "PENDING_WORKFLOW_MAPPING"}}))
+        if submit_intent:
+            db.add(AuditEvent(project_id=project_id, actor="comfy-worker",
+                              event_type="COMFY_SUBMIT_INTENT", entity_type="job",
+                              entity_id=target.id, payload={"prompt_graph_sha256": "a" * 64}))
+    return factory, physical, restarted_process, blocked_job["id"], old_lease_id, new_lease_id
+
+
+def test_handoff_restart_proof_releases_only_the_proven_pre_submit_reservation(api, monkeypatch):
+    from sqlalchemy import select
+
+    from shine.models import AuditEvent
+
+    factory, physical, restarted_process, blocked_job_id, old_lease_id, new_lease_id = (
+        _restarted_handoff_fixture(api, monkeypatch)
+    )
+    terminated = []
+
+    def terminate(name, *, timeout=10):
+        terminated.append(name)
+        physical.update(alive=False, members=0, port_busy=False)
+        return {"job_name": name, "active_processes": 0, "total_processes": 2}
+
+    monkeypatch.setattr(release, "terminate_named_group", terminate)
+    with factory.begin() as db:
+        report = release.release_managed_processes(db, actor="local-user", reason="test")
+    assert terminated == [restarted_process["job_name"]]
+    assert report["refused"] == []
+    assert any(item.get("lease_id") == new_lease_id
+               and item.get("external_submission") == "NOT_SENT_PROVEN" for item in report["released"])
+    with factory() as db:
+        assert db.get(ResourceLease, old_lease_id).status == "RELEASED"
+        assert db.get(ResourceLease, new_lease_id).status == "RELEASED"
+        reservation = db.get(AppSetting, "handoff-reservation:" + blocked_job_id)
+        assert reservation.value["stage"] == "RECONCILE_COMPLETE"
+        assert reservation.value["external_submission"] == "NOT_SENT_PROVEN"
+        assert reservation.value["reconciled_by"] == "local-user"
+        event = db.scalar(select(AuditEvent).where(
+            AuditEvent.entity_id == blocked_job_id,
+            AuditEvent.event_type == "COMFY_HANDOFF_PRE_SUBMIT_LEASE_RELEASED",
+        ))
+        assert event.actor == "local-user"
+
+
+def test_handoff_restart_does_not_release_a_reservation_with_submit_intent(api, monkeypatch):
+    factory, physical, restarted_process, _blocked_job_id, _old_lease_id, new_lease_id = (
+        _restarted_handoff_fixture(api, monkeypatch, submit_intent=True)
+    )
+
+    def terminate(_name, *, timeout=10):
+        physical.update(alive=False, members=0, port_busy=False)
+        return {"job_name": restarted_process["job_name"], "active_processes": 0, "total_processes": 2}
+
+    monkeypatch.setattr(release, "terminate_named_group", terminate)
+    with factory.begin() as db:
+        report = release.release_managed_processes(db, actor="local-user", reason="test")
+    assert report["refused"] == []
+    assert all(item.get("lease_id") != new_lease_id for item in report["released"])
+    with factory() as db:
+        assert db.get(ResourceLease, new_lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_handoff_restart_rebind_refuses_a_changed_installation_pin(api, monkeypatch):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import ComfyInstance
+
+    factory, physical, _restarted_process, _job_id, _old_lease_id, _new_lease_id = (
+        _restarted_handoff_fixture(api, monkeypatch)
+    )
+    with factory.begin() as db:
+        instance = db.get(ComfyInstance, "renderer-restarted")
+        instance.payload = {**instance.payload,
+                            "installation": {**instance.payload["installation"], "sha256": "e" * 64}}
+        instance.sha256 = graph_hash(instance.payload)
+    monkeypatch.setattr(release, "terminate_named_group",
+                        lambda *_args, **_kwargs: pytest.fail("changed installation pin must not be stopped"))
+    with factory.begin() as db:
+        processes = release.describe_managed_processes(db)
+    assert processes[0]["ownership_evidence"] == "startup_record"
+    assert processes[0]["state"] == "UNVERIFIED"
+    assert physical["alive"] is True

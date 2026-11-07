@@ -930,12 +930,13 @@ def create_app(
         return jsonable_encoder(_shot_data(db, shot)["bindings"])
 
     @app.put("/api/v1/shots/{shot_id}/bindings")
-    def replace_bindings(shot_id: str, body: ReplaceBindings, db: DBSession) -> list[dict[str, Any]]:
+    def replace_bindings(shot_id: str, body: ReplaceBindings, actor: Operator,
+                         db: DBSession) -> list[dict[str, Any]]:
         shot = db.get(Shot, shot_id)
         if not shot:
             raise HTTPException(status_code=404, detail="Shot not found")
         project = require_project(db, shot.project_id)
-        set_shot_bindings(db, project, shot, body.bindings)
+        set_shot_bindings(db, project, shot, body.bindings, actor=actor)
         db.commit()
         db.refresh(shot)
         return jsonable_encoder(_shot_data(db, shot)["bindings"])
@@ -1121,14 +1122,14 @@ def create_app(
         return jsonable_encoder(series_public(db, series))
 
     @app.post("/api/v1/production-series/{series_id}/cancel")
-    def cancel_production_series(series_id: str, db: DBSession) -> dict[str, Any]:
+    def cancel_production_series(series_id: str, actor: Operator, db: DBSession) -> dict[str, Any]:
         from shine.comfyops.production_series import cancel_series_in_session, series_public
 
         series = db.get(ProductionSeries, series_id)
         if not series:
             raise HTTPException(status_code=404, detail="Production series not found")
-        cancel_series_in_session(db, series_id)
-        add_audit(db, "user", "PRODUCTION_SERIES_CANCELLED", "production_series", series_id,
+        cancel_series_in_session(db, series_id, actor=actor)
+        add_audit(db, actor, "PRODUCTION_SERIES_CANCELLED", "production_series", series_id,
                   {}, project_id=series.project_id)
         db.commit()
         db.refresh(series)

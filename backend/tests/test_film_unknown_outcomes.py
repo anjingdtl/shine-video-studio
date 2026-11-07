@@ -73,6 +73,40 @@ def test_nonmock_timeout_is_unknown_and_same_request_does_not_call_again(prep, m
     assert len(calls) == 1
 
 
+def test_pre_request_resource_admission_failure_is_not_sent(prep, monkeypatch):  # noqa: F811
+    from fastapi import HTTPException
+
+    client, factory, settings = prep
+    project_id, _, spec, _ = setup_inputs(client)
+    client.app.state.settings = settings
+    profile = client.post("/api/v1/provider-profiles", json={
+        "name": "pre-request-resource-text", "kind": "openai_compatible", "model": "fixture-only",
+        "base_url": "https://text.example/v1", "max_retries": 0,
+    }).json()
+    client.put("/api/v1/agent-routes", json={"role": "qc_reviewer", "provider_profile_id": profile["id"]})
+    calls = []
+
+    def blocked_before_provider(_gateway, _db, _role, *, on_progress=None, **_kwargs):
+        calls.append("resource-slot")
+        on_progress("WAITING_RESOURCE")
+        raise HTTPException(409, detail="GPU_BUSY_RETRY_OR_QUEUE")
+
+    monkeypatch.setattr("shine.llm.gateway.LLMGateway.complete_for_role", blocked_before_provider)
+    response = client.post(f"/api/v1/projects/{project_id}/film-agents/qc_reviewer/run", json={
+        "shot_spec": spec, "allow_remote_text": True,
+    })
+    assert response.status_code == 422
+    with factory() as db:
+        task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.project_id == project_id))
+        assert task.status == "REJECTED"
+        assert task.error_code == "AGENT_PRE_REQUEST_FAILED"
+        assert task.trace["phase"] == "WAITING_RESOURCE"
+        assert task.trace["external_outcome"] == "NOT_SENT"
+        assert task.trace["diagnostic_category"] == "pre_request_resource"
+        assert task.trace["pre_request_error_code"] == "GPU_BUSY_RETRY_OR_QUEUE"
+    assert calls == ["resource-slot"]
+
+
 @pytest.mark.parametrize("damage", [None, "legacy-timeout", "local", "active-lease", "wrong-project", "no-auth",
                                   "expired-grant", "changed-snapshot", "changed-provider", "changed-options",
                                   "media-call-role"])

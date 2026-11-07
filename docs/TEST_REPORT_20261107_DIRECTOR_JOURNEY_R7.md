@@ -62,3 +62,27 @@ R7 代码与 pytest 基线：`bafb241`（第 7 轮改动见 §1）；本次真�
 - 真实远程 MiniMax 调用与真实应用分镜属于本机 API/Worker 集成验证；未知 outcome 不是 mock，也不能视为成功。
 - 没有进行 H3 推理、视频解码、ffprobe、EDL/交付核对。VLM 正负校准仍未做，`pending_review` / 未完成状态保持原样。
 - 订单 18–20 只有在可核对外部 UNKNOWN 的新证据或 `NOT_SENT_PROVEN` 证明出现后，才可继续；目前不得通过改输入另建近似请求绕过。
+
+## 6. 串行模型队列优化与真实 Run 续跑（2026-11-07）
+
+### 自动化回归
+
+| 命令 | 结果 |
+| --- | --- |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（资源修复后、run-batch read-model 小改之前） | **100% 完成，exit 0，1 skipped，0 failed**；Starlette deprecation 与一条既有 SQLAlchemy SAWarning |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_serial_stages.py backend/tests/test_gpu_release_confirmation.py backend/tests/test_comfy_adapter.py backend/tests/test_v13_preparation.py backend/tests/test_production_series.py backend/tests/test_director_long_form_regressions.py -q` | exit 0；覆盖过期 WAITING 回收、ACTIVE reconciliation、异步模型释放确认、safe resume 与 series 回归 |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_director_long_form_regressions.py backend/tests/test_production_series.py -q` | 在恢复队列状态修改后 exit 0 |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_director_long_form_regressions.py -q` | 在最终 read-model 修改后 exit 0；含「series=QUEUED、旧 batch=RUNNING 时 API read model 展示 QUEUED」断言 |
+| `backend\.venv\Scripts\ruff.exe check backend/shine/production/runner.py backend/shine/comfyops/scheduler.py backend/shine/comfy/client.py backend/tests/test_director_long_form_regressions.py backend/tests/test_serial_stages.py backend/tests/test_gpu_release_confirmation.py` | **All checks passed** |
+| `frontend/`：`npm.cmd test -- --run` | **150 passed，21 files** |
+| `frontend/`：`npm.cmd run build` | exit 0；仅 Vite 提示 chunk >500kB |
+
+完整 backend suite 没有在真实 H3 正在跑时再次启动，避免测试过程接触 8188 或打断 renderer；最后两个 runner 状态变更由 targeted regressions 覆盖。当前 live Worker/API 是改动前启动的进程，代码已通过文件级回归，但只有到安全重启边界后才能生效；不为部署代码中断正在执行的外部 H3 job。
+
+### 实际浏览器与 H3 证据
+
+- 内置浏览器 `http://127.0.0.1:5173/#d/run` 对「继续安全可恢复批次」进行真实点击；产品回 toast「已恢复生产」。操作者是所有者授权委托的 `local-user`；数据库 `PRODUCTION_SERIES_RECOVERED_PRE_SUBMIT` 事件记录 actor 与 `external_submission=NOT_SENT_PROVEN`。按钮只恢复有证据未提交的请求，UNKNOWN 不重发。
+- 浏览器刷新时显示 17/64 镜通过、2/6 批次已通过、0/4 集已交付。随后数据库 05:29 UTC 快照为 Run `e2da69c8-5b28-45b4-83e8-102b7c09a997`=`RUNNING`、19/64 shots passed、3/6 batches passed、delivery 0/4。恰有 1 个 ACTIVE H3 lease、1 个 RUNNING H3 job；另有 2 个 series 队列等待。浏览器当时仍把一些 series=QUEUED 的批次显示成「进行中」；原因是运行进程未载入安全恢复/read-model 修复，不能据此声称 UI 阻塞已全部修完。
+- 05:29 UTC `.local-acceptance/r7/serial_run_artifact_verification_20261107.json`：本 Run 已落盘的 19 个 artifact 全部重算 sha256，和 artifact/attempt SHA 一致，bytes 一致，非 mock；`ffprobe` 全为 H.264/1024×576/约24fps，19 次 `ffmpeg -f null -` 均 exit 0 且 stderr 空。仍未交付任何集，尚无 EDL/交付单的最终验收证据。
+- MiniMax quota 不影响外部请求状态定义。早先停在 `WAITING_RESOURCE` 的调用可证明尚未触发 provider；三条真实 `WAITING_PROVIDER` 超时仍是 `UNKNOWN`，本轮没有重发这些调用。
+- 当前结果是**真实多镜串行制作正在推进，不是全片完成**。目标仍要求最终 64 镜逐项 artifact/SHA/ffprobe/decode、EDL 顺序、episode delivery 与 UI 完成态全部实证；`pending_review` 仍不能写成 `accepted`。VLM 正负校准尚未完成。

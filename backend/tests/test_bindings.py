@@ -11,6 +11,8 @@ from tests.conftest import (
     upload_asset,
 )
 
+LOCAL = {"X-Shine-Local-Action": "1"}
+
 
 def test_each_shot_keeps_its_own_binding_and_job_manifest(studio):
     client, _factory, _root, _settings = studio
@@ -145,6 +147,7 @@ def test_binding_rejects_cross_project_duplicate_and_media_mismatch(studio):
     shot = create_shot(client, first, first_style["id"])
     response = client.put(
         f"/api/v1/shots/{shot['id']}/bindings",
+        headers=LOCAL,
         json={"bindings": [{"asset_id": foreign["id"], "use_as": "picture"}]},
     )
     assert response.status_code == 422
@@ -153,6 +156,7 @@ def test_binding_rejects_cross_project_duplicate_and_media_mismatch(studio):
     approve_lock(client, local["id"])
     duplicate = client.put(
         f"/api/v1/shots/{shot['id']}/bindings",
+        headers=LOCAL,
         json={
             "bindings": [
                 {"asset_id": local["id"], "use_as": "picture"},
@@ -173,6 +177,7 @@ def test_binding_rejects_cross_project_duplicate_and_media_mismatch(studio):
     approve_lock(client, audio["id"])
     mismatch = client.put(
         f"/api/v1/shots/{shot['id']}/bindings",
+        headers=LOCAL,
         json={"bindings": [{"asset_id": audio["id"], "use_as": "picture"}]},
     )
     assert mismatch.status_code == 422
@@ -190,6 +195,7 @@ def test_binding_count_limits_are_enforced(studio):
         ids.append(asset["id"])
     response = client.put(
         f"/api/v1/shots/{shot['id']}/bindings",
+        headers=LOCAL,
         json={
             "bindings": [
                 {"asset_id": asset_id, "use_as": "picture", "ordinal": index}

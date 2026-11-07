@@ -192,7 +192,19 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         The request may have been sent.  The block stays; only an explicit
         user replacement may create a new call, and the old row survives.
     """
-    blocked = list((row.trace or {}).get("blocked_subtasks") or [])
+    trace = row.trace or {}
+    blocked = list(trace.get("blocked_subtasks") or [])
+    if not blocked:
+        # Section runs persist film-agent failures under blocked_result rather
+        # than blocked_subtasks.  Reconcile those durable task ids through the
+        # same proof rules so a pre-request resource failure is not mistaken
+        # for a provider response that may have been lost.
+        rejections = (trace.get("blocked_result") or {}).get("rejections") or []
+        blocked = [
+            {"task_id": item["task_id"], "role": item.get("role"), "code": item.get("code")}
+            for item in rejections
+            if isinstance(item, dict) and isinstance(item.get("task_id"), str) and item["task_id"]
+        ]
     resolved: list[dict] = []
     outcomes: list[dict] = []
     for entry in blocked:
@@ -482,6 +494,7 @@ def _run_section(factory, settings, gateway, task_id, version, worker_id, projec
             text=document.text[unit["start_offset"]:unit["end_offset"]],
             locked_story_facts=state["locked_facts"], allow_remote_text=True,
             start_role=state.get("failed_role"), resume_steps=state.get("resume_steps", {}),
+            replace_interrupted_task_id=state.get("replace_interrupted_task_id"),
             production_context={"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                 "production_section_id": unit["production_section_id"], "source_offsets": unit,
                 "story_line": outline.payload_json.get("story_line", []),
@@ -492,6 +505,9 @@ def _run_section(factory, settings, gateway, task_id, version, worker_id, projec
                 "previous_render_status": "PENDING_SERVER_VERIFICATION"},
             consent_document_id=document.id, consent_document_sha256=document.sha256,
         ), SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings))), db, gateway)
+    # The authorization is one-shot. The Film dispatcher has its own durable
+    # receipt; do not carry the parent's authorization into a later role.
+    state["replace_interrupted_task_id"] = None
     if result["status"] != "PROPOSED":
         # The existing chain returns its own successful role artifacts. Resume
         # from the failed role only; unknown tasks retain the chain's guard.
