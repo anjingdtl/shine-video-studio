@@ -59,10 +59,26 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                 "scripts_total": len(scripts),
             })
     master_ref = plan.payload_json["source_master"] if plan else {"document_id": None, "sha256": None}
+    pending_bible = pipeline.latest_unconfirmed(db, project_id, pipeline.BIBLE_KIND)
+    pending_scripts = []
+    for volume in volumes:
+        for entry in volume.get("scripts", []):
+            script = pipeline.latest_unconfirmed_by_section(db, project_id, entry["section_id"])
+            if script is not None:
+                pending_scripts.append({
+                    "volume_id": volume["volume_id"],
+                    "section_id": entry["section_id"],
+                    "artifact_id": script.id, "sha256": script.sha256,
+                    "scene_key": entry["scene_key"], "title": entry["title"],
+                    "text": (script.payload_json or {}).get("text", ""),
+                })
     return {
         "master": master_ref,
         "volume_plan_confirmed": plan is not None,
         "bible_confirmed": bible is not None,
+        "pending_bible": ({"artifact_id": pending_bible.id, "sha256": pending_bible.sha256}
+                          if pending_bible else None),
+        "pending_scripts": pending_scripts,
         "volumes": volumes,
     }
 

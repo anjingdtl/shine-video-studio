@@ -948,6 +948,23 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
     return False
 
 
+def latest_unconfirmed_by_section(db, project_id: str, section_id: str) -> AgentArtifact | None:
+    """The newest unconfirmed SceneScript of one section."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == SCENE_SCRIPT_KIND).order_by(AgentArtifact.created_at.desc())).all()
+    return next((r for r in rows if not r.approved_at
+                 and r.payload_json.get("section_id") == section_id), None)
+
+
+def latest_unconfirmed(db, project_id: str, kind: str) -> AgentArtifact | None:
+    """The newest artifact of a kind that still waits for a person."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == kind).order_by(AgentArtifact.created_at.desc())).all()
+    return next((r for r in rows if not r.approved_at), None)
+
+
 def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
     """The volume's confirmed scripts, serialized in section order.
 
