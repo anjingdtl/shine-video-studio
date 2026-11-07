@@ -917,4 +917,13 @@ def select_outline_revision(db, project_id, outline):
         pointer.value = {"artifact_id": outline.id, "sha256": outline.sha256}
     else:
         db.add(AppSetting(key=key, value={"artifact_id": outline.id, "sha256": outline.sha256}))
+    # A document-scoped pointer records the same revision per source document,
+    # so a per-volume pipeline resolves its own outline without the
+    # project-level pointer colliding across volumes.  The project-level
+    # pointer stays authoritative for the existing single-document flow.
+    document_id = outline.payload_json.get("document_id")
+    if document_id:
+        doc_key = f"current-story-outline:{project_id}:{document_id}"
+        db.merge(AppSetting(key=doc_key,
+                            value={"artifact_id": outline.id, "sha256": outline.sha256}))
     return sorted(changed)
