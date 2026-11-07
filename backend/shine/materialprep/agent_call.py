@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from shine.llm.base import LLMError
+from shine.llm.output_budget import truncated_output, usage_summary
 
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window."""
@@ -196,6 +197,7 @@ def call_material_agent(
     contract,
     on_progress=None,
     before_call=None,
+    task_category: str = "default",
 ) -> AgentCallOutcome:
     """Ask one role for one contract, correcting at most once.
 
@@ -221,6 +223,7 @@ def call_material_agent(
                     user=user_payload,
                     schema=schema,
                     on_progress=on_progress,
+                    task_category=task_category,
                 )
         finally:
             # The anchor is the call's completion, so the gap to the next call
@@ -236,7 +239,8 @@ def call_material_agent(
             error_code=exc.code,
             uncertain=uncertain,
             details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
-                     "response_status": exc.details.get("status")},
+                     "response_status": exc.details.get("status"),
+                     "truncated": truncated_output(exc)},
         )
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
         # The request may already have reached the provider, so the outcome is
@@ -249,7 +253,10 @@ def call_material_agent(
 
     try:
         contract.model_validate(response.parsed)
-        return AgentCallOutcome(parsed=response.parsed)
+        return AgentCallOutcome(parsed=response.parsed, details={
+            "usage": usage_summary(response.usage),
+            "output_budget": (response.raw_meta or {}).get("output_budget"),
+        })
     except ValidationError as exc:
         errors = [
             {"field": ".".join(str(part) for part in error.get("loc", ())), "type": error.get("type")}
