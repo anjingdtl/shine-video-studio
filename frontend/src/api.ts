@@ -629,3 +629,76 @@ export type DeploymentRecommendation = {
 export const getDeploymentRecommendation = (reuseInstalled = true) =>
   api<DeploymentRecommendation>('/setup/deployment-recommendations',
     json('POST', { reuse_installed: reuseInstalled }));
+
+// ============ 四阶段流水线（AI 编导） ============
+export interface PipelineVolumeScriptEntry {
+  section_id: string;
+  scene_key: string;
+  title: string | null;
+  confirmed: boolean;
+}
+
+export interface PipelineVolume {
+  volume_id: string;
+  order: number;
+  title: string;
+  char_count: number | null;
+  outline_confirmed: boolean;
+  scripts: PipelineVolumeScriptEntry[];
+  scripts_confirmed: number;
+  scripts_total: number;
+}
+
+export interface PipelineOverview {
+  master: { document_id: string | null; sha256: string | null };
+  volume_plan_confirmed: boolean;
+  bible_confirmed: boolean;
+  pending_bible: { artifact_id: string; sha256: string } | null;
+  pending_scripts: Array<{
+    volume_id: string; section_id: string; artifact_id: string; sha256: string;
+    scene_key: string; title: string | null; text: string;
+  }>;
+  volumes: PipelineVolume[];
+}
+
+export const getPipelineOverview = (projectId: string) =>
+  api<PipelineOverview>(`${API}/projects/${projectId}/pipeline`);
+
+export const importPipelineSource = (projectId: string, documentId: string, expectedHash: string) =>
+  api<{ volume_plan_id: string; sha256: string; volumes: unknown[]; coverage: { complete: boolean } }>(
+    `${API}/projects/${projectId}/pipeline/sources`,
+    json('POST', { document_id: documentId, expected_document_hash: expectedHash }));
+
+export const confirmVolumePlan = (projectId: string, artifactId: string, sha256: string) =>
+  api<{ confirmed: boolean; sha256: string; volume_documents: string[] }>(
+    `${API}/projects/${projectId}/pipeline/volume-plans/${artifactId}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+export const queueVolumeOutline = (projectId: string, volumeId: string) =>
+  api<{ task_id: string }>(`${API}/projects/${projectId}/pipeline/volumes/${volumeId}/outline`, json('POST', {}));
+
+export const queueBible = (projectId: string) =>
+  api<{ task_id: string }>(`${API}/projects/${projectId}/pipeline/bible`, json('POST', {}));
+
+export const confirmBible = (projectId: string, artifactId: string, sha256: string) =>
+  api<{ confirmed: boolean; sha256: string }>(
+    `${API}/projects/${projectId}/pipeline/bibles/${artifactId}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+export const queueVolumeScripts = (projectId: string, volumeId: string) =>
+  api<{ queued: number; task_ids: string[] }>(
+    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/scripts`, json('POST', {}));
+
+export const confirmSceneScript = (projectId: string, artifactId: string, sha256: string) =>
+  api<{ confirmed: boolean; sha256: string }>(
+    `${API}/projects/${projectId}/pipeline/scene-scripts/${artifactId}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+export const editSceneScript = (projectId: string, artifactId: string, text: string, note = '') =>
+  api<{ artifact_id: string; sha256: string; confirmed: boolean }>(
+    `${API}/projects/${projectId}/pipeline/scene-scripts/${artifactId}/edit`,
+    json('POST', { text, note }));
+
+export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
+  api<{ status: string; record: { camera_artifact_id: string | null }; steps: Record<string, unknown>; next?: unknown }>(
+    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`, json('POST', {}));
