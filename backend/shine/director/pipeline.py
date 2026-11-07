@@ -39,7 +39,9 @@ PIPELINE_VERSION = "four-stage-pipeline-v1"
 POINTER_PREFIX = "four-stage-pointer:"
 
 HEADING_RE = re.compile(
-    r"^\s*(第[0-9一二三四五六七八九十百千零两]+[章节回卷幕]|CHAPTER\s+\d+|Chapter\s+\d+|SCENE\s+\d+|Scene\s+\d+|INT\.|EXT\.|场景[0-9一二三四五六七八九十]+)\s*$"
+    r"^\s*(第[0-9一二三四五六七八九十百千零两]+[章节回卷幕]"
+    r"|CHAPTER\s+\d+|Chapter\s+\d+|SCENE\s+\d+|Scene\s+\d+"
+    r"|INT\.|EXT\.|场景[0-9一二三四五六七八九十]+)\s*$"
 )
 VOLUME_MARKER_RE = re.compile(r"^\s*(第[0-9一二三四五六七八九十百千零两]+卷)\s*$")
 
@@ -565,7 +567,8 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             system=(
                 "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
                 "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
-                "开放问题与结局方向。只输出 JSON。"
+                "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
+                "其余字段用中文。只输出 JSON。"
             ),
             context=context,
             schema=schema,
@@ -943,3 +946,214 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
                                   "NEEDS_REVIEW", str(exc.detail))
             return True
     return False
+
+
+def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
+    """The volume's confirmed scripts, serialized in section order.
+
+    This text is what the crew chain reads: it is a deterministic projection
+    of the confirmed SceneScripts, and its sha256 is recorded with every
+    draft so a later script edit is detectable.
+    """
+
+    outline = _volume_outline(db, project_id, volume_id)
+    if outline is None:
+        raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
+    doc = _volume_document(db, project_id, volume_id)
+    if doc is None:
+        raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
+    sections = outline.payload_json.get("production_sections") or []
+    parts = []
+    for section in sections:
+        script = current_scene_script(db, project_id, volume_id, section["production_section_id"])
+        if script is None:
+            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section["production_section_id"])
+        title = section.get("title", "")
+        body_text = script.payload_json.get("text", "")
+        parts.append(f"第{section.get('order', '?')}场 {title}\n{body_text}")
+    return "\n\n".join(parts)
+
+
+def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None) -> dict:
+    """Run the crew chain in draft mode over the volume's confirmed scripts.
+
+    The chain runs on the serialized script text (inline mode); the draft
+    flag lets it proceed without a frozen style or approved masters, and the
+    volume linkage travels in the task trace so the handoff can find the
+    receipts.
+    """
+    from types import SimpleNamespace
+
+    from shine.api_film import StoryboardRequest, generate_storyboard
+
+    script_text = serialize_volume_script(db, project_id, volume_id)
+    bible = current_bible(db, project_id)
+    if bible is None:
+        raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
+    master_doc_id = None
+    plan = current_volume_plan(db, project_id)
+    if plan:
+        master_doc_id = plan.payload_json["source_master"]["document_id"]
+    master = db.get(ProjectDocument, master_doc_id) if master_doc_id else None
+    result = generate_storyboard(
+        project_id,
+        StoryboardRequest(
+            text=script_text,
+            draft=True,
+            locked_story_facts=list(bible.payload_json.get("locked_facts", []))[:100],
+            allow_remote_text=True,
+            consent_document_id=master.id if master else None,
+            consent_document_sha256=master.sha256 if master else None,
+        ),
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(data_dir=data_dir)))),
+        db,
+        gateway,
+    )
+    return result
+
+
+def record_storyboard_draft(db, project_id: str, volume_id: str, result: dict, script_text: str = "") -> dict:
+    """Record the draft chain result for the handoff to find receipts."""
+    camera = (result.get("steps") or {}).get("cinematographer") or {}
+    record = {
+        "camera_artifact_id": camera.get("artifact_id"),
+        "camera_sha256": camera.get("sha256"),
+        "script_sha256": digest(script_text),
+        "status": result.get("status"),
+        "missing_characters": result.get("missing_characters", []),
+        "recorded_at": utcnow().isoformat() + "Z",
+    }
+    from shine.models import AppSetting
+
+    key = f"four-stage-storyboard:{project_id}:{volume_id}"
+    db.merge(AppSetting(key=key, value=record))
+    return record
+
+
+
+
+
+def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_id: str) -> dict:
+    """Publish the volume to the existing production machinery.
+
+    Guards: confirmed plan + bible + outline + every script + every scene's
+    storyboard applied.  Builds the scoped shots-mode episode plan, confirms
+    it, builds the volume-scoped package, confirms it and records the
+    FourStageVolumeHandoff artifact.  Nothing here bypasses the existing
+    package/run admission checks.
+    """
+    from shine.director.contracts import EpisodePlanPayload
+    from shine.director.models import DirectorEpisodePlan
+    from shine.director.package import build_package, confirm_package, package_readiness
+    from shine.models import Project, Shot
+    plan = current_volume_plan(db, project_id)
+    if plan is None:
+        raise ValueError("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
+    bible = current_bible(db, project_id)
+    if bible is None:
+        raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
+    outline = _volume_outline(db, project_id, volume_id)
+    if outline is None:
+        raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
+    project = db.get(Project, project_id)
+    if not project.frozen_style_version_id:
+        raise ValueError("STYLE_NOT_FROZEN")
+    volume = next((v for v in plan.payload_json["volumes"] if v["volume_id"] == volume_id), None)
+    if volume is None:
+        raise ValueError("PIPELINE_VOLUME_NOT_IN_PLAN")
+    record = _read_pointer(db, f"four-stage-storyboard:{project_id}:{volume_id}")
+    if record is None or not record.get("camera_artifact_id"):
+        raise ValueError("PIPELINE_STORYBOARD_NOT_GENERATED")
+    from shine.models import AppSetting as _AS
+    receipt = db.get(_AS, f"film-apply:{record['camera_artifact_id']}")
+    if receipt is None:
+        raise ValueError("PIPELINE_STORYBOARD_NOT_APPLIED")
+    shot_ids = [str(s) for s in receipt.value.get("shot_ids", [])]
+    if not shot_ids:
+        raise ValueError("PIPELINE_STORYBOARD_APPLIED_EMPTY")
+    shots = db.scalars(select(Shot).where(Shot.id.in_(shot_ids))).all()
+    if len(shots) != len(shot_ids):
+        raise ValueError("PIPELINE_STORYBOARD_SHOTS_MISSING")
+    script_now = digest(serialize_volume_script(db, project_id, volume_id))
+    if record.get("script_sha256") and record["script_sha256"] != script_now:
+        raise ValueError("PIPELINE_SCRIPT_CHANGED_SINCE_STORYBOARD")
+    episodes: list[dict] = []
+    current: dict = {"episode_id": f"{volume_id}-e1", "order": 1, "title": "第1集",
+                     "shot_ids": [], "planned_seconds": 0.0}
+    for shot in shots:
+        duration = float(shot.spec.get("duration_target_s") or 0)
+        if current["planned_seconds"] + duration > 75.0 and current["shot_ids"]:
+            episodes.append(current)
+            next_order = len(episodes) + 1
+            current = {"episode_id": f"{volume_id}-e{next_order}", "order": next_order,
+                       "title": f"第{next_order}集", "shot_ids": [], "planned_seconds": 0.0}
+        current["shot_ids"].append(shot.id)
+        current["planned_seconds"] += duration
+    if current["shot_ids"]:
+        episodes.append(current)
+    payload = {
+        "schema_version": "1.0",
+        "mode": "shots",
+        "target_seconds": 60,
+        "tolerance_seconds": 15,
+        "episodes": episodes,
+        "allowed_repeats": [],
+        "source": {"volume_id": volume_id, "kind": "four_stage_volume",
+                   "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+                   "camera_artifact_id": record["camera_artifact_id"]},
+    }
+    payload = EpisodePlanPayload.model_validate(payload)
+    scope = set(shot_ids)
+    planned = payload.shot_order()
+    problems = []
+    if sorted(planned) != sorted(scope):
+        problems.append("VOLUME_SHOTS_NOT_COVERED_EXACTLY")
+    if len(planned) != len(set(planned)):
+        problems.append("VOLUME_SHOT_COVERED_TWICE")
+    if problems:
+        raise ValueError("PIPELINE_VOLUME_PLAN_SCOPE_INVALID:" + ",".join(problems)[:400])
+    previous = db.scalars(
+        select(DirectorEpisodePlan).where(DirectorEpisodePlan.project_id == project_id)).all()
+    version = max((r.version for r in previous), default=0) + 1
+    plan_row = DirectorEpisodePlan(
+        project_id=project_id, version=version, status="DRAFT",
+        target_seconds=payload.target_seconds, tolerance_seconds=payload.tolerance_seconds,
+        payload=payload.model_dump(mode="json"),
+        sha256=digest(payload.model_dump(mode="json")),
+        source="four_stage_volume", created_by="local-user",
+    )
+    db.add(plan_row)
+    db.flush()
+    plan_row.status = "CONFIRMED"
+    plan_row.confirmed_by = "local-user"
+    plan_row.confirmed_at = utcnow()
+    volume_shot_ids = shot_ids
+    package = build_package(db, project, workflow_profile_id=workflow_profile_id,
+                            plan=plan_row, scope_shot_ids=volume_shot_ids)
+    confirm_package(db, package, actor="local-user")
+    handoff_payload = {
+        "schema_version": "1.0",
+        "volume_id": volume_id, "volume_order": volume["order"],
+        "episode_plan_version": plan_row.version, "episode_plan_sha256": plan_row.sha256,
+        "package_revision": package.revision, "package_id": package.id,
+        "package_manifest_sha256": package.manifest_sha256,
+        "camera_artifact_id": record["camera_artifact_id"],
+        "script_sha256": script_now,
+        "shot_count": len(shot_ids),
+        "episode_count": len(episodes),
+    }
+    task_id = _authoring_task(db, project_id, "four_stage_handoff", {"volume": volume_id})
+    artifact = AgentArtifact(
+        project_id=project_id, kind="FourStageVolumeHandoff", schema_version="1.0",
+        payload_json=handoff_payload, sha256=digest(handoff_payload),
+        producer_role="four_stage_handoff", source_task_id=task_id,
+        input_revision_ids=[outline.id],
+    )
+    db.add(artifact)
+    db.flush()
+    add_audit(db, "local-user", "PIPELINE_VOLUME_HANDOFF", "agent_artifact", artifact.id,
+              {"volume_id": volume_id, "package": package.revision}, project_id=project_id)
+    readiness = package_readiness(db, package)
+    return {"handoff_id": artifact.id, "plan_version": plan_row.version,
+            "package_revision": package.revision, "package_id": package.id,
+            "readiness": readiness, "episodes": len(episodes), "shots": len(shot_ids)}

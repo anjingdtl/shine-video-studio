@@ -6,6 +6,8 @@ script starts unconfirmed; the volume plan covers the master completely.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from shine.director import pipeline
@@ -216,7 +218,7 @@ def test_scene_script_runs_confirms_and_edits(api):
             "schema_version": "1.0", "mainline": "渔村少年的成长",
             "characters": [{"name": "德明", "identity": "渔民之子", "arc_summary": "成长"}],
             "world": "渔村", "timeline": ["出海"], "foreshadowing": [],
-            "locked_facts": ["德明是渔民之子"], "open_questions": [], "ending_direction": "归航",
+            "locked_facts": ["Deming is a fisherman's son"], "open_questions": [], "ending_direction": "Homecoming",
         }
         task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {"fixture": True})
         bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
@@ -250,3 +252,90 @@ def test_scene_script_runs_confirms_and_edits(api):
         assert edited.approved_at is None
     with factory() as db:
         assert pipeline.current_scene_script(db, pid, volume_id, artifact.payload_json["section_id"]) is None
+
+
+def test_volume_storyboard_draft_and_handoff(api):
+    """The full volume path: scripts -> draft chain -> apply -> handoff."""
+    from tests.conftest import register_workflow_profile
+    from tests.test_film_crew import prepare as crew_prepare
+    client, factory, settings = api
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    pid, _style, _profile = crew_prepare(client)  # it creates its own project
+    assets = client.get(f"/api/v1/projects/{pid}/assets").json()
+    lin = next(a for a in assets if a["role"] == "character" and a["entity_id"] == "Lin")
+    register_workflow_profile(client)
+    text = "第一章 出海\nLin 在码头等待。德明出海了。\n第二章 归来\nLin 转身望向门口。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+    with factory.begin() as db:
+        volume_doc = pipeline._volume_document(db, pid, plan.payload_json["volumes"][0]["volume_id"])
+        _outline_artifact(db, pid, volume_doc, _sections_for(volume_doc.text))
+        bible_payload = {
+            "schema_version": "1.0", "mainline": "渔村少年成长为船长",
+            "characters": [{"name": "Lin", "identity": "守港人", "arc_summary": "等待与重逢"}],
+            "world": "渔村", "timeline": ["出海", "归来"], "foreshadowing": [],
+            "locked_facts": ["Lin is the keeper of the harbour"], "open_questions": [], "ending_direction": "Reunion",
+        }
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bible_payload, sha256=digest(bible_payload),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    with factory() as db:
+        gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_scene_responder("Lin：你来了。"))
+        tasks = pipeline.queue_scene_scripts(db, pid, plan.payload_json["volumes"][0]["volume_id"], gw)
+        db.commit()
+        assert len(tasks) == 2
+    for _ in range(6):
+        if not pipeline.run_pending_pipeline_task(factory, settings, "w1", gw):
+            break
+    with factory() as db:
+        from sqlalchemy import select as _sel
+        rows = db.scalars(_sel(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE)).all()
+        assert all(r.status == "SUCCEEDED" for r in rows), [r.trace for r in rows]
+        for r in rows:
+            artifact = db.get(AgentArtifact, r.trace["artifact_id"])
+            pipeline.confirm_scene_script(db, pid, artifact.id, artifact.sha256)
+        db.commit()
+    from tests.test_storyboard import _responder as chain_responder_factory
+    original_responder = chain_responder_factory({"lin_asset": lin["id"]})
+
+    def chain_responder(messages, schema):
+        value = original_responder(messages, schema)
+        if schema.get("title") == "ScriptBreakdown":
+            context = __import__("json").JSONDecoder().raw_decode(messages[1].content)[0]
+            value["locked_story_facts"] = context.get("locked_story_facts", [])
+        return value
+
+    client.app.state.mock_llm_responder = chain_responder
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    draft = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/storyboard-draft", json={})
+    assert draft.status_code == 201, draft.text
+    body = draft.json()
+    assert body["status"] == "PROPOSED", json.dumps(body.get("rejections") or body, ensure_ascii=False)[:600]
+    record = body["record"]
+    assert record["camera_artifact_id"]
+    apply_info = (body.get("next") or {}).get("apply_camera") or {}
+    assert apply_info.get("camera_artifact_id"), body
+    applied = client.post(
+        f"/api/v1/projects/{pid}/film-artifacts/{apply_info['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": apply_info["continuity_artifact_id"]}, headers=LOCAL,
+    )
+    assert applied.status_code == 200, applied.text
+    profile = register_workflow_profile(client)
+    handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
+                          json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
+    assert handoff.status_code == 201, handoff.text
+    body = handoff.json()
+    assert body["readiness"]["startable"] is True, body
+    assert body["shots"] >= 1
+    assert body["episodes"] >= 1
