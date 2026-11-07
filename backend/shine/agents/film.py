@@ -552,6 +552,7 @@ class FilmAgentDispatcher:
         body: FilmRunRequest,
         *,
         storyboard_request_sha256: str | None = None,
+        draft: bool = False,
         repair_visual_language: bool = False,
         replace_interrupted_task_id: str | None = None,
         repair_director: bool = False,
@@ -560,7 +561,7 @@ class FilmAgentDispatcher:
             raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
         contract, required = FilmAgentRegistry.get(role, body.tool)
         project = require_project(db, project_id)
-        if body.tool != "style_proposal" and not project.frozen_style_version_id:
+        if body.tool != "style_proposal" and not project.frozen_style_version_id and not draft:
             raise ValueError("STYLE_NOT_FROZEN")
         registry = H3RulebookRegistry(self.data_dir / "h3-source-cache" if self.data_dir else None)
         cache_state = registry.cache_status() if self.data_dir else []
@@ -586,6 +587,16 @@ class FilmAgentDispatcher:
         if profile.kind != "mock" and not is_loopback_url(profile.base_url) and not body.allow_remote_text:
             raise ValueError("REMOTE_AGENT_CONSENT_REQUIRED")
         style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
+        if draft and style is None and project.style_draft:
+            # The draft lane substitutes the person's saved style draft as the
+            # camera-language template; the frozen bible stays untouched.
+            from types import SimpleNamespace
+
+            from shine.schemas import StyleBible
+
+            style = SimpleNamespace(
+                snapshot=StyleBible.model_validate(project.style_draft).model_dump(mode="json"),
+                sha256=None)
         if role == "qc_reviewer":
             if (body.shot_spec is None or not style or body.input_revision_ids
                     or body.shot_spec.style_version_id != style.id):
