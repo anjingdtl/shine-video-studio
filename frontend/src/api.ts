@@ -644,8 +644,9 @@ export interface PipelineVolume {
   title: string;
   char_count: number | null;
   outline_confirmed: boolean;
-  latest_outline: { artifact_id: string; sha256: string; questions: string[];
-                    questions_sha256: string | null } | null;
+  latest_outline: {
+    artifact_id: string; sha256: string; questions: string[]; questions_sha256: string | null;
+  } | null;
   scripts: PipelineVolumeScriptEntry[];
   scripts_confirmed: number;
   scripts_total: number;
@@ -664,52 +665,54 @@ export interface PipelineOverview {
 }
 
 export const getPipelineOverview = (projectId: string) =>
-  api<PipelineOverview>(`${API}/projects/${projectId}/pipeline`);
+  api<PipelineOverview>(`/projects/${projectId}/pipeline`);
 
 export const importPipelineSource = (projectId: string, documentId: string, expectedHash: string) =>
   api<{ volume_plan_id: string; sha256: string; volumes: unknown[]; coverage: { complete: boolean } }>(
-    `${API}/projects/${projectId}/pipeline/sources`,
+    `/projects/${projectId}/pipeline/sources`,
     json('POST', { document_id: documentId, expected_document_hash: expectedHash }));
 
 export const confirmVolumePlan = (projectId: string, artifactId: string, sha256: string) =>
   api<{ confirmed: boolean; sha256: string; volume_documents: string[] }>(
-    `${API}/projects/${projectId}/pipeline/volume-plans/${artifactId}/confirm`,
+    `/projects/${projectId}/pipeline/volume-plans/${artifactId}/confirm`,
     json('POST', { expected_sha256: sha256 }));
 
 export const queueVolumeOutline = (projectId: string, volumeId: string) =>
-  api<{ task_id: string }>(`${API}/projects/${projectId}/pipeline/volumes/${volumeId}/outline`, json('POST', {}));
+  api<{ task_id: string }>(
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/outline`, json('POST', {}));
 
 export const queueBible = (projectId: string) =>
-  api<{ task_id: string }>(`${API}/projects/${projectId}/pipeline/bible`, json('POST', {}));
+  api<{ task_id: string }>(`/projects/${projectId}/pipeline/bible`, json('POST', {}));
 
 export const confirmBible = (projectId: string, artifactId: string, sha256: string) =>
   api<{ confirmed: boolean; sha256: string }>(
-    `${API}/projects/${projectId}/pipeline/bibles/${artifactId}/confirm`,
+    `/projects/${projectId}/pipeline/bibles/${artifactId}/confirm`,
     json('POST', { expected_sha256: sha256 }));
 
 export const queueVolumeScripts = (projectId: string, volumeId: string) =>
   api<{ queued: number; task_ids: string[] }>(
-    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/scripts`, json('POST', {}));
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/scripts`, json('POST', {}));
 
 export const confirmSceneScript = (projectId: string, artifactId: string, sha256: string) =>
   api<{ confirmed: boolean; sha256: string }>(
-    `${API}/projects/${projectId}/pipeline/scene-scripts/${artifactId}/confirm`,
+    `/projects/${projectId}/pipeline/scene-scripts/${artifactId}/confirm`,
     json('POST', { expected_sha256: sha256 }));
 
 export const editSceneScript = (projectId: string, artifactId: string, text: string, note = '') =>
   api<{ artifact_id: string; sha256: string; confirmed: boolean }>(
-    `${API}/projects/${projectId}/pipeline/scene-scripts/${artifactId}/edit`,
+    `/projects/${projectId}/pipeline/scene-scripts/${artifactId}/edit`,
     json('POST', { text, note }));
 
 export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
-  api<{ status: string; record: { camera_artifact_id: string | null }; steps: Record<string, unknown>; next?: unknown }>(
-    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`, json('POST', {}));
+  api<{ status: string; record: { camera_artifact_id: string | null };
+        steps: Record<string, unknown>; next?: unknown }>(
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`, json('POST', {}));
 
 export const confirmVolumeOutline = (
     projectId: string, volumeId: string, outlineArtifactId: string, sha256: string,
     questionsSha256: string | null) =>
   api<{ approved: boolean; invalidated_section_ids: string[] }>(
-    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/outline-confirm`,
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/outline-confirm`,
     json('POST', { outline_artifact_id: outlineArtifactId, expected_sha256: sha256,
                    acknowledge_questions_sha256: questionsSha256 }));
 
@@ -722,6 +725,6 @@ export const requestVolumeHandoff = (
         package_id: string; readiness: { ready: boolean; startable: boolean;
         blockers: Array<{ code: string; message?: string }> };
         episodes: number; shots: number }>(
-    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`,
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`,
     json('POST', { workflow_profile_id: workflowProfileId,
                    acknowledge_scene_coverage: options.acknowledgeSceneCoverage ?? false }));
