@@ -29,6 +29,8 @@
 - `frontend/src/App.tsx` 的冲突合并保留了 Assets 路由、Director 七阶段和指定导演包深链。对抗检查修复了重复的 hashchange 监听，并补回程回归，确保素材中心往返不会丢失 `package=<id>`。
 - 复核了 Worker 顺序：真实 H3 series/队列先行；全局图片和声音共用原队列及排他 ResourceLease，每个 Worker tick 最多推进一项；ComfyUI 释放仍要求空队列和 `/system_stats` 的显存确认，声音阶段在 TTS、ASR、对齐之间要求 provider 确认释放。UNKNOWN 外部提交仍须对账，不自动重发。
 - 迁移 head 未变化，仍为单 head `f180b0030001`；新 main 没有引入与素材中心冲突的数据库迁移。
+- 最新整合 head `1e36b983` 的 GitHub Linux 后端套件结束为 1,882 passed、138 skipped、13 failed，用时 45:13。日志里两个 Director TypeScript 合同测试因后端 job 未安装 `frontend/node_modules/typescript` 而无法启动；本地在依赖已存在时重跑该文件为 10 passed、2 failed，两个失败到达 `LOCAL_EXECUTION_NOT_ENABLED`，这是 API 明确的 Windows 本机执行门禁。其余失败均为主机资格或 Windows-only 路径，未修改这些安全门禁。
+- 已修订 `.github/workflows/ci.yml`：Linux 和 Windows 后端 job 都在 pytest 前设置 Node 20 并执行锁定的 `npm ci --prefix frontend`，让上述合同测试能够真正加载发布的 TypeScript 服务。该修订只补足测试依赖，不改变运行时判断或断言。最新 head 的 Windows job 当时仍运行中；本次整合不将其记为通过，也没有等待后续 GitHub CI。
 
 ### 合并前复测记录
 
@@ -37,13 +39,14 @@
 | 后端全量 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests --tb=short` | exit 1：1,872 passed、138 skipped、23 failed，用时 39:03。9 项是远端新增安装器崩溃测试的子进程未从 `backend/` 导入 `shine`；其余 14 项是下方列出的 Linux/Windows、显式本机执行、磁盘条件限制。 |
 | 安装器反例回归修复后复跑 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_v13_adversarial.py -q --tb=short` | exit 0：31 项全通过。修复是为测试子进程显式设置 `cwd=BACKEND_ROOT`，八个崩溃窗口现已实际进入恢复代码；断言未放宽。 |
 | Renderer 平台门禁复核 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_image_managed_renderer.py::test_an_unmanaged_instance_is_refused -q --tb=short` | exit 1，预期平台限制：Linux 返回 `IMAGE_RENDERER_WINDOWS_ONLY`，Windows 专属用例期待检查 managed-instance 条件；未跳过或削弱该保护。 |
+| Director setup TypeScript 合同（本地 Linux） | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_director_setup_contract.py -q --tb=short` | exit 1：10 passed、2 failed。TypeScript bridge 已正常加载；两项需要 `SHINE_ENABLE_LOCAL_EXECUTION` 的 Director 流程仍由 Linux 的 Windows-only API 门禁拒绝。 |
 | Ruff | `backend/.venv/bin/ruff check backend/shine backend/alembic backend/tests` | exit 0：All checks passed。 |
 | Alembic head | `backend/.venv/bin/alembic -c backend/alembic.ini heads` | exit 0：唯一 head `f180b0030001`。 |
 | 新库与旧库迁移 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_alembic.py backend/tests/test_migrations_windows.py -q --tb=short` | exit 0：8 项通过。 |
 | 前端 | `npm test -- --run`（`frontend/`） | exit 0：28 个文件、190 项通过。 |
 | TypeScript / 生产构建 | `npx tsc --noEmit`；`npm run build`（`frontend/`） | 均 exit 0；主包 761.36 kB（gzip 236.28 kB），仍有 Vite 的 500 kB 提示。 |
 
-全量后端套件是在修复上述测试子进程工作目录之前完成；修复后已完整重跑受影响的 `test_v13_adversarial.py` 文件（31 项通过）。当前整合头的 Windows 全量 CI 将对最终代码再执行完整套件。Linux 剩余 14 个失败分别是：4 项要求 Windows 主机资格、2 项要求 `SHINE_ENABLE_LOCAL_EXECUTION`、1 项因云端磁盘不足、1 项明确要求 Windows renderer、6 项 Windows-only service validation。云端没有更改这些原有门禁。
+全量后端套件是在修复上述测试子进程工作目录之前完成；修复后已完整重跑受影响的 `test_v13_adversarial.py` 文件（31 项通过）。Linux 当前仍有 Windows 主机资格、Windows renderer / service validation 和 `SHINE_ENABLE_LOCAL_EXECUTION` 的主机限制；云端没有更改这些原有门禁。Windows 的最终全量验证未记为通过，GPU/RTX 5080 与 ComfyUI 实测仍为 `NOT_RUN`。
 
 ## 图片与声音能力矩阵
 
