@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, HelpCircle, History, LockKeyhole, LockOpen, Sparkles } from 'lucide-react';
-import { api, json, type Style, type StyleVersion } from '../api';
+import { api, json, type DirectorStylePreview, type DirectorStyleProfile, type DirectorStyleSummary, type Style, type StyleVersion } from '../api';
 import { styleFields } from '../constants';
 import {
   matchStyleOption, presetForStyle, styleCatalogHash, STYLE_CATALOG_VERSION,
@@ -17,8 +17,8 @@ type Props = {
   currentStyle?: StyleVersion;
   styles: StyleVersion[];
   busy: boolean;
-  onSave: () => void;
-  onFreeze: () => void;
+  onSave: (preserveDirectorStyle?: boolean) => void;
+  onFreeze: (preserveDirectorStyle?: boolean) => void;
   onDraftApplied: () => void;
   onNavigate: (id: string) => void;
   onMessage: (text: string, kind?: 'success' | 'error') => void;
@@ -69,6 +69,15 @@ export default function StylePanel({
   const [aiProposal, setAiProposal] = useState<{
     artifactId: string; suggestion: Style; rationale: string; fromHistory: boolean;
   } | null>(null);
+  const [directorStyles, setDirectorStyles] = useState<DirectorStyleProfile[] | null>(null);
+  const [directorState, setDirectorState] = useState<{
+    draft_sha256: string; draft_source: DirectorStyleSummary | null; frozen_source: DirectorStyleSummary | null;
+  } | null>(null);
+  const [selectedDirectorId, setSelectedDirectorId] = useState('');
+  const [directorStrength, setDirectorStrength] = useState<'subtle' | 'balanced' | 'strong'>('balanced');
+  const [directorPreview, setDirectorPreview] = useState<DirectorStylePreview | null>(null);
+  const [directorBusy, setDirectorBusy] = useState(false);
+  const [directorError, setDirectorError] = useState('');
   const freshProposalRef = useRef(false);
 
   useEffect(() => {
@@ -87,6 +96,21 @@ export default function StylePanel({
     api<{ packs: Array<{ id: string }> }>('/h3-rulebook')
       .then((row) => { if (alive) setRulepacks(row.packs); })
       .catch(() => { if (alive) setRulepacks([]); });
+    api<DirectorStyleProfile[]>('/director-styles')
+      .then((rows) => { if (alive) setDirectorStyles(rows); })
+      .catch((error) => { if (alive) { setDirectorStyles([]); setDirectorError(String((error as Error).message)); } });
+    api<{
+      draft_sha256: string; draft_source: DirectorStyleSummary | null; frozen_source: DirectorStyleSummary | null;
+    }>(`/projects/${projectId}/director-style`)
+      .then((row) => {
+        if (!alive) return;
+        setDirectorState(row);
+        if (row.draft_source) {
+          setSelectedDirectorId(row.draft_source.profile_id);
+          setDirectorStrength(row.draft_source.strength);
+        }
+      })
+      .catch(() => { if (alive) setDirectorState(null); });
     api<ArtifactRow[]>(`/projects/${projectId}/film-artifacts`)
       .then((rows) => {
         if (!alive || freshProposalRef.current) return;
@@ -107,6 +131,9 @@ export default function StylePanel({
   // draft change to be meaningful.
   const canFreeze = allSevenFilled;
   const canSave = allSevenFilled && styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''));
+  const strengthLabel = (strength: DirectorStyleSummary['strength']) => ({
+    subtle: '轻', balanced: '均衡', strong: '鲜明',
+  })[strength];
   const diffRows = aiProposal
     ? styleFields.map(([field, label]) => ({ field, label, current: style[field], suggested: aiProposal.suggestion[field] ?? '' }))
     : [];
@@ -117,6 +144,8 @@ export default function StylePanel({
     const hasEdits = styleFields.some(([field]) => String(style[field] ?? '').trim() && style[field] !== preset.values[field]);
     if (hasEdits && !window.confirm('当前草稿已有自定义修改，选择整套预设会覆盖这些修改。继续吗？')) return;
     setStyle(() => ({ ...preset.values }));
+    setSelectedDirectorId('');
+    setDirectorPreview(null);
     setCustomFields(new Set());
     setAiProposal(null);
     onMessage(`已套用整套风格「${preset.label}」，确认无误后保存或冻结。`);
@@ -167,6 +196,9 @@ export default function StylePanel({
     setAdoptBusy(true);
     try {
       await api(`/projects/${projectId}/film-artifacts/${aiProposal.artifactId}/style-draft`, json('POST', { base_style: serverDraft }));
+      setSelectedDirectorId('');
+      setDirectorPreview(null);
+      setDirectorState((state) => state ? { ...state, draft_source: null } : state);
       onMessage('已采纳到草稿（仅草稿；冻结是单独的确认步骤）。');
       setAiProposal(null);
       onDraftApplied();
@@ -200,7 +232,59 @@ export default function StylePanel({
       if (!bound) return;
       onMessage('官方规则包已绑定，正在冻结风格…');
     }
-    onFreeze();
+    onFreeze(Boolean(selectedDirectorId));
+  }
+
+  async function previewDirectorStyle() {
+    const profile = directorStyles?.find((row) => row.id === selectedDirectorId);
+    if (!profile || directorBusy) return;
+    setDirectorBusy(true);
+    setDirectorError('');
+    setDirectorPreview(null);
+    try {
+      const result = await api<DirectorStylePreview>(`/projects/${projectId}/director-style/preview`, json('POST', {
+        profile_id: profile.id,
+        profile_version: profile.version,
+        profile_sha256: profile.sha256,
+        strength: directorStrength,
+        ...(allSevenFilled ? { compare_style: style } : {}),
+      }));
+      setDirectorPreview(result);
+    } catch (error) {
+      setDirectorError(String((error as Error).message));
+    } finally {
+      setDirectorBusy(false);
+    }
+  }
+
+  async function applyDirectorStyle() {
+    const profile = directorPreview?.profile;
+    if (!profile || !directorState || directorBusy) return;
+    setDirectorBusy(true);
+    setDirectorError('');
+    try {
+      const current = await api<{
+        draft_sha256: string; draft_source: DirectorStyleSummary | null; frozen_source: DirectorStyleSummary | null;
+      }>(`/projects/${projectId}/director-style`);
+      const result = await api<{
+        style_draft: Style; draft_sha256: string; draft_source: DirectorStyleSummary | null;
+      }>(`/projects/${projectId}/director-style/apply-draft`, json('POST', {
+        profile_id: profile.id,
+        profile_version: profile.version,
+        profile_sha256: profile.sha256,
+        strength: directorStrength,
+        expected_draft_sha256: current.draft_sha256,
+      }));
+      setStyle(() => result.style_draft);
+      setDirectorState((state) => state ? { ...state, draft_sha256: result.draft_sha256, draft_source: result.draft_source } : state);
+      setCustomFields(new Set());
+      onMessage(`已采用「${profile.name_zh}」到草稿；请检查七维内容后单独确认冻结。`);
+      onDraftApplied();
+    } catch (error) {
+      setDirectorError(String((error as Error).message));
+    } finally {
+      setDirectorBusy(false);
+    }
   }
 
   return (
@@ -239,6 +323,65 @@ export default function StylePanel({
         <p className="style-preset-summary">
           {matchedPreset ? matchedPreset.summary : '当前为自定义内容；可选一套整套风格作为起点，或在下方逐项调整。'}
         </p>
+      </div>
+
+      <div className="director-style-picker" aria-label="导演风格模板">
+        <div className="director-style-picker-heading">
+          <div><b>导演风格</b><span>服务端模板 · 预览后采用到草稿</span></div>
+          {directorState?.frozen_source && <small>
+            当前冻结：{directorStyles?.find((row) => row.id === directorState.frozen_source?.profile_id)?.name_zh ?? '历史导演风格'}
+            · {strengthLabel(directorState.frozen_source.strength)}
+          </small>}
+        </div>
+        <div className="director-style-controls">
+          <label>选择模板
+            <select
+              aria-label="选择导演风格模板"
+              value={selectedDirectorId}
+              onChange={(event) => { setSelectedDirectorId(event.target.value); setDirectorPreview(null); setDirectorError(''); }}
+              disabled={busy || directorBusy || directorStyles === null}
+            >
+              <option value="">选择一套导演风格…</option>
+              {(directorStyles ?? []).map((profile) => <option key={profile.id} value={profile.id} disabled={profile.availability !== 'available'}>
+                {profile.name_zh}{profile.availability !== 'available' ? '（暂不可选）' : ''}
+              </option>)}
+            </select>
+          </label>
+          <label>风格强度
+            <select aria-label="风格强度" value={directorStrength} onChange={(event) => {
+              setDirectorStrength(event.target.value as typeof directorStrength);
+              setDirectorPreview(null);
+            }} disabled={busy || directorBusy}>
+              <option value="subtle">轻</option><option value="balanced">均衡</option><option value="strong">鲜明</option>
+            </select>
+          </label>
+          <button type="button" className="secondary-button" disabled={!selectedDirectorId || directorBusy} onClick={previewDirectorStyle}>
+            {directorBusy && !directorPreview ? '正在预览…' : '预览差异'}
+          </button>
+        </div>
+        {selectedDirectorId && directorStyles?.find((row) => row.id === selectedDirectorId) && (
+          <p className="director-style-summary">{directorStyles.find((row) => row.id === selectedDirectorId)?.summary_zh}</p>
+        )}
+        {directorStyles?.length === 0 && !directorError && <p className="director-style-note">服务端目录暂时没有可用模板；通用预设和历史自定义风格仍可使用。</p>}
+        {directorError && <p className="error-line" role="alert">导演风格操作失败：{directorError}。请刷新模板后重新预览。</p>}
+        {directorPreview && <div className="director-style-preview">
+          <div className="director-style-meta">{directorPreview.profile.name_zh} · 已选 {directorPreview.resolution.selected_technique_ids.length} 项适用技法</div>
+          <table className="style-diff">
+            <thead><tr><th>风格维度</th><th>当前</th><th>采用后</th></tr></thead>
+            <tbody>{directorPreview.diff.map((row) => {
+              const label = styleFields.find(([field]) => field === row.field)?.[1] ?? row.field;
+              return <tr key={row.field} className={row.changed ? 'changed' : 'unchanged'}>
+                <th>{label}</th><td>{row.current || '（空）'}</td><td>{row.suggested}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+          <div className="section-footer">
+            <span>采用只更新草稿；人物、对白和镜头时长仍由现有合同保护。</span>
+            <button type="button" className="primary-button" disabled={directorBusy || !directorState} onClick={applyDirectorStyle}>
+              {directorBusy ? '正在采用…' : '采用到草稿'}
+            </button>
+          </div>
+        </div>}
       </div>
 
       <button type="button" className="text-button style-details-toggle" onClick={() => setDetailsOpen((open) => !open)} aria-expanded={detailsOpen}>
@@ -344,7 +487,7 @@ export default function StylePanel({
       <div className="section-footer">
         <span>{currentStyle ? <><Check size={13} /> 已冻结 V{currentStyle.version}：所有新镜头都按这一版执行</> : '保存后冻结：冻结的就是屏幕上这七项'}</span>
         <div>
-          <button className="secondary-button" disabled={busy || !canSave} onClick={onSave}>保存草稿</button>
+          <button className="secondary-button" disabled={busy || !canSave} onClick={() => onSave(Boolean(selectedDirectorId))}>保存草稿</button>
         </div>
       </div>
       {currentStyle

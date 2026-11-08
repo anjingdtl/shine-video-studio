@@ -1,0 +1,27 @@
+{
+  "schema_version": "director-style/1",
+  "id": "alfred-hitchcock",
+  "name_zh": "希区柯克参考风格",
+  "version": "1.0.0",
+  "summary_zh": "几何空间、信息控制、明确视线与逐步建立的悬念。",
+  "categories": ["suspense", "geometry", "drama"],
+  "style_bible": {
+    "photography_language": "通过稳定的几何构图和明确视线组织信息。",
+    "shot_blocking": "保持人物、关键物件与出口的空间关系可读。",
+    "color_palette": "控制色彩数量，让关键视觉信息获得清楚层级。",
+    "lighting_tone": "用有方向性的明暗关系塑造空间，但保留关键信息。",
+    "lens_texture": "以清晰、稳定的光学质感保证空间线索可辨。",
+    "editing_rhythm": "逐步揭示信息，切点服从行动、对白和悬念节奏。",
+    "sound_performance": "保留原对白，通过环境声与静默控制注意力。"
+  },
+  "techniques": [
+    {"id": "geometric-depth-composition", "target": "camera", "priority": 92, "when": {"scene_tags_any": []}, "instruction_en": "Organize the frame with clear geometric depth and preserve the visible relationship between people and story objects.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "measured-information-push", "target": "camera", "priority": 68, "when": {"scene_tags_any": []}, "instruction_en": "Use a measured camera approach only when it clarifies a visible story detail, keeping the action and axis intact.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "directional-shadow-control", "target": "lighting", "priority": 83, "when": {"scene_tags_any": []}, "instruction_en": "Shape the scene with directional contrast while keeping faces and plot-critical details legible.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "selective-color-hierarchy", "target": "color", "priority": 70, "when": {"scene_tags_any": []}, "instruction_en": "Use a restrained palette with one clear visual emphasis and natural, readable skin tones.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "precise-optical-clarity", "target": "texture", "priority": 59, "when": {"scene_tags_any": []}, "instruction_en": "Favor stable optical clarity so spatial clues and character identity remain easy to read.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "staged-reveal-rhythm", "target": "editing", "priority": 88, "when": {"scene_tags_any": []}, "instruction_en": "Reveal visual information in deliberate beats without changing locked shot duration or dialogue timing.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "focused-silence", "target": "sound", "priority": 51, "when": {"scene_tags_any": []}, "instruction_en": "Use restrained ambience and intentional silence to focus attention while preserving the original spoken track.", "requires_capabilities": [], "conflicts_with": []}
+  ],
+  "source_notes": ["Generalized suspense, staging, and visual-information principles; not a reproduction of a specific film shot."]
+}

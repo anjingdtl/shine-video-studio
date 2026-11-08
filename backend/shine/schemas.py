@@ -141,6 +141,8 @@ class ShotSpec(APIModel):
     duration_target_s: float = Field(ge=4, le=15)
     shot_priority: Literal["A", "B", "C"] = "B"
     style_version_id: str = Field(default="", max_length=36)
+    director_style_resolution_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    director_style_technique_ids: list[str] = Field(default_factory=list, max_length=40)
     camera: dict[str, str] = Field(default_factory=dict)
     characters: list[str] = Field(default_factory=list, max_length=20)
     required_asset_ids: list[str] = Field(default_factory=list, max_length=12)

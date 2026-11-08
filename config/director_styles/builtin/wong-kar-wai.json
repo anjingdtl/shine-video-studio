@@ -1,0 +1,27 @@
+{
+  "schema_version": "director-style/1",
+  "id": "wong-kar-wai",
+  "name_zh": "王家卫参考风格",
+  "version": "1.0.0",
+  "summary_zh": "城市情绪、前景遮挡、实景混合色光与克制留白。",
+  "categories": ["urban", "emotion", "drama"],
+  "style_bible": {
+    "photography_language": "以克制的横向移动和局部近景观察人物情绪。",
+    "shot_blocking": "优先使用前景遮挡与空间分层，同时保持人物方位清楚。",
+    "color_palette": "暖琥珀、暗绿与有限的红色点缀共同表现城市夜色。",
+    "lighting_tone": "采用有来源的暖色实景光，并控制彩色环境光的比例。",
+    "lens_texture": "适度长焦压缩和柔和景深，保留自然皮肤纹理。",
+    "editing_rhythm": "为情绪反应保留空间，切点仍遵循动作和对白边界。",
+    "sound_performance": "遵循项目原定语言，以适度城市环境声陪衬人物。"
+  },
+  "techniques": [
+    {"id": "foreground-layering", "target": "camera", "priority": 90, "when": {"scene_tags_any": []}, "instruction_en": "Frame the subject through a layered foreground while keeping screen direction and facial visibility clear.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "restrained-lateral-observation", "target": "camera", "priority": 65, "when": {"scene_tags_any": []}, "instruction_en": "Use a restrained lateral camera move that observes the character without changing the established action.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "motivated-practical-light", "target": "lighting", "priority": 82, "when": {"scene_tags_any": []}, "instruction_en": "Use a warm practical source with a controlled cool ambient edge and preserve readable facial detail.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "amber-green-color-separation", "target": "color", "priority": 72, "when": {"scene_tags_any": []}, "instruction_en": "Separate warm amber practical highlights from subdued green shadows without clipping skin tones.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "soft-natural-texture", "target": "texture", "priority": 58, "when": {"scene_tags_any": []}, "instruction_en": "Keep a gentle optical softness while retaining natural skin texture and stable facial identity.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "reaction-space", "target": "editing", "priority": 78, "when": {"scene_tags_any": []}, "instruction_en": "Leave a short reaction space after a completed action without trimming or retiming dialogue.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "quiet-city-ambience", "target": "sound", "priority": 42, "when": {"scene_tags_any": []}, "instruction_en": "Keep diegetic city ambience restrained beneath the original dialogue and preserve intentional silence.", "requires_capabilities": [], "conflicts_with": []}
+  ],
+  "source_notes": ["Generalized cinematography and editing principles; not a reproduction of a specific film shot."]
+}

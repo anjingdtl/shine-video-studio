@@ -1,0 +1,27 @@
+{
+  "schema_version": "director-style/1",
+  "id": "john-woo",
+  "name_zh": "吴宇森参考风格",
+  "version": "1.0.0",
+  "summary_zh": "清晰动作轴线、双人空间关系、逆光轮廓与庄重动作节奏。",
+  "categories": ["action", "duality", "drama"],
+  "style_bible": {
+    "photography_language": "用清楚的动作轴线和人物对位表现行动关系。",
+    "shot_blocking": "保持双人位置、运动方向和主要动作连续可辨。",
+    "color_palette": "以冷静中性色为基础，让关键动作主体清晰突出。",
+    "lighting_tone": "使用有动机的轮廓光和方向性明暗，保持面部可读。",
+    "lens_texture": "保持动作轮廓清楚，避免遮挡身份和关键手部动作。",
+    "editing_rhythm": "依照完整动作单元安排切点，不改变既定时长与对白。",
+    "sound_performance": "保留原对白与现场动作声，不凭空增加音效或音乐。"
+  },
+  "techniques": [
+    {"id": "balanced-two-plane-staging", "target": "camera", "priority": 93, "when": {"scene_tags_any": []}, "instruction_en": "Stage opposing subjects on readable planes and preserve the established action axis and screen direction.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "grounded-tracking-composition", "target": "camera", "priority": 69, "when": {"scene_tags_any": []}, "instruction_en": "Use grounded tracking composition to follow visible movement without inventing new actions or changing timing.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "motivated-rim-light", "target": "lighting", "priority": 84, "when": {"scene_tags_any": []}, "instruction_en": "Use motivated rim light to separate moving figures while keeping faces and action details readable.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "cool-neutral-action-palette", "target": "color", "priority": 67, "when": {"scene_tags_any": []}, "instruction_en": "Keep a controlled cool-neutral palette with clear subject separation and natural skin tones.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "clear-motion-texture", "target": "texture", "priority": 57, "when": {"scene_tags_any": []}, "instruction_en": "Keep motion contours legible and avoid texture that obscures identity, hands, or action direction.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "complete-action-phrases", "target": "editing", "priority": 87, "when": {"scene_tags_any": []}, "instruction_en": "Prefer cuts at complete action phrases while preserving locked shot durations and every dialogue boundary.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "preserved-diegetic-impact", "target": "sound", "priority": 49, "when": {"scene_tags_any": []}, "instruction_en": "Preserve source dialogue and diegetic action sound; do not invent music, voices, or sound effects.", "requires_capabilities": [], "conflicts_with": []}
+  ],
+  "source_notes": ["Generalized action staging and editing principles; not a reproduction of a specific film shot."]
+}

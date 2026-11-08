@@ -58,12 +58,19 @@ started with even if the project default changes later.
 
 
 def _style_snapshot(db: Session, project: Project) -> dict[str, Any] | None:
+    from shine.director_styles.service import binding_summary
+
     if not project.frozen_style_version_id:
         return None
     style = db.get(StyleVersion, project.frozen_style_version_id)
     if style is None or style.project_id != project.id:
         return None
-    return {"style_version_id": style.id, "version": style.version, "sha256": style.sha256}
+    return {
+        "style_version_id": style.id,
+        "version": style.version,
+        "sha256": style.sha256,
+        "director_style": binding_summary(style.director_style_binding),
+    }
 
 
 def current_script_basis(db: Session, project: Project) -> dict[str, Any]:
@@ -179,6 +186,8 @@ def _shot_manifest(db: Session, shot: Shot) -> dict[str, Any]:
         "spec_sha256": digest_of(shot.spec),
         "duration_target_s": spec.duration_target_s,
         "style_version_id": spec.style_version_id,
+        "director_style_resolution_sha256": spec.director_style_resolution_sha256,
+        "director_style_technique_ids": spec.director_style_technique_ids,
         "continuity_mode": continuity_mode(shot),
         "characters": list(spec.characters),
         "dialogue_line_count": len(spec.dialogue),
@@ -593,6 +602,7 @@ def _execution_fingerprint(
         "generation_mode": binding.get("generation_mode"),
         "output": binding.get("output") or {},
         "style": (manifest.get("style") or {}).get("sha256"),
+        "director_style": (manifest.get("style") or {}).get("director_style"),
         "preproduction": (manifest.get("preproduction") or {}).get("sha256"),
         "policy": policy_hash,
         "project_language": project_language,
@@ -652,6 +662,11 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
         if (project.frozen_style_version_id != pinned_style_id
                 or current is None or current.sha256 != style.get("sha256")):
             blockers.append(_blocker("STYLE_SUPERSEDED", "冻结风格已变更，请重新生成导演包"))
+        else:
+            from shine.director_styles.service import binding_summary
+
+            if style.get("director_style") != binding_summary(current.director_style_binding):
+                blockers.append(_blocker("STYLE_PROFILE_SUPERSEDED", "导演风格来源快照已变化，请重新生成导演包"))
 
     script = manifest.get("script") or {}
     if project is not None and script.get("document_id"):

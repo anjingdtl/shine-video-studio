@@ -18,6 +18,7 @@ from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRe
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
 from shine.asset_identity import resolve_character_asset, split_character_names
+from shine.director_styles.service import camera_style_text, resolve_frozen_binding, sound_style_text
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
@@ -30,6 +31,7 @@ from shine.models import (
     ProjectDocument,
     ProviderProfile,
     RulePack,
+    StyleVersion,
     WorkflowProfile,
     utcnow,
 )
@@ -202,6 +204,24 @@ class ApplyCamera(APIModel):
     name_prefix: str = Field(default="专业分镜", max_length=80)
 
 
+def _scene_style_tags(beat: dict, intent: dict) -> list[str]:
+    text = " ".join((str(beat.get("description", "")), str(intent.get("visual_description", "")))).lower()
+    vocabulary = {
+        "action": ("fight", "chase", "attack", "combat", "打斗", "追逐", "战斗"),
+        "architecture": ("building", "bridge", "corridor", "stair", "建筑", "桥", "走廊", "楼梯"),
+        "day": ("daylight", "daytime", "morning", "afternoon", "白天", "清晨", "上午", "下午"),
+        "emotion": ("grief", "fear", "longing", "anger", "悲伤", "害怕", "思念", "愤怒"),
+        "exterior": ("outside", "outdoor", "exterior", "户外", "外景", "街道"),
+        "interior": ("inside", "indoors", "interior", "room", "室内", "内景", "房间"),
+        "mystery": ("clue", "secret", "mystery", "线索", "秘密", "谜"),
+        "night": ("night", "nighttime", "evening", "dark", "夜晚", "夜里", "晚上", "傍晚"),
+        "urban": ("city", "urban", "street", "城市", "都市", "街道"),
+        "drama": ("dialogue", "argument", "confession", "对白", "争吵", "坦白"),
+    }
+    tags = [tag for tag, words in vocabulary.items() if any(word in text for word in words)]
+    if beat.get("dialogue") and "dialogue" not in tags:
+        tags.append("dialogue")
+    return sorted(tags)
 def _arbitration_releases(arbitration: dict | None, issues: list[str]) -> bool:
     """Whether a crew arbitration releases every raised issue.
 
@@ -372,10 +392,17 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         direction = next(a for a in parents if a.kind == "DirectorialPlan")
         scripts = load_inputs(db, project_id, direction.input_revision_ids)
         script = next(a for a in scripts if a.kind == "ScriptBreakdown")
+        frozen_style = (
+            db.get(StyleVersion, project.frozen_style_version_id)
+            if project.frozen_style_version_id
+            else None
+        )
+        director_binding = frozen_style.director_style_binding if frozen_style else None
         beats = {b["id"]: b for b in script.payload_json["beats"]}
         intents = {s["id"]: s for s in direction.payload_json["shots"]}
         created = []
         material_notices: list[dict] = []
+        style_warnings: list[dict] = []
         for camera in CameraPlan.model_validate(artifact.payload_json).shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
@@ -439,10 +466,45 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as,
                                                  ordinal=len(bindings)))
                 bound_asset_ids.append(identity)
+            camera_fields = {
+                "composition": camera.composition,
+                "movement": camera.movement,
+                "lighting": camera.lighting,
+                "axis_rule": camera.axis,
+            }
+            sound_fields: dict[str, str] = {}
+            style_resolution = None
+            if director_binding:
+                blocked_style_constraints = ["axis-locked", "duration-locked"]
+                if beat.get("dialogue"):
+                    blocked_style_constraints.append("dialogue-locked")
+                if intent.get("asset_ids"):
+                    blocked_style_constraints.append("approved-asset-only")
+                style_resolution = resolve_frozen_binding(
+                    director_binding,
+                    scene_tags=_scene_style_tags(beat, intent),
+                    blocked_constraints=blocked_style_constraints,
+                )
+                if style_resolution.warnings:
+                    style_warnings.extend(
+                        {
+                            "shot_intent_id": camera.intent_id,
+                            "warning": warning,
+                        }
+                        for warning in style_resolution.warnings
+                    )
+                visual_rules = camera_style_text(style_resolution)
+                if visual_rules:
+                    camera_fields["director_style"] = visual_rules
+                sound_rules = sound_style_text(style_resolution)
+                if sound_rules:
+                    sound_fields["ambience"] = sound_rules
             spec = ShotSpec(
                 story_beat=visual,
                 duration_target_s=intent["duration_s"],
                 style_version_id=project.frozen_style_version_id,
+                director_style_resolution_sha256=(style_resolution.resolution_sha256 if style_resolution else None),
+                director_style_technique_ids=(style_resolution.selected_technique_ids if style_resolution else []),
                 # 只有真正绑上的素材才是这一镜的要求：缺的那个由 H3 自行
                 # 生成，它不再是落镜的前置条件。
                 required_asset_ids=bound_asset_ids,
@@ -451,12 +513,8 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 locked_story_facts=script.payload_json["locked_story_facts"],
                 prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
                 prompt_style=script.payload_json.get("prompt_style"),
-                camera={
-                    "composition": camera.composition,
-                    "movement": camera.movement,
-                    "lighting": camera.lighting,
-                    "axis_rule": camera.axis,
-                },
+                camera=camera_fields,
+                sound=sound_fields,
                 **(
                     {
                         "continuity": {
@@ -487,7 +545,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         artifact.approved_by = "user"
         artifact.approved_at = utcnow()
         result = {"shot_ids": created, "source_artifact_id": artifact.id,
-                  "material_notices": material_notices}
+                  "material_notices": material_notices, "style_warnings": style_warnings}
         db.add(AppSetting(key=key, value=result))
         add_audit(db, "user", "FILM_CAMERA_PLAN_APPLIED", "agent_artifact", artifact.id, result, project_id=project_id)
         db.commit()

@@ -1,0 +1,27 @@
+{
+  "schema_version": "director-style/1",
+  "id": "christopher-nolan",
+  "name_zh": "诺兰参考风格",
+  "version": "1.0.0",
+  "summary_zh": "建筑尺度、明确空间坐标、克制色彩与层次化叙事节奏。",
+  "categories": ["architecture", "scale", "drama"],
+  "style_bible": {
+    "photography_language": "以建筑线条和人物尺度建立稳定的空间坐标。",
+    "shot_blocking": "让角色运动与空间边界保持清楚对应。",
+    "color_palette": "使用克制、低饱和度色彩，优先保证主体可读。",
+    "lighting_tone": "结合实景方向光与清晰阴影层次表现空间体量。",
+    "lens_texture": "保持清晰、稳定的空间质感和自然人物纹理。",
+    "editing_rhythm": "逐层传递叙事信息，切点不改变既定镜头和对白时长。",
+    "sound_performance": "按项目对白合同保留语言，以明确层次处理环境声。"
+  },
+  "techniques": [
+    {"id": "architectural-scale-composition", "target": "camera", "priority": 94, "when": {"scene_tags_any": []}, "instruction_en": "Use architectural lines and human scale to establish a stable, readable sense of place.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "deliberate-axial-movement", "target": "camera", "priority": 71, "when": {"scene_tags_any": []}, "instruction_en": "Choose deliberate axial camera movement that clarifies depth without changing the established geography.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "motivated-hard-source", "target": "lighting", "priority": 85, "when": {"scene_tags_any": []}, "instruction_en": "Use motivated directional light and layered shadows while keeping important faces and objects visible.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "restrained-low-saturation", "target": "color", "priority": 73, "when": {"scene_tags_any": []}, "instruction_en": "Keep color restrained and slightly desaturated without losing subject separation or natural skin tones.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "crisp-spatial-texture", "target": "texture", "priority": 61, "when": {"scene_tags_any": []}, "instruction_en": "Maintain crisp spatial detail and natural texture so foreground and background remain distinct.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "layered-information-rhythm", "target": "editing", "priority": 89, "when": {"scene_tags_any": []}, "instruction_en": "Let each cut add a clear piece of story information without changing locked order, duration, or dialogue.", "requires_capabilities": [], "conflicts_with": []},
+    {"id": "layered-ambient-perspective", "target": "sound", "priority": 47, "when": {"scene_tags_any": []}, "instruction_en": "Keep environmental sound layered by distance beneath the original dialogue and preserve required silence.", "requires_capabilities": [], "conflicts_with": []}
+  ],
+  "source_notes": ["Generalized spatial, lighting, and information-rhythm principles; not a reproduction of a specific film shot."]
+}

@@ -9,7 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-HEAD_REVISION = "f180b0050001"
+HEAD_REVISION = "f180b0060001"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -23,7 +23,7 @@ def alembic_config(db_path: Path) -> Config:
     return config
 
 
-def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
+def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
     db_path = tmp_path / "fresh.db"
     monkeypatch.setenv("SHINE_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
@@ -79,7 +79,10 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
         profile_columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_profiles)")}
         assert "media_transfers" in profile_columns
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
-        assert "quality_policy" in project_columns
+        assert {"quality_policy", "director_style_draft"}.issubset(project_columns)
+        style_columns = {row[1] for row in connection.execute("PRAGMA table_info(style_versions)")}
+        assert "director_style_binding" in style_columns
+        assert "director_style_profile_revisions" in tables
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
         assert {
             "role",

@@ -42,6 +42,7 @@ class Project(Base):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     language: Mapped[str] = mapped_column(String(32), default="Chinese", nullable=False)
     style_draft: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    director_style_draft: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     frozen_style_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     allow_remote_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -125,11 +126,27 @@ class StyleVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    director_style_binding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     approved_by: Mapped[str] = mapped_column(String(64), nullable=False)
     approval_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="style_versions")
+
+
+class DirectorStyleProfileRevision(Base):
+    """First-used immutable template snapshot; id/version content cannot drift."""
+
+    __tablename__ = "director_style_profile_revisions"
+    __table_args__ = (UniqueConstraint("profile_id", "version", name="uq_director_style_profile_version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    canonical_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class ProjectTerminology(Base):

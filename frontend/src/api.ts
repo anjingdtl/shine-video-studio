@@ -156,6 +156,29 @@ export type Style = {
   lighting_tone: string; lens_texture: string; editing_rhythm: string; sound_performance: string;
 };
 
+export type DirectorStyleSummary = {
+  profile_id: string; profile_version: string; profile_sha256: string;
+  strength: 'subtle' | 'balanced' | 'strong'; resolution_sha256: string;
+};
+
+export type DirectorStyleProfile = {
+  id: string; name_zh: string; version: string; summary_zh: string;
+  categories: string[]; sha256: string; source: string;
+  technique_count: number; availability: string;
+};
+
+export type DirectorStylePreview = {
+  profile: DirectorStyleProfile;
+  style_bible: Style;
+  diff: Array<{ field: keyof Style; current: string; suggested: string; changed: boolean }>;
+  resolution: {
+    selected_technique_ids: string[];
+    constraints: Record<string, string[]>;
+    warnings: string[];
+    resolution_sha256: string;
+  };
+};
+
 export type Project = {
   id: string; title: string; description: string; language: string;
   frozen_style_version_id: string | null; style_draft: Style | null;
@@ -171,6 +194,7 @@ export type Asset = {
 
 export type StyleVersion = {
   id: string; project_id: string; version: number; sha256: string; snapshot: Style;
+  director_style?: DirectorStyleSummary | null;
   approved_by: string; approval_note: string; frozen_at: string;
   impact?: { affected_shot_ids: string[]; invalidated_job_ids: string[] };
 };

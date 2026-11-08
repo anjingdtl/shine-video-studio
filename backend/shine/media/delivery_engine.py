@@ -180,6 +180,9 @@ def _edit_intent(db: Session, series: ProductionSeries) -> tuple[dict | None, di
             "sha256": artifact.sha256,
             "rhythm": plan.get("rhythm"),
             "dialogue_pace": plan.get("dialogue_pace"),
+            "director_style_id": plan.get("director_style_id"),
+            "director_style_resolution_sha256": plan.get("director_style_resolution_sha256"),
+            "editing_direction": plan.get("editing_direction"),
         },
     }
 

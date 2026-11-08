@@ -34,6 +34,7 @@ from shine.agents.film_contracts import (
 from shine.asset_identity import (
     canonical_character_name_for_asset_id,
 )
+from shine.director_styles.service import bind_editing_style, validate_binding
 from shine.h3.rulebook import H3RulebookRegistry, digest
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.context_window import model_context_for_profile
@@ -570,6 +571,7 @@ class FilmAgentDispatcher:
         if profile.kind != "mock" and not is_loopback_url(profile.base_url) and not body.allow_remote_text:
             raise ValueError("REMOTE_AGENT_CONSENT_REQUIRED")
         style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
+        director_binding = style.director_style_binding if style else None
         if draft and style is None and project.style_draft:
             # The draft lane substitutes the person's saved style draft as the
             # camera-language template; the frozen bible stays untouched.
@@ -580,6 +582,24 @@ class FilmAgentDispatcher:
             style = SimpleNamespace(
                 snapshot=StyleBible.model_validate(project.style_draft).model_dump(mode="json"),
                 sha256=None)
+            director_binding = project.director_style_draft
+        director_style_context = None
+        if director_binding:
+            try:
+                entry, resolution = validate_binding(
+                    director_binding,
+                    expected_style=(style.snapshot if style else project.style_draft),
+                )
+            except Exception as exc:
+                raise ValueError(getattr(exc, "detail", "STYLE_PROFILE_INVALID")) from exc
+            director_style_context = {
+                "profile_id": entry.profile.id,
+                "profile_version": entry.profile.version,
+                "profile_sha256": entry.sha256,
+                "strength": director_binding["strength"],
+                "style_bible": director_binding["style_bible_snapshot"],
+                "resolution": resolution.model_dump(mode="json"),
+            }
         if role == "qc_reviewer":
             if (body.shot_spec is None or not style or body.input_revision_ids
                     or body.shot_spec.style_version_id != style.id):
@@ -592,6 +612,7 @@ class FilmAgentDispatcher:
             "style_version_id": project.frozen_style_version_id,
             "style": style.snapshot if style else None,
             "style_hash": style.sha256 if style else None,
+            "director_style": director_style_context,
             "assets": asset_context(db, project_id),
             "inputs": [{"id": a.id, "kind": a.kind, "sha256": a.sha256, "payload": a.payload_json} for a in inputs],
             "rules": registry.search(() if body.tool == "continuity_arbitration"
@@ -852,6 +873,22 @@ class FilmAgentDispatcher:
                         else contract.model_validate(response_data))
             proposal = canonicalize_script_character_asset_ids(proposal, context["assets"])
             validate_output(role, proposal, body, inputs, context)
+            if role == "editor" and body.tool == "edit_intent" and isinstance(proposal, EditIntentPlan):
+                director_style = context.get("director_style")
+                if director_style:
+                    from shine.director_styles.contracts import StyleResolution
+
+                    proposal = bind_editing_style(
+                        proposal,
+                        director_style["profile_id"],
+                        StyleResolution.model_validate(director_style["resolution"]),
+                    )
+                else:
+                    proposal = proposal.model_copy(update={
+                        "director_style_id": None,
+                        "director_style_resolution_sha256": None,
+                        "editing_direction": None,
+                    })
             if repair_director:
                 old = next(a for a in inputs if a.kind == "DirectorialPlan")
                 original = old.payload_json["shots"]

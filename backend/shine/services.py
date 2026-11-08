@@ -4,6 +4,7 @@ import errno
 import hashlib
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -141,8 +142,27 @@ def store_asset_file(root: Path, digest: str, content: bytes) -> str:
     return relative
 
 
-def update_style_draft(db: Session, project: Project, style: StyleBible) -> None:
+def update_style_draft(
+    db: Session,
+    project: Project,
+    style: StyleBible,
+    *,
+    preserve_director_style: bool = False,
+) -> None:
     project.style_draft = style.model_dump(mode="json")
+    if preserve_director_style and project.director_style_draft:
+        from shine.director_styles.service import validate_binding
+
+        binding = deepcopy(project.director_style_draft)
+        entry, resolution = validate_binding(binding)
+        payload = style.model_dump(mode="json")
+        binding["style_bible_snapshot"] = payload
+        binding["style_bible_sha256"] = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        binding["profile_snapshot"] = entry.profile.model_dump(mode="json")
+        binding["preview_resolution"] = resolution.model_dump(mode="json")
+        project.director_style_draft = binding
+    else:
+        project.director_style_draft = None
     add_audit(db, "user", "STYLE_DRAFT_UPDATED", "project", project.id, project_id=project.id)
 
 
@@ -157,9 +177,15 @@ def freeze_style(
         raise HTTPException(status_code=409, detail="Save all seven style dimensions before freezing")
     snapshot = StyleBible.model_validate(project.style_draft).model_dump(mode="json")
     digest = _style_hash(snapshot)
+    style_binding = deepcopy(project.director_style_draft)
+    if style_binding:
+        from shine.director_styles.service import validate_binding
+
+        validate_binding(style_binding, expected_style=snapshot)
     previous_id = project.frozen_style_version_id
     previous = db.get(StyleVersion, previous_id) if previous_id else None
-    if previous and previous.sha256 == digest:
+    if (previous and previous.sha256 == digest
+            and (previous.director_style_binding or None) == (style_binding or None)):
         raise HTTPException(status_code=409, detail="The style draft is identical to the current frozen version")
     version_number = max((row.version for row in project.style_versions), default=0) + 1
     frozen = StyleVersion(
@@ -167,6 +193,7 @@ def freeze_style(
         version=version_number,
         snapshot=snapshot,
         sha256=digest,
+        director_style_binding=style_binding,
         approved_by=actor,
         approval_note=approval_note,
     )
@@ -179,7 +206,20 @@ def freeze_style(
         "STYLE_FROZEN",
         "style_version",
         frozen.id,
-        {"sha256": digest, "version": version_number, "previous_version_id": previous_id},
+        {
+            "sha256": digest,
+            "version": version_number,
+            "previous_version_id": previous_id,
+            "director_style": (
+                {
+                    "profile_id": style_binding.get("profile_id"),
+                    "profile_version": style_binding.get("profile_version"),
+                    "profile_sha256": style_binding.get("profile_sha256"),
+                    "resolution_sha256": style_binding.get("resolution_sha256"),
+                }
+                if style_binding else None
+            ),
+        },
         project_id=project.id,
     )
     impact = analyze_style_impact(db, project, previous_id=previous_id, new_version_id=frozen.id)

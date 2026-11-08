@@ -248,15 +248,16 @@ export function useStudio() {
     });
   }
 
-  async function saveStyle() {
+  async function saveStyle(preserveDirectorStyle = false) {
     if (!projectId) return;
     await withBusy(async () => {
-      await api(`/projects/${projectId}/style/draft`, json('PUT', style));
+      const payload = preserveDirectorStyle ? { ...style, director_style_action: 'preserve' } : style;
+      await api(`/projects/${projectId}/style/draft`, json('PUT', payload));
       await loadProject(projectId); report('风格草稿已保存，确认无误后可冻结。');
     });
   }
 
-  async function freezeStyle() {
+  async function freezeStyle(preserveDirectorStyle = false) {
     if (!projectId) return;
     await withBusy(async () => {
       // Freeze exactly what the user sees: save the on-screen form first, then
@@ -265,7 +266,8 @@ export function useStudio() {
       // saved draft before the grant is issued. The server checks both under
       // the same write lock as freezing.
       const snapshot: Style = { ...style };
-      await api(`/projects/${projectId}/style/draft`, json('PUT', snapshot));
+      const draftPayload = preserveDirectorStyle ? { ...snapshot, director_style_action: 'preserve' } : snapshot;
+      await api(`/projects/${projectId}/style/draft`, json('PUT', draftPayload));
       const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
         json('POST', { action: 'style_freeze', target_id: projectId }));
       const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, {

@@ -174,6 +174,9 @@ class EditIntentPlan(APIModel):
     clips: list[EditIntentClip] = Field(min_length=1, max_length=100)
     rhythm: str = Field(min_length=1, max_length=2000)
     dialogue_pace: str = Field(min_length=1, max_length=2000)
+    director_style_id: str | None = Field(default=None, max_length=64)
+    director_style_resolution_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    editing_direction: str | None = Field(default=None, max_length=1800)
 
     @model_validator(mode="after")
     def covers_every_intent_once_in_order(self):

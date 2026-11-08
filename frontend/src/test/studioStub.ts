@@ -143,6 +143,12 @@ export const FROZEN_STYLE = {
   impact: { affected_shot_ids: [], invalidated_job_ids: [] },
 };
 
+export const DIRECTOR_STYLE_CATALOG = [{
+  id: 'wong-kar-wai', name_zh: '王家卫参考风格', version: '1.0.0',
+  summary_zh: '城市情绪、前景遮挡与克制留白。', categories: ['urban', 'emotion'],
+  sha256: 'b'.repeat(64), source: 'builtin', technique_count: 7, availability: 'available',
+}];
+
 /** Baseline route table mirroring the loopback API contract for one project. */
 export function baseRoutes(project = baseProject()): Route[] {
   return [
@@ -171,6 +177,10 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1$/, respond: () => jsonResponse(project) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/assets$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/styles$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/director-styles$/, respond: () => jsonResponse(DIRECTOR_STYLE_CATALOG) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({
+      draft_sha256: 'c'.repeat(64), draft_source: null, frozen_source: null,
+    }) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/shots$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/jobs$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/events/, respond: () => jsonResponse({ items: [], total: 0, limit: 30, offset: 0 }) },

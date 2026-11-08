@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -111,6 +111,12 @@ def _session(request: Request):
 DBSession = Annotated[Session, Depends(_session)]
 
 
+class StyleDraftUpdate(StyleBible):
+    """The style draft plus an explicit indication that its DSE source stays attached."""
+
+    director_style_action: Literal["clear", "preserve"] = "clear"
+
+
 def _canonical_language(value: str) -> str:
     """The project language in the one form the H3 prompt may use.
 
@@ -172,12 +178,15 @@ def _asset_data(asset: Asset) -> dict[str, Any]:
 
 
 def _style_data(style: StyleVersion) -> dict[str, Any]:
+    from shine.director_styles.service import binding_summary
+
     return {
         "id": style.id,
         "project_id": style.project_id,
         "version": style.version,
         "snapshot": style.snapshot,
         "sha256": style.sha256,
+        "director_style": binding_summary(style.director_style_binding),
         "approved_by": style.approved_by,
         "approval_note": style.approval_note,
         "frozen_at": style.frozen_at,
@@ -452,6 +461,9 @@ def create_app(
     app.include_router(pipeline_router)
     app.include_router(instances_router)
     app.include_router(setup_router)
+    from shine.api_director_styles import router as director_styles_router
+
+    app.include_router(director_styles_router)
     from shine.api_preparation import router as preparation_router
 
     app.include_router(preparation_router)
@@ -788,11 +800,19 @@ def create_app(
         return decide_asset(asset_id, body, actor, db, locking=True)
 
     @app.put("/api/v1/projects/{project_id}/style/draft")
-    def save_style_draft(project_id: str, body: StyleBible, db: DBSession) -> dict[str, Any]:
+    def save_style_draft(project_id: str, body: StyleDraftUpdate, db: DBSession) -> dict[str, Any]:
         project = require_project(db, project_id)
-        update_style_draft(db, project, body)
+        style = StyleBible.model_validate(body.model_dump(exclude={"director_style_action"}))
+        update_style_draft(db, project, style, preserve_director_style=body.director_style_action == "preserve")
         db.commit()
-        return {"project_id": project.id, "style_draft": project.style_draft, "frozen": False}
+        from shine.director_styles.service import binding_summary
+
+        return {
+            "project_id": project.id,
+            "style_draft": project.style_draft,
+            "director_style": binding_summary(project.director_style_draft),
+            "frozen": False,
+        }
 
     @app.post("/api/v1/projects/{project_id}/style/freeze", status_code=201)
     def freeze_project_style(
