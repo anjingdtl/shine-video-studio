@@ -399,6 +399,7 @@ def queue_bible(db, project_id: str, gateway) -> AgentTaskRecord:
         raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
     outlines = []
     for row in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project_id,
             AgentArtifact.kind == "StoryOutline",
             AgentArtifact.approved_at.is_not(None))).all():
         outlines.append(row)

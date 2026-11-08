@@ -829,3 +829,30 @@ def test_blocked_runtime_never_starves_the_text_queue(api, monkeypatch):
         # not what this regression is about)
         assert row.status in {"RUNNING", "SUCCEEDED", "NEEDS_REVIEW"}, row.trace
         assert row.state_version > 1
+
+
+def test_bible_queue_only_reads_this_project_outlines(api):
+    """The bible queue's outline scan is project-filtered, never global."""
+    client, factory, settings = api
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    pid = create_project(client, "本卷")
+    other = create_project(client, "别卷")
+    doc = _make_doc(factory, pid, "第一章 甲\n浪。")
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        volume_doc = pipeline._volume_document(db, pid, plan.payload_json["volumes"][0]["volume_id"])
+        _outline_artifact(db, pid, volume_doc, _sections_for(volume_doc.text))
+        other_doc = _make_doc(factory, other, "第一章 别\n浪。")
+        other_row = db.get(ProjectDocument, other_doc.id)
+        other_outline = _outline_artifact(db, other, other_row, _sections_for(other_row.text))
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_bible_responder())
+    with factory.begin() as db:
+        task = pipeline.queue_bible(db, pid, gw)
+        db.commit()
+        refs = task.trace["outline_refs"]
+    assert [r["id"] for r in refs] != [], "this project's outline must be referenced"
+    assert all(r["id"] != other_outline.id for r in refs), \
+        "another project's outline must never enter the bible synthesis"
