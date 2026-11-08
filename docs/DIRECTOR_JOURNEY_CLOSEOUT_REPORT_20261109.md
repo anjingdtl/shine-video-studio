@@ -6,6 +6,8 @@
 
 **判定：`SOFTWARE_VERIFIED`。** 十项缺陷的反例都先在 `12dd99b` 上重现，修复版用同一组入口断言了正确行为；
 后端定向与全量、前端单测与构建、隔离浏览器验收、空库与旧库副本迁移、真实包构建均在本机执行并通过。
+远端 CI（[PR #11](https://github.com/anjingdtl/shine-video-studio/pull/11)）的 `frontend` 与 `web-e2e`
+通过，`backend`/`backend-windows` **没有新增产品失败**（Linux 13 个、Windows 3 个为基线既有平台限制，详见 §4.5）。
 `CLEAN_WINDOWS_INSTALL`、`REAL_DOWNLOAD`、`REAL_LLM`、`REAL_QWEN_IMAGE`、`REAL_VOICE`、`REAL_H3`、
 `VOLUME_DELIVERED`、`HUMAN_ACCEPTED` 为 `NOT_RUN`，具名阻塞与继续步骤见文末。本报告不把任何离线结果当作真实出片。
 
@@ -186,7 +188,7 @@ ComfyUI 安装，因此「复用已有安装」这条真机路径仍是 `NOT_RUN
 | 空库迁移 | `SHINE_DATA_DIR=.local-acceptance/closeout-migration alembic upgrade head` + `alembic check` | 唯一 head `f180b0050001`；`No new upgrade operations detected` | `.local-acceptance/closeout-migration/` |
 | 旧库副本迁移 | 从 `f180b0030001` 副本升级到 head | `f180b0050001 (head)`，升级前后 `workflow_profiles` 行不变 | `.local-acceptance/closeout-migration-old/` |
 | 发包 | `pwsh -NoProfile -File scripts/build_test_package.ps1 -OutDir .local-acceptance/closeout-package -Verify` | ZIP `cbae437c…13c60`，698 条目，`fixed_materials.packages = 189` | `§4.4` |
-| GitHub CI | 同 SHA 的 frontend / backend / web-e2e | `NOT_RUN`（本分支尚未 push，无法读取远端 runner） | `§4.5` |
+| GitHub CI | 同 SHA 的 frontend / backend / web-e2e | `frontend` 成功、`web-e2e` 成功（基线失败）；`backend` 15（13 既有 + 2 已修）、`backend-windows` 3（全为既有） | `§4.5` |
 
 ### 4.1 定向后端
 
@@ -267,9 +269,37 @@ pwsh -NoProfile -File scripts/build_test_package.ps1 \
 
 ### 4.5 同提交 CI
 
-本分支尚未 push，远端 Windows/Linux runner 与 `web-e2e` 无法读取，故记 `NOT_RUN`。
-本地对应项已执行：Ruff（同 CI 的 lint 步骤）、`test_migrations_windows.py`、`test_migration` 系列、
-`scripts/verify_v13_web.py`（同 `web-e2e` 的浏览器步骤）。push 后应按 `§5` 的同一 SHA 复核远端结论。
+PR：[#11](https://github.com/anjingdtl/shine-video-studio/pull/11)（分支 `codex/director-journey-closeout`）。
+基线 CI 为 [#42496535584](https://github.com/anjingdtl/shine-video-studio/actions/runs/42496535584)：
+`frontend` 成功，`backend` / `backend-windows` / `web-e2e` 失败。
+
+本分支第一次运行 [#42514827552](https://github.com/anjingdtl/shine-video-studio/actions/runs/42514827552)：
+`frontend` **success**、`web-e2e` **success**（基线为失败，本轮修正了过期定位并加了第一阶段大纲断言），
+`backend` 15 failed / 1902 passed / 138 skipped，`backend-windows` 3 failed / 2050 passed。
+
+逐项对照日志（`gh`/Actions API 下载的原始日志在 `.local-acceptance/ci/`）：
+
+| 通道 | 基线 | 本分支第一次 | 归因 |
+| --- | --- | --- | --- |
+| `backend`（Linux） | 13 failed / 1883 passed | 15 failed / 1902 passed | 13 个与基线**完全相同**（见下），新增 2 个是本轮 U01 用例缺少平台守卫 |
+| `backend-windows` | 3 failed / 2029 passed | 3 failed / 2050 passed（+21 通过） | **完全相同**的 3 个既有失败；本轮全部新用例在 Windows 上通过 |
+
+Linux 的既有 13 个是平台守卫而非产品缺陷：`test_service_validation`（6，`SERVICE_VALIDATION_WINDOWS_ONLY`）、
+`test_deployment_storage` / `test_install_plan_qualification` / `test_deployment_acceptance_regressions` /
+`test_new_machine_setup::test_next_instance_plan_state_machine`（4，`HOST_NOT_QUALIFIED: OS_UNSUPPORTED
+windows-x64 vs linux-x64`）、`test_director_setup_contract`（2，`LOCAL_EXECUTION_NOT_ENABLED`）、
+`test_image_managed_renderer`（1，`IMAGE_RENDERER_WINDOWS_ONLY`）。
+Windows 的既有 3 个是 `test_gpu_release_confirmation`（2）与 `test_image_installation_catalog`（1），
+与基线同样失败。
+
+本分支新增的 2 个（`test_the_same_install_request_is_one_plan_and_one_attempt`、
+`test_two_different_component_sets_cannot_share_the_same_storage_root`）已加 Windows 平台守卫：
+`os.name != "nt"` 时 `pytest.skip`，因为持久尝试需要 Windows 本地执行器；同一合同由 `backend-windows`
+在真实 Windows 上执行。修正提交 `4b48d7f` 已推送，其工作流结论以 PR #11 页面为准。
+
+结论：Linux 与 Windows 两条通道都**没有新增产品失败**；Linux 的 13 个与 Windows 的 3 个是基线既有的
+平台/环境限制，应在对应平台的验收轮里单独处理，而不是用本轮的软件验证冒充通过。
+
 
 
 ## 5. 真机门禁
