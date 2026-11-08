@@ -1,16 +1,23 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
   confirmBible, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan, editSceneScript,
-  generateStoryboardDraft, getPipelineOverview, importPipelineSource, listScriptDocuments,
-  queueBible, queueVolumeOutline, queueVolumeScripts, requestVolumeHandoff,
-  type PipelineOverview, type WorkflowProfileLite,
+  generateStoryboardDraft, getPipelineOverview, getTextConsentScope, grantTextConsent,
+  importPipelineSource, listScriptDocuments, queueBible, queueVolumeOutline, queueVolumeScripts,
+  requestVolumeHandoff, resumePipelineTask,
+  type PipelineOverview, type PipelineTaskSummary, type WorkflowProfileLite,
 } from '../api';
 
 type Props = {
   projectId: string;
   workflowProfiles?: WorkflowProfileLite[];
   onMessage: (message: string, kind?: 'error' | 'success') => void;
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  story_outline_run: '提取大纲',
+  four_stage_bible_run: '生成全局故事蓝图',
+  four_stage_scene_script_run: '编写场次剧本',
 };
 
 /** The four-stage creative pipeline in one place: import, outline, script, storyboard. */
@@ -40,6 +47,37 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // 有活跃任务时每 4 秒轮询真实进度；空闲时停止，避免无谓请求。
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    const active = (overview?.active_tasks ?? []).some(
+      (t) => ['QUEUED', 'RUNNING'].includes(t.status));
+    if (active && pollRef.current === null) {
+      pollRef.current = setInterval(() => { refresh(); }, 4000);
+    } else if (!active && pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    return () => {
+      if (pollRef.current !== null) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
+  }, [overview, refresh]);
+
+  async function authorizeAndContinue(task: PipelineTaskSummary) {
+    if (!task.consent_document_id || !task.consent_document_sha256) return;
+    setBusy(true);
+    try {
+      const scope = await getTextConsentScope(projectId, task.consent_document_id);
+      await grantTextConsent(projectId, task.consent_document_id,
+                             task.consent_document_sha256, scope.scope_hash, true);
+      await resumePipelineTask(projectId, task.task_id, task.state_version);
+      onMessage('已授权本机文本发送，任务已重新排队', 'success');
+      await refresh();
+    } catch (error) {
+      onMessage((error as Error).message, 'error');
+    } finally { setBusy(false); }
+  }
+
   async function run(action: () => Promise<unknown>, after?: (result: unknown) => void) {
     setBusy(true);
     try {
@@ -60,6 +98,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
 
   const volumes = overview.volumes ?? [];
   const pendingScripts = overview.pending_scripts ?? [];
+  const activeTasks = overview.active_tasks ?? [];
   return (
     <section className="card" id="four-stage">
       <header className="stage-head"><ListChecks size={17} /><h3>AI 编导四阶段</h3>
@@ -69,6 +108,43 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
           ③逐场生成并确认剧本 → ④生成分镜草案。正式拍摄仍走原有素材与风格门禁。</p>
         <p>每一步的「确认」都需要你亲自点击；任务详情、Token 与 JSON 收纳在专业模式。</p>
       </div></div>
+
+      {activeTasks.length > 0 && (
+        <div className="pipeline-progress" role="group" aria-label="后台任务进度">
+          {activeTasks.map((task) => {
+            const pct = task.progress_total > 0
+              ? Math.round((task.progress_done / task.progress_total) * 100)
+              : null;
+            const consentBlocked = task.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED'
+              && !!task.consent_document_id;
+            return (
+              <div className="progress-row" key={task.task_id}>
+                <span className="progress-name">{ROLE_LABELS[task.role] ?? task.role}</span>
+                <progress aria-label={`${ROLE_LABELS[task.role] ?? task.role}进度`}
+                  value={pct ?? undefined} max={100} />
+                <span className="progress-detail">
+                  {task.status === 'NEEDS_REVIEW'
+                    ? `待核对：${task.error_code ?? task.stage_label}`
+                    : `${task.stage_label}${pct !== null ? ` · ${task.progress_done}/${task.progress_total}` : ''}`}
+                </span>
+                {consentBlocked && (
+                  <button type="button" className="must-button" disabled={busy}
+                    onClick={() => authorizeAndContinue(task)}>
+                    授权本机文本发送并继续
+                  </button>
+                )}
+                {task.status === 'NEEDS_REVIEW' && !consentBlocked && task.error_code
+                  && task.error_code !== 'REMOTE_AGENT_CONSENT_REQUIRED' && (
+                  <button type="button" className="secondary-button" disabled={busy}
+                    onClick={() => run(() => resumePipelineTask(projectId, task.task_id, task.state_version))}>
+                    修复后继续
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ① 文本导入与分卷 */}
       <div className="pipeline-step">

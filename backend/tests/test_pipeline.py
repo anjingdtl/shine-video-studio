@@ -724,3 +724,63 @@ def test_pipeline_overview_names_latest_outline_and_pending(api):
     assert volume["latest_outline"]["sha256"] == outline.sha256
     assert body["bible_confirmed"] is False
     assert body["pending_bible"] is None
+
+
+def test_task_summary_and_soft_bible_basis(api):
+    """The overview reports live task progress; a bible draft is a usable basis."""
+    client, factory, settings = api
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    pid = create_project(client, "进度")
+    text = "第一章 甲\n浪。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        volume_doc = pipeline._volume_document(db, pid, plan.payload_json["volumes"][0]["volume_id"])
+        _outline_artifact(db, pid, volume_doc, _sections_for(volume_doc.text))
+        # an UNCONFIRMED bible draft is enough to start writing scripts
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        tid = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, source_task_id=tid)
+        db.add(bible)
+        db.flush()
+        draft_sha = bible.sha256
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_scene_responder())
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        tasks = pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+        assert len(tasks) == 1
+        assert tasks[0].trace.get("bible_basis") == "draft_unconfirmed"
+    # the summary names the live task with its stage
+    with factory() as db:
+        summary = pipeline.pipeline_task_summary(db, pid)
+        roles = {s["role"] for s in summary}
+        assert pipeline.SCENE_SCRIPT_RUN_ROLE in roles
+        entry = next(s for s in summary if s["role"] == pipeline.SCENE_SCRIPT_RUN_ROLE)
+        assert entry["status"] == "QUEUED"
+        assert entry["stage_label"]
+    # resume fence: a wrong version is refused, the right one re-queues
+    with factory.begin() as db:
+        from shine.models import AgentTaskRecord as _R
+        row = db.get(_R, tasks[0].id)
+        row.status = "NEEDS_REVIEW"
+        row.error_code = "REMOTE_AGENT_CONSENT_REQUIRED"
+        row.trace = {**row.trace, "external_outcome": "NOT_SENT",
+                     "blocked_reason": "REMOTE_AGENT_CONSENT_REQUIRED"}
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.resume_pipeline_task(db, pid, tasks[0].id, 99999)
+    assert "PIPELINE_TASK_STATE_CHANGED" in str(err.value)
+    with factory() as db:
+        version = db.get(AgentTaskRecord, tasks[0].id).state_version
+        result = pipeline.resume_pipeline_task(db, pid, tasks[0].id, version)
+        assert result["status"] == "QUEUED"

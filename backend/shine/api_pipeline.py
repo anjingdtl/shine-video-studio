@@ -98,6 +98,7 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
         "pending_bible": ({"artifact_id": pending_bible.id, "sha256": pending_bible.sha256}
                           if pending_bible else None),
         "pending_scripts": pending_scripts,
+        "active_tasks": pipeline.pipeline_task_summary(db, project_id),
         "volumes": volumes,
     }
 
@@ -355,4 +356,18 @@ def confirm_volume_outline_route(
         acknowledge_questions_sha256=(body or {}).get("acknowledge_questions_sha256"),
         actor=operator)
     db.commit()
+    return result
+
+
+@router.post("/projects/{project_id}/pipeline/tasks/{task_id}/resume")
+def resume_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
+    """Re-queue a blocked pipeline task after the person fixed its cause."""
+    require_project(db, project_id)
+    try:
+        result = pipeline.resume_pipeline_task(db, project_id, task_id,
+                                               (body or {}).get("expected_state_version"))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
     return result

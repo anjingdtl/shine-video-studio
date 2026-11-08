@@ -740,9 +740,10 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
     outline = _volume_outline(db, project_id, volume_id)
     if outline is None:
         raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
-    bible = current_bible(db, project_id)
+    bible = current_bible(db, project_id) or latest_bible_artifact(db, project_id)
     if bible is None:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
+    bible_basis = "confirmed" if bible.approved_at else "draft_unconfirmed"
     sections = outline.payload_json.get("production_sections") or []
     volume_doc = _volume_document(db, project_id, volume_id)
     if volume_doc is None:
@@ -800,6 +801,7 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
                 "section": section_ctx,
                 "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                 "bible_artifact_id": bible.id, "bible_sha256": bible.sha256,
+                "bible_basis": bible_basis,
                 "provider_fingerprint": fingerprint, "base_identity": identity,
             },
         )
@@ -1095,7 +1097,7 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
     from shine.api_film import StoryboardRequest, generate_storyboard
 
     script_text = serialize_volume_script(db, project_id, volume_id)
-    bible = current_bible(db, project_id)
+    bible = current_bible(db, project_id) or latest_bible_artifact(db, project_id)
     if bible is None:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
     master_doc_id = None
@@ -1471,3 +1473,96 @@ def confirmed_episode_scripts(db, project_id: str, volume_id: str) -> list:
         AgentArtifact.kind == EPISODE_SCRIPT_KIND).order_by(AgentArtifact.created_at)).all()
     return [r for r in rows if r.approved_at is not None
             and r.payload_json.get("volume_id") == volume_id]
+
+
+STAGE_LABELS = {
+    "DRAFT": "排队等待", "SENDING": "调用模型中", "WAITING_RESOURCE": "等待资源",
+    "PREPARING_PROVIDER": "准备供应商", "WAITING_PROVIDER": "等待模型返回",
+    "RESPONSE": "校验返回", "DOCUMENT": "落库中", "NEEDS_REVIEW": "待你核对",
+}
+
+
+def latest_bible_artifact(db, project_id: str) -> AgentArtifact | None:
+    """The newest bible artifact, confirmed or draft (with its status)."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == BIBLE_KIND).order_by(AgentArtifact.created_at.desc())).all()
+    return rows[0] if rows else None
+
+
+def pipeline_task_summary(db, project_id: str) -> list[dict]:
+    """The live progress of the pipeline's own tasks, for the UI progress bar.
+
+    The outline run's cursor over source units is real progress; the bible
+    and scene-script stages report their durable phase.  A blocked task
+    carries the consent document identity so the panel can offer the exact
+    recovery action instead of a dead end.
+    """
+    from shine.models import AgentTaskRecord
+
+    roles = ["story_outline_run", BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE]
+    rows = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id.in_(roles)).order_by(
+        AgentTaskRecord.created_at.desc())).all()
+    summary = []
+    seen = set()
+    for row in rows:
+        if row.role_id in seen:
+            continue
+        seen.add(row.role_id)
+        trace = row.trace or {}
+        done, total = 0, 0
+        if row.role_id == "story_outline_run":
+            units = trace.get("units") or trace.get("production_sections") or []
+            total = len(units) if isinstance(units, list) else 0
+            done = int(trace.get("cursor") or 0)
+        stage = trace.get("stage") or trace.get("phase") or ""
+        summary.append({
+            "task_id": row.id,
+            "role": row.role_id,
+            "state_version": row.state_version,
+            "status": row.status,
+            "stage": stage,
+            "stage_label": STAGE_LABELS.get(stage, stage or "—"),
+            "progress_done": done,
+            "progress_total": total,
+            "error_code": row.error_code,
+            "updated_at": (row.lease_expires_at.isoformat() if row.lease_expires_at else None),
+            "consent_document_id": trace.get("document_id") or trace.get("master_document_id"),
+            "consent_document_sha256": trace.get("document_sha256") or trace.get("master_document_sha256"),
+            "consent_role": row.role_id if row.role_id != "story_outline_run" else "scriptwriter",
+        })
+    return summary
+
+
+def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_version: int) -> dict:
+    """A person re-queues a blocked pipeline task after fixing its cause.
+
+    The fence matches the task's version so a stale view cannot resurrect a
+    task another action already moved.  Recovery never touches the UNKNOWN
+    ledger: a task blocked on an unknown send outcome needs the story
+    reconciliation path, not a blind re-queue, and stays refused here.
+    """
+    from sqlalchemy import update
+
+    from shine.models import AgentTaskRecord
+
+    row = db.get(AgentTaskRecord, task_id)
+    if row is None or row.project_id != project_id or row.role_id not in {
+            "story_outline_run", BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE}:
+        raise ValueError("PIPELINE_TASK_NOT_FOUND")
+    if row.trace.get("external_outcome") == "UNKNOWN" and row.status == "NEEDS_REVIEW" \
+            and row.trace.get("blocked_reason") == "PIPELINE_SEND_OUTCOME_UNKNOWN":
+        raise ValueError("PIPELINE_TASK_OUTCOME_UNKNOWN_RECONCILE_REQUIRED")
+    changed = db.execute(update(AgentTaskRecord).where(
+        AgentTaskRecord.id == task_id,
+        AgentTaskRecord.state_version == expected_state_version,
+        AgentTaskRecord.status.in_(["NEEDS_REVIEW", "PAUSED", "FAILED"]),
+    ).values(status="QUEUED", error_code=None,
+             state_version=AgentTaskRecord.state_version + 1)).rowcount
+    if not changed:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    add_audit(db, "local-user", "PIPELINE_TASK_RESUMED", "agent_task", task_id,
+              {"expected_state_version": expected_state_version}, project_id=project_id)
+    return {"task_id": task_id, "status": "QUEUED"}

@@ -657,6 +657,7 @@ export interface PipelineOverview {
   volume_plan_confirmed: boolean;
   bible_confirmed: boolean;
   pending_bible: { artifact_id: string; sha256: string } | null;
+  active_tasks: PipelineTaskSummary[];
   pending_scripts: Array<{
     volume_id: string; section_id: string; artifact_id: string; sha256: string;
     scene_key: string; title: string | null; text: string;
@@ -728,3 +729,43 @@ export const requestVolumeHandoff = (
     `/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`,
     json('POST', { workflow_profile_id: workflowProfileId,
                    acknowledge_scene_coverage: options.acknowledgeSceneCoverage ?? false }));
+
+export interface PipelineTaskSummary {
+  task_id: string;
+  role: string;
+  state_version: number;
+  status: string;
+  stage: string;
+  stage_label: string;
+  progress_done: number;
+  progress_total: number;
+  error_code: string | null;
+  updated_at: string | null;
+  consent_document_id: string | null;
+  consent_document_sha256: string | null;
+  consent_role: string;
+}
+
+export const resumePipelineTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
+  api<{ task_id: string; status: string }>(
+    `/projects/${projectId}/pipeline/tasks/${taskId}/resume`,
+    json('POST', { expected_state_version: expectedStateVersion }));
+
+export interface TextConsentScope {
+  document_id: string;
+  document_sha256: string;
+  scope_hash: string;
+  transmission: string;
+  roles: Array<{ role: string; configured: boolean; provider?: string;
+                 base_url?: string; model?: string; allowed: boolean }>;
+}
+
+export const getTextConsentScope = (projectId: string, documentId: string) =>
+  api<TextConsentScope>(`/projects/${projectId}/material-preparation/text-consent/${documentId}`);
+
+export const grantTextConsent = (
+    projectId: string, documentId: string, documentSha256: string, scopeHash: string, granted: boolean) =>
+  api<{ granted: boolean }>(
+    `/projects/${projectId}/material-preparation/text-consent`,
+    json('POST', { document_id: documentId, expected_document_hash: documentSha256,
+                   expected_scope_hash: scopeHash, granted }));

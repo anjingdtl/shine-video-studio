@@ -1355,3 +1355,23 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 .new-project-inline{width:190px!important;height:38px;font-size:11px!important}
 @media(max-width:700px){.new-project-inline{width:auto!important;flex:1}.new-project-button{flex:1;justify-content:center}}
 @media(prefers-reduced-motion:reduce){.new-project-button{transition:none}.new-project-button:hover:not(:disabled){transform:none}}
+
+/* ============ 四阶段流水线 ============ */
+.pipeline-progress { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 10px;
+  background: var(--surface-2, #f7f8fa); border-radius: 8px; }
+.progress-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.progress-row progress { flex: 1 1 140px; height: 10px; min-width: 120px; }
+.progress-name { font-weight: 600; min-width: 130px; }
+.progress-detail { font-size: 12px; color: var(--muted, #667); min-width: 180px; }
+.pipeline-step, .pipeline-volume-step { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line, #e4e6ea);
+  border-radius: 10px; display: flex; flex-direction: column; gap: 8px; }
+.volume-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.volume-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.script-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.script-list li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.script-list .ok { color: #1a7f4b; }
+.script-list .pending { color: #b06000; }
+.edit-box { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.edit-box textarea { width: 100%; font-family: inherit; }
+.scripts-grid { display: flex; flex-direction: column; gap: 10px; }
+.small { font-size: 12px; }
