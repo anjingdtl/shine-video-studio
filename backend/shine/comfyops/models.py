@@ -76,6 +76,12 @@ class WorkflowRevision(RecordMixin, Base):
 class RightsRecord(ProjectRecordMixin, Base):
     __tablename__ = "rights_records"
 
+    # Project-scoped rights records follow the project-local assets that use
+    # them. The global asset center keeps its own independent rights ledger.
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+
 
 class CandidateAsset(ProjectRecordMixin, Base):
     __tablename__ = "candidate_assets"

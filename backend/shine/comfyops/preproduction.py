@@ -217,6 +217,11 @@ def readiness(db, project_id, *, offline=True, data_dir=None):
             rights = db.get(RightsRecord, rights_id) if rights_id else None
             if rights_id and (not rights or rights.status != "APPROVED"):
                 reason = "LICENSE_NOT_APPROVED"
+            elif rights_id:
+                try:
+                    require_rights(db, project_id, rights_id, rights.payload.get("scope", "asset"))
+                except HTTPException:
+                    reason = "LICENSE_NOT_APPROVED"
             if mock and not offline:
                 reason = "MOCK_ASSET_NOT_PRODUCTION"
             links.append(

@@ -7,7 +7,7 @@ import pytest
 from alembic import command
 from tests.test_alembic import alembic_config
 
-HEAD_REVISION = "f180b0020001"
+HEAD_REVISION = "f180b0030001"
 
 
 def previous_database(tmp_path, monkeypatch):
@@ -32,8 +32,10 @@ def test_global_index_upgrade_preserves_private_scopes_and_reverses_without_row_
     path, config = previous_database(tmp_path, monkeypatch)
     with sqlite3.connect(path) as db:
         for project in ("A", "B"):
-            db.execute("INSERT INTO projects (id,title,description,created_at) VALUES (?,?, '', '2026-11-01')",
-                       (project, project))
+            db.execute(
+                "INSERT INTO projects (id,title,description,created_at) VALUES (?,?, '', '2026-11-01')",
+                (project, project),
+            )
             insert_profile(db, f"private-{project}", project)
         insert_profile(db, "original-global")
         before = db.execute("SELECT * FROM workflow_profiles ORDER BY id").fetchall()

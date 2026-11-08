@@ -774,7 +774,10 @@ def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1
     batch cannot starve the H3 queue: after every item the Worker returns to its
     normal dispatch order and a waiting series goes first.
     """
+    from shine.asset_center.execution import recover_stale_projectless_tasks
     from shine.materialprep import service
+
+    recover_stale_projectless_tasks(factory)
 
     processed = 0
     for _ in range(max(1, limit)):
@@ -810,6 +813,31 @@ def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1
         if result.get("status") == ITEM_QUEUED:
             # Still waiting for the GPU; do not spin on it this pass.
             break
+    if not processed:
+        # Projectless image and voice requests share this Worker. Preserve
+        # arrival order so a sustained image backlog cannot starve audio.
+        from shine.asset_center.models import LibraryRenderTask
+
+        with factory() as db:
+            next_task = db.scalar(
+                select(LibraryRenderTask)
+                .where(
+                    LibraryRenderTask.kind.in_({"image", "voice"}),
+                    LibraryRenderTask.status == "QUEUED",
+                    LibraryRenderTask.external_outcome == "NOT_SENT",
+                )
+                .order_by(LibraryRenderTask.created_at, LibraryRenderTask.id)
+                .limit(1)
+            )
+            next_kind = next_task.kind if next_task else None
+        if next_kind == "image":
+            from shine.asset_center.execution import run_one_pending_job
+
+            processed = run_one_pending_job(factory, settings, worker_id)
+        elif next_kind == "voice":
+            from shine.asset_center.voice_execution import run_one_pending_job as run_one_voice_job
+
+            processed = run_one_voice_job(factory, settings, worker_id)
     return processed
 
 

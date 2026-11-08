@@ -7,7 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-HEAD_REVISION = "f180b0020001"
+HEAD_REVISION = "f180b0030001"
 
 
 def alembic_config(db_path: Path) -> Config:
@@ -25,15 +25,11 @@ def test_fresh_database_migrates_to_head_with_the_final_hardening_columns(tmp_pa
     command.upgrade(alembic_config(db_path), "head")
     connection = sqlite3.connect(db_path)
     try:
-        tables = {
-            row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert "quality_gates" in tables
         assert {"rule_packs", "project_rule_locks", "agent_task_records", "agent_artifacts"}.issubset(tables)
         job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
-        assert {"request_revision", "pending_repair_context", "quality_verification"}.issubset(
-            job_columns
-        )
+        assert {"request_revision", "pending_repair_context", "quality_verification"}.issubset(job_columns)
         gate_columns = {row[1] for row in connection.execute("PRAGMA table_info(quality_gates)")}
         assert {
             "gate_name",

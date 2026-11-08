@@ -641,6 +641,7 @@ class ProductionSeriesItem(Base):
 
 
 # V1.3 extends this same metadata/SQLite ledger.
+from shine.asset_center import models as asset_center_models  # noqa: E402,F401
 from shine.comfyops import models as preparation_models  # noqa: E402,F401
 
 # The director journey (episode plans, the immutable package) and the whole-film

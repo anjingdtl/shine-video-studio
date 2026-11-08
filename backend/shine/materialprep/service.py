@@ -1098,6 +1098,16 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
                 rights = db.get(RightsRecord, rights_id)
                 if not rights or rights.status != "APPROVED":
                     reason = "LICENSE_NOT_APPROVED"
+                else:
+                    try:
+                        require_rights(
+                            db,
+                            project_id,
+                            rights_id,
+                            rights.payload.get("scope", "asset"),
+                        )
+                    except HTTPException:
+                        reason = "LICENSE_NOT_APPROVED"
             if data_dir:
                 from shine.media.artifacts import safe_asset_path
 
@@ -1141,6 +1151,7 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         payload = row.payload or {}
         requirements.append({
             "requirement_id": row.id,
+            "requirement_hash": row.sha256,
             "family": payload.get("family"),
             "entity_id": payload.get("entity_id"),
             "strategy": payload.get("strategy"),
