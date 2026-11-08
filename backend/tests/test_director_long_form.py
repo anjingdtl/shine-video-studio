@@ -645,18 +645,19 @@ def test_the_journey_reads_stage_completion_from_the_ledger(api):
     journey = client.get(f"/api/v1/projects/{studio['project']}/journey").json()
     stages = {stage["id"]: stage for stage in journey["stages"]}
     assert [stage["id"] for stage in journey["stages"]] == [
-        "script", "materials", "storyboard", "package", "production", "post",
+        "script", "plan", "storyboard", "assets", "package", "production", "post",
     ]
     assert stages["script"]["done"] is True
-    assert stages["materials"]["done"] is False
+    assert stages["plan"]["done"] is False
     assert stages["package"]["done"] is False
-    assert journey["next_stage"] == "materials"
+    assert journey["next_stage"] == "plan"
 
     _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
     journey = client.get(f"/api/v1/projects/{studio['project']}/journey").json()
     stages = {stage["id"]: stage for stage in journey["stages"]}
-    assert stages["materials"]["done"] is True
+    assert stages["plan"]["done"] is True
     assert stages["storyboard"]["done"] is True
+    assert stages["assets"]["done"] is True
     assert stages["package"]["done"] is False
 
     _confirm_package(client, package["id"])
@@ -777,3 +778,82 @@ def test_the_episode_list_is_paged_in_the_database(api):
     assert any(event["kind"] == "RUN_CREATED" for event in events)
     blockers = client.get(f"/api/v1/production-runs/{run['id']}/blockers").json()
     assert blockers["count"] == 0
+
+
+def test_materials_are_judged_after_the_storyboard(api):
+    """素材门禁属于分镜之后，不属于统筹之前。
+
+    What a shot needs is a question the storyboard asks, so the planning
+    stage asks for nothing but the plan and the frozen style, and the
+    material library is judged in its own stage, right after the storyboard.
+    """
+    from sqlalchemy import update
+
+    from shine.models import Asset
+
+    client, factory, settings = api
+    project_id = create_project(client, "素材后置")
+    style = freeze_style(client, project_id)
+    subject = upload_asset(client, project_id, content=PNG + b"-subject", filename="角色.png")
+    approve_lock(client, subject["id"])
+    create_shot(
+        client, project_id, style["id"], title="镜头1", beat="一个动作",
+        asset_ids=[subject["id"]],
+        bindings=[{"asset_id": subject["id"], "use_as": "subject",
+                   "role": "CHAR_A", "ordinal": 0}],
+    )
+    plan = client.post(f"/api/v1/projects/{project_id}/episode-plans",
+                       json={"target_seconds": 60, "tolerance_seconds": 0}, headers=LOCAL)
+    assert plan.status_code == 201, plan.text
+    confirmed = client.post(
+        f"/api/v1/projects/{project_id}/episode-plans/{plan.json()['version']}/confirm",
+        json={"expected_sha256": plan.json()["sha256"]}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    # the material was uploaded but never confirmed and locked: it is exactly
+    # what the material stage has to name.
+    with factory.begin() as db:
+        db.execute(update(Asset).where(Asset.id == subject["id"])
+                   .values(approved=False, locked=False))
+
+    journey = client.get(f"/api/v1/projects/{project_id}/journey").json()
+    stages = {stage["id"]: stage for stage in journey["stages"]}
+    assert [stage["id"] for stage in journey["stages"]] == [
+        "script", "plan", "storyboard", "assets", "package", "production", "post",
+    ]
+    # the planning stage never asks for a material
+    assert stages["plan"]["done"] is True, stages["plan"]
+    assert stages["plan"]["blockers"] == [], stages["plan"]
+    # the storyboard design is finished; the material is not
+    assert stages["storyboard"]["done"] is True, stages["storyboard"]
+    # and the material stage is the one that names what is missing
+    assert stages["assets"]["done"] is False, stages["assets"]
+    assert any(row["code"] == "SHOT_REQUIRED_ASSET_NOT_MASTER"
+               for row in stages["assets"]["blockers"]), stages["assets"]
+    assert journey["next_stage"] == "assets"
+
+
+def test_the_material_stage_names_a_character_without_a_master(api):
+    """A character the storyboard names is a material requirement too.
+
+    The name alone is not renderable, so the material step has to name the
+    character that still waits for its master.
+    """
+    client, factory, settings = api
+    project_id = create_project(client, "角色素材")
+    style = freeze_style(client, project_id)
+    create_shot(client, project_id, style["id"], title="镜头1", beat="一个人走过",
+                characters=["林岚"])
+    plan = client.post(f"/api/v1/projects/{project_id}/episode-plans",
+                       json={"target_seconds": 60, "tolerance_seconds": 0}, headers=LOCAL)
+    assert plan.status_code == 201, plan.text
+    confirmed = client.post(
+        f"/api/v1/projects/{project_id}/episode-plans/{plan.json()['version']}/confirm",
+        json={"expected_sha256": plan.json()["sha256"]}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+
+    journey = client.get(f"/api/v1/projects/{project_id}/journey").json()
+    stages = {stage["id"]: stage for stage in journey["stages"]}
+    assert stages["storyboard"]["done"] is True, stages["storyboard"]
+    assert stages["assets"]["done"] is False, stages["assets"]
+    assert any(row["code"].startswith("SHOT_CHARACTER_MASTER_MISSING")
+               for row in stages["assets"]["blockers"]), stages["assets"]

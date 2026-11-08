@@ -386,7 +386,7 @@ export type SubtitleTrack = {
 /* ======================= 导演流程 / 整部作品 ======================= */
 
 export type JourneyStage = {
-  id: 'script' | 'materials' | 'storyboard' | 'package' | 'production' | 'post';
+  id: 'script' | 'plan' | 'storyboard' | 'assets' | 'package' | 'production' | 'post';
   label: string;
   done: boolean;
   summary: string;
@@ -778,6 +778,8 @@ export interface StoryboardUnit {
   updated_at?: string | null;
   /** What actually went wrong in this unit, with its reconciliation handle. */
   rejections?: StoryboardUnitRejection[];
+  /** The characters this design names that have no approved master yet. */
+  missing_characters?: string[];
 }
 
 export interface StoryboardDraft {

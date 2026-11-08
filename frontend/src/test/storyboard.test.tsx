@@ -277,7 +277,7 @@ it('切换素材步骤再返回时保留正在运行的分镜请求和最终结�
   await user.click(screen.getByRole('checkbox', { name: /我同意把该剧本/ }));
   await user.click(screen.getByRole('button', { name: /生成 AI 分镜方案/ }));
   await waitFor(() => expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1));
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
   await gotoDirectorPage(user, /镜头拆解/);
   expect(screen.getByLabelText('粘贴完整剧本文本')).toHaveValue('剧本不会因切页丢失');
   expect(screen.getByRole('button', { name: /生成 AI 分镜方案/ })).toBeDisabled();

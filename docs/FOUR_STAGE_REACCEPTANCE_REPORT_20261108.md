@@ -150,6 +150,7 @@ F01–F11 的既有回归保持通过。软件门禁（后端全量、Ruff、前
 | `cd frontend && npm.cmd test -- --run` | 0 | 27 文件 / 177 项通过（含新增 6 项） |
 | `cd frontend && npm.cmd run build`（tsc -b + vite build） | 0 | 构建通过（仅既有 >500 kB chunk 警告） |
 | `backend/.venv/Scripts/python.exe scripts/verify_four_stage_browser.py --seed-only --data-dir .local-acceptance/four-stage-browser-r6` | 0 | 隔离库合成出 3 卷 / 2 集 / 4 镜 / 已交付包 |
+| `SHINE_DATA_DIR=<隔离目录> backend/.venv/Scripts/python.exe -m alembic -c alembic.ini upgrade head`（空库与旧库副本 `.local-acceptance/db/default_local-backup.db`） | 0 | 空库直升 head；旧库副本 `f180a0010001` → `f180b0020001`；`alembic check` = No new upgrade operations detected |
 
 注：`scripts/stop_shine.py` 有一个**既有**的 F401（`UNKNOWN` 未使用），不在 CI 的 lint 口径
 （`backend/shine backend/alembic backend/tests`）内，本轮未改动该文件。
@@ -247,3 +248,42 @@ Windows 本机能力上，与四阶段流水线无关；旧基线 `7081104` 的�
 | `frontend/src/App.tsx` | 地址栏可携带 `package` 深链并恢复 |
 | `frontend/src/test/fourStageRecovery.test.tsx` | **新增** R07/R08 的前端反例回归（5 项） |
 | `scripts/verify_four_stage_browser.py` | **新增** 隔离浏览器验收的种子与服务脚本 |
+
+## 8. 追加轮：素材后置的阶段重排
+
+**决定（用户裁定）**：素材一律后置 —— 剧本定稿、分镜设计完成后，才到素材库按分镜准备素材，然后拍摄。
+
+**为什么**：每镜需要什么素材是**分镜的产物**，不是剧本的产物（`api_film.py:414-418` 的
+`required_asset_ids=intent["asset_ids"]`，来自摄影方案）。原来的六阶段把「素材」挂在统筹阶段，
+而它的判据只能按镜头算 —— 判据被放在了它算不出来的阶段；同一个素材门禁又在 ③④ 各判一次。
+
+**改动**：
+
+1. 服务端 journey 由 6 阶段变 7 阶段：`script 创意与剧本 → plan 剧本统筹 → storyboard 镜头拆解
+   → assets 拍摄素材准备 → package 导演包 → production 视频生产 → post 后期成片`。
+2. ② 只保留**分集方案 + 冻结风格**，不再问任何素材。
+3. ③ 只判镜头自身（存在、参数有效、beat 非空），不再判素材。
+4. 新的 ④ 拍摄素材准备 承接逐镜素材判据，并新增「镜头点名的角色必须有绑定主素材」
+   （`SHOT_CHARACTER_MASTER_MISSING`）。
+5. 导演包冻结同样新增这条（`package_readiness`）—— 素材的最终关口仍在冻结时。
+6. 四阶段面板：每个单元回执带 `missing_characters`（分镜点名、但还没有主素材的角色），
+   面板如实显示，并在素材备齐前**不提供**「应用这一场」。
+7. 前端阶段条 7 格，顺序有断言。
+
+**证据**：
+
+- `backend/tests/test_director_long_form.py::test_materials_are_judged_after_the_storyboard`
+- `backend/tests/test_director_long_form.py::test_the_material_stage_names_a_character_without_a_master`
+- `frontend/src/test/setupEntry.test.tsx`（阶段条次序断言）
+- 既有测试同步：阶段 id 列表、阶段名、阶段序号。
+
+**尚未做的边界（明确记录，不假装完成）**：
+
+1. **正式（非草稿）分镜路径仍会因缺角色主素材而拒绝出方案**（`api_film.py:1054-1063` 的
+   `BLOCKED_MISSING_MASTERS`）。导演层的四阶段走草稿路径（缺角色只记录、不阻断），所以导演流程
+   已符合新次序；要让专家层的正式分镜也符合，需要把「角色需求以名字形式进入镜头 spec」这条
+   契约落进去 —— 下一轮。
+2. **落镜仍是服务端硬门禁**：`apply-camera` 要求参考素材已批准锁定（`api_film.py:445-450` 的
+   `ASSET_APPROVAL_CHANGED`）。这与新次序一致（先备素材、再落镜），但还没有「落镜前按角色名
+   核对」的具名拒绝。
+3. 导演模式还没有「逐镜绑定素材」的操作界面（逐镜绑定目前只在专业层的 `ShotPanel`）。

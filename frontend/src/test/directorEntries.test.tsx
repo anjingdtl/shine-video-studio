@@ -202,7 +202,7 @@ describe('② 剧本统筹先分集', () => {
       } });
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 4 阶段：导演包/);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
     const generate = await screen.findByRole('button', { name: /生成分集草案/ });
     await waitFor(() => expect(generate).toBeEnabled());
     await user.click(generate);

@@ -476,8 +476,19 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                           : '待应用镜头')
                         : '未完成：' + (unit.status ?? '未知')}
                     </span>
+                    {(unit.missing_characters ?? []).length > 0 && (
+                      <span className="muted small">
+                        分镜已定稿，这一场要用的主素材还没备齐：
+                        {(unit.missing_characters ?? []).join('、')}
+                        '（去素材库备齐并确认锁定后再应用这一场）'
+                      </span>
+                    )}
                     {unit.status === 'PROPOSED' && !unit.applied && (
-                      <button type="button" className="must-button" disabled={busy}
+                      <button type="button" className="must-button"
+                        disabled={busy || (unit.missing_characters ?? []).length > 0}
+                        title={(unit.missing_characters ?? []).length > 0
+                          ? '这一场要用的主素材还没备齐：' + (unit.missing_characters ?? []).join('、')
+                          : ''}
                         onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
                     )}
                     {unit.status !== 'PROPOSED' && (

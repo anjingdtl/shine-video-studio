@@ -999,3 +999,18 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `frontend/src/test/fourStageRecovery.test.tsx`（R07/R08）、
   `scripts/verify_four_stage_browser.py`（隔离浏览器旅程）。
   证据见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md`。
+
+
+## 2026-11-08 追加：素材后置（用户裁定）
+
+- **素材一律后置**：剧本定稿、分镜设计完成后，才到素材库**按分镜**准备素材，然后拍摄。
+  每镜需要什么素材是分镜的产物（`required_asset_ids` 来自摄影方案），不是剧本的产物。
+- **阶段次序改为 7 步**：`script 创意与剧本 → plan 剧本统筹 → storyboard 镜头拆解 →
+  assets 拍摄素材准备 → package 导演包 → production 视频生产 → post 后期成片`。
+  ② 只判分集方案与冻结风格，③ 只判镜头自身，④ 判逐镜素材（含「镜头点名的角色必须有绑定
+  主素材」`SHOT_CHARACTER_MASTER_MISSING`），素材的最终关口仍是导演包冻结。
+- **四阶段面板按同一顺序**：单元回执带 `missing_characters`，面板如实显示，并在素材备齐前
+  不提供「应用这一场」。
+- 验收：`backend/tests/test_director_long_form.py`（两条新断言）、
+  `frontend/src/test/setupEntry.test.tsx`（阶段条次序）。
+  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 8 节。

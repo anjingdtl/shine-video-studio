@@ -75,7 +75,7 @@ describe('导演包阶段', () => {
       } });
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 4 阶段：导演包/);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
 
     expect(await screen.findByText(/第 3 版 · 1 集 · 2 镜/)).toBeInTheDocument();
     expect(await screen.findByText(/本机检查通过/)).toBeInTheDocument();
@@ -91,7 +91,7 @@ describe('导演包阶段', () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 4 阶段：导演包/);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
 
     expect(await screen.findByText('冻结风格已变更，请重新生成导演包')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /启动整部作品生产/ })).toBeNull();
@@ -142,7 +142,7 @@ describe('全片生产阶段', () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 5 阶段：视频生产/);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
 
     await waitFor(() => expect(document.querySelector('.run-summary-facts')).not.toBeNull());
     const summary = document.querySelector('.run-summary-facts');
@@ -188,7 +188,7 @@ describe('全片生产阶段', () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 5 阶段：视频生产/);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
 
     expect(await screen.findByRole('button', { name: /继续安全可恢复批次/ })).toBeInTheDocument();
     expect(screen.getByText(/无法证明安全的批次继续保留在待处理状态/)).toBeInTheDocument();
@@ -203,7 +203,7 @@ describe('全片生产阶段', () => {
   it('还没有运行时明确说明先确认导演包，而不是假装在跑', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 5 阶段：视频生产/);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
     expect(await screen.findByText(/还没有整部作品的运行记录/)).toBeInTheDocument();
   });
 });

@@ -30,7 +30,7 @@ it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
   const confirm = await screen.findByRole('button', { name: '确认使用' });
   expect(screen.queryByLabelText(/操作员凭据|核验依据/)).toBeNull();
   vi.mocked(window.confirm).mockReturnValue(false);
@@ -50,7 +50,7 @@ it('图片素材显示缩略图，待确认素材用高对比按钮提示必做'
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
 
   const thumb = await screen.findByAltText('主角.png');
   expect(thumb).toHaveAttribute('src', '/api/v1/assets/asset-1/thumbnail');
@@ -75,7 +75,7 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
   await user.click(await screen.findByRole('button', { name: '确认使用' }));
   await screen.findByText('PLAN_HASH_CHANGED');
   await waitFor(() => expect(screen.getByRole('button', { name: '确认使用' })).toBeEnabled());

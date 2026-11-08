@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shine.asset_identity import resolve_character_asset
 from shine.director.contracts import (
     EpisodePlanPayload,
     PackagePolicyContract,
@@ -474,6 +475,7 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             if style and shot.get("style_version_id") != style.get("style_version_id"):
                 blockers.append(_blocker("SHOT_STYLE_MISMATCH", f"镜头「{row.name}」不执行当前冻结风格",
                                          shot_id=row.id))
+            bound_characters = []
             for link in shot.get("bindings", []):
                 asset = db.get(Asset, link.get("asset_id") or "")
                 if asset is None:
@@ -482,6 +484,17 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                 elif not (asset.approved and asset.locked):
                     blockers.append(_blocker("ASSET_NOT_MASTER", f"素材「{asset.filename}」尚未确认并锁定",
                                              shot_id=shot.get("shot_id"), asset_id=asset.id))
+                else:
+                    bound_characters.append({"id": asset.id, "kind": asset.kind,
+                                             "role": asset.role, "entity_id": asset.entity_id})
+            # A character the shot names must be bound to a master: the name
+            # alone is not renderable, and the storyboard is what asks for it.
+            for name in shot.get("characters", []):
+                reference = str(name or "").strip()
+                if reference and resolve_character_asset(reference, bound_characters) is None:
+                    blockers.append(_blocker("SHOT_CHARACTER_MASTER_MISSING",
+                                             f"镜头「{row.name}」的角色「{reference}」还没有绑定主素材",
+                                             shot_id=shot.get("shot_id")))
 
     fingerprint = digest_of(
         {

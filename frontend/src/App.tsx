@@ -4,7 +4,7 @@ import { PreproductionPanel } from './components/PreproductionPanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, BookOpenText, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
-  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, Plus, RefreshCw, Settings2,
+  Film, FolderKanban, Images, ListChecks, LockKeyhole, PackageCheck, PenLine, Plus, RefreshCw, Settings2,
   ShieldCheck, SlidersHorizontal, Sparkles, Users, Video, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -83,11 +83,14 @@ const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
   projects: '我的作品', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
   run: '全片生产', deliver: '成片中心', setup: '基础配置',
 };
-/** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
+/** 主线阶段。完成态一律来自服务端 /journey，不在前端另算一套。
+ *  顺序遵守一条原则：素材是为剧本和分镜服务的，所以「拍摄素材准备」排在
+ *  「镜头拆解」之后 —— 分镜先定稿，素材库再按分镜的要求准备。 */
 const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
   { id: 'script', text: '创意与剧本', icon: PenLine, page: 'assets', hint: '输入想法或导入现成剧本，确认后进入统筹' },
-  { id: 'materials', text: '剧本统筹与素材', icon: Film, page: 'assets', hint: '分集 · 人物场景道具 · 确认主素材 · 冻结风格' },
+  { id: 'plan', text: '剧本统筹', icon: Film, page: 'assets', hint: '分集 · 冻结风格 · 把剧本切成可拍的集' },
   { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜、对白与声音安排' },
+  { id: 'assets', text: '拍摄素材准备', icon: Images, page: 'produce', hint: '按分镜定稿的清单准备素材并确认为主素材' },
   { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结这次要拍的全部内容与执行政策' },
   { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完全部分集' },
   { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },

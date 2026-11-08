@@ -256,7 +256,7 @@ def test_episodes_are_planned_from_the_script_before_any_shot_exists(api):
 
     journey = client.get(f"/api/v1/projects/{project}/journey").json()
     stages = {stage["id"]: stage for stage in journey["stages"]}
-    assert not any(b["code"] == "EPISODE_PLAN_NOT_CONFIRMED" for b in stages["materials"]["blockers"])
+    assert not any(b["code"] == "EPISODE_PLAN_NOT_CONFIRMED" for b in stages["plan"]["blockers"])
     assert any(b["code"] == "EPISODE_PLAN_NOT_MATERIALIZED" for b in stages["storyboard"]["blockers"])
     assert stages["storyboard"]["done"] is False
 

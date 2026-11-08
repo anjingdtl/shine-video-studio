@@ -232,9 +232,11 @@ export const EMPTY_JOURNEY = {
   stages: [
     { id: 'script', label: '创意与剧本', done: false, summary: '还没有剧本',
       blockers: [{ code: 'SCRIPT_NOT_PREPARED', message: '导入剧本或直接建立分镜后才进入统稿' }], facts: {} },
-    { id: 'materials', label: '剧本统筹与素材', done: false, summary: '分集方案待确认',
+    { id: 'plan', label: '剧本统筹', done: false, summary: '分集方案待确认',
       blockers: [{ code: 'EPISODE_PLAN_NOT_CONFIRMED', message: '分集方案尚未确认' }], facts: {} },
     { id: 'storyboard', label: '镜头拆解', done: false, summary: '还没有分镜',
+      blockers: [], facts: {} },
+    { id: 'assets', label: '拍摄素材准备', done: false, summary: '等待分镜定稿',
       blockers: [], facts: {} },
     { id: 'package', label: '导演包', done: false, summary: '尚未生成导演包', blockers: [{ code: 'NO_PACKAGE', message: '尚未生成导演包' }], facts: {} },
     { id: 'production', label: '视频生产', done: false, summary: '等待导演包', blockers: [], facts: {} },

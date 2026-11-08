@@ -1719,6 +1719,7 @@ def volume_storyboard_state(db, project_id: str, volume_id: str) -> dict:
             "script_sha256": entry.get("script_sha256"),
             "chunk_sha256": entry.get("chunk_sha256"),
             "rejections": entry.get("rejections") or [],
+            "missing_characters": entry.get("missing_characters") or [],
             "updated_at": entry.get("updated_at"),
             **applied,
         })
@@ -1885,6 +1886,10 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
             "status": result.get("status"),
             "steps": steps,
             "rejections": unit_rejections,
+            # What this design asks the material library for: the characters
+            # it names that have no approved master yet.  The storyboard is
+            # finished; these are what the material step has to answer.
+            "missing_characters": [str(name) for name in (steps.get("draft_missing_characters") or [])],
             "camera_artifact_id": apply_info.get("camera_artifact_id"),
             "camera_sha256": (steps.get("cinematographer") or {}).get("sha256"),
             "continuity_artifact_id": apply_info.get("continuity_artifact_id"),
