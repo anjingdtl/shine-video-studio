@@ -247,7 +247,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div>
             <div className="section-kicker">① 分集方案</div>
             <h2>每集大约多长，由你定</h2>
-            <p>先按已确认剧本的场次分集，再逐集拆镜头：分集只在场次之间切，不会把一场戏或一句对白拦腰截断；超长的一集会如实标注原因。</p>
+            <p>按场次分集，不切断一场戏或一句对白；超长会标注原因。</p>
           </div>
           <div className="run-head-actions">
             {outlineConfirmed && shotCount > 0 && <label className="run-inline-field">分集依据
@@ -305,9 +305,9 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
               <span>来源 <code>{latestPlan.source}</code></span>
             </div>
           </details>
-        </div> : canPlan && <p className="empty-inline">还没有分集方案。先生成草案——它会覆盖全部场次（或全部镜头），不重不漏。</p>}
+        </div> : canPlan && <p className="empty-inline">还没有分集方案；先生成草案，覆盖全部场次或镜头。</p>}
 
-        {latestPlan && <ol className="run-episode-plan">
+        {latestPlan && <ol className="run-episode-plan" aria-label="分集草案">
           {latestPlan.payload.episodes.map((episode) => <li key={episode.episode_id}>
             <span className="run-ep-no">{episode.order}</span>
             <div>
@@ -325,7 +325,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div>
             <div className="section-kicker">② 导演包</div>
             <h2>把这次要拍的东西固定下来</h2>
-            <p>导演包会冻结剧本版本、分集、镜头、素材版本、风格、生成方案和生产政策。确认之后才能开拍。</p>
+            <p>冻结剧本、分集、镜头、素材、风格和生成方案；确认后才能开拍。</p>
           </div>
           <button className="secondary-button" disabled={busy !== ''} onClick={load}>
             <RefreshCw size={13} /> 重新检查
@@ -397,7 +397,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
               <Play size={14} /> 启动整部作品生产
               {latestPackage.episode_count > 1 ? `（${latestPackage.episode_count} 集一次跑完）` : ''}
             </button>}
-          {run && <p className="run-hint">这个导演包已经启动过一次；重复点击会返回同一次运行，不会重复开拍。</p>}
+          {run && <p className="run-hint">重复点击会返回同一次运行，不会重复开拍。</p>}
         </div>}
       </section>
     </>}
@@ -408,15 +408,15 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div className="section-kicker">{mode === 'post' ? '逐集成片' : '整部作品运行'}</div>
           <h2>{mode === 'post' ? '每一集都能单独播放' : '后台会一直推进，关了浏览器也一样'}</h2>
           <p>{mode === 'post'
-            ? '这里只展示真实装配完成的分集；缺片段的一集不会出现在成片里。'
-            : '运行状态来自服务端记录：心跳只代表后台还活着，最近进展才代表真的拍出了东西。'}</p>
+            ? '只展示真实装配完成的分集。'
+            : '状态来自服务端；最近进展才代表真的拍出了东西。'}</p>
         </div>
         <button className="secondary-button" disabled={busy !== ''} onClick={load}>
           <RefreshCw size={13} /> 刷新
         </button>
       </div>
 
-      {!activeRun ? <p className="empty-inline">还没有整部作品的运行记录。先在「导演包」阶段确认并启动。</p> : <>
+      {!activeRun ? <p className="empty-inline">还没有整部作品的运行记录；先在导演包确认并启动。</p> : <>
         <div className="run-summary-row">
           <span className={`run-badge ${tone(activeRun.status)}`}>{statusText(activeRun.status)}</span>
           <div className="run-summary-facts">
@@ -454,7 +454,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
         </div>}
 
         {activeRun.status === 'NEEDS_REVIEW' && <p className="run-hint">
-          续跑会逐项验证提交记录、冻结方案和素材身份；无法证明安全的批次继续保留在待处理状态。
+          续跑只恢复能证明安全的批次，其余保持待处理。
         </p>}
 
         <ol className="run-episodes">
@@ -515,7 +515,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div>
             <div className="section-kicker">待审清单</div>
             <h2>技术完成 ≠ 你已经认可</h2>
-            <p>自动交付只代表文件可播放、技术检查通过。艺术效果需要你自己看过之后决定。</p>
+            <p>自动交付只代表技术上可播放；艺术效果由你确认。</p>
           </div>
           <Film size={16} />
         </div>

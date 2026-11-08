@@ -533,8 +533,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       <div className="module-guide">
         <Sparkles size={13} />
         <div>
-          <p><b>先读剧本、备素材，再冻结风格。</b>这一步只调用文字模型，不占用显卡；真正出图在「选择素材」阶段排队。</p>
-          <p>AI 只生成候选。晋升为主素材需要你在下面明确确认，AI 不会替你决定。</p>
+          <p><b>先分析剧本、准备素材。</b>AI 只出候选，主素材由你确认。</p>
         </div>
       </div>
 
@@ -554,24 +553,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       )}
       {styleRows.length > 0 && (
         <details className="material-stage">
-          <summary>影视风格已冻结（版本 {frozenStyle?.version}）：逐项对照素材视觉方向</summary>
+          <summary>影视风格已冻结（第 {frozenStyle?.version} 版）</summary>
           <div className="material-stage-body">
             {styleRows.map((row) => (
               <p key={row.label}>
                 {row.label}：素材方向「{row.direction || '未填'}」／已冻结风格「{row.style || '未填'}」
               </p>
             ))}
-            <p className="material-hint">两者不一致时，请在下方「影视风格」新建一个版本；已冻结的合同不会被自动修改。</p>
+            <p className="material-hint">不一致时新建风格版本；已冻结内容不会被改写。</p>
           </div>
         </details>
       )}
       {(state?.blockers ?? []).map((blocker) => (
-        <div className="required-action" key={blocker.code}>
+        <div className="required-action" key={blocker.code} title={blocker.code}>
           <AlertTriangle size={14} className="required-icon" />
           <div className="required-text">
             <b>{reasonText(blocker.code)}</b>
             <small>{blocker.note}</small>
-            <small className="material-code">代码 {blocker.code}</small>
           </div>
         </div>
       ))}
@@ -593,7 +591,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         <summary>① 读剧本{state?.plan_status ? ` · ${PLAN_STATUS_LABELS[state.plan_status] ?? ''}` : ''}</summary>
         <div className="material-stage-body">
           {documents.length === 0 && (
-            <p className="material-hint">这个作品还没有剧本文件。请在本页上方「创意与剧本」里输入想法生成剧本，或导入现成剧本。</p>
+            <p className="material-hint">还没有剧本；先在上方写想法或导入。</p>
           )}
           <label className="material-field">
             <span>剧本文件</span>
@@ -670,8 +668,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             </ul>
           )}
           <fieldset className="material-direction">
-            <legend>视觉方向（先定方向，再冻结风格）</legend>
-            <p className="material-hint">这五项会直接进入英文出图提示词，请用英文填写；中文会被提示词规则拒绝。</p>
+            <legend>视觉方向</legend>
+            <p className="material-hint">五项都会进入英文提示词，请用英文填写。</p>
             {(Object.keys(DIRECTION_LABELS) as (keyof typeof DIRECTION_LABELS)[]).map((field) => (
               <label key={field} className="material-field">
                 <span>{DIRECTION_LABELS[field]}</span>
@@ -694,7 +692,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         onToggle={(event) => { if (event.currentTarget.open) setOpenStage(2); else if (shownStage === 2) setOpenStage(-1); }}>
         <summary>③ 选择素材 · {tiles.length} 项候选</summary>
         <div className="material-stage-body">
-          {runs.length === 0 && <p className="material-hint">还没有出图批次。确认清单后，生成的项目会在这里排队。</p>}
+          {runs.length === 0 && <p className="material-hint">确认清单后，出图批次会出现在这里。</p>}
           {tiles.length > 0 && <>
             <div className="material-toolbar">
               <label className="material-field"><span>候选素材分组</span><select value={candidateGroup} onChange={(e) => setCandidateGroup(e.target.value)}>

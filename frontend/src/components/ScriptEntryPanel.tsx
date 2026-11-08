@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { FileUp, Lightbulb, RefreshCw } from 'lucide-react';
+import { FileUp, RefreshCw } from 'lucide-react';
 import {
   ApiError, confirmCreativeBrief, generateScriptFromBrief,
   listCreativeBriefs, listScriptDocuments, saveCreativeBrief, uploadScriptDocument,
@@ -82,24 +82,17 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
   const lockedFacts = extra.split('\n').map((row) => row.trim()).filter(Boolean);
 
   return <section className="card script-entry" id="script-entry">
-    <div className="module-guide">
-      <Lightbulb size={13} />
-      <div>
-        <p><b>两条入口，一条链路：</b>写下想法让 AI 写剧本，或直接导入现成剧本。两边最终都进入同一份
-          「原文 + 大纲确认」流程，原文与锁定事实全程保留。</p>
-      </div>
-    </div>
     <div className="script-entry-grid">
       <div className="script-entry-a">
         <h3>入口 A · 我有一个想法</h3>
         <label className="script-entry-field">
-          <span>想法（一句话或一段描述）</span>
-          <textarea value={idea} rows={5} placeholder="例：雨夜里，一个钟表匠修好了一只停在十二点的怀表，客人却在第二天消失。"
+          <span>想法</span>
+          <textarea value={idea} rows={4} placeholder="例：雨夜里，一个钟表匠修好了一只停在十二点的怀表，客人却在第二天消失。"
             onChange={(event) => setIdea(event.target.value)} />
         </label>
         <label className="script-entry-field">
-          <span>锁定事实（每行一条，AI 不得改动）</span>
-          <textarea className="compact" value={extra} rows={3} placeholder="例：主角叫老周"
+          <span>锁定事实（每行一条）</span>
+          <textarea className="compact" value={extra} rows={2} placeholder="例：主角叫老周"
             onChange={(event) => setExtra(event.target.value)} />
         </label>
         <button type="button" className="secondary-button" disabled={busy || !idea.trim()}
@@ -145,15 +138,14 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
             下一步：{latest.script_task.next_step}
           </p>}
           {latest.script_task?.status === 'NEEDS_REVIEW' && <p className="must-note">
-            这次调用的结果不确定，只核对、不自动重发。请到专业设置查看任务日志后再决定。
+            结果不确定：只核对，不自动重发。
           </p>}
         </div>}
       </div>
 
       <div className="script-entry-b">
         <h3>入口 B · 我已有剧本</h3>
-        <p>上传剧本原文（.txt / .md / .json / .docx / .pdf）。原文与内容哈希先完整入库；
-          场次拆分、人物/对白整理与歧义确认在「总体大纲」里完成，改写锁定内容前会先显示差异。</p>
+        <p>支持 .txt / .md / .json / .docx / .pdf；导入后可在大纲里校正。</p>
         <label className="upload-button">
           <FileUp size={14} />
           <span>{busy ? '上传中…' : '选择并上传剧本'}</span>

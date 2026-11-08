@@ -92,15 +92,15 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
   return <details className="material-stage" open>
     <summary>总体大纲与生产段落（长剧本分步制作）</summary>
     <div className="material-stage-body">
-      <p>生产段落是章节或场群；H3 生成分段是一次 4–15 秒输出。先提取全文并逐层归并大纲，由你确认后，只为勾选的段落准备素材和正式分镜。</p>
-      <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新大纲输入）</span>
+      <p>生产段落是章节或场群；H3 每段 4–15 秒。先提取大纲，确认后只为勾选段落准备素材和分镜。</p>
+      <label className="material-field"><span>补充锁定事实（每行一条）</span>
         <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3} />
       </label>
       <button type="button" disabled={busy || !documentId} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
         document_id: documentId, expected_document_hash: documentHash, locked_facts: facts.split('\n').map((s) => s.trim()).filter(Boolean),
       })))}>后台提取并归并总体大纲</button>
       {outlineTask && <p>大纲任务 {outlineTask.task_id.slice(0, 8)} · {TASK_STATUS_LABELS[outlineTask.status] ?? outlineTask.status} · {outlineTask.summary?.label ?? outlineTask.progress.stage} · 已完成 {outlineTask.summary?.done ?? outlineTask.progress.cursor}/{outlineTask.summary?.total ?? '?'}（{outlineTask.summary?.percent ?? 0}%）</p>}
-      <p>关闭页面后由常驻 Worker 继续；刷新只查询进度。未知模型结果只核对，不自动重发。</p>
+      <p>关闭页面后 Worker 继续；未知结果只核对，不自动重发。</p>
       {outline && <>
         <b>大纲版本 {outline.artifact_id.slice(0, 8)} · {outline.approved ? '你已确认' : '待你审阅'}</b>
         <p>{outline.payload.summary}</p>
@@ -109,11 +109,11 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           <p>{outline.payload.characters.map((c) => `${c.name}（${c.entity_id}）`).join('、')}</p>
           <p>{outline.payload.relationships.join(' / ')}</p><p>{outline.payload.timeline.join(' / ')}</p>
           <ul>{outline.payload.locked_facts.map((f, i) => <li key={i}>{f}</li>)}</ul>
-          <p>摘要不替代原文；下面每段固定原文 Unicode 偏移，正式分镜读取对应原文。</p>
+          <p>摘要不替代原文；正式分镜读取对应原文。</p>
         </details>
         {outline.payload.questions.length > 0 && <div role="alert">
           <p>仍有待确认事实：{outline.payload.questions.join('；')}。</p>
-          <p>补充锁定事实后重新生成大纲；如果这些疑问是你有意保留的悬念（悬疑剧本常见），可以按当前设定确认，确认记录会写下你接受的全部疑问。</p>
+          <p>疑问可保留（悬疑常见）；确认记录会写下你接受的全部疑问。</p>
         </div>}
         {!outline.approved && <button type="button" disabled={busy || outline.stale || !!outline.payload.questions.length}
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', { expected_sha256: outline.sha256 })))}>确认这版总体大纲</button>}
@@ -167,7 +167,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           {!task.summary.awaiting_reclaim && task.summary.lease_remaining_s !== null && task.summary.lease_remaining_s > 0
             && <small>Worker 正在推进（本次接管有效期还剩约 {Math.ceil(task.summary.lease_remaining_s / 60)} 分钟）</small>}
         </div>}
-        {task.error_code && <p>需要处理：{task.error_code}。先点「核对已有结果」：服务商已答复但没有可用结果的子任务会被释放，可以重新尝试；结果未知的不会自动重发。</p>}
+        {task.error_code && <p>需要处理：{task.error_code}。先点「核对已有结果」；结果未知的不会自动重发。</p>}
         {!!task.progress.blocked_subtasks?.length && <small>阻塞的子任务：{task.progress.blocked_subtasks.map((item) => [item.scene_key, item.error_code].filter(Boolean).join(' ')).join('；')}</small>}
         {task.progress.blocked_subtasks?.some((item) => item.dead_worker) && (
           <small>上一次推进被中断（Worker 已退出）：可证明从未发出的请求会释放并重问；结果未知的不会自动重发，请核对原任务。</small>

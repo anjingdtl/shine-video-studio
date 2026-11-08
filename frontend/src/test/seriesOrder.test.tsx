@@ -52,7 +52,7 @@ describe('Web 发起生产序列（P04）', () => {
         onStarted={() => undefined} onMessage={() => undefined} onSaveBindings={() => Promise.resolve()} onModeAction={() => undefined} />);
       const blockers = screen.getByRole('status', { name: '开始制作前还需完成' });
       expect(blockers).toHaveTextContent('还没有应用分镜，制作列表为 0 镜');
-      expect(blockers).toHaveTextContent('还没有选定生成方案');
+      expect(blockers).toHaveTextContent('还没有生成方案');
       expect(screen.getByRole('button', { name: /开始制作影片/ })).toBeDisabled();
       await user.click(screen.getByRole('button', { name: '去完成并应用分镜' }));
       expect(target.scrollIntoView).toHaveBeenCalledTimes(1);

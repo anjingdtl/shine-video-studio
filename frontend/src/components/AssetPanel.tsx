@@ -52,21 +52,20 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
         <div>
           <div className="section-kicker">① 素材准备</div>
           <h2>项目素材</h2>
-          <p>上传素材，选好用途，再点击「确认使用」。确认后即可用于分镜，素材只保存在本机。</p>
+          <p>上传素材、选好用途，再点「确认使用」；素材只存本机。</p>
         </div>
         <div className="section-icon"><Film size={17} /></div>
       </div>
       <div className="module-guide">
         <HelpCircle size={13} />
         <div>
-          <p><b>这一步要做什么：</b>上传你有权使用的素材并选好用途。人物名字可以先不填；在「AI 导演制作」由编剧提出名字和名图对应，再由你二次确认。</p>
-          <p><b>为什么必须做：</b>人物对照确认后才调用导演；自动匹配只是建议，需要你按缩略图核对。</p>
+          <p><b>上传并选好用途：</b>人物名字可稍后补；人物对照确认后才调用导演，自动匹配只是建议。</p>
         </div>
       </div>
       <div className="upload-stack">
         <details open={role === 'character' || role === 'voice'}>
           <summary>可选：角色名称与标签</summary>
-          <label>{role === 'character' ? '人物名称（建议与剧本一致）' : '角色 / 场景名称'}<input value={entityId} placeholder="默认使用文件名；同一人物可填相同名称" onChange={e => setEntityId(e.target.value)} /></label>
+          <label>{role === 'character' ? '人物名称' : '角色 / 场景名称'}<input value={entityId} placeholder="同一人物填相同名称" onChange={e => setEntityId(e.target.value)} /></label>
           <label>标签<input value={tags} placeholder="主角, 夜戏, 定妆" onChange={e => setTags(e.target.value)} /></label>
         </details>
         <div className="upload-row">

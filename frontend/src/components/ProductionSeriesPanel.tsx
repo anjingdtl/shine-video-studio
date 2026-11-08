@@ -493,16 +493,16 @@ export default function ProductionSeriesPanel({
   const canStart = !demoSelected && mode === 'READY' && !activeSeries && selected.length > 0
     && selectedBusy.length === 0 && !!profileId && sizeValid && !sizeBlocked;
   const blockers = [
-    ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜。请先在上方完成 AI 分镜，并点击「应用为正式分镜（人工确认）」将方案加入制作列表。'] : []),
-    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。点上方「一键开拍」会自动勾选全部可制作镜头，无需手工逐个选。'] : []),
-    ...(!profileId ? ['还没有选定生成方案。点下方按钮即可在本页一键登记（来自本机已验证的标准工作流），不用跳去基础配置。'] : []),
-    ...(sizeBlocked ? ['当前方案没有宽高映射，不能按你选的画幅渲染。到基础配置点「补齐宽高参数」，或把画幅改回「按方案默认」。'] : []),
+    ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜；先完成并应用分镜。'] : []),
+    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头；一键开拍会自动勾选。'] : []),
+    ...(!profileId ? ['还没有生成方案；点下方按钮一键登记。'] : []),
+    ...(sizeBlocked ? ['当前方案缺少宽高映射；去基础配置补齐，或改回默认画幅。'] : []),
     ...(!sizeValid ? ['自定义画幅必须是 256–2048 之间、32 的倍数（H3 规范）。'] : []),
-    ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色没有绑定人物参考图；提交会被拦下，避免生成一张不相干的脸。`] : []),
+    ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色未绑定参考图，提交会被拦下。`] : []),
     ...(demoSelected ? ['当前选择演示，请先切回真实制作。'] : []),
     ...(mode !== 'READY' ? [system?.production_mode?.detail ?? '尚未连接本机服务，无法确认制作环境。'] : []),
-    ...(activeSeries ? ['已有未结束的生产序列，请先查看下方进度或处理该序列。'] : []),
-    ...(selectedBusy.length > 0 ? ['选中的部分镜头已经在生产中，请取消这些镜头的勾选。'] : []),
+    ...(activeSeries ? ['已有未结束的生产序列，先处理它。'] : []),
+    ...(selectedBusy.length > 0 ? ['选中镜头里有正在生产的，先取消勾选。'] : []),
     ...(busy || working ? ['正在处理当前操作，请等待完成。'] : []),
   ];
 
@@ -515,8 +515,8 @@ export default function ProductionSeriesPanel({
     <div className="section-heading compact">
       <div>
         <div className="section-kicker">② 排产制作</div>
-        <h2>勾选镜头，开始制作</h2>
-        <p>选好成片规格，勾选镜头点「开始制作影片」，本机会连续生成并自动整理成片。画面和对白的 AI 建议只作参考，不会卡住后续镜头；文件损坏或规格不符才会暂停等你处理。</p>
+        <h2>开始连续制作</h2>
+        <p>本机连续生成并自动成片；AI 建议仅供参考。</p>
       </div>
       <div className="section-icon plum"><Layers size={17} /></div>
     </div>
@@ -542,7 +542,7 @@ export default function ProductionSeriesPanel({
           <b>{shots.length === 0
             ? '完成分镜后，这里一键开拍'
             : `一键开拍：自动制作全部 ${shots.filter((shot) => !busyShotIds.has(shot.id)).length} 个镜头`}</b>
-          <small>自动选生成方案、按方案自动补齐场景图与音色参考、自动勾选镜头。高级设置默认已是最优，一般不用打开。</small>
+          <small>自动选方案、补齐参考、勾选镜头；高级设置一般不用改。</small>
         </div>
         <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
@@ -600,7 +600,7 @@ export default function ProductionSeriesPanel({
     )}
 
     <details className="series-advanced">
-      <summary>高级设置（一般不用改）：方案 · 审片 · 成片规格 · 手工勾选</summary>
+      <summary>高级设置：方案 · 审片 · 规格</summary>
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案

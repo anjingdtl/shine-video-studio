@@ -1428,7 +1428,8 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 }
 
 /* ---- 导演模式页面骨架 ---- */
-.ui-director .page-wrap{max-width:1180px;padding:24px 32px 44px}
+.ui-director .page-wrap{max-width:1180px;padding:20px 32px 40px}
+.ui-director .module-guide{margin:9px 0;padding:8px 11px;line-height:1.55}
 .ui-director .director-page{display:flex;flex-direction:column;gap:16px;min-width:0}
 .ui-director .director-page:not([hidden]){animation:director-page-in .24s ease}
 @keyframes director-page-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -1436,11 +1437,10 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 #assets,#produce,#package,#run,#deliver{scroll-margin-top:84px}
 
 /* ---- 旅程轨道：唯一进度来源 ---- */
-.journey-rail{margin:0 0 16px;padding:13px 16px 12px;border:1px solid #e5e4dc;border-radius:14px;background:linear-gradient(180deg,#fff 0%,#fbfbf7 100%);box-shadow:0 2px 12px #24252207}
-.journey-track-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.journey-kicker{font:10px var(--mono);letter-spacing:1.4px;text-transform:uppercase;color:#8c8e7d}
+.journey-rail{margin:0 0 14px;padding:10px 14px 9px;border:1px solid #e5e4dc;border-radius:14px;background:linear-gradient(180deg,#fff 0%,#fbfbf7 100%);box-shadow:0 2px 12px #24252207}
+.journey-track-head{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
 .journey-total{font-size:10px;color:#8c8d84;display:inline-flex;align-items:center;gap:5px}
-.journey-track{display:flex;align-items:stretch;list-style:none;margin:9px 0 0;padding:2px 0 4px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#d8d8cf transparent}
+.journey-track{display:flex;align-items:stretch;list-style:none;margin:6px 0 0;padding:1px 0 2px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#d8d8cf transparent}
 .journey-stage-item{display:flex;align-items:center;flex:1 1 0;min-width:132px}
 .journey-stage{flex:1;display:flex;align-items:center;gap:7px;min-width:0;padding:7px 9px;border:1px solid transparent;border-radius:10px;background:transparent;color:#6d6f64;text-align:left;transition:background .16s ease,border-color .16s ease,color .16s ease}
 .journey-stage:hover{background:#f4f5ec;color:var(--olive-dark)}
@@ -1456,12 +1456,12 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 .journey-count{font-style:normal;font:8px var(--mono);color:#8a6f45;background:#f5efdd;border-radius:8px;padding:2px 5px;flex:none}
 .journey-flag{font-style:normal;font:8px var(--mono);letter-spacing:.3px;color:#8a6f45;background:#f5efdd;border:1px solid #eadfc7;border-radius:8px;padding:2px 5px;flex:none;white-space:nowrap}
 .journey-link{flex:0 0 12px;height:1px;background:#e2e3d8}
-.journey-context{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;padding:9px 11px;border-radius:10px;background:#f6f8f0;border:1px solid #e1e7d5}
+.journey-context{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:8px;padding:7px 10px;border-radius:10px;background:#f6f8f0;border:1px solid #e1e7d5}
 .journey-context-tag{font:9px var(--mono);letter-spacing:1px;color:#4e6b3c;background:#e2eed9;border-radius:8px;padding:3px 7px;flex:none}
 .journey-context-icon{color:#6f8752;flex:none}
 .journey-context-text{flex:1;min-width:200px}
-.journey-context-text b{display:block;font-size:11.5px;color:#3f4a33}
-.journey-context-text span{display:block;font-size:10px;color:#7a8470;margin-top:2px;line-height:1.5}
+.journey-context-text b{display:inline;font-size:11.5px;color:#3f4a33}
+.journey-context-text span{display:inline;font-size:10px;color:#7a8470;margin-left:6px;line-height:1.5}
 .journey-context .must-button{height:31px;font-size:10px;padding:0 12px;flex:none}
 .journey-context-current{font:9px var(--mono);color:#9a9b90;flex:none}
 .journey-error .journey-context{background:#fbf3ef;border-color:#ecd8d2}
@@ -1483,9 +1483,9 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 /* ---- 页头与状态芯片 ---- */
 .director-page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:2px 0 0}
 .director-page-head-copy{min-width:0;flex:1 1 320px}
-.director-page-head h1{font-size:27px;line-height:1.2;letter-spacing:-.9px;margin:9px 0 6px;font-weight:600;color:#2f312b}
+.director-page-head h1{font-size:26px;line-height:1.2;letter-spacing:-.9px;margin:7px 0 4px;font-weight:600;color:#2f312b}
 .director-page-head h1 em{font-style:normal;color:#747b58}
-.director-page-head p{margin:0;font-size:11.5px;line-height:1.7;color:#8a8b84;max-width:680px}
+.director-page-head p{margin:0;font-size:11px;line-height:1.55;color:#8a8b84;max-width:680px}
 .director-page-head-aside{display:flex;align-items:center;gap:7px;flex-wrap:wrap;flex:none}
 .head-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #e5e4dc;background:#fff;border-radius:20px;padding:5px 10px;font-size:10px;color:#77796f;white-space:nowrap}
 .head-chip.ok{border-color:#d6e0c6;background:#f5f8ee;color:#4e6b3c}
@@ -1496,7 +1496,7 @@ html[data-theme='dark'] .setup-return-bar{color:#8f9186}
 html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 
 /* ---- 项目管理：一部作品一行，所有关键信息同屏 ---- */
-.portfolio{padding:18px 20px}
+.portfolio{padding:16px 18px}
 .portfolio-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
 .portfolio-head h2{font-size:18px;letter-spacing:-.3px;margin:4px 0 3px}
 .portfolio-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:720px}
@@ -1526,7 +1526,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .portfolio-open{height:29px;border:1px solid #dfe3d2;background:#fff;border-radius:6px;padding:0 10px;font-size:10px;color:#5d6b45;white-space:nowrap}
 .portfolio-open:hover{border-color:#b6bd9d;color:var(--olive-dark)}
 .portfolio-open.current{border-color:#b9c39b;background:#f1f4e6;color:var(--olive-dark);font-weight:600}
-.portfolio-create{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:13px 0 12px;padding:12px 14px;border:1px dashed #dcd4ba;background:#fbf8ee;border-radius:10px}
+.portfolio-create{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:10px 0;padding:10px 12px;border:1px dashed #dcd4ba;background:#fbf8ee;border-radius:10px}
 .portfolio-create-copy b,.portfolio-create-copy span{display:block}
 .portfolio-create-copy b{font-size:11px;color:#45473f}
 .portfolio-create-copy span{font-size:10px;color:#8a8b84;margin-top:3px;line-height:1.5}
@@ -1541,7 +1541,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 }
 
 /* ---- 当前作品的剧本工作区（在项目管理页下方） ---- */
-.creative-workspace{display:flex;flex-direction:column;gap:14px;scroll-margin-top:88px;padding-top:2px}
+.creative-workspace{display:flex;flex-direction:column;gap:12px;scroll-margin-top:88px;padding-top:2px}
 .creative-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 2px}
 .creative-head h2{font-size:17px;letter-spacing:-.2px;margin:4px 0 3px;color:#33352e}
 .creative-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:760px}
@@ -1581,7 +1581,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .ui-director .tech-details[open]>summary::before{content:'▾'}
 .ui-director .tech-details-body{display:flex;flex-direction:column;gap:4px;padding:6px 2px 0;font-size:9.5px;color:#8f9186;line-height:1.6;overflow-wrap:anywhere}
 .ui-director .tech-details code{font:9px var(--mono);color:#8f9186;background:#f6f6f1;border-radius:4px;padding:2px 5px}
-.ui-director .section-heading{flex-wrap:wrap;gap:12px;align-items:flex-start}
+.ui-director .section-heading{flex-wrap:wrap;gap:10px;align-items:flex-start;margin-bottom:13px}
 .ui-director .section-heading>div:first-child{flex:1 1 260px;min-width:0}
 .ui-director .section-heading>button,.ui-director .section-heading>.section-icon,.ui-director .section-heading>.run-head-actions{flex:none}
 .ui-director .run-head-actions{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;justify-content:flex-end}
@@ -1612,7 +1612,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .ui-director .demo-ribbon .text-button{white-space:nowrap}
 .ui-director .secondary-button,.ui-director .primary-button,.ui-director .subtle-button,.ui-director .must-button{white-space:nowrap}
 .ui-director .run-card .section-heading h2{font-size:16px}
-.ui-director .run-card{padding:17px 18px}
+.ui-director .run-card{padding:15px 16px}
 .ui-director .run-plan-summary>.tech-details{flex-basis:100%}
 @media(max-width:700px){.ui-director .page-wrap{padding:18px 14px 36px}.ui-director .run-card{padding:14px}}
 

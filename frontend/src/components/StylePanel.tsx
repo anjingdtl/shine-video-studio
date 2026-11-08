@@ -219,8 +219,7 @@ export default function StylePanel({
       <div className="module-guide">
         <HelpCircle size={13} />
         <div>
-          <p><b>这一步要做什么：</b>选一套风格或逐项调整，然后点右下角的冻结按钮。第一次冻结会同时批准并绑定官方规则包，所以那一次按钮写的是「批准并冻结」；之后写的是「冻结为新版本」。</p>
-          <p><b>为什么要冻结：</b>风格是七个维度的不可变版本，之后每个镜头都引用它；不冻结，下面的 AI 分镜会直接拒绝运行。</p>
+          <p><b>选一套风格或逐项调整，再冻结。</b>第一次会同时批准并绑定规则包；不冻结，AI 分镜不会运行。</p>
         </div>
       </div>
 
@@ -370,7 +369,7 @@ export default function StylePanel({
             <LockKeyhole size={14} /> 批准并冻结
           </button>
         </div>}
-      <p className="freeze-hint">点击冻结会先把屏幕上这七项<strong>原样保存</strong>，再申请一次性授权并冻结这份快照——你批准的内容和最终冻结的内容始终一致；失败时表单内容不会丢失。</p>
+      <p className="freeze-hint">冻结会<strong>原样保存</strong>这七项并生成新版本；失败时表单不会丢。</p>
       {styles.length > 0 && <div className="version-row">
         <span className="version-label"><History size={12} /> 版本记录</span>
         {styles.map((version) => (

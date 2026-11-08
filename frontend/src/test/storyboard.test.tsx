@@ -161,7 +161,7 @@ it('本项目没绑定官方规则包时，第 3 步直接给出入口', async (
 
   expect(await screen.findByText(/本项目还没绑定官方规则包/)).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: /去启用官方规则包/ }));
-  expect(navigated).toEqual(['assets']);
+  expect(navigated).toEqual(['produce']);
   stub.restore();
 });
 
@@ -247,7 +247,7 @@ it('读取已确认人物后先明确补齐文本同意，再直接从导演续�
   ]);
   const user = userEvent.setup();
   render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} />);
-  await user.click(screen.getByRole('button', { name: /读取已完成的编剧人物对照/ }));
+  await user.click(screen.getByRole('button', { name: /读取上次人物对照/ }));
   const continueButton = await screen.findByRole('button', { name: '复用已确认人物，继续导演' });
   expect(continueButton).toBeDisabled();
   expect(screen.getByText('导演还未启动：需要同意发送剧本文本')).toBeInTheDocument();

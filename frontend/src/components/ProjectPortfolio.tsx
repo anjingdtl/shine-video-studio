@@ -103,9 +103,8 @@ export function ProjectPortfolio({
   return <section className="card portfolio" aria-label="项目管理">
     <header className="portfolio-head">
       <div>
-        <div className="section-kicker">PROJECT PORTFOLIO</div>
         <h2>全部作品</h2>
-        <p>每个作品一行：素材、风格、分镜、制作方式、产出物和下一步。换作品不用先切换再找信息。</p>
+        <p>每个作品一行；换作品不用先切换。</p>
       </div>
       <span className="portfolio-count">{projects.length} 个作品</span>
     </header>
@@ -113,7 +112,7 @@ export function ProjectPortfolio({
     <div className="portfolio-create">
       <div className="portfolio-create-copy">
         <b>新建作品</b>
-        <span>起个名字就能开始；素材、风格、镜头和成片都会留在本机。</span>
+        <span>起个名字就能开始，所有内容留在本机。</span>
       </div>
       <div className="portfolio-create-actions">
         <input className="new-project-inline" value={projectTitle}

@@ -191,7 +191,7 @@ describe('全片生产阶段', () => {
     await gotoDirectorPage(user, /第 5 阶段：视频生产/);
 
     expect(await screen.findByRole('button', { name: /继续安全可恢复批次/ })).toBeInTheDocument();
-    expect(screen.getByText(/无法证明安全的批次继续保留在待处理状态/)).toBeInTheDocument();
+    expect(screen.getByText(/续跑只恢复能证明安全的批次/)).toBeInTheDocument();
     expect(stub.callsOf('POST', /\/production-runs\/run-1\/resume$/)).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: /继续安全可恢复批次/ }));
 

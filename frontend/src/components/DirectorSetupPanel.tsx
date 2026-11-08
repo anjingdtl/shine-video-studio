@@ -95,7 +95,7 @@ export default function DirectorSetupPanel({
       <div>
         <div className="eyebrow"><span className="eyebrow-line" /> 基础配置</div>
         <h1>先把机器调好，<em>再让 AI 开工。</em></h1>
-        <p>这三步不需要专业模式：装好本机环境、配置文本模型、选一个生成方案。任何一步没完成，制作页都会明确告诉你缺什么。</p>
+        <p>装好环境、配好文本模型、选一个生成方案；缺什么制作页会提示。</p>
       </div>
       <button className="secondary-button" onClick={() => void onRefresh()}>刷新全部状态</button>
     </section>
@@ -140,8 +140,7 @@ export default function DirectorSetupPanel({
       <div className="module-guide">
         <Sparkles size={13} />
         <div>
-          <p><b>第一次使用：</b>点「检测本机」看已有环境；没有 ComfyUI 或 H3 模型时，按页面给出的安装计划下载。安装会先让你确认体积与目录，不会静默下载。</p>
-          <p><b>已经装过：</b>可以复用现有目录，系统会核对固定版本文件，不会重复下载，也不会覆盖你的自定义节点。</p>
+          <p><b>先点「检测本机」：</b>没有环境就按安装计划下载；已有目录可复用，下载前会确认体积与目录。</p>
         </div>
       </div>
       <DeploymentRecommendationCard onChoice={setDeploymentChoice} />
@@ -155,8 +154,7 @@ export default function DirectorSetupPanel({
       <div className="module-guide">
         <Settings2 size={13} />
         <div>
-          <p><b>文本模型</b>负责写分镜、导演、摄影与剪辑方案；一个模型可以承担全部文本工种。密钥只存在本机。</p>
-          <p><b>生成方案</b>决定 H3 怎么出片。只有登记并通过本机节点验证的方案，才能用于真实制作；方案缺少宽高映射时，制作页的分辨率设置会明确报错，而不是偷偷按旧尺寸渲染。</p>
+          <p><b>文本模型</b>负责写分镜与方案，密钥只存本机；<b>生成方案</b>决定 H3 怎么出片，未验证或缺少宽高映射会明确报错。</p>
         </div>
       </div>
       <section className="card section-card">
@@ -164,7 +162,7 @@ export default function DirectorSetupPanel({
           <div>
             <div className="section-kicker">GENERATION PROFILES</div>
             <h2>生成方案与画幅</h2>
-            <p>这里的方案就是导演页「开始制作」可选的生成方案。带「宽高可调」的方案才会按你选的分辨率渲染。</p>
+            <p>带「宽高可调」的方案才会按你选的分辨率渲染。</p>
           </div>
         </div>
         {profiled.length === 0 && <div className="blocked-callout">
@@ -218,7 +216,7 @@ export default function DirectorSetupPanel({
           <b>本机声音能力：{voice?.voice_master_capable ? '可以生成角色音色参考' : '未配置（不影响出片）'}</b>
           {blockedVoice.length > 0 && <ul>{blockedVoice.map((row) => <li key={row.role}>{roleText(row)}</li>)}</ul>}
           <p>不绑定音色时，每个镜头的对白由 H3 原生生成；音色会在镜头之间自由变化，这是当前方案的已知取舍。</p>
-          <p>需要固定音色：在专业模式「制片准备 → 音色」里设计并冻结音色，再把它作为音频参考绑定到镜头。音色参考同样受 2–15 秒时长限制。</p>
+          <p>需要固定音色：到专业模式「制片准备 → 音色」设计并冻结，再绑定到镜头。</p>
         </div>
         <button type="button" className="secondary-button" onClick={onOpenExpert}>去专业模式配置音色</button>
       </section>

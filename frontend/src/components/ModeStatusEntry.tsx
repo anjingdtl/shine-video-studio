@@ -64,8 +64,8 @@ export function DemoRibbon({ production, onEnable }: { production: ProductionMod
     <div className="demo-ribbon" role="status">
       <Clapperboard size={15} />
       <span>{production.mode === 'DEMO'
-        ? '演示体验：当前只演练流程，不会生成真实影片。'
-        : '真实制作配置尚未完成，当前仍是演示体验。'}</span>
+        ? '演示体验：只演练流程，不出真实影片。'
+        : '真实制作未配置完，当前仍是演示。'}</span>
       <button type="button" className="text-button" onClick={onEnable}>
         {production.mode === 'DEMO' ? '启用真实制作' : '继续完成配置'}
       </button>

@@ -171,15 +171,14 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     <div className="module-guide">
       <HelpCircle size={13} />
       <div>
-        <p><b>这一步要做什么：</b>镜头全部通过质检后，这里自动出现成片；点「下载 MP4」拿到最终文件。</p>
-        <p><b>还没出现成片？</b>说明镜头还没全部通过——回到上一步看「生成进度与检查」里卡住的镜头。</p>
+        <p><b>镜头全部通过后，这里自动出现成片；没出现就回上一步看卡住的镜头。</b></p>
       </div>
     </div>
 
     {(asrUnverifiedCount > 0 || asrFlaggedCount > 0) && <div className="blocked-callout" role="status" aria-label="音频语言核对未完成">
       <HelpCircle size={15} />
       <span>
-        音频语言/禁声核对未完整：{asrUnverifiedCount} 个交付镜头没有可用的真实 ASR 结论（{asrUnavailableCount} 个 ASR 不可用，其中 {asrRouteMissingCount} 个未配置语音识别路由；{asrMissingCount} 个没有 ASR 记录）；{asrFlaggedCount > 0 && `另有 ${asrFlaggedCount} 个镜头的 ASR 结果需复核；` }技术音轨可解码不代表对白或旁白语言正确。请播放成片人工核对。此提示不改变现有交付文件或验收状态。
+        音频语言/禁声核对未完整：{asrUnverifiedCount} 个交付镜头没有可用的真实 ASR 结论（{asrUnavailableCount} 个 ASR 不可用，其中 {asrRouteMissingCount} 个未配置语音识别路由；{asrMissingCount} 个没有 ASR 记录）；{asrFlaggedCount > 0 && `另有 ${asrFlaggedCount} 个镜头的 ASR 结果需复核；` }技术音轨可解码不代表对白或旁白语言正确。
       </span>
     </div>}
 
@@ -220,14 +219,14 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
       </button>}
     </div>}
 
-    <p>连续制作完成后，系统会自动整理并装配成片，无需人工填写。下面的手工装配保留给人工修订与补剪。</p>
+    <p>连续制作会自动装配成片；下面的手工装配只用于补剪。</p>
     <label htmlFor="delivery-proposal">剪辑方案</label><select id="delivery-proposal" value={selected} disabled={proposals.length === 0} onChange={e => {
       setSelected(e.target.value);
       const proposal = proposals.find(a => a.id === e.target.value);
       setEdl(proposal ? JSON.stringify(proposal.payload_json, null, 2) : '');
     }}><option value="">选择剪辑方案</option>{proposals.map(a => <option key={a.id} value={a.id}>{a.id.slice(0, 10)}…（{new Date(a.created_at ?? Date.now()).toLocaleString()}）</option>)}</select>
     <div className="edl-visual" aria-label="装配镜头顺序（可编辑）">
-      {clips.length === 0 && <p className="empty-inline">还没有片段：选择一个剪辑方案，或展开高级编辑手动填写。</p>}
+      {clips.length === 0 && <p className="empty-inline">还没有片段；选择剪辑方案或展开高级编辑。</p>}
       {clips.map((clip, index) => (
         <div className="edl-clip-row" key={index}>
           <b>{index + 1}. {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（装配时校验）'}</b>

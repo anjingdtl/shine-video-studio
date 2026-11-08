@@ -88,7 +88,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <div>
           <div className="section-kicker">③ 进度与结果</div>
           <h2>制作进度与结果</h2>
-          <p>点开任务可查看生成进度、技术检查和 AI 审片建议。画面、风格与对白的建议只作参考，不会卡住制作；视频文件损坏或规格不符才会拦下成片。</p>
+          <p>点开任务看进度、技术检查与审片建议；建议不阻断制作。</p>
         </div>
         <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台制作服务在线' : '后台制作服务离线'}</div>
       </div>
@@ -96,7 +96,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         {realReady ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
           {production
-            ? `${production.label}：${production.detail}小模型审片只提供建议，不会阻止镜头继续制作；正式发布前的审美与版权决定仍由你确认。`
+            ? `${production.label}：${production.detail}审片只提供建议；发布前的审美与版权由你确认。`
             : '暂无法确认制作模式。'}
         </span>
       </div>

@@ -39,7 +39,6 @@ export function JourneyRail({
   return (
     <nav className={`journey-rail journey-${state}`} aria-label="制作六阶段">
       <div className="journey-track-head">
-        <span className="journey-kicker">制作旅程</span>
         <span className="journey-total" aria-live="polite">
           {state === 'loading' ? <><Loader2 size={12} className="spin" /> 正在读取进度</> : `${doneCount} / ${stages.length} 阶段完成`}
         </span>
@@ -97,8 +96,8 @@ export function JourneyRail({
           <>
             <span className="journey-context-tag">{nextIsCurrent ? '本页任务' : '下一步'}</span>
             <div className="journey-context-text">
-              <b>{nextStage.text}</b>
-              <span>{nextStage.hint}</span>
+              <b>{nextIsCurrent ? nextStage.hint : nextStage.text}</b>
+              {!nextIsCurrent && <span>{nextStage.hint}</span>}
             </div>
             {nextStage.page !== currentPage && currentPage !== 'projects' && (
               <button type="button" className="must-button" onClick={() => onNavigate(nextStage)}>

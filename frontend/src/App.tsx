@@ -87,12 +87,12 @@ const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
 };
 /** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
 const DIRECTOR_STAGES: Array<{ id: string; text: string; short?: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
-  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'projects', hint: '一行行管理作品；选中作品后在同一页写想法或导入剧本' },
-  { id: 'materials', text: '剧本统筹与素材', short: '统筹与素材', icon: Film, page: 'assets', hint: '分集 · 人物场景道具 · 确认主素材 · 冻结风格' },
-  { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜、对白与声音安排' },
-  { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结这次要拍的全部内容与执行政策' },
-  { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完全部分集' },
-  { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
+  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'projects', hint: '写想法或导入剧本' },
+  { id: 'materials', text: '剧本统筹与素材', short: '统筹与素材', icon: Film, page: 'assets', hint: '确认分集与主素材' },
+  { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜与对白' },
+  { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结本次拍摄范围' },
+  { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完' },
+  { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集核对并交付' },
 ];
 
 function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string } {
@@ -622,7 +622,7 @@ function App() {
               <div className="first-run-art"><Clapperboard size={30} /></div>
               {projectsLoaded ? <>
                 <h2>创建我的第一部AI短剧</h2>
-                <p>建好作品后按六个阶段推进，所有内容都保存在你自己的电脑上。现在只需要先起个名字：</p>
+                <p>按六个阶段推进，所有内容保存在本机。先起个名字：</p>
                 <ol className="first-run-journey" aria-label="制作全旅程">
                   <li className="now"><b>① 创意与剧本</b><span>输入想法，或导入现成剧本</span></li>
                   <li><b>② 统筹与素材</b><span>先分集，再定素材与风格</span></li>
@@ -679,7 +679,7 @@ function App() {
                     <h1>每一部作品，<em>都清清楚楚。</em></h1>
                     <p>{journeyState !== 'ready' || !journey
                       ? heroGuidance.hint
-                      : '素材、风格、分镜、制作方式和产出物逐行列清楚；选中哪部，就在下面继续创作。'}</p>
+                      : '素材、风格、分镜、产出物逐行列清；选中哪部就继续。'}</p>
                   </div>
                   <button className="primary-button big" disabled={journeyState === 'loading' && !journey}
                     onClick={() => {
@@ -741,14 +741,14 @@ function App() {
                 {directorPageIntro(
                   '第 2 阶段',
                   <>把故事变成<em>可拍的素材。</em></>,
-                  '先确认分集，再整理人物、场景与道具；确认主素材。画面风格现在和镜头拆解放在一起，因为它直接决定每个镜头怎么拍。',
+                  '先确认分集，再整理人物、场景与道具；风格在镜头拆解页维护。',
                   <span className={`head-chip ${approvedAssets.length ? 'ok' : ''}`}>素材 {approvedAssets.length}/{assets.length}</span>,
                 )}
 
                 <div className="module-guide style-moved-note">
                   <Sparkles size={13} />
                   <div>
-                    <p><b>画面风格已移到「镜头拆解」页。</b>风格是镜头的画面依据：构图、光线、质感和剪辑节奏都和分镜一起决定。冻结后所有新镜头按此执行。</p>
+                    <p><b>画面风格已移到镜头拆解页</b>，和分镜一起定；冻结后新镜头按此执行。</p>
                   </div>
                   <button type="button" className="text-button" onClick={() => goToDirectorPage('produce')}>去调整风格</button>
                 </div>
@@ -774,7 +774,7 @@ function App() {
                 {directorPageIntro(
                   '第 3 阶段',
                   <>把故事拆成<em>一镜一镜。</em></>,
-                  '先确认分镜，再排产制作；生成中的真实进度和结果都收在这一页，不跳来跳去。',
+                  '先定风格和分镜，再排产；进度与结果都留在这一页。',
                   <span className={`head-chip ${shots.length ? 'ok' : ''}`}>{shots.length ? `${shots.length} 个镜头在册` : '还没有分镜'}</span>,
                 )}
                 <nav className="produce-stages" aria-label="制作阶段">
@@ -799,7 +799,7 @@ function App() {
                   <div className="module-guide">
                     <Sparkles size={13} />
                     <div>
-                      <p><b>画面风格在这里和镜头一起定。</b>构图、光线、质感与剪辑节奏直接决定每个镜头怎么拍；冻结后所有新镜头按此执行。素材页只负责素材本身。</p>
+                      <p><b>画面风格和分镜一起定。</b>冻结后所有新镜头按此执行。</p>
                     </div>
                   </div>
                   <StylePanel
@@ -956,7 +956,7 @@ function App() {
                 {directorPageIntro(
                   '第 4 阶段',
                   <>把这次要拍的<em>固定下来。</em></>,
-                  '先按场次分集，再生成导演包。确认后才会锁定剧本、素材、风格、生成方案与执行政策。',
+                  '先分集，再生成导演包；确认后锁定本次要拍的全部内容。',
                   <span className="head-chip">确认后才可开拍</span>,
                 )}
                 {directorPage === 'package' && <DirectorProductionRunPanel
@@ -974,7 +974,7 @@ function App() {
                 {directorPageIntro(
                   '第 5 阶段',
                   <>一次启动，<em>后台跑完全片。</em></>,
-                  '关了浏览器也会继续。这里只看真实进度、阻塞与每一集的产出，工程细节收在技术详情里。',
+                  '关了浏览器也会继续；这里只看真实进度、阻塞与每集成片。',
                   <span className={`head-chip ${deliverableReady ? 'ok' : ''}`}>{productionScopeLabel ?? '等待导演包'}</span>,
                 )}
                 {directorPage === 'run' && <DirectorProductionRunPanel
@@ -992,7 +992,7 @@ function App() {
                 {directorPageIntro(
                   '第 6 阶段',
                   <>逐集播放，<em>确认后交付。</em></>,
-                  '技术完成不等于你已经认可。先播放核对每一集，再导出最终文件；自动交付记录只保留最近几条。',
+                  '技术完成不等于认可；先播放核对，再导出最终文件。',
                   <span className={`head-chip ${deliverableReady ? 'ok' : ''}`}>{deliverableReady ? '全部选定镜头已出片' : '等待镜头完成'}</span>,
                 )}
                 {directorPage === 'deliver' && <DirectorProductionRunPanel

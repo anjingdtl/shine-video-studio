@@ -246,9 +246,9 @@ it('冻结风格与素材视觉方向并排展示，是否一致由用户判断'
     }),
   });
   render(<MaterialPreparationPanel projectId="p1" frozenStyle={FROZEN_STYLE} />);
-  expect(await screen.findByText(/影视风格已冻结（版本 3）/)).toBeTruthy();
+  expect(await screen.findByText(/影视风格已冻结（第 3 版）/)).toBeTruthy();
   expect(screen.getByText(/色调：素材方向「青灰」／已冻结风格「暖色调」/)).toBeTruthy();
-  expect(screen.getByText(/请在下方「影视风格」新建一个版本/)).toBeTruthy();
+  expect(screen.getByText(/不一致时新建风格版本/)).toBeTruthy();
 });
 
 

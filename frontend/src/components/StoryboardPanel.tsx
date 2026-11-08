@@ -465,9 +465,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <ShieldCheck size={17} className="required-icon" />
       <div className="required-text">
         <b>还差一步：本项目还没绑定官方规则包</b>
-        <small>五个 Agent 都要按同一套官方规范工作，所以没绑定就会在第一步被拒绝。去「素材与风格」点「批准并冻结」风格，冻结时会一并完成绑定，不用单独操作。</small>
+        <small>五个 Agent 需要同一套官方规范；到镜头拆解页冻结风格时会一并绑定。</small>
       </div>
-      {onNavigate && <button className="must-button" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
+      {onNavigate && <button className="must-button" onClick={() => onNavigate('produce')}>去启用官方规则包</button>}
     </div>}
 
     <div className="storyboard-import">
@@ -491,7 +491,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     </div>
     <p className="storyboard-language-note">
       对白语言（{languageState === 'saved' ? '已保存' : languageState === 'saving' ? '保存中…' : '保存失败，请重选'}）：
-      之后的镜头会按这个语言说出台词；没有台词的镜头不会出现任何人声。已经生成的镜头不会被改写。
+      之后镜头按此说台词；无台词镜头不出人声。
     </p>
     {!selectedDoc && (
       <label>粘贴完整剧本文本<textarea rows={6} value={inlineText} onChange={e => {
@@ -499,7 +499,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       }} /></label>
     )}
     <details className="advanced-inline">
-      <summary>高级：锁定剧情事实 · 读取上次编剧结果</summary>
+      <summary>高级：锁定事实 · 读取上次结果</summary>
       <label className="storyboard-facts">锁定剧情事实（每行一条，可选）
         <textarea id="storyboard-facts" rows={3} value={facts} disabled={busy} onChange={e => {
           setFacts(e.target.value); setRequiresReconciliation(false); setResult(null);
@@ -508,7 +508,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       </label>
       {!busy && !binding && <button type="button" disabled={bindingBusy}
         onClick={() => openBinding('读取本项目最近一次编剧结果，请核对它属于当前选择的剧本。')}>
-        读取已完成的编剧人物对照（不重跑模型）
+        读取上次人物对照（不重跑）
       </button>}
     </details>
     <label className="consent-row">
