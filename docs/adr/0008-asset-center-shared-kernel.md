@@ -1,6 +1,6 @@
 # ADR 0008: Standalone Shine Assets on the shared production kernel
 
-- Status: Accepted for implementation
+- Status: Implemented; local model and GPU validation remains pending
 - Date: 2026-11-08
 - Baseline: `631d9a07c6be5911a88e138bb037da3d369f3d79` (`origin/main`)
 - Feature branch: `feature/shine-assets-center-20261108`
@@ -61,7 +61,7 @@ The browser only reattaches to task IDs after refresh. It never submits a job on
 - Existing T2I model identity: `Comfy-Org/Qwen-Image-2.1` revision `aacf31a6d48e707f352ecba714cee0680da3479b`; the existing audited T2I API graph remains the only image graph with prior render evidence.
 - Official edit example inspected: `Comfy-Org/workflow_templates/templates/image_qwen_image_2_1_image_edit.json`, repository commit `21d7cc4fb9afd983957f2d2d6b1d583860ccb40b`, SHA-256 `c1e6551759de131f083a040da072ac6f032c3c8401ceca202412cd912897d0fc` (96,740 bytes). This is a UI document with a nested subgraph, not an API prompt graph; it must be compiled and live-validated before use.
 - The official edit subgraph's visible upload slots are `images.image_1` through `images.image_10`. `image_1` is the edit canvas/target; later slots are ordered references. `TextEncodeQwenImage21` receives the image slots and prompt; its declared inputs include `images.image_1` through `images.image_12`, while the UI example exposes only ten top-level image slots and leaves 11/12 disconnected. Therefore the supported visible input cap from this sample is ten total images, including the edit target, not ten references plus a target.
-- The example has no mask input or mask node. It cannot prove local inpainting. The UI must keep the real-pixel mask path disabled with an explicit `PENDING_LOCAL_VALIDATION`/workflow blocker until a Qwen-2.1-compatible graph with a real mask mapping is registered and locally validated. A painted browser overlay is never accepted as a mask.
+- The example has no dedicated mask node. The adapter uploads and hashes the actual mask PNG into the final numbered `images.image_N` annotation slot, explicitly maps white/black semantics in the prompt, and also applies it to the harvested output in a deterministic pixel compositor: white selects generated pixels, black copies the exact original pixels. The mask consumes one of ten total graph slots. Capability stays pending until a local model sample proves the node accepts the annotation and passes the complete mask sample. The browser overlay alone is never accepted as a mask.
 - The workflow sample's model widgets include `qwen_image_2.1_int8_convrot.safetensors`, `qwen3vl_8b_int8_convrot.safetensors`, `qwen_image_2.1_vae_bf16.safetensors`, and an optional prompt-expansion encoder. The UI JSON does not establish that any are installed here.
 - The upstream Qwen repository license is a research license dated 2026-09-20. It does not grant commercial rights by default; the model terms require a separate commercial license. The UI and API preserve that restriction in rights records and block commercial production unless an operator records applicable authorization. User image, voice or likeness authorization remains separate.
 
@@ -73,10 +73,10 @@ The status ladder is `UNREGISTERED → REGISTERED → STATIC_VALIDATED → LOCAL
 |---|---|---|
 | T2I | Existing pinned API graph, one candidate per explicit request | Existing graph evidence only; current local READY is not asserted |
 | I2I | Official edit graph with target bytes in slot 1 and ordered refs in slots 2–10 | Pending local graph/object-info/render validation |
-| Inpaint | Canvas-space mask upload, dimensions/empty-mask checks and manifest hash | Blocked until a Qwen-compatible native mask graph is proven |
+| Inpaint | Canvas-space mask upload; native edit graph; actual mask applied after harvest with exact pixel preservation; mask SHA and semantics in the version manifest | Pending local render and output-pixel validation; the official graph itself has no mask input |
 | MultiRef | Strict ordered slot mapping; reject above the registered total-slot limit | Ten total inputs are evidenced by the UI template, API mapping still requires local validation |
 | Wardrobe | A MultiRef preset with explicit subject/garment/accessory roles | Pending local validation; no separate model is claimed |
-| RGBA | Preserve PNG and verify decoded alpha has non-opaque pixels | Pending an upstream graph and real-output validation |
+| RGBA | Deterministic canvas cutout writes a real alpha channel from an explicit subject mask; all output PNGs undergo decoded alpha checks | Manual mask cutout is software-ready; prompt-based/native Qwen alpha output remains pending real model proof |
 | 2K | Size fields flow to the graph only when schema and bounds declare them | Pending local VRAM/output validation; no performance promise |
 
 ## Consequences
