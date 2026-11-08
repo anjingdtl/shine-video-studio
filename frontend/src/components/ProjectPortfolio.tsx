@@ -110,6 +110,23 @@ export function ProjectPortfolio({
       <span className="portfolio-count">{projects.length} 个作品</span>
     </header>
 
+    <div className="portfolio-create">
+      <div className="portfolio-create-copy">
+        <b>新建作品</b>
+        <span>起个名字就能开始；素材、风格、镜头和成片都会留在本机。</span>
+      </div>
+      <div className="portfolio-create-actions">
+        <input className="new-project-inline" value={projectTitle}
+          onChange={(event) => setProjectTitle(event.target.value)}
+          placeholder="新作品名称"
+          onKeyDown={(event) => event.key === 'Enter' && onCreate()}
+          aria-label="新作品名称" />
+        <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={onCreate}>
+          <Plus size={15} aria-hidden="true" />新建作品
+        </button>
+      </div>
+    </div>
+
     <div className="portfolio-table-wrap">
       <table className="portfolio-table">
         <thead>
@@ -179,23 +196,6 @@ export function ProjectPortfolio({
           })}
         </tbody>
       </table>
-    </div>
-
-    <div className="portfolio-create">
-      <div className="portfolio-create-copy">
-        <b>新建作品</b>
-        <span>起个名字就能开始；素材、风格、镜头和成片都会留在本机。</span>
-      </div>
-      <div className="portfolio-create-actions">
-        <input className="new-project-inline" value={projectTitle}
-          onChange={(event) => setProjectTitle(event.target.value)}
-          placeholder="新作品名称"
-          onKeyDown={(event) => event.key === 'Enter' && onCreate()}
-          aria-label="新作品名称" />
-        <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={onCreate}>
-          <Plus size={15} aria-hidden="true" />新建作品
-        </button>
-      </div>
     </div>
   </section>;
 }

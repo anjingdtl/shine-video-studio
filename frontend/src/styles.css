@@ -1501,7 +1501,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .portfolio-head h2{font-size:18px;letter-spacing:-.3px;margin:4px 0 3px}
 .portfolio-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:720px}
 .portfolio-count{font:10px var(--mono);color:#8a8b84;background:#f5f5ef;border:1px solid #e9e8e2;border-radius:20px;padding:5px 10px;white-space:nowrap}
-.portfolio-table-wrap{margin-top:14px;border:1px solid #ecebe4;border-radius:10px;overflow-x:auto}
+.portfolio-table-wrap{margin-top:0;border:1px solid #ecebe4;border-radius:10px;overflow-x:auto}
 .portfolio-table{width:100%;border-collapse:collapse;min-width:980px}
 .portfolio-table th,.portfolio-table td{padding:11px 12px;text-align:left;vertical-align:middle;white-space:nowrap}
 .portfolio-table thead th{background:#f8f7f2;font-size:9px;font-weight:600;letter-spacing:.8px;color:#8f9186;text-transform:uppercase;border-bottom:1px solid #ecebe4}
@@ -1526,7 +1526,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .portfolio-open{height:29px;border:1px solid #dfe3d2;background:#fff;border-radius:6px;padding:0 10px;font-size:10px;color:#5d6b45;white-space:nowrap}
 .portfolio-open:hover{border-color:#b6bd9d;color:var(--olive-dark)}
 .portfolio-open.current{border-color:#b9c39b;background:#f1f4e6;color:var(--olive-dark);font-weight:600}
-.portfolio-create{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px dashed #e9e8e0}
+.portfolio-create{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:13px 0 12px;padding:12px 14px;border:1px dashed #dcd4ba;background:#fbf8ee;border-radius:10px}
 .portfolio-create-copy b,.portfolio-create-copy span{display:block}
 .portfolio-create-copy b{font-size:11px;color:#45473f}
 .portfolio-create-copy span{font-size:10px;color:#8a8b84;margin-top:3px;line-height:1.5}
@@ -1667,7 +1667,7 @@ html[data-theme='dark'] .portfolio-badge.error{background:#33241e;color:#c39a8f}
 html[data-theme='dark'] .portfolio-next{background:#2c3325;color:#b8c79b}
 html[data-theme='dark'] .portfolio-open{background:#24251f;border-color:#3f4036;color:#c9cac0}
 html[data-theme='dark'] .portfolio-open.current{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
-html[data-theme='dark'] .portfolio-create{border-top-color:#33342c}
+html[data-theme='dark'] .portfolio-create{background:#2a291d;border-color:#4a442c}
 html[data-theme='dark'] .portfolio-create-copy b{color:#d2d3c7}
 html[data-theme='dark'] .portfolio-create-copy span{color:#8f9186}
 html[data-theme='dark'] .creative-head h2{color:#e2e3db}
