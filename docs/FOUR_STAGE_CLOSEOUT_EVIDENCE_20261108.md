@@ -5,6 +5,15 @@
 > 对应审查：[本轮对抗审查](ADVERSARIAL_REVIEW_FOUR_STAGE_PIPELINE_20261108.md)（F01–F11）
 > 前序证据：[上轮实测断点](PROGRESS_20261108_FOUR_STAGE_LIVE_ACCEPTANCE.md)
 
+## 交付提交
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `feature/four-stage-closeout-20261108`（本机，未推送、未合并） |
+| 实现提交 | `5b9301924111b8004d658ae6d9f6987a285ceaa5` |
+| 父提交 | `7081104a79e6758228eb98e96d74e0bb36da52f8`（= 基线，`main`） |
+| 回滚 | `git checkout main` 即可；本轮无迁移新增，无数据格式变更 |
+
 ## 0. 开工核对（实测记录）
 
 | 项 | 实测值 |
