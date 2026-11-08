@@ -7,6 +7,7 @@ script starts unconfirmed; the volume plan covers the master completely.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import pytest
 from sqlalchemy import select
@@ -269,18 +270,28 @@ def test_scene_script_runs_confirms_and_edits(api):
         assert pipeline.current_scene_script(db, pid, volume_id, artifact.payload_json["section_id"]) is None
 
 
-def _prepare_handoff_fixture(api):
+def _prepare_handoff_fixture(api, *, confirm_character_master: bool = True):
     """Scripts confirmed, and one storyboard draft with per-scene units.
 
     Returns what the handoff tests need: the caller applies the units and
     decides what to assert about the delivery.
+
+    ``confirm_character_master=False`` leaves the character master a candidate:
+    the material layer has not confirmed and locked it yet, so the storyboard
+    has no approved material to name.  That is the real "the material is not
+    ready yet" state, and the chain must not stop because of it.
     """
     from tests.conftest import register_workflow_profile
     from tests.test_film_crew import prepare as crew_prepare
     client, factory, settings = api
     _route_mock(client, pipeline.BIBLE_RUN_ROLE)
     _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
-    pid, _style, _profile = crew_prepare(client)  # it creates its own project
+    if confirm_character_master:
+        pid, _style, _profile = crew_prepare(client)  # it creates its own project
+    else:
+        # The master is uploaded but never confirmed: it stays a candidate.
+        with mock.patch("tests.test_film_crew.approve_lock", lambda *a, **k: None):
+            pid, _style, _profile = crew_prepare(client)
     assets = client.get(f"/api/v1/projects/{pid}/assets").json()
     lin = next(a for a in assets if a["role"] == "character" and a["entity_id"] == "Lin")
     register_workflow_profile(client)
@@ -332,6 +343,13 @@ def _prepare_handoff_fixture(api):
         if schema.get("title") == "ScriptBreakdown":
             context = json.JSONDecoder().raw_decode(messages[1].content)[0]
             value["locked_story_facts"] = context.get("locked_story_facts", [])
+        if schema.get("title") == "DirectorialPlan" and not confirm_character_master:
+            # Nothing is confirmed, so the storyboard has no material it may
+            # name: it states the requirement instead.  Naming a candidate
+            # would be refused by the contract (asset ids must be approved
+            # masters), and the requirement is what the material layer works
+            # from.
+            value["shots"] = [{**shot, "asset_ids": []} for shot in value["shots"]]
         return value
 
     client.app.state.mock_llm_responder = chain_responder

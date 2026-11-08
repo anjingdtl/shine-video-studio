@@ -1,4 +1,4 @@
-"""Derive the six-stage journey from the project's real server state.
+"""Derive the seven-stage journey from the project's real server state.
 
 Every completion flag here is computed from the ledger, never from a browser
 counter.  The rule the whole workbench depends on is: a stage is only complete
@@ -29,8 +29,9 @@ def plan_shot_order(plan: DirectorEpisodePlan) -> list[str]:
 
 STAGES = [
     ("script", "创意与剧本"),
-    ("materials", "剧本统筹与素材"),
+    ("plan", "剧本统筹"),
     ("storyboard", "镜头拆解"),
+    ("assets", "拍摄素材准备"),
     ("package", "导演包"),
     ("production", "视频生产"),
     ("post", "后期成片"),
@@ -55,6 +56,7 @@ def _passed_shots(db: Session, project_id: str) -> dict[str, Job]:
 
 
 def _shot_problems(db: Session, shot: Shot) -> list[str]:
+    """What the shot itself still lacks: its own contract, nothing else."""
     problems: list[str] = []
     try:
         spec = ShotSpec.model_validate(shot.spec)
@@ -62,6 +64,24 @@ def _shot_problems(db: Session, shot: Shot) -> list[str]:
         return ["SHOT_SPEC_INVALID"]
     if not spec.story_beat.strip():
         problems.append("SHOT_BEAT_EMPTY")
+    return problems
+
+
+def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
+    """What the material library still owes this shot.
+
+    The requirement comes from the storyboard, never from the script: the
+    shot names what it needs, and only then does the library have to answer.
+    A character the shot names counts as a requirement: a name alone is not
+    renderable, so the shot must carry the bound master.
+    """
+    from shine.asset_identity import resolve_character_asset
+
+    problems: list[str] = []
+    try:
+        spec = ShotSpec.model_validate(shot.spec)
+    except Exception:
+        return []
     for asset_id in spec.required_asset_ids:
         asset = db.get(Asset, asset_id)
         if asset is None:
@@ -70,6 +90,17 @@ def _shot_problems(db: Session, shot: Shot) -> list[str]:
             problems.append("SHOT_REQUIRED_ASSET_NOT_MASTER")
     if not list(shot.bindings) and spec.required_asset_ids:
         problems.append("SHOT_REQUIRED_ASSET_UNBOUND")
+    bound = []
+    for link in shot.bindings:
+        asset = db.get(Asset, link.asset_id)
+        if asset is None:
+            continue
+        bound.append({"id": asset.id, "kind": asset.kind, "role": asset.role,
+                      "entity_id": asset.entity_id})
+    for name in spec.characters:
+        reference = str(name or "").strip()
+        if reference and resolve_character_asset(reference, bound) is None:
+            problems.append("SHOT_CHARACTER_MASTER_MISSING:" + reference)
     return problems
 
 
@@ -145,38 +176,23 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         },
     })
 
-    # ② 剧本统筹与素材: a confirmed episode plan, a frozen style, and every
-    #    required asset really promoted to a master asset.
-    material_blockers: list[dict[str, Any]] = []
+    # ② 剧本统筹: the episode plan and the frozen style, nothing else.
+    #    Materials are not decided here.  What a shot needs is a question
+    #    the storyboard asks, and the storyboard comes after this stage.
+    plan_blockers: list[dict[str, Any]] = []
     if not plan:
-        material_blockers.append({"code": "EPISODE_PLAN_NOT_CONFIRMED", "message": "分集方案尚未确认"})
+        plan_blockers.append({"code": "EPISODE_PLAN_NOT_CONFIRMED", "message": "分集方案尚未确认"})
     if style is None:
-        material_blockers.append({"code": "STYLE_NOT_FROZEN", "message": "风格尚未冻结"})
-    for shot in scoped_shots:
-        spec = None
-        try:
-            spec = ShotSpec.model_validate(shot.spec)
-        except Exception:
-            material_blockers.append({"code": "SHOT_SPEC_INVALID", "message": f"镜头「{shot.name}」参数无效"})
-            continue
-        for asset_id in spec.required_asset_ids:
-            asset = db.get(Asset, asset_id)
-            if asset is None or not (asset.approved and asset.locked):
-                material_blockers.append({
-                    "code": "ASSET_NOT_MASTER",
-                    "message": f"镜头「{shot.name}」需要的素材尚未确认并锁定",
-                    "shot_id": shot.id,
-                    "asset_id": asset_id,
-                })
+        plan_blockers.append({"code": "STYLE_NOT_FROZEN", "message": "风格尚未冻结"})
     stages.append({
-        "id": "materials",
-        "label": "剧本统筹与素材",
-        "done": not material_blockers,
+        "id": "plan",
+        "label": "剧本统筹",
+        "done": not plan_blockers,
         "summary": (
             f"{len(plan.payload.get('episodes', []))} 集 · 风格第 {style.version} 版" if plan and style
             else ("分集方案待确认" if style is None else "风格待冻结")
         ),
-        "blockers": material_blockers,
+        "blockers": plan_blockers,
         "facts": {
             "episode_plan_id": plan.id if plan else None,
             "episode_plan_version": plan.version if plan else None,
@@ -185,9 +201,11 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         },
     })
 
-    # ③ 镜头拆解: every planned shot exists and its own requirements are bound.
+    # ③ 镜头拆解: every planned shot exists and its own contract is whole.
     #    A script-first plan is only storyboarded once it was materialised into
     #    the shots its sections produced; until then the stage names the gap.
+    #    Materials are deliberately NOT a condition here: the design is done
+    #    first, and what it asks for is answered in the next stage.
     shot_blockers: list[dict[str, Any]] = []
     plan_mode = (plan.payload or {}).get("mode", "shots") if plan is not None else None
     plan_materialized = bool(plan is not None and all(
@@ -219,7 +237,37 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
                   "plan_mode": plan_mode, "plan_materialized": plan_materialized},
     })
 
-    # ④ 导演包: a confirmed, non-stale package that is really startable now.
+    # ④ 拍摄素材准备: what the storyboard asked for is really prepared.
+    #    The requirement is the shot's own: every reference it names must be
+    #    an approved, locked master.  This is the only place the material
+    #    library is judged, and it comes after the design that asks for it.
+    material_blockers: list[dict[str, Any]] = []
+    for shot in scoped_shots:
+        for problem in _shot_material_problems(db, shot):
+            material_blockers.append({
+                "code": problem,
+                "message": f"镜头「{shot.name}」需要的素材尚未确认并锁定",
+                "shot_id": shot.id,
+            })
+    stages.append({
+        "id": "assets",
+        "label": "拍摄素材准备",
+        # 素材不是落镜的硬前置：缺的那个图片由 H3 自行生成。这一步如实告诉
+        # 用户每一镜要什么、还缺什么，但不再把流程堵在这里。
+        "done": bool(scoped_shots),
+        "summary": (
+            f"{len(scoped_shots)} 镜的素材需求已核对" if scoped_shots and not material_blockers
+            else (f"{len(scoped_shots)} 镜的素材需求已核对（还缺 {len(material_blockers)} 项，"
+                  "缺的那个图片由 H3 自行生成）" if scoped_shots
+                  else "等待分镜定稿")
+        ),
+        "blockers": [],
+        "facts": {"material_shot_count": len(scoped_shots),
+                  "material_missing_count": len(material_blockers),
+                  "material_notices": material_blockers},
+    })
+
+    # ⑤ 导演包: a confirmed, non-stale package that is really startable now.
     stages.append({
         "id": "package",
         "label": "导演包",
@@ -240,7 +288,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         } if package and ready else {}),
     })
 
-    # ⑤ 视频生产: every shot in the confirmed scope has a current passed take.
+    # ⑥ 视频生产: every shot in the confirmed scope has a current passed take.
     production_blockers: list[dict[str, Any]] = []
     scope_shots = planned_shot_ids
     passed_scope_count = sum(shot_id in passed for shot_id in scope_shots)
@@ -261,7 +309,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         "facts": {"passed_shot_count": passed_scope_count, "scope_shot_count": len(scope_shots)},
     })
 
-    # ⑥ 后期成片: every required episode really has a delivered reel.
+    # ⑦ 后期成片: every required episode really has a delivered reel.
     from shine.production.runner import run_summary
 
     run = run_summary(db, project_id)

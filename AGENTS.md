@@ -753,6 +753,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - **台词说话方=必须绑定的人物**：服务器把 dialogue speaker 计入 required_characters，
   旧提示词只要求"出场人物"。修复：说话方即使从不露面，其已批准主素材也必须出现在该片段
   `asset_ids`（S8 三次 `CHARACTER_MASTER_BINDING_REQUIRED` 实证）。
+  **2026-11-08 变更**：这条门禁不再拦在 crew 链里，而是**需求链**的一环 —— 分镜提出需求
+  （缺哪个角色主素材），需求随答案交给素材层，拦住未满足需求的是「拍摄素材准备」这一步与
+  导演包冻结（`SHOT_CHARACTER_MASTER_MISSING`）。说到的仍是"说话方必须可绑定"。
   以上两处回归都在 `backend/tests/test_crew_prompt_contract.py`；真实链以 S3/S8
   "修前连败、修后一次过"验证。证据：`docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md`。
 - **仅声音的说话实体**（如念名单的"广播"）产品未建模：`_character_coverage` 按人物名解析
@@ -969,3 +972,75 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 验收：临时清空 bypass 白名单后做了一次**真实**推送，服务端返回
   `GH013: Cannot update this protected ref`，远端 `main` sha 未变（零污染）；恢复白名单后
   所有者推送非 `main` 分支成功。证据见 `docs/BRANCH_PROTECTION.md`。
+## 2026-11-08 四阶段二轮复验（R01–R08 关闭）
+
+- **一次授权只买一次新尝试**：`start_pipeline_new_attempt` 在建新任务的**同一事务**里用
+  `state_version` + `status` fence 消费授权，旧行写 `new_attempt_authorization`；重复调用
+  返回同一回执。旧行保持 `UNKNOWN` 历史且不再提供动作。审计分开：`PIPELINE_TASK_NEW_ATTEMPT`
+  与 `PIPELINE_TASK_RECONCILED`。
+- **四阶段任务有角色匹配的对账入口**：`POST /projects/{id}/pipeline/tasks/{id}/reconcile`。
+  只有 `NOT_SENT_PROVEN` 才允许普通继续；`UNKNOWN_REQUIRES_NEW_ATTEMPT` 只允许「核对后
+  重新发送一次」。普通 resume 仍拒绝 UNKNOWN。
+- **分镜交付按「预期单元」核验，不按场次数**：`expected_storyboard_units` 由当前场次
+  revision、来源范围、chunk ordinal/hash 与连续性基线算出稳定单元清单；逐单元结果、失败、
+  剧组步骤与 apply 句柄存在 `four-stage-storyboard-units:{pid}:{vid}` 台账里。丢片、重复、
+  越界、失效、未应用、失败全部具名拒绝正式交付；局部 `section_ids` 重做只替换自己。
+- **交付快照才是复用键**：`delivery_snapshot` 绑定 unit/apply、镜头 revision+spec、绑定、
+  冻结风格、规则包与工作流图/参数映射；只有完全相同的快照才复用包。镜头升版产生新包，
+  旧包以 `SHOT_REVISION_CHANGED` 阻止新 Run 与未提交批次，历史仍可读。缺 lineage 的旧
+  **四阶段**包进入新生产前需重新交付（`CREATIVE_LINEAGE_MISSING`），普通旧导演包不受影响。
+- **正式分集交付保留 EpisodeScript 身份**：`PlannedEpisode.episode_script_id` 是类型化
+  字段，分集清单同时保留它。分集合同以**当前**大纲与场次剧本为准，被替代即具名拒绝；
+  `volume_scope` 只在没有任何已确认分集合同时作为兼容合同保留。
+- **蓝图依据是可验证的**：蓝图产物带 `basis`（有序 outline refs + plan revision）；确认、
+  读取、卷发布与包准入读同一个 `bible_basis_blockers`。草稿蓝图写出的场次在发布时与确认
+  蓝图比对主线/人物/世界/时间线/锁定事实/结局/跨卷开放项。
+- **面板渲染服务端状态**：四阶段面板不再把分镜草案放在本地 state，刷新/崩溃/重启后仍能看到
+  待应用镜头、失败与对账句柄、发布回执与**确切 package ID**；「核对并只重做这一场」只重做
+  该场；地址栏 `#d/package?package=<id>` 可直达指定导演包。
+- 验收：`backend/tests/test_four_stage_reacceptance.py`（R01–R06）、
+  `frontend/src/test/fourStageRecovery.test.tsx`（R07/R08）、
+  `scripts/verify_four_stage_browser.py`（隔离浏览器旅程）。
+  证据见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md`。
+
+
+## 2026-11-08 追加：素材后置（用户裁定）
+
+- **素材一律后置**：剧本定稿、分镜设计完成后，才到素材库**按分镜**准备素材，然后拍摄。
+  每镜需要什么素材是分镜的产物（`required_asset_ids` 来自摄影方案），不是剧本的产物。
+- **阶段次序改为 7 步**：`script 创意与剧本 → plan 剧本统筹 → storyboard 镜头拆解 →
+  assets 拍摄素材准备 → package 导演包 → production 视频生产 → post 后期成片`。
+  ② 只判分集方案与冻结风格，③ 只判镜头自身，④ 判逐镜素材。
+- **素材是可选类需求（2026-11-08 第二轮收尾修订）**：④ 的素材缺口只**报**（notice），不再是 blocker；
+  导演包冻结也不再因缺主素材拒绝。缺的那个图片由 H3 自行生成。
+  详见下一节。
+- **四阶段面板按同一顺序**：单元回执带 `missing_characters`，面板如实显示；「应用这一场」不再
+  因为缺素材而禁用（缺的那个图片由 H3 自行生成，可以先落镜）。
+- 验收：`backend/tests/test_director_long_form.py`（两条新断言）、
+  `frontend/src/test/setupEntry.test.tsx`（阶段条次序）。
+  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 8 节。
+
+## 2026-11-08 第二轮收尾：素材是可选类需求（R09）
+
+- **素材缺失只提示，不再硬阻滞**：镜头点名的素材若不存在、不是本项目的、或没有批准锁定，
+  `apply-camera` **跳过绑定**并回 `material_notices`（`MISSING_IMAGE_MATERIAL`，
+  「无图片素材将由H3自行生成」），这一镜照样落。素材阶段（journey ④）与导演包冻结
+  （`package_readiness`）都不再因此拒绝。
+- **跳过绑定必须同时改「要求」**：被跳过的素材要从这一镜的 `required_asset_ids` 里去掉，
+  否则 `create_shot_record` 与渲染预检仍会拒掉它——只跳过绑定不改要求，等于把一种 422
+  换成另一种 422。
+- **绝不绑定未批准锁定的素材**：已绑定但没确认锁定的素材仍然具名拒绝（`ASSET_NOT_MASTER`）；
+  渲染侧 `_validate_binding_inputs` 也会拒绝。跳过的字节不进渲染。
+- **渲染侧的 image 族豁免有前提**：方案声明 image 传输族时，这一镜**一张图片都没绑**才豁免
+  （`WORKFLOW_MEDIA_FAMILY_NOT_BOUND` 不再触发，未用的图片装载节点会被剪掉，不会有占位文件名
+  送到渲染器）；绑定了就一张都不丢。audio 族的规则不变：有台词的镜头仍必须有音频参考。
+- **人物主体缺位仍然拦住**：H3 编译期 `H3_CHARACTER_REFERENCE_MISSING` 保护身份漂移的规则不变；
+  「人物主体」不是可选类素材。缺主素材且这一镜**没有任何参考**时走无参考的 T2VA 编译，
+  H3 临时生成人物（画面一致，但不保证是你指定的那个角色）。
+- **「一键开拍（自动适配）」尚未改**：排产提交入口仍会在缺参考素材时挡住提交（画面参考与人物主体
+  都算缺）。人物主体缺位应当继续拦住；画面参考缺位要降级为提示，得先解决 Ref2VA 方案
+  「至少一张参考」与无参考时编译模式退化为 T2VA 的匹配问题。
+- 验收：`backend/tests/test_four_stage_reacceptance.py`（R09 两条）、
+  `backend/tests/test_reference_transfer.py`（两条反向断言）、
+  `backend/tests/test_production_series.py`（API 层反向断言）。
+  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 9 节。

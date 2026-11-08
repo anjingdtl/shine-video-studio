@@ -269,6 +269,12 @@ def build_package(
             # The script range this episode covers: source section -> episode
             # -> shots, so coverage can be audited back to the original text.
             episode_entry["section_ids"] = list(planned.section_ids)
+        if planned.episode_script_id:
+            # Which confirmed contract produced this episode.  A delivery
+            # whose episodes carry no contract was cut by the server, not
+            # confirmed by the person, and the manifest has to say so.
+            episode_entry["episode_script_id"] = planned.episode_script_id
+            episode_entry["episode_script_sha256"] = planned.episode_script_sha256
         episodes.append(episode_entry)
 
     root = {
@@ -416,8 +422,21 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
     if not episodes:
         blockers.append(_blocker("PACKAGE_HAS_NO_EPISODES", "导演包没有分集"))
     lineage = manifest.get("creative_lineage") or {}
-    if lineage:
-        from shine.director.pipeline import current_lineage_digest
+    if not lineage:
+        # A four-stage delivery that predates the lineage contract cannot
+        # enter new production without a re-delivery.  An ordinary director
+        # package keeps its original path.
+        plan_row = (db.get(DirectorEpisodePlan, package.episode_plan_id)
+                    if package.episode_plan_id else None)
+        if plan_row is not None and plan_row.source == "four_stage_volume":
+            blockers.append(_blocker("CREATIVE_LINEAGE_MISSING",
+                                     "这份四阶段交付缺少上游依据，进入新生产前请重新交付本卷"))
+    else:
+        from shine.director.pipeline import (
+            bible_basis_blockers,
+            current_bible,
+            current_lineage_digest,
+        )
 
         current = current_lineage_digest(db, package.project_id, lineage.get("volume_id") or "")
         if current is None:
@@ -431,6 +450,12 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             # production is refused.
             blockers.append(_blocker("CREATIVE_LINEAGE_CHANGED",
                                      "上游剧本或分集契约已变更，请重新交付本卷后再开拍"))
+        bible = current_bible(db, package.project_id)
+        if bible is not None and bible_basis_blockers(db, package.project_id, bible):
+            # The blueprint must still describe the current outlines before
+            # a package built on it may be produced.
+            blockers.append(_blocker("CREATIVE_BASIS_CHANGED",
+                                     "上游蓝图与当前大纲已不一致，请重新生成蓝图并重新交付本卷"))
     for episode in episodes:
         if digest_of(episode.manifest) != episode.manifest_sha256:
             blockers.append(
@@ -449,6 +474,7 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             if style and shot.get("style_version_id") != style.get("style_version_id"):
                 blockers.append(_blocker("SHOT_STYLE_MISMATCH", f"镜头「{row.name}」不执行当前冻结风格",
                                          shot_id=row.id))
+            bound_characters = []
             for link in shot.get("bindings", []):
                 asset = db.get(Asset, link.get("asset_id") or "")
                 if asset is None:
@@ -457,6 +483,13 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                 elif not (asset.approved and asset.locked):
                     blockers.append(_blocker("ASSET_NOT_MASTER", f"素材「{asset.filename}」尚未确认并锁定",
                                              shot_id=shot.get("shot_id"), asset_id=asset.id))
+                else:
+                    bound_characters.append({"id": asset.id, "kind": asset.kind,
+                                             "role": asset.role, "entity_id": asset.entity_id})
+            # A character the shot names without a bound master is a material
+            # requirement, not a production blocker: the picture is optional
+            # and H3 generates it.  A reference that IS bound still has to be
+            # an approved master (checked above).
 
     fingerprint = digest_of(
         {

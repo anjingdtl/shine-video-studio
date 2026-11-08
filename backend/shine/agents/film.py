@@ -33,8 +33,6 @@ from shine.agents.film_contracts import (
 )
 from shine.asset_identity import (
     canonical_character_name_for_asset_id,
-    resolve_character_asset,
-    split_character_names,
 )
 from shine.h3.rulebook import H3RulebookRegistry, digest
 from shine.llm.base import LLMError, text_provider_snapshot
@@ -424,26 +422,11 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
             timeline.extend((beat_id, round(elapsed + start, 3))
                             for beat_id, start in zip(beat_ids, starts, strict=True))
             elapsed += shot.duration_s
-            bound_character_assets = [
-                a
-                for a in context["assets"]
-                if a["id"] in shot.asset_ids and a["kind"] == "image" and a["role"] == "character"
-            ]
-            required_characters = [name for beat_id in beat_ids for name in beats[beat_id]["characters"]]
-            for beat_id in beat_ids:
-                for line in beats[beat_id].get("dialogue", []):
-                    speaker = line.get("speaker_id")
-                    if not speaker:
-                        continue
-                    # A chorus line names several speakers in one field
-                    # ("阿德, 小米").  Every consumer splits a name list the
-                    # same way; a whole-list speaker would otherwise look like
-                    # a character nobody has a master for.
-                    for part in split_character_names(speaker):
-                        if part not in required_characters:
-                            required_characters.append(part)
-            if any(resolve_character_asset(name, bound_character_assets) is None for name in required_characters):
-                raise ValueError("CHARACTER_MASTER_BINDING_REQUIRED")
+            # 分镜提出的是**需求**，不是素材：这一镜要用的角色若还没有主素材，
+            # 那是素材层要准备的事，不是分镜该停下的理由。拦住它的是后面的
+            # 两道门：素材准备这一步（镜头点名的角色必须有绑定且已确认锁定的
+            # 主素材），以及导演包冻结。需求清单由 API 层如实计算并随答案
+            # 交给素材层。
         if timing and (round(elapsed, 3) != timing["total_s"]
                        or timeline != list(zip(beats, timing["cut_starts_s"], strict=False))
                        or len(timeline) != timing["editorial_shot_count"]

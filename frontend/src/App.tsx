@@ -4,7 +4,7 @@ import { PreproductionPanel } from './components/PreproductionPanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, BookOpenText, Check, ChevronDown, CircleHelp, Clapperboard, Clock3,
-  Film, FolderKanban, ListChecks, LockKeyhole, PackageCheck, PenLine, Plus, RefreshCw, Settings2,
+  Film, FolderKanban, Images, ListChecks, LockKeyhole, PackageCheck, PenLine, Plus, RefreshCw, Settings2,
   ShieldCheck, SlidersHorizontal, Sparkles, Users, Video, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -79,23 +79,33 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
   VIEW_GROUPS.map((group) => [group.view, group.title]),
 ) as Record<ViewId, string>;
 
-/** 导演模式：作品入口 + 六阶段制作页 + 不占流程序号的基础配置页。 */
+/** 导演模式：作品入口 + 七阶段制作页 + 不占流程序号的基础配置页。 */
 type DirectorPage = 'projects' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
   projects: '我的作品', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
   run: '全片生产', deliver: '成片中心', setup: '基础配置',
 };
-/** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
+/** 主线阶段。完成态一律来自服务端 /journey，不在前端另算一套。
+ *  顺序遵守一条原则：素材是为剧本和分镜服务的，所以「拍摄素材准备」排在
+ *  「镜头拆解」之后 —— 分镜先定稿，素材库再按分镜的要求准备。 */
 const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
   { id: 'script', text: '创意与剧本', icon: PenLine, page: 'assets', hint: '输入想法或导入现成剧本，确认后进入统筹' },
-  { id: 'materials', text: '剧本统筹与素材', icon: Film, page: 'assets', hint: '分集 · 人物场景道具 · 确认主素材 · 冻结风格' },
+  { id: 'plan', text: '剧本统筹', icon: Film, page: 'assets', hint: '分集 · 冻结风格 · 把剧本切成可拍的集' },
   { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜、对白与声音安排' },
+  { id: 'assets', text: '拍摄素材准备', icon: Images, page: 'produce', hint: '按分镜定稿的清单准备素材并确认为主素材' },
   { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结这次要拍的全部内容与执行政策' },
   { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完全部分集' },
   { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
 ];
 
-function resolveHash(hash: string): { ui: 'director' | 'expert' | 'assets'; view: ViewId; page: DirectorPage; anchor?: string; assetPage?: AssetCenterPage } {
+function resolveHash(hash: string): {
+  ui: 'director' | 'expert' | 'assets';
+  view: ViewId;
+  page: DirectorPage;
+  anchor?: string;
+  assetPage?: AssetCenterPage;
+  packageId?: string;
+} {
   const raw = hash.replace(/^#/, '');
   if (raw.startsWith('a/')) {
     const page = raw.slice(2) as AssetCenterPage;
@@ -103,9 +113,11 @@ function resolveHash(hash: string): { ui: 'director' | 'expert' | 'assets'; view
     return { ui: 'assets', view: 'production', page: 'projects', assetPage: pages.includes(page) ? page : 'home' };
   }
   if (raw.startsWith('d/')) {
-    const page = raw.slice(2) as DirectorPage;
+    const [path, query = ''] = raw.slice(2).split('?');
+    const packageId = new URLSearchParams(query).get('package') ?? undefined;
+    const page = path as DirectorPage;
     if (Object.prototype.hasOwnProperty.call(DIRECTOR_PAGE_LABELS, page)) {
-      return { ui: 'director', view: 'production', page };
+      return { ui: 'director', view: 'production', page, packageId };
     }
     return { ui: 'director', view: 'production', page: 'projects' };
   }
@@ -156,6 +168,9 @@ function App() {
   const [assetPage, setAssetPage] = useState<AssetCenterPage>(() => resolveHash(window.location.hash).assetPage ?? 'home');
   const [assetReturnHash, setAssetReturnHash] = useState(() => window.location.hash.startsWith('#a/') ? '#d/projects' : (window.location.hash || '#d/projects'));
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
+  /** The exact package a deep link named, so the workbench opens that one. */
+  const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
+    () => resolveHash(window.location.hash).packageId);
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
   /** 制作页单任务聚焦：默认自动落在第一个未完成阶段，用户可用阶段条/摘要行切换；
    *  自动阶段推进时回到正轨。同一时刻只展开当前该做的那一个阶段。 */
@@ -194,7 +209,7 @@ function App() {
 
   useEffect(() => { if (ui !== 'assets') window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
-  /** 六阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
+  /** 七阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
   /** 读取状态与结果分开：读不到进度 ≠ 全部完成，失败必须如实显示并可重试。 */
   const [journeyState, setJourneyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -245,14 +260,14 @@ function App() {
   const productionScopeLabel = hasProductionScope && passedScopeCount !== null
     ? `${passedScopeCount}/${scopeShotCount} 个计划镜头已通过`
     : null;
-  /** 第一个未完成的阶段；null 表示六阶段全部完成。 */
+  /** 第一个未完成的阶段；null 表示七阶段全部完成。 */
   const nextStage = journey?.next_stage
     ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
     : null;
   const heroGuidance = journeyState !== 'ready' || !journey
     ? (journeyState === 'error'
       ? { page: 'projects' as DirectorPage, cta: '重新读取进度', hint: `暂时读不到这部作品的进度（${journeyError || '服务未响应'}）。这不代表已经完成，请重试。` }
-      : { page: 'projects' as DirectorPage, cta: '正在读取进度…', hint: '正在从本机服务读取这部作品六个阶段的真实状态。' })
+      : { page: 'projects' as DirectorPage, cta: '正在读取进度…', hint: '正在从本机服务读取这部作品七个阶段的真实状态。' })
     : nextStage
       ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
       : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出；艺术验收仍需你确认。' };
@@ -284,6 +299,7 @@ function App() {
   function goToDirectorPage(page: DirectorPage) {
     setUi('director');
     setDirectorPage(page);
+    setDirectorPackageId(undefined);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
   }
@@ -299,8 +315,15 @@ function App() {
   function leaveAssets(workspace: 'director' | 'expert') {
     const route = resolveHash(assetReturnHash);
     if (workspace === 'director') {
-      const page = route.ui === 'director' ? route.page : 'projects';
-      goToDirectorPage(page);
+      if (route.ui === 'director') {
+        setUi('director');
+        setDirectorPage(route.page);
+        setDirectorPackageId(route.packageId);
+        window.history.pushState(null, '', assetReturnHash);
+        window.scrollTo({ top: 0 });
+      } else {
+        goToDirectorPage('projects');
+      }
       return;
     }
     if (route.ui === 'expert') {
@@ -404,6 +427,7 @@ function App() {
       if (target.ui === 'director') {
         setUi('director');
         setDirectorPage(target.page);
+        setDirectorPackageId(target.packageId);
         return;
       }
       setUi('expert');
@@ -421,7 +445,11 @@ function App() {
       }
     };
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    window.addEventListener('hashchange', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('hashchange', onPop);
+    };
   });
 
   /** 启动深链（如安装器落地 #setup 或 #v/production/assets）。 */
@@ -668,7 +696,7 @@ function App() {
             </section>}
 
             {project && <>
-              <nav className="director-steps six-stage" aria-label="制作六阶段" hidden={directorPage === 'setup'}>
+              <nav className="director-steps seven-stage" aria-label="制作七阶段" hidden={directorPage === 'setup'}>
                 {DIRECTOR_STAGES.map((stage) => {
                   const Icon = stage.icon;
                   // 一个页面可能承载两个阶段（剧本与素材）：只高亮当前该做的那一个，
@@ -962,6 +990,7 @@ function App() {
                   key={`package-${projectId}`}
                   projectId={projectId}
                   mode="package"
+                  packageId={directorPackageId}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
@@ -974,6 +1003,7 @@ function App() {
                   key={`run-${projectId}`}
                   projectId={projectId}
                   mode="run"
+                  packageId={directorPackageId}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}

@@ -31,6 +31,16 @@ it('从导演页面进入素材中心再返回时恢复原页面与地址', asyn
   expect(window.location.hash).toBe('#d/assets');
 });
 
+it('往返素材中心时保留指定导演包的深链标识', async () => {
+  window.history.replaceState(null, '', '#d/package?package=pkg-exact-1234');
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: '素材中心' }));
+  expect(await screen.findByRole('heading', { name: '创作首页' })).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /导演工作台/ }));
+  expect(window.location.hash).toBe('#d/package?package=pkg-exact-1234');
+});
+
 it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已固定素材', async () => {
   const asset = { id: 'asset-1', project_id: 'proj-1', filename: '主角.png', kind: 'image',
     sha256: 'a'.repeat(64), byte_size: 32, approved: false, locked: false, tags: [] };
@@ -43,7 +53,7 @@ it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
   const confirm = await screen.findByRole('button', { name: '确认使用' });
   expect(screen.queryByLabelText(/操作员凭据|核验依据/)).toBeNull();
   vi.mocked(window.confirm).mockReturnValue(false);
@@ -63,7 +73,7 @@ it('图片素材显示缩略图，待确认素材用高对比按钮提示必做'
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
 
   const thumb = await screen.findByAltText('主角.png');
   expect(thumb).toHaveAttribute('src', '/api/v1/assets/asset-1/thumbnail');
@@ -88,7 +98,7 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
   await user.click(await screen.findByRole('button', { name: '确认使用' }));
   await screen.findByText('PLAN_HASH_CHANGED');
   await waitFor(() => expect(screen.getByRole('button', { name: '确认使用' })).toBeEnabled());
@@ -107,7 +117,7 @@ it('项目锁定素材经明确授权确认后进入全局候选，不自动晋�
   }, 201) });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /剧本统筹与素材/);
+  await gotoDirectorPage(user, /剧本统筹/);
 
   await user.click(await screen.findByRole('button', { name: '收藏到素材中心' }));
   expect(screen.getByText(/仅限当前项目，跨项目使用需另行授权/)).toBeInTheDocument();

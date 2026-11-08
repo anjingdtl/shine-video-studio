@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from datetime import UTC
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,8 @@ from tests.test_v13_preparation import (  # noqa: F401
     rights,
     workflow,
 )
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def clone_request(client, project):
@@ -119,7 +122,12 @@ spec = PackageSpec(name="crashed", kind="model", revision="v1", license_id="TEST
     files=[dict(url="https://example.com/f", relative_path="f", size=1, sha256="a"*64)])
 LocalInstaller(Path(sys.argv[1]), FakeDownloader()).install(spec)
 """
-    result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], check=False, env=os.environ.copy())
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        check=False,
+        cwd=BACKEND_ROOT,
+        env=os.environ.copy(),
+    )
     assert result.returncode == 23
     assert (tmp_path / "crashed.lock").exists()
     LocalInstaller(tmp_path, None).recover("crashed")
@@ -217,7 +225,9 @@ LocalInstaller(root, FakeDownloader(), checkpoint=checkpoint).install(spec)
 """
     (tmp_path / "model").mkdir()
     (tmp_path / "model" / "f").write_bytes(b"old")
-    result = subprocess.run([sys.executable, "-c", script, str(tmp_path), phase], check=False)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), phase], check=False, cwd=BACKEND_ROOT,
+    )
     assert result.returncode == 23
     installer = LocalInstaller(tmp_path, None)
     outcome = installer.recover("model")
@@ -227,7 +237,9 @@ LocalInstaller(root, FakeDownloader(), checkpoint=checkpoint).install(spec)
     assert not (tmp_path / "model.lock").exists()
     assert not (tmp_path / "model.journal").exists()
     # Retry uses the actual installer in a fresh process and completes successfully.
-    assert subprocess.run([sys.executable, "-c", script, str(tmp_path), "NO_FAILURE"], check=False).returncode == 0
+    assert subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), "NO_FAILURE"], check=False, cwd=BACKEND_ROOT,
+    ).returncode == 0
 
 
 def test_installer_active_owner_and_unknown_owner_are_protected(tmp_path):

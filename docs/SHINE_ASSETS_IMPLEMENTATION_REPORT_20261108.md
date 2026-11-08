@@ -1,6 +1,6 @@
 # Shine Assets 云端实施与验收报告
 
-状态：Phase 0–4 云端实现与第一性原理对抗验收完成。Windows RTX 5080 / ComfyUI 真实推理未运行，所有依赖本机证据的能力仍为 `PENDING_LOCAL_VALIDATION`；后端全量运行中有 14 项既有 Windows/本机条件用例在 Linux 云端失败，未绕过其门禁。
+状态：Phase 0–4 云端实现与第一性原理对抗验收已完成；本报告后续追加了最新 `origin/main` 同步复核。Windows RTX 5080 / ComfyUI 真实推理未运行，所有依赖本机证据的能力仍为 `PENDING_LOCAL_VALIDATION`。原始功能分支的云端测试记录保留在下文；同步后的复测单独列出。
 
 ## 基线与 Git
 
@@ -10,17 +10,40 @@
 - 起始迁移 head：`f180b0020001`；新增 head：`f180b0030001`。
 - 起始工作树：干净；没有打开或修改生产数据库、密钥、用户图片/声音或 H3 任务。
 - 远端规范 PR #9 仍为 open；功能分支保持独立，目标为 `main`。
-- Draft PR #10：目标 `main`，保持 open/draft/未合并；GitHub 当前 head ref 为 `feature/shine-assets-center-20261108`。本机 RTX 5080 验收证据不存在，状态为 `NOT_RUN`。
+- 初稿 Draft PR #10：目标 `main`，head 为 `feature/shine-assets-center-20261108`；该状态为第一次实施报告时的记录。最新整合与 PR 进度以本报告的追加记录及 GitHub PR #10 为准。本机 RTX 5080 验收证据不存在，状态为 `NOT_RUN`。
 
 ## 实现范围
 
 - 新增无 `project_id` 的全局素材、媒体、版本、来源引用、权利、审批授权、声音、任务尝试和项目分配记录。新增项目绑定删除时只清理项目本地身份；项目级 RightsRecord 随所属项目删除，独立全局权利、正式版本和内容寻址文件继续保留。
-- 新增 Shine Assets 顶层路由和独立布局：首页、图片工坊、声音工坊、全局素材库、项目分配；保留 Director 六阶段和现有专业设置入口。
+- 新增 Shine Assets 顶层路由和独立布局：首页、图片工坊、声音工坊、全局素材库、项目分配；与最新 Director 七阶段流程及现有专业设置入口并行。
 - 图片和声音 GPU 任务从现有 Worker 串行执行，共用排他 ResourceLease；图片/声音全局队列每个 Worker tick 只执行一项，H3 保持高优先级。ComfyUI 需确认空队列及无活跃 CUDA tensor；声音任务需确认推理子进程退出或本机 HTTP 服务返回释放确认。TTS 在 ASR、词级对齐前分别确认模型释放；任何未知释放状态都阻断后续阶段并要求对账。T2I 复用旧固定图；edit 适配器固定官方 ComfyUI Qwen-Image-2.1 edit 样例 revision/hash。I2I、局部修订、多图、穿戴、原生 RGBA、2K 均以真实本机证据门控。
 - INPAINT 传递真实 PNG 遮罩字节并记录 SHA/尺寸/语义；因上游图无 mask 节点，输出在收获后按实际像素遮罩合成。透明抠图另外提供确定性手工 MASK_CUTOUT_V1，未宣称 AI 分割。
 - 声音任务复用当前 provider、TTS ResourceLease、授权过期/撤销检查、ASR/词级对齐和人工试听冻结；音效/音乐只管理导入。
 - Director→Assets 搜索全局正式版本，分配创建新项目 Asset 身份；项目锁定素材可经明确权利确认保存为仅限当前项目的全局候选。旧项目冻结引用保留其原始版本。
 - 新增版本读取 API，支持本机验收工具读取不可变元数据并独立校验下载文件 SHA 与解码尺寸。
+
+## 最新 origin/main 同步复核（2026-11-08）
+
+- 起始 main `631d9a07c6be5911a88e138bb037da3d369f3d79` 前进到 `a53d2b7099c8ccd71d8300ee88d5d3cfe6dde30b`；复核并纳入这 5 个 main 提交，没有把独立规范 PR #9 的分支合进来。
+- 新 main 把 Director 主线从六阶段改为七阶段，并加入 R01–R09 四阶段流水线重验收。素材中心仍走独立一级路由、全局素材领域与同一个 Worker；R09 的可选素材提示不会绕过项目身份、授权或主素材审批。
+- `frontend/src/App.tsx` 的冲突合并保留了 Assets 路由、Director 七阶段和指定导演包深链。对抗检查修复了重复的 hashchange 监听，并补回程回归，确保素材中心往返不会丢失 `package=<id>`。
+- 复核了 Worker 顺序：真实 H3 series/队列先行；全局图片和声音共用原队列及排他 ResourceLease，每个 Worker tick 最多推进一项；ComfyUI 释放仍要求空队列和 `/system_stats` 的显存确认，声音阶段在 TTS、ASR、对齐之间要求 provider 确认释放。UNKNOWN 外部提交仍须对账，不自动重发。
+- 迁移 head 未变化，仍为单 head `f180b0030001`；新 main 没有引入与素材中心冲突的数据库迁移。
+
+### 合并前复测记录
+
+| 检查 | 命令（从仓库根目录运行） | 结果 |
+|---|---|---|
+| 后端全量 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests --tb=short` | exit 1：1,872 passed、138 skipped、23 failed，用时 39:03。9 项是远端新增安装器崩溃测试的子进程未从 `backend/` 导入 `shine`；其余 14 项是下方列出的 Linux/Windows、显式本机执行、磁盘条件限制。 |
+| 安装器反例回归修复后复跑 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_v13_adversarial.py -q --tb=short` | exit 0：31 项全通过。修复是为测试子进程显式设置 `cwd=BACKEND_ROOT`，八个崩溃窗口现已实际进入恢复代码；断言未放宽。 |
+| Renderer 平台门禁复核 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_image_managed_renderer.py::test_an_unmanaged_instance_is_refused -q --tb=short` | exit 1，预期平台限制：Linux 返回 `IMAGE_RENDERER_WINDOWS_ONLY`，Windows 专属用例期待检查 managed-instance 条件；未跳过或削弱该保护。 |
+| Ruff | `backend/.venv/bin/ruff check backend/shine backend/alembic backend/tests` | exit 0：All checks passed。 |
+| Alembic head | `backend/.venv/bin/alembic -c backend/alembic.ini heads` | exit 0：唯一 head `f180b0030001`。 |
+| 新库与旧库迁移 | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_alembic.py backend/tests/test_migrations_windows.py -q --tb=short` | exit 0：8 项通过。 |
+| 前端 | `npm test -- --run`（`frontend/`） | exit 0：28 个文件、190 项通过。 |
+| TypeScript / 生产构建 | `npx tsc --noEmit`；`npm run build`（`frontend/`） | 均 exit 0；主包 761.36 kB（gzip 236.28 kB），仍有 Vite 的 500 kB 提示。 |
+
+全量后端套件是在修复上述测试子进程工作目录之前完成；修复后已完整重跑受影响的 `test_v13_adversarial.py` 文件（31 项通过）。当前整合头的 Windows 全量 CI 将对最终代码再执行完整套件。Linux 剩余 14 个失败分别是：4 项要求 Windows 主机资格、2 项要求 `SHINE_ENABLE_LOCAL_EXECUTION`、1 项因云端磁盘不足、1 项明确要求 Windows renderer、6 项 Windows-only service validation。云端没有更改这些原有门禁。
 
 ## 图片与声音能力矩阵
 
@@ -45,7 +68,7 @@
 | ID | 云端状态 | 证据/边界 |
 |---|---|---|
 | AC-01 | PASS | `test_projectless_import_persists_and_asset_metadata_uses_compare_and_swap`；Assets 独立首页无项目 UI 用例 |
-| AC-02 | PASS | URL 深链与素材中心跳转/返回导演页面的前端回归；六阶段状态依旧由 Director API 驱动 |
+| AC-02 | PASS | URL 深链与素材中心跳转/返回导演页面的前端回归；七阶段状态依旧由 Director API 驱动 |
 | AC-03 | PASS | `test_project_assignment_is_scoped_immutable_and_idempotency_binds_identity` 覆盖 QC、一次性授权、人工晋升及正式版本；assignment 只接受 `PROMOTED` 版本 |
 | AC-04 | PASS / 本机 NOT_RUN | `test_edit_adapter_uploads_every_reference_byte_and_preserves_slot_order`；本机 Comfy 实际生成未执行 |
 | AC-05 | PASS / 本机 NOT_RUN | mask 像素对齐、空/全幅拒绝、实际上传 SHA 与像素合成测试；鼠标/触控本机绘制验收未执行 |

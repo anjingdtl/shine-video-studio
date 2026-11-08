@@ -387,7 +387,7 @@ export type SubtitleTrack = {
 /* ======================= 导演流程 / 整部作品 ======================= */
 
 export type JourneyStage = {
-  id: 'script' | 'materials' | 'storyboard' | 'package' | 'production' | 'post';
+  id: 'script' | 'plan' | 'storyboard' | 'assets' | 'package' | 'production' | 'post';
   label: string;
   done: boolean;
   summary: string;
@@ -639,6 +639,40 @@ export interface PipelineVolumeScriptEntry {
   confirmed: boolean;
 }
 
+export interface PipelineVolumeStoryboard {
+  status: string | null;
+  updated_at: string | null;
+  units: StoryboardUnit[];
+}
+
+export interface PipelineEpisodeContract {
+  artifact_id: string;
+  sha256: string;
+  title: string | null;
+  sections: string[];
+  confirmed: boolean;
+  /** False once the outline or a scene script the contract pinned moved on. */
+  current: boolean;
+  reason: string | null;
+}
+
+export interface PipelineHandoffReceipt {
+  handoff_id: string;
+  package_id: string;
+  package_revision: number;
+  plan_version: number;
+  episodes: number;
+  shots: number;
+  episode_basis: string | null;
+  lineage_sha256: string | null;
+  created_at: string | null;
+  readiness: {
+    startable: boolean;
+    ready?: boolean;
+    blockers: Array<{ code: string; message?: string }>;
+  };
+}
+
 export interface PipelineVolume {
   volume_id: string;
   order: number;
@@ -651,13 +685,24 @@ export interface PipelineVolume {
   scripts: PipelineVolumeScriptEntry[];
   scripts_confirmed: number;
   scripts_total: number;
+  /** The authoritative per-unit state: a refresh restores it. */
+  storyboard: PipelineVolumeStoryboard;
+  episode_contracts: PipelineEpisodeContract[];
+  handoff: PipelineHandoffReceipt | null;
 }
 
 export interface PipelineOverview {
   master: { document_id: string | null; sha256: string | null };
   volume_plan_confirmed: boolean;
+  /** The confirmed plan revision the boundary editor changes. */
+  volume_plan: {
+    artifact_id: string; sha256: string;
+    volumes: Array<{ title: string; start_offset: number; end_offset: number }>;
+  } | null;
   bible_confirmed: boolean;
   pending_bible: { artifact_id: string; sha256: string } | null;
+  /** Why the confirmed blueprint no longer matches the current work. */
+  bible_status: { artifact_id: string; sha256: string; blockers: string[] } | null;
   active_tasks: PipelineTaskSummary[];
   pending_scripts: Array<{
     volume_id: string; section_id: string; artifact_id: string; sha256: string;
@@ -705,6 +750,15 @@ export const editSceneScript = (projectId: string, artifactId: string, text: str
     `/projects/${projectId}/pipeline/scene-scripts/${artifactId}/edit`,
     json('POST', { text, note }));
 
+export interface StoryboardUnitRejection {
+  code?: string;
+  rejection_reason_code?: string;
+  role?: string;
+  external_outcome?: string;
+  task_id?: string;
+  state_version?: number;
+}
+
 export interface StoryboardUnit {
   unit_id: string;
   section_id: string;
@@ -716,6 +770,17 @@ export interface StoryboardUnit {
   applied: boolean;
   /** The shots this scene really produced, once applied. */
   shot_ids?: string[];
+  /** The chunk ordinal of a scene that had to be split. */
+  chunk_index?: number;
+  chunk_count?: number;
+  title?: string | null;
+  scene_key?: string | null;
+  script_sha256?: string | null;
+  updated_at?: string | null;
+  /** What actually went wrong in this unit, with its reconciliation handle. */
+  rejections?: StoryboardUnitRejection[];
+  /** The characters this design names that have no approved master yet. */
+  missing_characters?: string[];
 }
 
 export interface StoryboardDraft {
@@ -736,7 +801,9 @@ export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
 /** Apply one scene's camera plan: this is what proves the scene->shots mapping. */
 export const applyCameraPlan = (
     projectId: string, cameraArtifactId: string, continuityArtifactId: string | null) =>
-  api<{ shot_ids: string[] }>(
+  api<{ shot_ids: string[];
+         material_notices?: Array<{ code: string; message: string;
+                                  asset_id?: string; shot_id?: string }> }>(
     `/projects/${projectId}/film-artifacts/${cameraArtifactId}/apply-camera`,
     json('POST', { continuity_artifact_id: continuityArtifactId }));
 
@@ -771,6 +838,60 @@ export const requestVolumeHandoff = (
     json('POST', { workflow_profile_id: workflowProfileId,
                    acknowledge_scene_coverage: options.acknowledgeSceneCoverage ?? false }));
 
+/** The authoritative state of one volume: draft, units, failures, receipt. */
+export const getVolumePipelineState = (projectId: string, volumeId: string) =>
+  api<PipelineVolume & { storyboard: PipelineVolumeStoryboard;
+                         episode_contracts: PipelineEpisodeContract[];
+                         handoff: PipelineHandoffReceipt | null }>(
+    `/projects/${projectId}/pipeline/volumes/${volumeId}`);
+
+/** The delivery receipt of one volume, with the exact package id. */
+export const getVolumeHandoffReceipt = (projectId: string, volumeId: string) =>
+  api<PipelineHandoffReceipt>(`/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`);
+
+/** Redo only the scenes the person named; the other scenes keep their work. */
+export const generateStoryboardDraftFor = (
+    projectId: string, volumeId: string, sectionIds: string[]) =>
+  api<StoryboardDraft>(
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`,
+    json('POST', { section_ids: sectionIds }));
+
+/**
+ * Reconcile one four-stage task.  The server decides whether it may continue:
+ * only a proven "not sent" may be resumed, an unknown outcome stays unknown.
+ */
+export const reconcilePipelineTask = (
+    projectId: string, taskId: string, expectedStateVersion: number) =>
+  api<{ outcome: string; resubmittable: boolean; state_version: number; note?: string }>(
+    `/projects/${projectId}/pipeline/tasks/${taskId}/reconcile`,
+    json('POST', { expected_state_version: expectedStateVersion }));
+
+/** Draft one episode contract from the confirmed scenes of a volume. */
+export const buildEpisodeScript = (
+    projectId: string, volumeId: string, title: string, sectionIds: string[]) =>
+  api<{ artifact_id: string; sha256: string; continuity_issues: unknown[] }>(
+    `/projects/${projectId}/pipeline/volumes/${volumeId}/episode-scripts`,
+    json('POST', { title, section_ids: sectionIds }));
+
+export const confirmEpisodeScript = (projectId: string, artifactId: string, sha256: string) =>
+  api<{ confirmed: boolean; sha256: string; continuity_status?: string }>(
+    `/projects/${projectId}/pipeline/episode-scripts/${artifactId}/confirm`,
+    json('POST', { expected_sha256: sha256 }));
+
+/** Adjust the volume boundaries: a new plan revision the person confirms. */
+export const adjustVolumeBoundaries = (
+    projectId: string, planArtifactId: string,
+    volumes: Array<{ title: string; start_offset: number; end_offset: number }>) =>
+  api<{ volume_plan_id: string; sha256: string; volumes: unknown[] }>(
+    `/projects/${projectId}/pipeline/volume-plans/${planArtifactId}/boundaries`,
+    json('POST', { volumes }));
+
+/** Open the director package page on one exact package. */
+export const openDirectorPackage = (packageId: string) => {
+  if (!packageId) return;
+  window.location.hash = `#d/package?package=${encodeURIComponent(packageId)}`;
+};
+
 export interface PipelineTaskSummary {
   task_id: string;
   role: string;
@@ -786,6 +907,9 @@ export interface PipelineTaskSummary {
   blocked_reason: string | null;
   /** The operations the server allows: never inferred from an error string. */
   available_actions: Array<'resume' | 'reconcile' | 'new_attempt'>;
+  /** The server's own reconciliation conclusion, when one was reached. */
+  reconciliation?: { outcome?: string; resubmittable?: boolean; checked_at?: string } | null;
+  superseded_by_task_id?: string | null;
   updated_at: string | null;
   consent_document_id: string | null;
   consent_document_sha256: string | null;

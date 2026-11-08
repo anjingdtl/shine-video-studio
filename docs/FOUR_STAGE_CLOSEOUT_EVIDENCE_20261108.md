@@ -14,6 +14,13 @@
 | 父提交 | `7081104a79e6758228eb98e96d74e0bb36da52f8`（= 基线，`main`） |
 | 回滚 | `git checkout main` 即可；本轮无迁移新增，无数据格式变更 |
 
+> **2026-11-08 更正（本轮复验时补记）**：上表的分支与回滚描述是**交付当时**的状态，已经过时。
+> 实现提交 `5b93019` 已随 `main` 推送，`main` 现在的顶端是 `631d9a0`（`docs: record the closeout
+> commit and rollback path in the evidence ledger`），因此 `git checkout main` 得到的正是这套实现，
+> 而不是「未合并」的旧状态。当前审查 commit 为 `631d9a07c6be5911a88e138bb037da3d369f3d79`；
+> 二轮的修复在分支 `feature/four-stage-reaccept-fix-20261108` 上，报告见
+> [二轮复验修复报告](FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md)。
+
 ## 0. 开工核对（实测记录）
 
 | 项 | 实测值 |

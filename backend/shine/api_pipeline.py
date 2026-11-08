@@ -77,6 +77,12 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                 "scripts": scripts,
                 "scripts_confirmed": sum(1 for s in scripts if s["confirmed"]),
                 "scripts_total": len(scripts),
+                # The authoritative per-unit state of this volume.  The panel
+                # renders from it, so a refresh restores every pending apply,
+                # every failed unit and the delivery receipt.
+                "storyboard": pipeline.volume_storyboard_state(db, project_id, volume_id),
+                "episode_contracts": pipeline.volume_episode_contracts(db, project_id, volume_id),
+                "handoff": pipeline.volume_handoff_receipt(db, project_id, volume_id),
             })
     master_ref = plan.payload_json["source_master"] if plan else {"document_id": None, "sha256": None}
     pending_bible = pipeline.latest_unconfirmed(db, project_id, pipeline.BIBLE_KIND)
@@ -95,7 +101,18 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
     return {
         "master": master_ref,
         "volume_plan_confirmed": plan is not None,
+        # The confirmed plan revision, so the boundary editor knows what it
+        # is changing.
+        "volume_plan": ({"artifact_id": plan.id, "sha256": plan.sha256,
+                         "volumes": plan.payload_json.get("volumes") or []}
+                        if plan is not None else None),
         "bible_confirmed": bible is not None,
+        # Whether the confirmed blueprint still describes the current work.
+        # The read path, the confirmation and the production path read the
+        # same check, so they can never disagree.
+        "bible_status": ({"artifact_id": bible.id, "sha256": bible.sha256,
+                          "blockers": pipeline.bible_basis_blockers(db, project_id, bible)}
+                         if bible is not None else None),
         "pending_bible": ({"artifact_id": pending_bible.id, "sha256": pending_bible.sha256}
                           if pending_bible else None),
         "pending_scripts": pending_scripts,
@@ -258,37 +275,51 @@ def storyboard_draft_route(
     except ValueError as exc:
         db.rollback()
         raise _http_from_value_error(exc) from None
-    units = [
-        {"unit_id": unit["unit_id"], "section_id": unit["section_id"],
-         "order": unit.get("order"), "status": unit.get("status"),
-         "camera_artifact_id": unit.get("camera_artifact_id"),
-         "continuity_artifact_id": unit.get("continuity_artifact_id"),
-         "arbitration_artifact_id": unit.get("arbitration_artifact_id"),
-         **_applied_shots(db, unit.get("camera_artifact_id"))}
-        for unit in (result.get("units") or [])
-    ]
+    # The response carries the persistent state, not just this run: a unit
+    # that was produced earlier stays listed with its apply handle, so the
+    # panel can restore the whole volume after a refresh.
+    state = pipeline.volume_storyboard_state(db, project_id, volume_id)
     return {"status": result.get("status"), "record": record,
-            "units": units,
+            "units": state["units"],
+            "state": state,
             "steps": {k: v for k, v in (result.get("steps") or {}).items()},
             "next": result.get("next"), "rejections": result.get("rejections")}
 
 
-def _applied_shots(db, camera_artifact_id: str | None) -> dict:
-    """Whether this scene's camera plan was applied, and how many shots it made.
+@router.get("/projects/{project_id}/pipeline/volumes/{volume_id}")
+def volume_pipeline_state(project_id: str, volume_id: str, db: DBSession) -> dict[str, Any]:
+    """The authoritative state of one volume.
 
-    The review table reads "场 -> 镜" from this: a scene counts as produced
-    only when its own apply receipt exists, and the shot ids are what the
-    handoff will verify.
+    It is the read-back point of the production chain: the draft, the
+    per-unit status, the pending applies, the failures with their
+    reconciliation handles, the episode contracts and the delivery receipt
+    with the exact package id.
     """
-    from shine.models import AppSetting
+    require_project(db, project_id)
+    plan = pipeline.current_volume_plan(db, project_id)
+    if plan is None:
+        raise HTTPException(409, "PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
+    volume = next((v for v in plan.payload_json["volumes"] if v["volume_id"] == volume_id), None)
+    if volume is None:
+        raise HTTPException(404, "VOLUME_NOT_IN_PLAN")
+    state = pipeline.volume_production_state(db, project_id, volume_id)
+    return {"volume_id": volume_id, "title": volume.get("title"),
+            "order": volume.get("order"), **state}
 
-    if not camera_artifact_id:
-        return {"applied": False, "shot_ids": []}
-    receipt = db.get(AppSetting, f"film-apply:{camera_artifact_id}")
+
+@router.get("/projects/{project_id}/pipeline/volumes/{volume_id}/handoff")
+def volume_handoff_receipt_route(project_id: str, volume_id: str, db: DBSession) -> dict[str, Any]:
+    """The delivery receipt of one volume, with the exact package id."""
+    require_project(db, project_id)
+    receipt = pipeline.volume_handoff_receipt(db, project_id, volume_id)
     if receipt is None:
-        return {"applied": False, "shot_ids": []}
-    shot_ids = [str(item) for item in (receipt.value or {}).get("shot_ids", [])]
-    return {"applied": bool(shot_ids), "shot_ids": shot_ids}
+        raise HTTPException(404, "PIPELINE_VOLUME_NOT_HANDED_OFF")
+    return receipt
+
+
+def _applied_shots(db, camera_artifact_id: str | None) -> dict:
+    """Whether this scene's camera plan was applied, and how many shots it made."""
+    return pipeline.applied_shots_for(db, camera_artifact_id)
 
 
 @router.post("/projects/{project_id}/pipeline/volumes/{volume_id}/handoff", status_code=201)
@@ -405,6 +436,27 @@ def resume_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DB
     try:
         result = pipeline.resume_pipeline_task(db, project_id, task_id,
                                                (body or {}).get("expected_state_version"))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return result
+
+
+@router.post("/projects/{project_id}/pipeline/tasks/{task_id}/reconcile")
+def reconcile_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DBSession,
+                                   operator: Operator) -> dict:
+    """Reconcile one four-stage task without contacting the provider.
+
+    The conclusion is the server's: only a proven "not sent" may be
+    continued as an ordinary resume, and an unknown outcome stays unknown
+    until the person authorises a separate new attempt.
+    """
+    require_project(db, project_id)
+    try:
+        result = pipeline.reconcile_pipeline_task(
+            db, project_id, task_id, (body or {}).get("expected_state_version"),
+            actor=_local_actor(operator))
         db.commit()
     except ValueError as exc:
         db.rollback()
