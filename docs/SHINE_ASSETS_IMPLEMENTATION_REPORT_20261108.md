@@ -10,7 +10,7 @@
 - 起始迁移 head：`f180b0020001`；新增 head：`f180b0030001`。
 - 起始工作树：干净；没有打开或修改生产数据库、密钥、用户图片/声音或 H3 任务。
 - 远端规范 PR #9 仍为 open；功能分支保持独立，目标为 `main`。
-- Draft PR 与最终 commit SHA：GitHub 创建并核对后在交付摘要报告；本机 RTX 5080 验收证据不存在，状态为 `NOT_RUN`。
+- Draft PR #10：目标 `main`，保持 open/draft/未合并；GitHub 当前 head ref 为 `feature/shine-assets-center-20261108`。本机 RTX 5080 验收证据不存在，状态为 `NOT_RUN`。
 
 ## 实现范围
 
@@ -80,6 +80,8 @@
 | Production build | `npm run build`（`frontend/`） | exit 0：Vite 产物完成；754.46 kB 主 JS 触发 >500 kB 提示，gzip 234.45 kB |
 | Browser interaction smoke | Chromium + Playwright inline Node; local API responses stubbed to an empty workspace | PASS：无项目打开素材首页、导航到图片工坊、刷新恢复路由、往返 Director；0 failed requests、0 page errors。此项只验 UI 流程，不作为后端或 GPU 证据。 |
 | Windows RTX 5080 + ComfyUI samples | `docs/SHINE_ASSETS_LOCAL_QWEN_VALIDATION_20261108.md` | `NOT_RUN`：云端无 Windows/RTX 5080/本机 ComfyUI 权重 |
+
+后端 14 个非通过项：`test_wizard_install_payload_is_accepted`、`test_full_deployment_budget_includes_environment_and_snapshots`、`test_shipped_service_uses_real_install_contract`、`test_shipped_service_uses_real_instance_approval_and_state_machine`、`test_the_product_can_plan_the_image_weight_installation`、`test_an_unmanaged_instance_is_refused`、`test_a_qualified_host_gets_a_plan_that_records_the_variant`、`test_next_instance_plan_state_machine`、`test_service_validation_binds_reviewer_models_and_l4_evidence`、`test_service_validation_rejects_live_workflow_contract_missing_node`、`test_missing_review_models_and_runtime_are_advisory_and_do_not_block_renderer`、`test_unavailable_review_probes_are_advisory_after_clean_process_exit`、`test_review_probe_cleanup_failure_keeps_core_environment_unconfirmed`、`test_service_validation_requires_candidate_and_operator`。前四个主机资格用例受 Linux/Windows 资格差异影响；两个 Director setup 用例受本机执行开关影响；image weight 用例因磁盘不足；renderer 与六个 service validation 用例受 Windows-only guard 阻断。deployment budget 用例被 OS gate 提前拦截，未到磁盘断言。
 
 ## 合并前检查与风险
 
