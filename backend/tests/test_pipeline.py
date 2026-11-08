@@ -569,3 +569,72 @@ def test_manual_volume_adjustment_and_master_isolation(api):
             other_r = db.get(ProjectDocument, other.id)
             pipeline.plan_volumes(db, pid, other_r)
     assert "PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED" in str(err3.value)
+
+
+def test_overlong_serialized_script_is_refused_by_name(api):
+    """A script past the chain's inline limit is refused with PIPELINE_SCRIPT_TOO_LONG."""
+    client, factory, settings = api
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    pid = create_project(client, "超长")
+    text = "第一章 甲\n浪。\n第二章 乙\n浪。\n第三章 丙\n浪。"
+    doc = _make_doc(factory, pid, text)
+
+    def long_responder(messages, schema):
+        payload = _scene_responder()(messages, schema)
+        payload["text"] = "浪" * 20_000
+        return payload
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=long_responder)
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+    for _ in range(4):
+        if not pipeline.run_pending_pipeline_task(factory, settings, "w1", gw):
+            break
+    from sqlalchemy import select as _sel
+    with factory() as db:
+        rows = db.scalars(_sel(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE)).all()
+        for r in rows:
+            assert r.status == "SUCCEEDED", r.trace
+            artifact = db.get(AgentArtifact, r.trace["artifact_id"])
+            pipeline.confirm_scene_script(db, pid, artifact.id, artifact.sha256)
+        db.commit()
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.serialize_volume_script(db, pid, volume_id)
+    assert "PIPELINE_SCRIPT_TOO_LONG" in str(err.value)
+
+
+def test_oversized_single_chapter_volume_carries_a_warning(api):
+    """One chapter past the inline budget makes the plan warn by name."""
+    client, factory, settings = api
+    pid = create_project(client, "单章超长")
+    text = "第一章 巨章\n" + "海。" * 30_000
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        codes = [w["code"] for w in plan.payload_json.get("warnings", [])]
+        assert "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes
+        assert plan.payload_json["coverage"]["complete"] is True

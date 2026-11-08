@@ -253,6 +253,13 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
         "volumes": volumes,
         "coverage": {"start_offset": 0, "end_offset": total,
                      "complete": sum(v["char_count"] for v in volumes) == total},
+        "warnings": [
+            {"volume_id": v["volume_id"],
+             "code": "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT",
+             "detail": "该卷超过 55,000 字，分镜草案可能超出链路单次输入上限；"
+                       "请在源文拆分该章或手动调整分卷边界"}
+            for v in volumes if v["char_count"] > 55_000
+        ],
         "status": "DRAFT",
     }
     task_id = _authoring_task(db, project_id, "four_stage_import", {"master": document.id})
@@ -1062,7 +1069,14 @@ def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
         title = section.get("title", "")
         body_text = script.payload_json.get("text", "")
         parts.append(f"第{section.get('order', '?')}场 {title}\n{body_text}")
-    return "\n\n".join(parts)
+    serialized = "\n\n".join(parts)
+    # The crew chain's inline input limit: refuse by name instead of an
+    # unhelpful schema validation leak.
+    if len(serialized) > 60_000:
+        raise ValueError(
+            "PIPELINE_SCRIPT_TOO_LONG:" + str(len(serialized))
+            + ":split the chapter in the source or adjust volume boundaries manually")
+    return serialized
 
 
 def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None) -> dict:
