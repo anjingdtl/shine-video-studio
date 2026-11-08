@@ -177,50 +177,100 @@ ComfyUI 安装，因此「复用已有安装」这条真机路径仍是 `NOT_RUN
 | 层级 | 命令 | 结果 | 证据 |
 | --- | --- | --- | --- |
 | 基线反例（12dd99b） | `pytest -o addopts='' .local-acceptance/director-uniqueness-12dd99b/test_counterexamples.py -q` | 9 passed，断言旧缺陷可重现 | `.local-acceptance/director-uniqueness-12dd99b/api-counterexamples.txt`、`browser-probe.txt`、三张截图 |
-| 定向后端（本分支） | 见 `§4.1` 文件清单 | 见 `§4.1` | `.local-acceptance/closeout-full-suite/*.log` |
-| 后端全量（分片） | 逐文件独立进程，清单见 `.local-acceptance/closeout-full-suite/chunk-*.log` | 见 `§4.2` | `chunk-a.log`、`chunk-b.log`、`per-file.json` |
+| 定向后端（本分支） | 见 `§4.1` | **176 passed / 1 skipped** | `.local-acceptance/closeout-full-suite/retest-four-stage-2.log` |
+| 后端全量（分片） | 逐文件独立进程，清单见 `§4.2` | **159 文件 / 1658 passed**；19 个文件在分片内被宿主守卫中断，单独复跑 18 个全通过、1 个 9/10 | `final-{0-40,40-80,80-120,120-200}.log`、`fail-*.log` |
 | Ruff | `backend/.venv/Scripts/python.exe -m ruff check backend/shine backend/alembic backend/tests scripts/verify_v13_web.py` | `All checks passed!` | 终端输出 |
-| 前端单测 | `cd frontend && npm.cmd test -- --run` | 28 文件 / 191 通过（一次并发运行的 `EPERM` 临时文件冲突后复跑） | `§4.3` |
+| 前端单测 | `cd frontend && npm.cmd test -- --run --no-file-parallelism` | **28 文件 / 191 通过** | `§4.3` |
 | 前端构建 | `cd frontend && npm.cmd run build` | 通过；Vite 提示 >500 kB chunk（既有） | `§4.3` |
 | 隔离浏览器 | `uv run --project backend --with playwright==1.62.0 python scripts/verify_v13_web.py --work-dir .local-acceptance/closeout-web/tmp --screenshot .local-acceptance/closeout-web/v13-web.png` | `MOCK_VERIFIED`，`api_errors: []`，含第一阶段大纲入口断言 | `.local-acceptance/closeout-web/v13-web.png` |
 | 空库迁移 | `SHINE_DATA_DIR=.local-acceptance/closeout-migration alembic upgrade head` + `alembic check` | 唯一 head `f180b0050001`；`No new upgrade operations detected` | `.local-acceptance/closeout-migration/` |
 | 旧库副本迁移 | 从 `f180b0030001` 副本升级到 head | `f180b0050001 (head)`，升级前后 `workflow_profiles` 行不变 | `.local-acceptance/closeout-migration-old/` |
-| 发包 | `pwsh -NoProfile -File scripts/build_test_package.ps1 -OutDir <隔离目录> -Verify` | 见 `§4.4` | `§4.4` |
-| GitHub CI | 同 SHA 的 frontend / backend / web-e2e | 见 `§4.5` | Actions 运行页 |
+| 发包 | `pwsh -NoProfile -File scripts/build_test_package.ps1 -OutDir .local-acceptance/closeout-package -Verify` | ZIP `cbae437c…13c60`，698 条目，`fixed_materials.packages = 189` | `§4.4` |
+| GitHub CI | 同 SHA 的 frontend / backend / web-e2e | `NOT_RUN`（本分支尚未 push，无法读取远端 runner） | `§4.5` |
 
 ### 4.1 定向后端
 
 ```text
-backend/.venv/Scripts/python.exe -m pytest -o addopts='' -q --tb=short \
+backend/.venv/Scripts/python.exe -m pytest -o addopts='' -q --tb=short -p no:cacheprovider \
   backend/tests/test_package_entrypoints.py backend/tests/test_director_setup_contract.py \
   backend/tests/test_new_machine_setup.py backend/tests/test_installation_persistence.py \
-  backend/tests/test_asset_center.py backend/tests/test_four_stage_reacceptance.py \
-  backend/tests/test_director_long_form.py backend/tests/test_director_long_form_regressions.py \
-  backend/tests/test_director_journey_closeout.py backend/tests/test_director_assets_closeout.py \
-  backend/tests/test_offline_e2e.py
+  backend/tests/test_asset_center.py backend/tests/test_director_long_form.py \
+  backend/tests/test_director_long_form_regressions.py backend/tests/test_director_journey_closeout.py \
+  backend/tests/test_director_assets_closeout.py backend/tests/test_offline_e2e.py
 ```
 
-结果见 `§4.1 运行记录`（本文件末尾的账本附录）。
+结果：**159 passed**（74.12s）。四阶段回归单独运行（它包含 3 分钟以上的长链）：
+`backend/tests/test_four_stage_reacceptance.py` → **17 passed / 1 skipped**（184.16s）。
+两项合计 **176 passed / 1 skipped**，退出码 0。
+
+定向集合覆盖：安装计划与持久尝试、新机/复用安装、素材中心与制片、四阶段回归、普通导演入口、
+package/Run/Series、发布与交付、离线端到端（`test_offline_e2e.py`），以及本轮两份新回归文件。
 
 ### 4.2 后端全量
 
-全量按「每个测试文件一个独立进程」分片，清单与合计见 `§4.2 运行记录`。分片边界是完整的文件，
-没有重叠；每个文件的退出码、耗时与 pytest 计数都记在 `chunk-*.log`。
+全量按「每个测试文件一个独立进程」分片，四段清单互不重叠（`0-40`、`40-80`、`80-120`、`120-200`），
+共 **159 个测试文件**。合计 **1658 passed**。
+
+19 个文件在分片内以 `SystemExit: 1` 结束：本机宿主注入了 `sitecustomize` 的 `safe-delete` 守卫，
+安装器/进程/临时目录的删除操作被拦截（例如 `shutil.rmtree` → `_safe_shutil_rmtree`），
+不是产品断言失败。把这 19 个文件单独复跑：
+
+| 文件 | 单独复跑 |
+| --- | --- |
+| `test_deployment_storage` | 13 passed |
+| `test_director_setup_contract` | 12 passed |
+| `test_existing_installation` | 14 passed |
+| `test_llm_gateway` | 18 passed |
+| `test_llm_setup_contract` | 27 passed |
+| `test_machine_recheck` | 9 passed |
+| `test_operator_review` | 36 passed |
+| `test_runtime_dependencies` | 8 passed |
+| `test_owned_process_group` | 9 passed / 1 failed（同一 `trash` 守卫：`renderer.py` 删除被拒） |
+| `test_v13_preparation` + `test_structured_review` + `test_v13_e2e` | 97 passed |
+| `test_v13_adversarial` + `test_v13_factory` | 50 passed |
+| `test_v13_instances` + `test_installer_redirects` + `test_sdk_role_process` + `test_stack_operations` + `test_security_windows` | 103 passed |
+
+分片里已通过的用例不重复计入复跑。因此全量的准确表述是：**159 文件 / 1658 passed**，
+另有 19 个文件受宿主删除守卫影响；其中 18 个单独复跑全通过，`test_owned_process_group` 有 1 例
+仍被同一守卫拒绝（与产品逻辑无关，可在无该守卫的宿主上复验）。
 
 ### 4.3 前端
 
-- `npm.cmd test -- --run`：28 文件 / 191 通过。曾出现一次 `EPERM ... \Temp\...\web\<hash>`（Vitest 写临时
-  文件被宿主拦截），仅表现为少收集 1–2 个文件；随后 `--reporter=verbose` 复跑为 28/191 全通过。
-- `npm.cmd run build`：`tsc -b && vite build` 通过，产物 `dist/assets/index-*.js 781.38 kB`。
+- `npm.cmd test -- --run --no-file-parallelism`：**28 文件 / 191 通过**，无未处理错误。
+- 默认并发模式在本机会随机出现
+  `EPERM: operation not permitted, open '...\Temp\...\web\<hash>'`：Vitest 的多个 worker 同时写同一
+  transform 缓存，宿主文件系统 shim 拒绝其中一个，表现为少收集 1–3 个文件并报 1 个 unhandled error。
+  串行模式不受影响；这不是测试失败，日志与复跑命令均保留在 `.local-acceptance/closeout-web/`。
+- `npm.cmd run build`：`tsc -b && vite build` 通过，`dist/assets/index-*.js 781.59 kB`。
 
 ### 4.4 测试包
 
-见 `§4.4 运行记录`（ZIP 文件名、SHA-256、manifest 文件数、排除规则核对）。
+```text
+pwsh -NoProfile -File scripts/build_test_package.ps1 \
+  -OutDir .local-acceptance/closeout-package -Verify
+```
+
+| 项 | 值 |
+| --- | --- |
+| 源提交 | `b3f105d726cb0e0593718f594925cef0247eedcd`，`source_tree=CLEAN_TREE` |
+| ZIP | `ShineVideoStudio-20261109-b3f105d-win64.zip` |
+| SHA-256 | `cbae437c34d32d5f3a0b51107575aebf177972ad66c0c87b3afa47aa06d13c60` |
+| 大小 | 3,803,568 bytes |
+| 条目 | 698（复制 689 个跟踪文件，跳过 117 个排除路径，加 5 个入口脚本与 2 份渲染文档） |
+| 入口编码 | 5 个 `.cmd` 均为 ASCII 源、打包时强制 CRLF；含中文的 `.ps1` 均带 UTF-8 BOM |
+| catalog 统计 | `components=14`、`packages=file_declarations=189`、`download_bytes=60,804,054,569`；`statistics_basis` 写明口径 |
+| 排除规则 | `packaging/`、`docs/evidence/`、`启动 Shine 工作台.cmd` 不进入包；无模型、数据库、密钥、证据 |
+
+`BUILD_INFO.json` 中 `default_production_bytes=48,317,862,339`、`optional_review_bytes=12,486,192,230`、
+`install_required_bytes=173,663,952,354` 与 catalog 计算一致；唯一变化是 `packages` 由手写的 154
+纠正为 189 条文件声明。
 
 ### 4.5 同提交 CI
 
-见 `§4.5 运行记录`。本地无法代替远端 Windows/Linux runner；本轮记录的是同一提交的实际工作流结论，
-若远端仍在运行或日志不可读，如实标注而不推测。
+本分支尚未 push，远端 Windows/Linux runner 与 `web-e2e` 无法读取，故记 `NOT_RUN`。
+本地对应项已执行：Ruff（同 CI 的 lint 步骤）、`test_migrations_windows.py`、`test_migration` 系列、
+`scripts/verify_v13_web.py`（同 `web-e2e` 的浏览器步骤）。push 后应按 `§5` 的同一 SHA 复核远端结论。
+
 
 ## 5. 真机门禁
 
