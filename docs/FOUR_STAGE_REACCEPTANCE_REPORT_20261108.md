@@ -145,7 +145,7 @@ F01–F11 的既有回归保持通过。软件门禁（后端全量、Ruff、前
 | 命令 | 退出码 | 结果 |
 | --- | --- | --- |
 | `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_four_stage_closeout.py backend/tests/test_four_stage_reacceptance.py backend/tests/test_pipeline.py backend/tests/test_creative_output_budget.py backend/tests/test_film_unknown_outcomes.py backend/tests/test_material_text_consent.py -q -p no:warnings` | 0 | 82 项（81 通过 + 1 条件跳过） |
-| `backend/.venv/Scripts/python.exe -m pytest backend/tests -q -p no:warnings`（全量） | 0 | 无失败；2 项条件跳过 |
+| `backend/.venv/Scripts/python.exe -m pytest backend/tests -q -p no:warnings`（全量，2004 项） | 0 | 无失败；2 项条件跳过 |
 | `backend/.venv/Scripts/python.exe -m ruff check backend/shine backend/alembic backend/tests`（CI 口径） | 0 | All checks passed! |
 | `cd frontend && npm.cmd test -- --run` | 0 | 27 文件 / 177 项通过（含新增 6 项） |
 | `cd frontend && npm.cmd run build`（tsc -b + vite build） | 0 | 构建通过（仅既有 >500 kB chunk 警告） |
