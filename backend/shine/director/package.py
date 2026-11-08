@@ -182,6 +182,8 @@ def build_package(
     project: Project,
     *,
     workflow_profile_id: str,
+    plan: DirectorEpisodePlan | None = None,
+    scope_shot_ids: list[str] | None = None,
     generation_mode: str | None = None,
     output: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
@@ -193,7 +195,7 @@ def build_package(
     is executable: an incomplete package is still built (so the person can see
     exactly what is missing) and stays ``DRAFT``.
     """
-    plan = latest_confirmed_plan(db, project.id)
+    plan = plan or latest_confirmed_plan(db, project.id)
     if plan is None:
         raise HTTPException(409, "DIRECTOR_EPISODE_PLAN_NOT_CONFIRMED")
 
@@ -201,6 +203,9 @@ def build_package(
     if not shots:
         raise HTTPException(422, "DIRECTOR_PACKAGE_REQUIRES_SHOTS")
     by_id = {shot.id: shot for shot in shots}
+    # A volume-scoped build validates coverage against the scope it was
+    # handed, never against the whole project's shots.
+    coverage_scope = list(scope_shot_ids or by_id.keys())
     plan_payload = EpisodePlanPayload.model_validate(plan.payload)
     if plan_payload.mode == "sections":
         # A script-first plan names its scope by sections; it may only be
@@ -213,7 +218,7 @@ def build_package(
         unknown = [shot_id for shot_id in plan_payload.shot_order() if shot_id not in by_id]
         problems = (["PLAN_REFERENCES_UNKNOWN_SHOTS:" + ",".join(unknown)[:400]] if unknown else [])
     else:
-        problems = validate_episode_coverage(plan_payload, by_id.keys())
+        problems = validate_episode_coverage(plan_payload, coverage_scope)
     if problems:
         raise HTTPException(409, {"code": "DIRECTOR_EPISODE_PLAN_STALE", "problems": problems})
 

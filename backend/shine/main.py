@@ -20,6 +20,7 @@ from shine.api_instances import router as instances_router
 from shine.api_llm import router as llm_router
 from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
+from shine.api_pipeline import router as pipeline_router
 from shine.api_preparation import Decision
 from shine.api_review import router as review_router
 from shine.api_setup import router as setup_router
@@ -448,6 +449,7 @@ def create_app(
     app.include_router(delivery_router)
     app.include_router(subtitles_router)
     app.include_router(operator_router)
+    app.include_router(pipeline_router)
     app.include_router(instances_router)
     app.include_router(setup_router)
     from shine.api_preparation import router as preparation_router

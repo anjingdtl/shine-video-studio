@@ -917,4 +917,46 @@ def select_outline_revision(db, project_id, outline):
         pointer.value = {"artifact_id": outline.id, "sha256": outline.sha256}
     else:
         db.add(AppSetting(key=key, value={"artifact_id": outline.id, "sha256": outline.sha256}))
+    # A document-scoped pointer records the same revision per source document,
+    # so a per-volume pipeline resolves its own outline without the
+    # project-level pointer colliding across volumes.  The project-level
+    # pointer stays authoritative for the existing single-document flow.
+    document_id = outline.payload_json.get("document_id")
+    if document_id:
+        doc_key = f"current-story-outline:{project_id}:{document_id}"
+        db.merge(AppSetting(key=doc_key,
+                            value={"artifact_id": outline.id, "sha256": outline.sha256}))
     return sorted(changed)
+
+
+def confirm_outline_artifact(db, project_id, row, *, expected_sha256, acknowledge_questions_sha256,
+                             actor) -> dict:
+    """The one outline confirmation: sha gate, questions gate, invalidation.
+
+    Both the expert endpoint and the four-stage pipeline's volume route go
+    through this function, so the two entrances can never diverge.
+    """
+    from fastapi import HTTPException
+
+    if (row is None or row.project_id != project_id or row.kind != "StoryOutline" or row.stale
+            or row.sha256 != expected_sha256 or row.sha256 != digest(row.payload_json)):
+        raise HTTPException(409, "STORY_OUTLINE_CHANGED")
+    document = db.get(ProjectDocument, row.payload_json["document_id"])
+    if document is None or document.project_id != project_id \
+            or document.sha256 != row.payload_json.get("document_sha256"):
+        raise HTTPException(409, "STORY_OUTLINE_CHANGED")
+    questions = list(row.payload_json.get("questions") or [])
+    if questions:
+        expected = digest({"artifact": row.id, "questions": questions})
+        if acknowledge_questions_sha256 != expected:
+            raise HTTPException(409, "STORY_OUTLINE_QUESTIONS_REQUIRE_FACTS")
+    was_approved = bool(row.approved_at)
+    if not was_approved:
+        row.approved_by, row.approved_at = actor, utcnow()
+    changed = select_outline_revision(db, project_id, row)
+    if changed or not was_approved:
+        add_audit(db, actor, "STORY_OUTLINE_CONFIRMED", "agent_artifact", row.id,
+                  {"sha256": row.sha256, "invalidated_section_ids": changed,
+                   "questions_acknowledged": questions or None}, project_id=project_id)
+    return {"artifact_id": row.id, "approved": True,
+            "invalidated_section_ids": sorted(changed)}

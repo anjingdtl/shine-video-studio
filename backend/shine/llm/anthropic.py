@@ -20,7 +20,27 @@ from shine.llm.base import (
     ProviderConfig,
     parse_json_object,
 )
+from shine.llm.output_budget import ANTHROPIC_DEFAULT_MAX_TOKENS
 from shine.llm.transport import build_client
+
+
+def _max_tokens_for(config) -> int:
+    """The request max_tokens: a configured option, bounded by the declared max.
+
+    The adapter honors a ``max_tokens`` generation option (validated through
+    the profile's connection/generation tests); without a configured value it
+    keeps the historical 4,096 safety value.  A provider-declared maximum
+    still bounds a configured value that claims more.
+    """
+    option = config.generation_options.get("max_tokens")
+    if isinstance(option, bool) or not isinstance(option, int) or option <= 0:
+        option = None
+    declared = config.max_output_tokens
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared <= 0:
+        declared = None
+    if option:
+        return min(option, declared) if declared else option
+    return min(ANTHROPIC_DEFAULT_MAX_TOKENS, declared) if declared else ANTHROPIC_DEFAULT_MAX_TOKENS
 
 
 class AnthropicMessagesProvider:
@@ -115,7 +135,10 @@ class AnthropicMessagesProvider:
             system_parts.append(instruction)
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "max_tokens": min(4096, self.config.max_output_tokens or 4096),
+            # The adapter honors a configured max_tokens option, bounded by a
+            # provider-declared maximum; without a configured value it keeps
+            # the historical 4,096 safety value.
+            "max_tokens": _max_tokens_for(config=self.config),
             "temperature": self.config.temperature,
             "messages": conversation,
         }

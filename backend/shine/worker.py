@@ -4030,11 +4030,25 @@ def _advance_text_preparation(session_factory, settings, worker_id) -> bool:
                                                              phase="story_preparation")):
         _text_preparation_ticks += 1
         return True
+    from shine.director.pipeline import run_pending_pipeline_task
+
+    if run_pending_pipeline_task(session_factory, settings, worker_id,
+                                 gateway=_text_gateway(settings)):
+        _text_preparation_ticks += 1
+        return True
     _text_preparation_ticks = 0
     return False
 
 
+def _text_gateway(settings):
+    """The gateway the text queues run through (creative.py's own builder)."""
+    from shine.director.creative import _gateway
+
+    return _gateway(settings)
+
+
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
+    global _text_preparation_ticks
     from shine.comfyops.runtime_configuration import resolve_runtime
 
     # A setup-type installation is durable work that does not need the video
@@ -4062,6 +4076,11 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     except HTTPException as exc:
         if not str(exc.detail).startswith("ACTIVE_RUNTIME_"):
             raise
+        # A blocked video runtime must never starve the text queues: the
+        # burst counter only resets inside the burst itself, so a runtime
+        # failure between two bursts would freeze the counter above the
+        # limit forever and a running outline would stall mid-run.
+        _text_preparation_ticks = 0
         raise
     if current != settings:
         # No inherited client may point at an old port after activation. Use a

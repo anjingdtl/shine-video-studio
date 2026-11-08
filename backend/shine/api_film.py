@@ -668,6 +668,11 @@ class StoryboardRequest(APIModel):
     production_context: dict | None = None
     consent_document_id: str | None = None
     consent_document_sha256: str | None = None
+    # A draft storyboard is produced BEFORE style freezing and master
+    # approval: it uses the project's saved style draft as the camera
+    # language template and never blocks on missing masters.  Applying a
+    # draft still runs the full apply-camera gates.
+    draft: bool = False
 
 
 # The crew order.  The chain and the resume request both walk this list.
@@ -736,7 +741,7 @@ def generate_storyboard(
         raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
 
     project = require_project(db, project_id)
-    if not project.frozen_style_version_id:
+    if not project.frozen_style_version_id and not body.draft:
         raise HTTPException(409, "STORYBOARD_STYLE_NOT_FROZEN")
     if body.document_id:
         document = db.get(ProjectDocument, body.document_id)
@@ -953,6 +958,7 @@ def generate_storyboard(
                     role,
                     FilmRunRequest(**kwargs),
                     storyboard_request_sha256=storyboard_request_sha256,
+                    draft=body.draft,
                     repair_visual_language=repair_visual_language,
                     repair_director=repair_director,
                     replace_interrupted_task_id=(body.replace_interrupted_task_id
@@ -1032,7 +1038,7 @@ def generate_storyboard(
             "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
             "action": "CONFIRM_CHARACTER_BINDINGS_THEN_RESUME_DIRECTOR",
         }
-    if missing:
+    if missing and not body.draft:
         return {
             "status": "BLOCKED_MISSING_MASTERS",
             "script_source": source,
@@ -1042,6 +1048,11 @@ def generate_storyboard(
             "failed_role": "scriptwriter",
             "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         }
+    if missing and body.draft:
+        # A draft records the missing masters and continues: the person can
+        # read the whole draft before deciding to prepare assets.  Applying
+        # it still runs every production gate.
+        steps["draft_missing_characters"] = missing
 
     def _run_step(name: str, role: str, **kwargs) -> dict:
         """Run one crew role unless a resumed step already produced it."""

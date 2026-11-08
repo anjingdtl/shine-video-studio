@@ -13,6 +13,7 @@ import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
 import { RealProductionWizard } from './components/RealProductionWizard';
 import AssetPanel from './components/AssetPanel';
 import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
+import { FourStagePanel } from './components/FourStagePanel';
 import { ScriptEntryPanel } from './components/ScriptEntryPanel';
 import { SchemaNotice } from './components/SchemaNotice';
 import StylePanel from './components/StylePanel';
@@ -703,6 +704,11 @@ function App() {
               </div>}
 
               <div className="director-page" id="assets" hidden={directorPage !== 'assets'}>
+                <FourStagePanel
+                  projectId={projectId}
+                  workflowProfiles={workflowProfiles}
+                  onMessage={report}
+                />
                 <ScriptEntryPanel
                   key={`script-entry-${projectId}`}
                   projectId={projectId}

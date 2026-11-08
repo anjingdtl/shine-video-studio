@@ -21,6 +21,12 @@ from shine.llm.base import (
 from shine.llm.context_window import model_context_for_profile
 from shine.llm.mock import MockLLMProvider, Responder
 from shine.llm.openai_compatible import OpenAICompatibleProvider
+from shine.llm.output_budget import (
+    apply_output_budget,
+    context_overflow,
+    creative_completion_cap,
+    estimate_input_tokens,
+)
 from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, ProviderProfile
 
@@ -95,7 +101,15 @@ class LLMGateway:
     def config_for(self, profile: ProviderProfile, *, api_key_override: str | None = None) -> ProviderConfig:
         from shine.schemas import TextGenerationOptions
         options = TextGenerationOptions.model_validate(profile.generation_options or {}).model_dump(exclude_none=True)
-        if options and profile.kind != "openai_compatible":
+        if options and profile.kind == "anthropic":
+            # Anthropic profiles may set one option: the request max_tokens.
+            # Everything else stays an OpenAI-compatible-only feature.
+            disallowed = set(options) - {"max_tokens"}
+            if disallowed:
+                raise LLMNotConfigured(
+                    "Anthropic profiles support only the max_tokens generation option")
+            options = {"max_tokens": options["max_tokens"]}
+        elif options and profile.kind != "openai_compatible":
             raise LLMNotConfigured("Generation options require an OpenAI-compatible provider")
         if not profile.enabled:
             raise LLMNotConfigured("Provider profile is disabled")
@@ -141,9 +155,23 @@ class LLMGateway:
         user: str,
         schema: dict[str, Any] | None = None,
         on_progress: Callable[[str], None] | None = None,
+        task_category: str = "default",
     ) -> LLMResponse:
         profile = self.profile_for_role(db, role)
-        config = agent_output_config(self.config_for(profile))
+        config = self.config_for(profile)
+        if task_category == "creative":
+            input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
+            overflow = context_overflow(config, input_estimate)
+            if overflow is not None:
+                # The request provably never left the workbench: the refusal
+                # is a named, local fact, not an unknown provider outcome.
+                raise LLMError("Creative request exceeds the shared context window",
+                               details=dict(overflow))
+            budget = creative_completion_cap(config, estimated_input_tokens=input_estimate)
+            config = apply_output_budget(config, budget)
+        else:
+            config = agent_output_config(config)
+            budget = None
         provider = self.provider_factory(config, self.mock_responder)
         if schema is not None:
             # The provider validates the answer against this schema, so the model
@@ -188,6 +216,8 @@ class LLMGateway:
                 on_progress("RELEASING_PROVIDER")
         if on_progress:
             on_progress("VALIDATING_RESULT")
+        if budget is not None:
+            response.raw_meta["output_budget"] = budget
         return response
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:
@@ -263,6 +293,9 @@ class LLMGateway:
                 if is_mock
                 else "Generation and structured output succeeded"
             ),
+            # The creative budget evidence: what the provider declares (or
+            # fails to declare) and the 60% cap the workbench would send.
+            "creative_output_budget": creative_completion_cap(config),
         }
 
 
