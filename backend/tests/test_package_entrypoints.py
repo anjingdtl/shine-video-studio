@@ -10,6 +10,7 @@ are asserted here instead.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -239,8 +240,20 @@ def test_personal_desktop_package_does_not_claim_an_operator_password_is_require
 
 
 def test_build_info_template_lists_the_real_catalog_numbers():
-    """Disk budget and package count must match the catalog, not the old 120GB/93 docs."""
+    """Disk budget and package count are counted from the shipped catalog."""
     text = BUILD_SCRIPT.read_text(encoding="utf-8-sig")
-    assert "154" in text
-    assert "60804054569" in text
+    assert "packages = $catalogFileDeclarations" in text
+    assert "download_bytes = $catalogDeclaredBytes" in text
+    assert "statistics_basis" in text
     assert "free_disk_gib = 180" in text
+    # The old hand-typed package count disagreed with the catalog (154 vs 189
+    # file declarations); it must not come back.
+    assert "packages = 154" not in text
+    catalog = json.loads(
+        (BUILD_SCRIPT.parents[1] / "config" / "deployment" / "h3-ref2va-windows-x64.json")
+        .read_text(encoding="utf-8")
+    )
+    assert sum(len(component["files"]) for component in catalog["components"]) == 189
+    assert sum(
+        int(row["size"]) for component in catalog["components"] for row in component["files"]
+    ) == 60_804_054_569

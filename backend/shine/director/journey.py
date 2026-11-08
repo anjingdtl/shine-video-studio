@@ -2,8 +2,14 @@
 
 Every completion flag here is computed from the ledger, never from a browser
 counter.  The rule the whole workbench depends on is: a stage is only complete
-for the *current scope* (the confirmed package revision), so "one shot passed"
+for the *current scope* (one confirmed package revision), so "one shot passed"
 or "one material uploaded" can never light up a whole stage.
+
+The scope is explicit.  A journey opened by a deep link names its package (and
+optionally its run); the progress, playback, EDL and delivery views then all
+read that same revision.  Falling back to "the newest of everything" is what
+used to mix an old 1/1 run into a new 2/3 plan, so it only happens for a
+project that has no package at all (the legacy path).
 """
 
 from __future__ import annotations
@@ -13,9 +19,18 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.director.models import DirectorEpisodePlan
+from shine.director.models import DirectorEpisodePlan, DirectorPackageEpisode, DirectorPackageVersion
 from shine.director.package import latest_confirmed_plan, latest_package, package_readiness
-from shine.models import Asset, Job, Project, Shot, StyleVersion
+from shine.models import (
+    AgentArtifact,
+    Asset,
+    Job,
+    MediaArtifact,
+    ProductionSeriesItem,
+    Project,
+    Shot,
+    StyleVersion,
+)
 from shine.schemas import ShotSpec
 
 
@@ -38,21 +53,67 @@ STAGES = [
 ]
 
 
-def _passed_shots(db: Session, project_id: str) -> dict[str, Job]:
-    """The current passed job per shot: passed, not stale, matching the revision."""
+def _is_demo(db: Session, job: Job) -> bool:
+    """A fixture/mock take is never current production evidence."""
+    if (job.provider or "").lower() == "mock":
+        return True
+    if (job.quality_verification or "").lower() == "mock":
+        return True
+    artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+    return bool(artifact is not None and artifact.is_mock)
+
+
+def _run_shot_jobs(db: Session, run_id: str) -> dict[str, str]:
+    """The job each shot of a run really owns, from its series items."""
+    from shine.production.models import ProductionRunBatch
+
+    series_ids = [
+        row for row in db.scalars(
+            select(ProductionRunBatch.series_id).where(ProductionRunBatch.run_id == run_id)
+        ).all() if row
+    ]
+    if not series_ids:
+        return {}
+    rows = db.scalars(
+        select(ProductionSeriesItem)
+        .where(ProductionSeriesItem.series_id.in_(series_ids))
+        .order_by(ProductionSeriesItem.updated_at)
+    ).all()
+    return {row.shot_id: row.job_id for row in rows if row.job_id}
+
+
+def _passed_shots(
+    db: Session, project_id: str, *, shot_ids: list[str], run_id: str | None
+) -> tuple[dict[str, Job], int]:
+    """The current passed real job per shot, plus how many demo takes exist.
+
+    A demo job is counted, never promoted: the production stage says "0 of 3"
+    even when a fixture marked itself PASSED.
+    """
     rows = db.scalars(
         select(Job)
         .where(Job.project_id == project_id, Job.status == "PASSED", Job.stale.is_(False))
         .order_by(Job.created_at)
     ).all()
     shots = {shot.id: shot for shot in db.scalars(select(Shot).where(Shot.project_id == project_id)).all()}
+    owned = _run_shot_jobs(db, run_id) if run_id else None
     passed: dict[str, Job] = {}
+    demo = 0
     for job in rows:
+        if shot_ids and job.shot_id not in shot_ids:
+            continue
+        if owned is not None and owned.get(job.shot_id) != job.id:
+            # The shot of this run was produced by a different attempt: an
+            # older take of the same shot is not this run's evidence.
+            continue
         shot = shots.get(job.shot_id)
         if shot is None or shot.revision != job.shot_revision or not job.artifact_id:
             continue
+        if _is_demo(db, job):
+            demo += 1
+            continue
         passed[job.shot_id] = job
-    return passed
+    return passed, demo
 
 
 def _shot_problems(db: Session, shot: Shot) -> list[str]:
@@ -104,34 +165,112 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
     return problems
 
 
-def compute_journey(db: Session, project: Project) -> dict[str, Any]:
+def scope_package(db: Session, project: Project, package_id: str | None) -> DirectorPackageVersion | None:
+    """The package the journey is about: the named one, or the newest."""
+    if package_id:
+        package = db.get(DirectorPackageVersion, package_id)
+        if package is None or package.project_id != project.id:
+            from fastapi import HTTPException
+
+            available = db.scalars(
+                select(DirectorPackageVersion.id)
+                .where(DirectorPackageVersion.project_id == project.id)
+                .order_by(DirectorPackageVersion.revision.desc())
+                .limit(20)
+            ).all()
+            raise HTTPException(404, {
+                "code": "DIRECTOR_PACKAGE_NOT_FOUND",
+                "message": "这个链接指向的导演包不属于当前作品",
+                "package_id": package_id,
+                "available_package_ids": list(available),
+            })
+        return package
+    return latest_package(db, project.id)
+
+
+def scope_run(db: Session, project: Project, package: DirectorPackageVersion | None, run_id: str | None):
+    """The run that belongs to this scope, never "whatever ran last"."""
+    from fastapi import HTTPException
+
+    from shine.production.models import ProductionRun
+
+    if run_id:
+        run = db.get(ProductionRun, run_id)
+        if run is None or run.project_id != project.id:
+            raise HTTPException(404, {
+                "code": "PRODUCTION_RUN_NOT_FOUND",
+                "message": "这个链接指向的整片运行不属于当前作品",
+                "run_id": run_id,
+            })
+        return run
+    if package is None:
+        return db.scalars(
+            select(ProductionRun)
+            .where(ProductionRun.project_id == project.id)
+            .order_by(ProductionRun.created_at.desc())
+        ).first()
+    return db.scalars(
+        select(ProductionRun)
+        .where(ProductionRun.project_id == project.id, ProductionRun.package_id == package.id)
+        .order_by(ProductionRun.created_at.desc())
+    ).first()
+
+
+def compute_journey(
+    db: Session,
+    project: Project,
+    *,
+    package_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     project_id = project.id
     shots = list(db.scalars(select(Shot).where(Shot.project_id == project_id)).all())
     style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
-    plan = latest_confirmed_plan(db, project_id)
-    package = latest_package(db, project_id)
+
+    package = scope_package(db, project, package_id)
+    if package is not None and package.episode_plan_id:
+        plan = db.get(DirectorEpisodePlan, package.episode_plan_id)
+    else:
+        plan = latest_confirmed_plan(db, project_id)
     ready = package_readiness(db, package) if package is not None else None
-    passed = _passed_shots(db, project_id)
-    planned_shot_ids = plan_shot_order(plan) if plan is not None else [shot.id for shot in shots]
+    run = scope_run(db, project, package, run_id)
+
     by_id = {shot.id: shot for shot in shots}
-    scoped_shots = [by_id[shot_id] for shot_id in planned_shot_ids if shot_id in by_id]
+    plan_shot_ids = plan_shot_order(plan) if plan is not None else [shot.id for shot in shots]
+    # The confirmed package is the authoritative production scope: a shot that
+    # was added to a newer plan is not part of what this package promised.
+    package_shot_ids: list[str] | None = None
+    if package is not None:
+        episodes_rows = db.scalars(
+            select(DirectorPackageEpisode)
+            .where(DirectorPackageEpisode.package_id == package.id)
+            .order_by(DirectorPackageEpisode.position)
+        ).all()
+        package_shot_ids = [
+            shot["shot_id"]
+            for episode in episodes_rows
+            for shot in (episode.manifest or {}).get("shots", [])
+        ]
+    scope_shot_ids = package_shot_ids if package_shot_ids else plan_shot_ids
+    scoped_shots = [by_id[shot_id] for shot_id in scope_shot_ids if shot_id in by_id]
 
-    from shine.models import AgentArtifact, ProjectDocument
+    from shine.director.package import _outline_for_document, current_script_basis
 
-    outline = db.scalars(
-        select(AgentArtifact)
-        .where(
-            AgentArtifact.project_id == project_id,
-            AgentArtifact.kind == "StoryOutline",
-            AgentArtifact.stale.is_(False),
-        )
-        .order_by(AgentArtifact.created_at.desc())
-    ).first()
-    document = db.scalars(
-        select(ProjectDocument)
-        .where(ProjectDocument.project_id == project_id)
-        .order_by(ProjectDocument.created_at.desc())
-    ).first()
+    basis = current_script_basis(db, project)
+    document = basis["document"]
+    outline = _outline_for_document(db, project_id, document) if document is not None else None
+    if document is None:
+        # No imported script: keep the legacy outline identity for hand-built
+        # storyboards (there is no document lineage to be wrong about).
+        outline = db.scalars(
+            select(AgentArtifact)
+            .where(
+                AgentArtifact.project_id == project_id,
+                AgentArtifact.kind == "StoryOutline",
+                AgentArtifact.stale.is_(False),
+            )
+            .order_by(AgentArtifact.created_at.desc())
+        ).first()
 
     stages: list[dict[str, Any]] = []
 
@@ -169,6 +308,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
             "document_id": document.id if document else None,
             "document_sha256": document.sha256 if document else None,
             "document_source": document.source_format if document else None,
+            "basis_explicit": basis["explicit"],
             "outline_artifact_id": outline.id if outline else None,
             "outline_confirmed": bool(outline and outline.approved_at),
             "brief_id": brief.id if brief else None,
@@ -214,7 +354,7 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     if plan is not None and plan_mode == "sections" and not plan_materialized:
         shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
                               "message": "按剧本分好的集还没有全部拆成镜头"})
-    for shot_id in planned_shot_ids:
+    for shot_id in plan_shot_ids:
         shot = by_id.get(shot_id)
         if shot is None:
             shot_blockers.append({"code": "PLANNED_SHOT_MISSING", "message": "计划中的镜头尚未建立",
@@ -223,17 +363,17 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         for problem in _shot_problems(db, shot):
             shot_blockers.append({"code": problem, "message": f"镜头「{shot.name}」需要补齐",
                                   "shot_id": shot.id})
-    storyboard_summary = f"{len(planned_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
-    if plan is not None and len(shots) != len(planned_shot_ids):
+    storyboard_summary = f"{len(plan_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
+    if plan is not None and len(shots) != len(plan_shot_ids):
         storyboard_summary += f"（项目共 {len(shots)} 个）"
     stages.append({
         "id": "storyboard",
         "label": "镜头拆解",
-        "done": bool(shots) and bool(planned_shot_ids) and not shot_blockers,
-        "summary": storyboard_summary if shots or planned_shot_ids else "还没有分镜",
+        "done": bool(shots) and bool(plan_shot_ids) and not shot_blockers,
+        "summary": storyboard_summary if shots or plan_shot_ids else "还没有分镜",
         "blockers": shot_blockers,
-        "facts": {"shot_count": len(shots), "planned_shot_count": len(planned_shot_ids),
-                  "planned_shot_ids": planned_shot_ids,
+        "facts": {"shot_count": len(shots), "planned_shot_count": len(plan_shot_ids),
+                  "planned_shot_ids": plan_shot_ids,
                   "plan_mode": plan_mode, "plan_materialized": plan_materialized},
     })
 
@@ -285,14 +425,18 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
             "scope_digest": package.scope_digest,
             "manifest_sha256": package.manifest_sha256,
             "config_fingerprint": ready.get("config_fingerprint"),
+            "pending_dependencies": ready.get("pending_dependencies", []),
         } if package and ready else {}),
     })
 
-    # ⑥ 视频生产: every shot in the confirmed scope has a current passed take.
+    # ⑥ 视频生产: every shot in the confirmed scope has a current passed take
+    #    produced by *this* scope.  Demo takes and older runs never count.
     production_blockers: list[dict[str, Any]] = []
-    scope_shots = planned_shot_ids
-    passed_scope_count = sum(shot_id in passed for shot_id in scope_shots)
-    for shot_id in scope_shots:
+    passed, demo_count = _passed_shots(
+        db, project_id, shot_ids=scope_shot_ids, run_id=run.id if run is not None else None
+    )
+    passed_scope_count = sum(shot_id in passed for shot_id in scope_shot_ids)
+    for shot_id in scope_shot_ids:
         if shot_id not in passed:
             shot = by_id.get(shot_id)
             production_blockers.append({
@@ -303,28 +447,42 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     stages.append({
         "id": "production",
         "label": "视频生产",
-        "done": bool(scope_shots) and not production_blockers,
-        "summary": f"{passed_scope_count} / {len(scope_shots)} 镜已通过" if scope_shots else "等待导演包",
+        "done": bool(scope_shot_ids) and not production_blockers,
+        "summary": (f"{passed_scope_count} / {len(scope_shot_ids)} 镜已通过"
+                    if scope_shot_ids else "等待导演包"),
         "blockers": production_blockers,
-        "facts": {"passed_shot_count": passed_scope_count, "scope_shot_count": len(scope_shots)},
+        "facts": {
+            "passed_shot_count": passed_scope_count,
+            "scope_shot_count": len(scope_shot_ids),
+            "scope_package_id": package.id if package else None,
+            "scope_run_id": run.id if run is not None else None,
+            "demo_shot_count": demo_count,
+        },
     })
 
-    # ⑦ 后期成片: every required episode really has a delivered reel.
+    # ⑦ 后期成片: every required episode of *this scope* really has a reel.
     from shine.production.runner import run_summary
 
-    run = run_summary(db, project_id)
-    post_done = bool(run and run.get("delivered_episode_count") == run.get("required_episode_count")
-                     and run.get("required_episode_count"))
+    # A scope without a run has not started; it must not borrow the newest run
+    # of a different package just because one exists.
+    summary = run_summary(db, project_id, run_id=run.id) if run is not None else None
+    post_done = bool(summary
+                     and summary.get("delivered_episode_count") == summary.get("required_episode_count")
+                     and summary.get("required_episode_count"))
     stages.append({
         "id": "post",
         "label": "后期成片",
         "done": bool(post_done),
         "summary": (
-            f"{run['delivered_episode_count']} / {run['required_episode_count']} 集已交付"
-            if run else "还没有整部作品运行"
+            f"{summary['delivered_episode_count']} / {summary['required_episode_count']} 集已交付"
+            if summary else ("等待这个导演包开拍" if package is not None else "还没有整部作品运行")
         ),
-        "blockers": (run or {}).get("blockers", []),
-        "facts": {"run_id": (run or {}).get("id"), "run_status": (run or {}).get("status")},
+        "blockers": (summary or {}).get("blockers", []),
+        "facts": {
+            "run_id": (summary or {}).get("id"),
+            "run_status": (summary or {}).get("status"),
+            "scope_package_id": package.id if package else None,
+        },
     })
 
     next_stage = next((stage["id"] for stage in stages if not stage["done"]), None)
@@ -332,9 +490,15 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
         "project_id": project_id,
         "stages": stages,
         "next_stage": next_stage,
+        "scope": {
+            "package_id": package.id if package else None,
+            "package_revision": package.revision if package else None,
+            "run_id": run.id if run is not None else None,
+            "shot_count": len(scope_shot_ids),
+        },
         "package": ({"id": package.id, "revision": package.revision, "status": package.status,
                      "stale": package.stale} if package else None),
         "episode_plan": ({"id": plan.id, "version": plan.version,
                           "episodes": len(plan.payload.get("episodes", []))} if plan else None),
-        "run": run,
+        "run": summary,
     }

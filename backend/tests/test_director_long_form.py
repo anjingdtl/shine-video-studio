@@ -688,7 +688,9 @@ def test_journey_counts_only_confirmed_plan_shots_not_other_passed_project_shots
     assert stages["storyboard"]["summary"] == "2 个计划内镜头（项目共 3 个）"
     assert stages["storyboard"]["facts"]["planned_shot_ids"] == [shot["id"] for shot in studio["shots"]]
     assert stages["production"]["summary"] == "2 / 2 镜已通过"
-    assert stages["production"]["facts"] == {"passed_shot_count": 2, "scope_shot_count": 2}
+    assert stages["production"]["facts"]["passed_shot_count"] == 2
+    assert stages["production"]["facts"]["scope_shot_count"] == 2
+    assert stages["production"]["facts"]["demo_shot_count"] == 0
     assert stages["production"]["done"] is True
 
 

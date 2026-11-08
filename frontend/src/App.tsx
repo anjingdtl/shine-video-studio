@@ -837,7 +837,7 @@ function App() {
                 </details>
               </div>
 
-              <div className="director-page director-plan" id="assets" hidden={directorPage !== 'assets'}>
+              <div className="director-page director-plan" id="plan-stage" hidden={directorPage !== 'assets'}>
                 {directorPageIntro(
                   '第 2 阶段',
                   <>把剧本切成<em>能拍的集。</em></>,

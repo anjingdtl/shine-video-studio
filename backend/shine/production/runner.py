@@ -1196,7 +1196,13 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
 
     recovered = 0
     package = db.get(DirectorPackageVersion, run.package_id)
-    if package is None or not package_readiness(db, package)["startable"]:
+    # This path repairs a submission that was *proven never sent*.  It must not
+    # be gated by the package's new-run readiness: a corrected binding is
+    # exactly the drift that makes a fresh run refuse to start, while the
+    # recovery only replaces an unsubmitted request.  The scope and the frozen
+    # execution identity are still enforced below by ``current_bindings_are_safe``
+    # and by the package's own confirmation.
+    if package is None or package.stale or package.status != "CONFIRMED":
         return 0
     pinned_shots = {
         shot.get("shot_id"): shot
@@ -1811,13 +1817,22 @@ def run_public(db: Session, run: ProductionRun, *, include_episodes: bool = True
     return payload
 
 
-def run_summary(db: Session, project_id: str) -> dict[str, Any] | None:
-    """The newest run of the project, in the small shape the journey needs."""
-    run = db.scalars(
-        select(ProductionRun)
-        .where(ProductionRun.project_id == project_id)
-        .order_by(ProductionRun.created_at.desc())
-    ).first()
+def run_summary(db: Session, project_id: str, *, run_id: str | None = None) -> dict[str, Any] | None:
+    """One run of the project, in the small shape the journey needs.
+
+    A journey that names its scope passes the run id it resolved; without one
+    the newest run is used for a project that has no package at all.
+    """
+    if run_id:
+        run = db.get(ProductionRun, run_id)
+        if run is None or run.project_id != project_id:
+            return None
+    else:
+        run = db.scalars(
+            select(ProductionRun)
+            .where(ProductionRun.project_id == project_id)
+            .order_by(ProductionRun.created_at.desc())
+        ).first()
     if run is None:
         return None
     episodes = _episode_rows(db, run.id)

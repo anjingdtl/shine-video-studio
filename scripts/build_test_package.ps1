@@ -150,6 +150,41 @@ function New-FileManifest([string]$Root) {
     return [ordered]@{ file_count = $files.Count; total_bytes = $total; files = $files }
 }
 
+# The package metadata is counted from the shipped catalog, not typed by hand:
+# a fixed number drifts the moment a component gains or loses a file, and the
+# person comparing the ZIP against the installer would see two different totals.
+$catalogPath = Join-Path $repoRoot 'config/deployment/h3-ref2va-windows-x64.json'
+$catalog = Get-Content -LiteralPath $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$catalogComponents = @($catalog.components)
+$catalogFileDeclarations = 0
+$catalogDeclaredBytes = [long]0
+foreach ($component in $catalogComponents) {
+    $componentFiles = @($component.files)
+    $catalogFileDeclarations += $componentFiles.Count
+    foreach ($componentFile in $componentFiles) {
+        $catalogDeclaredBytes += [long]$componentFile.size
+    }
+}
+Write-Host "[package] catalog $($catalog.catalog_id): $($catalogComponents.Count) components, $catalogFileDeclarations file declarations, $catalogDeclaredBytes bytes" -ForegroundColor Gray
+
+# Same grouping rule the installer uses: advisory reviewers are optional, the
+# rest is the default production set; weights alone are the model subset.
+$catalogProductionBytes = [long]0
+$catalogOptionalBytes = [long]0
+foreach ($component in $catalogComponents) {
+    $componentBytes = [long]0
+    foreach ($componentFile in @($component.files)) { $componentBytes += [long]$componentFile.size }
+    $optional = ($component.kind -eq 'review-model') -or (@('VLM', 'ASR') -contains $component.role)
+    if ($optional) { $catalogOptionalBytes += $componentBytes } else { $catalogProductionBytes += $componentBytes }
+}
+# The install requirement is the doubled on-disk footprint plus the runtime
+# reserve the catalog itself declares, exactly as create_install_plan computes it.
+$catalogRuntimeReserve = [long]0
+if ($catalog.dependency_policy.runtime_disk.runtime_reserve_bytes) {
+    $catalogRuntimeReserve = [long]$catalog.dependency_policy.runtime_disk.runtime_reserve_bytes
+}
+$catalogInstallBytes = ($catalogDeclaredBytes * 2) + $catalogRuntimeReserve
+
 $buildInfo = [ordered]@{
     product = 'Shine视频工作台 / Shine Video Studio'
     package_version = $Version
@@ -175,18 +210,25 @@ $buildInfo = [ordered]@{
         network = 'GitHub, Hugging Face, PyPI, PyTorch official download sources'
     }
     fixed_materials = [ordered]@{
-        components = 14
-        packages = 154
-        download_bytes = 60804054569
-        download_gib_approx = 56.6
+        catalog = $catalog.catalog_id
+        catalog_version = $catalog.catalog_version
+        statistics_basis = 'config/deployment/h3-ref2va-windows-x64.json: components[] count, components[].files[] count and sum of components[].files[].size'
+        components = $catalogComponents.Count
+        # Kept under its historical name; it now counts file declarations, the
+        # same unit the installer and the readiness page use.
+        packages = $catalogFileDeclarations
+        file_declarations = $catalogFileDeclarations
+        download_bytes = $catalogDeclaredBytes
+        download_gib_approx = [math]::Round($catalogDeclaredBytes / 1GB, 1)
         # The complete catalog, the default production components and the
-        # optional advisory components are three different numbers.
-        default_production_bytes = 48317862339
-        default_production_gib_approx = 45.0
-        optional_review_bytes = 12486192230
-        optional_review_gib_approx = 11.6
-        install_required_bytes = 173663952354
-        install_required_gib_approx = 161.7
+        # optional advisory components are three different numbers, all counted
+        # from the same catalog with the installer's own grouping rule.
+        default_production_bytes = $catalogProductionBytes
+        default_production_gib_approx = [math]::Round($catalogProductionBytes / 1GB, 1)
+        optional_review_bytes = $catalogOptionalBytes
+        optional_review_gib_approx = [math]::Round($catalogOptionalBytes / 1GB, 1)
+        install_required_bytes = $catalogInstallBytes
+        install_required_gib_approx = [math]::Round($catalogInstallBytes / 1GB, 1)
         recommended_free_gib = 180
     }
     entrypoints = [ordered]@{

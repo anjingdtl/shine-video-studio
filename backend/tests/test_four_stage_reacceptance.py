@@ -168,7 +168,7 @@ def test_r02_a_partial_redo_keeps_the_other_scenes(api):
         f"/api/v1/projects/{pid}/film-artifacts/{new_unit['camera_artifact_id']}/apply-camera",
         json={"continuity_artifact_id": new_unit["continuity_artifact_id"]}, headers=LOCAL)
     assert applied2.status_code == 200, applied2.text
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="Ref2VA")
     handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                           json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert handoff.status_code == 201, handoff.text
@@ -258,7 +258,7 @@ def test_r05_two_confirmed_episodes_reach_the_volume_delivery(api):
     first = _confirm_episode(client, pid, volume_id, "第一集", sections[:1])
     second = _confirm_episode(client, pid, volume_id, "第二集", sections[1:])
     _apply_units(client, pid, units)
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="Ref2VA")
     handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                           json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert handoff.status_code == 201, handoff.text
@@ -282,7 +282,7 @@ def test_r05_the_package_manifest_keeps_the_episode_script_identity(api):
     sections = _volume_sections(factory, pid, volume_id)
     contract = _confirm_episode(client, pid, volume_id, "唯一一集", sections)
     _apply_units(client, pid, units)
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="Ref2VA")
     handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                           json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert handoff.status_code == 201, handoff.text
@@ -502,7 +502,7 @@ def test_r04_a_changed_shot_revision_produces_a_new_package(api):
 
     client, factory, settings, pid, plan, volume_id, units = _prepare_handoff_fixture(api)
     _apply_units(client, pid, units)
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="Ref2VA")
     first = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                         json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert first.status_code == 201, first.text

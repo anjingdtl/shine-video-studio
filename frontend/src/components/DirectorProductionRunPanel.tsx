@@ -129,7 +129,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const load = useCallback(async () => {
     try {
       const [journeyRow, planRows, packageRows, runRows] = await Promise.all([
-        getJourney(projectId),
+        // The panel projects the exact package it is showing: progress,
+        // playback and delivery all read the same scope.
+        getJourney(projectId, { packageId: selectedPackageId || undefined }),
         listEpisodePlans(projectId),
         listDirectorPackages(projectId),
         listProductionRuns(projectId),
@@ -330,7 +332,10 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           </li>)}
         </ol>}
       </section>
+    </>}
 
+    {/* 第 5 阶段的导演包只出现在导演包页面；第 2 阶段只决定怎么分集。 */}
+    {mode === 'package' && <>
       <section className="card section-card run-card">
         <div className="section-heading">
           <div>

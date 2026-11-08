@@ -34,6 +34,12 @@ class InstallPlanRequest(BaseModel):
     #: The variant this plan installs.  It is normally derived from the
     #: requested components; naming it makes the binding explicit.
     variant_id: str | None = None
+    #: The deployment combination the person chose on the recommendation card.
+    #: It is recorded in the plan and echoed back, so the size, the components
+    #: and the plan the person approves are the same facts.  Image capability
+    #: is a *separate* catalog and therefore a separate companion plan: it is
+    #: never silently merged into the H3 installation.
+    include_image_capability: bool = False
 
 
 class InstanceChainRequest(BaseModel):
@@ -393,12 +399,38 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
                 "unknowns": qualification["unknowns"],
             })
     plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free,
-                                          variant=variant, qualification=qualification)
+                                          variant=variant, qualification=qualification,
+                                          configuration={
+                                              "h3_video": True,
+                                              "image_prep": bool(body.include_image_capability),
+                                          })
+    companion = []
+    if body.include_image_capability:
+        # Qwen Image is its own catalog with its own licence and its own disk
+        # budget.  It is reported as a separate companion plan instead of being
+        # folded into the H3 download, where its size would silently disappear
+        # from the number the person approved.
+        try:
+            image_catalog = deployment.load_deployment_catalog("qwen-image-2.1-windows-x64")
+            companion.append({
+                "capability": "image_prep",
+                "catalog": image_catalog.get("catalog_id"),
+                "catalog_version": image_catalog.get("catalog_version"),
+                "components": [row["component_id"] for row in image_catalog["components"]],
+                "bytes": int(image_catalog.get("total_bytes") or 0),
+                "file_declarations": sum(len(row.get("files", [])) for row in image_catalog["components"]),
+                "install_entry": "ImageCapabilityCard",
+                "note": "图片素材生成是独立能力，安装计划单独批准与执行。",
+            })
+        except (OSError, ValueError, FileNotFoundError):
+            companion.append({"capability": "image_prep", "status": "CATALOG_UNAVAILABLE"})
     return {"plan_id": plan.id, "sha256": plan.sha256, "status": plan.status,
             "download_bytes": plan.payload["download_bytes"], "disk_required": plan.payload["disk_required"],
             "packages": [p["id"] for p in plan.payload["packages"]],
             "variant_id": (variant or {}).get("variant_id"),
             "qualification": qualification,
+            "configuration": plan.payload.get("configuration"),
+            "companion_plans": companion,
             "download_breakdown": plan.payload.get("download_breakdown")}
 
 

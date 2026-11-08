@@ -282,8 +282,11 @@ function buildModelCards(
   return cards;
 }
 
-export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
+export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImageCapability = false }: {
   projectId: string; onRefresh: () => Promise<void>; refreshEpoch?: number;
+  /** The combination chosen on the recommendation card; it is sent with the
+   *  plan so the approved plan really is the configuration the person saw. */
+  includeImageCapability?: boolean;
 }) {
   const [checked, setChecked] = useState(false);
   const [progress, setProgress] = useState('');
@@ -714,7 +717,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
     const selected = projectId;
     const productionComponents = productionCatalogComponents(catalog?.components ?? []);
     const productionBytes = productionComponents.reduce((sum, component) => sum + component.bytes, 0);
-    if (!window.confirm(`准备本机 H3 生产环境？\n目录：${storage.root}\n本次只包含 H3 出片所需程序和权重，约 ${fmtBytes(productionBytes)}；ASR/VLM 仅用于建议审片，不会自动下载。已校验复用的模型与缓存不会重复下载。\n将独立安装缺少的固定版本组件，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
+    if (!window.confirm(`准备本机 H3 生产环境？\n目录：${storage.root}\n本次只包含 H3 出片所需程序和权重，约 ${fmtBytes(productionBytes)}；ASR/VLM 仅用于建议审片，不会自动下载。${includeImageCapability ? '\n图片素材生成（Qwen Image）是独立能力与独立安装计划，会在计划回执里单列，不并入这次 H3 下载。' : '\n不安装图片生成能力：素材全部由你上传，正式视频生产不受影响。'}\n已校验复用的模型与缓存不会重复下载。\n将独立安装缺少的固定版本组件，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
     void run(async () => {
       const ensureCurrent = () => {
         if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
@@ -738,7 +741,8 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         if (!ready.layers.some(layer => layer.layer === 'L2_files_verified' && layer.status === 'READY')) {
           setProgress('准备 H3 出片所需程序与权重；ASR/VLM 建议审片模型不在本次下载内…');
           const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
-            components: productionComponents.map(component => component.component_id), project_id: selected, disk_free: storage.free_bytes,
+            components: productionComponents.map(component => component.component_id), project_id: selected,
+            disk_free: storage.free_bytes, include_image_capability: includeImageCapability,
           }));
           ensureCurrent();
           const queued = await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');

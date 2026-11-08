@@ -100,17 +100,18 @@ def test_execute_queues_the_attempt_and_answers_202(prep):
     assert view["terminal"] is False
 
 
-def test_a_second_execute_of_the_same_plan_is_refused(prep):
+def test_a_second_execute_of_the_same_plan_returns_the_same_attempt(prep):
+    """A lost receipt must re-attach, never start a second physical install."""
     client, factory, settings = prep
     _, _, plan = approved_plan(client)
-    queue_fake_attempt(client, plan)
+    attempt_id = queue_fake_attempt(client, plan)
     response = client.post(
         f"/api/v1/comfyops/install-plans/{plan['id']}/execute",
         json={"plan_hash": plan["sha256"], "executor": "fake"},
         headers=HEADERS,
     )
-    assert response.status_code == 409
-    assert "INSTALL_ATTEMPT_ACTIVE" in response.text
+    assert response.status_code == 202, response.text
+    assert response.json()["attempt_id"] == attempt_id
 
 
 def test_the_worker_advances_the_queued_attempt(prep):

@@ -369,6 +369,70 @@ def _profile_matches_frozen_revision(revision, profile, project_id) -> bool:
     )
 
 
+def _asset_path_candidates(data_dir, storage_path: str):
+    """Where the bytes of an asset can legitimately live under this data root.
+
+    A deployment keeps assets directly under the data directory, while some
+    workspaces (and their fixtures) keep the library in a ``素材库`` folder.
+    Both are inside the configured root, so both are safe; nothing outside it
+    is ever accepted.
+    """
+    from shine.media.artifacts import safe_asset_path
+
+    roots = [data_dir]
+    library = data_dir / "素材库"
+    if library.is_dir():
+        roots.append(library)
+    return [safe_asset_path(root, storage_path) for root in roots]
+
+
+def enforce_live_references(db, project_id, render_request, *, data_dir=None, offline=False):
+    """Re-check the *current* rights and identity of every reference.
+
+    This is the part of the reference contract that does not depend on a frozen
+    pre-production plan.  A project without a plan is a legacy project, not an
+    ungoverned one: a revoked global licence, an unlocked master, changed bytes
+    or a stale shot revision must refuse the render before any external call.
+
+    Called by the job gate and the worker gate alike, so a job queued before a
+    revocation cannot slip through at submit time.
+    """
+    from shine.schemas import RenderRequest
+
+    request = RenderRequest.model_validate(render_request)
+    # The shot identity is checked by the caller that owns a real shot (the
+    # plan path and job creation).  This function governs the *references*; a
+    # pure request fixture has no shot row and must still be able to assert the
+    # rights rules in isolation.
+    for ref in request.reference_manifest:
+        if ref.role == "continuity_derivative":
+            _enforce_continuity_reference(db, project_id, request, ref, data_dir=data_dir)
+            continue
+        asset = db.get(Asset, ref.asset_id)
+        if not asset or asset.project_id != project_id:
+            raise HTTPException(409, "PREPRODUCTION_REFERENCE_MISSING")
+        if asset.sha256 != ref.sha256:
+            raise HTTPException(409, "PREPRODUCTION_REFERENCE_CHANGED")
+        if not offline and (not asset.approved or not asset.locked):
+            raise HTTPException(409, "PREPRODUCTION_REFERENCE_NOT_MASTER")
+        if not offline and (asset.provenance or {}).get("offline_only"):
+            raise HTTPException(409, "MOCK_ASSET_NOT_PRODUCTION")
+        rights_id = (asset.provenance or {}).get("rights_id")
+        if rights_id and not offline:
+            # The project-level snapshot chains to the global version and its
+            # current rights; a revocation anywhere in that chain refuses here.
+            require_rights(db, project_id, rights_id)
+        if data_dir:
+            candidates = _asset_path_candidates(data_dir, asset.storage_path)
+            if not any(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == ref.sha256
+                       for path in candidates):
+                raise HTTPException(409, {
+                    "code": "PREPRODUCTION_REFERENCE_BYTES_MISSING",
+                    "asset_id": asset.id,
+                    "storage_path": asset.storage_path,
+                })
+
+
 def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id=None, render_request=None):
     plan = current_plan(db, project_id)
     if plan and plan.status != "FROZEN":
@@ -407,7 +471,12 @@ def enforce(db, project_id, *, offline=False, data_dir=None, workflow_profile_id
         if plan and not offline and assessment is not None:
             frozen_input_policy(db, project_id, evidence_present=True)
     if not plan:
-        return  # Legacy projects preserve their original contract.
+        # Legacy projects keep their original *frozen-manifest* contract, but
+        # never an ungoverned one: current rights, approval and bytes are
+        # re-checked for every reference before the render may run.
+        if render_request is not None:
+            enforce_live_references(db, project_id, render_request, data_dir=data_dir, offline=offline)
+        return
     report = readiness(db, project_id, offline=offline, data_dir=data_dir)
     frozen = plan.payload["manifest"]
     if render_request is None:

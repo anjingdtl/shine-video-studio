@@ -1988,3 +1988,229 @@ def local_validation_plan():
         ],
         "safety": "Do not run against a live H3 job or user's production library; use an isolated local test dataset.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Assign -> adopt: the project master becomes a reference on exact shots
+# ---------------------------------------------------------------------------
+
+
+class AdoptionPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str
+    library_version_id: str
+    project_asset_id: str
+    shot_ids: list[str] | None = Field(default=None, max_length=200)
+    role: str | None = None
+    entity_id: str | None = None
+
+
+class AdoptionRequest(AdoptionPreviewRequest):
+    expected_shot_revisions: dict[str, int] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=1, max_length=120)
+    confirmed: bool = False
+
+
+def _adoption_asset(db, body: AdoptionPreviewRequest):
+    from shine.models import Asset
+
+    asset = db.get(Asset, body.project_asset_id)
+    if asset is None or asset.project_id != body.project_id:
+        raise HTTPException(404, {"code": "PROJECT_ASSET_NOT_FOUND", "message": "项目素材不存在"})
+    provenance = asset.provenance or {}
+    if provenance.get("library_version_id") != body.library_version_id:
+        raise HTTPException(409, {
+            "code": "LIBRARY_ASSIGNMENT_REQUIRED",
+            "message": "先把全局版本分配到本项目，再采用到镜头",
+            "library_version_id": body.library_version_id,
+        })
+    if not (asset.approved and asset.locked):
+        raise HTTPException(409, {"code": "ASSET_NOT_MASTER", "message": "项目素材尚未确认并锁定"})
+    return asset
+
+
+def _confirmed_package_for_shot(db, project_id: str, shot_id: str) -> str | None:
+    from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
+
+    packages = db.scalars(
+        select(DirectorPackageVersion).where(
+            DirectorPackageVersion.project_id == project_id,
+            DirectorPackageVersion.status == "CONFIRMED",
+            DirectorPackageVersion.stale.is_(False),
+        )
+    ).all()
+    for package in packages:
+        episodes = db.scalars(
+            select(DirectorPackageEpisode).where(DirectorPackageEpisode.package_id == package.id)
+        ).all()
+        if any(
+            shot.get("shot_id") == shot_id
+            for episode in episodes
+            for shot in (episode.manifest or {}).get("shots", [])
+        ):
+            return package.id
+    return None
+
+
+def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str, Any]]]:
+    from shine.models import Asset, Shot
+    from shine.schemas import ShotSpec
+
+    asset = _adoption_asset(db, body)
+    shots = list(db.scalars(select(Shot).where(Shot.project_id == body.project_id)).all())
+    if body.shot_ids is not None:
+        by_id = {shot.id: shot for shot in shots}
+        missing = [shot_id for shot_id in body.shot_ids if shot_id not in by_id]
+        if missing:
+            raise HTTPException(404, {"code": "SHOT_NOT_FOUND", "missing": missing})
+        scoped = [by_id[shot_id] for shot_id in body.shot_ids]
+    else:
+        # No explicit list: the shots whose storyboard asks for this identity.
+        wanted_entity = (body.entity_id or "").strip()
+        scoped = []
+        for shot in shots:
+            try:
+                spec = ShotSpec.model_validate(shot.spec)
+            except Exception:
+                continue
+            if wanted_entity and any(str(name).strip() == wanted_entity for name in spec.characters):
+                scoped.append(shot)
+            elif wanted_entity and any(
+                (db.get(Asset, asset_id) or None) is not None
+                and (db.get(Asset, asset_id).entity_id == wanted_entity)
+                for asset_id in spec.required_asset_ids
+            ):
+                scoped.append(shot)
+    use_as = "subject" if (body.role == "character" or asset.kind == "image" and asset.role == "character") else (
+        {"image": "picture", "video": "video", "audio": "audio"}.get(asset.kind, "picture")
+    )
+    entries = []
+    for shot in scoped:
+        already = [row for row in shot.bindings if row.asset_id == asset.id]
+        package_id = _confirmed_package_for_shot(db, body.project_id, shot.id)
+        entries.append({
+            "shot_id": shot.id,
+            "shot_name": shot.name,
+            "revision": shot.revision,
+            "already_bound": bool(already),
+            "current_binding_count": len(list(shot.bindings)),
+            "use_as": already[0].use_as if already else use_as,
+            "will_bump_revision": not already,
+            "confirmed_package_id": package_id,
+            "conflict": (
+                None if already
+                else ("SHOT_IN_CONFIRMED_PACKAGE" if package_id else None)
+            ),
+        })
+    return asset, entries
+
+
+@router.post("/asset-center/adoptions/preview")
+def preview_adoption(body: AdoptionPreviewRequest, db: DBSession):
+    """What adopting this version onto these shots would change, before consent.
+
+    The preview names the exact shot revisions and the conflicts (an already
+    confirmed package).  It never writes a binding.
+    """
+    asset, entries = _adoption_plan(db, body)
+    return {
+        "project_id": body.project_id,
+        "project_asset_id": asset.id,
+        "library_version_id": body.library_version_id,
+        "asset_sha256": asset.sha256,
+        "shot_count": len(entries),
+        "shots": entries,
+        "blocked": [row for row in entries if row["conflict"]],
+    }
+
+
+@router.post("/asset-center/adoptions", status_code=201)
+def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
+    """Apply the project master to exactly the shots the person agreed to.
+
+    Each shot that really changes becomes a new shot revision; the previous
+    take is invalidated, never overwritten.  A shot inside an already confirmed
+    package is a named conflict: the person must re-freeze the package instead
+    of silently producing a different film than the one confirmed.
+    """
+    from shine.models import AppSetting, Project, Shot
+    from shine.schemas import ShotBindingInput, ShotSpec
+    from shine.services import revise_shot_record
+
+    project = db.get(Project, body.project_id)
+    if project is None:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND"})
+
+    if not body.confirmed:
+        raise HTTPException(409, {"code": "ADOPTION_CONFIRMATION_REQUIRED",
+                                  "message": "请先确认采用范围与镜头版本"})
+    # AppSetting.key is String(80); the digest keeps the receipt id bounded
+    # while scoping the caller's key to this project.
+    receipt_key = "asset-adoption:" + hashlib.sha256(
+        f"{body.project_id}:{body.idempotency_key}".encode()
+    ).hexdigest()
+    previous = db.get(AppSetting, receipt_key)
+    if previous is not None:
+        return {**previous.value, "replayed": True}
+    asset, entries = _adoption_plan(db, body)
+    blocked = [row for row in entries if row["conflict"]]
+    if blocked:
+        raise HTTPException(409, {
+            "code": "ADOPTION_BLOCKED",
+            "message": "这些镜头属于已确认的导演包；先重新生成导演包，不能静默替换已确认的内容",
+            "blocked": blocked,
+        })
+    results = []
+    for entry in entries:
+        shot = db.get(Shot, entry["shot_id"])
+        expected = body.expected_shot_revisions.get(shot.id)
+        if expected is None or expected != shot.revision:
+            raise HTTPException(409, {
+                "code": "SHOT_REVISION_CHANGED",
+                "message": "镜头在你确认之后被修改过，请重新预览",
+                "shot_id": shot.id,
+                "expected": expected,
+                "current": shot.revision,
+            })
+        current = [
+            ShotBindingInput(
+                asset_id=row.asset_id, use_as=row.use_as, role=row.role,
+                frame_role=row.frame_role, ordinal=row.ordinal,
+            )
+            for row in sorted(shot.bindings, key=lambda link: link.ordinal)
+        ]
+        if any(row.asset_id == asset.id for row in current):
+            results.append({"shot_id": shot.id, "status": "ALREADY_BOUND", "revision": shot.revision})
+            continue
+        if len(current) >= 12:
+            raise HTTPException(409, {"code": "SHOT_REFERENCE_LIMIT", "shot_id": shot.id})
+        current.append(ShotBindingInput(
+            asset_id=asset.id,
+            use_as=entry["use_as"],
+            role=body.role or asset.role,
+            ordinal=len(current),
+        ))
+        revise_shot_record(
+            db, project, shot,
+            spec=ShotSpec.model_validate(shot.spec), bindings=current, actor=actor,
+        )
+        results.append({
+            "shot_id": shot.id,
+            "status": "ADOPTED",
+            "from_revision": entry["revision"],
+            "to_revision": shot.revision,
+            "use_as": entry["use_as"],
+        })
+    receipt = {
+        "adoption_id": receipt_key,
+        "project_id": body.project_id,
+        "library_version_id": body.library_version_id,
+        "project_asset_id": asset.id,
+        "asset_sha256": asset.sha256,
+        "shots": results,
+        "adopted_count": sum(1 for row in results if row["status"] == "ADOPTED"),
+        "reused_count": sum(1 for row in results if row["status"] == "ALREADY_BOUND"),
+    }
+    db.add(AppSetting(key=receipt_key, value=receipt))
+    db.commit()
+    return {**receipt, "replayed": False}

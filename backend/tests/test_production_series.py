@@ -771,6 +771,11 @@ def test_a_profile_without_the_declared_media_family_warns_and_renders(api):
             "seed": "1.inputs.seed",
             "duration": "1.inputs.duration",
             "reference_picture_1": "1.inputs.reference_picture_1",
+            # The shot binds a subject too; a profile with no subject slot would
+            # silently drop it, so both slots are mapped.  The *audio* family is
+            # the one deliberately left unbound, which is the warning this test
+            # is about.
+            "reference_subject_1": "1.inputs.reference_subject_1",
             "reference_audio_1": "1.inputs.reference_audio_1",
         },
         graph={
@@ -778,7 +783,8 @@ def test_a_profile_without_the_declared_media_family_warns_and_renders(api):
                 "class_type": "H3BaseSampler",
                 "inputs": {
                     "positive_prompt": "", "seed": 0, "duration": 6.0,
-                    "reference_picture_1": "", "reference_audio_1": "",
+                    "reference_picture_1": "", "reference_subject_1": "",
+                    "reference_audio_1": "",
                 },
             },
             "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},

@@ -121,6 +121,11 @@ async def upload_document(project_id: str, db: DBSession, file: Annotated[Upload
     )
     db.add(document)
     db.flush()
+    # The first script in an empty project is naturally its basis.  A later
+    # upload only becomes a candidate: switching the production source is an
+    # explicit action, never a side effect of importing a file.
+    if not project.current_document_id:
+        project.current_document_id = document.id
     add_audit(
         db,
         "user",

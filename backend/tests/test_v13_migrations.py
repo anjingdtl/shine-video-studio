@@ -18,13 +18,23 @@ def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_pa
     command.upgrade(config, "f121a0010001")
     engine = make_engine(url)
     factory = make_session_factory(engine)
+    project_id = "legacy-project"
     with factory.begin() as db:
-        project = Project(title="Legacy migration fixture")
-        db.add(project)
-        db.flush()
+        # Core insert with the columns this old schema really has.  An ORM
+        # object would also write columns added by later migrations (for
+        # example ``projects.current_document_id``) and fail on the old table.
+        db.execute(Project.__table__.insert().values(
+            id=project_id,
+            title="Legacy migration fixture",
+            description="",
+            language="Chinese",
+            allow_remote_review=False,
+            auto_repair_enabled=False,
+            created_at=utcnow(),
+        ))
         db.add(
             Asset(
-                project_id=project.id,
+                project_id=project_id,
                 filename="legacy.png",
                 kind="image",
                 content_type="image/png",
@@ -36,19 +46,19 @@ def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_pa
     with factory.begin() as db:
         style = StyleVersion(
             id="legacy-style",
-            project_id=project.id,
+            project_id=project_id,
             version=1,
             snapshot={},
             sha256="b" * 64,
             approved_by="legacy-migration-fixture",
         )
         db.add(style)
-        db.add(Shot(id="legacy-shot", project_id=project.id, name="legacy fixture", spec={}))
+        db.add(Shot(id="legacy-shot", project_id=project_id, name="legacy fixture", spec={}))
         db.flush()
         db.execute(
             Job.__table__.insert().values(
                 id="legacy-job",
-                project_id=project.id,
+                project_id=project_id,
                 shot_id="legacy-shot",
                 shot_revision=1,
                 style_version_id=style.id,
@@ -80,7 +90,7 @@ def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_pa
         )
         db.add(
             AuditEvent(
-                project_id=project.id,
+                project_id=project_id,
                 actor="legacy-fixture",
                 event_type="MIGRATION_FIXTURE",
                 entity_type="job",

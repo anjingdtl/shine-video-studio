@@ -145,7 +145,8 @@ export default function DirectorSetupPanel({
         </div>
       </div>
       <DeploymentRecommendationCard onChoice={setDeploymentChoice} />
-      <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch} />
+      <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch}
+        includeImageCapability={deploymentChoice.image_prep} />
       {deploymentChoice.image_prep
         ? <ImageCapabilityCard projectId={projectId} busy={busy} />
         : <p className="run-hint">你选择了不安装生图组合：素材全部自行上传即可，正式视频生产不受影响。需要时可在上方重新勾选。</p>}

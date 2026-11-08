@@ -66,21 +66,42 @@ def _style_snapshot(db: Session, project: Project) -> dict[str, Any] | None:
     return {"style_version_id": style.id, "version": style.version, "sha256": style.sha256}
 
 
-def _script_ref(db: Session, project_id: str) -> dict[str, Any]:
-    """The confirmed script identity, when the project has one.
+def current_script_basis(db: Session, project: Project) -> dict[str, Any]:
+    """The document the production basis is anchored to.
 
-    A project may legitimately have no imported document (ideas entered directly
-    in the storyboard).  The package records ``None`` rather than inventing a
-    script version.
+    An explicit choice wins.  A project that never made one keeps the legacy
+    rule (the newest document) so packages confirmed before this identity
+    existed stay readable and executable.
+
+    Uploading a second script therefore only adds a *candidate*: it does not
+    change the current basis by itself.  Selecting the document, or confirming
+    an outline built from it, is the explicit action that switches it.
     """
     from shine.models import ProjectDocument
 
-    document = db.scalars(
-        select(ProjectDocument)
-        .where(ProjectDocument.project_id == project_id)
-        .order_by(ProjectDocument.created_at.desc())
-    ).first()
-    outline = db.scalars(
+    document = None
+    explicit = False
+    if project.current_document_id:
+        candidate = db.get(ProjectDocument, project.current_document_id)
+        if candidate is not None and candidate.project_id == project.id:
+            document, explicit = candidate, True
+    if document is None:
+        document = db.scalars(
+            select(ProjectDocument)
+            .where(ProjectDocument.project_id == project.id)
+            .order_by(ProjectDocument.created_at.desc())
+        ).first()
+    return {"document": document, "explicit": explicit}
+
+
+def _outline_for_document(db: Session, project_id: str, document) -> AgentArtifact | None:
+    """The newest readable outline that was really built from this document.
+
+    An outline written before provenance was recorded has no ``document_id``.
+    It cannot *claim* to belong to another script, so it stays usable as the
+    legacy fallback; an outline that names a different document never is.
+    """
+    rows = db.scalars(
         select(AgentArtifact)
         .where(
             AgentArtifact.project_id == project_id,
@@ -88,13 +109,39 @@ def _script_ref(db: Session, project_id: str) -> dict[str, Any]:
             AgentArtifact.stale.is_(False),
         )
         .order_by(AgentArtifact.created_at.desc())
-    ).first()
+    ).all()
+    legacy: AgentArtifact | None = None
+    for row in rows:
+        payload = row.payload_json or {}
+        declared = payload.get("document_id")
+        if document is not None and declared == document.id:
+            return row
+        if not declared and legacy is None:
+            legacy = row
+    return legacy if document is not None else None
+
+
+def _script_ref(db: Session, project: Project) -> dict[str, Any]:
+    """The confirmed script identity, when the project has one.
+
+    A project may legitimately have no imported document (ideas entered directly
+    in the storyboard).  The package records ``None`` rather than inventing a
+    script version.
+
+    The outline is resolved *through* the current basis document, never by
+    recency alone: an outline built from an older script must not be attached
+    to a newer upload.
+    """
+    basis = current_script_basis(db, project)
+    document = basis["document"]
+    outline = _outline_for_document(db, project.id, document) if document is not None else None
     return {
         "document_id": document.id if document else None,
         "document_sha256": document.sha256 if document else None,
         "outline_artifact_id": outline.id if outline else None,
         "outline_sha256": outline.sha256 if outline else None,
         "outline_confirmed": bool(outline and outline.approved_at),
+        "basis_explicit": basis["explicit"],
     }
 
 
@@ -288,7 +335,7 @@ def build_package(
             "target_seconds": plan_payload.target_seconds,
             "tolerance_seconds": plan_payload.tolerance_seconds,
         },
-        "script": _script_ref(db, project.id),
+        "script": _script_ref(db, project),
         "style": style,
         "binding": binding,
         "preproduction": _binding_ref(db, project.id),
@@ -350,6 +397,219 @@ def _blocker(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"code": code, "message": message, **extra}
 
 
+#: The parts of a workflow profile that decide what the renderer actually
+#: receives.  ``validated_against`` and other declaration fields are excluded:
+#: they describe how the profile was qualified, not what it executes.
+EXECUTION_BINDING_FIELDS = (
+    "mode",
+    "graph_sha256",
+    "checkpoint_id",
+    "model_identity",
+    "parameter_map",
+    "media_transfers",
+)
+
+
+def _profile_execution_drift(pinned: dict[str, Any], profile: WorkflowProfile) -> list[str]:
+    """Fields whose in-place edit invalidates the frozen execution promise."""
+    changed: list[str] = []
+    for field in EXECUTION_BINDING_FIELDS:
+        current = getattr(profile, field, None)
+        if field in {"model_identity", "parameter_map", "media_transfers"}:
+            current = current or {}
+        if pinned.get(field) != current:
+            changed.append(field)
+    return changed
+
+
+def _compiled_shot_blockers(
+    db: Session, project: Project, manifest: dict[str, Any], episodes: list[Any]
+) -> list[dict[str, Any]]:
+    """Re-run the one H3 compiler over every shot this package freezes.
+
+    A package that says ``startable`` while the same shot, profile and mode is
+    refused at job creation is a lie: the person waits for a run that cannot
+    start.  The readiness check therefore executes the same compiler with the
+    same profile constraints the worker will use, and names the shot, the mode
+    and the missing slot before anything is queued.
+
+    A dynamic continuity reference is *dependency waiting*, not a static
+    impossibility: it can only be compiled once the real predecessor passed.
+    """
+    from shine.comfy.capabilities import continuity_capability, profile_metadata
+    from shine.h3.compiler import H3PromptCompiler, PromptCompilationError
+    from shine.schemas import GenerationMode, ShotBindingInput, StyleBible
+    from shine.services import build_reference_manifest, order_bindings_for_cast
+
+    binding = manifest.get("binding") or {}
+    profile = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
+    pinned_style = manifest.get("style") or {}
+    style_row = db.get(StyleVersion, pinned_style.get("style_version_id") or "")
+    if profile is None or style_row is None:
+        return []
+    try:
+        bible = StyleBible.model_validate(style_row.snapshot)
+    except Exception:
+        return [_blocker("STYLE_SNAPSHOT_INVALID", "冻结风格的快照无法解析，请重新冻结风格")]
+
+    mode_hint = None
+    if binding.get("generation_mode"):
+        try:
+            mode_hint = GenerationMode(binding["generation_mode"])
+        except ValueError:
+            return [_blocker("PACKAGE_GENERATION_MODE_INVALID",
+                             "导演包记录的生片模式无效", mode=binding["generation_mode"])]
+
+    compiler = H3PromptCompiler()
+    problems: list[dict[str, Any]] = []
+    for episode in episodes:
+        for entry in (episode.manifest or {}).get("shots", []):
+            shot = db.get(Shot, entry.get("shot_id") or "")
+            if shot is None or shot.revision != entry.get("revision"):
+                continue  # already reported as SHOT_MISSING / SHOT_REVISION_CHANGED
+            try:
+                spec = ShotSpec.model_validate(shot.spec)
+            except Exception:
+                continue
+            if spec.continuity.mode.value != "cut":
+                problems.append(_blocker(
+                    "CONTINUITY_DEPENDENCY_WAITING",
+                    f"镜头「{shot.name}」等待前序成片，属于依赖等待，不是静态缺口",
+                    shot_id=shot.id,
+                    dependency_only=True,
+                ))
+                continue
+            assets: dict[str, Any] = {}
+            bindings = []
+            for link in entry.get("bindings", []):
+                asset = db.get(Asset, link.get("asset_id") or "")
+                if asset is None:
+                    break
+                assets[asset.id] = asset
+                bindings.append(ShotBindingInput(
+                    asset_id=asset.id,
+                    use_as=link["use_as"],
+                    role=link.get("role"),
+                    frame_role=link.get("frame_role"),
+                    ordinal=link.get("ordinal", 0),
+                ))
+            if len(assets) != len(entry.get("bindings", [])):
+                continue  # ASSET_MISSING already reported
+            try:
+                ordered = order_bindings_for_cast(bindings, list(spec.characters), assets)
+                reference_manifest = build_reference_manifest(ordered, assets)
+                compiled = compiler.compile(
+                    spec=spec, style=bible, manifest=reference_manifest,
+                    project_language=project.language, mode_hint=mode_hint,
+                )
+            except PromptCompilationError as exc:
+                problems.append(_blocker(
+                    exc.code,
+                    f"镜头「{shot.name}」按当前生成方案无法执行：{exc}",
+                    shot_id=shot.id,
+                    mode=profile.mode,
+                    details=exc.details,
+                ))
+                continue
+            if profile.mode and compiled.mode.value.lower() != profile.mode.lower():
+                problems.append(_blocker(
+                    "H3_MODE_REFERENCE_MISMATCH",
+                    f"镜头「{shot.name}」编译出 {compiled.mode.value}，生成方案登记的是 {profile.mode}",
+                    shot_id=shot.id,
+                    mode=profile.mode,
+                    compiled_mode=compiled.mode.value,
+                ))
+                continue
+            try:
+                from shine.comfy.provider import validate_reference_slots
+
+                validate_reference_slots(profile.parameter_map or {}, reference_manifest)
+            except Exception as exc:  # ComfyPendingWorkflowMapping
+                problems.append(_blocker(
+                    "PENDING_WORKFLOW_MAPPING",
+                    f"镜头「{shot.name}」的参考素材在工作流里没有落点",
+                    shot_id=shot.id,
+                    details=getattr(exc, "details", {}),
+                ))
+                continue
+            capability = continuity_capability(spec.continuity.mode.value)
+            if capability:
+                capabilities = profile_metadata(
+                    profile.graph, profile.mode, profile.parameter_map, profile.media_transfers
+                )
+                if capability not in capabilities["continuity_modes"]:
+                    problems.append(_blocker(
+                        "PENDING_HARD_CONTINUITY_TEST" if capability == "hard_frame_anchor"
+                        else "PENDING_WORKFLOW_MAPPING",
+                        f"镜头「{shot.name}」请求的连续性能力尚未在生成方案里验证",
+                        shot_id=shot.id,
+                        requested_continuity=capability,
+                    ))
+    return problems
+
+
+def _execution_fingerprint(
+    manifest: dict[str, Any], policy_hash: str, project_language: str, episodes: list[Any],
+    drifting_fields: list[str] | None = None,
+    shot_drift: list[str] | None = None,
+    binding_drift: list[str] | None = None,
+) -> str:
+    """The complete execution identity a package freezes.
+
+    It covers every field that can change what lands on disk: workflow graph,
+    checkpoint, model, parameter map, media transfers, the chosen mode and
+    output, the style, the pre-production manifest, the policy, the project
+    language and every shot's own revision and reference set.
+    """
+    binding = manifest.get("binding") or {}
+    shots = [
+        {
+            "shot_id": shot.get("shot_id"),
+            "revision": shot.get("revision"),
+            "spec_sha256": shot.get("spec_sha256"),
+            "style_version_id": shot.get("style_version_id"),
+            "bindings": [
+                {
+                    "asset_id": link.get("asset_id"),
+                    "use_as": link.get("use_as"),
+                    "role": link.get("role"),
+                    "frame_role": link.get("frame_role"),
+                    "ordinal": link.get("ordinal"),
+                    "sha256": link.get("sha256"),
+                }
+                for link in shot.get("bindings", [])
+            ],
+        }
+        for episode in episodes
+        for shot in (episode.manifest or {}).get("shots", [])
+    ]
+    return digest_of({
+        "graph": binding.get("graph_sha256"),
+        "checkpoint": binding.get("checkpoint_id"),
+        "model": binding.get("model_identity") or {},
+        "parameter_map": binding.get("parameter_map") or {},
+        "media_transfers": binding.get("media_transfers") or {},
+        "profile_mode": binding.get("mode"),
+        "generation_mode": binding.get("generation_mode"),
+        "output": binding.get("output") or {},
+        "style": (manifest.get("style") or {}).get("sha256"),
+        "preproduction": (manifest.get("preproduction") or {}).get("sha256"),
+        "policy": policy_hash,
+        "project_language": project_language,
+        "episodes": [
+            {"episode_id": row.episode_id, "position": row.position, "manifest_sha256": row.manifest_sha256}
+            for row in episodes
+        ],
+        "shots": shots,
+        # Whether the live profile still matches what was frozen is part of the
+        # execution identity the workbench compares: a silent drift must change
+        # the number, not only a blocker list.
+        "drifting_fields": sorted(drifting_fields or []),
+        "shot_drift": sorted(shot_drift or []),
+        "binding_drift": sorted(binding_drift or []),
+    })
+
+
 def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str, Any]:
     """Everything that must be true before this package may really be started.
 
@@ -393,13 +653,50 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                 or current is None or current.sha256 != style.get("sha256")):
             blockers.append(_blocker("STYLE_SUPERSEDED", "冻结风格已变更，请重新生成导演包"))
 
+    script = manifest.get("script") or {}
+    if project is not None and script.get("document_id"):
+        basis = current_script_basis(db, project)
+        live_document = basis["document"]
+        if (
+            live_document is None
+            or live_document.id != script.get("document_id")
+            or live_document.sha256 != script.get("document_sha256")
+        ):
+            # The person picked another basis (or the document bytes changed)
+            # after this package was frozen: rendering it would produce a
+            # superseded script under the identity that was confirmed.
+            blockers.append(_blocker(
+                "SCRIPT_BASIS_CHANGED",
+                "这份导演包绑定的剧本已不是当前选用的剧本；请重新生成导演包",
+                document_id=script.get("document_id"),
+                current_document_id=live_document.id if live_document else None,
+            ))
+        elif script.get("outline_artifact_id"):
+            frozen_outline = db.get(AgentArtifact, script["outline_artifact_id"])
+            if (frozen_outline is None or frozen_outline.stale
+                    or frozen_outline.sha256 != script.get("outline_sha256")):
+                blockers.append(_blocker(
+                    "SCRIPT_OUTLINE_CHANGED", "导演包绑定的剧本大纲已失效或变更，请重新生成导演包",
+                    outline_artifact_id=script.get("outline_artifact_id"),
+                ))
+
     profile_row = db.get(WorkflowProfile, (manifest.get("binding") or {}).get("workflow_profile_id") or "")
+    drift: list[str] = []
     if profile_row is None:
         blockers.append(_blocker("WORKFLOW_PROFILE_MISSING", "生成方案已不存在"))
-    elif profile_row.graph_sha256 != (manifest.get("binding") or {}).get("graph_sha256"):
-        blockers.append(_blocker("WORKFLOW_PROFILE_CHANGED", "生成方案图已变更，请重新生成导演包"))
-    elif not (profile_row.parameter_map or {}):
-        blockers.append(_blocker("WORKFLOW_PARAMETER_MAP_MISSING", "生成方案未声明参数映射"))
+    else:
+        drift = _profile_execution_drift(manifest.get("binding") or {}, profile_row)
+        if drift:
+            # The pin is the whole execution identity: a graph hash alone does
+            # not decide what the renderer receives.  A parameter map edited in
+            # place after confirmation drifts the frozen promise silently.
+            blockers.append(_blocker(
+                "WORKFLOW_PROFILE_CHANGED",
+                "生成方案的执行身份已变更，请重新生成导演包",
+                changed_fields=drift,
+            ))
+        elif not (profile_row.parameter_map or {}):
+            blockers.append(_blocker("WORKFLOW_PARAMETER_MAP_MISSING", "生成方案未声明参数映射"))
 
     from shine.comfyops.preproduction import current_plan
 
@@ -421,6 +718,10 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
     ).all()
     if not episodes:
         blockers.append(_blocker("PACKAGE_HAS_NO_EPISODES", "导演包没有分集"))
+    # Static impossibility is named before anything is queued.  A dynamic
+    # continuity reference stays a declared dependency instead of a refusal.
+    compile_problems = _compiled_shot_blockers(db, project, manifest, episodes)
+    blockers.extend(compile_problems)
     lineage = manifest.get("creative_lineage") or {}
     if not lineage:
         # A four-stage delivery that predates the lineage contract cannot
@@ -456,6 +757,8 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             # a package built on it may be produced.
             blockers.append(_blocker("CREATIVE_BASIS_CHANGED",
                                      "上游蓝图与当前大纲已不一致，请重新生成蓝图并重新交付本卷"))
+    shot_drift: list[str] = []
+    binding_drift: list[str] = []
     for episode in episodes:
         if digest_of(episode.manifest) != episode.manifest_sha256:
             blockers.append(
@@ -469,8 +772,28 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                                          shot_id=shot.get("shot_id")))
                 continue
             if row.revision != shot.get("revision"):
+                shot_drift.append(row.id)
                 blockers.append(_blocker("SHOT_REVISION_CHANGED", f"镜头「{row.name}」已修改",
                                          shot_id=row.id))
+            current_links = sorted(
+                (link.asset_id, link.use_as, link.role, link.frame_role, link.ordinal)
+                for link in row.bindings
+            )
+            pinned_links = sorted(
+                (link.get("asset_id"), link.get("use_as"), link.get("role"),
+                 link.get("frame_role"), link.get("ordinal"))
+                for link in shot.get("bindings", [])
+            )
+            if current_links != pinned_links:
+                # The frozen reference set is the contract: a binding edited in
+                # place (even without a revision bump by an older client) makes
+                # the confirmed package describe a different film.
+                binding_drift.append(row.id)
+                blockers.append(_blocker(
+                    "SHOT_BINDINGS_CHANGED",
+                    f"镜头「{row.name}」的参考绑定与导演包不一致，请重新生成导演包",
+                    shot_id=row.id,
+                ))
             if style and shot.get("style_version_id") != style.get("style_version_id"):
                 blockers.append(_blocker("SHOT_STYLE_MISMATCH", f"镜头「{row.name}」不执行当前冻结风格",
                                          shot_id=row.id))
@@ -491,19 +814,19 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             # and H3 generates it.  A reference that IS bound still has to be
             # an approved master (checked above).
 
-    fingerprint = digest_of(
-        {
-            "graph": (manifest.get("binding") or {}).get("graph_sha256"),
-            "style": (manifest.get("style") or {}).get("sha256"),
-            "preproduction": pinned.get("sha256"),
-            "policy": package.policy_hash,
-        }
+    fingerprint = _execution_fingerprint(
+        manifest, package.policy_hash, project.language if project is not None else "", list(episodes),
+        drifting_fields=drift, shot_drift=shot_drift, binding_drift=binding_drift,
     )
     # ``ready`` answers "is the content satisfiable right now" — everything a
     # confirmation would have to fix.  ``startable`` additionally requires the
     # user's confirmation, because a confirmed package is a separate decision
-    # from a satisfiable one.
-    hard = [row for row in blockers if row["code"] != "PACKAGE_NOT_CONFIRMED"]
+    # from a satisfiable one.  A pending continuity dependency is not a
+    # readiness failure: the compiler runs it against the real predecessor.
+    hard = [
+        row for row in blockers
+        if row["code"] != "PACKAGE_NOT_CONFIRMED" and not row.get("dependency_only")
+    ]
     return {
         "package_id": package.id,
         "revision": package.revision,
@@ -513,8 +836,9 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
         "manifest_sha256": package.manifest_sha256,
         "config_fingerprint": fingerprint,
         "ready": not hard,
-        "startable": not blockers and not package.stale,
-        "blockers": blockers,
+        "startable": not hard and not package.stale and package.status == "CONFIRMED",
+        "blockers": hard,
+        "pending_dependencies": [row for row in blockers if row.get("dependency_only")],
         "episode_count": len(episodes),
         "shot_count": package.shot_count,
         "checked_at": utcnow().isoformat() + "Z",

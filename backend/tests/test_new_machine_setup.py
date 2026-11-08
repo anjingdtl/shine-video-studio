@@ -290,3 +290,111 @@ def test_environment_probe_reports_this_host(tmp_path):
     blockers = setup_blockers(report)
     for blocker in blockers:
         assert blocker["code"]
+
+
+# ---------------------------------------------------------------------------
+# One physical target, one live attempt (U01) and one approved combination (U02)
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_install_request_is_one_plan_and_one_attempt(prep, monkeypatch):
+    """Two tabs, a refresh and a lost receipt re-attach the same physical work.
+
+    The old defect queued two attempts for the same plan hash.  The identity now
+    belongs to the normalized storage root and the component closure, so a
+    repeated request returns the one plan and the one attempt it already owns.
+    """
+    client, _, _ = prep
+    monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "1")
+    project = create_project(client)
+    body = {"components": CORE_SMALL, "project_id": project, "disk_free": 10**12}
+
+    first = post(client, "/setup/install-plan", body)
+    second = post(client, "/setup/install-plan", body)
+    assert second["plan_id"] == first["plan_id"], "the same work must not become a second plan"
+    assert second["sha256"] == first["sha256"]
+
+    plan = approve(client, {"id": first["plan_id"]}, "install",
+                   f"/comfyops/install-plans/{first['plan_id']}/approve")
+    execute_body = {"plan_hash": plan["sha256"], "executor": "local"}
+    first_attempt = post(client, f"/comfyops/install-plans/{first['plan_id']}/execute",
+                         execute_body, operator=True, expected=(200, 202))
+    again = post(client, f"/comfyops/install-plans/{first['plan_id']}/execute",
+                 execute_body, operator=True, expected=(200, 202))
+    assert again["attempt_id"] == first_attempt["attempt_id"]
+
+    from sqlalchemy import func, select
+
+    from shine.comfyops.models import InstallationAttempt
+
+    with client.app.state.session_factory() as db:
+        total = db.scalar(select(func.count()).select_from(InstallationAttempt)) or 0
+    assert total == 1, "exactly one attempt exists for this target"
+
+
+def test_two_different_component_sets_cannot_share_the_same_storage_root(prep, monkeypatch):
+    """Different content in the same directory is a conflicting identity."""
+    client, _, _ = prep
+    monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "1")
+    project_a = create_project(client, "甲")
+    project_b = create_project(client, "乙")
+    first = post(client, "/setup/install-plan",
+                 {"components": CORE_SMALL, "project_id": project_a, "disk_free": 10**12})
+    second = post(client, "/setup/install-plan",
+                  {"components": ["comfyui"], "project_id": project_b, "disk_free": 10**12})
+    plan_a = approve(client, {"id": first["plan_id"]}, "install",
+                     f"/comfyops/install-plans/{first['plan_id']}/approve")
+    plan_b = approve(client, {"id": second["plan_id"]}, "install",
+                     f"/comfyops/install-plans/{second['plan_id']}/approve")
+    post(client, f"/comfyops/install-plans/{first['plan_id']}/execute",
+         {"plan_hash": plan_a["sha256"], "executor": "local"}, operator=True, expected=(200, 202))
+    refused = client.post(
+        f"/api/v1/comfyops/install-plans/{second['plan_id']}/execute",
+        json={"plan_hash": plan_b["sha256"], "executor": "local"}, headers=HEADERS,
+    )
+    assert refused.status_code == 409, refused.text
+    assert "INSTALL_TARGET_CONFLICT" in refused.text
+
+
+def test_the_install_plan_states_the_combination_that_was_really_chosen(prep):
+    """The card's choice reaches the approved plan, and image capability is separate."""
+    client, _, _ = prep
+    project = create_project(client)
+    without_image = post(client, "/setup/install-plan", {
+        "components": CORE_SMALL, "project_id": project, "disk_free": 10**12,
+    })
+    assert without_image["configuration"] == {"h3_video": True, "image_prep": False}
+    assert without_image["companion_plans"] == []
+
+    with_image = post(client, "/setup/install-plan", {
+        "components": CORE_SMALL, "project_id": project, "disk_free": 10**12,
+        "include_image_capability": True,
+    })
+    # A different combination is a different plan, and the H3 plan never
+    # silently absorbs the image catalog's bytes.
+    assert with_image["plan_id"] != without_image["plan_id"]
+    assert with_image["configuration"] == {"h3_video": True, "image_prep": True}
+    assert with_image["download_bytes"] == without_image["download_bytes"]
+    companion = with_image["companion_plans"][0]
+    assert companion["capability"] == "image_prep"
+    assert companion["bytes"] > 0 and companion["file_declarations"] > 0
+    assert companion["catalog"] == "shine-qwen-image-21-windows-x64"
+
+
+def test_package_metadata_counts_the_catalog_it_ships():
+    """The ZIP metadata is counted from the catalog, not typed by hand."""
+    import re
+
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "build_test_package.ps1").read_text(
+        encoding="utf-8-sig")
+    assert "packages = 154" not in script
+    assert "statistics_basis" in script and "file_declarations" in script
+    catalog = deployment.load_default_catalog()
+    declarations = sum(len(component["files"]) for component in catalog["components"])
+    declared_bytes = sum(
+        int(row["size"]) for component in catalog["components"] for row in component["files"])
+    assert declarations == 189, declarations
+    assert declared_bytes == 60_804_054_569
+    # The shipped catalog's own total agrees with the per-file declarations.
+    assert int(catalog["total_bytes"]) == declared_bytes
+    assert re.search(r"components = \$catalogComponents\.Count", script)

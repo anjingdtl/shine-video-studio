@@ -433,12 +433,20 @@ def precheck_install_plan(identity: str, actor: Operator, db: DBSession):
 
 
 def _queued_response(attempt, plan_hash: str) -> dict:
-    """The answer of a queued installation: the attempt id is the truth."""
+    """The answer of a queued installation: the attempt id is the truth.
+
+    A re-attached attempt reports the stage it really reached; it is never
+    rewritten to "queued" just because this browser session is new.
+    """
+    from shine.comfyops import installation as installation_service
+
+    view = installation_service.attempt_view(attempt)
     return {
         "attempt_id": attempt.id,
-        "status": "QUEUED",
-        "stage": "QUEUED",
+        "status": view["status"],
+        "stage": view["stage"],
         "plan_hash": plan_hash,
+        "reused": view["stage"] != "QUEUED",
         "payload": attempt.payload,
     }
 

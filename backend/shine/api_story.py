@@ -36,6 +36,67 @@ def _document(db, project_id, document_id, expected_hash=None):
     return document
 
 
+class ScriptBasisRequest(APIModel):
+    document_id: str = Field(min_length=1, max_length=36)
+
+
+def _basis_view(db, project) -> dict:
+    from shine.director.package import _outline_for_document, current_script_basis
+
+    basis = current_script_basis(db, project)
+    document = basis["document"]
+    outline = _outline_for_document(db, project.id, document) if document is not None else None
+    return {
+        "project_id": project.id,
+        "document_id": document.id if document else None,
+        "document_sha256": document.sha256 if document else None,
+        "document_filename": document.filename if document else None,
+        "explicit": basis["explicit"],
+        "outline_artifact_id": outline.id if outline else None,
+        "outline_confirmed": bool(outline and outline.approved_at),
+    }
+
+
+@router.get("/projects/{project_id}/script-basis")
+def read_script_basis(project_id: str, db: DBSession) -> dict:
+    """Which script the project will produce from, and what is still a candidate."""
+    project = require_project(db, project_id)
+    documents = db.scalars(
+        select(ProjectDocument)
+        .where(ProjectDocument.project_id == project_id)
+        .order_by(ProjectDocument.created_at.desc())
+    ).all()
+    return _basis_view(db, project) | {
+        "candidates": [
+            {"document_id": row.id, "filename": row.filename, "sha256": row.sha256,
+             "created_at": row.created_at.isoformat() + "Z"}
+            for row in documents
+        ],
+    }
+
+
+@router.post("/projects/{project_id}/script-basis")
+def choose_script_basis(project_id: str, body: ScriptBasisRequest, actor: Operator, db: DBSession) -> dict:
+    """Switch the production basis to one already-imported document.
+
+    This is the explicit action a second upload never performs by itself.
+    Packages confirmed against the previous basis stay readable by id; their
+    readiness reports ``SCRIPT_BASIS_CHANGED`` so they cannot silently produce
+    a superseded script.
+    """
+    project = require_project(db, project_id)
+    document = _document(db, project_id, body.document_id)
+    changed = project.current_document_id != document.id
+    if changed:
+        previous = project.current_document_id
+        project.current_document_id = document.id
+        add_audit(db, actor, "SCRIPT_BASIS_SELECTED", "project_document", document.id,
+                  {"previous_document_id": previous, "sha256": document.sha256}, project_id=project_id)
+    db.commit()
+    db.refresh(project)
+    return _basis_view(db, project) | {"changed": changed}
+
+
 @router.post("/projects/{project_id}/story-preparation/outlines", status_code=202)
 def queue_outline(project_id: str, body: OutlineRequest, actor: Operator, db: DBSession,
                   gateway: Annotated[LLMGateway, Depends(llm_gateway)]):
@@ -132,6 +193,14 @@ def confirm_outline(project_id: str, artifact_id: str, body: OutlineApproval, ac
             or row.sha256 != body.expected_sha256 or row.sha256 != digest(row.payload_json)):
         raise HTTPException(409, "STORY_OUTLINE_CHANGED")
     _document(db, project_id, row.payload_json["document_id"], row.payload_json["document_sha256"])
+    # Confirming an outline is an explicit choice of the script it was built
+    # from: that document becomes the project's production basis.  An upload
+    # that was never confirmed stays a candidate.
+    from shine.models import Project
+
+    project = db.get(Project, project_id)
+    if project is not None and project.current_document_id != row.payload_json["document_id"]:
+        project.current_document_id = row.payload_json["document_id"]
     questions = list(row.payload_json.get("questions") or [])
     if questions:
         expected = digest({"artifact": row.id, "questions": questions})

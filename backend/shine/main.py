@@ -942,6 +942,12 @@ def create_app(
         if not shot:
             raise HTTPException(status_code=404, detail="Shot not found")
         project = require_project(db, shot.project_id)
+        # This is the compatible binding entry: it stays a pure replacement so a
+        # proven pre-submit recovery can repair a mapping without invalidating
+        # the shot.  The explicit adoption route (asset center) is the action
+        # that always creates a new revision.  A confirmed package is still
+        # protected: readiness compares the frozen reference set with the live
+        # bindings and refuses to start on any drift.
         set_shot_bindings(db, project, shot, body.bindings, actor=actor)
         db.commit()
         db.refresh(shot)
@@ -991,6 +997,9 @@ def create_app(
         # request does not bind) ride along on the job payload: they are hints
         # for the user, never a refusal.
         data["warnings"] = compiler_meta.get("warnings", [])
+        # A repeated submission is the same receipt, not a second render.  The
+        # flag lets the workbench scroll to the job it already queued.
+        data["replayed"] = bool(compiler_meta.get("replayed"))
         logger.info(
             "job_created id=%s project_id=%s provider=%s status=%s",
             job.id,

@@ -46,6 +46,11 @@ class Project(Base):
     allow_remote_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     quality_policy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # The script basis the person explicitly chose.  An import only adds a
+    # candidate: uploading a second file never silently becomes the production
+    # source.  ``None`` keeps the legacy rule (the newest document) for
+    # projects created before this identity existed.
+    current_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     assets: Mapped[list[Asset]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -224,6 +229,10 @@ class Job(Base):
     style_version_id: Mapped[str] = mapped_column(ForeignKey("style_versions.id"), nullable=False)
     preproduction_manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    #: Identity of *what was asked*, separate from the compiled request body.
+    #: A replay with the same request key compares this; it never pollutes the
+    #: RenderRequest payload the Worker validates.
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", index=True, nullable=False)
     state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

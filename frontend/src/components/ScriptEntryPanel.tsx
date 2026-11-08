@@ -5,6 +5,7 @@ import {
   listCreativeBriefs, listScriptDocuments, saveCreativeBrief, uploadScriptDocument,
   type CreativeBrief,
 } from '../api';
+import { OutlineConfirmationPanel } from './OutlineConfirmationPanel';
 
 const TASK_STATUS_LABELS: Record<string, string> = {
   QUEUED: '排队中（常驻 Worker 会接着处理）',
@@ -31,6 +32,10 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
 }) {
   const [briefs, setBriefs] = useState<CreativeBrief[]>([]);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string; source_format: string }>>([]);
+  // The outline step lives on this page: a script is not "imported and done",
+  // it becomes usable when its outline is confirmed.  The selected document is
+  // an explicit choice — importing another file only adds a candidate.
+  const [selectedDocumentId, setSelectedDocumentId] = useState('');
   const [idea, setIdea] = useState('');
   const [extra, setExtra] = useState('');
   const [busy, setBusy] = useState(false);
@@ -53,6 +58,9 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
     if (announced.current === null) announced.current = new Set(finishedDocuments(briefRows));
     setBriefs(briefRows);
     setDocuments(docRows);
+    setSelectedDocumentId((current) => (
+      current && docRows.some((row) => row.id === current) ? current : (docRows[0]?.id ?? '')
+    ));
   }, [projectId]);
 
   useEffect(() => { void load().catch(() => undefined); }, [load]);
@@ -171,8 +179,14 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
         </label>
         {documents.length > 0 && <ul className="script-doc-list">
           {documents.slice(0, 6).map((row) => <li key={row.id}>
-            <b>{row.filename}</b>
-            <span>{row.source_format === 'idea' ? '（由创意简报生成）' : ''} {row.sha256.slice(0, 8)}</span>
+            <button type="button"
+              className={selectedDocumentId === row.id ? 'script-doc active' : 'script-doc'}
+              aria-pressed={selectedDocumentId === row.id}
+              onClick={() => setSelectedDocumentId(row.id)}>
+              <b>{row.filename}</b>
+              <span>{row.source_format === 'idea' ? '（由创意简报生成）' : ''} {row.sha256.slice(0, 8)}</span>
+              {selectedDocumentId === row.id && <em>当前依据</em>}
+            </button>
           </li>)}
         </ul>}
         <button type="button" className="subtle-button" disabled={busy}
@@ -181,6 +195,13 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
         </button>
       </div>
     </div>
+    {selectedDocumentId && <OutlineConfirmationPanel
+      key={`outline-${projectId}-${selectedDocumentId}`}
+      projectId={projectId}
+      documentId={selectedDocumentId}
+      documentHash={documents.find((row) => row.id === selectedDocumentId)?.sha256 ?? ''}
+      onMessage={onMessage}
+    />}
     {problem && <p className="form-error">{problem}</p>}
   </section>;
 }

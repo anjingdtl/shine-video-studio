@@ -91,16 +91,23 @@ COMFY_GRAPH = {
             "seed": 0,
             "duration": 6.0,
             "reference_picture_1": "",
+            "reference_subject_1": "",
+            "reference_subject_2": "",
         },
     },
     "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},
 }
 
+# A real Ref2VA profile maps every reference family the shot can bind.  A
+# fixture that only maps a bare picture cannot actually dispatch the shots the
+# director package freezes, so the package readiness correctly refuses it.
 COMFY_PARAM_MAP = {
     "positive_prompt": "1.inputs.positive_prompt",
     "seed": "1.inputs.seed",
     "duration": "1.inputs.duration",
     "reference_picture_1": "1.inputs.reference_picture_1",
+    "reference_subject_1": "1.inputs.reference_subject_1",
+    "reference_subject_2": "1.inputs.reference_subject_2",
 }
 
 
@@ -340,6 +347,8 @@ def create_job(client: TestClient, project_id: str, shot_id: str, **kwargs) -> d
 def register_workflow_profile(client: TestClient, **overrides) -> dict:
     body = {
         "name": overrides.pop("name", f"test-profile-{id(overrides)}"),
+        # Default is text-only: a test that binds references must ask for the
+        # multi-reference profile explicitly, exactly like a real project must.
         "mode": "T2VA",
         "graph": overrides.pop("graph", COMFY_GRAPH),
         "parameter_map": overrides.pop("parameter_map", COMFY_PARAM_MAP),

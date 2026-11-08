@@ -328,7 +328,10 @@ it('人物对不上时给出人物对照，并可确认名图后从导演这一�
   expect(screen.getByRole('region', { name: '分镜交接状态' })).toHaveTextContent('导演尚未启动');
   expect(screen.getByRole('progressbar')).toHaveValue(1);
   expect(submitted).toHaveLength(1);
-  expect(submitted[0].confirm_characters).toBe(true);
+  // Designing continues without the matching step: a missing master is a
+  // material requirement, so the UI no longer asks the server to stop.
+  expect(submitted[0].confirm_characters).toBe(false);
+  // A backend that still answers the legacy state is handled the same way.
   expect(stub.callsOf('POST', /character-binding\/proposal$/)[0].body)
     .toEqual({ breakdown_artifact_id: 'b-2' });
   await user.click(screen.getByRole('button', { name: /确认并写入名字/ }));

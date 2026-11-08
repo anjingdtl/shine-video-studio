@@ -274,6 +274,11 @@ class CreateJob(APIModel):
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
     output: OutputSpec | None = None
+    #: Stable client identity of this submission.  A double click, a retried
+    #: POST or a second browser tab that repeats the same request replays the
+    #: same receipt instead of queueing a second render.  A different request
+    #: under the same key is a 409, never a silent substitution.
+    request_key: str | None = Field(default=None, min_length=1, max_length=120)
     # Repair policy of the contract that owns this job.  ``None`` keeps the
     # project default; a frozen director package sets both explicitly so the
     # jobs of its run never inherit a later project-level change.

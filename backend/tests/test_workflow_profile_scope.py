@@ -263,7 +263,12 @@ def test_a_project_local_profile_matches_a_published_revision_by_exact_graph_ide
 
 
 def test_old_database_copy_upgrade_preserves_profiles_and_job_references(tmp_path, monkeypatch):
-    """Old DB at f140a0030001: upgrade keeps profile ids, content and job refs."""
+    """Old DB one revision before head: upgrade keeps profile ids, content and job refs.
+
+    The fixture starts at ``f180b0040001`` rather than a much older schema: the
+    ORM can only write columns the schema actually has, so the sample sits at the
+    immediate predecessor of the migration under test (``jobs.request_fingerprint``).
+    """
     from alembic import command
     from shine.db import make_engine, make_session_factory
     from tests.test_alembic import alembic_config
@@ -273,7 +278,7 @@ def test_old_database_copy_upgrade_preserves_profiles_and_job_references(tmp_pat
     monkeypatch.setenv("SHINE_DATABASE_URL", url)
     monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
     config = alembic_config(db_path)
-    command.upgrade(config, "f140a0030001")
+    command.upgrade(config, "f180b0040001")
 
     engine = make_engine(url)
     factory = make_session_factory(engine)

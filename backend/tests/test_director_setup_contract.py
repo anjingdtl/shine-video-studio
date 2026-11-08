@@ -81,7 +81,11 @@ def test_shipped_service_uses_real_install_contract(prep, monkeypatch):
         assert row.payload['approved_by'] == 'local-user'
         assert requests[-1]['body'] == {'plan_hash': row.sha256, 'executor': 'local'}
         assert row.sha256 != plan['sha256']
-    assert client.post(requests[-1]['url'], json=requests[-1]['body'], headers=LOCAL).status_code == 409
+    # A repeated execute is the same receipt: queueing is re-attachable, so a
+    # lost response never becomes a second physical installation.
+    replay = client.post(requests[-1]['url'], json=requests[-1]['body'], headers=LOCAL)
+    assert replay.status_code == 202, replay.text
+    assert replay.json()['attempt_id'] == result['attempt_id']
 
 
 def test_shipped_service_uses_real_instance_approval_and_state_machine(prep, monkeypatch):

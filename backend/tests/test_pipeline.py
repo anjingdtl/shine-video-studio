@@ -385,7 +385,7 @@ def test_volume_storyboard_draft_and_handoff(api):
         )
         assert applied.status_code == 200, applied.text
         shot_total += len(applied.json()["shot_ids"])
-    profile = register_workflow_profile(client)
+    profile = register_workflow_profile(client, mode="Ref2VA")
     handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                           json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert handoff.status_code == 201, handoff.text

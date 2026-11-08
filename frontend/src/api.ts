@@ -399,6 +399,8 @@ export type Journey = {
   project_id: string;
   stages: JourneyStage[];
   next_stage: string | null;
+  /** The exact package/run every production view must project. */
+  scope?: { package_id: string | null; package_revision: number | null; run_id: string | null; shot_count: number };
   package: { id: string; revision: number; status: string; stale: boolean } | null;
   episode_plan: { id: string; version: number; episodes: number } | null;
   run: {
@@ -490,8 +492,13 @@ export type RunEvent = {
   id: number; kind: string; message: string; payload: Record<string, unknown>; created_at: string;
 };
 
-export const getJourney = (projectId: string) =>
-  api<Journey>(`/projects/${projectId}/journey`);
+export const getJourney = (projectId: string, scope?: { packageId?: string | null; runId?: string | null }) => {
+  const query = new URLSearchParams();
+  if (scope?.packageId) query.set('package_id', scope.packageId);
+  if (scope?.runId) query.set('run_id', scope.runId);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return api<Journey>(`/projects/${projectId}/journey${suffix}`);
+};
 
 export const listEpisodePlans = (projectId: string) =>
   api<EpisodePlan[]>(`/projects/${projectId}/episode-plans`);

@@ -101,6 +101,56 @@ ACTIVE_STAGES = frozenset(
 LEASE_SECONDS = 300
 
 
+def normalized_storage_root(value: str | None) -> str:
+    """One physical directory has exactly one identity on this host."""
+    import os as _os
+
+    if not value:
+        return ""
+    return _os.path.normcase(_os.path.realpath(_os.path.abspath(value)))
+
+
+def plan_target_key(plan) -> str:
+    """The physical work a plan owns: the directory it writes and the bytes.
+
+    Two plans in two browser tabs, or in two projects, that would write the
+    same files into the same root share this key.  The key is what makes the
+    second one a re-attach or a conflict instead of a second download.
+    """
+    payload = plan.payload or {}
+    pinned = payload.get("target_key")
+    if pinned:
+        return pinned
+    from shine.comfyops.deployment import target_identity
+
+    return target_identity(
+        payload.get("storage_root"), payload.get("executor"), payload.get("packages", [])
+    )
+
+
+def active_attempts(db):
+    """Every live attempt, with the plan it belongs to."""
+    from shine.comfyops.models import InstallationPlan
+
+    attempts = db.scalars(
+        select(InstallationAttempt).where(
+            or_(
+                InstallationAttempt.stage.in_(sorted(ACTIVE_STAGES)),
+                and_(
+                    InstallationAttempt.stage.is_(None),
+                    InstallationAttempt.status == "SUBMIT_INTENT",
+                ),
+            )
+        )
+    ).all()
+    rows = []
+    for attempt in attempts:
+        plan = db.get(InstallationPlan, attempt.plan_id)
+        if plan is not None:
+            rows.append((attempt, plan))
+    return rows
+
+
 def _iso(value):
     return value.isoformat() if value else None
 
@@ -155,11 +205,44 @@ def active_attempt_query(plan_id: str):
 
 
 def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str, extra=None) -> InstallationAttempt:
-    """Create the persistent attempt.  Nothing is downloaded here."""
-    if db.scalar(active_attempt_query(plan.id).limit(1)):
-        raise ValueError("INSTALL_ATTEMPT_ACTIVE")
+    """Create the persistent attempt.  Nothing is downloaded here.
+
+    The exclusive right belongs to the *physical target*, not to one plan row:
+    a second tab, a second project or a fresh browser session that asks for the
+    same bytes in the same directory either re-attaches to the one live attempt
+    (same plan hash) or is refused with a conflicting identity.  Two attempts
+    can never write the same files at the same time.
+    """
+    existing_id = db.scalar(active_attempt_query(plan.id).limit(1))
+    if existing_id:
+        # The same plan asked again (a lost receipt, a refreshed tab) gets the
+        # one attempt it already owns.  Queueing is the re-attachable receipt,
+        # not a second piece of physical work.
+        return db.get(InstallationAttempt, existing_id)
+    target_key = plan_target_key(plan)
+    target_root = normalized_storage_root((plan.payload or {}).get("storage_root"))
+    for existing, existing_plan in active_attempts(db):
+        if plan_target_key(existing_plan) == target_key:
+            add_audit(
+                db,
+                actor,
+                "LOCAL_INSTALL_REATTACHED",
+                "installation_attempt",
+                existing.id,
+                {"plan_id": plan.id, "owner_plan_id": existing_plan.id,
+                 "target_key": target_key},
+                project_id=plan.project_id,
+            )
+            return existing
+        # The same physical directory cannot receive two different component
+        # sets at once: two writers would interleave into the same files.
+        if target_root and normalized_storage_root(
+            (existing_plan.payload or {}).get("storage_root")
+        ) == target_root:
+            raise ValueError("INSTALL_TARGET_CONFLICT")
     payload = {
         "plan_hash": plan_hash,
+        "target_key": target_key,
         "queued_at": str(utcnow()),
         "actor": actor,
         "executor": plan.payload.get("executor"),

@@ -60,10 +60,17 @@ def _plan_public(row: DirectorEpisodePlan) -> dict[str, Any]:
 
 
 @router.get("/projects/{project_id}/journey")
-def project_journey(project_id: str, db: DBSession) -> dict[str, Any]:
-    """The seven-stage completion state, derived from the ledger only."""
+def project_journey(project_id: str, db: DBSession, package_id: str | None = None,
+                    run_id: str | None = None) -> dict[str, Any]:
+    """The seven-stage completion state, derived from the ledger only.
+
+    ``package_id`` (and optionally ``run_id``) names the exact scope every
+    production, playback and delivery view must project.  Without it the newest
+    package is the scope; an unknown id is a clear 404 with the package ids the
+    project really has, never a silent fallback to a different revision.
+    """
     project = require_project(db, project_id)
-    return compute_journey(db, project)
+    return compute_journey(db, project, package_id=package_id, run_id=run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -161,18 +168,35 @@ class EpisodePlanBody(APIModel):
 
 
 def _confirmed_outline(db, project_id: str):
-    from shine.models import AgentArtifact
+    """The confirmed outline of the *current* script basis.
 
-    return db.scalars(
-        select(AgentArtifact)
-        .where(
-            AgentArtifact.project_id == project_id,
-            AgentArtifact.kind == "StoryOutline",
-            AgentArtifact.stale.is_(False),
-            AgentArtifact.approved_at.isnot(None),
-        )
-        .order_by(AgentArtifact.created_at.desc())
-    ).first()
+    A project can hold several imported scripts.  The plan is derived from the
+    outline that belongs to the basis the person selected, never from whichever
+    outline happens to be newest.
+    """
+    from shine.director.package import _outline_for_document, current_script_basis
+    from shine.models import AgentArtifact, Project
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return None
+    basis = current_script_basis(db, project)
+    if basis["document"] is None:
+        # A project without any imported document (an idea written straight
+        # into the storyboard, or a package that predates provenance) keeps
+        # its original outline contract: there is no document to be wrong about.
+        return db.scalars(
+            select(AgentArtifact)
+            .where(
+                AgentArtifact.project_id == project_id,
+                AgentArtifact.kind == "StoryOutline",
+                AgentArtifact.stale.is_(False),
+                AgentArtifact.approved_at.isnot(None),
+            )
+            .order_by(AgentArtifact.created_at.desc())
+        ).first()
+    outline = _outline_for_document(db, project_id, basis["document"])
+    return outline if outline is not None and outline.approved_at else None
 
 
 def _outline_sections(outline) -> list[dict[str, Any]]:

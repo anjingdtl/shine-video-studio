@@ -389,10 +389,31 @@ def register_catalog_packages(db, catalog: dict, requested: list[str]) -> dict:
     return rows
 
 
+def target_identity(storage_root: str | None, executor: str | None, packages: list[dict]) -> str:
+    """The physical work identity: one directory, one component closure.
+
+    A plan is not the owner of an installation — the target it writes is.  The
+    identity is deliberately independent of project id, plan id and approval
+    timestamps so two tabs or two projects that ask for the same bytes in the
+    same directory resolve to the same physical work.
+    """
+    from shine.comfyops.installation import normalized_storage_root
+
+    return graph_hash({
+        "storage_root": normalized_storage_root(storage_root),
+        "executor": executor,
+        "packages": [
+            {"id": package.get("id"), "hash": package.get("hash")}
+            for package in packages
+        ],
+    })
+
+
 def create_install_plan(db, settings: Settings, catalog: dict, requested: list[str],
                         project_id: str, disk_free: int, *,
                         variant: dict | None = None,
-                        qualification: dict | None = None) -> InstallationPlan:
+                        qualification: dict | None = None,
+                        configuration: dict | None = None) -> InstallationPlan:
     """Assemble a LOCAL_ISOLATED install plan from the pinned catalog.
 
     Reuses the same payload contract as the manual /comfyops/install-plans path,
@@ -444,7 +465,42 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
         } if variant else None,
         "qualification": qualification,
         "download_breakdown": download_breakdown(catalog, requested),
+        # The chosen combination is part of the approved payload: the person
+        # approving the plan approves the same configuration the card showed.
+        "configuration": configuration or {"h3_video": True, "image_prep": False},
     }
+    payload["target_key"] = target_identity(
+        payload["storage_root"], payload["executor"], payload["packages"]
+    )
+    # Repeating the same plan in another tab returns the plan that is already
+    # awaiting approval instead of creating a second row for the same work.
+    # An approved plan keeps its own approval; a new request that arrives after
+    # approval is resolved by the attempt-level target ownership below.
+    existing_plan = next(
+        (
+            row
+            for row in db.scalars(
+                select(InstallationPlan).where(
+                    InstallationPlan.project_id == project_id,
+                    InstallationPlan.status == "AWAITING_APPROVAL",
+                )
+            ).all()
+            if (row.payload or {}).get("target_key") == payload["target_key"]
+            and (row.payload or {}).get("configuration") == payload["configuration"]
+            # A cache that changed since the plan was assembled changes the
+            # download this approval covers; reusing the stale number would
+            # approve bytes the host no longer has to fetch.
+            and (row.payload or {}).get("download_bytes") == payload["download_bytes"]
+            and (row.payload or {}).get("cached_bytes") == payload["cached_bytes"]
+        ),
+        None,
+    )
+    if existing_plan is not None:
+        add_audit(db, "comfyops", "DEPLOYMENT_INSTALL_PLAN_REUSED", "installation_plan", existing_plan.id,
+                  {"hash": existing_plan.sha256, "target_key": payload["target_key"]},
+                  project_id=project_id)
+        db.commit()
+        return existing_plan
     row = InstallationPlan(
         project_id=project_id, payload=payload, sha256=graph_hash(payload), status="AWAITING_APPROVAL"
     )

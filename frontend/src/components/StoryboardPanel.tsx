@@ -247,7 +247,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       const body: Record<string, unknown> = {
         allow_remote_text: consent,
         locked_story_facts: facts.split('\n').map(s => s.trim()).filter(Boolean),
-        confirm_characters: !options?.start_role && !options?.verifiedUnsent,
+        // A missing character master is a material *requirement* the storyboard
+        // raises, not a reason to stop designing.  The explicit "人物对照"
+        // action above stays available for a person who wants to match names to
+        // pictures first; the default chain continues into the director.
+        confirm_characters: false,
         ...(options?.start_role ? { start_role: options.start_role } : {}),
         ...(options?.resume_steps ? { resume_steps: options.resume_steps } : {}),
         ...(options?.replaceInterruptedTaskId ? { replace_interrupted_task_id: options.replaceInterruptedTaskId } : {}),

@@ -486,6 +486,7 @@ def make_render_request(
     spec: ShotSpec | None = None,
     continuity_artifact_id: str | None = None,
     offline: bool = False,
+    idempotency_key: str | None = None,
 ) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
@@ -616,6 +617,20 @@ def make_render_request(
             raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
         if profile.mode.lower() != compiled.mode.value.lower():
             raise HTTPException(status_code=422, detail="Workflow profile does not support the compiled H3 mode")
+        # A reference the profile has no slot for would be silently dropped by
+        # the submitted graph.  The single-shot job refuses it here, exactly as
+        # the run dispatcher and the package readiness do, so "startable" and
+        # "this shot can be queued" are the same statement.
+        from shine.comfy.provider import ComfyPendingWorkflowMapping, validate_reference_slots
+
+        try:
+            validate_reference_slots(profile.parameter_map or {}, manifest)
+        except ComfyPendingWorkflowMapping as exc:
+            raise HTTPException(status_code=422, detail={
+                "code": "PENDING_WORKFLOW_MAPPING",
+                "message": "生成方案没有为这些参考素材声明落点",
+                "details": exc.details,
+            }) from exc
         workflow_hash = profile.graph_sha256
         from shine.comfy.capabilities import HARD, VIDEO, continuity_capability, profile_metadata
 
@@ -659,7 +674,7 @@ def make_render_request(
     render_request = RenderRequest(
         model_checkpoint_id=profile.checkpoint_id if body.workflow_profile_id else "MiniMax-H3-Base",
         project_language=project.language,
-        idempotency_key=uuid4().hex,
+        idempotency_key=idempotency_key or uuid4().hex,
         shot_id=shot.id,
         shot_revision=shot.revision,
         style_version_id=style.id,
@@ -690,7 +705,26 @@ def make_render_request(
         if not report.passed:
             raise HTTPException(status_code=422, detail=report.model_dump(mode="json"))
     if not stored and bindings:
-        set_shot_bindings(db, project, shot, bindings)
+        # A request may not create shot bindings as a side effect.  The
+        # reference set a shot renders with is an explicit, auditable decision;
+        # otherwise one API call silently rewrites what every later take of
+        # this shot will use, and a retry looks identical to a new shot.
+        raise HTTPException(status_code=409, detail={
+            "code": "SHOT_BINDINGS_REQUIRED",
+            "message": "这个镜头还没有保存的参考绑定；先明确保存绑定，再创建任务",
+            "shot_id": shot.id,
+            "action": f"PUT /api/v1/shots/{shot.id}/bindings",
+            "references": [
+                {
+                    "asset_id": item.asset_id,
+                    "use_as": item.use_as.value,
+                    "role": item.role,
+                    "frame_role": item.frame_role.value if item.frame_role else None,
+                    "ordinal": item.ordinal,
+                }
+                for item in bindings
+            ],
+        })
     compiler_meta = {
         "mode": compiled.mode.value,
         "warnings": [*compiled.warnings, *transfer_warning_lines],
@@ -818,6 +852,44 @@ def resolve_continuity_source(
     return previous_job_id, f"continuity:{continuity.mode.value}"
 
 
+UNKNOWN_SUBMISSION_CODES = frozenset({
+    "COMFY_SUBMISSION_OUTCOME_UNKNOWN",
+    "COMFY_WORKER_EXCEPTION_WITH_EXTERNAL",
+    "SUBMISSION_OUTCOME_UNKNOWN",
+})
+"""A job whose external outcome is unknown owns its shot until reconciled."""
+
+
+def _digest(payload) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+def job_request_identity(project_id: str, shot: Shot, body: CreateJob) -> str:
+    """What the caller asked for, independent of when they asked it."""
+    return _digest({
+        "project": project_id,
+        "shot": shot.id,
+        "shot_revision": shot.revision,
+        "provider": body.provider.value,
+        "generation_mode": body.generation_mode.value if body.generation_mode else None,
+        "workflow_profile_id": body.workflow_profile_id,
+        "references": (
+            [
+                {
+                    "asset_id": row.asset_id,
+                    "use_as": row.use_as.value,
+                    "role": row.role,
+                    "frame_role": row.frame_role.value if row.frame_role else None,
+                }
+                for row in body.references
+            ] if body.references is not None else None
+        ),
+        "output": body.output.model_dump(mode="json") if body.output else None,
+        "self_review_scope": body.self_review_scope,
+        "depends_on": sorted(body.depends_on),
+    })
+
+
 def create_render_job(
     db: Session,
     project: Project,
@@ -836,8 +908,51 @@ def create_render_job(
     Worker both call it, so a job queued by the Worker obeys exactly the same
     asset, style, dependency and pre-production rules as a job queued by a
     person in the Web workbench.
+
+    A caller that supplies ``request_key`` gets exactly one receipt per
+    distinct request: the retry replays it, a different request under the same
+    key is refused.  An unreconciled uncertain submission blocks a *new*
+    attempt for the same shot until a person resolves it.
     """
     spec = spec or ShotSpec.model_validate(shot.spec)
+    request_digest = job_request_identity(project.id, shot, body)
+    if body.request_key:
+        # 64 hex characters: the column is String(64), and the digest already
+        # scopes the key by project and shot.
+        idempotency_key = _digest({
+            "project": project.id, "shot": shot.id, "key": body.request_key,
+        })
+        existing = db.scalar(select(Job).where(Job.idempotency_key == idempotency_key))
+        if existing is not None:
+            if existing.project_id != project.id or existing.shot_id != shot.id:
+                raise HTTPException(409, "JOB_IDEMPOTENCY_SCOPE_CONFLICT")
+            if (existing.request_fingerprint or "") != request_digest:
+                raise HTTPException(409, {
+                    "code": "JOB_REQUEST_CONFLICT",
+                    "message": "同一个请求编号被用于了不同的拍摄请求",
+                    "job_id": existing.id,
+                })
+            return existing, {"warnings": [], "replayed": True}
+    else:
+        idempotency_key = uuid4().hex
+    if body.provider == RenderProvider.COMFYUI:
+        uncertain = db.scalars(
+            select(Job).where(
+                Job.project_id == project.id,
+                Job.shot_id == shot.id,
+                Job.stale.is_(False),
+                Job.status == "NEEDS_REVIEW",
+                Job.failure_code.in_(sorted(UNKNOWN_SUBMISSION_CODES)),
+            ).order_by(Job.created_at.desc())
+        ).first()
+        if uncertain is not None:
+            raise HTTPException(409, {
+                "code": "SHOT_SUBMISSION_OUTCOME_UNKNOWN",
+                "message": "这个镜头上一次外部提交的结果还没核对，先对账再决定是否重拍",
+                "shot_id": shot.id,
+                "job_id": uncertain.id,
+                "action": "核对这次提交的结果，或在确认后显式重拍",
+            })
     if body.provider == RenderProvider.COMFYUI and not offline:
         for binding in shot.bindings:
             if (binding.asset.provenance or {}).get("offline_only"):
@@ -855,6 +970,7 @@ def create_render_job(
 
     request_data, _assets, compiler_meta = make_render_request(
         db, project, shot, body, spec=spec, continuity_artifact_id=continuity_artifact_id, offline=offline,
+        idempotency_key=idempotency_key,
     )
     if body.provider == RenderProvider.COMFYUI:
         from shine.quality.input_assessment import assessment_for_request
@@ -885,7 +1001,10 @@ def create_render_job(
         style_version_id=request_data.style_version_id,
         preproduction_manifest_hash=preproduction_hash,
         request=request_data.model_dump(mode="json"),
-        idempotency_key=request_data.idempotency_key,
+        # The identity of the ask lives beside the compiled request, never
+        # inside it: the Worker validates that payload as a RenderRequest.
+        request_fingerprint=request_digest,
+        idempotency_key=idempotency_key,
         status=initial_status,
         provider=body.provider.value,
         mock_scenario=body.mock_scenario.value,

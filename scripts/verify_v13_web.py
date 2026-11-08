@@ -266,7 +266,19 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             else None,
         )
         page.goto(ui_base, wait_until="networkidle")
-        page.locator("select").first.select_option(p)
+        # The project switcher lives on the production board; the default
+        # director page has its own document selectors, so "the first select"
+        # is not a stable way to choose a project.
+        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
+        page.get_by_label("切换项目").select_option(p)
+        # The outline step is on stage 1, next to the import: an imported script
+        # is not "done" until its outline is confirmed, and the workbench must
+        # not send the person to the stage-4 material panel to find it.
+        page.goto(f"{ui_base}#d/creative", wait_until="networkidle")
+        outline_panel = page.locator("#outline-confirm")
+        expect(outline_panel).to_contain_text("先把这版故事定下来", timeout=15000)
+        expect(outline_panel).to_contain_text("后台提取并归并总体大纲")
+        expect(page.locator(".script-doc.active")).to_contain_text("当前依据")
         # The director journey gives the style and master panels their own page
         # and keeps the pre-production panel in the expert layer. The script
         # navigates the way a user does instead of assuming one flat page.
@@ -278,6 +290,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             "button", name="批准并冻结", exact=True
         ).click()
         expect(page.locator("#style")).to_contain_text("已冻结 V1", timeout=15000)
+        # Confirming a master still lives on the production board's asset panel;
+        # the director pages use their own material workflow.  ``#assets`` must
+        # therefore stay unique (the plan page was renamed to ``#plan-stage``).
+        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
+        page.reload(wait_until="networkidle")
         masters = page.locator("#assets")
         master = masters.locator(".asset-row").filter(
             has_text="isolated-browser-upload.png"
@@ -793,8 +810,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--browser-path", type=Path, help="Use an already installed Chromium executable")
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="Temporary root. On Windows it must be outside the system drive, because the "
+             "installer refuses a deployment directory on C: by policy.",
+    )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+    if args.work_dir:
+        args.work_dir.mkdir(parents=True, exist_ok=True)
     uv = shutil.which("uv")
     npm = shutil.which("npm")
     if not uv or not npm:
@@ -805,7 +830,9 @@ def main():
     api_base = f"http://127.0.0.1:{api_port}"
     ui_base = f"http://127.0.0.1:{ui_port}"
     children = []
-    with tempfile.TemporaryDirectory(prefix="shine-v13-web-qa-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="shine-v13-web-qa-", dir=str(args.work_dir) if args.work_dir else None
+    ) as temporary:
         environment = dict(os.environ)
         environment.update(
             {
