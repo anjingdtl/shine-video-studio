@@ -1889,7 +1889,8 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
             # What this design asks the material library for: the characters
             # it names that have no approved master yet.  The storyboard is
             # finished; these are what the material step has to answer.
-            "missing_characters": [str(name) for name in (steps.get("draft_missing_characters") or [])],
+            "missing_characters": [str(name) for name in (
+                (result.get("material_requirements") or {}).get("characters") or [])],
             "camera_artifact_id": apply_info.get("camera_artifact_id"),
             "camera_sha256": (steps.get("cinematographer") or {}).get("sha256"),
             "continuity_artifact_id": apply_info.get("continuity_artifact_id"),

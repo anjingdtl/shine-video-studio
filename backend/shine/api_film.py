@@ -1051,21 +1051,16 @@ def generate_storyboard(
             "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
             "action": "CONFIRM_CHARACTER_BINDINGS_THEN_RESUME_DIRECTOR",
         }
-    if missing and not body.draft:
-        return {
-            "status": "BLOCKED_MISSING_MASTERS",
-            "script_source": source,
-            "steps": steps,
-            "missing_characters": missing,
-            "action": "UPLOAD_AND_APPROVE_MISSING_CHARACTER_MASTERS_THEN_REGENERATE",
-            "failed_role": "scriptwriter",
-            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+    # 分镜提出的是**需求**，不是素材：缺哪个角色主素材被如实记下来，交给
+    # 素材层去准备。剧本与分镜不因为素材库还没备齐而停下——素材是为
+    # 剧本和分镜服务的，需求先立起来，素材再跟上。落镜与导演包冻结仍然
+    # 会逐镜校验这些需求是否已被满足。
+    material_requirements: dict = {"characters": [], "note": ""}
+    if missing:
+        material_requirements = {
+            "characters": list(missing),
+            "note": "这些角色还没有已确认的主素材；请在素材层准备、确认并锁定后再落镜。",
         }
-    if missing and body.draft:
-        # A draft records the missing masters and continues: the person can
-        # read the whole draft before deciding to prepare assets.  Applying
-        # it still runs every production gate.
-        steps["draft_missing_characters"] = missing
 
     def _run_step(name: str, role: str, **kwargs) -> dict:
         """Run one crew role unless a resumed step already produced it."""
@@ -1244,7 +1239,8 @@ def generate_storyboard(
         "script_source": source,
         "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
         "steps": steps,
-        "missing_characters": [],
+        "missing_characters": list(missing),
+        "material_requirements": material_requirements,
         "rejections": [],
         "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),

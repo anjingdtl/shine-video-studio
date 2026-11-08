@@ -608,7 +608,13 @@ def test_unknown_storyboard_result_blocks_exact_replay_before_agent_calls(studio
     assert revised.json()["status"] == "PROPOSED"
 
 
-def test_storyboard_blocks_on_missing_character_masters(studio):
+def test_storyboard_proposes_the_material_requirement_instead_of_blocking(studio):
+    """分镜提出需求，需求交给素材层：剧本与分镜不因素材库没备齐而停下。
+
+    The missing master is a requirement the material layer has to answer,
+    not a reason to stop designing the shots.  The delivery gates still
+    refuse a shot whose character has no master.
+    """
     client, factory, tmp_path, settings = studio
     project_id, _style, registry = _studio_with_chain(client)
     client.app.state.mock_llm_responder = _responder(registry)
@@ -628,10 +634,15 @@ def test_storyboard_blocks_on_missing_character_masters(studio):
     response = _storyboard_request(client, project_id)
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["status"] == "BLOCKED_MISSING_MASTERS"
+    # The design completes; the missing master is a requirement, not a blocker.
+    assert body["status"] in {"PROPOSED", "NEEDS_REVIEW"}, (
+        body["status"], body.get("failed_role"), body.get("rejections"))
     assert body["missing_characters"] == ["Chen"]
-    # The chain stopped: no director/camera/continuity/edit artifacts exist.
-    assert set(body["steps"]) == {"scriptwriter"}
+    assert body["material_requirements"]["characters"] == ["Chen"]
+    # The chain ran: the director, the camera plan and the continuity report
+    # all exist, so the storyboard is really designed.
+    assert {"scriptwriter", "director", "cinematographer"} <= set(body["steps"]), body["steps"]
+    # Nothing is applied: the shot still waits for the material.
     shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
     assert shots == []
 

@@ -277,13 +277,27 @@ Windows 本机能力上，与四阶段流水线无关；旧基线 `7081104` 的�
 - `frontend/src/test/setupEntry.test.tsx`（阶段条次序断言）
 - 既有测试同步：阶段 id 列表、阶段名、阶段序号。
 
+**需求链（用户补充的架构，已落地）**：
+
+分镜提出的是**需求**，不是素材 —— 缺哪个角色主素材被如实记下来随答案交给素材层，由素材层准备；
+剧本与分镜不因为素材库还没备齐而停下。
+
+- 校验层不再因缺主素材拒绝出方案（`shine/agents/film.py`：原来的
+  `CHARACTER_MASTER_BINDING_REQUIRED` 硬拒绝已移除，改为由需求链承担）。
+- 需求清单由 API 层如实计算（`_character_coverage`：出场人物 + 台词说话方，按 `entity_id` 解析），
+  随答案的 `material_requirements` 交给素材层。
+- 拦住未满足需求的是两道门：**拍摄素材准备**这一步（`SHOT_CHARACTER_MASTER_MISSING`）与
+  **导演包冻结**（同一判定）。
+- 四阶段面板按同一顺序：单元回执带 `missing_characters`，面板如实显示，并在素材备齐前
+  不提供「应用这一场」。
+- 回归：`backend/tests/test_storyboard.py::test_storyboard_proposes_the_material_requirement_instead_of_blocking`
+  （缺主素材时链不停止、需求被记录、镜头仍未落）。
+
 **尚未做的边界（明确记录，不假装完成）**：
 
-1. **正式（非草稿）分镜路径仍会因缺角色主素材而拒绝出方案**（`api_film.py:1054-1063` 的
-   `BLOCKED_MISSING_MASTERS`）。导演层的四阶段走草稿路径（缺角色只记录、不阻断），所以导演流程
-   已符合新次序；要让专家层的正式分镜也符合，需要把「角色需求以名字形式进入镜头 spec」这条
-   契约落进去 —— 下一轮。
-2. **落镜仍是服务端硬门禁**：`apply-camera` 要求参考素材已批准锁定（`api_film.py:445-450` 的
+1. **落镜仍是服务端硬门禁**：`apply-camera` 要求参考素材已批准锁定（`api_film.py:445-450` 的
    `ASSET_APPROVAL_CHANGED`）。这与新次序一致（先备素材、再落镜），但还没有「落镜前按角色名
    核对」的具名拒绝。
+2. **道具需求还没有载体**：角色需求走 `beat.characters`（名字），场景需求走大纲的 production_sections，
+   但「这一镜要哪件道具」目前没有类型化字段，只能落在镜头的 `required_asset_ids`（已存在的素材）。
 3. 导演模式还没有「逐镜绑定素材」的操作界面（逐镜绑定目前只在专业层的 `ShotPanel`）。

@@ -753,6 +753,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - **台词说话方=必须绑定的人物**：服务器把 dialogue speaker 计入 required_characters，
   旧提示词只要求"出场人物"。修复：说话方即使从不露面，其已批准主素材也必须出现在该片段
   `asset_ids`（S8 三次 `CHARACTER_MASTER_BINDING_REQUIRED` 实证）。
+  **2026-11-08 变更**：这条门禁不再拦在 crew 链里，而是**需求链**的一环 —— 分镜提出需求
+  （缺哪个角色主素材），需求随答案交给素材层，拦住未满足需求的是「拍摄素材准备」这一步与
+  导演包冻结（`SHOT_CHARACTER_MASTER_MISSING`）。说到的仍是"说话方必须可绑定"。
   以上两处回归都在 `backend/tests/test_crew_prompt_contract.py`；真实链以 S3/S8
   "修前连败、修后一次过"验证。证据：`docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md`。
 - **仅声音的说话实体**（如念名单的"广播"）产品未建模：`_character_coverage` 按人物名解析
