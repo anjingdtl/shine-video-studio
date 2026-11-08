@@ -114,11 +114,14 @@ def _authoring_task(db, project_id: str, role_id: str, trace: dict) -> str:
     """The human authoring task every imported artifact must point at."""
     from shine.models import AgentTaskRecord
 
+    unique = {"role": role_id, "project": project_id, "trace": trace,
+              "at": utcnow().isoformat()}
+    identity = digest(unique)
     row = AgentTaskRecord(
         project_id=project_id, role_id=role_id,
-        request_identity=digest({"role": role_id, "project": project_id, "trace": trace}),
-        input_hash=digest({"role": role_id, "project": project_id, "trace": trace}),
-        asset_manifest_hash=digest({"role": role_id, "project": project_id, "trace": trace}),
+        request_identity=identity,
+        input_hash=identity,
+        asset_manifest_hash=identity,
         rulepack_id=PIPELINE_VERSION, rulepack_hash=digest(PIPELINE_VERSION),
         model_profile_id="human", model_id="human", status="SUCCEEDED",
         trace={"external_outcome": "NOT_SENT", **trace},
@@ -1180,6 +1183,18 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     if len(shots) != len(shot_ids):
         raise ValueError("PIPELINE_STORYBOARD_SHOTS_MISSING")
     script_now = digest(serialize_volume_script(db, project_id, volume_id))
+    # When the person confirmed EpisodeScript contracts, their section set
+    # must cover the volume's confirmed sections exactly; a partial set is
+    # an incomplete episode contract, not a handoff-able state.
+    episode_contracts = confirmed_episode_scripts(db, project_id, volume_id)
+    if episode_contracts:
+        contracted = set()
+        for contract in episode_contracts:
+            contracted.update(e["section_id"] for e in contract.payload_json["sections"])
+        volume_sections = {s["production_section_id"]
+                           for s in (outline.payload_json.get("production_sections") or [])}
+        if contracted != volume_sections:
+            raise ValueError("PIPELINE_EPISODE_COVERAGE_INCOMPLETE")
     if record.get("script_sha256") and record["script_sha256"] != script_now:
         raise ValueError("PIPELINE_SCRIPT_CHANGED_SINCE_STORYBOARD")
     episodes: list[dict] = []
@@ -1246,6 +1261,7 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
         "script_sha256": script_now,
         "shot_count": len(shot_ids),
         "episode_count": len(episodes),
+        "episode_script_ids": [c.id for c in episode_contracts],
     }
     task_id = _authoring_task(db, project_id, "four_stage_handoff", {"volume": volume_id})
     artifact = AgentArtifact(
@@ -1336,3 +1352,111 @@ def adjust_volume_boundaries(db, project_id: str, base_plan_id: str,
               artifact.id, {"base_plan": base_plan_id, "volume_count": len(adjusted)},
               project_id=project_id)
     return artifact
+
+
+EPISODE_SCRIPT_KIND = "FourStageEpisodeScript"
+
+
+def build_episode_script(db, project_id: str, volume_id: str, title: str,
+                         section_ids: list[str]) -> AgentArtifact:
+    """One episode's script as an independent, confirmable contract.
+
+    The contract pins the exact confirmed SceneScript revisions it covers
+    and records the continuity check across them: each scene's continuity_in
+    should answer the previous scene's continuity_out.  A mismatch is an
+    advisory issue for the person, never a silent rewrite of either scene.
+    """
+    plan = current_volume_plan(db, project_id)
+    if plan is None:
+        raise ValueError("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
+    outline = _volume_outline(db, project_id, volume_id)
+    if outline is None:
+        raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
+    sections = outline.payload_json.get("production_sections") or []
+    by_id = {s["production_section_id"]: s for s in sections}
+    if not section_ids or any(sid not in by_id for sid in section_ids):
+        raise ValueError("PIPELINE_EPISODE_SECTIONS_INVALID")
+    entries = []
+    issues = []
+    previous_out = None
+    for order, sid in enumerate(section_ids, start=1):
+        script = current_scene_script(db, project_id, volume_id, sid)
+        if script is None:
+            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + sid)
+        payload = script.payload_json
+        continuity_in = payload.get("continuity_in", "")
+        if previous_out is not None and continuity_in and previous_out:
+            if continuity_in.strip() != previous_out.strip():
+                issues.append({
+                    "after_section_id": sid,
+                    "code": "CONTINUITY_IN_MISMATCH",
+                    "expected_from_previous_out": previous_out,
+                    "actual_continuity_in": continuity_in,
+                })
+        entries.append({
+            "order": order,
+            "section_id": sid,
+            "scene_key": payload.get("scene_key", sid),
+            "script_artifact_id": script.id,
+            "script_sha256": script.sha256,
+            "text": payload.get("text", ""),
+            "estimated_seconds": payload.get("estimated_seconds", 0),
+        })
+        previous_out = payload.get("continuity_out", "")
+    episode_payload = {
+        "schema_version": "1.0",
+        "volume_id": volume_id,
+        "title": title[:120],
+        "outline_sha256": outline.sha256,
+        "sections": entries,
+        "planned_seconds": sum(e["estimated_seconds"] or 0 for e in entries),
+        "continuity_issues": issues,
+        "continuity_status": "verified" if not issues else "needs_review",
+    }
+    task_id = _authoring_task(db, project_id, "four_stage_episode_script",
+                              {"volume": volume_id, "sections": len(entries)})
+    artifact = AgentArtifact(
+        project_id=project_id, kind=EPISODE_SCRIPT_KIND, schema_version="1.0",
+        payload_json=episode_payload, sha256=digest(episode_payload),
+        producer_role="four_stage_episode_script", source_task_id=task_id,
+        input_revision_ids=[outline.id] + [e["script_artifact_id"] for e in entries],
+    )
+    db.add(artifact)
+    db.flush()
+    add_audit(db, "local-user", "PIPELINE_EPISODE_SCRIPT_DRAFTED", "agent_artifact",
+              artifact.id, {"volume_id": volume_id, "sections": len(entries),
+                            "continuity": episode_payload["continuity_status"]},
+              project_id=project_id)
+    return artifact
+
+
+def confirm_episode_script(db, project_id: str, artifact_id: str, expected_sha256: str) -> AgentArtifact:
+    """A person confirms one episode's script contract; the pointer names it."""
+    from shine.models import AppSetting
+
+    artifact = db.get(AgentArtifact, artifact_id)
+    if not artifact or artifact.project_id != project_id or artifact.kind != EPISODE_SCRIPT_KIND:
+        raise ValueError("PIPELINE_EPISODE_SCRIPT_NOT_FOUND")
+    if artifact.sha256 != expected_sha256:
+        raise ValueError("PIPELINE_EPISODE_SCRIPT_SHA_MISMATCH")
+    volume_id = str(artifact.payload_json.get("volume_id"))
+    key = _pointer_key(project_id, f"episode-script:{volume_id}:{artifact_id}")
+    row = AppSetting(key=key, value={"artifact_id": artifact.id, "sha256": artifact.sha256})
+    db.merge(row)
+    artifact.approved_by = "local-user"
+    artifact.approved_at = utcnow()
+    db.flush()
+    add_audit(db, "local-user", "PIPELINE_EPISODE_SCRIPT_CONFIRMED", "agent_artifact",
+              artifact.id, {"sha256": artifact.sha256,
+                            "continuity": artifact.payload_json.get("continuity_status")},
+              project_id=project_id)
+    return artifact
+
+
+def confirmed_episode_scripts(db, project_id: str, volume_id: str) -> list:
+    """The confirmed EpisodeScript contracts of one volume, in creation order."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == EPISODE_SCRIPT_KIND).order_by(AgentArtifact.created_at)).all()
+    return [r for r in rows if r.approved_at is not None
+            and r.payload_json.get("volume_id") == volume_id]

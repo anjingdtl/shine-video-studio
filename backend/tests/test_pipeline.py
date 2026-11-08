@@ -638,3 +638,64 @@ def test_oversized_single_chapter_volume_carries_a_warning(api):
         codes = [w["code"] for w in plan.payload_json.get("warnings", [])]
         assert "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes
         assert plan.payload_json["coverage"]["complete"] is True
+
+
+def test_episode_script_contract_with_continuity_check(api):
+    """The episode contract pins script revisions and records continuity issues."""
+    client, factory, settings = api
+    pid = create_project(client, "分集合同")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    text = "第一章 甲\n浪。\n第二章 乙\n浪。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        tid = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=tid)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_scene_responder("Lin：你来了。"))
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+    for _ in range(4):
+        if not pipeline.run_pending_pipeline_task(factory, settings, "w1", gw):
+            break
+    from sqlalchemy import select as _sel
+    sections = []
+    with factory() as db:
+        rows = db.scalars(_sel(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE)).all()
+        for r in rows:
+            artifact = db.get(AgentArtifact, r.trace["artifact_id"])
+            sections.append(artifact.payload_json["section_id"])
+            pipeline.confirm_scene_script(db, pid, artifact.id, artifact.sha256)
+        db.commit()
+    assert len(sections) == 2
+    with factory.begin() as db:
+        contract = pipeline.build_episode_script(db, pid, volume_id, "第一集", sections)
+        # the mock answers every scene with the same fixed continuity, so the
+        # cross-scene check MUST record the mismatch instead of passing it
+        assert contract.payload_json["continuity_status"] == "needs_review"
+        assert contract.payload_json["continuity_issues"], "the mismatch must be named"
+        pipeline.confirm_episode_script(db, pid, contract.id, contract.sha256)
+    # a partial contract set blocks the handoff's episode coverage
+    with factory.begin() as db:
+        partial = pipeline.build_episode_script(db, pid, volume_id, "残集", sections[:1])
+        pipeline.confirm_episode_script(db, pid, partial.id, partial.sha256)
+    with factory() as db:
+        assert len(pipeline.confirmed_episode_scripts(db, pid, volume_id)) == 2

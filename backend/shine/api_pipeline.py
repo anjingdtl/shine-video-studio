@@ -267,3 +267,39 @@ def adjust_boundaries_route(project_id: str, artifact_id: str, body: dict, db: D
         raise _http_from_value_error(exc) from None
     return {"volume_plan_id": artifact.id, "sha256": artifact.sha256,
             "volumes": artifact.payload_json["volumes"]}
+
+
+@router.post("/projects/{project_id}/pipeline/volumes/{volume_id}/episode-scripts", status_code=201)
+def build_episode_script_route(project_id: str, volume_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
+    """Draft one episode's script contract from confirmed scene scripts."""
+    from shine.director.pipeline import build_episode_script
+
+    require_project(db, project_id)
+    title = str((body or {}).get("title") or "").strip()
+    section_ids = (body or {}).get("section_ids")
+    if not title or not isinstance(section_ids, list) or not section_ids:
+        raise HTTPException(422, "PIPELINE_EPISODE_SECTIONS_INVALID")
+    try:
+        artifact = build_episode_script(db, project_id, volume_id, title, section_ids)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return {"artifact_id": artifact.id, "sha256": artifact.sha256,
+            "continuity_issues": artifact.payload_json.get("continuity_issues", []),
+            "planned_seconds": artifact.payload_json.get("planned_seconds")}
+
+
+@router.post("/projects/{project_id}/pipeline/episode-scripts/{artifact_id}/confirm", status_code=200)
+def confirm_episode_script_route(
+        project_id: str, artifact_id: str, body: dict, db: DBSession,
+        operator: Operator) -> dict:
+    require_project(db, project_id)
+    try:
+        artifact = pipeline.confirm_episode_script(db, project_id, artifact_id, body.get("expected_sha256"))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return {"confirmed": True, "sha256": artifact.sha256,
+            "continuity_status": artifact.payload_json.get("continuity_status")}
