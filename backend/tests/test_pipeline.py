@@ -838,6 +838,7 @@ def test_bible_queue_only_reads_this_project_outlines(api):
     pid = create_project(client, "本卷")
     other = create_project(client, "别卷")
     doc = _make_doc(factory, pid, "第一章 甲\n浪。")
+    other_doc = _make_doc(factory, other, "第一章 别\n浪。")
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
         plan = pipeline.plan_volumes(db, pid, doc_r)
@@ -845,7 +846,7 @@ def test_bible_queue_only_reads_this_project_outlines(api):
         pipeline.materialize_volume_documents(db, pid, plan.id)
         volume_doc = pipeline._volume_document(db, pid, plan.payload_json["volumes"][0]["volume_id"])
         _outline_artifact(db, pid, volume_doc, _sections_for(volume_doc.text))
-        other_doc = _make_doc(factory, other, "第一章 别\n浪。")
+    with factory.begin() as db:
         other_row = db.get(ProjectDocument, other_doc.id)
         other_outline = _outline_artifact(db, other, other_row, _sections_for(other_row.text))
     gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_bible_responder())
