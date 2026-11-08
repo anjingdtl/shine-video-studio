@@ -78,6 +78,16 @@ class PlannedEpisode(APIModel):
     section_ids: list[str] = Field(default_factory=list, max_length=MAX_SHOTS_PER_EPISODE)
     planned_seconds: float = Field(gt=0, allow_inf_nan=False)
     boundary_note: str = Field(default="", max_length=500)
+    episode_script_id: str = Field(
+        default="",
+        max_length=80,
+        description=(
+            "The confirmed EpisodeScript contract this episode was built from. "
+            "It is the episode's own identity: a delivery without it was cut "
+            "by the server, not confirmed by the person."
+        ),
+    )
+    episode_script_sha256: str = Field(default="", max_length=64)
 
 
 class EpisodePlanPayload(APIModel):

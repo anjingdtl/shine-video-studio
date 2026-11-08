@@ -73,13 +73,15 @@ function since(iso: string | null | undefined): string {
 type Props = {
   projectId: string;
   mode: Mode;
+  /** Open the panel on this exact package instead of the newest one. */
+  packageId?: string | null;
   demo?: boolean;
   workflowProfiles: WorkflowProfile[];
   onMessage: (text: string, kind: 'success' | 'error') => void;
   onRefresh?: () => void;
 };
 
-export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProfiles, onMessage, onRefresh }: Props) {
+export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, workflowProfiles, onMessage, onRefresh }: Props) {
   const [journey, setJourney] = useState<Journey | null>(null);
   const [plans, setPlans] = useState<EpisodePlan[]>([]);
   const [packages, setPackages] = useState<DirectorPackage[]>([]);
@@ -91,6 +93,9 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
+  const [selectedPackageId, setSelectedPackageId] = useState<string>(packageId ?? '');
+  // A deep link names one exact package; the selection follows it.
+  useEffect(() => { setSelectedPackageId(packageId ?? ''); }, [packageId]);
   const [episodePage, setEpisodePage] = useState(0);
   const mounted = useRef(true);
 
@@ -112,7 +117,11 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
   const confirmedPlan = plans.find((row) => row.status === 'CONFIRMED') ?? null;
   const latestPlanIsSections = latestPlan?.payload.mode === 'sections';
   const latestPlanMaterialized = !!latestPlan && latestPlan.payload.episodes.every((row) => row.shot_ids.length > 0);
-  const latestPackage = packages[0] ?? null;
+  // The package the person is looking at: the one they asked for, or the
+  // newest one.  The delivery receipt of a volume names it exactly.
+  const latestPackage = (selectedPackageId
+    ? packages.find((row) => row.id === selectedPackageId)
+    : null) ?? packages[0] ?? null;
   const activeRun = run;
 
   const load = useCallback(async () => {
@@ -137,7 +146,9 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
         setRun(null);
         setEvents([]);
       }
-      const packageRow = packageRows[0] ?? null;
+      const packageRow = (selectedPackageId
+        ? packageRows.find((row) => row.id === selectedPackageId)
+        : null) ?? packageRows[0] ?? null;
       if (packageRow) {
         setReadiness(await getPackageReadiness(packageRow.id));
         if (!profileId) setProfileId(packageRow.binding?.workflow_profile_id ?? '');
@@ -148,7 +159,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
     } catch (exc) {
       if (mounted.current) setError(exc instanceof Error ? exc.message : String(exc));
     }
-  }, [projectId, profileId]);
+  }, [projectId, profileId, selectedPackageId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -323,6 +334,14 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
         </div>
 
         <div className="run-binding-row">
+          {packages.length > 1 && <label>选择导演包
+            <select value={latestPackage?.id ?? ''}
+              onChange={(event) => setSelectedPackageId(event.target.value)}>
+              {packages.map((row) => <option key={row.id} value={row.id}>
+                第 {row.revision} 版 · {statusText(row.status)} · {row.episode_count} 集 · {row.shot_count} 镜
+              </option>)}
+            </select>
+          </label>}
           <label>本机生成方案
             <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
               <option value="">请选择…</option>

@@ -93,12 +93,14 @@ const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page:
   { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
 ];
 
-function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string } {
+function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string; packageId?: string } {
   const raw = hash.replace(/^#/, '');
   if (raw.startsWith('d/')) {
-    const page = raw.slice(2) as DirectorPage;
+    const [path, query = ''] = raw.slice(2).split('?');
+    const packageId = new URLSearchParams(query).get('package') ?? undefined;
+    const page = path as DirectorPage;
     if (Object.prototype.hasOwnProperty.call(DIRECTOR_PAGE_LABELS, page)) {
-      return { ui: 'director', view: 'production', page };
+      return { ui: 'director', view: 'production', page, packageId };
     }
     return { ui: 'director', view: 'production', page: 'projects' };
   }
@@ -144,6 +146,9 @@ function App() {
     return saved === 'expert' ? 'expert' : 'director';
   });
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
+  /** The exact package a deep link named, so the workbench opens that one. */
+  const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
+    () => resolveHash(window.location.hash).packageId);
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
   /** 制作页单任务聚焦：默认自动落在第一个未完成阶段，用户可用阶段条/摘要行切换；
    *  自动阶段推进时回到正轨。同一时刻只展开当前该做的那一个阶段。 */
@@ -272,6 +277,7 @@ function App() {
   function goToDirectorPage(page: DirectorPage) {
     setUi('director');
     setDirectorPage(page);
+    setDirectorPackageId(undefined);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
   }
@@ -353,11 +359,20 @@ function App() {
 
   /** 浏览器前进/后退：按地址栏恢复视图与锚点。 */
   useEffect(() => {
+    const onHash = () => {
+      const target = resolveHash(window.location.hash);
+      if (target.ui !== 'director') return;
+      setUi('director');
+      setDirectorPage(target.page);
+      setDirectorPackageId(target.packageId);
+    };
+    window.addEventListener('hashchange', onHash);
     const onPop = () => {
       const target = resolveHash(window.location.hash);
       if (target.ui === 'director') {
         setUi('director');
         setDirectorPage(target.page);
+        setDirectorPackageId(target.packageId);
         return;
       }
       setUi('expert');
@@ -375,7 +390,11 @@ function App() {
       }
     };
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    window.addEventListener('hashchange', onHash);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('hashchange', onHash);
+    };
   });
 
   /** 启动深链（如安装器落地 #setup 或 #v/production/assets）。 */
@@ -903,6 +922,7 @@ function App() {
                   key={`package-${projectId}`}
                   projectId={projectId}
                   mode="package"
+                  packageId={directorPackageId}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
@@ -915,6 +935,7 @@ function App() {
                   key={`run-${projectId}`}
                   projectId={projectId}
                   mode="run"
+                  packageId={directorPackageId}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}

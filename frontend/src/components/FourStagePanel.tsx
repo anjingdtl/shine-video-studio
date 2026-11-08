@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
-  applyCameraPlan, confirmBible, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
-  editSceneScript, generateStoryboardDraft, getPipelineOverview, getTextConsentScope,
-  grantTextConsent, importPipelineSource, listScriptDocuments, queueBible, queueVolumeOutline,
-  queueVolumeScripts, reconcileFilmTask, requestVolumeHandoff, resumePipelineTask,
-  startPipelineNewAttempt,
-  type PipelineOverview, type PipelineTaskSummary, type StoryboardDraft, type StoryboardUnit,
+  adjustVolumeBoundaries, applyCameraPlan, buildEpisodeScript, confirmBible,
+  confirmEpisodeScript, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
+  editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
+  getTextConsentScope, grantTextConsent, importPipelineSource, listScriptDocuments,
+  openDirectorPackage, queueBible, queueVolumeOutline, queueVolumeScripts,
+  reconcilePipelineTask, requestVolumeHandoff, resumePipelineTask, startPipelineNewAttempt,
+  type PipelineOverview, type PipelineTaskSummary, type StoryboardUnit,
   type WorkflowProfileLite,
 } from '../api';
 
@@ -35,12 +36,9 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   // applying and delivering must never drift to a different volume than the
   // one the person is looking at.
   const [selectedVolumeId, setSelectedVolumeId] = useState<string>('');
-  const [drafts, setDrafts] = useState<Record<string, StoryboardDraft>>({});
-  const [handoff, setHandoff] = useState<{
-    volumeId: string; packageId: string; reused: boolean;
-    startable: boolean; blockers: Array<{ code: string; message?: string }>;
-    episodes: number; shots: number;
-  } | null>(null);
+  const [episodeTitle, setEpisodeTitle] = useState('');
+  const [episodeSections, setEpisodeSections] = useState<string[]>([]);
+  const [boundaryMode, setBoundaryMode] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -61,9 +59,10 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   // Switching project must not keep another project's selection or receipt.
   useEffect(() => {
     setSelectedVolumeId('');
-    setDrafts({});
-    setHandoff(null);
+    setHandoffProfile('');
     setVolumePlanDraft(null);
+    setEpisodeTitle('');
+    setEpisodeSections([]);
   }, [projectId]);
 
   // 有活跃任务时每 4 秒轮询真实进度；空闲时停止，避免无谓请求。
@@ -120,19 +119,26 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   const activeTasks = overview.active_tasks ?? [];
   const currentVolumeId = selectedVolumeId || volumes[0]?.volume_id || '';
   const currentVolume = volumes.find((v) => v.volume_id === currentVolumeId);
-  const currentDraft = drafts[currentVolumeId];
+  // The draft is read from the server, never from local state: a refresh, a
+  // crash or a restart must show the same pending work.
+  const draftUnits = currentVolume?.storyboard?.units ?? [];
+  const draftStatus = currentVolume?.storyboard?.status ?? null;
+  const receipt = currentVolume?.handoff ?? null;
+  const contracts = currentVolume?.episode_contracts ?? [];
 
-  async function draftAndRecord(volumeId: string) {
+  async function draftAndRecord(volumeId: string, sectionIds?: string[]) {
     setBusy(true);
     try {
-      const result = await generateStoryboardDraft(projectId, volumeId);
-      setDrafts((previous) => ({ ...previous, [volumeId]: result }));
+      const result = sectionIds && sectionIds.length > 0
+        ? await generateStoryboardDraftFor(projectId, volumeId, sectionIds)
+        : await generateStoryboardDraft(projectId, volumeId);
+      const proposed = result.units.filter((u) => u.status === 'PROPOSED').length;
       if (result.status === 'PROPOSED') {
-        onMessage(`分镜草案已生成：${result.units.length} 个场次单元，请逐场应用`, 'success');
+        onMessage('分镜草案已生成：' + proposed + ' 个场次单元，请逐场应用', 'success');
       } else {
         const codes = (result.rejections ?? []).map((row) => row.rejection_reason_code ?? row.code);
-        onMessage(`分镜草案未全部完成：${result.units.filter((u) => u.status === 'PROPOSED').length}`
-          + `/${result.units.length} 个单元已生成；${codes[0] ?? '请查看原因'}`, 'error');
+        onMessage('分镜草案未全部完成：' + proposed + '/' + result.units.length
+          + ' 个单元已生成；' + (codes[0] ?? '请查看原因'), 'error');
       }
       await refresh();
     } catch (error) {
@@ -146,36 +152,45 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
       () => applyCameraPlan(projectId, unit.camera_artifact_id!, unit.continuity_artifact_id),
       (applied) => {
         const shotIds = (applied as { shot_ids?: string[] })?.shot_ids ?? [];
-        setDrafts((previous) => {
-          const draft = previous[currentVolumeId];
-          if (!draft) return previous;
-          return { ...previous, [currentVolumeId]: {
-            ...draft,
-            units: draft.units.map((row) => row.unit_id === unit.unit_id
-              ? { ...row, applied: true, shot_ids: shotIds } : row),
-          } };
-        });
+        onMessage('这一场的镜头已应用：' + shotIds.length + ' 个', 'success');
       });
   }
 
-  async function reconcileAndRetry(volumeId: string, draft: StoryboardDraft) {
+  /**
+   * Reconcile one failed unit and continue only that unit.
+   *
+   * The server decides whether the call may be repeated: only a proven
+   * "not sent" may continue, an unknown outcome stays unknown and is
+   * reported as it is.  The failed unit is never silently skipped and the
+   * other units are never re-run.
+   */
+  async function reconcileUnit(unit: StoryboardUnit) {
     setBusy(true);
     try {
-      // Only a provably unsent call may be retried: the server decides that,
-      // and records the conclusion before the request is attempted again.
-      for (const rejection of draft.rejections ?? []) {
+      const conclusions: string[] = [];
+      let mayContinue = false;
+      for (const rejection of unit.rejections ?? []) {
         if (!rejection.task_id || rejection.state_version === undefined) continue;
-        if (rejection.external_outcome === 'UNKNOWN') continue;
-        // A stale version is refused by the server; that refusal is the
-        // answer, and the next refresh shows the task's real state.
-        await reconcileFilmTask(projectId, rejection.task_id, rejection.state_version)
-          .catch(() => undefined);
+        const result = await reconcilePipelineTask(
+          projectId, rejection.task_id, rejection.state_version);
+        conclusions.push(result.note ?? result.outcome);
+        if (result.resubmittable) mayContinue = true;
       }
-      onMessage('已记录这些调用未发送，正在重新尝试', 'success');
+      if (conclusions.length === 0) {
+        onMessage('这一项没有可核对的调用记录，请查看任务详情', 'error');
+        return;
+      }
+      await refresh();
+      if (!mayContinue) {
+        onMessage(conclusions.join('；'), 'error');
+        return;
+      }
+      onMessage(conclusions.join('；') + ' 正在只重做这一场', 'success');
+      setBusy(false);
+      await draftAndRecord(unit.section_id ? currentVolumeId : currentVolumeId, [unit.section_id]);
     } catch (error) {
       onMessage((error as Error).message, 'error');
     } finally { setBusy(false); }
-    await draftAndRecord(volumeId);
   }
 
   return (
@@ -197,21 +212,36 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
             const consentBlocked = task.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED'
               && !!task.consent_document_id;
             const actions = task.available_actions ?? [];
+            // A progress bar without a value is an indeterminate animation: it
+            // keeps moving even after the work is done.  Only a task that is
+            // really in flight gets one.
+            const inFlight = task.status === 'QUEUED' || task.status === 'RUNNING';
             return (
               <div className="progress-row" key={task.task_id}>
                 <span className="progress-name">{ROLE_LABELS[task.role] ?? task.role}</span>
-                <progress aria-label={`${ROLE_LABELS[task.role] ?? task.role}进度`}
-                  value={pct ?? undefined} max={100} />
+                {inFlight && <progress
+                  aria-label={(ROLE_LABELS[task.role] ?? task.role) + '进度'}
+                  value={pct ?? undefined} max={100} />}
                 <span className="progress-detail">
                   {task.status === 'NEEDS_REVIEW'
-                    ? `待核对：${task.error_code ?? task.stage_label}`
-                    : `${task.stage_label}${pct !== null ? ` · ${task.progress_done}/${task.progress_total}` : ''}`}
-                  {task.attempt > 1 ? ` · 第 ${task.attempt} 次尝试` : ''}
+                    ? '待核对：' + (task.error_code ?? task.stage_label)
+                    : (task.status === 'FAILED' || task.status === 'PAUSED')
+                      ? '已停止：' + (task.error_code ?? task.stage_label)
+                      : task.stage_label + (inFlight && pct !== null ? ' · ' + task.progress_done + '/' + task.progress_total : '')}
+                  {task.attempt > 1 ? ' · 第 ' + task.attempt + ' 次尝试' : ''}
+                  {task.reconciliation?.outcome ? ' · 核对结论：' + task.reconciliation.outcome : ''}
                 </span>
                 {consentBlocked && (
                   <button type="button" className="must-button" disabled={busy}
                     onClick={() => authorizeAndContinue(task)}>
                     授权本机文本发送并继续
+                  </button>
+                )}
+                {actions.includes('reconcile') && !consentBlocked && (
+                  <button type="button" className="secondary-button" disabled={busy}
+                    onClick={() => run(() => reconcilePipelineTask(
+                      projectId, task.task_id, task.state_version))}>
+                    核对这一项
                   </button>
                 )}
                 {actions.includes('resume') && !consentBlocked && (
@@ -268,6 +298,26 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
           </div>
         )}
         {overview.volume_plan_confirmed && <span className="muted">母本已导入，分卷方案已确认。</span>}
+        {overview.volume_plan_confirmed && (
+          <div className="row">
+            <button type="button" className="secondary-button" disabled={busy}
+              onClick={() => setBoundaryMode(!boundaryMode)}>
+              {boundaryMode ? '收起卷界调整' : '调整卷界'}
+            </button>
+            <span className="muted small">
+              卷界改一次就产生新的分卷方案版本，旧版本保留为历史。
+            </span>
+          </div>
+        )}
+        {boundaryMode && overview.volume_plan && (
+          <VolumeBoundaryEditor
+            projectId={projectId}
+            plan={overview.volume_plan}
+            busy={busy}
+            onMessage={onMessage}
+            onDone={() => { setBoundaryMode(false); refresh(); }}
+          />
+        )}
       </div>
 
       {/* 全局面板共用同一个「当前卷」 */}
@@ -302,7 +352,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                 {v.latest_outline && !v.outline_confirmed && (
                   <button type="button" className="must-button" disabled={busy}
                     title={v.latest_outline.questions.length
-                      ? `待确认问题：${v.latest_outline.questions.join('；')}`
+                      ? '待确认问题：' + v.latest_outline.questions.join('；')
                       : ''}
                     onClick={() => run(() => confirmVolumeOutline(
                       projectId, v.volume_id, v.latest_outline!.artifact_id,
@@ -335,6 +385,15 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
           </div>
         )}
         {overview.bible_confirmed && <span className="muted">全局故事蓝图已确认。</span>}
+        {overview.bible_confirmed && (overview.bible_status?.blockers ?? []).length > 0 && (
+          <div className="required-action">
+            <b>蓝图与当前大纲已不一致：</b>
+            <ul>
+              {(overview.bible_status?.blockers ?? []).map((code) => <li key={code}>{code}</li>)}
+            </ul>
+            <span className="muted small">请重新生成并确认蓝图，再继续生产。</span>
+          </div>
+        )}
       </div>
 
       {/* ③ 剧本编写 */}
@@ -399,36 +458,87 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                 disabled={busy || !currentVolume.scripts_confirmed}
                 title={currentVolume.scripts_confirmed ? '' : '先确认该卷全部场次剧本'}
                 onClick={() => draftAndRecord(currentVolume.volume_id)}>
-                {currentDraft ? '重新生成分镜草案' : '生成分镜草案'}
+                {draftUnits.length > 0 ? '重新生成本卷分镜草案' : '生成分镜草案'}
               </button>
               <span className="muted small">按场逐次调用五个工种；项目再长也不会被单次输入上限卡住。</span>
             </div>
-            {currentDraft && (
+            {draftUnits.length > 0 && (
               <ul className="volume-list">
-                {currentDraft.units.map((unit) => (
+                {draftUnits.map((unit) => (
                   <li key={unit.unit_id}>
-                    <span>{unit.unit_id}</span>
+                    <span>{unit.title || unit.unit_id}
+                      {unit.chunk_count && unit.chunk_count > 1
+                        ? '（第 ' + unit.chunk_index + '/' + unit.chunk_count + ' 段）' : ''}</span>
                     <span className={unit.applied ? 'ok' : 'pending'}>
                       {unit.status === 'PROPOSED'
                         ? (unit.applied
-                          ? `镜头已应用（${unit.shot_ids?.length ?? 0} 个）`
+                          ? '镜头已应用（' + (unit.shot_ids?.length ?? 0) + ' 个）'
                           : '待应用镜头')
-                        : `未完成：${unit.status ?? '未知'}`}
+                        : '未完成：' + (unit.status ?? '未知')}
                     </span>
                     {unit.status === 'PROPOSED' && !unit.applied && (
                       <button type="button" className="must-button" disabled={busy}
                         onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
                     )}
+                    {unit.status !== 'PROPOSED' && (
+                      <button type="button" className="secondary-button" disabled={busy}
+                        title="只有核对得出「确实没有发出」才允许只重做这一场。"
+                        onClick={() => reconcileUnit(unit)}>核对并只重做这一场</button>
+                    )}
+                    {unit.status !== 'PROPOSED' && (unit.rejections ?? []).length > 0 && (
+                      <span className="muted small">
+                        {(unit.rejections ?? []).map((row) => row.rejection_reason_code ?? row.code).join('；')}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
-            {currentDraft && currentDraft.status !== 'PROPOSED' && (
+            {draftUnits.length > 0 && draftStatus && draftStatus !== 'PROPOSED' && (
+              <div className="muted small">
+                有单元没有完成。每一项都要单独核对：只有「确认未发送」后才会重做这一场，不会重跑整卷。
+              </div>
+            )}
+            {contracts.length > 0 && (
               <div className="row">
-                <span className="muted small">有单元没有完成。只有「确认未发送」后才会重新发起同样的调用。</span>
-                <button type="button" className="secondary-button" disabled={busy}
-                  onClick={() => reconcileAndRetry(currentVolume.volume_id, currentDraft)}>
-                  核对未发送并重试
+                <span>分集合同：</span>
+                {contracts.map((contract) => (
+                  <span key={contract.artifact_id} className={contract.current ? 'ok' : 'pending'}>
+                    {contract.title ?? '未命名分集'}（{contract.sections.length} 场）
+                    {contract.current ? '已确认且有效' : '已失效：' + (contract.reason ?? '')}
+                  </span>
+                ))}
+              </div>
+            )}
+            {currentVolume.scripts_confirmed > 0 && (
+              <div className="row">
+                <label htmlFor="four-stage-episode-title">按场分集：</label>
+                <input id="four-stage-episode-title" aria-label="分集标题" value={episodeTitle}
+                  onChange={(event) => setEpisodeTitle(event.target.value)}
+                  placeholder="例如：第1集" />
+                <span className="muted small">勾选要归入这一集的场次</span>
+                {currentVolume.scripts.map((script) => (
+                  <label key={script.section_id} className="muted small">
+                    <input type="checkbox" checked={episodeSections.includes(script.section_id)}
+                      onChange={(event) => setEpisodeSections((previous) => (
+                        event.target.checked
+                          ? [...previous, script.section_id]
+                          : previous.filter((id) => id !== script.section_id)))} />
+                    {script.scene_key} {script.title ?? ''}
+                  </label>
+                ))}
+                <button type="button" className="secondary-button"
+                  disabled={busy || !episodeTitle.trim() || episodeSections.length === 0}
+                  onClick={() => run(async () => {
+                    const drafted = await buildEpisodeScript(
+                      projectId, currentVolume.volume_id, episodeTitle.trim(), episodeSections);
+                    const confirmed = await confirmEpisodeScript(
+                      projectId, drafted.artifact_id, drafted.sha256);
+                    setEpisodeTitle('');
+                    setEpisodeSections([]);
+                    return confirmed;
+                  }, () => onMessage('这一集的分集合同已确认', 'success'))}>
+                  生成并确认这一集
                 </button>
               </div>
             )}
@@ -449,32 +559,31 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                       package_id: string; reused: boolean; episodes: number; shots: number;
                       readiness: { startable: boolean; blockers: Array<{ code: string; message?: string }> };
                     };
-                    setHandoff({
-                      volumeId: currentVolume.volume_id, packageId: body.package_id,
-                      reused: body.reused, startable: body.readiness.startable,
-                      blockers: body.readiness.blockers, episodes: body.episodes, shots: body.shots,
-                    });
                     if (body.readiness.startable) {
                       onMessage(body.reused
                         ? '这一卷已经交付过，返回的是同一份交付回执'
-                        : `卷交付完成：${body.episodes} 集 / ${body.shots} 个镜头，可到导演包页创建生产运行`,
+                        : '卷交付完成：' + body.episodes + ' 集 / ' + body.shots + ' 个镜头，可到导演包页创建生产运行',
                         'success');
                     } else {
-                      onMessage(`卷交付已建立，但有 ${body.readiness.blockers.length} 项待解决`, 'error');
+                      onMessage('卷交付已建立，但有 ' + body.readiness.blockers.length + ' 项待解决', 'error');
                     }
                   })}>
                 交付本卷制作
               </button>
             </div>
-            {handoff && handoff.volumeId === currentVolume.volume_id && (
+            {receipt && (
               <div className="muted small">
                 <div>
-                  交付回执：导演包 {handoff.packageId.slice(0, 8)} · {handoff.episodes} 集 ·{' '}
-                  {handoff.shots} 个镜头{handoff.reused ? '（复用既有交付，未重复建包）' : ''}
+                  交付回执：导演包 {receipt.package_id}（第 {receipt.package_revision} 版 · {receipt.episodes} 集 ·{' '}
+                  {receipt.shots} 个镜头 · {receipt.episode_basis ?? '未知依据'}）
                 </div>
-                {handoff.blockers.length > 0 && (
+                <div className="row">
+                  <button type="button" className="secondary-button" disabled={busy}
+                    onClick={() => openDirectorPackage(receipt.package_id)}>打开这个导演包</button>
+                </div>
+                {receipt.readiness.blockers.length > 0 && (
                   <ul>
-                    {handoff.blockers.map((blocker) => (
+                    {receipt.readiness.blockers.map((blocker) => (
                       <li key={blocker.code}>{blocker.message ?? blocker.code}</li>
                     ))}
                   </ul>
@@ -488,5 +597,46 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
         </div>
       </div>
     </section>
+  );
+}
+
+/** The volume boundary editor: a new plan revision the person confirms. */
+function VolumeBoundaryEditor({ projectId, plan, busy, onMessage, onDone }: {
+  projectId: string;
+  plan: { artifact_id: string; sha256: string; volumes: Array<{ title: string; start_offset: number; end_offset: number }> };
+  busy: boolean;
+  onMessage: (message: string, kind?: 'error' | 'success') => void;
+  onDone: () => void;
+}) {
+  const [rows, setRows] = useState(plan.volumes.map((volume) => ({ ...volume })));
+  return (
+    <div className="edit-box">
+      {rows.map((row, index) => (
+        <div className="row" key={index}>
+          <input aria-label={'第 ' + (index + 1) + ' 卷标题'} value={row.title}
+            onChange={(event) => setRows((previous) => previous.map((item, at) => (
+              at === index ? { ...item, title: event.target.value } : item)))} />
+          <input aria-label={'第 ' + (index + 1) + ' 卷起点'} type="number" value={row.start_offset}
+            onChange={(event) => setRows((previous) => previous.map((item, at) => (
+              at === index ? { ...item, start_offset: Number(event.target.value) } : item)))} />
+          <input aria-label={'第 ' + (index + 1) + ' 卷终点'} type="number" value={row.end_offset}
+            onChange={(event) => setRows((previous) => previous.map((item, at) => (
+              at === index ? { ...item, end_offset: Number(event.target.value) } : item)))} />
+        </div>
+      ))}
+      <div className="row">
+        <button type="button" className="must-button" disabled={busy}
+          onClick={async () => {
+            try {
+              const adjusted = await adjustVolumeBoundaries(projectId, plan.artifact_id, rows);
+              onMessage('新的分卷方案已生成，请到第①步确认', 'success');
+              onDone();
+              void adjusted;
+            } catch (error) {
+              onMessage((error as Error).message, 'error');
+            }
+          }}>生成新的分卷方案</button>
+      </div>
+    </div>
   );
 }

@@ -969,3 +969,33 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 验收：临时清空 bypass 白名单后做了一次**真实**推送，服务端返回
   `GH013: Cannot update this protected ref`，远端 `main` sha 未变（零污染）；恢复白名单后
   所有者推送非 `main` 分支成功。证据见 `docs/BRANCH_PROTECTION.md`。
+## 2026-11-08 四阶段二轮复验（R01–R08 关闭）
+
+- **一次授权只买一次新尝试**：`start_pipeline_new_attempt` 在建新任务的**同一事务**里用
+  `state_version` + `status` fence 消费授权，旧行写 `new_attempt_authorization`；重复调用
+  返回同一回执。旧行保持 `UNKNOWN` 历史且不再提供动作。审计分开：`PIPELINE_TASK_NEW_ATTEMPT`
+  与 `PIPELINE_TASK_RECONCILED`。
+- **四阶段任务有角色匹配的对账入口**：`POST /projects/{id}/pipeline/tasks/{id}/reconcile`。
+  只有 `NOT_SENT_PROVEN` 才允许普通继续；`UNKNOWN_REQUIRES_NEW_ATTEMPT` 只允许「核对后
+  重新发送一次」。普通 resume 仍拒绝 UNKNOWN。
+- **分镜交付按「预期单元」核验，不按场次数**：`expected_storyboard_units` 由当前场次
+  revision、来源范围、chunk ordinal/hash 与连续性基线算出稳定单元清单；逐单元结果、失败、
+  剧组步骤与 apply 句柄存在 `four-stage-storyboard-units:{pid}:{vid}` 台账里。丢片、重复、
+  越界、失效、未应用、失败全部具名拒绝正式交付；局部 `section_ids` 重做只替换自己。
+- **交付快照才是复用键**：`delivery_snapshot` 绑定 unit/apply、镜头 revision+spec、绑定、
+  冻结风格、规则包与工作流图/参数映射；只有完全相同的快照才复用包。镜头升版产生新包，
+  旧包以 `SHOT_REVISION_CHANGED` 阻止新 Run 与未提交批次，历史仍可读。缺 lineage 的旧
+  **四阶段**包进入新生产前需重新交付（`CREATIVE_LINEAGE_MISSING`），普通旧导演包不受影响。
+- **正式分集交付保留 EpisodeScript 身份**：`PlannedEpisode.episode_script_id` 是类型化
+  字段，分集清单同时保留它。分集合同以**当前**大纲与场次剧本为准，被替代即具名拒绝；
+  `volume_scope` 只在没有任何已确认分集合同时作为兼容合同保留。
+- **蓝图依据是可验证的**：蓝图产物带 `basis`（有序 outline refs + plan revision）；确认、
+  读取、卷发布与包准入读同一个 `bible_basis_blockers`。草稿蓝图写出的场次在发布时与确认
+  蓝图比对主线/人物/世界/时间线/锁定事实/结局/跨卷开放项。
+- **面板渲染服务端状态**：四阶段面板不再把分镜草案放在本地 state，刷新/崩溃/重启后仍能看到
+  待应用镜头、失败与对账句柄、发布回执与**确切 package ID**；「核对并只重做这一场」只重做
+  该场；地址栏 `#d/package?package=<id>` 可直达指定导演包。
+- 验收：`backend/tests/test_four_stage_reacceptance.py`（R01–R06）、
+  `frontend/src/test/fourStageRecovery.test.tsx`（R07/R08）、
+  `scripts/verify_four_stage_browser.py`（隔离浏览器旅程）。
+  证据见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md`。
