@@ -49,6 +49,8 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
   const [selected, setSelected] = useState('');
   const [edl, setEdl] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 自动交付记录会长期累积：默认只展开最近 5 次，历史按需加载。 */
+  const [orderLimit, setOrderLimit] = useState(5);
   const [message, setMessage] = useState('');
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
@@ -186,7 +188,8 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     <GenerationSegmentsPanel key={projectId} projectId={projectId} fingerprint={`${jobFingerprint}:${refreshEpoch}`} />
 
     {orders.length > 0 && <div className="auto-delivery" aria-label="自动交付">
-      {[...orders].sort((a, b) => (utcMs(b.delivered_at ?? b.created_at) ?? 0) - (utcMs(a.delivered_at ?? a.created_at) ?? 0)).map((order, index) => {
+      {[...orders].sort((a, b) => (utcMs(b.delivered_at ?? b.created_at) ?? 0) - (utcMs(a.delivered_at ?? a.created_at) ?? 0))
+        .slice(0, orderLimit).map((order, index) => {
         const deliveredAt = utcMs(order.delivered_at ?? order.created_at);
         const timeLabel = deliveredAt != null
           ? new Date(deliveredAt).toLocaleString('zh-CN', { hour12: false })
@@ -211,6 +214,10 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
           ? <article className="settings-block latest" key={order.id}>{head}{body}</article>
           : <details className="history-order" key={order.id}><summary>{head}</summary>{body}</details>;
       })}
+      {orders.length > orderLimit && <button type="button" className="list-more"
+        onClick={() => setOrderLimit((limit) => limit + 5)}>
+        查看更早的交付记录（还有 {orders.length - orderLimit} 条）
+      </button>}
     </div>}
 
     <p>连续制作完成后，系统会自动整理并装配成片，无需人工填写。下面的手工装配保留给人工修订与补剪。</p>

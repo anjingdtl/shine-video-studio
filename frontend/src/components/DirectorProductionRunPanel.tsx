@@ -92,6 +92,8 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
   const [episodePage, setEpisodePage] = useState(0);
+  /** 进展日志只渲染最近几条：记录可以一直增长，页面高度不能跟着长。 */
+  const [eventLimit, setEventLimit] = useState(8);
   const mounted = useRef(true);
 
   // 剧本统筹先分集：大纲确认后即可按场次分集，不需要先有镜头；
@@ -282,7 +284,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
             <b>第 {latestPlan.version} 版 · {latestPlan.payload.episodes.length} 集
               {latestPlanIsSections ? ' · 按剧本场次' : ' · 按镜头'}</b>
             <span>{statusText(latestPlan.status)} · 目标 {latestPlan.payload.target_seconds} 秒
-              ± {latestPlan.payload.tolerance_seconds} 秒 · {latestPlan.sha256.slice(0, 8)}</span>
+              ± {latestPlan.payload.tolerance_seconds} 秒</span>
           </div>
           {latestPlan.status !== 'CONFIRMED' && <button className="must-button" disabled={busy !== ''} onClick={confirmPlan}>
             <Check size={13} /> 确认分集方案
@@ -295,6 +297,14 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           {confirmedPlan && confirmedPlan.version !== latestPlan.version && <span className="run-hint">
             当前确认的是第 {confirmedPlan.version} 版；这一版确认后会取代它。
           </span>}
+          <details className="tech-details">
+            <summary>技术详情：分集校验指纹</summary>
+            <div className="tech-details-body">
+              <span>方案编号 <code>{latestPlan.id}</code></span>
+              <span>清单指纹 <code>{latestPlan.sha256}</code></span>
+              <span>来源 <code>{latestPlan.source}</code></span>
+            </div>
+          </details>
         </div> : canPlan && <p className="empty-inline">还没有分集方案。先生成草案——它会覆盖全部场次（或全部镜头），不重不漏。</p>}
 
         {latestPlan && <ol className="run-episode-plan">
@@ -341,9 +351,7 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <div className="run-package-head">
             <div>
               <b>第 {latestPackage.revision} 版 · {latestPackage.episode_count} 集 · {latestPackage.shot_count} 镜</b>
-              <span>{statusText(latestPackage.status)}{latestPackage.stale ? ' · 已失效' : ''}
-                {' '}· 范围 {latestPackage.scope_digest.slice(0, 8)}
-                {' '}· 清单 {latestPackage.manifest_sha256.slice(0, 8)}</span>
+              <span>{statusText(latestPackage.status)}{latestPackage.stale ? ' · 已失效，需要重新生成' : ''}</span>
             </div>
             {latestPackage.status !== 'CONFIRMED' && <button className="must-button"
               disabled={busy !== '' || !readiness?.ready} onClick={confirmPackage}>
@@ -354,24 +362,34 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
           <dl className="run-facts">
             <div><dt>剧本</dt><dd>{latestPackage.script?.outline_confirmed ? '大纲已确认' : '无导入剧本（按分镜执行）'}</dd></div>
             <div><dt>风格</dt><dd>{latestPackage.style
-              ? `第 ${latestPackage.style.version} 版 · ${latestPackage.style.sha256.slice(0, 8)}` : '未冻结'}</dd></div>
+              ? `第 ${latestPackage.style.version} 版 · 已冻结` : '未冻结'}</dd></div>
             <div><dt>生成方案</dt><dd>{latestPackage.binding
-              ? `${latestPackage.binding.mode} · 图 ${latestPackage.binding.graph_sha256.slice(0, 8)}`
-              : '未绑定'}</dd></div>
+              ? latestPackage.binding.mode : '未绑定'}</dd></div>
             <div><dt>自动返工</dt><dd>{String(latestPackage.policy?.max_repairs_per_shot ?? '—')} 次/镜（有界）</dd></div>
           </dl>
 
           {readiness && <div className={`run-readiness ${readiness.startable ? 'ok' : readiness.ready ? 'warn' : 'bad'}`}>
             {readiness.startable
               ? <><Check size={13} /> 本机检查通过，可以启动整部作品生产</>
-              : <><AlertTriangle size={13} /> {readiness.ready ? '内容已满足，等待你确认导演包' : '还不能开拍'}（配置指纹 {readiness.config_fingerprint.slice(0, 8)}）</>}
+              : <><AlertTriangle size={13} /> {readiness.ready ? '内容已满足，等待你确认导演包' : '还不能开拍'}</>}
           </div>}
 
           {shownBlockers.length > 0 && <ul className="run-blockers">
             {shownBlockers.slice(0, 8).map((blocker, index) => <li key={`${blocker.code}-${index}`}>
-              <ShieldAlert size={12} /><span>{blocker.message}</span><code>{blocker.code}</code>
+              <ShieldAlert size={12} /><span>{blocker.message}</span>
             </li>)}
           </ul>}
+
+          <details className="tech-details">
+            <summary>技术详情：版本、范围与校验指纹</summary>
+            <div className="tech-details-body">
+              <span>导演包编号 <code>{latestPackage.id}</code></span>
+              <span>范围摘要 <code>{latestPackage.scope_digest}</code></span>
+              <span>清单指纹 <code>{latestPackage.manifest_sha256}</code></span>
+              <span>配置指纹 <code>{readiness?.config_fingerprint ?? '尚未检查'}</code></span>
+              <span>策略指纹 <code>{latestPackage.policy_hash}</code></span>
+            </div>
+          </details>
 
           {latestPackage.status === 'CONFIRMED' && readiness?.startable
             && (!run || !RUN_ACTIVE.includes(run.status)) && <button className="must-button wide"
@@ -452,9 +470,10 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
               <span className={`run-badge ${tone(episode.status)}`}>{statusText(episode.status)}</span>
             </div>
             {episode.batches.length > 0 && <div className="run-batches">
-              {episode.batches.map((batch) => <span key={batch.batch_key}
-                className={`run-batch ${tone(batch.status)}`} title={batch.failure_code ?? batch.series_id ?? ''}>
-                {batch.batch_key.replace(`${episode.episode_id}-`, '')} · {statusText(batch.status)}
+              {episode.batches.map((batch, index) => <span key={batch.batch_key}
+                className={`run-batch ${tone(batch.status)}`}
+                title={`${batch.batch_key} · ${batch.shot_count} 镜${batch.failure_code ? ` · ${batch.failure_code}` : ''}`}>
+                第 {index + 1} 批 · {statusText(batch.status)}
               </span>)}
             </div>}
             {episode.blocker_code && <div className="run-ep-blocker">
@@ -478,10 +497,14 @@ export function DirectorProductionRunPanel({ projectId, mode, demo, workflowProf
         <details className="advanced-fold run-events">
           <summary>最近进展（{events.length}）</summary>
           <ul>
-            {events.slice().reverse().map((event) => <li key={event.id}>
+            {events.slice().reverse().slice(0, eventLimit).map((event) => <li key={event.id}>
               <span>{event.message}</span><em>{since(event.created_at)}</em>
             </li>)}
           </ul>
+          {events.length > eventLimit && <button type="button" className="list-more"
+            onClick={() => setEventLimit((limit) => limit + 20)}>
+            显示更多（还有 {events.length - eventLimit} 条）
+          </button>}
         </details>
       </>}
     </section>}

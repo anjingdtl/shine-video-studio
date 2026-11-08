@@ -178,6 +178,8 @@ export default function ProductionSeriesPanel({
   const [working, setWorking] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [quality, setQuality] = useState<QualityTier>('fast');
+  /** 制作批次会越积越多：默认只展示最近 3 个，历史按需展开。 */
+  const [seriesLimit, setSeriesLimit] = useState(3);
 
   /** 一键为本作品登记生成方案：与启用向导第 6 阶段同一组接口（固定工作流登记 +
    *  运行配置），在本页原地完成，不再让用户跳去基础配置跑整个向导。
@@ -718,7 +720,8 @@ export default function ProductionSeriesPanel({
       <AlertTriangle size={17} className="required-icon" />
       <div className="required-text">
         <b>现在为什么不能开始制作</b>
-        <ul>{blockers.map(reason => <li key={reason}>{reason}</li>)}</ul>
+        <ul>{blockers.slice(0, 4).map(reason => <li key={reason}>{reason}</li>)}</ul>
+        {blockers.length > 4 && <small>还有 {blockers.length - 4} 项前置条件，处理完上面的会自动刷新。</small>}
         {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
       </div>
       {shots.length === 0 && <button type="button" className="must-button"
@@ -734,16 +737,15 @@ export default function ProductionSeriesPanel({
     </div>}
 
     {series.length > 0 && <div className="series-list">
-      {series.map((row) => (
+      {series.slice(0, seriesLimit).map((row) => (
         <article key={row.id} className={`series-block ${row.status.toLowerCase()}`}>
           <div className="series-head">
             <div>
               <b>{statusText[row.status] ?? row.status}</b>
-              <span>{row.completed_count}/{row.shot_count} 镜完成 · {row.id.slice(0, 8)}…</span>
+              <span>{row.completed_count}/{row.shot_count} 镜完成</span>
               {row.output_spec?.width && row.output_spec?.height
                 && <small>规格：{row.output_spec.width}×{row.output_spec.height}
                   {row.output_spec.clip_seconds ? ` · 单镜 ${row.output_spec.clip_seconds}s` : ''}</small>}
-              {row.worker_id && <small>执行：本机制作服务 {row.worker_id.slice(0, 12)}</small>}
               {row.failure_code && <small className="failure">· {label(failureLabels, row.failure_code)}</small>}
               {row.finalization_state !== 'NONE' && <small>收尾：{label(finalizationLabels, row.finalization_state)}</small>}
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
@@ -768,8 +770,21 @@ export default function ProductionSeriesPanel({
               </li>
             ))}
           </ol>
+          <details className="tech-details">
+            <summary>技术详情：批次编号与执行服务</summary>
+            <div className="tech-details-body">
+              <span>批次编号 <code>{row.id}</code></span>
+              {row.worker_id && <span>执行服务 <code>{row.worker_id}</code></span>}
+              {row.failure_code && <span>失败代码 <code>{row.failure_code}</code></span>}
+              {row.finalization_state !== 'NONE' && <span>收尾状态 <code>{row.finalization_state}</code></span>}
+            </div>
+          </details>
         </article>
       ))}
+      {series.length > seriesLimit && <button type="button" className="list-more"
+        onClick={() => setSeriesLimit((limit) => limit + 5)}>
+        查看更早的制作批次（还有 {series.length - seriesLimit} 个）
+      </button>}
     </div>}
   </div>;
 }
