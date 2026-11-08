@@ -339,3 +339,185 @@ def test_volume_storyboard_draft_and_handoff(api):
     assert body["readiness"]["startable"] is True, body
     assert body["shots"] >= 1
     assert body["episodes"] >= 1
+
+
+def test_sending_crash_never_replays_the_provider(api):
+    """A task whose send intent was persisted is NEVER asked again."""
+    client, factory, settings = api
+    pid = create_project(client, "断点")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    text = "第一章\n德明出海。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    calls = []
+
+    def counting_responder(messages, schema):
+        calls.append(schema.get("title"))
+        return _scene_responder()(messages, schema)
+
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=counting_responder)
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        tasks = pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+        task_id = tasks[0].id
+    with factory.begin() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        row.trace = {**row.trace, "stage": "SENDING", "external_outcome": "SENDING",
+                     "sent_at": "2026-11-08T00:00:00Z"}
+        row.status = "RUNNING"
+        row.lease_owner = None
+        row.lease_expires_at = None
+    ran = pipeline.run_pending_pipeline_task(factory, settings, "w-recovery", gw)
+    assert ran is True
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        assert row.status == "NEEDS_REVIEW", row.trace
+        assert row.trace["external_outcome"] == "UNKNOWN"
+        assert row.trace["blocked_reason"] == "PIPELINE_SEND_OUTCOME_UNKNOWN"
+    assert calls == [], "the provider must never be contacted after a durable send intent"
+
+
+def test_persisted_answer_is_adopted_without_a_second_call(api):
+    """A task whose answer artifact exists finishes without re-buying the call."""
+    client, factory, settings = api
+    pid = create_project(client, "采纳")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    text = "第一章\n德明出海。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    calls = []
+
+    def counting_responder(messages, schema):
+        calls.append(schema.get("title"))
+        return _scene_responder()(messages, schema)
+
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=counting_responder)
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        tasks = pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+        task_id = tasks[0].id
+    # simulate: the worker died AFTER persisting the answer artifact
+    with factory.begin() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        answer = dict(_scene_responder()([], {"title": "SceneScript"}))
+        answer["scene_key"] = row.trace["section"].get("scene_key", "S1")
+        answer["section_id"] = row.trace["section"]["section_id"]
+        answer["source_refs"] = {"volume_id": volume_id}
+        artifact = AgentArtifact(
+            project_id=pid, kind=pipeline.SCENE_SCRIPT_KIND, schema_version="1.0",
+            payload_json=answer, sha256=digest(answer),
+            producer_role=pipeline.SCENE_SCRIPT_RUN_ROLE, source_task_id=task_id)
+        db.add(artifact)
+        db.flush()
+        row.trace = {**row.trace, "stage": "DOCUMENT", "artifact_id": artifact.id,
+                     "artifact_sha256": artifact.sha256, "external_outcome": "SENDING"}
+        row.status = "RUNNING"
+        row.lease_owner = None
+        row.lease_expires_at = None
+    ran = pipeline.run_pending_pipeline_task(factory, settings, "w-recovery", gw)
+    assert ran is True
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        assert row.status == "SUCCEEDED", row.trace
+        assert row.trace.get("adopted") is True
+    assert calls == [], "a persisted answer must never cost a second provider call"
+
+
+def test_cross_project_artifact_reference_is_refused(api):
+    """A trace that names another project's artifact can never be read."""
+    client, factory, settings = api
+    pid = create_project(client, "本作品")
+    other = create_project(client, "别的作品")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    text = "第一章\n德明出海。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        doc_r = db.get(ProjectDocument, doc.id)
+        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
+              "timeline": [], "foreshadowing": [],
+              "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
+              "ending_direction": "Homecoming"}
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=bp, sha256=digest(bp),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, approved_by="local-user",
+                              approved_at=utcnow(), source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        pipeline.confirm_bible(db, pid, bible.id, bible.sha256)
+    # the OTHER project's outline artifact: same shape, different project
+    with factory.begin() as db:
+        other_doc = _make_doc(factory, other, "第一章\n别的故事。")
+        other_outline = _outline_artifact(db, other, other_doc, _sections_for(other_doc.text))
+        other_outline_id, other_outline_sha = other_outline.id, other_outline.sha256
+    calls = []
+
+    def counting_responder(messages, schema):
+        calls.append(schema.get("title"))
+        return _scene_responder()(messages, schema)
+
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=counting_responder)
+    volume_id = plan.payload_json["volumes"][0]["volume_id"]
+    with factory() as db:
+        tasks = pipeline.queue_scene_scripts(db, pid, volume_id, gw)
+        db.commit()
+        task_id = tasks[0].id
+    # poison the trace to point at the other project's outline
+    with factory.begin() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        row.trace = {**row.trace, "outline_artifact_id": other_outline_id,
+                     "outline_sha256": other_outline_sha}
+    ran = pipeline.run_pending_pipeline_task(factory, settings, "w-x", gw)
+    assert ran is True
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        assert row.status == "NEEDS_REVIEW", row.trace
+        assert row.trace["blocked_reason"] == "PIPELINE_OUTLINE_CHANGED"
+    assert calls == [], "no provider call may consume another project's context"

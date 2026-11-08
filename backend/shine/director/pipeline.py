@@ -515,8 +515,50 @@ def _persist_pipeline_sending(session_factory, task_id, version, worker_id, trac
     return updated if changed == 1 else None
 
 
+def _pipeline_entry_guard(factory, task_id: str, version: int, worker_id: str, trace: dict) -> str:
+    """Dispatch on the durable stage BEFORE any provider contact.
+
+    * SENDING: the send intent was persisted, so the outcome is unknown -
+      the task stops as NEEDS_REVIEW and is never replayed.
+    * DOCUMENT with a persisted artifact: the answer exists - adopt it and
+      finish without a second provider call.
+    * DRAFT: safe to proceed to a fresh send.
+    Returns "proceed" when the caller may send.
+    """
+    if trace.get("artifact_id"):
+        return "adopt"
+    if trace.get("stage") in ("SENDING", "WAITING_PROVIDER", "PREPARING_PROVIDER"):
+        _finish_pipeline_task(
+            factory, task_id, version, worker_id,
+            {**trace, "stage": "NEEDS_REVIEW", "external_outcome": "UNKNOWN",
+             "blocked_reason": "PIPELINE_SEND_OUTCOME_UNKNOWN"},
+            "NEEDS_REVIEW", "PIPELINE_SEND_OUTCOME_UNKNOWN")
+        return "blocked"
+    return "proceed"
+
+
+def _adopt_persisted_artifact(factory, task_id: str, version: int, worker_id: str, trace: dict,
+                              project_id: str) -> bool:
+    """Finish a task whose answer artifact is already in the ledger."""
+    from shine.models import AgentArtifact
+
+    with factory() as db:
+        artifact = db.get(AgentArtifact, trace["artifact_id"])
+        if (artifact is None or artifact.project_id != project_id
+                or artifact.sha256 != trace.get("artifact_sha256")):
+            _finish_pipeline_task(
+                factory, task_id, version, worker_id,
+                {**trace, "stage": "NEEDS_REVIEW", "blocked_reason": "PIPELINE_PERSISTED_ARTIFACT_INVALID"},
+                "NEEDS_REVIEW", "PIPELINE_PERSISTED_ARTIFACT_INVALID")
+            return True
+    _finish_pipeline_task(factory, task_id, version, worker_id,
+                          {**trace, "stage": "DOCUMENT", "adopted": True}, "SUCCEEDED")
+    return True
+
+
 def run_bible_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one bible synthesis task under the fenced claim."""
+    from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentArtifact, AgentTaskRecord
 
@@ -526,8 +568,14 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             return False
         trace = dict(task.trace or {})
         project_id = task.project_id
+        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace)
+        if verdict == "adopt":
+            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace, project_id)
+        if verdict == "blocked":
+            return True
         master_doc = db.get(ProjectDocument, trace["document_id"])
-        if master_doc is None or master_doc.sha256 != trace["document_sha256"]:
+        if (master_doc is None or master_doc.project_id != project_id
+                or master_doc.sha256 != trace["document_sha256"]):
             _finish_pipeline_task(factory, task_id, version, worker_id,
                                   {**trace, "blocked_reason": "PIPELINE_MASTER_CHANGED"},
                                   "NEEDS_REVIEW", "PIPELINE_MASTER_CHANGED")
@@ -535,7 +583,8 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
         outlines = []
         for ref in trace["outline_refs"]:
             outline = db.get(AgentArtifact, ref["id"])
-            if (outline is None or outline.stale or outline.sha256 != ref["sha256"]
+            if (outline is None or outline.project_id != project_id
+                    or outline.stale or outline.sha256 != ref["sha256"]
                     or not outline.approved_at):
                 _finish_pipeline_task(factory, task_id, version, worker_id,
                                       {**trace, "blocked_reason": "PIPELINE_OUTLINE_CHANGED"},
@@ -574,6 +623,8 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             schema=schema,
             contract=GlobalStoryBiblePayload,
             task_category="creative",
+            before_call=text_consent.guard(project_id, trace["document_id"], trace["document_sha256"],
+                                           BIBLE_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
             blocked = {**trace, "stage": "NEEDS_REVIEW",
@@ -725,6 +776,8 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
                 "volume_id": volume_id,
                 "volume_document_id": volume_doc.id,
                 "volume_document_sha256": volume_doc.sha256,
+                "master_document_id": plan.payload_json["source_master"]["document_id"],
+                "master_document_sha256": plan.payload_json["source_master"]["sha256"],
                 "section": section_ctx,
                 "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                 "bible_artifact_id": bible.id, "bible_sha256": bible.sha256,
@@ -742,6 +795,7 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
 
 def run_scene_script_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one scene-script task under the fenced claim."""
+    from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument
 
@@ -751,21 +805,29 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             return False
         trace = dict(task.trace or {})
         project_id = task.project_id
+        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace)
+        if verdict == "adopt":
+            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace, project_id)
+        if verdict == "blocked":
+            return True
         volume_doc = db.get(ProjectDocument, trace["volume_document_id"])
-        if volume_doc is None or volume_doc.sha256 != trace["volume_document_sha256"]:
+        if (volume_doc is None or volume_doc.project_id != project_id
+                or volume_doc.sha256 != trace["volume_document_sha256"]):
             _finish_pipeline_task(factory, task_id, version, worker_id,
                                   {**trace, "blocked_reason": "PIPELINE_VOLUME_DOCUMENT_CHANGED"},
                                   "NEEDS_REVIEW", "PIPELINE_VOLUME_DOCUMENT_CHANGED")
             return True
         bible = db.get(AgentArtifact, trace["bible_artifact_id"])
-        if (bible is None or bible.stale or bible.sha256 != trace["bible_sha256"]
+        if (bible is None or bible.project_id != project_id
+                or bible.stale or bible.sha256 != trace["bible_sha256"]
                 or not bible.approved_at):
             _finish_pipeline_task(factory, task_id, version, worker_id,
                                   {**trace, "blocked_reason": "PIPELINE_BIBLE_CHANGED"},
                                   "NEEDS_REVIEW", "PIPELINE_BIBLE_CHANGED")
             return True
         outline = db.get(AgentArtifact, trace["outline_artifact_id"])
-        if (outline is None or outline.stale or outline.sha256 != trace["outline_sha256"]
+        if (outline is None or outline.project_id != project_id
+                or outline.stale or outline.sha256 != trace["outline_sha256"]
                 or not outline.approved_at):
             _finish_pipeline_task(factory, task_id, version, worker_id,
                                   {**trace, "blocked_reason": "PIPELINE_OUTLINE_CHANGED"},
@@ -809,6 +871,9 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             schema=schema,
             contract=SceneScriptPayload,
             task_category="creative",
+            before_call=text_consent.guard(
+                project_id, trace["master_document_id"], trace["master_document_sha256"],
+                SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
             blocked = {**trace, "stage": "NEEDS_REVIEW",
