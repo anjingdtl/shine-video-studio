@@ -185,8 +185,12 @@ function App() {
     () => resolveHash(window.location.hash).packageId);
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
   /** 制作页分区聚焦：默认自动落在最该做的分区，用户可用分区条切换；
-   *  自动推进时回到正轨。同一时刻只展开当前该做的那一个分区。 */
-  const [stageOverride, setStageOverride] = useState<'storyboard' | 'assets' | 'produce' | 'monitor' | null>(null);
+   *  自动推进时回到正轨。同一时刻只展开当前该做的那一个分区。
+   *  深链 #d/produce?stage=<focus> 可直接落在指定分区（如素材准备）。 */
+  const [stageOverride, setStageOverride] = useState<ProduceStageFocus | null>(() => {
+    const route = resolveHash(window.location.hash);
+    return route.page === 'produce' ? route.produceFocus ?? null : null;
+  });
   const [wizard, setWizard] = useState<null | 'enable' | 'diagnose'>(null);
   const [activeSection, setActiveSection] = useState('overview');
   const [helpOpen, setHelpOpen] = useState(false);
