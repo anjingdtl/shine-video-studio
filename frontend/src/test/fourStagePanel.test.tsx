@@ -62,6 +62,62 @@ describe('四阶段面板', () => {
     await user.click(screen.getByRole('button', { name: '确认这一场' }));
     await waitForConfirmation(stub);
   });
+
+  it('交付按钮交付的是当前选中的卷，不是第一卷', async () => {
+    stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/(documents|pipeline)$'),
+               respond: () => jsonResponse(baseOverview({
+                 volume_plan_confirmed: true, bible_confirmed: true,
+                 volumes: [
+                   { volume_id: 'v1', order: 1, title: '第1卷', char_count: 100,
+                     outline_confirmed: true, scripts: [], scripts_confirmed: 0, scripts_total: 0 },
+                   { volume_id: 'v2', order: 2, title: '第2卷', char_count: 100,
+                     outline_confirmed: true, scripts: [], scripts_confirmed: 0, scripts_total: 0 },
+                 ],
+               })) });
+    stub.add({ method: 'POST', pattern: new RegExp('/pipeline/volumes/v2/handoff$'),
+               respond: () => jsonResponse({
+                 handoff_id: 'h2', plan_version: 2, package_revision: 2, package_id: 'pkg-2',
+                 reused: false, episodes: 2, shots: 5,
+                 readiness: { ready: true, startable: true, blockers: [] } }) });
+    const user = userEvent.setup();
+    render(<FourStagePanel projectId={PROJECT}
+      workflowProfiles={[{ id: 'wf-1', name: '方案甲', mode: 'Ref2VA' } as never]}
+      onMessage={vi.fn()} />);
+    await screen.findByLabelText('当前处理的卷：');
+    await user.selectOptions(screen.getByLabelText('当前处理的卷：'), 'v2');
+    await user.selectOptions(screen.getByLabelText('选择生成方案'), 'wf-1');
+    await user.click(screen.getByRole('button', { name: '交付本卷制作' }));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(stub.callsOf('POST', new RegExp('/pipeline/volumes/v2/handoff$'))).toHaveLength(1);
+    expect(stub.callsOf('POST', new RegExp('/pipeline/volumes/v1/handoff$'))).toHaveLength(0);
+  });
+
+  it('未知发送结果只提供核对与显式新尝试，不提供普通继续', async () => {
+    stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/documents$'),
+               respond: () => jsonResponse([]) });
+    stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/pipeline$'),
+               respond: () => jsonResponse(baseOverview({
+                 active_tasks: [{
+                   task_id: 'task-1', role: 'four_stage_scene_script_run', state_version: 4,
+                   status: 'NEEDS_REVIEW', stage: 'NEEDS_REVIEW', stage_label: '待你核对',
+                   progress_done: 0, progress_total: 0, error_code: 'LLM_HTTP',
+                   attempt: 1, external_outcome: 'UNKNOWN',
+                   blocked_reason: 'LLM_HTTP', available_actions: ['reconcile', 'new_attempt'],
+                   updated_at: null, consent_document_id: null,
+                   consent_document_sha256: null, consent_role: 'four_stage_scene_script_run',
+                 }],
+               })) });
+    stub.add({ method: 'POST', pattern: new RegExp('/pipeline/tasks/task-1/new-attempt$'),
+               respond: () => jsonResponse({ task_id: 'task-2', attempt: 2, status: 'QUEUED',
+                                             supersedes: 'task-1' }) });
+    const user = userEvent.setup();
+    render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
+    await screen.findByText(/待核对：LLM_HTTP/);
+    expect(screen.queryByRole('button', { name: '修复后继续' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '核对后重新发送一次' }));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(stub.callsOf('POST', new RegExp('/tasks/task-1/new-attempt$'))).toHaveLength(1);
+  });
 });
 
 async function waitForConfirmation(stub: StudioStub) {

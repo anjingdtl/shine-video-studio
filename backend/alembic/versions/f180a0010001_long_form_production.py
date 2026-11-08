@@ -12,6 +12,7 @@ every row, so existing orders, their versions and their artifacts survive.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "f180a0010001"

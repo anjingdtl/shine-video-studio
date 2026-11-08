@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
-  confirmBible, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan, editSceneScript,
-  generateStoryboardDraft, getPipelineOverview, getTextConsentScope, grantTextConsent,
-  importPipelineSource, listScriptDocuments, queueBible, queueVolumeOutline, queueVolumeScripts,
-  requestVolumeHandoff, resumePipelineTask,
-  type PipelineOverview, type PipelineTaskSummary, type WorkflowProfileLite,
+  applyCameraPlan, confirmBible, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
+  editSceneScript, generateStoryboardDraft, getPipelineOverview, getTextConsentScope,
+  grantTextConsent, importPipelineSource, listScriptDocuments, queueBible, queueVolumeOutline,
+  queueVolumeScripts, reconcileFilmTask, requestVolumeHandoff, resumePipelineTask,
+  startPipelineNewAttempt,
+  type PipelineOverview, type PipelineTaskSummary, type StoryboardDraft, type StoryboardUnit,
+  type WorkflowProfileLite,
 } from '../api';
 
 type Props = {
@@ -29,6 +31,16 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [handoffProfile, setHandoffProfile] = useState('');
+  // The whole panel works on ONE selected volume: reviewing, drafting,
+  // applying and delivering must never drift to a different volume than the
+  // one the person is looking at.
+  const [selectedVolumeId, setSelectedVolumeId] = useState<string>('');
+  const [drafts, setDrafts] = useState<Record<string, StoryboardDraft>>({});
+  const [handoff, setHandoff] = useState<{
+    volumeId: string; packageId: string; reused: boolean;
+    startable: boolean; blockers: Array<{ code: string; message?: string }>;
+    episodes: number; shots: number;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -46,6 +58,13 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   }, [projectId]);
 
   useEffect(() => { refresh(); }, [refresh]);
+  // Switching project must not keep another project's selection or receipt.
+  useEffect(() => {
+    setSelectedVolumeId('');
+    setDrafts({});
+    setHandoff(null);
+    setVolumePlanDraft(null);
+  }, [projectId]);
 
   // 有活跃任务时每 4 秒轮询真实进度；空闲时停止，避免无谓请求。
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -99,13 +118,73 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   const volumes = overview.volumes ?? [];
   const pendingScripts = overview.pending_scripts ?? [];
   const activeTasks = overview.active_tasks ?? [];
+  const currentVolumeId = selectedVolumeId || volumes[0]?.volume_id || '';
+  const currentVolume = volumes.find((v) => v.volume_id === currentVolumeId);
+  const currentDraft = drafts[currentVolumeId];
+
+  async function draftAndRecord(volumeId: string) {
+    setBusy(true);
+    try {
+      const result = await generateStoryboardDraft(projectId, volumeId);
+      setDrafts((previous) => ({ ...previous, [volumeId]: result }));
+      if (result.status === 'PROPOSED') {
+        onMessage(`分镜草案已生成：${result.units.length} 个场次单元，请逐场应用`, 'success');
+      } else {
+        const codes = (result.rejections ?? []).map((row) => row.rejection_reason_code ?? row.code);
+        onMessage(`分镜草案未全部完成：${result.units.filter((u) => u.status === 'PROPOSED').length}`
+          + `/${result.units.length} 个单元已生成；${codes[0] ?? '请查看原因'}`, 'error');
+      }
+      await refresh();
+    } catch (error) {
+      onMessage((error as Error).message, 'error');
+    } finally { setBusy(false); }
+  }
+
+  async function applyUnit(unit: StoryboardUnit) {
+    if (!unit.camera_artifact_id) return;
+    await run(
+      () => applyCameraPlan(projectId, unit.camera_artifact_id!, unit.continuity_artifact_id),
+      (applied) => {
+        const shotIds = (applied as { shot_ids?: string[] })?.shot_ids ?? [];
+        setDrafts((previous) => {
+          const draft = previous[currentVolumeId];
+          if (!draft) return previous;
+          return { ...previous, [currentVolumeId]: {
+            ...draft,
+            units: draft.units.map((row) => row.unit_id === unit.unit_id
+              ? { ...row, applied: true, shot_ids: shotIds } : row),
+          } };
+        });
+      });
+  }
+
+  async function reconcileAndRetry(volumeId: string, draft: StoryboardDraft) {
+    setBusy(true);
+    try {
+      // Only a provably unsent call may be retried: the server decides that,
+      // and records the conclusion before the request is attempted again.
+      for (const rejection of draft.rejections ?? []) {
+        if (!rejection.task_id || rejection.state_version === undefined) continue;
+        if (rejection.external_outcome === 'UNKNOWN') continue;
+        // A stale version is refused by the server; that refusal is the
+        // answer, and the next refresh shows the task's real state.
+        await reconcileFilmTask(projectId, rejection.task_id, rejection.state_version)
+          .catch(() => undefined);
+      }
+      onMessage('已记录这些调用未发送，正在重新尝试', 'success');
+    } catch (error) {
+      onMessage((error as Error).message, 'error');
+    } finally { setBusy(false); }
+    await draftAndRecord(volumeId);
+  }
+
   return (
     <section className="card" id="four-stage">
       <header className="stage-head"><ListChecks size={17} /><h3>AI 编导四阶段</h3>
         <span className="muted">导入 → 大纲 → 剧本 → 分镜</span></header>
       <div className="module-guide"><CircleHelp size={13} /><div>
         <p><b>四步做完一部作品：</b>①选择母本并确认分卷 → ②逐卷提取大纲并确认全局故事蓝图 →
-          ③逐场生成并确认剧本 → ④生成分镜草案。正式拍摄仍走原有素材与风格门禁。</p>
+          ③逐场生成并确认剧本 → ④逐场生成分镜草案、应用镜头并交付本卷。</p>
         <p>每一步的「确认」都需要你亲自点击；任务详情、Token 与 JSON 收纳在专业模式。</p>
       </div></div>
 
@@ -117,6 +196,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
               : null;
             const consentBlocked = task.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED'
               && !!task.consent_document_id;
+            const actions = task.available_actions ?? [];
             return (
               <div className="progress-row" key={task.task_id}>
                 <span className="progress-name">{ROLE_LABELS[task.role] ?? task.role}</span>
@@ -126,6 +206,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                   {task.status === 'NEEDS_REVIEW'
                     ? `待核对：${task.error_code ?? task.stage_label}`
                     : `${task.stage_label}${pct !== null ? ` · ${task.progress_done}/${task.progress_total}` : ''}`}
+                  {task.attempt > 1 ? ` · 第 ${task.attempt} 次尝试` : ''}
                 </span>
                 {consentBlocked && (
                   <button type="button" className="must-button" disabled={busy}
@@ -133,11 +214,18 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                     授权本机文本发送并继续
                   </button>
                 )}
-                {task.status === 'NEEDS_REVIEW' && !consentBlocked && task.error_code
-                  && task.error_code !== 'REMOTE_AGENT_CONSENT_REQUIRED' && (
+                {actions.includes('resume') && !consentBlocked && (
                   <button type="button" className="secondary-button" disabled={busy}
                     onClick={() => run(() => resumePipelineTask(projectId, task.task_id, task.state_version))}>
                     修复后继续
+                  </button>
+                )}
+                {actions.includes('new_attempt') && (
+                  <button type="button" className="must-button" disabled={busy}
+                    title="上一次可能已经发出去了。再次发送会多一次调用，上一次的结果会作为历史保留。"
+                    onClick={() => run(() => startPipelineNewAttempt(
+                      projectId, task.task_id, task.state_version))}>
+                    核对后重新发送一次
                   </button>
                 )}
               </div>
@@ -182,6 +270,21 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
         {overview.volume_plan_confirmed && <span className="muted">母本已导入，分卷方案已确认。</span>}
       </div>
 
+      {/* 全局面板共用同一个「当前卷」 */}
+      {volumes.length > 1 && (
+        <div className="row">
+          <label htmlFor="four-stage-volume">当前处理的卷：</label>
+          <select id="four-stage-volume" value={currentVolumeId}
+            onChange={(event) => setSelectedVolumeId(event.target.value)}>
+            {volumes.map((v) => (
+              <option key={v.volume_id} value={v.volume_id}>
+                {v.title}（大纲{v.outline_confirmed ? '已确认' : '未确认'} · 剧本 {v.scripts_confirmed}/{v.scripts_total}）
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* ② 大纲与蓝图 */}
       <div className="pipeline-step">
         <b>② 故事大纲与全局蓝图</b>
@@ -190,7 +293,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
           <ul className="volume-list">
             {volumes.map((v) => (
               <li key={v.volume_id}>
-                <span>{v.title}</span>
+                <span>{v.title}{v.volume_id === currentVolumeId ? '（当前）' : ''}</span>
                 <span className="muted">大纲{v.outline_confirmed ? '已确认' : '未确认'}</span>
                 <button type="button" className="secondary-button" disabled={busy}
                   onClick={() => run(() => queueVolumeOutline(projectId, v.volume_id))}>
@@ -220,6 +323,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
           <div className="row">
             <button type="button" className="must-button" disabled={busy}
               onClick={() => run(() => queueBible(projectId))}>生成全局故事蓝图</button>
+            <span className="muted small">蓝图按当前计划的每一卷大纲合成；缺卷会如实标为草稿，不能作为正式发布依据。</span>
           </div>
         )}
         {overview.pending_bible && !overview.bible_confirmed && (
@@ -286,40 +390,101 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
       <div className="pipeline-volume-step">
         <b>④ 分镜编写（草案）与卷交付</b>
         <span className="muted">草案不需要素材与风格冻结；正式拍摄（卷交付）仍走原有全部门禁。</span>
-        {volumes.map((v) => (
-          <div key={v.volume_id} className="row">
-            <span>{v.title}</span>
-            <button type="button" className="secondary-button" disabled={busy || !v.scripts_confirmed}
-              title={v.scripts_confirmed ? '' : '先确认该卷全部场次剧本'}
-              onClick={() => run(() => generateStoryboardDraft(projectId, v.volume_id))}>
-              生成分镜草案
-            </button>
-          </div>
-        ))}
-        <div className="row">
-          <span>卷交付 H3 制作（正式拍摄）：</span>
-          <select aria-label="选择生成方案" value={handoffProfile}
-            onChange={(event) => setHandoffProfile(event.target.value)}>
-            <option value="" disabled>选择已登记的生成方案</option>
-            {(workflowProfiles ?? []).map((p) => (
-              <option key={p.id} value={p.id}>{p.name}（{p.mode}）</option>
-            ))}
-          </select>
-          <button type="button" className="must-button" disabled={busy || !handoffProfile}
-            onClick={() => run(() => requestVolumeHandoff(projectId, volumes[0]?.volume_id ?? '', handoffProfile),
-              (result) => {
-                const handoff = result as { readiness: { startable: boolean; blockers: Array<{ code: string }> } };
-                if (handoff.readiness?.startable) {
-                  onMessage('卷交付完成：可在导演包页创建生产运行', 'success');
-                } else {
-                  onMessage(`卷交付已建立，但有 ${handoff.readiness?.blockers?.length ?? 0} 项待解决`, 'error');
-                }
-              })}>
-            交付本卷制作
-          </button>
-        </div>
+        {!currentVolume && <span className="muted">先完成第①步并确认分卷。</span>}
+        {currentVolume && (
+          <>
+            <div className="row">
+              <span>{currentVolume.title}</span>
+              <button type="button" className="secondary-button"
+                disabled={busy || !currentVolume.scripts_confirmed}
+                title={currentVolume.scripts_confirmed ? '' : '先确认该卷全部场次剧本'}
+                onClick={() => draftAndRecord(currentVolume.volume_id)}>
+                {currentDraft ? '重新生成分镜草案' : '生成分镜草案'}
+              </button>
+              <span className="muted small">按场逐次调用五个工种；项目再长也不会被单次输入上限卡住。</span>
+            </div>
+            {currentDraft && (
+              <ul className="volume-list">
+                {currentDraft.units.map((unit) => (
+                  <li key={unit.unit_id}>
+                    <span>{unit.unit_id}</span>
+                    <span className={unit.applied ? 'ok' : 'pending'}>
+                      {unit.status === 'PROPOSED'
+                        ? (unit.applied
+                          ? `镜头已应用（${unit.shot_ids?.length ?? 0} 个）`
+                          : '待应用镜头')
+                        : `未完成：${unit.status ?? '未知'}`}
+                    </span>
+                    {unit.status === 'PROPOSED' && !unit.applied && (
+                      <button type="button" className="must-button" disabled={busy}
+                        onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {currentDraft && currentDraft.status !== 'PROPOSED' && (
+              <div className="row">
+                <span className="muted small">有单元没有完成。只有「确认未发送」后才会重新发起同样的调用。</span>
+                <button type="button" className="secondary-button" disabled={busy}
+                  onClick={() => reconcileAndRetry(currentVolume.volume_id, currentDraft)}>
+                  核对未发送并重试
+                </button>
+              </div>
+            )}
+            <div className="row">
+              <span>卷交付 H3 制作（正式拍摄）：</span>
+              <select aria-label="选择生成方案" value={handoffProfile}
+                onChange={(event) => setHandoffProfile(event.target.value)}>
+                <option value="" disabled>选择已登记的生成方案</option>
+                {(workflowProfiles ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}（{p.mode}）</option>
+                ))}
+              </select>
+              <button type="button" className="must-button" disabled={busy || !handoffProfile}
+                onClick={() => run(
+                  () => requestVolumeHandoff(projectId, currentVolume.volume_id, handoffProfile),
+                  (result) => {
+                    const body = result as {
+                      package_id: string; reused: boolean; episodes: number; shots: number;
+                      readiness: { startable: boolean; blockers: Array<{ code: string; message?: string }> };
+                    };
+                    setHandoff({
+                      volumeId: currentVolume.volume_id, packageId: body.package_id,
+                      reused: body.reused, startable: body.readiness.startable,
+                      blockers: body.readiness.blockers, episodes: body.episodes, shots: body.shots,
+                    });
+                    if (body.readiness.startable) {
+                      onMessage(body.reused
+                        ? '这一卷已经交付过，返回的是同一份交付回执'
+                        : `卷交付完成：${body.episodes} 集 / ${body.shots} 个镜头，可到导演包页创建生产运行`,
+                        'success');
+                    } else {
+                      onMessage(`卷交付已建立，但有 ${body.readiness.blockers.length} 项待解决`, 'error');
+                    }
+                  })}>
+                交付本卷制作
+              </button>
+            </div>
+            {handoff && handoff.volumeId === currentVolume.volume_id && (
+              <div className="muted small">
+                <div>
+                  交付回执：导演包 {handoff.packageId.slice(0, 8)} · {handoff.episodes} 集 ·{' '}
+                  {handoff.shots} 个镜头{handoff.reused ? '（复用既有交付，未重复建包）' : ''}
+                </div>
+                {handoff.blockers.length > 0 && (
+                  <ul>
+                    {handoff.blockers.map((blocker) => (
+                      <li key={blocker.code}>{blocker.message ?? blocker.code}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </>
+        )}
         <div className="muted small">
-          卷交付会把本卷已应用的镜头装进分集计划与导演包；缺少已批准母版、未冻结风格或方案未映射时会列出全部缺项。
+          卷交付会把本卷已应用的镜头按场次顺序装进分集计划与导演包；缺少已批准母版、未冻结风格或方案未映射时会列出全部缺项。
         </div>
       </div>
     </section>

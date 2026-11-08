@@ -772,6 +772,10 @@ def generate_storyboard(
         "project_id": project_id,
         "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
         "locked_story_facts": body.locked_story_facts,
+        # The consent scope is part of the request identity: a request made
+        # under one document consent may not be adopted under another.
+        "consent_document_id": body.consent_document_id,
+        "consent_document_sha256": body.consent_document_sha256,
         **({"production_context": body.production_context} if body.production_context is not None else {}),
         "style_version_id": project.frozen_style_version_id,
         "approved_asset_manifest": asset_context(db, project_id),
@@ -940,9 +944,16 @@ def generate_storyboard(
 
     def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
-        if body.production_context is not None:
-            kwargs.update(production_context=body.production_context, consent_document_id=body.consent_document_id,
+        # The consent identity travels with EVERY crew call, not only with a
+        # production-context request: the volume storyboard lane sends derived
+        # script text with a document consent and no production context, and
+        # dropping the fields here made the Dispatcher skip its per-role
+        # consent guard entirely.
+        if body.consent_document_id is not None:
+            kwargs.update(consent_document_id=body.consent_document_id,
                           consent_document_sha256=body.consent_document_sha256)
+        if body.production_context is not None:
+            kwargs.update(production_context=body.production_context)
         last: ValueError | LLMError | None = None
         repair_visual_language = False
         for attempt in range(1, attempts + 1):
@@ -994,6 +1005,8 @@ def generate_storyboard(
                      if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256), None)
         if task:
             rejection["task_id"] = task.id
+            # The exact version the panel must present to reconcile this task.
+            rejection["state_version"] = task.state_version
             reason = task.trace.get("rejection_reason_code")
             if reason:
                 # The precise reason the role's answer was refused.  Without it

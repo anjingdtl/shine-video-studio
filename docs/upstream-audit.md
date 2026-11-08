@@ -1,5 +1,9 @@
 # Upstream source and license audit
 
+## 2026-11-08 四阶段流水线对照
+
+基线为 `7081104a79e6758228eb98e96d74e0bb36da52f8`。本轮核对 Toonflow-app 的章节事件与分镜审阅、Huobao Drama 的集内成员资格校验、NarratoAI 的脚本解析边界和 Temporal 的 Activity 幂等合同。仓库修订、对应模块、许可证与适用范围见 [四阶段对抗审查](ADVERSARIAL_REVIEW_FOUR_STAGE_PIPELINE_20261108.md#4-高星-github-模块的可移植做法)。本轮只记录设计借鉴，产品依赖与上游代码均未变动。
+
 ## 2026-11-02 director acceptance V2 and core LLM preparation
 
 Baseline `5b06f5e17784d899230b91a6fd6c438c7bc6e57a`. Reused this repository's
@@ -457,3 +461,15 @@ ComfyUI 的真实报文形状回答 `/object_info`、`/prompt`、`/history`、`/
 真机确实产出声明输出节点；三类（角色/场景/道具）真实出图；实际显存占用与
 生成耗时（本机 RTX 5080 16 GB、系统内存 31.7 GB，必需权重合计 16.10 GiB，必然涉及 offload，
 **未实测前不得给出显存下限数字**）；`Comfy-Org` 转换权重的许可证文本。
+
+### 本轮实际采用范围（2026-11-08 收尾轮）
+
+上节记录的是设计借鉴。本轮在 Shine 既有合同内**独立实现**，未复制上述任一项目的代码、
+prompt、UI 或素材；许可证与使用领域约束未因此变化。
+
+| 上游模块 | 实际采用的可验证约束 | 落地位置 |
+| --- | --- | --- |
+| Toonflow-app（事件来源、分集剧本、分镜回读） | 蓝图输入必须是当前计划逐卷的有序大纲集合；分镜按「集→场→片段→镜」保留场到镜头的映射 | `backend/shine/director/pipeline.py`（`resolve_plan_outlines`、`storyboard_units`、`_section_shot_groups`） |
+| Huobao Drama（`validateStoryboardBindings`） | 交付前对卷/集/场/Shot revision 做集合校验，越界在写副作用前拒绝 | `build_volume_handoff`（`PIPELINE_SCENE_WITHOUT_SHOT`、`PIPELINE_SHOT_CLAIMED_TWICE`） |
+| NarratoAI（解析与内容验收分层） | 结果分类（NOT_SENT / RESPONSE_RECEIVED / UNKNOWN）与内容验收分离，截断进入未完成 | `backend/shine/materialprep/agent_call.py`、`director/pipeline.py`（`_send_outcome_unknown`） |
+| Temporal（Activity 幂等与崩溃窗口） | SQLite 本地 fence + 持久回执 + 孤儿结果唯一采纳；外部副作用从不盲目重放 | `_commit_pipeline_result`、`_adopt_orphan_result`、`start_pipeline_new_attempt` |

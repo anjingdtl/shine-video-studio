@@ -704,10 +704,49 @@ export const editSceneScript = (projectId: string, artifactId: string, text: str
     `/projects/${projectId}/pipeline/scene-scripts/${artifactId}/edit`,
     json('POST', { text, note }));
 
+export interface StoryboardUnit {
+  unit_id: string;
+  section_id: string;
+  order: number | null;
+  status: string | null;
+  camera_artifact_id: string | null;
+  continuity_artifact_id: string | null;
+  arbitration_artifact_id: string | null;
+  applied: boolean;
+  /** The shots this scene really produced, once applied. */
+  shot_ids?: string[];
+}
+
+export interface StoryboardDraft {
+  status: string;
+  /** One bounded crew input per scene, in scene order. */
+  units: StoryboardUnit[];
+  steps: Record<string, unknown>;
+  next?: unknown;
+  rejections?: Array<{ role?: string; code?: string; task_id?: string;
+                       state_version?: number; external_outcome?: string;
+                       rejection_reason_code?: string }>;
+}
+
 export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
-  api<{ status: string; record: { camera_artifact_id: string | null };
-        steps: Record<string, unknown>; next?: unknown }>(
+  api<StoryboardDraft>(
     `/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`, json('POST', {}));
+
+/** Apply one scene's camera plan: this is what proves the scene->shots mapping. */
+export const applyCameraPlan = (
+    projectId: string, cameraArtifactId: string, continuityArtifactId: string | null) =>
+  api<{ shot_ids: string[] }>(
+    `/projects/${projectId}/film-artifacts/${cameraArtifactId}/apply-camera`,
+    json('POST', { continuity_artifact_id: continuityArtifactId }));
+
+/**
+ * Record that a refused crew call was provably never sent.  Only this lets the
+ * same request be attempted again; the ledger, not the button, decides.
+ */
+export const reconcileFilmTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
+  api<{ outcome: string; resubmittable: boolean; state_version: number }>(
+    `/projects/${projectId}/film-runs/${taskId}/reconcile`,
+    json('POST', { expected_state_version: expectedStateVersion }));
 
 export const confirmVolumeOutline = (
     projectId: string, volumeId: string, outlineArtifactId: string, sha256: string,
@@ -723,7 +762,8 @@ export const requestVolumeHandoff = (
     projectId: string, volumeId: string, workflowProfileId: string,
     options: { acknowledgeSceneCoverage?: boolean } = {}) =>
   api<{ handoff_id: string; plan_version: number; package_revision: number;
-        package_id: string; readiness: { ready: boolean; startable: boolean;
+        package_id: string; reused: boolean; episode_basis?: string;
+        readiness: { ready: boolean; startable: boolean;
         blockers: Array<{ code: string; message?: string }> };
         episodes: number; shots: number }>(
     `/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`,
@@ -740,6 +780,11 @@ export interface PipelineTaskSummary {
   progress_done: number;
   progress_total: number;
   error_code: string | null;
+  attempt: number;
+  external_outcome: string | null;
+  blocked_reason: string | null;
+  /** The operations the server allows: never inferred from an error string. */
+  available_actions: Array<'resume' | 'reconcile' | 'new_attempt'>;
   updated_at: string | null;
   consent_document_id: string | null;
   consent_document_sha256: string | null;
@@ -749,6 +794,17 @@ export interface PipelineTaskSummary {
 export const resumePipelineTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string }>(
     `/projects/${projectId}/pipeline/tasks/${taskId}/resume`,
+    json('POST', { expected_state_version: expectedStateVersion }));
+
+/**
+ * Authorise a physically separate retry after an unknown send outcome.  The
+ * first attempt keeps its UNKNOWN result as history; this accepts a second
+ * provider call.
+ */
+export const startPipelineNewAttempt = (
+    projectId: string, taskId: string, expectedStateVersion: number) =>
+  api<{ task_id: string; attempt: number; status: string; supersedes: string }>(
+    `/projects/${projectId}/pipeline/tasks/${taskId}/new-attempt`,
     json('POST', { expected_state_version: expectedStateVersion }));
 
 export interface TextConsentScope {

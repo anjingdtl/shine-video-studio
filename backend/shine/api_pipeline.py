@@ -235,22 +235,60 @@ def storyboard_draft_route(
         body: dict | None = None, db: DBSession = None,
         gateway: Annotated[LLMGateway, Depends(llm_gateway_dep)] = None,
         request: Request = None) -> dict:
-    """Run the crew chain in draft mode over the volume's confirmed scripts."""
+    """Run the crew chain in draft mode over the volume's confirmed scripts.
+
+    The chain runs once per scene, so a project-length volume is written in
+    bounded batches instead of being refused by an inline limit.  The response
+    carries every unit's apply handle: the panel applies each scene's camera
+    plan, and the handoff verifies the resulting scene -> shots mapping.
+    """
     from shine.director.pipeline import record_storyboard_draft, volume_storyboard_draft
 
     require_project(db, project_id)
+    only = (body or {}).get("section_ids")
+    only_section_ids = [str(item) for item in only] if isinstance(only, list) and only else None
     try:
         script_text = pipeline.serialize_volume_script(db, project_id, volume_id)
-        result = volume_storyboard_draft(db, project_id, volume_id, gateway,
-                              data_dir=request.app.state.settings.data_dir)
+        result = volume_storyboard_draft(
+            db, project_id, volume_id, gateway,
+            data_dir=request.app.state.settings.data_dir,
+            only_section_ids=only_section_ids)
         record = record_storyboard_draft(db, project_id, volume_id, result, script_text)
         db.commit()
     except ValueError as exc:
         db.rollback()
         raise _http_from_value_error(exc) from None
+    units = [
+        {"unit_id": unit["unit_id"], "section_id": unit["section_id"],
+         "order": unit.get("order"), "status": unit.get("status"),
+         "camera_artifact_id": unit.get("camera_artifact_id"),
+         "continuity_artifact_id": unit.get("continuity_artifact_id"),
+         "arbitration_artifact_id": unit.get("arbitration_artifact_id"),
+         **_applied_shots(db, unit.get("camera_artifact_id"))}
+        for unit in (result.get("units") or [])
+    ]
     return {"status": result.get("status"), "record": record,
+            "units": units,
             "steps": {k: v for k, v in (result.get("steps") or {}).items()},
             "next": result.get("next"), "rejections": result.get("rejections")}
+
+
+def _applied_shots(db, camera_artifact_id: str | None) -> dict:
+    """Whether this scene's camera plan was applied, and how many shots it made.
+
+    The review table reads "场 -> 镜" from this: a scene counts as produced
+    only when its own apply receipt exists, and the shot ids are what the
+    handoff will verify.
+    """
+    from shine.models import AppSetting
+
+    if not camera_artifact_id:
+        return {"applied": False, "shot_ids": []}
+    receipt = db.get(AppSetting, f"film-apply:{camera_artifact_id}")
+    if receipt is None:
+        return {"applied": False, "shot_ids": []}
+    shot_ids = [str(item) for item in (receipt.value or {}).get("shot_ids", [])]
+    return {"applied": bool(shot_ids), "shot_ids": shot_ids}
 
 
 @router.post("/projects/{project_id}/pipeline/volumes/{volume_id}/handoff", status_code=201)
@@ -367,6 +405,27 @@ def resume_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DB
     try:
         result = pipeline.resume_pipeline_task(db, project_id, task_id,
                                                (body or {}).get("expected_state_version"))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return result
+
+
+@router.post("/projects/{project_id}/pipeline/tasks/{task_id}/new-attempt", status_code=202)
+def new_pipeline_attempt_route(project_id: str, task_id: str, body: dict, db: DBSession,
+                               operator: Operator) -> dict:
+    """Authorise a physically separate retry after an unknown send outcome.
+
+    This is a different decision from "continue": the person accepts a second
+    provider call while the first one may still have been answered.  The
+    original attempt keeps its UNKNOWN outcome as history.
+    """
+    require_project(db, project_id)
+    try:
+        result = pipeline.start_pipeline_new_attempt(
+            db, project_id, task_id, (body or {}).get("expected_state_version"),
+            actor=_local_actor(operator))
         db.commit()
     except ValueError as exc:
         db.rollback()

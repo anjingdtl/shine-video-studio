@@ -22,6 +22,7 @@ downgrade.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "f180b0010001"

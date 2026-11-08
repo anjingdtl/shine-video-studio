@@ -28,6 +28,11 @@ SCENE_SCRIPT_KIND = "FourStageSceneScript"
 BIBLE_RUN_ROLE = "four_stage_bible_run"
 SCENE_SCRIPT_RUN_ROLE = "four_stage_scene_script_run"
 
+#: One scene's script text limit.  The writer contract and the person's editor
+#: share this number, so an edit is refused by name instead of being truncated
+#: into a scene that silently lost its ending.
+SCENE_SCRIPT_TEXT_LIMIT = 24_000
+
 #: A single volume keeps the whole master when the master fits the budget.
 SINGLE_VOLUME_MAX_CHARS = 45_000
 #: The working budget of one volume: sections are grouped at narrative
@@ -68,6 +73,10 @@ def _write_pointer(db, key: str, value: dict) -> None:
 
 
 REUSABLE_TASK_STATUSES = ("QUEUED", "RUNNING", "PAUSED", "NEEDS_REVIEW", "SUCCEEDED")
+
+
+class _FenceLost(Exception):
+    """The claimed task moved on: this worker may not publish a result."""
 
 
 def current_volume_plan(db, project_id: str) -> AgentArtifact | None:
@@ -240,12 +249,15 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
     total = len(document.text or "")
     volumes = []
     for index, boundary in enumerate(boundaries):
-        volume_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"shine:{project_id}:volume:{index + 1}:{total}"))
+        volume_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                   f"shine:{project_id}:volume:{index + 1}:{document.sha256}"))
         volumes.append({
             "volume_id": volume_id, "order": index + 1,
             "title": boundary["title"],
             "start_offset": boundary["start_offset"],
             "end_offset": boundary["end_offset"],
+            "volume_revision": volume_revision(document.sha256, boundary["start_offset"],
+                                               boundary["end_offset"]),
             "section_ids": boundary["section_ids"],
             "char_count": boundary.get("char_count", boundary["end_offset"] - boundary["start_offset"]),
             "boundary_reason": boundary["boundary_reason"],
@@ -323,6 +335,7 @@ def materialize_volume_documents(db, project_id: str, plan_artifact_id: str) -> 
             "kind": "four_stage_volume", "master_document_id": master.id,
             "master_sha256": master.sha256, "volume_id": volume["volume_id"],
             "volume_order": volume["order"], "volume_title": volume["title"],
+            "volume_revision": volume.get("volume_revision"),
             "start_offset": start, "end_offset": end,
         }
         sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -376,7 +389,7 @@ class SceneScriptPayload(BaseModel):
     scene_key: str = Field(min_length=1, max_length=64)
     section_id: str = Field(min_length=1, max_length=64)
     title: str = Field(default="", max_length=120)
-    text: str = Field(min_length=1, max_length=24000)
+    text: str = Field(min_length=1, max_length=SCENE_SCRIPT_TEXT_LIMIT)
     characters: list[str] = Field(default_factory=list, max_length=24)
     dialogue: list[dict] = Field(default_factory=list, max_length=64)
     estimated_seconds: int = Field(default=0, ge=0, le=3600)
@@ -386,44 +399,75 @@ class SceneScriptPayload(BaseModel):
     questions: list[str] = Field(default_factory=list, max_length=8)
 
 
+def resolve_plan_outlines(db, project_id: str, plan) -> tuple[list[dict], list[dict]]:
+    """The current plan's volumes in order, each with its own confirmed outline.
+
+    The blueprint is a cross-volume document, so its input must be the plan's
+    volumes in plan order - never "every confirmed outline the project has".
+    A project that holds an older document's outline would otherwise mix two
+    ranges into one blueprint and silently lose a volume.  Returns the
+    resolved pairs and the volumes that still lack a confirmed outline.
+    """
+    resolved: list[dict] = []
+    missing: list[dict] = []
+    for volume in plan.payload_json.get("volumes") or []:
+        outline = _volume_outline(db, project_id, volume["volume_id"])
+        entry = {"volume_id": volume["volume_id"], "order": volume["order"],
+                 "title": volume.get("title", ""),
+                 "start_offset": volume.get("start_offset"),
+                 "end_offset": volume.get("end_offset"),
+                 "volume_revision": volume.get("volume_revision")}
+        if outline is None:
+            missing.append(entry)
+        else:
+            resolved.append({**entry, "outline": outline})
+    return resolved, missing
+
+
 def queue_bible(db, project_id: str, gateway) -> AgentTaskRecord:
-    """Queue one bible synthesis task for the project's current master."""
+    """Queue one bible synthesis task over the plan's volumes in order.
+
+    A partial set is allowed for *draft* synthesis and is recorded as such;
+    confirming or publishing that blueprint later requires the full set, so a
+    missing volume cannot be mistaken for a finished blueprint.
+    """
     from shine.materialprep import text_consent
-    from shine.models import AgentArtifact, AgentTaskRecord
+    from shine.models import AgentTaskRecord
 
     plan = current_volume_plan(db, project_id)
     if plan is None:
         raise ValueError("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
     master_doc = db.get(ProjectDocument, plan.payload_json["source_master"]["document_id"])
-    if master_doc is None:
+    if master_doc is None or master_doc.project_id != project_id:
         raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
-    outlines = []
-    for row in db.scalars(select(AgentArtifact).where(
-            AgentArtifact.project_id == project_id,
-            AgentArtifact.kind == "StoryOutline",
-            AgentArtifact.approved_at.is_not(None))).all():
-        outlines.append(row)
-    if not outlines:
+    resolved, missing = resolve_plan_outlines(db, project_id, plan)
+    if not resolved:
         raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
+    coverage = {
+        "complete": not missing,
+        "volume_count": len(resolved) + len(missing),
+        "covered_volume_ids": [entry["volume_id"] for entry in resolved],
+        "missing_volumes": [{"volume_id": entry["volume_id"], "order": entry["order"]}
+                            for entry in missing],
+        "plan_sha256": plan.sha256,
+    }
     profile = gateway.profile_for_role(db, BIBLE_RUN_ROLE)
     fingerprint = text_consent.fingerprint(profile)
     base = {
         "project": project_id, "master": master_doc.id, "master_sha": master_doc.sha256,
-        "outlines": [{"id": o.id, "sha": o.sha256} for o in outlines],
+        "plan": plan.sha256,
+        "outlines": [{"volume": entry["volume_id"], "id": entry["outline"].id,
+                      "sha": entry["outline"].sha256} for entry in resolved],
         "facts": [], "profile": fingerprint, "tool": BIBLE_RUN_ROLE, "version": PIPELINE_VERSION,
     }
     identity = digest(base)
-    attempts = db.scalars(select(AgentTaskRecord).where(
-        AgentTaskRecord.project_id == project_id,
-        AgentTaskRecord.role_id == BIBLE_RUN_ROLE,
-        AgentTaskRecord.input_hash == identity)).all()
-    for old in attempts:
-        if old.status in REUSABLE_TASK_STATUSES:
-            return old
+    existing = _existing_attempt(db, project_id, BIBLE_RUN_ROLE, identity)
+    if existing is not None:
+        return existing
     row = AgentTaskRecord(
         project_id=project_id,
         role_id=BIBLE_RUN_ROLE,
-        request_identity=identity,
+        request_identity=attempt_identity(identity, 1),
         input_hash=identity,
         asset_manifest_hash=identity,
         rulepack_id=PIPELINE_VERSION,
@@ -433,16 +477,23 @@ def queue_bible(db, project_id: str, gateway) -> AgentTaskRecord:
         schema_version="1.0",
         status="QUEUED",
         trace={
-            "stage": "DRAFT", "cursor": 0, "automatic_replay": False,
+            "stage": "DRAFT", "cursor": 0, "automatic_replay": False, "attempt": 1,
+            "result_contract": _result_contract(BIBLE_KIND),
+            "input_revision_ids": [entry["outline"].id for entry in resolved],
             "document_id": master_doc.id, "document_sha256": master_doc.sha256,
-            "outline_refs": [{"id": o.id, "sha256": o.sha256} for o in outlines],
+            "plan_artifact_id": plan.id, "plan_sha256": plan.sha256,
+            "outline_coverage": coverage,
+            "outline_refs": [{"id": entry["outline"].id, "sha256": entry["outline"].sha256,
+                              "volume_id": entry["volume_id"], "order": entry["order"]}
+                             for entry in resolved],
             "provider_fingerprint": fingerprint, "base_identity": identity,
         },
     )
     db.add(row)
     db.flush()
     add_audit(db, "local-user", "PIPELINE_BIBLE_QUEUED", "agent_task", row.id,
-              {"master_sha256": master_doc.sha256}, project_id=project_id)
+              {"master_sha256": master_doc.sha256, "volumes": len(resolved),
+               "missing_volumes": len(missing)}, project_id=project_id)
     return row
 
 
@@ -535,19 +586,119 @@ def _persist_pipeline_sending(session_factory, task_id, version, worker_id, trac
     return updated if changed == 1 else None
 
 
-def _pipeline_entry_guard(factory, task_id: str, version: int, worker_id: str, trace: dict) -> str:
+#: Stages that prove a provider request was opened and may still own an answer.
+UNCERTAIN_SEND_STAGES = ("SENDING", "WAITING_PROVIDER", "PREPARING_PROVIDER")
+
+#: Trace keys that describe one finished attempt; a new attempt clears them.
+_ATTEMPT_RESULT_KEYS = (
+    "artifact_id", "artifact_sha256", "blocked_reason", "sent_at", "adopted",
+    "received_result_sha256", "response_status", "truncated", "usage", "output_budget",
+)
+
+
+def _send_outcome_unknown(trace: dict) -> bool:
+    """True when the durable ledger cannot rule out that the provider answered.
+
+    The decision reads the persisted outcome, never the error text: a provider
+    timeout keeps its own error code (``LLM_HTTP``, ``LLM_PROVIDER_FAULT``) yet
+    the answer may exist upstream, so re-queueing it would buy the same call
+    twice and lose one of the two answers.
+    """
+    if trace.get("artifact_id"):
+        return False
+    if trace.get("external_outcome") == "UNKNOWN":
+        return True
+    return trace.get("stage") in UNCERTAIN_SEND_STAGES
+
+
+def _result_contract(kind: str) -> str:
+    """The contract identity one artifact of a kind must satisfy."""
+    return f"{kind}:{PIPELINE_VERSION}"
+
+
+def _orphan_candidates(db, task_id: str, project_id: str, kind: str, role: str,
+                       trace: dict) -> tuple[list, str | None]:
+    """Artifacts a crashed attempt already wrote, judged by their own evidence.
+
+    An artifact only counts as this task's answer when everything a replay
+    cannot fake agrees: the source task, the project, the artifact kind, the
+    producing role, the contract version, the pinned input chain and a digest
+    recomputed from the stored payload.  Two matching rows are ambiguous and
+    are reported, never picked arbitrarily.
+    """
+    from shine.models import AgentArtifact
+
+    contract = trace.get("result_contract")
+    if contract:
+        expected_kind, _, expected_version = contract.partition(":")
+        if expected_kind != kind or expected_version != PIPELINE_VERSION:
+            # The task was queued under a different result contract, so its
+            # artifacts cannot be judged as this contract's answer.  Say so by
+            # name instead of adopting them or silently buying a second call.
+            return [], "PIPELINE_RESULT_CONTRACT_MISMATCH"
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.source_task_id == task_id,
+        AgentArtifact.project_id == project_id)).all()
+    candidates = []
+    for row in rows:
+        if row.kind != kind or row.producer_role != role or row.stale:
+            continue
+        if digest(row.payload_json) != row.sha256:
+            continue
+        pinned = trace.get("input_revision_ids")
+        if isinstance(pinned, list) and pinned and list(row.input_revision_ids) != pinned:
+            continue
+        candidates.append(row)
+    if len(candidates) > 1:
+        return candidates, "PIPELINE_AMBIGUOUS_RESULT_CANDIDATES"
+    return candidates, None
+
+
+def _adopt_orphan_result(factory, task_id: str, version: int, worker_id: str, trace: dict,
+                         project_id: str, kind: str, role: str) -> bool:
+    """Adopt a uniquely matching orphan artifact a crashed attempt left behind."""
+    with factory() as db:
+        candidates, ambiguous = _orphan_candidates(db, task_id, project_id, kind, role, trace)
+        if ambiguous:
+            _finish_pipeline_task(
+                factory, task_id, version, worker_id,
+                {**trace, "stage": "NEEDS_REVIEW", "blocked_reason": ambiguous,
+                 "orphan_candidate_ids": [row.id for row in candidates][:8]},
+                "NEEDS_REVIEW", ambiguous)
+            return True
+        if not candidates:
+            return False
+        artifact = candidates[0]
+        artifact_id, artifact_sha = artifact.id, artifact.sha256
+    _finish_pipeline_task(
+        factory, task_id, version, worker_id,
+        {**trace, "stage": "DOCUMENT", "adopted": True, "external_outcome": "RESPONSE_RECEIVED",
+         "artifact_id": artifact_id, "artifact_sha256": artifact_sha},
+        "SUCCEEDED")
+    return True
+
+
+def _pipeline_entry_guard(factory, task_id: str, version: int, worker_id: str, trace: dict,
+                          *, project_id: str, kind: str, role: str) -> str:
     """Dispatch on the durable stage BEFORE any provider contact.
 
-    * SENDING: the send intent was persisted, so the outcome is unknown -
-      the task stops as NEEDS_REVIEW and is never replayed.
-    * DOCUMENT with a persisted artifact: the answer exists - adopt it and
-      finish without a second provider call.
+    * a persisted pointer: the answer exists - adopt it without a second call.
+    * a unique orphan artifact from this task: also adopt, because the answer
+      really was written and only the task's own pointer was lost.
+    * an uncertain send with no result: the outcome is unknown - stop for
+      reconciliation and never replay.
     * DRAFT: safe to proceed to a fresh send.
     Returns "proceed" when the caller may send.
     """
     if trace.get("artifact_id"):
         return "adopt"
-    if trace.get("stage") in ("SENDING", "WAITING_PROVIDER", "PREPARING_PROVIDER"):
+    if _adopt_orphan_result(factory, task_id, version, worker_id, trace,
+                            project_id, kind, role):
+        # A unique orphan is this task's real answer, and an ambiguous set is
+        # reported: either way the ledger already proves what happened, so the
+        # caller must not open another provider request.
+        return "adopted"
+    if _send_outcome_unknown(trace):
         _finish_pipeline_task(
             factory, task_id, version, worker_id,
             {**trace, "stage": "NEEDS_REVIEW", "external_outcome": "UNKNOWN",
@@ -558,29 +709,83 @@ def _pipeline_entry_guard(factory, task_id: str, version: int, worker_id: str, t
 
 
 def _adopt_persisted_artifact(factory, task_id: str, version: int, worker_id: str, trace: dict,
-                              project_id: str) -> bool:
+                              project_id: str, kind: str, role: str) -> bool:
     """Finish a task whose answer artifact is already in the ledger."""
     from shine.models import AgentArtifact
 
     with factory() as db:
         artifact = db.get(AgentArtifact, trace["artifact_id"])
-        if (artifact is None or artifact.project_id != project_id
-                or artifact.sha256 != trace.get("artifact_sha256")):
+        invalid = (
+            artifact is None or artifact.project_id != project_id
+            or artifact.sha256 != trace.get("artifact_sha256")
+            or artifact.kind != kind or artifact.producer_role != role
+            or artifact.source_task_id != task_id
+            or digest(artifact.payload_json) != artifact.sha256)
+        if invalid:
             _finish_pipeline_task(
                 factory, task_id, version, worker_id,
                 {**trace, "stage": "NEEDS_REVIEW", "blocked_reason": "PIPELINE_PERSISTED_ARTIFACT_INVALID"},
                 "NEEDS_REVIEW", "PIPELINE_PERSISTED_ARTIFACT_INVALID")
             return True
     _finish_pipeline_task(factory, task_id, version, worker_id,
-                          {**trace, "stage": "DOCUMENT", "adopted": True}, "SUCCEEDED")
+                          {**trace, "stage": "DOCUMENT", "adopted": True,
+                           "external_outcome": "RESPONSE_RECEIVED"}, "SUCCEEDED")
     return True
+
+
+def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: str,
+                            project_id: str, kind: str, role: str, payload: dict,
+                            input_revision_ids: list[str], trace: dict) -> tuple[str, str] | None:
+    """Write the answer artifact and close the task in ONE fenced transaction.
+
+    Both rows must commit together or not at all.  A crash after the artifact
+    but before the task state used to leave a paid answer nobody could adopt;
+    a worker whose lease was taken over must not be able to publish at all,
+    so the artifact insert is undone when the fenced task update matches no
+    row.  The transaction never wraps a provider call.
+    """
+    from sqlalchemy import update
+
+    from shine.models import AgentArtifact, AgentTaskRecord
+
+    try:
+        with factory.begin() as db:
+            artifact = AgentArtifact(
+                project_id=project_id,
+                kind=kind,
+                schema_version="1.0",
+                payload_json=payload,
+                sha256=digest(payload),
+                producer_role=role,
+                source_task_id=task_id,
+                input_revision_ids=list(input_revision_ids),
+            )
+            db.add(artifact)
+            db.flush()
+            updated = {**trace, "stage": "DOCUMENT", "artifact_id": artifact.id,
+                       "artifact_sha256": artifact.sha256,
+                       "external_outcome": "RESPONSE_RECEIVED",
+                       "input_revision_ids": list(input_revision_ids)}
+            changed = db.execute(update(AgentTaskRecord).where(
+                AgentTaskRecord.id == task_id,
+                AgentTaskRecord.state_version == version,
+                AgentTaskRecord.lease_owner == worker_id,
+                AgentTaskRecord.status == "RUNNING",
+            ).values(trace=updated, status="SUCCEEDED", error_code=None,
+                     lease_owner=None, lease_expires_at=None,
+                     state_version=version + 1)).rowcount
+            if changed != 1:
+                raise _FenceLost(task_id)
+            return artifact.id, artifact.sha256
+    except _FenceLost:
+        return None
 
 
 def run_bible_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one bible synthesis task under the fenced claim."""
     from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
-    from shine.models import AgentArtifact, AgentTaskRecord
+    from shine.models import AgentTaskRecord
 
     with factory() as db:
         task = db.get(AgentTaskRecord, task_id)
@@ -588,10 +793,12 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             return False
         trace = dict(task.trace or {})
         project_id = task.project_id
-        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace)
+        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace,
+                                        project_id=project_id, kind=BIBLE_KIND, role=BIBLE_RUN_ROLE)
         if verdict == "adopt":
-            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace, project_id)
-        if verdict == "blocked":
+            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace,
+                                             project_id, BIBLE_KIND, BIBLE_RUN_ROLE)
+        if verdict in ("blocked", "adopted"):
             return True
         master_doc = db.get(ProjectDocument, trace["document_id"])
         if (master_doc is None or master_doc.project_id != project_id
@@ -610,6 +817,18 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
                                       {**trace, "blocked_reason": "PIPELINE_OUTLINE_CHANGED"},
                                       "NEEDS_REVIEW", "PIPELINE_OUTLINE_CHANGED")
                 return True
+            volume_id = ref.get("volume_id")
+            if volume_id:
+                # The reference must still be the current outline of that
+                # volume: a re-extracted or re-adjusted volume makes this
+                # blueprint's input range obsolete rather than silently
+                # mixing two revisions of the same volume.
+                current = _volume_outline(db, project_id, volume_id)
+                if current is None or current.id != outline.id:
+                    _finish_pipeline_task(factory, task_id, version, worker_id,
+                                          {**trace, "blocked_reason": "PIPELINE_VOLUME_OUTLINE_SUPERSEDED"},
+                                          "NEEDS_REVIEW", "PIPELINE_VOLUME_OUTLINE_SUPERSEDED")
+                    return True
             outlines.append(outline)
         context = {
             "master": {"char_count": len(master_doc.text or ""), "outline_count": len(outlines)},
@@ -655,25 +874,50 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
         payload = dict(outcome.parsed)
-        with factory.begin() as db:
-            artifact = AgentArtifact(
-                project_id=project_id,
-                kind=BIBLE_KIND,
-                schema_version="1.0",
-                payload_json=payload,
-                sha256=digest(payload),
-                producer_role=BIBLE_RUN_ROLE,
-                source_task_id=task_id,
-                input_revision_ids=[ref["id"] for ref in trace["outline_refs"]],
-            )
-            db.add(artifact)
-            db.flush()
-            updated = {**trace, "stage": "DOCUMENT", "artifact_id": artifact.id,
-                       "artifact_sha256": artifact.sha256,
-                       "usage": outcome.details.get("usage"),
-                       "output_budget": outcome.details.get("output_budget")}
-        _finish_pipeline_task(factory, task_id, version, worker_id, updated, "SUCCEEDED")
+        _commit_pipeline_result(
+            factory, task_id=task_id, version=version, worker_id=worker_id,
+            project_id=project_id, kind=BIBLE_KIND, role=BIBLE_RUN_ROLE, payload=payload,
+            input_revision_ids=trace.get("input_revision_ids")
+            or [ref["id"] for ref in trace["outline_refs"]],
+            trace={**trace, "usage": outcome.details.get("usage"),
+                   "output_budget": outcome.details.get("output_budget")})
         return True
+
+
+def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
+    """Why a blueprint may not yet be confirmed, decided from durable evidence.
+
+    Confirming a blueprint is the cross-volume decision, so it needs the full
+    ordered set of the *current* plan's volumes.  A blueprint synthesized from
+    a partial set stays a usable draft and is refused here by name instead of
+    being confirmed as if every volume had been read.  A blueprint a person
+    wrote themselves needs no provider coverage evidence, but it is held to
+    the same rule about the plan's volumes.
+    """
+    from shine.models import AgentTaskRecord
+
+    blockers: list[str] = []
+    task = db.get(AgentTaskRecord, artifact.source_task_id) if artifact.source_task_id else None
+    trace = (task.trace or {}) if task is not None else {}
+    authored_by_person = trace.get("external_outcome") == "NOT_SENT"
+    coverage = trace.get("outline_coverage") or {}
+    if task is None and not authored_by_person:
+        return ["PIPELINE_BIBLE_SOURCE_TASK_MISSING"]
+    if not authored_by_person and not coverage.get("complete"):
+        missing = coverage.get("missing_volumes") or []
+        blockers.append("PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE:"
+                        + ",".join(str(item.get("order")) for item in missing)[:200])
+    plan = current_volume_plan(db, project_id)
+    if plan is None:
+        blockers.append("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
+        return blockers
+    if coverage.get("plan_sha256") and coverage["plan_sha256"] != plan.sha256:
+        blockers.append("PIPELINE_BIBLE_PLAN_SUPERSEDED")
+    _, missing_now = resolve_plan_outlines(db, project_id, plan)
+    if missing_now:
+        blockers.append("PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE:"
+                        + ",".join(str(item["order"]) for item in missing_now)[:200])
+    return blockers
 
 
 def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -> AgentArtifact:
@@ -685,32 +929,81 @@ def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -
         raise ValueError("PIPELINE_BIBLE_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_BIBLE_SHA_MISMATCH")
+    blockers = bible_confirmation_blockers(db, project_id, artifact)
+    if blockers:
+        raise ValueError(blockers[0])
+    open_questions = list(artifact.payload_json.get("open_questions") or [])
     row = AppSetting(key=_pointer_key(project_id, "story-bible"),
-                     value={"artifact_id": artifact.id, "sha256": artifact.sha256})
+                     value={"artifact_id": artifact.id, "sha256": artifact.sha256,
+                            "open_questions": open_questions[:48]})
     db.merge(row)
     artifact.approved_by = "local-user"
     artifact.approved_at = utcnow()
     db.flush()
     add_audit(db, "local-user", "PIPELINE_BIBLE_CONFIRMED", "agent_artifact", artifact.id,
-              {"sha256": artifact.sha256}, project_id=project_id)
+              {"sha256": artifact.sha256, "open_questions": open_questions[:48]},
+              project_id=project_id)
     return artifact
 
 
+def _planned_volume(db, project_id: str, volume_id: str) -> tuple[dict | None, dict]:
+    """The current plan's entry for one stable volume key, plus its master ref."""
+    plan = current_volume_plan(db, project_id)
+    if plan is None:
+        return None, {}
+    master = plan.payload_json.get("source_master") or {}
+    volume = next((v for v in (plan.payload_json.get("volumes") or [])
+                   if v.get("volume_id") == volume_id), None)
+    return volume, master
+
+
+def volume_revision(master_sha256: str, start: int, end: int) -> str:
+    """The content revision of one volume: its exact range in one master.
+
+    The volume *key* is stable across boundary adjustments so the same
+    business volume keeps its identity; this revision is what actually pins
+    the text, and a document is only reusable when both agree.
+    """
+    return digest({"master_sha256": master_sha256, "start_offset": start, "end_offset": end})
+
+
 def _volume_document(db, project_id: str, volume_id: str):
-    """The derived volume document row for one volume id."""
+    """The derived volume document of one volume, matched on its exact span.
+
+    Reading by key alone used to return the first document an earlier
+    adjustment had created, so a re-adjusted plan could silently read the old
+    range.  The match therefore pins the master identity and the planned
+    offsets, and the newest exact match wins.
+    """
     from shine.models import ProjectDocument
 
+    planned, master = _planned_volume(db, project_id, volume_id)
+    candidates = []
     for row in db.scalars(select(ProjectDocument).where(
             ProjectDocument.project_id == project_id,
             ProjectDocument.source_format == "volume")).all():
         parsed = row.parsed if isinstance(row.parsed, dict) else {}
-        if parsed.get("kind") == "four_stage_volume" and parsed.get("volume_id") == volume_id:
-            return row
-    return None
+        if parsed.get("kind") != "four_stage_volume" or parsed.get("volume_id") != volume_id:
+            continue
+        if planned is not None:
+            if (parsed.get("master_document_id") != master.get("document_id")
+                    or parsed.get("master_sha256") != master.get("sha256")
+                    or parsed.get("start_offset") != planned.get("start_offset")
+                    or parsed.get("end_offset") != planned.get("end_offset")):
+                continue
+        candidates.append(row)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: (row.created_at, row.id))
 
 
 def _volume_outline(db, project_id: str, volume_id: str):
-    """The confirmed StoryOutline artifact of one volume's document."""
+    """The confirmed StoryOutline of exactly this volume's document.
+
+    A project-level pointer is only a hint: an outline is accepted only when
+    its own payload names this volume's document and digest, so an unrelated
+    or superseded outline can never stand in for the current volume.
+    """
     from shine.models import AgentArtifact
 
     doc = _volume_document(db, project_id, volume_id)
@@ -722,9 +1015,78 @@ def _volume_outline(db, project_id: str, volume_id: str):
     if pointer is None:
         return None
     artifact = db.get(AgentArtifact, pointer.get("artifact_id", ""))
-    if artifact is None or artifact.stale or not artifact.approved_at:
+    if (artifact is None or artifact.project_id != project_id or artifact.stale
+            or not artifact.approved_at
+            or artifact.payload_json.get("document_id") != doc.id
+            or artifact.payload_json.get("document_sha256") != doc.sha256
+            or digest(artifact.payload_json) != artifact.sha256):
         return None
     return artifact
+
+
+def bible_eligibility(db, project_id: str, artifact) -> tuple[bool, str]:
+    """Whether a blueprint may be the basis of drafting, and on what grounds.
+
+    The queue and the Worker call this same function, so a draft blueprint
+    that let a task be enqueued can never be refused at execution time for the
+    same reason.  A draft is a real basis for *draft* writing; only a
+    confirmed blueprint may publish a volume.
+    """
+    if (artifact is None or artifact.project_id != project_id or artifact.stale
+            or artifact.kind != BIBLE_KIND
+            or digest(artifact.payload_json) != artifact.sha256):
+        return False, "PIPELINE_BIBLE_CHANGED"
+    return True, "confirmed" if artifact.approved_at else "draft_unconfirmed"
+
+
+def bible_basis_equivalent(a: dict, b: dict) -> bool:
+    """True when two blueprints agree on every decisive, user-visible fact.
+
+    A script drafted on a draft blueprint may be published without rewriting
+    when the confirmed blueprint says the same things; any difference in the
+    mainline, the locked facts or the ending direction needs a re-review.
+    """
+    def normalized(payload: dict) -> dict:
+        return {
+            "mainline": str(payload.get("mainline") or "").strip(),
+            "locked_facts": sorted(str(item).strip() for item in (payload.get("locked_facts") or [])),
+            "ending_direction": str(payload.get("ending_direction") or "").strip(),
+        }
+    return normalized(a) == normalized(b)
+
+
+def _existing_attempt(db, project_id: str, role: str, base_identity: str):
+    """The newest reusable attempt of one logical input identity.
+
+    Attempts of one logical unit share ``base_identity`` and differ only in
+    their attempt number, so re-queueing must look them up by that identity -
+    otherwise an explicitly authorised new attempt would spawn a third task.
+    """
+    from shine.models import AgentTaskRecord
+
+    rows = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == role).order_by(
+        AgentTaskRecord.created_at.desc())).all()
+    matching = [row for row in rows
+                if (row.trace or {}).get("base_identity") == base_identity
+                or row.input_hash == base_identity]
+    return next((row for row in matching if row.status in REUSABLE_TASK_STATUSES), None)
+
+
+def attempt_identity(base_identity: str, attempt: int) -> str:
+    """The request identity of one physical attempt of one logical unit."""
+    return base_identity if attempt <= 1 else digest({"base": base_identity, "attempt": attempt})
+
+
+def _attempt_count(db, project_id: str, role: str, base_identity: str) -> int:
+    from shine.models import AgentTaskRecord
+
+    rows = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == role)).all()
+    return sum(1 for row in rows
+               if (row.trace or {}).get("base_identity") == base_identity)
 
 
 def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
@@ -742,9 +1104,9 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
     if outline is None:
         raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
     bible = current_bible(db, project_id) or latest_bible_artifact(db, project_id)
-    if bible is None:
+    eligible, bible_basis = bible_eligibility(db, project_id, bible)
+    if not eligible:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
-    bible_basis = "confirmed" if bible.approved_at else "draft_unconfirmed"
     sections = outline.payload_json.get("production_sections") or []
     volume_doc = _volume_document(db, project_id, volume_id)
     if volume_doc is None:
@@ -772,18 +1134,14 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
             "profile": fingerprint, "tool": SCENE_SCRIPT_RUN_ROLE, "version": PIPELINE_VERSION,
         }
         identity = digest(base)
-        attempts = db.scalars(select(AgentTaskRecord).where(
-            AgentTaskRecord.project_id == project_id,
-            AgentTaskRecord.role_id == SCENE_SCRIPT_RUN_ROLE,
-            AgentTaskRecord.input_hash == identity)).all()
-        existing_task = next((a for a in attempts if a.status in REUSABLE_TASK_STATUSES), None)
+        existing_task = _existing_attempt(db, project_id, SCENE_SCRIPT_RUN_ROLE, identity)
         if existing_task:
             created.append(existing_task)
             continue
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=SCENE_SCRIPT_RUN_ROLE,
-            request_identity=identity,
+            request_identity=attempt_identity(identity, 1),
             input_hash=identity,
             asset_manifest_hash=identity,
             rulepack_id=PIPELINE_VERSION,
@@ -793,7 +1151,9 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
             schema_version="1.0",
             status="QUEUED",
             trace={
-                "stage": "DRAFT", "automatic_replay": False,
+                "stage": "DRAFT", "automatic_replay": False, "attempt": 1,
+                "result_contract": _result_contract(SCENE_SCRIPT_KIND),
+                "input_revision_ids": [bible.id, outline.id],
                 "volume_id": volume_id,
                 "volume_document_id": volume_doc.id,
                 "volume_document_sha256": volume_doc.sha256,
@@ -827,10 +1187,13 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             return False
         trace = dict(task.trace or {})
         project_id = task.project_id
-        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace)
+        verdict = _pipeline_entry_guard(factory, task_id, version, worker_id, trace,
+                                        project_id=project_id, kind=SCENE_SCRIPT_KIND,
+                                        role=SCENE_SCRIPT_RUN_ROLE)
         if verdict == "adopt":
-            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace, project_id)
-        if verdict == "blocked":
+            return _adopt_persisted_artifact(factory, task_id, version, worker_id, trace,
+                                             project_id, SCENE_SCRIPT_KIND, SCENE_SCRIPT_RUN_ROLE)
+        if verdict in ("blocked", "adopted"):
             return True
         volume_doc = db.get(ProjectDocument, trace["volume_document_id"])
         if (volume_doc is None or volume_doc.project_id != project_id
@@ -840,13 +1203,16 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                                   "NEEDS_REVIEW", "PIPELINE_VOLUME_DOCUMENT_CHANGED")
             return True
         bible = db.get(AgentArtifact, trace["bible_artifact_id"])
-        if (bible is None or bible.project_id != project_id
-                or bible.stale or bible.sha256 != trace["bible_sha256"]
-                or not bible.approved_at):
+        # The queue and the Worker answer the same question with the same
+        # function: a draft blueprint may drive draft scripts, and only a
+        # confirmed one may publish them.
+        eligible, basis = bible_eligibility(db, project_id, bible)
+        if not eligible or bible.sha256 != trace["bible_sha256"]:
             _finish_pipeline_task(factory, task_id, version, worker_id,
                                   {**trace, "blocked_reason": "PIPELINE_BIBLE_CHANGED"},
                                   "NEEDS_REVIEW", "PIPELINE_BIBLE_CHANGED")
             return True
+        trace = {**trace, "bible_basis": basis}
         outline = db.get(AgentArtifact, trace["outline_artifact_id"])
         if (outline is None or outline.project_id != project_id
                 or outline.stale or outline.sha256 != trace["outline_sha256"]
@@ -912,25 +1278,15 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                                   "volume_document_id": trace["volume_document_id"],
                                   "start_offset": section.get("start_offset"),
                                   "end_offset": section.get("end_offset"),
-                                  "outline_sha256": trace["outline_sha256"]}
-        with factory.begin() as db:
-            artifact = AgentArtifact(
-                project_id=project_id,
-                kind=SCENE_SCRIPT_KIND,
-                schema_version="1.0",
-                payload_json=payload,
-                sha256=digest(payload),
-                producer_role=SCENE_SCRIPT_RUN_ROLE,
-                source_task_id=task_id,
-                input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
-            )
-            db.add(artifact)
-            db.flush()
-            updated = {**trace, "stage": "DOCUMENT", "artifact_id": artifact.id,
-                       "artifact_sha256": artifact.sha256,
-                       "usage": outcome.details.get("usage"),
-                       "output_budget": outcome.details.get("output_budget")}
-        _finish_pipeline_task(factory, task_id, version, worker_id, updated, "SUCCEEDED")
+                                  "outline_sha256": trace["outline_sha256"],
+                                  "bible_sha256": trace["bible_sha256"]}
+        _commit_pipeline_result(
+            factory, task_id=task_id, version=version, worker_id=worker_id,
+            project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
+            payload=payload,
+            input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
+            trace={**trace, "usage": outcome.details.get("usage"),
+                   "output_budget": outcome.details.get("output_budget")})
         return True
 
 
@@ -979,13 +1335,21 @@ def edit_scene_script(db, project_id: str, artifact_id: str, new_text: str, note
     after reading, and the old revision stays in the ledger.  The pointer is
     cleared when the edited artifact was the confirmed one, so a stale
     confirmation can never silently cover an unconfirmed text.
+
+    Text past the scene contract's limit is refused by name with its real
+    length.  Silently truncating an edit would drop the ending of a scene
+    while still writing a new artifact that looks complete.
     """
     from shine.models import AgentArtifact, AppSetting
 
     old = db.get(AgentArtifact, artifact_id)
     if not old or old.project_id != project_id or old.kind != SCENE_SCRIPT_KIND:
         raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_FOUND")
-    payload = {**old.payload_json, "text": new_text[:24000], "edited": True,
+    limit = SCENE_SCRIPT_TEXT_LIMIT
+    if len(new_text) > limit:
+        raise ValueError(f"PIPELINE_SCENE_SCRIPT_TEXT_TOO_LONG:{len(new_text)}:{limit}"
+                         ":edit within the limit or split the scene in the source")
+    payload = {**old.payload_json, "text": new_text, "edited": True,
                "edited_from": old.sha256, "edit_note": note[:400]}
     artifact = AgentArtifact(
         project_id=project_id,
@@ -1052,19 +1416,33 @@ def latest_unconfirmed(db, project_id: str, kind: str) -> AgentArtifact | None:
     return next((r for r in rows if not r.approved_at), None)
 
 
+#: The inline budget of one crew run.  The storyboard request contract caps a
+#: single call at 60,000 characters; staying well below it leaves room for the
+#: locked facts, the JSON schema and the answer, so a batch can never be
+#: refused by the very limit it was designed to respect.
+STORYBOARD_UNIT_CHARS = 15_000
+
+#: Failures that will fail identically for every remaining unit: a missing
+#: route or a refused consent is not fixed by trying the next scene.
+GLOBAL_STORYBOARD_STOPS = {
+    "REMOTE_AGENT_CONSENT_REQUIRED",
+    "STORYBOARD_AGENT_ROUTE_MISSING",
+    "PIPELINE_MASTER_DOCUMENT_NOT_FOUND",
+}
+
+
 def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
     """The volume's confirmed scripts, serialized in section order.
 
-    This text is what the crew chain reads: it is a deterministic projection
-    of the confirmed SceneScripts, and its sha256 is recorded with every
-    draft so a later script edit is detectable.
+    This projection is the volume's *identity*, not one crew input: the crew
+    chain runs per scene (see ``storyboard_units``), so a project-length
+    volume is never refused by an inline character limit.  Its sha256 is what
+    the storyboard receipts and the package lineage pin.
     """
-
     outline = _volume_outline(db, project_id, volume_id)
     if outline is None:
         raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
-    doc = _volume_document(db, project_id, volume_id)
-    if doc is None:
+    if _volume_document(db, project_id, volume_id) is None:
         raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
     sections = outline.payload_json.get("production_sections") or []
     parts = []
@@ -1073,91 +1451,400 @@ def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
         if script is None:
             raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section["production_section_id"])
         title = section.get("title", "")
-        body_text = script.payload_json.get("text", "")
-        parts.append(f"第{section.get('order', '?')}场 {title}\n{body_text}")
-    serialized = "\n\n".join(parts)
-    # The crew chain's inline input limit: refuse by name instead of an
-    # unhelpful schema validation leak.
-    if len(serialized) > 60_000:
-        raise ValueError(
-            "PIPELINE_SCRIPT_TOO_LONG:" + str(len(serialized))
-            + ":split the chapter in the source or adjust volume boundaries manually")
-    return serialized
+        parts.append(f"第{section.get('order', '?')}场 {title}\n{script.payload_json.get('text', '')}")
+    return "\n\n".join(parts)
 
 
-def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None) -> dict:
-    """Run the crew chain in draft mode over the volume's confirmed scripts.
+def _split_scene_text(text: str, limit: int) -> list[str]:
+    """Split one oversized scene at paragraph boundaries, never mid-sentence.
 
-    The chain runs on the serialized script text (inline mode); the draft
-    flag lets it proceed without a frozen style or approved masters, and the
-    volume linkage travels in the task trace so the handoff can find the
-    receipts.
+    A scene is the smallest unit that carries narrative meaning, so it is only
+    divided when it cannot fit at all, and then on the paragraph boundaries
+    the writer already wrote.  A single paragraph longer than the budget is
+    the one case that must hard-split; it is labelled by chunk index, never
+    dropped or silently truncated.
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for paragraph in text.split("\n"):
+        candidate = f"{current}\n{paragraph}" if current else paragraph
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    result: list[str] = []
+    for chunk in chunks:
+        while len(chunk) > limit:
+            result.append(chunk[:limit])
+            chunk = chunk[limit:]
+        if chunk:
+            result.append(chunk)
+    return result
+
+
+def storyboard_units(db, project_id: str, volume_id: str) -> list[dict]:
+    """One bounded crew input per scene, in plan order.
+
+    Whole scenes are the unit because the per-scene mapping is exactly what
+    the review table ("集 → 场 → 片段 → 镜") and the delivery coverage check
+    need: a batch that mixed two scenes into one indistinguishable block would
+    lose which shot belongs to which scene.  An oversized scene becomes
+    labelled chunks, each with its own receipt and its own resume boundary.
+    """
+    outline = _volume_outline(db, project_id, volume_id)
+    if outline is None:
+        raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
+    if _volume_document(db, project_id, volume_id) is None:
+        raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
+    units: list[dict] = []
+    for section in outline.payload_json.get("production_sections") or []:
+        section_id = section["production_section_id"]
+        script = current_scene_script(db, project_id, volume_id, section_id)
+        if script is None:
+            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section_id)
+        text = f"第{section.get('order', '?')}场 {section.get('title', '')}\n" \
+               f"{script.payload_json.get('text', '')}"
+        chunks = _split_scene_text(text, STORYBOARD_UNIT_CHARS)
+        for index, chunk in enumerate(chunks, start=1):
+            units.append({
+                "unit_id": section_id if len(chunks) == 1 else f"{section_id}#{index}",
+                "section_id": section_id,
+                "scene_key": section.get("scene_key", section_id),
+                "order": section.get("order"),
+                "title": section.get("title", ""),
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "script_sha256": script.sha256,
+                "continuity_in": script.payload_json.get("continuity_in", ""),
+                "continuity_out": script.payload_json.get("continuity_out", ""),
+                "text": chunk,
+                "char_count": len(chunk),
+            })
+    return units
+
+
+def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None,
+                            only_section_ids: list[str] | None = None) -> dict:
+    """Run the draft crew chain over every confirmed scene, one unit at a time.
+
+    Each unit is one bounded crew input, so a project-length volume is written
+    scene by scene instead of being refused by an inline limit, and a failed
+    unit never invalidates the units that already passed: the run reports
+    ``INCOMPLETE`` with the exact failed boundary and keeps the receipts of
+    the units that really produced a proposal.
+
+    These crew calls send *derived* script text to a provider, so the master
+    document's persistent consent travels with every one of them:
+    ``allow_remote_text`` only states that this lane may use a remote provider
+    at all, while the per-role document consent guard inside the Dispatcher is
+    what authorises each individual send.
     """
     from types import SimpleNamespace
 
     from shine.api_film import StoryboardRequest, generate_storyboard
 
-    script_text = serialize_volume_script(db, project_id, volume_id)
+    plan = current_volume_plan(db, project_id)
+    if plan is None:
+        raise ValueError("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
     bible = current_bible(db, project_id) or latest_bible_artifact(db, project_id)
     if bible is None:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
-    master_doc_id = None
-    plan = current_volume_plan(db, project_id)
-    if plan:
-        master_doc_id = plan.payload_json["source_master"]["document_id"]
-    master = db.get(ProjectDocument, master_doc_id) if master_doc_id else None
-    result = generate_storyboard(
-        project_id,
-        StoryboardRequest(
-            text=script_text,
-            draft=True,
-            locked_story_facts=list(bible.payload_json.get("locked_facts", []))[:100],
-            allow_remote_text=True,
-            consent_document_id=master.id if master else None,
-            consent_document_sha256=master.sha256 if master else None,
-        ),
-        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(data_dir=data_dir)))),
-        db,
-        gateway,
-    )
-    return result
+    master = db.get(ProjectDocument, plan.payload_json["source_master"]["document_id"])
+    if master is None or master.project_id != project_id:
+        raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
+    units = storyboard_units(db, project_id, volume_id)
+    if only_section_ids:
+        selected = set(only_section_ids)
+        units = [unit for unit in units if unit["section_id"] in selected]
+    if not units:
+        raise ValueError("PIPELINE_STORYBOARD_UNITS_EMPTY")
+    namespace = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        settings=SimpleNamespace(data_dir=data_dir))))
+    locked = list(bible.payload_json.get("locked_facts", []))[:100]
+    receipts: list[dict] = []
+    rejections: list[dict] = []
+    incomplete = False
+    previous_ending = None
+    last_steps: dict = {}
+    last_apply: dict = {}
+    for unit in units:
+        request_text = unit["text"]
+        if previous_ending:
+            # The previous scene's closing state is the explicit boundary a
+            # later batch starts from, so two units never restart cold.
+            request_text = f"【上一场收尾】{previous_ending}\n\n{request_text}"
+        try:
+            result = generate_storyboard(
+                project_id,
+                StoryboardRequest(
+                    text=request_text, draft=True, locked_story_facts=locked,
+                    allow_remote_text=True,
+                    consent_document_id=master.id,
+                    consent_document_sha256=master.sha256,
+                ),
+                namespace, db, gateway,
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            code = detail if isinstance(detail, str) else str((detail or {}).get("code", "STORYBOARD_REJECTED"))
+            rejections.append({"unit_id": unit["unit_id"], "section_id": unit["section_id"],
+                               "code": code, "external_outcome": "NOT_SENT"})
+            incomplete = True
+            if code.split(":")[0] in GLOBAL_STORYBOARD_STOPS:
+                break
+            continue
+        apply_info = (result.get("next") or {}).get("apply_camera") or {}
+        steps = result.get("steps") or {}
+        receipt = {
+            "unit_id": unit["unit_id"], "section_id": unit["section_id"],
+            "scene_key": unit["scene_key"], "order": unit["order"], "title": unit["title"],
+            "chunk_index": unit["chunk_index"], "chunk_count": unit["chunk_count"],
+            "script_sha256": unit["script_sha256"], "char_count": unit["char_count"],
+            "status": result.get("status"),
+            "camera_artifact_id": apply_info.get("camera_artifact_id"),
+            "camera_sha256": (steps.get("cinematographer") or {}).get("sha256"),
+            "continuity_artifact_id": apply_info.get("continuity_artifact_id"),
+            "arbitration_artifact_id": apply_info.get("arbitration_artifact_id"),
+        }
+        receipts.append(receipt)
+        if result.get("status") != "PROPOSED":
+            incomplete = True
+            rejections.extend({**item, "unit_id": unit["unit_id"],
+                               "section_id": unit["section_id"]}
+                              for item in (result.get("rejections") or []))
+            if any(item.get("external_outcome") == "NOT_SENT"
+                   for item in (result.get("rejections") or [])):
+                # A provably unsent call will fail the same way for every
+                # remaining unit: stop, keep the completed receipts, and let
+                # the person fix the cause before continuing.
+                break
+            continue
+        last_steps = steps
+        last_apply = apply_info
+        previous_ending = unit.get("continuity_out") or previous_ending
+    proposed = [item for item in receipts if item["status"] == "PROPOSED"]
+    return {
+        "status": "PROPOSED" if proposed and not incomplete else "INCOMPLETE",
+        "units": receipts,
+        "proposed_units": len(proposed),
+        "total_units": len(receipts),
+        "steps": last_steps,
+        "next": {"apply_camera": last_apply} if last_apply else {},
+        "rejections": rejections,
+        "missing_characters": [],
+    }
 
 
-def record_storyboard_draft(db, project_id: str, volume_id: str, result: dict, script_text: str = "") -> dict:
-    """Record the draft chain result for the handoff to find receipts."""
-    camera = (result.get("steps") or {}).get("cinematographer") or {}
+def record_storyboard_draft(db, project_id: str, volume_id: str, result: dict,
+                            script_text: str = "") -> dict:
+    """Record the per-unit draft receipts the handoff verifies.
+
+    The record is the mapping between a scene and the shots it will produce,
+    so it keeps the unit order, each unit's camera artifact and hash, and the
+    script digest it was built from.
+    """
+    from shine.models import AppSetting
+
+    units = result.get("units") or []
+    first_camera = next((unit for unit in units if unit.get("camera_artifact_id")), {})
     record = {
-        "camera_artifact_id": camera.get("artifact_id"),
-        "camera_sha256": camera.get("sha256"),
-        "script_sha256": digest(script_text),
+        "camera_artifact_id": first_camera.get("camera_artifact_id"),
+        "camera_sha256": first_camera.get("camera_sha256"),
+        "script_sha256": digest(script_text) if script_text else None,
         "status": result.get("status"),
+        "units": units,
         "missing_characters": result.get("missing_characters", []),
         "recorded_at": utcnow().isoformat() + "Z",
     }
-    from shine.models import AppSetting
-
     key = f"four-stage-storyboard:{project_id}:{volume_id}"
     db.merge(AppSetting(key=key, value=record))
     return record
 
 
+def creative_lineage(db, project_id: str, volume_id: str) -> dict:
+    """The exact creative identities a volume's production was derived from.
 
+    A package built from this volume pins this digest, so editing a scene, a
+    blueprint or an episode contract is detected before a run starts or a
+    batch is dispatched - instead of discovering it after paying for renders.
+    """
+    plan = current_volume_plan(db, project_id)
+    outline = _volume_outline(db, project_id, volume_id)
+    bible = current_bible(db, project_id)
+    sections = (outline.payload_json.get("production_sections") or []) if outline else []
+    script_parts = []
+    for section in sections:
+        section_id = section["production_section_id"]
+        script = current_scene_script(db, project_id, volume_id, section_id)
+        script_parts.append({"section_id": section_id,
+                             "script_sha256": script.sha256 if script else None})
+    plan_volume = None
+    if plan:
+        plan_volume = next((v for v in plan.payload_json.get("volumes") or []
+                            if v["volume_id"] == volume_id), None)
+    payload = {
+        "volume_id": volume_id,
+        "plan_sha256": plan.sha256 if plan else None,
+        "volume_revision": (plan_volume or {}).get("volume_revision"),
+        "outline_sha256": outline.sha256 if outline else None,
+        "bible_sha256": bible.sha256 if bible else None,
+        "sections": script_parts,
+        "episode_scripts": [{"artifact_id": row.id, "sha256": row.sha256}
+                            for row in confirmed_episode_scripts(db, project_id, volume_id)],
+    }
+    return {**payload, "sha256": digest(payload)}
+
+
+def current_lineage_digest(db, project_id: str, volume_id: str) -> str | None:
+    """The recomputed lineage digest, or None when the volume cannot be read."""
+    try:
+        return creative_lineage(db, project_id, volume_id)["sha256"]
+    except ValueError:
+        return None
+
+
+def _section_shot_groups(db, project_id: str, record: dict) -> tuple[list[dict], list[str]]:
+    """The ordered scene -> shots mapping the apply receipts actually prove.
+
+    Each unit's camera artifact must still be the artifact that was applied,
+    must still belong to this project and must still hash to what the record
+    pinned.  A receipt that names no shot, or a shot two units both claim, is
+    a coverage defect - never a number to be compared against a count.
+    """
+    from shine.models import AppSetting
+    from shine.models import Shot as _Shot
+
+    groups: list[dict] = []
+    problems: list[str] = []
+    claimed: set[str] = set()
+    units = record.get("units") or []
+    if not units and record.get("camera_artifact_id"):
+        # A record written by the single-chain lane: one unit over every scene.
+        units = [{"unit_id": "legacy", "section_id": None,
+                  "camera_artifact_id": record["camera_artifact_id"],
+                  "camera_sha256": record.get("camera_sha256")}]
+    for unit in units:
+        camera_id = unit.get("camera_artifact_id")
+        label = str(unit.get("section_id") or unit.get("unit_id") or "?")
+        if unit.get("status") not in (None, "PROPOSED"):
+            problems.append("PIPELINE_STORYBOARD_UNIT_REJECTED:" + label)
+            continue
+        if not camera_id:
+            problems.append("PIPELINE_STORYBOARD_UNIT_MISSING:" + label)
+            continue
+        camera = db.get(AgentArtifact, camera_id)
+        if (camera is None or camera.project_id != project_id or camera.stale
+                or (unit.get("camera_sha256") and camera.sha256 != unit["camera_sha256"])
+                or digest(camera.payload_json) != camera.sha256):
+            problems.append("PIPELINE_STORYBOARD_CHANGED:" + label)
+            continue
+        receipt = db.get(AppSetting, f"film-apply:{camera_id}")
+        if receipt is None:
+            problems.append("PIPELINE_STORYBOARD_NOT_APPLIED:" + label)
+            continue
+        shot_ids = [str(item) for item in (receipt.value or {}).get("shot_ids", [])]
+        if not shot_ids:
+            problems.append("PIPELINE_STORYBOARD_APPLIED_EMPTY:" + label)
+            continue
+        for shot_id in shot_ids:
+            if shot_id in claimed:
+                problems.append("PIPELINE_SHOT_CLAIMED_TWICE:" + shot_id)
+            claimed.add(shot_id)
+            row = db.get(_Shot, shot_id)
+            if row is None or row.project_id != project_id:
+                # A receipt that names a shot this project no longer holds
+                # cannot become a delivery scope: refuse by id instead of
+                # failing later while building the package manifest.
+                problems.append("PIPELINE_STORYBOARD_SHOT_MISSING:" + shot_id)
+        groups.append({"unit_id": unit.get("unit_id"), "section_id": unit.get("section_id"),
+                       "order": unit.get("order"), "chunk_index": unit.get("chunk_index", 1),
+                       "camera_artifact_id": camera_id, "shot_ids": shot_ids})
+    return groups, problems
+
+
+def _handoff_episodes(db, project_id: str, volume_id: str, groups: list[dict]) -> tuple[list[dict], str]:
+    """The delivery episodes, derived from the confirmed episode contracts.
+
+    A confirmed EpisodeScript owns the episode boundaries, so the plan follows
+    it exactly and never re-cuts the volume by a duration heuristic.  Without
+    a confirmed contract the volume is delivered as one episode over its
+    scenes in order, and the basis is recorded instead of being disguised.
+    """
+    from shine.models import Shot
+
+    durations = {}
+    for group in groups:
+        for shot_id in group["shot_ids"]:
+            shot = db.get(Shot, shot_id)
+            durations[shot_id] = float((shot.spec or {}).get("duration_target_s") or 0) if shot else 0.0
+    contracts = confirmed_episode_scripts(db, project_id, volume_id)
+    if contracts:
+        outline = _volume_outline(db, project_id, volume_id)
+        # Delivery order follows the script's own scene order, not the order in
+        # which the person happened to create the episode contracts: an episode
+        # covering scene 1 is episode 1 even if it was confirmed last.
+        section_order = {section["production_section_id"]: index
+                         for index, section in enumerate(
+                             (outline.payload_json.get("production_sections") or [])
+                             if outline else [])}
+        contracts = sorted(
+            contracts,
+            key=lambda row: min((section_order.get(entry["section_id"], 10_000)
+                                 for entry in row.payload_json.get("sections") or []),
+                                default=10_000))
+        episodes = []
+        for index, contract in enumerate(contracts, start=1):
+            wanted = [entry["section_id"] for entry in contract.payload_json.get("sections") or []]
+            shot_ids = [shot_id for group in groups if group["section_id"] in wanted
+                        for shot_id in group["shot_ids"]]
+            episodes.append({
+                "episode_id": f"{volume_id}-e{index}",
+                "order": index,
+                "title": contract.payload_json.get("title") or f"第{index}集",
+                "shot_ids": shot_ids,
+                "planned_seconds": round(sum(durations.get(shot_id, 0.0) for shot_id in shot_ids), 3),
+                "section_ids": wanted,
+                "episode_script_id": contract.id,
+                "episode_script_sha256": contract.sha256,
+            })
+        return episodes, "episode_script"
+    ordered: list[str] = []
+    for group in groups:
+        for shot_id in group["shot_ids"]:
+            if shot_id not in ordered:
+                ordered.append(shot_id)
+    return ([{
+        "episode_id": f"{volume_id}-e1", "order": 1, "title": "第1集",
+        "shot_ids": ordered,
+        "planned_seconds": round(sum(durations.get(shot_id, 0.0) for shot_id in ordered), 3),
+        "section_ids": [group["section_id"] for group in groups if group["section_id"]],
+    }], "volume_scope")
 
 
 def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_id: str,
                          *, acknowledge_scene_coverage: bool = False) -> dict:
     """Publish the volume to the existing production machinery.
 
-    Guards: confirmed plan + bible + outline + every script + every scene's
-    storyboard applied.  Builds the scoped shots-mode episode plan, confirms
-    it, builds the volume-scoped package, confirms it and records the
-    FourStageVolumeHandoff artifact.  Nothing here bypasses the existing
-    package/run admission checks.
+    The scope is the ordered ``section -> shots`` mapping the apply receipts
+    prove, and the episodes come from the confirmed episode contracts.  A
+    shot count is never evidence of coverage: a volume whose scenes are not
+    all mapped is refused by scene name.  Confirming a package, creating a run
+    and dispatching a batch all read the same readiness, which pins this
+    creative lineage, so an upstream edit stops production before it spends a
+    render rather than after.
+
+    ``acknowledge_scene_coverage`` is accepted and recorded for compatibility
+    but no longer waives coverage: the mapping is verified, not counted.
     """
     from shine.director.contracts import EpisodePlanPayload
-    from shine.director.models import DirectorEpisodePlan
+    from shine.director.models import DirectorEpisodePlan, DirectorPackageVersion
     from shine.director.package import build_package, confirm_package, package_readiness
-    from shine.models import Project, Shot
+    from shine.models import Project
+
     plan = current_volume_plan(db, project_id)
     if plan is None:
         raise ValueError("PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
@@ -1168,61 +1855,38 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     if outline is None:
         raise ValueError("PIPELINE_OUTLINE_NOT_CONFIRMED")
     project = db.get(Project, project_id)
+    if project is None:
+        raise ValueError("PROJECT_NOT_FOUND")
     if not project.frozen_style_version_id:
         raise ValueError("STYLE_NOT_FROZEN")
     volume = next((v for v in plan.payload_json["volumes"] if v["volume_id"] == volume_id), None)
     if volume is None:
         raise ValueError("PIPELINE_VOLUME_NOT_IN_PLAN")
     record = _read_pointer(db, f"four-stage-storyboard:{project_id}:{volume_id}")
-    if record is None or not record.get("camera_artifact_id"):
+    if record is None or not (record.get("units") or record.get("camera_artifact_id")):
         raise ValueError("PIPELINE_STORYBOARD_NOT_GENERATED")
-    from shine.models import AppSetting as _AS
-    receipt = db.get(_AS, f"film-apply:{record['camera_artifact_id']}")
-    if receipt is None:
-        raise ValueError("PIPELINE_STORYBOARD_NOT_APPLIED")
-    shot_ids = [str(s) for s in receipt.value.get("shot_ids", [])]
-    if not shot_ids:
-        raise ValueError("PIPELINE_STORYBOARD_APPLIED_EMPTY")
-    sections_count = len(outline.payload_json.get("production_sections") or [])
-    if len(shot_ids) < sections_count and not acknowledge_scene_coverage:
-        # Every scene was expected to contribute at least one shot; fewer
-        # applied shots than scenes needs the person's explicit cover, never
-        # a silent partial production.
-        raise ValueError(
-            "PIPELINE_VOLUME_SHOT_COVERAGE_SUSPECT:" + f"{len(shot_ids)}/{sections_count}"
-            + ":每个场次至少应有一个镜头；不足时需明确确认后才能交付")
-    shots = db.scalars(select(Shot).where(Shot.id.in_(shot_ids))).all()
-    if len(shots) != len(shot_ids):
-        raise ValueError("PIPELINE_STORYBOARD_SHOTS_MISSING")
-    script_now = digest(serialize_volume_script(db, project_id, volume_id))
-    # When the person confirmed EpisodeScript contracts, their section set
-    # must cover the volume's confirmed sections exactly; a partial set is
-    # an incomplete episode contract, not a handoff-able state.
+    lineage = creative_lineage(db, project_id, volume_id)
+    if record.get("script_sha256") and record["script_sha256"] != digest(
+            serialize_volume_script(db, project_id, volume_id)):
+        raise ValueError("PIPELINE_SCRIPT_CHANGED_SINCE_STORYBOARD")
+    groups, problems = _section_shot_groups(db, project_id, record)
+    sections = outline.payload_json.get("production_sections") or []
+    grouped_sections = {group["section_id"] for group in groups if group["section_id"]}
+    for section in sections:
+        section_id = section["production_section_id"]
+        if section_id not in grouped_sections:
+            problems.append("PIPELINE_SCENE_WITHOUT_SHOT:" + section_id)
+    if problems:
+        raise ValueError(problems[0])
     episode_contracts = confirmed_episode_scripts(db, project_id, volume_id)
     if episode_contracts:
-        contracted = set()
+        contracted: list[str] = []
         for contract in episode_contracts:
-            contracted.update(e["section_id"] for e in contract.payload_json["sections"])
-        volume_sections = {s["production_section_id"]
-                           for s in (outline.payload_json.get("production_sections") or [])}
-        if contracted != volume_sections:
+            contracted.extend(entry["section_id"] for entry in contract.payload_json["sections"])
+        volume_sections = {section["production_section_id"] for section in sections}
+        if set(contracted) != volume_sections or len(contracted) != len(set(contracted)):
             raise ValueError("PIPELINE_EPISODE_COVERAGE_INCOMPLETE")
-    if record.get("script_sha256") and record["script_sha256"] != script_now:
-        raise ValueError("PIPELINE_SCRIPT_CHANGED_SINCE_STORYBOARD")
-    episodes: list[dict] = []
-    current: dict = {"episode_id": f"{volume_id}-e1", "order": 1, "title": "第1集",
-                     "shot_ids": [], "planned_seconds": 0.0}
-    for shot in shots:
-        duration = float(shot.spec.get("duration_target_s") or 0)
-        if current["planned_seconds"] + duration > 75.0 and current["shot_ids"]:
-            episodes.append(current)
-            next_order = len(episodes) + 1
-            current = {"episode_id": f"{volume_id}-e{next_order}", "order": next_order,
-                       "title": f"第{next_order}集", "shot_ids": [], "planned_seconds": 0.0}
-        current["shot_ids"].append(shot.id)
-        current["planned_seconds"] += duration
-    if current["shot_ids"]:
-        episodes.append(current)
+    episodes, episode_basis = _handoff_episodes(db, project_id, volume_id, groups)
     payload = {
         "schema_version": "1.0",
         "mode": "shots",
@@ -1232,11 +1896,12 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
         "allowed_repeats": [],
         "source": {"volume_id": volume_id, "kind": "four_stage_volume",
                    "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
-                   "camera_artifact_id": record["camera_artifact_id"]},
+                   "episode_basis": episode_basis,
+                   "lineage_sha256": lineage["sha256"]},
     }
     payload = EpisodePlanPayload.model_validate(payload)
-    scope = set(shot_ids)
     planned = payload.shot_order()
+    scope = {shot_id for group in groups for shot_id in group["shot_ids"]}
     problems = []
     if sorted(planned) != sorted(scope):
         problems.append("VOLUME_SHOTS_NOT_COVERED_EXACTLY")
@@ -1244,14 +1909,41 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
         problems.append("VOLUME_SHOT_COVERED_TWICE")
     if problems:
         raise ValueError("PIPELINE_VOLUME_PLAN_SCOPE_INVALID:" + ",".join(problems)[:400])
+    plan_dump = payload.model_dump(mode="json")
+    handoff_digest = digest({
+        "project": project_id, "volume": volume_id,
+        "workflow_profile": workflow_profile_id,
+        "lineage_sha256": lineage["sha256"],
+        "episode_basis": episode_basis,
+        "episode_plan_sha256": digest(plan_dump),
+        "shot_order": planned,
+    })
+    for existing in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project_id,
+            AgentArtifact.kind == "FourStageVolumeHandoff")).all():
+        if existing.payload_json.get("handoff_digest") != handoff_digest:
+            continue
+        # The same confirmed scope was already handed off: return that exact
+        # receipt instead of creating a second plan, package and handoff.
+        package = db.get(DirectorPackageVersion, existing.payload_json.get("package_id") or "")
+        return {
+            "handoff_id": existing.id, "reused": True,
+            "plan_version": existing.payload_json.get("episode_plan_version"),
+            "package_revision": existing.payload_json.get("package_revision"),
+            "package_id": existing.payload_json.get("package_id"),
+            "readiness": package_readiness(db, package) if package else {"startable": False},
+            "episodes": existing.payload_json.get("episode_count"),
+            "shots": existing.payload_json.get("shot_count"),
+            "episode_basis": existing.payload_json.get("episode_basis"),
+        }
     previous = db.scalars(
         select(DirectorEpisodePlan).where(DirectorEpisodePlan.project_id == project_id)).all()
-    version = max((r.version for r in previous), default=0) + 1
+    version = max((row.version for row in previous), default=0) + 1
     plan_row = DirectorEpisodePlan(
         project_id=project_id, version=version, status="DRAFT",
         target_seconds=payload.target_seconds, tolerance_seconds=payload.tolerance_seconds,
-        payload=payload.model_dump(mode="json"),
-        sha256=digest(payload.model_dump(mode="json")),
+        payload=plan_dump,
+        sha256=digest(plan_dump),
         source="four_stage_volume", created_by="local-user",
     )
     db.add(plan_row)
@@ -1259,9 +1951,10 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     plan_row.status = "CONFIRMED"
     plan_row.confirmed_by = "local-user"
     plan_row.confirmed_at = utcnow()
-    volume_shot_ids = shot_ids
+    shot_ids = [shot_id for group in groups for shot_id in group["shot_ids"]]
     package = build_package(db, project, workflow_profile_id=workflow_profile_id,
-                            plan=plan_row, scope_shot_ids=volume_shot_ids)
+                            plan=plan_row, scope_shot_ids=shot_ids,
+                            creative_lineage=lineage)
     confirm_package(db, package, actor="local-user")
     handoff_payload = {
         "schema_version": "1.0",
@@ -1269,13 +1962,20 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
         "episode_plan_version": plan_row.version, "episode_plan_sha256": plan_row.sha256,
         "package_revision": package.revision, "package_id": package.id,
         "package_manifest_sha256": package.manifest_sha256,
-        "camera_artifact_id": record["camera_artifact_id"],
-        "script_sha256": script_now,
+        "camera_artifact_id": record.get("camera_artifact_id"),
+        "script_sha256": digest(serialize_volume_script(db, project_id, volume_id)),
+        "lineage_sha256": lineage["sha256"],
+        "handoff_digest": handoff_digest,
+        "episode_basis": episode_basis,
         "shot_count": len(shot_ids),
         "episode_count": len(episodes),
-        "episode_script_ids": [c.id for c in episode_contracts],
-        "scene_coverage": {"scenes": sections_count, "shots_applied": len(shot_ids),
-                           "acknowledged": acknowledge_scene_coverage},
+        "episode_script_ids": [contract.id for contract in episode_contracts],
+        "scene_coverage": {
+            "scenes": len(sections),
+            "scenes_mapped": len(grouped_sections),
+            "shots": len(shot_ids),
+            "acknowledged": bool(acknowledge_scene_coverage),
+        },
     }
     task_id = _authoring_task(db, project_id, "four_stage_handoff", {"volume": volume_id})
     artifact = AgentArtifact(
@@ -1287,11 +1987,13 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     db.add(artifact)
     db.flush()
     add_audit(db, "local-user", "PIPELINE_VOLUME_HANDOFF", "agent_artifact", artifact.id,
-              {"volume_id": volume_id, "package": package.revision}, project_id=project_id)
+              {"volume_id": volume_id, "package": package.revision,
+               "episode_basis": episode_basis}, project_id=project_id)
     readiness = package_readiness(db, package)
-    return {"handoff_id": artifact.id, "plan_version": plan_row.version,
-            "package_revision": package.revision, "package_id": package.id,
-            "readiness": readiness, "episodes": len(episodes), "shots": len(shot_ids)}
+    return {"handoff_id": artifact.id, "reused": False,
+            "plan_version": plan_row.version, "package_revision": package.revision,
+            "package_id": package.id, "readiness": readiness, "episodes": len(episodes),
+            "shots": len(shot_ids), "episode_basis": episode_basis}
 
 
 def adjust_volume_boundaries(db, project_id: str, base_plan_id: str,
@@ -1339,10 +2041,11 @@ def adjust_volume_boundaries(db, project_id: str, base_plan_id: str,
         "volumes": [
             {
                 "volume_id": str(uuid.uuid5(uuid.NAMESPACE_URL,
-                                            f"shine:{project_id}:volume:{index + 1}:{total}:manual")),
+                                            f"shine:{project_id}:volume:{index + 1}:{master.sha256}")),
                 "order": index + 1,
                 "title": str(v["volume"].get("title") or f"第{index + 1}卷")[:80],
                 "start_offset": v["start"], "end_offset": v["end"],
+                "volume_revision": volume_revision(master.sha256, v["start"], v["end"]),
                 "section_ids": [s["production_section_id"] for s in sections
                                 if v["start"] <= s["start_offset"] and s["end_offset"] <= v["end"]],
                 "char_count": v["end"] - v["start"],
@@ -1529,6 +2232,10 @@ def pipeline_task_summary(db, project_id: str) -> list[dict]:
             "progress_done": done,
             "progress_total": total,
             "error_code": row.error_code,
+            "attempt": trace.get("attempt", 1),
+            "external_outcome": trace.get("external_outcome"),
+            "blocked_reason": trace.get("blocked_reason"),
+            "available_actions": task_available_actions(row),
             "updated_at": (row.lease_expires_at.isoformat() if row.lease_expires_at else None),
             "consent_document_id": trace.get("document_id") or trace.get("master_document_id"),
             "consent_document_sha256": trace.get("document_sha256") or trace.get("master_document_sha256"),
@@ -1537,13 +2244,38 @@ def pipeline_task_summary(db, project_id: str) -> list[dict]:
     return summary
 
 
+def task_available_actions(row) -> list[str]:
+    """The operations the server allows on a pipeline task, decided here only.
+
+    The UI reads this list instead of guessing from an error string: an
+    unknown outcome offers reconciliation (and an explicitly authorised new
+    attempt), a provably unsent request offers a plain resume.
+    """
+    trace = row.trace or {}
+    if row.status == "SUCCEEDED":
+        return []
+    unknown = _send_outcome_unknown(trace)
+    if unknown:
+        return ["reconcile", "new_attempt"]
+    if row.status in ("NEEDS_REVIEW", "PAUSED", "FAILED"):
+        return ["resume"]
+    return []
+
+
+def _next_attempt_number(db, project_id: str, role: str, base_identity: str) -> int:
+    return _attempt_count(db, project_id, role, base_identity) + 1
+
+
 def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_version: int) -> dict:
     """A person re-queues a blocked pipeline task after fixing its cause.
 
     The fence matches the task's version so a stale view cannot resurrect a
-    task another action already moved.  Recovery never touches the UNKNOWN
-    ledger: a task blocked on an unknown send outcome needs the story
-    reconciliation path, not a blind re-queue, and stays refused here.
+    task another action already moved.  Recovery never touches the unknown
+    ledger: whenever the durable evidence cannot rule out that the provider
+    answered, the task is refused here - whatever error code it carries -
+    because a plain resume would buy the same call twice and discard one
+    answer.  Such a task needs ``start_pipeline_new_attempt`` with its own
+    authorization and attempt identity.
     """
     from sqlalchemy import update
 
@@ -1553,8 +2285,7 @@ def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_versi
     if row is None or row.project_id != project_id or row.role_id not in {
             "story_outline_run", BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE}:
         raise ValueError("PIPELINE_TASK_NOT_FOUND")
-    if row.trace.get("external_outcome") == "UNKNOWN" and row.status == "NEEDS_REVIEW" \
-            and row.trace.get("blocked_reason") == "PIPELINE_SEND_OUTCOME_UNKNOWN":
+    if _send_outcome_unknown(row.trace or {}):
         raise ValueError("PIPELINE_TASK_OUTCOME_UNKNOWN_RECONCILE_REQUIRED")
     changed = db.execute(update(AgentTaskRecord).where(
         AgentTaskRecord.id == task_id,
@@ -1567,3 +2298,71 @@ def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_versi
     add_audit(db, "local-user", "PIPELINE_TASK_RESUMED", "agent_task", task_id,
               {"expected_state_version": expected_state_version}, project_id=project_id)
     return {"task_id": task_id, "status": "QUEUED"}
+
+
+def start_pipeline_new_attempt(db, project_id: str, task_id: str,
+                               expected_state_version: int, actor: str = "local-user") -> dict:
+    """An explicitly authorised, physically separate retry of an unknown call.
+
+    The original row stays exactly as it is - its ``UNKNOWN`` outcome remains
+    the truth about that attempt, together with the cost already paid.  The
+    new attempt is a different task with a different request identity, so no
+    queue, claim or dedupe rule can ever confuse the two.
+    """
+    from shine.models import AgentTaskRecord
+
+    row = db.get(AgentTaskRecord, task_id)
+    if row is None or row.project_id != project_id or row.role_id not in {
+            BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE}:
+        raise ValueError("PIPELINE_TASK_NOT_FOUND")
+    if row.state_version != expected_state_version:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    trace = dict(row.trace or {})
+    if not _send_outcome_unknown(trace):
+        raise ValueError("PIPELINE_TASK_NOT_UNKNOWN")
+    if row.status not in {"NEEDS_REVIEW", "FAILED", "PAUSED"}:
+        # A task still RUNNING may really be in flight; a succeeded one has its
+        # answer.  Neither may start a parallel second attempt.
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    base = trace.get("base_identity") or row.input_hash
+    if not base:
+        raise ValueError("PIPELINE_TASK_IDENTITY_MISSING")
+    attempt = _next_attempt_number(db, project_id, row.role_id, base)
+    identity = attempt_identity(base, attempt)
+    rebuilt = {key: value for key, value in trace.items() if key not in _ATTEMPT_RESULT_KEYS}
+    rebuilt.pop("external_outcome", None)
+    new_trace = {
+        **rebuilt,
+        "stage": "DRAFT",
+        "external_outcome": None,
+        "attempt": attempt,
+        "base_identity": base,
+        "retry_of_task_id": row.id,
+        "prior_external_outcome": trace.get("external_outcome") or "UNKNOWN",
+        "authorized_by": actor,
+        "authorization": "explicit_new_attempt_after_unknown",
+        "automatic_replay": False,
+    }
+    new_row = AgentTaskRecord(
+        project_id=project_id,
+        role_id=row.role_id,
+        request_identity=identity,
+        input_hash=base,
+        asset_manifest_hash=row.asset_manifest_hash,
+        rulepack_id=row.rulepack_id,
+        rulepack_hash=row.rulepack_hash,
+        model_profile_id=row.model_profile_id,
+        model_id=row.model_id,
+        schema_version=row.schema_version,
+        status="QUEUED",
+        trace=new_trace,
+    )
+    db.add(new_row)
+    db.flush()
+    row.trace = {**trace, "superseded_by_task_id": new_row.id}
+    add_audit(db, actor, "PIPELINE_TASK_NEW_ATTEMPT", "agent_task", new_row.id,
+              {"prior_task_id": row.id, "attempt": attempt,
+               "prior_external_outcome": new_trace["prior_external_outcome"]},
+              project_id=project_id)
+    return {"task_id": new_row.id, "attempt": attempt, "status": "QUEUED",
+            "supersedes": row.id}

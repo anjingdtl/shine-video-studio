@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from sqlalchemy import select
 
 from shine.director import pipeline
 from shine.director.pipeline import _authoring_task
@@ -59,8 +60,22 @@ def _outline_artifact(db, project_id, doc, sections):
     db.flush()
     db.merge(AppSetting(key=f"current-story-outline:{project_id}",
                         value={"artifact_id": a.id, "sha256": a.sha256}))
+    db.merge(AppSetting(key=f"current-story-outline:{project_id}:{doc.id}",
+                        value={"artifact_id": a.id, "sha256": a.sha256}))
     db.flush()
     return a
+
+
+def _materialize_and_outline(db, project_id, plan, volume_index=0):
+    """The real flow: materialize the plan's volumes, then confirm the outline
+    of the *volume document*.  The blueprint reads per-volume outlines, so a
+    fixture that pins the outline to the master document would not exercise
+    the contract the queue and the Worker enforce."""
+    pipeline.materialize_volume_documents(db, project_id, plan.id)
+    volume = plan.payload_json["volumes"][volume_index]
+    volume_doc = pipeline._volume_document(db, project_id, volume["volume_id"])
+    assert volume_doc is not None, "the volume document must exist after materialization"
+    return _outline_artifact(db, project_id, volume_doc, _sections_for(volume_doc.text))
 def _sections_for(doc_text):
     """Two sections over the doc text, mirroring source_sections' contract."""
     from shine.materialprep.story import source_sections
@@ -162,7 +177,7 @@ def test_bible_task_runs_and_confirms(api):
         pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
     with factory.begin() as db:
         db.commit()
     with factory() as db:
@@ -213,7 +228,7 @@ def test_scene_script_runs_confirms_and_edits(api):
         pipeline.materialize_volume_documents(db, pid, plan.id)
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bible_payload = {
             "schema_version": "1.0", "mainline": "渔村少年的成长",
             "characters": [{"name": "德明", "identity": "渔民之子", "arc_summary": "成长"}],
@@ -254,8 +269,12 @@ def test_scene_script_runs_confirms_and_edits(api):
         assert pipeline.current_scene_script(db, pid, volume_id, artifact.payload_json["section_id"]) is None
 
 
-def test_volume_storyboard_draft_and_handoff(api):
-    """The full volume path: scripts -> draft chain -> apply -> handoff."""
+def _prepare_handoff_fixture(api):
+    """Scripts confirmed, and one storyboard draft with per-scene units.
+
+    Returns what the handoff tests need: the caller applies the units and
+    decides what to assert about the delivery.
+    """
     from tests.conftest import register_workflow_profile
     from tests.test_film_crew import prepare as crew_prepare
     client, factory, settings = api
@@ -298,8 +317,7 @@ def test_volume_storyboard_draft_and_handoff(api):
         if not pipeline.run_pending_pipeline_task(factory, settings, "w1", gw):
             break
     with factory() as db:
-        from sqlalchemy import select as _sel
-        rows = db.scalars(_sel(AgentTaskRecord).where(
+        rows = db.scalars(select(AgentTaskRecord).where(
             AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE)).all()
         assert all(r.status == "SUCCEEDED" for r in rows), [r.trace for r in rows]
         for r in rows:
@@ -312,7 +330,7 @@ def test_volume_storyboard_draft_and_handoff(api):
     def chain_responder(messages, schema):
         value = original_responder(messages, schema)
         if schema.get("title") == "ScriptBreakdown":
-            context = __import__("json").JSONDecoder().raw_decode(messages[1].content)[0]
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
             value["locked_story_facts"] = context.get("locked_story_facts", [])
         return value
 
@@ -322,23 +340,65 @@ def test_volume_storyboard_draft_and_handoff(api):
     assert draft.status_code == 201, draft.text
     body = draft.json()
     assert body["status"] == "PROPOSED", json.dumps(body.get("rejections") or body, ensure_ascii=False)[:600]
-    record = body["record"]
-    assert record["camera_artifact_id"]
-    apply_info = (body.get("next") or {}).get("apply_camera") or {}
-    assert apply_info.get("camera_artifact_id"), body
-    applied = client.post(
-        f"/api/v1/projects/{pid}/film-artifacts/{apply_info['camera_artifact_id']}/apply-camera",
-        json={"continuity_artifact_id": apply_info["continuity_artifact_id"]}, headers=LOCAL,
-    )
-    assert applied.status_code == 200, applied.text
+    return client, factory, settings, pid, plan, volume_id, body["units"]
+
+
+def test_volume_storyboard_draft_and_handoff(api):
+    """The full volume path: scripts -> per-scene draft -> apply -> handoff."""
+    from shine.director.models import DirectorPackageVersion
+    from shine.director.package import package_readiness
+    from tests.conftest import register_workflow_profile
+
+    client, factory, settings, pid, plan, volume_id, units = _prepare_handoff_fixture(api)
+    with factory() as db:
+        sections = (pipeline._volume_outline(db, pid, volume_id).payload_json
+                    .get("production_sections") or [])
+        expected_sections = [section["production_section_id"] for section in sections]
+    # F06: the draft carries one bounded crew input per scene, in scene order,
+    # each with its own apply handle - the mapping the handoff verifies.
+    assert len(units) == 2, units
+    assert [unit["section_id"] for unit in units] == expected_sections
+    shot_total = 0
+    for unit in units:
+        assert unit["camera_artifact_id"], unit
+        applied = client.post(
+            f"/api/v1/projects/{pid}/film-artifacts/{unit['camera_artifact_id']}/apply-camera",
+            json={"continuity_artifact_id": unit["continuity_artifact_id"]}, headers=LOCAL,
+        )
+        assert applied.status_code == 200, applied.text
+        shot_total += len(applied.json()["shot_ids"])
     profile = register_workflow_profile(client)
     handoff = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
                           json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
     assert handoff.status_code == 201, handoff.text
     body = handoff.json()
     assert body["readiness"]["startable"] is True, body
-    assert body["shots"] >= 1
+    assert body["shots"] == shot_total
     assert body["episodes"] >= 1
+    assert body["episode_basis"] == "volume_scope"
+    # F11: the same confirmed scope hands off to the same receipt, never to a
+    # second plan, package or delivery artifact.
+    again = client.post(f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
+                        json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
+    assert again.status_code == 201, again.text
+    assert again.json()["package_id"] == body["package_id"]
+    assert again.json()["reused"] is True
+    with factory() as db:
+        packages = db.scalars(select(DirectorPackageVersion).where(
+            DirectorPackageVersion.project_id == pid)).all()
+        assert len(packages) == 1, "a repeated handoff must not build a second package"
+    # F07: editing a confirmed scene makes the delivered package unstartable
+    # before any render is spent, and the history stays readable.
+    with factory.begin() as db:
+        script = pipeline.current_scene_script(db, pid, volume_id, units[0]["section_id"])
+        pipeline.edit_scene_script(db, pid, script.id, script.payload_json["text"] + "\n补充一句。")
+    with factory() as db:
+        stored = db.get(DirectorPackageVersion, body["package_id"])
+        assert stored.manifest["creative_lineage"]["volume_id"] == volume_id
+        readiness = package_readiness(db, stored)
+        codes = {row["code"] for row in readiness["blockers"]}
+        assert readiness["startable"] is False, codes
+        assert "CREATIVE_LINEAGE_CHANGED" in codes or "CREATIVE_LINEAGE_UNREADABLE" in codes, codes
 
 
 def test_sending_crash_never_replays_the_provider(api):
@@ -356,7 +416,7 @@ def test_sending_crash_never_replays_the_provider(api):
         pipeline.materialize_volume_documents(db, pid, plan.id)
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
               "timeline": [], "foreshadowing": [],
               "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
@@ -412,7 +472,7 @@ def test_persisted_answer_is_adopted_without_a_second_call(api):
         pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
         pipeline.materialize_volume_documents(db, pid, plan.id)
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
               "timeline": [], "foreshadowing": [],
               "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
@@ -479,7 +539,7 @@ def test_cross_project_artifact_reference_is_refused(api):
         pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
         pipeline.materialize_volume_documents(db, pid, plan.id)
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
               "timeline": [], "foreshadowing": [],
               "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
@@ -571,8 +631,14 @@ def test_manual_volume_adjustment_and_master_isolation(api):
     assert "PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED" in str(err3.value)
 
 
-def test_overlong_serialized_script_is_refused_by_name(api):
-    """A script past the chain's inline limit is refused with PIPELINE_SCRIPT_TOO_LONG."""
+def test_overlong_volume_is_batched_and_the_editor_limit_is_named(api):
+    """A project-length volume is batched per scene, not refused by a limit.
+
+    F09: the crew chain runs on bounded scene units, so a volume whose
+    serialized script is far past the single-call inline limit still produces
+    per-scene units.  F07: a person's edit past the scene contract is refused
+    by name with its real length instead of being silently truncated.
+    """
     client, factory, settings = api
     _route_mock(client, pipeline.BIBLE_RUN_ROLE)
     _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
@@ -588,9 +654,7 @@ def test_overlong_serialized_script_is_refused_by_name(api):
         doc_r = db.get(ProjectDocument, doc.id)
         plan = pipeline.plan_volumes(db, pid, doc_r)
         pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
-        pipeline.materialize_volume_documents(db, pid, plan.id)
-        doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
               "timeline": [], "foreshadowing": [],
               "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],
@@ -620,10 +684,28 @@ def test_overlong_serialized_script_is_refused_by_name(api):
             artifact = db.get(AgentArtifact, r.trace["artifact_id"])
             pipeline.confirm_scene_script(db, pid, artifact.id, artifact.sha256)
         db.commit()
-    with pytest.raises(ValueError) as err:
-        with factory.begin() as db:
-            pipeline.serialize_volume_script(db, pid, volume_id)
-    assert "PIPELINE_SCRIPT_TOO_LONG" in str(err.value)
+    with factory() as db:
+        script = pipeline.serialize_volume_script(db, pid, volume_id)
+        assert len(script) > 60_000, "the fixture must really exceed one inline call"
+        units = pipeline.storyboard_units(db, pid, volume_id)
+        sections = pipeline._volume_outline(db, pid, volume_id).payload_json["production_sections"]
+        assert len(units) > len(sections), "an oversized scene must become labelled chunks"
+        assert all(unit["char_count"] <= pipeline.STORYBOARD_UNIT_CHARS for unit in units)
+        assert all(unit["char_count"] <= 60_000 for unit in units)
+        per_section = {}
+        for unit in units:
+            per_section.setdefault(unit["section_id"], []).append(unit["chunk_index"])
+        assert [unit["section_id"] for unit in units] == [
+            section["production_section_id"] for section in sections
+            for _ in range(len(per_section[section["production_section_id"]]))]
+        assert all(indexes == list(range(1, len(indexes) + 1)) for indexes in per_section.values())
+        assert all(unit["script_sha256"] for unit in units)
+        confirmed = pipeline.current_scene_script(db, pid, volume_id, sections[0]["production_section_id"])
+        with pytest.raises(ValueError) as err:
+            pipeline.edit_scene_script(db, pid, confirmed.id, "浪" * 24_003)
+    message = str(err.value)
+    assert "PIPELINE_SCENE_SCRIPT_TEXT_TOO_LONG" in message
+    assert "24003" in message and "24000" in message
 
 
 def test_oversized_single_chapter_volume_carries_a_warning(api):
@@ -654,7 +736,7 @@ def test_episode_script_contract_with_continuity_check(api):
         pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
         pipeline.materialize_volume_documents(db, pid, plan.id)
         doc_r = db.get(ProjectDocument, doc.id)
-        _outline_artifact(db, pid, doc_r, _sections_for(doc_r.text))
+        _materialize_and_outline(db, pid, plan)
         bp = {"schema_version": "1.0", "mainline": "m", "characters": [], "world": "",
               "timeline": [], "foreshadowing": [],
               "locked_facts": ["Deming is a fisherman's son"], "open_questions": [],

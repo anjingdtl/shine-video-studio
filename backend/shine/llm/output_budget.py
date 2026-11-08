@@ -50,46 +50,101 @@ def _adapter_cap(config: ProviderConfig) -> int | None:
     return None
 
 
+def _probed_cap(config: ProviderConfig) -> int | None:
+    """A cap an actual probe established, when the profile recorded one."""
+    return _positive_int(config.generation_options.get("probed_max_output_tokens"))
+
+
+def adapter_token_semantics(config: ProviderConfig) -> dict:
+    """How one adapter counts the completion budget, recorded for the audit.
+
+    The three kinds do not mean the same thing by "max tokens": an
+    OpenAI-compatible request caps visible plus reasoning completion, an
+    Ollama request caps generated tokens, and an Anthropic ``max_tokens`` is
+    the whole assistant turn.  Recording the semantics keeps a later reader
+    from comparing two adapters' numbers as if they were the same unit.
+    """
+    semantics = {
+        "openai_compatible": "max_completion_tokens caps visible+reasoning completion tokens",
+        "ollama": "max_tokens caps generated tokens for this call",
+        "anthropic": "max_tokens caps the whole assistant turn",
+        "mock": "no provider budget applies",
+    }
+    return {"capability_class": config.kind,
+            "completion_budget_semantics": semantics.get(config.kind, "unknown adapter semantics")}
+
+
 def creative_completion_cap(config: ProviderConfig, *, estimated_input_tokens: int = 0) -> dict:
     """The per-call completion cap for one creative call, with its sources.
 
-    Returns completion_cap, output_max_verified, sources and share.  The
-    sources list is the auditable min() chain the cap came from.
+    Three different things can bound a completion budget and they are not
+    interchangeable evidence:
+
+    * a *capability* bound - the provider declared it in its model metadata,
+      or a probe established it.  Only these may certify the ceiling.
+    * a *constraint* - the profile's configured cap or the adapter's own
+      ceiling.  A configuration states what the operator allows, never what
+      the model can do, so it can only lower the cap.
+    * a *fallback* - no capability evidence at all, so the conservative
+      default applies and ``output_max_verified`` stays False.
+
+    Returns completion_cap, output_max_verified, capability_basis, sources,
+    share and ``requires_capability_confirmation``.
     """
     sources: list[dict] = []
     declared = _positive_int(config.max_output_tokens)
+    probed = _probed_cap(config)
     configured = _positive_int(config.generation_options.get("max_completion_tokens"))
     adapter_cap = _adapter_cap(config)
 
+    if probed:
+        sources.append({"source": "probed_output_max", "max": probed, "kind": "capability"})
     if declared:
-        sources.append({"source": "provider_declared_max_output", "max": declared})
+        sources.append({"source": "provider_declared_max_output", "max": declared,
+                        "kind": "capability"})
     if configured:
-        sources.append({"source": "profile_configured_cap", "max": configured})
+        sources.append({"source": "profile_configured_cap", "max": configured,
+                        "kind": "constraint"})
     if adapter_cap:
-        sources.append({"source": "adapter_cap", "max": adapter_cap})
+        sources.append({"source": "adapter_cap", "max": adapter_cap, "kind": "constraint"})
 
-    verified_max = min((int(item["max"]) for item in sources), default=None)
-    if verified_max:
-        cap = int(math.floor(verified_max * CREATIVE_COMPLETION_SHARE))
+    capability = [int(item["max"]) for item in sources if item["kind"] == "capability"]
+    constraints = [int(item["max"]) for item in sources if item["kind"] == "constraint"]
+    if capability:
+        ceiling = min([min(capability), *constraints])
+        cap = int(math.floor(ceiling * CREATIVE_COMPLETION_SHARE))
         verified = True
+        basis = "capability_min_chain"
     else:
         model = _model_id(config)
-        cap = MINIMAX_M31_FLASH_DEFAULT_LIMIT if model in {
+        baseline = MINIMAX_M31_FLASH_DEFAULT_LIMIT if model in {
             "minimax-m3.1-flash", "minimax-m3-1-flash"} else CONSERVATIVE_DEFAULT_LIMIT
+        # Without capability evidence the conservative default is the ceiling:
+        # a configured value may lower it but can never raise it, so an
+        # unverified provider is never sent a budget it merely asked for.
+        ceiling = min([baseline, *(int(math.floor(value * CREATIVE_COMPLETION_SHARE))
+                                   for value in constraints)])
+        cap = ceiling
         verified = False
-        sources.append({"source": "conservative_default_not_declared", "max": cap})
+        basis = "unverified_conservative_ceiling"
+        sources.append({"source": "conservative_default_not_declared", "max": cap,
+                        "kind": "fallback"})
 
     window = _positive_int(config.context_window_tokens)
     if window:
         share_of_window = window - max(0, estimated_input_tokens)
         if share_of_window > 0 and share_of_window < cap:
             cap = share_of_window
-            sources.append({"source": "shared_window_reserve", "max": share_of_window})
+            sources.append({"source": "shared_window_reserve", "max": share_of_window,
+                            "kind": "constraint"})
     return {
         "completion_cap": cap,
         "output_max_verified": verified,
+        "capability_basis": basis,
+        "requires_capability_confirmation": not verified,
         "sources": sources,
         "share": CREATIVE_COMPLETION_SHARE,
+        **adapter_token_semantics(config),
     }
 
 

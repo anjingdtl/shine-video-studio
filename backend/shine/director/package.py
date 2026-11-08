@@ -187,6 +187,7 @@ def build_package(
     generation_mode: str | None = None,
     output: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    creative_lineage: dict[str, Any] | None = None,
     created_by: str = "user",
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
@@ -194,6 +195,11 @@ def build_package(
     Building never mutates the underlying objects and never assumes that a state
     is executable: an incomplete package is still built (so the person can see
     exactly what is missing) and stays ``DRAFT``.
+
+    ``creative_lineage`` is the four-stage pipeline's contract: when supplied,
+    the package pins the exact scene scripts, blueprint and episode contracts
+    it was built from, so a later upstream edit is detected by
+    :func:`package_readiness` before a run starts or a batch is dispatched.
     """
     plan = plan or latest_confirmed_plan(db, project.id)
     if plan is None:
@@ -296,6 +302,10 @@ def build_package(
     root["scope_digest"] = scope_digest(
         project.id, episodes, style=style, binding=binding, script=root["script"]
     )
+    if creative_lineage is not None:
+        # The pinned creative lineage is inside the hashed root, so the
+        # manifest digest covers it like every other frozen identity.
+        root["creative_lineage"] = creative_lineage
 
     package = DirectorPackageVersion(
         project_id=project.id,
@@ -405,6 +415,22 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
     ).all()
     if not episodes:
         blockers.append(_blocker("PACKAGE_HAS_NO_EPISODES", "导演包没有分集"))
+    lineage = manifest.get("creative_lineage") or {}
+    if lineage:
+        from shine.director.pipeline import current_lineage_digest
+
+        current = current_lineage_digest(db, package.project_id, lineage.get("volume_id") or "")
+        if current is None:
+            blockers.append(_blocker("CREATIVE_LINEAGE_UNREADABLE",
+                                     "本卷的上游剧本已无法解析，请重新交付本卷"))
+        elif current != lineage.get("sha256"):
+            # An upstream scene, blueprint or episode contract changed after
+            # this package was confirmed: the frozen scope no longer describes
+            # the current work, so starting or dispatching it would render a
+            # superseded script.  The history stays readable; only new
+            # production is refused.
+            blockers.append(_blocker("CREATIVE_LINEAGE_CHANGED",
+                                     "上游剧本或分集契约已变更，请重新交付本卷后再开拍"))
     for episode in episodes:
         if digest_of(episode.manifest) != episode.manifest_sha256:
             blockers.append(
@@ -508,6 +534,7 @@ def package_public(
         "style": manifest.get("style"),
         "binding": manifest.get("binding"),
         "policy": manifest.get("policy"),
+        "creative_lineage": manifest.get("creative_lineage"),
         "episodes": [
             {
                 "episode_id": row.episode_id,
