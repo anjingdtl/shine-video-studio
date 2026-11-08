@@ -222,6 +222,15 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
     """One draft VolumePlan for the master, covering the text completely."""
     from shine.models import AgentArtifact
 
+    pointer = _read_pointer(db, _pointer_key(project_id, "volume-plan"))
+    if pointer is not None:
+        confirmed = db.get(AgentArtifact, pointer.get("artifact_id", ""))
+        if (confirmed is not None and confirmed.approved_at is not None
+                and confirmed.payload_json.get("source_master", {}).get("document_id") != document.id):
+            # Master isolation: one confirmed pipeline per project.  A
+            # different master requires an explicit supersede, never a
+            # silent mix of two masters' volumes.
+            raise ValueError("PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED")
     master = build_source_master(db, project_id, document)
     sections = source_sections_safe(project_id, document)
     boundaries = detect_volume_boundaries(document.text or "", sections)
@@ -1239,3 +1248,77 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     return {"handoff_id": artifact.id, "plan_version": plan_row.version,
             "package_revision": package.revision, "package_id": package.id,
             "readiness": readiness, "episodes": len(episodes), "shots": len(shot_ids)}
+
+
+def adjust_volume_boundaries(db, project_id: str, base_plan_id: str,
+                             volumes: list[dict]) -> AgentArtifact:
+    """A person's manual boundary adjustment becomes a NEW draft plan revision.
+
+    The adjustment is validated before it exists: volumes must cover the
+    master completely, never overlap, stay ordered and keep every section
+    inside exactly one volume - a chapter is never split in half.  The base
+    plan stays history; the new revision needs its own confirmation.
+    """
+    from shine.models import AgentArtifact, ProjectDocument
+
+    base = db.get(AgentArtifact, base_plan_id)
+    if (base is None or base.project_id != project_id or base.kind != VOLUME_PLAN_KIND):
+        raise ValueError("PIPELINE_VOLUME_PLAN_NOT_FOUND")
+    master_doc_id = base.payload_json["source_master"]["document_id"]
+    master = db.get(ProjectDocument, master_doc_id)
+    if master is None or master.project_id != project_id:
+        raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
+    text = master.text or ""
+    total = len(text)
+    sections = source_sections_safe(project_id, master)
+    if not volumes:
+        raise ValueError("PIPELINE_VOLUME_EDITS_EMPTY")
+    adjusted = []
+    cursor = 0
+    for _index, volume in enumerate(volumes):
+        start = volume.get("start_offset")
+        end = volume.get("end_offset")
+        if not isinstance(start, int) or not isinstance(end, int) or start < cursor or end <= start:
+            raise ValueError("PIPELINE_VOLUME_EDITS_INVALID_ORDER")
+        adjusted.append({"volume": volume, "start": start, "end": end})
+        cursor = end
+    if cursor != total:
+        raise ValueError("PIPELINE_VOLUME_EDITS_INCOMPLETE_COVERAGE")
+    for section in sections:
+        s_start, s_end = section["start_offset"], section["end_offset"]
+        hosts = [v for v in adjusted if v["start"] <= s_start and s_end <= v["end"]]
+        if len(hosts) != 1:
+            raise ValueError("PIPELINE_VOLUME_EDITS_SPLIT_SECTION:" + section["production_section_id"])
+    payload = {
+        "source_master": {"document_id": master.id, "sha256": master.sha256},
+        "master_char_count": total,
+        "volumes": [
+            {
+                "volume_id": str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f"shine:{project_id}:volume:{index + 1}:{total}:manual")),
+                "order": index + 1,
+                "title": str(v["volume"].get("title") or f"第{index + 1}卷")[:80],
+                "start_offset": v["start"], "end_offset": v["end"],
+                "section_ids": [s["production_section_id"] for s in sections
+                                if v["start"] <= s["start_offset"] and s["end_offset"] <= v["end"]],
+                "char_count": v["end"] - v["start"],
+                "boundary_reason": "manual_adjustment",
+            }
+            for index, v in enumerate(adjusted)
+        ],
+        "coverage": {"start_offset": 0, "end_offset": total, "complete": True},
+        "status": "DRAFT",
+    }
+    task_id = _authoring_task(db, project_id, "four_stage_import",
+                              {"manual_adjustment_of": base_plan_id})
+    artifact = AgentArtifact(
+        project_id=project_id, kind=VOLUME_PLAN_KIND, schema_version="1.0",
+        payload_json=payload, sha256=digest(payload), producer_role="user_edit",
+        input_revision_ids=[base.id], source_task_id=task_id,
+    )
+    db.add(artifact)
+    db.flush()
+    add_audit(db, "local-user", "PIPELINE_VOLUME_PLAN_ADJUSTED", "agent_artifact",
+              artifact.id, {"base_plan": base_plan_id, "volume_count": len(adjusted)},
+              project_id=project_id)
+    return artifact

@@ -248,3 +248,22 @@ def handoff_route(project_id: str, volume_id: str, body: dict, db: DBSession, op
         db.rollback()
         raise _http_from_value_error(exc) from None
     return result
+
+
+@router.post("/projects/{project_id}/pipeline/volume-plans/{artifact_id}/boundaries", status_code=201)
+def adjust_boundaries_route(project_id: str, artifact_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
+    """A person's manual volume boundaries become a new draft plan revision."""
+    from shine.director.pipeline import adjust_volume_boundaries
+
+    require_project(db, project_id)
+    volumes = (body or {}).get("volumes")
+    if not isinstance(volumes, list) or not volumes:
+        raise HTTPException(422, "PIPELINE_VOLUME_EDITS_EMPTY")
+    try:
+        artifact = adjust_volume_boundaries(db, project_id, artifact_id, volumes)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return {"volume_plan_id": artifact.id, "sha256": artifact.sha256,
+            "volumes": artifact.payload_json["volumes"]}

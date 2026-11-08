@@ -521,3 +521,51 @@ def test_cross_project_artifact_reference_is_refused(api):
         assert row.status == "NEEDS_REVIEW", row.trace
         assert row.trace["blocked_reason"] == "PIPELINE_OUTLINE_CHANGED"
     assert calls == [], "no provider call may consume another project's context"
+
+
+def test_manual_volume_adjustment_and_master_isolation(api):
+    """Boundaries adjust by new revision; a second master is refused, not mixed."""
+    client, factory, settings = api
+    pid = create_project(client, "分卷调整")
+    doc = _make_doc(factory, pid, "第一章 甲\n内容甲。" * 200 + "\n第二章 乙\n内容乙。" * 200)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        sections = pipeline.source_sections_safe(pid, doc_r)
+        assert len(sections) >= 2
+        first = sections[0]
+    # manual adjustment: two volumes split exactly at the section boundary
+    split = first["end_offset"]
+    with factory.begin() as db:
+        adjusted = pipeline.adjust_volume_boundaries(db, pid, plan.id, [
+            {"title": "上卷", "start_offset": 0, "end_offset": split},
+            {"title": "下卷", "start_offset": split, "end_offset": len(doc_r.text or "")},
+        ])
+        assert adjusted.payload_json["coverage"]["complete"] is True
+        assert all(v["boundary_reason"] == "manual_adjustment"
+                   for v in adjusted.payload_json["volumes"])
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.adjust_volume_boundaries(db, pid, adjusted.id, [
+                {"title": "坏", "start_offset": 0, "end_offset": 10},
+                {"title": "坏", "start_offset": 12, "end_offset": len(doc_r.text or "")},
+            ])
+    assert any(code in str(err.value) for code in
+               ("INCOMPLETE_COVERAGE", "INVALID_ORDER", "SPLIT_SECTION"))
+    # splitting a section in half is refused
+    mid = first["start_offset"] + (first["end_offset"] - first["start_offset"]) // 2
+    with pytest.raises(ValueError) as err2:
+        with factory.begin() as db:
+            pipeline.adjust_volume_boundaries(db, pid, adjusted.id, [
+                {"title": "半章", "start_offset": 0, "end_offset": mid},
+                {"title": "半章", "start_offset": mid, "end_offset": len(doc_r.text or "")},
+            ])
+    assert "SPLIT_SECTION" in str(err2.value)
+    # a different master on a confirmed pipeline is refused
+    other = _make_doc(factory, pid, "另一部作品\n第一章\n内容。")
+    with pytest.raises(ValueError) as err3:
+        with factory.begin() as db:
+            other_r = db.get(ProjectDocument, other.id)
+            pipeline.plan_volumes(db, pid, other_r)
+    assert "PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED" in str(err3.value)
