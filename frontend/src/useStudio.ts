@@ -214,10 +214,16 @@ export function useStudio() {
   }, [loadSystem]);
 
   useEffect(() => {
-    void checkConnection();
-    const timer = window.setInterval(checkConnection, 3000);
+    const probe = async () => {
+      const online = await checkConnection();
+      // 初始作品列表加载赶上的若是后端短暂不可用，重试耗尽后它会停在
+      // “未加载”；连接一恢复就自动补拉，不让用户手动点刷新才看到作品。
+      if (online && !projectsLoaded) void loadProjects().catch(() => undefined);
+    };
+    void probe();
+    const timer = window.setInterval(probe, 3000);
     return () => window.clearInterval(timer);
-  }, [checkConnection]);
+  }, [checkConnection, loadProjects, projectsLoaded]);
 
   useEffect(() => {
     if (!projectId) return;

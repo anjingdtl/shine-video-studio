@@ -90,6 +90,20 @@ describe('顶部模式入口（唯一权威状态）', () => {
     expect(await screen.findByText('工作台后端在线')).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('button', { name: /重连/ })).not.toBeInTheDocument());
   });
+  it('初始加载赶上后端短暂不可用时，连接恢复后自动补拉作品列表，无需手动刷新', async () => {
+    let online = false;
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => online
+      ? jsonResponse([baseProject()]) : jsonResponse({ detail: 'offline' }, 503) });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({ detail: 'slow probe' }, 504) });
+    render(<App />);
+    // 失联态出现说明初始加载已经失败；此时后端恢复，不点任何按钮。
+    expect(await screen.findByText('工作台后端失联')).toBeInTheDocument();
+    online = true;
+    // 3 秒连接轮询发现恢复且列表未加载过，应自动补拉并渲染作品
+    // （顶栏项目芯片与首页作品表格都会出现这个名字）。
+    expect((await screen.findAllByText('雾港夜账', undefined, { timeout: 9000 })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: '重连工作台' })).toBeNull();
+  }, 15000);
   it('演示徽章常驻且提供启用入口；点击打开向导', async () => {
     const user = userEvent.setup();
     render(<App />);

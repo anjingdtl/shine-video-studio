@@ -51,6 +51,8 @@ temp/
 /.local-data/
 /.local-acceptance/
 /.local-data-*/
+# Browser-verification screenshots from agent runs belong in docs/evidence
+/gui-test-screenshots/
 *.tsbuildinfo
 
 # Model weights and generated media
