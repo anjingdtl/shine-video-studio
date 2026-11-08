@@ -121,7 +121,8 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
             description = (requirement.get("description") or "").strip()
             entry = merged.setdefault(
                 key,
-                {"family": family, "entity_id": name, "descriptions": [], "scene_keys": [], "questions": []},
+                {"family": family, "entity_id": name, "descriptions": [], "scene_keys": [], "questions": [],
+                 "carriers": []},
             )
             if description and description not in entry["descriptions"]:
                 entry["descriptions"].append(description)
@@ -130,6 +131,9 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
             for question in requirement.get("questions") or []:
                 if question not in entry["questions"]:
                     entry["questions"].append(question)
+            carrier = requirement.get("carrier")
+            if family == "prop" and carrier and carrier not in entry["carriers"]:
+                entry["carriers"].append(carrier)
     for (family, name), entry in merged.items():
         if len(entry["descriptions"]) > 1:
             conflicts.append({"family": family, "entity_id": name, "descriptions": entry["descriptions"],
@@ -145,6 +149,12 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
                 "family": family,
                 "entity_id": name,
                 "description": entry["descriptions"][0] if entry["descriptions"] else "",
+                # The first cited carrier is the primary one; a prop cited with
+                # different carriers across scenes keeps every variant as a
+                # display note, never a hard conflict (a letter can be sealed
+                # in one scene and open in the next).
+                "carrier": entry["carriers"][0] if entry["carriers"] else ("object" if family == "prop" else None),
+                "carrier_variants": entry["carriers"] if len(entry["carriers"]) > 1 else [],
                 "scene_keys": entry["scene_keys"],
                 "questions": entry["questions"],
             }
@@ -542,6 +552,7 @@ def create_batch(
             payload={
                 "family": (requirement.payload or {}).get("family"),
                 "entity_id": (requirement.payload or {}).get("entity_id"),
+                "carrier": (requirement.payload or {}).get("carrier"),
                 "brief_note": (requirement.payload or {}).get("brief_note") or "",
                 "visual_direction": plan.payload.get("visual_direction") or {},
                 "seed": seed,
@@ -961,6 +972,7 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
         "requirement_id": item.requirement_id,
         "family": (requirement.payload or {}).get("family") if requirement else None,
         "entity_id": (requirement.payload or {}).get("entity_id") if requirement else None,
+        "carrier": (requirement.payload or {}).get("carrier") if requirement else (item.payload or {}).get("carrier"),
         "generation_revision": item.generation_revision,
         "status": item.status,
         "state_version": item.state_version,

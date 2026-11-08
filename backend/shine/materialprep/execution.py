@@ -337,6 +337,7 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
         brief,
         visual_direction=direction,
         requirement_name=str(requirement.get("entity_id") or ""),
+        carrier=requirement.get("carrier") or payload.get("carrier"),
     )
 
 

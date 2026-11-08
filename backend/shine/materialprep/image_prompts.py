@@ -13,7 +13,11 @@ and the model may not change:
   grey-white background;
 * scene - empty environment plate, no people, honouring the confirmed space,
   era, weather and lighting;
-* prop - one complete object, no holder, neutral grey-white background.
+* prop - one complete object, no holder, neutral grey-white background.  A prop
+  requirement additionally carries a typed carrier: ``object`` keeps the
+  still-life rule, while a ``paper`` or ``screen`` carrier is shown face-on
+  with its written/printed/on-screen content legible, because for those the
+  content IS the material.
 
 The producer supplies appearance text only.  Composition, ordering, negative
 prompt assembly and every bound below are server-side and deterministic: the same
@@ -28,9 +32,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from shine.materialprep.contracts import MaterialFamily, MaterialImageBrief, MaterialVisualDirection
+from shine.materialprep.contracts import (
+    MaterialCarrier,
+    MaterialFamily,
+    MaterialImageBrief,
+    MaterialVisualDirection,
+)
 
-PROMPT_TEMPLATE_VERSION = "material-image-v1"
+PROMPT_TEMPLATE_VERSION = "material-image-v2"
 """Bump when a composition rule changes; readiness evidence is bound to it."""
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -40,6 +49,7 @@ MAX_COMPOSED_PROMPT_CHARS = 4000
 MAX_COMPOSED_NEGATIVE_CHARS = 1200
 
 _NO_TEXT_WATERMARK = "no text, no typography, no letters, no words, no numbers, no captions, no logo, no watermark"
+_NO_WATERMARK_ONLY = "no watermark"
 _NO_COLLAGE = "no collage, no split panel, no multiple views, no character sheet, no border, no frame overlay"
 
 COMPOSITION_RULES: dict[MaterialFamily, str] = {
@@ -58,6 +68,22 @@ COMPOSITION_RULES: dict[MaterialFamily, str] = {
         "Single complete object shown as one whole item, entirely inside the frame with its full outline visible, "
         "no person holding it, no person wearing it, no hands, no body parts, plain neutral grey-white seamless "
         "studio background, even soft diffused lighting, product-study framing, no second copy of the object"
+    ),
+}
+
+PROP_CARRIER_RULES: dict[MaterialCarrier, str] = {
+    "object": COMPOSITION_RULES["prop"],
+    "paper": (
+        "Single flat paper content carrier (a letter, a notice, a sign, a plaque, a map or a book page) shown "
+        "complete and face-on, entirely inside the frame, its written or printed content visible and legible as "
+        "the brief describes it, text on the carrier is legitimate content, no person, no hands, no body parts, "
+        "plain neutral grey-white seamless studio background, even soft diffused lighting, no second copy"
+    ),
+    "screen": (
+        "Single screen display carrier (a monitor, a phone, a television or a projection surface) shown complete "
+        "and face-on, entirely inside the frame, its on-screen content visible and legible as the brief describes "
+        "it, on-screen text and imagery is legitimate content, no person, no hands, no body parts, plain neutral "
+        "grey-white seamless studio background, even soft diffused lighting, no second copy"
     ),
 }
 
@@ -120,6 +146,7 @@ def compose(
     *,
     visual_direction: MaterialVisualDirection | None = None,
     requirement_name: str = "",
+    carrier: MaterialCarrier | None = None,
 ) -> ImagePrompt:
     """Build the deterministic prompt pair for one confirmed requirement.
 
@@ -128,9 +155,22 @@ def compose(
     producer's ``avoid`` list followed by the fixed exclusions, because the
     audited graph exposes a real ``negative_prompt`` input on
     ``TextEncodeQwenImage21``.
+
+    A prop requirement may declare a typed carrier.  ``object`` keeps the
+    still-life rule and the blanket text ban; a ``paper`` or ``screen`` carrier
+    is shown face-on with its content legible, so the blanket text ban is
+    replaced by a watermark-only ban — the written or on-screen content IS the
+    material the script asks for.
     """
     if family not in COMPOSITION_RULES:
         raise ImagePromptError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
+
+    composition = COMPOSITION_RULES[family]
+    text_exclusion = _NO_TEXT_WATERMARK
+    if family == "prop" and carrier in PROP_CARRIER_RULES:
+        composition = PROP_CARRIER_RULES[carrier]
+        if carrier in ("paper", "screen"):
+            text_exclusion = _NO_WATERMARK_ONLY
 
     appearance = _require_prompt_language(brief.appearance, field="appearance")
     if not appearance:
@@ -165,16 +205,16 @@ def compose(
             subject = requirement_name.strip()
     positive = _join(
         [
-            COMPOSITION_RULES[family],
+            composition,
             f"subject: {subject}" if subject else "",
             f"appearance: {appearance}",
             "; ".join(f"must keep {item}" for item in must_keep),
             "; ".join(direction_parts),
-            _NO_TEXT_WATERMARK,
+            text_exclusion,
             _NO_COLLAGE,
         ]
     )
-    negative = _join([*avoid, _NO_TEXT_WATERMARK, _NO_COLLAGE])
+    negative = _join([*avoid, text_exclusion, _NO_COLLAGE])
 
     if len(positive) > MAX_COMPOSED_PROMPT_CHARS:
         # Never truncate: a cut composition rule or must-keep fact would render
@@ -193,7 +233,7 @@ def compose(
         )
 
     digest = hashlib.sha256(
-        "\n".join([PROMPT_TEMPLATE_VERSION, family, positive, negative]).encode("utf-8")
+        "\n".join([PROMPT_TEMPLATE_VERSION, family, carrier or "", positive, negative]).encode("utf-8")
     ).hexdigest()
     return ImagePrompt(
         prompt=positive,
@@ -209,10 +249,15 @@ def template_evidence() -> dict[str, Any]:
     rules_hash = hashlib.sha256(
         "\n".join(f"{family}={rule}" for family, rule in sorted(COMPOSITION_RULES.items())).encode("utf-8")
     ).hexdigest()
+    carrier_hash = hashlib.sha256(
+        "\n".join(f"{carrier}={rule}" for carrier, rule in sorted(PROP_CARRIER_RULES.items())).encode("utf-8")
+    ).hexdigest()
     return {
         "template_version": PROMPT_TEMPLATE_VERSION,
         "composition_rules_sha256": rules_hash,
+        "prop_carrier_rules_sha256": carrier_hash,
         "families": sorted(COMPOSITION_RULES),
+        "prop_carriers": sorted(PROP_CARRIER_RULES),
         "max_prompt_chars": MAX_COMPOSED_PROMPT_CHARS,
         "max_negative_chars": MAX_COMPOSED_NEGATIVE_CHARS,
     }

@@ -779,6 +779,12 @@ html[data-theme='dark'] .wizard-stage.blocked{background:#33241e;border-color:#5
 .module-guide p{margin:0 0 4px}
 .module-guide p:last-child{margin-bottom:0}
 
+/* ---- 非阻断提示卡（降级自硬阻滞的调度/瞬时说明） ---- */
+.series-hint-card{display:flex;align-items:flex-start;gap:9px;border:1px solid #d8d4c0;background:#fbfaf2;border-radius:8px;padding:10px 13px;margin:11px 0;color:#7c7a66}
+.series-hint-card svg{flex-shrink:0;margin-top:2px;color:#a09a7e}
+.series-hint-card ul{margin:0;padding-left:16px;font-size:9px;line-height:1.7}
+.series-hint-card li{margin:2px 0}
+
 /* ---- 素材缩略图 ---- */
 .asset-thumb{width:56px;height:56px;border-radius:6px;object-fit:cover;border:1px solid #e4e4dc;background:#f3f3ee;flex-shrink:0;display:block}
 .asset-thumb-fallback{width:56px;height:56px;border-radius:6px;background:#f2eee6;color:#9a8558;display:grid;place-items:center;font:9px var(--mono);flex-shrink:0}
@@ -1136,6 +1142,7 @@ html[data-theme='dark'] .material-library-result b{color:#ccd8ce}
 .asset-library-save-form p{margin:0;font-size:10px;color:#526656}
 html[data-theme='dark'] .asset-library-save-form{border-color:#3b493d;background:#202a22}
 html[data-theme='dark'] .asset-library-save-form label,html[data-theme='dark'] .asset-library-save-form p{color:#ccd8ce}
+.material-requirement-list .material-carrier{color:#5f7d54}
 .material-direction{border:1px dashed #d3d8bb;border-radius:7px;padding:9px 11px;margin:8px 0 11px}
 .material-direction legend{font-size:9.5px;color:#7e8072;padding:0 4px}
 .material-scene-list{list-style:none;padding:0;margin:9px 0 0;font-size:9.5px;color:#7e8072}

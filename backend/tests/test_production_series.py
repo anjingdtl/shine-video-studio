@@ -742,14 +742,16 @@ def test_a_dependent_shot_stays_blocked_when_its_source_did_not_pass(api, monkey
         assert items[1].failure_code == "SERIES_SOURCE_NOT_PASSED"
 
 
-def test_a_profile_without_the_declared_media_family_is_refused(api):
-    """A profile that declares an audio transfer needs an audio reference —
-    unless the shot carries no dialogue, where an audio reference can only
-    become a speech cue (foreign-language muttering) against the no-speech
-    contract, and the submitted graph prunes the unused audio loader anyway."""
+def test_a_profile_without_the_declared_media_family_warns_and_renders(api):
+    """A profile that declares a transfer family this request does not bind is
+    a warning, not a refusal.  Voice is optional ("音色可选、H3 自己说话"): H3
+    speaks a dialogue line natively, so a dialogue shot without a voice
+    reference still queues, and the unused audio loader is pruned from the
+    submitted graph anyway."""
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
-    # Give the shot a spoken line: with dialogue the audio family is required.
+    # Give the shot a spoken line: voice is optional, so the dialogue shot
+    # queues without an audio reference and the warning names the family.
     spoken = create_shot(
         client, project_id, style["id"],
         title="有声镜头", beat="他说了一句", asset_ids=shots[0]["spec"]["required_asset_ids"],
@@ -793,18 +795,19 @@ def test_a_profile_without_the_declared_media_family_is_refused(api):
         f"/api/v1/projects/{project_id}/jobs",
         json={"shot_id": spoken["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
     )
-    assert response.status_code == 422, response.text
-    assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" in response.text
-    assert "audio" in response.text
+    assert response.status_code == 201, response.text
+    warnings = response.json().get("warnings") or []
+    assert any("audio" in warning for warning in warnings), response.text
 
-    # The dialogue-free twin may queue without any audio reference: the family
-    # exemption keeps silent shots from being forced to carry a human voice.
+    # The dialogue-free twin queues the same way: voice is optional for silent
+    # shots too — the audio family is a warning for both, never a refusal.
     silent_response = client.post(
         f"/api/v1/projects/{project_id}/jobs",
         json={"shot_id": shots[0]["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
     )
     assert silent_response.status_code == 201, silent_response.text
-    assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" not in silent_response.text
+    silent_warnings = " ".join(silent_response.json().get("warnings") or [])
+    assert "audio" in silent_warnings, silent_response.text
 
 
 def test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile(api):

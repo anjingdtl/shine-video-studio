@@ -231,6 +231,62 @@ def _requirement() -> dict:
     return {"family": "prop", "name": "铜怀表", "description": "表盖刻字。", "source_span_ids": ["S1#p2"]}
 
 
+def test_prop_carrier_typing_roundtrip():
+    """The typed prop carrier survives the contract, the aggregation and the
+    composition: paper/screen carriers show their content under a
+    watermark-only ban, an object keeps the blanket text ban, and a
+    non-prop family normalises the field away."""
+    from shine.materialprep.contracts import ScriptPreparationRequirement
+    from shine.materialprep.image_prompts import compose
+    from shine.materialprep.service import aggregate_requirements
+
+    prepared = ScriptPreparationRequirement.model_validate({
+        "family": "prop", "name": "案发现场告示", "description": "贴在墙上的告示。", "carrier": "paper",
+    })
+    assert prepared.carrier == "paper"
+    character = ScriptPreparationRequirement.model_validate({
+        "family": "character", "name": "林知远", "description": "三十岁上下。", "carrier": "paper",
+    })
+    # 非道具族：字段被规范化为 None，而不是拒绝整份答案。
+    assert character.carrier is None
+
+    merged = aggregate_requirements([
+        {"scene_key": "S1", "requirements": [
+            {"family": "prop", "name": "信", "description": "封着的信。", "carrier": "object"},
+        ]},
+        {"scene_key": "S2", "requirements": [
+            {"family": "prop", "name": "信", "description": "封着的信。", "carrier": "paper"},
+        ]},
+    ])
+    letter = next(row for row in merged["requirements"] if row["entity_id"] == "信")
+    # 首个被引用的载体是主载体；跨场不同载体保留变体清单，不作为硬冲突。
+    assert letter["carrier"] == "object"
+    assert letter["carrier_variants"] == ["object", "paper"]
+    # 无声明的道具回落 object；人物/场景不携带载体。
+    plain = aggregate_requirements([
+        {"scene_key": "S1", "requirements": [
+            {"family": "prop", "name": "铜怀表", "description": "表盖刻字。"},
+            {"family": "character", "name": "林知远", "description": "三十岁上下。"},
+        ]},
+    ])
+    by_id = {row["entity_id"]: row for row in plain["requirements"]}
+    assert by_id["铜怀表"]["carrier"] == "object"
+    assert by_id["林知远"]["carrier"] is None
+
+    brief = MaterialImageBrief.model_validate({
+        "appearance": "a weathered paper notice with a red seal, pinned to a wall",
+        "must_keep": ["the notice complete and face-on"],
+        "avoid": [],
+        "questions": [],
+    })
+    paper_prompt = compose("prop", brief, requirement_name="告示", carrier="paper")
+    object_prompt = compose("prop", brief, requirement_name="告示", carrier="object")
+    assert "no text, no typography" not in paper_prompt.negative_prompt
+    assert "no watermark" in paper_prompt.negative_prompt
+    assert "no text, no typography" in object_prompt.negative_prompt
+    assert "paper content carrier" in paper_prompt.prompt
+
+
 def test_material_image_brief_carries_no_execution_authority():
     brief = MaterialImageBrief.model_validate(
         {

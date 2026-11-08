@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Clapperboard, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
+import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
 
@@ -490,6 +490,9 @@ export default function ProductionSeriesPanel({
   const mode = system?.production_mode?.mode ?? null;
   const canStart = !demoSelected && mode === 'READY' && !activeSeries && selected.length > 0
     && selectedBusy.length === 0 && !!profileId && sizeValid && !sizeBlocked;
+  // 「硬阻滞」只保留会让生成根本无法发生（或必然生成错误结果）的事：
+  // 无分镜、没勾选、无生成方案、画幅不合法/未接入、人物没参考图、环境未就绪。
+  // 调度与瞬时状态（已在生产中、正在处理）降为下方「提示」，不再阻断样式恐吓。
   const blockers = [
     ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜。请先在上方完成 AI 分镜，并点击「应用为正式分镜（人工确认）」将方案加入制作列表。'] : []),
     ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。点上方「一键开拍」会自动勾选全部可制作镜头，无需手工逐个选。'] : []),
@@ -499,9 +502,11 @@ export default function ProductionSeriesPanel({
     ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色没有绑定人物参考图；提交会被拦下，避免生成一张不相干的脸。`] : []),
     ...(demoSelected ? ['当前选择演示，请先切回真实制作。'] : []),
     ...(mode !== 'READY' ? [system?.production_mode?.detail ?? '尚未连接本机服务，无法确认制作环境。'] : []),
-    ...(activeSeries ? ['已有未结束的生产序列，请先查看下方进度或处理该序列。'] : []),
-    ...(selectedBusy.length > 0 ? ['选中的部分镜头已经在生产中，请取消这些镜头的勾选。'] : []),
-    ...(busy || working ? ['正在处理当前操作，请等待完成。'] : []),
+  ];
+  // 提示（不阻断开拍判断之外的事实）：展示为非阻断的黄色说明，不进红色阻断卡。
+  const hints = [
+    ...(activeSeries ? ['已有未结束的生产序列在跑，可先在下方查看进度；新序列要等它收尾后才能开拍。'] : []),
+    ...(selectedBusy.length > 0 ? [`选中的 ${selectedBusy.length} 个镜头已在生产中，取消它们的勾选即可提交其余镜头。`] : []),
   ];
 
   // 制作已在进行（本面板的序列或任一任务在跑）时，不再解释“为什么不能开始”，
@@ -713,6 +718,11 @@ export default function ProductionSeriesPanel({
       </button>
     </div>
     </details>
+
+    {!productionLive && hints.length > 0 && <div className="series-hint-card" role="note" aria-label="开拍提示（不阻断）">
+      <Info size={15} />
+      <ul>{hints.map((hint) => <li key={hint}>{hint}</li>)}</ul>
+    </div>}
 
     {!productionLive && blockers.length > 0 && <div className="required-action" role="status" aria-label="开始制作前还需完成">
       <AlertTriangle size={17} className="required-icon" />

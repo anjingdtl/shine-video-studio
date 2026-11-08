@@ -986,6 +986,11 @@ def create_app(
         )
         db.commit()
         db.refresh(job)
+        data = jsonable_encoder(_job_data(db, job))
+        # Compile-time advisory warnings (e.g. a declared transfer family the
+        # request does not bind) ride along on the job payload: they are hints
+        # for the user, never a refusal.
+        data["warnings"] = compiler_meta.get("warnings", [])
         logger.info(
             "job_created id=%s project_id=%s provider=%s status=%s",
             job.id,
@@ -993,7 +998,7 @@ def create_app(
             job.provider,
             job.status,
         )
-        return jsonable_encoder(_job_data(db, job))
+        return data
 
     @app.get("/api/v1/projects/{project_id}/jobs")
     def list_jobs(project_id: str, db: DBSession) -> list[dict[str, Any]]:

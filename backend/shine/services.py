@@ -607,6 +607,7 @@ def make_render_request(
         ) from exc
 
     workflow_hash = None
+    transfer_warning_lines: list[str] = []
     if body.workflow_profile_id:
         from shine.models import WorkflowProfile
 
@@ -643,27 +644,17 @@ def make_render_request(
                 code = "SUPPORTED_NODE_UNVERIFIED_TRANSFER"
             raise HTTPException(status_code=422, detail={"code": code, "requested_continuity": capability})
         # The other direction matters too: a profile that declares a media
-        # transfer needs a reference of that family.  Without one the workflow
-        # would keep its own placeholder, so the render would either use the
-        # wrong bytes or be rejected by the renderer long after the person
-        # queued the shot.
-        from shine.comfy.provider import validate_declared_transfer_families
+        # transfer while the request binds no reference of that family.  This
+        # no longer refuses the render: the submitted graph deterministically
+        # prunes the unused loader, so the shot still renders.  It is surfaced
+        # as a warning ("voice is optional - H3 speaks a dialogue line
+        # natively"), and the user decides from the warning whether to bind a
+        # reference first.  A reference the profile has no slot for is still a
+        # hard refusal above: that would silently drop a user-approved asset.
+        from shine.comfy.provider import collect_unbound_transfer_families, unbound_transfer_family_warning
 
-        try:
-            validate_declared_transfer_families(profile.media_transfers, manifest, assets,
-                                                 dialogue_free=not spec.dialogue)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            details = getattr(exc, "details", None)
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "WORKFLOW_MEDIA_FAMILY_NOT_BOUND",
-                    "message": str(exc),
-                    "details": details,
-                },
-            ) from exc
+        transfer_warnings = collect_unbound_transfer_families(profile.media_transfers, manifest, assets)
+        transfer_warning_lines = [unbound_transfer_family_warning(family) for family in transfer_warnings]
 
     render_request = RenderRequest(
         model_checkpoint_id=profile.checkpoint_id if body.workflow_profile_id else "MiniMax-H3-Base",
@@ -702,7 +693,7 @@ def make_render_request(
         set_shot_bindings(db, project, shot, bindings)
     compiler_meta = {
         "mode": compiled.mode.value,
-        "warnings": compiled.warnings,
+        "warnings": [*compiled.warnings, *transfer_warning_lines],
         "labels": compiled.labels,
         "rule_version": compiled.rule_version,
     }

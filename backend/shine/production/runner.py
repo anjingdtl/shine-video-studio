@@ -1189,10 +1189,9 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
     artifact, active lease, or unknown failure keeps the blocker intact.
     """
     from shine.comfy.client import ComfyError
-    from shine.comfy.provider import validate_declared_transfer_families, validate_reference_slots
+    from shine.comfy.provider import collect_unbound_transfer_families, validate_reference_slots
     from shine.comfyops.models import ResourceLease
     from shine.models import Asset
-    from shine.schemas import ShotSpec
     from shine.services import manifest_from_shot_bindings
 
     recovered = 0
@@ -1257,12 +1256,11 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             return False
         try:
             validate_reference_slots(profile.parameter_map, manifest)
-            spec = ShotSpec.model_validate(shot.spec)
-            validate_declared_transfer_families(
-                profile.media_transfers or {}, manifest, current_assets, dialogue_free=not bool(spec.dialogue),
-            )
         except (ComfyError, HTTPException, ValueError):
             return False
+        # An unbound declared transfer family is a warning now, not a refusal:
+        # the unused loader is pruned and the shot still renders.
+        collect_unbound_transfer_families(profile.media_transfers or {}, manifest, current_assets)
         return True
 
     for batch in _batch_rows(db, run.id):

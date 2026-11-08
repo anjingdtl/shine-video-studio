@@ -30,6 +30,8 @@ export type MaterialRequirement = {
   bound_asset_id: string | null;
   brief_note: string;
   description: string;
+  carrier?: string | null;
+  carrier_variants?: string[];
 };
 
 export type MaterialCandidate = {
@@ -46,6 +48,7 @@ export type MaterialItem = {
   requirement_id: string | null;
   family: string | null;
   entity_id: string | null;
+  carrier?: string | null;
   generation_revision: number;
   status: string;
   error_code: string | null;
@@ -91,6 +94,13 @@ const FAMILY_LABELS: Record<string, string> = {
   character: '人物',
   scene: '场景',
   prop: '道具',
+};
+
+/** 道具需求的内容载体类型（与后端 contracts.MaterialCarrier 对齐）。 */
+const propCarrierLabels: Record<string, string> = {
+  object: '实物',
+  paper: '纸质文书',
+  screen: '屏幕显示',
 };
 
 const DIRECTION_LABELS = {
@@ -543,8 +553,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     const base = {
       row,
       item,
-      title: [FAMILY_LABELS[item.family ?? ''] ?? item.family, item.entity_id].filter(Boolean).join(' · ')
-        || '能力验证小样',
+      title: [
+        FAMILY_LABELS[item.family ?? ''] ?? item.family,
+        item.entity_id,
+        item.family === 'prop' && item.carrier ? `载体：${propCarrierLabels[item.carrier] ?? item.carrier}` : '',
+      ].filter(Boolean).join(' · ') || '能力验证小样',
       error: item.error_code ? reasonText(item.error_code) : '',
       questions: row.kind === 'production' ? (item.brief?.questions ?? []) : [],
       brief: row.kind === 'production' && item.allowed_actions?.includes('regenerate') ? item.brief ?? null : null,
@@ -690,6 +703,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               {requirements.map((requirement) => (
                 <li key={requirement.requirement_id}>
                   <b>{FAMILY_LABELS[requirement.family] ?? requirement.family} · {requirement.entity_id}</b>
+                  {requirement.family === 'prop' && requirement.carrier
+                    && <small className="material-carrier">载体：{propCarrierLabels[requirement.carrier] ?? requirement.carrier}{(requirement.carrier_variants ?? []).length > 0 ? `（另有：${requirement.carrier_variants!.map((c) => propCarrierLabels[c] ?? c).join('、')}）` : ''}</small>}
                   <small>{requirement.description}</small>
                   <label className="material-field">
                     <span>素材来源</span>

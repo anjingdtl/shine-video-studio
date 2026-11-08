@@ -37,6 +37,21 @@ are not a separate generation category, and voice is out of scope because H3
 speaks a dialogue line natively.
 """
 
+MaterialCarrier = Literal["object", "paper", "screen"]
+"""What physically carries a prop's visual content.
+
+``object`` - the prop itself is the visual content (a watch, a vase, a gun);
+it is photographed as one whole item on a plain background.  ``paper`` - the
+content lives on a flat written or printed carrier (a letter, a notice, a
+sign, a plaque, a map, a book page); the written or printed content IS the
+material.  ``screen`` - the content is displayed on a screen (a monitor, a
+phone, a television, a projection); the on-screen image IS the material.
+
+The carrier decides the composition rule: an object keeps the neutral
+still-life rule, while a paper or screen carrier shows its content face-on
+and may legitimately carry text the script itself asks for.
+"""
+
 _SpanId = Annotated[str, StringConstraints(min_length=1, max_length=80)]
 _LockedFact = Annotated[str, StringConstraints(min_length=1, max_length=300)]
 _ShortQuestion = Annotated[str, StringConstraints(min_length=1, max_length=200)]
@@ -49,8 +64,25 @@ class ScriptPreparationRequirement(APIModel):
     family: MaterialFamily
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=600)
+    carrier: MaterialCarrier | None = None
+    """Props only: what carries the visual content.  Characters and scenes
+    have no carrier and must leave this unset; the server normalises it."""
     source_span_ids: list[_SpanId] = Field(default_factory=list, max_length=8)
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=4)
+
+    @field_validator("carrier")
+    @classmethod
+    def _carrier_is_prop_only(cls, value: Any, info: ValidationInfo) -> Any:
+        """A carrier is a prop concept; normalise it away for other families.
+
+        Normalisation, not refusal: the field is advisory typing the model
+        supplies, and a character answer that echoes the field must not burn a
+        whole scene call.
+        """
+        family = (info.data or {}).get("family")
+        if family != "prop" and value is not None:
+            return None
+        return value
 
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
