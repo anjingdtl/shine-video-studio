@@ -293,11 +293,108 @@ Windows 本机能力上，与四阶段流水线无关；旧基线 `7081104` 的�
 - 回归：`backend/tests/test_storyboard.py::test_storyboard_proposes_the_material_requirement_instead_of_blocking`
   （缺主素材时链不停止、需求被记录、镜头仍未落）。
 
-**尚未做的边界（明确记录，不假装完成）**：
+**尚未做的边界（2026-11-08 第二轮收尾后更新；本轮 = R09，见第 9 节）**：
 
-1. **落镜仍是服务端硬门禁**：`apply-camera` 要求参考素材已批准锁定（`api_film.py:445-450` 的
-   `ASSET_APPROVAL_CHANGED`）。这与新次序一致（先备素材、再落镜），但还没有「落镜前按角色名
-   核对」的具名拒绝。
-2. **道具需求还没有载体**：角色需求走 `beat.characters`（名字），场景需求走大纲的 production_sections，
+1. ~~**落镜仍是服务端硬门禁**~~ → **本轮已改为提示**：缺素材不再拒绝落镜（`apply-camera` 跳过绑定并回
+   `material_notices`），也不再拒绝导演包冻结（`package_readiness` 去掉 `SHOT_CHARACTER_MASTER_MISSING`）。
+   见第 9 节。
+2. **道具需求还没有载体**（未解决）：角色需求走 `beat.characters`（名字），场景需求走大纲的 production_sections，
    但「这一镜要哪件道具」目前没有类型化字段，只能落在镜头的 `required_asset_ids`（已存在的素材）。
-3. 导演模式还没有「逐镜绑定素材」的操作界面（逐镜绑定目前只在专业层的 `ShotPanel`）。
+3. ~~导演模式还没有「逐镜绑定素材」的操作界面~~ → **撤回这一条**：逐镜绑定本来就不是人工动作。
+   导演角色在分镜里逐镜给出 `asset_ids`，`apply-camera` 逐镜落绑定；「缺哪张图」是**需求**，
+   由素材层准备，导演模式不需要另设一个人工绑定界面。人工逐镜绑定仍然只在专业层的 `ShotPanel`。
+4. **新增（未解决）**：「一键开拍（自动适配）」这一档仍会在缺参考素材时挡住提交（画面参考与人物主体
+   都算缺）。它是排产提交入口，不是落镜、也不是冻结，本轮没有改它。人物主体缺位**应当**继续拦住
+   （身份漂移保护：`H3_CHARACTER_REFERENCE_MISSING`）；画面参考缺位是否也降级为提示，要先解决
+   Ref2VA 方案「至少一张参考」与无参考时编译模式退化为 T2VA 的匹配问题，否则会变成服务端的模式不匹配。
+5. **新增（未解决）**：方案声明 audio 传输族时，**有台词**的镜头仍必须有音频参考
+   （`WORKFLOW_MEDIA_FAMILY_NOT_BOUND`）。产品口径是「音色是可选的，H3 自己说话」，与渲染侧这一条
+   不一致；本轮没有改，因为「无台词镜头豁免 audio」是上一轮有意加的（实测外语呢喃），放宽有台词镜头
+   需要单独一轮验证。
+
+## 9. 第二轮收尾（R09）：素材是可选类需求
+
+**决定（用户裁定）**：素材是**可选类**需求 —— 缺失只提示「无图片素材将由H3自行生成」，不再硬阻滞
+落镜/冻结；但**绝不绑定未批准锁定的素材**（未确认的字节不能进渲染），已绑定的参考图一张都不能丢。
+
+**为什么**：分镜提出需求 → 传给素材层 → 素材层准备 → 落镜校验。需求没被满足时，链条应该继续往前走
+并把缺口如实说出来；让一条缺素材的链条停在半路，用户看到的只是一个没有解释的拒绝。
+
+**改动**：
+
+1. **落镜**（`backend/shine/api_film.py`）：镜头点名的素材若不存在、不是本项目的、或没有批准锁定，
+   就**跳过绑定**并记一条 `MISSING_IMAGE_MATERIAL`（「无图片素材将由H3自行生成」），这一镜照样落；
+   绝不绑定未确认的字节。
+   - 同时补上一个会让该改动**直接失效**的连带点：被跳过的素材必须同时从这一镜的 `required_asset_ids`
+     里去掉。否则 `create_shot_record`（`Shot requires user-approved, locked assets`）与渲染预检
+     （`Render references are missing assets required by the shot`）仍会拒掉这一镜——只跳过绑定、
+     不改要求，等于把一种 422 换成另一种 422。修好后这一镜的「要求」就是它真正绑上的那些素材。
+2. **素材阶段**（`backend/shine/director/journey.py`）：④ 拍摄素材准备 的缺失项进
+   `facts.material_notices`，`blockers` 为空，这一步不再堵流程。
+3. **导演包冻结**（`backend/shine/director/package.py`）：去掉 `SHOT_CHARACTER_MASTER_MISSING` 这条阻断。
+   **仍然保留**「已绑定但没确认锁定的素材」→ `ASSET_NOT_MASTER`：绑了就必须是真主素材。
+4. **渲染侧**（`backend/shine/comfy/provider.py`）：方案声明 image 传输族时，这一镜一张图片都没绑就
+   **不再**被判 `WORKFLOW_MEDIA_FAMILY_NOT_BOUND`——未用的图片装载节点会在提交的图里被剪掉，不会有
+   占位文件名送到渲染器。**只在这一镜没有绑定任何图片时**才豁免；绑定了就一张都不丢。
+5. **前端**（`frontend/src/api.ts`、`frontend/src/components/FourStagePanel.tsx`）：「应用这一场」不再
+   因为缺素材而禁用；回执里的 `material_notices` 如实显示；面板文案从「备齐后再应用这一场」改成
+   「可以先落镜；缺的那个图片将由 H3 自行生成」。
+6. **需求说明文案**（`backend/shine/api_film.py` 的 `material_requirements.note`）：不再说「准备确认锁定
+   后再落镜」，改成「缺的那张图片由 H3 自行生成，落镜不再因此停下」。
+7. **素材阶段的文案也如实**：④ 的 summary 在还有缺口时写明「还缺 N 项，缺的那个图片由 H3 自行生成」，
+   阶段条打勾不再意味着「素材都齐了」。
+
+**证据**：
+
+- `backend/tests/test_four_stage_reacceptance.py::test_r09_a_missing_material_is_a_notice_not_a_block`
+  —— 角色主素材**上传但未确认**的真实状态：分镜提出需求（`missing_characters == ["Lin"]`）→ 落镜成功
+  → 这一镜**没有任何绑定**（未确认的字节没进渲染）→ 素材阶段只报 notice → 导演包照常冻结
+  （`readiness.startable is True`，没有 `SHOT_CHARACTER_MASTER_MISSING`）。
+- `backend/tests/test_four_stage_reacceptance.py::test_r09_a_revoked_master_is_skipped_and_never_bound`
+  —— 计划做完后撤销确认：绑定被跳过、提示如实返回、被撤销的素材**没有**进绑定，也不再是这一镜的要求。
+- `backend/tests/test_reference_transfer.py::test_a_shot_without_a_picture_is_not_refused_by_an_image_transfer_family`
+  —— 方案声明 image 传输族、无图镜头放行。
+- `backend/tests/test_reference_transfer.py::test_a_bound_picture_is_never_dropped_by_the_image_transfer_family`
+  —— 绑了两张图，两张都上传，一张都不丢。
+- `backend/tests/test_production_series.py::test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile`
+  —— API 层的同一条。
+- `backend/tests/test_director_long_form.py::test_materials_are_judged_after_the_storyboard`、
+  `::test_the_material_stage_names_a_character_without_a_master` —— 素材阶段只报 notice、不报 blocker。
+
+**反例证明**：临时去掉 provider 的 image 豁免后，上面两条「无图镜头放行」的断言立刻失败
+（`WORKFLOW_MEDIA_FAMILY_NOT_BOUND`）；恢复后全绿。「已绑定的参考图一张都不丢」这条在有无豁免时都通过，
+它是防止**过度豁免**的护栏。
+
+**一条必须如实说明的机制**：`asset_context` 只统计**已确认并锁定**的素材，而分镜链的每个任务都
+记着当时的这份上下文摘要（`load_inputs` 比对 `task.asset_manifest_hash`）。所以在真实运行里，
+主素材若在出方案之后被撤销确认，落镜会先被「输入上下文已变」（`INPUT_CONTEXT_CHANGED` /
+`FILM_HANDOFF_REJECTED`）挡住，而不是走到绑定那一步——这是对的：方案本来就是按旧上下文做的，
+应当重做方案。本轮把「跳过绑定」做成真正可用的路径（`required_asset_ids` 同步去掉），并用 R09 的
+第二条断言覆盖它。
+
+也正因如此，**常态下「素材还没备齐」根本不会走到绑定那一步**：素材未确认时它不在 `asset_context`
+里，分镜就没有可指名的素材，于是它提出**需求**（`missing_characters`），镜头没有绑定地落下，
+H3 自行生成。R09 的第一条断言走的就是这条真实路径。
+
+**本轮执行的命令与结果**：
+
+| 命令 | 结果 |
+| --- | --- |
+| `backend/.venv/Scripts/python.exe -m pytest tests/test_four_stage_reacceptance.py tests/test_comfy_handoff_journal.py tests/test_h3_compiler.py tests/test_production_series.py tests/test_reference_transfer.py tests/test_workflow_profile_scope.py tests/test_v13_e2e.py tests/test_director_long_form.py -q` | 定向回归全绿。**第一跑这里有 1 处失败**：是上一轮写好但从未跑过的 R09 用例本身有问题（它假设「翻转素材确认状态」会走到绑定那一步，实际会先被输入上下文校验挡下），重写后才全绿 |
+| `backend/.venv/Scripts/python.exe -m ruff check shine alembic tests` | All checks passed!（CI 同口径） |
+| `cd frontend && npm.cmd test -- --run` | 27 个测试文件、177 项全部通过 |
+| `cd frontend && npm.cmd run build` | `tsc -b && vite build` 通过（构建脚本本身带类型检查） |
+| `pytest <第 1 段：按文件名排序的前 78 个测试文件> -q -ra` | 退出码 0；进度行逐格计数 **971 项**：970 通过、1 跳过（`test_four_stage_reacceptance.py:365`「this fixture needs three scenes」）、**0 失败** |
+| `pytest <第 2 段：后 78 个测试文件> -q -ra` | 退出码 0；进度行逐格计数 **1110 项**：1109 通过、1 跳过（`test_real_managed_startup.py:85` 需要真实 ComfyUI 安装）、**0 失败** |
+| `pytest tests/test_director_long_form.py tests/test_four_stage_reacceptance.py tests/test_pipeline.py tests/test_reference_transfer.py tests/test_production_series.py tests/test_director_long_form_regressions.py tests/test_storyboard.py -q -ra` | 最终代码复跑：133 项，132 通过、1 跳过、**0 失败** |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_image_managed_renderer.py backend/tests/test_managed_comfy_bootstrap.py -q`（**在仓库根**） | 7 项通过。两段是**在 `backend/` 目录里**跑的，而 AGENTS.md 记着「后端测试必须在仓库根运行，否则 `test_image_managed_renderer.py` 会误报失败」——这两个最依赖仓库根相对路径的文件已在仓库根复跑确认 |
+
+**全量后端是分段覆盖，不是「一次性全量通过」**：本机单条 `pytest backend/tests` 约 30 分钟会被截断，
+所以按文件清单（156 个）切成两段**顺序**跑，两段没有重叠任务。合计 **2081 项：2079 通过、2 跳过、
+0 失败**（跳过的两项都是明确的外部条件：需要三场次夹具、需要真实 ComfyUI 安装）。
+两段跑完后只改过一处不改变行为的文案（④ 素材阶段的 summary 字符串），受影响的 7 个文件已按上表
+最后一行复跑确认。
+
+**未实跑**：`REAL_LLM`、`REAL_H3`、`VOLUME_DELIVERED`、`HUMAN_ACCEPTED` 仍为 `NOT_RUN`。
+本轮没有碰真实 H3、GPU 与租约；「H3 自行生成缺的那张图片」是编译与提交层的合同结论，
+真实成片里的实际画面质量仍未验证。

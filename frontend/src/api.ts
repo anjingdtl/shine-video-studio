@@ -800,7 +800,9 @@ export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
 /** Apply one scene's camera plan: this is what proves the scene->shots mapping. */
 export const applyCameraPlan = (
     projectId: string, cameraArtifactId: string, continuityArtifactId: string | null) =>
-  api<{ shot_ids: string[] }>(
+  api<{ shot_ids: string[];
+         material_notices?: Array<{ code: string; message: string;
+                                  asset_id?: string; shot_id?: string }> }>(
     `/projects/${projectId}/film-artifacts/${cameraArtifactId}/apply-camera`,
     json('POST', { continuity_artifact_id: continuityArtifactId }));
 

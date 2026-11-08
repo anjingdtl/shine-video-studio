@@ -15,7 +15,6 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.asset_identity import resolve_character_asset
 from shine.director.contracts import (
     EpisodePlanPayload,
     PackagePolicyContract,
@@ -487,14 +486,10 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                 else:
                     bound_characters.append({"id": asset.id, "kind": asset.kind,
                                              "role": asset.role, "entity_id": asset.entity_id})
-            # A character the shot names must be bound to a master: the name
-            # alone is not renderable, and the storyboard is what asks for it.
-            for name in shot.get("characters", []):
-                reference = str(name or "").strip()
-                if reference and resolve_character_asset(reference, bound_characters) is None:
-                    blockers.append(_blocker("SHOT_CHARACTER_MASTER_MISSING",
-                                             f"镜头「{row.name}」的角色「{reference}」还没有绑定主素材",
-                                             shot_id=shot.get("shot_id")))
+            # A character the shot names without a bound master is a material
+            # requirement, not a production blocker: the picture is optional
+            # and H3 generates it.  A reference that IS bound still has to be
+            # an approved master (checked above).
 
     fingerprint = digest_of(
         {

@@ -1010,10 +1010,37 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   每镜需要什么素材是分镜的产物（`required_asset_ids` 来自摄影方案），不是剧本的产物。
 - **阶段次序改为 7 步**：`script 创意与剧本 → plan 剧本统筹 → storyboard 镜头拆解 →
   assets 拍摄素材准备 → package 导演包 → production 视频生产 → post 后期成片`。
-  ② 只判分集方案与冻结风格，③ 只判镜头自身，④ 判逐镜素材（含「镜头点名的角色必须有绑定
-  主素材」`SHOT_CHARACTER_MASTER_MISSING`），素材的最终关口仍是导演包冻结。
-- **四阶段面板按同一顺序**：单元回执带 `missing_characters`，面板如实显示，并在素材备齐前
-  不提供「应用这一场」。
+  ② 只判分集方案与冻结风格，③ 只判镜头自身，④ 判逐镜素材。
+- **素材是可选类需求（2026-11-08 第二轮收尾修订）**：④ 的素材缺口只**报**（notice），不再是 blocker；
+  导演包冻结也不再因缺主素材拒绝。缺的那个图片由 H3 自行生成。
+  详见下一节。
+- **四阶段面板按同一顺序**：单元回执带 `missing_characters`，面板如实显示；「应用这一场」不再
+  因为缺素材而禁用（缺的那个图片由 H3 自行生成，可以先落镜）。
 - 验收：`backend/tests/test_director_long_form.py`（两条新断言）、
   `frontend/src/test/setupEntry.test.tsx`（阶段条次序）。
   报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 8 节。
+
+## 2026-11-08 第二轮收尾：素材是可选类需求（R09）
+
+- **素材缺失只提示，不再硬阻滞**：镜头点名的素材若不存在、不是本项目的、或没有批准锁定，
+  `apply-camera` **跳过绑定**并回 `material_notices`（`MISSING_IMAGE_MATERIAL`，
+  「无图片素材将由H3自行生成」），这一镜照样落。素材阶段（journey ④）与导演包冻结
+  （`package_readiness`）都不再因此拒绝。
+- **跳过绑定必须同时改「要求」**：被跳过的素材要从这一镜的 `required_asset_ids` 里去掉，
+  否则 `create_shot_record` 与渲染预检仍会拒掉它——只跳过绑定不改要求，等于把一种 422
+  换成另一种 422。
+- **绝不绑定未批准锁定的素材**：已绑定但没确认锁定的素材仍然具名拒绝（`ASSET_NOT_MASTER`）；
+  渲染侧 `_validate_binding_inputs` 也会拒绝。跳过的字节不进渲染。
+- **渲染侧的 image 族豁免有前提**：方案声明 image 传输族时，这一镜**一张图片都没绑**才豁免
+  （`WORKFLOW_MEDIA_FAMILY_NOT_BOUND` 不再触发，未用的图片装载节点会被剪掉，不会有占位文件名
+  送到渲染器）；绑定了就一张都不丢。audio 族的规则不变：有台词的镜头仍必须有音频参考。
+- **人物主体缺位仍然拦住**：H3 编译期 `H3_CHARACTER_REFERENCE_MISSING` 保护身份漂移的规则不变；
+  「人物主体」不是可选类素材。缺主素材且这一镜**没有任何参考**时走无参考的 T2VA 编译，
+  H3 临时生成人物（画面一致，但不保证是你指定的那个角色）。
+- **「一键开拍（自动适配）」尚未改**：排产提交入口仍会在缺参考素材时挡住提交（画面参考与人物主体
+  都算缺）。人物主体缺位应当继续拦住；画面参考缺位要降级为提示，得先解决 Ref2VA 方案
+  「至少一张参考」与无参考时编译模式退化为 T2VA 的匹配问题。
+- 验收：`backend/tests/test_four_stage_reacceptance.py`（R09 两条）、
+  `backend/tests/test_reference_transfer.py`（两条反向断言）、
+  `backend/tests/test_production_series.py`（API 层反向断言）。
+  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 9 节。

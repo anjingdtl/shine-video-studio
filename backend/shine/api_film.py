@@ -375,6 +375,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         beats = {b["id"]: b for b in script.payload_json["beats"]}
         intents = {s["id"]: s for s in direction.payload_json["shots"]}
         created = []
+        material_notices: list[dict] = []
         for camera in CameraPlan.model_validate(artifact.payload_json).shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
@@ -411,11 +412,40 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     line["start_s"], line["end_s"] = round(start, 3), round(end, 3)
                 dialogue.append(line)
             beat = {**beat, "dialogue": dialogue}
+            bindings = []
+            shot_notices: list[dict] = []
+            bound_asset_ids: list[str] = []
+            for identity in intent["asset_ids"]:
+                asset = db.get(Asset, identity)
+                if (not asset or asset.project_id != project_id
+                        or not asset.approved or not asset.locked):
+                    # 素材不是落镜的硬前置：还没备齐就如实告诉用户「无图片素材
+                    # 将由 H3 自行生成」，这一镜照样落。绝不绑定一个还没确认
+                    # 的素材——没确认的字节不能进渲染。
+                    shot_notices.append({
+                        "code": "MISSING_IMAGE_MATERIAL",
+                        "message": "无图片素材将由H3自行生成",
+                        "asset_id": identity,
+                    })
+                    continue
+                # The approved master's role decides the reference family: a
+                # character master is a subject reference, any other picture is
+                # a picture reference; audio and video map to themselves.
+                use_as = {
+                    "image": "subject" if asset.role == "character" else "picture",
+                    "audio": "audio",
+                    "video": "video",
+                }[asset.kind]
+                bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as,
+                                                 ordinal=len(bindings)))
+                bound_asset_ids.append(identity)
             spec = ShotSpec(
                 story_beat=visual,
                 duration_target_s=intent["duration_s"],
                 style_version_id=project.frozen_style_version_id,
-                required_asset_ids=intent["asset_ids"],
+                # 只有真正绑上的素材才是这一镜的要求：缺的那个由 H3 自行
+                # 生成，它不再是落镜的前置条件。
+                required_asset_ids=bound_asset_ids,
                 characters=beat["characters"],
                 dialogue=beat["dialogue"],
                 locked_story_facts=script.payload_json["locked_story_facts"],
@@ -439,20 +469,6 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     else {}
                 ),
             )
-            bindings = []
-            for index, identity in enumerate(intent["asset_ids"]):
-                asset = db.get(Asset, identity)
-                if not asset or asset.project_id != project_id or not asset.approved or not asset.locked:
-                    raise ValueError("ASSET_APPROVAL_CHANGED")
-                # The approved master's role decides the reference family: a
-                # character master is a subject reference, any other picture is
-                # a picture reference; audio and video map to themselves.
-                use_as = {
-                    "image": "subject" if asset.role == "character" else "picture",
-                    "audio": "audio",
-                    "video": "video",
-                }[asset.kind]
-                bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=index))
             # The H3 presentation numbers images in one sequence, so a static
             # workflow profile can only map the slots if the references arrive
             # in a fixed family order: subjects, then pictures, then the other
@@ -467,9 +483,11 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             # Preflight before committing any new shot; rollback the entire application on error.
             make_render_request(db, project, shot, CreateJob(shot_id=shot.id))
             created.append(shot.id)
+            material_notices.extend({**notice, "shot_id": shot.id} for notice in shot_notices)
         artifact.approved_by = "user"
         artifact.approved_at = utcnow()
-        result = {"shot_ids": created, "source_artifact_id": artifact.id}
+        result = {"shot_ids": created, "source_artifact_id": artifact.id,
+                  "material_notices": material_notices}
         db.add(AppSetting(key=key, value=result))
         add_audit(db, "user", "FILM_CAMERA_PLAN_APPLIED", "agent_artifact", artifact.id, result, project_id=project_id)
         db.commit()
@@ -1059,7 +1077,8 @@ def generate_storyboard(
     if missing:
         material_requirements = {
             "characters": list(missing),
-            "note": "这些角色还没有已确认的主素材；请在素材层准备、确认并锁定后再落镜。",
+            "note": "这些角色还没有已确认的主素材；素材层准备、确认并锁定后可以绑到镜头上，"
+                    "缺的那张图片由 H3 自行生成，落镜不再因此停下。",
         }
 
     def _run_step(name: str, role: str, **kwargs) -> dict:

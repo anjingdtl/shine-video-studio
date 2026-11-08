@@ -252,13 +252,19 @@ def compute_journey(db: Session, project: Project) -> dict[str, Any]:
     stages.append({
         "id": "assets",
         "label": "拍摄素材准备",
-        "done": bool(scoped_shots) and not material_blockers,
-        "summary": (f"{len(scoped_shots)} 镜的素材已备齐" if scoped_shots and not material_blockers
-                    else (f"{len(material_blockers)} 项素材还没备齐" if material_blockers
-                          else "等待分镜定稿")),
-        "blockers": material_blockers,
+        # 素材不是落镜的硬前置：缺的那个图片由 H3 自行生成。这一步如实告诉
+        # 用户每一镜要什么、还缺什么，但不再把流程堵在这里。
+        "done": bool(scoped_shots),
+        "summary": (
+            f"{len(scoped_shots)} 镜的素材需求已核对" if scoped_shots and not material_blockers
+            else (f"{len(scoped_shots)} 镜的素材需求已核对（还缺 {len(material_blockers)} 项，"
+                  "缺的那个图片由 H3 自行生成）" if scoped_shots
+                  else "等待分镜定稿")
+        ),
+        "blockers": [],
         "facts": {"material_shot_count": len(scoped_shots),
-                  "material_missing_count": len(material_blockers)},
+                  "material_missing_count": len(material_blockers),
+                  "material_notices": material_blockers},
     })
 
     # ⑤ 导演包: a confirmed, non-stale package that is really startable now.

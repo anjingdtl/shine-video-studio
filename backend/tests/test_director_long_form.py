@@ -823,13 +823,15 @@ def test_materials_are_judged_after_the_storyboard(api):
     # the planning stage never asks for a material
     assert stages["plan"]["done"] is True, stages["plan"]
     assert stages["plan"]["blockers"] == [], stages["plan"]
-    # the storyboard design is finished; the material is not
+    # the storyboard design is finished
     assert stages["storyboard"]["done"] is True, stages["storyboard"]
-    # and the material stage is the one that names what is missing
-    assert stages["assets"]["done"] is False, stages["assets"]
+    # and the material stage names what is still missing without blocking:
+    # the picture is optional and H3 generates the one that is missing.
+    assert stages["assets"]["done"] is True, stages["assets"]
+    assert stages["assets"]["blockers"] == [], stages["assets"]
     assert any(row["code"] == "SHOT_REQUIRED_ASSET_NOT_MASTER"
-               for row in stages["assets"]["blockers"]), stages["assets"]
-    assert journey["next_stage"] == "assets"
+               for row in stages["assets"]["facts"]["material_notices"]), stages["assets"]
+    assert journey["next_stage"] == "package"
 
 
 def test_the_material_stage_names_a_character_without_a_master(api):
@@ -854,6 +856,10 @@ def test_the_material_stage_names_a_character_without_a_master(api):
     journey = client.get(f"/api/v1/projects/{project_id}/journey").json()
     stages = {stage["id"]: stage for stage in journey["stages"]}
     assert stages["storyboard"]["done"] is True, stages["storyboard"]
-    assert stages["assets"]["done"] is False, stages["assets"]
+    # The material is a requirement, not a blocker: the stage says what is
+    # still missing, and the picture H3 will generate is named as such.
+    assert stages["assets"]["done"] is True, stages["assets"]
+    assert stages["assets"]["blockers"] == [], stages["assets"]
+    notices = stages["assets"]["facts"]["material_notices"]
     assert any(row["code"].startswith("SHOT_CHARACTER_MASTER_MISSING")
-               for row in stages["assets"]["blockers"]), stages["assets"]
+               for row in notices), stages["assets"]

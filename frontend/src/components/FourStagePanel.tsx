@@ -151,8 +151,15 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
     await run(
       () => applyCameraPlan(projectId, unit.camera_artifact_id!, unit.continuity_artifact_id),
       (applied) => {
-        const shotIds = (applied as { shot_ids?: string[] })?.shot_ids ?? [];
-        onMessage('这一场的镜头已应用：' + shotIds.length + ' 个', 'success');
+        const body = applied as { shot_ids?: string[];
+          material_notices?: Array<{ code: string; message: string }> };
+        const shotIds = body?.shot_ids ?? [];
+        const notices = body?.material_notices ?? [];
+        if (notices.length > 0) {
+          onMessage('这一场的镜头已应用：' + shotIds.length + ' 个；' + notices[0].message, 'success');
+        } else {
+          onMessage('这一场的镜头已应用：' + shotIds.length + ' 个', 'success');
+        }
       });
   }
 
@@ -480,14 +487,14 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                       <span className="muted small">
                         分镜已定稿，这一场要用的主素材还没备齐：
                         {(unit.missing_characters ?? []).join('、')}
-                        '（去素材库备齐并确认锁定后再应用这一场）'
+                        '（可以先落镜；缺的那个图片将由 H3 自行生成）'
                       </span>
                     )}
                     {unit.status === 'PROPOSED' && !unit.applied && (
-                      <button type="button" className="must-button"
-                        disabled={busy || (unit.missing_characters ?? []).length > 0}
+                      <button type="button" className="must-button" disabled={busy}
                         title={(unit.missing_characters ?? []).length > 0
                           ? '这一场要用的主素材还没备齐：' + (unit.missing_characters ?? []).join('、')
+                          + '。缺的那个图片将由 H3 自行生成，可以先落镜。'
                           : ''}
                         onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
                     )}

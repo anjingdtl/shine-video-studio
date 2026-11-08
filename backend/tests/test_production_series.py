@@ -807,6 +807,54 @@ def test_a_profile_without_the_declared_media_family_is_refused(api):
     assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" not in silent_response.text
 
 
+def test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile(api):
+    """素材是可选类需求：没绑图片的镜头放行，缺的那张由 H3 生成。
+
+    The profile declares an image transfer, but this shot binds no picture at
+    all: H3 generates the missing one and the submitted graph prunes the
+    unused image loader, so no placeholder reaches the renderer.  Before the
+    materials became optional this shot was refused with
+    WORKFLOW_MEDIA_FAMILY_NOT_BOUND.
+    """
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
+    bare = create_shot(
+        client, project_id, style["id"],
+        title="没有素材的镜头", beat="风从窗口吹过", asset_ids=[], bindings=[],
+    )
+    profile = register_workflow_profile(
+        client,
+        mode="T2VA",
+        parameter_map={
+            "positive_prompt": "1.inputs.positive_prompt",
+            "seed": "1.inputs.seed",
+            "duration": "1.inputs.duration",
+            "reference_picture_1": "1.inputs.reference_picture_1",
+        },
+        graph={
+            "1": {
+                "class_type": "H3BaseSampler",
+                "inputs": {
+                    "positive_prompt": "", "seed": 0, "duration": 6.0,
+                    "reference_picture_1": "",
+                },
+            },
+            "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},
+        },
+        required_nodes=["H3BaseSampler"],
+        media_transfers={
+            "image": {"upload_path": "/upload/image", "field_name": "image",
+                      "subfolder": "shine", "style": "multipart"},
+        },
+    )
+    response = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={"shot_id": bare["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
+    )
+    assert response.status_code == 201, response.text
+    assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" not in response.text
+
+
 def test_a_production_series_needs_a_real_h3_provider(api):
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)

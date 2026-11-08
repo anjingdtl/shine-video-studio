@@ -253,6 +253,91 @@ def test_video_reference_uses_the_declared_transfer_adapter(tmp_path, fake_comfy
     assert fake_comfy.uploads[0]["content_type"] == "video/mp4"
 
 
+def test_a_shot_without_a_picture_is_not_refused_by_an_image_transfer_family(tmp_path, fake_comfy):
+    """素材是可选类需求：没绑图片的镜头放行，缺的那张由 H3 生成。
+
+    The profile declares an image transfer, but this shot binds no picture at
+    all.  The submitted graph prunes the unused image loader, so no
+    placeholder file name reaches the renderer: refusing the shot here would
+    stop a perfectly renderable shot for a missing optional material.
+    """
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    service = ComfyUIRenderService(client, asset_root=tmp_path)
+    profile = make_profile(
+        media_transfers={
+            "image": {
+                "upload_path": "/upload/image",
+                "field_name": "image",
+                "subfolder": "shine",
+                "required_node_classes": [],
+            }
+        }
+    )
+    request = make_request([])
+    # No reference at all: the mode is the text-only one.
+    request.generation_mode = GenerationMode.T2VA
+    submission = service.submit(request, profile, {}, project_id="project-1")
+    assert submission.uploaded_references == 0
+    assert fake_comfy.prompt_count == 1
+    assert fake_comfy.upload_count == 0
+
+
+def test_a_bound_picture_is_never_dropped_by_the_image_transfer_family(tmp_path, fake_comfy):
+    """The exemption only covers a shot that binds no picture at all.
+
+    Every picture that IS bound is uploaded: a reference that exists always
+    reaches the renderer, and the family is satisfied by the bound picture.
+    """
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    service = ComfyUIRenderService(client, asset_root=tmp_path)
+    graph = {
+        "1": {
+            "class_type": "H3BaseSampler",
+            "inputs": {
+                "positive_prompt": "",
+                "seed": 0,
+                "duration": 6.0,
+                "reference_picture_1": "",
+                "reference_picture_2": "",
+            },
+        },
+        "2": {"class_type": "SaveVideo", "inputs": {"images": ["1", 0]}},
+    }
+    profile = make_profile(
+        graph=graph,
+        parameter_map={
+            "positive_prompt": "1.inputs.positive_prompt",
+            "seed": "1.inputs.seed",
+            "duration": "1.inputs.duration",
+            "reference_picture_1": "1.inputs.reference_picture_1",
+            "reference_picture_2": "1.inputs.reference_picture_2",
+        },
+        media_transfers={
+            "image": {
+                "upload_path": "/upload/image",
+                "field_name": "image",
+                "subfolder": "shine",
+                "required_node_classes": [],
+            }
+        },
+    )
+    first = make_asset(tmp_path, asset_id="asset-p1", content_type="image/png", payload=b"png-one")
+    second = make_asset(tmp_path, asset_id="asset-p2", content_type="image/png", payload=b"png-two")
+    items = [
+        manifest_item(use_as=ReferenceUse.PICTURE, asset_id=first.id, content_type="image/png",
+                      sha256=first.sha256, ordinal=0),
+        manifest_item(use_as=ReferenceUse.PICTURE, asset_id=second.id, content_type="image/png",
+                      sha256=second.sha256, ordinal=1),
+    ]
+    submission = service.submit(
+        make_request(items), profile, {first.id: first, second.id: second}, project_id="project-1"
+    )
+    assert submission.uploaded_references == 2
+    assert fake_comfy.upload_count == 2
+    uploaded = {row["filename"] for row in fake_comfy.uploads}
+    assert uploaded == {f"shine_{first.id}.png", f"shine_{second.id}.png"}, uploaded
+
+
 def test_missing_loader_node_capability_is_reported(tmp_path, fake_comfy):
     client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
     service = ComfyUIRenderService(client, asset_root=tmp_path)
