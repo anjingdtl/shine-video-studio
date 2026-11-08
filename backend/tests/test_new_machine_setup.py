@@ -9,6 +9,7 @@ NOT prove: real model inference is never simulated.
 
 # ruff: noqa: F811
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,11 @@ def test_the_same_install_request_is_one_plan_and_one_attempt(prep, monkeypatch)
     """
     client, _, _ = prep
     monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "1")
+    if os.name != "nt":
+        # Queueing the attempt needs the Windows local executor.  The Windows
+        # CI job runs this same contract on the real platform; here the endpoint
+        # correctly answers LOCAL_EXECUTOR_UNAVAILABLE.
+        pytest.skip("the local package executor only runs on the authorized Windows host")
     project = create_project(client)
     body = {"components": CORE_SMALL, "project_id": project, "disk_free": 10**12}
 
@@ -336,6 +342,8 @@ def test_two_different_component_sets_cannot_share_the_same_storage_root(prep, m
     """Different content in the same directory is a conflicting identity."""
     client, _, _ = prep
     monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "1")
+    if os.name != "nt":
+        pytest.skip("the local package executor only runs on the authorized Windows host")
     project_a = create_project(client, "甲")
     project_b = create_project(client, "乙")
     first = post(client, "/setup/install-plan",
