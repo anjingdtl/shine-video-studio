@@ -363,7 +363,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         }
       }
       setBindingChoice(choices);
-      setMessage(requiresReconciliation ? '已读取保存的人物对照。你可以核对素材与风格。'
+      setMessage(requiresReconciliation ? '已读取保存的人物对照。可在「剧本统筹」继续核对风格。'
         : `${reason ?? ''}已打开人物对照：逐条核对「谁是哪张图」，必要时改名，再点「确认并写入名字」。`);
     } catch (e) {
       setMessage(`${reason ?? ''}人物对照暂时打不开：${String(e)}`);
@@ -465,7 +465,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <ShieldCheck size={17} className="required-icon" />
       <div className="required-text">
         <b>还差一步：本项目还没绑定官方规则包</b>
-        <small>五个 Agent 都要按同一套官方规范工作，所以没绑定就会在第一步被拒绝。去「素材与风格」点「批准并冻结」风格，冻结时会一并完成绑定，不用单独操作。</small>
+        <small>五个 Agent 需要同一套官方规范；到「剧本统筹」冻结风格时会一并绑定。</small>
       </div>
       {onNavigate && <button className="must-button" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
     </div>}
@@ -541,7 +541,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         onClick={() => void checkAndResumeDirector(true)}>检查后从头重跑</button>
     </details>}
     {pollError && <p role="alert">{pollError}</p>}
-    {busy && !progressPaused && <p>切换到「素材与风格」不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
+    {busy && !progressPaused && <p>切换页面不会中断本次调用；返回后可继续查看进度。模型未提供内部百分比。</p>}
     {(busy || result || progressRuns.length > 0) && <AgentProgress runs={progressRuns}
       completedRoles={completedRoles} awaitingCharacters={!requiresReconciliation && (!!binding || result?.status === 'AWAITING_CHARACTER_CONFIRMATION')}
       charactersConfirmed={!!confirmedBreakdownId}
@@ -638,7 +638,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
           <button type="button" className="must-button" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
         </div>}
         {requiresReconciliation ? onNavigate && <button type="button" className="must-button" onClick={() => onNavigate('assets')}>
-          继续核对素材与风格
+          去剧本统筹核对风格
         </button> : <div className="required-action">
           <CheckCircle2 size={17} className="required-icon" />
           <div className="required-text">

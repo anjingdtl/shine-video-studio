@@ -87,7 +87,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
     <section className="card section-card" id="assets">
       <div className="section-heading">
         <div>
-          <div className="section-kicker">① 素材准备</div>
+          <div className="section-kicker">② 素材准备</div>
           <h2>项目素材</h2>
           <p>上传素材，选好用途，再点击「确认使用」。确认后即可用于分镜，素材只保存在本机。</p>
         </div>

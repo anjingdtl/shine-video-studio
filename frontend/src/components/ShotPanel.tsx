@@ -162,7 +162,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
         </div>
         <div className="section-icon plum"><Clapperboard size={17} /></div>
       </div>
-      {!currentStyle && <div className="blocked-callout"><Clapperboard size={15} /><span>风格基准还没冻结，先去「素材与风格」完成冻结，才能建分镜。</span></div>}
+      {!currentStyle && <div className="blocked-callout"><Clapperboard size={15} /><span>风格基准还没冻结，先去「剧本统筹」完成冻结，才能建分镜。</span></div>}
       <div className={`shot-form ${!currentStyle ? 'is-disabled' : ''}`}>
         <label>镜头名称<input value={shotName} onChange={(event) => setShotName(event.target.value)} disabled={!currentStyle} /></label>
         <label>时长（4–15 秒）<input type="number" min={4} max={15} value={duration} onChange={(event) => setDuration(Number(event.target.value))} disabled={!currentStyle} /></label>

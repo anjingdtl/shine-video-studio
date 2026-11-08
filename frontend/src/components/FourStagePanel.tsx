@@ -455,7 +455,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
       {/* ④ 分镜编写（草案）与卷交付 */}
       <div className="pipeline-volume-step">
         <b>④ 分镜编写（草案）与卷交付</b>
-        <span className="muted">草案不需要素材与风格冻结；正式拍摄（卷交付）仍走原有全部门禁。</span>
+        <span className="muted">草案不需要风格冻结；正式拍摄（卷交付）仍走原有全部门禁。</span>
         {!currentVolume && <span className="muted">先完成第①步并确认分卷。</span>}
         {currentVolume && (
           <>

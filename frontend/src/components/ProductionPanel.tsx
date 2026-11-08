@@ -42,6 +42,9 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
   const [gates, setGates] = useState<QualityGate[]>([]);
   const [suggestion, setSuggestion] = useState<RepairSuggestion | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  /** 任务会持续累积：先按“需要我处理”筛选，再限制一屏渲染条数。 */
+  const [jobFilter, setJobFilter] = useState<'all' | 'attention' | 'active' | 'done'>('all');
+  const [jobLimit, setJobLimit] = useState(12);
 
   async function openJob(job: Job) {
     setSelected(job.id);
@@ -68,13 +71,24 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
     .filter((gate): gate is QualityGate => Boolean(gate));
   const production = system?.production_mode ?? null;
   const realReady = production !== null && ['READY', 'RUNNING'].includes(production.mode);
+  const attentionJobs = jobs.filter((job) => ['NEEDS_REVIEW', 'FAILED', 'BLOCKED'].includes(job.status));
+  const activeJobs = jobs.filter((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING', 'PLANNED', 'READY', 'QUEUED'].includes(job.status));
+  const doneJobs = jobs.filter((job) => ['PASSED', 'CANCELLED'].includes(job.status));
+  const statusRank = (status: string) => (['NEEDS_REVIEW', 'FAILED', 'BLOCKED'].includes(status) ? 0
+    : ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(status) ? 1
+      : ['PLANNED', 'READY', 'QUEUED'].includes(status) ? 2 : 3);
+  const filteredJobs = (jobFilter === 'attention' ? attentionJobs
+    : jobFilter === 'active' ? activeJobs
+      : jobFilter === 'done' ? doneJobs
+        : [...jobs].sort((left, right) => statusRank(left.status) - statusRank(right.status)));
+  const shownJobs = filteredJobs.slice(0, jobLimit);
   return (
     <div className="card section-card monitor-card">
       <div className="section-heading compact">
         <div>
-          <div className="section-kicker">③ 进度与结果</div>
+          <div className="section-kicker">④ 进度与结果</div>
           <h2>制作进度与结果</h2>
-          <p>点开任务可查看生成进度、技术检查和 AI 审片建议。画面、风格与对白的建议只作参考，不会卡住制作；视频文件损坏或规格不符才会拦下成片。</p>
+          <p>点开任务看进度、技术检查与审片建议；建议不阻断制作。</p>
         </div>
         <div className="worker-indicator"><span className="pulse" />{system?.worker_online ? '后台制作服务在线' : '后台制作服务离线'}</div>
       </div>
@@ -82,7 +96,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         {realReady ? <AlertTriangle size={13} /> : <Sparkles size={13} />}
         <span>
           {production
-            ? `${production.label}：${production.detail}小模型审片只提供建议，不会阻止镜头继续制作；正式发布前的审美与版权决定仍由你确认。`
+            ? `${production.label}：${production.detail}审片只提供建议；发布前的审美与版权由你确认。`
             : '暂无法确认制作模式。'}
         </span>
       </div>
@@ -104,8 +118,20 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         </label>
         {!system?.worker_online && <code>uv run --project backend python -m shine.worker</code>}
       </div>}
+      <div className="filter-chips" role="group" aria-label="任务筛选">
+        <button type="button" className={`filter-chip ${jobFilter === 'all' ? 'active' : ''}`}
+          onClick={() => { setJobFilter('all'); setJobLimit(12); }}>全部 <em>{jobs.length}</em></button>
+        <button type="button" className={`filter-chip ${jobFilter === 'attention' ? 'active' : ''}`}
+          onClick={() => { setJobFilter('attention'); setJobLimit(12); }}>需要处理 <em>{attentionJobs.length}</em></button>
+        <button type="button" className={`filter-chip ${jobFilter === 'active' ? 'active' : ''}`}
+          onClick={() => { setJobFilter('active'); setJobLimit(12); }}>正在跑 <em>{activeJobs.length}</em></button>
+        <button type="button" className={`filter-chip ${jobFilter === 'done' ? 'active' : ''}`}
+          onClick={() => { setJobFilter('done'); setJobLimit(12); }}>已完成 <em>{doneJobs.length}</em></button>
+      </div>
       <div className="job-list">
-        {jobs.length === 0 ? <div className="empty-inline">还没有任务。在左侧分镜卡片上点「加入队列」。</div> : jobs.map((job) => (
+        {jobs.length === 0 ? <div className="empty-inline">还没有任务。在左侧分镜卡片上点「加入队列」。</div>
+          : shownJobs.length === 0 ? <div className="empty-inline">这个筛选下没有任务，换一个分类看看。</div>
+            : shownJobs.map((job) => (
           <div className={`job-row ${selected === job.id ? 'selected' : ''}`} key={job.id} onClick={() => openJob(job)}>
             <div className={`job-state ${job.status.toLowerCase()}`}><span /></div>
             <div className="job-details">
@@ -126,6 +152,10 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
           </div>
         ))}
       </div>
+      {filteredJobs.length > shownJobs.length && <button type="button" className="list-more"
+        onClick={() => setJobLimit((limit) => limit + 20)}>
+        显示更多任务（还有 {filteredJobs.length - shownJobs.length} 个）
+      </button>}
       {selectedJob && <div className="job-detail">
         {selectedJob.provider === 'comfyui' && (selectedJob.status === 'NEEDS_REVIEW'
           || (selectedJob.status === 'PASSED' && selectedJob.acceptance_status !== 'accepted')) && <OperatorReview key={selectedJob.id} jobId={selectedJob.id} />}

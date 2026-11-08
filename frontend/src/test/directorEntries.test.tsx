@@ -98,7 +98,7 @@ describe('journey 读取状态', () => {
     expect(await screen.findByText(/已应用 64 个计划镜头（项目共 70 镜）/)).toBeInTheDocument();
     expect(screen.getByText('一键开拍：自动制作全部 64 个镜头')).toBeInTheDocument();
     expect(screen.queryByText('一键开拍：自动制作全部 70 个镜头')).toBeNull();
-    expect(screen.getByText('③ 进度与结果 · 64/64 个计划镜头已通过')).toBeInTheDocument();
+    expect(screen.getByText('④ 进度与结果 · 64/64 个计划镜头已通过')).toBeInTheDocument();
     expect(screen.getByText(/本次确认范围：64 镜，64\/64 个计划镜头已通过/)).toBeInTheDocument();
     expect(screen.queryByText(/65\/72 完成/)).toBeNull();
   });

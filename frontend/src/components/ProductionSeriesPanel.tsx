@@ -178,6 +178,8 @@ export default function ProductionSeriesPanel({
   const [working, setWorking] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [quality, setQuality] = useState<QualityTier>('fast');
+  /** 制作批次会越积越多：默认只展示最近 3 个，历史按需展开。 */
+  const [seriesLimit, setSeriesLimit] = useState(3);
 
   /** 一键为本作品登记生成方案：与启用向导第 6 阶段同一组接口（固定工作流登记 +
    *  运行配置），在本页原地完成，不再让用户跳去基础配置跑整个向导。
@@ -462,7 +464,7 @@ export default function ProductionSeriesPanel({
     }
     if (missingAll.length > 0) {
       setWorking(false);
-      onMessage(`自动适配还缺：${[...new Set(missingAll)].join('、')}。到「素材与风格」上传并确认对应素材后，再点一次一键开拍即可。`, 'error');
+      onMessage(`自动适配还缺：${[...new Set(missingAll)].join('、')}。到「镜头与素材」页的素材准备分区上传并确认对应素材后，再点一次一键开拍即可。`, 'error');
       return;
     }
     // 4) 提交生产序列（沿用 start 的全部校验）。
@@ -494,12 +496,12 @@ export default function ProductionSeriesPanel({
   // 无分镜、没勾选、无生成方案、画幅不合法/未接入、人物没参考图、环境未就绪。
   // 调度与瞬时状态（已在生产中、正在处理）降为下方「提示」，不再阻断样式恐吓。
   const blockers = [
-    ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜。请先在上方完成 AI 分镜，并点击「应用为正式分镜（人工确认）」将方案加入制作列表。'] : []),
-    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头。点上方「一键开拍」会自动勾选全部可制作镜头，无需手工逐个选。'] : []),
-    ...(!profileId ? ['还没有选定生成方案。点下方按钮即可在本页一键登记（来自本机已验证的标准工作流），不用跳去基础配置。'] : []),
-    ...(sizeBlocked ? ['当前方案没有宽高映射，不能按你选的画幅渲染。到基础配置点「补齐宽高参数」，或把画幅改回「按方案默认」。'] : []),
+    ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜；先完成并应用分镜。'] : []),
+    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头；一键开拍会自动勾选。'] : []),
+    ...(!profileId ? ['还没有生成方案；点下方按钮一键登记。'] : []),
+    ...(sizeBlocked ? ['当前方案缺少宽高映射；去基础配置补齐，或改回默认画幅。'] : []),
     ...(!sizeValid ? ['自定义画幅必须是 256–2048 之间、32 的倍数（H3 规范）。'] : []),
-    ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色没有绑定人物参考图；提交会被拦下，避免生成一张不相干的脸。`] : []),
+    ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色未绑定参考图，提交会被拦下。`] : []),
     ...(demoSelected ? ['当前选择演示，请先切回真实制作。'] : []),
     ...(mode !== 'READY' ? [system?.production_mode?.detail ?? '尚未连接本机服务，无法确认制作环境。'] : []),
   ];
@@ -517,9 +519,9 @@ export default function ProductionSeriesPanel({
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">
       <div>
-        <div className="section-kicker">② 排产制作</div>
-        <h2>勾选镜头，开始制作</h2>
-        <p>选好成片规格，勾选镜头点「开始制作影片」，本机会连续生成并自动整理成片。画面和对白的 AI 建议只作参考，不会卡住后续镜头；文件损坏或规格不符才会暂停等你处理。</p>
+        <div className="section-kicker">③ 排产制作</div>
+        <h2>开始连续制作</h2>
+        <p>本机连续生成并自动成片；AI 建议仅供参考。</p>
       </div>
       <div className="section-icon plum"><Layers size={17} /></div>
     </div>
@@ -545,7 +547,7 @@ export default function ProductionSeriesPanel({
           <b>{shots.length === 0
             ? '完成分镜后，这里一键开拍'
             : `一键开拍：自动制作全部 ${shots.filter((shot) => !busyShotIds.has(shot.id)).length} 个镜头`}</b>
-          <small>自动选生成方案、按方案自动补齐场景图与音色参考、自动勾选镜头。高级设置默认已是最优，一般不用打开。</small>
+          <small>自动选方案、补齐参考、勾选镜头；高级设置一般不用改。</small>
         </div>
         <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
@@ -603,7 +605,7 @@ export default function ProductionSeriesPanel({
     )}
 
     <details className="series-advanced">
-      <summary>高级设置（一般不用改）：方案 · 审片 · 成片规格 · 手工勾选</summary>
+      <summary>高级设置：方案 · 审片 · 规格</summary>
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案
@@ -728,7 +730,8 @@ export default function ProductionSeriesPanel({
       <AlertTriangle size={17} className="required-icon" />
       <div className="required-text">
         <b>现在为什么不能开始制作</b>
-        <ul>{blockers.map(reason => <li key={reason}>{reason}</li>)}</ul>
+        <ul>{blockers.slice(0, 4).map(reason => <li key={reason}>{reason}</li>)}</ul>
+        {blockers.length > 4 && <small>还有 {blockers.length - 4} 项前置条件，处理完上面的会自动刷新。</small>}
         {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
       </div>
       {shots.length === 0 && <button type="button" className="must-button"
@@ -744,16 +747,15 @@ export default function ProductionSeriesPanel({
     </div>}
 
     {series.length > 0 && <div className="series-list">
-      {series.map((row) => (
+      {series.slice(0, seriesLimit).map((row) => (
         <article key={row.id} className={`series-block ${row.status.toLowerCase()}`}>
           <div className="series-head">
             <div>
               <b>{statusText[row.status] ?? row.status}</b>
-              <span>{row.completed_count}/{row.shot_count} 镜完成 · {row.id.slice(0, 8)}…</span>
+              <span>{row.completed_count}/{row.shot_count} 镜完成</span>
               {row.output_spec?.width && row.output_spec?.height
                 && <small>规格：{row.output_spec.width}×{row.output_spec.height}
                   {row.output_spec.clip_seconds ? ` · 单镜 ${row.output_spec.clip_seconds}s` : ''}</small>}
-              {row.worker_id && <small>执行：本机制作服务 {row.worker_id.slice(0, 12)}</small>}
               {row.failure_code && <small className="failure">· {label(failureLabels, row.failure_code)}</small>}
               {row.finalization_state !== 'NONE' && <small>收尾：{label(finalizationLabels, row.finalization_state)}</small>}
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
@@ -778,8 +780,21 @@ export default function ProductionSeriesPanel({
               </li>
             ))}
           </ol>
+          <details className="tech-details">
+            <summary>技术详情：批次编号与执行服务</summary>
+            <div className="tech-details-body">
+              <span>批次编号 <code>{row.id}</code></span>
+              {row.worker_id && <span>执行服务 <code>{row.worker_id}</code></span>}
+              {row.failure_code && <span>失败代码 <code>{row.failure_code}</code></span>}
+              {row.finalization_state !== 'NONE' && <span>收尾状态 <code>{row.finalization_state}</code></span>}
+            </div>
+          </details>
         </article>
       ))}
+      {series.length > seriesLimit && <button type="button" className="list-more"
+        onClick={() => setSeriesLimit((limit) => limit + 5)}>
+        查看更早的制作批次（还有 {series.length - seriesLimit} 个）
+      </button>}
     </div>}
   </div>;
 }
