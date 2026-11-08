@@ -116,3 +116,48 @@ def test_gateway_creative_call_sends_cap_and_records_budget():
     budget = creative_completion_cap(config, estimated_input_tokens=estimate_input_tokens("x"))
     config = apply_output_budget(config, budget)
     assert config.generation_options["max_completion_tokens"] == 76800
+
+
+def test_context_overflow_refuses_before_sending():
+    """A request whose input nearly fills the window is refused, provably not sent."""
+    from shine.llm.output_budget import context_overflow
+    cfg = _cfg(max_output_tokens=128000, context_window_tokens=8192)
+    verdict = context_overflow(cfg, estimated_input_tokens=6000)
+    assert verdict is not None
+    assert verdict["code"] == "LLM_CREATIVE_CONTEXT_OVERFLOW"
+    assert verdict["external_outcome"] == "NOT_SENT"
+    assert verdict["headroom_tokens"] == 2192
+    assert context_overflow(cfg, estimated_input_tokens=3000) is None
+    assert context_overflow(_cfg(context_window_tokens=None), estimated_input_tokens=10**9) is None
+
+
+def test_gateway_creative_overflow_is_a_classified_local_refusal():
+    """The gateway raises the refusal as a named local fact, not a provider outcome."""
+    import pytest
+
+    from shine.llm.base import LLMError
+    from shine.llm.gateway import LLMGateway
+    from shine.materialprep.agent_call import classify_external_outcome
+    gw = LLMGateway(None, mock_responder=lambda m, s: {"ok": True})
+
+    class OverflowProfile:
+        id = "p1"
+        name = "overflow"
+        kind = "openai_compatible"
+        base_url = "https://api.example.com/v1"
+        model = "test-model"
+        enabled = True
+        api_key_ref = None
+        timeout_s = 30
+        max_retries = 1
+        temperature = 1.0
+        generation_options = {}
+        capabilities = {"model_metadata": [
+            {"id": "test-model", "context_window_tokens": 8192, "max_output_tokens": 8000}]}
+    gw.profile_for_role = lambda db, role: OverflowProfile()
+    gw.secrets = None
+    with pytest.raises(LLMError) as err:
+        gw.complete_for_role(None, "scriptwriter", system="x" * 14000, user="y",
+                             task_category="creative")
+    assert err.value.details["code"] == "LLM_CREATIVE_CONTEXT_OVERFLOW"
+    assert classify_external_outcome(err.value) == "NOT_SENT"

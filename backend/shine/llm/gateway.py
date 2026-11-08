@@ -21,7 +21,12 @@ from shine.llm.base import (
 from shine.llm.context_window import model_context_for_profile
 from shine.llm.mock import MockLLMProvider, Responder
 from shine.llm.openai_compatible import OpenAICompatibleProvider
-from shine.llm.output_budget import apply_output_budget, creative_completion_cap, estimate_input_tokens
+from shine.llm.output_budget import (
+    apply_output_budget,
+    context_overflow,
+    creative_completion_cap,
+    estimate_input_tokens,
+)
 from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, ProviderProfile
 
@@ -155,10 +160,14 @@ class LLMGateway:
         profile = self.profile_for_role(db, role)
         config = self.config_for(profile)
         if task_category == "creative":
-            budget = creative_completion_cap(
-                config,
-                estimated_input_tokens=estimate_input_tokens(system) + estimate_input_tokens(user),
-            )
+            input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
+            overflow = context_overflow(config, input_estimate)
+            if overflow is not None:
+                # The request provably never left the workbench: the refusal
+                # is a named, local fact, not an unknown provider outcome.
+                raise LLMError("Creative request exceeds the shared context window",
+                               details=dict(overflow))
+            budget = creative_completion_cap(config, estimated_input_tokens=input_estimate)
             config = apply_output_budget(config, budget)
         else:
             config = agent_output_config(config)
@@ -284,6 +293,9 @@ class LLMGateway:
                 if is_mock
                 else "Generation and structured output succeeded"
             ),
+            # The creative budget evidence: what the provider declares (or
+            # fails to declare) and the 60% cap the workbench would send.
+            "creative_output_budget": creative_completion_cap(config),
         }
 
 

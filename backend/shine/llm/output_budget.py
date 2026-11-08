@@ -172,3 +172,33 @@ def estimate_input_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, math.ceil(len(text.encode("utf-8")) / 3))
+
+
+#: A creative call that cannot leave this much completion room in a shared
+#: window is refused before sending: a request whose input nearly fills the
+#: window can neither produce a usable answer nor fail as a clean refusal.
+MIN_CREATIVE_COMPLETION_RESERVE = 4_096
+
+
+def context_overflow(config: ProviderConfig, estimated_input_tokens: int) -> dict | None:
+    """The refusal evidence when the input cannot fit the shared window.
+
+    Returns None when the request fits; otherwise a named-evidence dict.  A
+    refusal raised from this check is provably NOT_SENT: the request never
+    left the workbench, so a new request after a real fix is a new decision,
+    not a replay of an unknown outcome.
+    """
+    window = config.context_window_tokens
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        return None
+    headroom = window - estimated_input_tokens
+    if headroom >= MIN_CREATIVE_COMPLETION_RESERVE:
+        return None
+    return {
+        "code": "LLM_CREATIVE_CONTEXT_OVERFLOW",
+        "context_window_tokens": window,
+        "estimated_input_tokens": estimated_input_tokens,
+        "headroom_tokens": headroom,
+        "required_reserve_tokens": MIN_CREATIVE_COMPLETION_RESERVE,
+        "external_outcome": "NOT_SENT",
+    }
