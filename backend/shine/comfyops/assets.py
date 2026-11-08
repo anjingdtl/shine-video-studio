@@ -59,6 +59,38 @@ def require_rights(db, project_id, rights_id, scope="asset"):
 
         if datetime.fromisoformat(expiry).replace(tzinfo=UTC) <= datetime.now(UTC):
             raise HTTPException(409, "CONSENT_EXPIRED")
+    for source in rights.payload.get("shine_assets_sources") or []:
+        from shine.asset_center import service as library_service
+        from shine.asset_center.models import LibraryMedia, LibraryRights, LibraryVersion
+
+        usage_scope = source.get("usage_scope")
+        kind = source.get("kind")
+        if kind == "version":
+            version = db.get(LibraryVersion, source.get("version_id"))
+            if version is None:
+                raise HTTPException(409, "LIBRARY_SOURCE_MISSING")
+            current = library_service.require_version_rights(
+                db, version, project_id=project_id, usage_scope=usage_scope
+            )
+        elif kind == "media":
+            media = db.get(LibraryMedia, source.get("media_id"))
+            if media is None:
+                raise HTTPException(409, "LIBRARY_SOURCE_MISSING")
+            current = library_service.require_rights(
+                db.get(LibraryRights, source.get("rights_id") or media.rights_id),
+                project_id=project_id,
+                usage_scope=usage_scope,
+            )
+            if media.rights_id != current.id:
+                raise HTTPException(409, "LIBRARY_SOURCE_RIGHTS_CHANGED")
+        elif kind == "rights":
+            current = library_service.require_rights(
+                db.get(LibraryRights, source.get("rights_id")),
+                project_id=project_id,
+                usage_scope=usage_scope,
+            )
+        else:
+            raise HTTPException(409, "LIBRARY_SOURCE_INVALID")
     return rights
 
 

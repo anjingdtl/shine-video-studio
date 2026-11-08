@@ -13,6 +13,7 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 export const ERROR_CODE_LABELS: Record<string, string> = {
+  INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
   EXISTING_MODEL_HASH_REJECTIONS_PRESENT: '本机有模型文件未通过完整性校验。为保护原文件，本次没有复用或下载替代文件；请到专业设置查看失败项。',

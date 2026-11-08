@@ -257,6 +257,7 @@ def test_a_dead_renderer_releases_the_exclusive_lease_it_left_behind(handoff, mo
         }))
     monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
     monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
 
     findings = handoff_startup.reconcile_dead_renderer_leases(factory)
 

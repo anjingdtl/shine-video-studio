@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Check, Clock3, Film, HelpCircle, LockKeyhole, Pencil, Upload, X } from 'lucide-react';
-import { API, type Asset } from '../api';
+import { API, api, type Asset } from '../api';
 import { ImagePreview } from './ImagePreview';
 import { roleLabels, roleOptions } from '../constants';
 
@@ -10,9 +10,10 @@ type Props = {
   onUpload: (file: File, meta: { kind: string; role: string; entityId: string; tags: string }) => void;
   onConfirm: (assetIds: string[]) => void;
   onPatchMetadata: (assetId: string, patch: { role?: string | null; entity_id?: string; tags?: string[] }) => void;
+  onOpenLibrary: () => void;
 };
 
-export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchMetadata }: Props) {
+export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchMetadata, onOpenLibrary }: Props) {
   const [role, setRole] = useState('character');
   const [entityId, setEntityId] = useState('');
   const [tags, setTags] = useState('');
@@ -23,6 +24,13 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
   const [group, setGroup] = useState('all');
   const [visible, setVisible] = useState(24);
   const [selection, setSelection] = useState<string[]>([]);
+  const [saveAssetId, setSaveAssetId] = useState('');
+  const [saveTitle, setSaveTitle] = useState('');
+  const [saveCategory, setSaveCategory] = useState('other');
+  const [saveRightsConfirmed, setSaveRightsConfirmed] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [saved, setSaved] = useState(false);
   const projectId = assets[0]?.project_id;
   useEffect(() => { setSelection([]); setVisible(24); }, [projectId]);
   const shown = assets.filter((a) => group === 'all' || a.role === group);
@@ -44,6 +52,35 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
       tags: editTags.split(',').map((tag) => tag.trim()).filter(Boolean),
     });
     setEditingId('');
+  }
+
+  function beginLibrarySave(asset: Asset) {
+    const category = ['character', 'scene', 'prop', 'costume', 'voice'].includes(asset.role ?? '')
+      ? asset.role!
+      : asset.kind === 'audio' ? 'dialogue' : 'other';
+    setSaveAssetId(asset.id);
+    setSaveTitle(asset.entity_id || asset.filename.replace(/\.[^.]+$/, ''));
+    setSaveCategory(category);
+    setSaveRightsConfirmed(false);
+    setSaveError('');
+    setSaved(false);
+  }
+
+  async function saveToLibrary(asset: Asset) {
+    if (!asset.project_id || !saveRightsConfirmed || !saveTitle.trim()) return;
+    setSaveBusy(true);
+    setSaveError('');
+    try {
+      await api(`/projects/${encodeURIComponent(asset.project_id)}/assets/${encodeURIComponent(asset.id)}/save-to-library`, {
+        method: 'POST',
+        body: JSON.stringify({ title: saveTitle.trim(), category: saveCategory, tags: asset.tags ?? [], confirmed_rights: true }),
+      });
+      setSaved(true);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaveBusy(false);
+    }
   }
 
   return (
@@ -149,7 +186,20 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
             {!asset.locked && <label><input type="checkbox" aria-label={`选择上传素材 ${asset.filename}`} checked={selection.includes(asset.id)}
               onChange={(e) => setSelection((old) => e.target.checked ? [...old, asset.id] : old.filter((id) => id !== asset.id))} />选择</label>}
             {!asset.locked && <button className="text-button" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
+            {asset.locked && <button className="text-button" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>}
             <button className="icon-button tiny" title="编辑元数据" aria-label={`编辑 ${asset.filename} 元数据`} onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
+            {saveAssetId === asset.id && <div className="asset-library-save-form">
+              {saved ? <><p role="status">已保存为素材中心候选，当前授权仍仅限本项目。完成授权复核、技术检查和人工晋升后才能使用；跨项目使用需另行授权。</p><button className="text-button" onClick={onOpenLibrary}>打开全局素材库</button></> : <>
+                <label>全局素材名称<input value={saveTitle} maxLength={160} onChange={(event) => setSaveTitle(event.target.value)} /></label>
+                <label>素材分类<select value={saveCategory} onChange={(event) => setSaveCategory(event.target.value)}>
+                  <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
+                </select></label>
+                <label className="asset-library-rights-confirm"><input type="checkbox" checked={saveRightsConfirmed} onChange={(event) => setSaveRightsConfirmed(event.target.checked)} />我确认已核对来源许可，允许把此锁定版本加入素材中心。它初始仍仅限当前项目，跨项目使用需另行授权。</label>
+                {saveError && <p role="alert" className="required-text">{saveError}</p>}
+                <button className="must-button" disabled={busy || saveBusy || !saveRightsConfirmed || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
+                <button className="text-button" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
+              </>}
+            </div>}
           </div>
         ))}
       </div>

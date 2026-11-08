@@ -468,6 +468,10 @@ def create_app(
 
     app.include_router(director_router)
 
+    from shine.api_asset_center import router as asset_center_router
+
+    app.include_router(asset_center_router)
+
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):
         """Refuse non-loopback clients until the API has real authentication.

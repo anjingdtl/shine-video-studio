@@ -19,6 +19,7 @@ afterEach(() => {
   stub.restore();
   vi.restoreAllMocks();
   window.localStorage.clear();
+  window.history.replaceState(null, '', '/');
 });
 
 const PROFILE = {

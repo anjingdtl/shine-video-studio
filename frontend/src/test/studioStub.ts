@@ -198,7 +198,7 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/agent-routes$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/workflow-profiles/, respond: () => jsonResponse([]) },
-    // 六阶段的完成态来自服务端；基线里是一个“还没开始制作”的真实形状。
+    // 七阶段的完成态来自服务端；基线里是一个“还没开始制作”的真实形状。
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/, respond: () => jsonResponse(EMPTY_JOURNEY) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/, respond: () => jsonResponse([]) },
@@ -226,7 +226,7 @@ export function baseRoutes(project = baseProject()): Route[] {
   ];
 }
 
-/** 新建作品、还没有任何物料时的六阶段状态（服务端真实会返回的形状）。 */
+/** 新建作品、还没有任何物料时的七阶段状态（服务端真实会返回的形状）。 */
 export const EMPTY_JOURNEY = {
   project_id: 'proj-1',
   stages: [

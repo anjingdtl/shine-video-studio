@@ -1,4 +1,4 @@
-"""Derive the six-stage journey from the project's real server state.
+"""Derive the seven-stage journey from the project's real server state.
 
 Every completion flag here is computed from the ledger, never from a browser
 counter.  The rule the whole workbench depends on is: a stage is only complete

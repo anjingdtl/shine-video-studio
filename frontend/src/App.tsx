@@ -30,6 +30,8 @@ import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
+import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
+import type { Asset, Project } from './api';
 
 type ViewId = 'setup' | 'production' | 'delivery' | 'pro';
 type NavItem = { id: string; text: string; icon: LucideIcon };
@@ -77,7 +79,7 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
   VIEW_GROUPS.map((group) => [group.view, group.title]),
 ) as Record<ViewId, string>;
 
-/** 导演模式：作品入口 + 六阶段制作页 + 不占流程序号的基础配置页。 */
+/** 导演模式：作品入口 + 七阶段制作页 + 不占流程序号的基础配置页。 */
 type DirectorPage = 'projects' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
   projects: '我的作品', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
@@ -96,8 +98,20 @@ const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page:
   { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
 ];
 
-function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string; packageId?: string } {
+function resolveHash(hash: string): {
+  ui: 'director' | 'expert' | 'assets';
+  view: ViewId;
+  page: DirectorPage;
+  anchor?: string;
+  assetPage?: AssetCenterPage;
+  packageId?: string;
+} {
   const raw = hash.replace(/^#/, '');
+  if (raw.startsWith('a/')) {
+    const page = raw.slice(2) as AssetCenterPage;
+    const pages: AssetCenterPage[] = ['home', 'images', 'voices', 'library', 'assignments'];
+    return { ui: 'assets', view: 'production', page: 'projects', assetPage: pages.includes(page) ? page : 'home' };
+  }
   if (raw.startsWith('d/')) {
     const [path, query = ''] = raw.slice(2).split('?');
     const packageId = new URLSearchParams(query).get('package') ?? undefined;
@@ -144,10 +158,15 @@ function App() {
     bindStandardParameters, abandonJob,
   } = studio;
 
-  const [ui, setUi] = useState<'director' | 'expert'>(() => {
+  const [ui, setUi] = useState<'director' | 'expert' | 'assets'>(() => {
+    const hash = window.location.hash;
+    const route = resolveHash(hash);
+    if (route.ui === 'assets' || hash.startsWith('#d/') || hash.startsWith('#v/') || ANCHOR_VIEW[hash.slice(1)]) return route.ui;
     const saved = window.localStorage.getItem('shine-interface');
     return saved === 'expert' ? 'expert' : 'director';
   });
+  const [assetPage, setAssetPage] = useState<AssetCenterPage>(() => resolveHash(window.location.hash).assetPage ?? 'home');
+  const [assetReturnHash, setAssetReturnHash] = useState(() => window.location.hash.startsWith('#a/') ? '#d/projects' : (window.location.hash || '#d/projects'));
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
   /** The exact package a deep link named, so the workbench opens that one. */
   const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
@@ -188,9 +207,9 @@ function App() {
   const viewScrollRef = useRef<Partial<Record<ViewId, number>>>({});
   const viewMountedRef = useRef(false);
 
-  useEffect(() => { window.localStorage.setItem('shine-interface', ui); }, [ui]);
+  useEffect(() => { if (ui !== 'assets') window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
-  /** 六阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
+  /** 七阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
   /** 读取状态与结果分开：读不到进度 ≠ 全部完成，失败必须如实显示并可重试。 */
   const [journeyState, setJourneyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -241,14 +260,14 @@ function App() {
   const productionScopeLabel = hasProductionScope && passedScopeCount !== null
     ? `${passedScopeCount}/${scopeShotCount} 个计划镜头已通过`
     : null;
-  /** 第一个未完成的阶段；null 表示六阶段全部完成。 */
+  /** 第一个未完成的阶段；null 表示七阶段全部完成。 */
   const nextStage = journey?.next_stage
     ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
     : null;
   const heroGuidance = journeyState !== 'ready' || !journey
     ? (journeyState === 'error'
       ? { page: 'projects' as DirectorPage, cta: '重新读取进度', hint: `暂时读不到这部作品的进度（${journeyError || '服务未响应'}）。这不代表已经完成，请重试。` }
-      : { page: 'projects' as DirectorPage, cta: '正在读取进度…', hint: '正在从本机服务读取这部作品六个阶段的真实状态。' })
+      : { page: 'projects' as DirectorPage, cta: '正在读取进度…', hint: '正在从本机服务读取这部作品七个阶段的真实状态。' })
     : nextStage
       ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
       : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出；艺术验收仍需你确认。' };
@@ -263,8 +282,8 @@ function App() {
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
     else if (action === 'check_fix') setWizard('diagnose');
-    else if (ui !== 'director') { setUi('director'); setDirectorPage('produce'); }
-    else setDirectorPage('produce');
+    else if (ui !== 'director') { setUi('director'); setDirectorPage('produce'); window.history.pushState(null, '', '#d/produce'); }
+    else { setDirectorPage('produce'); window.history.pushState(null, '', '#d/produce'); }
   }
 
   function goToExpert(viewId: ViewId, anchor?: string) {
@@ -283,6 +302,42 @@ function App() {
     setDirectorPackageId(undefined);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
+  }
+
+  function goToAssets(page: AssetCenterPage = 'home') {
+    if (ui !== 'assets') setAssetReturnHash(window.location.hash || (ui === 'expert' ? `#v/${view}` : `#d/${directorPage}`));
+    setAssetPage(page);
+    setUi('assets');
+    window.history.pushState(null, '', `#a/${page}`);
+    window.scrollTo({ top: 0 });
+  }
+
+  function leaveAssets(workspace: 'director' | 'expert') {
+    const route = resolveHash(assetReturnHash);
+    if (workspace === 'director') {
+      if (route.ui === 'director') {
+        setUi('director');
+        setDirectorPage(route.page);
+        setDirectorPackageId(route.packageId);
+        window.history.pushState(null, '', assetReturnHash);
+        window.scrollTo({ top: 0 });
+      } else {
+        goToDirectorPage('projects');
+      }
+      return;
+    }
+    if (route.ui === 'expert') {
+      setUi('expert');
+      setView(route.view);
+      if (route.anchor) setActiveSection(route.anchor);
+      window.history.pushState(null, '', assetReturnHash);
+      window.setTimeout(() => {
+        if (route.anchor) document.getElementById(route.anchor)?.scrollIntoView({ behavior: 'auto', block: 'start' });
+        else window.scrollTo({ top: viewScrollRef.current[route.view] ?? 0 });
+      }, 30);
+    } else {
+      goToExpert('production');
+    }
   }
 
   /** 进入导演层基础配置，可直达指定分区；普通入口回到①安装与下载。
@@ -362,16 +417,13 @@ function App() {
 
   /** 浏览器前进/后退：按地址栏恢复视图与锚点。 */
   useEffect(() => {
-    const onHash = () => {
-      const target = resolveHash(window.location.hash);
-      if (target.ui !== 'director') return;
-      setUi('director');
-      setDirectorPage(target.page);
-      setDirectorPackageId(target.packageId);
-    };
-    window.addEventListener('hashchange', onHash);
     const onPop = () => {
       const target = resolveHash(window.location.hash);
+      if (target.ui === 'assets') {
+        setUi('assets');
+        setAssetPage(target.assetPage ?? 'home');
+        return;
+      }
       if (target.ui === 'director') {
         setUi('director');
         setDirectorPage(target.page);
@@ -393,10 +445,10 @@ function App() {
       }
     };
     window.addEventListener('popstate', onPop);
-    window.addEventListener('hashchange', onHash);
+    window.addEventListener('hashchange', onPop);
     return () => {
       window.removeEventListener('popstate', onPop);
-      window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('hashchange', onPop);
     };
   });
 
@@ -448,6 +500,17 @@ function App() {
   );
 
   const modeLabel = production?.label ?? '状态未知';
+
+  if (ui === 'assets') {
+    return <AssetsWorkspace
+      page={assetPage}
+      onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
+      onWorkspace={leaveAssets}
+      projects={projects as Project[]}
+      projectId={projectId}
+      projectAssets={assets as Asset[]}
+    />;
+  }
 
   const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting}>
     <button type="button" className="primary-button" disabled={reconnecting} onClick={reconnectWorkbench}>
@@ -529,6 +592,7 @@ function App() {
             {ui === 'director' && project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}
           </div>
           <div className="top-actions">
+            <button type="button" className="secondary-button" onClick={() => goToAssets('home')}>素材中心</button>
             <span className="service-status" aria-live="polite">
               <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
               {apiOnline ? '工作台后端在线' : systemChecked ? '工作台后端失联' : '正在检查工作台后端'}
@@ -555,7 +619,7 @@ function App() {
               type="button"
               className={`ui-toggle ${ui === 'director' ? 'on-director' : 'on-expert'}`}
               title={ui === 'director' ? '切换到专业模式：模型、工作流、调度诊断等全部高级能力' : '回到导演模式：普通用户的简洁制作流程'}
-              onClick={() => { setUi(ui === 'director' ? 'expert' : 'director'); window.scrollTo({ top: 0 }); }}
+              onClick={() => { if (ui === 'director') goToExpert(view, activeSection); else goToDirectorPage(directorPage); window.scrollTo({ top: 0 }); }}
             >
               <Clapperboard size={13} /><span>导演模式</span>
               <i className="ui-toggle-sep" />
@@ -632,7 +696,7 @@ function App() {
             </section>}
 
             {project && <>
-              <nav className="director-steps six-stage" aria-label="制作六阶段" hidden={directorPage === 'setup'}>
+              <nav className="director-steps seven-stage" aria-label="制作七阶段" hidden={directorPage === 'setup'}>
                 {DIRECTOR_STAGES.map((stage) => {
                   const Icon = stage.icon;
                   // 一个页面可能承载两个阶段（剧本与素材）：只高亮当前该做的那一个，
@@ -751,6 +815,7 @@ function App() {
                   onUpload={uploadAsset}
                   onConfirm={confirmAssets}
                   onPatchMetadata={patchAssetMetadata}
+                  onOpenLibrary={() => goToAssets('library')}
                 />
                 <StylePanel
                   key={`style-${projectId}`}
@@ -1024,6 +1089,7 @@ function App() {
                   onUpload={uploadAsset}
                   onConfirm={confirmAssets}
                   onPatchMetadata={patchAssetMetadata}
+                  onOpenLibrary={() => goToAssets('library')}
                 />
 
                 <StylePanel

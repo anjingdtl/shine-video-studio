@@ -9,7 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-HEAD_REVISION = "f180b0020001"
+HEAD_REVISION = "f180b0030001"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -30,10 +30,7 @@ def test_fresh_database_upgrades_to_the_m2_schema(tmp_path, monkeypatch):
     command.upgrade(alembic_config(db_path), "head")
     connection = sqlite3.connect(db_path)
     try:
-        tables = {
-            row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {
             "projects",
             "assets",

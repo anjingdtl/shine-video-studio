@@ -238,7 +238,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     return profile?.mode ?? null;
   }, [profileId, workflowProfiles]);
 
-  // 就绪检查是即时事实（会随风格/绑定/文件变化）；六阶段摘要只在没有包时兜底。
+  // 就绪检查是即时事实（会随风格/绑定/文件变化）；七阶段摘要只在没有包时兜底。
   const shownBlockers = (readiness?.blockers
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
     ?? []).filter((blocker) => blocker.code !== 'PACKAGE_NOT_CONFIRMED');

@@ -1,4 +1,4 @@
-"""Director journey endpoints: the six stages, the package and the whole-film run.
+"""Director journey endpoints: the seven stages, the package and the whole-film run.
 
 These routes only persist intent.  Nothing here calls ComfyUI, FFmpeg or a model
 provider: the resident Worker performs every real action, so an HTTP call can
@@ -61,7 +61,7 @@ def _plan_public(row: DirectorEpisodePlan) -> dict[str, Any]:
 
 @router.get("/projects/{project_id}/journey")
 def project_journey(project_id: str, db: DBSession) -> dict[str, Any]:
-    """The six-stage completion state, derived from the ledger only."""
+    """The seven-stage completion state, derived from the ledger only."""
     project = require_project(db, project_id)
     return compute_journey(db, project)
 
