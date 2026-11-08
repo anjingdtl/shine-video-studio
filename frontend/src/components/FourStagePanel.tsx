@@ -1,24 +1,27 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
-  confirmBible, confirmSceneScript, confirmVolumePlan, editSceneScript, generateStoryboardDraft,
-  getPipelineOverview, importPipelineSource, listScriptDocuments, queueBible, queueVolumeOutline, queueVolumeScripts,
-  type PipelineOverview,
+  confirmBible, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan, editSceneScript,
+  generateStoryboardDraft, getPipelineOverview, importPipelineSource, listScriptDocuments,
+  queueBible, queueVolumeOutline, queueVolumeScripts, requestVolumeHandoff,
+  type PipelineOverview, type WorkflowProfileLite,
 } from '../api';
 
 type Props = {
   projectId: string;
+  workflowProfiles?: WorkflowProfileLite[];
   onMessage: (message: string, kind?: 'error' | 'success') => void;
 };
 
 /** The four-stage creative pipeline in one place: import, outline, script, storyboard. */
-export function FourStagePanel({ projectId, onMessage }: Props) {
+export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props) {
   const [overview, setOverview] = useState<PipelineOverview | null>(null);
   const [busy, setBusy] = useState(false);
   const [volumePlanDraft, setVolumePlanDraft] = useState<{ id: string; sha256: string; volumes: unknown[] } | null>(null);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string }>>([]);
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const [handoffProfile, setHandoffProfile] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -117,6 +120,22 @@ export function FourStagePanel({ projectId, onMessage }: Props) {
                   onClick={() => run(() => queueVolumeOutline(projectId, v.volume_id))}>
                   {v.outline_confirmed ? '重新提取大纲' : '提取大纲'}
                 </button>
+                {v.latest_outline && !v.outline_confirmed && (
+                  <button type="button" className="must-button" disabled={busy}
+                    title={v.latest_outline.questions.length
+                      ? `待确认问题：${v.latest_outline.questions.join('；')}`
+                      : ''}
+                    onClick={() => run(() => confirmVolumeOutline(
+                      projectId, v.volume_id, v.latest_outline!.artifact_id,
+                      v.latest_outline!.sha256, v.latest_outline!.questions_sha256))}>
+                    确认本卷大纲
+                  </button>
+                )}
+                {v.latest_outline && !v.outline_confirmed && v.latest_outline.questions.length > 0 && (
+                  <div className="muted small">
+                    大纲提出了 {v.latest_outline.questions.length} 个待确认问题，按钮上的提示列出全文；确认即视为已读并接受。
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -187,10 +206,10 @@ export function FourStagePanel({ projectId, onMessage }: Props) {
         )}
       </div>
 
-      {/* ④ 分镜编写（草案） */}
+      {/* ④ 分镜编写（草案）与卷交付 */}
       <div className="pipeline-volume-step">
-        <b>④ 分镜编写（草案）</b>
-        <span className="muted">草案不需要素材与风格冻结；正式拍摄仍走原有全部门禁。</span>
+        <b>④ 分镜编写（草案）与卷交付</b>
+        <span className="muted">草案不需要素材与风格冻结；正式拍摄（卷交付）仍走原有全部门禁。</span>
         {volumes.map((v) => (
           <div key={v.volume_id} className="row">
             <span>{v.title}</span>
@@ -201,6 +220,31 @@ export function FourStagePanel({ projectId, onMessage }: Props) {
             </button>
           </div>
         ))}
+        <div className="row">
+          <span>卷交付 H3 制作（正式拍摄）：</span>
+          <select aria-label="选择生成方案" value={handoffProfile}
+            onChange={(event) => setHandoffProfile(event.target.value)}>
+            <option value="" disabled>选择已登记的生成方案</option>
+            {(workflowProfiles ?? []).map((p) => (
+              <option key={p.id} value={p.id}>{p.name}（{p.mode}）</option>
+            ))}
+          </select>
+          <button type="button" className="must-button" disabled={busy || !handoffProfile}
+            onClick={() => run(() => requestVolumeHandoff(projectId, volumes[0]?.volume_id ?? '', handoffProfile),
+              (result) => {
+                const handoff = result as { readiness: { startable: boolean; blockers: Array<{ code: string }> } };
+                if (handoff.readiness?.startable) {
+                  onMessage('卷交付完成：可在导演包页创建生产运行', 'success');
+                } else {
+                  onMessage(`卷交付已建立，但有 ${handoff.readiness?.blockers?.length ?? 0} 项待解决`, 'error');
+                }
+              })}>
+            交付本卷制作
+          </button>
+        </div>
+        <div className="muted small">
+          卷交付会把本卷已应用的镜头装进分集计划与导演包；缺少已批准母版、未冻结风格或方案未映射时会列出全部缺项。
+        </div>
       </div>
     </section>
   );

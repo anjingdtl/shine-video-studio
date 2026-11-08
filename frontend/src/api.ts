@@ -644,6 +644,8 @@ export interface PipelineVolume {
   title: string;
   char_count: number | null;
   outline_confirmed: boolean;
+  latest_outline: { artifact_id: string; sha256: string; questions: string[];
+                    questions_sha256: string | null } | null;
   scripts: PipelineVolumeScriptEntry[];
   scripts_confirmed: number;
   scripts_total: number;
@@ -702,3 +704,24 @@ export const editSceneScript = (projectId: string, artifactId: string, text: str
 export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
   api<{ status: string; record: { camera_artifact_id: string | null }; steps: Record<string, unknown>; next?: unknown }>(
     `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/storyboard-draft`, json('POST', {}));
+
+export const confirmVolumeOutline = (
+    projectId: string, volumeId: string, outlineArtifactId: string, sha256: string,
+    questionsSha256: string | null) =>
+  api<{ approved: boolean; invalidated_section_ids: string[] }>(
+    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/outline-confirm`,
+    json('POST', { outline_artifact_id: outlineArtifactId, expected_sha256: sha256,
+                   acknowledge_questions_sha256: questionsSha256 }));
+
+export interface WorkflowProfileLite { id: string; name: string; mode: string }
+
+export const requestVolumeHandoff = (
+    projectId: string, volumeId: string, workflowProfileId: string,
+    options: { acknowledgeSceneCoverage?: boolean } = {}) =>
+  api<{ handoff_id: string; plan_version: number; package_revision: number;
+        package_id: string; readiness: { ready: boolean; startable: boolean;
+        blockers: Array<{ code: string; message?: string }> };
+        episodes: number; shots: number }>(
+    `${API}/projects/${projectId}/pipeline/volumes/${volumeId}/handoff`,
+    json('POST', { workflow_profile_id: workflowProfileId,
+                   acknowledge_scene_coverage: options.acknowledgeSceneCoverage ?? false }));

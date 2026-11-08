@@ -61,13 +61,17 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     AgentArtifact.created_at.desc())).all()
                 latest_outline_row = next(
                     (r for r in rows if r.payload_json.get("document_id") == volume_doc.id), None)
+                questions = list(latest_outline_row.payload_json.get("questions") or [])                     if latest_outline_row else []
             volumes.append({
                 "volume_id": volume_id, "order": volume["order"], "title": volume["title"],
                 "char_count": volume.get("char_count"),
                 "outline_confirmed": outline is not None,
                 "latest_outline": ({"artifact_id": latest_outline_row.id,
                                     "sha256": latest_outline_row.sha256,
-                                    "questions": list(latest_outline_row.payload_json.get("questions") or [])}
+                                    "questions": questions,
+                                    "questions_sha256": (digest({"artifact": latest_outline_row.id,
+                                                                 "questions": questions})
+                                                         if questions else None)}
                                    if latest_outline_row else None),
                 "scripts": scripts,
                 "scripts_confirmed": sum(1 for s in scripts if s["confirmed"]),

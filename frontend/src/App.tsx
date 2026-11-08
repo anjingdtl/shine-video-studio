@@ -706,6 +706,7 @@ function App() {
               <div className="director-page" id="assets" hidden={directorPage !== 'assets'}>
                 <FourStagePanel
                   projectId={projectId}
+                  workflowProfiles={workflowProfiles}
                   onMessage={report}
                 />
                 <ScriptEntryPanel
