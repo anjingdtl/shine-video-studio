@@ -1113,8 +1113,8 @@ html[data-theme='dark'] .asset-list::-webkit-scrollbar-thumb,html[data-theme='da
 .script-entry h3{margin:0 0 6px;font-size:13px}
 .script-entry-field{display:flex;flex-direction:column;gap:6px;margin:8px 0;font-size:11px;color:#56584b}
 .script-entry-field>span{color:#7e8072}
-.script-entry-field textarea{width:100%;box-sizing:border-box;min-height:112px;resize:vertical;border:1px solid #d9ddc4;border-radius:8px;padding:10px 12px;font:inherit;font-size:13px;line-height:1.6;background:#fff;color:#3d3f37}
-.script-entry-field textarea.compact{min-height:64px}
+.script-entry-field textarea{width:100%;box-sizing:border-box;min-height:92px;resize:vertical;border:1px solid #d9ddc4;border-radius:8px;padding:10px 12px;font:inherit;font-size:13px;line-height:1.6;background:#fff;color:#3d3f37}
+.script-entry-field textarea.compact{min-height:54px}
 .script-entry-field textarea:focus{outline:none;border-color:#b9bf8f;box-shadow:0 0 0 2px rgba(185,191,143,.25)}
 .script-entry-b{border-top:1px dashed #e2e5d0;padding-top:14px}
 html[data-theme='dark'] .script-entry-field textarea{border-color:#3b3d2f;background:#22231d;color:#cdcec0}
@@ -1392,6 +1392,9 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 .director-brand-text{display:flex;flex-direction:column;line-height:1.15}
 .director-brand-text b{font-size:12px;letter-spacing:2.4px;color:#3f4138}
 .director-brand-text i{font:9px var(--mono);font-style:normal;letter-spacing:.6px;color:#9a9b90}
+.topbar-home{display:inline-flex;align-items:center;gap:5px;border:1px solid #e3e4dc;background:#fff;border-radius:20px;padding:5px 9px;font-size:10px;color:#6a6b62;flex:none;white-space:nowrap}
+.topbar-home:hover{border-color:#b6bd9d;color:var(--olive-dark)}
+.topbar-home svg{color:#8a9370}
 .project-chip{display:inline-flex;align-items:center;gap:6px;max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border:1px solid #e3e4dc;background:#fff;border-radius:20px;padding:5px 10px;font-size:11px;color:#55574e;flex:none}
 .project-chip svg{color:#8a9370;flex:none}
 .project-switch{display:inline-flex;align-items:center;gap:5px;border:1px solid #e3e4dc;background:#fff;border-radius:20px;padding:3px 8px;color:#77796f;min-width:0;max-width:240px}
@@ -1416,6 +1419,7 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
   .ui-toggle .ui-toggle-sep{display:none}
   .ui-toggle{padding:7px 9px}
   .topbar-controls .help-button span{display:none}
+  .topbar-home span{display:none}
 }
 @media(max-width:760px){
   .director-brand-text{display:none}
@@ -1502,8 +1506,8 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .portfolio-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:720px}
 .portfolio-count{font:10px var(--mono);color:#8a8b84;background:#f5f5ef;border:1px solid #e9e8e2;border-radius:20px;padding:5px 10px;white-space:nowrap}
 .portfolio-table-wrap{margin-top:0;border:1px solid #ecebe4;border-radius:10px;overflow-x:auto}
-.portfolio-table{width:100%;border-collapse:collapse;min-width:980px}
-.portfolio-table th,.portfolio-table td{padding:11px 12px;text-align:left;vertical-align:middle;white-space:nowrap}
+.portfolio-table{width:100%;border-collapse:collapse;min-width:880px}
+.portfolio-table th,.portfolio-table td{padding:10px 9px;text-align:left;vertical-align:middle;white-space:nowrap}
 .portfolio-table thead th{background:#f8f7f2;font-size:9px;font-weight:600;letter-spacing:.8px;color:#8f9186;text-transform:uppercase;border-bottom:1px solid #ecebe4}
 .portfolio-table tbody th,.portfolio-table tbody td{border-top:1px solid #f1f0ea;font-size:11px;color:#4f5148}
 .portfolio-table tbody tr:first-child th,.portfolio-table tbody tr:first-child td{border-top:0}
@@ -1535,17 +1539,13 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 .portfolio-create-actions .new-project-button{height:38px}
 @media(max-width:760px){
   .portfolio{padding:14px}
-  .portfolio-table{min-width:860px}
+  .portfolio-table{min-width:840px}
   .portfolio-create{flex-direction:column;align-items:stretch}
   .portfolio-create-actions .new-project-inline{flex:1;width:auto!important}
 }
 
-/* ---- 当前作品的剧本工作区（在项目管理页下方） ---- */
+/* ---- 创意与剧本页的工作区 ---- */
 .creative-workspace{display:flex;flex-direction:column;gap:12px;scroll-margin-top:88px;padding-top:2px}
-.creative-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 2px}
-.creative-head h2{font-size:17px;letter-spacing:-.2px;margin:4px 0 3px;color:#33352e}
-.creative-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:760px}
-@media(max-width:760px){.creative-head{flex-direction:column}}
 
 /* ---- 风格迁到镜头拆解页后的说明与区块 ---- */
 .style-shot-section{display:flex;flex-direction:column;gap:12px;scroll-margin-top:88px}
@@ -1623,7 +1623,7 @@ html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 html[data-theme='dark'] .director-brand-mark{background:#2c2d25;border-color:#3f4036;color:#c2c9a4}
 html[data-theme='dark'] .director-brand-text b{color:#d6d7cd}
 html[data-theme='dark'] .director-brand-text i{color:#8f9186}
-html[data-theme='dark'] .project-chip,html[data-theme='dark'] .project-switch{background:#24251f;border-color:#3a3b31;color:#c9cac0}
+html[data-theme='dark'] .project-chip,html[data-theme='dark'] .project-switch,html[data-theme='dark'] .topbar-home{background:#24251f;border-color:#3a3b31;color:#c9cac0}
 html[data-theme='dark'] .project-switch select{color:#d9dad0}
 html[data-theme='dark'] .director-topbar{background:#1f201bcc;border-bottom-color:#33342c}
 html[data-theme='dark'] .journey-rail{background:linear-gradient(180deg,#24251f 0%,#20211c 100%);border-color:#3a3b31;box-shadow:none}
@@ -1670,6 +1670,5 @@ html[data-theme='dark'] .portfolio-open.current{background:#2c3325;border-color:
 html[data-theme='dark'] .portfolio-create{background:#2a291d;border-color:#4a442c}
 html[data-theme='dark'] .portfolio-create-copy b{color:#d2d3c7}
 html[data-theme='dark'] .portfolio-create-copy span{color:#8f9186}
-html[data-theme='dark'] .creative-head h2{color:#e2e3db}
-html[data-theme='dark'] .creative-head p{color:#8f9186}
+
 

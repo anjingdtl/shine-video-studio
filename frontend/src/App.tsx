@@ -80,15 +80,15 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
 ) as Record<ViewId, string>;
 
 /** 导演模式：作品入口 + 六阶段制作页 + 不占流程序号的基础配置页。 */
-type DirectorPage = 'projects' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
+type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
-  projects: '项目管理', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
+  projects: '项目管理', creative: '创意与剧本', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
   run: '全片生产', deliver: '成片中心', setup: '基础配置',
 };
 /** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
 const DIRECTOR_STAGES: Array<{ id: string; text: string; short?: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
-  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'projects', hint: '写想法或导入剧本' },
-  { id: 'materials', text: '剧本统筹与素材', short: '统筹与素材', icon: Film, page: 'assets', hint: '确认分集与主素材' },
+  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'creative', hint: '写想法或导入剧本' },
+  { id: 'materials', text: '剧本统筹与素材', short: '统筹素材', icon: Film, page: 'assets', hint: '确认分集与主素材' },
   { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜与对白' },
   { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结本次拍摄范围' },
   { id: 'production', text: '视频生产', icon: Video, page: 'run', hint: '一次启动，后台跑完' },
@@ -533,6 +533,12 @@ function App() {
                 ? <b>{DIRECTOR_PAGE_LABELS[directorPage]}</b>
                 : <><b>{VIEW_TITLES[view]}</b>{project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}</>}
             </nav>
+            {ui === 'director' && project && directorPage !== 'projects' && (
+              <button type="button" className="topbar-home" onClick={() => goToDirectorPage('projects')}
+                title="返回项目管理" aria-label="返回项目管理">
+                <FolderKanban size={12} aria-hidden="true" /><span>项目管理</span>
+              </button>
+            )}
             {ui === 'director' && project && (projects.length > 1
               ? <label className="project-switch">
                 <span className="visually-hidden">快速切换作品</span>
@@ -675,21 +681,14 @@ function App() {
               {directorPage === 'projects' && <div className="director-page">
                 <section className="welcome-row">
                   <div>
-                    <div className="eyebrow"><span className="eyebrow-line" /> 创意与剧本 · 项目管理</div>
+                    <div className="eyebrow"><span className="eyebrow-line" /> 项目管理</div>
                     <h1>每一部作品，<em>都清清楚楚。</em></h1>
                     <p>{journeyState !== 'ready' || !journey
                       ? heroGuidance.hint
-                      : '素材、风格、分镜、产出物逐行列清；选中哪部就继续。'}</p>
+                      : '所有作品的进度和产出物都在这里；选中哪部就继续。'}</p>
                   </div>
                   <button className="primary-button big" disabled={journeyState === 'loading' && !journey}
-                    onClick={() => {
-                      if (journeyState === 'error') { setJourneyRetry((n) => n + 1); return; }
-                      if (nextStage?.page === 'projects') {
-                        document.getElementById('creative-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        return;
-                      }
-                      goToDirectorPage(heroGuidance.page);
-                    }}>{heroGuidance.cta}</button>
+                    onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>{heroGuidance.cta}</button>
                 </section>
                 <ProjectPortfolio
                   projects={projects}
@@ -701,21 +700,24 @@ function App() {
                   busy={busy}
                   refreshEpoch={dataEpoch}
                   onOpen={(id) => {
-                    setProjectId(id);
-                    window.setTimeout(() => document.getElementById('creative-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 90);
+                    if (id !== projectId) setProjectId(id);
+                    goToDirectorPage('creative');
                   }}
                   onCreate={createProject}
                 />
+              </div>}
 
+              <div className="director-page director-creative" id="creative" hidden={directorPage !== 'creative'}>
+                {directorPageIntro(
+                  '第 1 阶段',
+                  <>先有一个<em>能开拍的故事。</em></>,
+                  '写想法或导入剧本；确认大纲后进入统筹。',
+                  <>
+                    <span className="head-chip">{project.title}</span>
+                    {stageDone.script && <span className="portfolio-badge ok"><Check size={10} />已完成</span>}
+                  </>,
+                )}
                 <section className="creative-workspace" id="creative-workspace">
-                  <header className="creative-head">
-                    <div>
-                      <div className="section-kicker">CURRENT PROJECT / SCRIPT</div>
-                      <h2>当前作品：{project.title} · 创意与剧本</h2>
-                      <p>写一句想法，或导入现成剧本；确认大纲后再进入统筹。要换作品，点上方项目表里的「打开作品」。</p>
-                    </div>
-                    {stageDone.script && <span className="portfolio-badge ok"><Check size={10} />这一阶段已完成</span>}
-                  </header>
                   <ScriptEntryPanel
                     key={`script-entry-${projectId}`}
                     projectId={projectId}
@@ -735,7 +737,7 @@ function App() {
                     />
                   </details>
                 </section>
-              </div>}
+              </div>
 
               <div className="director-page director-assets" id="assets" hidden={directorPage !== 'assets'}>
                 {directorPageIntro(
