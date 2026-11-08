@@ -29,6 +29,7 @@ import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
+import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
 
@@ -81,12 +82,12 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
 /** 导演模式：作品入口 + 六阶段制作页 + 不占流程序号的基础配置页。 */
 type DirectorPage = 'projects' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
-  projects: '我的作品', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
+  projects: '项目管理', assets: '剧本与素材', produce: '镜头拆解', package: '导演包',
   run: '全片生产', deliver: '成片中心', setup: '基础配置',
 };
 /** 六阶段主线。完成态一律来自服务端 /journey，不在前端另算一套。 */
 const DIRECTOR_STAGES: Array<{ id: string; text: string; short?: string; icon: LucideIcon; page: DirectorPage; hint: string }> = [
-  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'assets', hint: '输入想法或导入现成剧本，确认后进入统筹' },
+  { id: 'script', text: '创意与剧本', icon: PenLine, page: 'projects', hint: '一行行管理作品；选中作品后在同一页写想法或导入剧本' },
   { id: 'materials', text: '剧本统筹与素材', short: '统筹与素材', icon: Film, page: 'assets', hint: '分集 · 人物场景道具 · 确认主素材 · 冻结风格' },
   { id: 'storyboard', text: '镜头拆解', icon: ListChecks, page: 'produce', hint: '逐场分镜、对白与声音安排' },
   { id: 'package', text: '导演包', icon: LockKeyhole, page: 'package', hint: '冻结这次要拍的全部内容与执行政策' },
@@ -147,9 +148,6 @@ function App() {
     return saved === 'expert' ? 'expert' : 'director';
   });
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
-  /** 「剧本与素材」一页承载两个阶段：默认先看素材，点①才切到剧本。
-   *  两个分区都保持挂载，切换不会丢掉正在编辑的内容或运行中的任务。 */
-  const [assetsTab, setAssetsTab] = useState<'script' | 'materials'>('materials');
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
   /** 制作页单任务聚焦：默认自动落在第一个未完成阶段，用户可用阶段条/摘要行切换；
    *  自动阶段推进时回到正轨。同一时刻只展开当前该做的那一个阶段。 */
@@ -243,12 +241,8 @@ function App() {
   const nextStage = journey?.next_stage
     ? DIRECTOR_STAGES.find((stage) => stage.id === journey.next_stage) ?? null
     : null;
-  /** 当前页面对应的阶段：素材页跟随分区，其余页面按服务端进度取第一个未完成项。 */
+  /** 当前页面对应的阶段；项目管理页承载第 1 阶段，素材页承载第 2 阶段。 */
   const activeDirectorStage = (() => {
-    if (directorPage === 'assets') {
-      const wanted = assetsTab === 'script' ? 'script' : 'materials';
-      return DIRECTOR_STAGES.find((stage) => stage.id === wanted) ?? null;
-    }
     const pageStages = DIRECTOR_STAGES.filter((stage) => stage.page === directorPage);
     if (pageStages.length === 0) return null;
     if (nextStage?.page === directorPage && pageStages.some((stage) => stage.id === nextStage.id)) return nextStage;
@@ -286,13 +280,8 @@ function App() {
     }
   }
 
-  function goToDirectorPage(page: DirectorPage, stageId?: string) {
+  function goToDirectorPage(page: DirectorPage) {
     setUi('director');
-    if (page === 'assets') {
-      // 同一个页面承载两个阶段：从阶段轨道进来时落在对应分区。
-      const target = stageId ?? (nextStage?.page === 'assets' ? nextStage.id : undefined);
-      setAssetsTab(target === 'script' ? 'script' : 'materials');
-    }
     setDirectorPage(page);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
@@ -598,7 +587,7 @@ function App() {
           {/* ============ 导演模式：普通用户的默认层 ============ */}
           {ui === 'director' && <>
             {directorPage === 'setup' && <div className="setup-return-bar">
-              <button type="button" className="text-button" onClick={() => goToDirectorPage('projects')}>← 返回我的作品</button>
+              <button type="button" className="text-button" onClick={() => goToDirectorPage('projects')}>← 返回项目管理</button>
               <span>基础配置可以随时回来补齐；已经建好的作品、素材和运行中的任务不会受影响。</span>
             </div>}
             {directorPage === 'setup' && <DirectorSetupPanel
@@ -674,7 +663,7 @@ function App() {
                 nextStage={nextStage}
                 state={journeyState}
                 error={journeyError}
-                onNavigate={(stage) => goToDirectorPage(stage.page as DirectorPage, stage.id)}
+                onNavigate={(stage) => goToDirectorPage(stage.page as DirectorPage)}
                 onRetry={() => setJourneyRetry((n) => n + 1)}
               />}
               <div className="demo-ribbon-slot" hidden={directorPage === 'setup'}><DemoRibbon production={production ?? {
@@ -686,69 +675,47 @@ function App() {
               {directorPage === 'projects' && <div className="director-page">
                 <section className="welcome-row">
                   <div>
-                    <div className="eyebrow"><span className="eyebrow-line" /> 我的作品</div>
-                    <h1>让好故事，<em>有章可循。</em></h1>
+                    <div className="eyebrow"><span className="eyebrow-line" /> 创意与剧本 · 项目管理</div>
+                    <h1>每一部作品，<em>都清清楚楚。</em></h1>
                     <p>{journeyState !== 'ready' || !journey
                       ? heroGuidance.hint
-                      : '素材、风格、镜头和成片都留在这部作品里；按上面的旅程一步一步来。'}</p>
+                      : '素材、风格、分镜、制作方式和产出物逐行列清楚；选中哪部，就在下面继续创作。'}</p>
                   </div>
                   <button className="primary-button big" disabled={journeyState === 'loading' && !journey}
-                    onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>{heroGuidance.cta}</button>
+                    onClick={() => {
+                      if (journeyState === 'error') { setJourneyRetry((n) => n + 1); return; }
+                      if (nextStage?.page === 'projects') {
+                        document.getElementById('creative-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return;
+                      }
+                      goToDirectorPage(heroGuidance.page);
+                    }}>{heroGuidance.cta}</button>
                 </section>
-                <section className="metrics-grid">
-                  <div className="metric-card"><div className="metric-top"><span>作品素材</span><div className="metric-icon mint"><Film size={15} /></div></div><div className="metric-value">{assets.length}<small>项</small></div><div className="metric-foot">{approvedAssets.length} 项已确认可用</div></div>
-                  <div className="metric-card"><div className="metric-top"><span>作品风格</span><div className="metric-icon sand"><LockKeyhole size={15} /></div></div><div className="metric-value">{currentStyle ? `第 ${currentStyle.version} 版` : '—'}</div><div className="metric-foot">{currentStyle ? '已冻结，全部镜头按此执行' : '待确认冻结'}</div></div>
-                  <div className="metric-card"><div className="metric-top"><span>分镜</span><div className="metric-icon blue"><Activity size={15} /></div></div><div className="metric-value">{shots.length}<small>个</small></div><div className="metric-foot">{jobs.filter((job) => job.status === 'PASSED').length} 个镜头已完成</div></div>
-                  <div className="metric-card accent-metric"><div className="metric-top"><span>制作方式</span><div className="metric-icon cream"><Sparkles size={15} /></div></div><div className="metric-value small-value">{modeLabel}</div><div className="metric-foot">{production?.detail ?? ''}</div></div>
-                </section>
-                <section className="project-selector card" id="overview">
-                  <div className="project-icon"><Clapperboard size={20} /></div>
-                  <div className="project-meta"><span>当前作品</span><b>{project.title}</b></div>
-                  <select aria-label="切换作品" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}</select>
-                  <div className="selector-divider" />
-                  <input className="new-project-inline" value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="新作品名称" />
-                  <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={createProject}><Plus size={15} aria-hidden="true" />新建作品</button>
-                </section>
-                <div className="module-guide">
-                  <CircleHelp size={13} />
-                  <div>
-                    <p><b>六个阶段做完一部作品：</b>创意与剧本 → 统筹与素材 → 镜头拆解 → 导演包 → 视频生产 → 后期成片。顶部的旅程轨道只按本机服务返回的真实状态打勾，不在前端猜。</p>
-                    <p><b>不知道下一步做什么：</b>看顶部轨道下方那条提示，或页面底部「下一阶段」按钮。真正必须点一次的动作都用橙色高亮，不会藏在技术细节里。</p>
-                  </div>
-                </div>
-              </div>}
+                <ProjectPortfolio
+                  projects={projects}
+                  currentProjectId={projectId}
+                  productionLabel={modeLabel}
+                  productionDetail={production?.detail}
+                  projectTitle={projectTitle}
+                  setProjectTitle={setProjectTitle}
+                  busy={busy}
+                  refreshEpoch={dataEpoch}
+                  onOpen={(id) => {
+                    setProjectId(id);
+                    window.setTimeout(() => document.getElementById('creative-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 90);
+                  }}
+                  onCreate={createProject}
+                />
 
-              <div className="director-page director-assets" id="assets" hidden={directorPage !== 'assets'}>
-                {directorPageIntro(
-                  assetsTab === 'script' ? '第 1 阶段' : '第 2 阶段',
-                  assetsTab === 'script' ? <>先有一个<em>能开拍的故事。</em></> : <>把故事变成<em>可拍的素材。</em></>,
-                  assetsTab === 'script'
-                    ? '写一句想法，或导入现成剧本。确认大纲后再进入统筹，不会丢字。'
-                    : '先确认分集，再整理人物、场景与道具；确认主素材并冻结风格后，镜头才有稳定的画面依据。',
-                  <>
-                    <span className={`head-chip ${approvedAssets.length ? 'ok' : ''}`}>素材 {approvedAssets.length}/{assets.length}</span>
-                    <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
-                  </>,
-                )}
-
-                <nav className="workspace-tabs" aria-label="剧本与素材分区">
-                  <button type="button" aria-pressed={assetsTab === 'script'}
-                    className={`workspace-tab ${assetsTab === 'script' ? 'active' : ''}`}
-                    onClick={() => setAssetsTab('script')}>
-                    <span className="workspace-tab-no">①</span>
-                    <span className="workspace-tab-copy"><b>创意与剧本</b><small>想法 / 导入 / 大纲</small></span>
-                    {stageDone.script && <Check size={14} className="workspace-tab-done" aria-label="已完成" />}
-                  </button>
-                  <button type="button" aria-pressed={assetsTab === 'materials'}
-                    className={`workspace-tab ${assetsTab === 'materials' ? 'active' : ''}`}
-                    onClick={() => setAssetsTab('materials')}>
-                    <span className="workspace-tab-no">②</span>
-                    <span className="workspace-tab-copy"><b>素材与风格</b><small>分集 / 人物场景道具 / 画面风格</small></span>
-                    {stageDone.materials && <Check size={14} className="workspace-tab-done" aria-label="已完成" />}
-                  </button>
-                </nav>
-
-                <div className="workspace-pane" hidden={assetsTab !== 'script'}>
+                <section className="creative-workspace" id="creative-workspace">
+                  <header className="creative-head">
+                    <div>
+                      <div className="section-kicker">CURRENT PROJECT / SCRIPT</div>
+                      <h2>当前作品：{project.title} · 创意与剧本</h2>
+                      <p>写一句想法，或导入现成剧本；确认大纲后再进入统筹。要换作品，点上方项目表里的「打开作品」。</p>
+                    </div>
+                    {stageDone.script && <span className="portfolio-badge ok"><Check size={10} />这一阶段已完成</span>}
+                  </header>
                   <ScriptEntryPanel
                     key={`script-entry-${projectId}`}
                     projectId={projectId}
@@ -767,40 +734,40 @@ function App() {
                       onMessage={report}
                     />
                   </details>
+                </section>
+              </div>}
+
+              <div className="director-page director-assets" id="assets" hidden={directorPage !== 'assets'}>
+                {directorPageIntro(
+                  '第 2 阶段',
+                  <>把故事变成<em>可拍的素材。</em></>,
+                  '先确认分集，再整理人物、场景与道具；确认主素材。画面风格现在和镜头拆解放在一起，因为它直接决定每个镜头怎么拍。',
+                  <span className={`head-chip ${approvedAssets.length ? 'ok' : ''}`}>素材 {approvedAssets.length}/{assets.length}</span>,
+                )}
+
+                <div className="module-guide style-moved-note">
+                  <Sparkles size={13} />
+                  <div>
+                    <p><b>画面风格已移到「镜头拆解」页。</b>风格是镜头的画面依据：构图、光线、质感和剪辑节奏都和分镜一起决定。冻结后所有新镜头按此执行。</p>
+                  </div>
+                  <button type="button" className="text-button" onClick={() => goToDirectorPage('produce')}>去调整风格</button>
                 </div>
 
-                <div className="workspace-pane" hidden={assetsTab !== 'materials'}>
-                  <MaterialPreparationPanel
-                    key={`material-${projectId}`}
-                    projectId={projectId}
-                    documentsVersion={documentsVersion}
-                    onMessage={report}
-                    frozenStyle={currentStyle}
-                    onPromoted={() => { refreshAll().catch(() => undefined); }}
-                  />
-                  <AssetPanel
-                    assets={assets}
-                    busy={busy}
-                    onUpload={uploadAsset}
-                    onConfirm={confirmAssets}
-                    onPatchMetadata={patchAssetMetadata}
-                  />
-                  <StylePanel
-                    key={`style-${projectId}`}
-                    projectId={projectId}
-                    style={style}
-                    setStyle={setStyle}
-                    serverDraft={project.style_draft}
-                    currentStyle={currentStyle}
-                    styles={styles}
-                    busy={busy}
-                    onSave={saveStyle}
-                    onFreeze={freezeStyle}
-                    onDraftApplied={() => { refreshAll().catch(() => undefined); }}
-                    onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
-                    onMessage={report}
-                  />
-                </div>
+                <MaterialPreparationPanel
+                  key={`material-${projectId}`}
+                  projectId={projectId}
+                  documentsVersion={documentsVersion}
+                  onMessage={report}
+                  frozenStyle={currentStyle}
+                  onPromoted={() => { refreshAll().catch(() => undefined); }}
+                />
+                <AssetPanel
+                  assets={assets}
+                  busy={busy}
+                  onUpload={uploadAsset}
+                  onConfirm={confirmAssets}
+                  onPatchMetadata={patchAssetMetadata}
+                />
               </div>
 
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
@@ -827,6 +794,31 @@ function App() {
                     );
                   })}
                 </nav>
+
+                <section className="style-shot-section" id="shot-style">
+                  <div className="module-guide">
+                    <Sparkles size={13} />
+                    <div>
+                      <p><b>画面风格在这里和镜头一起定。</b>构图、光线、质感与剪辑节奏直接决定每个镜头怎么拍；冻结后所有新镜头按此执行。素材页只负责素材本身。</p>
+                    </div>
+                  </div>
+                  <StylePanel
+                    key={`style-${projectId}`}
+                    projectId={projectId}
+                    style={style}
+                    setStyle={setStyle}
+                    serverDraft={project.style_draft}
+                    currentStyle={currentStyle}
+                    styles={styles}
+                    busy={busy}
+                    onSave={saveStyle}
+                    onFreeze={freezeStyle}
+                    onDraftApplied={() => { refreshAll().catch(() => undefined); }}
+                    onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
+                    onMessage={report}
+                  />
+                </section>
+
                 <details className="stage-dock" id="storyboard-dock" open={focusStage === 'storyboard'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('storyboard'); }}>
                   <summary>
@@ -1019,7 +1011,7 @@ function App() {
                 <JourneyBridge
                   stages={DIRECTOR_STAGES}
                   activeStageId={activeDirectorStage.id}
-                  onNavigate={(stage) => goToDirectorPage(stage.page as DirectorPage, stage.id)}
+                  onNavigate={(stage) => goToDirectorPage(stage.page as DirectorPage)}
                   onHome={() => goToDirectorPage('projects')}
                 />
               )}

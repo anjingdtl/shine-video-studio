@@ -136,15 +136,15 @@ export function JourneyBridge({ stages, activeStageId, onNavigate, onHome }: Bri
   return (
     <nav className="journey-bridge" aria-label="阶段衔接">
       <button type="button" className="bridge-step" disabled={!previous}
-        title={previous ? `返回：${previous.text}` : '已经在第一阶段'}
+        title={previous ? '返回上一阶段' : '已经在第一阶段'}
         onClick={() => previous && onNavigate(previous)}>
         <ArrowLeft size={14} />
         <span>{previous ? '上一阶段' : '已经是第一阶段'}</span>
       </button>
-      <button type="button" className="bridge-home" onClick={onHome}>回到我的作品</button>
+      <button type="button" className="bridge-home" onClick={onHome}>回到项目管理</button>
       <span className="bridge-hint">{next ? `接下来：${next.text}` : '全部阶段已完成'}</span>
       <button type="button" className="bridge-step next" disabled={!next}
-        title={next ? `继续：${next.text}` : '最后阶段：交付完成'}
+        title={next ? '前往下一阶段' : '最后阶段：交付完成'}
         onClick={() => next && onNavigate(next)}>
         <span>{next ? '下一阶段' : '最后阶段'}</span>
         <ArrowRight size={14} />

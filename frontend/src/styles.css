@@ -1495,20 +1495,62 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 html[data-theme='dark'] .setup-return-bar{color:#8f9186}
 html[data-theme='dark'] .setup-return-bar .text-button{color:#b8c79b}
 
-/* ---- 双分区工作台：剧本 / 素材与风格 ---- */
-.workspace-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;padding:6px;border:1px solid #e6e5dd;border-radius:13px;background:#f6f5f0}
-.workspace-tab{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid transparent;border-radius:9px;background:transparent;text-align:left;color:#6a6b62;min-width:0}
-.workspace-tab:hover{background:#fffdf8;color:#4e5736}
-.workspace-tab.active{background:#fff;border-color:#d3dabe;box-shadow:0 2px 8px #2425220a;color:#3f4138}
-.workspace-tab-no{width:24px;height:24px;flex:none;border-radius:50%;border:1px solid #dfe0d5;background:#fff;display:grid;place-items:center;font:9px var(--mono);color:#8e9083}
-.workspace-tab.active .workspace-tab-no{border-color:#b9c39b;background:#f1f4e6;color:var(--olive-dark)}
-.workspace-tab-copy{min-width:0;flex:1}
-.workspace-tab-copy b{display:block;font-size:12px;letter-spacing:.1px}
-.workspace-tab-copy small{display:block;font-size:9.5px;color:#94958d;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.workspace-tab.active .workspace-tab-copy small{color:#7f8470}
-.workspace-tab-done{color:#5c7553;flex:none}
-.workspace-pane{display:flex;flex-direction:column;gap:16px;min-width:0}
-@media(max-width:700px){.workspace-tabs{grid-template-columns:1fr}.workspace-tab-copy small{white-space:normal}}
+/* ---- 项目管理：一部作品一行，所有关键信息同屏 ---- */
+.portfolio{padding:18px 20px}
+.portfolio-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.portfolio-head h2{font-size:18px;letter-spacing:-.3px;margin:4px 0 3px}
+.portfolio-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:720px}
+.portfolio-count{font:10px var(--mono);color:#8a8b84;background:#f5f5ef;border:1px solid #e9e8e2;border-radius:20px;padding:5px 10px;white-space:nowrap}
+.portfolio-table-wrap{margin-top:14px;border:1px solid #ecebe4;border-radius:10px;overflow-x:auto}
+.portfolio-table{width:100%;border-collapse:collapse;min-width:980px}
+.portfolio-table th,.portfolio-table td{padding:11px 12px;text-align:left;vertical-align:middle;white-space:nowrap}
+.portfolio-table thead th{background:#f8f7f2;font-size:9px;font-weight:600;letter-spacing:.8px;color:#8f9186;text-transform:uppercase;border-bottom:1px solid #ecebe4}
+.portfolio-table tbody th,.portfolio-table tbody td{border-top:1px solid #f1f0ea;font-size:11px;color:#4f5148}
+.portfolio-table tbody tr:first-child th,.portfolio-table tbody tr:first-child td{border-top:0}
+.portfolio-table tbody tr:hover{background:#fbfbf7}
+.portfolio-table tbody tr.current{background:#f6f8f0}
+.portfolio-table tbody tr.current th:first-child{box-shadow:inset 3px 0 0 #626b47}
+.portfolio-icon{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:7px;background:#f0f0e8;color:#707851;vertical-align:middle}
+.portfolio-work-copy{display:inline-flex;flex-direction:column;gap:2px;margin-left:9px;vertical-align:middle;white-space:normal}
+.portfolio-work-copy b{font-size:12px;color:#33352e}
+.portfolio-work-copy em{font:8px var(--mono);font-style:normal;letter-spacing:.4px;color:#5d6b45;background:#eef2e3;border-radius:4px;padding:2px 5px;width:fit-content}
+.portfolio-metric{font-size:11px;color:#4f5148}
+.portfolio-metric small{font-size:9px;color:#9a9b90}
+.portfolio-metric.muted{color:#a3a49a}
+.portfolio-badge{display:inline-flex;align-items:center;gap:4px;font-size:9px;border-radius:12px;padding:3px 8px}
+.portfolio-badge.ok{color:#58714f;background:#eef3e9}
+.portfolio-badge.pending{color:#9a7d43;background:#f6f1e3}
+.portfolio-badge.error{color:#a4655a;background:#f8ece9}
+.portfolio-next{font-size:10px;color:#6f7751;background:#f1f4e6;border-radius:10px;padding:3px 8px}
+.portfolio-action{text-align:right}
+.portfolio-open{height:29px;border:1px solid #dfe3d2;background:#fff;border-radius:6px;padding:0 10px;font-size:10px;color:#5d6b45;white-space:nowrap}
+.portfolio-open:hover{border-color:#b6bd9d;color:var(--olive-dark)}
+.portfolio-open.current{border-color:#b9c39b;background:#f1f4e6;color:var(--olive-dark);font-weight:600}
+.portfolio-create{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px dashed #e9e8e0}
+.portfolio-create-copy b,.portfolio-create-copy span{display:block}
+.portfolio-create-copy b{font-size:11px;color:#45473f}
+.portfolio-create-copy span{font-size:10px;color:#8a8b84;margin-top:3px;line-height:1.5}
+.portfolio-create-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.portfolio-create-actions .new-project-inline{width:190px!important}
+.portfolio-create-actions .new-project-button{height:38px}
+@media(max-width:760px){
+  .portfolio{padding:14px}
+  .portfolio-table{min-width:860px}
+  .portfolio-create{flex-direction:column;align-items:stretch}
+  .portfolio-create-actions .new-project-inline{flex:1;width:auto!important}
+}
+
+/* ---- 当前作品的剧本工作区（在项目管理页下方） ---- */
+.creative-workspace{display:flex;flex-direction:column;gap:14px;scroll-margin-top:88px;padding-top:2px}
+.creative-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 2px}
+.creative-head h2{font-size:17px;letter-spacing:-.2px;margin:4px 0 3px;color:#33352e}
+.creative-head p{margin:0;font-size:11px;line-height:1.7;color:#8a8b84;max-width:760px}
+@media(max-width:760px){.creative-head{flex-direction:column}}
+
+/* ---- 风格迁到镜头拆解页后的说明与区块 ---- */
+.style-shot-section{display:flex;flex-direction:column;gap:12px;scroll-margin-top:88px}
+.style-moved-note{align-items:center}
+.style-moved-note .text-button{margin-left:auto;white-space:nowrap;font-size:10px}
 
 /* ---- 折叠：四阶段自动编导（不是 .advanced-fold，避免抢占单镜头高级区的选择器） ---- */
 .pipeline-fold{border:1px solid #e6e5dd;border-radius:12px;background:#fff;padding:0}
@@ -1599,12 +1641,7 @@ html[data-theme='dark'] .director-page-head h1 em{color:#b8c79b}
 html[data-theme='dark'] .director-page-head p{color:#8f9186}
 html[data-theme='dark'] .head-chip{background:#24251f;border-color:#3a3b31;color:#b3b4a8}
 html[data-theme='dark'] .head-chip.ok{background:#232a1d;border-color:#3f4a32;color:#a9c193}
-html[data-theme='dark'] .workspace-tabs{background:#20211c;border-color:#3a3b31}
-html[data-theme='dark'] .workspace-tab{color:#b3b4a8}
-html[data-theme='dark'] .workspace-tab.active{background:#24251f;border-color:#4d553b;color:#d2d3c7}
-html[data-theme='dark'] .workspace-tab-no{background:#24251f;border-color:#3f4036;color:#a9aa9c}
-html[data-theme='dark'] .workspace-tab.active .workspace-tab-no{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
-html[data-theme='dark'] .workspace-tab-copy small{color:#8f9186}
+
 html[data-theme='dark'] .pipeline-fold{background:#24251f;border-color:#3a3b31}
 html[data-theme='dark'] .pipeline-fold>summary{color:#cdcec0}
 html[data-theme='dark'] .journey-bridge{background:#24251f;border-color:#3a3b31}
@@ -1615,4 +1652,24 @@ html[data-theme='dark'] .tech-details code{background:#2c2d25;color:#a9aa9c}
 html[data-theme='dark'] .filter-chip{background:#24251f;border-color:#3f4036;color:#c9cac0}
 html[data-theme='dark'] .filter-chip.active{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
 html[data-theme='dark'] .list-more{background:#24251f;border-color:#3f4036;color:#c9cac0}
+html[data-theme='dark'] .portfolio-count{background:#2c2d25;border-color:#3f4036;color:#a9aa9c}
+html[data-theme='dark'] .portfolio-table-wrap{border-color:#35362d}
+html[data-theme='dark'] .portfolio-table thead th{background:#26271f;color:#8f9186;border-bottom-color:#35362d}
+html[data-theme='dark'] .portfolio-table tbody th,html[data-theme='dark'] .portfolio-table tbody td{border-top-color:#33342c;color:#c9cac0}
+html[data-theme='dark'] .portfolio-table tbody tr:hover{background:#26271f}
+html[data-theme='dark'] .portfolio-table tbody tr.current{background:#232a1d}
+html[data-theme='dark'] .portfolio-icon{background:#2c2d25;color:#b8c79b}
+html[data-theme='dark'] .portfolio-work-copy b{color:#e2e3db}
+html[data-theme='dark'] .portfolio-work-copy em{background:#2c3325;color:#b8c79b}
+html[data-theme='dark'] .portfolio-badge.ok{background:#2c3325;color:#a9c193}
+html[data-theme='dark'] .portfolio-badge.pending{background:#353021;color:#c9b98c}
+html[data-theme='dark'] .portfolio-badge.error{background:#33241e;color:#c39a8f}
+html[data-theme='dark'] .portfolio-next{background:#2c3325;color:#b8c79b}
+html[data-theme='dark'] .portfolio-open{background:#24251f;border-color:#3f4036;color:#c9cac0}
+html[data-theme='dark'] .portfolio-open.current{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
+html[data-theme='dark'] .portfolio-create{border-top-color:#33342c}
+html[data-theme='dark'] .portfolio-create-copy b{color:#d2d3c7}
+html[data-theme='dark'] .portfolio-create-copy span{color:#8f9186}
+html[data-theme='dark'] .creative-head h2{color:#e2e3db}
+html[data-theme='dark'] .creative-head p{color:#8f9186}
 
