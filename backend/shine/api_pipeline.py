@@ -5,13 +5,15 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 
 from shine.api_common import DBSession
 from shine.api_common import llm_gateway as llm_gateway_dep
 from shine.api_operator import Operator
 from shine.director import pipeline
+from shine.h3.rulebook import digest
 from shine.llm.gateway import LLMGateway
-from shine.models import ProjectDocument
+from shine.models import AgentArtifact, ProjectDocument
 from shine.services import require_project
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
@@ -50,10 +52,23 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                 }
                 for s in sections
             ]
+            latest_outline_row = None
+            volume_doc = pipeline._volume_document(db, project_id, volume_id)
+            if volume_doc is not None:
+                rows = db.scalars(select(AgentArtifact).where(
+                    AgentArtifact.project_id == project_id,
+                    AgentArtifact.kind == "StoryOutline").order_by(
+                    AgentArtifact.created_at.desc())).all()
+                latest_outline_row = next(
+                    (r for r in rows if r.payload_json.get("document_id") == volume_doc.id), None)
             volumes.append({
                 "volume_id": volume_id, "order": volume["order"], "title": volume["title"],
                 "char_count": volume.get("char_count"),
                 "outline_confirmed": outline is not None,
+                "latest_outline": ({"artifact_id": latest_outline_row.id,
+                                    "sha256": latest_outline_row.sha256,
+                                    "questions": list(latest_outline_row.payload_json.get("questions") or [])}
+                                   if latest_outline_row else None),
                 "scripts": scripts,
                 "scripts_confirmed": sum(1 for s in scripts if s["confirmed"]),
                 "scripts_total": len(scripts),
@@ -242,7 +257,9 @@ def handoff_route(project_id: str, volume_id: str, body: dict, db: DBSession, op
     if not workflow_profile_id:
         raise HTTPException(422, "PIPELINE_WORKFLOW_PROFILE_REQUIRED")
     try:
-        result = build_volume_handoff(db, project_id, volume_id, workflow_profile_id)
+        result = build_volume_handoff(
+            db, project_id, volume_id, workflow_profile_id,
+            acknowledge_scene_coverage=bool((body or {}).get("acknowledge_scene_coverage")))
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -303,3 +320,35 @@ def confirm_episode_script_route(
         raise _http_from_value_error(exc) from None
     return {"confirmed": True, "sha256": artifact.sha256,
             "continuity_status": artifact.payload_json.get("continuity_status")}
+
+
+@router.post("/projects/{project_id}/pipeline/volumes/{volume_id}/outline-confirm")
+def confirm_volume_outline_route(
+        project_id: str, volume_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
+    """Confirm one volume's outline from the four-stage panel.
+
+    Same gates as the expert confirmation (sha, questions acknowledgement,
+    section invalidation); the volume document must own the outline.
+    """
+    from shine.materialprep.story import confirm_outline_artifact
+
+    require_project(db, project_id)
+    plan = pipeline.current_volume_plan(db, project_id)
+    if plan is None:
+        raise HTTPException(409, "PIPELINE_VOLUME_PLAN_NOT_CONFIRMED")
+    doc = pipeline._volume_document(db, project_id, volume_id)
+    if doc is None:
+        raise HTTPException(409, "PIPELINE_VOLUME_DOCUMENT_MISSING")
+    artifact_id = (body or {}).get("outline_artifact_id")
+    expected = (body or {}).get("expected_sha256")
+    row = db.get(AgentArtifact, artifact_id)
+    if (row is None or row.project_id != project_id or row.kind != "StoryOutline" or row.stale
+            or row.sha256 != expected or row.sha256 != digest(row.payload_json)
+            or row.payload_json.get("document_id") != doc.id):
+        raise HTTPException(409, "STORY_OUTLINE_CHANGED")
+    result = confirm_outline_artifact(
+        db, project_id, row, expected_sha256=expected,
+        acknowledge_questions_sha256=(body or {}).get("acknowledge_questions_sha256"),
+        actor=operator)
+    db.commit()
+    return result

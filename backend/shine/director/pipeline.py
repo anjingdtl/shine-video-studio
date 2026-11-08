@@ -1141,7 +1141,8 @@ def record_storyboard_draft(db, project_id: str, volume_id: str, result: dict, s
 
 
 
-def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_id: str) -> dict:
+def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_id: str,
+                         *, acknowledge_scene_coverage: bool = False) -> dict:
     """Publish the volume to the existing production machinery.
 
     Guards: confirmed plan + bible + outline + every script + every scene's
@@ -1179,6 +1180,14 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     shot_ids = [str(s) for s in receipt.value.get("shot_ids", [])]
     if not shot_ids:
         raise ValueError("PIPELINE_STORYBOARD_APPLIED_EMPTY")
+    sections_count = len(outline.payload_json.get("production_sections") or [])
+    if len(shot_ids) < sections_count and not acknowledge_scene_coverage:
+        # Every scene was expected to contribute at least one shot; fewer
+        # applied shots than scenes needs the person's explicit cover, never
+        # a silent partial production.
+        raise ValueError(
+            "PIPELINE_VOLUME_SHOT_COVERAGE_SUSPECT:" + f"{len(shot_ids)}/{sections_count}"
+            + ":每个场次至少应有一个镜头；不足时需明确确认后才能交付")
     shots = db.scalars(select(Shot).where(Shot.id.in_(shot_ids))).all()
     if len(shots) != len(shot_ids):
         raise ValueError("PIPELINE_STORYBOARD_SHOTS_MISSING")
@@ -1262,6 +1271,8 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
         "shot_count": len(shot_ids),
         "episode_count": len(episodes),
         "episode_script_ids": [c.id for c in episode_contracts],
+        "scene_coverage": {"scenes": sections_count, "shots_applied": len(shot_ids),
+                           "acknowledged": acknowledge_scene_coverage},
     }
     task_id = _authoring_task(db, project_id, "four_stage_handoff", {"volume": volume_id})
     artifact = AgentArtifact(

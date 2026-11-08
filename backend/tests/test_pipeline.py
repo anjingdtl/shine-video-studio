@@ -699,3 +699,28 @@ def test_episode_script_contract_with_continuity_check(api):
         pipeline.confirm_episode_script(db, pid, partial.id, partial.sha256)
     with factory() as db:
         assert len(pipeline.confirmed_episode_scripts(db, pid, volume_id)) == 2
+
+
+def test_pipeline_overview_names_latest_outline_and_pending(api):
+    """The overview is the UI's single read model: plan, bible, outline, scripts."""
+    client, factory, settings = api
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    pid = create_project(client, "总览")
+    text = "第一章 甲\n浪。\n第二章 乙\n浪。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        volume_doc = pipeline._volume_document(db, pid, plan.payload_json["volumes"][0]["volume_id"])
+        outline = _outline_artifact(db, pid, volume_doc, _sections_for(volume_doc.text))
+    response = client.get(f"/api/v1/projects/{pid}/pipeline")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    volume = body["volumes"][0]
+    assert volume["latest_outline"]["artifact_id"] == outline.id
+    assert volume["latest_outline"]["sha256"] == outline.sha256
+    assert body["bible_confirmed"] is False
+    assert body["pending_bible"] is None
