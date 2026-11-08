@@ -4048,6 +4048,7 @@ def _text_gateway(settings):
 
 
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
+    global _text_preparation_ticks
     from shine.comfyops.runtime_configuration import resolve_runtime
 
     # A setup-type installation is durable work that does not need the video
@@ -4075,6 +4076,11 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     except HTTPException as exc:
         if not str(exc.detail).startswith("ACTIVE_RUNTIME_"):
             raise
+        # A blocked video runtime must never starve the text queues: the
+        # burst counter only resets inside the burst itself, so a runtime
+        # failure between two bursts would freeze the counter above the
+        # limit forever and a running outline would stall mid-run.
+        _text_preparation_ticks = 0
         raise
     if current != settings:
         # No inherited client may point at an old port after activation. Use a

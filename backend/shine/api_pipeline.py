@@ -61,7 +61,8 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     AgentArtifact.created_at.desc())).all()
                 latest_outline_row = next(
                     (r for r in rows if r.payload_json.get("document_id") == volume_doc.id), None)
-                questions = list(latest_outline_row.payload_json.get("questions") or [])                     if latest_outline_row else []
+                questions = (list(latest_outline_row.payload_json.get("questions") or [])
+                             if latest_outline_row else [])
             volumes.append({
                 "volume_id": volume_id, "order": volume["order"], "title": volume["title"],
                 "char_count": volume.get("char_count"),

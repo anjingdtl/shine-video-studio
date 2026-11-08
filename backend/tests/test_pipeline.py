@@ -752,7 +752,6 @@ def test_task_summary_and_soft_bible_basis(api):
                               producer_role=pipeline.BIBLE_RUN_ROLE, source_task_id=tid)
         db.add(bible)
         db.flush()
-        draft_sha = bible.sha256
     gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_scene_responder())
     volume_id = plan.payload_json["volumes"][0]["volume_id"]
     with factory() as db:
@@ -784,3 +783,49 @@ def test_task_summary_and_soft_bible_basis(api):
         version = db.get(AgentTaskRecord, tasks[0].id).state_version
         result = pipeline.resume_pipeline_task(db, pid, tasks[0].id, version)
         assert result["status"] == "QUEUED"
+
+
+def test_blocked_runtime_never_starves_the_text_queue(api, monkeypatch):
+    """A frozen burst counter must not stall a running outline mid-way."""
+    from shine import worker
+
+    client, factory, settings = api
+    _route_mock(client, "scriptwriter")
+    _route_mock(client, pipeline.BIBLE_RUN_ROLE)
+    _route_mock(client, pipeline.SCENE_SCRIPT_RUN_ROLE)
+    pid = create_project(client, "不饿死")
+    text = "第一章 甲\n浪。\n第二章 乙\n浪。"
+    doc = _make_doc(factory, pid, text)
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_bible_responder())
+    from shine.materialprep.story import queue_outline
+    with factory() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        task = queue_outline(db, pid, doc_r, gw, facts=[])
+        db.commit()
+        task_id = task.id
+    worker._text_preparation_ticks = worker.TEXT_PREPARATION_BURST
+    import fastapi
+
+    from shine.comfyops import runtime_configuration
+    monkeypatch.setattr(runtime_configuration, "resolve_runtime",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            fastapi.HTTPException(409, "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")))
+    with pytest.raises(fastapi.HTTPException) as err:
+        worker.run_configured_once(factory, None, "w-starve", settings=settings)
+    assert "ACTIVE_RUNTIME_" in str(err.value.detail)
+    assert worker._text_preparation_ticks == 0, "the blocked tick must reset the burst counter"
+    worker._text_preparation_ticks = 0
+    ok = worker._advance_text_preparation(factory, settings, "w-starve")
+    assert ok is True, "the queued outline must be claimable by the burst"
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        # the burst really claimed and ran the task (any progressed state
+        # proves the counter reset worked; the mock answer's schema fit is
+        # not what this regression is about)
+        assert row.status in {"RUNNING", "SUCCEEDED", "NEEDS_REVIEW"}, row.trace
+        assert row.state_version > 1
