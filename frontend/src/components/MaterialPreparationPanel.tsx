@@ -3,6 +3,8 @@ import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { API, api, ERROR_CODE_LABELS, type Asset, type StyleVersion } from '../api';
+import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
+import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
 
 /** Plan and batch states in the words of the page, not the words of the ledger. */
 const PLAN_STATUS_LABELS: Record<string, string> = {
@@ -20,6 +22,7 @@ export type MaterialStrategy = 'reuse_master' | 'upload' | 'generate';
 
 export type MaterialRequirement = {
   requirement_id: string;
+  requirement_hash: string;
   family: 'character' | 'scene' | 'prop';
   entity_id: string;
   strategy: MaterialStrategy | null;
@@ -146,6 +149,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [sceneReport, setSceneReport] = useState<{ scene_key: string; status: string; error_code?: string;
     task_id?: string; state_version?: number; external_outcome?: string }[]>([]);
   const [promotionReport, setPromotionReport] = useState<{ entity: string; ok: boolean; note: string }[]>([]);
+  const [librarySearchRequirement, setLibrarySearchRequirement] = useState<string | null>(null);
+  const [librarySearchResults, setLibrarySearchResults] = useState<Array<{ asset: LibraryAsset; version: LibraryVersion }>>([]);
+  const [librarySearchError, setLibrarySearchError] = useState('');
+  const [librarySearchBusy, setLibrarySearchBusy] = useState(false);
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
   /** The stage the person has open; null means "follow the server". */
@@ -155,6 +162,48 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const directionDirty = useRef(false);
   const activeProject = useRef(projectId);
   activeProject.current = projectId;
+
+  async function searchGlobalMaterial(requirement: MaterialRequirement) {
+    setLibrarySearchRequirement(requirement.requirement_id);
+    setLibrarySearchResults([]);
+    setLibrarySearchError('');
+    setLibrarySearchBusy(true);
+    try {
+      const result = await searchLibraryForProject(projectId, requirement.entity_id, requirement.family);
+      if (activeProject.current === projectId) setLibrarySearchResults(result.items);
+    } catch (error) {
+      setLibrarySearchError(error instanceof Error ? error.message : String(error));
+    } finally { setLibrarySearchBusy(false); }
+  }
+
+  async function assignGlobalMaterial(requirement: MaterialRequirement, result: { asset: LibraryAsset; version: LibraryVersion }) {
+    setLibrarySearchBusy(true);
+    setLibrarySearchError('');
+    try {
+      const assignment = await assignLibraryVersion({
+        project_id: projectId,
+        library_version_id: result.version.id,
+        role: requirement.family,
+        entity_id: requirement.entity_id,
+        usage_scope: 'research',
+        idempotency_key: crypto.randomUUID(),
+        confirmed: true,
+        requirement_context: {
+          project_id: projectId,
+          requirement_id: requirement.requirement_id,
+          requirement_hash: requirement.requirement_hash,
+        },
+      });
+      if (activeProject.current !== projectId) return;
+      setBindings((current) => ({ ...current, [requirement.requirement_id]: assignment.project_asset_id }));
+      setStrategy((current) => ({ ...current, [requirement.requirement_id]: 'reuse_master' }));
+      setLibrarySearchRequirement(null);
+      setOperationReport(`已把全局素材 V${result.version.ordinal} 复制为本项目独立素材身份；请继续确认需求清单。`);
+      await load();
+    } catch (error) {
+      setLibrarySearchError(error instanceof Error ? error.message : String(error));
+    } finally { setLibrarySearchBusy(false); }
+  }
 
   const load = useCallback(async () => {
     const requested = projectId;
@@ -665,6 +714,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                         <option key={a.id} value={a.id}>{a.filename} · {a.sha256.slice(0, 8)} · {a.locked ? '已确认' : '待确认上传'}</option>)}
                     </select>
                   </label>}
+                  <button type="button" className="text-button" disabled={busy || librarySearchBusy}
+                    onClick={() => void searchGlobalMaterial(requirement)}>
+                    {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
+                  </button>
+                  {librarySearchRequirement === requirement.requirement_id && <div className="material-stage-body">
+                    {librarySearchError && <p role="alert" className="required-text">{librarySearchError}</p>}
+                    {librarySearchBusy && <p className="material-hint">正在检查当前作品授权范围和全局正式版本…</p>}
+                    {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到当前作品授权可用的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
+                    {librarySearchResults.map((result) => <div className="material-library-result" key={result.version.id}>
+                      <div><b>{result.asset.title} · V{result.version.ordinal}</b><small>{result.version.content_sha256.slice(0, 12)} · {result.version.rights?.license_kind ?? '授权待核对'}</small></div>
+                      <button type="button" className="must-button" disabled={librarySearchBusy}
+                        onClick={() => void assignGlobalMaterial(requirement, result)}>分配到本项目</button>
+                    </div>)}
+                  </div>}
                 </li>
               ))}
             </ul>

@@ -18,6 +18,19 @@ it('刷新后按 director 深链接恢复素材页，而不是回到作品概览
   expect(screen.queryByText('MY WORK')).toBeNull();
 });
 
+it('从导演页面进入素材中心再返回时恢复原页面与地址', async () => {
+  window.history.replaceState(null, '', '#d/assets');
+  const user = userEvent.setup();
+  render(<App />);
+  expect(await screen.findByRole('heading', { name: '项目素材' })).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '素材中心' }));
+  expect(await screen.findByRole('heading', { name: '创作首页' })).toBeInTheDocument();
+  expect(window.location.hash).toBe('#a/home');
+  await user.click(screen.getByRole('button', { name: /导演工作台/ }));
+  expect(await screen.findByRole('heading', { name: '项目素材' })).toBeInTheDocument();
+  expect(window.location.hash).toBe('#d/assets');
+});
+
 it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已固定素材', async () => {
   const asset = { id: 'asset-1', project_id: 'proj-1', filename: '主角.png', kind: 'image',
     sha256: 'a'.repeat(64), byte_size: 32, approved: false, locked: false, tags: [] };
@@ -83,4 +96,28 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   await screen.findByText('可用于分镜');
   expect(stub.callsOf('POST', /asset-1\/approve$/)).toHaveLength(1);
   expect(stub.callsOf('POST', /asset-1\/lock$/)).toHaveLength(2);
+});
+
+it('项目锁定素材经明确授权确认后进入全局候选，不自动晋升', async () => {
+  const asset = { id: 'asset-locked', project_id: 'proj-1', filename: '主角.png', kind: 'image', role: 'character',
+    sha256: 'a'.repeat(64), byte_size: 32, approved: true, locked: true, entity_id: '林知远', tags: ['定妆'] };
+  stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
+  stub.add({ method: 'POST', pattern: /projects\/proj-1\/assets\/asset-locked\/save-to-library$/, respond: () => jsonResponse({
+    id: 'library-1', title: '林知远', versions: [{ id: 'version-1', status: 'READY_FOR_REVIEW' }],
+  }, 201) });
+  const user = userEvent.setup();
+  render(<App />);
+  await gotoDirectorPage(user, /剧本统筹与素材/);
+
+  await user.click(await screen.findByRole('button', { name: '收藏到素材中心' }));
+  expect(screen.getByText(/仅限当前项目，跨项目使用需另行授权/)).toBeInTheDocument();
+  await user.click(screen.getByRole('checkbox', { name: /我确认已核对来源许可/ }));
+  await user.click(screen.getByRole('button', { name: '保存为待审核候选' }));
+  expect(await screen.findByText(/授权仍仅限本项目/)).toBeInTheDocument();
+  expect(stub.callsOf('POST', /save-to-library$/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /save-to-library$/)[0].body).toMatchObject({
+    title: '林知远', category: 'character', confirmed_rights: true,
+  });
+  await user.click(screen.getByRole('button', { name: '打开全局素材库' }));
+  expect(window.location.hash).toBe('#a/library');
 });

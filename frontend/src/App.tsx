@@ -30,6 +30,8 @@ import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
+import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
+import type { Asset, Project } from './api';
 
 type ViewId = 'setup' | 'production' | 'delivery' | 'pro';
 type NavItem = { id: string; text: string; icon: LucideIcon };
@@ -93,8 +95,13 @@ const DIRECTOR_STAGES: Array<{ id: string; text: string; icon: LucideIcon; page:
   { id: 'post', text: '后期成片', icon: ArrowDownToLine, page: 'deliver', hint: '逐集剪辑、字幕、声音与交付' },
 ];
 
-function resolveHash(hash: string): { ui: 'director' | 'expert'; view: ViewId; page: DirectorPage; anchor?: string } {
+function resolveHash(hash: string): { ui: 'director' | 'expert' | 'assets'; view: ViewId; page: DirectorPage; anchor?: string; assetPage?: AssetCenterPage } {
   const raw = hash.replace(/^#/, '');
+  if (raw.startsWith('a/')) {
+    const page = raw.slice(2) as AssetCenterPage;
+    const pages: AssetCenterPage[] = ['home', 'images', 'voices', 'library', 'assignments'];
+    return { ui: 'assets', view: 'production', page: 'projects', assetPage: pages.includes(page) ? page : 'home' };
+  }
   if (raw.startsWith('d/')) {
     const page = raw.slice(2) as DirectorPage;
     if (Object.prototype.hasOwnProperty.call(DIRECTOR_PAGE_LABELS, page)) {
@@ -139,10 +146,15 @@ function App() {
     bindStandardParameters, abandonJob,
   } = studio;
 
-  const [ui, setUi] = useState<'director' | 'expert'>(() => {
+  const [ui, setUi] = useState<'director' | 'expert' | 'assets'>(() => {
+    const hash = window.location.hash;
+    const route = resolveHash(hash);
+    if (route.ui === 'assets' || hash.startsWith('#d/') || hash.startsWith('#v/') || ANCHOR_VIEW[hash.slice(1)]) return route.ui;
     const saved = window.localStorage.getItem('shine-interface');
     return saved === 'expert' ? 'expert' : 'director';
   });
+  const [assetPage, setAssetPage] = useState<AssetCenterPage>(() => resolveHash(window.location.hash).assetPage ?? 'home');
+  const [assetReturnHash, setAssetReturnHash] = useState(() => window.location.hash.startsWith('#a/') ? '#d/projects' : (window.location.hash || '#d/projects'));
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
   /** 制作页单任务聚焦：默认自动落在第一个未完成阶段，用户可用阶段条/摘要行切换；
@@ -180,7 +192,7 @@ function App() {
   const viewScrollRef = useRef<Partial<Record<ViewId, number>>>({});
   const viewMountedRef = useRef(false);
 
-  useEffect(() => { window.localStorage.setItem('shine-interface', ui); }, [ui]);
+  useEffect(() => { if (ui !== 'assets') window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
   /** 六阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
@@ -255,8 +267,8 @@ function App() {
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
     else if (action === 'check_fix') setWizard('diagnose');
-    else if (ui !== 'director') { setUi('director'); setDirectorPage('produce'); }
-    else setDirectorPage('produce');
+    else if (ui !== 'director') { setUi('director'); setDirectorPage('produce'); window.history.pushState(null, '', '#d/produce'); }
+    else { setDirectorPage('produce'); window.history.pushState(null, '', '#d/produce'); }
   }
 
   function goToExpert(viewId: ViewId, anchor?: string) {
@@ -274,6 +286,35 @@ function App() {
     setDirectorPage(page);
     window.history.pushState(null, '', `#d/${page}`);
     window.scrollTo({ top: 0 });
+  }
+
+  function goToAssets(page: AssetCenterPage = 'home') {
+    if (ui !== 'assets') setAssetReturnHash(window.location.hash || (ui === 'expert' ? `#v/${view}` : `#d/${directorPage}`));
+    setAssetPage(page);
+    setUi('assets');
+    window.history.pushState(null, '', `#a/${page}`);
+    window.scrollTo({ top: 0 });
+  }
+
+  function leaveAssets(workspace: 'director' | 'expert') {
+    const route = resolveHash(assetReturnHash);
+    if (workspace === 'director') {
+      const page = route.ui === 'director' ? route.page : 'projects';
+      goToDirectorPage(page);
+      return;
+    }
+    if (route.ui === 'expert') {
+      setUi('expert');
+      setView(route.view);
+      if (route.anchor) setActiveSection(route.anchor);
+      window.history.pushState(null, '', assetReturnHash);
+      window.setTimeout(() => {
+        if (route.anchor) document.getElementById(route.anchor)?.scrollIntoView({ behavior: 'auto', block: 'start' });
+        else window.scrollTo({ top: viewScrollRef.current[route.view] ?? 0 });
+      }, 30);
+    } else {
+      goToExpert('production');
+    }
   }
 
   /** 进入导演层基础配置，可直达指定分区；普通入口回到①安装与下载。
@@ -355,6 +396,11 @@ function App() {
   useEffect(() => {
     const onPop = () => {
       const target = resolveHash(window.location.hash);
+      if (target.ui === 'assets') {
+        setUi('assets');
+        setAssetPage(target.assetPage ?? 'home');
+        return;
+      }
       if (target.ui === 'director') {
         setUi('director');
         setDirectorPage(target.page);
@@ -426,6 +472,17 @@ function App() {
   );
 
   const modeLabel = production?.label ?? '状态未知';
+
+  if (ui === 'assets') {
+    return <AssetsWorkspace
+      page={assetPage}
+      onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
+      onWorkspace={leaveAssets}
+      projects={projects as Project[]}
+      projectId={projectId}
+      projectAssets={assets as Asset[]}
+    />;
+  }
 
   const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting}>
     <button type="button" className="primary-button" disabled={reconnecting} onClick={reconnectWorkbench}>
@@ -507,6 +564,7 @@ function App() {
             {ui === 'director' && project && <><span className="crumb-slash">/</span><span>{project.title}</span></>}
           </div>
           <div className="top-actions">
+            <button type="button" className="secondary-button" onClick={() => goToAssets('home')}>素材中心</button>
             <span className="service-status" aria-live="polite">
               <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
               {apiOnline ? '工作台后端在线' : systemChecked ? '工作台后端失联' : '正在检查工作台后端'}
@@ -533,7 +591,7 @@ function App() {
               type="button"
               className={`ui-toggle ${ui === 'director' ? 'on-director' : 'on-expert'}`}
               title={ui === 'director' ? '切换到专业模式：模型、工作流、调度诊断等全部高级能力' : '回到导演模式：普通用户的简洁制作流程'}
-              onClick={() => { setUi(ui === 'director' ? 'expert' : 'director'); window.scrollTo({ top: 0 }); }}
+              onClick={() => { if (ui === 'director') goToExpert(view, activeSection); else goToDirectorPage(directorPage); window.scrollTo({ top: 0 }); }}
             >
               <Clapperboard size={13} /><span>导演模式</span>
               <i className="ui-toggle-sep" />
@@ -729,6 +787,7 @@ function App() {
                   onUpload={uploadAsset}
                   onConfirm={confirmAssets}
                   onPatchMetadata={patchAssetMetadata}
+                  onOpenLibrary={() => goToAssets('library')}
                 />
                 <StylePanel
                   key={`style-${projectId}`}
@@ -1000,6 +1059,7 @@ function App() {
                   onUpload={uploadAsset}
                   onConfirm={confirmAssets}
                   onPatchMetadata={patchAssetMetadata}
+                  onOpenLibrary={() => goToAssets('library')}
                 />
 
                 <StylePanel
