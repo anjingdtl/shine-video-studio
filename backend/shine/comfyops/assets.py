@@ -4,6 +4,7 @@ import hashlib
 import struct
 import zlib
 from datetime import UTC
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -92,6 +93,40 @@ def require_rights(db, project_id, rights_id, scope="asset"):
         else:
             raise HTTPException(409, "LIBRARY_SOURCE_INVALID")
     return rights
+
+
+#: Why a rights chain is not in force, in the words the person sees.
+_RIGHTS_MESSAGES = {
+    "LICENSE_NOT_APPROVED": "这个素材的授权已被撤销，或从未批准",
+    "CONSENT_EXPIRED": "这个素材的授权已经过期",
+    "LIBRARY_RIGHTS_NOT_APPROVED": "这个素材在全局素材库里的授权已被撤销",
+    "LIBRARY_SOURCE_RIGHTS_CHANGED": "这个素材的来源授权已经变更",
+    "LIBRARY_SOURCE_MISSING": "这个素材的来源记录读不到",
+    "VOICE_CONSENT_REQUIRED": "这个素材缺少音色同意记录",
+}
+
+
+def rights_status(db, project_id: str, rights_id: str | None, scope: str = "asset") -> dict[str, Any]:
+    """Whether an asset's rights chain is still in force, and why it is not.
+
+    ``require_rights`` refuses; this one answers.  The adoption preview and
+    the package readiness need the *reason* next to the shot that carries
+    it, not a bare refusal.  An asset without a rights record (a personal
+    upload) has no licence chain to lose and is always in force.
+    """
+    if not rights_id:
+        return {"approved": True, "code": None, "message": None, "rights_id": None}
+    try:
+        require_rights(db, project_id, rights_id, scope)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else (exc.detail or {}).get("code")
+        return {
+            "approved": False,
+            "code": detail or "LICENSE_NOT_APPROVED",
+            "message": _RIGHTS_MESSAGES.get(detail or "", "这个素材的授权已经不在有效状态"),
+            "rights_id": rights_id,
+        }
+    return {"approved": True, "code": None, "message": None, "rights_id": rights_id}
 
 
 def create_candidate(db, settings, project, family, entity, content, filename, rights_id, provenance, parent=None):

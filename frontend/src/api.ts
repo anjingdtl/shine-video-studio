@@ -112,6 +112,21 @@ function describeDetail(detail: unknown): string {
     });
     return `服务器拒绝了这次提交（${parts.join('；')}）`;
   }
+  if (detail && typeof detail === 'object' && 'blocked' in detail
+      && Array.isArray((detail as { blocked?: unknown[] }).blocked)) {
+    // A refused batch names every shot that cannot run and keeps the ones
+    // that can: the person continues instead of losing the whole project.
+    const payload = detail as {
+      message?: string;
+      blocked?: Array<{ shot_id?: string; shot_name?: string; message?: string; code?: string }>;
+      runnable_shot_ids?: string[];
+    };
+    const parts = (payload.blocked ?? []).map((row) =>
+      `「${row.shot_name ?? row.shot_id ?? '镜头'}」${row.message ?? row.code ?? '无法执行'}`);
+    const runnable = payload.runnable_shot_ids ?? [];
+    const tail = runnable.length ? `；其余 ${runnable.length} 个镜头仍可开拍` : '';
+    return `${payload.message ?? '这一批里有镜头无法执行'}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
+  }
   if (detail && typeof detail === 'object' && 'message' in detail) {
     const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';
     return `${String(detail.message)}${code}`;

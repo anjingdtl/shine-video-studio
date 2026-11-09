@@ -31,6 +31,7 @@ from sqlalchemy import select, text
 from shine.comfyops.models import ResourceLease
 from shine.media.delivery_engine import DeliveryBlock, cancel_orders_for_series, enqueue_auto_delivery
 from shine.models import (
+    AppSetting,
     AuditEvent,
     Job,
     JobAttempt,
@@ -149,9 +150,21 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
         resolution = BasicReviewResolution.model_validate(series.basic_review_resolution)
     output = None
     if series.output_spec:
+        from pydantic import ValidationError
+
         from shine.schemas import OutputSpec
 
-        output = OutputSpec.model_validate(series.output_spec)
+        try:
+            output = OutputSpec.model_validate(series.output_spec)
+        except ValidationError as exc:
+            # A frozen output that does not satisfy the H3 contract is named,
+            # never handed to the renderer as a crash.
+            raise HTTPException(422, {
+                "code": "OUTPUT_SPEC_INVALID",
+                "message": "这次生产的输出参数不符合 H3 的输出合同",
+                "details": [f"{'.'.join(str(part) for part in error.get('loc', ()))}: "
+                           f"{error.get('msg', 'invalid')}" for error in exc.errors()][:10],
+            }) from exc
     return CreateJob(
         shot_id=shot.id,
         mock_scenario=MockScenario(series.mock_scenario),
@@ -168,6 +181,36 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
     )
 
 
+def clip_seconds_conflict(name: str, spec, clip_seconds: float) -> dict[str, Any] | None:
+    """Whether a shot's dialogue or internal cut does not fit the clip length.
+
+    The same fact the Series entry refuses by name: a line that ends after
+    the clip would be cut off, and an internal cut beyond the clip would never
+    be reached.  The director package asks the same question before it
+    promises a run, so both answers agree.
+    """
+    import re
+
+    latest_dialogue = max((line.end_s for line in spec.dialogue), default=0.0)
+    if latest_dialogue + 0.2 > clip_seconds:
+        return {
+            "code": "CLIP_TOO_SHORT_FOR_DIALOGUE",
+            "message": f"「{name}」的对白到 {latest_dialogue:.2f} 秒，装不进 {clip_seconds:g} 秒的片段",
+            "details": {"dialogue_end_s": latest_dialogue, "clip_seconds": clip_seconds},
+        }
+    cuts = [
+        int(minute) * 60 + float(second)
+        for minute, second in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", spec.story_beat or "")
+    ]
+    if cuts and any(cut >= clip_seconds - 0.1 for cut in cuts):
+        return {
+            "code": "CLIP_TOO_SHORT_FOR_CUT",
+            "message": f"「{name}」内部有 {max(cuts):.2f} 秒的剪辑点，装不进 {clip_seconds:g} 秒的片段",
+            "details": {"latest_cut_s": max(cuts), "clip_seconds": clip_seconds},
+        }
+    return None
+
+
 def _apply_clip_seconds(db, project: Project, shots: list[Shot], clip_seconds: float | None) -> None:
     """Apply one clip length to the shots of this run, or refuse honestly.
 
@@ -176,8 +219,6 @@ def _apply_clip_seconds(db, project: Project, shots: list[Shot], clip_seconds: f
     revised.  A shot whose dialogue or internal cut does not fit in the chosen
     length is refused by name instead of being silently truncated.
     """
-    import re
-
     from shine.services import revise_shot_record
 
     if clip_seconds is None:
@@ -186,24 +227,13 @@ def _apply_clip_seconds(db, project: Project, shots: list[Shot], clip_seconds: f
         spec = ShotSpec.model_validate(shot.spec)
         if abs(spec.duration_target_s - clip_seconds) < 1e-6:
             continue
-        latest_dialogue = max((line.end_s for line in spec.dialogue), default=0.0)
-        if latest_dialogue + 0.2 > clip_seconds:
+        conflict = clip_seconds_conflict(shot.name, spec, clip_seconds)
+        if conflict is not None:
             raise HTTPException(422, {
-                "code": "CLIP_TOO_SHORT_FOR_DIALOGUE",
-                "message": f"「{shot.name}」的对白到 {latest_dialogue:.2f} 秒，装不进 {clip_seconds:g} 秒的片段",
-                "details": {"shot_id": shot.id, "shot_name": shot.name,
-                            "dialogue_end_s": latest_dialogue, "clip_seconds": clip_seconds},
-            })
-        cuts = [
-            int(minute) * 60 + float(second)
-            for minute, second in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", spec.story_beat or "")
-        ]
-        if any(cut >= clip_seconds - 0.1 for cut in cuts):
-            raise HTTPException(422, {
-                "code": "CLIP_TOO_SHORT_FOR_CUT",
-                "message": f"「{shot.name}」内部有 {max(cuts):.2f} 秒的剪辑点，装不进 {clip_seconds:g} 秒的片段",
-                "details": {"shot_id": shot.id, "shot_name": shot.name,
-                            "latest_cut_s": max(cuts), "clip_seconds": clip_seconds},
+                "code": conflict["code"],
+                "message": conflict["message"],
+                "details": {**conflict["details"], "shot_id": shot.id,
+                            "shot_name": shot.name},
             })
         revise_shot_record(
             db, project, shot,
@@ -265,26 +295,42 @@ def create_series(
                 output=body.output.model_dump(mode="json") if body.output else None,
             )
 
-    # Every real H3 render belongs to exactly one series.  A shot that is
-    # already being produced must not be produced a second time, but unrelated
-    # shots of the same project may form their own series.
-    live_shot_ids = set(db.scalars(
-        select(ProductionSeriesItem.shot_id)
-        .join(ProductionSeries, ProductionSeries.id == ProductionSeriesItem.series_id)
-        .where(
-            ProductionSeries.status.in_(["QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED"]),
-            ProductionSeriesItem.shot_id.in_([shot.id for shot in shots]),
-        )
-    ).all())
-    live_jobs = db.scalars(
-        select(Job.id).where(
-            Job.shot_id.in_([shot.id for shot in shots]),
-            Job.stale.is_(False),
-            Job.status.in_(["PLANNED", "QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING"]),
-        )
-    ).all()
-    if live_shot_ids or live_jobs:
-        raise HTTPException(409, "PRODUCTION_SERIES_SHOT_ALREADY_QUEUED")
+    # Every real H3 render belongs to exactly one series.  The answer comes
+    # from the same helper the single-shot entry uses, so a shot that is
+    # reserved by a live series - even before its job exists - is owned by
+    # that series and not by this request.
+    from shine.comfyops.ownership import shot_ownership
+
+    receipt_key = None
+    if body.request_key:
+        # The same request never starts a second series: the receipt points
+        # at the one it already created, so a retry after a lost response
+        # finds the same run instead of a second shoot of the same shots.
+        import hashlib
+        import json
+
+        receipt_key = "series-request:" + hashlib.sha256(json.dumps({
+            "project": project.id, "shots": [shot.id for shot in shots],
+            "key": body.request_key,
+        }, sort_keys=True).encode("utf-8")).hexdigest()
+        prior = db.get(AppSetting, receipt_key)
+        if prior is not None:
+            existing = db.get(ProductionSeries, (prior.value or {}).get("series_id"))
+            if existing is not None:
+                job = db.get(Job, existing.current_job_id) if existing.current_job_id else None
+                return existing, job
+
+    owners = shot_ownership(db, project.id, [shot.id for shot in shots])
+    if owners:
+        first = next(iter(owners.values()))
+        raise HTTPException(409, {
+            "code": "PRODUCTION_SERIES_SHOT_ALREADY_QUEUED",
+            "message": "这些镜头里至少有一个已经在一次拍摄中",
+            "shot_ids": sorted(owners),
+            "series_id": first.get("series_id"),
+            "job_id": first.get("job_id"),
+            "status": first.get("status"),
+        })
 
     # A chosen clip length is applied to the shots before anything is queued,
     # so the series never mixes a click on "6 秒" with a 4.3-second render.
@@ -310,6 +356,10 @@ def create_series(
     )
     db.add(series)
     db.flush()
+    if receipt_key is not None:
+        # The receipt is the request's own identity: a retry after a lost
+        # response finds this series instead of starting a second one.
+        db.add(AppSetting(key=receipt_key, value={"series_id": series.id}))
 
     first_item: ProductionSeriesItem | None = None
     for position, shot in enumerate(shots):
@@ -335,6 +385,7 @@ def create_series(
         return series, None
     job, _meta = create_render_job(
         db, project, first_shot, body, settings=settings, offline=offline, spec=first_spec,
+        series_item_id=first_item.id,
     )
     first_item.job_id = job.id
     first_item.status = "QUEUED"
@@ -792,6 +843,7 @@ def _create_item_job(session_factory, series_id: str, item_id: str, *, settings,
         job, _meta = create_render_job(
             db, project, shot, body, settings=settings, offline=offline, spec=spec,
             continuity_artifact_id=derivative_id,
+            series_item_id=item.id,
         )
         item.job_id = job.id
         item.status = "QUEUED"

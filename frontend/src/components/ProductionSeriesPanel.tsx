@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
@@ -187,6 +187,9 @@ export default function ProductionSeriesPanel({
   const [quality, setQuality] = useState<QualityTier>('fast');
   /** 制作批次会越积越多：默认只展示最近 3 个，历史按需展开。 */
   const [seriesLimit, setSeriesLimit] = useState(3);
+  /** 本次开拍请求的身份：同一个范围的重试（响应丢失、刷新、第二个标签页）
+   *  复用同一个 key，服务端据此重接已有回执，而不是再开一次拍摄（R05）。 */
+  const pendingSeriesKeys = useRef<Map<string, string>>(new Map());
 
   /** 一键为本作品登记生成方案：与启用向导第 6 阶段同一组接口（固定工作流登记 +
    *  运行配置），在本页原地完成，不再让用户跳去基础配置跑整个向导。
@@ -453,8 +456,30 @@ export default function ProductionSeriesPanel({
         // half-written bindings (J08).
         body.bindings = options.bindings;
       }
+      // The revisions the workbench showed are part of the request too: a
+      // shot that another tab changed in the meantime is refused instead of
+      // being shot from a stale screen (R04).
+      const expected_shot_revisions: Record<string, number> = {};
+      for (const shot of shots) {
+        if (shot_ids.includes(shot.id)) expected_shot_revisions[shot.id] = shot.revision;
+      }
+      body.expected_shot_revisions = expected_shot_revisions;
+      // The request's own identity: a retry of the same scope replays the
+      // same series instead of starting a second shoot (R05).
+      const scopeSignature = JSON.stringify({
+        shots: shot_ids,
+        profile: effectiveProfile,
+        revisions: shot_ids.map((id) => expected_shot_revisions[id] ?? 0),
+      });
+      let requestKey = pendingSeriesKeys.current.get(scopeSignature);
+      if (!requestKey) {
+        requestKey = crypto.randomUUID();
+        pendingSeriesKeys.current.set(scopeSignature, requestKey);
+      }
+      body.request_key = requestKey;
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
+      pendingSeriesKeys.current.delete(scopeSignature);
       const usedProfile = ref2vaProfiles.find((row) => row.id === effectiveProfile);
     onMessage(`已开始连续制作；使用方案「${usedProfile?.name ?? effectiveProfile}」，本机会依次生成 ${shot_ids.length} 个镜头并自动整理成片。小模型审片和对白识别只提供建议。`, 'success');
       await reload();

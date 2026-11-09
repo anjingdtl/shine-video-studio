@@ -354,6 +354,10 @@ def _restarted_handoff_fixture(api, monkeypatch, *, submit_intent=False):
     style = freeze_style(client, project_id)
     shot = create_shot(client, project_id, style["id"])
     prior_job = create_job(client, project_id, shot["id"])
+    # The previous job is finished before the next one starts: a shot that is
+    # still being produced belongs to that production (R05).
+    with factory.begin() as db:
+        db.get(Job, prior_job["id"]).status = "PASSED"
     blocked_job = create_job(client, project_id, shot["id"])
     old_attempt_id = str(uuid4())
     instance_id = "renderer-restarted"

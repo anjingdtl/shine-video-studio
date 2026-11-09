@@ -273,7 +273,25 @@ def compute_journey(
             for episode in episodes_rows
             for shot in (episode.manifest or {}).get("shots", [])
         ]
-    scope_shot_ids = package_shot_ids if package_shot_ids else plan_shot_ids
+    overview_shot_ids = package_shot_ids if package_shot_ids else plan_shot_ids
+    # The current Run's scope is the run's own frozen selection: the episodes
+    # it was started with and the shots those episodes name.  A run that was
+    # started for one episode therefore counts one episode's shots, not the
+    # whole package's.  The package stays an overview in its own field (R07).
+    run_shot_ids: list[str] = []
+    run_episode_ids: list[str] = []
+    if run is not None:
+        from shine.production.models import ProductionRunEpisode
+
+        rows = db.scalars(
+            select(ProductionRunEpisode)
+            .where(ProductionRunEpisode.run_id == run.id)
+            .order_by(ProductionRunEpisode.position)
+        ).all()
+        run_episode_ids = [row.episode_id for row in rows]
+        for row in rows:
+            run_shot_ids.extend(str(shot_id) for shot_id in (row.shot_ids or []))
+    scope_shot_ids = run_shot_ids or overview_shot_ids
     scoped_shots = [by_id[shot_id] for shot_id in scope_shot_ids if shot_id in by_id]
 
     from shine.director.package import _outline_for_document, current_script_basis
@@ -349,6 +367,7 @@ def compute_journey(
     if not plan:
         plan_blockers.append({"code": "EPISODE_PLAN_NOT_CONFIRMED", "message": "分集方案尚未确认"})
     elif document is not None:
+        from shine.director.basis import plan_basis_pointer
         from shine.director.contracts import EpisodePlanPayload
         from shine.director.package import plan_basis_blockers
 
@@ -358,6 +377,11 @@ def compute_journey(
             payload = None
         if payload is not None:
             plan_blockers.extend(plan_basis_blockers(db, project, payload))
+            # A plan whose shots have no script lineage is not refused here -
+            # it is named, with the confirm / rebuild action that exists.
+            pointer = plan_basis_pointer(db, project, payload)
+            if pointer is not None:
+                plan_blockers.append(pointer)
     if style is None:
         plan_blockers.append({"code": "STYLE_NOT_FROZEN", "message": "风格尚未冻结"})
     stages.append({
@@ -392,7 +416,7 @@ def compute_journey(
     if plan is not None and plan_mode == "sections" and not plan_materialized:
         shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
                               "message": "按剧本分好的集还没有全部拆成镜头"})
-    for shot_id in plan_shot_ids:
+    for shot_id in scope_shot_ids:
         shot = by_id.get(shot_id)
         if shot is None:
             shot_blockers.append({"code": "PLANNED_SHOT_MISSING", "message": "计划中的镜头尚未建立",
@@ -401,17 +425,19 @@ def compute_journey(
         for problem in _shot_problems(db, shot):
             shot_blockers.append({"code": problem, "message": f"镜头「{shot.name}」需要补齐",
                                   "shot_id": shot.id})
-    storyboard_summary = f"{len(plan_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
-    if plan is not None and len(shots) != len(plan_shot_ids):
+    storyboard_summary = f"{len(scope_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
+    if plan is not None and len(shots) != len(scope_shot_ids):
         storyboard_summary += f"（项目共 {len(shots)} 个）"
     stages.append({
         "id": "storyboard",
         "label": "镜头拆解",
-        "done": bool(shots) and bool(plan_shot_ids) and not shot_blockers,
-        "summary": storyboard_summary if shots or plan_shot_ids else "还没有分镜",
+        "done": bool(shots) and bool(scope_shot_ids) and not shot_blockers,
+        "summary": storyboard_summary if shots or scope_shot_ids else "还没有分镜",
         "blockers": shot_blockers,
-        "facts": {"shot_count": len(shots), "planned_shot_count": len(plan_shot_ids),
-                  "planned_shot_ids": plan_shot_ids,
+        "facts": {"shot_count": len(shots), "planned_shot_count": len(scope_shot_ids),
+                  "planned_shot_ids": scope_shot_ids,
+                  "package_shot_count": len(overview_shot_ids),
+                  "scope_episode_ids": run_episode_ids,
                   "plan_mode": plan_mode, "plan_materialized": plan_materialized},
     })
 
@@ -492,6 +518,8 @@ def compute_journey(
         "facts": {
             "passed_shot_count": passed_scope_count,
             "scope_shot_count": len(scope_shot_ids),
+            "package_shot_count": len(overview_shot_ids),
+            "scope_episode_ids": run_episode_ids,
             "scope_package_id": package.id if package else None,
             "scope_run_id": run.id if run is not None else None,
             "demo_shot_count": demo_count,
@@ -532,7 +560,16 @@ def compute_journey(
             "package_id": package.id if package else None,
             "package_revision": package.revision if package else None,
             "run_id": run.id if run is not None else None,
+            # The denominator of this scope: the run's own selection when a
+            # run is in scope, the whole package otherwise.
             "shot_count": len(scope_shot_ids),
+            "episode_ids": run_episode_ids,
+        },
+        # The whole-package overview, in its own field: it never becomes the
+        # denominator of a run that selected fewer episodes.
+        "package_scope": {
+            "shot_count": len(overview_shot_ids),
+            "episode_count": len(plan.payload.get("episodes", [])) if plan is not None else 0,
         },
         "package": ({"id": package.id, "revision": package.revision, "status": package.status,
                      "stale": package.stale} if package else None),

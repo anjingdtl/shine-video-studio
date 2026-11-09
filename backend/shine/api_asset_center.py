@@ -2068,6 +2068,12 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
     from shine.services import UNKNOWN_SUBMISSION_CODES
 
     asset = _adoption_asset(db, body)
+    from shine.comfyops.assets import rights_status
+
+    # A revoked licence is a fact about the material, not about the shot:
+    # the preview names it and the apply refuses it, so no revision is
+    # written for an asset nobody may use any more.
+    rights = rights_status(db, body.project_id, (asset.provenance or {}).get("rights_id"))
     shots = list(db.scalars(select(Shot).where(Shot.project_id == body.project_id)).all())
     if body.shot_ids is not None:
         by_id = {shot.id: shot for shot in shots}
@@ -2121,13 +2127,17 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
             "confirmed_package_id": package_id,
             "production_job_id": getattr(in_flight, "id", None),
             "production_status": getattr(in_flight, "status", None),
+            "rights": {"approved": rights["approved"], "code": rights["code"],
+                       "message": rights["message"]},
             "conflict": (
-                None if already
+                "ASSET_RIGHTS_NOT_APPROVED" if not rights["approved"]
+                else None if already
                 else ("SHOT_PRODUCTION_IN_FLIGHT" if in_flight
                       else "SHOT_IN_CONFIRMED_PACKAGE" if package_id else None)
             ),
             "action": (
-                None if already
+                "REPLACE_WITH_AUTHORIZED_VERSION" if not rights["approved"]
+                else None if already
                 else ("RECONCILE_OR_FINISH_CURRENT_TAKE" if in_flight
                       else "REGENERATE_PACKAGE_AFTER_ADOPTION" if package_id else None)
             ),

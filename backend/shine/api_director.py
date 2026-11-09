@@ -247,7 +247,7 @@ def create_episode_plan(project_id: str, body: EpisodePlanBody, actor: Operator,
     """
     from shine.director.contracts import derive_episode_plan_from_sections
 
-    require_project(db, project_id)
+    project = require_project(db, project_id)
     shots = list(db.scalars(select(Shot).where(Shot.project_id == project_id)).all())
     mode = body.mode or ("shots" if shots else "sections")
     if mode == "sections":
@@ -289,6 +289,16 @@ def create_episode_plan(project_id: str, body: EpisodePlanBody, actor: Operator,
             payload = derive_episode_plan(
                 shots, target_seconds=body.target_seconds, tolerance_seconds=body.tolerance_seconds
             )
+        # The compatible entry groups the shots the project already has.  It
+        # records the outline those shots really came from, so a re-grouping
+        # of an old script's shots under a new script is visible instead of
+        # silent (R01).  The recorded basis is the *actual* one, never the
+        # outline that happens to be confirmed now.
+        from shine.director.basis import shots_plan_source
+
+        payload = payload.model_copy(update={
+            "source": shots_plan_source(db, project, payload.shot_order())["source"],
+        })
         problems = validate_episode_coverage(payload, [shot.id for shot in shots])
     if problems:
         raise HTTPException(422, {"code": "EPISODE_PLAN_COVERAGE_INVALID", "problems": problems})

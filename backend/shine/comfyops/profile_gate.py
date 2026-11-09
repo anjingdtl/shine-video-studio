@@ -117,7 +117,20 @@ def profile_blockers(db: Session, settings, project_id: str,
 
 def _weight_blockers(db: Session, settings, manifest: dict[str, Any],
                      variant_id: str) -> list[dict[str, Any]]:
-    """The bytes have to be here and hash-verified before anything is queued."""
+    """The bytes have to be here, hash-verified and consumable before anything is queued.
+
+    Three states are told apart, because they need three different actions:
+
+    * the files are not on this machine at all;
+    * the files are here but were never checked byte by byte - a file whose
+      name is its digest proves nothing;
+    * the bytes were checked, but the renderer that would execute them does
+      not read them from that place: they are only in the verified cache, or
+      in some other directory.
+
+    ``prepared`` stays what it always was - a display fact that says the
+    bytes were found.  It never stands in for a verification.
+    """
     try:
         from shine.comfyops.variant_binding import load_binding
         from shine.comfyops.variant_readiness import weight_evidence
@@ -131,15 +144,41 @@ def _weight_blockers(db: Session, settings, manifest: dict[str, Any],
         )]
     evidence = weight_evidence(db, settings, binding)
     missing = [row["component_id"] for row in evidence if not row["prepared"]]
-    if not missing:
-        return []
-    return [_blocker(
-        "PROFILE_WEIGHTS_NOT_AVAILABLE",
-        "这个变体的权重还没有在本机就位并逐字节核验：" + "、".join(missing)
-        + "。候选变体不会自动下载，也不能跳过资格检查。",
-        variant_id=variant_id,
-        missing_components=missing,
-    )]
+    unverified = [row["component_id"] for row in evidence
+                  if row["prepared"] and not row["verified"]]
+    unbound = [row["component_id"] for row in evidence
+               if row["verified"] and not row.get("consumable", True)]
+    blockers: list[dict[str, Any]] = []
+    if missing:
+        blockers.append(_blocker(
+            "PROFILE_WEIGHTS_NOT_AVAILABLE",
+            "这个变体的权重还没有在本机就位：" + "、".join(missing)
+            + "。候选变体不会自动下载，也不能跳过资格检查。",
+            variant_id=variant_id,
+            missing_components=missing,
+            action="EXISTING_INSTALLATION_IMPORT",
+        ))
+    if unverified:
+        blockers.append(_blocker(
+            "PROFILE_WEIGHTS_NOT_VERIFIED",
+            "这些权重文件在本机，但没有按锁定的 revision、字节数与 SHA-256 核验："
+            + "、".join(unverified)
+            + "。请用已有的本机核对或导入流程逐字节核验后再开拍。",
+            variant_id=variant_id,
+            unverified_components=unverified,
+            action="EXISTING_INSTALLATION_VERIFY",
+        ))
+    if unbound:
+        blockers.append(_blocker(
+            "PROFILE_WEIGHTS_NOT_CONSUMABLE",
+            "这些权重虽然已核验，但当前受管渲染器不会从那个目录读取："
+            + "、".join(unbound)
+            + "。请用已有的本机导入流程把它们装进本实例的模型目录后再开拍。",
+            variant_id=variant_id,
+            unbound_components=unbound,
+            action="EXISTING_INSTALLATION_IMPORT",
+        ))
+    return blockers
 
 
 def _runtime_blockers(db: Session, settings) -> list[dict[str, Any]]:
@@ -164,6 +203,35 @@ def _runtime_blockers(db: Session, settings) -> list[dict[str, Any]]:
         return [_blocker(
             "MANAGED_INSTANCE_NOT_CONFIGURED",
             "本机还没有生成受管的渲染器配置，无法用真实 H3 出片。",
+        )]
+    return []
+
+
+def output_contract_blockers(output: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The frozen output must satisfy the H3 output contract.
+
+    The same ``OutputSpec`` the Series and Job entries validate is the
+    contract here: 24 fps, a paired resolution that is a multiple of 32 and
+    a clip between 4 and 15 seconds.  A package that freezes anything else
+    promises a render the renderer cannot make.
+    """
+    if not output:
+        return []
+    from pydantic import ValidationError
+
+    from shine.schemas import OutputSpec
+
+    try:
+        OutputSpec.model_validate(output)
+    except ValidationError as exc:
+        problems = []
+        for error in exc.errors():
+            location = ".".join(str(part) for part in error.get("loc", ()))
+            problems.append(f"{location or 'output'}: {error.get('msg', 'invalid')}")
+        return [_blocker(
+            "OUTPUT_SPEC_INVALID",
+            "这份导演包冻结的输出不符合 H3 的输出合同：" + "；".join(problems[:10]),
+            problems=problems[:20],
         )]
     return []
 

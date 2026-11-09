@@ -1240,14 +1240,18 @@ def test_a_failing_shot_callback_still_releases_the_renderer(api, monkeypatch):
 
     monkeypatch.setattr("shine.worker._FirstManagedContinuation", _Continuation)
 
-    # A real queued job of the series, created through the ordinary API.
-    queued = client.post(
+    # The series owns its first shot: the job it queued is the one the worker
+    # runs, and a second entry for the same shot is refused with the task
+    # that owns it (R05).
+    job_id = series.current_job_id
+    assert job_id
+    duplicate = client.post(
         f"/api/v1/projects/{project_id}/jobs",
         json={"shot_id": shots[0]["id"], "provider": "comfyui",
               "workflow_profile_id": profile["id"]},
     )
-    assert queued.status_code == 201, queued.text
-    job_id = queued.json()["id"]
+    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.json()["detail"]["code"] == "SHOT_ALREADY_IN_PRODUCTION"
 
     def fake_run_one(session_factory, worker_id, *, settings, comfy_service, comfy_client,
                      semantic_reviewer, asr_reviewer, expected_job_id, managed_continuation):

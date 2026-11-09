@@ -15,6 +15,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shine.director.basis import (
+    current_script_basis,
+    plan_basis_blockers,
+)
+from shine.director.basis import (
+    outline_for_document as _outline_for_document,
+)
 from shine.director.contracts import (
     EpisodePlanPayload,
     PackagePolicyContract,
@@ -71,61 +78,6 @@ def _style_snapshot(db: Session, project: Project) -> dict[str, Any] | None:
         "sha256": style.sha256,
         "director_style": binding_summary(style.director_style_binding),
     }
-
-
-def current_script_basis(db: Session, project: Project) -> dict[str, Any]:
-    """The document the production basis is anchored to.
-
-    An explicit choice wins.  A project that never made one keeps the legacy
-    rule (the newest document) so packages confirmed before this identity
-    existed stay readable and executable.
-
-    Uploading a second script therefore only adds a *candidate*: it does not
-    change the current basis by itself.  Selecting the document, or confirming
-    an outline built from it, is the explicit action that switches it.
-    """
-    from shine.models import ProjectDocument
-
-    document = None
-    explicit = False
-    if project.current_document_id:
-        candidate = db.get(ProjectDocument, project.current_document_id)
-        if candidate is not None and candidate.project_id == project.id:
-            document, explicit = candidate, True
-    if document is None:
-        document = db.scalars(
-            select(ProjectDocument)
-            .where(ProjectDocument.project_id == project.id)
-            .order_by(ProjectDocument.created_at.desc())
-        ).first()
-    return {"document": document, "explicit": explicit}
-
-
-def _outline_for_document(db: Session, project_id: str, document) -> AgentArtifact | None:
-    """The newest readable outline that was really built from this document.
-
-    An outline written before provenance was recorded has no ``document_id``.
-    It cannot *claim* to belong to another script, so it stays usable as the
-    legacy fallback; an outline that names a different document never is.
-    """
-    rows = db.scalars(
-        select(AgentArtifact)
-        .where(
-            AgentArtifact.project_id == project_id,
-            AgentArtifact.kind == "StoryOutline",
-            AgentArtifact.stale.is_(False),
-        )
-        .order_by(AgentArtifact.created_at.desc())
-    ).all()
-    legacy: AgentArtifact | None = None
-    for row in rows:
-        payload = row.payload_json or {}
-        declared = payload.get("document_id")
-        if document is not None and declared == document.id:
-            return row
-        if not declared and legacy is None:
-            legacy = row
-    return legacy if document is not None else None
 
 
 def _script_ref(db: Session, project: Project) -> dict[str, Any]:
@@ -232,52 +184,6 @@ def latest_package(db: Session, project_id: str) -> DirectorPackageVersion | Non
         .order_by(DirectorPackageVersion.revision.desc())
     ).first()
 
-
-def plan_basis_blockers(db: Session, project: Project, plan_payload) -> list[dict[str, Any]]:
-    """Is this episode plan still the plan of the *current* script?
-
-    An uploaded script B is only a candidate until the person selects it or
-    confirms an outline built from it.  Once that happens, a plan derived from
-    A can no longer be packaged as B: the manifest would name B's document and
-    outline while carrying A's episodes and shots (J06).
-    """
-    source = getattr(plan_payload, "source", None) or {}
-    basis = current_script_basis(db, project)
-    document = basis["document"]
-    if document is None:
-        # A hand-built shot list has no document lineage to be wrong about.
-        return []
-    outline = _outline_for_document(db, project.id, document)
-    confirmed = outline if outline is not None and outline.approved_at else None
-    if confirmed is None:
-        return [_blocker(
-            "SCRIPT_OUTLINE_NOT_CONFIRMED",
-            "当前剧本还没有确认的大纲；先整理并确认大纲，再生成分集和导演包",
-            document_id=document.id,
-            outline_artifact_id=outline.id if outline else None,
-            action="CONFIRM_OUTLINE",
-        )]
-    declared_id = source.get("outline_artifact_id")
-    declared_sha = source.get("outline_sha256")
-    if not declared_id and getattr(plan_payload, "mode", "shots") == "sections":
-        return [_blocker(
-            "EPISODE_PLAN_SOURCE_MISSING",
-            "这份分集方案没有记录它来自哪一版大纲，无法确认它属于当前剧本",
-            current_outline_artifact_id=confirmed.id,
-            current_outline_sha256=confirmed.sha256,
-            action="REMATERIALIZE_PLAN",
-        )]
-    if declared_id and (declared_id != confirmed.id or
-                        (declared_sha and declared_sha != confirmed.sha256)):
-        return [_blocker(
-            "EPISODE_PLAN_SCRIPT_CHANGED",
-            "分集方案来自另一版剧本大纲；请按当前剧本重新生成分集，再落到镜头和导演包",
-            plan_outline_artifact_id=declared_id,
-            current_outline_artifact_id=confirmed.id,
-            current_document_id=document.id,
-            action="REMATERIALIZE_PLAN",
-        )]
-    return []
 
 
 def build_package(
@@ -813,6 +719,13 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
 
             blockers.extend(size_blockers(profile_row, manifest.get("binding", {}).get("output")))
 
+    # The frozen output is a promise about the delivered clip: it has to
+    # satisfy the same H3 output contract the Series and Job entries enforce.
+    # A draft may show this gap; a confirmation or a start may not.
+    from shine.comfyops.profile_gate import output_contract_blockers
+
+    blockers.extend(output_contract_blockers((manifest.get("binding") or {}).get("output")))
+
     from shine.comfyops.preproduction import current_plan
 
     plan = current_plan(db, package.project_id)
@@ -922,12 +835,47 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                     blockers.append(_blocker("ASSET_NOT_MASTER", f"素材「{asset.filename}」尚未确认并锁定",
                                              shot_id=shot.get("shot_id"), asset_id=asset.id))
                 else:
+                    from shine.comfyops.assets import rights_status
+
+                    rights = rights_status(
+                        db, package.project_id, (asset.provenance or {}).get("rights_id"))
+                    if not rights["approved"]:
+                        blockers.append(_blocker(
+                            "ASSET_RIGHTS_NOT_APPROVED",
+                            f"素材「{asset.filename}」的授权已经不在有效状态：{rights['message']}",
+                            shot_id=shot.get("shot_id"), asset_id=asset.id,
+                            rights_code=rights["code"],
+                            action="REPLACE_WITH_AUTHORIZED_VERSION",
+                        ))
                     bound_characters.append({"id": asset.id, "kind": asset.kind,
                                              "role": asset.role, "entity_id": asset.entity_id})
             # A character the shot names without a bound master is a material
             # requirement, not a production blocker: the picture is optional
             # and H3 generates it.  A reference that IS bound still has to be
             # an approved master (checked above).
+
+    # A frozen clip length has to fit the dialogue and the internal cuts of
+    # every shot it would shorten.  The Series entry refuses the same fact by
+    # name, so the package and the dispatch always agree.
+    frozen_clip = ((manifest.get("binding") or {}).get("output") or {}).get("clip_seconds")
+    if frozen_clip:
+        from shine.comfyops.production_series import clip_seconds_conflict
+
+        for episode in episodes:
+            for entry in (episode.manifest or {}).get("shots", []):
+                row = db.get(Shot, entry.get("shot_id") or "")
+                if row is None:
+                    continue
+                try:
+                    spec = ShotSpec.model_validate(row.spec)
+                except Exception:
+                    continue
+                conflict = clip_seconds_conflict(row.name, spec, float(frozen_clip))
+                if conflict is not None:
+                    blockers.append(_blocker(
+                        conflict["code"], conflict["message"],
+                        shot_id=row.id, **conflict["details"],
+                    ))
 
     fingerprint = _execution_fingerprint(
         manifest, package.policy_hash, project.language if project is not None else "", list(episodes),

@@ -339,6 +339,27 @@ def _validate_binding_inputs(db: Session, project: Project, bindings: list[ShotB
     return assets
 
 
+def bindings_unchanged(shot: Shot, planned: list[ShotBindingInput]) -> bool:
+    """Whether the planned bindings are the ones the shot already carries.
+
+    A submission that only uses the existing bindings must not rewrite
+    them: the shot keeps its own history instead of losing it to a start
+    request that changed nothing.
+    """
+    current = sorted(
+        (row.asset_id, row.use_as, row.role, row.frame_role)
+        for row in shot.bindings
+    )
+    proposed = sorted(
+        (row.asset_id,
+         row.use_as.value if hasattr(row.use_as, "value") else row.use_as,
+         row.role,
+         row.frame_role.value if hasattr(row.frame_role, "value") else row.frame_role)
+        for row in planned
+    )
+    return current == proposed
+
+
 def set_shot_bindings(
     db: Session, project: Project, shot: Shot, bindings: list[ShotBindingInput], *, actor: str = "user"
 ) -> list[ShotAssetBinding]:
@@ -942,6 +963,60 @@ def job_request_identity(project_id: str, shot: Shot, body: CreateJob) -> str:
     })
 
 
+#: The refusals that belong to the whole batch, not to one shot.
+BATCH_LEVEL_CODES = frozenset({"WORKFLOW_SIZE_NOT_MAPPED", "WORKFLOW_PROFILE_NOT_FOUND"})
+"""A profile that cannot apply the requested size refuses every shot equally."""
+
+
+def shot_static_blockers(
+    db: Session,
+    project: Project,
+    shot: Shot,
+    *,
+    body: CreateJob,
+    spec: ShotSpec | None = None,
+) -> list[dict[str, Any]]:
+    """The static verdict on one shot: can this shot be rendered at all?
+
+    These are the facts the single-shot Job entry decides: the material is
+    an approved master, the shot's own requirement is bound, the compiler
+    can build the prompt, and the workflow declares a slot for every
+    reference.  The batch entry needs the same verdict for *every* shot it
+    will produce, not only for the first one: a batch that would fail on
+    its second shot has to say so before it writes anything.
+
+    A dynamic continuity reference is not one of these facts: that shot
+    waits for the real predecessor, and the Worker resolves it.
+    """
+    spec = spec or ShotSpec.model_validate(shot.spec)
+    if spec.continuity.mode.value != "cut":
+        return []
+    try:
+        make_render_request(db, project, shot, body, spec=spec)
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "SHOT_NOT_EXECUTABLE")
+            message = str(detail.get("message") or code)
+            extra = {key: value for key, value in detail.items()
+                     if key not in {"code", "message"}}
+        else:
+            code, message, extra = "SHOT_NOT_EXECUTABLE", str(detail), {}
+        if code in BATCH_LEVEL_CODES:
+            # A refusal that belongs to the whole batch - the profile cannot
+            # apply the requested size, for instance - keeps its own code and
+            # status instead of being reported as one broken shot.
+            raise
+        return [{
+            "shot_id": shot.id,
+            "shot_name": shot.name,
+            "code": code,
+            "message": message,
+            **extra,
+        }]
+    return []
+
+
 def create_render_job(
     db: Session,
     project: Project,
@@ -953,6 +1028,7 @@ def create_render_job(
     spec: ShotSpec | None = None,
     depends_on: list[str] | None = None,
     continuity_artifact_id: str | None = None,
+    series_item_id: str | None = None,
 ) -> tuple[Job, dict[str, Any]]:
     """Create one render job for a shot, with every production gate applied.
 
@@ -1007,6 +1083,36 @@ def create_render_job(
                 "shot_id": shot.id,
                 "job_id": uncertain.id,
                 "action": "核对这次提交的结果，或在确认后显式重拍",
+            })
+    # One authoritative answer for every entry that may start a shoot: the
+    # single-shot job, the production series and the run dispatch all ask
+    # it here.  A shot that is reserved by a live series counts even while
+    # its job does not exist yet, and an independent request is pointed at
+    # the task that owns the shot instead of starting a second one.
+    # The internal dispatch of a series passes the item it owns, so it may
+    # create the job of the shot it already reserved.
+    if series_item_id is None:
+        from shine.comfyops.ownership import ownership_refusal, shot_ownership
+
+        owner = shot_ownership(db, project.id, [shot.id]).get(shot.id)
+        if owner is not None:
+            raise HTTPException(409, ownership_refusal(shot.id, owner))
+    else:
+        from shine.comfyops.ownership import LIVE_SERIES_STATUSES
+        from shine.models import ProductionSeries, ProductionSeriesItem
+
+        item = db.get(ProductionSeriesItem, series_item_id)
+        series = db.get(ProductionSeries, item.series_id) if item is not None else None
+        if (
+            item is None
+            or item.shot_id != shot.id
+            or series is None
+            or series.status not in LIVE_SERIES_STATUSES
+        ):
+            raise HTTPException(409, {
+                "code": "SERIES_ITEM_OWNERSHIP_LOST",
+                "message": "这个镜头的拍摄归属已经不在本次连续制作里",
+                "shot_id": shot.id,
             })
     if body.provider == RenderProvider.COMFYUI and not offline:
         for binding in shot.bindings:

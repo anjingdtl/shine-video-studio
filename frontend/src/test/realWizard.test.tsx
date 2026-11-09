@@ -270,3 +270,59 @@ it('执行断线保留未确认标记，重新检查不能重投', async () => {
   await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent('EXECUTION_UNCONFIRMED'));
   expect(stub.callsOf('POST', /install-plans\/install\/execute$/)).toHaveLength(1);
 });
+
+it('计划状态不是真相：已知运行中的尝试在向导里续上，不跳去专业设置', async () => {
+  // The plan row says INSTALLING, but the attempt that really writes this
+  // target is DOWNLOADING.  The wizard must read that receipt, follow it and
+  // execute nothing a second time (R06).
+  route('GET', 'comfyops/install-plans\\?project_id=proj-1', [{ id: 'install', status: 'INSTALLING' }]);
+  stub.add({ method: 'GET', pattern: /install-plans\/install\/attempts/, respond: () => jsonResponse([
+    { attempt_id: 'attempt-live', plan_id: 'install', stage: 'DOWNLOADING', status: 'DOWNLOADING',
+      confirmed_bytes: 2, total_bytes: 4, speed_bps: 1, retry_count: 0, cancel_requested: false,
+      pause_requested: false, terminal: false, resumable: true },
+  ]) });
+  stub.add({ method: 'GET', pattern: /installation-attempts\/attempt-live$/, respond: () => jsonResponse({
+    attempt_id: 'attempt-live', plan_id: 'install', stage: 'FILES_VERIFIED_PENDING_RUNTIME',
+    status: 'FILES_VERIFIED_PENDING_RUNTIME', confirmed_bytes: 4, total_bytes: 4, speed_bps: 0,
+    retry_count: 0, cancel_requested: false, pause_requested: false, terminal: true, resumable: false,
+  }) });
+  route('GET', 'setup/readiness', { layers: [{ layer: 'L2_files_verified', status: 'READY' }] });
+  show();
+  await screen.findByText(/真实制作已准备好/);
+  expect(stub.callsOf('GET', /install-plans\/install\/attempts/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /install-plans\/install\/execute$/)).toHaveLength(0);
+  expect(screen.queryByRole('button', { name: '到专业设置处理' })).toBeNull();
+});
+
+it('真正需要对账的尝试才交给专业设置，绝不重复执行', async () => {
+  route('GET', 'comfyops/install-plans\\?project_id=proj-1', [{ id: 'install', status: 'NEEDS_REVIEW' }]);
+  stub.add({ method: 'GET', pattern: /install-plans\/install\/attempts/, respond: () => jsonResponse([
+    { attempt_id: 'attempt-review', plan_id: 'install', stage: 'NEEDS_REVIEW', status: 'NEEDS_REVIEW',
+      confirmed_bytes: 2, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
+      pause_requested: false, terminal: true, resumable: false, error_code: 'INSTALL_HASH_MISMATCH',
+      error_message: 'bytes changed' },
+  ]) });
+  show();
+  await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent('NEEDS_REVIEW'));
+  expect(stub.callsOf('POST', /execute$/)).toHaveLength(0);
+  expect(screen.getByRole('button', { name: '到专业设置处理' })).toBeInTheDocument();
+});
+
+it('暂停的安装显示对应动作，不会一直等待，也不会重投', async () => {
+  route('GET', 'comfyops/install-plans\\?project_id=proj-1', [{ id: 'install', status: 'INSTALLING' }]);
+  stub.add({ method: 'GET', pattern: /install-plans\/install\/attempts/, respond: () => jsonResponse([
+    { attempt_id: 'attempt-paused', plan_id: 'install', stage: 'PAUSED', status: 'PAUSED',
+      confirmed_bytes: 2, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
+      pause_requested: true, terminal: false, resumable: false },
+  ]) });
+  show();
+  await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent('PAUSED'));
+  expect(stub.callsOf('POST', /execute$/)).toHaveLength(0);
+});
+
+it('状态接口失联不挡 H3 安装路径', async () => {
+  route('GET', 'system/status', { detail: 'STATUS_UNREACHABLE' }, 503);
+  show();
+  await screen.findByText(/真实制作已准备好/);
+  expect(stub.callsOf('POST', /install-plans\/install\/execute$/)).toHaveLength(1);
+});

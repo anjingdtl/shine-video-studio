@@ -118,6 +118,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   /** 进展日志只渲染最近几条：记录可以一直增长，页面高度不能跟着长。 */
   const [eventLimit, setEventLimit] = useState(8);
   const mounted = useRef(true);
+  /** 快切包、作品或整片运行时，只有最后一次读取的结果算数。 */
+  const loadEpoch = useRef(0);
 
   // 剧本统筹先分集：大纲确认后即可按场次分集，不需要先有镜头；
   // 已手工建好的镜头列表仍可用兼容入口按镜头分组。
@@ -145,6 +147,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const activeRun = run;
 
   const load = useCallback(async () => {
+    // 快切包、作品或整片运行时丢弃旧异步结果：只有最后一次读取算数。
+    const epoch = ++loadEpoch.current;
+    const current = () => mounted.current && epoch === loadEpoch.current;
     try {
       const [journeyRow, planRows, packageRows] = await Promise.all([
         // The panel projects the exact package it is showing: progress,
@@ -153,7 +158,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         listEpisodePlans(projectId),
         listDirectorPackages(projectId),
       ]);
-      if (!mounted.current) return;
+      if (!current()) return;
       setJourney(journeyRow);
       setPlans(planRows);
       setPackages(packageRows);
@@ -163,9 +168,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       const scopedRunId = journeyRow.scope?.run_id ?? journeyRow.run?.id ?? null;
       if (scopedRunId) {
         const detail = await getProductionRun(scopedRunId);
-        if (!mounted.current) return;
+        if (!current()) return;
         setRun(detail);
-        setEvents(await getRunEvents(scopedRunId));
+        const scopedEvents = await getRunEvents(scopedRunId);
+        if (!current()) return;
+        setEvents(scopedEvents);
       } else {
         setRun(null);
         setEvents([]);
@@ -175,7 +182,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         ? packageRows.find((row) => row.id === scopedPackageId)
         : null) ?? packageRows[0] ?? null;
       if (packageRow) {
-        setReadiness(await getPackageReadiness(packageRow.id));
+        const scopedReadiness = await getPackageReadiness(packageRow.id);
+        if (!current()) return;
+        setReadiness(scopedReadiness);
         if (!profileId) {
           const remembered = storedProductionProfile(projectId);
           const candidate = remembered || packageRow.binding?.workflow_profile_id || '';
@@ -186,7 +195,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       }
       setError('');
     } catch (exc) {
-      if (mounted.current) setError(exc instanceof Error ? exc.message : String(exc));
+      if (current()) setError(exc instanceof Error ? exc.message : String(exc));
     }
   }, [projectId, profileId, selectedPackageId]);
 

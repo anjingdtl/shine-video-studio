@@ -20,6 +20,8 @@ without the matching bytes proves nothing.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -104,6 +106,53 @@ def _cache_dir(settings) -> Any:
         return None
 
 
+def managed_model_bindings(db: Session, settings) -> dict[str, str]:
+    """The model directories the *current* managed renderer consumes.
+
+    The relation is read from the instance's own extra_model_paths.yaml, so a
+    managed instance that was switched is answered from its new binding
+    without reading a single weight byte again.  An instance that cannot be
+    read simply has no binding: that is a fact, not a failure.
+    """
+    if settings is None:
+        return {}
+    try:
+        from shine.comfyops.runtime_configuration import _current_identity
+
+        identity = _current_identity(db, settings) or {}
+    except Exception:  # noqa: BLE001 - an unreadable runtime is a fact
+        return {}
+    instance_id = identity.get("instance_id")
+    if not instance_id:
+        return {}
+    try:
+        from shine.comfyops.models import ComfyInstance
+
+        instance = db.get(ComfyInstance, instance_id)
+    except Exception:  # noqa: BLE001 - no instance row is a fact
+        return {}
+    root = (instance.payload or {}).get("root") if instance is not None else None
+    if not root:
+        return {}
+    try:
+        raw = json.loads((Path(root) / "extra_model_paths.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    bindings = raw.get("shine") if isinstance(raw, dict) else None
+    if not isinstance(bindings, dict):
+        return {}
+    return {str(key): str(value) for key, value in bindings.items()}
+
+
+def _same_directory(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return False
+
+
 def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     """Per component: are the pinned bytes here, and were they really verified?
 
@@ -119,9 +168,14 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     summary.  It cannot turn a layer green when the current revision, the file
     list or the bytes differ (J04).
     """
-    from shine.comfyops.verification_receipts import cache_candidates, verify_receipt
+    from shine.comfyops.verification_receipts import (
+        cache_candidates,
+        installed_directory,
+        verify_receipt,
+    )
 
     cache = _cache_dir(settings)
+    bound = managed_model_bindings(db, settings)
     registry = {row.id: row for row in db.scalars(select(ModelPackage)).all()}
     evidence: list[dict[str, Any]] = []
     for component in _required_components(binding.catalog, binding.profiles):
@@ -146,6 +200,16 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
             for index, entry in enumerate(component.get("files") or [])
         ]
         row = registry.get(component_id)
+        # Three different facts, kept apart: the bytes are here, the bytes
+        # were hash-checked, and the renderer that would execute them reads
+        # them from that very place.
+        verified_directory = (receipt.get("receipt") or {}).get("directory") if receipt["verified"] else None
+        installed_path = installed_directory(settings, component)
+        installed = str(installed_path) if installed_path is not None else None
+        in_place = bool(receipt["verified"] and _same_directory(verified_directory, installed))
+        bound_here = bool(receipt["verified"] and any(
+            _same_directory(verified_directory, directory) for directory in bound.values()))
+        consumable = bool(receipt["verified"] and (in_place or bound_here))
         evidence.append({
             "component_id": component_id,
             "registry_status": None if row is None else str(row.status),
@@ -171,6 +235,11 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
             # were checked".
             "prepared": bool(files) and (receipt["present"] or cached["present"]),
             "verified": bool(files) and (receipt["verified"] or cached["verified"]),
+            "verified_directory": verified_directory,
+            "installed_directory": installed,
+            "in_place": in_place,
+            "bound_to_instance": bound_here,
+            "consumable": consumable,
         })
     return evidence
 

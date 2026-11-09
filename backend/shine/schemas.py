@@ -335,6 +335,19 @@ class CreateProductionSeries(APIModel):
     output: OutputSpec | None = None
     """The output size and clip length of this run; refused when the profile cannot honour it."""
     bindings: dict[str, list[ShotBindingInput]] | None = None
+    expected_shot_revisions: dict[str, int] | None = None
+    request_key: str | None = Field(default=None, min_length=1, max_length=120)
+    """The identity of this start request.
+
+    A retried start - a lost response, a second tab, a refresh - replays the
+    same series instead of starting a second shoot of the same shots.
+    """
+    """The shot revisions the workbench showed when the person pressed start.
+
+    The server compares them before it writes anything: a batch that was
+    prepared against a different revision of a shot is refused instead of
+    quietly shooting what the tab happens to hold now.
+    """
     """An all-or-nothing binding plan, keyed by shot id.
 
     The one-click entry sends the references it intends to use together with

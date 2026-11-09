@@ -170,10 +170,14 @@ def test_reserve_queued_job_without_an_unleased_gap(api, handoff, monkeypatch, s
     with factory() as db:
         old = db.get(Job, old_job_id)
         project_id, shot_id = old.project_id, old.shot_id
-    new_job_id = create_comfy_job(client, project_id, shot_id)["id"]
+    # The previous attempt is finished before the next one starts: a shot
+    # that is still being produced belongs to that production (R05).
+
     with factory.begin() as db:
         old = db.get(Job, old_job_id)
         old.status, old.lease_owner, old.lease_expires_at = "NEEDS_REVIEW", None, None
+    new_job_id = create_comfy_job(client, project_id, shot_id)["id"]
+    with factory.begin() as db:
         job = db.get(Job, new_job_id)
         if scenario == "not_queued":
             job.status = "NEEDS_REVIEW"
@@ -228,10 +232,14 @@ def test_next_job_takes_lease_atomically_and_preserves_previous_record(api, hand
     with factory() as db:
         old = db.get(Job, old_job_id)
         project_id, shot_id = old.project_id, old.shot_id
-    new_job_id = create_comfy_job(client, project_id, shot_id)["id"]
+    # The previous attempt is finished before the next one starts: a shot
+    # that is still being produced belongs to that production (R05).
+
     with factory.begin() as db:
         old = db.get(Job, old_job_id)
         old.status, old.lease_owner, old.lease_expires_at = "NEEDS_REVIEW", None, None
+    new_job_id = create_comfy_job(client, project_id, shot_id)["id"]
+    with factory.begin() as db:
         next_job = db.get(Job, new_job_id)
         next_job.status, next_job.lease_owner = "SUBMITTING", "worker-next"
         next_job.lease_expires_at = utcnow() + timedelta(seconds=60)

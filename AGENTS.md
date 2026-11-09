@@ -1096,3 +1096,42 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 证据：`docs/ACCEPTANCE_20261109_W6A8_LOWEND_VARIANT.md`；回归
   `backend/tests/test_variant_binding_and_gate.py`（21 项）、
   `frontend/src/test/variantCandidate.test.tsx`（4 项）。
+
+## 2026-11-09 复验收尾轮（R01–R07：入口与状态交接）
+
+- **当前制作依据只有一个解析口**。`shine/director/basis.py` 是「这次制作属于哪一版剧本」
+  的唯一答案：显式选中的文档、该文档下已确认的大纲，以及镜头**真正来自哪一版大纲**
+  （分节运行 → 分镜应用回执 → 镜头）。普通按镜头分组、按场次物化和四阶段按卷共用它。
+- **按镜头分组必须记录真实来源**。兼容入口不再留空来源：它记录镜头实际来自的大纲，
+  所以「A 的镜头重新分组」不会被无声认作 B。旧行有可信回执证据就自动衔接；
+  证据缺失只在旅程里指出现有的「确认大纲 / 重新拆分镜」，不新增审批层。
+- **生产准入读「已核验」，不读「已发现」**。`profile_gate` 现在区分
+  `PROFILE_WEIGHTS_NOT_AVAILABLE`（没就位）、`PROFILE_WEIGHTS_NOT_VERIFIED`（没逐字节核验）
+  和 `PROFILE_WEIGHTS_NOT_CONSUMABLE`（已核验但当前受管实例不消费那个目录）。
+  `prepared` 只用于显示。已核验缓存、实际绑定目录和当前实例是三件事：
+  切换受管实例后重新判断消费关系，正常提交不反复全量哈希。
+- **导演包与采用按执行合同判定**。导演包的 `output` 走既有 `OutputSpec`：
+  24 fps、成对的 32 倍数画幅、4–15 秒片段；不合规时草案可以显示缺项，
+  确认与开拍按 `OUTPUT_SPEC_INVALID` 拒绝。片段长度还要装得下每一镜的对白与内部剪辑点
+  （`CLIP_TOO_SHORT_FOR_DIALOGUE` / `CLIP_TOO_SHORT_FOR_CUT`）。
+  素材权利撤权后，采用预览必须显示 `ASSET_RIGHTS_NOT_APPROVED`、采用不得写新 revision，
+  已冻结的包不得继续显示可开拍。
+- **一键开拍判定整批，不只第一镜**。提交带 `expected_shot_revisions`（前端看到的镜头修订）
+  与显式授权的绑定；服务端先核对快照，再在同一事务写绑定，并对**每一镜**跑单镜入口
+  用的静态判定。任一镜不可执行 → `PRODUCTION_SERIES_SHOT_NOT_EXECUTABLE`，
+  列出该镜原因与仍可开拍的镜头；不留半写绑定，也不产生意外 Job。
+- **拍摄归属只有一个答案**。`shine/comfyops/ownership.py` 回答「这一镜现在归谁」：
+  生产序列的预留（哪怕还没建 Job）与活动 Job 都算占用。单镜、Series 与 Run 派发共用它；
+  独立请求撞上活动拍摄 → `SHOT_ALREADY_IN_PRODUCTION` 并指出原任务；
+  内部派发按自己持有的预留建 Job；同一请求身份（`request_key`）重接已有回执。
+- **首次向导读真实回执**。计划状态不是真相，写入物理目标的尝试才是：
+  运行中的尝试在向导原地续上并显示进度，已完成的沿原步骤继续准备实例，
+  真正需要对账的才交给专业设置；向导与基础配置共用同一套回执读取。
+- **旅程范围跟随当前 Run**。选集与镜头来自 Run 冻结的 scope/episode 行；
+  整包概况是独立字段（`package_scope`），进度分母、可操作 Run、后期与下载用同一选定范围。
+  切换包/作品/Run 时丢弃旧异步结果。
+- 回归：`backend/tests/test_director_basis_grouping.py`、
+  `test_production_gate_weight_evidence.py`、`test_director_execution_contract.py`、
+  `test_one_click_batch_admission.py`、`test_shoot_ownership.py`、
+  `test_director_run_scope.py`；前端 `frontend/src/test/realWizard.test.tsx`（+2）。
+  报告见 `docs/REACCEPT_R01_R07_REPORT_20261109.md`。

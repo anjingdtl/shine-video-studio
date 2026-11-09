@@ -2,7 +2,12 @@ import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from
 import { useEffect, useRef, useState } from 'react';
 import { api as request, json, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
-import { approveAndExecuteSetupPlan, type SetupPlan } from '../setupExecution';
+import {
+  approveAndExecuteSetupPlan,
+  latestInstallationAttempt,
+  waitForInstallationAttempt,
+  type SetupPlan,
+} from '../setupExecution';
 
 /** 「启用真实制作」单一路径向导。检查顺序和每个接口调用都与专业版
  *  制作环境面板共用同一后端合同；这里只做普通用户能读懂的进度呈现。
@@ -143,10 +148,24 @@ export function RealProductionWizard({
     return total;
   }
 
-  async function verifyProductionReady() {
-    const status = await api<SystemStatus>('/system/status');
-    if (!['READY', 'RUNNING'].includes(status.production_mode.mode)) {
-      throw new Error(`真实制作暂未就绪（${status.production_mode.code ?? status.production_mode.mode}）：${status.production_mode.detail}`);
+  /** The status endpoint corroborates the activation; it is not the proof.
+   *  An unreachable status interface must not undo an installation the server
+   *  already committed, and a mode that is really not ready is still named. */
+  async function verifyProductionReady(): Promise<{ ok: boolean; note: string }> {
+    try {
+      const status = await api<SystemStatus>('/system/status');
+      if (!['READY', 'RUNNING'].includes(status.production_mode.mode)) {
+        return {
+          ok: false,
+          note: `真实制作暂未就绪（${status.production_mode.code ?? status.production_mode.mode}）：${status.production_mode.detail}`,
+        };
+      }
+      return { ok: true, note: '' };
+    } catch (error) {
+      return {
+        ok: true,
+        note: `状态接口暂时读不到（${(error as Error).message}）：安装与启用已经完成，可以稍后重新检查。`,
+      };
     }
   }
 
@@ -192,18 +211,52 @@ export function RealProductionWizard({
         else { stopWith('project', '有执行结果未确认（EXECUTION_UNCONFIRMED），请到专业设置对账。'); return; }
       }
     }
-    if (plans.some(plan => ['INSTALLING', 'SUBMIT_INTENT', 'NEEDS_REVIEW'].includes(plan.status))) {
-      stopWith('project', '存在执行中或需要对账的计划（RECONCILE_REQUIRED）。请到专业设置查看尝试记录，不能重新执行。');
-      return;
+    // The plan row is not the truth about the bytes: the attempt that writes
+    // this physical target is.  A known running attempt is re-attached here
+    // with its own progress, a finished one lets the preparation continue at
+    // its own step, and only an attempt that really waits for a person is
+    // handed to the expert page (R06).
+    const blocked = plans.find(plan => ['INSTALLING', 'SUBMIT_INTENT', 'NEEDS_REVIEW'].includes(plan.status));
+    if (blocked) {
+      const attempt = await latestInstallationAttempt(blocked.id).catch(() => null);
+      if (attempt && !attempt.terminal) {
+        if (attempt.stage === 'PAUSED') {
+          // A paused attempt waits for a person: it is not a failure and it
+          // is not a silent restart either.
+          stopWith('project', '这次安装已暂停（PAUSED）：已下载的字节还在，可以继续下载，不会重新执行。到专业设置继续，或回到这里重新检查。');
+          return;
+        }
+        setStage('project', { status: 'running', note: `这次安装还在进行（${attempt.stage}）：${attempt.confirmed_bytes}/${attempt.total_bytes} 字节。继续等待，不会重复执行。` });
+        try {
+          const view = await waitForInstallationAttempt(attempt.attempt_id, (update) => {
+            if (!alive()) return;
+            setStage('project', { status: 'running', note: `这次安装还在进行（${update.stage}）：${update.confirmed_bytes}/${update.total_bytes} 字节。继续等待，不会重复执行。` });
+          }, { maxTicks: 90 });
+          if (!alive()) return;
+          setStage('project', { status: 'ok', note: `这次安装已完成（${view.stage}），继续后面的准备。` });
+        } catch (error) {
+          stopWith('project', `这次安装没有完成：${(error as Error).message}`);
+          return;
+        }
+      } else if (attempt && attempt.terminal && ['NEEDS_REVIEW', 'CANCELLED'].includes(attempt.stage)) {
+        stopWith('project', `这次安装在 ${attempt.stage} 停下（${attempt.error_code ?? ''}）：${attempt.error_message ?? '结果未知'}。请到专业设置对账，不能重复执行。`);
+        return;
+      } else if (attempt && attempt.terminal) {
+        setStage('project', { status: 'ok', note: `这次安装已经完成（${attempt.stage}），继续后面的准备。` });
+      } else {
+        stopWith('project', '存在执行中或需要对账的计划（RECONCILE_REQUIRED）。请到专业设置查看尝试记录，不能重新执行。');
+        return;
+      }
     }
     const active = await api<RuntimeState>('/setup/runtime');
     if (active.status === 'INVALID_REQUIRES_REVIEW') {
       stopWith('project', `配置需要检查（INVALID_REQUIRES_REVIEW）：${String(active.error)}。请到专业设置处理。`); return;
     }
     if (active.status === 'ACTIVE' && active.candidate?.project_id === projectId && active.service_validation?.status === 'READY') {
-      await verifyProductionReady();
+      const confirmed = await verifyProductionReady();
+      if (!confirmed.ok) { stopWith('project', confirmed.note); return; }
       for (const stage of STAGE_TITLES) setStage(stage.id, { status: 'ok', note: '已有配置与服务验证有效。' });
-      setFinished({ ok: true, summary: '真实制作已就绪；渲染器空闲停止时也无需重新安装。' });
+      setFinished({ ok: true, summary: confirmed.note || '真实制作已就绪；渲染器空闲停止时也无需重新安装。' });
       return;
     }
 
@@ -412,7 +465,9 @@ export function RealProductionWizard({
       const activated = await api<RuntimeState>('/setup/runtime/activate', json('POST', body));
       if (activated.status !== 'ACTIVE') throw new Error(`RUNTIME_NOT_ACTIVE：${activated.status}`);
       if (!alive()) return;
-      await verifyProductionReady();
+      const confirmed = await verifyProductionReady();
+      if (!confirmed.ok) { stopWith('runtime', confirmed.note); return; }
+      if (confirmed.note) setStage('runtime', { status: 'warn', note: confirmed.note });
       await onRefresh();
       if (!alive()) return;
     } catch (error) {

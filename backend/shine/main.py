@@ -1108,15 +1108,34 @@ def create_app(
         them back - the workbench never leaves a half-applied binding plan (J08).
         """
         from shine.comfyops.production_series import create_series, series_public
-        from shine.services import set_shot_bindings
+        from shine.services import bindings_unchanged, set_shot_bindings, shot_static_blockers
 
         try:
+            # The snapshot the person acted on must still be the current one:
+            # another tab may have changed a shot since the workbench showed
+            # it, and a start request never shoots what it did not show.
+            if body.expected_shot_revisions:
+                drifted = [
+                    shot.id for shot in shots
+                    if shot.id in body.expected_shot_revisions
+                    and body.expected_shot_revisions[shot.id] != shot.revision
+                ]
+                if drifted:
+                    raise HTTPException(409, {
+                        "code": "SHOT_REVISION_CHANGED",
+                        "message": "这些镜头在你看到之后被改过；请刷新后重新开拍",
+                        "shot_ids": drifted,
+                    })
             if body.bindings:
                 by_id = {shot.id: shot for shot in shots}
                 for shot_id, planned in body.bindings.items():
                     shot = by_id.get(shot_id)
                     if shot is None:
                         raise HTTPException(422, "PRODUCTION_SERIES_BINDING_SHOT_NOT_FOUND")
+                    if bindings_unchanged(shot, planned):
+                        # The person did not change this shot: the start
+                        # request does not rewrite what it already carries.
+                        continue
                     set_shot_bindings(db, project, shot, planned, actor="user")
                 db.flush()
             job_body = CreateJob(
@@ -1128,7 +1147,25 @@ def create_app(
                 self_review_scope=body.self_review_scope,
                 basic_review_resolution=body.basic_review_resolution,
                 output=body.output,
+                request_key=body.request_key,
             )
+            # Every shot of the batch is judged, not only the first one: a
+            # second shot that names a character without a subject reference,
+            # a reference the workflow has no slot for, or a shot whose
+            # revision moved is refused by name before anything is queued.
+            # The refusal keeps the shots that can run, so the person can
+            # start those directly instead of losing the whole project.
+            blocked: list[dict[str, Any]] = []
+            for shot in shots:
+                blocked.extend(shot_static_blockers(db, project, shot, body=job_body))
+            if blocked:
+                blocked_ids = {str(row.get("shot_id")) for row in blocked}
+                raise HTTPException(422, {
+                    "code": "PRODUCTION_SERIES_SHOT_NOT_EXECUTABLE",
+                    "message": "这一批里有镜头按当前生成方案无法执行；可以先开拍其余镜头",
+                    "blocked": blocked,
+                    "runnable_shot_ids": [shot.id for shot in shots if shot.id not in blocked_ids],
+                })
             series, job = create_series(
                 db, project, shots, body=job_body,
                 settings=resolve_runtime(db, request.app.state.settings),

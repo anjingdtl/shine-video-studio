@@ -789,10 +789,11 @@ def test_synthetic_review_release_restores_owned_renderer_without_releasing_leas
             with factory() as db:
                 old = db.get(Job, job_id)
                 project, shot = old.project_id, old.shot_id
-            new_job_id = create_comfy_job(api[0], project, shot)["id"]
+            # The previous attempt is finished before the next one starts.
             with factory.begin() as db:
                 old = db.get(Job, job_id)
                 old.status, old.lease_owner, old.lease_expires_at = "NEEDS_REVIEW", None, None
+            new_job_id = create_comfy_job(api[0], project, shot)["id"]
             new_receipt = deepcopy(receipt)
             new_receipt["stage_id"] = str(uuid4())
 
@@ -940,10 +941,11 @@ def test_synthetic_review_release_restores_owned_renderer_without_releasing_leas
             with factory() as db:
                 old = db.get(Job, job_id)
                 project, shot = old.project_id, old.shot_id
-            new_job_id = create_comfy_job(api[0], project, shot)["id"]
+            # The previous attempt is finished before the next one starts.
             with factory.begin() as db:
                 old = db.get(Job, job_id)
                 old.status, old.lease_owner, old.lease_expires_at = "NEEDS_REVIEW", None, None
+            new_job_id = create_comfy_job(api[0], project, shot)["id"]
             keeper = IdleHandoffKeeper(factory, attempt_id, replacement).start()
             try:
                 reserved = keeper.reserve(settings, boundary, new_job_id, instance_id)
@@ -981,10 +983,12 @@ def test_synthetic_review_release_restores_owned_renderer_without_releasing_leas
             with factory() as db:
                 old_job = db.get(Job, job_id)
                 project, shot = old_job.project_id, old_job.shot_id
-            next_job_id = create_comfy_job(client, project, shot)["id"]
+            # The previous attempt is finished before the next one starts.
             with factory.begin() as db:
                 old_job = db.get(Job, job_id)
                 old_job.status, old_job.lease_owner, old_job.lease_expires_at = "NEEDS_REVIEW", None, None
+            next_job_id = create_comfy_job(client, project, shot)["id"]
+            with factory.begin() as db:
                 job = db.get(Job, next_job_id)
                 job.status, job.lease_owner = "SUBMITTING", "worker-next"
                 job.lease_expires_at = utcnow() + timedelta(seconds=60)
