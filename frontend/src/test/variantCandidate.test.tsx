@@ -19,14 +19,18 @@ import { SYSTEM_STATUS, StudioStub, jsonResponse, productionMode } from './studi
 let stub: StudioStub;
 
 const subject = {
-  id: 'asset-lin', project_id: 'proj-1', filename: 'lin.png', kind: 'image', role: 'character',
-  entity_id: 'Lin', approved: true, locked: true, sha256: 'a'.repeat(64),
+  id: 'asset-lin', project_id: 'proj-1', filename: 'lin.png', kind: 'image',
+  content_type: 'image/png', sha256: 'a'.repeat(64), byte_size: 12,
+  role: 'character', entity_id: 'Lin', tags: [], duration_s: null,
+  width: 2, height: 2, approved: true, locked: true,
+  approved_at: '2026-11-09T00:00:00Z', locked_at: '2026-11-09T00:00:00Z',
 };
 const shots = [
   { id: 'shot-a', project_id: 'proj-1', name: '第一镜', revision: 1,
     spec: { story_beat: 'a', characters: ['Lin'] },
-    bindings: [{ asset_id: 'asset-lin', use_as: 'subject', role: 'CHAR_A',
-      frame_role: null, ordinal: 0, entity_id: 'Lin', filename: 'lin.png' }] },
+    bindings: [{ id: 'binding-lin', asset_id: 'asset-lin', use_as: 'subject',
+      role: 'CHAR_A', frame_role: null, ordinal: 0, entity_id: 'Lin',
+      filename: 'lin.png', kind: 'image', sha256: 'a'.repeat(64) }] },
 ];
 
 const baselineProfile = {
