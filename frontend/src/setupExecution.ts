@@ -55,9 +55,14 @@ export type InstallationAttemptView = {
 /** The answer of a queued installation: the attempt id is the only truth. */
 export type QueuedInstallation = {
   attempt_id: string;
-  status: 'QUEUED';
-  stage: 'QUEUED';
+  status: string;
+  stage: string;
+  /** The plan that owns the attempt (may differ from the requested plan). */
+  plan_id?: string;
   plan_hash: string;
+  requested_plan_id?: string;
+  requested_plan_hash?: string;
+  reused?: boolean;
 };
 
 /** The answer of a synchronous execution that is not an installation queue. */
@@ -177,19 +182,42 @@ export async function waitForInstallationAttempt(
   throw new Error('安装仍在进行中（INSTALL_STILL_RUNNING）：可以稍后重新打开页面继续查看进度；不会重复提交。');
 }
 
-/** The newest attempt of a plan that still owns it, if there is one. */
+/**
+ * The attempts that write this plan's physical target.
+ *
+ * The receipt belongs to the directory, not to the plan row that requested it
+ * first: two workspaces that install the same bytes into the same root share
+ * one attempt.  Asking only for this plan's own rows loses that receipt after
+ * a refresh or a cleared browser cache (J02).
+ */
+async function targetAttempts(planId: string): Promise<InstallationAttemptView[]> {
+  const rows = await api<Array<InstallationAttemptView>>(
+    `/comfyops/install-plans/${planId}/attempts?scope=target`,
+  );
+  return (rows ?? []).filter((row) => !!row?.attempt_id);
+}
+
+/** The newest attempt that still owns this plan's target, if there is one. */
 export async function findActiveAttempt(planId: string): Promise<InstallationAttemptView | null> {
-  const rows = await api<Array<InstallationAttemptView>>(`/comfyops/install-plans/${planId}/attempts`);
-  const active = [...(rows ?? [])].reverse().find((row) => row && !row.terminal);
-  return active ?? null;
+  const rows = await targetAttempts(planId);
+  return [...rows].reverse().find((row) => !row.terminal) ?? null;
+}
+
+/**
+ * The newest attempt of this target, including a finished one.
+ *
+ * A reopened page must be able to show "the installation already finished"
+ * instead of an empty installer, so completion is a valid re-attachment.
+ */
+export async function latestInstallationAttempt(planId: string): Promise<InstallationAttemptView | null> {
+  const rows = await targetAttempts(planId);
+  return rows.length ? rows[rows.length - 1] : null;
 }
 
 /** The server record of the attempts of a plan, if it can be read at all. */
 async function lookupAttempt(planId: string): Promise<InstallationAttemptView | null> {
   try {
-    const rows = await api<Array<InstallationAttemptView>>(`/comfyops/install-plans/${planId}/attempts`);
-    const active = [...(rows ?? [])].reverse().find((row) => row && !row.terminal);
-    return active ?? null;
+    return await latestInstallationAttempt(planId);
   } catch {
     return null;
   }
@@ -221,9 +249,13 @@ export async function approveAndExecuteSetupPlan(
       }
       return {
         attempt_id: view.attempt_id,
-        status: 'QUEUED',
-        stage: 'QUEUED',
+        status: view.status,
+        stage: view.stage,
+        plan_id: view.plan_id,
         plan_hash: view.plan_hash ?? plan.sha256,
+        requested_plan_id: plan.plan_id,
+        requested_plan_hash: plan.sha256,
+        reused: true,
       };
     }
     throw new Error('EXECUTION_UNCONFIRMED：请到专业设置对账，不能重投此计划。');
@@ -286,9 +318,13 @@ export async function approveAndExecuteSetupPlan(
       rememberInstallationAttempt(plan.plan_id, view.attempt_id);
       queued = {
         attempt_id: view.attempt_id,
-        status: 'QUEUED',
-        stage: 'QUEUED',
+        status: view.status,
+        stage: view.stage,
+        plan_id: view.plan_id,
         plan_hash: view.plan_hash ?? digest,
+        requested_plan_id: plan.plan_id,
+        requested_plan_hash: digest,
+        reused: true,
       };
     } else {
       // The outcome stays unknown: mark it and refuse a blind resubmission.

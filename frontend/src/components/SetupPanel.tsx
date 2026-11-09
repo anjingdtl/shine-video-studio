@@ -8,6 +8,7 @@ import {
   cancelInstallationAttempt,
   fetchInstallationAttempt,
   isQueuedInstallation,
+  latestInstallationAttempt,
   pauseInstallationAttempt,
   rememberInstallationAttempt,
   resumeInstallationAttempt,
@@ -379,16 +380,29 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
         kind: row.payload.kind ?? 'INSTALL', action: row.payload.operation?.action }));
     setPlans(next);
     // A reopened page re-attaches to the attempt it remembers instead of
-    // starting a second installation.
+    // starting a second installation.  When the browser has no memory (new
+    // tab, cleared cache) the server's target-scoped history is the receipt.
     for (const plan of next) {
       const stored = storedInstallationAttempt(plan.plan_id);
-      if (!stored) continue;
+      if (stored) {
+        try {
+          const view = await fetchInstallationAttempt(stored);
+          if (projectRef.current !== selected) return;
+          setAttempt(view);
+          continue;
+        } catch {
+          /* fall through to the server's own receipt */
+        }
+      }
       try {
-        const view = await fetchInstallationAttempt(stored);
+        const view = await latestInstallationAttempt(plan.plan_id);
         if (projectRef.current !== selected) return;
-        setAttempt(view);
+        if (view) {
+          rememberInstallationAttempt(plan.plan_id, view.attempt_id);
+          setAttempt(view);
+        }
       } catch {
-        rememberInstallationAttempt(plan.plan_id, stored);
+        /* a plan with no attempt is a plan that was never executed */
       }
     }
   }, [projectId]);
@@ -428,10 +442,10 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
     rememberInstallationAttempt(plan.plan_id, queued.attempt_id);
     setAttempt({
       attempt_id: queued.attempt_id,
-      plan_id: plan.plan_id,
+      plan_id: queued.plan_id ?? plan.plan_id,
       plan_hash: queued.plan_hash,
-      stage: 'QUEUED',
-      status: 'QUEUED',
+      stage: queued.stage,
+      status: queued.status,
       confirmed_bytes: 0,
       total_bytes: 0,
       speed_bps: 0,
@@ -722,10 +736,20 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       const ensureCurrent = () => {
         if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
       };
+      // Text readiness is a parallel branch, not a precondition of the H3
+      // download (J03).  Whatever is missing is reported once the environment
+      // is ready, and only the action that really calls a role asks for it.
+      let textNote = '';
       try {
         const llm = await api<{ status: string }>('/setup/llm-readiness');
         ensureCurrent();
-        if (llm.status !== 'READY') throw new Error('LLM_SETUP_REQUIRED：请先完成核心 LLM 配置、测试和文本工种路由。');
+        if (llm.status !== 'READY') {
+          textNote = '；文本模型还有角色未配置：不影响 H3 安装与已可拍镜头的开拍，生成大纲/分镜时会按实际角色提示配置';
+        }
+      } catch {
+        textNote = '；文本模型就绪状态暂时读不到：不影响 H3 安装';
+      }
+      try {
         setProgress('检查下载网络…');
         const network = await api<Connectivity>('/setup/connectivity');
         setConnectivity(network);
@@ -784,7 +808,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         ensureCurrent();
         await api('/setup/runtime/activate', withJson('POST', body));
         await onRefresh();
-        return '环境已配置并通过服务检测，可以回到制片。真实 H3 生成效果将在实际任务中验证。';
+        return '环境已配置并通过服务检测，可以回到制片。真实 H3 生成效果将在实际任务中验证' + textNote + '。';
       } finally {
         setProgress(''); setChecked(false);
         await Promise.allSettled([loadRuntime(), loadReadiness(), loadPlans()]);

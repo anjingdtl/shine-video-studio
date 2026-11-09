@@ -163,6 +163,17 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [librarySearchResults, setLibrarySearchResults] = useState<Array<{ asset: LibraryAsset; version: LibraryVersion }>>([]);
   const [librarySearchError, setLibrarySearchError] = useState('');
   const [librarySearchBusy, setLibrarySearchBusy] = useState(false);
+  /** The assignment receipt that can be turned into a per-shot adoption. */
+  const [adoptionReceipt, setAdoptionReceipt] = useState<null | {
+    requirementId: string; projectAssetId: string; libraryVersionId: string;
+    role: string; entity: string; key: string;
+  }>(null);
+  const [adoptionPreview, setAdoptionPreview] = useState<null | {
+    shot_count: number; blocked: Array<Record<string, any>>;
+    shots: Array<Record<string, any>>;
+  }>(null);
+  const [adoptionBusy, setAdoptionBusy] = useState(false);
+  const [adoptionReport, setAdoptionReport] = useState('');
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
   /** The stage the person has open; null means "follow the server". */
@@ -208,11 +219,86 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       setBindings((current) => ({ ...current, [requirement.requirement_id]: assignment.project_asset_id }));
       setStrategy((current) => ({ ...current, [requirement.requirement_id]: 'reuse_master' }));
       setLibrarySearchRequirement(null);
-      setOperationReport(`已把全局素材 V${result.version.ordinal} 复制为本项目独立素材身份；请继续确认需求清单。`);
+      setAdoptionReceipt({
+        requirementId: requirement.requirement_id,
+        projectAssetId: assignment.project_asset_id,
+        libraryVersionId: result.version.id,
+        role: requirement.family,
+        entity: requirement.entity_id,
+        key: crypto.randomUUID(),
+      });
+      setAdoptionPreview(null);
+      setAdoptionReport('');
+      setOperationReport(`已把全局素材 V${result.version.ordinal} 复制为本项目独立素材身份；请继续确认需求清单，或直接「用于这些镜头」。`);
       await load();
     } catch (error) {
       setLibrarySearchError(error instanceof Error ? error.message : String(error));
     } finally { setLibrarySearchBusy(false); }
+  }
+
+  async function previewAdoption() {
+    if (!adoptionReceipt) return;
+    setAdoptionBusy(true);
+    setAdoptionReport('');
+    try {
+      const preview = await api<{
+        shot_count: number; blocked: Array<Record<string, any>>;
+        shots: Array<Record<string, any>>;
+      }>('/asset-center/adoptions/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          library_version_id: adoptionReceipt.libraryVersionId,
+          project_asset_id: adoptionReceipt.projectAssetId,
+          role: adoptionReceipt.role,
+          entity_id: adoptionReceipt.entity,
+        }),
+      });
+      if (activeProject.current !== projectId) return;
+      setAdoptionPreview(preview);
+    } catch (error) {
+      setAdoptionReport(error instanceof Error ? error.message : String(error));
+    } finally { setAdoptionBusy(false); }
+  }
+
+  async function applyAdoption() {
+    if (!adoptionReceipt || !adoptionPreview) return;
+    const usable = adoptionPreview.shots.filter((row) => !row.conflict);
+    if (!usable.length) {
+      setAdoptionReport('这些镜头都不能直接采用：先处理冲突（正在拍摄的镜头先收束，已确认导演包先生成新版本）。');
+      return;
+    }
+    setAdoptionBusy(true);
+    try {
+      const result = await api<{
+        adopted_count: number; reused_count: number;
+        shots: Array<Record<string, any>>; replayed: boolean;
+      }>('/asset-center/adoptions', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          library_version_id: adoptionReceipt.libraryVersionId,
+          project_asset_id: adoptionReceipt.projectAssetId,
+          shot_ids: usable.map((row) => row.shot_id),
+          role: adoptionReceipt.role,
+          entity_id: adoptionReceipt.entity,
+          // The preview the person saw is the exact revision set they confirm.
+          expected_shot_revisions: Object.fromEntries(usable.map((row) => [row.shot_id, row.revision])),
+          idempotency_key: adoptionReceipt.key,
+          confirmed: true,
+        }),
+      });
+      if (activeProject.current !== projectId) return;
+      setAdoptionPreview(null);
+      setAdoptionReceipt({ ...adoptionReceipt, key: crypto.randomUUID() });
+      setAdoptionReport(
+        `已采用到 ${result.adopted_count} 个镜头（另有 ${result.reused_count} 个原本已绑定）。`
+        + (result.adopted_count ? '镜头版本已更新；当前导演包需要用最新镜头重新生成。' : ''),
+      );
+      await load();
+    } catch (error) {
+      setAdoptionReport(error instanceof Error ? error.message : String(error));
+    } finally { setAdoptionBusy(false); }
   }
 
   const load = useCallback(async () => {
@@ -733,6 +819,28 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
                   </button>
+                  {adoptionReceipt?.requirementId === requirement.requirement_id && <div className="material-stage-body material-adoption">
+                    <b>这次分配已回到当前作品：可用于这些镜头</b>
+                    <small>采用会只推进你确认的镜头 revision；历史导演包保留原快照，当前导演包需要重新生成。</small>
+                    <div className="material-button-row">
+                      <button type="button" className="text-button" disabled={adoptionBusy}
+                        onClick={() => void previewAdoption()}>用于这些镜头</button>
+                      {adoptionPreview && <button type="button" className="must-button" disabled={adoptionBusy}
+                        onClick={() => void applyAdoption()}>确认采用到 {adoptionPreview.shots.filter((row) => !row.conflict).length} 个镜头</button>}
+                    </div>
+                    {adoptionPreview && <ul className="material-adoption-shots">
+                      {adoptionPreview.shots.map((row) => <li key={row.shot_id}>
+                        <b>{row.shot_name}</b>
+                        <small>镜头 r{row.revision} · {row.already_bound ? '已绑定这个素材'
+                          : row.conflict === 'SHOT_PRODUCTION_IN_FLIGHT'
+                            ? `正在拍摄或结果未知（${row.production_status ?? '进行中'}）：先按原尝试收束`
+                            : row.conflict === 'SHOT_IN_CONFIRMED_PACKAGE'
+                              ? '属于当前已确认导演包：先生成并确认新导演包'
+                              : '将采用并生成新镜头版本'}</small>
+                      </li>)}
+                    </ul>}
+                    {adoptionReport && <p role="status" className="material-hint">{adoptionReport}</p>}
+                  </div>}
                   {librarySearchRequirement === requirement.requirement_id && <div className="material-stage-body">
                     {librarySearchError && <p role="alert" className="required-text">{librarySearchError}</p>}
                     {librarySearchBusy && <p className="material-hint">正在检查当前作品授权范围和全局正式版本…</p>}

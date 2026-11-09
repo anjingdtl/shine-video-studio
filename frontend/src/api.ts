@@ -33,6 +33,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   APPROVAL_REQUIRED_OR_REPLAYED: '这次确认已过期或已经用过。请重新加载安装列表后再确认一次。',
   STOP_WORKER_BEFORE_SERVICE_VALIDATION: '本机后台制作服务正在运行，重新验证需要先停止它（一键启动器窗口里可以停止后台服务）。首次安装验证不受影响。',
   LLM_NOT_CONFIGURED: '还没有给这个角色配置模型服务。请先到基础配置里配置文本模型。',
+  TEXT_ROLE_NOT_READY: '这一步需要的文本工种还没有配置好。只需配置它自己，其它工种不影响。',
   REMOTE_AGENT_CONSENT_REQUIRED: '当前模型在远端，需要你明确同意才会把剧本文字发出去。',
   LLM_CONTEXT_BUDGET_EXCEEDED: '这一段内容超过了模型的上下文预算。请拆短剧本或减少这一场的描述后重试。',
   MATERIAL_SCENE_PREPARATION_INVALID: '这一场的拆解结果不符合约定格式，请让模型按约定重答这一场。',

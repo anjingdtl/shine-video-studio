@@ -166,14 +166,22 @@ export function RealProductionWizard({
     }
     setStage('project', { status: 'ok', note: '当前作品已就绪。' });
 
-    setStage('llm', { status: 'running', note: '检查文本模型、连接检测与全部文本工种路由…' });
-    const llm = await api<{ status: string }>('/setup/llm-readiness');
-    if (llm.status !== 'READY') {
-      setLlmRequired(true);
-      stopWith('llm', '请先完成核心 LLM 配置、连接测试及文本工种指定（LLM_SETUP_REQUIRED），再点击重新检查继续。');
-      return;
+    // Text models and the H3 environment are two independent preparations.
+    // A missing text role must never hold the download, the weight check or a
+    // single real shot hostage (J03); the role is checked at the action that
+    // actually calls it (outline, storyboard, creative script).
+    setStage('llm', { status: 'running', note: '检查文本模型与文本工种路由（与 H3 环境并行，不阻断安装）…' });
+    try {
+      const llm = await api<{ status: string }>('/setup/llm-readiness');
+      if (llm.status === 'READY') {
+        setStage('llm', { status: 'ok', note: '核心 LLM 配置与连接检查通过；文本生成质量独立验收。' });
+      } else {
+        setLlmRequired(true);
+        setStage('llm', { status: 'warn', note: '文本模型还有角色未配置：不影响本机 H3 安装与已可拍镜头的开拍；生成大纲或分镜时会按实际使用的那一个角色提示配置。' });
+      }
+    } catch {
+      setStage('llm', { status: 'warn', note: '文本模型就绪状态暂时读不到：不影响本机 H3 安装；需要生成文本时再到基础配置检查。' });
     }
-    setStage('llm', { status: 'ok', note: '核心 LLM 配置与连接检查通过；文本生成质量独立验收。' });
 
     // Read durable state before creating any further intent. Never replay ambiguous work.
     const plans = await api<Array<{ id: string; status: string }>>(`/comfyops/install-plans?project_id=${projectId}`);

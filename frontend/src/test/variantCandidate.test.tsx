@@ -18,8 +18,15 @@ import { SYSTEM_STATUS, StudioStub, jsonResponse, productionMode } from './studi
 
 let stub: StudioStub;
 
+const subject = {
+  id: 'asset-lin', project_id: 'proj-1', filename: 'lin.png', kind: 'image', role: 'character',
+  entity_id: 'Lin', approved: true, locked: true, sha256: 'a'.repeat(64),
+};
 const shots = [
-  { id: 'shot-a', project_id: 'proj-1', name: '第一镜', revision: 1, spec: { story_beat: 'a' }, bindings: [] },
+  { id: 'shot-a', project_id: 'proj-1', name: '第一镜', revision: 1,
+    spec: { story_beat: 'a', characters: ['Lin'] },
+    bindings: [{ asset_id: 'asset-lin', use_as: 'subject', role: 'CHAR_A',
+      frame_role: null, ordinal: 0, entity_id: 'Lin', filename: 'lin.png' }] },
 ];
 
 const baselineProfile = {
@@ -89,7 +96,7 @@ function renderPanel(onMessage: (message: string, kind?: 'success' | 'error') =>
     <ProductionSeriesPanel
       projectId="proj-1"
       shots={shots}
-      assets={[]}
+      assets={[subject]}
       jobs={[]}
       workflowProfiles={[baselineProfile, candidateProfile]}
       system={readySystem}

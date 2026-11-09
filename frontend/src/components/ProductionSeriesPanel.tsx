@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
+import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
@@ -129,45 +130,45 @@ function declaredSlots(profile: WorkflowProfile): { subject: number; picture: nu
   return slots;
 }
 
-/** 为一个镜头补齐方案声明的参考槽位：已绑定保留；缺的场景图/音色按已确认素材的
- *  固定顺序补足；人物主体缺位不自动编造（那是分镜/对照的职责），如实报缺。 */
-function autoAdaptBindings(shot: Shot, profile: WorkflowProfile, assets: Asset[]): { bindings: AutoBinding[]; added: string[]; missing: string[] } {
-  const slots = declaredSlots(profile);
-  // 无对白的镜头不自动绑人声参考：音频参考只服务台词，而且真声样本会被 H3 当作
-  // 语音线索、无视「不要人声」的合同（2026-11-04 实测出现外语呢喃）。提交层会
-  // 剪掉未用的音频装载节点，方案声明 audio 也不再强制。
-  if (!(shot.spec.dialogue ?? []).length) slots.audio = 0;
-  const current = shot.bindings
-    .map((b, index) => ({ asset_id: b.asset_id, use_as: b.use_as, role: b.role ?? null, frame_role: b.frame_role ?? null, ordinal: index }));
-  const used = new Set(current.map((b) => b.asset_id));
-  const count = (family: string) => current.filter((b) => b.use_as === family).length;
-  const added: string[] = [];
+/** 一个镜头要开拍，真正缺的是什么。
+ *
+ * 方案声明的槽位是**容量**，不是义务：这些镜头只要已经绑定人物主体，空的画面
+ * 槽位由 H3 自行生成，不再填写无关素材充数。人物主体缺位仍然具名拦住（那是
+ * 身份漂移），没有任何参考的镜头也不能被静默改成 T2VA 蒙混过去。音色参考只在
+ * 这一镜真的有对白且用户已绑定音频时使用，不自动补。
+ */
+function shotReferenceReadiness(shot: Shot, profile: WorkflowProfile): {
+  bindings: AutoBinding[]; missing: string[]; notices: string[];
+} {
+  const bindings = shot.bindings.map((binding, index) => ({
+    asset_id: binding.asset_id,
+    use_as: binding.use_as,
+    role: binding.role ?? null,
+    frame_role: binding.frame_role ?? null,
+    ordinal: index,
+  }));
+  const boundSubjectNames = new Set(
+    shot.bindings.filter((row) => row.use_as === 'subject').map((row) => row.entity_id ?? ''),
+  );
   const missing: string[] = [];
-  const candidates = (family: 'picture' | 'audio') => assets
-    .filter((a) => a.locked && !used.has(a.id) && (family === 'picture'
-      ? a.kind === 'image' && (a.role === 'scene' || a.role === 'prop' || !a.role || a.role === 'character')
-      : a.kind === 'audio'))
-    .sort((x, y) => (x.role === (family === 'picture' ? 'scene' : 'voice') ? -1 : 0) - (y.role === (family === 'picture' ? 'scene' : 'voice') ? -1 : 0) || x.filename.localeCompare(y.filename));
-  for (const family of ['picture', 'audio'] as const) {
-    const pool = candidates(family);
-    let have = count(family);
-    for (let i = 0; have < slots[family] && i < pool.length; i += 1) {
-      const candidate = pool[i];
-      current.push({ asset_id: candidate.id, use_as: family, role: candidate.role ?? null, frame_role: null, ordinal: current.length });
-      used.add(candidate.id);
-      have += 1;
-      added.push(`${shot.name}：${candidate.filename}（${family === 'picture' ? '画面参考' : '音色参考'}）`);
-    }
-    for (; have < slots[family]; have += 1) missing.push(family === 'picture' ? '场景/画面参考图' : '音色参考音频');
+  const notices: string[] = [];
+  const characters = [...new Set(shot.spec.characters ?? [])];
+  for (const name of characters) {
+    if (!boundSubjectNames.has(name)) missing.push(`${shot.name} 的人物主体「${name}」`);
   }
-  const subjectShort = Math.max(0, slots.subject - count('subject'));
-  for (let i = 0; i < subjectShort; i += 1) missing.push(`${shot.name} 的人物主体`);
-  return { bindings: current, added, missing };
+  const hasAnyReference = bindings.some((row) => row.use_as === 'subject' || row.use_as === 'picture');
+  if (!hasAnyReference) {
+    missing.push(`${shot.name} 没有任何参考（至少需要一张人物或画面参考）`);
+  }
+  if (declaredSlots(profile).picture > bindings.filter((row) => row.use_as === 'picture').length && hasAnyReference) {
+    notices.push(`${shot.name} 的画面参考槽位为空，将由 H3 自行生成`);
+  }
+  return { bindings, missing, notices };
 }
 
 export default function ProductionSeriesPanel({
-  projectId, shots, assets, jobs, workflowProfiles, system, busy, reviewWidth, reviewHeight,
-  onStarted, onMessage, onSaveBindings, onModeAction, onGoSetup, demoSelected = false, onSelectReal,
+  projectId, shots, jobs, workflowProfiles, system, busy, reviewWidth, reviewHeight,
+  onStarted, onMessage, onModeAction, onGoSetup, demoSelected = false, onSelectReal,
 }: Props) {
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -237,8 +238,16 @@ export default function ProductionSeriesPanel({
   // Only one validated Ref2VA profile exists: preselect it instead of making
   // the user pick from one option; multiple options keep the manual choice.
   useEffect(() => {
-    if (ref2vaProfiles.length === 1 && !profileId) setProfileId(ref2vaProfiles[0].id);
-  }, [ref2vaProfiles, profileId]);
+    if (!profileId) {
+      const remembered = storedProductionProfile(projectId);
+      if (remembered && ref2vaProfiles.some((profile) => profile.id === remembered)) {
+        setProfileId(remembered);
+        setProfileChosenByUser(true);
+        return;
+      }
+      if (ref2vaProfiles.length === 1) setProfileId(ref2vaProfiles[0].id);
+    }
+  }, [ref2vaProfiles, profileId, projectId]);
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
   const selectedGate = profileId ? gates[profileId] : undefined;
   /** 用户自己选定的那套方案（一键开拍会用它）。 */
@@ -378,7 +387,8 @@ export default function ProductionSeriesPanel({
     setSelected(shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id));
   }
 
-  async function start(options?: { shotIds?: string[]; profileOverride?: string }) {
+  async function start(options?: { shotIds?: string[]; profileOverride?: string;
+    bindings?: Record<string, Array<Record<string, unknown>>> }) {
     const effectiveProfile = options?.profileOverride ?? profileId;
     const effectiveSelected = options?.shotIds ?? selected;
     if (demoSelected || system?.production_mode?.mode !== 'READY' || working || busy) return;
@@ -437,6 +447,12 @@ export default function ProductionSeriesPanel({
       if (editIntentId) {
         body.edit_intent_artifact_id = editIntentId;
       }
+      if (options?.bindings && Object.keys(options.bindings).length > 0) {
+        // The references the person saw are part of the start request: the
+        // server applies them in the same transaction, so a refusal leaves no
+        // half-written bindings (J08).
+        body.bindings = options.bindings;
+      }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
       const usedProfile = ref2vaProfiles.find((row) => row.id === effectiveProfile);
@@ -450,17 +466,17 @@ export default function ProductionSeriesPanel({
     }
   }
 
-  /** 一键开拍：自动选方案 → 按方案声明的槽位自动补齐每镜参考 → 自动勾选全部可制作镜头 → 提交。
-   *  用户只点一次；每步自动做了什么都会说明，缺什么就明说，绝不静默跳过。 */
+  /** 一键开拍：用用户选定的方案，先做一份不写库的计划，再一次性提交。
+   *
+   * 方案声明的槽位提供容量；引用义务只来自这一镜的人物与有效请求。空的画面槽
+   * 位不再是「缺素材」，已绑定人物主体的镜头可以直接开拍。全部镜头先一起判定，
+   * 有任何一镜缺关键参考就整批不提交，不会先写一串绑定再拒绝。 */
   async function oneClickStart() {
     if (working || busy) return;
     if (demoSelected) { onMessage('当前是演示状态：点上方「切回真实制作」后再一键开拍。', 'error'); return; }
     if (mode === null) { onMessage('正在确认本机制作环境（约需几秒），稍等两三秒再点一次。', 'error'); return; }
     if (mode !== 'READY') { onMessage(system?.production_mode?.detail ?? '制作环境未就绪：请先在顶部完成「启用真实制作」。', 'error'); return; }
     if (activeSeries) { onMessage('已有未结束的生产序列：等它完成，或先在下方处理该序列。', 'error'); return; }
-    // 1) 选方案：**用哪一套由用户决定**。用户在高级设置里自己选过方案，
-    //    一键开拍就用他选的那一套，任何情况下都不替换；只有用户还没选过时，
-    //    才按他选择的拍摄质量档推荐一套。
     const explicitProfile = ref2vaProfiles.find((p) => p.id === profileId);
     const userChoseProfile = profileChosenByUser && !!explicitProfile;
     const tierPool = ref2vaProfiles.filter((p) => tierOfProfile(p.name) === quality);
@@ -473,7 +489,7 @@ export default function ProductionSeriesPanel({
       const sized = tierPool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
       const pool = sized.length ? sized : tierPool;
       target = pool[0]?.id ?? '';
-      if (target) setProfileId(target);
+      if (target) { setProfileId(target); rememberProductionProfile(projectId, target); }
     }
     const profile = ref2vaProfiles.find((p) => p.id === target);
     if (!profile) { onMessage('本机还没有可用的生成方案：先点下方「为本作品一键登记生成方案」，或去基础配置完成安装。', 'error'); return; }
@@ -482,35 +498,26 @@ export default function ProductionSeriesPanel({
       onMessage(`不能选「${profile.name}」：${gateReason(gate)}`, 'error');
       return;
     }
-    // 2) 自动勾选全部可制作镜头。
     const shotIds = shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id);
     if (shotIds.length === 0) { onMessage('还没有可制作的镜头：先在上方完成并应用分镜。', 'error'); return; }
+
+    const plans = shots
+      .filter((shot) => shotIds.includes(shot.id))
+      .map((shot) => ({ shot, readiness: shotReferenceReadiness(shot, profile) }));
+    const missing = plans.flatMap((row) => row.readiness.missing);
+    if (missing.length > 0) {
+      onMessage(`还不能开拍：${[...new Set(missing)].join('、')}。到「镜头与素材」页补齐对应人物主体后再点一次；没有任何参考的镜头不会被偷偷改成无参考模式。`, 'error');
+      return;
+    }
+    const notices = plans.flatMap((row) => row.readiness.notices);
+    const bindings: Record<string, Array<Record<string, unknown>>> = {};
+    for (const row of plans) {
+      if (row.readiness.bindings.length > 0) bindings[row.shot.id] = row.readiness.bindings;
+    }
     setSelected(shotIds);
-    // 3) 按方案槽位自动补齐参考绑定（场景图/音色等），人物主体缺位如实报缺。
-    const adapted: string[] = [];
-    const missingAll: string[] = [];
-    setWorking(true);
-    try {
-      for (const shot of shots.filter((row) => shotIds.includes(row.id))) {
-        const plan = autoAdaptBindings(shot, profile, assets);
-        adapted.push(...plan.added);
-        missingAll.push(...plan.missing);
-        if (plan.added.length > 0) await onSaveBindings(shot.id, plan.bindings);
-      }
-    } catch (error) {
-      setWorking(false);
-      onMessage(`自动补齐参考时失败：${String(error)}。可在下方高级设置里手工调整后重试。`, 'error');
-      return;
-    }
-    if (missingAll.length > 0) {
-      setWorking(false);
-      onMessage(`自动适配还缺：${[...new Set(missingAll)].join('、')}。到「镜头与素材」页的素材准备分区上传并确认对应素材后，再点一次一键开拍即可。`, 'error');
-      return;
-    }
-    // 4) 提交生产序列（沿用 start 的全部校验）。
-    await start({ shotIds, profileOverride: target });
-    if (adapted.length > 0) {
-      onMessage(`一键开拍已自动绑定 ${adapted.length} 项参考（${adapted.slice(0, 3).join('；')}${adapted.length > 3 ? '…' : ''}），方案「${profile.name}」。`, 'success');
+    await start({ shotIds, profileOverride: target, bindings });
+    if (notices.length > 0) {
+      onMessage(`已按方案「${profile.name}」开拍；${[...new Set(notices)].slice(0, 2).join('；')}。`, 'success');
     }
   }
 

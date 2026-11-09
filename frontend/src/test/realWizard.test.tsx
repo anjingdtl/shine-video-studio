@@ -128,15 +128,16 @@ it('关闭或切换作品后不继续发起后续副作用', async () => {
   expect(callbacks.onRefresh).not.toHaveBeenCalled();
 });
 
-it('核心 LLM 未配置时在下载前阻断，并提供同一配置入口', async () => {
+it('核心 LLM 未配置时仍安装 H3，并把文本步骤单独标为待配置', async () => {
+  // Text readiness and the H3 environment are independent preparations: the
+  // missing role is reported and configured at the text action, not held in
+  // front of the download (J03).
   route('GET', 'setup/llm-readiness', { status: 'BLOCKED', roles: [{ role: 'director', code: 'LLM_ROUTE_REQUIRED' }] });
   show();
-  await waitFor(() => expect(screen.getByTestId('wizard-result')).toHaveTextContent('LLM_SETUP_REQUIRED'));
-  expect(screen.getByTestId('llm-setup')).toBeInTheDocument();
-  expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
-  route('GET', 'setup/llm-readiness', { status: 'READY', roles: [] });
-  await userEvent.click(screen.getByRole('button', { name: '重新检查' }));
   await screen.findByText(/真实制作已准备好/);
+  expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(1);
+  expect(screen.getByTestId('wizard-stages')).toHaveTextContent(/文本模型还有角色未配置/);
+  expect(screen.getByTestId('llm-setup')).toBeInTheDocument();
 });
 it('识别并确认复用已安装 ComfyUI 与 H3，完成准备时不重复下载', async () => {
   route('GET', 'setup/catalog', { ...CATALOG, components: [{ component_id: 'minimax-h3-diffusion', files: 1 }] });

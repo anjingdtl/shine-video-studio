@@ -6,10 +6,11 @@ import {
 import {
   API, ApiError, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
-  listDirectorPackages, listEpisodePlans, listProductionRuns, materializeEpisodePlan,
+  listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
   type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness, type ProductionRun,
   type RunEvent, type WorkflowProfile,
 } from '../api';
+import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { EpisodePostEditor } from './EpisodePostEditor';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
@@ -145,34 +146,41 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
 
   const load = useCallback(async () => {
     try {
-      const [journeyRow, planRows, packageRows, runRows] = await Promise.all([
+      const [journeyRow, planRows, packageRows] = await Promise.all([
         // The panel projects the exact package it is showing: progress,
         // playback and delivery all read the same scope.
         getJourney(projectId, { packageId: selectedPackageId || undefined }),
         listEpisodePlans(projectId),
         listDirectorPackages(projectId),
-        listProductionRuns(projectId),
       ]);
       if (!mounted.current) return;
       setJourney(journeyRow);
       setPlans(planRows);
       setPackages(packageRows);
-      const newest = runRows[0] ?? null;
-      if (newest) {
-        const detail = await getProductionRun(newest.id);
+      // The run comes from the journey's resolved scope, never from "the
+      // newest run of this project".  A package that was never started shows
+      // its待开拍 state instead of borrowing another package's controls (J11).
+      const scopedRunId = journeyRow.scope?.run_id ?? journeyRow.run?.id ?? null;
+      if (scopedRunId) {
+        const detail = await getProductionRun(scopedRunId);
         if (!mounted.current) return;
         setRun(detail);
-        setEvents(await getRunEvents(newest.id));
+        setEvents(await getRunEvents(scopedRunId));
       } else {
         setRun(null);
         setEvents([]);
       }
-      const packageRow = (selectedPackageId
-        ? packageRows.find((row) => row.id === selectedPackageId)
+      const scopedPackageId = journeyRow.scope?.package_id ?? selectedPackageId;
+      const packageRow = (scopedPackageId
+        ? packageRows.find((row) => row.id === scopedPackageId)
         : null) ?? packageRows[0] ?? null;
       if (packageRow) {
         setReadiness(await getPackageReadiness(packageRow.id));
-        if (!profileId) setProfileId(packageRow.binding?.workflow_profile_id ?? '');
+        if (!profileId) {
+          const remembered = storedProductionProfile(projectId);
+          const candidate = remembered || packageRow.binding?.workflow_profile_id || '';
+          if (candidate) setProfileId(candidate);
+        }
       } else {
         setReadiness(null);
       }
@@ -384,7 +392,10 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             </select>
           </label>}
           <label>本机生成方案
-            <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+            <select value={profileId} onChange={(event) => {
+              setProfileId(event.target.value);
+              rememberProductionProfile(projectId, event.target.value);
+            }}>
               <option value="">请选择…</option>
               {workflowProfiles.map((profile) => {
                 const gate = gates[profile.id];

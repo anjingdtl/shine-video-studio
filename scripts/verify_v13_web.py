@@ -695,7 +695,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # crew panel.
         page.goto(f"{ui_base}#v/setup", wait_until="networkidle")
         settings = page.locator("#settings")
-        settings.get_by_placeholder("配置名称", exact=True).fill("UI bounded text fixture")
+        settings.get_by_label("模型配置名称", exact=True).fill("UI bounded text fixture")
         settings.locator(".provider-form select").first.select_option("openai_compatible")
         settings.get_by_placeholder("Base URL", exact=True).fill("http://127.0.0.1:9999/v1")
         settings.get_by_placeholder("Model ID", exact=True).fill("UI_ONLY_NO_MODEL_CALL")

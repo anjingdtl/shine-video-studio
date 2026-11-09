@@ -36,6 +36,13 @@ export function useStudio() {
   const [preview, setPreview] = useState<PromptPreview | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /** One request key per pending single-shot submission.
+   *
+   * A retry after a lost response, a timeout or a double click is the same
+   * request, not a second take.  The key stays until the server answers with
+   * a job, so the server's idempotency receipt can hand the first one back
+   * instead of queueing the shot twice (J10). */
+  const pendingJobKeys = useRef<Map<string, string>>(new Map());
   /** Bumped by the global refresh button; panels that keep their own data
    *  (delivery) listen to it so the topbar refresh covers their data too. */
   const [dataEpoch, setDataEpoch] = useState(0);
@@ -370,15 +377,37 @@ export function useStudio() {
       }
       if (!window.confirm(`确认用真实模式生成？\n镜头：${shot.name}\n方案：${profile.name}\n会占用本机显卡，耗时较长。`)) return;
     }
+    const requestSignature = JSON.stringify({
+      project: projectId, shot: shot.id, shot_revision: shot.revision,
+      provider: queueProvider, profile: profile?.id ?? null,
+      mode: profile?.mode ?? null, mock: mockScenario,
+      scope: basic ? 'basic' : 'full',
+      resolution: basic ? [width, height] : null,
+    });
+    let requestKey = pendingJobKeys.current.get(requestSignature);
+    if (!requestKey) {
+      requestKey = crypto.randomUUID();
+      pendingJobKeys.current.set(requestSignature, requestKey);
+    }
     await withBusy(async () => {
-      await api(`/projects/${projectId}/jobs`, json('POST', {
-        shot_id: shot.id, mock_scenario: mockScenario, provider: queueProvider,
-        workflow_profile_id: profile?.id ?? null,
-        generation_mode: profile?.mode ?? null,
-        self_review_scope: basic ? 'basic' : 'full',
-        basic_review_resolution: basic ? { width, height } : null,
-      }));
-      await loadProject(projectId); report('任务已加入本机队列，后台制作服务会自动领取，稍后可在下方查看进度。');
+      try {
+        await api(`/projects/${projectId}/jobs`, json('POST', {
+          shot_id: shot.id, mock_scenario: mockScenario, provider: queueProvider,
+          workflow_profile_id: profile?.id ?? null,
+          generation_mode: profile?.mode ?? null,
+          self_review_scope: basic ? 'basic' : 'full',
+          basic_review_resolution: basic ? { width, height } : null,
+          // A retried click reuses this key; a genuinely new take after a shot
+          // revision gets a new signature and therefore a new identity.
+          request_key: requestKey,
+        }));
+        pendingJobKeys.current.delete(requestSignature);
+        await loadProject(projectId); report('任务已加入本机队列，后台制作服务会自动领取，稍后可在下方查看进度。');
+      } catch (error) {
+        // A lost response may still have queued the job.  The key is kept so
+        // the next click re-attaches instead of producing a duplicate take.
+        throw error;
+      }
     });
   }
 

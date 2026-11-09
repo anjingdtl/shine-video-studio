@@ -7,7 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
-import { StudioStub, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
+import { EMPTY_JOURNEY, StudioStub, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
@@ -19,6 +19,12 @@ afterEach(() => {
   stub.restore();
   vi.useRealTimers();
 });
+
+function scopeJourney(runId: string, shotCount = 4) {
+  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey(\?|$)/,
+    respond: () => jsonResponse({ ...EMPTY_JOURNEY,
+      scope: { package_id: 'package-1', run_id: runId, shot_count: shotCount } }) });
+}
 
 const CONFIRMED_PLAN = {
   id: 'plan-1', project_id: 'proj-1', version: 2, status: 'CONFIRMED', target_seconds: 60,
@@ -102,6 +108,7 @@ describe('导演包阶段', () => {
 
 describe('全片生产阶段', () => {
   it('按集展示真实进度、批次与阻塞，并保留播放已交付那一集', async () => {
+    scopeJourney('run-1');
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
       respond: () => jsonResponse([{ id: 'run-1', status: 'RUNNING' }]) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1$/,
@@ -157,6 +164,7 @@ describe('全片生产阶段', () => {
   });
 
   it('待人工处理时，用户可从界面尝试安全续跑现有批次，不会新建 Run', async () => {
+    scopeJourney('run-1', 6);
     let status = 'NEEDS_REVIEW';
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
       respond: () => jsonResponse([{ id: 'run-1', status }]) });
