@@ -135,17 +135,44 @@ foreach ($document in @('START_HERE.md', 'TESTER_CHECKLIST.md')) {
 
 # --- 4. Integrity manifest ------------------------------------------------
 function New-FileManifest([string]$Root) {
-    $files = @()
+    # The root can be handed to us in its 8.3 short form (C:\Users\ADMINI~1\...)
+    # while the enumerated children report long names.  Subtracting one string
+    # from the other then cuts the prefix at the wrong offset (J01).  The only
+    # reliable relative path is the one built while walking: every level knows
+    # its own child name, so the manifest never depends on how the root was
+    # spelled.
+    $rootInfo = [IO.DirectoryInfo]::new((Resolve-Path -LiteralPath $Root).ProviderPath)
+    if (-not $rootInfo.Exists) { throw "Manifest root does not exist: $Root" }
+    $entries = New-Object System.Collections.Generic.List[object]
     $total = [long]0
-    $rootFull = (Resolve-Path $Root).Path
-    foreach ($item in (Get-ChildItem -LiteralPath $rootFull -Recurse -File | Sort-Object FullName)) {
-        $relative = $item.FullName.Substring($rootFull.Length).TrimStart('\').Replace('\', '/')
-        $files += [ordered]@{
-            path = $relative
-            bytes = $item.Length
-            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLower()
+    $pending = New-Object System.Collections.Generic.Stack[object]
+    $pending.Push(@($rootInfo, ''))
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $directory = $current[0]
+        $prefix = [string]$current[1]
+        foreach ($file in $directory.GetFiles()) {
+            $relative = if ($prefix) { "$prefix/$($file.Name)" } else { $file.Name }
+            $entries.Add([ordered]@{
+                path = $relative
+                bytes = $file.Length
+                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLower()
+            })
+            $total += $file.Length
         }
-        $total += $item.Length
+        foreach ($child in $directory.GetDirectories()) {
+            $relative = if ($prefix) { "$prefix/$($child.Name)" } else { $child.Name }
+            $pending.Push(@($child, $relative))
+        }
+    }
+    $files = @($entries | Sort-Object { $_.path })
+    foreach ($entry in $files) {
+        # A manifest may only describe files inside the package root: an
+        # absolute or escaping path would make the verifier read someone
+        # else's bytes and still call the archive intact.
+        if ([IO.Path]::IsPathRooted($entry.path) -or $entry.path -match '(^|/)\.\.(/|$)' -or $entry.path.Contains('\')) {
+            throw "Manifest path escapes the package root: $($entry.path)"
+        }
     }
     return [ordered]@{ file_count = $files.Count; total_bytes = $total; files = $files }
 }
@@ -393,9 +420,18 @@ if ($Verify) {
         throw "Extracted file count $actual does not match manifest $($expandedManifest.file_count) + 1"
     }
     $mismatch = @()
+    $expandedRoot = ([IO.DirectoryInfo]::new($expanded)).FullName
     foreach ($entry in $expandedManifest.files) {
-        $target = Join-Path $expanded $entry.path
-        $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLower()
+        $path = [string]$entry.path
+        if ([IO.Path]::IsPathRooted($path) -or $path -match '(^|/)\.\.(/|$)') {
+            throw "Manifest entry escapes the extracted root: $path"
+        }
+        $target = Join-Path $expandedRoot $path
+        $resolved = [IO.Path]::GetFullPath($target)
+        if (-not $resolved.StartsWith($expandedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Manifest entry resolves outside the extracted root: $path"
+        }
+        $hash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash.ToLower()
         if ($hash -ne $entry.sha256) { $mismatch += $entry.path }
     }
     if ($mismatch.Count -gt 0) {
