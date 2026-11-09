@@ -180,6 +180,20 @@ class AnthropicMessagesProvider:
             }) from None
         if response.status_code in {401, 403}:
             raise LLMAuthError("Anthropic rejected the API key", details={"status": response.status_code})
+        if response.status_code == 404:
+            return {
+                "available": True,
+                "reachable": True,
+                "auth_ok": None,
+                "catalog_ok": False,
+                "catalog_supported": False,
+                "catalog_error_code": "LLM_CATALOG_UNAVAILABLE",
+                "models": [],
+                "model_listed": None,
+                "json_mode": "prompt-enforced",
+                "vision": None,
+                "tools": None,
+            }
         if response.status_code >= 400:
             raise LLMCatalogError("Anthropic capability probe failed", details={
                 "status": response.status_code, "reachable": True, "auth_ok": True, "catalog_ok": False,
@@ -205,6 +219,7 @@ class AnthropicMessagesProvider:
             "reachable": True,
             "auth_ok": True,
             "catalog_ok": True,
+            "catalog_supported": True,
             "models": models,
             # Only an exact match confirms the configured model.
             "model_listed": bool(models) and self.config.model in models,

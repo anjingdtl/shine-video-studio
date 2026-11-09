@@ -806,7 +806,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         <div className="section-icon"><Sparkles size={17} /></div>
       </div>
 
-      <details className="advanced-fold"><summary>0 · 核心 LLM 配置（新机必备）</summary><LLMSetupPanel onChanged={onRefresh} /></details>
+      <LLMSetupPanel onChanged={onRefresh} />
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
       <div className="settings-block">
@@ -817,7 +817,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             <div className="env-summary-item"><b>基础环境</b><span>{env?.blockers.length ? '有阻断项（见下方提示）' : '满足制作要求'}</span></div>
             <div className="env-summary-item"><b>安装空间</b><span>{storage ? `${storage.root} · 可用 ${storage.free_gb} GB` : '读取中'}</span></div>
             <div className="env-summary-item"><b>生成服务</b><span>{runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
-            <div className="env-summary-item"><b>AI 助手</b><span>在「模型与系统」单独配置；配置 LLM 不代表拥有画面/语音检查能力</span></div>
+            <div className="env-summary-item"><b>文本模型</b><span>在本页上方配置；不需要先安装 H3</span></div>
             <div className="env-summary-item"><b>语音能力</b><span>{voiceSummary(voice)}</span></div>
             <div className="env-summary-item"><b>真实出片</b><span>只能由真实生产证据更新；Mock/演示不改变它</span></div>
           </div>

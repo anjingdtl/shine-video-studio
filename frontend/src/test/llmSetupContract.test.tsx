@@ -40,7 +40,10 @@ describe('LLM 写入与状态刷新是两个结果', () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse({ detail: 'boom' }, 503) });
 
     render(<LLMSetupPanel />);
-    await user.click(await screen.findByRole('button', { name: /添加/ }));
+    await user.type(await screen.findByLabelText('模型配置名称'), '本地模型');
+    await user.type(screen.getByLabelText('接口地址'), 'http://127.0.0.1:11434/v1');
+    await user.type(screen.getByLabelText('Model ID'), 'qwen-local');
+    await user.click(screen.getByRole('button', { name: '添加' }));
 
     const alert = await screen.findByRole('alert');
     await waitFor(() => {
@@ -54,7 +57,10 @@ describe('LLM 写入与状态刷新是两个结果', () => {
     stub.add({ method: 'POST', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse({ detail: '名称已存在' }, 409) });
 
     render(<LLMSetupPanel />);
-    await user.click(await screen.findByRole('button', { name: /添加/ }));
+    await user.type(await screen.findByLabelText('模型配置名称'), '本地模型');
+    await user.type(screen.getByLabelText('接口地址'), 'http://127.0.0.1:11434/v1');
+    await user.type(screen.getByLabelText('Model ID'), 'qwen-local');
+    await user.click(screen.getByRole('button', { name: '添加' }));
 
     const alert = await screen.findByRole('alert');
     await waitFor(() => {
@@ -69,12 +75,15 @@ describe('密钥草稿只在服务端确认后清空', () => {
     const user = userEvent.setup();
     render(<LLMConfiguration profiles={[PROFILE]} routes={[]} busy={false}
       onCreateProfile={vi.fn()} onUpdateProfile={vi.fn()} onTestProfile={vi.fn()}
-      onSetKey={() => Promise.resolve(false)} onDeleteProfile={vi.fn()} onRoute={vi.fn()} />);
+      onDuplicateProfile={vi.fn()} onTestGeneration={vi.fn()}
+      onSetKey={() => Promise.resolve(false)} onDeleteProfile={vi.fn()} />);
 
-    await user.type(screen.getByPlaceholderText('更新密钥'), 'sk-new');
-    await user.click(screen.getByRole('button', { name: '保存密钥' }));
+    await user.click(screen.getByText('更新密钥'));
+    const keyField = screen.getByLabelText('更新密钥 本地文本模型');
+    await user.type(keyField, 'sk-new');
+    await user.click(screen.getByRole('button', { name: '保存新密钥' }));
     await waitFor(() => {
-      expect((screen.getByPlaceholderText('更新密钥') as HTMLInputElement).value).toBe('sk-new');
+      expect((screen.getByLabelText('更新密钥 本地文本模型') as HTMLInputElement).value).toBe('sk-new');
     });
   });
 
@@ -82,39 +91,57 @@ describe('密钥草稿只在服务端确认后清空', () => {
     const user = userEvent.setup();
     render(<LLMConfiguration profiles={[PROFILE]} routes={[]} busy={false}
       onCreateProfile={vi.fn()} onUpdateProfile={vi.fn()} onTestProfile={vi.fn()}
-      onSetKey={() => Promise.resolve(true)} onDeleteProfile={vi.fn()} onRoute={vi.fn()} />);
+      onDuplicateProfile={vi.fn()} onTestGeneration={vi.fn()}
+      onSetKey={() => Promise.resolve(true)} onDeleteProfile={vi.fn()} />);
 
-    await user.type(screen.getByPlaceholderText('更新密钥'), 'sk-new');
-    await user.click(screen.getByRole('button', { name: '保存密钥' }));
+    await user.click(screen.getByText('更新密钥'));
+    const keyField = screen.getByLabelText('更新密钥 本地文本模型');
+    await user.type(keyField, 'sk-new');
+    await user.click(screen.getByRole('button', { name: '保存新密钥' }));
     await waitFor(() => {
-      expect((screen.getByPlaceholderText('更新密钥') as HTMLInputElement).value).toBe('');
+      expect((screen.getByLabelText('更新密钥 本地文本模型') as HTMLInputElement).value).toBe('');
     });
   });
 });
 
-describe('文本工种一次事务绑定', () => {
-  it('只发一次批量绑定请求', async () => {
+describe('文本工种事务性路由', () => {
+  it('先预览影响，再以版本号发送一笔异构批量保存', async () => {
     const user = userEvent.setup();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     stub.add({ method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([PROFILE]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/llm\/roles$/, respond: () => jsonResponse({ route_revision: 'r'.repeat(64) }) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/llm-readiness$/, respond: () => jsonResponse({
       status: 'READY', generation_status: 'CONNECTION_READY', text_agent_ready: false,
       roles: [{ role: 'director', code: null }, { role: 'editor', code: null }],
     }) });
-    stub.add({ method: 'PUT', pattern: /\/api\/v1\/agent-routes\/bulk$/, respond: () => jsonResponse({
-      roles: [], bound_roles: ['director', 'editor'], readiness: { status: 'READY', roles: [] },
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/agent-routes\/preview$/, respond: () => jsonResponse({
+      expected_revision: 'r'.repeat(64),
+      updates: [{ role: 'director', provider_profile_id: 'profile-1' }, { role: 'editor', provider_profile_id: 'profile-1' }],
+      changes: [
+        { role: 'director', action: 'added', from_profile_id: null, to_profile_id: 'profile-1', from_profile_name: null, to_profile_name: '本地文本模型' },
+        { role: 'editor', action: 'added', from_profile_id: null, to_profile_id: 'profile-1', from_profile_name: null, to_profile_name: '本地文本模型' },
+      ], changed_role_count: 2, affected_tasks: [], blockers: [], can_apply: true,
+    }) });
+    stub.add({ method: 'PUT', pattern: /\/api\/v1\/agent-routes\/batch$/, respond: () => jsonResponse({
+      routes: [], route_revision: 'n'.repeat(64), readiness: { status: 'READY', roles: [] }, changed_roles: ['director', 'editor'],
     }) });
 
     render(<LLMSetupPanel />);
-    await user.selectOptions(await screen.findByLabelText('用于文本工种的模型'), 'profile-1');
-    await user.click(screen.getByRole('button', { name: '用于全部文本工种' }));
+    await user.selectOptions(await screen.findByLabelText('批量分配模型'), 'profile-1');
+    await user.click(screen.getByText('按工作阶段选择'));
+    await user.click(screen.getByRole('button', { name: '全部文本 Agent' }));
+    await user.click(screen.getByRole('button', { name: /分配给选中角色/ }));
+    await user.click(screen.getByRole('button', { name: /预览改派影响/ }));
+    await user.click(await screen.findByRole('button', { name: /确认保存 2 项分配/ }));
 
     await waitFor(() => {
-      expect(stub.callsOf('PUT', /agent-routes\/bulk/)).toHaveLength(1);
+      expect(stub.callsOf('POST', /agent-routes\/preview/)).toHaveLength(1);
+      expect(stub.callsOf('PUT', /agent-routes\/batch/)).toHaveLength(1);
     });
     expect(stub.callsOf('PUT', /\/api\/v1\/agent-routes$/)).toHaveLength(0);
-    expect(stub.callsOf('PUT', /agent-routes\/bulk/)[0].body).toEqual({
-      provider_profile_id: 'profile-1', roles: ['director', 'editor'],
+    expect(stub.callsOf('PUT', /agent-routes\/batch/)[0].body).toEqual({
+      updates: [{ role: 'director', provider_profile_id: 'profile-1' }, { role: 'editor', provider_profile_id: 'profile-1' }],
+      expected_revision: 'r'.repeat(64),
     });
   });
 });

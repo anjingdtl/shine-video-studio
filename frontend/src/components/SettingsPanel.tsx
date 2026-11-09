@@ -26,6 +26,8 @@ type Props = {
   onDeleteWorkflow: (profileId: string) => void;
   /** Map the H3 node's own width/height inputs, when the registered graph has them. */
   onBindStandardParameters?: (profileId: string) => void;
+  /** Director setup places the same manager before its generation-profile section. */
+  includeLlm?: boolean;
 };
 
 const defaultGraph = '{}';
@@ -33,7 +35,7 @@ const defaultMap = '{}';
 
 export default function SettingsPanel({
   project, onRefresh, workflowProfiles, system, busy, onProjectSettings, onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow,
-  onBindStandardParameters,
+  onBindStandardParameters, includeLlm = true,
 }: Props) {
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188');
   const [comfyResult, setComfyResult] = useState<SystemHealth | null>(null);
@@ -72,6 +74,8 @@ export default function SettingsPanel({
         <div className="section-icon"><Server size={17} /></div>
       </div>
 
+      {includeLlm && <LLMSetupPanel onChanged={onRefresh} />}
+
       <div className="settings-grid">
         <StorageSettings />
         <div className="settings-block">
@@ -95,8 +99,6 @@ export default function SettingsPanel({
             </label>
           </> : <div className="empty-inline">创建项目后可配置。</div>}
         </div>
-
-        <LLMSetupPanel onChanged={onRefresh} />
 
         <div className="settings-block" id="comfy-config">
           <h3><Wifi size={14} /> ComfyUI 生成引擎连接</h3>

@@ -175,7 +175,6 @@ def test_a_catalog_without_the_configured_model_lists_the_candidates(api, fake_o
 
 @pytest.mark.parametrize("status, expected_code", [
     (401, "LLM_AUTH"),
-    (404, "LLM_CATALOG_INVALID"),
     (429, "LLM_RATE_LIMIT"),
     (503, "LLM_SERVER"),
 ])
@@ -187,6 +186,17 @@ def test_provider_failures_are_classified(api, fake_openai, status, expected_cod
     assert result["ok"] is False
     assert result["error_code"] == expected_code
     assert result["message"]
+
+
+def test_an_unsupported_model_catalog_does_not_claim_the_chat_api_is_offline(api, fake_openai):
+    client, _, _ = api
+    profile = create_profile(client, fake_openai)
+    fake_openai.models_status = 404
+    result = client.post(f"/api/v1/provider-profiles/{profile['id']}/test").json()
+    assert result["ok"] is True
+    assert result["reachable"] is True
+    assert result["catalog_ok"] is False
+    assert result["model_listed"] is None
 
 
 def test_an_unreachable_provider_is_classified(api):
@@ -236,6 +246,33 @@ def test_the_generation_test_proves_the_generation_path(api, fake_openai):
     assert readiness["generation_status"] == "GENERATION_READY"
     assert readiness["text_agent_ready"] is True
     assert all(row["readiness_status"] == "GENERATION_READY" for row in readiness["roles"])
+
+
+def test_structured_generation_can_pass_when_provider_has_no_model_catalog(api, fake_openai):
+    client, _, _ = api
+    profile = create_profile(client, fake_openai)
+    fake_openai.models_status = 404
+
+    connection = client.post(f"/api/v1/provider-profiles/{profile['id']}/test").json()
+    assert connection["ok"] is True
+    assert connection["reachable"] is True
+    assert connection["auth_ok"] is None
+    assert connection["catalog_ok"] is False
+    assert connection["model_listed"] is None
+
+    bound = client.put("/api/v1/agent-routes/bulk", json={
+        "provider_profile_id": profile["id"], "roles": list(TEXT_ROLES),
+    })
+    assert bound.status_code == 200, bound.text
+    before_generation = client.get("/api/v1/setup/llm-readiness").json()
+    assert all(row["connection_status"] == "REACHABLE_AUTH_UNVERIFIED" for row in before_generation["roles"])
+    assert client.post(f"/api/v1/provider-profiles/{profile['id']}/test-generation").json()["ok"] is True
+
+    readiness = client.get("/api/v1/setup/llm-readiness").json()
+    assert readiness["text_agent_ready"] is True
+    assert all(row["connection_status"] == "CONNECTED" for row in readiness["roles"])
+    assert all(row["catalog_status"] == "UNAVAILABLE" for row in readiness["roles"])
+    assert all(row["generation_status"] == "PASSED_CATALOG_UNAVAILABLE" for row in readiness["roles"])
 
 
 def test_a_failed_generation_test_does_not_keep_a_previous_acceptance(api, fake_openai):

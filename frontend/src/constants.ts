@@ -189,6 +189,7 @@ export const providerKindLabels: Record<string, string> = {
 
 export const routeRoleLabels: Record<string, string> = {
   shot_planner: '镜头规划', script_planner: '剧本规划',
+  four_stage_bible_run: '全剧蓝图', four_stage_scene_script_run: '分场剧本',
   scriptwriter: '编剧', director: '导演', cinematographer: '摄影指导', editor: '剪辑师',
   continuity_supervisor: '场记', sound_director: '声音导演', producer: '制片统筹',
   comfyops: '制作环境助理', repair_planner: '修复规划', qc_reviewer: '质量审核',

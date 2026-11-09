@@ -608,6 +608,19 @@ class ProviderProfileUpdate(APIModel):
     generation_options: TextGenerationOptions | None = None
 
 
+class ProviderProfileDuplicate(APIModel):
+    """A model derived from an existing provider profile.
+
+    `copy_credential` is an explicit server-side action.  The credential is
+    never accepted from or returned to the browser during duplication.
+    """
+
+    name: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=160)
+    copy_credential: bool = False
+    generation_options: TextGenerationOptions | None = None
+
+
 class ProviderProfilePublic(APIModel):
     id: str
     name: str
@@ -686,6 +699,21 @@ class AgentRouteBulkUpdate(APIModel):
 
     provider_profile_id: str = Field(min_length=1)
     roles: list[AgentRole] = Field(min_length=1, max_length=32)
+
+
+class AgentRouteAssignment(APIModel):
+    """One text-role target. A null profile explicitly removes the route."""
+
+    role: AgentRole
+    provider_profile_id: str | None = Field(default=None, min_length=1)
+
+
+class AgentRoutePreviewRequest(APIModel):
+    updates: list[AgentRouteAssignment] = Field(min_length=1, max_length=14)
+
+
+class AgentRouteBatchUpdate(AgentRoutePreviewRequest):
+    expected_revision: str = Field(min_length=64, max_length=64)
 
 
 # ---------------------------------------------------------------------------

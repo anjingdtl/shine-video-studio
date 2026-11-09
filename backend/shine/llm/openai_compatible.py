@@ -216,14 +216,30 @@ class OpenAICompatibleProvider:
         """Read the model catalog and report what it can actually prove.
 
         Every failure mode of a catalog endpoint - a login page, an empty
-        directory, a JSON array, a missing key - is rejected here.  The
-        configured model is only "listed" when the catalog names that exact
-        identifier; no case-insensitive guessing is allowed.
+        directory, a JSON array, a missing key - is reported distinctly. A
+        missing catalog endpoint is not proof that the chat endpoint fails;
+        the user must confirm the Model ID with the structured generation
+        probe instead. The configured model is only "listed" when the catalog
+        names that exact identifier; no case-insensitive guessing is allowed.
         """
         url = _models_url(self.config.base_url)
         try:
             response = self._request("GET", url)
         except LLMModelNotFound as exc:
+            if exc.details.get("status") == 404:
+                return {
+                    "available": True,
+                    "reachable": True,
+                    "auth_ok": None,
+                    "catalog_ok": False,
+                    "catalog_supported": False,
+                    "catalog_error_code": "LLM_CATALOG_UNAVAILABLE",
+                    "models": [],
+                    "model_listed": None,
+                    "json_mode": "unknown",
+                    "vision": None,
+                    "tools": None,
+                }
             raise LLMCatalogError(
                 "Provider does not expose a model catalog",
                 details={**exc.details, "reachable": True, "auth_ok": True, "catalog_ok": False},
@@ -284,6 +300,7 @@ class OpenAICompatibleProvider:
             "reachable": True,
             "auth_ok": True,
             "catalog_ok": True,
+            "catalog_supported": True,
             "models": models[:200],
             # An empty catalog cannot confirm the configured model, and a
             # catalog that does not name it exactly cannot confirm it either.

@@ -1,16 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { api as request, json, type AgentRoute, type ProviderProfile, type ProviderTestResult } from '../api';
+import {
+  api as request, json, type AgentRoute, type AgentRoutePreview, type LlmOverview,
+  type LlmReadiness, type LlmRole, type ProviderProfile, type ProviderTestResult,
+} from '../api';
 import { routeRoleLabels } from '../constants';
+import { AgentModelRouting } from './AgentModelRouting';
 import { LLMConfiguration } from './LLMConfiguration';
-
-type Readiness = {
-  status: string;
-  generation_status?: string;
-  text_agent_ready?: boolean;
-  roles: Array<{
-    role: string; profile_name: string | null; code: string | null; readiness_status?: string;
-  }>;
-};
 
 type MutationStatus = 'idle' | 'succeeded' | 'failed' | 'unconfirmed';
 type RefreshStatus = 'idle' | 'succeeded' | 'failed';
@@ -24,7 +19,7 @@ class ProviderCheckFailed extends Error {
 function describeFailure(error: unknown): string {
   if (error instanceof ProviderCheckFailed) {
     const code = error.result.error_code;
-    return code ? error.message + '（' + code + '）' : error.message;
+    return code ? `${error.message}（${code}）` : error.message;
   }
   if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
     return '请求超时或被中断，服务端可能已经写入；请先重新检查状态，不要重复提交。';
@@ -32,37 +27,86 @@ function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function legacyRole(role: Record<string, unknown>, route?: AgentRoute): LlmRole {
+  const roleId = String(role.role ?? '');
+  return {
+    role: roleId,
+    label_zh: String(role.label_zh ?? routeRoleLabels[roleId] ?? roleId),
+    group: String(role.group ?? '文本 Agent'),
+    business_entry: String(role.business_entry ?? ''),
+    required: role.required !== false,
+    capability_type: String(role.capability_type ?? 'structured_text'),
+    dependency_stages: Array.isArray(role.dependency_stages) ? role.dependency_stages.map(String) : [],
+    description: String(role.description ?? ''),
+    profile_id: route?.provider_profile_id ?? null,
+    profile_name: route?.profile_name ?? null,
+    profile_kind: null,
+    profile_enabled: null,
+    profile_valid: false,
+    code: typeof role.code === 'string' ? role.code : null,
+    generation_code: typeof role.generation_code === 'string' ? role.generation_code : null,
+    readiness_status: String(role.readiness_status ?? 'UNCONFIGURED'),
+    secret_status: String(role.secret_status ?? 'unknown'),
+    connection_status: String(role.connection_status ?? 'NOT_CHECKED'),
+    catalog_status: String(role.catalog_status ?? 'NOT_CHECKED'),
+    generation_status: String(role.generation_status ?? 'NOT_CHECKED'),
+    last_connection_checked_at: typeof role.last_connection_checked_at === 'string' ? role.last_connection_checked_at : null,
+    last_generation_checked_at: typeof role.last_generation_checked_at === 'string' ? role.last_generation_checked_at : null,
+  };
+}
+
 export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<void> }) {
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [routes, setRoutes] = useState<AgentRoute[]>([]);
-  const [readiness, setReadiness] = useState<Readiness | null>(null);
-  const [selected, setSelected] = useState('');
+  const [roles, setRoles] = useState<LlmRole[]>([]);
+  const [routeRevision, setRouteRevision] = useState('');
+  const [readiness, setReadiness] = useState<LlmReadiness | null>(null);
+  const [multimodal, setMultimodal] = useState<Array<Record<string, unknown>>>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [mutationStatus, setMutationStatus] = useState<MutationStatus>('idle');
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>('idle');
   const mounted = useRef(true);
+  const locked = useRef(false);
 
   async function api<T>(path: string, init?: RequestInit, timeoutMs = 60_000): Promise<T> {
     return request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
   }
-  const locked = useRef(false);
 
   async function load() {
-    const [p, r, state] = await Promise.all([api<ProviderProfile[]>('/provider-profiles'),
-      api<AgentRoute[]>('/agent-routes'), api<Readiness>('/setup/llm-readiness')]);
+    try {
+      const overview = await api<LlmOverview>('/llm/overview');
+      if (!mounted.current) return;
+      setProfiles(overview.profiles);
+      setRoutes(overview.routes);
+      setRoles(overview.roles);
+      setRouteRevision(overview.route_revision);
+      setReadiness(overview.readiness);
+      setMultimodal(overview.multimodal_capabilities ?? []);
+      return;
+    } catch {
+      // Older local workspaces keep their original CRUD and readiness routes.
+      // The newer overview is the source used when available.
+    }
+    const [p, r, state] = await Promise.all([
+      api<ProviderProfile[]>('/provider-profiles'),
+      api<AgentRoute[]>('/agent-routes'),
+      api<LlmReadiness>('/setup/llm-readiness'),
+    ]);
+    let revision = '';
+    let multi: Array<Record<string, unknown>> = [];
+    try { revision = (await api<{ route_revision: string }>('/llm/roles')).route_revision; } catch { /* old server */ }
+    try { multi = (await api<{ multimodal: Array<Record<string, unknown>> }>('/llm/capabilities')).multimodal; } catch { /* old server */ }
     if (!mounted.current) return;
-    setProfiles(p); setRoutes(r); setReadiness(state);
+    const routeMap = new Map(r.map(route => [route.role, route]));
+    setProfiles(p);
+    setRoutes(r);
+    setRoles(state.roles.map(role => legacyRole(role as unknown as Record<string, unknown>, routeMap.get(role.role))));
+    setRouteRevision(revision);
+    setReadiness(state);
+    setMultimodal(multi ?? []);
   }
 
-  /**
-   * Run one write, then read the server state again.
-   *
-   * The write and the refresh have their own results: a successful write
-   * that is followed by a failed refresh is still a saved configuration and
-   * must never be shown as "not configured".  A failed write is re-read too,
-   * because the answer may have been lost after the commit.
-   */
   async function run(
     action: () => Promise<unknown>,
     options: { successMessage?: string } = {},
@@ -113,58 +157,60 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
     return Math.max(60, Math.ceil(profile?.timeout_s ?? 180) + 30) * 1000;
   }
 
-  return <div data-testid="llm-setup">
-    <p>新机准备 · 先配置文本 LLM，再安装 H3。可由一个模型承担全部文本工种；画面与语音审片仍使用独立配置。</p>
-    {notice && <p role="alert">{notice}</p>}
-    <p>写入状态：{mutationStatus === 'idle' ? '未操作'
-      : mutationStatus === 'succeeded' ? '已保存'
-      : mutationStatus === 'failed' ? '未完成'
-      : '结果未知（请重新检查）'}
-      ｜状态刷新：{refreshStatus === 'idle' ? '未刷新'
-        : refreshStatus === 'succeeded' ? '已刷新' : '刷新失败'}</p>
+  async function previewRoutes(updates: AgentRoutePreview['updates']): Promise<AgentRoutePreview | null> {
+    try {
+      return await api<AgentRoutePreview>('/agent-routes/preview', json('POST', { updates }));
+    } catch (error) {
+      setNotice('改派预览失败：' + describeFailure(error));
+      return null;
+    }
+  }
+
+  function applyRoutes(preview: AgentRoutePreview): Promise<boolean> {
+    return run(() => api('/agent-routes/batch', json('PUT', {
+      updates: preview.updates,
+      expected_revision: preview.expected_revision || routeRevision,
+    })), { successMessage: `已保存 ${preview.changed_role_count} 项 Agent 模型分配。` });
+  }
+
+  return <div data-testid="llm-setup" className="llm-setup-panel">
+    {notice && <p role="alert" className="llm-notice">{notice}</p>}
+    <div className="llm-write-state" role="status">
+      写入：{mutationStatus === 'idle' ? '尚未操作'
+        : mutationStatus === 'succeeded' ? '已保存'
+          : mutationStatus === 'failed' ? '未完成' : '结果未知，请重新检查'}
+      <span>状态刷新：{refreshStatus === 'idle' ? '尚未刷新' : refreshStatus === 'succeeded' ? '已刷新' : '刷新失败'}</span>
+      <button className="text-button" type="button" disabled={busy} onClick={() => void run(async () => {
+        await load();
+      }, { successMessage: '已重新读取模型与路由状态。' })}>重新读取模型状态</button>
+    </div>
+
     <LLMConfiguration profiles={profiles} routes={routes} busy={busy}
-      onCreateProfile={body => run(() => api('/provider-profiles', json('POST', body)),
-        { successMessage: '模型配置已保存。' })}
-      onUpdateProfile={(id, body) => run(() => api('/provider-profiles/' + id, json('PUT', body)),
-        { successMessage: '模型配置已保存。' })}
+      onCreateProfile={body => run(() => api('/provider-profiles', json('POST', body)), { successMessage: '模型配置已保存。现在可以测试连接与结构化生成。' })}
+      onUpdateProfile={(id, body) => run(() => api('/provider-profiles/' + id, json('PUT', body)), { successMessage: '模型配置已保存；相关检查证据已过期。' })}
+      onDuplicateProfile={(id, body) => run(() => api('/provider-profiles/' + id + '/duplicate', json('POST', body)), { successMessage: '模型副本已创建，并使用独立的本机密钥引用。' })}
       onTestProfile={id => run(async () => {
-        const result = await api<ProviderTestResult>('/provider-profiles/' + id + '/test',
-          { method: 'POST' }, timeoutFor(id));
+        const result = await api<ProviderTestResult>('/provider-profiles/' + id + '/test', { method: 'POST' }, timeoutFor(id));
         if (!result.ok) throw new ProviderCheckFailed(result);
-      }, { successMessage: '连接检查通过：服务可达，且模型目录列出了配置的 Model ID。' })}
+      }, { successMessage: '连接检查已完成；模型目录状态会单独显示。' })}
       onTestGeneration={id => run(async () => {
-        const result = await api<ProviderTestResult>('/provider-profiles/' + id + '/test-generation',
-          { method: 'POST' }, timeoutFor(id));
+        const result = await api<ProviderTestResult>('/provider-profiles/' + id + '/test-generation', { method: 'POST' }, timeoutFor(id));
         if (!result.ok) throw new ProviderCheckFailed(result);
-      }, { successMessage: '生成与结构化输出测试通过：模型能按 JSON 约定回答（这不是答案质量验收）。' })}
-      onSetKey={(id, key) => run(() => api('/provider-profiles/' + id + '/key', json('PUT', { api_key: key })),
-        { successMessage: '密钥已保存。' })}
-      onDeleteProfile={id => run(() => api('/provider-profiles/' + id, { method: 'DELETE' }),
-        { successMessage: '模型配置已删除。' })}
-      onRoute={(role, id) => run(() => api('/agent-routes', json('PUT', { role, provider_profile_id: id })),
-        { successMessage: '已更新该工种使用的模型。' })} />
-    <label>用于文本工种的模型<select value={selected} disabled={busy} onChange={event => setSelected(event.target.value)}>
-      <option value="">请选择已添加的真实模型</option>
-      {profiles.filter(p => p.kind !== 'mock' && p.enabled).map(p => <option key={p.id} value={p.id}>{p.name} · {p.model}</option>)}
-    </select></label>
-    <button type="button" disabled={busy || !selected || !readiness} onClick={() => {
-      if (!window.confirm('将所选模型明确用于全部文本工种（含编剧、导演、摄影、剪辑、规划与修复），并覆盖这些工种已有路由。继续？')) return;
-      void run(async () => {
-        const roles = (readiness?.roles ?? []).map(row => row.role);
-        if (!roles.length) throw new Error('服务端没有返回可绑定的文本工种');
-        // One request, one transaction: a half-bound routing table is never
-        // written and never left behind.
-        await api('/agent-routes/bulk', json('PUT', { provider_profile_id: selected, roles }));
-      }, { successMessage: '已把所选模型用于全部文本工种。' });
-    }}>用于全部文本工种</button>
-    <button type="button" disabled={busy} onClick={() => void run(async () => undefined, { successMessage: '已重新读取 LLM 配置状态。' })}>重新检查 LLM 配置</button>
-    <p>LLM 准备：{readiness?.status === 'READY'
-      ? '连接检查通过（服务可达且模型目录列出了配置的 Model ID）'
-      : '连接检查尚未完成'}</p>
-    <p>生成验收：{readiness?.generation_status === 'GENERATION_READY'
-      ? '生成与结构化输出测试通过（这是接口与格式验收，不代表答案质量验收）'
-      : '尚未做生成验收；连接可用不等于模型能按约定完成结构化生成'}</p>
-    {readiness?.roles.filter(row => row.code).map(row => <p key={row.role}>{routeRoleLabels[row.role] ?? row.role}：{row.code}</p>)}
-    <p>「测试」只检测服务与模型列表；「生成验收」会真正调用一次生成接口，远端模型可能产生一次 API 费用。未通过测试、配置变更、禁用或 Mock 均不能完成真实准备。密钥只存本机；不会在检测中发送项目素材。</p>
+      }, { successMessage: '结构化生成检查通过；这不代表答案质量验收。' })}
+      onSetKey={(id, key) => run(() => api('/provider-profiles/' + id + '/key', json('PUT', { api_key: key })), { successMessage: '新密钥已安全保存；原检查证据已过期。' })}
+      onDeleteProfile={id => void run(() => api('/provider-profiles/' + id, { method: 'DELETE' }), { successMessage: '模型配置已删除。' })} />
+
+    {readiness && <div className="llm-readiness-summary" aria-label="LLM 就绪状态">
+      <div><b>模型配置</b><span>{profiles.length} 个模型已保存</span></div>
+      <div><b>连接</b><span>{readiness.status === 'READY' ? '角色路由已配置，连接检查满足当前要求' : '还有角色或连接检查待完成'}</span></div>
+      <div><b>结构化生成</b><span>{readiness.text_agent_ready ? '所有文本 Agent 检查通过' : '尚未完成全部角色的生成检查'}</span></div>
+    </div>}
+    {readiness?.roles.filter(role => role.code).length ? <ul className="llm-missing-roles">
+      {readiness.roles.filter(role => role.code).map(role => <li key={role.role}>{role.label_zh || routeRoleLabels[role.role] || role.role}：{role.code}</li>)}
+    </ul> : null}
+
+    <AgentModelRouting roles={roles} profiles={profiles} routes={routes} revision={routeRevision} busy={busy}
+      multimodal={multimodal} onPreview={previewRoutes} onApply={applyRoutes} />
+    <p className="llm-data-safety-note">每个新任务使用保存时明确指定的 Agent 路由；排队和运行中的任务不会因路由变更而重选模型。远端文本发送仍须遵守项目授权、上下文窗口、创作输出预算和任务审计规则。</p>
   </div>;
 }

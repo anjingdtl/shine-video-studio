@@ -14,10 +14,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from shine.api_common import DBSession, app_settings
+from shine.api_common import DBSession, app_settings, secret_store
 from shine.api_operator import Operator
 from shine.comfyops import deployment
 from shine.config import Settings
+from shine.llm.secrets import SecretStore
 
 router = APIRouter(prefix="/api/v1/setup", tags=["new-machine-setup"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
@@ -701,9 +702,9 @@ def production_gate(project_id: str, profile_id: str, settings: SettingsDep, db:
 
 
 @router.get('/llm-readiness')
-def text_model_readiness(db: DBSession):
+def text_model_readiness(db: DBSession, secrets: Annotated[SecretStore, Depends(secret_store)]):
     from shine.comfyops.llm_readiness import llm_readiness
-    return llm_readiness(db)
+    return llm_readiness(db, secrets=secrets)
 
 
 @router.get('/voice-readiness')

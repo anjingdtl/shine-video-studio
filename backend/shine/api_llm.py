@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -9,14 +11,18 @@ from sqlalchemy import select
 from shine.api_common import DBSession, public_profile, secret_store
 from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
+from shine.llm.role_catalog import TEXT_ROLES
 from shine.llm.secrets import SecretStore, SecureStoreUnavailable
-from shine.models import AgentRoute, ProviderProfile
+from shine.models import AgentRoute, AgentTaskRecord, ProviderProfile
 from shine.schemas import (
+    AgentRouteBatchUpdate,
     AgentRouteBulkUpdate,
+    AgentRoutePreviewRequest,
     AgentRoutePublic,
     AgentRouteUpdate,
     ProviderKeyUpdate,
     ProviderProfileCreate,
+    ProviderProfileDuplicate,
     ProviderProfilePublic,
     ProviderProfileUpdate,
     ProviderTestResult,
@@ -27,6 +33,7 @@ router = APIRouter(prefix="/api/v1", tags=["llm"])
 
 #: Providers that talk to an HTTP service and therefore need a real endpoint.
 REMOTE_KINDS = frozenset({"openai_compatible", "anthropic", "ollama"})
+LIVE_ROUTE_CHANGE_STATUSES = frozenset({"QUEUED", "RUNNING", "NEEDS_REVIEW"})
 
 
 def _gateway(secrets: SecretStore) -> LLMGateway:
@@ -87,6 +94,14 @@ def _discard_old_secret(
     """
     if not old_ref or old_ref == new_ref:
         return
+    still_referenced = db.scalar(
+        select(ProviderProfile.id).where(
+            ProviderProfile.api_key_ref == old_ref,
+            ProviderProfile.id != profile_id,
+        ).limit(1)
+    )
+    if still_referenced:
+        return
     try:
         secrets.delete(old_ref)
     except Exception as exc:  # noqa: BLE001 - the new key is already active
@@ -104,6 +119,159 @@ def _discard_old_secret(
             db.rollback()
 
 
+def _active_task_dict(task: AgentTaskRecord) -> dict[str, str]:
+    """Expose only task identity and pinned model metadata in impact previews."""
+    return {
+        "task_id": task.id,
+        "role": task.role_id,
+        "status": task.status,
+        "model_profile_id": task.model_profile_id,
+        "model_id": task.model_id,
+    }
+
+
+def _live_tasks_for_roles(db, roles: set[str]) -> list[AgentTaskRecord]:
+    if not roles:
+        return []
+    return list(db.scalars(
+        select(AgentTaskRecord)
+        .where(
+            AgentTaskRecord.role_id.in_(sorted(roles)),
+            AgentTaskRecord.status.in_(sorted(LIVE_ROUTE_CHANGE_STATUSES)),
+        )
+        .order_by(AgentTaskRecord.created_at, AgentTaskRecord.id)
+    ).all())
+
+
+def _live_tasks_for_profile(db, profile_id: str) -> list[AgentTaskRecord]:
+    return list(db.scalars(
+        select(AgentTaskRecord)
+        .where(
+            AgentTaskRecord.model_profile_id == profile_id,
+            AgentTaskRecord.status.in_(sorted(LIVE_ROUTE_CHANGE_STATUSES)),
+        )
+        .order_by(AgentTaskRecord.created_at, AgentTaskRecord.id)
+    ).all())
+
+
+def _route_revision(db) -> str:
+    rows = db.scalars(select(AgentRoute).order_by(AgentRoute.role)).all()
+    canonical = [(row.role, row.provider_profile_id) for row in rows]
+    return hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _route_rows(db) -> list[AgentRoutePublic]:
+    rows = db.execute(
+        select(AgentRoute, ProviderProfile)
+        .join(ProviderProfile, AgentRoute.provider_profile_id == ProviderProfile.id)
+        .order_by(AgentRoute.role)
+    ).all()
+    return [
+        AgentRoutePublic(role=route.role, provider_profile_id=route.provider_profile_id,
+                         profile_name=profile.name)
+        for route, profile in rows
+    ]
+
+
+def _route_preview(db, assignments: list[dict[str, Any]], secrets: SecretStore) -> dict[str, Any]:
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    current_routes = {
+        row.role: row.provider_profile_id for row in db.scalars(select(AgentRoute))
+    }
+    changes: list[dict[str, Any]] = []
+    blockers: list[dict[str, str]] = []
+    changed_roles: set[str] = set()
+
+    for item in assignments:
+        role = str(item["role"])
+        profile_id = item.get("provider_profile_id")
+        if role not in TEXT_ROLES:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "TEXT_AGENT_ROLE_REQUIRED", "message": "请选择文本 Agent 角色。"},
+            )
+        if role in seen:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "DUPLICATE_AGENT_ROLE", "message": "同一批次不能重复选择同一个角色。"},
+            )
+        seen.add(role)
+        normalized.append({"role": role, "provider_profile_id": profile_id})
+        current_profile_id = current_routes.get(role)
+        if current_profile_id == profile_id:
+            changes.append({
+                "role": role,
+                "action": "unchanged",
+                "from_profile_id": current_profile_id,
+                "to_profile_id": profile_id,
+                "from_profile_name": None,
+                "to_profile_name": None,
+            })
+            continue
+
+        changed_roles.add(role)
+        current_profile = db.get(ProviderProfile, current_profile_id) if current_profile_id else None
+        target_profile = db.get(ProviderProfile, profile_id) if profile_id else None
+        action = "added" if current_profile_id is None else "removed" if profile_id is None else "reassigned"
+        changes.append({
+            "role": role,
+            "action": action,
+            "from_profile_id": current_profile_id,
+            "to_profile_id": profile_id,
+            "from_profile_name": current_profile.name if current_profile else None,
+            "to_profile_name": target_profile.name if target_profile else None,
+        })
+        if profile_id is None:
+            continue
+        if target_profile is None:
+            blockers.append({
+                "role": role,
+                "code": "PROVIDER_PROFILE_NOT_FOUND",
+                "message": "所选模型已经不存在，请刷新模型列表。",
+            })
+            continue
+        if target_profile.kind == "mock":
+            blockers.append({
+                "role": role,
+                "code": "REAL_TEXT_MODEL_REQUIRED",
+                "message": "开发测试模型不能用于真实文本工种。",
+            })
+        elif not target_profile.enabled:
+            blockers.append({
+                "role": role,
+                "code": "PROVIDER_PROFILE_DISABLED",
+                "message": "所选模型已停用，请先启用或选择其他模型。",
+            })
+        elif not target_profile.model.strip():
+            blockers.append({
+                "role": role,
+                "code": "PROVIDER_MODEL_ID_REQUIRED",
+                "message": "所选模型缺少 Model ID。",
+            })
+        else:
+            secret_status = secrets.status(target_profile.api_key_ref)
+            if secret_status in {"missing", "unreadable"}:
+                blockers.append({
+                    "role": role,
+                    "code": "PROVIDER_CREDENTIAL_UNAVAILABLE",
+                    "message": "所选模型的密钥不可读取，请重新保存密钥。",
+                })
+
+    active_tasks = [_active_task_dict(task) for task in _live_tasks_for_roles(db, changed_roles)]
+    return {
+        "expected_revision": _route_revision(db),
+        "updates": normalized,
+        "changes": changes,
+        "changed_role_count": len(changed_roles),
+        "affected_tasks": active_tasks,
+        "blockers": blockers,
+        "can_apply": bool(changed_roles) and not active_tasks and not blockers,
+    }
+
+
 def _connection_evidence(
     capabilities: dict[str, Any], *, error: LLMError | None
 ) -> dict[str, Any]:
@@ -115,7 +283,7 @@ def _connection_evidence(
     if error is None:
         return {
             "reachable": bool(capabilities.get("reachable", True)),
-            "auth_ok": bool(capabilities.get("auth_ok", True)),
+            "auth_ok": capabilities.get("auth_ok", True),
             "catalog_ok": bool(capabilities.get("catalog_ok", True)),
             "model_listed": capabilities.get("model_listed"),
         }
@@ -146,6 +314,71 @@ def list_profiles(
 ) -> list[ProviderProfilePublic]:
     rows = db.scalars(select(ProviderProfile).order_by(ProviderProfile.created_at)).all()
     return [_profile_public(row, secrets) for row in rows]
+
+
+@router.get("/llm/roles")
+def list_text_roles(
+    db: DBSession, secrets: Annotated[SecretStore, Depends(secret_store)]
+) -> dict[str, Any]:
+    from shine.comfyops.llm_readiness import llm_readiness
+
+    report = llm_readiness(db, secrets=secrets)
+    return {"roles": report["roles"], "route_revision": _route_revision(db)}
+
+
+@router.get("/llm/readiness")
+def workflow_llm_readiness(
+    db: DBSession,
+    secrets: Annotated[SecretStore, Depends(secret_store)],
+    workflow: str | None = None,
+) -> dict[str, Any]:
+    from shine.comfyops.llm_readiness import llm_readiness
+
+    try:
+        return llm_readiness(db, workflow=workflow, secrets=secrets)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/llm/capabilities")
+def llm_capabilities(
+    db: DBSession, secrets: Annotated[SecretStore, Depends(secret_store)]
+) -> dict[str, Any]:
+    from shine.comfyops.llm_readiness import multimodal_capability_status
+
+    return {"multimodal": multimodal_capability_status(db, secrets=secrets)}
+
+
+@router.get("/llm/overview")
+def llm_overview(
+    db: DBSession, secrets: Annotated[SecretStore, Depends(secret_store)]
+) -> dict[str, Any]:
+    from shine.comfyops.llm_readiness import (
+        llm_readiness,
+        multimodal_capability_status,
+        profile_evidence,
+    )
+
+    profiles = db.scalars(select(ProviderProfile).order_by(ProviderProfile.created_at)).all()
+    readiness = llm_readiness(db, secrets=secrets)
+    return {
+        "contract": "llm-management-v1",
+        "profiles": [
+            {
+                **_profile_public(row, secrets).model_dump(mode="json"),
+                "evidence": profile_evidence(row, secrets.status(row.api_key_ref)),
+            }
+            for row in profiles
+        ],
+        "routes": _route_rows(db),
+        "route_revision": _route_revision(db),
+        "roles": readiness["roles"],
+        "readiness": readiness,
+        "multimodal_capabilities": multimodal_capability_status(db, secrets=secrets),
+        "workflows": [
+            "script_and_storyboard", "four_stage", "film_crew", "real_production", "all_text",
+        ],
+    }
 
 
 @router.post("/provider-profiles", response_model=ProviderProfilePublic, status_code=201)
@@ -197,6 +430,116 @@ def create_profile(
     return _profile_public(profile, secrets)
 
 
+@router.post("/provider-profiles/{profile_id}/duplicate", response_model=ProviderProfilePublic, status_code=201)
+def duplicate_profile(
+    profile_id: str,
+    body: ProviderProfileDuplicate,
+    db: DBSession,
+    secrets: Annotated[SecretStore, Depends(secret_store)],
+) -> ProviderProfilePublic:
+    """Clone non-secret settings and, only when asked, re-encrypt a key.
+
+    The new profile always receives its own SecretStore reference.  The
+    source key is read only inside the service and never enters a response or
+    audit payload.
+    """
+    source = db.get(ProviderProfile, profile_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Provider profile not found")
+    if db.scalar(select(ProviderProfile).where(ProviderProfile.name == body.name)):
+        raise HTTPException(status_code=409, detail="A provider profile with this name already exists")
+    if body.copy_credential and not source.api_key_ref:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROVIDER_CREDENTIAL_NOT_AVAILABLE",
+                "message": "原模型没有可复制的密钥；请新建后单独填写。",
+            },
+        )
+
+    options = (
+        body.generation_options.model_dump(exclude_none=True)
+        if body.generation_options is not None
+        else dict(source.generation_options or {})
+    )
+    _validate_profile_fields(
+        kind=source.kind,
+        base_url=source.base_url,
+        model=body.model,
+        generation_options=options,
+    )
+    duplicate = ProviderProfile(
+        name=body.name,
+        kind=source.kind,
+        base_url=source.base_url,
+        model=body.model,
+        timeout_s=source.timeout_s,
+        max_retries=source.max_retries,
+        temperature=source.temperature,
+        enabled=source.enabled,
+        capabilities={},
+        generation_options=options,
+    )
+    db.add(duplicate)
+    db.flush()
+    new_ref: str | None = None
+    try:
+        if body.copy_credential:
+            try:
+                credential = secrets.load(source.api_key_ref)
+            except Exception as exc:  # noqa: BLE001 - do not return storage details or secret data
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "PROVIDER_CREDENTIAL_UNAVAILABLE",
+                        "message": "原模型的密钥不可读取；请新建后重新保存密钥。",
+                    },
+                ) from exc
+            if not credential:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "PROVIDER_CREDENTIAL_UNAVAILABLE",
+                        "message": "原模型的密钥不可读取；请新建后重新保存密钥。",
+                    },
+                )
+            try:
+                new_ref = _rotate_key(duplicate, credential, secrets)
+            except SecureStoreUnavailable as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail="新模型的密钥副本无法安全保存；原模型配置未变更。",
+                ) from exc
+            duplicate.api_key_ref = new_ref
+
+        add_audit(
+            db,
+            "user",
+            "PROVIDER_PROFILE_DUPLICATED",
+            "provider_profile",
+            duplicate.id,
+            {
+                "source_profile_id": source.id,
+                "model": duplicate.model,
+                "credential_copied": body.copy_credential,
+            },
+        )
+        try:
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - remove the unreferenced secret on rollback
+            db.rollback()
+            if new_ref:
+                secrets.delete(new_ref)
+            raise HTTPException(status_code=500, detail="Provider profile was not duplicated") from exc
+    except HTTPException:
+        db.rollback()
+        if new_ref:
+            secrets.delete(new_ref)
+        raise
+    db.refresh(duplicate)
+    return _profile_public(duplicate, secrets)
+
+
 @router.put("/provider-profiles/{profile_id}", response_model=ProviderProfilePublic)
 def update_profile(
     profile_id: str,
@@ -231,8 +574,19 @@ def update_profile(
         if duplicate:
             raise HTTPException(status_code=409, detail="A provider profile with this name already exists")
     if set(updates) - {"name"}:
-        # Any change of the provider contract invalidates the recorded evidence.
-        profile.capabilities = {}
+        active_tasks = _live_tasks_for_profile(db, profile.id)
+        if active_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROVIDER_PROFILE_HAS_IN_FLIGHT_TASKS",
+                    "message": "此模型仍被排队、运行或待核对任务使用；请先完成或对账这些任务，再修改模型配置。",
+                    "active_tasks": [_active_task_dict(task) for task in active_tasks],
+                },
+            )
+        # Keep the previous evidence with its old fingerprint.  Readers can
+        # label it expired instead of confusing a changed model with a never-
+        # tested model.
     for key, value in updates.items():
         setattr(profile, key, value)
     add_audit(
@@ -258,9 +612,33 @@ def delete_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
     routes = db.scalars(select(AgentRoute).where(AgentRoute.provider_profile_id == profile_id)).all()
-    if routes:
-        raise HTTPException(status_code=409, detail="Remove agent role routes before deleting this profile")
+    active_tasks = _live_tasks_for_profile(db, profile_id)
+    if routes or active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROVIDER_PROFILE_IN_USE",
+                "message": "此模型仍被 Agent 或未结束任务使用；请先改派角色并完成或对账任务。",
+                "roles_in_use": sorted(route.role for route in routes),
+                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+            },
+        )
     old_ref = profile.api_key_ref
+    if old_ref:
+        shared = db.scalar(
+            select(ProviderProfile.id).where(
+                ProviderProfile.api_key_ref == old_ref,
+                ProviderProfile.id != profile_id,
+            ).limit(1)
+        )
+        if shared:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROVIDER_CREDENTIAL_SHARED",
+                    "message": "此密钥引用仍被其他模型使用；为避免破坏其他配置，请先为模型分别轮换密钥。",
+                },
+            )
     add_audit(db, "user", "PROVIDER_PROFILE_DELETED", "provider_profile", profile.id)
     db.delete(profile)
     db.commit()
@@ -285,13 +663,22 @@ def set_profile_key(
     profile = db.get(ProviderProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
+    active_tasks = _live_tasks_for_profile(db, profile.id)
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROVIDER_PROFILE_HAS_IN_FLIGHT_TASKS",
+                "message": "此模型仍被排队、运行或待核对任务使用；请先完成或对账这些任务，再轮换密钥。",
+                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+            },
+        )
     try:
         new_ref = _rotate_key(profile, body.api_key, secrets)
     except SecureStoreUnavailable as exc:
         raise HTTPException(status_code=500, detail=f"Provider key could not be stored: {exc}") from exc
     old_ref = profile.api_key_ref
     profile.api_key_ref = new_ref
-    profile.capabilities = {}
     add_audit(db, "user", "PROVIDER_KEY_UPDATED", "provider_profile", profile.id, {"storage": secrets.mode})
     try:
         db.commit()
@@ -316,13 +703,22 @@ def clear_profile_key(
     profile = db.get(ProviderProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
+    active_tasks = _live_tasks_for_profile(db, profile.id)
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROVIDER_PROFILE_HAS_IN_FLIGHT_TASKS",
+                "message": "此模型仍被排队、运行或待核对任务使用；请先完成或对账任务，再移除密钥。",
+                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+            },
+        )
     old_ref = profile.api_key_ref
     profile.api_key_ref = None
-    profile.capabilities = {}
     add_audit(db, "user", "PROVIDER_KEY_CLEARED", "provider_profile", profile.id)
     db.commit()
     if old_ref:
-        secrets.delete(old_ref)
+        _discard_old_secret(db, secrets, profile.id, old_ref, None)
     db.refresh(profile)
     return _profile_public(profile, secrets)
 
@@ -333,10 +729,11 @@ def test_profile(
     db: DBSession,
     secrets: Annotated[SecretStore, Depends(secret_store)],
 ) -> ProviderTestResult:
-    """Prove the connection and the model catalog.
+    """Check reachability and, when supported, the provider's model catalog.
 
-    "The service answered" is not "the configured model exists".  The result
-    reports both, and a missing model makes the test fail.
+    An exact catalog miss fails the check. A provider without a catalog can
+    still be reachable; in that case its Model ID and authentication stay
+    unverified until the separate structured-generation probe succeeds.
     """
     profile = db.get(ProviderProfile, profile_id)
     if not profile:
@@ -350,7 +747,13 @@ def test_profile(
     except LLMError as exc:
         capabilities = {"available": False, "error_code": exc.code, "message": str(exc)}
         evidence = _connection_evidence(capabilities, error=exc)
-        profile.capabilities = {**capabilities, "setup_config_sha256": identity}
+        profile.capabilities = {
+            **dict(profile.capabilities or {}),
+            **capabilities,
+            **evidence,
+            "setup_config_sha256": identity,
+            "setup_checked_at": checked_at.isoformat(),
+        }
         add_audit(
             db,
             "user",
@@ -374,12 +777,20 @@ def test_profile(
     model_listed = capabilities.get("model_listed")
     ok = bool(capabilities.get("available")) and model_listed is not False
     error_code = None
-    message = "连接检查通过：服务可达且模型目录列出了配置的 Model ID"
-    if not ok:
+    if model_listed is True:
+        message = "连接检查通过：服务可达，模型目录列出了配置的 Model ID。"
+    elif ok:
+        message = "服务已连接，但模型目录不可验证；请确认 Model ID，并进行结构化生成检查。"
+    else:
         error_code = "LLM_MODEL_NOT_LISTED"
         message = "服务可连接，但模型目录中没有配置的 Model ID；请从候选 Model ID 中明确选择"
-    capabilities = {**capabilities, "setup_config_sha256": identity}
-    profile.capabilities = capabilities
+    capabilities = {
+        **capabilities,
+        **evidence,
+        "setup_config_sha256": identity,
+        "setup_checked_at": checked_at.isoformat(),
+    }
+    profile.capabilities = {**dict(profile.capabilities or {}), **capabilities}
     add_audit(
         db,
         "user",
@@ -434,6 +845,13 @@ def test_generation(
     }
     existing = dict(profile.capabilities or {})
     existing["generation"] = generation
+    if (
+        generation["generation_ok"]
+        and generation["structured_output_ok"]
+        and generation["model_matches_config"] is True
+    ):
+        existing["reachable"] = True
+        existing["auth_ok"] = True
     profile.capabilities = existing
     add_audit(
         db,
@@ -444,10 +862,18 @@ def test_generation(
         {"generation_ok": generation["generation_ok"], "error_code": generation["error_code"]},
     )
     db.commit()
-    ok = bool(generation["generation_ok"])
+    ok = bool(
+        generation["generation_ok"]
+        and generation["structured_output_ok"]
+        and generation["model_matches_config"] is True
+    )
     message = "生成与结构化输出测试通过"
     if not ok:
         message = "生成测试未通过；连接可用不等于模型可以完成结构化生成"
+    elif existing.get("model_listed") is False:
+        message = "结构化生成通过，但模型目录没有列出该 Model ID；请核对服务商命名。"
+    elif existing.get("model_listed") is None:
+        message = "结构化生成通过，但模型目录不可验证；Model ID 未由目录确认。"
     return ProviderTestResult(
         ok=ok,
         level="generation",
@@ -465,19 +891,126 @@ def test_generation(
 
 @router.get("/agent-routes", response_model=list[AgentRoutePublic])
 def list_routes(db: DBSession) -> list[AgentRoutePublic]:
-    rows = db.execute(
-        select(AgentRoute, ProviderProfile)
-        .join(ProviderProfile, AgentRoute.provider_profile_id == ProviderProfile.id)
-        .order_by(AgentRoute.role)
-    ).all()
-    return [
-        AgentRoutePublic(role=route.role, provider_profile_id=route.provider_profile_id, profile_name=profile.name)
-        for route, profile in rows
+    return _route_rows(db)
+
+
+@router.post("/agent-routes/preview")
+def preview_agent_routes(
+    body: AgentRoutePreviewRequest,
+    db: DBSession,
+    secrets: Annotated[SecretStore, Depends(secret_store)],
+) -> dict[str, Any]:
+    return _route_preview(
+        db,
+        [
+            {"role": item.role.value, "provider_profile_id": item.provider_profile_id}
+            for item in body.updates
+        ],
+        secrets,
+    )
+
+
+@router.put("/agent-routes/batch")
+def batch_agent_routes(
+    body: AgentRouteBatchUpdate,
+    db: DBSession,
+    secrets: Annotated[SecretStore, Depends(secret_store)],
+) -> dict[str, Any]:
+    """Apply heterogeneous text-role changes in one revision-checked commit."""
+    assignments = [
+        {"role": item.role.value, "provider_profile_id": item.provider_profile_id}
+        for item in body.updates
     ]
+    preview = _route_preview(db, assignments, secrets)
+    if preview["expected_revision"] != body.expected_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LLM_ROUTE_REVISION_CONFLICT",
+                "message": "Agent 分配已被其他页面更新；请刷新后重新预览。",
+                "current_revision": preview["expected_revision"],
+            },
+        )
+    if preview["changed_role_count"] == 0:
+        from shine.comfyops.llm_readiness import llm_readiness
+
+        return {
+            "routes": _route_rows(db),
+            "route_revision": _route_revision(db),
+            "readiness": llm_readiness(db, secrets=secrets),
+            "changed_roles": [],
+        }
+    if not preview["can_apply"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LLM_ROUTE_PREVIEW_BLOCKED",
+                "message": (
+                    "部分 Agent 仍有未结束任务，或所选模型当前不可用于真实文本任务。"
+                    "请按下方提示处理后重新预览。"
+                ),
+                "preview": preview,
+            },
+        )
+
+    roles = {item["role"] for item in assignments}
+    current = {
+        row.role: row for row in db.scalars(select(AgentRoute).where(AgentRoute.role.in_(roles)))
+    }
+    try:
+        for item in assignments:
+            role = item["role"]
+            profile_id = item["provider_profile_id"]
+            route = current.get(role)
+            if profile_id is None:
+                if route is not None:
+                    db.delete(route)
+            elif route is None:
+                route = AgentRoute(role=role, provider_profile_id=profile_id)
+                db.add(route)
+            else:
+                route.provider_profile_id = profile_id
+        changed = [
+            {"role": item["role"], "provider_profile_id": item["provider_profile_id"]}
+            for item in assignments
+            if next((change["action"] for change in preview["changes"]
+                     if change["role"] == item["role"]), "unchanged") != "unchanged"
+        ]
+        add_audit(
+            db,
+            "user",
+            "AGENT_ROUTES_BATCH_UPDATED",
+            "agent_routes",
+            "text",
+            {"updates": changed, "expected_revision": body.expected_revision},
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001 - route table changes are all-or-nothing
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Agent 分配未保存；服务端已回滚本次批量变更。",
+        ) from exc
+
+    from shine.comfyops.llm_readiness import llm_readiness
+
+    return {
+        "routes": _route_rows(db),
+        "route_revision": _route_revision(db),
+        "readiness": llm_readiness(db, secrets=secrets),
+        "changed_roles": changed,
+    }
 
 
 @router.put("/agent-routes/bulk")
-def bulk_route(body: AgentRouteBulkUpdate, db: DBSession) -> dict[str, Any]:
+def bulk_route(
+    body: AgentRouteBulkUpdate,
+    db: DBSession,
+    secrets: Annotated[SecretStore, Depends(secret_store)],
+) -> dict[str, Any]:
     """Bind every text role in one transaction.
 
     A half-bound routing table silently sends some roles to a different
@@ -493,6 +1026,21 @@ def bulk_route(body: AgentRouteBulkUpdate, db: DBSession) -> dict[str, Any]:
     roles = sorted({role.value for role in body.roles})
     if not roles:
         raise HTTPException(status_code=422, detail="At least one role is required")
+    existing = {
+        row.role: row.provider_profile_id
+        for row in db.scalars(select(AgentRoute).where(AgentRoute.role.in_(roles)))
+    }
+    changed_roles = {role for role in roles if existing.get(role) != profile.id}
+    active_tasks = _live_tasks_for_roles(db, changed_roles)
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
+                "message": "受影响角色仍有排队、运行或待核对任务；请先完成或对账，再批量改派。",
+                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+            },
+        )
     try:
         for role in roles:
             route = db.scalar(select(AgentRoute).where(AgentRoute.role == role))
@@ -519,17 +1067,9 @@ def bulk_route(body: AgentRouteBulkUpdate, db: DBSession) -> dict[str, Any]:
         ) from exc
     from shine.comfyops.llm_readiness import llm_readiness
 
-    readiness = llm_readiness(db)
-    rows = db.execute(
-        select(AgentRoute, ProviderProfile)
-        .join(ProviderProfile, AgentRoute.provider_profile_id == ProviderProfile.id)
-        .order_by(AgentRoute.role)
-    ).all()
+    readiness = llm_readiness(db, secrets=secrets)
     return {
-        "roles": [
-            AgentRoutePublic(role=route.role, provider_profile_id=route.provider_profile_id, profile_name=profile.name)
-            for route, profile in rows
-        ],
+        "roles": _route_rows(db),
         "bound_roles": roles,
         "readiness": readiness,
     }
@@ -541,6 +1081,17 @@ def upsert_route(body: AgentRouteUpdate, db: DBSession) -> AgentRoutePublic:
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
     route = db.scalar(select(AgentRoute).where(AgentRoute.role == body.role.value))
+    if (route.provider_profile_id if route else None) != profile.id:
+        active_tasks = _live_tasks_for_roles(db, {body.role.value})
+        if active_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
+                    "message": "该角色仍有排队、运行或待核对任务；请先完成或对账后再改派。",
+                    "active_tasks": [_active_task_dict(task) for task in active_tasks],
+                },
+            )
     if route is None:
         route = AgentRoute(role=body.role.value, provider_profile_id=profile.id)
         db.add(route)
@@ -565,6 +1116,16 @@ def delete_route(role: str, db: DBSession) -> Response:
     route = db.scalar(select(AgentRoute).where(AgentRoute.role == role))
     if not route:
         raise HTTPException(status_code=404, detail="Agent route not found")
+    active_tasks = _live_tasks_for_roles(db, {role})
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
+                "message": "该角色仍有排队、运行或待核对任务；请先完成或对账后再移除路由。",
+                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+            },
+        )
     add_audit(db, "user", "AGENT_ROUTE_DELETED", "agent_route", route.id, {"role": role})
     db.delete(route)
     db.commit()

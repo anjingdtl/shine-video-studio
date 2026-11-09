@@ -323,6 +323,11 @@ export type ProviderProfile = {
   generation_options?: { max_completion_tokens?: number | null; reasoning_effort?: string | null };
   /** not_set | stored | missing | unreadable - never the key itself. */
   secret_status?: string;
+  evidence?: {
+    secret_status?: string; connection_status?: string; catalog_status?: string;
+    generation_status?: string; last_connection_checked_at?: string | null;
+    last_generation_checked_at?: string | null;
+  };
 };
 
 /** The evidence of one provider check.
@@ -340,6 +345,43 @@ export type ProviderTestResult = {
 };
 
 export type AgentRoute = { role: string; provider_profile_id: string; profile_name: string };
+
+export type LlmRole = {
+  role: string; label_zh: string; group: string; business_entry: string; required: boolean;
+  capability_type: string; dependency_stages: string[]; description: string;
+  profile_id: string | null; profile_name: string | null; profile_kind: string | null;
+  profile_enabled: boolean | null; profile_valid: boolean; code: string | null;
+  generation_code: string | null; readiness_status: string; secret_status: string;
+  connection_status: string; catalog_status: string; generation_status: string;
+  last_connection_checked_at: string | null; last_generation_checked_at: string | null;
+};
+
+export type LlmReadiness = {
+  status: string; workflow: string; role_count: number; roles: LlmRole[];
+  verification: string; generation_verification: string; generation_status: string;
+  text_agent_ready: boolean;
+};
+
+export type LlmOverview = {
+  contract: string; profiles: ProviderProfile[]; routes: AgentRoute[]; route_revision: string;
+  roles: LlmRole[]; readiness: LlmReadiness;
+  multimodal_capabilities: Array<Record<string, unknown>>; workflows: string[];
+};
+
+export type AgentRouteAssignment = { role: string; provider_profile_id: string | null };
+
+export type AgentRoutePreview = {
+  expected_revision: string; updates: AgentRouteAssignment[];
+  changes: Array<{
+    role: string; action: 'added' | 'reassigned' | 'removed' | 'unchanged';
+    from_profile_id: string | null; to_profile_id: string | null;
+    from_profile_name: string | null; to_profile_name: string | null;
+  }>;
+  changed_role_count: number;
+  affected_tasks: Array<{ task_id: string; role: string; status: string; model_profile_id: string; model_id: string }>;
+  blockers: Array<{ role: string; code: string; message: string }>;
+  can_apply: boolean;
+};
 
 export type WorkflowProfile = {
   id: string; project_id: string | null; name: string; mode: string; graph_sha256: string;

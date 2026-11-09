@@ -6,6 +6,7 @@ import { VariantReadinessCard } from './VariantReadinessCard';
 import { DeploymentRecommendationCard, type DeploymentChoice } from './DeploymentRecommendationCard';
 import { ImageCapabilityCard } from './ImageCapabilityCard';
 import SettingsPanel from './SettingsPanel';
+import { LLMSetupPanel } from './LLMSetupPanel';
 
 type Tab = 'env' | 'models' | 'voice';
 
@@ -167,6 +168,7 @@ export default function DirectorSetupPanel({
           <p><b>生成方案</b>决定 H3 怎么出片。只有登记并通过本机节点验证的方案，才能用于真实制作；方案缺少宽高映射时，制作页的分辨率设置会明确报错，而不是偷偷按旧尺寸渲染。</p>
         </div>
       </div>
+      <LLMSetupPanel onChanged={onRefresh} />
       <section className="card section-card">
         <div className="section-heading compact">
           <div>
@@ -211,6 +213,7 @@ export default function DirectorSetupPanel({
         onChanged={onRefresh}
       />
       <SettingsPanel
+        includeLlm={false}
         onRefresh={onRefresh}
         project={project}
         profiles={profiles}
