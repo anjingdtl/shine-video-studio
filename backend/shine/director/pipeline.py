@@ -154,10 +154,11 @@ def build_source_master(db, project_id: str, document) -> AgentArtifact:
     for row in db.scalars(select(AgentArtifact).where(
             AgentArtifact.project_id == project_id,
             AgentArtifact.kind == SOURCE_MASTER_KIND)).all():
-        if row.payload_json.get("document_id") == document.id:
+        if (row.payload_json.get("document_id") == document.id
+                and row.payload_json.get("document_sha256") == document.sha256):
             existing = row
             break
-    if existing and existing.payload_json.get("sha256") == document.sha256:
+    if existing is not None:
         return existing
     task_id = _authoring_task(db, project_id, "four_stage_import", {"document_id": document.id})
     artifact = AgentArtifact(
@@ -234,6 +235,8 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
     """One draft VolumePlan for the master, covering the text completely."""
     from shine.models import AgentArtifact
 
+    if document.source_format == "volume":
+        raise ValueError("PIPELINE_SOURCE_MUST_BE_MASTER")
     pointer = _read_pointer(db, _pointer_key(project_id, "volume-plan"))
     if pointer is not None:
         confirmed = db.get(AgentArtifact, pointer.get("artifact_id", ""))
@@ -302,8 +305,16 @@ def confirm_volume_plan(db, project_id: str, artifact_id: str, expected_sha256: 
     artifact = db.get(AgentArtifact, artifact_id)
     if not artifact or artifact.project_id != project_id or artifact.kind != VOLUME_PLAN_KIND:
         raise ValueError("PIPELINE_VOLUME_PLAN_NOT_FOUND")
-    if artifact.sha256 != expected_sha256:
+    if artifact.sha256 != expected_sha256 or digest(artifact.payload_json) != artifact.sha256:
         raise ValueError("PIPELINE_VOLUME_PLAN_SHA_MISMATCH")
+    current = current_volume_plan(db, project_id)
+    if current is not None:
+        if current.id == artifact.id:
+            return current
+        if current.payload_json["source_master"] != artifact.payload_json["source_master"]:
+            raise ValueError("PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED")
+        if artifact.approved_at or artifact.input_revision_ids != [current.id]:
+            raise ValueError("PIPELINE_VOLUME_PLAN_CHANGED")
     row = AppSetting(key=_pointer_key(project_id, "volume-plan"),
                      value={"artifact_id": artifact.id, "sha256": artifact.sha256})
     db.merge(row)
@@ -320,13 +331,23 @@ def materialize_volume_documents(db, project_id: str, plan_artifact_id: str) -> 
     from shine.models import ProjectDocument
 
     plan = db.get(AgentArtifact, plan_artifact_id)
-    if plan is None or plan.kind != VOLUME_PLAN_KIND:
+    if plan is None or plan.project_id != project_id or plan.kind != VOLUME_PLAN_KIND:
         raise ValueError("PIPELINE_VOLUME_PLAN_NOT_FOUND")
     created = []
     master_doc_id = plan.payload_json["source_master"]["document_id"]
     master = db.get(ProjectDocument, master_doc_id)
     if master is None or master.project_id != project_id:
         raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
+    existing_documents = db.scalars(select(ProjectDocument).where(
+        ProjectDocument.project_id == project_id, ProjectDocument.source_format == "volume"
+    ).order_by(ProjectDocument.created_at, ProjectDocument.id)).all()
+    existing_by_range = {
+        (row.parsed.get("volume_id"), row.parsed.get("start_offset"), row.parsed.get("end_offset")): row
+        for row in existing_documents
+        if isinstance(row.parsed, dict) and row.parsed.get("kind") == "four_stage_volume"
+        and row.parsed.get("master_document_id") == master.id
+        and row.parsed.get("master_sha256") == master.sha256
+    }
     for volume in plan.payload_json["volumes"]:
         start = volume["start_offset"]
         end = volume["end_offset"]
@@ -339,17 +360,8 @@ def materialize_volume_documents(db, project_id: str, plan_artifact_id: str) -> 
             "start_offset": start, "end_offset": end,
         }
         sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        existing = None
-        for row in db.scalars(select(ProjectDocument).where(
-                ProjectDocument.project_id == project_id,
-                ProjectDocument.source_format == "volume")).all():
-            parsed = row.parsed if isinstance(row.parsed, dict) else {}
-            if parsed.get("kind") == "four_stage_volume" and parsed.get("volume_id") == volume["volume_id"] \
-                    and parsed.get("master_sha256") == master.sha256 \
-                    and parsed.get("start_offset") == start and parsed.get("end_offset") == end:
-                existing = row
-                break
-        if existing:
+        existing = existing_by_range.get((volume["volume_id"], start, end))
+        if existing is not None:
             created.append(existing)
             continue
         doc = ProjectDocument(
@@ -856,7 +868,10 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
                 "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
                 "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
                 "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
-                "其余字段用中文。只输出 JSON。"
+                "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
+                "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
+                "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
+                "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。只输出 JSON。"
             ),
             context=context,
             schema=schema,
@@ -870,6 +885,7 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
+                       "schema_errors": outcome.schema_errors,
                        "truncated": outcome.details.get("truncated")}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
@@ -1042,23 +1058,21 @@ def _volume_document(db, project_id: str, volume_id: str):
     from shine.models import ProjectDocument
 
     planned, master = _planned_volume(db, project_id, volume_id)
-    candidates = []
-    for row in db.scalars(select(ProjectDocument).where(
-            ProjectDocument.project_id == project_id,
-            ProjectDocument.source_format == "volume")).all():
-        parsed = row.parsed if isinstance(row.parsed, dict) else {}
-        if parsed.get("kind") != "four_stage_volume" or parsed.get("volume_id") != volume_id:
-            continue
-        if planned is not None:
-            if (parsed.get("master_document_id") != master.get("document_id")
-                    or parsed.get("master_sha256") != master.get("sha256")
-                    or parsed.get("start_offset") != planned.get("start_offset")
-                    or parsed.get("end_offset") != planned.get("end_offset")):
-                continue
-        candidates.append(row)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda row: (row.created_at, row.id))
+    parsed = ProjectDocument.parsed
+    query = select(ProjectDocument).where(
+        ProjectDocument.project_id == project_id,
+        ProjectDocument.source_format == "volume",
+        parsed["kind"].as_string() == "four_stage_volume",
+        parsed["volume_id"].as_string() == volume_id,
+    )
+    if planned is not None:
+        query = query.where(
+            parsed["master_document_id"].as_string() == master["document_id"],
+            parsed["master_sha256"].as_string() == master["sha256"],
+            parsed["start_offset"].as_integer() == planned["start_offset"],
+            parsed["end_offset"].as_integer() == planned["end_offset"],
+        )
+    return db.scalar(query.order_by(ProjectDocument.created_at.desc(), ProjectDocument.id.desc()).limit(1))
 
 
 def _volume_outline(db, project_id: str, volume_id: str):
@@ -1318,7 +1332,8 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                     db, project_id, trace["volume_id"], prior_section["production_section_id"])
         context = {
             "bible": _bible_snapshot(bible.payload_json),
-            "section": {"scene_key": section.get("scene_key", section["section_id"]),
+            "section": {"section_id": section["section_id"],
+                        "scene_key": section.get("scene_key", section["section_id"]),
                         "title": section.get("title"), "summary": section.get("summary"),
                         "order": section_order},
             "source_text": source_text,
@@ -1334,7 +1349,9 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             gateway, factory, SCENE_SCRIPT_RUN_ROLE,
             system=(
                 "你是剧集编剧。基于全书故事蓝图、本段原文与上一场的收尾状态，写出这一场的完整剧本："
-                "对白、动作、场景与时间空间，并把收尾状态写入 continuity_out。只输出 JSON。"
+                "对白、动作、场景与时间空间，并把收尾状态写入 continuity_out。"
+                "原样复制 section_id 和 scene_key。dialogue 是含 speaker、line 字符串的对象数组；"
+                "characters 与 questions 均为字符串数组。只输出 JSON。"
             ),
             context=context,
             schema=schema,
@@ -1349,6 +1366,7 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
+                       "schema_errors": outcome.schema_errors,
                        "truncated": outcome.details.get("truncated")}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
@@ -1498,13 +1516,17 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
     return False
 
 
-def latest_unconfirmed_by_section(db, project_id: str, section_id: str) -> AgentArtifact | None:
+def latest_unconfirmed_by_section(db, project_id: str, volume_id: str, section_id: str) -> AgentArtifact | None:
     """The newest unconfirmed SceneScript of one section."""
-    rows = db.scalars(select(AgentArtifact).where(
+    payload = AgentArtifact.payload_json
+    return db.scalar(select(AgentArtifact).where(
         AgentArtifact.project_id == project_id,
-        AgentArtifact.kind == SCENE_SCRIPT_KIND).order_by(AgentArtifact.created_at.desc())).all()
-    return next((r for r in rows if not r.approved_at
-                 and r.payload_json.get("section_id") == section_id), None)
+        AgentArtifact.kind == SCENE_SCRIPT_KIND,
+        AgentArtifact.approved_at.is_(None),
+        AgentArtifact.stale.is_(False),
+        payload["section_id"].as_string() == section_id,
+        payload["source_refs"]["volume_id"].as_string() == volume_id,
+    ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
 
 
 def latest_unconfirmed(db, project_id: str, kind: str) -> AgentArtifact | None:

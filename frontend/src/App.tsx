@@ -830,7 +830,9 @@ function App() {
                     <em>高级</em>
                   </summary>
                   <FourStagePanel
+                    key={projectId}
                     projectId={projectId}
+                    documentsVersion={documentsVersion}
                     workflowProfiles={workflowProfiles}
                     onMessage={report}
                   />

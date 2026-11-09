@@ -224,12 +224,14 @@ class TextConsentBody(APIModel):
 
 
 def _text_scope(db, gateway, project_id, document):
+    from shine.director.pipeline import BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE
     from shine.h3.rulebook import digest
     from shine.llm.base import LLMError
     from shine.materialprep import text_consent
 
     roles = []
-    for role in ("scriptwriter", "producer", "director", "cinematographer", "continuity_supervisor", "editor"):
+    for role in ("scriptwriter", "producer", "director", "cinematographer",
+                 "continuity_supervisor", "editor", BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE):
         try:
             profile = gateway.profile_for_role(db, role)
         except LLMError:

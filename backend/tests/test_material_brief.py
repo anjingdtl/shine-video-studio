@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
@@ -19,7 +20,7 @@ from shine.comfyops.models import (
     AssetRequirement,
     PreProductionPlan,
 )
-from shine.llm.base import LLMTimeout
+from shine.llm.base import LLMFormatError, LLMTimeout
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import brief, image_prompts
 from shine.materialprep.models import MaterialItem, MaterialRun
@@ -186,7 +187,8 @@ def test_the_producer_writes_the_brief_and_the_item_carries_it(api, monkeypatch)
         assert tasks[0].trace["tool"] == "material_image_brief"
 
 
-def test_a_schema_error_earns_exactly_one_correction(api, monkeypatch):
+@pytest.mark.parametrize("transport_validates", [False, True])
+def test_a_schema_error_earns_exactly_one_correction(api, monkeypatch, transport_validates):
     """One targeted correction, never a loop."""
     client, factory, settings = api
     project_id = _project(client)
@@ -194,6 +196,10 @@ def test_a_schema_error_earns_exactly_one_correction(api, monkeypatch):
 
     def handler(call_number):
         if call_number == 1:
+            if transport_validates:
+                raise LLMFormatError("Schema mismatch", details={
+                    "status": 200, "path": "appearance", "validator": "minLength",
+                })
             return {"schema_version": "1.0", "appearance": ""}
         return copy.deepcopy(BRIEF_ANSWER)
 

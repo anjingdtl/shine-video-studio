@@ -3,6 +3,7 @@ import copy
 
 import pytest
 
+from shine.director.pipeline import BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE
 from shine.llm.base import LLMResponse
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import brief, text_consent
@@ -10,6 +11,26 @@ from shine.models import AgentRoute, MaterialTextConsent, ProjectDocument, Provi
 from tests.test_material_brief import BRIEF_ANSWER, _item, _project, _route
 
 LOCAL = {"x-shine-local-action": "1"}
+
+
+def test_four_stage_roles_get_document_scoped_consent(api):
+    client, factory, _ = api
+    project = _project(client)
+    profile_id = _route(client, kind="openai_compatible", base_url="https://text.example.invalid/v1")
+    roles = {BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE}
+    with factory.begin() as db:
+        db.add_all([AgentRoute(role=role, provider_profile_id=profile_id) for role in roles])
+    document = client.post(f"/api/v1/projects/{project}/documents",
+                           files={"file": ("novel.txt", b"Chapter one")}).json()
+    path = f"/api/v1/projects/{project}/material-preparation/text-consent"
+    scope = client.get(path + "/" + document["id"]).json()
+    assert roles <= {row["role"] for row in scope["roles"] if row["configured"] and not row["allowed"]}
+    response = client.post(path, headers=LOCAL, json={
+        "document_id": document["id"], "expected_document_hash": document["sha256"],
+        "expected_scope_hash": scope["scope_hash"], "granted": True,
+    })
+    assert response.status_code == 200
+    assert roles <= {row["role"] for row in response.json()["roles"] if row.get("allowed")}
 
 
 def test_remote_worker_consent_revocation_scope_and_provider_change(api, monkeypatch):

@@ -889,19 +889,21 @@ export const generateStoryboardDraft = (projectId: string, volumeId: string) =>
 
 /** Apply one scene's camera plan: this is what proves the scene->shots mapping. */
 export const applyCameraPlan = (
-    projectId: string, cameraArtifactId: string, continuityArtifactId: string | null) =>
+    projectId: string, cameraArtifactId: string, continuityArtifactId: string | null,
+    arbitrationArtifactId?: string | null) =>
   api<{ shot_ids: string[];
          material_notices?: Array<{ code: string; message: string;
                                   asset_id?: string; shot_id?: string }> }>(
     `/projects/${projectId}/film-artifacts/${cameraArtifactId}/apply-camera`,
-    json('POST', { continuity_artifact_id: continuityArtifactId }));
+    json('POST', { continuity_artifact_id: continuityArtifactId,
+                   arbitration_artifact_id: arbitrationArtifactId ?? undefined }));
 
 /**
  * Record that a refused crew call was provably never sent.  Only this lets the
  * same request be attempted again; the ledger, not the button, decides.
  */
 export const reconcileFilmTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
-  api<{ outcome: string; resubmittable: boolean; state_version: number }>(
+  api<{ outcome: string; resubmittable: boolean; state_version: number; note?: string }>(
     `/projects/${projectId}/film-runs/${taskId}/reconcile`,
     json('POST', { expected_state_version: expectedStateVersion }));
 

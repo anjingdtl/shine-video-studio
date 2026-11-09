@@ -22,6 +22,24 @@ beforeEach(() => { stub = new StudioStub([]); });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
 describe('四阶段面板', () => {
+  it('上传完成后立即更新母本选项并排除派生卷文档', async () => {
+    let uploaded = false;
+    stub.add({ method: 'GET', pattern: /\/projects\/proj-1\/documents$/,
+      respond: () => jsonResponse([
+        { id: 'derived', filename: '派生卷.md', sha256: 'b'.repeat(64), source_format: 'volume' },
+        ...(uploaded ? [{ id: 'novel', filename: '新上传的小说.txt', sha256: 'a'.repeat(64) }] : []),
+      ]) });
+    stub.add({ method: 'GET', pattern: /\/projects\/proj-1\/pipeline$/,
+      respond: () => jsonResponse(baseOverview()) });
+    const onMessage = vi.fn();
+    const { rerender } = render(<FourStagePanel projectId={PROJECT} documentsVersion={0} onMessage={onMessage} />);
+    await screen.findByText(/请先在上方上传母本/);
+    uploaded = true;
+    rerender(<FourStagePanel projectId={PROJECT} documentsVersion={1} onMessage={onMessage} />);
+    expect(await screen.findByRole('option', { name: '新上传的小说.txt' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '派生卷.md' })).toBeNull();
+  });
+
   it('导入步骤：选择母本后生成并确认分卷方案', async () => {
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/documents$'),
                respond: () => jsonResponse([{ id: 'doc-1', filename: 'novel.txt', sha256: 'a'.repeat(64) }]) });

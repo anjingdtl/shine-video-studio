@@ -43,9 +43,8 @@ MIN_OUTPUT_RESERVE_TOKENS = 800
 MAX_OUTPUT_RESERVE_TOKENS = 2000
 
 CORRECTION_RULE = (
-    " Your previous answer did not satisfy the contract. Fix only the fields the "
-    "validator named, keep everything else that was already correct, and return the same "
-    "JSON object shape."
+    " Your previous answer did not satisfy the contract. Regenerate the complete "
+    "JSON object from the original task. Check the named fields against the schema."
 )
 
 
@@ -232,42 +231,45 @@ def call_material_agent(
 
     try:
         response = call(system, json.dumps(context, ensure_ascii=False))
+        contract.model_validate(response.parsed)
+        return AgentCallOutcome(parsed=response.parsed, details={
+            "usage": usage_summary(response.usage),
+            "output_budget": (response.raw_meta or {}).get("output_budget"),
+        })
     except LLMError as exc:
         external_outcome = classify_external_outcome(exc)
-        uncertain = external_outcome == "UNKNOWN"
-        return AgentCallOutcome(
-            error_code=exc.code,
-            uncertain=uncertain,
-            details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
-                     "response_status": exc.details.get("status"),
-                     "truncated": truncated_output(exc)},
-        )
+        validator = exc.details.get("validator")
+        if external_outcome == "RESPONSE_RECEIVED" and exc.code == "LLM_FORMAT" and validator:
+            # The transport validates the JSON schema before Pydantic sees it.
+            # Only a response with a known contract violation earns a correction.
+            errors = [{"field": exc.details.get("path", ""), "type": validator}]
+        else:
+            return AgentCallOutcome(
+                error_code=exc.code,
+                uncertain=external_outcome == "UNKNOWN",
+                details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
+                         "response_status": exc.details.get("status"),
+                         "truncated": truncated_output(exc)},
+            )
+    except ValidationError as exc:
+        errors = [
+            {"field": ".".join(str(part) for part in error.get("loc", ())), "type": error.get("type")}
+            for error in exc.errors(include_input=False, include_url=False)
+        ]
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
-        # The request may already have reached the provider, so the outcome is
-        # unknown rather than failed.  The scene is reviewed, never replayed.
         return AgentCallOutcome(
             error_code="LLM_PROVIDER_FAULT",
             uncertain=True,
             details={"error_type": type(exc).__name__, "external_outcome": "UNKNOWN"},
         )
 
-    try:
-        contract.model_validate(response.parsed)
-        return AgentCallOutcome(parsed=response.parsed, details={
-            "usage": usage_summary(response.usage),
-            "output_budget": (response.raw_meta or {}).get("output_budget"),
-        })
-    except ValidationError as exc:
-        errors = [
-            {"field": ".".join(str(part) for part in error.get("loc", ())), "type": error.get("type")}
-            for error in exc.errors(include_input=False, include_url=False)
-        ]
-
     correction = {"task": context, "schema_errors": errors, "validator": schema}
     try:
         corrected = call(system + CORRECTION_RULE, json.dumps(correction, ensure_ascii=False))
         contract.model_validate(corrected.parsed)
-        return AgentCallOutcome(parsed=corrected.parsed, correction_used=True, schema_errors=errors)
+        return AgentCallOutcome(parsed=corrected.parsed, correction_used=True, schema_errors=errors,
+            details={"usage": usage_summary(corrected.usage),
+                     "output_budget": (corrected.raw_meta or {}).get("output_budget")})
     except LLMError as second:
         external_outcome = classify_external_outcome(second)
         uncertain = external_outcome == "UNKNOWN"
@@ -277,7 +279,8 @@ def call_material_agent(
             correction_used=True,
             schema_errors=errors,
             details={"error_type": type(second).__name__, "external_outcome": external_outcome,
-                     "response_status": second.details.get("status")},
+                     "response_status": second.details.get("status"),
+                     "truncated": truncated_output(second)},
         )
     except ValidationError:
         return AgentCallOutcome(

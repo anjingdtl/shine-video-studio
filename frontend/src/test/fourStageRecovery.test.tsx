@@ -41,7 +41,7 @@ describe('四阶段面板的恢复闭环', () => {
       units: [
         { unit_id: 's1', section_id: 's1', order: 1, status: 'PROPOSED',
           camera_artifact_id: 'cam-1', continuity_artifact_id: 'con-1',
-          arbitration_artifact_id: null, applied: false, shot_ids: [] },
+          arbitration_artifact_id: 'arb-1', applied: false, shot_ids: [] },
         { unit_id: 's2', section_id: 's2', order: 2, status: 'REJECTED',
           camera_artifact_id: null, continuity_artifact_id: null,
           arbitration_artifact_id: null, applied: false, shot_ids: [],
@@ -52,6 +52,8 @@ describe('四阶段面板的恢复闭环', () => {
                respond: () => jsonResponse([]) });
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/pipeline$'),
                respond: () => jsonResponse(state) });
+    stub.add({ method: 'POST', pattern: /\/film-artifacts\/cam-1\/apply-camera$/,
+               respond: () => jsonResponse({ shot_ids: ['shot-1'] }) });
     const first = render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
     await screen.findByRole('button', { name: '应用这一场的镜头' });
     expect(screen.getByRole('button', { name: '核对并只重做这一场' })).toBeInTheDocument();
@@ -60,6 +62,10 @@ describe('四阶段面板的恢复闭环', () => {
     render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
     expect(await screen.findByRole('button', { name: '应用这一场的镜头' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '核对并只重做这一场' })).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: '应用这一场的镜头' }));
+    expect(stub.callsOf('POST', /\/apply-camera$/)[0]?.body).toEqual({
+      continuity_artifact_id: 'con-1', arbitration_artifact_id: 'arb-1',
+    });
   });
 
   it('核对得出「确实没有发出」才只重做那一场，不会重跑整卷', async () => {
@@ -76,7 +82,7 @@ describe('四阶段面板的恢复闭环', () => {
                respond: () => jsonResponse([]) });
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/pipeline$'),
                respond: () => jsonResponse(state) });
-    stub.add({ method: 'POST', pattern: new RegExp('/pipeline/tasks/task-9/reconcile$'),
+    stub.add({ method: 'POST', pattern: new RegExp('/film-runs/task-9/reconcile$'),
                respond: () => jsonResponse({ outcome: 'NOT_SENT_PROVEN', resubmittable: true,
                                              state_version: 4, note: '已确认上一次没有发出，可以继续这一项。' }) });
     stub.add({ method: 'POST', pattern: new RegExp('/storyboard-draft$'),
@@ -103,16 +109,15 @@ describe('四阶段面板的恢复闭环', () => {
                respond: () => jsonResponse([]) });
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/pipeline$'),
                respond: () => jsonResponse(state) });
-    stub.add({ method: 'POST', pattern: new RegExp('/pipeline/tasks/task-9/reconcile$'),
-               respond: () => jsonResponse({ outcome: 'UNKNOWN_REQUIRES_NEW_ATTEMPT',
-                                             resubmittable: false, state_version: 4,
-                                             note: '无法确认上一次是否已经发出。' }) });
+    stub.add({ method: 'POST', pattern: new RegExp('/film-runs/task-9/reconcile$'),
+               respond: () => jsonResponse({ outcome: 'UNCONFIRMABLE',
+                                             resubmittable: false, state_version: 3 }) });
     const user = userEvent.setup();
     const messages: string[] = [];
     render(<FourStagePanel projectId={PROJECT}
       onMessage={(message) => { messages.push(message); }} />);
     await user.click(await screen.findByRole('button', { name: '核对并只重做这一场' }));
-    await waitFor(() => expect(messages.join(' ')).toContain('无法确认上一次是否已经发出'));
+    await waitFor(() => expect(messages.join(' ')).toContain('无法确认服务商是否已处理这次调用'));
     expect(stub.callsOf('POST', new RegExp('/storyboard-draft$'))).toHaveLength(0);
   });
 

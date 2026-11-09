@@ -98,6 +98,47 @@ def test_short_novel_plans_one_volume(api):
         assert plan.payload_json["coverage"]["complete"] is True
 
 
+def test_upload_gb18030_and_confirm_only_one_master(api):
+    client, factory, _ = api
+    project = create_project(client)
+    path = f"/api/v1/projects/{project}"
+    source = "第一章 初遇\r\n王子见到了女巫。\r\n第二章 归来\r\n"
+
+    def upload(name, text):
+        response = client.post(path + "/documents", files={"file": (name, text.encode("gb18030"))})
+        assert response.status_code == 201
+        return response.json()
+
+    def draft(document):
+        return client.post(path + "/pipeline/sources", json={
+            "document_id": document["id"], "expected_document_hash": document["sha256"],
+        })
+
+    def confirm(plan):
+        return client.post(path + f"/pipeline/volume-plans/{plan['volume_plan_id']}/confirm",
+                           headers=LOCAL, json={"expected_sha256": plan["sha256"]})
+
+    doc = upload("母本.txt", source)
+    assert doc["text_preview"] == source.strip()
+    first = draft(doc).json()
+    assert first["coverage"]["complete"]
+    assert draft(doc).status_code == 201
+    competing = draft(upload("另一母本.txt", "第一章 新故事\n他们出发了。")).json()
+    receipt = confirm(first)
+    assert receipt.status_code == 200
+    assert confirm(first).json() == receipt.json()
+    refused = confirm(competing)
+    assert refused.json()["detail"]["code"] == "PIPELINE_MASTER_CONFLICT_ALREADY_CONFIRMED"
+    volume = receipt.json()["volume_documents"][0]
+    assert draft({"id": volume, "sha256": None}).json()["detail"]["code"] == "PIPELINE_SOURCE_MUST_BE_MASTER"
+    with factory() as db:
+        assert db.get(ProjectDocument, volume).text == source.strip()
+        masters = db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project, AgentArtifact.kind == pipeline.SOURCE_MASTER_KIND,
+        )).all()
+        assert sum(row.payload_json["document_id"] == doc["id"] for row in masters) == 1
+
+
 def test_long_novel_groups_by_budget_at_section_boundaries(api):
     """Sections are grouped at boundaries; coverage is complete and ordered."""
     client, factory, settings = api

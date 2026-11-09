@@ -6,13 +6,14 @@ import {
   editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
   getTextConsentScope, grantTextConsent, importPipelineSource, listScriptDocuments,
   openDirectorPackage, queueBible, queueVolumeOutline, queueVolumeScripts,
-  reconcilePipelineTask, requestVolumeHandoff, resumePipelineTask, startPipelineNewAttempt,
+  reconcileFilmTask, reconcilePipelineTask, requestVolumeHandoff, resumePipelineTask, startPipelineNewAttempt,
   type PipelineOverview, type PipelineTaskSummary, type StoryboardUnit,
   type WorkflowProfileLite,
 } from '../api';
 
 type Props = {
   projectId: string;
+  documentsVersion?: number;
   workflowProfiles?: WorkflowProfileLite[];
   onMessage: (message: string, kind?: 'error' | 'success') => void;
 };
@@ -24,8 +25,9 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 /** The four-stage creative pipeline in one place: import, outline, script, storyboard. */
-export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props) {
+export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, onMessage }: Props) {
   const [overview, setOverview] = useState<PipelineOverview | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [volumePlanDraft, setVolumePlanDraft] = useState<{ id: string; sha256: string; volumes: unknown[] } | null>(null);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string }>>([]);
@@ -41,21 +43,20 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   const [boundaryMode, setBoundaryMode] = useState(false);
 
   const refresh = useCallback(async () => {
+    setLoadFailed(false);
     try {
       const [data, docs] = await Promise.all([
         getPipelineOverview(projectId),
         listScriptDocuments(projectId),
       ]);
       setOverview(data);
-      setDocuments(docs ?? []);
+      setDocuments((docs ?? []).filter((doc) => doc.source_format !== 'volume'));
     } catch {
-      // A passive refresh that cannot reach the server stays silent: the
-      // panel shows its loading state, and only user actions report errors.
-      setOverview(null);
+      setLoadFailed(true);
     }
   }, [projectId]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh, documentsVersion]);
   // Switching project must not keep another project's selection or receipt.
   useEffect(() => {
     setSelectedVolumeId('');
@@ -111,14 +112,20 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
 
   if (!overview) {
     return <section className="card" id="four-stage"><div className="module-guide"><CircleHelp size={13} />
-      <p>正在读取四阶段进度…</p></div></section>;
+      {loadFailed
+        ? <><p>四阶段进度读取失败。</p><button type="button" className="secondary-button"
+            onClick={() => void refresh()}>重新读取</button></>
+        : <p>正在读取四阶段进度…</p>}
+    </div></section>;
   }
 
   const volumes = overview.volumes ?? [];
   const pendingScripts = overview.pending_scripts ?? [];
   const activeTasks = overview.active_tasks ?? [];
-  const currentVolumeId = selectedVolumeId || volumes[0]?.volume_id || '';
+  const currentVolumeId = volumes.some((volume) => volume.volume_id === selectedVolumeId)
+    ? selectedVolumeId : volumes[0]?.volume_id ?? '';
   const currentVolume = volumes.find((v) => v.volume_id === currentVolumeId);
+  const bibleNeedsConfirmation = !overview.bible_confirmed || !!overview.bible_status?.blockers.length;
   // The draft is read from the server, never from local state: a refresh, a
   // crash or a restart must show the same pending work.
   const draftUnits = currentVolume?.storyboard?.units ?? [];
@@ -149,7 +156,8 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   async function applyUnit(unit: StoryboardUnit) {
     if (!unit.camera_artifact_id) return;
     await run(
-      () => applyCameraPlan(projectId, unit.camera_artifact_id!, unit.continuity_artifact_id),
+      () => applyCameraPlan(projectId, unit.camera_artifact_id!, unit.continuity_artifact_id,
+                            unit.arbitration_artifact_id),
       (applied) => {
         const body = applied as { shot_ids?: string[];
           material_notices?: Array<{ code: string; message: string }> };
@@ -166,22 +174,26 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
   /**
    * Reconcile one failed unit and continue only that unit.
    *
-   * The server decides whether the call may be repeated: only a proven
-   * "not sent" may continue, an unknown outcome stays unknown and is
-   * reported as it is.  The failed unit is never silently skipped and the
-   * other units are never re-run.
+   * The film ledger decides whether each call is safe to repeat.
+   * An unknown outcome is reported as it is.
    */
   async function reconcileUnit(unit: StoryboardUnit) {
     setBusy(true);
     try {
       const conclusions: string[] = [];
-      let mayContinue = false;
-      for (const rejection of unit.rejections ?? []) {
-        if (!rejection.task_id || rejection.state_version === undefined) continue;
-        const result = await reconcilePipelineTask(
+      const rejections = unit.rejections ?? [];
+      let mayContinue = rejections.length > 0;
+      for (const rejection of rejections) {
+        if (!rejection.task_id || rejection.state_version === undefined) {
+          mayContinue = false;
+          continue;
+        }
+        const result = await reconcileFilmTask(
           projectId, rejection.task_id, rejection.state_version);
-        conclusions.push(result.note ?? result.outcome);
-        if (result.resubmittable) mayContinue = true;
+        conclusions.push(result.note ?? (result.outcome === 'UNCONFIRMABLE'
+          ? '无法确认服务商是否已处理这次调用，原任务已保留。'
+          : result.outcome));
+        mayContinue = mayContinue && result.resubmittable;
       }
       if (conclusions.length === 0) {
         onMessage('这一项没有可核对的调用记录，请查看任务详情', 'error');
@@ -194,7 +206,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
       }
       onMessage(conclusions.join('；') + ' 正在只重做这一场', 'success');
       setBusy(false);
-      await draftAndRecord(unit.section_id ? currentVolumeId : currentVolumeId, [unit.section_id]);
+      await draftAndRecord(currentVolumeId, [unit.section_id]);
     } catch (error) {
       onMessage((error as Error).message, 'error');
     } finally { setBusy(false); }
@@ -274,6 +286,8 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
       {/* ① 文本导入与分卷 */}
       <div className="pipeline-step">
         <b>① 文本导入与分卷</b>
+        {!overview.volume_plan_confirmed && documents.length === 0 &&
+          <p className="muted">请先在上方上传母本，或从创意简报生成剧本。</p>}
         {!overview.volume_plan_confirmed && (
           <div className="row">
             <select aria-label="选择母本文档" defaultValue="">
@@ -376,14 +390,14 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
             ))}
           </ul>
         )}
-        {overview.volume_plan_confirmed && !overview.bible_confirmed && (
+        {overview.volume_plan_confirmed && bibleNeedsConfirmation && (
           <div className="row">
             <button type="button" className="must-button" disabled={busy}
               onClick={() => run(() => queueBible(projectId))}>生成全局故事蓝图</button>
             <span className="muted small">蓝图按当前计划的每一卷大纲合成；缺卷会如实标为草稿，不能作为正式发布依据。</span>
           </div>
         )}
-        {overview.pending_bible && !overview.bible_confirmed && (
+        {overview.pending_bible && bibleNeedsConfirmation && (
           <div className="row">
             <span>全局故事蓝图已生成，请阅读后确认。</span>
             <button type="button" className="must-button" disabled={busy}
@@ -391,7 +405,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
               确认蓝图</button>
           </div>
         )}
-        {overview.bible_confirmed && <span className="muted">全局故事蓝图已确认。</span>}
+        {!bibleNeedsConfirmation && <span className="muted">全局故事蓝图已确认。</span>}
         {overview.bible_confirmed && (overview.bible_status?.blockers ?? []).length > 0 && (
           <div className="required-action">
             <b>蓝图与当前大纲已不一致：</b>
@@ -500,7 +514,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
                     )}
                     {unit.status !== 'PROPOSED' && (
                       <button type="button" className="secondary-button" disabled={busy}
-                        title="只有核对得出「确实没有发出」才允许只重做这一场。"
+                        title="核对每条调用记录，服务端确认可以重做后才继续。"
                         onClick={() => reconcileUnit(unit)}>核对并只重做这一场</button>
                     )}
                     {unit.status !== 'PROPOSED' && (unit.rejections ?? []).length > 0 && (
@@ -514,7 +528,7 @@ export function FourStagePanel({ projectId, workflowProfiles, onMessage }: Props
             )}
             {draftUnits.length > 0 && draftStatus && draftStatus !== 'PROPOSED' && (
               <div className="muted small">
-                有单元没有完成。每一项都要单独核对：只有「确认未发送」后才会重做这一场，不会重跑整卷。
+                有单元没有完成。逐场核对后，服务端会判断是否可以只重做这一场。
               </div>
             )}
             {contracts.length > 0 && (

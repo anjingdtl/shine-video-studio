@@ -55,12 +55,13 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
             latest_outline_row = None
             volume_doc = pipeline._volume_document(db, project_id, volume_id)
             if volume_doc is not None:
-                rows = db.scalars(select(AgentArtifact).where(
+                latest_outline_row = db.scalar(select(AgentArtifact).where(
                     AgentArtifact.project_id == project_id,
-                    AgentArtifact.kind == "StoryOutline").order_by(
-                    AgentArtifact.created_at.desc())).all()
-                latest_outline_row = next(
-                    (r for r in rows if r.payload_json.get("document_id") == volume_doc.id), None)
+                    AgentArtifact.kind == "StoryOutline",
+                    AgentArtifact.stale.is_(False),
+                    AgentArtifact.payload_json["document_id"].as_string() == volume_doc.id,
+                    AgentArtifact.payload_json["document_sha256"].as_string() == volume_doc.sha256,
+                ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
                 questions = (list(latest_outline_row.payload_json.get("questions") or [])
                              if latest_outline_row else [])
             volumes.append({
@@ -89,7 +90,8 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
     pending_scripts = []
     for volume in volumes:
         for entry in volume.get("scripts", []):
-            script = pipeline.latest_unconfirmed_by_section(db, project_id, entry["section_id"])
+            script = pipeline.latest_unconfirmed_by_section(
+                db, project_id, volume["volume_id"], entry["section_id"])
             if script is not None:
                 pending_scripts.append({
                     "volume_id": volume["volume_id"],
@@ -144,6 +146,9 @@ def import_source(project_id: str, body: dict, db: DBSession) -> dict[str, Any]:
 @router.post("/projects/{project_id}/pipeline/volume-plans/{artifact_id}/confirm", status_code=200)
 def confirm_plan_route(project_id: str, artifact_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
     """A person confirms the volume plan; volume documents are materialized."""
+    from shine.api_preparation import locked
+
+    locked(db)
     require_project(db, project_id)
     try:
         artifact = pipeline.confirm_volume_plan(db, project_id, artifact_id, body.get("expected_sha256"))
