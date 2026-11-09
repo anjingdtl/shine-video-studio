@@ -543,14 +543,19 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
         task_id, version, project_id, role = row.id, row.state_version, row.project_id, row.role_id
         state = dict(row.trace)
         document = db.get(ProjectDocument, state["document_id"])
-    pinned, pinned_model = _pinned_profile(factory, task_id)
-    if (pinned is None or not pinned.enabled or not pinned.model.strip()
-            or (pinned_model and pinned.model != pinned_model)):
-        # The task keeps its durable identity and its completed units; only the
-        # model snapshot is unusable.  Name it instead of silently switching.
-        _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW",
-                     "STORY_PROVIDER_PIN_INVALID")
-        return True
+    if role == SECTION_RUN:
+        # A section run is driven by the crew's per-role routing; it has no
+        # single pinned profile of its own (its marker is not a provider id).
+        pinned, pinned_model = None, None
+    else:
+        pinned, pinned_model = _pinned_profile(factory, task_id)
+        if (pinned is None or not pinned.enabled or not pinned.model.strip()
+                or (pinned_model and pinned.model != pinned_model)):
+            # The task keeps its durable identity and its completed units; only
+            # the model snapshot is unusable.  Name it instead of switching.
+            _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW",
+                         "STORY_PROVIDER_PIN_INVALID")
+            return True
     with _pinned_story_provider(gateway, pinned), _renew_story_claim(
             factory, task_id, version, worker_id, heartbeat_fn):
         if document is None or document.project_id != project_id or document.sha256 != state["document_sha256"]:
@@ -561,7 +566,7 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 return _run_section(factory, settings, gateway, task_id, version, worker_id,
                                      project_id, document, state)
             profile = pinned
-            if text_consent.fingerprint(profile) != state["provider_fingerprint"]:
+            if profile is None or text_consent.fingerprint(profile) != state["provider_fingerprint"]:
                 # The pinned profile itself was edited (endpoint, key reference
                 # or options): the queued request no longer describes the same
                 # provider, so it stops by name rather than silently switching.
