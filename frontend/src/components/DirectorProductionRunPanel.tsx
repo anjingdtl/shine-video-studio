@@ -11,6 +11,7 @@ import {
   type RunEvent, type WorkflowProfile,
 } from '../api';
 import { EpisodePostEditor } from './EpisodePostEditor';
+import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
 type Mode = 'plan' | 'package' | 'run' | 'post';
 
@@ -93,6 +94,22 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
+  /** 每个方案在本机能不能用于生产：服务端判定，浏览器只显示结论和原因。 */
+  const [gates, setGates] = useState<Record<string, ProfileGate>>({});
+  const ref2vaProfiles = useMemo(
+    () => workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va'),
+    [workflowProfiles],
+  );
+  const profileKey = ref2vaProfiles.map((profile) => profile.id).join(',');
+  useEffect(() => {
+    if (!projectId || !profileKey) { setGates({}); return; }
+    let cancelled = false;
+    fetchProfileGates(projectId, ref2vaProfiles)
+      .then((rows) => { if (!cancelled) setGates(rows); })
+      .catch(() => { if (!cancelled) setGates({}); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, profileKey]);
   const [selectedPackageId, setSelectedPackageId] = useState<string>(packageId ?? '');
   // A deep link names one exact package; the selection follows it.
   useEffect(() => { setSelectedPackageId(packageId ?? ''); }, [packageId]);
@@ -213,6 +230,13 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       onMessage('先在基础配置里登记本机生成方案，再生成导演包', 'error');
       return;
     }
+    // 候选方案（W6A8 等）在这台电脑上还不能跑时，导演包不会生成；
+    // 也不会换成 INT8 基线继续——身份必须是同一个。
+    const gate = gates[profileId];
+    if (gate && !gate.selectable) {
+      onMessage(`这个生成方案现在不能用于生产：${gateReason(gate)}`, 'error');
+      return;
+    }
     return act('package', () => createDirectorPackage(projectId, {
       workflow_profile_id: profileId,
       generation_mode: profileMode,
@@ -241,6 +265,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     const profile = workflowProfiles.find((row) => row.id === profileId);
     return profile?.mode ?? null;
   }, [profileId, workflowProfiles]);
+
+  const selectedGate = profileId ? gates[profileId] : undefined;
 
   // 就绪检查是即时事实（会随风格/绑定/文件变化）；七阶段摘要只在没有包时兜底。
   const shownBlockers = (readiness?.blockers
@@ -360,11 +386,18 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           <label>本机生成方案
             <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
               <option value="">请选择…</option>
-              {workflowProfiles.map((profile) => <option key={profile.id} value={profile.id}>
-                {profile.name} · {profile.mode}
-              </option>)}
+              {workflowProfiles.map((profile) => {
+                const gate = gates[profile.id];
+                const blocked = gate ? !gate.selectable : false;
+                return <option key={profile.id} value={profile.id} disabled={blocked}>
+                  {profile.name} · {profile.mode}{blocked ? '（本机暂不可用）' : ''}
+                </option>;
+              })}
             </select>
           </label>
+          {selectedGate && !selectedGate.selectable && <span className="run-hint">
+            <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
+          </span>}
           <button className="primary-button" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
             <LockKeyhole size={13} /> 生成导演包
           </button>

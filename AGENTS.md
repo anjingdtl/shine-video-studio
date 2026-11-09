@@ -1044,3 +1044,55 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `backend/tests/test_reference_transfer.py`（两条反向断言）、
   `backend/tests/test_production_series.py`（API 层反向断言）。
   报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 9 节。
+
+## 2026-11-09 W6A8 低显存候选轮（导演模式新档）
+
+- **一个变体，一个目录，一套方案**。`shine/comfyops/variant_binding.py` 是唯一解析
+  变体→部署目录→工作流文件的地方。`POST /setup/profiles` 带 `variant_id` 时登记的是
+  **该变体自己的**方案（`local-h3-ref2va-lowend-pdd-free-2img`），绝不借用默认目录的方案；
+  **不传变体参数的调用完全不变**（默认目录 + 原三个方案）。
+- **变体与目录不一致就拒绝**。`VARIANT_CATALOG_MISMATCH`（409）：变体清单登记的
+  `catalog_id` 与调用方指定的不一致时，不合并、不回退到任何一个。同名同项目内容不同仍然
+  `PROFILE_CONTENT_CHANGED`；重复登记仍然幂等。
+- **身份链要能核对**。变体清单登记 `checkpoint_id` 与 `graph_sha256`（方案名→图哈希），
+  `profile_metadata` 才能从图反查变体；候选方案因此带 `variant_id=ref2va-lowend-candidate`、
+  `variant_acceptance_status=CANDIDATE`、`variant_verified=false`。**候选不继承基线的验收**。
+- **五层就绪 + 唯一下一步**。`GET /setup/variant-readiness` 给出「待准备权重 / 文件已核验 /
+  工作流已登记 / 本机运行环境已验证 / 真实出片已验证」，并只给**一个**下一步。
+  「差不多能用」不是动作。权重要求**跟着方案图走**：图里没加载的可选 turbo LoRA 不算缺件。
+- **候选的下载仍然是关闭的**。`auto_download_allowed` 仍是 `false`，安装计划仍以
+  `VARIANT_NOT_DOWNLOADABLE` 拒绝；**禁止**通过改 `SUPPORTED`、改 `auto_download_allowed`
+  或跳过资格检查来解锁。已批准的准备路径是既有的「检测已有安装 / 导入模型」，并且这条路径
+  现在按**变体自己的目录**比对 revision、字节数与 SHA-256。
+- **候选必须走完整门禁才能进生产**。`shine/comfyops/profile_gate.py` 只对**未验收**变体加码，
+  已验收变体（含 INT8 基线）行为完全不变。门禁项：项目作用域、图身份、已登记到本作品、
+  节点已核对、权重已就位并逐字节核验、受管运行时已配置、宽高已接入。任一不满足 → 具名 409，
+  **不替换方案**（不改 INT8、不改 FL2VA、不换参考资产、不换 checkpoint），且拒绝发生在
+  **改镜头规格、自动补绑定、入队之前**。
+- **服务端是唯一的门，浏览器只是显示**。`create_series`、`create_render_job`、
+  `build_package` 调用同一个门禁，绕过界面直接调接口同样被拒；浏览器读到不了结论时
+  **不发明拒绝**，由服务端裁决并给出它自己的原因。
+- **候选不与基线混档**。拍摄质量新增独立档「低显存候选 · W6A8」；W6A8 方案绝不会被当成
+  「高质量 · 原生20步」，一键开拍不会把它换回 INT8。**显式选中的候选方案优先于质量档**：
+  要么用它，要么明确说为什么不能用。
+- **显式选定就保持同一身份**。导演包钉住 `workflow_profile_id / graph_sha256 / checkpoint_id /
+  parameter_map / media_transfers / validated_against`，生产系列与 Job 带同一个
+  `workflow_profile_id`，实际 `/prompt` 用同一份 `parameter_map`。
+- **最终用哪套方案由用户决定（2026-11-09 用户裁定）**。基础配置的方案列表是**参考清单**，
+  不是产品的决定；真正用哪一套由用户在制作页自己选。**用户显式选过的方案，一键开拍与
+  导演包都必须照用，任何情况下都不替换**——包括质量档与所选方案不一致时。拍摄质量档只在
+  **用户还没选过方案**时充当推荐依据。界面必须显示「用你选定的方案 X」。
+- **五层就绪状态是累积的**。后一层只有在前一层达成时才算达成：权重都没到位就不能说
+  「文件已核验」，方案没登记就不能说「本机运行环境已验证」。层与层之间的依赖顺序写在
+  `variant_readiness.py`，页面不允许出现依赖未达成却显示「已完成」的层。
+- **就绪状态区不能长得像方案列表**。五层用独立的 `readiness-layers` 样式并写明标题
+  「五层就绪状态」；候选在参考清单里是**同一份列表里的一行**（标注「候选 · 未登记」），
+  不能另起一张看起来像方案清单的卡片，否则用户会以为原来的方案不见了。
+- **本轮不改 `client_review_identity` 钉住的文件**（`worker.py` / `preproduction.py` /
+  handoff / quality），因此不触发 VLM 重校准；但真实正负校准本来就没做过，**不得声称已校准**。
+- **本轮真机出片是 BLOCKED**：本机是 RTX 5080 16GB（无 4070 Super 12GB），且官方 W6A8 权重
+  未就位（候选不进自动下载路径）。因此**没有**任何 attempt / artifact / 显存峰值 / 解码 /
+  人工观感证据，**不得声称任何真实出片结论**。
+- 证据：`docs/ACCEPTANCE_20261109_W6A8_LOWEND_VARIANT.md`；回归
+  `backend/tests/test_variant_binding_and_gate.py`（21 项）、
+  `frontend/src/test/variantCandidate.test.tsx`（4 项）。

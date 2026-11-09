@@ -288,6 +288,20 @@ def build_package(
     if profile is None or (profile.project_id not in (None, project.id)):
         raise HTTPException(404, "WORKFLOW_PROFILE_NOT_FOUND")
 
+    # A candidate variant may only be packaged when this project really owns
+    # it and this machine really checked it.  The package pins exactly one
+    # identity, so a profile that cannot run here never reaches a package and
+    # can never be silently replaced by the INT8 baseline.
+    from shine.comfyops.profile_gate import profile_blockers
+
+    gate_blockers = profile_blockers(db, None, project.id, profile, require_runtime=False)
+    if gate_blockers:
+        raise HTTPException(409, {
+            "code": gate_blockers[0]["code"],
+            "message": gate_blockers[0]["message"],
+            "blockers": gate_blockers,
+        })
+
     style = _style_snapshot(db, project)
     binding = {
         "workflow_profile_id": profile.id,

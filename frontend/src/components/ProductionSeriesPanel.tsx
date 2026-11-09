@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
+import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
 type AutoBinding = { asset_id: string; use_as: string; role: string | null; frame_role: string | null; ordinal: number };
 
@@ -64,11 +65,14 @@ const CLIP_CHOICES = ['', '4', '5', '6', '8', '10', '12', '15'];
 
 /** 拍摄质量档：按方案名确定性匹配（pdd8=步数加速、upscale=画面放大），
  *  每档明说耗时代价，用户自己权衡。 */
-type QualityTier = 'fast' | 'native' | 'upscale';
+type QualityTier = 'fast' | 'native' | 'upscale' | 'lowend';
 const QUALITY_TIERS: Array<{ id: QualityTier; label: string; note: string; match: (name: string) => boolean }> = [
   { id: 'fast', label: '快速 · 8步加速', note: '8 步加速生成，速度最快（默认）', match: (n) => /pdd8/i.test(n) && !/upscale/i.test(n) },
-  { id: 'native', label: '高质量 · 原生20步', note: '原生 20 步生成，画面细节与稳定性更好，耗时约为快速档的 2~3 倍', match: (n) => !/pdd8/i.test(n) && !/upscale/i.test(n) },
+  { id: 'native', label: '高质量 · 原生20步', note: '原生 20 步生成，画面细节与稳定性更好，耗时约为快速档的 2~3 倍', match: (n) => !/pdd8/i.test(n) && !/upscale/i.test(n) && !/lowend|w6a8/i.test(n) },
   { id: 'upscale', label: '超清 · 加速+画面放大', note: '8 步加速生成后再高清放大，细节最高；生成+放大两段耗时，整片时间最长', match: (n) => /pdd8/i.test(n) && /upscale/i.test(n) },
+  // 候选组合单列一档：它绝不与「原生 20 步」混在一起，否则自动适配会在
+  // INT8 基线和 W6A8 候选之间静默换一套权重。
+  { id: 'lowend', label: '低显存候选 · W6A8', note: '官方 W6A8 候选组合（12GB 级显卡候选）：未完成真机验收，本机运行时核对通过后才能选', match: (n) => /lowend|w6a8/i.test(n) },
 ];
 
 function tierOfProfile(name: string): QualityTier | null {
@@ -168,6 +172,8 @@ export default function ProductionSeriesPanel({
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [profileId, setProfileId] = useState('');
+  /** 方案是不是**用户自己**选的。自动预选不算；用户的显式选择永远优先。 */
+  const [profileChosenByUser, setProfileChosenByUser] = useState(false);
   const [scope, setScope] = useState<'full' | 'basic'>('full');
   const [editIntents, setEditIntents] = useState<Array<{ id: string; created_at: string }>>([]);
   const [editIntentId, setEditIntentId] = useState('');
@@ -216,12 +222,31 @@ export default function ProductionSeriesPanel({
   }, [projectId, shots.length]);
 
   const ref2vaProfiles = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
+  /** 每个方案在本机能不能用于生产：由服务端判定，浏览器只显示结论和原因。 */
+  const [gates, setGates] = useState<Record<string, ProfileGate>>({});
+  const profileKey = ref2vaProfiles.map((profile) => profile.id).join(',');
+  useEffect(() => {
+    if (!projectId || !profileKey) { setGates({}); return; }
+    let cancelled = false;
+    fetchProfileGates(projectId, ref2vaProfiles)
+      .then((rows) => { if (!cancelled) setGates(rows); })
+      .catch(() => { if (!cancelled) setGates({}); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, profileKey]);
   // Only one validated Ref2VA profile exists: preselect it instead of making
   // the user pick from one option; multiple options keep the manual choice.
   useEffect(() => {
     if (ref2vaProfiles.length === 1 && !profileId) setProfileId(ref2vaProfiles[0].id);
   }, [ref2vaProfiles, profileId]);
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
+  const selectedGate = profileId ? gates[profileId] : undefined;
+  /** 用户自己选定的那套方案（一键开拍会用它）。 */
+  const userChosenProfile = profileChosenByUser
+    ? ref2vaProfiles.find((profile) => profile.id === profileId) ?? null
+    : null;
+  /** 候选方案不可用时要说清楚为什么，而不是让它悄悄消失。 */
+  const blockedProfiles = Object.entries(gates).filter(([, gate]) => !gate.selectable);
 
   /** 制作期间每 5 秒刷新序列本身，进度卡才有最新的分镜状态。 */
   useEffect(() => {
@@ -358,6 +383,11 @@ export default function ProductionSeriesPanel({
     const effectiveSelected = options?.shotIds ?? selected;
     if (demoSelected || system?.production_mode?.mode !== 'READY' || working || busy) return;
     if (!effectiveProfile) { onMessage('当前没有可用的生成方案，请先在基础配置里完成登记。', 'error'); return; }
+    const gate = gates[effectiveProfile];
+    if (gate && !gate.selectable) {
+      onMessage(`这个生成方案现在不能用于生产：${gateReason(gate)}`, 'error');
+      return;
+    }
     if (effectiveSelected.length === 0) { onMessage('请至少选择一个镜头。', 'error'); return; }
     const busyInSelection = effectiveSelected.filter((id) => busyShotIds.has(id));
     if (busyInSelection.length > 0) {
@@ -409,7 +439,8 @@ export default function ProductionSeriesPanel({
       }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
-      onMessage(`已开始连续制作；本机会依次生成 ${shot_ids.length} 个镜头并自动整理成片。小模型审片和对白识别只提供建议。`, 'success');
+      const usedProfile = ref2vaProfiles.find((row) => row.id === effectiveProfile);
+    onMessage(`已开始连续制作；使用方案「${usedProfile?.name ?? effectiveProfile}」，本机会依次生成 ${shot_ids.length} 个镜头并自动整理成片。小模型审片和对白识别只提供建议。`, 'success');
       await reload();
       onStarted();
     } catch (error) {
@@ -427,14 +458,18 @@ export default function ProductionSeriesPanel({
     if (mode === null) { onMessage('正在确认本机制作环境（约需几秒），稍等两三秒再点一次。', 'error'); return; }
     if (mode !== 'READY') { onMessage(system?.production_mode?.detail ?? '制作环境未就绪：请先在顶部完成「启用真实制作」。', 'error'); return; }
     if (activeSeries) { onMessage('已有未结束的生产序列：等它完成，或先在下方处理该序列。', 'error'); return; }
-    // 1) 自动选方案：先按所选拍摄质量档过滤，再优先宽高已接通的标准方案。
+    // 1) 选方案：**用哪一套由用户决定**。用户在高级设置里自己选过方案，
+    //    一键开拍就用他选的那一套，任何情况下都不替换；只有用户还没选过时，
+    //    才按他选择的拍摄质量档推荐一套。
+    const explicitProfile = ref2vaProfiles.find((p) => p.id === profileId);
+    const userChoseProfile = profileChosenByUser && !!explicitProfile;
     const tierPool = ref2vaProfiles.filter((p) => tierOfProfile(p.name) === quality);
-    if (tierPool.length === 0) {
-      onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
-      return;
-    }
     let target = profileId;
-    if (!target || tierOfProfile(ref2vaProfiles.find((p) => p.id === target)?.name ?? '') !== quality) {
+    if (!userChoseProfile) {
+      if (tierPool.length === 0) {
+        onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
+        return;
+      }
       const sized = tierPool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
       const pool = sized.length ? sized : tierPool;
       target = pool[0]?.id ?? '';
@@ -442,6 +477,11 @@ export default function ProductionSeriesPanel({
     }
     const profile = ref2vaProfiles.find((p) => p.id === target);
     if (!profile) { onMessage('本机还没有可用的生成方案：先点下方「为本作品一键登记生成方案」，或去基础配置完成安装。', 'error'); return; }
+    const gate = gates[target];
+    if (gate && !gate.selectable) {
+      onMessage(`不能选「${profile.name}」：${gateReason(gate)}`, 'error');
+      return;
+    }
     // 2) 自动勾选全部可制作镜头。
     const shotIds = shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id);
     if (shotIds.length === 0) { onMessage('还没有可制作的镜头：先在上方完成并应用分镜。', 'error'); return; }
@@ -560,7 +600,9 @@ export default function ProductionSeriesPanel({
           <b>{shots.length === 0
             ? '完成分镜后，这里一键开拍'
             : `一键开拍：自动制作全部 ${shots.filter((shot) => !busyShotIds.has(shot.id)).length} 个镜头`}</b>
-          <small>自动选方案、补齐参考、勾选镜头；高级设置一般不用改。</small>
+          <small>{userChosenProfile
+            ? `用你选定的方案「${userChosenProfile.name}」；自动补齐参考、勾选镜头。`
+            : '自动选方案、补齐参考、勾选镜头；高级设置一般不用改。'}</small>
         </div>
         <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
@@ -622,13 +664,35 @@ export default function ProductionSeriesPanel({
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案
-          <select id="series-profile" value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+          <select id="series-profile" value={profileId}
+            onChange={(event) => {
+              const nextId = event.target.value;
+              setProfileId(nextId);
+              setProfileChosenByUser(true);
+              // Keep the quality tier in step with the profile the user just
+              // picked, so the two controls never contradict each other.
+              const nextTier = tierOfProfile(ref2vaProfiles.find((row) => row.id === nextId)?.name ?? '');
+              if (nextTier) setQuality(nextTier);
+            }}>
             <option value="">自动选择已验证的方案</option>
-            {ref2vaProfiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>{profile.name}</option>
-            ))}
+            {ref2vaProfiles.map((profile) => {
+              const gate = gates[profile.id];
+              const blocked = gate ? !gate.selectable : false;
+              return <option key={profile.id} value={profile.id} disabled={blocked}>
+                {profile.name}{blocked ? '（本机暂不可用）' : ''}
+              </option>;
+            })}
           </select>
         </label>
+        {selectedGate && !selectedGate.selectable && <p className="series-hint">
+          <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
+          {onGoSetup && <>· <button type="button" className="text-button" onClick={onGoSetup}>去基础配置</button></>}
+        </p>}
+        {blockedProfiles.length > 0 && <div className="series-hint" role="note" aria-label="暂不可用的生成方案">
+          {blockedProfiles.map(([id, gate]) => <p key={id}>
+            <AlertTriangle size={13} /> 「{gate.profile_name ?? id}」暂不可用：{gateReason(gate)}
+          </p>)}
+        </div>}
         <label htmlFor="series-scope">审片建议（可选）
           <select id="series-scope" value={scope} onChange={(event) => setScope(event.target.value as 'full' | 'basic')}>
             <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
