@@ -495,18 +495,31 @@ export default function ProductionSeriesPanel({
   // 「硬阻滞」只保留会让生成根本无法发生（或必然生成错误结果）的事：
   // 无分镜、没勾选、无生成方案、画幅不合法/未接入、人物没参考图、环境未就绪。
   // 调度与瞬时状态（已在生产中、正在处理）降为下方「提示」，不再阻断样式恐吓。
+  // 「已完成」优先于「还不能开始」：当前范围内每一镜都有真实产物时，排产区应显示
+  // 已完成并允许重拍/补拍，而不是继续解释"为什么不能开始"。
+  const producedShotIds = new Set(
+    jobs
+      .filter((job) => job.artifact_id && !job.simulated
+        && ['PASSED', 'DELIVERED'].includes(job.status))
+      .map((job) => job.shot_id),
+  );
+  const scopeAllProduced = shots.length > 0 && shots.every((shot) => producedShotIds.has(shot.id));
   const blockers = [
     ...(shots.length === 0 ? ['还没有应用分镜，制作列表为 0 镜；先完成并应用分镜。'] : []),
-    ...(shots.length > 0 && selected.length === 0 ? ['还没有勾选镜头；一键开拍会自动勾选。'] : []),
-    ...(!profileId ? ['还没有生成方案；点下方按钮一键登记。'] : []),
+    ...(shots.length > 0 && selected.length === 0 && !scopeAllProduced
+      ? ['还没有勾选镜头；一键开拍会自动勾选。'] : []),
+    ...(!profileId && !scopeAllProduced ? ['还没有生成方案；点下方按钮一键登记。'] : []),
     ...(sizeBlocked ? ['当前方案缺少宽高映射；去基础配置补齐，或改回默认画幅。'] : []),
     ...(!sizeValid ? ['自定义画幅必须是 256–2048 之间、32 的倍数（H3 规范）。'] : []),
-    ...(unboundCount > 0 ? [`有 ${unboundCount} 个角色未绑定参考图，提交会被拦下。`] : []),
+    ...(unboundCount > 0 && !scopeAllProduced
+      ? [`有 ${unboundCount} 个角色未绑定参考图，提交会被拦下。`] : []),
     ...(demoSelected ? ['当前选择演示，请先切回真实制作。'] : []),
     ...(mode !== 'READY' ? [system?.production_mode?.detail ?? '尚未连接本机服务，无法确认制作环境。'] : []),
   ];
   // 提示（不阻断开拍判断之外的事实）：展示为非阻断的黄色说明，不进红色阻断卡。
   const hints = [
+    ...(scopeAllProduced
+      ? [`本范围 ${shots.length} 镜已全部出片；要重拍或补拍，勾选镜头后会按当前方案重新生成。`] : []),
     ...(activeSeries ? ['已有未结束的生产序列在跑，可先在下方查看进度；新序列要等它收尾后才能开拍。'] : []),
     ...(selectedBusy.length > 0 ? [`选中的 ${selectedBusy.length} 个镜头已在生产中，取消它们的勾选即可提交其余镜头。`] : []),
   ];
