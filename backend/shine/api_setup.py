@@ -73,6 +73,15 @@ class ServiceValidationRequest(BaseModel):
 class ProfileRegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
+    #: The variant whose own catalog and profiles are registered.  Omitting it
+    #: keeps the ordinary path: the default catalog and the profiles it
+    #: declares.  Naming a variant resolves *that* variant's catalog, so a
+    #: candidate stack never borrows the default catalog's profiles.
+    variant_id: str | None = None
+    #: The deployment catalog the caller expects.  When it disagrees with the
+    #: catalog the variant declares, the request is refused instead of
+    #: falling back to either of them.
+    catalog: str | None = None
 
 
 class StorageRequest(BaseModel):
@@ -90,6 +99,12 @@ class RecommendationRequest(BaseModel):
 class ExistingInstallationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     path: str = Field(min_length=1, max_length=1024)
+    #: Compare the found files against this variant's own catalog instead of
+    #: the default one.  This is the approved path for a candidate stack: the
+    #: official weights are matched by their pinned revision, byte count and
+    #: SHA-256 and then cached - never downloaded by the product.
+    variant_id: str | None = None
+    catalog: str | None = None
 
 
 class ExistingModelImportRequest(ExistingInstallationRequest):
@@ -100,6 +115,21 @@ class ExistingInstallationAdoptRequest(ExistingModelImportRequest):
     project_id: str
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
     port: int = Field(default=8188, ge=1024, le=65535)
+
+
+def _inspection_catalog(variant_id: str | None = None, catalog: str | None = None) -> dict:
+    """The catalog the existing-installation path compares the found files with.
+
+    Without a variant this is the audited default catalog, unchanged.  With a
+    variant it is *that* variant's catalog, so the approved local-import path
+    can verify the official W6A8 weights against their own pins instead of
+    against the INT8 baseline's.
+    """
+    if not variant_id and not catalog:
+        return deployment.load_default_catalog()
+    from shine.comfyops.variant_binding import resolve_registration_target
+
+    return resolve_registration_target(variant_id=variant_id, catalog_id=catalog).catalog
 
 
 @router.get('/existing-installations')
@@ -113,7 +143,7 @@ def existing_installations(settings: SettingsDep):
 def inspect_existing(body: ExistingInstallationRequest, actor: Operator):
     from shine.comfyops.existing_installation import inspect
 
-    return inspect(body.path, deployment.load_default_catalog())
+    return inspect(body.path, _inspection_catalog(body.variant_id, body.catalog))
 
 
 @router.post('/existing-installations/import-models')
@@ -121,7 +151,7 @@ def import_existing_models(body: ExistingModelImportRequest, actor: Operator, se
     from shine.comfyops.existing_installation import import_models, inspect
     from shine.services import add_audit
 
-    report = inspect(body.path, deployment.load_default_catalog())
+    report = inspect(body.path, _inspection_catalog(body.variant_id, body.catalog))
     result = import_models(settings, report, body.snapshot)
     add_audit(db, actor, 'EXISTING_COMFY_MODELS_CACHED', 'deployment', report['catalog_id'],
               {'root': report['root'], 'snapshot': body.snapshot, 'reused_bytes': result['reused_bytes'],
@@ -140,7 +170,7 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
     from shine.models import AuditEvent
     from shine.services import add_audit
 
-    catalog = deployment.load_default_catalog()
+    catalog = _inspection_catalog(body.variant_id, body.catalog)
     report = inspect(body.path, catalog)
     if body.snapshot != report['snapshot']:
         return verify_models(report, body.snapshot)  # raises the snapshot conflict before reading weights
@@ -507,7 +537,8 @@ def validate_services(body: ServiceValidationRequest, actor: Operator, settings:
     return run(db, settings, body.project_id, body.recipe_sha256, actor=actor)
 
 
-def _register_project_profiles(db, project_id: str) -> list[dict]:
+def _register_project_profiles(db, project_id: str, *, variant_id: str | None = None,
+                                catalog: str | None = None) -> list[dict]:
     """Register this project's H3 Ref2VA workflow profiles from the canonical files.
 
     Idempotent per project: the default profiles are project-scoped copies, so
@@ -517,23 +548,19 @@ def _register_project_profiles(db, project_id: str) -> list[dict]:
     stays a hard conflict (PROFILE_CONTENT_CHANGED); profiles of other
     projects and historical references are never touched.
     """
-    import json as _json
-
     from sqlalchemy import select
 
     from shine.api_comfy import create_workflow_profile
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.variant_binding import resolve_registration_target
     from shine.models import WorkflowProfile
     from shine.schemas import WorkflowProfileCreate
 
     deployment._require_project(db, project_id)
+    binding = resolve_registration_target(variant_id=variant_id, catalog_id=catalog)
     registered = []
-    for name in deployment.load_default_catalog()["workflow_profiles"]:
-        from shine.comfy.workflow import graph_hash
-        matches = [p for p in deployment.PROFILE_DIR.glob('*.json')
-                   if _json.loads(p.read_text(encoding='utf-8')).get('name') == name]
-        if len(matches) != 1:
-            raise HTTPException(409, f"PROFILE_FILE_MISSING_OR_AMBIGUOUS: {name}")
-        raw = _json.loads(matches[0].read_text(encoding='utf-8'))
+    for raw in binding.profiles:
+        name = str(raw.get("name"))
         existing = db.scalar(select(WorkflowProfile).where(
             WorkflowProfile.name == name,
             WorkflowProfile.project_id == project_id,
@@ -586,8 +613,15 @@ def _register_project_profiles(db, project_id: str) -> list[dict]:
 
 @router.post("/profiles")
 def profiles(body: ProfileRegistrationRequest, db: DBSession):
-    """Register the two supported Ref2VA workflow profiles for this project."""
-    return {"profiles": _register_project_profiles(db, body.project_id)}
+    """Register this project's Ref2VA workflow profiles from the canonical files.
+
+    Without a variant the ordinary, audited default catalog is used, exactly as
+    before.  With a variant that variant's own catalog and its own profiles are
+    registered, so the official W6A8 candidate gets its PDD-free profile and
+    never the INT8 baseline's profiles.
+    """
+    return {"profiles": _register_project_profiles(
+        db, body.project_id, variant_id=body.variant_id, catalog=body.catalog)}
 
 
 @router.post("/profiles/validate")
@@ -610,7 +644,8 @@ def validate_profiles(body: ProfileRegistrationRequest, settings: SettingsDep, d
     from shine.comfyops.service_validation import validate_registered_workflow
     from shine.models import WorkflowProfile
 
-    registered = _register_project_profiles(db, body.project_id)
+    registered = _register_project_profiles(
+        db, body.project_id, variant_id=body.variant_id, catalog=body.catalog)
     by_id = {entry["profile_id"]: entry for entry in registered}
     for profile in db.scalars(
         select(WorkflowProfile).where(WorkflowProfile.project_id == body.project_id,
@@ -630,6 +665,39 @@ def validate_profiles(body: ProfileRegistrationRequest, settings: SettingsDep, d
         results.append({**entry, "validated": True, "code": None,
                         "validated_against": validated})
     return {"profiles": results}
+
+
+@router.get("/variant-readiness")
+def variant_readiness(project_id: str, variant_id: str, settings: SettingsDep, db: DBSession):
+    """How far one variant got on this machine, and the single next step.
+
+    The five layers are the dependency order: the pinned bytes, the byte-level
+    verification, the project-scoped profile, the live node check and finally a
+    real shot.  The response names exactly one next step, because "almost
+    ready" is not an action.
+    """
+    from shine.comfyops.variant_binding import load_binding
+    from shine.comfyops.variant_readiness import readiness
+
+    deployment._require_project(db, project_id)
+    binding = load_binding(variant_id)
+    return readiness(db, settings, binding, project_id)
+
+
+@router.get("/production-gate")
+def production_gate(project_id: str, profile_id: str, settings: SettingsDep, db: DBSession):
+    """Whether one generation profile may be selected for production right now.
+
+    An accepted variant keeps its historic behaviour.  A candidate variant is
+    only selectable when this machine can really execute it; every reason it
+    cannot is named.
+    """
+    from shine.comfyops.profile_gate import profile_gate_report
+    from shine.models import WorkflowProfile
+
+    deployment._require_project(db, project_id)
+    profile = db.get(WorkflowProfile, profile_id)
+    return profile_gate_report(db, settings, project_id, profile)
 
 
 @router.get('/llm-readiness')

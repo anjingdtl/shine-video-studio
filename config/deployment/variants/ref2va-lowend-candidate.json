@@ -16,7 +16,7 @@
   "preference": 6,
   "required_inputs": [],
   "catalog_id": "h3-ref2va-lowend-candidate-windows-x64",
-  "checkpoint_id": "unknown",
+  "checkpoint_id": "Minimax-H3\\minimax_h3_ref2va_pruned_w6a8.safetensors",
   "required_component_ids": [],
   "install_component_ids": [],
   "files": [
@@ -136,7 +136,9 @@
   "workflow_profile_ids": [
     "local-h3-ref2va-lowend-pdd-free-2img"
   ],
-  "graph_sha256": {},
+  "graph_sha256": {
+    "local-h3-ref2va-lowend-pdd-free-2img": "596d48912d236314e7bdcf93b676cb9aeabc97cdc0b6c3eaf8e916b1f6c6f715"
+  },
   "compatibility": {
     "pdd": {
       "status": "unknown",
@@ -206,10 +208,6 @@
     {
       "field": "architecture_requirements.torch_arch_list",
       "reason": "torch arch list 必须在隔离环境安装 torch 之后复核。"
-    },
-    {
-      "field": "checkpoint_id",
-      "reason": "checkpoint 身份要等这一变体拥有独立工作流图并被钉定后才能写下来。"
     },
     {
       "field": "compatibility.lora.status",

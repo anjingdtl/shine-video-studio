@@ -248,6 +248,20 @@ def create_series(
     if body.provider != RenderProvider.COMFYUI:
         raise HTTPException(422, "PRODUCTION_SERIES_REQUIRES_COMFYUI")
 
+    # A candidate variant may only enter a production run when this machine can
+    # really execute it.  The refusal happens here - before any shot spec is
+    # revised, before any binding is filled in and before anything is queued -
+    # and it names its reason instead of falling back to another profile.
+    if not offline and body.workflow_profile_id:
+        from shine.comfyops.profile_gate import require_production_ready
+        from shine.models import WorkflowProfile
+
+        profile = db.get(WorkflowProfile, body.workflow_profile_id)
+        require_production_ready(
+            db, settings, project.id, profile,
+            output=body.output.model_dump(mode="json") if body.output else None,
+        )
+
     # Every real H3 render belongs to exactly one series.  A shot that is
     # already being produced must not be produced a second time, but unrelated
     # shots of the same project may form their own series.

@@ -2,11 +2,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Mic, Settings2, Sparkles, Wand2 } from 'lucide-react';
 import { api, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupPanel } from './SetupPanel';
+import { VariantReadinessCard } from './VariantReadinessCard';
 import { DeploymentRecommendationCard, type DeploymentChoice } from './DeploymentRecommendationCard';
 import { ImageCapabilityCard } from './ImageCapabilityCard';
 import SettingsPanel from './SettingsPanel';
 
 type Tab = 'env' | 'models' | 'voice';
+
+/** 官方 W6A8 低显存候选：它有自己的部署目录、自己的生成方案和自己的验收状态，
+ *  不与 INT8 基线共用任何一条结论。 */
+const LOWEND_VARIANT_ID = 'ref2va-lowend-candidate';
 
 type VoiceReadiness = {
   status: string;
@@ -184,6 +189,12 @@ export default function DirectorSetupPanel({
           })}
         </div>
       </section>
+      <VariantReadinessCard
+        projectId={projectId}
+        variantId={LOWEND_VARIANT_ID}
+        title="W6A8 · 低显存候选"
+        onChanged={onRefresh}
+      />
       <SettingsPanel
         onRefresh={onRefresh}
         project={project}
