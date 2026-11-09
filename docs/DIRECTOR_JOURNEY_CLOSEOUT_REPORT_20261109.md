@@ -13,7 +13,7 @@
 **本机实机运行（§6）**：用这台 Windows 上已有的 ComfyUI（含完整 H3 权重）复用为零下载、零拷贝的实例，
 跑通「素材审核 → 冻结风格 → 镜头 → 真实 H3 出片 → 导演包 → Run → 交付 → 下载」，单镜 job `PASSED`、
 `quality_verification=real`、1344×768 / 5.17 s / 带 AAC 音频，交付成片带中文文件名下载。
-`CLEAN_WINDOWS_INSTALL`、`REAL_DOWNLOAD`、`REAL_LLM`、`REAL_QWEN_IMAGE`、`REAL_VOICE`、
+`CLEAN_WINDOWS_INSTALL`、`REAL_DOWNLOAD`、`REAL_QWEN_IMAGE`、`REAL_VOICE`、
 `VOLUME_DELIVERED`、`HUMAN_ACCEPTED` 仍为 `NOT_RUN`，具名阻塞与继续步骤见 §5。
 
 ## 1. 本轮基线核对
@@ -313,7 +313,7 @@ Windows 的既有 3 个是 `test_gpu_release_confirmation`（2）与 `test_image
 | --- | --- | --- | --- |
 | `CLEAN_WINDOWS_INSTALL` | `NOT_RUN` | 需要一个干净 Windows 宿主（或可回滚的恢复点）与 ≥180 GiB 非系统盘；本轮不接管当前用户环境 | 在干净宿主用 ZIP 的 `一键安装并启动.cmd` 建第一个作品，走授权 → 非系统盘 → 依赖/模型下载 → 校验 → 断网续传 → 启动 → 复跑；记录盘符空间、GPU/驱动、组件 pin |
 | `REAL_DOWNLOAD` | `NOT_RUN` | 未获授权执行 60.8 GB 下载；当前 `SHINE_ENABLE_LOCAL_EXECUTION` 未开启，且下载会改变本机存储 | 用户批准后设置 `SHINE_ENABLE_LOCAL_EXECUTION=1`，在 `SETUP` 页创建计划、批准并执行；或指定一台测试机 |
-| `REAL_LLM` | `NOT_RUN` | 未提供获授权的文本模型 provider 与密钥 | 在「专业设置 → AI 助手」填入 provider、模型与密钥，跑一次文档分析/分集/分镜；密钥只存本机 |
+| `REAL_LLM` | **本机已跑通**（真实 MiniMax，大纲链路） | 分镜/分集尚未用真实模型跑（本轮只验证到「大纲确认」） | 继续在 UI 里走「分集 → 分镜」，或换回 `MiniMax-M3.1-Flash` 观察 MERGE 输出稳定性（详见 §6.1） |
 | `REAL_QWEN_IMAGE` | `NOT_RUN` | 未安装 Qwen Image 权重/节点，且没有正在运行的 ComfyUI | 安装 `qwen-image-2.1-windows-x64` 独立计划后，在素材中心跑一个真实样本，核对解码、尺寸、SHA 与回执 |
 | `REAL_VOICE` | `NOT_RUN` | 未启动本地 TTS/ASR 运行时，也未授权音色 | 启动语音运行时，走一次试听 → 冻结 → 发布；另验一条「语音可选」路径 |
 | `REAL_H3` | **本机已跑通**（复用现有安装）；干净宿主仍 `NOT_RUN` | 干净宿主需先完成 `CLEAN_WINDOWS_INSTALL`。本机已用既有 ComfyUI 完成：1 镜真实出片（`PASSED`/`real`）+ 1 集 Run 交付，详见 §6 | 第二台机器或干净宿主上重复同一条链路，并补多镜多集；记录包/Run/Series/Job/Attempt/prompt ID/租约/EDL/SHA/五门 QC |
@@ -348,13 +348,43 @@ Windows 的既有 3 个是 `test_gpu_release_confirmation`（2）与 `test_image
 
 **耗时**：单镜从提交到 `PASSED` 约 2 分 40 秒（含首次模型加载）；Run 从创建到交付约 3 分 28 秒。
 
-**已知 UI 瑕疵（本机实测发现，未修）**：Run 已交付后，`#d/produce` 的排产区仍显示「还没有勾选镜头 /
-还没有生成方案 / 有 1 个角色未绑定参考图」三条提示，与顶部「7/7 阶段全部完成」不一致。原因是该区块读的是
-本次页面会话的勾选与「一键登记」状态，而不是已完成的 Run；重新勾选或刷新后消失。它不影响已交付产物，
-但会让人误以为还不能开拍，应在后续轮次修掉（同类问题：API 驱动的操作不会回填 UI 的本地选择状态）。
+**UI 瑕疵：已修（提交 `e1b68a3`）**。Run 已交付后，`#d/produce` 的排产区原本仍显示「还没有勾选镜头 /
+还没有生成方案 / 有 1 个角色未绑定参考图」三条红色阻断，与顶部「7/7 阶段全部完成」矛盾。原因是阻断清单只
+看页面会话的本地选择，没有看"当前范围内每镜是否已有真实产物"。
 
-**未跑的部分**：干净 Windows 安装（用户另找机器）、60.8 GB 真实下载、真实 LLM 剧本/分镜、Qwen Image 真实样本、
+修法：以 `jobs` 里带 `artifact_id`、非 `simulated`、状态为 `PASSED/DELIVERED` 的真实产物为准，算出
+`scopeAllProduced`；当范围内每一镜都已出片时，「未勾选 / 无生成方案 / 未绑定参考」不再作为阻断原因，
+改为一条非阻断提示：「本范围 N 镜已全部出片；要重拍或补拍，勾选镜头后会按当前方案重新生成」。
+回归：`frontend/src/test/productionComplete.test.tsx`（2 例，含"无产物时仍要说明缺什么"的反向断言）；
+本机实测 Playwright 复核：红色阻断卡消失、完成提示出现、下方序列显示「已装配并释放资源 / 已交付 / 已出片」。
+
+**未跑的部分**：干净 Windows 安装（用户另找机器）、60.8 GB 真实下载、Qwen Image 真实样本、
 语音授权与试听、多集多镜与跨批次连续性、人工验收。
+
+### 6.1 真实 LLM（MiniMax，本机）
+
+凭据由用户提供（密钥只写入本机 secret store，不进入仓库、报告或提交）。
+
+| 步骤 | 结果 |
+| --- | --- |
+| 配置 | `POST /api/v1/provider-profiles`：`openai_compatible`、`https://api.minimax.cn/v1`；`has_api_key=true`、`secret_status=stored`（加密引用，不存明文） |
+| 连接 | `POST /provider-profiles/{id}/test` → `ok=true`、`reachable/auth_ok/catalog_ok/model_listed=true`（模型 ID 需与目录大小写一致，`MiniMax-M3.1-flash` → `MiniMax-M3.1-Flash`） |
+| 生成 | `POST /provider-profiles/{id}/test-generation` → `generation_ok=true`、`structured_output_ok=true`、4.876 s |
+| 角色绑定 | `PUT /agent-routes/bulk`：14 个文本角色绑定该 profile；`llm-readiness` = `READY` |
+| 剧本大纲 | 上传短剧 → `GET/POST .../material-preparation/text-consent` 显式授权（只发必要文字，不发字节）→ `POST .../story-preparation/outlines` → **EXTRACT 3 次真实调用（HTTP 200）+ MERGE 成功** → 大纲 3 场次（前言 2.2 s / 码头 17.4 s / 栈桥 14.0 s），含 `summary`、`relationships`、4 条待澄清 `questions` |
+| 确认 | `questions` 非空时要求显式 `acknowledge_questions_sha256`（产品合同：接受模糊才能确认）→ `approved=true`；`journey.script.done=true`，依据文档切换为该稿 |
+
+**真实遇到并走完的失败路径**（都按产品合同处理，没有绕过）：
+
+1. 首次调用被 `REMOTE_AGENT_CONSENT_REQUIRED` 拦下 —— 未授权就不发剧本文字；授权后 `resume` 才重跑。
+2. MERGE 阶段 provider 返回 **529 过载** → 任务 `NEEDS_REVIEW/LLM_SERVER`，外部结果判为 `UNCONFIRMABLE`
+   （`reconcile` 不自动重发），按合同走 `resend-unknown`（人工证据 + 只重问一次）后才重新排队。
+3. 重问后 HTTP 200，但模型输出不满足大纲 schema → `LLM_FORMAT`。
+   **换 `MiniMax-M2.7-highspeed` 后同一份剧本一次跑通**；`MiniMax-M3.1-Flash` 的 MERGE 结构化输出不稳定，
+   这是模型侧差异，不是链路缺陷（连接/生成/结构化输出测试在它上面是通过的）。
+
+**结论**：真实 LLM 已在本机接通并产出真实大纲；分集与分镜尚未用真实模型跑，属于下一步。
+
 
 ## 7. 交付、回滚与已知边界
 
