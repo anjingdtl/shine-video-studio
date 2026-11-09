@@ -742,6 +742,19 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(page.locator("#assets .asset-row")).to_have_count(0)
         expect(page.get_by_text("Mode routing UI fixture", exact=True)).to_have_count(0)
         page.unroute(old_assets_url)
+        # Director run scope: a project with no run shows "not started" and no
+        # controls borrowed from another package.  A disconnected journey
+        # request must recover on reload instead of leaving a dead page (J11).
+        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
+        page.get_by_label("切换项目").select_option(other)
+        page.goto(f"{ui_base}#d/run", wait_until="networkidle")
+        expect(page.get_by_text("还没有整部作品的运行记录", exact=False)).to_be_visible(timeout=15000)
+        expect(page.get_by_role("button", name="暂停", exact=True)).to_have_count(0)
+        page.route("**/api/v1/projects/*/journey*", lambda route: route.abort())
+        page.reload(wait_until="domcontentloaded")
+        page.unroute("**/api/v1/projects/*/journey*")
+        page.reload(wait_until="networkidle")
+        expect(page.get_by_text("还没有整部作品的运行记录", exact=False)).to_be_visible(timeout=15000)
         if screenshot:
             page.screenshot(path=str(screenshot), full_page=True)
         browser.close()
@@ -786,6 +799,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "independent text critic requires selected shot, routes exact spec and resets per-call consent (intercepted)",
                     "remote text response abandonment cancel/confirm, exact authenticated grant and credential clearing (intercepted; no model call)",
                     "explicit text output budget and reasoning depth persist from UI without a model call",
+                    "director run scope shows a not-started project without borrowed controls and recovers after a dropped journey request",
                 ],
                 "api_errors": failures,
             }
