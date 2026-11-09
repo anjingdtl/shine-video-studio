@@ -161,7 +161,7 @@ export function VariantReadinessCard({ projectId, variantId, title, onNeedImport
     <div className="section-heading compact">
       <div>
         <div className="section-kicker">LOW-VRAM CANDIDATE</div>
-        <h2>{title}</h2>
+        <h2>{title} · 五层就绪状态</h2>
         <p>官方 W6A8 低显存候选：官方 pinned 的 DiT + INT8 ConvRot 视频 VAE + FP32 音频 VAE + NVFP4 文本编码器。
           官方没有公布这一组合的显存门槛，所以它在本机能不能跑通必须真机验证。</p>
       </div>
@@ -185,8 +185,8 @@ export function VariantReadinessCard({ projectId, variantId, title, onNeedImport
         <span>磁盘可用：{host.disk_free_gb != null ? `${host.disk_free_gb} GB` : '未识别'}</span>
       </div>
 
-      <div className="workflow-list">
-        {data.layers.map((layer) => <div className="workflow-row" key={layer.id}>
+      <div className="readiness-layers">
+        {data.layers.map((layer) => <div className="readiness-layer" key={layer.id}>
           <div>
             <b>{layer.label}</b>
             <span>{layer.detail}</span>

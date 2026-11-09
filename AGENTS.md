@@ -1078,6 +1078,16 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - **显式选定就保持同一身份**。导演包钉住 `workflow_profile_id / graph_sha256 / checkpoint_id /
   parameter_map / media_transfers / validated_against`，生产系列与 Job 带同一个
   `workflow_profile_id`，实际 `/prompt` 用同一份 `parameter_map`。
+- **最终用哪套方案由用户决定（2026-11-09 用户裁定）**。基础配置的方案列表是**参考清单**，
+  不是产品的决定；真正用哪一套由用户在制作页自己选。**用户显式选过的方案，一键开拍与
+  导演包都必须照用，任何情况下都不替换**——包括质量档与所选方案不一致时。拍摄质量档只在
+  **用户还没选过方案**时充当推荐依据。界面必须显示「用你选定的方案 X」。
+- **五层就绪状态是累积的**。后一层只有在前一层达成时才算达成：权重都没到位就不能说
+  「文件已核验」，方案没登记就不能说「本机运行环境已验证」。层与层之间的依赖顺序写在
+  `variant_readiness.py`，页面不允许出现依赖未达成却显示「已完成」的层。
+- **就绪状态区不能长得像方案列表**。五层用独立的 `readiness-layers` 样式并写明标题
+  「五层就绪状态」；候选在参考清单里是**同一份列表里的一行**（标注「候选 · 未登记」），
+  不能另起一张看起来像方案清单的卡片，否则用户会以为原来的方案不见了。
 - **本轮不改 `client_review_identity` 钉住的文件**（`worker.py` / `preproduction.py` /
   handoff / quality），因此不触发 VLM 重校准；但真实正负校准本来就没做过，**不得声称已校准**。
 - **本轮真机出片是 BLOCKED**：本机是 RTX 5080 16GB（无 4070 Super 12GB），且官方 W6A8 权重

@@ -894,6 +894,14 @@ fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}
 .voice-state ul{margin:6px 0 6px 16px;padding:0}
 .voice-state p{margin:6px 0 0}
 .workflow-size-ok{font:9px var(--mono);color:#5d7a4e;background:#eef3e9;border-radius:5px;padding:4px 6px}
+/* The candidate's readiness layers are NOT a profile list: they look different
+   on purpose, so nobody reads them as another set of generation profiles. */
+.readiness-layers{margin-top:9px;border-left:2px solid #e6e2d2;padding-left:11px}
+.readiness-layer{display:flex;align-items:center;gap:7px;border-top:1px solid #f4f2e8;padding:6px 0}
+.readiness-layer div{flex:1;min-width:0}
+.readiness-layer b{display:block;font-size:9px;color:#6f6f63}
+.readiness-layer span{display:block;font:7px var(--mono);color:#9c9d91;margin-top:3px;overflow:hidden;text-overflow:ellipsis}
+.readiness-layer .workflow-size-ok,.readiness-layer .chip{flex:none}
 .output-spec{border:1px solid var(--line);border-radius:9px;background:#fbfbf7;padding:12px 13px}
 .output-spec-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:9px}
 .output-spec-head b{font-size:11px;color:#45473e}

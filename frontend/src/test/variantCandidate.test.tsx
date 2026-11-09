@@ -152,6 +152,29 @@ describe('W6A8 候选方案在排产区的身份', () => {
     expect(body.workflow_profile_id).toBe('wf-w6a8');
   });
 
+  it('用户自己选的方案不被质量档替换——最终用哪套由用户决定', async () => {
+    const user = userEvent.setup();
+    stub.restore();
+    installStub(true);
+    renderPanel();
+    await screen.findByText('选择全部可制作镜头');
+
+    // The quality tier defaults to 快速, whose pool is empty in this project.
+    // The user picks a profile by hand: that choice is the decision.
+    await user.selectOptions(screen.getByLabelText('生成方案'), 'wf-int8');
+    await waitFor(() => {
+      expect((screen.getByLabelText('生成方案') as HTMLSelectElement).value).toBe('wf-int8');
+    });
+
+    await user.click(screen.getByRole('button', { name: /一键开拍/ }));
+    await waitFor(() => {
+      expect(stub.callsOf('POST', /production-series$/)).toHaveLength(1);
+    });
+    const body = stub.callsOf('POST', /production-series$/)[0].body as { workflow_profile_id: string };
+    // The chosen profile was not swapped for another tier's profile.
+    expect(body.workflow_profile_id).toBe('wf-int8');
+  });
+
   it('门禁未通过时，候选方案不能被选中，也就没有可提交的身份', async () => {
     const user = userEvent.setup();
     renderPanel();

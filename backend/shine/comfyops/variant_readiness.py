@@ -258,40 +258,58 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
     unvalidated = [row["name"] for row in profiles if row["registered"] and not row["validated"]]
 
     layers: list[dict[str, Any]] = []
+    # The five layers are a dependency order: a layer can only be done when
+    # every layer before it is done.  "The weights are not here" therefore
+    # cannot leave "the files are verified" green.
+    blocked = False
+
+    def add(state: str, detail: str, **extra: Any) -> None:
+        layers.append(_layer(state, detail, **extra))
+
     if missing_bytes:
-        layers.append(_layer(
+        add(
             "PENDING",
             "还缺这些权重：" + "、".join(missing_bytes) + "。"
             + ("官方没有公布这一组合的显存门槛，本机能不能跑通仍待真机验证。" if not downloadable else ""),
             components=missing_bytes,
-        ))
+        )
+        blocked = True
     else:
-        layers.append(_layer("DONE", "本机已经准备好这个变体的全部权重文件。"))
-    if unverified:
-        layers.append(_layer(
-            "PENDING", "这些文件已经在本机，但还没有逐字节核验：" + "、".join(unverified) + "。",
-            components=unverified,
-        ))
+        add("DONE", "本机已经准备好这个变体的全部权重文件。")
+
+    if blocked:
+        add("PENDING", "等权重就位后才能逐字节核验。")
+    elif unverified:
+        add("PENDING", "这些文件已经在本机，但还没有逐字节核验：" + "、".join(unverified) + "。",
+            components=unverified)
+        blocked = True
     else:
-        layers.append(_layer("DONE", "权重已按锁定的 revision、字节数与 SHA-256 核验。"))
-    if missing_profiles:
-        layers.append(_layer(
-            "PENDING", "这个作品还没有登记这些生成方案：" + "、".join(missing_profiles) + "。",
-            profiles=missing_profiles,
-        ))
+        add("DONE", "权重已按锁定的 revision、字节数与 SHA-256 核验。")
+
+    if blocked:
+        add("PENDING", "等前面的步骤完成后，才能把生成方案登记到这个作品。")
+    elif missing_profiles:
+        add("PENDING", "这个作品还没有登记这些生成方案：" + "、".join(missing_profiles) + "。",
+            profiles=missing_profiles)
+        blocked = True
     else:
-        layers.append(_layer("DONE", "生成方案已登记到当前作品。"))
-    if unvalidated:
-        layers.append(_layer(
-            "PENDING", "这些方案还没有在本机真实渲染器上核对过节点：" + "、".join(unvalidated) + "。",
-            profiles=unvalidated,
-        ))
+        add("DONE", "生成方案已登记到当前作品。")
+
+    if blocked:
+        add("PENDING", "等方案登记后，才能在本机真实渲染器上核对节点。")
+    elif unvalidated:
+        add("PENDING", "这些方案还没有在本机真实渲染器上核对过节点：" + "、".join(unvalidated) + "。",
+            profiles=unvalidated)
+        blocked = True
     else:
-        layers.append(_layer("DONE", "方案已在受管渲染器上核对过节点与输入。"))
-    if render is None:
-        layers.append(_layer("PENDING", "还没有用这个变体真实出过片；候选变体在这一步之前永远是候选。"))
+        add("DONE", "方案已在受管渲染器上核对过节点与输入。")
+
+    if blocked:
+        add("PENDING", "前面的步骤完成后，才能用这个变体真实出片。")
+    elif render is None:
+        add("PENDING", "还没有用这个变体真实出过片；候选变体在这一步之前永远是候选。")
     else:
-        layers.append(_layer("DONE", "已用这个变体真实出过片并通过技术质检。", job=render))
+        add("DONE", "已用这个变体真实出过片并通过技术质检。", job=render)
 
     for index, (layer_id, label) in enumerate(LAYERS):
         layers[index]["id"] = layer_id

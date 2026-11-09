@@ -469,6 +469,45 @@ def test_the_readiness_next_step_moves_forward_with_the_evidence(api):
     assert report["layers"][4]["state"] == "PENDING"
 
 
+def test_a_layer_after_an_unmet_one_is_never_green(api):
+    """The five layers are a dependency order, not five independent facts.
+
+    Weights that are not on this machine cannot make "the files are verified"
+    true, and a profile that was never registered cannot make "the runtime
+    was verified" true.  The card must not report a green layer that rests
+    on an unmet one.
+    """
+    client, _factory, _settings = api
+    project_id = create_project(client, "层级累积")
+
+    report = client.get(
+        f"/api/v1/setup/variant-readiness?project_id={project_id}&variant_id={LOWEND_VARIANT}").json()
+
+    states = [layer["state"] for layer in report["layers"]]
+    assert states[0] == "PENDING"
+    assert all(state == "PENDING" for state in states), states
+    assert report["reached_layer"] == "WEIGHTS_PENDING"
+    assert report["production_ready"] is False
+
+
+def test_the_layers_open_up_in_order_as_the_evidence_arrives(api):
+    client, factory, _settings = api
+    project_id = create_project(client, "层级推进")
+    _mark_weights_verified(factory)
+    _register_candidate(client, project_id)
+
+    report = client.get(
+        f"/api/v1/setup/variant-readiness?project_id={project_id}&variant_id={LOWEND_VARIANT}").json()
+
+    states = {layer["id"]: layer["state"] for layer in report["layers"]}
+    assert states["WEIGHTS_PENDING"] == "DONE"
+    assert states["FILES_VERIFIED"] == "DONE"
+    assert states["WORKFLOW_REGISTERED"] == "DONE"
+    assert states["RUNTIME_VALIDATED"] == "PENDING"
+    assert states["REAL_RENDER_VERIFIED"] == "PENDING"
+    assert report["next_step"]["code"] == "PROFILE_NOT_VALIDATED"
+
+
 def test_the_readiness_report_states_the_host_facts_it_read(api):
     client, _factory, _settings = api
     project_id = create_project(client, "本机事实")

@@ -14,8 +14,9 @@
 
 | 项 | 状态 | 证据 |
 | --- | --- | --- |
-| 配置入口（登记 / 校验 / 就绪 / 下一步） | 已实现并真机核对 | §5、§7 |
+| 配置入口（登记 / 校验 / 就绪 / 下一步） | 已实现，**真实浏览器**核对通过 | §5、§7、§7.1 |
 | 生产选档门禁（服务端 + 浏览器） | 已实现，候选在本机为禁用 | §4、§7 |
+| 启动器四条验收 | **全部通过** | §7.2 |
 | 同一身份链（方案 → 导演包 → 系列 → Job） | 已实现并离线验证 | §3、§6 |
 | 原有 INT8 默认路径 | 未改动，已回归 | §6 |
 | **4070 Super 12GB 真机出片** | **BLOCKED**（无该硬件 + 无已批准权重） | §8 |
@@ -125,7 +126,7 @@ variant_verified = false
 
 **服务端是唯一的门**：浏览器读不到结论时**不发明拒绝**（避免用一个没读到的结论挡住人），由服务端裁决并给出它自己的原因。
 
-### 4.3 显式选定就保持同一身份
+### 4.4 显式选定就保持同一身份
 
 - 拍摄质量新增独立档「低显存候选 · W6A8」，W6A8 方案**不会**被当成「高质量 · 原生20步」，自动适配不会在 INT8 与 W6A8 之间静默换权重。
 - 一键开拍里**显式选中的候选方案优先于质量档**：要么用它，要么明确说不能用，不会悄悄换成基线。
@@ -184,7 +185,7 @@ diffusion_models/Minimax-H3/MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors          
 
 ### 6.1 新增用例
 
-`backend/tests/test_variant_binding_and_gate.py`（21 项）：
+`backend/tests/test_variant_binding_and_gate.py`（23 项）：
 
 | 用例 | 覆盖 |
 | --- | --- |
@@ -210,7 +211,7 @@ diffusion_models/Minimax-H3/MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors          
 | `test_the_resolution_helper_refuses_a_mismatched_catalog` | 解析层拒绝错配 |
 | `test_the_resolution_helper_without_a_variant_keeps_the_default_catalog` | 不传变体 → 默认目录不变 |
 
-`frontend/src/test/variantCandidate.test.tsx`（4 项）：候选有自己的质量档且不与原生档混用；本机不能执行时选项被禁用并说明原因；门禁通过后显式选中的候选带着同一个身份进生产序列（`workflow_profile_id === 'wf-w6a8'`，不是基线）；门禁未通过时候选不会被提交。
+`frontend/src/test/variantCandidate.test.tsx`（5 项）：候选有自己的质量档且不与原生档混用；本机不能执行时选项被禁用并说明原因；门禁通过后显式选中的候选带着同一个身份进生产序列（`workflow_profile_id === 'wf-w6a8'`，不是基线）；**用户自己选过的方案不被质量档替换**（显式选 INT8 时提交的就是 INT8）；门禁未通过时候选不会被提交。
 
 ### 6.2 命令与结果
 
@@ -218,13 +219,13 @@ diffusion_models/Minimax-H3/MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors          
 
 | 命令 | 结果 |
 | --- | --- |
-| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_variant_binding_and_gate.py -q` | **21 passed** |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_variant_binding_and_gate.py -q` | **23 passed** |
 | `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_deployment_recommendation.py test_deployment_acceptance_regressions.py test_setup_workflow_profiles.py test_workflow_profile_scope.py test_director_setup_contract.py test_production_series.py test_new_machine_setup.py test_variant_manifest.py test_install_plan_qualification.py -q` | **126 passed** |
 | `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_variant_binding_and_gate.py test_offline_e2e.py test_production_series.py test_workflow_profile_scope.py -q` | **65 passed** |
-| `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（完整后端套件，2091 项） | **2089 passed · 2 skipped · 0 failed · 0 errors** |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（完整后端套件，2093 项） | **2091 passed · 2 skipped · 0 failed · 0 errors** |
 | `backend\.venv\Scripts\python.exe -m ruff check backend/shine backend/tests` | **All checks passed!** |
 | `alembic upgrade head && alembic check`（临时库） | **No new upgrade operations detected.**（本轮无迁移） |
-| `npm.cmd test -- --run`（frontend） | **31 files / 198 tests passed** |
+| `npm.cmd test -- --run`（frontend） | **31 files / 199 tests passed** |
 | `npm.cmd run build`（frontend） | **✓ built**（`tsc -b && vite build`） |
 
 ### 6.3 完整后端套件发现的两处新回归（已修）
@@ -238,12 +239,18 @@ diffusion_models/Minimax-H3/MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors          
 
 两条修法的共同原则：**门禁只新增拒绝，不改写既有拒绝的状态码与形状。** 修完后这两条用例与它们的邻居全绿。
 
+第三处缺陷是**真实浏览器验收**才发现的（离线用例测不出来）：
+
+| 症状 | 根因 | 修法 |
+| --- | --- | --- |
+| 权重明明没到位，「文件已核验」「本机运行环境已验证」却显示「已完成」 | 五层各自独立判定事实，没有按依赖顺序累积 | 层改为累积：后一层只有在前一层达成时才算达成；未达成时写明「等前面的步骤完成后…」。新增 2 条回归用例（`test_a_layer_after_an_unmet_one_is_never_green`、`test_the_layers_open_up_in_order_as_the_evidence_arrives`） |
+
 ### 6.4 完整后端套件（最终）
 
 ```
 backend\.venv\Scripts\python.exe -m pytest backend/tests -q
-→ 2091 tests collected
-→ 2089 passed, 2 skipped, 0 failed, 0 errors
+→ 2093 tests collected
+→ 2091 passed, 2 skipped, 0 failed, 0 errors
 ```
 
 2 项跳过都是仓库既有的、事先就有的跳过，与本轮无关：
@@ -293,6 +300,50 @@ acceptance      CANDIDATE · auto_download_allowed = false
 **这条证据说明三件事**：候选在真机上被正确识别为候选而不是基线；缺什么、下一步做什么、为什么不能自动下载都写清楚了；**基线的三个方案一个都没受影响**。
 
 ---
+
+### 7.1 真实浏览器验收（内置浏览器，实际页面）
+
+启动器把受管栈起在本机（API 8000 / Web 5173，`render_provider=comfyui`）后，用内置浏览器走真实路径：
+
+1. **落点**：打开 `http://127.0.0.1:5173/` → 落在导演模式首页（已有作品「本机联调」），
+   与 AGENTS.md「已有作品 → /」一致。
+2. **基础配置 → ② 模型与生成方案**：参考清单里**四个方案齐平**——
+   `local-h3-ref2va-pdd8-2img-1aud`、`local-h3-ref2va-pdd8-2img-1aud-portrait`、
+   `local-h3-ref2va-2img-1aud`（三个 INT8，均「宽高可调」）+
+   `local-h3-ref2va-lowend-pdd-free-2img`（「候选 · 未登记」+「查看就绪状态」）。
+3. **W6A8 就绪卡片**（真实渲染文本）：
+
+```
+显卡：GeForce RTX 5080  显存：15.9 GiB（可用 14.0 GiB）  内存：31.7 GiB（可用 21.0 GiB）
+提交上限：70.7 GiB（可用 54.5 GiB）  CUDA：12.0  Torch：未安装  磁盘可用：284.29 GB
+
+待准备权重        待完成  还缺这些权重：minimax-h3-diffusion-w6a8、minimax-h3-vae-int8、
+                                minimax-h3-audio-vae-fp32、minimax-h3-text-encoder-nvfp4
+文件已核验        待完成  等权重就位后才能逐字节核验
+工作流已登记      待完成  等前面的步骤完成后，才能把生成方案登记到这个作品
+本机运行环境已验证 待完成  等方案登记后，才能在本机真实渲染器上核对节点
+真实出片已验证    待完成  前面的步骤完成后，才能用这个变体真实出片
+
+当前唯一下一步：把权重放到本机（或走已有的本地导入 / 隔离验证流程）
+「这个变体还没有进入自动下载路径（验收状态是 CANDIDATE）。不能用改 SUPPORTED、
+  改 auto_download_allowed 或跳过资格检查的方式解锁下载；请用已有的
+  「检测已有安装 / 导入模型」流程，把官方权重按 revision、字节数与 SHA-256 校验后放进来。」
+
+验收状态：候选（未完成真机验收） · 不会自动下载
+部署目录 shine-h3-ref2va-lowend-candidate-windows-x64
+权重 Minimax-H3\minimax_h3_ref2va_pruned_w6a8.safetensors
+```
+
+### 7.2 启动器四条验收（AGENTS.md §A）
+
+本机当时没有运行中的栈，正好用真实安装验证：
+
+| 入口 | 结果 |
+| --- | --- |
+| ① 干净重启 | API `/health` 200、Web `/` 200；浏览器落在 `/`（已有作品 → 导演模式首页）；API 错误日志无异常 |
+| ② 默认端口被外来进程占用 | 8000 被一个**非本栈**的 python 进程占住 → 启动器自动改用 **8001**（Web 5173）；两个端口均 200；**外来进程未被误杀**（pid 3528 仍在） |
+| ③ 半启动残栈 | 只保留 API、杀掉 Web → 再启动时收尾残栈并重启成完整栈（API 8001 与 Web 5173 均 200） |
+| ④ 停止 | `scripts/stop_shine.py` 退出码 **0**，`processes.json` 消失，8000/8001/5173/8188 全部不再监听 |
 
 ## 8. 真机出片：BLOCKED（附原因）
 

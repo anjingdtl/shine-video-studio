@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
-import { fetchProfileGates, gateReason, isCandidateProfile, type ProfileGate } from './variantGate';
+import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
 type AutoBinding = { asset_id: string; use_as: string; role: string | null; frame_role: string | null; ordinal: number };
 
@@ -172,6 +172,8 @@ export default function ProductionSeriesPanel({
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [profileId, setProfileId] = useState('');
+  /** 方案是不是**用户自己**选的。自动预选不算；用户的显式选择永远优先。 */
+  const [profileChosenByUser, setProfileChosenByUser] = useState(false);
   const [scope, setScope] = useState<'full' | 'basic'>('full');
   const [editIntents, setEditIntents] = useState<Array<{ id: string; created_at: string }>>([]);
   const [editIntentId, setEditIntentId] = useState('');
@@ -239,6 +241,10 @@ export default function ProductionSeriesPanel({
   }, [ref2vaProfiles, profileId]);
   const activeSeries = series.find((row) => ['QUEUED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED'].includes(row.status));
   const selectedGate = profileId ? gates[profileId] : undefined;
+  /** 用户自己选定的那套方案（一键开拍会用它）。 */
+  const userChosenProfile = profileChosenByUser
+    ? ref2vaProfiles.find((profile) => profile.id === profileId) ?? null
+    : null;
   /** 候选方案不可用时要说清楚为什么，而不是让它悄悄消失。 */
   const blockedProfiles = Object.entries(gates).filter(([, gate]) => !gate.selectable);
 
@@ -433,7 +439,8 @@ export default function ProductionSeriesPanel({
       }
       await api(`/projects/${projectId}/production-series`, json('POST', body));
       setSelected([]);
-      onMessage(`已开始连续制作；本机会依次生成 ${shot_ids.length} 个镜头并自动整理成片。小模型审片和对白识别只提供建议。`, 'success');
+      const usedProfile = ref2vaProfiles.find((row) => row.id === effectiveProfile);
+    onMessage(`已开始连续制作；使用方案「${usedProfile?.name ?? effectiveProfile}」，本机会依次生成 ${shot_ids.length} 个镜头并自动整理成片。小模型审片和对白识别只提供建议。`, 'success');
       await reload();
       onStarted();
     } catch (error) {
@@ -451,19 +458,18 @@ export default function ProductionSeriesPanel({
     if (mode === null) { onMessage('正在确认本机制作环境（约需几秒），稍等两三秒再点一次。', 'error'); return; }
     if (mode !== 'READY') { onMessage(system?.production_mode?.detail ?? '制作环境未就绪：请先在顶部完成「启用真实制作」。', 'error'); return; }
     if (activeSeries) { onMessage('已有未结束的生产序列：等它完成，或先在下方处理该序列。', 'error'); return; }
-    // 1) 自动选方案：先按所选拍摄质量档过滤，再优先宽高已接通的标准方案。
-    // 显式选中的候选方案（W6A8 等）不受质量档限制，也不会被自动适配悄悄
-    // 换回 INT8 基线：要么就用它，要么明确说为什么不能用。
+    // 1) 选方案：**用哪一套由用户决定**。用户在高级设置里自己选过方案，
+    //    一键开拍就用他选的那一套，任何情况下都不替换；只有用户还没选过时，
+    //    才按他选择的拍摄质量档推荐一套。
     const explicitProfile = ref2vaProfiles.find((p) => p.id === profileId);
-    const explicitCandidate = isCandidateProfile(explicitProfile);
+    const userChoseProfile = profileChosenByUser && !!explicitProfile;
     const tierPool = ref2vaProfiles.filter((p) => tierOfProfile(p.name) === quality);
-    if (tierPool.length === 0 && !explicitCandidate) {
-      onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
-      return;
-    }
     let target = profileId;
-    if (!explicitCandidate
-      && (!target || tierOfProfile(ref2vaProfiles.find((p) => p.id === target)?.name ?? '') !== quality)) {
+    if (!userChoseProfile) {
+      if (tierPool.length === 0) {
+        onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
+        return;
+      }
       const sized = tierPool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
       const pool = sized.length ? sized : tierPool;
       target = pool[0]?.id ?? '';
@@ -594,7 +600,9 @@ export default function ProductionSeriesPanel({
           <b>{shots.length === 0
             ? '完成分镜后，这里一键开拍'
             : `一键开拍：自动制作全部 ${shots.filter((shot) => !busyShotIds.has(shot.id)).length} 个镜头`}</b>
-          <small>自动选方案、补齐参考、勾选镜头；高级设置一般不用改。</small>
+          <small>{userChosenProfile
+            ? `用你选定的方案「${userChosenProfile.name}」；自动补齐参考、勾选镜头。`
+            : '自动选方案、补齐参考、勾选镜头；高级设置一般不用改。'}</small>
         </div>
         <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
@@ -656,7 +664,16 @@ export default function ProductionSeriesPanel({
     <div className="series-builder">
       <div className="series-profile">
         <label htmlFor="series-profile">生成方案
-          <select id="series-profile" value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+          <select id="series-profile" value={profileId}
+            onChange={(event) => {
+              const nextId = event.target.value;
+              setProfileId(nextId);
+              setProfileChosenByUser(true);
+              // Keep the quality tier in step with the profile the user just
+              // picked, so the two controls never contradict each other.
+              const nextTier = tierOfProfile(ref2vaProfiles.find((row) => row.id === nextId)?.name ?? '');
+              if (nextTier) setQuality(nextTier);
+            }}>
             <option value="">自动选择已验证的方案</option>
             {ref2vaProfiles.map((profile) => {
               const gate = gates[profile.id];

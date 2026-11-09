@@ -12,6 +12,7 @@ type Tab = 'env' | 'models' | 'voice';
 /** 官方 W6A8 低显存候选：它有自己的部署目录、自己的生成方案和自己的验收状态，
  *  不与 INT8 基线共用任何一条结论。 */
 const LOWEND_VARIANT_ID = 'ref2va-lowend-candidate';
+const LOWEND_PROFILE_NAME = 'local-h3-ref2va-lowend-pdd-free-2img';
 
 type VoiceReadiness = {
   status: string;
@@ -90,6 +91,7 @@ export default function DirectorSetupPanel({
 
   const mode = system?.production_mode?.mode ?? null;
   const profiled = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
+  const lowendRegistered = workflowProfiles.some((profile) => profile.name === LOWEND_PROFILE_NAME);
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
   const missingRoles = (llm?.roles ?? []).filter((row) => row.code);
@@ -169,8 +171,10 @@ export default function DirectorSetupPanel({
         <div className="section-heading compact">
           <div>
             <div className="section-kicker">GENERATION PROFILES</div>
-            <h2>生成方案与画幅</h2>
-            <p>这里的方案就是导演页「开始制作」可选的生成方案。带「宽高可调」的方案才会按你选的分辨率渲染。</p>
+            <h2>生成方案参考</h2>
+            <p>这是一份<b>参考清单</b>：本机登记过哪些出片方案、各自是什么状态。
+              <b>真正用哪一套，由你在制作页自己选</b>，系统不会替你决定，也不会在你选好后偷偷换一套。
+              带「宽高可调」的方案才能按你选的分辨率渲染。</p>
           </div>
         </div>
         {profiled.length === 0 && <div className="blocked-callout">
@@ -187,6 +191,17 @@ export default function DirectorSetupPanel({
               <button className="small-action" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
             </div>;
           })}
+          <div className="workflow-row">
+            <div>
+              <b>{LOWEND_PROFILE_NAME}</b>
+              <span>Ref2VA · 官方 W6A8 候选 · 宽高可调 · {lowendRegistered ? '已登记' : '未登记'}</span>
+            </div>
+            <span className="chip warn">候选</span>
+            <button type="button" className="small-action"
+              onClick={() => document.getElementById('variant-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+              查看就绪状态
+            </button>
+          </div>
         </div>
       </section>
       <VariantReadinessCard
