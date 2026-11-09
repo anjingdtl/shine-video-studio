@@ -202,6 +202,16 @@ def scope_run(db: Session, project: Project, package: DirectorPackageVersion | N
                 "message": "这个链接指向的整片运行不属于当前作品",
                 "run_id": run_id,
             })
+        if package is not None and run.package_id != package.id:
+            # A deep link that names package B and run A is two scopes; never
+            # answer with one and render the other's controls (J11).
+            raise HTTPException(404, {
+                "code": "PRODUCTION_RUN_SCOPE_MISMATCH",
+                "message": "这个整片运行属于另一个导演包，不能和当前导演包混在一起显示",
+                "run_id": run_id,
+                "run_package_id": run.package_id,
+                "package_id": package.id,
+            })
         return run
     if package is None:
         return db.scalars(
@@ -227,7 +237,19 @@ def compute_journey(
     shots = list(db.scalars(select(Shot).where(Shot.project_id == project_id)).all())
     style = db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
 
-    package = scope_package(db, project, package_id)
+    if run_id and not package_id:
+        # Only a run was named: its own package is the scope, never the newest
+        # package of the project.
+        from fastapi import HTTPException
+
+        from shine.production.models import ProductionRun
+
+        named = db.get(ProductionRun, run_id)
+        if named is None or named.project_id != project.id:
+            raise HTTPException(404, {"code": "PRODUCTION_RUN_NOT_FOUND", "run_id": run_id})
+        package = db.get(DirectorPackageVersion, named.package_id) if named.package_id else None
+    else:
+        package = scope_package(db, project, package_id)
     if package is not None and package.episode_plan_id:
         plan = db.get(DirectorEpisodePlan, package.episode_plan_id)
     else:
@@ -282,7 +304,11 @@ def compute_journey(
     # ① 创意与剧本: a confirmed outline, or an explicitly authored shot list.
     #    An idea (creative brief) alone is not a script: it is the entry that
     #    produces one, so the stage reports it without lighting up.
-    script_done = bool(outline and outline.approved_at) or bool(shots)
+    # A manual shot list is a legitimate script basis only when this project
+    # has no imported document.  With a document, the current confirmed outline
+    # is the authority; another script's old shots must not light this stage
+    # (J06).
+    script_done = bool(outline and outline.approved_at) or (document is None and bool(shots))
     if outline and outline.approved_at:
         script_summary = f"大纲已确认（{outline.sha256[:8]}）"
     elif shots:
@@ -322,6 +348,16 @@ def compute_journey(
     plan_blockers: list[dict[str, Any]] = []
     if not plan:
         plan_blockers.append({"code": "EPISODE_PLAN_NOT_CONFIRMED", "message": "分集方案尚未确认"})
+    elif document is not None:
+        from shine.director.contracts import EpisodePlanPayload
+        from shine.director.package import plan_basis_blockers
+
+        try:
+            payload = EpisodePlanPayload.model_validate(plan.payload)
+        except Exception:
+            payload = None
+        if payload is not None:
+            plan_blockers.extend(plan_basis_blockers(db, project, payload))
     if style is None:
         plan_blockers.append({"code": "STYLE_NOT_FROZEN", "message": "风格尚未冻结"})
     stages.append({
@@ -336,6 +372,8 @@ def compute_journey(
         "facts": {
             "episode_plan_id": plan.id if plan else None,
             "episode_plan_version": plan.version if plan else None,
+            "episode_plan_source": (plan.payload or {}).get("source") or {} if plan else None,
+            "current_outline_artifact_id": outline.id if outline else None,
             "style_version_id": style.id if style else None,
             "style_sha256": style.sha256 if style else None,
         },

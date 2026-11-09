@@ -257,10 +257,30 @@ def install_plan(identity: str, db: DBSession):
 
 
 @router.get("/comfyops/install-plans/{identity}/attempts")
-def install_plan_attempts(identity: str, db: DBSession):
-    get(db, InstallationPlan, identity)
-    query = select(InstallationAttempt).where(InstallationAttempt.plan_id == identity)
-    return [public(r) for r in db.scalars(query.order_by(InstallationAttempt.created_at, InstallationAttempt.id))]
+def install_plan_attempts(identity: str, db: DBSession, scope: str = "plan"):
+    """The installation receipts of a plan, or of its physical target.
+
+    ``scope=plan`` keeps the historic, plan-scoped history.  ``scope=target``
+    answers the question a reopened page actually asks: "is anything already
+    writing these bytes into this directory?" - even when the attempt was
+    queued from another workbench or another project (J02).  Every row carries
+    the re-attachable attempt id and its terminal flag, never only raw ORM
+    columns.
+    """
+    from shine.comfyops import installation as installation_service
+
+    plan = get(db, InstallationPlan, identity)
+    if scope == "target":
+        rows = installation_service.attempts_for_target(db, plan)
+    elif scope == "plan":
+        rows = list(db.scalars(
+            select(InstallationAttempt)
+            .where(InstallationAttempt.plan_id == identity)
+            .order_by(InstallationAttempt.created_at, InstallationAttempt.id)
+        ))
+    else:
+        raise HTTPException(422, "INSTALL_ATTEMPT_SCOPE_INVALID")
+    return [{**public(row), **installation_service.attempt_view(row)} for row in rows]
 
 
 class GrantRequest(Strict):
@@ -371,7 +391,7 @@ def execute_install(
             raise HTTPException(409, "LOCAL_EXECUTOR_UNAVAILABLE")
         db.rollback()
         try:
-            attempt_id = queue_install_attempt(
+            attempt_id, reused = queue_install_attempt(
                 request.app.state.session_factory,
                 settings,
                 identity,
@@ -383,7 +403,7 @@ def execute_install(
             raise HTTPException(409, str(exc)) from exc
         with request.app.state.session_factory() as attempt_db:
             queued = attempt_db.get(InstallationAttempt, attempt_id)
-            return _queued_response(queued, body.plan_hash)
+            return _queued_response(queued, row, reused=reused)
     if row.status != "APPROVED" or row.sha256 != body.plan_hash or graph_hash(row.payload) != row.sha256:
         raise HTTPException(409, "INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")
     if row.payload.get("executor") != "FAKE_ONLY":
@@ -399,7 +419,7 @@ def execute_install(
     from shine.comfyops.installation import queue_attempt
 
     try:
-        attempt = queue_attempt(
+        attempt, reused = queue_attempt(
             db,
             row,
             row.sha256,
@@ -414,7 +434,7 @@ def execute_install(
         raise HTTPException(409, str(exc)) from exc
     audit(db, actor, "INSTALL_FAKE_QUEUED", row)
     db.commit()
-    return _queued_response(attempt, row.sha256)
+    return _queued_response(attempt, row, reused=reused)
 
 
 @router.post("/comfyops/install-plans/{identity}/precheck")
@@ -432,11 +452,14 @@ def precheck_install_plan(identity: str, actor: Operator, db: DBSession):
     return PlanPrecheck().check(row.payload)
 
 
-def _queued_response(attempt, plan_hash: str) -> dict:
+def _queued_response(attempt, requested_plan, *, reused: bool) -> dict:
     """The answer of a queued installation: the attempt id is the truth.
 
     A re-attached attempt reports the stage it really reached; it is never
-    rewritten to "queued" just because this browser session is new.
+    rewritten to "queued" just because this browser session is new.  The plan
+    that *owns* the attempt and the plan the caller *requested* are two
+    different identities when two workspaces share one physical target, so the
+    receipt states both instead of labelling the attempt with the wrong hash.
     """
     from shine.comfyops import installation as installation_service
 
@@ -445,8 +468,13 @@ def _queued_response(attempt, plan_hash: str) -> dict:
         "attempt_id": attempt.id,
         "status": view["status"],
         "stage": view["stage"],
-        "plan_hash": plan_hash,
-        "reused": view["stage"] != "QUEUED",
+        "reused": reused,
+        # The attempt's own identity.  A caller that lost its response can
+        # keep working from this hash even when its request named another plan.
+        "plan_id": attempt.plan_id,
+        "plan_hash": view["plan_hash"],
+        "requested_plan_id": requested_plan.id,
+        "requested_plan_hash": requested_plan.sha256,
         "payload": attempt.payload,
     }
 

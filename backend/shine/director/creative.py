@@ -666,13 +666,41 @@ def run_pending_creative_task(session_factory, settings, worker_id: str, *,
     * ``RESPONSE`` — the answer is durable; it is reused, not re-bought.
     * ``DOCUMENT`` — the script is in the database; the task is just closed.
     """
-    from shine.materialprep.agent_call import call_material_agent
-
     claimed = _claim_creative_task(session_factory, worker_id)
     if claimed is None:
         return False
     task_id, version, trace = claimed
+    gateway = gateway or _gateway(settings)
 
+    from shine.models import ProviderProfile
+
+    with session_factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        pinned = db.get(ProviderProfile, task.model_profile_id) if task and task.model_profile_id else None
+        pinned_model = task.model_id if task else None
+    if pinned is None or not pinned.enabled or not pinned.model.strip() or (
+            pinned_model and pinned.model != pinned_model):
+        _finish_task(session_factory, task_id, version, worker_id,
+                     {**trace, "external_outcome": "NOT_SENT"},
+                     "NEEDS_REVIEW", "CREATIVE_SCRIPT_PIN_INVALID")
+        return True
+    # The task continues on the model it was queued with, even when the route
+    # has moved on; the next task follows the new route (J05).
+    gateway.pin_role(SCRIPT_AGENT_ROLE, pinned)
+    try:
+        return _run_claimed_creative(
+            session_factory, settings, worker_id, task_id, version, trace,
+            heartbeat_fn=heartbeat_fn, gateway=gateway)
+    finally:
+        gateway.pin_role(SCRIPT_AGENT_ROLE, None)
+
+
+def _run_claimed_creative(session_factory, settings, worker_id, task_id, version, trace, *,
+                          heartbeat_fn=None, gateway=None) -> bool:
+    from shine.materialprep.agent_call import call_material_agent
+
+    if gateway is None:
+        gateway = _gateway(settings)
     with _renew_creative_claim(session_factory, task_id, version, worker_id, heartbeat_fn):
         stage = trace.get("stage") or STAGE_DRAFT
 

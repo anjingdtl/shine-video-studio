@@ -78,6 +78,54 @@ def queue_fake_attempt(client, plan) -> str:
     return response.json()["attempt_id"]
 
 
+def test_a_second_plan_shares_the_physical_attempt_and_reads_the_same_receipt(prep):
+    """The receipt belongs to the target: a lost response is found again (J02)."""
+    client, factory, settings = prep
+    _, _, plan_a = approved_plan(client)
+    first = client.post(
+        f"/api/v1/comfyops/install-plans/{plan_a['id']}/execute",
+        json={"plan_hash": plan_a["sha256"], "executor": "fake"}, headers=HEADERS)
+    assert first.status_code == 202, first.text
+    attempt_id = first.json()["attempt_id"]
+    assert first.json()["reused"] is False
+    assert first.json()["plan_id"] == plan_a["id"]
+    assert first.json()["plan_hash"] == plan_a["sha256"]
+
+    # The same pinned closure in the same root: this is one physical target.
+    package_id = plan_a["payload"]["packages"][0]["id"]
+    plan_b = post(
+        client, "/comfyops/install-plans",
+        {"project_id": create_project(client), "package_ids": [package_id],
+         "disk_free": 10**12, "executor": "fake"},
+    )
+    plan_b = approve(client, plan_b, "install",
+                     f"/comfyops/install-plans/{plan_b['id']}/approve")
+    assert plan_b["id"] != plan_a["id"]
+    rows = client.get(
+        f"/api/v1/comfyops/install-plans/{plan_b['id']}/attempts?scope=target",
+        headers=HEADERS).json()
+    assert [row["attempt_id"] for row in rows] == [attempt_id]
+    assert rows[0]["terminal"] is False
+    assert rows[0]["plan_id"] == plan_a["id"]
+    assert rows[0]["plan_hash"] == plan_a["sha256"]
+    # The plan-scoped history is unchanged: B never wrote its own attempt.
+    assert client.get(
+        f"/api/v1/comfyops/install-plans/{plan_b['id']}/attempts",
+        headers=HEADERS).json() == []
+
+    second = client.post(
+        f"/api/v1/comfyops/install-plans/{plan_b['id']}/execute",
+        json={"plan_hash": plan_b["sha256"], "executor": "fake"}, headers=HEADERS)
+    assert second.status_code == 202, second.text
+    body = second.json()
+    assert body["attempt_id"] == attempt_id
+    assert body["reused"] is True
+    assert body["plan_id"] == plan_a["id"]
+    assert body["plan_hash"] == plan_a["sha256"], "the attempt keeps its own plan hash"
+    assert body["requested_plan_id"] == plan_b["id"]
+    assert body["requested_plan_hash"] == plan_b["sha256"]
+
+
 def test_execute_queues_the_attempt_and_answers_202(prep):
     client, factory, settings = prep
     _, _, plan = approved_plan(client)
@@ -165,7 +213,7 @@ def test_the_local_attempt_runs_and_reports_verified_files(prep, monkeypatch):
     _, _, plan = approved_plan(client, executor="local")
     from shine.comfyops.local import queue_install_attempt
 
-    attempt_id = queue_install_attempt(
+    attempt_id, _reused = queue_install_attempt(
         factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
     )
     monkeypatch.setattr("shine.comfyops.installation_worker.local_execution_enabled", lambda: True)
@@ -187,7 +235,7 @@ def test_a_dead_worker_in_a_download_stage_leaves_a_claimable_attempt(prep):
     _, _, plan = approved_plan(client, executor="local")
     from shine.comfyops.local import queue_install_attempt
 
-    attempt_id = queue_install_attempt(
+    attempt_id, _reused = queue_install_attempt(
         factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
     )
     with factory.begin() as db:
@@ -209,7 +257,7 @@ def test_a_dead_worker_in_an_uncertain_stage_is_never_replayed(prep):
     _, _, plan = approved_plan(client, executor="local")
     from shine.comfyops.local import queue_install_attempt
 
-    attempt_id = queue_install_attempt(
+    attempt_id, _reused = queue_install_attempt(
         factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
     )
     with factory.begin() as db:
@@ -231,7 +279,7 @@ def test_a_changed_plan_hash_blocks_the_automatic_resume(prep):
     _, _, plan = approved_plan(client, executor="local")
     from shine.comfyops.local import queue_install_attempt
 
-    attempt_id = queue_install_attempt(
+    attempt_id, _reused = queue_install_attempt(
         factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
     )
     with factory.begin() as db:

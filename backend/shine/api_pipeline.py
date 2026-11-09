@@ -323,7 +323,8 @@ def _applied_shots(db, camera_artifact_id: str | None) -> dict:
 
 
 @router.post("/projects/{project_id}/pipeline/volumes/{volume_id}/handoff", status_code=201)
-def handoff_route(project_id: str, volume_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
+def handoff_route(project_id: str, volume_id: str, body: dict, request: Request,
+                  db: DBSession, operator: Operator) -> dict:
     """Publish the volume to the existing production machinery (plan+package)."""
     from shine.director.pipeline import build_volume_handoff
 
@@ -334,7 +335,8 @@ def handoff_route(project_id: str, volume_id: str, body: dict, db: DBSession, op
     try:
         result = build_volume_handoff(
             db, project_id, volume_id, workflow_profile_id,
-            acknowledge_scene_coverage=bool((body or {}).get("acknowledge_scene_coverage")))
+            acknowledge_scene_coverage=bool((body or {}).get("acknowledge_scene_coverage")),
+            settings=request.app.state.settings)
         db.commit()
     except ValueError as exc:
         db.rollback()

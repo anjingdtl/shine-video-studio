@@ -453,12 +453,14 @@ def list_packages(project_id: str, db: DBSession) -> list[dict[str, Any]]:
 
 
 @router.post("/projects/{project_id}/director-packages", status_code=201)
-def create_package(project_id: str, body: PackageBody, actor: Operator, db: DBSession) -> dict[str, Any]:
+def create_package(project_id: str, body: PackageBody, request: Request,
+                   actor: Operator, db: DBSession) -> dict[str, Any]:
     """Snapshot the current confirmed state into a new package revision."""
     project = require_project(db, project_id)
     package = build_package(
         db,
         project,
+        settings=request.app.state.settings,
         workflow_profile_id=body.workflow_profile_id,
         generation_mode=body.generation_mode,
         output=body.output,

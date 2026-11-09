@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from shine.api_common import DBSession, app_settings
@@ -2030,15 +2031,24 @@ def _adoption_asset(db, body: AdoptionPreviewRequest):
 
 
 def _confirmed_package_for_shot(db, project_id: str, shot_id: str) -> str | None:
+    """The *current* confirmed package that still contains this shot.
+
+    A confirmed package from an earlier revision is history, not a lock: once a
+    newer package revision exists, the person has already started the path that
+    replaces it.  Blocking on the oldest confirmed row forever made an explicit
+    material replacement impossible to finish (J07).
+    """
     from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
 
-    packages = db.scalars(
-        select(DirectorPackageVersion).where(
-            DirectorPackageVersion.project_id == project_id,
-            DirectorPackageVersion.status == "CONFIRMED",
-            DirectorPackageVersion.stale.is_(False),
-        )
-    ).all()
+    latest = db.scalars(
+        select(DirectorPackageVersion)
+        .where(DirectorPackageVersion.project_id == project_id)
+        .order_by(DirectorPackageVersion.revision.desc())
+        .limit(1)
+    ).first()
+    if latest is None or latest.status != "CONFIRMED" or latest.stale:
+        return None
+    packages = [latest]
     for package in packages:
         episodes = db.scalars(
             select(DirectorPackageEpisode).where(DirectorPackageEpisode.package_id == package.id)
@@ -2053,8 +2063,9 @@ def _confirmed_package_for_shot(db, project_id: str, shot_id: str) -> str | None
 
 
 def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str, Any]]]:
-    from shine.models import Asset, Shot
+    from shine.models import Asset, Job, Shot
     from shine.schemas import ShotSpec
+    from shine.services import UNKNOWN_SUBMISSION_CODES
 
     asset = _adoption_asset(db, body)
     shots = list(db.scalars(select(Shot).where(Shot.project_id == body.project_id)).all())
@@ -2088,6 +2099,17 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
     for shot in scoped:
         already = [row for row in shot.bindings if row.asset_id == asset.id]
         package_id = _confirmed_package_for_shot(db, body.project_id, shot.id)
+        in_flight = db.scalars(
+            select(Job).where(
+                Job.project_id == body.project_id,
+                Job.shot_id == shot.id,
+                Job.stale.is_(False),
+                or_(
+                    Job.status.in_(["PLANNED", "QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING"]),
+                    and_(Job.status == "NEEDS_REVIEW", Job.failure_code.in_(sorted(UNKNOWN_SUBMISSION_CODES))),
+                ),
+            ).order_by(Job.created_at.desc())
+        ).first()
         entries.append({
             "shot_id": shot.id,
             "shot_name": shot.name,
@@ -2097,9 +2119,17 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
             "use_as": already[0].use_as if already else use_as,
             "will_bump_revision": not already,
             "confirmed_package_id": package_id,
+            "production_job_id": getattr(in_flight, "id", None),
+            "production_status": getattr(in_flight, "status", None),
             "conflict": (
                 None if already
-                else ("SHOT_IN_CONFIRMED_PACKAGE" if package_id else None)
+                else ("SHOT_PRODUCTION_IN_FLIGHT" if in_flight
+                      else "SHOT_IN_CONFIRMED_PACKAGE" if package_id else None)
+            ),
+            "action": (
+                None if already
+                else ("RECONCILE_OR_FINISH_CURRENT_TAKE" if in_flight
+                      else "REGENERATE_PACKAGE_AFTER_ADOPTION" if package_id else None)
             ),
         })
     return asset, entries
@@ -2144,6 +2174,19 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
     if not body.confirmed:
         raise HTTPException(409, {"code": "ADOPTION_CONFIRMATION_REQUIRED",
                                   "message": "请先确认采用范围与镜头版本"})
+    # The canonical request is part of the receipt: the same key with a
+    # different payload is a named conflict, never a replay of the old answer
+    # (J07's second counterexample).
+    request_digest = hashlib.sha256(json.dumps({
+        "project_id": body.project_id,
+        "library_version_id": body.library_version_id,
+        "project_asset_id": body.project_asset_id,
+        "shot_ids": sorted(body.shot_ids) if body.shot_ids is not None else None,
+        "role": body.role,
+        "entity_id": body.entity_id,
+        "expected_shot_revisions": {key: body.expected_shot_revisions[key]
+                                    for key in sorted(body.expected_shot_revisions)},
+    }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     # AppSetting.key is String(80); the digest keeps the receipt id bounded
     # while scoping the caller's key to this project.
     receipt_key = "asset-adoption:" + hashlib.sha256(
@@ -2151,13 +2194,24 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
     ).hexdigest()
     previous = db.get(AppSetting, receipt_key)
     if previous is not None:
+        if (previous.value or {}).get("request_digest") != request_digest:
+            raise HTTPException(409, {
+                "code": "ADOPTION_IDEMPOTENCY_CONFLICT",
+                "message": "同一个请求编号被用于了不同的采用内容；请用新的编号重新确认",
+                "adoption_id": receipt_key,
+            })
         return {**previous.value, "replayed": True}
     asset, entries = _adoption_plan(db, body)
     blocked = [row for row in entries if row["conflict"]]
     if blocked:
+        in_flight = [row for row in blocked if row["conflict"] == "SHOT_PRODUCTION_IN_FLIGHT"]
         raise HTTPException(409, {
             "code": "ADOPTION_BLOCKED",
-            "message": "这些镜头属于已确认的导演包；先重新生成导演包，不能静默替换已确认的内容",
+            "message": (
+                "这些镜头正在拍摄或结果未知：先按原尝试收束，再继续采用"
+                if in_flight else
+                "这些镜头属于当前已确认的导演包；先生成并确认新的导演包，不能静默替换已确认的内容"
+            ),
             "blocked": blocked,
         })
     results = []
@@ -2203,6 +2257,7 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
         })
     receipt = {
         "adoption_id": receipt_key,
+        "request_digest": request_digest,
         "project_id": body.project_id,
         "library_version_id": body.library_version_id,
         "project_asset_id": asset.id,

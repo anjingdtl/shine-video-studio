@@ -315,6 +315,54 @@ def test_an_unreconciled_unknown_submission_blocks_a_new_attempt(api):
     })
     assert also_blocked.status_code == 409, also_blocked.text
 
+    # A shot revision takes the take out of the current cut, but it does not
+    # prove the external request was never sent.  The unknown code survives
+    # and the shot still has to be reconciled before another take is queued.
+    from shine.models import Project as ProjectRow
+    from shine.models import Shot as ShotRow
+    from shine.schemas import ShotSpec
+    from shine.services import revise_shot_record
+
+    with factory.begin() as db:
+        row = db.get(ShotRow, shot["id"])
+        project_row = db.get(ProjectRow, project)
+        revise_shot_record(db, project_row, row, spec=ShotSpec.model_validate(row.spec))
+    with factory() as db:
+        kept = db.get(Job, first.json()["id"])
+        assert kept.stale is True
+        assert kept.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+    after_revision = client.post(f"/api/v1/projects/{project}/jobs", json={
+        "shot_id": shot["id"], "provider": "comfyui",
+        "workflow_profile_id": data["profile"]["id"], "generation_mode": "Ref2VA",
+        "request_key": "after-revision-01",
+    })
+    assert after_revision.status_code == 409, after_revision.text
+    assert "SHOT_SUBMISSION_OUTCOME_UNKNOWN" in after_revision.text
+
+    # A shot revision takes the take out of the current cut, but it does not
+    # prove the external request was never sent.  The unknown code survives
+    # and the shot still has to be reconciled before another take is queued.
+    from shine.models import Project as ProjectRow
+    from shine.models import Shot as ShotRow
+    from shine.schemas import ShotSpec
+    from shine.services import revise_shot_record
+
+    with factory.begin() as db:
+        row = db.get(ShotRow, shot["id"])
+        project_row = db.get(ProjectRow, project)
+        revise_shot_record(db, project_row, row, spec=ShotSpec.model_validate(row.spec))
+    with factory() as db:
+        kept = db.get(Job, first.json()["id"])
+        assert kept.stale is True
+        assert kept.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+    after_revision = client.post(f"/api/v1/projects/{project}/jobs", json={
+        "shot_id": shot["id"], "provider": "comfyui",
+        "workflow_profile_id": data["profile"]["id"], "generation_mode": "Ref2VA",
+        "request_key": "after-revision-01",
+    })
+    assert after_revision.status_code == 409, after_revision.text
+    assert "SHOT_SUBMISSION_OUTCOME_UNKNOWN" in after_revision.text
+
 
 # ---------------------------------------------------------------------------
 # U10 · one scope decides production, delivery and progress
@@ -345,6 +393,39 @@ def test_an_old_delivered_run_never_lights_up_a_new_plan(api):
     old_scoped, _ = stages(client, project, package_id=old_run["package_id"])
     assert old_scoped["post"]["done"] is True
     assert old_scoped["post"]["facts"]["run_id"] == old_run["id"]
+
+
+def test_a_run_from_another_package_is_never_rendered_as_this_scope(api):
+    """Package B has no run; the old completed run is not its progress."""
+    client, factory, settings = api
+    if not _has_ffmpeg(settings):
+        pytest.skip("ffmpeg unavailable")
+    data, old_run = _delivered_run(api)
+    project = data["project"]
+    create_shot(client, project, data["style"]["id"], title="package B shot",
+                asset_ids=[data["subject"]["id"]], bindings=[{
+                    "asset_id": data["subject"]["id"], "use_as": "subject",
+                    "role": "CHAR_A", "ordinal": 0}])
+    _, package_b = _plan_and_package(client, data, target_seconds=60)
+
+    scoped, body = stages(client, project, package_id=package_b["id"])
+    assert body["scope"]["run_id"] is None
+    assert body["run"] is None
+    assert scoped["post"]["facts"]["run_id"] is None
+    assert scoped["post"]["done"] is False
+
+    # A deep link that names B and A's run is two scopes: refuse it instead of
+    # mixing B's package with A's controls.
+    mismatch = client.get(
+        f"/api/v1/projects/{project}/journey?package_id={package_b['id']}&run_id={old_run['id']}")
+    assert mismatch.status_code == 404, mismatch.text
+    assert mismatch.json()["detail"]["code"] == "PRODUCTION_RUN_SCOPE_MISMATCH"
+
+    # Only the run was named: its own package is derived, never the newest one.
+    by_run = client.get(f"/api/v1/projects/{project}/journey?run_id={old_run['id']}")
+    assert by_run.status_code == 200, by_run.text
+    assert by_run.json()["scope"]["package_id"] == old_run["package_id"]
+    assert by_run.json()["scope"]["run_id"] == old_run["id"]
 
 
 def test_a_mock_take_is_counted_as_demo_never_as_production(api):

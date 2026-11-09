@@ -284,11 +284,35 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
     # Every file of every package is on disk and hash-verified.  That is a
     # proven fact about the files, not a runtime claim.
     with factory.begin() as db:
+        from shine.comfyops.verification_receipts import save_receipt
+
+        plan_row = db.get(InstallationPlan, plan.id)
+        variant = (plan.payload or {}).get("variant") or {}
+        deployment = (plan.payload or {}).get("deployment") or {}
+        install_root = settings.comfyops_dir / "isolated-packages"
         for package in packages:
-            cls = ModelPackage if package["spec"]["kind"] == "model" else NodePackage
+            spec = package["spec"]
+            cls = ModelPackage if spec["kind"] == "model" else NodePackage
             row = db.get(cls, package["id"])
             if row is not None:
                 row.status = "FILES_VERIFIED_PENDING_RUNTIME"
+            # The status is a summary; the receipt is the evidence.  It binds
+            # the exact revision, every file length/SHA and the directory that
+            # really holds them, so a later readiness check never turns green
+            # from an old row or a same-sized wrong byte (J04).
+            save_receipt(
+                db,
+                variant_id=variant.get("variant_id"),
+                catalog_id=deployment.get("catalog_id"),
+                catalog_version=deployment.get("catalog_version"),
+                component={
+                    "component_id": spec["name"],
+                    "revision": spec.get("revision"),
+                    "files": spec.get("files") or [],
+                },
+                root=install_root,
+                directory=install_root / spec["name"],
+            )
         plan_row = db.get(InstallationPlan, plan.id)
         plan_row.status = "FILES_VERIFIED_PENDING_RUNTIME"
         attempt = db.get(InstallationAttempt, attempt_id)

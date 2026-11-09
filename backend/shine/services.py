@@ -655,6 +655,18 @@ def make_render_request(
         profile = db.get(WorkflowProfile, body.workflow_profile_id)
         if not profile or (profile.project_id and profile.project_id != project.id):
             raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
+        if (profile.mode.lower() == "ref2va" and spec.characters
+                and not any(str(link.use_as).lower() == "subject" for link in shot.bindings)):
+            # A named character without a subject reference would compile into
+            # a text-only request: the face would be invented.  Name the gap
+            # and the entry that fixes it, instead of a generic mode mismatch.
+            raise HTTPException(status_code=422, detail={
+                "code": "H3_CHARACTER_REFERENCE_MISSING",
+                "message": "这一镜点名了人物，但没有任何人物主体参考；H3 会自行编造一张脸",
+                "shot_id": shot.id,
+                "characters": list(spec.characters),
+                "action": "BIND_SUBJECT_REFERENCE",
+            })
         if profile.mode.lower() != compiled.mode.value.lower():
             raise HTTPException(status_code=422, detail="Workflow profile does not support the compiled H3 mode")
         # A reference the profile has no slot for would be silently dropped by
@@ -980,7 +992,10 @@ def create_render_job(
             select(Job).where(
                 Job.project_id == project.id,
                 Job.shot_id == shot.id,
-                Job.stale.is_(False),
+                # ``stale`` marks a take out of the current cut; it does not
+                # prove that an external submission never happened.  A revised
+                # shot still has to reconcile its unknown request before a new
+                # one may be sent (J10).
                 Job.status == "NEEDS_REVIEW",
                 Job.failure_code.in_(sorted(UNKNOWN_SUBMISSION_CODES)),
             ).order_by(Job.created_at.desc())
@@ -1257,6 +1272,11 @@ def revise_shot_record(
     shot.spec = spec.model_dump(mode="json")
     for job in old_jobs:
         job.stale = True
+        if job.failure_code in UNKNOWN_SUBMISSION_CODES:
+            # Revision and reconciliation are two different facts.  The take is
+            # out of the current cut, but what the provider received is still
+            # unknown and keeps its own code until a person reconciles it.
+            continue
         job.failure_code = "SHOT_REVISION_REPLACED"
         if job.status not in {"FAILED", "NEEDS_REVIEW"}:
             try_transition(job, "NEEDS_REVIEW")

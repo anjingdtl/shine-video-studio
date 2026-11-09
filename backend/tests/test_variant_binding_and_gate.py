@@ -73,12 +73,18 @@ def _register_candidate(client, project_id: str) -> dict:
     return rows[0]
 
 
-def _mark_weights_verified(factory) -> list[str]:
+def _mark_weights_verified(factory, settings, monkeypatch) -> list[str]:
     """The candidate's own model files, hash-verified in the package registry.
 
     This is exactly what the approved local-import path does after it checked
-    the bytes against the pinned revision, byte count and SHA-256.
+    the bytes against the pinned revision, byte count and SHA-256.  The real
+    files are tens of gigabytes, so this test double replaces only the byte
+    reading; the receipt identity and the registry rows are the real ones.
+    The false-green cases (wrong revision, same-length wrong bytes) are covered
+    with real small files in test_weight_verification_receipts.py.
     """
+    import shine.comfyops.verification_receipts as receipts
+
     catalog = deployment.load_deployment_catalog(LOWEND_CATALOG)
     binding = load_binding(LOWEND_VARIANT)
     component_ids = [c["component_id"]
@@ -88,6 +94,18 @@ def _mark_weights_verified(factory) -> list[str]:
         rows = deployment.register_catalog_packages(db, catalog, component_ids)
         for row in rows.values():
             row.status = "FILES_VERIFIED_PENDING_RUNTIME"
+
+    def verified_receipt(db, *, component, variant_id, catalog_id, catalog_version, cache_dir=None):
+        return {
+            "verified": True, "present": True, "reason": None,
+            "identity": receipts.component_identity(component),
+            "receipt": {
+                "directory": str(settings.comfyops_dir / "isolated-packages" / component["component_id"]),
+                "verified_at": "2026-11-09T00:00:00+00:00",
+            },
+        }
+
+    monkeypatch.setattr(receipts, "verify_receipt", verified_receipt)
     return component_ids
 
 
@@ -175,7 +193,7 @@ def test_a_variant_and_a_catalog_that_disagree_are_refused(api):
 
 
 def test_a_same_name_profile_with_different_content_is_refused(api):
-    client, factory, _settings = api
+    client, factory, settings = api
     project_id = create_project(client, "同名冲突")
     graph = {"1": {"class_type": "UnrelatedWorkflow", "inputs": {}}}
     from shine.comfy.workflow import graph_hash
@@ -202,7 +220,7 @@ def test_an_unknown_variant_is_refused_by_name(api):
 
 def test_the_candidate_profile_carries_its_own_variant_identity(api):
     """The identity chain starts at the profile: variant, graph, checkpoint."""
-    client, factory, _settings = api
+    client, factory, settings = api
     project_id = create_project(client, "身份链")
     row = _register_candidate(client, project_id)
 
@@ -239,8 +257,8 @@ def test_the_gate_names_what_is_missing_instead_of_claiming_a_pass(api):
         assert blocker["message"], "a refusal must say why"
 
 
-def test_the_gate_reports_the_missing_nodes_and_the_missing_weights(api):
-    client, factory, _settings = api
+def test_the_gate_reports_the_missing_nodes_and_the_missing_weights(api, monkeypatch):
+    client, factory, settings = api
     project_id = create_project(client, "缺权重与节点")
     row = _register_candidate(client, project_id)
 
@@ -250,16 +268,16 @@ def test_the_gate_reports_the_missing_nodes_and_the_missing_weights(api):
     assert weights, "the missing weights must be named"
     assert weights[0]["missing_components"], "the missing component must be named"
 
-    _mark_weights_verified(factory)
+    _mark_weights_verified(factory, settings, monkeypatch)
     gate = _gate(client, project_id, row["profile_id"])
     assert "PROFILE_WEIGHTS_NOT_AVAILABLE" not in _codes(gate)
 
 
 def test_the_gate_reports_a_runtime_that_is_not_there(api, monkeypatch):
-    client, factory, _settings = api
+    client, factory, settings = api
     project_id = create_project(client, "运行时失效")
     row = _register_candidate(client, project_id)
-    _mark_weights_verified(factory)
+    _mark_weights_verified(factory, settings, monkeypatch)
     _mark_validated(factory, row["profile_id"])
 
     gate = _gate(client, project_id, row["profile_id"])
@@ -273,7 +291,7 @@ def test_the_gate_reports_a_runtime_that_is_not_there(api, monkeypatch):
 
 
 def test_a_candidate_profile_of_another_project_cannot_be_used(api):
-    client, factory, _settings = api
+    client, factory, settings = api
     owner = create_project(client, "方案主人")
     other = create_project(client, "越权者")
     row = _register_candidate(client, owner)
@@ -285,7 +303,7 @@ def test_a_candidate_profile_of_another_project_cannot_be_used(api):
 
 def test_the_gate_leaves_the_audited_baseline_alone(api):
     """An accepted variant keeps its historic behaviour - no new blockers."""
-    client, factory, _settings = api
+    client, factory, settings = api
     project_id = create_project(client, "基线不受影响")
     registered = client.post("/api/v1/setup/profiles", json={"project_id": project_id})
     assert registered.status_code == 200, registered.text
@@ -352,7 +370,7 @@ def test_an_explicitly_selected_candidate_keeps_one_identity(api, monkeypatch):
     client, factory, settings = api
     studio = _studio(client)
     row = _register_candidate(client, studio["project"])
-    _mark_weights_verified(factory)
+    _mark_weights_verified(factory, settings, monkeypatch)
     _mark_validated(factory, row["profile_id"])
     _fake_managed_runtime(monkeypatch)
 
@@ -391,7 +409,7 @@ def test_an_explicitly_selected_candidate_keeps_one_identity(api, monkeypatch):
 
 
 def test_a_candidate_the_machine_cannot_run_never_reaches_a_director_package(api):
-    client, factory, _settings = api
+    client, factory, settings = api
     studio = _studio(client)
     row = _register_candidate(client, studio["project"])
     plan = client.post(f"/api/v1/projects/{studio['project']}/episode-plans",
@@ -438,8 +456,8 @@ def test_the_readiness_report_has_five_layers_and_one_next_step(api):
     assert report["auto_download_allowed"] is False
 
 
-def test_the_readiness_next_step_moves_forward_with_the_evidence(api):
-    client, factory, _settings = api
+def test_the_readiness_next_step_moves_forward_with_the_evidence(api, monkeypatch):
+    client, factory, settings = api
     project_id = create_project(client, "下一步推进")
 
     def next_step():
@@ -451,7 +469,7 @@ def test_the_readiness_next_step_moves_forward_with_the_evidence(api):
     assert step["code"] == "VARIANT_NOT_DOWNLOADABLE"
     assert report["layers"][0]["state"] == "PENDING"
 
-    _mark_weights_verified(factory)
+    _mark_weights_verified(factory, settings, monkeypatch)
     step, report = next_step()
     assert step["code"] == "PROFILE_NOT_REGISTERED"
     assert report["layers"][1]["state"] == "DONE"
@@ -490,10 +508,10 @@ def test_a_layer_after_an_unmet_one_is_never_green(api):
     assert report["production_ready"] is False
 
 
-def test_the_layers_open_up_in_order_as_the_evidence_arrives(api):
-    client, factory, _settings = api
+def test_the_layers_open_up_in_order_as_the_evidence_arrives(api, monkeypatch):
+    client, factory, settings = api
     project_id = create_project(client, "层级推进")
-    _mark_weights_verified(factory)
+    _mark_weights_verified(factory, settings, monkeypatch)
     _register_candidate(client, project_id)
 
     report = client.get(

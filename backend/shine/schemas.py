@@ -334,6 +334,24 @@ class CreateProductionSeries(APIModel):
     """The frozen EditIntentPlan artifact that the automatic delivery inherits."""
     output: OutputSpec | None = None
     """The output size and clip length of this run; refused when the profile cannot honour it."""
+    bindings: dict[str, list[ShotBindingInput]] | None = None
+    """An all-or-nothing binding plan, keyed by shot id.
+
+    The one-click entry sends the references it intends to use together with
+    the start request.  The server applies them in the same transaction that
+    creates the series: a refused profile, an unapproved asset or one bad shot
+    leaves no half-written bindings behind (J08).
+    """
+
+    @model_validator(mode="after")
+    def binding_plan_matches_shots(self):
+        if self.bindings is None:
+            return self
+        unknown = set(self.bindings) - set(self.shot_ids)
+        if unknown:
+            raise ValueError("A binding plan may only name shots of this series: "
+                             + ",".join(sorted(unknown))[:200])
+        return self
 
     @model_validator(mode="after")
     def basic_scope_needs_resolution(self):

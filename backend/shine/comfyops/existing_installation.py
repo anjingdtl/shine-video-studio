@@ -244,7 +244,8 @@ def verify_models(report: dict, snapshot: str) -> dict:
     }
 
 
-def register_verified_packages(db, verified: list[dict], catalog: dict) -> list[str]:
+def register_verified_packages(db, verified: list[dict], catalog: dict,
+                               root: str | None = None) -> list[str]:
     """Register the catalog packages whose every file was hash-verified in place.
 
     The existing-install reuse path historically only cached or verified bytes;
@@ -263,11 +264,31 @@ def register_verified_packages(db, verified: list[dict], catalog: dict) -> list[
     if not complete:
         return []
     rows = register_catalog_packages(db, catalog, complete)
+    from pathlib import Path
+
+    from shine.comfyops.verification_receipts import save_receipt
+
+    components = _component_map(catalog)
     registered = []
     for component_id, row in rows.items():
         if row.status == 'UNVERIFIED_ORIGIN':
             row.status = 'FILES_VERIFIED_PENDING_RUNTIME'
             registered.append(component_id)
+        # An in-place verification proves the files at the selected existing
+        # installation, not at the isolated-package directory.  The receipt
+        # says exactly which directory was read, so readiness cannot borrow
+        # this evidence for a different copy (J04).
+        variant_block = catalog.get('variant')
+        save_receipt(
+            db,
+            variant_id=(variant_block or {}).get('variant_id')
+            if isinstance(variant_block, dict) else None,
+            catalog_id=catalog.get('catalog_id'),
+            catalog_version=catalog.get('catalog_version'),
+            component=components[component_id],
+            root=Path(root) if root else None,
+            directory=Path(root) if root else None,
+        )
     return registered
 
 

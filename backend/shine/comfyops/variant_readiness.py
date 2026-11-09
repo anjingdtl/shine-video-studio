@@ -105,49 +105,72 @@ def _cache_dir(settings) -> Any:
 
 
 def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
-    """Per component: are the pinned bytes on this machine, and were they verified?
+    """Per component: are the pinned bytes here, and were they really verified?
 
-    Two independent signals are accepted, and neither is trusted alone:
+    Two sources are accepted, and both are evidence about *bytes*:
 
-    * the product's own package registry says the component's files were
-      hash-verified (status advanced past ``UNVERIFIED_ORIGIN``);
-    * the verified cache holds a file whose name *is* the pinned SHA-256 and
-      whose size matches the pin - that file is only written after the digest
-      was verified while copying.
+    * a durable verification receipt that binds the exact revision, every
+      file length/SHA and the directory that was read, still matching on disk;
+    * the verified-bytes cache, whose file is read (or hashed once and then
+      reused while its size/mtime stay unchanged) - a digest-shaped file name
+      is never accepted on its own.
+
+    A registry row that says ``FILES_VERIFIED_PENDING_RUNTIME`` is a historical
+    summary.  It cannot turn a layer green when the current revision, the file
+    list or the bytes differ (J04).
     """
+    from shine.comfyops.verification_receipts import cache_candidates, verify_receipt
+
     cache = _cache_dir(settings)
     registry = {row.id: row for row in db.scalars(select(ModelPackage)).all()}
     evidence: list[dict[str, Any]] = []
     for component in _required_components(binding.catalog, binding.profiles):
         component_id = str(component.get("component_id"))
-        files: list[dict[str, Any]] = []
-        for entry in component.get("files") or []:
-            present = False
-            if cache is not None:
-                try:
-                    candidate = cache / str(entry.get("sha256"))
-                    present = candidate.is_file() and candidate.stat().st_size == int(entry.get("size"))
-                except (OSError, TypeError, ValueError):
-                    present = False
-            files.append({
+        receipt = verify_receipt(
+            db,
+            component=component,
+            variant_id=binding.variant_id,
+            catalog_id=binding.catalog_id,
+            catalog_version=str((binding.catalog or {}).get("catalog_version") or ""),
+            cache_dir=cache,
+        )
+        cached = cache_candidates(cache, component)
+        files = [
+            {
+                "relative_path": entry.get("relative_path"),
                 "sha256": str(entry.get("sha256")),
                 "size": entry.get("size"),
                 "revision": str(component.get("revision") or ""),
-                "on_disk": present,
-            })
+                "on_disk": bool(cached["files"][index].get("present")) if index < len(cached["files"]) else False,
+            }
+            for index, entry in enumerate(component.get("files") or [])
+        ]
         row = registry.get(component_id)
-        registry_status = None if row is None else str(row.status)
-        registered_verified = registry_status in VERIFIED_PACKAGE_STATUSES
-        on_disk = [f for f in files if f["on_disk"]]
         evidence.append({
             "component_id": component_id,
-            "registry_status": registry_status,
-            "registry_verified": registered_verified,
+            "registry_status": None if row is None else str(row.status),
+            # A registry row alone is never verification any more.
+            "registry_verified": False,
+            "revision": str(component.get("revision") or ""),
             "files": files,
-            "bytes_present": sum(int(f["size"]) for f in on_disk),
-            "bytes_total": sum(int(f["size"]) for f in files),
-            "prepared": registered_verified or len(on_disk) == len(files),
-            "verified": registered_verified or (bool(files) and len(on_disk) == len(files)),
+            "receipt": {
+                "verified": receipt["verified"],
+                "present": receipt["present"],
+                "reason": receipt["reason"],
+                "identity": receipt["identity"],
+                "directory": (receipt.get("receipt") or {}).get("directory"),
+                "verified_at": (receipt.get("receipt") or {}).get("verified_at"),
+            },
+            "cache": {"verified": cached["verified"], "present": cached["present"],
+                      "reason": cached["reason"]},
+            "bytes_present": sum(int(f["size"] or 0) for f in files
+                                 if receipt["present"] or cached["present"]),
+            "bytes_total": sum(int(f["size"] or 0) for f in files),
+            # Present is a directory fact; verified is a byte fact.  They stay
+            # separate so "the files are here" cannot impersonate "the bytes
+            # were checked".
+            "prepared": bool(files) and (receipt["present"] or cached["present"]),
+            "verified": bool(files) and (receipt["verified"] or cached["verified"]),
         })
     return evidence
 

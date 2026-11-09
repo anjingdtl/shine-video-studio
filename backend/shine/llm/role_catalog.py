@@ -102,6 +102,28 @@ MULTIMODAL_ROLE_CATALOG: tuple[dict[str, str], ...] = (
     },
 )
 
+#: Parent task roles that execute the *output* of one text role.
+#:
+#: A route change has to see the work that will actually call the role, not only
+#: rows whose ``role_id`` equals the role name.  Tasks here carry a durable
+#: ``model_profile_id`` snapshot, so a queued one continues on its original
+#: model; a new one uses the new route (J05).
+TASK_ROLE_CONSUMERS: dict[str, str] = {
+    "story_outline_run": AgentRole.SCRIPTWRITER.value,
+    "story_section_run": AgentRole.SCRIPTWRITER.value,
+    "creative_script_run": AgentRole.SCRIPTWRITER.value,
+    "four_stage_bible_run": AgentRole.FOUR_STAGE_BIBLE.value,
+    "four_stage_scene_script_run": AgentRole.FOUR_STAGE_SCENE_SCRIPT.value,
+}
+
+
+def task_roles_for(changed_roles: set[str]) -> list[str]:
+    """Every task role that can call one of the changed roles."""
+    parents = {parent for parent, consumed in TASK_ROLE_CONSUMERS.items()
+               if consumed in changed_roles}
+    return sorted({*changed_roles, *parents})
+
+
 WORKFLOW_ROLE_IDS: dict[str, tuple[str, ...]] = {
     "script_and_storyboard": (
         AgentRole.SCRIPTWRITER.value,

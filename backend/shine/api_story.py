@@ -108,7 +108,17 @@ def queue_outline(project_id: str, body: OutlineRequest, actor: Operator, db: DB
     try:
         row = story.queue_outline(db, project_id, document, gateway, body.locked_facts)
     except LLMError as exc:
-        raise HTTPException(409, {"code": exc.code, "role": "scriptwriter"}) from None
+        # The script is stored already; only this role's model is missing.  The
+        # refusal names the role and the page that fixes it, instead of failing
+        # the whole preparation or asking for every text role at once (J03).
+        raise HTTPException(409, {
+            "code": "TEXT_ROLE_NOT_READY",
+            "role": "scriptwriter",
+            "role_label": "故事大纲",
+            "reason": exc.code,
+            "action": "CONFIGURE_TEXT_ROLE",
+            "message": "整理大纲需要「故事大纲」这一个角色已配置并测试；其它文本工种不影响这一步。",
+        }) from None
     db.commit()
     return {"task_id": row.id, "status": row.status, "state_version": row.state_version}
 

@@ -204,6 +204,101 @@ def test_adoption_refuses_a_shot_inside_a_confirmed_package(api):
     assert refused.status_code == 409 and "ADOPTION_BLOCKED" in refused.text
 
 
+def test_the_same_adoption_key_cannot_describe_another_shot(api):
+    """One key, one canonical request: a different payload is a named conflict."""
+    client, factory, _ = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    first = create_shot(client, project, style["id"], title="第一镜", characters=["Lin"])
+    second = create_shot(client, project, style["id"], title="第二镜", characters=["Lin"])
+    version, asset_id = _library_character(client, factory, project)
+
+    base = {
+        "project_id": project, "library_version_id": version, "project_asset_id": asset_id,
+        "role": "character", "entity_id": "Lin", "idempotency_key": "one-key-one-request",
+        "confirmed": True,
+    }
+    adopted = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        **base, "shot_ids": [first["id"]],
+        "expected_shot_revisions": {first["id"]: first["revision"]},
+    })
+    assert adopted.status_code == 201, adopted.text
+
+    conflicting = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        **base, "shot_ids": [second["id"]],
+        "expected_shot_revisions": {second["id"]: second["revision"]},
+    })
+    assert conflicting.status_code == 409, conflicting.text
+    assert conflicting.json()["detail"]["code"] == "ADOPTION_IDEMPOTENCY_CONFLICT"
+    assert client.get(f"/api/v1/shots/{second['id']}/bindings").json() == []
+
+
+def test_a_newer_package_revision_unlocks_material_adoption(api):
+    """A confirmed package is history once a newer revision exists."""
+    client, factory, _ = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    subject = upload_asset(client, project, content=b"\x89PNG\r\n\x1a\n-subject",
+                           filename="角色.png", role="character", entity_id="Lin")
+    approve_lock(client, subject["id"])
+    shot = create_shot(client, project, style["id"], characters=["Lin"], asset_ids=[subject["id"]],
+                       bindings=[{"asset_id": subject["id"], "use_as": "subject",
+                                  "role": "CHAR_A", "ordinal": 0}])
+    profile = register_workflow_profile(client, mode="Ref2VA")
+    plan = client.post(f"/api/v1/projects/{project}/episode-plans",
+                       json={"target_seconds": 60, "tolerance_seconds": 10}, headers=LOCAL).json()
+    client.post(f"/api/v1/projects/{project}/episode-plans/{plan['version']}/confirm",
+                json={"expected_sha256": plan["sha256"]}, headers=LOCAL)
+    first = client.post(f"/api/v1/projects/{project}/director-packages",
+                        json={"workflow_profile_id": profile["id"]}, headers=LOCAL).json()
+    assert client.post(f"/api/v1/director-packages/{first['id']}/confirm", json={},
+                       headers=LOCAL).status_code == 200
+    # The person started the replacement path: a newer draft package exists.
+    second = client.post(f"/api/v1/projects/{project}/director-packages",
+                         json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
+    assert second.status_code == 201, second.text
+
+    version, asset_id = _library_character(client, factory, project)
+    preview = client.post("/api/v1/asset-center/adoptions/preview", json={
+        "project_id": project, "library_version_id": version, "project_asset_id": asset_id,
+        "shot_ids": [shot["id"]], "role": "character", "entity_id": "Lin"})
+    assert preview.json()["blocked"] == [], preview.text
+    adopted = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        "project_id": project, "library_version_id": version, "project_asset_id": asset_id,
+        "shot_ids": [shot["id"]], "role": "character", "entity_id": "Lin",
+        "expected_shot_revisions": {shot["id"]: shot["revision"]},
+        "idempotency_key": "adopt-after-new-revision", "confirmed": True})
+    assert adopted.status_code == 201, adopted.text
+    assert adopted.json()["adopted_count"] == 1
+
+
+def test_a_live_take_blocks_adoption_by_name(api):
+    client, factory, _ = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"], title="在拍镜头", characters=["Lin"])
+    queued = client.post(f"/api/v1/projects/{project}/jobs", json={
+        "shot_id": shot["id"], "provider": "mock", "mock_scenario": "success"})
+    assert queued.status_code == 201, queued.text
+    version, asset_id = _library_character(client, factory, project)
+
+    preview = client.post("/api/v1/asset-center/adoptions/preview", json={
+        "project_id": project, "library_version_id": version, "project_asset_id": asset_id,
+        "shot_ids": [shot["id"]], "role": "character", "entity_id": "Lin"})
+    blocked = preview.json()["blocked"][0]
+    assert blocked["conflict"] == "SHOT_PRODUCTION_IN_FLIGHT"
+    assert blocked["action"] == "RECONCILE_OR_FINISH_CURRENT_TAKE"
+    assert blocked["production_job_id"]
+
+    refused = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        "project_id": project, "library_version_id": version, "project_asset_id": asset_id,
+        "shot_ids": [shot["id"]], "role": "character", "entity_id": "Lin",
+        "expected_shot_revisions": {shot["id"]: shot["revision"]},
+        "idempotency_key": "adopt-while-running", "confirmed": True})
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "ADOPTION_BLOCKED"
+
+
 # ---------------------------------------------------------------------------
 # U06 · a revoked global licence stops every real consumer
 # ---------------------------------------------------------------------------

@@ -209,7 +209,7 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
         verified_bytes = payload.get('verified_bytes')
         if verified_bytes != sum(row['size'] for row in verified):
             continue
-        registered = register_verified_packages(db, verified, catalog)
+        registered = register_verified_packages(db, verified, catalog, root=report['root'])
         if registered:
             add_audit(db, actor, 'EXISTING_VERIFIED_PACKAGES_REGISTERED', 'deployment', report['catalog_id'],
                       {'components': sorted(registered)})
@@ -252,7 +252,7 @@ def verify_existing_installation(body: ExistingModelImportRequest, actor: Operat
             'verified_bytes': result['verified_bytes'],
             'copied_bytes': 0,
         })
-        registered = register_verified_packages(db, result['verified'], catalog)
+        registered = register_verified_packages(db, result['verified'], catalog, root=report['root'])
         if registered:
             add_audit(db, actor, 'EXISTING_VERIFIED_PACKAGES_REGISTERED', 'deployment', report['catalog_id'],
                       {'components': sorted(registered)})

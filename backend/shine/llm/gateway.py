@@ -97,6 +97,11 @@ class LLMGateway:
         self.provider_factory = provider_factory or (
             lambda config, responder: build_provider(config, mock_responder=responder)
         )
+        # A queued task carries the model it was queued with.  A worker tick
+        # pins that profile here so every internal role lookup of the unit -
+        # including the consent fingerprint - resolves to the same identity
+        # instead of whatever the route happens to point at now (J05).
+        self._pinned_roles: dict[str, ProviderProfile] = {}
 
     def config_for(self, profile: ProviderProfile, *, api_key_override: str | None = None) -> ProviderConfig:
         from shine.schemas import TextGenerationOptions
@@ -137,7 +142,20 @@ class LLMGateway:
         config = self.config_for(profile, api_key_override=api_key_override)
         return self.provider_factory(config, self.mock_responder)
 
+    def pin_role(self, role: str, profile: ProviderProfile | None) -> None:
+        """Run this unit with the task's own profile, not the current route."""
+        if profile is None:
+            self._pinned_roles.pop(role, None)
+        else:
+            self._pinned_roles[role] = profile
+
+    def clear_pins(self) -> None:
+        self._pinned_roles.clear()
+
     def profile_for_role(self, db: Session, role: str) -> ProviderProfile:
+        pinned = self._pinned_roles.get(role)
+        if pinned is not None:
+            return pinned
         route = db.scalar(select(AgentRoute).where(AgentRoute.role == role))
         if not route:
             raise LLMNotConfigured(f"No provider profile is routed to the {role} role")

@@ -1468,6 +1468,22 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
         if claimed is None:
             continue
         task_id, version, _trace = claimed
+        if gateway is None:
+            from shine.director.creative import _gateway
+            gateway = _gateway(settings)
+        from shine.models import AgentTaskRecord, ProviderProfile
+
+        with factory() as db:
+            task = db.get(AgentTaskRecord, task_id)
+            pinned = db.get(ProviderProfile, task.model_profile_id) if task and task.model_profile_id else None
+            pinned_model = task.model_id if task else None
+        if pinned is None or not pinned.enabled or not pinned.model.strip() or (
+                pinned_model and pinned.model != pinned_model):
+            _finish_pipeline_task(factory, task_id, version, worker_id,
+                                  {"stage": "NEEDS_REVIEW", "blocked_reason": "PIPELINE_PROVIDER_PIN_INVALID"},
+                                  "NEEDS_REVIEW", "PIPELINE_PROVIDER_PIN_INVALID")
+            return True
+        gateway.pin_role(role, pinned)
         try:
             if role == BIBLE_RUN_ROLE:
                 return run_bible_task(factory, settings, gateway, task_id, version, worker_id)
@@ -1477,6 +1493,8 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
                                   {"stage": "NEEDS_REVIEW", "blocked_reason": str(exc.detail)},
                                   "NEEDS_REVIEW", str(exc.detail))
             return True
+        finally:
+            gateway.pin_role(role, None)
     return False
 
 
@@ -2261,7 +2279,7 @@ def delivery_snapshot(db, project_id: str, volume_id: str, groups: list[dict],
 
 
 def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_id: str,
-                         *, acknowledge_scene_coverage: bool = False) -> dict:
+                         *, acknowledge_scene_coverage: bool = False, settings=None) -> dict:
     """Publish the volume to the existing production machinery.
 
     The scope is the ordered ``section -> shots`` mapping the apply receipts
@@ -2431,7 +2449,7 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     plan_row.confirmed_by = "local-user"
     plan_row.confirmed_at = utcnow()
     shot_ids = [shot_id for group in groups for shot_id in group["shot_ids"]]
-    package = build_package(db, project, workflow_profile_id=workflow_profile_id,
+    package = build_package(db, project, settings=settings, workflow_profile_id=workflow_profile_id,
                             plan=plan_row, scope_shot_ids=shot_ids,
                             creative_lineage=lineage)
     confirm_package(db, package, actor="local-user")

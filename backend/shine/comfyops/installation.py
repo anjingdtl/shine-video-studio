@@ -204,7 +204,8 @@ def active_attempt_query(plan_id: str):
     )
 
 
-def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str, extra=None) -> InstallationAttempt:
+def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str,
+                  extra=None) -> tuple[InstallationAttempt, bool]:
     """Create the persistent attempt.  Nothing is downloaded here.
 
     The exclusive right belongs to the *physical target*, not to one plan row:
@@ -218,7 +219,7 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str, extra=
         # The same plan asked again (a lost receipt, a refreshed tab) gets the
         # one attempt it already owns.  Queueing is the re-attachable receipt,
         # not a second piece of physical work.
-        return db.get(InstallationAttempt, existing_id)
+        return db.get(InstallationAttempt, existing_id), True
     target_key = plan_target_key(plan)
     target_root = normalized_storage_root((plan.payload or {}).get("storage_root"))
     for existing, existing_plan in active_attempts(db):
@@ -233,7 +234,7 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str, extra=
                  "target_key": target_key},
                 project_id=plan.project_id,
             )
-            return existing
+            return existing, True
         # The same physical directory cannot receive two different component
         # sets at once: two writers would interleave into the same files.
         if target_root and normalized_storage_root(
@@ -268,7 +269,32 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str, extra=
         {"plan_id": plan.id, "plan_hash": plan_hash},
         project_id=plan.project_id,
     )
-    return attempt
+    return attempt, False
+
+
+def attempts_for_target(db, plan: InstallationPlan) -> list[InstallationAttempt]:
+    """Every attempt that ever wrote this plan's physical target.
+
+    The receipt of a lost response belongs to the *directory*, not to the plan
+    row that happened to request it first.  A second project or a fresh browser
+    that asks for the same bytes must find that history; otherwise an attempt
+    that is really queued or really finished looks like it never existed (J02).
+    """
+    key = plan_target_key(plan)
+    root = normalized_storage_root((plan.payload or {}).get("storage_root"))
+    matches = []
+    rows = db.execute(
+        select(InstallationAttempt, InstallationPlan).join(
+            InstallationPlan, InstallationPlan.id == InstallationAttempt.plan_id
+        )
+    ).all()
+    for attempt, owner in rows:
+        if plan_target_key(owner) == key:
+            matches.append(attempt)
+            continue
+        if root and normalized_storage_root((owner.payload or {}).get("storage_root")) == root:
+            matches.append(attempt)
+    return sorted(matches, key=lambda row: (row.created_at, row.id))
 
 
 def request_pause(db, attempt: InstallationAttempt) -> InstallationAttempt:

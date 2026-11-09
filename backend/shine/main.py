@@ -1089,54 +1089,80 @@ def create_app(
         run a command for the run to continue.
         """
         from shine.api_preparation import locked
-        from shine.comfyops.production_series import create_series, series_public
 
         locked(db)
         project = require_project(db, project_id)
         if body.provider != RenderProvider.COMFYUI:
             raise HTTPException(422, "A production series needs a real H3 provider")
         shots = [require_shot(db, project_id, shot_id) for shot_id in body.shot_ids]
-        job_body = CreateJob(
-            shot_id=shots[0].id,
-            mock_scenario=body.mock_scenario,
-            provider=body.provider,
-            generation_mode=body.generation_mode,
-            workflow_profile_id=body.workflow_profile_id,
-            self_review_scope=body.self_review_scope,
-            basic_review_resolution=body.basic_review_resolution,
-            output=body.output,
-        )
-        series, job = create_series(
-            db, project, shots, body=job_body,
-            settings=resolve_runtime(db, request.app.state.settings),
-            offline=request.app.state.settings.offline_simulation,
-        )
-        if body.edit_intent_artifact_id:
-            artifact = db.get(AgentArtifact, body.edit_intent_artifact_id)
-            if (
-                not artifact
-                or artifact.project_id != project.id
-                or artifact.kind != "EditIntentPlan"
-                or artifact.stale
-            ):
-                db.rollback()
-                raise HTTPException(
-                    422, "EDIT_INTENT_ARTIFACT_INVALID"
+        return _create_production_series(
+            project, body, request, db, shots)
+
+
+    def _create_production_series(project, body, request, db, shots):
+        """The transaction body: bindings and series commit together.
+
+        The one-click entry sends the references it intends to bind with the start
+        request.  They are written here, in the same transaction, and a refusal
+        from the profile gate, the asset check or the series itself rolls all of
+        them back - the workbench never leaves a half-applied binding plan (J08).
+        """
+        from shine.comfyops.production_series import create_series, series_public
+        from shine.services import set_shot_bindings
+
+        try:
+            if body.bindings:
+                by_id = {shot.id: shot for shot in shots}
+                for shot_id, planned in body.bindings.items():
+                    shot = by_id.get(shot_id)
+                    if shot is None:
+                        raise HTTPException(422, "PRODUCTION_SERIES_BINDING_SHOT_NOT_FOUND")
+                    set_shot_bindings(db, project, shot, planned, actor="user")
+                db.flush()
+            job_body = CreateJob(
+                shot_id=shots[0].id,
+                mock_scenario=body.mock_scenario,
+                provider=body.provider,
+                generation_mode=body.generation_mode,
+                workflow_profile_id=body.workflow_profile_id,
+                self_review_scope=body.self_review_scope,
+                basic_review_resolution=body.basic_review_resolution,
+                output=body.output,
+            )
+            series, job = create_series(
+                db, project, shots, body=job_body,
+                settings=resolve_runtime(db, request.app.state.settings),
+                offline=request.app.state.settings.offline_simulation,
+            )
+            if body.edit_intent_artifact_id:
+                artifact = db.get(AgentArtifact, body.edit_intent_artifact_id)
+                if (
+                    not artifact
+                    or artifact.project_id != project.id
+                    or artifact.kind != "EditIntentPlan"
+                    or artifact.stale
+                ):
+                    db.rollback()
+                    raise HTTPException(
+                        422, "EDIT_INTENT_ARTIFACT_INVALID"
+                    )
+                series.edit_intent_artifact_id = artifact.id
+                add_audit(
+                    db, "user", "SERIES_EDIT_INTENT_BOUND", "production_series", series.id,
+                    {"artifact_id": artifact.id, "sha256": artifact.sha256},
+                    project_id=project.id,
                 )
-            series.edit_intent_artifact_id = artifact.id
             add_audit(
-                db, "user", "SERIES_EDIT_INTENT_BOUND", "production_series", series.id,
-                {"artifact_id": artifact.id, "sha256": artifact.sha256},
+                db, "user", "PRODUCTION_SERIES_CREATED", "production_series", series.id,
+                {"shot_count": len(shots), "first_job_id": job.id if job else None,
+                 "deferred_first_shot": job is None,
+                 "workflow_profile_id": series.workflow_profile_id},
                 project_id=project.id,
             )
-        add_audit(
-            db, "user", "PRODUCTION_SERIES_CREATED", "production_series", series.id,
-            {"shot_count": len(shots), "first_job_id": job.id if job else None,
-             "deferred_first_shot": job is None,
-             "workflow_profile_id": series.workflow_profile_id},
-            project_id=project.id,
-        )
-        db.commit()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(series)
         return jsonable_encoder(series_public(db, series))
 

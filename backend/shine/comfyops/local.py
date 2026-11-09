@@ -129,6 +129,24 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
                     raise ValueError("INSTALL_DESTINATION_CHANGED")
                 status = "MATCHES_PINNED_FILES"
             advanced = advance_verified_package(db, registered) if status == "MATCHES_PINNED_FILES" else False
+            if status == "MATCHES_PINNED_FILES":
+                from shine.comfyops.verification_receipts import save_receipt
+
+                plan_variant = (plan.payload or {}).get("variant") or {}
+                deployment = (plan.payload or {}).get("deployment") or {}
+                save_receipt(
+                    db,
+                    variant_id=plan_variant.get("variant_id"),
+                    catalog_id=deployment.get("catalog_id"),
+                    catalog_version=deployment.get("catalog_version"),
+                    component={
+                        "component_id": spec.name,
+                        "revision": spec.revision,
+                        "files": [file.model_dump() for file in spec.files],
+                    },
+                    root=root,
+                    directory=destination,
+                )
             observations.append({
                 "package_id": package["id"],
                 "package_sha256": package["hash"],
@@ -201,7 +219,7 @@ def validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor="LO
     return plan
 
 
-def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED") -> str:
+def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED") -> tuple[str, bool]:
     """Queue the persistent attempt.  Nothing is downloaded in this request.
 
     The Worker claims the attempt afterwards, writes its stage and its
@@ -212,9 +230,9 @@ def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         plan = validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor)
-        attempt = queue_attempt(db, plan, plan_hash, actor)
+        attempt, reused = queue_attempt(db, plan, plan_hash, actor)
         attempt_id = attempt.id
-    return attempt_id
+    return attempt_id, reused
 
 
 def execute_approved(factory, settings, plan_id, plan_hash, actor, installer):

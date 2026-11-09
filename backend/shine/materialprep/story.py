@@ -25,7 +25,7 @@ from shine.llm.secrets import SecretStore
 from shine.materialprep import scenes, text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent
 from shine.materialprep.source_spans import HEADING, segment_document
-from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
+from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, ProviderProfile, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit
 
@@ -488,6 +488,33 @@ def _renew_story_claim(factory, task_id, version, worker_id, heartbeat_fn=None, 
         thread.join(timeout=2)
 
 
+@contextmanager
+def _pinned_story_provider(gateway, profile):
+    """Run one unit on the profile the task was queued with.
+
+    The route may have changed since the task was queued; that changes the next
+    task, not this one.  Pinning here also keeps the consent fingerprint and the
+    per-scene subcalls on the same identity, so a queued outline continues on
+    its original model instead of stopping with STORY_PROVIDER_CHANGED (J05).
+    """
+    gateway.pin_role("scriptwriter", profile)
+    try:
+        yield
+    finally:
+        gateway.pin_role("scriptwriter", None)
+
+
+def _pinned_profile(factory, task_id: str) -> tuple[ProviderProfile | None, str | None]:
+    """The durable model snapshot of one task, if it can still be executed."""
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        if task is None:
+            return None, None
+        profile = db.get(ProviderProfile, task.model_profile_id) if task.model_profile_id else None
+        snapshot = task.model_id
+    return profile, snapshot
+
+
 def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):
     """One durable unit per tick, with no database writer held over a model call."""
     gateway = gateway or LLMGateway(SecretStore(settings.secret_store_dir or settings.data_dir / "secrets"))
@@ -516,7 +543,16 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
         task_id, version, project_id, role = row.id, row.state_version, row.project_id, row.role_id
         state = dict(row.trace)
         document = db.get(ProjectDocument, state["document_id"])
-    with _renew_story_claim(factory, task_id, version, worker_id, heartbeat_fn):
+    pinned, pinned_model = _pinned_profile(factory, task_id)
+    if (pinned is None or not pinned.enabled or not pinned.model.strip()
+            or (pinned_model and pinned.model != pinned_model)):
+        # The task keeps its durable identity and its completed units; only the
+        # model snapshot is unusable.  Name it instead of silently switching.
+        _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW",
+                     "STORY_PROVIDER_PIN_INVALID")
+        return True
+    with _pinned_story_provider(gateway, pinned), _renew_story_claim(
+            factory, task_id, version, worker_id, heartbeat_fn):
         if document is None or document.project_id != project_id or document.sha256 != state["document_sha256"]:
             _finish_step(factory, task_id, version, worker_id, state, "FAILED", "STORY_DOCUMENT_CHANGED")
             return True
@@ -524,11 +560,12 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
             if role == SECTION_RUN:
                 return _run_section(factory, settings, gateway, task_id, version, worker_id,
                                      project_id, document, state)
-            profile = None
-            with factory() as db:
-                profile = gateway.profile_for_role(db, "scriptwriter")
-                if text_consent.fingerprint(profile) != state["provider_fingerprint"]:
-                    raise HTTPException(409, "STORY_PROVIDER_CHANGED")
+            profile = pinned
+            if text_consent.fingerprint(profile) != state["provider_fingerprint"]:
+                # The pinned profile itself was edited (endpoint, key reference
+                # or options): the queued request no longer describes the same
+                # provider, so it stops by name rather than silently switching.
+                raise HTTPException(409, "STORY_PROVIDER_CHANGED")
             source = segment_document(document.text)
             # The number of source units is part of the progress the person
             # waits for; it is recorded once and reused after a restart.

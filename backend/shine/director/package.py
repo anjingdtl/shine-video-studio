@@ -233,6 +233,53 @@ def latest_package(db: Session, project_id: str) -> DirectorPackageVersion | Non
     ).first()
 
 
+def plan_basis_blockers(db: Session, project: Project, plan_payload) -> list[dict[str, Any]]:
+    """Is this episode plan still the plan of the *current* script?
+
+    An uploaded script B is only a candidate until the person selects it or
+    confirms an outline built from it.  Once that happens, a plan derived from
+    A can no longer be packaged as B: the manifest would name B's document and
+    outline while carrying A's episodes and shots (J06).
+    """
+    source = getattr(plan_payload, "source", None) or {}
+    basis = current_script_basis(db, project)
+    document = basis["document"]
+    if document is None:
+        # A hand-built shot list has no document lineage to be wrong about.
+        return []
+    outline = _outline_for_document(db, project.id, document)
+    confirmed = outline if outline is not None and outline.approved_at else None
+    if confirmed is None:
+        return [_blocker(
+            "SCRIPT_OUTLINE_NOT_CONFIRMED",
+            "当前剧本还没有确认的大纲；先整理并确认大纲，再生成分集和导演包",
+            document_id=document.id,
+            outline_artifact_id=outline.id if outline else None,
+            action="CONFIRM_OUTLINE",
+        )]
+    declared_id = source.get("outline_artifact_id")
+    declared_sha = source.get("outline_sha256")
+    if not declared_id and getattr(plan_payload, "mode", "shots") == "sections":
+        return [_blocker(
+            "EPISODE_PLAN_SOURCE_MISSING",
+            "这份分集方案没有记录它来自哪一版大纲，无法确认它属于当前剧本",
+            current_outline_artifact_id=confirmed.id,
+            current_outline_sha256=confirmed.sha256,
+            action="REMATERIALIZE_PLAN",
+        )]
+    if declared_id and (declared_id != confirmed.id or
+                        (declared_sha and declared_sha != confirmed.sha256)):
+        return [_blocker(
+            "EPISODE_PLAN_SCRIPT_CHANGED",
+            "分集方案来自另一版剧本大纲；请按当前剧本重新生成分集，再落到镜头和导演包",
+            plan_outline_artifact_id=declared_id,
+            current_outline_artifact_id=confirmed.id,
+            current_document_id=document.id,
+            action="REMATERIALIZE_PLAN",
+        )]
+    return []
+
+
 def build_package(
     db: Session,
     project: Project,
@@ -245,6 +292,7 @@ def build_package(
     policy: dict[str, Any] | None = None,
     creative_lineage: dict[str, Any] | None = None,
     created_by: str = "user",
+    settings=None,
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
 
@@ -269,6 +317,13 @@ def build_package(
     # handed, never against the whole project's shots.
     coverage_scope = list(scope_shot_ids or by_id.keys())
     plan_payload = EpisodePlanPayload.model_validate(plan.payload)
+    basis_problems = plan_basis_blockers(db, project, plan_payload)
+    if basis_problems:
+        raise HTTPException(409, {
+            "code": basis_problems[0]["code"],
+            "message": basis_problems[0]["message"],
+            "blockers": basis_problems,
+        })
     if plan_payload.mode == "sections":
         # A script-first plan names its scope by sections; it may only be
         # packaged once every episode was materialised into the shots its
@@ -292,14 +347,28 @@ def build_package(
     # it and this machine really checked it.  The package pins exactly one
     # identity, so a profile that cannot run here never reaches a package and
     # can never be silently replaced by the INT8 baseline.
-    from shine.comfyops.profile_gate import profile_blockers
+    from shine.comfyops.profile_gate import profile_blockers, size_blockers
 
-    gate_blockers = profile_blockers(db, None, project.id, profile, require_runtime=False)
+    # The package promises what the run will really do, so it reads the same
+    # facts: the live machine (when the caller can provide it) and the output
+    # size this package freezes.  A size the profile cannot map is refused
+    # here, at the same boundary that names it later, instead of confirming a
+    # package that the first batch dispatch would refuse (J09).
+    gate_blockers = profile_blockers(
+        db, settings, project.id, profile,
+        require_runtime=settings is not None,
+    )
+    gate_blockers.extend(size_blockers(profile, output))
     if gate_blockers:
-        raise HTTPException(409, {
-            "code": gate_blockers[0]["code"],
-            "message": gate_blockers[0]["message"],
+        first = gate_blockers[0]
+        raise HTTPException(422 if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else 409, {
+            "code": first["code"],
+            "message": first["message"],
             "blockers": gate_blockers,
+            "details": {
+                "missing_parameters": first.get("missing_parameters") or [],
+                "mapped_parameters": first.get("mapped_parameters") or [],
+            } if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else None,
         })
 
     style = _style_snapshot(db, project)
@@ -357,6 +426,10 @@ def build_package(
             "sha256": plan.sha256,
             "target_seconds": plan_payload.target_seconds,
             "tolerance_seconds": plan_payload.tolerance_seconds,
+            # The plan's own source travels into the frozen manifest: a package
+            # that names B's script and A's plan is detectable after the fact,
+            # not only at the moment it was built.
+            "source": plan_payload.source or {},
         },
         "script": _script_ref(db, project),
         "style": style,
@@ -683,6 +756,15 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                 blockers.append(_blocker("STYLE_PROFILE_SUPERSEDED", "导演风格来源快照已变化，请重新生成导演包"))
 
     script = manifest.get("script") or {}
+    plan_source = ((manifest.get("episode_plan") or {}).get("source") or {})
+    if (script.get("outline_artifact_id") and plan_source.get("outline_artifact_id")
+            and plan_source["outline_artifact_id"] != script["outline_artifact_id"]):
+        blockers.append(_blocker(
+            "PACKAGE_SCRIPT_PLAN_MISMATCH",
+            "导演包里的分集方案来自另一版剧本大纲，和它声明的剧本不一致；请重新生成分集与导演包",
+            plan_outline_artifact_id=plan_source.get("outline_artifact_id"),
+            script_outline_artifact_id=script.get("outline_artifact_id"),
+        ))
     if project is not None and script.get("document_id"):
         basis = current_script_basis(db, project)
         live_document = basis["document"]
@@ -726,6 +808,10 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
             ))
         elif not (profile_row.parameter_map or {}):
             blockers.append(_blocker("WORKFLOW_PARAMETER_MAP_MISSING", "生成方案未声明参数映射"))
+        else:
+            from shine.comfyops.profile_gate import size_blockers
+
+            blockers.extend(size_blockers(profile_row, manifest.get("binding", {}).get("output")))
 
     from shine.comfyops.preproduction import current_plan
 
