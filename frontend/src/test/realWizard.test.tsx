@@ -308,6 +308,23 @@ it('真正需要对账的尝试才交给专业设置，绝不重复执行', asyn
   expect(screen.getByRole('button', { name: '到专业设置处理' })).toBeInTheDocument();
 });
 
+it('已完成的安装在向导里沿原步骤继续，不会重新下载', async () => {
+  // The receipt of a finished installation is a valid re-attachment: the
+  // wizard continues with the instance preparation instead of downloading
+  // the same bytes again (R06).
+  route('GET', 'comfyops/install-plans\\?project_id=proj-1', [{ id: 'install', status: 'INSTALLING' }]);
+  stub.add({ method: 'GET', pattern: /install-plans\/install\/attempts/, respond: () => jsonResponse([
+    { attempt_id: 'attempt-done', plan_id: 'install', stage: 'FILES_VERIFIED_PENDING_RUNTIME',
+      status: 'FILES_VERIFIED_PENDING_RUNTIME', confirmed_bytes: 4, total_bytes: 4, speed_bps: 0,
+      retry_count: 0, cancel_requested: false, pause_requested: false, terminal: true, resumable: false },
+  ]) });
+  route('GET', 'setup/readiness', { layers: [{ layer: 'L2_files_verified', status: 'READY' }] });
+  show();
+  await screen.findByText(/真实制作已准备好/);
+  expect(stub.callsOf('GET', /install-plans\/install\/attempts/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+});
+
 it('暂停的安装显示对应动作，不会一直等待，也不会重投', async () => {
   route('GET', 'comfyops/install-plans\\?project_id=proj-1', [{ id: 'install', status: 'INSTALLING' }]);
   stub.add({ method: 'GET', pattern: /install-plans\/install\/attempts/, respond: () => jsonResponse([
