@@ -177,8 +177,7 @@ def size_blockers(profile: WorkflowProfile, output: dict[str, Any] | None) -> li
         return []
     return [_blocker(
         "WORKFLOW_SIZE_NOT_MAPPED",
-        "这个生成方案没有接入宽高参数，无法按你选的分辨率渲染；"
-        "请到基础配置 → 模型与生成方案补齐宽高参数，或改选其它方案。",
+        "The selected workflow profile cannot apply the requested output size",
         missing_parameters=unmapped,
         mapped_parameters=sorted(profile.parameter_map or {}),
     )]
@@ -199,14 +198,25 @@ def require_production_ready(db: Session, settings, project_id: str,
         # A profile that does not exist, or that belongs to another project,
         # keeps its historic 404: the gate only adds new refusals, it never
         # reclassifies an existing one.
-        status = 404 if first["code"] in {"PROFILE_NOT_FOUND", "PROFILE_SCOPE_MISMATCH"} else 409
-        raise HTTPException(status, {
+        if first["code"] in {"PROFILE_NOT_FOUND", "PROFILE_SCOPE_MISMATCH"}:
+            status = 404
+        elif first["code"] == "WORKFLOW_SIZE_NOT_MAPPED":
+            status = 422
+        else:
+            status = 409
+        detail = {
             "code": first["code"],
             "message": first["message"],
             "blockers": blockers,
             "variant_id": (profile.model_identity or {}).get("variant_id") if profile is not None else None,
             "workflow_profile_id": profile.id if profile is not None else None,
-        })
+        }
+        if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED":
+            detail["details"] = {
+                "missing_parameters": first.get("missing_parameters") or [],
+                "mapped_parameters": first.get("mapped_parameters") or [],
+            }
+        raise HTTPException(status, detail)
 
 
 def profile_gate_report(db: Session, settings, project_id: str,

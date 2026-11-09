@@ -1006,10 +1006,14 @@ def create_render_job(
             from shine.models import WorkflowProfile
 
             profile = db.get(WorkflowProfile, body.workflow_profile_id)
-            require_production_ready(
-                db, settings, project.id, profile,
-                output=body.output.model_dump(mode="json") if body.output else None,
-            )
+            # A profile that does not exist keeps its historic refusal from the
+            # request builder; the gate only speaks about profiles that are
+            # really there.
+            if profile is not None:
+                require_production_ready(
+                    db, settings, project.id, profile,
+                    output=body.output.model_dump(mode="json") if body.output else None,
+                )
 
     dependency_ids = list(depends_on if depends_on is not None else body.depends_on)
     dependency_kinds = {dependency_id: "explicit" for dependency_id in dependency_ids}

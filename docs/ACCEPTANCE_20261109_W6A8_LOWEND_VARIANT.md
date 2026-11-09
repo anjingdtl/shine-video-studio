@@ -221,15 +221,39 @@ diffusion_models/Minimax-H3/MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors          
 | `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_variant_binding_and_gate.py -q` | **21 passed** |
 | `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_deployment_recommendation.py test_deployment_acceptance_regressions.py test_setup_workflow_profiles.py test_workflow_profile_scope.py test_director_setup_contract.py test_production_series.py test_new_machine_setup.py test_variant_manifest.py test_install_plan_qualification.py -q` | **126 passed** |
 | `backend\.venv\Scripts\python.exe -m pytest backend/tests/test_variant_binding_and_gate.py test_offline_e2e.py test_production_series.py test_workflow_profile_scope.py -q` | **65 passed** |
-| `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（完整后端套件） | 见 §6.3 |
+| `backend\.venv\Scripts\python.exe -m pytest backend/tests -q`（完整后端套件，2091 项） | **2089 passed · 2 skipped · 0 failed · 0 errors** |
 | `backend\.venv\Scripts\python.exe -m ruff check backend/shine backend/tests` | **All checks passed!** |
 | `alembic upgrade head && alembic check`（临时库） | **No new upgrade operations detected.**（本轮无迁移） |
 | `npm.cmd test -- --run`（frontend） | **31 files / 198 tests passed** |
 | `npm.cmd run build`（frontend） | **✓ built**（`tsc -b && vite build`） |
 
-### 6.3 完整后端套件
+### 6.3 完整后端套件发现的两处新回归（已修）
 
-见 §6.4（最终结果随报告一并记录）。
+完整套件第一次跑出**两处失败**，两处都是本轮引入的**新回归**（不是基线环境问题），都已定位并修掉：
+
+| 失败用例 | 症状 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| `test_output_spec_and_identity.py::test_series_refuses_a_size_the_profile_does_not_map` | 期望 422 + `WORKFLOW_SIZE_NOT_MAPPED`，实际 409 | 门禁把「方案没接宽高」当成候选专属阻断，用 409 提前拒了 | 宽高是**请求**属性不是机器属性：恢复 422 与 `WORKFLOW_SIZE_NOT_MAPPED`，并保留原来的 `details.missing_parameters / mapped_parameters` 形状 |
+| `test_continuity.py::test_comfy_continuity_requires_a_real_source_artifact` | 期望 409（连续性/工作流），实际 404 | 门禁在请求构建器之前拦下不存在的方案 id，把历史的连续性 409 换成了 404 | 门禁只对**真实存在**的方案说话；方案不存在时交给原来的请求构建器裁决 |
+
+两条修法的共同原则：**门禁只新增拒绝，不改写既有拒绝的状态码与形状。** 修完后这两条用例与它们的邻居全绿。
+
+### 6.4 完整后端套件（最终）
+
+```
+backend\.venv\Scripts\python.exe -m pytest backend/tests -q
+→ 2091 tests collected
+→ 2089 passed, 2 skipped, 0 failed, 0 errors
+```
+
+2 项跳过都是仓库既有的、事先就有的跳过，与本轮无关：
+
+```
+SKIPPED [1] test_four_stage_reacceptance.py:365  this fixture needs three scenes
+SKIPPED [1] test_real_managed_startup.py:85       SHINE_REAL_COMFY_PROBE=1 and a local ComfyUI install are required
+```
+
+**没有**一项因为本轮而跳过。
 
 ---
 

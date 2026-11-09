@@ -257,10 +257,13 @@ def create_series(
         from shine.models import WorkflowProfile
 
         profile = db.get(WorkflowProfile, body.workflow_profile_id)
-        require_production_ready(
-            db, settings, project.id, profile,
-            output=body.output.model_dump(mode="json") if body.output else None,
-        )
+        # A profile that does not exist keeps its historic refusal from the
+        # request builder; the gate only speaks about profiles that are there.
+        if profile is not None:
+            require_production_ready(
+                db, settings, project.id, profile,
+                output=body.output.model_dump(mode="json") if body.output else None,
+            )
 
     # Every real H3 render belongs to exactly one series.  A shot that is
     # already being produced must not be produced a second time, but unrelated
