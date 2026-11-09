@@ -213,8 +213,9 @@ J01–J12 的十二个反例全部在代码中处理，旧反例均改写为正�
   - `4d79536` J11 浏览器 scope/断网回归
   - `35c8b1c` J05 钉住判定收紧
   - `5bb6498` J05 分段任务保留 crew 路由（修复回归）
-  - 本报告提交（见 `git log` 最新一条）
-- 测试包：`releases/ShineVideoStudio-<build-id>-win64.zip` 与同名 `.sha256`；最终 SHA-256 在提交后重建并记录于本文件末尾。
+  - `c9774f8` 本报告与审查文档
+  - `d7bf7cc` 前端候选方案夹具类型（最终前端证据）
+- 测试包：`releases/ShineVideoStudio-<build-id>-win64.zip` 与同名 `.sha256`；最终包从干净树重建，SHA-256 记录在 `releases/` 的同名文件与交付回复中（报告不内嵌会随自身提交变化的哈希）。
 - 可重跑命令：
   - 后端定向：`cd backend && .venv/Scripts/python.exe -m pytest -q <上面的文件列表>`
   - 后端完整：`cd backend && .venv/Scripts/python.exe -m pytest -q tests`
