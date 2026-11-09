@@ -348,6 +348,7 @@ def prepare_scenes(
                                  "schema_errors": outcome.schema_errors,
                                  "external_outcome": external_outcome,
                                  "response_status": outcome.details.get("response_status"),
+                                 "provider_code": outcome.details.get("provider_code"),
                                  "automatic_replay": False}
             with db_factory() as db:
                 failed_task = db.get(AgentTaskRecord, task_id)

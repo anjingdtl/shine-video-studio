@@ -1301,6 +1301,9 @@ html[data-theme='dark'] .material-toolbar small { color: #a9aba1; }
 .run-plan-summary b{font-size:11px}
 .run-plan-summary span{font-size:9px;color:#93948b;margin-top:3px}
 .run-hint{font-size:9px;color:#a0a198}
+.outline-confirm progress{display:block;width:min(100%,360px);margin:6px 0;accent-color:#a4571a}
+.outline-retry{margin:8px 0;padding:8px 12px;border-inline-start:3px solid #a4571a;font-size:.85rem}
+.outline-retry p{margin:0 0 6px}
 .run-episode-plan{list-style:none;margin:0;padding:0;max-height:230px;overflow:auto}
 .run-episode-plan li{display:flex;gap:10px;align-items:flex-start;padding:9px 2px;border-top:1px solid #f0f0ec}
 .run-episode-plan b{font-size:10px;display:block}

@@ -10,9 +10,10 @@ The four-stage plan pins the rule:
   cap, adapter cap).  Reasoning/thinking tokens count toward the same
   completion budget when the provider bills them as completion, so the cap
   includes them by construction.
-* With nothing verifiable, the conservative defaults stay (16,384 for the
-  MiniMax M3.1 Flash, 100,000 otherwise) and output_max_verified is False:
-  the workbench never sends 76,800 on an unverified provider.
+* With nothing verifiable, the conservative defaults stay (131,072 - the 128K
+  output ceiling a 1M-context reasoning model is budgeted against) and
+  output_max_verified is False: a fallback never certifies a model maximum, it
+  only states the ceiling the workbench refuses to exceed.
 * On a shared window the cap can never exceed window minus the estimated
   input: the completion budget is reserved out of the same window the input
   uses, so a huge input can only shrink the cap, never grow it.
@@ -24,8 +25,8 @@ import math
 from shine.llm.base import ProviderConfig
 
 CREATIVE_COMPLETION_SHARE = 0.60
-CONSERVATIVE_DEFAULT_LIMIT = 100_000
-MINIMAX_M31_FLASH_DEFAULT_LIMIT = 16_384
+CONSERVATIVE_DEFAULT_LIMIT = 131_072
+MINIMAX_M31_FLASH_DEFAULT_LIMIT = 131_072
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4_096
 
 

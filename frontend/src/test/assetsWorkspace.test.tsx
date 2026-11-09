@@ -15,7 +15,7 @@ const apiMock = vi.hoisted(() => ({
   listLibraryAssets: vi.fn(async () => ({ items: [] as unknown[], limit: 100, offset: 0 })),
   listLibraryVoices: vi.fn(async () => ({ items: [] as unknown[] })),
   getLibraryAsset: vi.fn(async (_id: string): Promise<unknown> => { throw new Error('asset not found'); }),
-  grantVersionPromotion: vi.fn(async () => ({ grant_id: 'grant-1', snapshot: 'version-snapshot' })),
+  grantVersionPromotion: vi.fn(async () => ({ grant_id: 'grant-1', snapshot: 'version-snapshot', expires_at: '2026-11-09' })),
   promoteLibraryVersion: vi.fn(async () => ({})),
 }));
 
@@ -59,7 +59,7 @@ it('本机候选可以直接进行人工晋升', async () => {
     media_url: '/api/v1/asset-center/versions/version-1/media',
   };
   const asset = { id: 'asset-1', title: 'Portrait', kind: 'image', category: 'character', tags: [], collection: null,
-    favorite: false, status: 'ACTIVE', state_version: 1, version_count: 1, current_version: version, versions: [version] };
+    favorite: false, status: 'ACTIVE', state_version: 1, version_count: 1, current_version: null, versions: [version] };
   apiMock.listLibraryAssets.mockResolvedValueOnce({ items: [asset], limit: 100, offset: 0 });
   apiMock.getLibraryAsset.mockResolvedValue(asset);
   const user = userEvent.setup();
@@ -69,9 +69,10 @@ it('本机候选可以直接进行人工晋升', async () => {
   );
 
   await user.click(await screen.findByRole('button', { name: /Portrait/ }));
+  expect(await screen.findByRole('img', { name: 'Portrait V1 预览' })).toHaveAttribute('src', version.media_url);
   await user.click(await screen.findByRole('button', { name: /检查并人工晋升/ }));
   await waitFor(() => expect(apiMock.promoteLibraryVersion).toHaveBeenCalledWith('version-1',
-    expect.objectContaining({ grant_id: 'grant-1', snapshot: 'version-snapshot' })));
+    { grant_id: 'grant-1', snapshot: 'version-snapshot', evidence: expect.any(String) }));
 });
 
 it('可以直接收藏已锁定的项目素材', async () => {

@@ -11,8 +11,9 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
+from shine.comfyops.models import InstallationAttempt, InstallationPlan, ResourceLease
 from shine.comfyops.runtime_configuration import require_idle_configuration
-from shine.models import ProductionSeries
+from shine.models import ProductionSeries, utcnow
 from tests.conftest import create_project
 
 
@@ -31,6 +32,24 @@ def test_a_blocked_series_does_not_block_a_runtime_revalidation(studio):
 
     with factory() as db:
         require_idle_configuration(db)  # must not raise
+
+
+def test_pending_install_record_without_a_lease_does_not_block_h3_checks(studio):
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "安装历史")
+    with factory.begin() as db:
+        plan = InstallationPlan(project_id=project_id, status="NEEDS_REVIEW", sha256="plan")
+        db.add(plan)
+        db.flush()
+        db.add(InstallationAttempt(plan_id=plan.id, status="NEEDS_REVIEW", sha256="attempt"))
+    with factory() as db:
+        require_idle_configuration(db)
+    with factory.begin() as db:
+        db.add(ResourceLease(owner="h3:unresolved", budget_mb=1, exclusive=True, priority=10,
+                             status="RECONCILE_REQUIRED",
+                             expires_at=utcnow()))
+    with factory() as db, pytest.raises(HTTPException, match="RUNTIME_CONFIGURATION_REQUIRES"):
+        require_idle_configuration(db)
 
 
 @pytest.mark.parametrize("status", ["QUEUED", "RUNNING", "PAUSED", "RECONCILING"])

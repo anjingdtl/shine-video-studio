@@ -550,6 +550,10 @@ function App() {
       page={assetPage}
       onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
       onWorkspace={leaveAssets}
+      onOpenImageSetup={() => {
+        goToDirectorSetup();
+        window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
+      }}
       projects={projects as Project[]}
       projectId={projectId}
       projectAssets={assets as Asset[]}

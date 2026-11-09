@@ -18,7 +18,7 @@ from shine.llm.base import (
     LLMResponse,
     ProviderConfig,
 )
-from shine.llm.context_window import model_context_for_profile
+from shine.llm.context_window import model_context_for_profile, provider_model_matches
 from shine.llm.mock import MockLLMProvider, Responder
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.output_budget import (
@@ -42,15 +42,22 @@ GENERATION_PROBE_SCHEMA = {
 }
 
 
+DEFAULT_AGENT_OUTPUT_TOKENS = 131_072
+"""The completion ceiling one typed agent reply is budgeted against.
+
+A current 1M-context reasoning model bills its thinking as completion, so a
+16K ceiling is spent entirely on reasoning and the visible JSON comes back
+empty with ``finish_reason=length``. 128K is the ceiling the routed provider
+accepts for this class of model, so the default is a real budget instead of a
+guess about the model maximum. The value is a ceiling, never a demand: a
+profile that declares or configures something smaller still wins through the
+min chain below.
+"""
+
+
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
-    model = config.model.casefold().replace("_", "-")
-    # MiniMax's official M3.1 Flash console example uses 16,384 completion
-    # tokens while advertising a 1M context. Use that as a conservative agent
-    # output budget, not as a claim about the model maximum or a diagnosis of
-    # prior timeouts. Typed agent replies do not need the generic 100k ceiling.
-    default_limit = 16_384 if model in {"minimax-m3.1-flash", "minimax-m3-1-flash"} else 100_000
-    limits = [default_limit]
+    limits = [DEFAULT_AGENT_OUTPUT_TOKENS]
     configured = config.generation_options.get("max_completion_tokens")
     if configured:
         limits.append(configured)
@@ -303,7 +310,7 @@ class LLMGateway:
             "structured_output_ok": response.parsed is not None,
             "mock": is_mock,
             "model": response.model,
-            "model_matches_config": response.model == config.model,
+            "model_matches_config": provider_model_matches(config.base_url, config.model, response.model),
             "latency_ms": response.latency_ms,
             "error_code": "LLM_MOCK_PROVIDER" if is_mock else None,
             "message": (

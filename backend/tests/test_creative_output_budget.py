@@ -36,8 +36,9 @@ def test_131072_declared_yields_78643():
 
 
 def test_undeclared_keeps_conservative_default_and_stays_unverified():
+    """A fallback ceiling is the 128K reasoning-model budget, not a 16K guess."""
     cap = creative_completion_cap(_cfg(model="minimax-m3.1-flash"))
-    assert cap["completion_cap"] == 16384
+    assert cap["completion_cap"] == 131_072
     assert cap["output_max_verified"] is False
     assert cap["sources"][0]["source"] == "conservative_default_not_declared"
 

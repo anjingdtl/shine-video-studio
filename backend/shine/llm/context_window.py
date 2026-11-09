@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+_MINIMAX_HOSTS = {"api.minimax.cn", "api.minimax.io", "api.minimaxi.com", "platform.minimax.io"}
+
+
+def provider_model_matches(base_url: str, configured: str, reported: str | None) -> bool:
+    if configured == reported:
+        return True
+    # MiniMax's catalog and completions can capitalize this model's name differently.
+    return (
+        reported is not None
+        and (urlparse(base_url).hostname or "").lower() in _MINIMAX_HOSTS
+        and configured.casefold() == reported.casefold() == "minimax-m3.1-flash"
+    )
+
 
 def _positive_int(value) -> int | None:
     if isinstance(value, bool):
@@ -19,12 +32,18 @@ def official_model_context(base_url: str, model: str) -> dict | None:
     """Known official 1M-context model declarations, used when /models omits limits."""
     host = (urlparse(base_url).hostname or "").lower()
     model_id = model.strip().lower().replace("_", "-")
-    if host in {"api.minimax.cn", "api.minimax.io", "api.minimaxi.com", "platform.minimax.io"} \
+    if host in _MINIMAX_HOSTS \
             and model_id in {"minimax-m3.1-flash", "minimax-m3-1-flash"}:
         return {
             "model": model,
             "context_window_tokens": 1_000_000,
-            "max_output_tokens": None,
+            # The completions endpoint accepts max_completion_tokens=131072 for
+            # this model (verified against api.minimax.cn on 2026-11-09: a
+            # structured probe answered 200 at that ceiling). Reasoning tokens
+            # are billed as completion, so the output ceiling is a real budget:
+            # too small a value is spent entirely on thinking and the visible
+            # JSON arrives empty with finish_reason=length.
+            "max_output_tokens": 131_072,
             "source": "minimax_official_m3_1_flash_1m",
         }
     if host == "api.deepseek.com" and model_id in {

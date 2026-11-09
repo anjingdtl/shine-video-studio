@@ -111,6 +111,7 @@ describe('四阶段面板', () => {
   });
 
   it('未知发送结果只提供核对与显式新尝试，不提供普通继续', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/documents$'),
                respond: () => jsonResponse([]) });
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/pipeline$'),

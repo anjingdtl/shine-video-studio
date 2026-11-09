@@ -12,11 +12,12 @@ a Fake candidate that could later be mistaken for real verification.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from shine.api_common import DBSession, app_settings, llm_gateway
 from shine.api_operator import Operator
@@ -566,7 +567,29 @@ def image_readiness(db: DBSession, settings: SettingsDep):
     the node layer stays unproven.
     """
     config = runtime.load_config(settings)
-    return runtime.readiness(db, settings, object_info=_probe_object_info(config, settings))
+    readiness = runtime.readiness(db, settings, object_info=_probe_object_info(config, settings))
+    if not readiness["configured"]:
+        readiness["binding_candidate"] = _managed_image_binding(db, settings)
+    return readiness
+
+
+def _managed_image_binding(db, settings):
+    from shine.comfyops.image_renderer import load_image_recipe
+    from shine.comfyops.models import ComfyInstance
+
+    try:
+        renderer = load_image_recipe(settings)["renderer"]
+    except HTTPException:
+        return None
+    instance = db.get(ComfyInstance, renderer["instance_id"])
+    if (not instance or not instance.payload.get("managed") or instance.payload.get("is_mock")
+            or not instance.payload.get("root") or instance.payload.get("port") != renderer["port"]):
+        return None
+    return {
+        "instance_id": instance.id,
+        "base_url": f"http://127.0.0.1:{renderer['port']}",
+        "model_root": str(Path(instance.payload["root"]) / "models"),
+    }
 
 
 def _probe_object_info(config, settings) -> dict | None:
@@ -600,6 +623,7 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     from shine.security import require_loopback_url
     from shine.services import add_audit
 
+    db.execute(text("BEGIN IMMEDIATE"))
     instance = db.get(ComfyInstance, body.instance_id)
     if instance is None:
         raise HTTPException(404, "COMFY_INSTANCE_NOT_FOUND")

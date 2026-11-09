@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from shine.api_common import DBSession, public_profile, secret_store
 from shine.llm.base import LLMError
@@ -583,6 +583,7 @@ def update_profile(
     db: DBSession,
     secrets: Annotated[SecretStore, Depends(secret_store)],
 ) -> ProviderProfilePublic:
+    db.execute(text("BEGIN IMMEDIATE"))
     profile = db.get(ProviderProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Provider profile not found")
@@ -609,8 +610,14 @@ def update_profile(
         )
         if duplicate:
             raise HTTPException(status_code=409, detail="A provider profile with this name already exists")
-    if set(updates) - {"name"}:
+    updates = {key: value for key, value in updates.items() if value != getattr(profile, key)}
+    execution_changes = set(updates) - {"name"}
+    if execution_changes:
         active_tasks = _live_tasks_for_profile(db, profile.id)
+        if execution_changes == {"timeout_s"}:
+            # A waiting limit can be changed before an explicit retry without
+            # changing what the previous (possibly sent) request contained.
+            active_tasks = [task for task in active_tasks if task.status != "NEEDS_REVIEW"]
         if active_tasks:
             raise HTTPException(
                 status_code=409,

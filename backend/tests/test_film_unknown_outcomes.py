@@ -311,3 +311,39 @@ def test_newer_unresolved_text_task_cannot_fall_back_to_older_usable_artifact(pr
     render.style_input_assessment_sha256 = artifact["sha256"]
     with factory() as db, pytest.raises(HTTPException):
         enforce(db, project, render_request=render)
+
+
+def test_a_refused_answer_that_arrived_allows_one_authorized_new_request(prep, monkeypatch):  # noqa: F811
+    """A 200 answer that broke the contract is finished, not unknown.
+
+    Nothing is still in flight, so the operator may replace that exact record
+    with one new request; without naming it the guard keeps refusing, because a
+    silent replay would pay for the same unusable answer twice.
+    """
+    from shine.agents.execution import guard_request
+    from shine.llm.base import LLMFormatError
+    from shine.models import ProviderProfile
+
+    def format_rejected():
+        return LLMFormatError("Provider completion is truncated or filtered",
+                              details={"status": 200, "provider_code": 0, "finish_reason": "length"})
+
+    client, factory, project, task_id, path, body, calls = uncertain(
+        prep, monkeypatch, failure=format_rejected,
+    )
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "REJECTED"
+        assert task.trace["external_outcome"] == "RESPONSE_RECEIVED"
+        profile = db.get(ProviderProfile, task.model_profile_id)
+        text_hash = task.trace["text_input_sha256"]
+        with pytest.raises(ValueError, match="AGENT_RESPONSE_RECEIVED_NO_REPLAY"):
+            guard_request(db, project, task.role_id, task.input_hash, profile, text_hash=text_hash)
+        # The named record authorizes the retry; nothing is raised.
+        guard_request(db, project, task.role_id, task.input_hash, profile, text_hash=text_hash,
+                      authorize_replay_task_id=task.id)
+        # A record from another project can never authorize this one.
+        with pytest.raises(ValueError, match="AGENT_RESPONSE_RECEIVED_NO_REPLAY"):
+            guard_request(db, project, task.role_id, task.input_hash, profile, text_hash=text_hash,
+                          authorize_replay_task_id="00000000-0000-0000-0000-000000000000")
+    assert len(calls) == 1

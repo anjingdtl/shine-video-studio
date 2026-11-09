@@ -167,6 +167,7 @@ def public_task(db, row):
     questions = list(outline.payload_json.get("questions") or []) if outline else []
     return {"task_id": row.id, "role": row.role_id, "status": row.status, "state_version": row.state_version,
             "error_code": row.error_code, "progress": trace, "summary": _task_summary(row),
+            "retry": _outline_retry_view(db, row) if row.role_id == story.OUTLINE_RUN else None,
             "outline": {"artifact_id": outline.id, "sha256": outline.sha256, "payload": outline.payload_json,
                         "approved": bool(outline.approved_at), "stale": outline.stale,
                         # What the person is acknowledging, so the workbench can
@@ -175,6 +176,36 @@ def public_task(db, row):
                         # ambiguous.
                         "questions_sha256": digest({"artifact": outline.id, "questions": questions})
                         if questions else None} if outline else None}
+
+
+def _outline_retry_view(db, row):
+    blocked = (row.trace or {}).get("blocked_subtasks") or []
+    entry = blocked[0] if blocked else {}
+    sub = db.get(AgentTaskRecord, entry["task_id"]) if entry.get("task_id") else None
+    if sub is not None and sub.project_id != row.project_id:
+        sub = None
+    trace = sub.trace if sub is not None else {}
+    code = (sub.error_code if sub else None) or entry.get("error_code") or row.error_code
+    outcome = trace.get("external_outcome") or entry.get("external_outcome")
+    provider_code = trace.get("provider_code")
+    failure = ({"code": code, "scene_key": entry.get("scene_key"), "outcome": outcome,
+                "http_status": trace.get("response_status"),
+                "provider_code": provider_code if type(provider_code) is int and provider_code else None}
+               if code else row.trace.get("last_retry_failure"))
+    eligible = row.status in {"NEEDS_REVIEW", "FAILED"} and (
+        bool(blocked) or code == "REMOTE_AGENT_CONSENT_REQUIRED"
+    )
+    unknown = outcome == "UNKNOWN" and entry.get("reconciliation") not in {
+        "NOT_SENT_PROVEN", "RESULT_ADOPTED", "USER_AUTHORIZED_NEW_REQUEST",
+    }
+    exhausted = (entry.get("reconciliation") == "RETRIES_EXHAUSTED"
+                 or bool(eligible and unknown and sub and story.unknown_resends_used(db, sub)
+                         >= story.MAX_UNKNOWN_RESENDS))
+    if unknown and (sub is None or sub.status != "NEEDS_REVIEW"):
+        eligible = False
+    return {"failure": failure, "can_retry": eligible and not exhausted,
+            "unknown_subtask_id": sub.id if eligible and not exhausted and unknown and sub else None,
+            "exhausted": exhausted}
 
 
 @router.get("/projects/{project_id}/story-preparation")
@@ -373,6 +404,7 @@ def queue_sections(project_id: str, body: SectionRequest, actor: Operator, db: D
 class TaskControl(APIModel):
     expected_state_version: int = Field(ge=0)
     subtask_id: str | None = Field(default=None, max_length=36)
+    evidence: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class ResendUnknownBody(APIModel):
@@ -412,12 +444,26 @@ def control(project_id: str, task_id: str, action: str, body: TaskControl, actor
     row = db.get(AgentTaskRecord, task_id)
     if not row or row.project_id != project_id or row.role_id not in {story.OUTLINE_RUN, story.SECTION_RUN}:
         raise HTTPException(404, "STORY_TASK_NOT_FOUND")
-    if action not in {"pause", "cancel", "resume", "reconcile", "replace-unknown"}:
+    if action not in {"pause", "cancel", "resume", "reconcile", "replace-unknown", "retry"}:
         raise HTTPException(422, "STORY_ACTION_UNKNOWN")
     if action == "replace-unknown":
         raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     if row.state_version != body.expected_state_version:
         raise HTTPException(409, "STORY_TASK_STATE_CHANGED")
+    if action == "retry":
+        if row.role_id != story.OUTLINE_RUN:
+            raise HTTPException(409, "STORY_TASK_RETRY_UNAVAILABLE")
+        retry = _outline_retry_view(db, row)
+        if not retry["can_retry"]:
+            raise HTTPException(409, "STORY_TASK_RETRY_UNAVAILABLE")
+        checked = story.reconcile_blocked_subtasks(db, row, actor)
+        if not checked["resumable"]:
+            unknown_id = retry["unknown_subtask_id"]
+            if not unknown_id or body.subtask_id != unknown_id or not body.evidence:
+                raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_RECONCILIATION_REQUIRED")
+            story.authorize_unknown_resend(db, row, unknown_id, actor, body.evidence)
+        row.trace = {**row.trace, "last_retry_failure": retry["failure"]}
+        action = "resume"
     blocked = row.trace.get("blocked_subtasks", [])
     if action == "reconcile":
         if row.status == "RUNNING" and row.lease_expires_at and row.lease_expires_at > utcnow():

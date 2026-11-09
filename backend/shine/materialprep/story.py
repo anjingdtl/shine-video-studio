@@ -16,7 +16,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 from pydantic import Field
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 
 from shine.h3.rulebook import digest
@@ -119,6 +119,24 @@ def queue_outline(db, project_id, document, gateway, facts):
 MAX_UNKNOWN_RESENDS = 1
 
 
+def unknown_resends_used(db, subtask):
+    trace = subtask.trace or {}
+    identity = AgentTaskRecord.input_hash == subtask.input_hash
+    if trace.get("document_id") and trace.get("scene_key"):
+        identity = or_(identity, and_(
+            AgentTaskRecord.trace["document_id"].as_string() == trace["document_id"],
+            AgentTaskRecord.trace["scene_key"].as_string() == trace["scene_key"],
+        ))
+    return sum(
+        ((other.trace or {}).get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"
+        for other in db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == subtask.project_id,
+            AgentTaskRecord.role_id == subtask.role_id,
+            identity,
+        ))
+    )
+
+
 def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str) -> dict:
     """Let one person ask one unknown scene again, on the record.
 
@@ -137,13 +155,12 @@ def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str
     if sub is None or sub.project_id != row.project_id:
         raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_FOUND")
     # One resend per scene: a scene must not be able to burn a series of calls.
-    used = len([other for other in db.scalars(select(AgentTaskRecord).where(
-        AgentTaskRecord.project_id == row.project_id,
-        AgentTaskRecord.role_id == "scriptwriter",
-        AgentTaskRecord.input_hash == sub.input_hash,
-    )).all() if ((other.trace or {}).get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"])
+    used = unknown_resends_used(db, sub)
     if used >= MAX_UNKNOWN_RESENDS:
         raise HTTPException(409, "STORY_UNKNOWN_RESEND_ALREADY_USED")
+    if (row.status != "NEEDS_REVIEW" or (sub.trace or {}).get("external_outcome") != "UNKNOWN"
+            or (sub.status != "NEEDS_REVIEW" and not scenes.is_dead_scene_task(sub))):
+        raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_RETRYABLE")
     previous_identity = sub.request_identity
     sub.status = "SUPERSEDED"
     sub.request_identity = None
@@ -228,7 +245,9 @@ def _merge(factory, gateway, project_id, document, ids, facts):
             task.status = "NEEDS_REVIEW" if uncertain else "FAILED"
             task.error_code = result.error_code
             task.state_version += 1
-            task.trace = {**task.trace, "phase": "FAILED", "external_outcome": external_outcome}
+            task.trace = {**task.trace, "phase": "FAILED", "external_outcome": external_outcome,
+                          "response_status": result.details.get("response_status"),
+                          "provider_code": result.details.get("provider_code")}
             return {"status": task.status, "task_id": task.id, "error_code": task.error_code}
         payload = OutlinePart.model_validate(result.parsed).model_dump(mode="json")
         artifact = AgentArtifact(project_id=project_id, kind="StoryOutlinePart", schema_version="1.0",
@@ -296,7 +315,9 @@ def reconcile_blocked_subtasks(db, row, actor="local-user"):
         ]
     resolved: list[dict] = []
     outcomes: list[dict] = []
-    decided_outcomes = {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}
+    decided_outcomes = {
+        "RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER", "USER_AUTHORIZED_NEW_REQUEST",
+    }
     for entry in blocked:
         # A block that was already decided keeps its verdict.  Reconciling a
         # second time must never turn a released block back into an

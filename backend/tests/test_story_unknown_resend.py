@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import story
@@ -16,6 +18,33 @@ from tests.test_material_scene_safety import setup_scene
 from tests.test_material_scenes import _prepare, _responder
 from tests.test_story_outline_unblock import _blocked_outline
 from tests.test_story_preparation import LOCAL, responder
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_inline_retry_is_fenced_and_keeps_the_previous_failure(api, monkeypatch, unknown):
+    client, factory, project, doc, task_id, stuck_id = _blocked_outline(
+        api, monkeypatch, status="NEEDS_REVIEW" if unknown else "REJECTED", phase="FAILED",
+        external_outcome="UNKNOWN" if unknown else "RESPONSE_RECEIVED",
+        error_code="LLM_TIMEOUT" if unknown else "LLM_FORMAT")
+    prefix = f"/api/v1/projects/{project}/story-preparation"
+    task = client.get(f"{prefix}?document_id={doc['id']}").json()[0]
+    assert task["retry"]["failure"]["code"] == ("LLM_TIMEOUT" if unknown else "LLM_FORMAT")
+    body = {"expected_state_version": task["state_version"]}
+    if unknown:
+        denied = client.post(f"{prefix}/tasks/{task_id}/retry", json=body, headers=LOCAL)
+        assert denied.status_code == 409
+        body.update(subtask_id=stuck_id, evidence="明确同意发起一次新请求")
+    queued = client.post(f"{prefix}/tasks/{task_id}/retry", json=body, headers=LOCAL)
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["status"] == "QUEUED"
+    assert queued.json()["retry"]["failure"] == task["retry"]["failure"]
+    assert queued.json()["retry"]["can_retry"] is False
+    duplicate = client.post(f"{prefix}/tasks/{task_id}/retry", json=body, headers=LOCAL)
+    assert duplicate.status_code == 409
+    with factory() as db:
+        original = db.get(AgentTaskRecord, stuck_id)
+        assert original.status == "SUPERSEDED"
+        assert original.trace["external_outcome"] == ("UNKNOWN" if unknown else "RESPONSE_RECEIVED")
 
 
 def test_a_person_may_ask_one_unknown_scene_again_and_the_decision_is_audited(api, monkeypatch):

@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from shine.comfyops.llm_readiness import TEXT_ROLES
+from shine.llm import openai_compatible
 from shine.llm.secrets import SecretStore
-from shine.models import AgentRoute, ProviderProfile
+from shine.models import AgentRoute, AgentTaskRecord, ProviderProfile
+from tests.conftest import create_project
 from tests.fake_http import FakeOpenAIServer
 
 pytestmark = pytest.mark.integration
@@ -65,6 +68,35 @@ def test_a_saved_profile_is_never_lost_to_a_failed_refresh(api, fake_openai):
         "base_url": f"{fake_openai.base_url}/v1", "model": "test-model"})
     assert duplicate.status_code == 409
     assert profile_row(factory, profile["id"]) is not None
+
+
+def test_timeout_can_be_raised_for_review_without_changing_the_pinned_model(api, fake_openai):
+    client, factory, _ = api
+    profile = create_profile(client, fake_openai)
+    project_id = create_project(client, "重试测试")
+    with factory.begin() as db:
+        task = AgentTaskRecord(
+            project_id=project_id, role_id="scriptwriter", input_hash="input", asset_manifest_hash="assets",
+            rulepack_id="rules", rulepack_hash="rules", model_profile_id=profile["id"], model_id=profile["model"],
+            schema_version="1.0", status="NEEDS_REVIEW", error_code="LLM_TIMEOUT",
+            trace={"external_outcome": "UNKNOWN"},
+        )
+        db.add(task)
+        db.flush()
+        task_id = task.id
+    path = f"/api/v1/provider-profiles/{profile['id']}"
+    changed = client.put(path, json={
+        "kind": profile["kind"], "model": profile["model"], "base_url": profile["base_url"],
+        "generation_options": {}, "timeout_s": 300,
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["timeout_s"] == 300
+    assert client.put(path, json={"model": "another-model"}).status_code == 409
+    with factory.begin() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.trace["external_outcome"] == "UNKNOWN"
+        task.status = "RUNNING"
+    assert client.put(path, json={"timeout_s": 400}).status_code == 409
 
 
 def test_a_failed_key_write_keeps_the_previous_key(api, fake_openai, monkeypatch):
@@ -248,6 +280,47 @@ def test_the_generation_test_proves_the_generation_path(api, fake_openai):
     assert readiness["generation_status"] == "GENERATION_READY"
     assert readiness["text_agent_ready"] is True
     assert all(row["readiness_status"] == "GENERATION_READY" for row in readiness["roles"])
+
+
+def test_generation_rate_limit_does_not_immediately_post_again(api, fake_openai):
+    client, _, _ = api
+    profile = create_profile(client, fake_openai, max_retries=2)
+    fake_openai.chat_status = 429
+    result = client.post(f"/api/v1/provider-profiles/{profile['id']}/test-generation").json()
+    assert result["error_code"] == "LLM_RATE_LIMIT"
+    assert len(fake_openai.requests) == 1
+
+
+@pytest.mark.parametrize("host,reported,expected", [
+    ("api.minimax.cn", "MiniMax-M3.1-Flash", True),
+    ("api.minimax.cn", "MiniMax-M3-1-Flash", False),
+    ("example.test", "MiniMax-M3.1-Flash", False),
+])
+def test_minimax_flash_catalog_and_generation_handle_provider_casing(
+    api, fake_openai, monkeypatch, host, reported, expected,
+):
+    client, _, _ = api
+    configured = "MiniMax-M3.1-flash"
+
+    def respond(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": reported}]})
+        assert json.loads(request.content)["model"] == configured
+        return httpx.Response(200, json={
+            "model": reported,
+            "choices": [{"message": {"content": '{"ok":true}'}}],
+        })
+
+    monkeypatch.setattr(openai_compatible, "build_client", lambda *args, **kwargs: httpx.Client(
+        transport=httpx.MockTransport(respond),
+    ))
+    profile = create_profile(client, fake_openai, base_url=f"https://{host}/v1", model=configured)
+    prefix = f"/api/v1/provider-profiles/{profile['id']}"
+    assert client.post(f"{prefix}/test").json()["model_listed"] is expected
+    generation = client.post(f"{prefix}/test-generation").json()
+    assert generation["model"] == reported
+    assert generation["structured_output_ok"] is True
+    assert generation["ok"] is expected
 
 
 def test_structured_generation_can_pass_when_provider_has_no_model_catalog(api, fake_openai):

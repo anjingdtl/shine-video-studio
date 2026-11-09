@@ -18,7 +18,7 @@ def test_minimax_m31_flash_uses_official_one_million_context_when_endpoint_omits
     assert context == {
         "model": "MiniMax-M3.1-Flash",
         "context_window_tokens": 1_000_000,
-        "max_output_tokens": None,
+        "max_output_tokens": 131_072,
         "source": "minimax_official_m3_1_flash_1m",
     }
 

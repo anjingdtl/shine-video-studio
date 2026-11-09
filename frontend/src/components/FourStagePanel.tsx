@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
+  ERROR_CODE_LABELS,
   adjustVolumeBoundaries, applyCameraPlan, buildEpisodeScript, confirmBible,
   confirmEpisodeScript, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
   editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
@@ -10,6 +11,7 @@ import {
   type PipelineOverview, type PipelineTaskSummary, type StoryboardUnit,
   type WorkflowProfileLite,
 } from '../api';
+import { failureLabels } from '../constants';
 
 type Props = {
   projectId: string;
@@ -29,6 +31,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const [overview, setOverview] = useState<PipelineOverview | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const actionInFlight = useRef(false);
   const [volumePlanDraft, setVolumePlanDraft] = useState<{ id: string; sha256: string; volumes: unknown[] } | null>(null);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string }>>([]);
   const [editTarget, setEditTarget] = useState<string | null>(null);
@@ -98,6 +101,8 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   }
 
   async function run(action: () => Promise<unknown>, after?: (result: unknown) => void) {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(true);
     try {
       const result = await action();
@@ -106,6 +111,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     } catch (error) {
       onMessage((error as Error).message, 'error');
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   }
@@ -235,6 +241,8 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             // keeps moving even after the work is done.  Only a task that is
             // really in flight gets one.
             const inFlight = task.status === 'QUEUED' || task.status === 'RUNNING';
+            const errorReason = task.error_code && (ERROR_CODE_LABELS[task.error_code]
+              ?? failureLabels[task.error_code] ?? '这一步未完成，请根据错误代码核对原因。');
             return (
               <div className="progress-row" key={task.task_id}>
                 <span className="progress-name">{ROLE_LABELS[task.role] ?? task.role}</span>
@@ -250,30 +258,33 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   {task.attempt > 1 ? ' · 第 ' + task.attempt + ' 次尝试' : ''}
                   {task.reconciliation?.outcome ? ' · 核对结论：' + task.reconciliation.outcome : ''}
                 </span>
+                {errorReason && <span className="progress-detail">{errorReason}</span>}
                 {consentBlocked && (
                   <button type="button" className="must-button" disabled={busy}
                     onClick={() => authorizeAndContinue(task)}>
                     授权本机文本发送并继续
                   </button>
                 )}
-                {actions.includes('reconcile') && !consentBlocked && (
+                {!inFlight && actions.includes('reconcile') && !consentBlocked && (
                   <button type="button" className="secondary-button" disabled={busy}
                     onClick={() => run(() => reconcilePipelineTask(
                       projectId, task.task_id, task.state_version))}>
                     核对这一项
                   </button>
                 )}
-                {actions.includes('resume') && !consentBlocked && (
+                {!inFlight && actions.includes('resume') && !consentBlocked && (
                   <button type="button" className="secondary-button" disabled={busy}
                     onClick={() => run(() => resumePipelineTask(projectId, task.task_id, task.state_version))}>
                     修复后继续
                   </button>
                 )}
-                {actions.includes('new_attempt') && (
+                {!inFlight && actions.includes('new_attempt') && (
                   <button type="button" className="must-button" disabled={busy}
                     title="上一次可能已经发出去了。再次发送会多一次调用，上一次的结果会作为历史保留。"
-                    onClick={() => run(() => startPipelineNewAttempt(
-                      projectId, task.task_id, task.state_version))}>
+                    onClick={() => {
+                      if (!window.confirm('上一次模型请求的结果仍未知。确认发起一次新请求？')) return;
+                      void run(() => startPipelineNewAttempt(projectId, task.task_id, task.state_version));
+                    }}>
                     核对后重新发送一次
                   </button>
                 )}

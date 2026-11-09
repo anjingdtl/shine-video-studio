@@ -194,6 +194,7 @@
 .asset-detail-title h2 { margin: 5px 0; }
 .asset-detail-title > span { color: #8a958e; font-size: 9px; }
 .asset-version-card { margin-top: 10px; padding: 10px; border: 1px solid #e9ede9; border-radius: 9px; }
+.asset-version-card .asset-version-image { height: auto; max-height: 320px; object-fit: contain; margin: 8px 0; }
 .asset-version-heading { display: flex; justify-content: space-between; gap: 8px; }
 .asset-version-heading b { font-size: 10px; }
 .asset-version-heading small, .asset-version-meta { color: #879189; font-size: 8px; }

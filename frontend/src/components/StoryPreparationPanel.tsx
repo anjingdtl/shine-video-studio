@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, json } from '../api';
+import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
 
 type Section = { production_section_id: string; order: number; title: string; start_offset: number; end_offset: number; estimated_duration_s: number };
 type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: boolean; questions_sha256?: string | null; payload: {
@@ -10,10 +11,10 @@ type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: 
 type TaskSummary = { stage: string; label: string; done: number; total: number; percent: number;
   lease_expires_at: string | null; awaiting_reclaim: boolean; lease_remaining_s: number | null };
 type StoryTask = { task_id: string; role: string; status: string; state_version: number; error_code: string | null;
-  outline: Outline | null; summary?: TaskSummary;
+  outline: Outline | null; summary?: TaskSummary; retry?: OutlineRetry | null;
   progress: { stage: string; cursor: number;
     blocked_subtasks?: { status?: string; reconciliation?: string; scene_key?: string; error_code?: string;
-      dead_worker?: boolean; outcome_unknown?: boolean; task_id?: string }[];
+      dead_worker?: boolean; outcome_unknown?: boolean; external_outcome?: string; task_id?: string }[];
     blocked_result?: { rejections?: { role?: string; task_id?: string; code?: string; external_outcome?: string }[] };
     reconciliation?: { checked_at: string; outcomes: { subtask_id: string | null; outcome: string; last_phase?: string | null }[] };
     results?: { unit: { production_section_id: string }; storyboard: { steps: Record<string, { artifact_id: string }> } }[] } };
@@ -60,6 +61,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
   const [carryover, setCarryover] = useState<Record<string, ContinuityInfo>>({});
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const load = useCallback(async () => {
     const tasks = await api<StoryTask[]>(`/projects/${projectId}/story-preparation?document_id=${documentId}`);
     setTasks(tasks);
@@ -81,10 +83,12 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
   const outline = tasks.find((t) => t.outline)?.outline;
   const outlineTask = tasks.find((t) => t.role === 'story_outline_run');
   async function action(call: () => Promise<unknown>) {
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(true); setMessage('');
     try { await call(); await load(); }
-    catch (e) { setMessage(String(e)); }
-    finally { setBusy(false); }
+    catch (e) { setMessage(String(e)); await load().catch(() => undefined); }
+    finally { submitting.current = false; setBusy(false); }
   }
   const selectionBody = { outline_artifact_id: outline?.artifact_id, expected_outline_hash: outline?.sha256,
     production_section_ids: selected, continuity_facts: Object.fromEntries(Object.entries(continuity)
@@ -157,7 +161,11 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
       {tasks.map((task) => {
         const rejection = task.progress.blocked_result?.rejections?.find((item) => item.task_id
           && ['director', 'editor'].includes(item.role ?? '')
-          && ['AGENT_REQUEST_REPLAY_BLOCKED', 'AGENT_REQUEST_RECONCILIATION_REQUIRED'].includes(item.code ?? ''));
+            && ['AGENT_REQUEST_REPLAY_BLOCKED', 'AGENT_REQUEST_RECONCILIATION_REQUIRED'].includes(item.code ?? ''));
+        const canExplicitlyResend = (item: NonNullable<StoryTask['progress']['blocked_subtasks']>[number]) =>
+          task.status === 'NEEDS_REVIEW' && item.task_id && UNDECIDED.has(item.status ?? '')
+          && (item.external_outcome === 'UNKNOWN' || item.outcome_unknown)
+          && (!item.reconciliation || item.reconciliation === 'UNCONFIRMABLE');
         return <div key={task.task_id} className="material-run">
         <b>{task.role === 'story_section_run' ? '分步分镜' : '总体大纲'} · {TASK_STATUS_LABELS[task.status] ?? task.status}</b>
         {task.summary && (task.summary.total > 0 || ['QUEUED', 'RUNNING'].includes(task.status)) && <div className="run-progress">
@@ -167,13 +175,18 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           {!task.summary.awaiting_reclaim && task.summary.lease_remaining_s !== null && task.summary.lease_remaining_s > 0
             && <small>Worker 正在推进（本次接管有效期还剩约 {Math.ceil(task.summary.lease_remaining_s / 60)} 分钟）</small>}
         </div>}
+        {task.retry && <OutlineTaskRetry retry={task.retry} busy={busy}
+          onRetry={(fields) => void action(() => api(
+            `/projects/${projectId}/story-preparation/tasks/${task.task_id}/retry`,
+            json('POST', { expected_state_version: task.state_version, ...fields }),
+          ))} />}
         {task.error_code && <p>需要处理：{task.error_code}。先点「核对已有结果」：服务商已答复但没有可用结果的子任务会被释放，可以重新尝试；结果未知的不会自动重发。</p>}
         {!!task.progress.blocked_subtasks?.length && <small>阻塞的子任务：{task.progress.blocked_subtasks.map((item) => [item.scene_key, item.error_code].filter(Boolean).join(' ')).join('；')}</small>}
         {task.progress.blocked_subtasks?.some((item) => item.dead_worker) && (
           <small>上一次推进被中断（Worker 已退出）：可证明从未发出的请求会释放并重问；结果未知的不会自动重发，请核对原任务。</small>
         )}
         {task.progress.blocked_subtasks?.map((item) => (
-          item.task_id && UNDECIDED.has(item.status ?? '') && !item.reconciliation ? (
+          !task.retry?.can_retry && !task.retry?.exhausted && canExplicitlyResend(item) ? (
             <button key={item.task_id} type="button" className="text-button" disabled={busy}
               onClick={() => {
                 const which = item.scene_key ? '「' + item.scene_key + '」' : '这一场';
@@ -192,7 +205,11 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
           {rejection && <>
             <small>原 {rejection.role} 调用仍为 UNKNOWN。只能核对原任务；在没有未发送证明前不会创建新请求。</small>
           </>}
-          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务的模型结果未知：只核对原任务，系统不会用同一请求重发。若核对后仍无法继续，请修改剧本后重新导入并重新提取，或取消本任务。</small>}
+          {!resumable(task.progress.blocked_subtasks) && !rejection && <small>有子任务的模型结果未知，系统不会自动重发。{
+            task.retry?.can_retry || (!task.retry?.exhausted && task.progress.blocked_subtasks?.some(canExplicitlyResend))
+              ? '核对后仍无结果时，可以明确确认发起一次新请求。'
+              : '若核对后仍无法继续，请修改剧本后重新导入并重新提取，或取消本任务。'
+          }</small>}
           {task.status === 'CANCELLED' && <small>本任务已取消：仍可核对原任务，释放可证明从未发出的请求，然后重新提取。</small>}
         </>}
         {!['SUCCEEDED', 'CANCELLED'].includes(task.status) && <button type="button" disabled={busy} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/tasks/${task.task_id}/cancel`, json('POST', { expected_state_version: task.state_version })))}>取消后续工作</button>}

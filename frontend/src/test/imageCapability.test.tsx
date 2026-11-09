@@ -87,6 +87,19 @@ it('没有绑定受管渲染器时说明原因，并且不排队验证', async (
   expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)).toHaveLength(0);
 });
 
+it('可从界面绑定已登记的真实实例和模型目录', async () => {
+  const binding = { instance_id: 'i1', base_url: 'http://127.0.0.1:8188', model_root: 'D:\\ComfyUI\\models' };
+  stub = new StudioStub(routes({ ...UNBOUND, binding_candidate: binding }));
+  stub.add({ method: 'POST', pattern: /setup\/image-runtime$/, respond: () => jsonResponse({ readiness: READY }) });
+  const user = userEvent.setup();
+  render(<ImageCapabilityCard projectId="p1" busy={false} />);
+  await user.click(await screen.findByRole('button', { name: '绑定现有实例用于出图' }));
+  expect(await screen.findByText(/已绑定本机受管实例/)).toBeInTheDocument();
+  expect(stub.callsOf('POST', /setup\/image-runtime$/)[0].body).toEqual({
+    ...binding, expected_config_revision: UNBOUND.config_revision,
+  });
+});
+
 it('验证三类小样直接排队真实渲染', async () => {
   stub = new StudioStub(routes(READY));
   const user = userEvent.setup();

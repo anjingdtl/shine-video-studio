@@ -120,11 +120,12 @@ function capabilityLabel(capability: { state: string; reason: string; can_genera
 }
 
 export function AssetsWorkspace({
-  page, onNavigate, onWorkspace, projects, projectId, projectAssets,
+  page, onNavigate, onWorkspace, projects, projectId, projectAssets, onOpenImageSetup,
 }: {
   page: AssetCenterPage; onNavigate: (page: AssetCenterPage) => void;
   onWorkspace: (space: 'director' | 'expert') => void; projects: Project[]; projectId: string;
   projectAssets: Asset[];
+  onOpenImageSetup?: () => void;
 }) {
   const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
@@ -174,7 +175,8 @@ export function AssetsWorkspace({
         {capabilityError && <div className="asset-inline-error" role="alert">暂时无法读取本机能力状态：{capabilityError}</div>}
         <div className="asset-center-page">
           {page === 'home' && <HomePage capabilities={capabilities} onNavigate={navigate} />}
-          {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate} onValidated={refreshCapabilities} />}
+          {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate}
+            onValidated={refreshCapabilities} onOpenImageSetup={onOpenImageSetup} />}
           {page === 'voices' && <VoiceWorkshop capabilities={capabilities} onNavigate={navigate} />}
           {page === 'library' && <LibraryPage />}
           {page === 'assignments' && <AssignmentsPage projects={projects} projectId={projectId} projectAssets={projectAssets} />}
@@ -246,10 +248,11 @@ function CapabilityRows({ capabilities }: { capabilities: CapabilityReport | nul
   </div>)}</div>;
 }
 
-function ImageWorkshop({ capabilities, onNavigate, onValidated }: {
+function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup }: {
   capabilities: CapabilityReport | null;
   onNavigate: (page: AssetCenterPage) => void;
   onValidated: () => void;
+  onOpenImageSetup?: () => void;
 }) {
   const draftStorageKey = 'shine-assets-image-draft-v1';
   const restoredDraft = storedObject(draftStorageKey);
@@ -534,6 +537,9 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated }: {
       <button className="asset-primary-button" disabled={busy || (mode === 'T2I' && references.length > 0) || (!canGenerate && !canValidate) || (mode !== 'RGBA' && !prompt.trim()) || (mode === 'RGBA' && !manualCutoutReady && !prompt.trim())} onClick={() => void submit(!manualCutoutReady && !canGenerate && canValidate)}>
         {busy ? <><LoaderCircle className="asset-spin" size={16} />正在保存请求…</> : manualCutoutReady ? <><Eraser size={16} />生成透明 PNG 候选</> : canGenerate ? <><WandSparkles size={16} />生成图片候选</> : canValidate ? <><ShieldCheck size={16} />运行一次本机验证样例</> : <><ShieldCheck size={16} />等待本机能力验证</>}
       </button>
+      {capabilities && !canGenerate && !canValidate && !manualCutoutReady && onOpenImageSetup && (
+        <button type="button" className="asset-secondary-button" onClick={onOpenImageSetup}>打开本机出图配置</button>
+      )}
     </section>
     <aside className="asset-workshop-side">
       <div className="asset-card"><div className="asset-card-heading"><div><h2>任务记录</h2><p>页面不会自动重提任何任务。</p></div><RefreshCw size={15} /></div>
@@ -924,8 +930,8 @@ function LibraryPage() {
       let current = version;
       if (current.status === 'CANDIDATE' || current.status === 'QC_FAILED') current = await qcLibraryVersion(current.id);
       if (current.status !== 'READY_FOR_REVIEW') throw new Error(`该版本状态为${current.status}，不能晋升。`);
-      const grant = await grantVersionPromotion(current.id);
-      await promoteLibraryVersion(current.id, { ...grant, evidence: '已检查内容和技术质量，确认晋升为全局正式版本。' });
+      const { grant_id, snapshot } = await grantVersionPromotion(current.id);
+      await promoteLibraryVersion(current.id, { grant_id, snapshot, evidence: '已检查内容和技术质量，确认晋升为全局正式版本。' });
       setRefreshKey((n) => n + 1);
       if (selected) setSelected(await getLibraryAsset(selected.id));
     } catch (reason) { setError(errorText(reason)); }
@@ -1000,6 +1006,9 @@ function LibraryPage() {
         {selected.versions?.map((version) => <div className="asset-version-card" key={version.id}>
           <div className="asset-version-heading"><b>V{version.ordinal} · {LABELS[version.status] ?? version.status}</b><small>{version.width && version.height ? `${version.width} × ${version.height} · ` : ''}{version.content_sha256.slice(0, 12)}</small></div>
           <div className="asset-version-meta"><span>{version.source_mode}</span><span>{version.is_mock ? '模拟结果' : '真实文件'}</span></div>
+          {version.kind === 'image' && version.id !== selected.current_version?.id
+            && <img className="asset-preview-image large asset-version-image" src={version.media_url}
+              alt={`${selected.title} V${version.ordinal} 预览`} loading="lazy" />}
           {version.prompt && <p className="asset-prompt-preview">{version.prompt}</p>}
           {version.kind === 'audio' && <audio className="asset-version-audio" controls preload="none" src={version.media_url}>当前浏览器不支持音频播放。</audio>}
           {version.qc && <details className="asset-diagnostics"><summary>技术检查详情</summary><pre>{JSON.stringify(version.qc, null, 2)}</pre></details>}

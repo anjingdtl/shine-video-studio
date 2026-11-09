@@ -98,9 +98,9 @@ class AnthropicMessagesProvider:
                 if response.status_code < 400:
                     return response
                 if response.status_code in {401, 403}:
-                    raise LLMAuthError("Anthropic rejected the API key")
+                    raise LLMAuthError("Anthropic rejected the API key", details={"status": response.status_code})
                 if response.status_code == 429:
-                    last_error = LLMRateLimit("Anthropic rate limit reached")
+                    raise LLMRateLimit("Anthropic rate limit reached", details={"status": 429})
                 elif response.status_code >= 500:
                     raise LLMServerError("Anthropic server error", details={
                         "status": response.status_code, "external_outcome": "UNKNOWN",

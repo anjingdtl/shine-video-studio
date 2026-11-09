@@ -17,7 +17,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
   EXISTING_MODEL_HASH_REJECTIONS_PRESENT: '本机有模型文件未通过完整性校验。为保护原文件，本次没有复用或下载替代文件；请到专业设置查看失败项。',
-  RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: '本机还有未核对或未结束的任务，暂时不能重新验证或启用运行配置。请先处理「有任务待核对」的镜头任务，或取消未完成的生产系列，再重试。',
+  RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: '本机仍有运行中的安装、生产任务或尚未释放的 GPU 使用权，请等待释放后再验证。仅待核对、没有占用本机资源的文本或镜头任务可留在原状态。',
   GENERATE_RUNTIME_CONFIGURATION_FIRST: '还没有为本机生成运行配置。请先在「制作环境」完成一次准备，再验证工作流。',
   STOP_OWNED_INSTANCE_BEFORE_VALIDATION: '本机渲染器仍在运行。请先停止受管实例，再验证工作流节点。',
   STORY_DURABLE_OUTLINE_REQUIRED: '这份剧本太长，一次性分析会丢掉细节。请改用「总体大纲与生产段落」：后台提取并归并全剧大纲，你确认后只为你勾选的段落准备正式分镜。',

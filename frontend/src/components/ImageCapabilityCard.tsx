@@ -23,6 +23,7 @@ export type ImageReadiness = {
   renderer: ImageRendererState;
   fingerprint: string;
   config_revision: number;
+  binding_candidate?: { instance_id: string; base_url: string; model_root: string } | null;
   config_digest: string;
   graph_sha256: string;
   output_node_id: string;
@@ -133,6 +134,23 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     }
   };
 
+  const bindRenderer = async () => {
+    if (!state?.binding_candidate) return;
+    setWorking(true); setProblem(null); setNote(null);
+    try {
+      const result = await jsonPost<{ readiness: ImageReadiness }>('/setup/image-runtime', {
+        ...state.binding_candidate, expected_config_revision: state.config_revision,
+      });
+      setState(result.readiness);
+      setNote('已绑定本机受管实例。下一步是验证真实出图。');
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+      await load().catch(() => undefined);
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const stopRenderer = async () => {
     setWorking(true);
     setProblem(null);
@@ -172,7 +190,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
   const gigabytes = state ? (state.upstream.required_bytes / 1024 ** 3).toFixed(2) : '—';
 
   return (
-    <section className="card section-card image-capability" aria-label="AI 素材出图能力">
+    <section id="image-capability" className="card section-card image-capability" aria-label="AI 素材出图能力">
       <div className="section-heading compact">
         <div>
           <div className="section-kicker">AI MATERIAL CAPABILITY</div>
@@ -273,7 +291,13 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
       <button type="button" className="must-button" disabled={working || busy || !state?.configured} onClick={validate}>
         {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 验证三类真实小样
       </button>
-      {!state?.configured && (
+      {!state?.configured && state?.binding_candidate && <div className="module-guide">
+        <p>可复用已登记的本机实例，模型目录为 {state.binding_candidate.model_root}。绑定后核验固定权重。</p>
+        <button type="button" className="must-button" disabled={working || busy} onClick={bindRenderer}>
+          {working ? '正在核验出图权重…' : '绑定现有实例用于出图'}
+        </button>
+      </div>}
+      {!state?.configured && !state?.binding_candidate && (
         <p className="material-hint">
           还没有绑定受管渲染器，出图能力无法验证。先在「安装与下载」完成本机环境检测与受管实例绑定。
         </p>

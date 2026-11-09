@@ -51,16 +51,16 @@ RULEPACK_ID = "material-image-prompt"
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window."""
 
-CONSERVATIVE_CONTEXT_WINDOW = 8192
+CONSERVATIVE_CONTEXT_WINDOW = 1_000_000
 """The window assumed when the provider declares none.
 
-The plan refuses an unbounded window.  A conservative, named default is used
-and recorded in the evidence, so the reader knows the number was a default and
-not a measurement.
+Current 1M-context reasoning models are the budget baseline, so the estimate
+starts from that class.  A provider that declares its own smaller window still
+overrides this default and is recorded by name.
 """
 
-MIN_OUTPUT_RESERVE_TOKENS = 800
-MAX_OUTPUT_RESERVE_TOKENS = 2000
+MIN_OUTPUT_RESERVE_TOKENS = 4_096
+MAX_OUTPUT_RESERVE_TOKENS = 131_072
 
 CORRECTION_RULE = (
     " Your previous answer did not satisfy the contract. Fix only the fields the "

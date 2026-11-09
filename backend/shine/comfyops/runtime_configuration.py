@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe
@@ -238,8 +238,10 @@ def require_idle_configuration(db):
                 Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
             or db.scalar(select(ProductionSeries.id).where(
                 ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(1))
-            or db.scalar(select(InstallationAttempt.id).where(InstallationAttempt.status.in_(
-                ['SUBMIT_INTENT', 'INSTALLING', 'NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])).limit(1))):
+            or db.scalar(select(InstallationAttempt.id).where(or_(
+                InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING', 'FAILED_RECONCILE_REQUIRED']),
+                (InstallationAttempt.status == 'NEEDS_REVIEW') & InstallationAttempt.lease_owner.is_not(None),
+            )).limit(1))):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
 
 

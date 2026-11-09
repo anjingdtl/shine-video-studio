@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import { API, ApiError, api, json } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
@@ -84,6 +84,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   const [consent, setConsent] = useState(false);
   const [facts, setFacts] = useState('');
   const [busy, setBusy] = useState(false);
+  const chainInFlight = useRef(false);
   const [requiresReconciliation, setRequiresReconciliation] = useState(false);
   const [checkingPreviousRun, setCheckingPreviousRun] = useState(false);
   const [replacement, setReplacement] = useState<{ taskId: string; scriptwriter: string } | null>(null);
@@ -107,6 +108,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   const [completedRoles, setCompletedRoles] = useState<string[]>([]);
   const [lastCheckedAt, setLastCheckedAt] = useState<number>();
   const [confirmedBreakdownId, setConfirmedBreakdownId] = useState<string | null>(null);
+  // Every crew artifact is durable.  After a reload the panel has no in-memory
+  // result, but the finished chain is still there; find it so a page refresh
+  // never forces a second paid run just to press "apply".
+  const [recoveredApply, setRecoveredApply] = useState<{ camera_artifact_id: string; continuity_artifact_id: string;
+    arbitration_artifact_id: string | null; edit_intent_artifact_id: string | null; shot_count: number } | null>(null);
 
   const saveLanguage = useCallback(async (value: string) => {
     setLanguage(value);
@@ -145,6 +151,40 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
 
   useEffect(() => { reloadDocuments(); reloadLanguage(); }, [reloadDocuments, reloadLanguage]);
 
+  useEffect(() => {
+    if (!visible) return;
+    let alive = true;
+    type ArtifactRow = { id: string; kind: string; stale: boolean; input_revision_ids: string[];
+      created_at: string; payload_json: Record<string, unknown> };
+    api<ArtifactRow[]>(`/projects/${projectId}/film-artifacts`)
+      .then(rows => {
+        if (!alive) return;
+        const fresh = rows.filter(row => !row.stale);
+        const newest = (kind: string) => fresh
+          .filter(row => row.kind === kind)
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+        const camera = newest('CameraPlan');
+        const continuity = camera && fresh.find(row => row.kind === 'ContinuityReport'
+          && row.input_revision_ids.includes(camera.id));
+        if (!camera || !continuity) { setRecoveredApply(null); return; }
+        const edit = fresh.find(row => row.kind === 'EditIntentPlan'
+          && row.input_revision_ids.includes(continuity.id))
+          ?? newest('EditIntentPlan');
+        const arbitration = fresh.find(row => row.kind === 'ContinuityArbitration'
+          && row.input_revision_ids.includes(continuity.id));
+        const shots = (camera.payload_json?.shots ?? []) as unknown[];
+        setRecoveredApply({
+          camera_artifact_id: camera.id,
+          continuity_artifact_id: continuity.id,
+          arbitration_artifact_id: arbitration?.id ?? null,
+          edit_intent_artifact_id: edit?.id ?? null,
+          shot_count: shots.length,
+        });
+      })
+      .catch(() => { if (alive) setRecoveredApply(null); });
+    return () => { alive = false; };
+  }, [projectId, visible]);
+
   // The crew cannot run before the project is bound to the official rule pack.
   // Say so here, with the way out, instead of letting the chain refuse later.
   // Re-check whenever the panel becomes visible again: the binding usually
@@ -178,7 +218,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
 
   /** Run the crew chain, optionally continuing from one role. */
   async function runChain(options?: { start_role?: string; resume_steps?: Record<string, string>; verifiedUnsent?: boolean;
-    replaceInterruptedTaskId?: string }) {
+    replaceInterruptedTaskId?: string; authorizeReplayTaskId?: string }) {
+    if (chainInFlight.current) return;
     if (requiresReconciliation && !options?.verifiedUnsent && !options?.replaceInterruptedTaskId) return;
     if (backendDisconnected) { setMessage('工作台后端失联，请先使用顶栏的重连按钮。'); return; }
     if (!consent) { setMessage('需要先勾选同意把剧本文本发给已配置的 LLM 服务商。'); return; }
@@ -186,6 +227,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       setMessage('请先从“已导入剧本”中选择一份，或导入/粘贴剧本。');
       return;
     }
+    chainInFlight.current = true;
     setBusy(true); setResult(null); setProgressRuns([]); setPollError('');
     setRequiresReconciliation(false);
     setReplacement(null);
@@ -255,6 +297,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         ...(options?.start_role ? { start_role: options.start_role } : {}),
         ...(options?.resume_steps ? { resume_steps: options.resume_steps } : {}),
         ...(options?.replaceInterruptedTaskId ? { replace_interrupted_task_id: options.replaceInterruptedTaskId } : {}),
+        ...(options?.authorizeReplayTaskId ? { authorize_replay_task_id: options.authorizeReplayTaskId } : {}),
       };
       if (selectedDoc) body.document_id = selectedDoc; else body.text = inlineText;
       const row = await api<StoryboardResult>(`/projects/${projectId}/storyboard/generate`, json('POST', body));
@@ -287,8 +330,14 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         const reason = rejections.map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.rejection_reason_code ?? r.code)}`)
           .join('；') || '未知原因';
         const definitelyNotSent = rejections.some(r => r.external_outcome === 'NOT_SENT');
+        const replayBlocked = rejections.find(r => r.code === 'AGENT_RESPONSE_RECEIVED_NO_REPLAY' && r.task_id);
         const taskId = rejections.find(r => r.task_id)?.task_id;
-        setMessage(uncertain
+        setMessage(replayBlocked
+          // The provider answered and the answer was refused: a finished call,
+          // not an unknown one. Saying "rejected" here would hide the only fact
+          // the operator can act on - a new request costs a second call.
+          ? `上一次请求已收到服务商响应，但返回的答案被拒绝（确定不可用，不是超时）。系统不会自动重发；确认后可以发起一次新请求，会再次计费。${taskId ? `任务编号：${taskId}。` : ''}`
+          : uncertain
           ? `远端结果未确认，系统已保留请求且不会自动重发。请核对服务商的前次请求结果。`
           : definitelyNotSent
             ? `分镜链未能连接到模型服务：${reason}。系统确认请求未送达，没有产生远端结果；检查网络恢复后可以重新生成。${taskId ? `任务编号：${taskId}。` : ''}`
@@ -308,6 +357,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         setProgressRuns(runs.filter(run => !priorRunIds.has(run.id)));
         setLastCheckedAt(Date.now());
       } catch { /* Keep the last observed progress. */ }
+      chainInFlight.current = false;
       setBusy(false);
     }
   }
@@ -426,11 +476,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   }
 
   async function apply() {
-    if (result?.status !== 'PROPOSED' || !result.next) return;
+    const camera = result?.next?.apply_camera ?? recoveredApply;
+    if (!camera) return;
     setApplyError('');
     setApplying(true);
     try {
-      const camera = result.next.apply_camera;
       const row = await api<{ shot_ids: string[] }>(`/projects/${projectId}/film-artifacts/${camera.camera_artifact_id}/apply-camera`, json('POST', {
         continuity_artifact_id: camera.continuity_artifact_id,
         ...(camera.arbitration_artifact_id ? { arbitration_artifact_id: camera.arbitration_artifact_id } : {}),
@@ -446,6 +496,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   const failedRole = result?.failed_role ?? (arbitrationFailed ? 'director_arbitration' : undefined);
   const resumeSteps = result?.resume_steps ?? (arbitrationFailed
     ? Object.fromEntries(Object.entries(result?.steps ?? {}).map(([role, step]) => [role, step.artifact_id])) : {});
+  // A refused answer that really arrived needs an authorized new request, not
+  // the ordinary "retry this step" button: repeating the same call would be
+  // refused again and would look like a mysterious format error.
+  const replayTarget = result?.rejections?.find(
+    rejection => rejection.code === 'AGENT_RESPONSE_RECEIVED_NO_REPLAY' && rejection.task_id);
 
   return <section className="card section-card" id="storyboard">
     <div className="section-heading compact">
@@ -553,16 +608,39 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       paused={progressPaused || !busy}
       onConfirmCharacters={() => document.getElementById(`character-confirmation-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
 
+    {!result && recoveredApply && !busy && <div className="module-guide">
+      <div>
+        <b>已有一套完成的分镜方案保存在本机（{recoveredApply.shot_count} 个镜头）</b>
+        <p>五个工种都已完成真实调用。可以直接应用为正式分镜，不需要再次调用模型；应用后可到镜头列表逐条核对。</p>
+      </div>
+      <button className="primary-button" type="button" disabled={applying} onClick={apply}>
+        {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）
+      </button>
+    </div>}
+    {applyError && !result && <p role="alert">{applyError}</p>}
+
     {result && <div className="storyboard-result">
       {result.status === 'REJECTED' && <div className="blocked-callout">
         <AlertTriangle size={15} />
-        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => `${stepLabels[r.role] ?? r.role}：${label(failureLabels, r.rejection_reason_code ?? r.code)}`).join('；') || '未知原因'}</span>
+        <span>分镜链被拒绝：{(result.rejections ?? []).map(r => {
+          const code = r.rejection_reason_code ?? r.code;
+          const reason = failureLabels[code];
+          return `${stepLabels[r.role] ?? r.role}：${code}${reason ? `（${reason}）` : ''}`;
+        }).join('；') || '未知原因'}</span>
       </div>}
       {result.status === 'BLOCKED_MISSING_MASTERS' && <div className="blocked-callout">
         <AlertTriangle size={15} />
         <span>这些人物没有匹配到唯一的已确认人物素材：{(result.missing_characters ?? []).join('、')}。请在下面的「人物对照」里确认谁是哪张图，确认后会自动改名并冻结。</span>
       </div>}
-      {result.status === 'REJECTED' && failedRole && Object.keys(resumeSteps).length > 0 && <div className="step-retry">
+      {result.status === 'REJECTED' && replayTarget && <div className="step-retry">
+        <RefreshCw size={14} />
+        <span>上一次已收到服务商响应但答案被拒绝，结果确定不可用。发起新请求会重新调用模型并再次计费；被拒绝的记录会保留为历史。</span>
+        <button className="must-button" disabled={busy}
+          onClick={() => runChain({ authorizeReplayTaskId: replayTarget.task_id })}>
+          重新生成（新请求，会再次计费）
+        </button>
+      </div>}
+      {result.status === 'REJECTED' && failedRole && !replayTarget && <div className="step-retry">
         <RefreshCw size={14} />
         <span>这一步已经完成的部分不会重跑。</span>
         <button className="must-button" disabled={busy || requiresReconciliation}

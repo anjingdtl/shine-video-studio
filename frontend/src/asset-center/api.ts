@@ -80,7 +80,7 @@ export function qcLibraryVersion(id: string) {
 export function grantVersionPromotion(id: string) {
   return api<{ grant_id: string; snapshot: string }>(`/asset-center/versions/${id}/grant`, json('POST', {}));
 }
-export function promoteLibraryVersion(id: string, body: Record<string, unknown>) {
+export function promoteLibraryVersion(id: string, body: { grant_id: string; snapshot: string; evidence: string }) {
   return api<LibraryVersion>(`/asset-center/versions/${id}/promote`, json('POST', body));
 }
 export function listLibraryVoices() {

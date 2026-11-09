@@ -45,7 +45,7 @@ def rejection_reason(exc):
 
 
 def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, contract_hash=None,
-                  replace_interrupted_task_id=None):
+                  replace_interrupted_task_id=None, authorize_replay_task_id=None):
     if replace_interrupted_task_id is not None:
         raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     rows = db.scalars(select(AgentTaskRecord).where(
@@ -64,6 +64,14 @@ def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, 
             if external_outcome == "NOT_SENT":
                 raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
             if external_outcome == "RESPONSE_RECEIVED":
+                # The provider answered and the answer was refused; nothing is
+                # still in flight, so no answer is being bought twice.  One new
+                # request is allowed once the user names this exact record as
+                # the refused attempt they want to replace.  Without the
+                # authorization the refusal stands, because a silent replay
+                # would pay for the same unusable answer again.
+                if authorize_replay_task_id == row.id:
+                    continue
                 raise ValueError("AGENT_RESPONSE_RECEIVED_NO_REPLAY")
             raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
         old_contract = row.trace.get("review_contract_sha256")

@@ -31,16 +31,18 @@ from shine.llm.output_budget import truncated_output, usage_summary
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window."""
 
-CONSERVATIVE_CONTEXT_WINDOW = 8192
+CONSERVATIVE_CONTEXT_WINDOW = 1_000_000
 """The window assumed when the provider declares none.
 
-The plan refuses an unbounded window.  A conservative, named default is used
-and recorded in the evidence, so the reader knows the number was a default and
-not a measurement.
+The plan refuses an unbounded window.  Current 1M-context reasoning models are
+the budget baseline: the window is 1M tokens and the output ceiling is 128K, so
+the estimate starts from that class instead of a small legacy window that
+refuses ordinary scripts.  A provider that declares its own smaller window still
+overrides this default and is recorded by name.
 """
 
-MIN_OUTPUT_RESERVE_TOKENS = 800
-MAX_OUTPUT_RESERVE_TOKENS = 2000
+MIN_OUTPUT_RESERVE_TOKENS = 4_096
+MAX_OUTPUT_RESERVE_TOKENS = 131_072
 
 CORRECTION_RULE = (
     " Your previous answer did not satisfy the contract. Regenerate the complete "
@@ -249,6 +251,7 @@ def call_material_agent(
                 uncertain=external_outcome == "UNKNOWN",
                 details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
                          "response_status": exc.details.get("status"),
+                         "provider_code": exc.details.get("provider_code"),
                          "truncated": truncated_output(exc)},
             )
     except ValidationError as exc:
@@ -280,6 +283,7 @@ def call_material_agent(
             schema_errors=errors,
             details={"error_type": type(second).__name__, "external_outcome": external_outcome,
                      "response_status": second.details.get("status"),
+                     "provider_code": second.details.get("provider_code"),
                      "truncated": truncated_output(second)},
         )
     except ValidationError:

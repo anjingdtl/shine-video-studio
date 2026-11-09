@@ -25,7 +25,7 @@ from shine.llm.base import (
     ProviderConfig,
     parse_json_object,
 )
-from shine.llm.context_window import model_context_from_capabilities
+from shine.llm.context_window import model_context_from_capabilities, provider_model_matches
 from shine.llm.transport import build_client
 
 
@@ -111,7 +111,8 @@ class OpenAICompatibleProvider:
                 if response.status_code < 400:
                     return response
                 last_error = self._classify(response)
-                if not last_error.retryable or isinstance(last_error, LLMServerError):
+                if (not last_error.retryable or isinstance(last_error, LLMServerError)
+                        or (method == "POST" and isinstance(last_error, LLMRateLimit))):
                     raise last_error
             if attempt + 1 < attempts:
                 time.sleep(min(2.0, 0.25 * (2**attempt)))
@@ -177,15 +178,31 @@ class OpenAICompatibleProvider:
         if isinstance(provider_code, int) and provider_code != 0:
             raise LLMError("Provider returned an error status", details=response_details)
         choices = body.get("choices") or []
+        usage = body.get("usage") or {}
+        usage_details = usage.get("completion_tokens_details")
+        usage_details = usage_details if isinstance(usage_details, dict) else {}
+        reasoning_tokens = usage_details.get("reasoning_tokens")
+        # A reasoning model bills its thinking as completion. When the ceiling
+        # is spent on reasoning, the visible answer is empty and only
+        # finish_reason=length tells the two cases apart. Carry that evidence
+        # with the error so the workbench can name a starved output budget
+        # instead of reporting a generic format problem.
+        format_details = {
+            **response_details,
+            "finish_reason": choices[0].get("finish_reason") if choices else None,
+            "completion_tokens": usage.get("completion_tokens"),
+            **({"reasoning_tokens": reasoning_tokens}
+               if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) else {}),
+        }
         if not choices:
-            raise LLMFormatError("Provider returned no completions", details=response_details)
+            raise LLMFormatError("Provider returned no completions", details=format_details)
         if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:
-            raise LLMFormatError("Provider completion is truncated or filtered", details=response_details)
+            raise LLMFormatError("Provider completion is truncated or filtered", details=format_details)
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         if not isinstance(content, str) or not content.strip():
-            raise LLMFormatError("Provider returned an empty completion", details=response_details)
+            raise LLMFormatError("Provider returned an empty completion", details=format_details)
         try:
             parsed = parse_json_object(content) if json_mode else None
         except LLMFormatError as exc:
@@ -219,8 +236,8 @@ class OpenAICompatibleProvider:
         directory, a JSON array, a missing key - is reported distinctly. A
         missing catalog endpoint is not proof that the chat endpoint fails;
         the user must confirm the Model ID with the structured generation
-        probe instead. The configured model is only "listed" when the catalog
-        names that exact identifier; no case-insensitive guessing is allowed.
+        probe instead. Listing requires the configured identifier or a known
+        spelling of that same model from its official provider.
         """
         url = _models_url(self.config.base_url)
         try:
@@ -302,9 +319,9 @@ class OpenAICompatibleProvider:
             "catalog_ok": True,
             "catalog_supported": True,
             "models": models[:200],
-            # An empty catalog cannot confirm the configured model, and a
-            # catalog that does not name it exactly cannot confirm it either.
-            "model_listed": bool(models) and self.config.model in models,
+            "model_listed": any(
+                provider_model_matches(self.config.base_url, self.config.model, model) for model in models
+            ),
             "json_mode": "assumed",
             "vision": None,
             "tools": None,

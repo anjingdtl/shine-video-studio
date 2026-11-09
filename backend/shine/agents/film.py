@@ -539,6 +539,7 @@ class FilmAgentDispatcher:
         draft: bool = False,
         repair_visual_language: bool = False,
         replace_interrupted_task_id: str | None = None,
+        authorize_replay_task_id: str | None = None,
         repair_director: bool = False,
     ) -> AgentArtifact:
         if replace_interrupted_task_id is not None:
@@ -761,7 +762,8 @@ class FilmAgentDispatcher:
                 time.sleep(0.4 * (attempt + 1))
         guard_request(db, project_id, role, digest(context), profile,
                       text_hash=digest(model_context) if role == "qc_reviewer" else None,
-                      contract_hash=contract_hash)
+                      contract_hash=contract_hash,
+                      authorize_replay_task_id=authorize_replay_task_id)
         task = AgentTaskRecord(
             project_id=project_id,
             role_id=role,
@@ -805,6 +807,14 @@ class FilmAgentDispatcher:
             },
         )
         db.add(task)
+        if authorize_replay_task_id:
+            # One authorized new request replaces a finished refusal without
+            # erasing it: the rejected record keeps its code and trace as
+            # history, and only stops guarding this context.
+            previous = db.get(AgentTaskRecord, authorize_replay_task_id)
+            if previous is not None and previous.status in {"REJECTED", "FAILED"}:
+                previous.status = "SUPERSEDED"
+                previous.state_version += 1
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
         if body.tool == "continuity_arbitration":
             system_prompt = arbiter_prompt()

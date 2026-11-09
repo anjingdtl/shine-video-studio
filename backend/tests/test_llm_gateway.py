@@ -93,7 +93,7 @@ def test_provider_error_code_in_http_200_is_not_a_success(monkeypatch, fake_open
 
 
 @pytest.mark.parametrize(("configured", "model_limit", "expected"), [
-    (None, None, 100_000), (200_000, None, 100_000),
+    (None, None, 131_072), (200_000, None, 131_072),
     (4096, None, 4096), (None, 8192, 8192),
 ])
 def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, model_limit, expected):
@@ -106,10 +106,11 @@ def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, mo
 
 @pytest.mark.parametrize("model", ["MiniMax-M3.1-Flash", "MiniMax-M3-1-Flash"])
 def test_minimax_m31_flash_uses_bounded_default_output_budget(fake_openai, model):
+    """A 1M-context reasoning model is budgeted at its 128K output ceiling."""
     original = config(fake_openai, model=model, generation_options={"reasoning_effort": "medium"})
     bounded = agent_output_config(original)
     assert bounded.generation_options == {
-        "reasoning_effort": "medium", "max_completion_tokens": 16_384,
+        "reasoning_effort": "medium", "max_completion_tokens": 131_072,
     }
 
 
@@ -117,7 +118,24 @@ def test_minimax_m31_flash_never_expands_an_explicit_output_budget(fake_openai):
     original = config(
         fake_openai, model="MiniMax-M3.1-Flash", generation_options={"max_completion_tokens": 100_000},
     )
-    assert agent_output_config(original).generation_options["max_completion_tokens"] == 16_384
+    assert agent_output_config(original).generation_options["max_completion_tokens"] == 100_000
+
+
+def test_truncated_completion_names_the_finish_reason_and_reasoning_usage(monkeypatch, fake_openai):
+    """An empty answer caused by a starved budget must say so, not read as bad JSON."""
+    provider = OpenAICompatibleProvider(config(fake_openai))
+    response = httpx.Response(200, json={
+        "choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+        "usage": {"completion_tokens": 16_384,
+                  "completion_tokens_details": {"reasoning_tokens": 16_383}},
+    })
+    monkeypatch.setattr(provider, "_request", lambda *args, **kwargs: response)
+    with pytest.raises(LLMFormatError) as error:
+        provider.complete([ChatMessage("user", "x")])
+    assert error.value.details["finish_reason"] == "length"
+    assert error.value.details["reasoning_tokens"] == 16_383
+    assert error.value.details["completion_tokens"] == 16_384
+    assert error.value.details["status"] == 200
 
 
 def test_schema_mismatch_malformed_json_and_auth_errors_are_classified(fake_openai):

@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { StoryPreparationPanel } from '../components/StoryPreparationPanel';
+import { OutlineConfirmationPanel } from '../components/OutlineConfirmationPanel';
 import { StudioStub, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
@@ -36,6 +37,41 @@ function renderPanel() {
 }
 
 describe('大纲任务卡在提取剧情要点', () => {
+  it('在大纲进度旁显示错误，并在确认未知结果后只提交一次重试', async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const retry = { failure: { code: 'LLM_TIMEOUT', scene_key: 'S1', outcome: 'UNKNOWN' },
+      can_retry: true, unknown_subtask_id: 'sub-1', exhausted: false };
+    let queued = false;
+    stub.add({ method: 'GET', pattern: /text-consent\/doc-1$/, respond: () => jsonResponse({
+      roles: [{ role: 'scriptwriter', configured: true, allowed: true }],
+    }) });
+    stub.add({ method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([{
+      ...outlineTask([]), status: queued ? 'QUEUED' : 'NEEDS_REVIEW',
+      retry: { ...retry, can_retry: !queued },
+    }]) });
+    stub.add({ method: 'POST', pattern: /tasks\/task-1\/retry$/, respond: () => {
+      queued = true;
+      return jsonResponse({ status: 'QUEUED' });
+    } });
+    render(<OutlineConfirmationPanel projectId="p1" documentId="doc-1" documentHash={'b'.repeat(64)} />);
+    expect(await screen.findByRole('progressbar', { name: '大纲任务进度' })).toBeInTheDocument();
+    expect(screen.getByText('LLM_TIMEOUT')).toBeInTheDocument();
+    expect(screen.getByText(/远端模型响应超时/)).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: '重试大纲任务' });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    expect(stub.callsOf('POST', /\/retry$/)).toHaveLength(0);
+    confirm.mockReturnValue(true);
+    await user.dblClick(button);
+    expect(stub.callsOf('POST', /\/retry$/)).toHaveLength(1);
+    expect(stub.callsOf('POST', /\/retry$/)[0].body).toMatchObject({
+      expected_state_version: 5, subtask_id: 'sub-1',
+    });
+    expect(await screen.findByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText('LLM_TIMEOUT')).toBeInTheDocument();
+  });
+
   it('服务商已答复但没有可用结果时允许恢复，并显示阻塞原因', async () => {
     stub.add({ method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([
       outlineTask([{ scene_key: 'S2', status: 'REJECTED', error_code: 'SCHEMA_VALIDATION_FAILED',
@@ -82,7 +118,7 @@ describe('大纲任务卡在提取剧情要点', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     stub.add({ method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([
       outlineTask([{ scene_key: 'S3', status: 'NEEDS_REVIEW', error_code: 'LLM_TIMEOUT',
-        external_outcome: 'UNKNOWN', outcome_unknown: true, task_id: 'sub-1' }]),
+        external_outcome: 'UNKNOWN', outcome_unknown: true, task_id: 'sub-1', reconciliation: 'UNCONFIRMABLE' }]),
     ]) });
     stub.add({ method: 'POST', pattern: /story-preparation\/tasks\/task-1\/resend-unknown$/,
       respond: () => jsonResponse({ status: 'NEEDS_REVIEW', state_version: 6, decision: { resend_allowed: true } }) });

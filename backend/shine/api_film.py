@@ -741,6 +741,11 @@ class StoryboardRequest(APIModel):
     ] | None = None
     resume_steps: dict[str, str] = Field(default_factory=dict, max_length=8)
     replace_interrupted_task_id: str | None = Field(default=None, max_length=36)
+    # A refused answer that really arrived is a finished call, not an unknown
+    # outcome: the user may authorize exactly one new request for the same
+    # context, and the refused record is kept as SUPERSEDED history. Without a
+    # named record the guard still refuses a silent replay.
+    authorize_replay_task_id: str | None = Field(default=None, max_length=36)
     production_context: dict | None = None
     consent_document_id: str | None = None
     consent_document_sha256: str | None = None
@@ -817,6 +822,20 @@ def generate_storyboard(
         raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
 
     project = require_project(db, project_id)
+    if body.authorize_replay_task_id:
+        # Only a finished refusal whose answer really arrived may be replaced.
+        # An unknown outcome keeps its reconciliation path, and a record from
+        # another project or role is never a valid target.
+        replay_target = db.get(AgentTaskRecord, body.authorize_replay_task_id)
+        if (
+            not replay_target
+            or replay_target.project_id != project_id
+            or replay_target.role_id != (body.start_role or "scriptwriter")
+            or replay_target.status not in {"REJECTED", "FAILED"}
+            or replay_target.trace.get("external_outcome") != "RESPONSE_RECEIVED"
+            or replay_target.trace.get("is_mock") is True
+        ):
+            raise HTTPException(409, "STORYBOARD_REPLAY_TARGET_NOT_RESPONSE_RECEIVED")
     if not project.frozen_style_version_id and not body.draft:
         raise HTTPException(409, "STORYBOARD_STYLE_NOT_FROZEN")
     if body.document_id:
@@ -1017,6 +1036,9 @@ def generate_storyboard(
 
     delay = _agent_step_delay_seconds()
     calls_in_request = 0
+    # Everything this request records is newer than this instant; anything
+    # older belongs to an earlier run and its reason is not this one's.
+    request_started_at = utcnow()
 
     def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
@@ -1032,6 +1054,13 @@ def generate_storyboard(
             kwargs.update(production_context=body.production_context)
         last: ValueError | LLMError | None = None
         repair_visual_language = False
+        # A bounded retry of one crew call must be able to replace the record
+        # that the *same* request just created.  Without this the guard sees the
+        # first refusal and blocks the second attempt, so the designed retry
+        # could never run.  The authorization is always the record this request
+        # produced, never an unrelated one.
+        authorized_replay = (body.authorize_replay_task_id
+                             if role == (body.start_role or "scriptwriter") else None)
         for attempt in range(1, attempts + 1):
             if calls_in_request:
                 # Leave a real gap between two crew calls, and between the
@@ -1051,6 +1080,7 @@ def generate_storyboard(
                     replace_interrupted_task_id=(body.replace_interrupted_task_id
                         if role == body.start_role and role in {"director", "editor"} and not repair_director
                         and kwargs.get("tool") != "continuity_arbitration" else None),
+                    authorize_replay_task_id=authorized_replay,
                 )
                 return {"artifact_id": artifact.id, "kind": artifact.kind,
                         "sha256": artifact.sha256, "attempt": attempt}
@@ -1060,8 +1090,15 @@ def generate_storyboard(
                 if code not in RETRYABLE_REJECTIONS or attempt == attempts:
                     raise
                 failure = _rejection(role, exc)
-                if failure.get("external_outcome") == "UNKNOWN":
+                if failure.get("external_outcome") in {"UNKNOWN", "NOT_SENT"}:
+                    # Nothing came back, or nothing was ever sent: another call
+                    # would repeat the same refusal or buy the same answer
+                    # twice.  Only a definite answer that arrived is worth one
+                    # bounded retry.
                     raise
+                # The next attempt replaces the refusal this request just
+                # recorded, so the guard lets the bounded retry through.
+                authorized_replay = failure.get("task_id") or authorized_replay
                 repair_visual_language = (
                     role in {"director", "cinematographer"}
                     and failure.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
@@ -1084,10 +1121,12 @@ def generate_storyboard(
             # The exact version the panel must present to reconcile this task.
             rejection["state_version"] = task.state_version
             reason = task.trace.get("rejection_reason_code")
-            if reason:
-                # The precise reason the role's answer was refused.  Without it
-                # the operator only sees a generic code and cannot tell a
-                # contract miss from an unrepairable request.
+            if reason and task.created_at >= request_started_at:
+                # The precise reason the role's answer was refused, taken from
+                # the record this request itself produced.  Without it the
+                # operator only sees a generic code and cannot tell a contract
+                # miss from an unrepairable request.  A record left by an
+                # earlier run never masquerades as this refusal's reason.
                 rejection["rejection_reason_code"] = reason
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
+import { ScriptTextConsent } from './ScriptTextConsent';
 import { API, api, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
 import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
@@ -150,7 +151,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [selected, setSelected] = useState<Record<string, string>>({});
   const [operationReport, setOperationReport] = useState('');
   const [briefEdits, setBriefEdits] = useState<Record<string, string>>({});
-  const [textScope, setTextScope] = useState<{ scope_hash: string; document_sha256: string; transmission: string; roles: { role: string; configured: boolean; provider?: string; base_url?: string; model?: string; allowed?: boolean }[] } | null>(null);
   const [candidateGroup, setCandidateGroup] = useState('all');
   const [visibleCandidates, setVisibleCandidates] = useState(24);
   const [strategy, setStrategy] = useState<Record<string, MaterialStrategy>>({});
@@ -348,14 +348,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     void load().catch(() => undefined);
   }, [load]);
 
-  useEffect(() => {
-    setTextScope(null);
-    if (!documentId) return;
-    let current = true;
-    api<NonNullable<typeof textScope>>(`/projects/${projectId}/material-preparation/text-consent/${documentId}`)
-      .then((result) => { if (current) setTextScope(result); }).catch(() => undefined);
-    return () => { current = false; };
-  }, [projectId, documentId]);
   // A newly imported or generated script (the list is newest first): reload
   // and select it, so the person continues with the script just provided.
   useEffect(() => {
@@ -550,16 +542,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     await load();
   });
 
-  const decideText = (granted: boolean) => run(async () => {
-    if (!textScope) return;
-    const result = await jsonPost<NonNullable<typeof textScope>>(`/projects/${projectId}/material-preparation/text-consent`, {
-      document_id: documentId, expected_document_hash: textScope.document_sha256,
-      expected_scope_hash: textScope.scope_hash, granted,
-    });
-    setTextScope(result);
-    setOperationReport(granted ? '已保存上表所列服务范围内的文字授权；只发送本剧本必要文字，不发送素材字节。'
-      : '已撤回文字授权；后续调用停止，已经发送的请求无法撤回。');
-  });
   const itemAction = (batch: MaterialRun, item: MaterialItem, action: 'resume' | 'reconcile' | 'regenerate') => run(async () => {
     if (action === 'regenerate') {
       if (!state?.confirmation || !item.requirement_id || !item.brief) throw new Error('尚无可修改的外观描述，请先恢复出品人步骤。');
@@ -677,13 +659,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       </div>
 
       {operationReport && <p role="status">{operationReport}</p>}
-      {textScope && <details className="material-stage"><summary>文字模型发送授权</summary>
-        <p>{textScope.transmission}</p>
-        {textScope.roles.map((row) => <p key={row.role}>{({ producer: '出品人', scriptwriter: '编剧', director: '导演', cinematographer: '摄影指导', continuity: '场记', editor: '剪辑师' } as Record<string, string>)[row.role] ?? row.role} · {row.configured ? `${row.provider} / ${row.model} / ${row.base_url}` : '未配置'} · {row.allowed ? '当前允许' : '需要授权'}</p>)}
-        <button type="button" disabled={busy} onClick={() => decideText(true)}>允许向上述模型发送本剧本必要文字</button>
-        <button type="button" disabled={busy} onClick={() => decideText(false)}>撤回文字发送授权</button>
-        <small>更换剧本修订、角色路由或模型配置后需要重新确认。授权不包含图片、音频或视频字节。</small>
-      </details>}
+      {documentId && <ScriptTextConsent key={`${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}
       {problem && (
         <div className="required-action" role="alert">
           <AlertTriangle size={14} className="required-icon" />
