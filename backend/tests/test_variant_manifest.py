@@ -20,8 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from shine.comfy.capabilities import profile_metadata
 from shine.comfyops import deployment, recommendation, variants
+
+pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parents[2]
 CATALOG_DIR = REPO / "config" / "deployment"

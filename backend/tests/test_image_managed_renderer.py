@@ -9,6 +9,7 @@ process group would only prove the fake.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from fastapi import HTTPException
 from shine.comfyops import image_renderer
 from shine.comfyops.models import ComfyInstance
 from shine.models import AppSetting
+
+pytestmark = pytest.mark.integration
 
 
 def _write_recipe(settings, tmp_path, *, instance_id="managed-instance", port=8188):
@@ -71,6 +74,8 @@ def test_the_bound_instance_has_to_match_the_recipe(api, tmp_path):
     assert failure.value.detail["code"] == "IMAGE_RENDERER_RECIPE_MISMATCH"
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer starts only on Windows")
 def test_an_unmanaged_instance_is_refused(api, tmp_path):
     """A renderer the workbench cannot own may not serve the image runtime."""
     _, factory, settings = api

@@ -27,6 +27,8 @@ from tests.conftest import (
 )
 from tests.fake_http import FakeComfyServer
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def fake_comfy():

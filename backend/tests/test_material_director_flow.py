@@ -18,7 +18,11 @@ Every assertion here is a property the product plan states in prose:
 
 from __future__ import annotations
 
+import pytest
+
 from shine.comfyops.models import RightsRecord
+
+pytestmark = pytest.mark.integration
 
 LOCAL_ACTION = {"x-shine-local-action": "1"}
 """The personal-desktop CSRF marker the mutating routes require.

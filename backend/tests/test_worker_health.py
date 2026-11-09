@@ -10,6 +10,8 @@ from shine.worker import run_one
 from tests.conftest import create_job, create_project, create_shot, freeze_style
 from tests.fake_http import FakeComfyServer
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def fake_comfy():
@@ -25,6 +27,7 @@ class ExplodingProvider(MockH3Provider):
         raise RuntimeError("simulated provider crash")
 
 
+@pytest.mark.unit
 def test_system_status_distinguishes_api_worker_mock_and_real_h3(studio):
     client, factory, _root, _settings = studio
     project_id = create_project(client)

@@ -2,22 +2,108 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      test_tier:
+        description: Select a local validation tier. Use full for important PRs and releases.
+        required: true
+        type: choice
+        default: full
+        options:
+          - quick
+          - integration
+          - full
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Push and pull_request events for the same branch share a group. A PR update
+  # therefore cancels the equivalent push run, while newer commits supersede
+  # older work. An explicit manual acceptance run has its own group.
+  group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}-${{ github.event_name == 'workflow_dispatch' && 'manual' || 'auto' }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  backend:
+  backend-l1:
+    name: L1 backend quick
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.test_tier == 'quick' || inputs.test_tier == 'integration'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Backend contract tests execute the shipped TypeScript setup service.
+        with:
+          fetch-depth: 0
+      # Some backend contracts execute the shipped TypeScript setup service.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --project backend --locked
+      - run: uv run --project backend python scripts/run_tests.py quick
+
+  backend-l2:
+    name: L2 backend integration
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.test_tier == 'integration')
+    needs: backend-l1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --project backend --locked
+      - run: uv run --project backend python scripts/run_tests.py integration
+
+  frontend:
+    name: Frontend build
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.test_tier == 'integration' || inputs.test_tier == 'full'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - run: npm --prefix frontend run build
+
+  backend-l3-linux:
+    name: L3 backend full (Linux)
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.test_tier == 'full')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -38,15 +124,16 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
       - run: uv sync --project backend --locked
-      - run: uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
-      - run: uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
-      - run: uv run --project backend alembic -c backend/alembic.ini upgrade head
+      - run: uv run --project backend python scripts/run_tests.py full
 
-  backend-windows:
+  backend-l3-windows:
+    name: L3 backend full (Windows)
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.test_tier == 'full')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # Backend contract tests execute the shipped TypeScript setup service.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -67,65 +154,22 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
       - run: uv sync --project backend --locked
-      - name: Backend tests (Windows, no GPU)
-        run: uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
-      - name: Lint
-        run: uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
-      - name: Migrate a fresh database
-        shell: pwsh
-        run: |
-          $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-data'
-          New-Item -ItemType Directory -Path $env:SHINE_DATA_DIR | Out-Null
-          uv run --project backend alembic -c backend/alembic.ini upgrade head
-      - name: Start the local workbench and check the health endpoint
-        shell: pwsh
-        run: |
-          $env:SHINE_RENDER_PROVIDER = 'mock'
-          $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-data'
-          $api = Start-Process -PassThru -WindowStyle Hidden `
-            -FilePath 'uv' `
-            -ArgumentList @('run','--project','backend','uvicorn','shine.main:app','--host','127.0.0.1','--port','8123')
-          try {
-            $ok = $false
-            for ($i = 0; $i -lt 30; $i++) {
-              Start-Sleep -Seconds 2
-              try {
-                $response = Invoke-RestMethod -Uri 'http://127.0.0.1:8123/health' -TimeoutSec 5
-                $ok = $true
-                break
-              } catch { }
-            }
-            if (-not $ok) { throw 'The local API did not answer on 127.0.0.1:8123' }
-            Write-Host "health: $($response | ConvertTo-Json -Compress)"
-            $status = Invoke-RestMethod -Uri 'http://127.0.0.1:8123/api/v1/system/status' -TimeoutSec 10
-            Write-Host "status: $($status.render_mode) api_online=$($status.api_online)"
-          } finally {
-            Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue
-          }
-
+      - name: Full backend suite, Ruff, and isolated migration
+        run: uv run --project backend python scripts/run_tests.py full
       - name: Windows API and Worker mock smoke
         shell: pwsh
         run: |
           $env:SHINE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'shine-worker-smoke'
           ./scripts/verify_local_stack.ps1 -ApiPort 8127
-
       - name: Windows owned stack start, proxy and stop regression
         shell: pwsh
         run: ./scripts/verify_stack_operations.ps1
 
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci --prefix frontend
-      - run: npm --prefix frontend run build
-
   web-e2e:
+    name: L3 browser E2E
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.test_tier == 'full')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

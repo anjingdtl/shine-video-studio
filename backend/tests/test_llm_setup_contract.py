@@ -18,6 +18,8 @@ from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, ProviderProfile
 from tests.fake_http import FakeOpenAIServer
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def fake_openai():

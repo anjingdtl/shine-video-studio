@@ -49,6 +49,8 @@ from tests.test_director_long_form import (
     _plan_and_package,
 )
 
+pytestmark = pytest.mark.integration
+
 
 def _has_ffmpeg(settings) -> bool:
     return bool(shutil.which(settings.ffmpeg_path) and shutil.which(settings.ffprobe_path))

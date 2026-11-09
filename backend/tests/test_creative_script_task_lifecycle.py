@@ -34,6 +34,8 @@ from tests.test_director_entries_and_post import (
     _scriptwriter,
 )
 
+pytestmark = pytest.mark.integration
+
 
 def _queued_task(client, project: str):
     """A confirmed brief with one queued brief→script task."""

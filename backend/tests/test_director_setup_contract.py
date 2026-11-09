@@ -1,6 +1,7 @@
 """Shipped TypeScript -> real FastAPI/Pydantic/SQLite, external executor ports only isolated."""
 # ruff: noqa: F811
 import json
+import os
 import subprocess
 from datetime import timedelta
 from pathlib import Path
@@ -14,6 +15,8 @@ from shine.models import utcnow
 from tests.conftest import create_project
 from tests.test_setup_cold_start import seed
 from tests.test_v13_preparation import HEADERS, prep  # noqa: F401
+
+pytestmark = pytest.mark.full
 
 LOCAL = {'X-Shine-Local-Action': '1'}
 REPO = Path(__file__).resolve().parents[2]
@@ -59,6 +62,8 @@ def approve(client, plan):
     return response.json()
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="local installation execution is Windows-only")
 def test_shipped_service_uses_real_install_contract(prep, monkeypatch):
     client, factory, _ = prep
     monkeypatch.setenv('SHINE_ENABLE_LOCAL_EXECUTION', '1')
@@ -88,6 +93,8 @@ def test_shipped_service_uses_real_install_contract(prep, monkeypatch):
     assert replay.json()['attempt_id'] == result['attempt_id']
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="local installation execution is Windows-only")
 def test_shipped_service_uses_real_instance_approval_and_state_machine(prep, monkeypatch):
     client, factory, _ = prep
     owner = {'pid': 99999999, 'birth': 'synthetic-port-only'}

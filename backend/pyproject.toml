@@ -33,7 +33,16 @@ packages = ["shine"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+  "unit: L1 deterministic pure-logic, schema, model, and contract test",
+  "integration: L2 isolated FastAPI, database, worker, and mocked-service integration test",
+  "full: L3-only test that requires full engineering acceptance coverage",
+  "windows_only: behavior that is meaningful only on Windows",
+  "media: invokes real FFmpeg/FFprobe media processing with synthetic test assets",
+  "external_service: requires a real ComfyUI/provider process or service outside the in-process mocks",
+  "gpu_required: requires an actual compatible GPU and model runtime",
+]
 
 [tool.ruff]
 line-length = 120

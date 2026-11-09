@@ -11,6 +11,8 @@ import pytest
 
 from shine.security import is_loopback_peer, is_loopback_url
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize(
     "url",

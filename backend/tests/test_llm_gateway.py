@@ -22,6 +22,8 @@ from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from tests.fake_http import FakeOpenAIServer
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def fake_openai():

@@ -8,7 +8,11 @@ an unverified registration proves nothing about what a render can carry.
 
 from __future__ import annotations
 
+import pytest
+
 from shine.agents.film import reference_budget_note
+
+pytestmark = pytest.mark.unit
 
 
 def _budget(validated=True, image=3, audio=1, name="suZhen-ref2va-3img-1aud"):

@@ -32,6 +32,8 @@ from shine.materialprep.contracts import (
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
 from shine.models import Project
 
+pytestmark = pytest.mark.integration
+
 
 def _add_plan(db, project_id, *, purpose, status="ANALYZED", payload=None, created_at=None):
     body = payload if payload is not None else {"document_id": "doc", "script_hash": "h", "requirements": []}

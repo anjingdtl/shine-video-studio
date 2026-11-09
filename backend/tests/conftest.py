@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,238 @@ from shine.db import Base, make_engine, make_session_factory
 from shine.main import create_app
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
+
+
+_TEST_TIERS = ("unit", "integration", "full")
+_TEST_DIMENSIONS = ("windows_only", "media", "external_service", "gpu_required")
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("shine-test-tiers")
+    group.addoption(
+        "--shine-runner-tier",
+        choices=("quick", "integration", "full", "profile"),
+        default=None,
+        help="Apply the supported Shine test tier selection policy.",
+    )
+    group.addoption(
+        "--shine-quick-scope",
+        choices=("unit", "integration"),
+        default="unit",
+        help="For quick runs, optionally include the complete integration tier.",
+    )
+    group.addoption(
+        "--shine-quick-target",
+        action="append",
+        default=[],
+        help="Repository-relative test file to include in a quick run.",
+    )
+    group.addoption(
+        "--shine-module",
+        action="append",
+        default=[],
+        help="Restrict an integration run to test module names containing this value.",
+    )
+    group.addoption(
+        "--shine-integration-target",
+        action="append",
+        default=[],
+        help="Restrict integration tests to repository-relative files selected by diff analysis.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    tier_counts = Counter()
+    dimension_counts = Counter()
+    defaulted_integration = 0
+    defaulted_full = 0
+    item_tiers = {}
+    for item in items:
+        own_tiers = [
+            name for name in _TEST_TIERS
+            if any(marker.name == name for marker in item.own_markers)
+        ]
+        inherited_tiers = [name for name in _TEST_TIERS if item.get_closest_marker(name)]
+        if len(own_tiers) > 1 or (not own_tiers and len(inherited_tiers) > 1):
+            marked_tiers = own_tiers or inherited_tiers
+            raise pytest.UsageError(
+                f"{item.nodeid} has multiple test tier markers: {', '.join(marked_tiers)}"
+            )
+        function_code = getattr(getattr(item, "function", None), "__code__", None)
+        uses_synthetic_media = bool(function_code and "make_test_video_bytes" in function_code.co_names)
+        if uses_synthetic_media:
+            if own_tiers and own_tiers[0] != "full":
+                raise pytest.UsageError(
+                    f"{item.nodeid} encodes synthetic media and conflicts with its explicit {own_tiers[0]} tier."
+                )
+            if not own_tiers and inherited_tiers and inherited_tiers[0] == "unit":
+                raise pytest.UsageError(
+                    f"{item.nodeid} encodes synthetic media inside a unit-tier module; split the module marker."
+                )
+            if not item.get_closest_marker("media"):
+                item.add_marker(pytest.mark.media)
+            if not item.get_closest_marker("full"):
+                item.add_marker(pytest.mark.full)
+            if not own_tiers and not inherited_tiers:
+                defaulted_full += 1
+            tier = "full"
+        elif own_tiers:
+            tier = own_tiers[0]
+        elif inherited_tiers:
+            tier = inherited_tiers[0]
+        else:
+            # Unknown tests are visible in L3 until explicitly assigned to L1/L2.
+            item.add_marker(pytest.mark.full)
+            tier = "full"
+            defaulted_full += 1
+
+        item_tiers[id(item)] = tier
+        tier_counts[tier] += 1
+
+        for name in _TEST_DIMENSIONS:
+            if item.get_closest_marker(name):
+                dimension_counts[name] += 1
+        if not item.get_closest_marker("windows_only"):
+            for marker in item.iter_markers("skipif"):
+                reason = str(marker.kwargs.get("reason", "")).casefold()
+                if any(value in reason for value in ("windows", "job object", "powershell 5.1", "windows process")):
+                    item.add_marker(pytest.mark.windows_only)
+                    dimension_counts["windows_only"] += 1
+                    break
+
+    if sum(tier_counts.values()) != len(items):
+        raise pytest.UsageError("Every collected backend test must belong to exactly one tier.")
+
+    original_count = len(items)
+    runner_tier = config.getoption("shine_runner_tier")
+    root = Path(__file__).resolve().parents[2]
+    target_paths = {
+        value.replace("\\", "/").casefold()
+        for value in config.getoption("shine_quick_target")
+    }
+    module_filters = [value.casefold() for value in config.getoption("shine_module")]
+    integration_targets = {
+        value.replace("\\", "/").casefold()
+        for value in config.getoption("shine_integration_target")
+    }
+    selected = []
+    quick_targets_deferred = 0
+    for item in items:
+        tier = item_tiers[id(item)]
+        relative_path = Path(item.path).resolve().relative_to(root).as_posix().casefold()
+        if runner_tier == "quick":
+            if relative_path in target_paths and (tier == "full" or item.get_closest_marker("media")):
+                quick_targets_deferred += 1
+            keep = tier == "unit" or (
+                config.getoption("shine_quick_scope") == "integration" and tier == "integration"
+            ) or (relative_path in target_paths and tier != "full" and not item.get_closest_marker("media"))
+        elif runner_tier == "integration":
+            keep = tier == "integration"
+            if integration_targets:
+                keep = keep and relative_path in integration_targets
+            if module_filters:
+                module_name = Path(item.path).stem.casefold()
+                keep = keep and any(value in module_name for value in module_filters)
+        else:
+            keep = True
+        if keep:
+            selected.append(item)
+
+    integration_target_fallback = False
+    if runner_tier == "integration" and integration_targets and not selected and not module_filters:
+        # A mapped file may contain only L1 or L3 cases. An empty L2 run is
+        # not a validation result, so widen safely to the complete L2 set.
+        selected = [item for item in items if item_tiers[id(item)] == "integration"]
+        integration_target_fallback = True
+
+    selected_ids = {id(item) for item in selected}
+    deselected = [item for item in items if id(item) not in selected_ids]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+    config._shine_test_tier_summary = {
+        "tier": runner_tier or "full (default pytest)",
+        "total": original_count,
+        "selected": len(selected),
+        "deselected": len(deselected),
+        "quick_targets_deferred": quick_targets_deferred,
+        "integration_target_fallback": integration_target_fallback,
+        "integration_targets": sorted(integration_targets),
+        "module_filters": module_filters,
+        "defaulted_integration": defaulted_integration,
+        "defaulted_full": defaulted_full,
+        "tiers": dict(tier_counts),
+        "dimensions": dict(dimension_counts),
+    }
+    module_counts = Counter(
+        Path(item.path).resolve().relative_to(root).as_posix()
+        for item in selected
+    )
+    config._shine_module_case_counts = module_counts
+    config._shine_module_durations = Counter()
+    config._shine_module_phases = Counter()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    module_durations = getattr(item.config, "_shine_module_durations", None)
+    if module_durations is not None:
+        root = Path(__file__).resolve().parents[2]
+        module = Path(item.path).resolve().relative_to(root).as_posix()
+        module_durations[module] += report.duration
+        item.config._shine_module_phases[module] += 1
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    summary = getattr(config, "_shine_test_tier_summary", None)
+    if not summary:
+        return
+    tiers = summary["tiers"]
+    dimensions = summary["dimensions"]
+    terminalreporter.write_sep(
+        "=",
+        "Shine test-tier collection guard",
+    )
+    terminalreporter.write_line(
+        "[shine-tier] "
+        f"total={summary['total']} selected={summary['selected']} deselected={summary['deselected']} "
+        f"unit={tiers.get('unit', 0)} integration={tiers.get('integration', 0)} "
+        f"full={tiers.get('full', 0)} defaulted_to_integration={summary['defaulted_integration']} "
+        f"defaulted_to_full={summary['defaulted_full']}"
+    )
+    terminalreporter.write_line(
+        "[shine-tier] dimensions "
+        + " ".join(f"{name}={dimensions.get(name, 0)}" for name in _TEST_DIMENSIONS)
+    )
+    terminalreporter.write_line(f"[shine-tier] selected test modules={len(config._shine_module_case_counts)}")
+    module_durations = getattr(config, "_shine_module_durations", {})
+    for module, seconds in sorted(module_durations.items(), key=lambda row: row[1], reverse=True)[:20]:
+        terminalreporter.write_line(
+            f"[shine-module] {seconds:.3f}s phases={config._shine_module_phases[module]} "
+            f"cases={config._shine_module_case_counts[module]} {module}"
+        )
+    if summary["quick_targets_deferred"]:
+        terminalreporter.write_line(
+            f"[shine-tier] changed full/media test cases deferred to L3: {summary['quick_targets_deferred']}"
+        )
+    if summary["integration_target_fallback"]:
+        terminalreporter.write_line(
+            "[shine-tier] changed-file selection contained no L2 tests; running the complete integration tier"
+        )
+    if summary["deselected"]:
+        if summary["tier"] == "quick":
+            reason = (
+                "quick policy: all unit tests plus compatible changed-module targets; media/full targets stay in L3"
+            )
+        elif summary["integration_targets"]:
+            reason = "integration diff selection: only matching mapped files are selected"
+        elif summary["module_filters"]:
+            reason = "integration module filter: other integration modules are intentionally omitted"
+        else:
+            reason = "integration policy: full-only tests remain in L3"
+        terminalreporter.write_line(f"[shine-tier] deselected reason: {reason}")
 
 
 def qualified_hardware() -> dict:
@@ -78,6 +312,11 @@ def fake_deployment_host(monkeypatch):
     def declared_host_facts(*args, **kwargs):
         facts = probed(*args, **kwargs)
         facts.update(qualified_hardware())
+        # These tests exercise plans for the product's supported Windows host.
+        # Keep real fixture paths and disk probes, while making the simulated
+        # host platform explicit so OS qualification is tested independently
+        # from the machine running pytest.
+        facts['platform'] = qualified_host_facts()['platform']
         facts['evidence'] = {**(facts.get('evidence') or {}), 'failures': []}
         return facts
 
@@ -132,6 +371,7 @@ def ffprobe_executable() -> str | None:
     return shutil.which("ffprobe")
 
 
+@lru_cache(maxsize=16)
 def make_test_video_bytes(
     *,
     duration_s: float = 6.0,

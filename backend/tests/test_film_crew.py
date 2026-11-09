@@ -30,6 +30,8 @@ from tests.conftest import (
 from tests.fake_http import FakeComfyServer
 from tests.test_offline_e2e import ScriptedASR, ScriptedSemanticReviewer
 
+pytestmark = pytest.mark.integration
+
 ENGLISH_STYLE = {
     "photography_language": "Eye-level stable medium shots",
     "shot_blocking": "Preserve the dialogue axis",

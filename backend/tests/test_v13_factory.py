@@ -357,20 +357,64 @@ def test_model_proxy_never_calls_provider_when_gpu_exclusive(prep):
         TrackedProvider(NoCall(), factory, project).design("guarded", "你好", "Lin")
 
 
-def test_resource_slot_heartbeats_a_long_running_model(prep):
+def test_resource_slot_heartbeats_a_long_running_model(prep, monkeypatch):
+    import threading
     import time
 
     from shine.comfyops.models import ResourceLease
-    from shine.comfyops.scheduler import resource_slot
+    from shine.comfyops.scheduler import ResourceScheduler, resource_slot
+
+    # Keep the production heartbeat cadence at 15 seconds, but shorten only
+    # the waiting primitive in this test. The assertion waits for the actual
+    # background database heartbeat and checks that it advanced.
+    real_event = threading.Event
+    heartbeat_observed = real_event()
+    wait_intervals = []
+
+    class FastHeartbeatEvent:
+        def __init__(self):
+            self.event = real_event()
+
+        def wait(self, timeout=None):
+            wait_intervals.append(timeout)
+            return self.event.wait(min(timeout, 0.01) if timeout == 15 else timeout)
+
+        def set(self):
+            self.event.set()
+
+        def clear(self):
+            self.event.clear()
+
+        def is_set(self):
+            return self.event.is_set()
+
+        def __repr__(self):
+            return repr(self.event)
+
+    original_heartbeat = ResourceScheduler.heartbeat
+
+    def observe_heartbeat(scheduler, db, lease_id, owner):
+        original_heartbeat(scheduler, db, lease_id, owner)
+        heartbeat_observed.set()
+
+    monkeypatch.setattr(threading, "Event", FastHeartbeatEvent)
+    monkeypatch.setattr(ResourceScheduler, "heartbeat", observe_heartbeat)
 
     _, factory, _ = prep
     with resource_slot(factory, "TTS", 4000) as identity:
         with factory() as db:
             first = db.get(ResourceLease, identity).heartbeat_at
-        time.sleep(16)
-        with factory() as db:
-            lease = db.get(ResourceLease, identity)
-            assert lease.status == "ACTIVE" and lease.heartbeat_at > first
+        assert heartbeat_observed.wait(timeout=1), "the resource heartbeat thread did not run"
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with factory() as db:
+                lease = db.get(ResourceLease, identity)
+                if lease.status == "ACTIVE" and lease.heartbeat_at > first:
+                    break
+            real_event().wait(0.01)
+        else:
+            pytest.fail("the committed resource heartbeat did not advance")
+        assert 15 in wait_intervals, "the production heartbeat cadence changed"
     with factory() as db:
         assert db.get(ResourceLease, identity).status == "RELEASED"
 

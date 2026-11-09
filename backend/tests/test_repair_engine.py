@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from shine.providers import MockH3Provider
 from shine.quality.repair import RepairEngine, categorize
 from shine.schemas import FusedQCResult, HardFailure, RepairAction
 from shine.worker import run_one
 from tests.conftest import create_job, create_project, create_shot, freeze_style
+
+pytestmark = pytest.mark.integration
 
 
 def report(*codes: str, confidence: float = 1.0) -> FusedQCResult:

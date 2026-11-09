@@ -122,14 +122,22 @@ managed new-machine install keeps ComfyUI under
 ## Tests and checks
 
 ```powershell
-uv run --project backend --locked pytest -c backend/pyproject.toml backend/tests
-uv run --project backend --locked ruff check backend/shine backend/alembic backend/tests
+# L1 quick
+uv run --project backend python scripts/run_tests.py quick
+
+# L2 integration
+uv run --project backend python scripts/run_tests.py integration
+
+# L3 full suite on this machine
+uv run --project backend python scripts/run_tests.py full
+
+# Slowest tests and modules
+uv run --project backend python scripts/run_tests.py profile
+
 npm --prefix frontend run build
 ```
 
-The suite covers style-version gates, binding isolation, concurrent revision, two-worker claims, crash recovery, uncertain submission, project audit, worker health, LLM retry/schema/auth classification, Agent output rejection, H3 label/section validation, Fake ComfyUI lifecycle, continuity, technical QC fallback, semantic fusion, repair budgets, path traversal, disk-full handling, and Alembic fresh/M1 upgrades.
-
-The V1.1 offline suite has **200 tests** (174 existing + 26 film-crew/rulebook cases). It includes the Fake ComfyUI crew collaboration/repair/EDL loop. `imageio-ffmpeg` is a development-only dependency for synthetic test media, never real H3 generation. See the V1.1 implementation report for exact validation results and scope.
+Read [the three-tier strategy](docs/testing/THREE_TIER_TEST_STRATEGY.md) for marker rules, diff selection, platform boundaries, and CI triggers. L3 CI runs all backend tests on Linux and Windows and retains the browser E2E job. A local `full` run covers the current OS only; it is not evidence of Windows, GPU, real-model, or browser acceptance. `imageio-ffmpeg` is a development-only dependency for synthetic test media, never real H3 generation.
 
 ## V1.1 professional film crew
 

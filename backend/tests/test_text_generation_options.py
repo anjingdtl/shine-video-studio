@@ -11,6 +11,8 @@ from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.models import ProviderProfile
 from tests.test_llm_gateway import config
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize("reason", ["length", "max_tokens", "content_filter"])
 def test_truncated_completion_never_passes_even_if_json_is_valid(reason, monkeypatch):

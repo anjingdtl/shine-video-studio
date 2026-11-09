@@ -1,7 +1,11 @@
 """Production completion and final acceptance are separate public states."""
 
+import pytest
+
 from shine.models import Job, QualityGate
 from tests.conftest import create_comfy_job, create_project, create_shot, freeze_style
+
+pytestmark = pytest.mark.unit
 
 
 def test_passed_production_with_pending_final_gate_is_not_accepted(api):

@@ -15,6 +15,8 @@ from shine.models import DirectorStyleProfileRevision, Project, StyleVersion
 from shine.schemas import GenerationMode, ReferenceManifestItem, ReferenceUse, ShotSpec, StyleBible
 from tests.conftest import create_project
 
+pytestmark = pytest.mark.integration
+
 
 def _profile_payload() -> dict:
     entry = DirectorStyleCatalog().get("wong-kar-wai")

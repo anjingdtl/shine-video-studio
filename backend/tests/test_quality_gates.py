@@ -27,6 +27,8 @@ from shine.schemas import (
     TechnicalQCResult,
 )
 
+pytestmark = pytest.mark.integration
+
 
 def technical(*, result: str = "passed", failing: str | None = None) -> TechnicalQCResult:
     checks = [

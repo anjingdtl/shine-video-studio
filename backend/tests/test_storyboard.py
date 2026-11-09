@@ -20,6 +20,8 @@ from shine.models import AgentArtifact, AgentTaskRecord
 from tests.conftest import PNG, approve_lock, create_project, upload_asset
 from tests.test_film_crew import BRIEF, FACTS, prepare
 
+pytestmark = pytest.mark.integration
+
 # A minimal RIFF/WAVE header: the upload verifies the file signature.
 WAV = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVEfmt " + b"\x10\x00\x00\x00"
 

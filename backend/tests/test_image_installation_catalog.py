@@ -53,7 +53,7 @@ def test_the_catalog_is_research_only(api):
         assert "research" in component["license_id"], component["component_id"]
 
 
-def test_the_product_can_plan_the_image_weight_installation(api):
+def test_the_product_can_plan_the_image_weight_installation(api, fake_deployment_host):
     """The installation goes through the ordinary controlled path."""
     client, factory, settings = api
     project_id = client.post("/api/v1/projects", json={"title": "出图权重"}).json()["id"]

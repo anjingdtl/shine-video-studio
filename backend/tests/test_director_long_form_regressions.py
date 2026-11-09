@@ -63,6 +63,8 @@ from tests.test_director_long_form import (
     upload_asset,
 )
 
+pytestmark = pytest.mark.integration
+
 
 def start(api, *, shots=2, batch_limit=1, policy=None):
     client, factory, settings = api

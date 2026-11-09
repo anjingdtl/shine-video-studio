@@ -46,6 +46,8 @@ from shine.comfyops.models import (
 from shine.materialprep import runtime as image_runtime
 from shine.models import Asset, Project, utcnow
 
+pytestmark = pytest.mark.integration
+
 
 def _chunk(kind: bytes, body: bytes) -> bytes:
     return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", binascii.crc32(kind + body) & 0xFFFFFFFF)

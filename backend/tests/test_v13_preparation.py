@@ -31,6 +31,8 @@ from shine.models import Asset, utcnow
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
 from tests.conftest import create_project, create_shot, freeze_style
 
+pytestmark = pytest.mark.integration
+
 TOKEN = "isolated-v13-test-operator-credential-12345"
 HEADERS = {"Authorization": "Bearer " + TOKEN}
 

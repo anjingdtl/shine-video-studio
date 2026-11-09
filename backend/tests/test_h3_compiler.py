@@ -13,6 +13,8 @@ from shine.schemas import (
 )
 from tests.conftest import create_project, create_shot, freeze_style, shot_payload
 
+pytestmark = pytest.mark.unit
+
 STYLE = StyleBible(
     photography_language="平视中近景，稳定缓推",
     shot_blocking="对话保持视线轴线",

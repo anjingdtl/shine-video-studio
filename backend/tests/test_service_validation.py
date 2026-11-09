@@ -1,6 +1,7 @@
 """Live setup-service validation: fake probes, no model load, no real process."""
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,6 +22,10 @@ from shine.models import AgentRoute, AppSetting, ProviderProfile
 from tests.conftest import make_studio
 from tests.test_new_machine_setup import test_configuration_generation_and_recipe_validation as exercise_configuration
 from tests.test_v13_preparation import HEADERS, TOKEN, post
+
+pytestmark = pytest.mark.integration
+
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="managed service validation is Windows-only")
 
 
 @pytest.fixture
@@ -96,6 +101,8 @@ def test_registered_workflow_managed_probe_records_only_node_validation(prep, mo
         assert db.scalar(select(ResourceLease.id).where(ResourceLease.status == 'RECONCILE_REQUIRED'))
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypatch):
     client, factory, settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -143,6 +150,8 @@ def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypa
     assert layer4["node_count"] > 0
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_service_validation_rejects_live_workflow_contract_missing_node(prep, monkeypatch):
     client, factory, settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -164,6 +173,8 @@ def test_service_validation_rejects_live_workflow_contract_missing_node(prep, mo
     assert "LIVE_WORKFLOW_CONTRACT_FAILED" in response.text
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_renderer(prep, monkeypatch):
     client, factory, settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -195,6 +206,8 @@ def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_rendere
         assert status["advisory_reviews"]["ASR"]["status"] == "NOT_READY"
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_unavailable_review_probes_are_advisory_after_clean_process_exit(prep, monkeypatch):
     client, factory, _settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -222,6 +235,8 @@ def test_unavailable_review_probes_are_advisory_after_clean_process_exit(prep, m
     }
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_review_probe_cleanup_failure_keeps_core_environment_unconfirmed(prep, monkeypatch):
     client, factory, _settings = prep
     exercise_configuration(prep, monkeypatch)
@@ -264,6 +279,8 @@ def test_service_validation_stops_waiting_when_owned_process_exits(monkeypatch):
     assert failure.value.detail["exit_code"] == 9
 
 
+@pytest.mark.windows_only
+@WINDOWS_ONLY
 def test_service_validation_requires_candidate_and_operator(prep):
     client, _, _ = prep
     response = client.post("/api/v1/setup/services/validate", json={

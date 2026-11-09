@@ -28,10 +28,15 @@ from shine.comfyops.models import ComfyInstance, ResourceLease
 from shine.comfyops.scheduler import ResourceScheduler
 from shine.models import AppSetting, Job, JobAttempt, utcnow
 
-pytestmark = pytest.mark.skipif(
-    os.name != "nt" or os.environ.get("SHINE_REAL_COMFY_PROBE") != "1",
-    reason="SHINE_REAL_COMFY_PROBE=1 and a local ComfyUI install are required",
-)
+pytestmark = [
+    pytest.mark.full,
+    pytest.mark.external_service,
+    pytest.mark.gpu_required,
+    pytest.mark.skipif(
+        os.name != "nt" or os.environ.get("SHINE_REAL_COMFY_PROBE") != "1",
+        reason="SHINE_REAL_COMFY_PROBE=1 and a local ComfyUI install are required",
+    ),
+]
 
 REPO = Path(__file__).resolve().parents[2]
 

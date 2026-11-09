@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,8 @@ from shine.llm.secrets import SecretStore
 from shine.models import AgentRoute, AgentTaskRecord, AuditEvent, ProviderProfile
 from shine.schemas import AgentRole
 from tests.conftest import create_project
+
+pytestmark = pytest.mark.unit
 
 
 def create_profile(client, *, name: str, model: str = "model-one", **patch) -> dict:

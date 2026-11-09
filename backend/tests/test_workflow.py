@@ -19,6 +19,8 @@ from shine.services import transition
 from shine.worker import recover_expired_jobs, run_one
 from tests.conftest import asset_decision
 
+pytestmark = pytest.mark.integration
+
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
 
 

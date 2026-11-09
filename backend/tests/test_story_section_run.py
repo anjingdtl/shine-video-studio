@@ -26,6 +26,8 @@ from shine.models import AgentArtifact, AgentTaskRecord, AuditEvent
 from tests.test_film_crew import FACTS, prepare
 from tests.test_material_scenes import _responder as scene_responder
 
+pytestmark = pytest.mark.integration
+
 LOCAL = {"x-shine-local-action": "1"}
 
 CHAPTER_ONE = "第一章 起点\n林：你来了。\n阿尔法在海边等待落日。\n"

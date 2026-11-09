@@ -14,6 +14,8 @@ from shine.worker import run_one
 from tests.conftest import create_job, create_project, create_shot, freeze_style
 from tests.fake_http import FakeComfyServer
 
+pytestmark = pytest.mark.integration
+
 GRAPH = {
     "1": {
         "class_type": "H3BaseSampler",

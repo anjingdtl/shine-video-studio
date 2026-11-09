@@ -69,6 +69,7 @@ def test_catalog_rejects_unsafe_relative_path(tmp_path, monkeypatch):
     assert "UNSAFE_CATALOG_PATH" in str(excinfo.value.detail)
 
 
+@pytest.mark.windows_only
 def test_install_plan_via_setup_endpoint(prep):
     client, factory, settings = prep
     project = create_project(client)
@@ -298,6 +299,7 @@ def test_environment_probe_reports_this_host(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.windows_only
 def test_the_same_install_request_is_one_plan_and_one_attempt(prep, monkeypatch):
     """Two tabs, a refresh and a lost receipt re-attach the same physical work.
 
@@ -338,6 +340,7 @@ def test_the_same_install_request_is_one_plan_and_one_attempt(prep, monkeypatch)
     assert total == 1, "exactly one attempt exists for this target"
 
 
+@pytest.mark.windows_only
 def test_two_different_component_sets_cannot_share_the_same_storage_root(prep, monkeypatch):
     """Different content in the same directory is a conflicting identity."""
     client, _, _ = prep

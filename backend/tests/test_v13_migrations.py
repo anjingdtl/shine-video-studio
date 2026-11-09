@@ -1,5 +1,6 @@
 import sqlite3
 
+import pytest
 from sqlalchemy import inspect
 
 from alembic import command
@@ -7,6 +8,8 @@ from alembic.script import ScriptDirectory
 from shine.db import Base, make_engine, make_session_factory
 from shine.models import Asset, AuditEvent, Job, JobAttempt, Project, QCReport, Shot, StyleVersion, utcnow
 from tests.test_alembic import alembic_config
+
+pytestmark = pytest.mark.integration
 
 
 def test_v121_upgrade_preserves_every_existing_table_and_matches_metadata(tmp_path, monkeypatch):

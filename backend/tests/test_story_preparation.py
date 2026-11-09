@@ -2,6 +2,7 @@
 import json
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import select
 
 from shine.llm.gateway import LLMGateway
@@ -10,6 +11,8 @@ from shine.materialprep import story
 from shine.models import AgentArtifact, AgentTaskRecord, utcnow
 from tests.test_material_scene_safety import setup_scene
 from tests.test_material_scenes import _responder
+
+pytestmark = pytest.mark.integration
 
 LOCAL = {"x-shine-local-action": "1"}
 

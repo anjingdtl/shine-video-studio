@@ -19,6 +19,8 @@ import pytest
 from shine.comfyops import host_env, variants
 from shine.comfyops.variants import STATUS_BLOCKED, STATUS_SUPPORTED, STATUS_UNKNOWN, qualify
 
+pytestmark = pytest.mark.unit
+
 BASELINE = "h3-ref2va-int8-convrot"
 
 

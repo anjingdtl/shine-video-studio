@@ -695,28 +695,27 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # crew panel.
         page.goto(f"{ui_base}#v/setup", wait_until="networkidle")
         settings = page.locator("#settings")
-        settings.get_by_label("模型配置名称", exact=True).fill("UI bounded text fixture")
-        settings.get_by_label("服务平台", exact=True).select_option("openai_compatible")
-        settings.get_by_label("接口地址", exact=True).fill("http://127.0.0.1:9999/v1")
-        settings.get_by_label("Model ID", exact=True).fill("UI_ONLY_NO_MODEL_CALL")
-        # The bounded-output fields live inside the collapsed advanced block.
-        settings.locator("details.llm-add-model details summary").first.click()
-        settings.get_by_label("回复上限 token", exact=True).fill("8192")
-        settings.get_by_label("思考深度", exact=True).select_option("low")
+        add_model = settings.locator(".llm-add-model")
+        add_model.get_by_label("模型配置名称", exact=True).fill("UI bounded text fixture")
+        add_model.get_by_label("服务平台", exact=True).select_option("openai_compatible")
+        add_model.get_by_label("接口地址", exact=True).fill("http://127.0.0.1:9999/v1")
+        add_model.get_by_label("Model ID", exact=True).fill("UI_ONLY_NO_MODEL_CALL")
+        add_model.get_by_text("高级参数（可选）", exact=True).click()
+        add_model.get_by_label("回复上限 token", exact=True).fill("8192")
+        add_model.get_by_label("思考深度", exact=True).select_option("low")
         with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/provider-profiles")) as bounded_response:
-            settings.get_by_role("button", name="添加", exact=True).click()
+            add_model.get_by_role("button", name="添加", exact=True).click()
         assert bounded_response.value.status == 201
         assert bounded_response.value.json()["generation_options"] == {"max_completion_tokens": 8192, "reasoning_effort": "low"}
-        # The card is the model library entry.  The persisted generation
-        # options were asserted from the API response above; the card itself
-        # stays a short summary of name, platform and Model ID.
         bounded_card = settings.locator(".llm-model-card").filter(has_text="UI bounded text fixture")
-        expect(bounded_card).to_contain_text("UI_ONLY_NO_MODEL_CALL")
-        # Saving the first model closes the add block; reopen it to check that
-        # a platform without generation options hides those fields.
-        settings.locator("details.llm-add-model > summary").click()
-        settings.get_by_label("服务平台", exact=True).select_option("anthropic")
-        expect(settings.get_by_label("回复上限 token", exact=True)).to_have_count(0)
+        expect(bounded_card).to_contain_text("UI bounded text fixture")
+        bounded_card.get_by_text("编辑连接与模型参数", exact=True).click()
+        bounded_card.locator("details.llm-advanced-settings.llm-advanced-nested > summary").click()
+        expect(bounded_card.get_by_label("回复上限 UI bounded text fixture", exact=True)).to_have_value("8192")
+        expect(bounded_card.locator(".llm-advanced-grid select")).to_have_value("low")
+        add_model.locator("summary").first.click()
+        add_model.get_by_label("服务平台", exact=True).select_option("anthropic")
+        expect(add_model.get_by_label("回复上限 token", exact=True)).to_have_count(0)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
         # Back to the production view: the asset-isolation assertions below

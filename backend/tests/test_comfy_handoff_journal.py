@@ -595,9 +595,9 @@ def test_long_stage_holds_same_resource_until_exit(handoff):
 
     factory, job_id, attempt_id, lease_id, instance_id, version = handoff
     begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version, "http://127.0.0.1:8190")
-    with HandoffHeartbeat(factory, attempt_id, lease_seconds=2, interval=0.2) as guard:
+    with HandoffHeartbeat(factory, attempt_id, lease_seconds=1, interval=0.02) as guard:
         assert CURRENT_RESOURCE.get() == lease_id
-        time.sleep(2.2)  # Exceeds the initial lease while synthetic work is in progress.
+        time.sleep(1.1)  # Exceeds the shortened initial lease during synthetic work.
         guard.check()
         with factory.begin() as db:
             other = ResourceScheduler().enqueue(db, "other-review", 1)

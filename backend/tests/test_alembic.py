@@ -9,6 +9,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
+pytestmark = pytest.mark.integration
+
 HEAD_REVISION = "f180b0060001"
 
 REPO = Path(__file__).resolve().parents[2]

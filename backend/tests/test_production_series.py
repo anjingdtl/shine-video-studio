@@ -37,6 +37,8 @@ from .conftest import (
     upload_asset,
 )
 
+pytestmark = pytest.mark.integration
+
 
 def _register_ref2va_profile(client):
     """A Ref2VA profile: the shot under test carries an image reference."""

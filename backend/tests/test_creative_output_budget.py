@@ -1,4 +1,6 @@
 """The creative output budget: 60% of a verified output maximum, never more."""
+import pytest
+
 from shine.llm.base import ProviderConfig
 from shine.llm.output_budget import (
     creative_completion_cap,
@@ -6,6 +8,8 @@ from shine.llm.output_budget import (
     truncated_output,
     usage_summary,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def _cfg(**overrides) -> ProviderConfig:

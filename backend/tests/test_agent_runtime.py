@@ -13,6 +13,8 @@ from shine.agents.tools import AssetView
 from shine.schemas import ScriptPlan, StyleBible
 from tests.conftest import PNG, approve_lock, create_project, freeze_style, upload_asset
 
+pytestmark = pytest.mark.integration
+
 
 def test_txt_markdown_and_json_scripts_are_parsed():
     text = parse_document("剧本.txt", "雾港\n韩魁：账册在哪儿？\n".encode())

@@ -4,6 +4,8 @@ import pytest
 from shine.voiceops.local_sdk import restore_unspoken_text
 from shine.voiceops.providers import verify_dialogue
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize("text,tokens,expected", [
     ("你好。", ["你", "好"], ["你", "好。"]),

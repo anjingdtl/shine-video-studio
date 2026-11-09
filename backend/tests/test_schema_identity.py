@@ -6,9 +6,12 @@ to say why.  ``/health`` now states the database revision next to the head this
 code ships with; an unknown revision is reported as unknown, never as current.
 """
 
+import pytest
 from sqlalchemy import text
 
 from shine.main import _code_schema_head
+
+pytestmark = pytest.mark.unit
 
 
 def test_health_states_the_schema_head_this_code_expects(api):

@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from shine.llm.base import ProviderConfig
 from shine.llm.context_window import model_context_for_profile, model_context_from_capabilities
@@ -6,6 +7,8 @@ from shine.llm.gateway import LLMGateway
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from shine.models import ProviderProfile
+
+pytestmark = pytest.mark.unit
 
 
 def test_minimax_m31_flash_uses_official_one_million_context_when_endpoint_omits_limits():
