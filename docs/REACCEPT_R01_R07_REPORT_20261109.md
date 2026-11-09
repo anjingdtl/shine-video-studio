@@ -135,3 +135,59 @@ A 分组 → 切到 B → 重新分组被 409 拒绝且旅程点名；按场次�
 - 前端 `DirectorProductionRunPanel` 增加读取代号（epoch）：快切包、作品或 Run 时丢弃旧异步结果。
 
 **验收**：`backend/tests/test_director_run_scope.py`（3 项）。
+
+---
+
+## 验证账本（本机，2026-11-09）
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 后端完整套件 | `backend/.venv/Scripts/python.exe -m pytest -q`（`SHINE_DATA_DIR` 指向临时目录） | **通过**（1 项跳过，0 失败） |
+| 本轮定向套件 | `pytest tests/test_director_basis_grouping.py tests/test_production_gate_weight_evidence.py tests/test_director_execution_contract.py tests/test_one_click_batch_admission.py tests/test_shoot_ownership.py tests/test_director_run_scope.py` | 28 项通过 |
+| 受影响既有套件 | `pytest tests/test_production_series.py tests/test_variant_binding_and_gate.py tests/test_director_journey_closeout.py tests/test_director_assets_closeout.py tests/test_output_spec_and_identity.py tests/test_production_preflight_closeout.py tests/test_one_click_start_closeout.py tests/test_director_entries_and_post.py tests/test_director_script_basis_closeout.py` | 全部通过 |
+| 合同收紧后的既有套件 | `pytest tests/test_handoff_lease_transfer.py tests/test_managed_process_release.py tests/test_renderer_supervisor.py` | 全部通过（按新合同：旧尝试先终态，新尝试再开始） |
+| Ruff | `python -m ruff check shine tests` | 通过 |
+| 前端构建 | `npm.cmd run build` | 通过（tsc -b + vite build） |
+| 前端单测 | `npm.cmd test` | **32 个文件 / 206 项通过**（基线 201 + 本轮 5 项向导回归） |
+| Alembic 空库 | `alembic upgrade head`（新临时库） | 通过，升到 `f180b0060001` |
+| Alembic 旧库副本 | `alembic upgrade head`（`.local-data/mig-check/check.db` 的副本） | 通过，升到 `f180b0060001` |
+| Windows 测试包 | `pwsh -File scripts\build_test_package.ps1 -OutDir releases -Verify` | 通过：解包后 **750 个文件逐个验签** |
+| 浏览器 smoke | `pytest scripts/test_director_browser.py` | **未通过（既有问题）**，见下 |
+| 远端 CI | PR #12 | `frontend` 通过；`web-e2e` 在一处**与本轮无关**的旧断言上失败（前一次同代码通过，判定为抖动，已申请重跑）；`backend` / `backend-windows` 见 PR 页面 |
+
+### 测试包
+
+- 文件：`releases/ShineVideoStudio-20261109-bc8e0d3-win64.zip`
+- SHA-256：`80d8517229671fdf3d36e25e5715ee49a8c37cc8402ad311694c1fd92993bcfb`
+- 大小：4046710 字节；来源提交 `bc8e0d3`（分支 `feature/reaccept-r01-r07`）
+
+### 未通过的浏览器 smoke（如实记录）
+
+`scripts/test_director_browser.py` 的三个场景在本轮**仍未跑通**，原因是这个脚本早于本轮就已
+与当前契约不一致：
+
+1. **基线提交同样失败**：把 `main@5739e2b` 拉进独立 worktree 跑同一脚本，三个场景
+   以同样方式失败（`LLM_SETUP_REQUIRED` 断言、`真实制作已准备好` 断言），证明这不是本轮引入的回归。
+2. 本轮已修的三处与当前契约不符的地方：文本模型不再阻断 H3 安装（J03 的新合同）、
+   表单可访问名改为 `模型配置名称` / `接口地址`（J12 的定位器）、隔离夹具不再把本机已有
+   安装当成可复用项。
+3. **剩下的缺口**：脚本最后一步要打开排产制作阶段的「单镜头制作与任务明细（高级）」折叠区，
+   需要先切到工作台的生产阶段；本轮未能定位到该导航入口。向导部分（`真实制作已准备好`）
+   在 `models_complete` 场景已经走通，失败发生在其后的演示态偏好检查。
+
+### 未覆盖的边界（本轮不声称）
+
+- **真实 Windows 全新机安装**、重复启动、真实依赖与权重下载、断点恢复、已有环境原位复用：未做。
+- **真实 Provider 的 LLM / H3 出片**：未做；本轮所有 H3 相关证据都来自隔离 SQLite、网络桩与合成素材。
+- **多集连续交付**（至少两集分别产出、解码、下载）：未做。
+- **人工观感验收**：未做。
+- **W6A8 / Qwen / 固定音色 / 建议审片**的真实能力证据：未做；本轮只改了 W6A8 的生产准入判定。
+- 本轮没有改动 `client_review_identity` 钉住的文件（`worker.py` / `preproduction.py` / handoff / quality），
+  因此不触发 VLM 重校准；真实正负校准本来就没做过，仍不得声称已校准。
+
+### 交付
+
+- 分支：`feature/reaccept-r01-r07`（`main@5739e2b` 之上），PR：<https://github.com/anjingdtl/shine-video-studio/pull/12>
+- 提交：`81e35f4`（七项修复与回归）、`bc8e0d3`（补一项向导回归）
+- 报告：`docs/REACCEPT_R01_R07_REPORT_20261109.md`；`AGENTS.md` 增加本轮规则。
+- 保留用户现有安装、历史成片、授权与未知提交：未做任何清理或重置。
