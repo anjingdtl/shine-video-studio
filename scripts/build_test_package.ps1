@@ -262,7 +262,8 @@ $buildInfo = [ordered]@{
         'alembic check reports two pre-existing delivery_orders index differences; normal upgrades and rollback tests pass',
         'L4 services and node contracts stay PENDING until the wizard service validation is run on the real machine',
         'the per-shot / total seconds timer is implemented against server timestamps and covered by tests, but its live per-second ticking has not been human-observed inside a real render window',
-        'the H3 renderer release is proven for process and port; a GPU memory before/after reading currently exists only for the image renderer release path'
+        'the H3 renderer release is proven for process and port; a GPU memory before/after reading currently exists only for the image renderer release path',
+        'the official W6A8 low-end candidate tier exists but has no real acceptance: this host is an RTX 5080 16GB (no 4070 Super 12GB), the approved W6A8 weights are not installed, and a CANDIDATE variant is never downloaded automatically - its weights must be brought in by the person through the existing detect/import path, checked against the pinned revision, byte count and SHA-256'
     )
     closed_in_this_build = @(
         'the whole-film run layer no longer starves its own executors: it separates "inspected" from "really changed", a reused pending delivery order is not new work, a run that only checked yields the tick to the series, the episode assembly and the ordinary queue, and several runs take turns instead of one starving the others',
@@ -278,6 +279,8 @@ $buildInfo = [ordered]@{
         'delivery orders sort newest-first with a Latest badge and collapsed history',
         'the installer creates a desktop one-click shortcut on both the fresh-install and the already-installed paths',
         'three shooting-quality tiers (PDD 8-step / native 20-step / PDD 8-step + upscale) come from the upstream canonical graphs, catalog 1.2.0',
+        'a fourth, separate tier for the official W6A8 low-end candidate: it has its own deployment catalog, its own PDD-free workflow graph, its own five-layer readiness report (weights, byte-level verification, project profile, live node check, real shot) with exactly one next step, and it stays a CANDIDATE until a real machine renders it',
+        'the generation-profile list is a reference and the person decides which profile runs: an explicitly chosen profile is never replaced by the automatic start, by the quality tier or by the director package',
         'reviewer routes are created and bound to the actually installed 8B VLM and 0.6B ASR',
         'L4 readiness is derived from sealed service evidence instead of a hard-coded PENDING',
         'child process TMPDIR no longer falls back to the system drive',
