@@ -157,9 +157,10 @@ A 分组 → 切到 B → 重新分组被 409 拒绝且旅程点名；按场次�
 
 ### 测试包
 
-- 文件：`releases/ShineVideoStudio-20261109-bc8e0d3-win64.zip`
-- SHA-256：`80d8517229671fdf3d36e25e5715ee49a8c37cc8402ad311694c1fd92993bcfb`
-- 大小：4046710 字节；来源提交 `bc8e0d3`（分支 `feature/reaccept-r01-r07`）
+- 文件：`releases/ShineVideoStudio-20261109-5d2f42c-win64.zip`
+- SHA-256：`454c3c17e7b54c5aba301ff3ad09762486a12d6283c532d198c42dfc61e221da`
+- 大小：4048973 字节；来源提交 `5d2f42c`（分支 `feature/reaccept-r01-r07`）
+- 其后只有一个提交：把这一行哈希写进本报告（纯文档），代码与包内容不变。
 
 ### 未通过的浏览器 smoke（如实记录）
 
