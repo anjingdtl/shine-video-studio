@@ -473,3 +473,9 @@ prompt、UI 或素材；许可证与使用领域约束未因此变化。
 | Huobao Drama（`validateStoryboardBindings`） | 交付前对卷/集/场/Shot revision 做集合校验，越界在写副作用前拒绝 | `build_volume_handoff`（`PIPELINE_SCENE_WITHOUT_SHOT`、`PIPELINE_SHOT_CLAIMED_TWICE`） |
 | NarratoAI（解析与内容验收分层） | 结果分类（NOT_SENT / RESPONSE_RECEIVED / UNKNOWN）与内容验收分离，截断进入未完成 | `backend/shine/materialprep/agent_call.py`、`director/pipeline.py`（`_send_outcome_unknown`） |
 | Temporal（Activity 幂等与崩溃窗口） | SQLite 本地 fence + 持久回执 + 孤儿结果唯一采纳；外部副作用从不盲目重放 | `_commit_pipeline_result`、`_adopt_orphan_result`、`start_pipeline_new_attempt` |
+
+### 2026-11-09 素材中心图生图尺寸
+
+- 本机 ComfyUI `b0b743566f65daafc423b4fea8a2fbda94b3384a` 的 `comfy_extras/nodes_qwen.py` 中，`TextEncodeQwenImage21` 将 `resolution²` 作为像素预算，按首张参考图比例对齐到 32 像素，首张参考的尺寸决定编辑 latent。
+- 同一版本 `nodes.py` 提供 `ImageScale` 的 Lanczos 和中心裁切。Shine 通过 API 图调用该节点，把成品归一到明确请求的宽高，再由输出节点 `461` 写入 PNG。编辑图的能力证据继续绑定 adapter hash，图变化后需要新样例。模板 commit 仍为 `21d7cc4fb9afd983957f2d2d6b1d583860ccb40b`。
+- 本机 RTX 5080 上通过受管 ComfyUI 实测 512×512 文生图和带真实底图的 640×448 图生图。两项均由 Worker 获取节点 `461` 的结果并完成技术质检。复用本机节点和原有锁定模型文件，通过 ComfyUI API 调用。

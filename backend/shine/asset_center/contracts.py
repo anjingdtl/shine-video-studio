@@ -3,6 +3,7 @@ from __future__ import annotations
 import binascii
 import hashlib
 import json
+import math
 import struct
 import zlib
 from typing import Any
@@ -188,7 +189,6 @@ def build_qwen_edit_graph(
     seed: int,
     steps: int = 25,
     cfg: float = 1.0,
-    resolution: int = 1024,
 ) -> dict[str, Any]:
     """Compile the published native Qwen edit subgraph to an API prompt graph.
 
@@ -226,7 +226,8 @@ def build_qwen_edit_graph(
                 "vae": ["454", 0],
                 "prompt": prompt,
                 "negative_prompt": "",
-                "resolution": resolution,
+                # The native node budgets reference pixels by area.
+                "resolution": round(math.sqrt(width * height) / 32) * 32,
                 **{f"images.image_{index + 1}": [str(700 + index), 0] for index in range(len(uploaded_names))},
             },
         },
@@ -246,22 +247,24 @@ def build_qwen_edit_graph(
             },
         },
         "457": {"class_type": "VAEDecode", "inputs": {"samples": ["458", 0], "vae": ["454", 0]}},
+        "7010": {
+            "class_type": "ImageScale",
+            "inputs": {
+                "image": ["457", 0],
+                "upscale_method": "lanczos",
+                "width": width,
+                "height": height,
+                "crop": "center",
+            },
+        },
         "461": {
             "class_type": "SaveImage",
-            "inputs": {"images": ["457", 0], "filename_prefix": "shine-assets-qwen-edit"},
+            "inputs": {"images": ["7010", 0], "filename_prefix": "shine-assets-qwen-edit"},
         },
     }
     for index, uploaded in enumerate(uploaded_names):
         node_id = str(700 + index)
         graph[node_id] = {"class_type": "LoadImage", "inputs": {"image": uploaded}}
-    # Image edit output dimensions are chosen by the first reference latent in
-    # the native node. The requested width/height are recorded, but this graph
-    # cannot honestly promise arbitrary dimensions until local samples validate
-    # the exact latent/resize behavior.
-    # The official template exposes one resolution scalar and preserves the
-    # target image's aspect ratio. Keep the requested pixel budget tied to the
-    # longer edge; the candidate must still pass exact dimensions in QC.
-    graph["474"]["inputs"]["resolution"] = max(256, min(2048, round(max(width, height) / 32) * 32))
     return graph
 
 

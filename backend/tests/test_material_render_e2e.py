@@ -28,7 +28,7 @@ from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.assets import fake_image
-from shine.comfyops.models import PreProductionPlan, RightsRecord
+from shine.comfyops.models import PreProductionPlan
 from shine.materialprep import execution, runtime
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
 from tests.test_material_image_jobs import object_info_fixture
@@ -160,16 +160,7 @@ def test_the_image_path_submits_harvests_and_registers_a_candidate(api, tmp_path
             )
             db.add(plan)
             db.flush()
-            rights_payload = {"scope": "asset", "license_id": "local-research", "purpose": "material preparation"}
-            rights = RightsRecord(
-                project_id=project_id,
-                status="APPROVED",
-                payload=rights_payload,
-                sha256=graph_hash(rights_payload),
-            )
-            db.add(rights)
-            db.flush()
-            run_payload = {"kind": "validation", "rights_id": rights.id}
+            run_payload = {"kind": "validation", "rights_id": None}
             run = MaterialRun(
                 project_id=project_id,
                 plan_id=plan.id,

@@ -130,7 +130,8 @@ def rights_status(db, project_id: str, rights_id: str | None, scope: str = "asse
 
 
 def create_candidate(db, settings, project, family, entity, content, filename, rights_id, provenance, parent=None):
-    require_rights(db, project.id, rights_id)
+    if rights_id:
+        require_rights(db, project.id, rights_id)
     if family not in FAMILIES:
         raise HTTPException(422, "UNKNOWN_ASSET_FAMILY")
     if parent:
@@ -258,7 +259,8 @@ def promote(db, settings, row, actor, decision, *, offline):
     approval.consume(db, actor, "promote", row, decision.grant_id, decision.snapshot)
     if row.status != "READY_FOR_REVIEW":
         raise HTTPException(409, "CANDIDATE_NOT_APPROVED")
-    require_rights(db, row.project_id, row.payload["rights_id"])
+    if row.payload.get("rights_id"):
+        require_rights(db, row.project_id, row.payload["rights_id"])
     verify_candidate(settings, row)
     p = row.payload
     if p.get("dialogue_review_errors"):

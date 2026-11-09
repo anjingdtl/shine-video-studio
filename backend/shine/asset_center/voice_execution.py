@@ -28,6 +28,7 @@ from shine.comfyops.scheduler import resource_slot
 from shine.models import utcnow
 from shine.security import probe_upload, verify_upload
 from shine.services import add_audit, store_asset_file
+from shine.voiceops.sdk_runtime import CURRENT_LIBRARY_VOICE_ATTEMPT
 
 
 def _voice_role_codes(db, settings) -> dict[str, str | None]:
@@ -51,7 +52,7 @@ def can_queue_voice(factory, settings, mode: str) -> bool:
     else:
         with factory() as db:
             roles = _voice_role_codes(db, settings)
-    return bool(required) and all(roles.get(role) is None for role in required)
+    return bool(required) and all(role in roles and roles[role] is None for role in required)
 
 
 def _provider(factory, settings):
@@ -141,7 +142,7 @@ def _claim_inputs(factory, settings, task_id: str) -> tuple[dict[str, Any], dict
                 raise RuntimeError("VOICE_CONSENT_SOURCE_MISSING")
             if media.content_type != "audio/wav" or media.sha256 != payload.get("reference_media_sha256"):
                 raise RuntimeError("VOICE_REFERENCE_WAV_OR_HASH_INVALID")
-            service.require_rights(rights, usage_scope="research")
+            service.require_rights(rights, usage_scope="local")
             if rights.id != media.rights_id or rights.scope != "voice_clone":
                 raise RuntimeError("VOICE_CONSENT_SOURCE_MISMATCH")
             reference = service.media_bytes(settings, media)
@@ -151,11 +152,11 @@ def _claim_inputs(factory, settings, task_id: str) -> tuple[dict[str, Any], dict
             if profile is None or profile.status != "FROZEN" or profile.voice_hash != payload.get("voice_hash"):
                 raise RuntimeError("VOICE_PROFILE_NOT_FROZEN_OR_HASH_CHANGED")
             rights = db.get(LibraryRights, profile.rights_id)
-            service.require_rights(rights, usage_scope="research")
+            service.require_rights(rights, usage_scope="local")
             version = db.get(LibraryVersion, profile.version_id)
             if version is None or version.status != "PROMOTED" or version.is_mock:
                 raise RuntimeError("VOICE_PROFILE_VERSION_NOT_PROMOTED")
-            service.require_version_rights(db, version, usage_scope="research")
+            service.require_version_rights(db, version, usage_scope="local")
             conditioning = service.version_bytes(settings, version)
             if hashlib.sha256(conditioning).hexdigest() != profile.voice_hash:
                 raise RuntimeError("VOICE_PROFILE_CONDITIONING_HASH_CHANGED")
@@ -186,7 +187,7 @@ def _open_attempt(
         if task.mode == "AUTHORIZED_CLONE":
             media = db.get(LibraryMedia, payload.get("reference_media_id"))
             rights = db.get(LibraryRights, payload.get("rights_id"))
-            service.require_rights(rights, usage_scope="research")
+            service.require_rights(rights, usage_scope="local")
             if media is None or rights is None or media.rights_id != rights.id:
                 raise RuntimeError("VOICE_CONSENT_SOURCE_MISMATCH")
             if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
@@ -197,13 +198,13 @@ def _open_attempt(
             if profile is None or profile.status != "FROZEN" or profile.voice_hash != payload.get("voice_hash"):
                 raise RuntimeError("VOICE_PROFILE_NOT_FROZEN_OR_HASH_CHANGED")
             rights = db.get(LibraryRights, profile.rights_id)
-            service.require_rights(rights, usage_scope="research")
+            service.require_rights(rights, usage_scope="local")
             if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
                 raise RuntimeError("VOICE_RIGHTS_CHANGED_AFTER_QUEUE")
             version = db.get(LibraryVersion, profile.version_id)
             if version is None or version.id != payload.get("voice_version_id") or version.status != "PROMOTED":
                 raise RuntimeError("VOICE_PROFILE_VERSION_CHANGED_AFTER_QUEUE")
-            service.require_version_rights(db, version, usage_scope="research")
+            service.require_version_rights(db, version, usage_scope="local")
             service.version_bytes(settings, version)
         attempt_no = (
             db.scalar(
@@ -221,7 +222,7 @@ def _open_attempt(
             submit_stage="SUBMIT_INTENT",
             status="SUBMIT_INTENT",
             external_outcome="NOT_SENT",
-            payload={"runtime": runtime, "mode": task.mode},
+            payload={"runtime": runtime, "mode": task.mode, "lease_id": lease_id},
         )
         db.add(attempt)
         db.flush()
@@ -236,7 +237,7 @@ def _open_attempt(
 def _new_output_rights(db, mode: str, context: dict[str, Any]) -> LibraryRights:
     if mode in {"AUTHORIZED_CLONE", "TTS"}:
         source = context.get("reference_rights") or context.get("profile_rights")
-        if source is None or source.status != "APPROVED" or source.revoked_at is not None:
+        if source is None or source.status not in {"APPROVED", "DECLARED"} or source.revoked_at is not None:
             raise RuntimeError("VOICE_SOURCE_RIGHTS_REVOKED")
         return LibraryRights(
             source_type="inherited_voice_consent",
@@ -247,7 +248,7 @@ def _new_output_rights(db, mode: str, context: dict[str, Any]) -> LibraryRights:
             allowed_project_ids=list(source.allowed_project_ids or []),
             permitted_uses=list(source.permitted_uses or []),
             commercial_allowed=source.commercial_allowed,
-            status="APPROVED",
+            status=source.status,
             recorded_actor="shine-worker",
             approved_by=source.approved_by,
             expires_at=source.expires_at,
@@ -274,7 +275,7 @@ def _revalidate_output_sources(db, settings, payload: dict[str, Any], context: d
         rights = db.get(LibraryRights, payload.get("rights_id"))
         if media is None or rights is None or media.rights_id != rights.id:
             raise RuntimeError("VOICE_CONSENT_SOURCE_MISMATCH")
-        service.require_rights(rights, usage_scope="research")
+        service.require_rights(rights, usage_scope="local")
         if media.sha256 != payload.get("reference_media_sha256"):
             raise RuntimeError("VOICE_REFERENCE_HASH_CHANGED_AFTER_INFERENCE")
         if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
@@ -286,13 +287,13 @@ def _revalidate_output_sources(db, settings, payload: dict[str, Any], context: d
         if profile is None or profile.status != "FROZEN" or profile.voice_hash != payload.get("voice_hash"):
             raise RuntimeError("VOICE_PROFILE_CHANGED_AFTER_INFERENCE")
         rights = db.get(LibraryRights, profile.rights_id)
-        service.require_rights(rights, usage_scope="research")
+        service.require_rights(rights, usage_scope="local")
         if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
             raise RuntimeError("VOICE_RIGHTS_CHANGED_AFTER_INFERENCE")
         version = db.get(LibraryVersion, profile.version_id)
         if version is None or version.id != payload.get("voice_version_id") or version.status != "PROMOTED":
             raise RuntimeError("VOICE_PROFILE_VERSION_CHANGED_AFTER_INFERENCE")
-        service.require_version_rights(db, version, usage_scope="research")
+        service.require_version_rights(db, version, usage_scope="local")
         conditioning = service.version_bytes(settings, version)
         if hashlib.sha256(conditioning).hexdigest() != profile.voice_hash:
             raise RuntimeError("VOICE_PROFILE_CONDITIONING_HASH_CHANGED")
@@ -444,6 +445,7 @@ def _run_one(factory, settings, task_id: str, worker_id: str) -> None:
     payload: dict[str, Any] = {}
     attempt_id: str | None = None
     intent_open = False
+    sdk_context = None
     try:
         payload, context = _claim_inputs(factory, settings, task_id)
         provider = _provider(factory, settings)
@@ -478,6 +480,7 @@ def _run_one(factory, settings, task_id: str, worker_id: str) -> None:
             runtime["fingerprint"] = graph_hash(runtime)
             attempt_id = _open_attempt(factory, settings, task_id, worker_id, lease_id, payload, runtime)
             intent_open = True
+            sdk_context = CURRENT_LIBRARY_VOICE_ATTEMPT.set((factory, attempt_id))
             if mode == "DESIGN":
                 result = provider.design(str(payload["description"]), str(payload["text"]), str(payload["character"]))
             elif mode == "AUTHORIZED_CLONE":
@@ -549,6 +552,9 @@ def _run_one(factory, settings, task_id: str, worker_id: str) -> None:
                 task_id,
                 {"status": task.status, "error_code": task.error_code, "submit_intent": bool(task.submit_intent_at)},
             )
+    finally:
+        if sdk_context is not None:
+            CURRENT_LIBRARY_VOICE_ATTEMPT.reset(sdk_context)
 
 
 def run_one_pending_job(factory, settings, worker_id: str) -> int:

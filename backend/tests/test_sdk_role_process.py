@@ -299,6 +299,45 @@ def test_normal_api_configures_role_process_provider_and_keeps_fake_candidate(is
         assert db.get(ResourceLease, task.trace["resource_id"]).budget_mb == 8000
 
 
+def test_library_clone_tracks_the_owned_sdk_child_in_its_attempt(isolated_sdk, prep, monkeypatch):
+    from shine.asset_center.models import LibraryTaskAttempt, LibraryVersion
+    from shine.asset_center.voice_execution import run_one_pending_job
+    from shine.voiceops.local_sdk import encode_wav
+
+    provider, loader, _, factory, _ = isolated_sdk
+    client, _, settings = prep
+    monkeypatch.setenv("SHINE_VOICE_SDK_PACKAGES", json.dumps(provider.packages))
+    monkeypatch.setenv(
+        "SHINE_VOICE_ROLE_RUNTIMES", json.dumps({k: v.model_dump(mode="json") for k, v in loader.runtimes.items()})
+    )
+    sample, _ = encode_wav([0.1] * 16000, 16000)
+    media = client.post(
+        "/api/v1/asset-center/uploads",
+        data={"asset_kind": "audio", "purpose": "voice_sample"},
+        files={"file": ("synthetic.wav", sample, "audio/wav")},
+    )
+    assert media.status_code == 201, media.text
+    created = client.post("/api/v1/asset-center/voice-jobs", json={
+        "idempotency_key": "isolated-library-sdk-clone",
+        "mode": "AUTHORIZED_CLONE",
+        "title": "Synthetic voice",
+        "character": "Lin",
+        "reference_media_id": media.json()["id"],
+        "reference_text": "你好",
+    })
+    assert created.status_code == 202, created.text
+    task_id = created.json()["item"]["id"]
+    assert run_one_pending_job(factory, settings, "isolated-sdk-voice-worker") == 1
+    task = client.get(f"/api/v1/asset-center/voice-jobs/{task_id}").json()
+    assert task["status"] == "CANDIDATE_READY", task
+    with factory() as db:
+        attempt = db.scalar(select(LibraryTaskAttempt).where(LibraryTaskAttempt.task_id == task_id))
+        assert attempt.payload["model_child_exit"]["returncode"] == 0
+        assert attempt.payload["role_runtime"] == "base"
+        assert db.get(ResourceLease, attempt.payload["lease_id"]).status == "RELEASED"
+        assert db.get(LibraryVersion, task["result_version_id"]).is_mock
+
+
 def test_live_model_child_blocks_human_abandon_without_consuming_grant(prep):
     from shine.comfyops.models import ApprovalGrant
     from shine.models import utcnow

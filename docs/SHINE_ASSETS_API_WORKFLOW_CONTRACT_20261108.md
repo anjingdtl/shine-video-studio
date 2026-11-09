@@ -8,7 +8,7 @@
 |---|---|
 | `GET /asset-center/capabilities` | 只读工作流、模型、服务状态和能力验证状态。没有本机证据时返回 `PENDING_LOCAL_VALIDATION`。 |
 | `GET /asset-center/local-validation-plan` | 返回锁定的官方 Qwen 编辑模板、输入槽、遮罩/输出检查和本机实测证据要求。 |
-| `POST /asset-center/uploads` | 校验上传种类、MIME、实际解码、大小、hash 和用途；mask 限 PNG。 |
+| `POST /asset-center/uploads` | 校验上传种类、MIME、实际解码、大小、hash 和用途，mask 限 PNG。来源字段可省略。 |
 | `GET /asset-center/assets[?q=&category=]` | 搜索无项目全局素材。 |
 | `POST /asset-center/assets` | 用已导入的 `media_id` 建立素材容器和待审核候选。 |
 | `GET/PATCH /asset-center/assets/{id}` | 详情/带 `expected_state_version` 的元数据更新。 |
@@ -23,14 +23,17 @@
 | `POST /asset-center/image-jobs/{id}/cancel` | 只允许安全取消尚未开始外部提交的任务。 |
 | `POST /asset-center/image-jobs/{id}/reconcile` | 只查询既有 ComfyUI history 并收获已完成结果，不重新提交。 |
 | `POST /asset-center/image-jobs/{id}/new-attempt` | 仅在原请求确认 `FAILED + NOT_SENT + no submit intent` 时可用；必须显式确认、新 idempotency key，并重查授权/当前能力。UNKNOWN 一律拒绝。 |
-| `POST /asset-center/voice-jobs` 与 `GET /asset-center/voice-jobs/{id}` | 通过现有本机声音 provider 提交和查看设计、授权克隆、TTS 状态。 |
-| `POST /asset-center/voice-profiles/{id}/grant` 与 `/freeze` | 必须真人试听和确认，授权有效且快照未变。 |
+| `POST /asset-center/voice-jobs` 与 `GET /asset-center/voice-jobs/{id}` | 通过本机声音 provider 提交和查看设计、克隆、TTS 状态。克隆从 `reference_media_id` 解析来源记录。 |
+| `POST /asset-center/voice-profiles/{id}/grant` 与 `/freeze` | 用户试听并确认，冻结绑定当前快照。 |
 | `GET /asset-center/voice-profiles` | 全局音色与冻结状态。 |
-| `POST /asset-center/assignments` / `GET /asset-center/assignments` | 按项目创建新的本地素材身份并查看使用记录。 |
-| `GET /projects/{id}/asset-center/search` | 导演侧仅搜索当前项目获准使用的全局正式版本。 |
-| `POST /projects/{id}/assets/{asset_id}/save-to-library` | 把本项目素材在人工确认版权后复制为全局候选。 |
+| `POST /asset-center/assignments` / `GET /asset-center/assignments` | 按项目创建本地素材身份并查看使用记录。默认 `usage_scope=local`，直接提交分配。 |
+| `GET /projects/{id}/asset-center/search` | 导演侧搜索可在本机分配的全局正式版本。 |
+| `POST /projects/{id}/assets/{asset_id}/save-to-library` | 把本项目已确认、锁定的真实素材收藏为全局候选。 |
+| `POST /asset-center/adoptions/preview` 与 `/adoptions` | 预览和采用到指定镜头 revision。项目内主素材可省略 `library_version_id`。 |
 
 错误对象以稳定 `code` 和中文 `message` 表达；调用方应把 409 当成快照/授权冲突，重新读取后由用户决定下一步。`UNKNOWN`、资源等待和能力缺失不能被伪装为普通失败。
+
+专业模式的候选导入、生成、批量备料与音色创建同样支持省略来源 ID。项目音色的本机来源记录由服务端建立，继续供冻结清单引用。带显式历史来源记录的调用仍按该记录校验。声音克隆保留本机操作标记，候选晋升和音色冻结继续绑定一次性快照。
 
 ## 图片请求
 
@@ -70,7 +73,7 @@ RGBA 有两条不同路径：使用 PNG 底图和用户画布遮罩时，白色�
 
 ## 声音权利与调度
 
-声音任务复用现有 `QwenLocalVoiceProvider` 或本机 `LocalVoiceHTTPProvider` 及共享 TTS ResourceLease。`AUTHORIZED_CLONE` 每次提交前重查授权、样本 SHA、用途和有效期；TTS 仅接受有效、已晋升且人工试听冻结的全局音色。输出继续执行现有 ASR、词级对齐和 hard-error 检查。音效/音乐只支持导入与管理，没有已验证生成 provider。
+声音任务复用 `QwenLocalVoiceProvider` 或本机 `LocalVoiceHTTPProvider` 及共享 TTS ResourceLease。`AUTHORIZED_CLONE` 在提交前复核样本 SHA 和来源快照。SDK 子进程的身份和退出证明写入声音 attempt。TTS 使用已晋升且试听冻结的全局音色，并执行现有 ASR、词级对齐和 hard-error 检查。音效和音乐支持导入与管理。
 
 图片和声音 GPU 任务统一由现有 Worker 串行执行：项目级图像队列完成一个任务后 Worker 才回到主调度；无项目素材图像与声音任务按入队时间选一个处理，每个 tick 最多执行一项。H3 series 继续保持更高优先级，素材任务不得抢租或释放 H3 renderer。
 

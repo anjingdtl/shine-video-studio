@@ -15,7 +15,8 @@ const apiMock = vi.hoisted(() => ({
   listLibraryAssets: vi.fn(async () => ({ items: [] as unknown[], limit: 100, offset: 0 })),
   listLibraryVoices: vi.fn(async () => ({ items: [] as unknown[] })),
   getLibraryAsset: vi.fn(async (_id: string): Promise<unknown> => { throw new Error('asset not found'); }),
-  updateLibraryRights: vi.fn(async () => ({})),
+  grantVersionPromotion: vi.fn(async () => ({ grant_id: 'grant-1', snapshot: 'version-snapshot' })),
+  promoteLibraryVersion: vi.fn(async () => ({})),
 }));
 
 vi.mock('../asset-center/api', () => ({
@@ -25,7 +26,8 @@ vi.mock('../asset-center/api', () => ({
   listLibraryAssets: apiMock.listLibraryAssets,
   listLibraryVoices: apiMock.listLibraryVoices,
   getLibraryAsset: apiMock.getLibraryAsset,
-  updateLibraryRights: apiMock.updateLibraryRights,
+  grantVersionPromotion: apiMock.grantVersionPromotion,
+  promoteLibraryVersion: apiMock.promoteLibraryVersion,
   getCapabilities: vi.fn(async () => ({
     workspaces: ['director', 'assets'],
     image_capabilities: Object.fromEntries(['T2I', 'I2I', 'INPAINT', 'MULTIREF', 'WARDROBE', 'RGBA'].map((mode) => [
@@ -45,7 +47,7 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
-it('人工晋升不会静默批准或扩大模型结果的项目授权范围', async () => {
+it('本机候选可以直接进行人工晋升', async () => {
   const version = {
     id: 'version-1', ordinal: 1, parent_version_id: null, filename: 'portrait.png', kind: 'image',
     content_type: 'image/png', content_sha256: 'a'.repeat(64), byte_size: 10, width: 32, height: 32,
@@ -68,19 +70,11 @@ it('人工晋升不会静默批准或扩大模型结果的项目授权范围', a
 
   await user.click(await screen.findByRole('button', { name: /Portrait/ }));
   await user.click(await screen.findByRole('button', { name: /检查并人工晋升/ }));
-  expect(await screen.findByText(/请先展开“授权范围”/)).toBeInTheDocument();
-  expect(apiMock.updateLibraryRights).not.toHaveBeenCalled();
-
-  await user.click(screen.getByRole('button', { name: '核对并设置授权' }));
-  expect(screen.getByRole('checkbox', { name: /所有当前和未来项目/ })).not.toBeChecked();
-  await user.click(screen.getByRole('checkbox', { name: '作品 A' }));
-  await user.click(screen.getByRole('button', { name: '确认并保存授权范围' }));
-  await waitFor(() => expect(apiMock.updateLibraryRights).toHaveBeenCalledWith('rights-1', expect.objectContaining({
-    allowed_project_ids: ['project-a'], permitted_uses: ['research'], commercial_allowed: false,
-  })));
+  await waitFor(() => expect(apiMock.promoteLibraryVersion).toHaveBeenCalledWith('version-1',
+    expect.objectContaining({ grant_id: 'grant-1', snapshot: 'version-snapshot' })));
 });
 
-it('收藏项目素材前必须明确确认权利范围', async () => {
+it('可以直接收藏已锁定的项目素材', async () => {
   apiMock.saveProjectAssetToLibrary.mockClear();
   const user = userEvent.setup();
   const projectAsset = {
@@ -99,12 +93,8 @@ it('收藏项目素材前必须明确确认权利范围', async () => {
   );
 
   const saveButton = await screen.findByRole('button', { name: '收藏到全局库' });
-  expect(saveButton).toBeDisabled();
-  expect(apiMock.saveProjectAssetToLibrary).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('checkbox', { name: /我已核对来源许可/ }));
-  expect(saveButton).toBeEnabled();
   await user.click(saveButton);
-  await waitFor(() => expect(apiMock.saveProjectAssetToLibrary).toHaveBeenCalledWith('project-1', 'asset-1', expect.objectContaining({ confirmed_rights: true })));
+  await waitFor(() => expect(apiMock.saveProjectAssetToLibrary).toHaveBeenCalledWith('project-1', 'asset-1', { title: 'portrait', category: 'character', tags: [] }));
 });
 
 it('素材中心可以在没有影视项目时独立打开并进入图片工坊', async () => {
@@ -208,7 +198,7 @@ it('刷新后的声音任务恢复使用原幂等键', async () => {
   apiMock.createVoiceJob.mockClear();
   const body = {
     mode: 'DESIGN', title: '新音色 预览', character: '新音色', description: '',
-    text: '你好，欢迎来到我的故事。', reference_text: '', reference_media_id: null, rights_id: null,
+    text: '你好，欢迎来到我的故事。', reference_text: '', reference_media_id: null,
     voice_profile_id: null, speed: 1, pause: 0, emotion: 'neutral',
   };
   localStorage.setItem('shine-assets-pending-voice-intent-v1', JSON.stringify({

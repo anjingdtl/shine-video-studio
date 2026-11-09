@@ -108,7 +108,7 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   expect(stub.callsOf('POST', /asset-1\/lock$/)).toHaveLength(2);
 });
 
-it('项目锁定素材经明确授权确认后进入全局候选，不自动晋升', async () => {
+it('项目锁定素材直接进入全局候选，不自动晋升', async () => {
   const asset = { id: 'asset-locked', project_id: 'proj-1', filename: '主角.png', kind: 'image', role: 'character',
     sha256: 'a'.repeat(64), byte_size: 32, approved: true, locked: true, entity_id: '林知远', tags: ['定妆'] };
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
@@ -120,13 +120,11 @@ it('项目锁定素材经明确授权确认后进入全局候选，不自动晋�
   await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
 
   await user.click(await screen.findByRole('button', { name: '收藏到素材中心' }));
-  expect(screen.getByText(/仅限当前项目，跨项目使用需另行授权/)).toBeInTheDocument();
-  await user.click(screen.getByRole('checkbox', { name: /我确认已核对来源许可/ }));
   await user.click(screen.getByRole('button', { name: '保存为待审核候选' }));
-  expect(await screen.findByText(/授权仍仅限本项目/)).toBeInTheDocument();
+  expect(await screen.findByText(/已保存为素材中心候选/)).toBeInTheDocument();
   expect(stub.callsOf('POST', /save-to-library$/)).toHaveLength(1);
   expect(stub.callsOf('POST', /save-to-library$/)[0].body).toMatchObject({
-    title: '林知远', category: 'character', confirmed_rights: true,
+    title: '林知远', category: 'character',
   });
   await user.click(screen.getByRole('button', { name: '打开全局素材库' }));
   expect(window.location.hash).toBe('#a/library');

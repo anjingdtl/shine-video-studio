@@ -53,7 +53,7 @@ class GenerateBody(APIModel):
     confirmation_hash: str = Field(min_length=64, max_length=64)
     requirement_ids: list[str] = Field(min_length=1, max_length=200)
     idempotency_key: str = Field(min_length=1, max_length=128)
-    rights_id: str
+    rights_id: str | None = None
     mode: Literal["real"] = EXECUTION_MODE_REAL
     seeds: dict[str, int] = Field(default_factory=dict)
 
@@ -77,7 +77,7 @@ class RegenerateBody(APIModel):
     confirmation_id: str = Field(min_length=64, max_length=64)
     confirmation_hash: str = Field(min_length=64, max_length=64)
     idempotency_key: str = Field(min_length=1, max_length=128)
-    rights_id: str
+    rights_id: str | None = None
     brief: dict
     seed: int = Field(default=0, ge=0)
 
@@ -95,7 +95,7 @@ class ValidateBody(APIModel):
     families: list[Literal["character", "scene", "prop"]] = Field(
         default_factory=lambda: ["character", "scene", "prop"]
     )
-    rights_id: str
+    rights_id: str | None = None
 
 
 @router.post("/projects/{project_id}/material-preparation/analyze", status_code=202)
@@ -154,8 +154,8 @@ def complete_materials(project_id: str, actor: Operator, db: DBSession, settings
 
     The material list is only ready when every required requirement is bound to
     a current master of this project that is approved, locked, of the right
-    family and identity, still hashes to its registered digest and carries an
-    approved licence.  The judgement comes back with the items that are still
+    family and identity, still hashes to its registered digest. Existing source restrictions are
+    checked when a master carries them.  The judgement comes back with the items that are still
     open and the reason for each, so the page never claims a completion it
     cannot prove.
     """
@@ -675,7 +675,8 @@ def validate_image_runtime(body: ValidateBody, actor: Operator, db: DBSession, s
     from shine.services import require_project
 
     project = require_project(db, body.project_id)
-    require_rights(db, project.id, body.rights_id)
+    if body.rights_id:
+        require_rights(db, project.id, body.rights_id)
     config = runtime.load_config(settings)
     if not config.base_url or not config.instance_id:
         raise HTTPException(409, {"code": "IMAGE_RUNTIME_NOT_READY", "detail": "IMAGE_RUNTIME_NOT_BOUND"})

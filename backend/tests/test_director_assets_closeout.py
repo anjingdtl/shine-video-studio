@@ -170,6 +170,34 @@ def test_an_assignment_only_reaches_a_shot_through_an_explicit_adoption(api):
     assert stale.status_code == 409 and "SHOT_REVISION_CHANGED" in stale.text
 
 
+def test_project_master_can_be_collected_and_bound_without_a_source_declaration(api):
+    client, _, _ = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    asset = upload_asset(client, project, role="prop", entity_id="Lantern")
+    approve_lock(client, asset["id"])
+
+    collected = client.post(
+        f"/api/v1/projects/{project}/assets/{asset['id']}/save-to-library",
+        headers=LOCAL, json={"title": "Lantern", "category": "prop"},
+    )
+    assert collected.status_code == 201, collected.text
+    assert collected.json()["versions"][0]["status"] == "READY_FOR_REVIEW"
+
+    request = {"project_id": project, "project_asset_id": asset["id"], "shot_ids": [shot["id"]]}
+    preview = client.post("/api/v1/asset-center/adoptions/preview", json=request)
+    assert preview.status_code == 200 and preview.json()["shots"][0]["use_as"] == "picture"
+    adopted = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        **request,
+        "expected_shot_revisions": {shot["id"]: shot["revision"]},
+        "idempotency_key": "project-master-adoption",
+        "confirmed": True,
+    })
+    assert adopted.status_code == 201, adopted.text
+    assert adopted.json()["adopted_count"] == 1
+
+
 def test_adoption_refuses_a_shot_inside_a_confirmed_package(api):
     client, factory, _ = api
     project = create_project(client)

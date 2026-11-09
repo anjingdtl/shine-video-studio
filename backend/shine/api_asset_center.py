@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import islice
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -228,9 +229,9 @@ class Assignment(Strict):
         "character", "costume", "scene", "prop", "voice", "dialogue", "sfx", "music", "style_reference", "generic"
     ]
     entity_id: str | None = Field(default=None, max_length=80)
-    usage_scope: Literal["research", "personal", "non_commercial", "commercial"]
+    usage_scope: Literal["local", "research", "personal", "non_commercial", "commercial"] = "local"
     idempotency_key: str = Field(min_length=8, max_length=100)
-    confirmed: bool
+    confirmed: bool = True
     requirement_context: dict[str, str] | None = None
 
 
@@ -238,7 +239,7 @@ class SaveToLibrary(Strict):
     title: str = Field(min_length=1, max_length=200)
     category: Literal["character", "scene", "prop", "costume", "voice", "dialogue", "sfx", "music", "other"]
     tags: list[str] = Field(default_factory=list, max_length=40)
-    confirmed_rights: bool
+    confirmed_rights: bool = True
 
 
 class ImageReference(Strict):
@@ -379,7 +380,7 @@ def _capabilities(db, settings) -> dict[str, Any]:
             "state": "PENDING_LOCAL_VALIDATION",
             "can_generate": False,
             "can_queue": can_queue_voice(db, settings, "AUTHORIZED_CLONE"),
-            "reason": "克隆需当前有效的说话人授权、本地模型和真人试听验收。",
+            "reason": "声音克隆使用本机声音模型和 WAV 样本，生成后可试听候选。",
         },
         "TTS_MANDARIN": {
             "state": "PENDING_LOCAL_VALIDATION",
@@ -481,11 +482,11 @@ async def upload_media(
     file: Annotated[UploadFile, File()],
     asset_kind: Annotated[Literal["image", "audio"], Form()],
     purpose: Annotated[Literal["source", "reference", "mask", "audio_import", "voice_sample"], Form()],
-    source_type: Annotated[str, Form()],
-    license_kind: Annotated[str, Form()],
-    rights_statement: Annotated[str, Form()],
     settings: SettingsDep,
     db: DBSession,
+    source_type: Annotated[str, Form()] = "local_upload",
+    license_kind: Annotated[str, Form()] = "UNSPECIFIED",
+    rights_statement: Annotated[str, Form()] = "",
     subject: Annotated[str, Form()] = "",
     allowed_project_ids: Annotated[str, Form()] = "[]",
     permitted_uses: Annotated[str, Form()] = '["research"]',
@@ -500,10 +501,6 @@ async def upload_media(
     content = await file.read(settings.max_upload_bytes + 1)
     if purpose == "mask" and Path(filename).suffix.lower() != ".png":
         raise HTTPException(415, {"code": "MASK_PNG_REQUIRED", "message": "遮罩画布只接受 PNG 文件"})
-    if not source_type.strip() or not license_kind.strip() or len(rights_statement.strip()) < 8:
-        raise HTTPException(
-            422, {"code": "RIGHTS_DECLARATION_REQUIRED", "message": "请填写素材来源、许可类型和授权说明"}
-        )
     projects = service.safe_json_list(allowed_project_ids, label="PROJECT_SCOPE")
     uses = service.safe_json_list(permitted_uses, label="PERMITTED_USES", max_length=4)
     expires = service.parse_expiry(expires_at)
@@ -558,22 +555,28 @@ def list_library_assets(
         stmt = stmt.where(LibraryAsset.category == category)
     if favorite is not None:
         stmt = stmt.where(LibraryAsset.favorite.is_(favorite))
-    rows = db.scalars(stmt.order_by(LibraryAsset.updated_at.desc(), LibraryAsset.id).offset(offset).limit(limit)).all()
     normalized = q.casefold().strip()
+    stmt = stmt.order_by(LibraryAsset.updated_at.desc(), LibraryAsset.id)
+    if normalized:
+        matches = (
+            row for row in db.scalars(stmt.execution_options(yield_per=100))
+            if _matches_library_query(row, normalized)
+        )
+        rows = list(islice(matches, offset, offset + limit))
+    else:
+        rows = db.scalars(stmt.offset(offset).limit(limit)).all()
     output = []
     for row in rows:
-        if (
-            normalized
-            and normalized not in row.title.casefold()
-            and not any(normalized in tag.casefold() for tag in (row.tags or []))
-        ):
-            continue
         result = service.asset_data(db, row)
         result["usage_count"] = (
             db.query(LibraryProjectLink).filter(LibraryProjectLink.library_asset_id == row.id).count()
         )
         output.append(result)
     return {"items": output, "limit": limit, "offset": offset, "query": q}
+
+
+def _matches_library_query(asset: LibraryAsset, term: str) -> bool:
+    return not term or term in asset.title.casefold() or any(term in tag.casefold() for tag in (asset.tags or []))
 
 
 @router.post("/asset-center/assets", status_code=201)
@@ -1064,7 +1067,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
             raise HTTPException(
                 409, {"code": "IMAGE_PARENT_VERSION_NOT_PROMOTED", "message": "只能从已晋升的真实版本继续创作"}
             )
-        parent_rights = service.require_version_rights(db, parent, usage_scope="research")
+        parent_rights = service.require_version_rights(db, parent, usage_scope="local")
         service.version_bytes(settings, parent)
         payload["target_asset_id"] = target_asset.id
         payload["parent_version_id"] = parent.id
@@ -1091,7 +1094,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
                 raise HTTPException(
                     404, {"code": "IMAGE_REFERENCE_NOT_FOUND", "message": "有一张参考图不存在或用途不正确"}
                 )
-            rights = service.require_rights(db.get(LibraryRights, media.rights_id), usage_scope="research")
+            rights = service.require_rights(db.get(LibraryRights, media.rights_id), usage_scope="local")
             service.media_bytes(settings, media)
             reference_rows.append(
                 {
@@ -1109,7 +1112,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
                 raise HTTPException(
                     404, {"code": "IMAGE_REFERENCE_NOT_FOUND", "message": "全局参考版本不存在或尚未晋升"}
                 )
-            rights = service.require_version_rights(db, version, usage_scope="research")
+            rights = service.require_version_rights(db, version, usage_scope="local")
             service.version_bytes(settings, version)
             reference_rows.append(
                 {
@@ -1132,7 +1135,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
             if first_reference.get("media_id")
             else db.get(LibraryVersion, first_reference.get("version_id"))
         )
-        mask_rights = service.require_rights(db.get(LibraryRights, mask.rights_id), usage_scope="research")
+        mask_rights = service.require_rights(db.get(LibraryRights, mask.rights_id), usage_scope="local")
         mask_info = validate_aligned_mask(
             (source.width or 0),
             (source.height or 0),
@@ -1521,10 +1524,6 @@ def new_image_attempt(task_id: str, body: NewImageAttempt, settings: SettingsDep
 
 @router.post("/asset-center/assignments", status_code=201)
 def assign_library_version(body: Assignment, actor: Operator, settings: SettingsDep, db: DBSession):
-    if not body.confirmed:
-        raise HTTPException(
-            409, {"code": "ASSIGNMENT_CONFIRMATION_REQUIRED", "message": "請先確認素材版本、角色身份和授權用途"}
-        )
     version = db.get(LibraryVersion, body.library_version_id)
     if version is None:
         raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "素材版本不存在"})
@@ -1660,20 +1659,22 @@ def search_library_for_project(
     stmt = select(LibraryAsset).where(LibraryAsset.status == "ACTIVE")
     if category:
         stmt = stmt.where(LibraryAsset.category == category)
-    rows = db.scalars(stmt.order_by(LibraryAsset.updated_at.desc()).limit(200)).all()
+    rows = db.scalars(stmt.order_by(LibraryAsset.updated_at.desc(), LibraryAsset.id).execution_options(yield_per=100))
     term = q.casefold().strip()
     output = []
     for asset in rows:
-        if term and term not in asset.title.casefold() and not any(term in tag.casefold() for tag in asset.tags or []):
+        if not _matches_library_query(asset, term):
             continue
         version = db.get(LibraryVersion, asset.current_version_id) if asset.current_version_id else None
         if version is None or version.status != "PROMOTED" or version.is_mock:
             continue
         try:
-            service.require_version_rights(db, version, project_id=project_id, usage_scope="research")
+            service.require_version_rights(db, version, project_id=project_id, usage_scope="local")
         except HTTPException:
             continue
         output.append({"asset": service.asset_data(db, asset), "version": service.version_data(db, version)})
+        if len(output) == 200:
+            break
     return {"items": output}
 
 
@@ -1686,10 +1687,6 @@ def save_project_asset_to_library(
     settings: SettingsDep,
     db: DBSession,
 ):
-    if not body.confirmed_rights:
-        raise HTTPException(
-            409, {"code": "SOURCE_RIGHTS_CONFIRMATION_REQUIRED", "message": "請先確認來源授权可以进入全局素材库"}
-        )
     project = db.get(Project, project_id)
     asset = db.get(Asset, asset_id)
     if project is None or asset is None or asset.project_id != project_id:
@@ -1700,26 +1697,26 @@ def save_project_asset_to_library(
         )
     project_rights_id = (asset.provenance or {}).get("rights_id")
     project_rights = db.get(RightsRecord, project_rights_id) if project_rights_id else None
-    if project_rights is None:
-        raise HTTPException(409, {"code": "PROJECT_ASSET_RIGHTS_MISSING", "message": "项目素材没有可核对的授权记录"})
-    require_project_rights(db, project_id, project_rights_id)
+    if project_rights_id:
+        require_project_rights(db, project_id, project_rights_id)
+    source_rights = project_rights.payload if project_rights else {}
     path = safe_asset_path(settings.data_dir, asset.storage_path)
     content = path.read_bytes() if path.is_file() else b""
     if not content or hashlib.sha256(content).hexdigest() != asset.sha256:
         raise HTTPException(409, {"code": "PROJECT_ASSET_HASH_CHANGED", "message": "项目素材文件校验失败"})
     global_rights = LibraryRights(
         source_type="project_asset",
-        license_kind=str(project_rights.payload.get("license_kind", "PROJECT_RIGHTS_REVIEW")),
+        license_kind=str(source_rights.get("license_kind") or source_rights.get("license_id", "UNSPECIFIED")),
         scope="asset",
-        statement=f"从作品 {project.title} 收藏；原授权范围需重新核对。",
-        subject=str(project_rights.payload.get("subject", "")),
+        statement=f"从作品 {project.title} 收藏。",
+        subject=str(source_rights.get("subject", "")),
         allowed_project_ids=[project_id],
         permitted_uses=["research"],
         commercial_allowed=False,
         status="APPROVED",
         recorded_actor=actor,
         approved_by=actor,
-        expires_at=service.parse_expiry(project_rights.payload.get("expires_at")),
+        expires_at=service.parse_expiry(source_rights.get("expires_at")),
     )
     db.add(global_rights)
     db.flush()
@@ -1754,7 +1751,7 @@ def save_project_asset_to_library(
         provenance={
             "source_project_id": project.id,
             "source_project_asset_id": asset.id,
-            "source_rights_id": project_rights.id,
+            "source_rights_id": project_rights_id,
         },
     )
     version.status = "READY_FOR_REVIEW"
@@ -1786,7 +1783,7 @@ def create_voice_job(body: VoiceJobRequest, settings: SettingsDep, db: DBSession
         raise HTTPException(422, {"code": "VOICE_DIALOGUE_TEXT_REQUIRED", "message": "普通话对白不能为空"})
     if body.mode == "AUTHORIZED_CLONE":
         media = db.get(LibraryMedia, body.reference_media_id) if body.reference_media_id else None
-        rights = db.get(LibraryRights, body.rights_id) if body.rights_id else None
+        rights = db.get(LibraryRights, media.rights_id) if media else None
         if (
             media is None
             or media.kind != "audio"
@@ -1796,15 +1793,16 @@ def create_voice_job(body: VoiceJobRequest, settings: SettingsDep, db: DBSession
             or rights.scope != "voice_clone"
         ):
             raise HTTPException(
-                409, {"code": "VOICE_CONSENT_REQUIRED", "message": "声音克隆需要授权的来源录音和对应许可"}
+                409, {"code": "VOICE_SAMPLE_REQUIRED", "message": "声音克隆需要导入一段 WAV 录音作为声音样本"}
             )
-        if rights.id != media.rights_id:
+        if body.rights_id and body.rights_id != rights.id:
             raise HTTPException(409, {"code": "VOICE_CONSENT_SOURCE_MISMATCH", "message": "授权记录与来源录音不匹配"})
         if not body.reference_text.strip():
             raise HTTPException(
                 422, {"code": "VOICE_REFERENCE_TRANSCRIPT_REQUIRED", "message": "授权克隆需要填写录音中的实际对白"}
             )
-        service.require_rights(rights, usage_scope="research")
+        service.require_rights(rights, usage_scope="local")
+        payload["rights_id"] = rights.id
         payload["reference_media_sha256"] = media.sha256
         payload["rights_snapshot"] = service.rights_snapshot(rights)
     elif body.mode == "TTS":
@@ -1814,8 +1812,8 @@ def create_voice_job(body: VoiceJobRequest, settings: SettingsDep, db: DBSession
         voice_version = db.get(LibraryVersion, profile.version_id)
         if voice_version is None:
             raise HTTPException(409, {"code": "VOICE_PROFILE_VERSION_MISSING", "message": "冻结音色缺少对应版本"})
-        service.require_version_rights(db, voice_version, usage_scope="research")
-        service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="research")
+        service.require_version_rights(db, voice_version, usage_scope="local")
+        service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="local")
         payload["voice_hash"] = profile.voice_hash
         payload["rights_snapshot"] = service.rights_snapshot(db.get(LibraryRights, profile.rights_id))
         payload["voice_version_id"] = profile.version_id
@@ -1888,8 +1886,8 @@ def grant_voice_freeze(profile_id: str, actor: Operator, db: DBSession):
     version = db.get(LibraryVersion, profile.version_id)
     if version is None or version.status != "PROMOTED" or version.is_mock:
         raise HTTPException(409, {"code": "VOICE_VERSION_NOT_REVIEWABLE", "message": "请先完成真实音频审核和晋升"})
-    service.require_version_rights(db, version, usage_scope="research")
-    service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="research")
+    service.require_version_rights(db, version, usage_scope="local")
+    service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="local")
     return service.issue_grant(db, actor, "library_voice_freeze", version)
 
 
@@ -1904,8 +1902,8 @@ def freeze_library_voice(profile_id: str, body: VoiceFreeze, actor: Operator, db
     if version is None:
         raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "音色版本不存在"})
     service.consume_grant(db, actor, "library_voice_freeze", version, body.grant_id, body.snapshot)
-    service.require_version_rights(db, version, usage_scope="research")
-    service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="research")
+    service.require_version_rights(db, version, usage_scope="local")
+    service.require_rights(db.get(LibraryRights, profile.rights_id), usage_scope="local")
     if version.status != "PROMOTED" or version.is_mock:
         raise HTTPException(409, {"code": "VOICE_VERSION_NOT_REVIEWABLE", "message": "模拟或未晋升音频不能冻结"})
     profile.status = "FROZEN"
@@ -1999,7 +1997,7 @@ def local_validation_plan():
 class AdoptionPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
-    library_version_id: str
+    library_version_id: str | None = None
     project_asset_id: str
     shot_ids: list[str] | None = Field(default=None, max_length=200)
     role: str | None = None
@@ -2019,12 +2017,16 @@ def _adoption_asset(db, body: AdoptionPreviewRequest):
     if asset is None or asset.project_id != body.project_id:
         raise HTTPException(404, {"code": "PROJECT_ASSET_NOT_FOUND", "message": "项目素材不存在"})
     provenance = asset.provenance or {}
-    if provenance.get("library_version_id") != body.library_version_id:
+    if body.library_version_id is not None and provenance.get("library_version_id") != body.library_version_id:
         raise HTTPException(409, {
             "code": "LIBRARY_ASSIGNMENT_REQUIRED",
             "message": "先把全局版本分配到本项目，再采用到镜头",
             "library_version_id": body.library_version_id,
         })
+    if body.role is not None and body.role != asset.role:
+        raise HTTPException(409, {"code": "ASSET_ROLE_MISMATCH", "message": "素材用途与作品中的用途不一致"})
+    if body.entity_id is not None and body.entity_id != asset.entity_id:
+        raise HTTPException(409, {"code": "ASSET_ENTITY_MISMATCH", "message": "素材身份与作品中的身份不一致"})
     if not (asset.approved and asset.locked):
         raise HTTPException(409, {"code": "ASSET_NOT_MASTER", "message": "项目素材尚未确认并锁定"})
     return asset
@@ -2080,21 +2082,23 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
         missing = [shot_id for shot_id in body.shot_ids if shot_id not in by_id]
         if missing:
             raise HTTPException(404, {"code": "SHOT_NOT_FOUND", "missing": missing})
-        scoped = [by_id[shot_id] for shot_id in body.shot_ids]
+        scoped = [by_id[shot_id] for shot_id in dict.fromkeys(body.shot_ids)]
     else:
         # No explicit list: the shots whose storyboard asks for this identity.
-        wanted_entity = (body.entity_id or "").strip()
+        wanted_entity = (asset.entity_id or "").strip()
         scoped = []
         for shot in shots:
             try:
                 spec = ShotSpec.model_validate(shot.spec)
             except Exception:
                 continue
-            if wanted_entity and any(str(name).strip() == wanted_entity for name in spec.characters):
+            if asset.role == "character" and wanted_entity in spec.characters:
                 scoped.append(shot)
             elif wanted_entity and any(
-                (db.get(Asset, asset_id) or None) is not None
-                and (db.get(Asset, asset_id).entity_id == wanted_entity)
+                (required := db.get(Asset, asset_id)) is not None
+                and required.project_id == body.project_id
+                and required.role == asset.role
+                and required.entity_id == wanted_entity
                 for asset_id in spec.required_asset_ids
             ):
                 scoped.append(shot)
@@ -2165,7 +2169,7 @@ def preview_adoption(body: AdoptionPreviewRequest, db: DBSession):
 
 
 @router.post("/asset-center/adoptions", status_code=201)
-def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
+def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsDep, db: DBSession):
     """Apply the project master to exactly the shots the person agreed to.
 
     Each shot that really changes becomes a new shot revision; the previous
@@ -2191,7 +2195,7 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
         "project_id": body.project_id,
         "library_version_id": body.library_version_id,
         "project_asset_id": body.project_asset_id,
-        "shot_ids": sorted(body.shot_ids) if body.shot_ids is not None else None,
+        "shot_ids": sorted(set(body.shot_ids)) if body.shot_ids is not None else None,
         "role": body.role,
         "entity_id": body.entity_id,
         "expected_shot_revisions": {key: body.expected_shot_revisions[key]
@@ -2224,6 +2228,16 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, db: DBSession):
             ),
             "blocked": blocked,
         })
+    if not entries:
+        raise HTTPException(422, {"code": "ADOPTION_SHOTS_REQUIRED", "message": "请选择需要采用素材的镜头"})
+    path = safe_asset_path(settings.data_dir, asset.storage_path)
+    try:
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError as exc:
+        raise HTTPException(409, {"code": "PROJECT_ASSET_FILE_MISSING", "message": "项目素材文件不可读取"}) from exc
+    if digest != asset.sha256:
+        raise HTTPException(409, {"code": "PROJECT_ASSET_HASH_CHANGED", "message": "项目素材文件校验失败"})
     results = []
     for entry in entries:
         shot = db.get(Shot, entry["shot_id"])

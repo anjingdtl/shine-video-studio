@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Archive, ArrowLeft, ArrowRight, AudioLines, BadgeCheck, Brush, Check, ChevronDown, CircleHelp,
   Copy, Eraser, FileAudio2, FileImage, ImagePlus, LibraryBig, LoaderCircle, Mic2,
@@ -7,12 +7,12 @@ import {
 import { ApiError } from '../api';
 import type { Asset, Project } from '../api';
 import {
-  approveLibraryRights, archiveLibraryAsset, assignLibraryVersion, createImageJobs, createLibraryAsset,
+  archiveLibraryAsset, assignLibraryVersion, createImageJobs, createLibraryAsset,
   createVoiceFreezeGrant, createVoiceJob, freezeLibraryVoice, getCapabilities, getLibraryAsset,
   getLibraryTask, grantVersionPromotion, listAssignments, listLibraryAssets, listLibraryVoices,
   newLibraryImageAttempt,
-  patchLibraryAsset, promoteLibraryVersion, qcLibraryVersion, reconcileLibraryImageTask, revokeLibraryRights,
-  saveProjectAssetToLibrary, updateLibraryRights,
+  patchLibraryAsset, promoteLibraryVersion, qcLibraryVersion, reconcileLibraryImageTask,
+  saveProjectAssetToLibrary,
   uploadLibraryMedia,
 } from './api';
 import type { CapabilityReport, LibraryAsset, LibraryTask, LibraryVersion } from './api';
@@ -94,7 +94,7 @@ function taskLabel(task: LibraryTask) {
   return `${LABELS[task.status] ?? task.status}${specific}`;
 }
 
-function useFreshList() {
+function useFreshList(query = '') {
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -102,16 +102,19 @@ function useFreshList() {
   const refresh = () => setRefreshKey((n) => n + 1);
   useEffect(() => {
     let alive = true;
-    listLibraryAssets().then((result) => { if (alive) { setAssets(result.items); setError(''); } })
+    setLoading(true);
+    listLibraryAssets(query).then((result) => { if (alive) { setAssets(result.items); setError(''); } })
       .catch((reason) => { if (alive) setError(errorText(reason)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [refreshKey]);
+  }, [query, refreshKey]);
   return { assets, setAssets, loading, error, refresh };
 }
 
-function capabilityLabel(capability: { state: string; reason: string; can_generate?: boolean }) {
+function capabilityLabel(capability: { state: string; reason: string; can_generate?: boolean; can_queue?: boolean }) {
   if (capability.can_generate) return '本机已验证';
+  if (capability.can_queue) return '可提交 · 生成后试听';
+  if (capability.can_queue === false && capability.state !== 'READY') return '本机声音运行时未就绪';
   if (capability.state === 'PENDING_LOCAL_VALIDATION') return '待本机验证';
   return capability.state;
 }
@@ -125,12 +128,14 @@ export function AssetsWorkspace({
 }) {
   const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
+  const [capabilityRevision, setCapabilityRevision] = useState(0);
+  const refreshCapabilities = useCallback(() => setCapabilityRevision((revision) => revision + 1), []);
   useEffect(() => {
     let alive = true;
     getCapabilities().then((row) => { if (alive) { setCapabilities(row); setCapabilityError(''); } })
       .catch((error) => { if (alive) setCapabilityError(errorText(error)); });
     return () => { alive = false; };
-  }, []);
+  }, [capabilityRevision]);
   const title = PAGES.find((item) => item.id === page)?.label ?? '创作首页';
 
   function navigate(next: AssetCenterPage) {
@@ -152,7 +157,7 @@ export function AssetsWorkspace({
             </button>;
           })}
         </nav>
-        <div className="asset-center-sidebar-note"><ShieldCheck size={16} /><span>素材保存在本机，可在明确授权后分配给作品。</span></div>
+        <div className="asset-center-sidebar-note"><ShieldCheck size={16} /><span>素材保存在本机，已晋升版本可分配给作品。</span></div>
         <div className="asset-center-workspace-links">
           <button onClick={() => onWorkspace('director')}><ArrowLeft size={14} />导演工作台</button>
           <button onClick={() => onWorkspace('expert')}><ChevronDown size={14} />专业设置</button>
@@ -163,15 +168,15 @@ export function AssetsWorkspace({
           <div><div className="asset-eyebrow">SHINE ASSETS · 独立素材空间</div><h1>{title}</h1></div>
           <div className="asset-center-header-actions">
             <span className="asset-local-badge"><i />本机素材库</span>
-            <button className="asset-icon-button" aria-label="重新读取能力状态" onClick={() => window.location.reload()}><RefreshCw size={15} /></button>
+            <button className="asset-icon-button" aria-label="重新读取能力状态" onClick={refreshCapabilities}><RefreshCw size={15} /></button>
           </div>
         </header>
         {capabilityError && <div className="asset-inline-error" role="alert">暂时无法读取本机能力状态：{capabilityError}</div>}
         <div className="asset-center-page">
           {page === 'home' && <HomePage capabilities={capabilities} onNavigate={navigate} />}
-          {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate} />}
+          {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate} onValidated={refreshCapabilities} />}
           {page === 'voices' && <VoiceWorkshop capabilities={capabilities} onNavigate={navigate} />}
-          {page === 'library' && <LibraryPage projects={projects} />}
+          {page === 'library' && <LibraryPage />}
           {page === 'assignments' && <AssignmentsPage projects={projects} projectId={projectId} projectAssets={projectAssets} />}
         </div>
       </main>
@@ -241,7 +246,11 @@ function CapabilityRows({ capabilities }: { capabilities: CapabilityReport | nul
   </div>)}</div>;
 }
 
-function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityReport | null; onNavigate: (page: AssetCenterPage) => void }) {
+function ImageWorkshop({ capabilities, onNavigate, onValidated }: {
+  capabilities: CapabilityReport | null;
+  onNavigate: (page: AssetCenterPage) => void;
+  onValidated: () => void;
+}) {
   const draftStorageKey = 'shine-assets-image-draft-v1';
   const restoredDraft = storedObject(draftStorageKey);
   const pendingIntentStorageKey = 'shine-assets-pending-image-intent-v1';
@@ -263,10 +272,6 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [savedMask, setSavedMask] = useState(Boolean(restoredDraft.maskMedia));
-  const [rightsAllProjects, setRightsAllProjects] = useState(false);
-  const [rightsLicense, setRightsLicense] = useState('用户自有或已获授权素材');
-  const [rightsEvidence, setRightsEvidence] = useState('我确认已获准在个人工作区保存并用于研究用途。');
-  const [rightsExpiry, setRightsExpiry] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
   const taskStorageKey = 'shine-assets-recent-tasks';
   useEffect(() => {
@@ -280,6 +285,16 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
   const selectedCapability = mode === 'T2I'
     ? (transparent ? capabilities?.image_capabilities.QWEN_IMAGE_RGBA : t2iCapability)
     : capabilities?.image_capabilities[`QWEN_IMAGE_${mode}`];
+  const readyTaskIds = tasks.filter((task) => task.status === 'CANDIDATE_READY').map((task) => task.id).join('|');
+  useEffect(() => {
+    if (readyTaskIds) onValidated();
+  }, [readyTaskIds, onValidated]);
+
+  function fitEditSize(sourceWidth: number, sourceHeight: number) {
+    const scale = Math.min(1, 2048 / Math.max(sourceWidth, sourceHeight));
+    setWidth(Math.max(256, Math.round(sourceWidth * scale / 32) * 32));
+    setHeight(Math.max(256, Math.round(sourceHeight * scale / 32) * 32));
+  }
 
   function selectMode(nextMode: string) {
     if ((nextMode === 'RGBA' || mode === 'RGBA') && nextMode !== mode) {
@@ -339,7 +354,7 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
     }
     setTitle(asset.title);
     setCategory(asset.category);
-    if (version.width && version.height) { setWidth(version.width); setHeight(version.height); }
+    if (version.width && version.height) fitEditSize(version.width, version.height);
     setMode('I2I');
     setReferences((rows) => {
       const prior = rows.filter((row) => row.version_id !== version.id);
@@ -355,24 +370,19 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
   async function uploadFile(file: File, purpose: 'reference' | 'mask') {
     setBusy(true); setError(''); setNotice('');
     try {
-      const media = await uploadLibraryMedia(file, purpose, {
-        source_type: purpose === 'mask' ? 'user_created_mask' : 'user_declared_source',
-        license_kind: purpose === 'mask' ? 'USER_CREATED_MASK' : rightsLicense,
-        rights_statement: purpose === 'mask' ? '遮罩由我在本机针对已授权参考图创建。' : rightsEvidence,
-        allowed_project_ids: rightsAllProjects ? ['*'] : [], permitted_uses: ['research', 'personal'],
-        expires_at: rightsExpiry ? new Date(`${rightsExpiry}T23:59:59`).toISOString() : undefined,
-      });
-      await approveLibraryRights(media.rights_id, {
-        expected_snapshot: media.rights_snapshot_hash, evidence: purpose === 'mask' ? '我确认遮罩来自本机绘制，并与原图用途一致。' : rightsEvidence,
-        allowed_project_ids: purpose === 'mask' ? ['*'] : rightsAllProjects ? ['*'] : [],
-        permitted_uses: ['research', 'personal'], commercial_allowed: false,
-      });
+      const media = await uploadLibraryMedia(file, purpose);
       const image: ReferenceMedia = { id: media.id, media_id: media.id, filename: media.filename, sha256: media.sha256,
         width: media.width, height: media.height, media_url: media.media_url, rights_id: media.rights_id,
         role: purpose === 'mask' ? 'mask' : references.length ? 'garment' : 'canvas', order: purpose === 'mask' ? 0 : references.length };
       if (purpose === 'mask') { setMaskMedia(image); setSavedMask(true); setNotice('遮罩已上传并校验尺寸；正式图工作流仍需本机 mask 能力验证。'); }
       else {
-        if (references.length === 0 && image.width && image.height) { setWidth(image.width); setHeight(image.height); }
+        if (references.length === 0 && image.width && image.height) {
+          if (mode === 'INPAINT' || mode === 'RGBA') {
+            setWidth(image.width); setHeight(image.height);
+          } else {
+            fitEditSize(image.width, image.height);
+          }
+        }
         setReferences((rows) => [...rows, { ...image, order: rows.length }]); setNotice('参考图已导入本机素材库。');
       }
     } catch (reason) { setError(errorText(reason)); }
@@ -411,7 +421,7 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
         title: title.trim(), mode, prompt, category,
         references: references.map(({ id, media_id, version_id, order, role }) => ({ media_id: media_id ?? (version_id ? undefined : id), version_id, order, role })),
         mask_media_id: mode === 'INPAINT' || manualCutout ? maskMedia?.id : null,
-        output: { width, height }, seed: null, candidate_count: candidateCount, validation_only: validationOnly,
+        output: { width, height }, seed: null, candidate_count: validationOnly ? 1 : candidateCount, validation_only: validationOnly,
         transparent: transparent || mode === 'RGBA',
         target_asset_id: targetAssetId || null,
         parent_version_id: reusableAssets.find((asset) => asset.id === targetAssetId)?.current_version?.id ?? null,
@@ -496,10 +506,6 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
           <button type="button" className="asset-secondary-button" disabled={busy || references.length >= maxReferenceCount} onClick={() => { fileInput.current?.click(); }}><Upload size={15} />导入图片</button>
           <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file, 'reference'); event.target.value = ''; }} />
         </div>
-        <label className="asset-rights-line"><input type="checkbox" checked={rightsAllProjects} onChange={(event) => setRightsAllProjects(event.target.checked)} />允许这张参考素材用于我的其他作品（研究用途）</label>
-        <label className="asset-field"><span>图片许可名称</span><input value={rightsLicense} onChange={(event) => setRightsLicense(event.target.value)} /></label>
-        <label className="asset-field"><span>素材使用授权说明</span><input value={rightsEvidence} onChange={(event) => setRightsEvidence(event.target.value)} /></label>
-        <label className="asset-field"><span>许可到期日（可选）</span><input type="date" value={rightsExpiry} onChange={(event) => setRightsExpiry(event.target.value)} /></label>
         {references.length > 0 && <div className="asset-reference-list">{references.map((row, index) => <div key={row.id} className="asset-reference-row">
           <img src={row.media_url} alt="" /><div className="asset-reference-name"><b>第 {index + 1} 张 · {row.filename}</b><small>{row.width} × {row.height} px · {row.sha256.slice(0, 10)}</small></div>
           <select aria-label={`第 ${index + 1} 张图片用途`} value={row.role} onChange={(event) => setReferences((rows) => rows.map((item) => item.id === row.id ? { ...item, role: event.target.value } : item))}>
@@ -508,7 +514,7 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
           <button aria-label="上移参考图" disabled={index === 0} onClick={() => reorder(index, -1)}>↑</button><button aria-label="下移参考图" disabled={index === references.length - 1} onClick={() => reorder(index, 1)}>↓</button>
           <button aria-label="移除参考图" onClick={() => { if (index === 0) { setMaskMedia(null); setSavedMask(false); } setReferences((rows) => rows.filter((item) => item.id !== row.id).map((item, order) => ({ ...item, order }))); }}><X size={14} /></button>
         </div>)}</div>}
-        {references.length === 0 && <div className="asset-drop-area" onClick={() => fileInput.current?.click()}><ImagePlus size={21} /><span>导入本机授权的图片</span><small>PNG、JPG、WebP</small></div>}
+        {references.length === 0 && <div className="asset-drop-area" onClick={() => fileInput.current?.click()}><ImagePlus size={21} /><span>导入本机图片</span><small>PNG、JPG、WebP</small></div>}
       </div>}
       {mode === 'T2I' && references.length > 0 && <div className="asset-capability-notice pending" role="status"><span><i />文生图不会使用参考图</span><p>移除这些参考图后继续，或切换到图生图以使用它们。</p></div>}
       {(mode === 'INPAINT' || mode === 'RGBA') && references[0] && <MaskCanvas key={`${mode}:${references[0].id}`} source={references[0]} existingMask={maskMedia} savedMask={savedMask} busy={busy} semantics={mode === 'RGBA' ? 'keep' : 'edit'} onSave={exportMask} onDirty={() => { setMaskMedia(null); setSavedMask(false); }} />}
@@ -534,7 +540,6 @@ function ImageWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
         {tasks.length ? <div className="asset-task-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onLibrary={() => onNavigate('library')} />)}</div>
           : <div className="asset-empty-small">保存任务后，状态会出现在这里。</div>}
       </div>
-      <div className="asset-card asset-privacy-card"><ShieldCheck size={18} /><div><b>来源与授权记录</b><p>上传前请确认图片来源与使用许可。素材晋升不代表模型授予了商业版权。</p></div></div>
     </aside>
   </div>;
 }
@@ -683,9 +688,6 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
   const [file, setFile] = useState<File | null>(null);
   const [sampleTranscript, setSampleTranscript] = useState(typeof restoredDraft.sampleTranscript === 'string' ? restoredDraft.sampleTranscript : '');
   const [title, setTitle] = useState(typeof restoredDraft.title === 'string' ? restoredDraft.title : '');
-  const [rightsEvidence, setRightsEvidence] = useState(typeof restoredDraft.rightsEvidence === 'string' ? restoredDraft.rightsEvidence : '我确认已获准保存并在研究用途下使用这段音频。');
-  const [rightsAllProjects, setRightsAllProjects] = useState(Boolean(restoredDraft.rightsAllProjects));
-  const [rightsExpiry, setRightsExpiry] = useState(typeof restoredDraft.rightsExpiry === 'string' ? restoredDraft.rightsExpiry : '');
   const [mode, setMode] = useState<'DESIGN' | 'AUTHORIZED_CLONE' | 'TTS'>(
     ['DESIGN', 'AUTHORIZED_CLONE', 'TTS'].includes(restoredDraft.mode) ? restoredDraft.mode : 'DESIGN',
   );
@@ -705,10 +707,10 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
   const { assets, refresh } = useFreshList();
   useEffect(() => {
     window.localStorage.setItem(draftStorageKey, JSON.stringify({
-      category, sampleTranscript, title, rightsEvidence, rightsAllProjects, rightsExpiry,
+      category, sampleTranscript, title,
       mode, character, description, text, sample, selectedVoiceId,
     }));
-  }, [category, sampleTranscript, title, rightsEvidence, rightsAllProjects, rightsExpiry, mode, character, description, text, sample, selectedVoiceId]);
+  }, [category, sampleTranscript, title, mode, character, description, text, sample, selectedVoiceId]);
   const cap = mode === 'DESIGN' ? capabilities?.voice_capabilities.VOICE_DESIGN : mode === 'AUTHORIZED_CLONE'
     ? capabilities?.voice_capabilities.VOICE_CLONE : capabilities?.voice_capabilities.TTS_MANDARIN;
   useEffect(() => {
@@ -739,9 +741,9 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
       const choices = rows.filter((row): row is LibraryAsset => row !== null).flatMap((asset) =>
         (asset.versions ?? []).filter((version) => version.kind === 'audio' && (version.provenance as any).media_purpose === 'voice_sample')
           .map((version) => ({ id: (version.provenance as any).source_media_id, rights_id: version.rights?.id,
-            title: asset.title, filename: version.filename, sha256: version.content_sha256, media_url: version.media_url,
+            title: asset.title, filename: version.filename, transcript: version.prompt, sha256: version.content_sha256, media_url: version.media_url,
             rights_status: version.rights?.status, expires_at: version.rights?.expires_at })),
-      ).filter((item) => item.id && item.rights_id && item.rights_status === 'APPROVED');
+      ).filter((item) => item.id && item.rights_status !== 'REVOKED');
       setSampleOptions(choices);
     }).catch(() => { if (alive) setSampleOptions([]); });
     return () => { alive = false; };
@@ -749,27 +751,19 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
 
   async function importAudio() {
     if (!file || !title.trim()) { setError('请选择音频并填写素材名称。'); return; }
-    if (category === 'voice' && !sampleTranscript.trim()) { setError('登记授权声音样本时，请填写录音中的实际对白原文。'); return; }
+    if (category === 'voice' && !sampleTranscript.trim()) { setError('请填写录音中的实际对白原文。'); return; }
     setBusy(true); setError(''); setNotice('');
     try {
-      const media = await uploadLibraryMedia(file, category === 'voice' ? 'voice_sample' : 'audio_import', {
-        source_type: category === 'voice' ? 'speaker_consent' : 'user_declared_source',
-        license_kind: category === 'voice' ? 'VOICE_SAMPLE_CONSENT' : 'USER_DECLARED_AUDIO',
-        rights_statement: rightsEvidence,
-        subject: category === 'voice' ? character || title : '',
-        allowed_project_ids: rightsAllProjects ? ['*'] : [], permitted_uses: ['research', 'personal'],
-        expires_at: rightsExpiry ? new Date(`${rightsExpiry}T23:59:59`).toISOString() : undefined,
-      });
-      await approveLibraryRights(media.rights_id, {
-        expected_snapshot: media.rights_snapshot_hash, evidence: rightsEvidence,
-        allowed_project_ids: rightsAllProjects ? ['*'] : [], permitted_uses: ['research', 'personal'], commercial_allowed: false,
-      });
+      const media = await uploadLibraryMedia(file, category === 'voice' ? 'voice_sample' : 'audio_import');
       await createLibraryAsset({
         title: title.trim(), kind: 'audio', category, media_id: media.id,
         source_mode: category === 'voice' ? 'AUTHORIZED_CLONE' : 'UPLOAD',
         prompt: category === 'voice' ? sampleTranscript.trim() : '',
       });
-      if (category === 'voice') setSample({ id: media.id, rights_id: media.rights_id, title: title.trim(), filename: file.name });
+      if (category === 'voice') {
+        setSample({ id: media.id, title: title.trim(), filename: file.name });
+        setText(sampleTranscript.trim());
+      }
       setFile(null); setTitle(''); setSampleTranscript(''); refresh(); setNotice('音频已导入并保存到全局素材库。');
     } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
@@ -783,7 +777,6 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
         mode, title: title || `${character || '新音色'} 预览`, character: character || '新音色',
         description, text, reference_text: mode === 'AUTHORIZED_CLONE' ? text : '',
         reference_media_id: mode === 'AUTHORIZED_CLONE' ? sample?.id : null,
-        rights_id: mode === 'AUTHORIZED_CLONE' ? sample?.rights_id : null,
         voice_profile_id: mode === 'TTS' ? selectedVoiceId : null,
         speed: 1, pause: 0, emotion: 'neutral',
       };
@@ -837,31 +830,32 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
 
   return <div className="asset-voice-layout">
     <div className="asset-card asset-voice-form">
-      <div className="asset-card-heading"><div><div className="asset-eyebrow">声音工坊</div><h2>准备可授权复用的声音素材</h2><p>试听与授权冻结由人工完成；音效和配乐只提供导入管理。</p></div><Mic2 size={22} /></div>
+      <div className="asset-card-heading"><div><div className="asset-eyebrow">声音工坊</div><h2>准备可复用的声音素材</h2><p>试听与音色冻结由人工完成；音效和配乐只提供导入管理。</p></div><Mic2 size={22} /></div>
       <div className="asset-mode-grid voice-mode-grid">
-        {([['DESIGN', '音色设计'], ['AUTHORIZED_CLONE', '授权声音克隆'], ['TTS', '普通话对白']] as const).map(([value, label]) => <button key={value} className={mode === value ? 'active' : ''} onClick={() => setMode(value)}>{label}</button>)}
+        {([['DESIGN', '音色设计'], ['AUTHORIZED_CLONE', '声音克隆'], ['TTS', '普通话对白']] as const).map(([value, label]) => <button key={value} className={mode === value ? 'active' : ''} onClick={() => setMode(value)}>{label}</button>)}
       </div>
       <div className="asset-capability-notice pending"><span><i />{cap ? capabilityLabel(cap) : '读取中'}</span><p>{cap?.reason ?? '正在读取声音能力。'}</p></div>
-      {mode !== 'TTS' && <label className="asset-field"><span>{mode === 'DESIGN' ? '声音特征描述' : '声音持有人 / 授权主体'}</span><input value={mode === 'DESIGN' ? description : character} onChange={(event) => mode === 'DESIGN' ? setDescription(event.target.value) : setCharacter(event.target.value)} placeholder={mode === 'DESIGN' ? '例如：温和、清晰、略带沙哑的中年男声' : '请填写授权主体名称'} /></label>}
-      {mode === 'AUTHORIZED_CLONE' && <label className="asset-field"><span>选择已授权的声音样本</span><select value={sample?.id ?? ''} onChange={(event) => setSample(sampleOptions.find((item) => item.id === event.target.value) ?? null)}>
-        <option value="">选择一段已登记并授权的录音</option>{sampleOptions.map((item) => <option key={item.id} value={item.id}>{item.title} · {item.filename}</option>)}
-      </select><small>克隆仅对授权用途和期限内的样本开放。</small></label>}
+      {mode !== 'TTS' && <label className="asset-field"><span>{mode === 'DESIGN' ? '声音特征描述' : '角色或说话人'}</span><input value={mode === 'DESIGN' ? description : character} onChange={(event) => mode === 'DESIGN' ? setDescription(event.target.value) : setCharacter(event.target.value)} placeholder={mode === 'DESIGN' ? '例如：温和、清晰、略带沙哑的中年男声' : '例如：林岚'} /></label>}
+      {mode === 'AUTHORIZED_CLONE' && <label className="asset-field"><span>选择声音样本</span><select value={sample?.id ?? ''} onChange={(event) => {
+        const selected = sampleOptions.find((item) => item.id === event.target.value);
+        setSample(selected ?? null);
+        setText(selected?.transcript ?? '');
+      }}>
+        <option value="">选择一段已导入的录音</option>{sampleOptions.map((item) => <option key={item.id} value={item.id}>{item.title} · {item.filename}</option>)}
+      </select></label>}
       {mode === 'TTS' && <label className="asset-field"><span>已冻结音色</span><select value={selectedVoiceId} onChange={(event) => setSelectedVoiceId(event.target.value)} disabled={!voices.some((voice) => voice.status === 'FROZEN')}>
         {voices.filter((voice) => voice.status === 'FROZEN').map((voice) => <option key={voice.id} value={voice.id}>{voice.title}</option>)}
         {!voices.some((voice) => voice.status === 'FROZEN') && <option>请先完成人工试听与冻结</option>}
       </select></label>}
-      <label className="asset-field"><span>{mode === 'TTS' ? '普通话对白' : mode === 'AUTHORIZED_CLONE' ? '授权录音中的对白原文' : '试听文本'}</span><textarea rows={3} value={text} onChange={(event) => setText(event.target.value)} /></label>
+      <label className="asset-field"><span>{mode === 'TTS' ? '普通话对白' : mode === 'AUTHORIZED_CLONE' ? '录音中的对白原文' : '试听文本'}</span><textarea rows={3} value={text} onChange={(event) => setText(event.target.value)} /></label>
       {mode !== 'TTS' && <label className="asset-field"><span>音色名称</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：林岚·旁白音色" /></label>}
       <div className="asset-card asset-audio-import">
         <div><b>导入音频素材</b><p>对白、音效、配乐和声音样本均可分类、试听和跨项目管理。</p></div>
-        <label className="asset-field"><span>分类</span><select value={category} onChange={(event) => setCategory(event.target.value)}><option value="dialogue">对白</option><option value="voice">音色 / 授权样本</option><option value="sfx">音效</option><option value="music">音乐</option></select></label>
+        <label className="asset-field"><span>分类</span><select value={category} onChange={(event) => setCategory(event.target.value)}><option value="dialogue">对白</option><option value="voice">音色 / 参考样本</option><option value="sfx">音效</option><option value="music">音乐</option></select></label>
         <label className="asset-field"><span>素材名称</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="音频名称" /></label>
-        <label className="asset-field"><span>来源及授权说明</span><input value={rightsEvidence} onChange={(event) => setRightsEvidence(event.target.value)} /></label>
-        {category === 'voice' && <label className="asset-field"><span>授权录音中的对白原文</span><textarea value={sampleTranscript} onChange={(event) => setSampleTranscript(event.target.value)} rows={3} placeholder="逐字填写样本中实际说出的内容" /></label>}
-        {category === 'voice' && <label className="asset-field"><span>声音授权到期日（可选）</span><input type="date" value={rightsExpiry} onChange={(event) => setRightsExpiry(event.target.value)} /></label>}
-        <label className="asset-rights-line"><input type="checkbox" checked={rightsAllProjects} onChange={(event) => setRightsAllProjects(event.target.checked)} />允许在我的其他作品中使用（研究用途）</label>
+        {category === 'voice' && <label className="asset-field"><span>录音中的对白原文</span><textarea value={sampleTranscript} onChange={(event) => setSampleTranscript(event.target.value)} rows={3} placeholder="逐字填写样本中实际说出的内容" /></label>}
         <div className="asset-upload-line"><input type="file" accept={category === 'voice' ? 'audio/wav' : 'audio/wav,audio/mpeg,audio/flac'} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><button className="asset-secondary-button" disabled={busy || !file || !title.trim()} onClick={() => void importAudio()}><Upload size={14} />导入音频</button></div>
-        {category === 'voice' && <small>授权克隆参考样本目前需使用 WAV，并填写样本中的对白原文。</small>}
+        {category === 'voice' && <small>请使用单声道 16-bit PCM WAV，并填写样本中的对白原文。</small>}
       </div>
       {error && <div className="asset-inline-error" role="alert">{error}</div>}{notice && <div className="asset-success-note" role="status"><Check size={15} />{notice}</div>}
       {pendingIntent && <div className="asset-capability-notice pending" role="status">
@@ -869,19 +863,18 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
         <p>刷新或断网后可用原请求编号核对并恢复；恢复不会重复创建任务。</p>
         <button type="button" className="asset-secondary-button" disabled={busy} onClick={() => void recoverPendingIntent()}>核对并恢复上次请求</button>
       </div>}
-      <button className="asset-primary-button" disabled={busy || !text.trim() || (mode === 'AUTHORIZED_CLONE' && !sample)} onClick={() => void submitVoice()}><Mic2 size={16} />保存声音任务</button>
+      <button className="asset-primary-button" disabled={busy || cap?.can_queue === false || !text.trim() || (mode === 'AUTHORIZED_CLONE' && !sample)} onClick={() => void submitVoice()}><Mic2 size={16} />保存声音任务</button>
     </div>
     <aside className="asset-workshop-side">
       <div className="asset-card"><div className="asset-card-heading"><div><h2>我的音色</h2><p>冻结前必须实际试听并确认。</p></div><AudioLines size={16} /></div>
         {voices.length ? <div className="asset-task-list">{voices.map((voice) => <div key={voice.id} className="asset-voice-row"><div><b>{voice.title}</b><small>{LABELS[voice.status] ?? voice.status} · {voice.voice_hash.slice(0, 10)}</small></div><audio controls src={voice.media_url} onPlay={() => setHeardVoiceId(voice.id)} />{voice.status === 'PREVIEW' && <button className="asset-text-button" disabled={busy || heardVoiceId !== voice.id} onClick={() => void freezeVoice(voice)}>试听后冻结</button>}</div>)}</div> : <div className="asset-empty-small">还没有全局音色。</div>}
       </div>
       <div className="asset-card"><h2>最近声音任务</h2>{tasks.length ? <div className="asset-task-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onLibrary={() => onNavigate('library')} />)}</div> : <div className="asset-empty-small">声音任务会保留在这里，等待本机服务验证。</div>}</div>
-      <div className="asset-card asset-privacy-card"><ShieldCheck size={18} /><div><b>授权可撤销、会过期</b><p>声音克隆需要说话人授权、用途和期限；音色冻结不会扩大许可范围。</p></div></div>
     </aside>
   </div>;
 }
 
-function LibraryPage({ projects }: { projects: Project[] }) {
+function LibraryPage() {
   const [q, setQ] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
@@ -894,13 +887,7 @@ function LibraryPage({ projects }: { projects: Project[] }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [editingRightsId, setEditingRightsId] = useState('');
-  const [rightsProjectIds, setRightsProjectIds] = useState<string[]>([]);
-  const [rightsAllProjects, setRightsAllProjects] = useState(false);
-  const [rightsUses, setRightsUses] = useState<string[]>([]);
-  const [rightsCommercial, setRightsCommercial] = useState(false);
-  const [rightsExpiry, setRightsExpiry] = useState('');
-  const [rightsEvidence, setRightsEvidence] = useState('');
+  const imageInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -916,49 +903,30 @@ function LibraryPage({ projects }: { projects: Project[] }) {
     setEditCollection(selected?.collection ?? '');
   }, [selected?.id, selected?.state_version]);
 
-  async function reviewVersion(version: LibraryVersion) {
+  async function importImage(file: File) {
     setBusy(true); setError('');
     try {
-      let current = version;
-      if (current.rights?.status !== 'APPROVED') {
-        throw new Error('请先展开“授权范围”，核对来源许可并明确保存项目范围后，再晋升候选。');
-      }
-      if (current.status === 'CANDIDATE' || current.status === 'QC_FAILED') current = await qcLibraryVersion(current.id);
-      if (current.status !== 'READY_FOR_REVIEW') throw new Error(`该版本状态为${current.status}，不能晋升。`);
-      const grant = await grantVersionPromotion(current.id);
-      await promoteLibraryVersion(current.id, { ...grant, evidence: '已检查来源、内容和技术质量，确认晋升为全局正式版本。' });
+      const media = await uploadLibraryMedia(file, 'source');
+      const asset = await createLibraryAsset({
+        title: file.name.replace(/\.[^.]+$/, '') || file.name, kind: 'image', category: 'other', media_id: media.id,
+      });
+      setSelected(asset);
+      setQ('');
+      setCategoryFilter('');
       setRefreshKey((n) => n + 1);
-      if (selected) setSelected(await getLibraryAsset(selected.id));
     } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
   }
 
-  function beginRightsEdit(version: LibraryVersion) {
-    const rights = version.rights;
-    if (!rights || rights.status === 'REVOKED') return;
-    setEditingRightsId(rights.id);
-    setRightsAllProjects((rights.allowed_project_ids ?? []).includes('*'));
-    setRightsProjectIds((rights.allowed_project_ids ?? []).filter((id) => id !== '*'));
-    setRightsUses(rights.permitted_uses ?? []);
-    setRightsCommercial(rights.commercial_allowed);
-    setRightsExpiry(rights.expires_at ? rights.expires_at.slice(0, 16) : '');
-    setRightsEvidence('我已核对素材来源、许可范围和目标项目。');
-  }
-
-  async function saveRights(version: LibraryVersion) {
-    if (!version.rights || !rightsEvidence.trim()) { setError('请填写授权核对依据。'); return; }
+  async function reviewVersion(version: LibraryVersion) {
     setBusy(true); setError('');
     try {
-      await updateLibraryRights(version.rights.id, {
-        expected_snapshot: version.rights_snapshot_hash ?? '',
-        evidence: rightsEvidence.trim(),
-        allowed_project_ids: rightsAllProjects ? ['*'] : rightsProjectIds,
-        permitted_uses: rightsUses,
-        commercial_allowed: rightsCommercial,
-        expires_at: rightsExpiry ? new Date(rightsExpiry).toISOString() : null,
-        license_kind: version.rights.license_kind,
-      });
-      setEditingRightsId('');
+      let current = version;
+      if (current.status === 'CANDIDATE' || current.status === 'QC_FAILED') current = await qcLibraryVersion(current.id);
+      if (current.status !== 'READY_FOR_REVIEW') throw new Error(`该版本状态为${current.status}，不能晋升。`);
+      const grant = await grantVersionPromotion(current.id);
+      await promoteLibraryVersion(current.id, { ...grant, evidence: '已检查内容和技术质量，确认晋升为全局正式版本。' });
+      setRefreshKey((n) => n + 1);
       if (selected) setSelected(await getLibraryAsset(selected.id));
     } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
@@ -997,19 +965,15 @@ function LibraryPage({ projects }: { projects: Project[] }) {
     catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
   }
 
-  async function revokeRights(rightsId: string) {
-    if (!selected || !window.confirm('撤销这项授权？之后新的项目分配和声音生成将被阻止。')) return;
-    setBusy(true); setError('');
-    try {
-      await revokeLibraryRights(rightsId, '用户在素材中心撤销授权');
-      setSelected(await getLibraryAsset(selected.id));
-    } catch (reason) { setError(errorText(reason)); }
-    finally { setBusy(false); }
-  }
-
   return <div className="asset-library-layout">
     <section className="asset-library-main">
       <div className="asset-card"><div className="asset-library-toolbar"><div><div className="asset-eyebrow">全局素材库</div><h2>所有素材和版本都在这里</h2></div>
+        <button type="button" className="asset-secondary-button" disabled={busy} onClick={() => imageInput.current?.click()}><Upload size={15} />导入图片</button>
+        <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = '';
+          if (file) void importImage(file);
+        }} />
         <label className="asset-search"><Search size={15} /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="搜索名称或标签" /></label>
         <select className="asset-category-filter" aria-label="按分类筛选素材" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
           <option value="">全部分类</option><option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
@@ -1035,29 +999,9 @@ function LibraryPage({ projects }: { projects: Project[] }) {
         </details>
         {selected.versions?.map((version) => <div className="asset-version-card" key={version.id}>
           <div className="asset-version-heading"><b>V{version.ordinal} · {LABELS[version.status] ?? version.status}</b><small>{version.width && version.height ? `${version.width} × ${version.height} · ` : ''}{version.content_sha256.slice(0, 12)}</small></div>
-          <div className="asset-version-meta"><span>{version.source_mode}</span><span>{version.is_mock ? '模拟结果' : '真实文件'}</span><span>{version.rights?.commercial_allowed ? '含商业授权' : '不含商业授权'}</span></div>
-          {version.rights && <div className="asset-rights-summary">
-            <span>授权：{version.rights.status} · {version.rights.allowed_project_ids.includes('*') ? '全部项目' : version.rights.allowed_project_ids.length ? `${version.rights.allowed_project_ids.length} 个指定项目` : '尚未授权任何项目'}</span>
-            {version.rights.status !== 'REVOKED' && <button className="asset-text-button" disabled={busy} onClick={() => beginRightsEdit(version)}>{version.rights.status === 'APPROVED' ? '调整授权范围' : '核对并设置授权'}</button>}
-          </div>}
-          {version.rights && editingRightsId === version.rights.id && <div className="asset-rights-editor">
-            <b>只授予你确认过的项目和用途</b>
-            <p>Qwen 研究许可不包含商业授权。来源素材的项目范围、用途和到期时间也会限制衍生版本。</p>
-            <label className="asset-rights-line"><input type="checkbox" checked={rightsAllProjects} onChange={(event) => setRightsAllProjects(event.target.checked)} />我已核对许可，可用于所有当前和未来项目。</label>
-            {!rightsAllProjects && <div className="asset-rights-project-list">{projects.length ? projects.map((project) => <label className="asset-rights-line" key={project.id}><input type="checkbox" checked={rightsProjectIds.includes(project.id)} onChange={(event) => setRightsProjectIds((rows) => event.target.checked ? [...new Set([...rows, project.id])] : rows.filter((id) => id !== project.id))} />{project.title}</label>) : <small>还没有影视项目；可以先留空，之后再为具体项目授权。</small>}</div>}
-            <fieldset className="asset-rights-use-list"><legend>允许的用途</legend>{['research', 'personal', 'non_commercial', 'commercial'].map((use) => {
-              const modelResearchOnly = version.rights!.license_kind.toUpperCase().startsWith('QWEN');
-              const disabled = use === 'commercial' && (modelResearchOnly || !version.rights!.commercial_allowed);
-              return <label key={use}><input type="checkbox" disabled={disabled} checked={rightsUses.includes(use)} onChange={(event) => setRightsUses((rows) => event.target.checked ? [...new Set([...rows, use])] : rows.filter((item) => item !== use))} />{{ research: '研究与评估', personal: '个人用途', non_commercial: '非商业项目', commercial: '商业用途' }[use]}</label>;
-            })}</fieldset>
-            {version.rights.license_kind.toUpperCase().startsWith('QWEN') && <small>当前登记的是 Qwen 研究许可或待复核模型许可；商业用途不能开启。</small>}
-            <label className="asset-field"><span>授权到期时间（可选）</span><input type="datetime-local" value={rightsExpiry} onChange={(event) => setRightsExpiry(event.target.value)} /></label>
-            <label className="asset-field"><span>来源许可核对依据</span><textarea value={rightsEvidence} onChange={(event) => setRightsEvidence(event.target.value)} /></label>
-            <div className="asset-button-row"><button className="asset-primary-button" disabled={busy || !rightsEvidence.trim() || !rightsUses.length} onClick={() => void saveRights(version)}>确认并保存授权范围</button><button className="asset-secondary-button" disabled={busy} onClick={() => setEditingRightsId('')}>取消</button></div>
-          </div>}
+          <div className="asset-version-meta"><span>{version.source_mode}</span><span>{version.is_mock ? '模拟结果' : '真实文件'}</span></div>
           {version.prompt && <p className="asset-prompt-preview">{version.prompt}</p>}
           {version.kind === 'audio' && <audio className="asset-version-audio" controls preload="none" src={version.media_url}>当前浏览器不支持音频播放。</audio>}
-          {version.rights?.status === 'APPROVED' && <button className="asset-text-button" disabled={busy} onClick={() => void revokeRights(version.rights!.id)}>撤销此版本授权</button>}
           {version.qc && <details className="asset-diagnostics"><summary>技术检查详情</summary><pre>{JSON.stringify(version.qc, null, 2)}</pre></details>}
           {version.status !== 'PROMOTED' && !version.is_mock && <button className="asset-secondary-button full" disabled={busy} onClick={() => void reviewVersion(version)}><BadgeCheck size={14} />检查并人工晋升</button>}
           {version.status === 'PROMOTED' && <div className="asset-promoted-note"><Check size={13} />已人工晋升；项目版本引用不会随全局升级而改变。</div>}
@@ -1069,76 +1013,74 @@ function LibraryPage({ projects }: { projects: Project[] }) {
 }
 
 function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Project[]; projectId: string; projectAssets: Asset[] }) {
-  const { assets, loading, error: loadError, refresh } = useFreshList();
+  const [query, setQuery] = useState('');
+  const { assets, loading, error: loadError, refresh } = useFreshList(query);
   const [selectedVersion, setSelectedVersion] = useState('');
-  const [selectedAsset, setSelectedAsset] = useState('');
   const [targetProject, setTargetProject] = useState(projectId || projects[0]?.id || '');
   const [role, setRole] = useState('character');
   const [entity, setEntity] = useState('');
-  const [usage, setUsage] = useState('research');
-  const [confirmed, setConfirmed] = useState(false);
   const [assignments, setAssignments] = useState<Array<Record<string, any>>>([]);
   const [error, setError] = useState(loadError);
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
   const [savingProjectAsset, setSavingProjectAsset] = useState('');
-  const [confirmedProjectSave, setConfirmedProjectSave] = useState(false);
 
   useEffect(() => { listAssignments().then((row) => setAssignments(row.items)).catch((reason) => setError(errorText(reason))); }, []);
-  useEffect(() => { if (!selectedAsset) { setSelectedVersion(''); return; }
-    getLibraryAsset(selectedAsset).then((row) => setSelectedVersion(row.current_version?.status === 'PROMOTED' ? row.current_version.id : ''))
-      .catch((reason) => setError(errorText(reason)));
-  }, [selectedAsset]);
-
   const choices = assets.filter((asset) => asset.current_version?.status === 'PROMOTED' && !asset.current_version.is_mock);
   async function assign() {
-    if (!targetProject || !selectedVersion || !confirmed) { setError('请选择作品和已晋升版本，并确认项目用途及素材身份。'); return; }
+    if (!targetProject || !selectedVersion) { setError('请选择作品和已晋升版本，并填写作品内素材身份。'); return; }
     setSaving(true); setError(''); setNotice('');
     try {
       const result = await assignLibraryVersion({ project_id: targetProject, library_version_id: selectedVersion,
-        role, entity_id: entity.trim() || null, usage_scope: usage, idempotency_key: crypto.randomUUID(), confirmed: true });
+        role, entity_id: entity.trim() || null, idempotency_key: crypto.randomUUID() });
       setNotice(`已分配到作品。项目素材编号：${result.project_asset_id}`);
-      setAssignments((rows) => [result, ...rows]); setConfirmed(false); refresh();
+      setAssignments((rows) => [result, ...rows]); refresh();
     } catch (reason) { setError(errorText(reason)); }
     finally { setSaving(false); }
   }
 
   async function saveProjectAsset(asset: Asset) {
-    if (!confirmedProjectSave) { setError('请先确认来源许可，并确认保存后授权仍仅限当前项目。'); return; }
     setSavingProjectAsset(asset.id); setError(''); setNotice('');
     try {
       const result = await saveProjectAssetToLibrary(asset.project_id, asset.id, {
-        title: asset.filename.replace(/\.[^.]+$/, ''), category: asset.role ?? 'other', tags: asset.tags ?? [], confirmed_rights: true,
+        title: asset.entity_id || asset.filename.replace(/\.[^.]+$/, ''),
+        category: !asset.role || ['generic', 'style_reference'].includes(asset.role) ? 'other' : asset.role,
+        tags: asset.tags ?? [],
       });
-      setNotice(`项目素材已保存到全局库：${result.title}。其跨项目授权仍未自动扩大。`);
-      setConfirmedProjectSave(false);
+      setNotice(`项目素材已保存到全局库：${result.title}。`);
       refresh();
     } catch (reason) { setError(errorText(reason)); }
     finally { setSavingProjectAsset(''); }
   }
 
   return <div className="asset-assignment-layout">
-    <div className="asset-card"><div className="asset-eyebrow">全局素材 → 作品</div><h2>分配一个已晋升版本</h2><p className="asset-muted">每个作品会得到独立 Asset 身份和授权快照；旧项目冻结引用保持原样。</p>
+    <div className="asset-card"><div className="asset-eyebrow">全局素材 → 作品</div><h2>分配一个已晋升版本</h2><p className="asset-muted">每个作品会得到独立 Asset 身份；旧项目冻结引用保持原样。</p>
       {loading && <div className="asset-empty-small">正在读取全局素材…</div>}
       {projects.length ? <>
         <label className="asset-field"><span>目标作品</span><select value={targetProject} onChange={(event) => setTargetProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
-        <label className="asset-field"><span>全局素材版本</span><select value={selectedVersion} onChange={(event) => { setSelectedVersion(event.target.value); const row = choices.find((item) => item.current_version?.id === event.target.value); if (row) setSelectedAsset(row.id); }}>
+        <label className="asset-field"><span>搜索素材</span><input value={query} onChange={(event) => {
+          setQuery(event.target.value);
+          setSelectedVersion('');
+        }} placeholder="名称或标签" /></label>
+        <label className="asset-field"><span>全局素材版本</span><select value={selectedVersion} onChange={(event) => {
+          const versionId = event.target.value;
+          const asset = choices.find((item) => item.current_version?.id === versionId);
+          setSelectedVersion(versionId);
+          if (asset) setRole(asset.category === 'other' ? 'generic' : asset.category);
+        }}>
           <option value="">选择已晋升的正式版本</option>{choices.map((asset) => <option key={asset.id} value={asset.current_version!.id}>{asset.title} · V{asset.current_version!.ordinal}</option>)}
         </select></label>
         <div className="asset-field-row"><label className="asset-field"><span>作品中的用途</span><select value={role} onChange={(event) => setRole(event.target.value)}><option value="character">人物</option><option value="costume">服装</option><option value="scene">场景</option><option value="prop">道具</option><option value="voice">音色</option><option value="dialogue">对白音频</option><option value="sfx">音效</option><option value="music">音乐</option><option value="generic">其他</option></select></label>
           <label className="asset-field"><span>作品内身份名称</span><input value={entity} onChange={(event) => setEntity(event.target.value)} placeholder="例如：林岚" /></label></div>
-        <label className="asset-field"><span>用途范围</span><select value={usage} onChange={(event) => setUsage(event.target.value)}><option value="research">研究 / 评估</option><option value="personal">个人用途</option><option value="non_commercial">非商业项目</option><option value="commercial">商业作品（需有商业许可）</option></select></label>
-        <label className="asset-rights-line confirmation-line"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />我确认所选版本、作品内身份和授权用途正确。</label>
-        <button className="asset-primary-button" disabled={saving || !selectedVersion || !confirmed} onClick={() => void assign()}><ArrowRight size={16} />{saving ? '正在分配…' : '分配到作品'}</button>
+        <button className="asset-primary-button" disabled={saving || !selectedVersion} onClick={() => void assign()}><ArrowRight size={16} />{saving ? '正在分配…' : '分配到作品'}</button>
       </> : <div className="asset-empty-small">尚无影视项目。可以先独立整理素材，创建作品后再分配。</div>}
       {error && <div className="asset-inline-error" role="alert">{error}</div>}{notice && <div className="asset-success-note" role="status"><Check size={14} />{notice}</div>}
     </div>
-    <div className="asset-card"><div className="asset-eyebrow">作品 → 全局素材</div><h2>收藏项目已锁定素材</h2><p className="asset-muted">保存操作会先检查项目归属、审批、锁定状态、文件哈希和项目授权。</p>
+    <div className="asset-card"><div className="asset-eyebrow">作品 → 全局素材</div><h2>收藏项目已锁定素材</h2><p className="asset-muted">保存操作会先检查项目归属、审批、锁定状态、文件哈希。</p>
       {projectAssets.filter((asset) => asset.approved && asset.locked).length ? <>
-        <label className="asset-rights-line confirmation-line"><input type="checkbox" checked={confirmedProjectSave} onChange={(event) => setConfirmedProjectSave(event.target.checked)} />我已核对来源许可，并确认收藏后仍仅限当前项目，跨项目使用需另行授权。</label>
         <div className="asset-task-list">{projectAssets.filter((asset) => asset.approved && asset.locked).map((asset) => <div key={asset.id} className="asset-project-save-row">
         <div><b>{asset.filename}</b><small>{asset.role ?? '其他'} · {asset.sha256.slice(0, 12)} · {asset.locked ? '已锁定' : '未锁定'}</small></div>
-        <button className="asset-secondary-button" disabled={!!savingProjectAsset || !confirmedProjectSave} onClick={() => void saveProjectAsset(asset)}><Copy size={14} />{savingProjectAsset === asset.id ? '正在保存…' : '收藏到全局库'}</button>
+        <button className="asset-secondary-button" disabled={!!savingProjectAsset} onClick={() => void saveProjectAsset(asset)}><Copy size={14} />{savingProjectAsset === asset.id ? '正在保存…' : '收藏到全局库'}</button>
       </div>)}</div>
       </> : <div className="asset-empty-small">当前作品没有已批准并锁定的素材，或尚未选择作品。</div>}
     </div>

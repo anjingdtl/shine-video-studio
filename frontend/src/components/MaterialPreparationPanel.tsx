@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
-import { API, api, ERROR_CODE_LABELS, type Asset, type StyleVersion } from '../api';
+import { API, api, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
 import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
 
@@ -132,7 +132,7 @@ function reasonText(code: string | null | undefined): string {
   return ERROR_CODE_LABELS[code] ?? `这一步没有完成（${code}）。请到专业设置查看专业日志。`;
 }
 
-function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion }: {
+function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [] }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onPromoted?: () => void;
@@ -140,6 +140,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   frozenStyle?: StyleVersion | null;
   /** Bumped when a script was imported or generated, so the list reloads. */
   documentsVersion?: number;
+  shots?: Shot[];
 }) {
   const [state, setState] = useState<MaterialState | null>(null);
   const [documents, setDocuments] = useState<{ id: string; filename: string; sha256: string }[]>([]);
@@ -165,13 +166,14 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [librarySearchBusy, setLibrarySearchBusy] = useState(false);
   /** The assignment receipt that can be turned into a per-shot adoption. */
   const [adoptionReceipt, setAdoptionReceipt] = useState<null | {
-    requirementId: string; projectAssetId: string; libraryVersionId: string;
+    requirementId: string; projectAssetId: string; libraryVersionId?: string;
     role: string; entity: string; key: string;
   }>(null);
   const [adoptionPreview, setAdoptionPreview] = useState<null | {
     shot_count: number; blocked: Array<Record<string, any>>;
     shots: Array<Record<string, any>>;
   }>(null);
+  const [adoptionShotId, setAdoptionShotId] = useState('');
   const [adoptionBusy, setAdoptionBusy] = useState(false);
   const [adoptionReport, setAdoptionReport] = useState('');
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
@@ -206,7 +208,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         library_version_id: result.version.id,
         role: requirement.family,
         entity_id: requirement.entity_id,
-        usage_scope: 'research',
         idempotency_key: crypto.randomUUID(),
         confirmed: true,
         requirement_context: {
@@ -228,12 +229,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         key: crypto.randomUUID(),
       });
       setAdoptionPreview(null);
+      setAdoptionShotId('');
       setAdoptionReport('');
       setOperationReport(`已把全局素材 V${result.version.ordinal} 复制为本项目独立素材身份；请继续确认需求清单，或直接「用于这些镜头」。`);
       await load();
     } catch (error) {
       setLibrarySearchError(error instanceof Error ? error.message : String(error));
     } finally { setLibrarySearchBusy(false); }
+  }
+
+  function openProjectAdoption(requirement: MaterialRequirement, asset: Asset) {
+    setAdoptionReceipt({
+      requirementId: requirement.requirement_id, projectAssetId: asset.id,
+      role: requirement.family, entity: requirement.entity_id, key: crypto.randomUUID(),
+    });
+    setAdoptionShotId('');
+    setAdoptionPreview(null);
+    setAdoptionReport('');
   }
 
   async function previewAdoption() {
@@ -252,6 +264,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           project_asset_id: adoptionReceipt.projectAssetId,
           role: adoptionReceipt.role,
           entity_id: adoptionReceipt.entity,
+          shot_ids: adoptionShotId ? [adoptionShotId] : undefined,
         }),
       });
       if (activeProject.current !== projectId) return;
@@ -296,6 +309,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         + (result.adopted_count ? '镜头版本已更新；当前导演包需要用最新镜头重新生成。' : ''),
       );
       await load();
+      onPromoted?.();
     } catch (error) {
       setAdoptionReport(error instanceof Error ? error.message : String(error));
     } finally { setAdoptionBusy(false); }
@@ -424,27 +438,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     await load();
   });
 
-  const ensureRights = async (): Promise<string> => {
-    const created = await jsonPost<{ id: string }>('/preparation/rights', {
-      project_id: projectId,
-      scope: 'asset',
-      license_id: 'local-research-and-evaluation',
-      evidence: '本地研究用途：由导演模式素材准备流程登记，用于本机生成素材候选。',
-      purpose: 'LOCAL_RESEARCH_AND_EVALUATION_ONLY',
-    });
-    const grant = await jsonPost<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
-      action: 'rights_approve',
-      target_id: created.id,
-    });
-    await jsonPost(`/preparation/rights/${created.id}/approve`, {
-      grant_id: grant.grant_id,
-      snapshot: grant.snapshot,
-      offline: true,
-      evidence: '本地研究用途授权：只用于本机评估，不产生商业授权。',
-    });
-    return created.id;
-  };
-
   const confirmAndGenerate = () => run(async () => {
     if (!state?.plan_revision_id || !state.expected_snapshot) {
       throw new Error('先分析剧本，生成需求清单。');
@@ -480,13 +473,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       await load();
       return;
     }
-    const rightsId = await ensureRights();
     await jsonPost(`/projects/${projectId}/material-preparation/generate`, {
       confirmation_id: confirmed.confirmation_id,
       confirmation_hash: confirmed.confirmation_hash,
       requirement_ids: generatable,
       idempotency_key: `material-generate-${confirmed.confirmation_id.slice(0, 12)}`,
-      rights_id: rightsId,
       mode: 'real',
     });
     setStepReport((current) => ({
@@ -573,7 +564,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (action === 'regenerate') {
       if (!state?.confirmation || !item.requirement_id || !item.brief) throw new Error('尚无可修改的外观描述，请先恢复出品人步骤。');
       const appearance = briefEdits[item.item_id] ?? item.brief.appearance;
-      const rightsId = await ensureRights();
       const requestBytes = new TextEncoder().encode(`${item.item_id}:${item.generation_revision}:${appearance}`);
       const requestHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', requestBytes)))
         .map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -582,7 +572,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         idempotency_key: `regenerate-${requestHash}`,
         // The edited description IS the answer to the producer's questions;
         // re-sending them would only re-trigger the clarification refusal.
-        rights_id: rightsId, brief: { ...item.brief, appearance, questions: [] }, seed: item.generation_revision + 1,
+        brief: { ...item.brief, appearance, questions: [] }, seed: item.generation_revision + 1,
       });
       setOperationReport('已创建新的生成版本；你对澄清问题的回答已并入描述，历史图片保留，需要重新选用。');
     } else {
@@ -819,22 +809,39 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
                   </button>
+                  {assets.filter((asset) => asset.id === (bindings[requirement.requirement_id] ?? requirement.bound_asset_id)
+                    && asset.approved && asset.locked && asset.role === requirement.family && asset.entity_id === requirement.entity_id)
+                    .map((asset) => <button key={asset.id} type="button" className="text-button" disabled={adoptionBusy}
+                      onClick={() => openProjectAdoption(requirement, asset)}>绑定已选主素材到镜头</button>)}
                   {adoptionReceipt?.requirementId === requirement.requirement_id && <div className="material-stage-body material-adoption">
-                    <b>这次分配已回到当前作品：可用于这些镜头</b>
+                    <b>选择镜头并核对版本</b>
                     <small>采用会只推进你确认的镜头 revision；历史导演包保留原快照，当前导演包需要重新生成。</small>
+                    {shots.length > 0 && <label className="material-field">
+                      <span>镜头范围</span>
+                      <select value={adoptionShotId} disabled={adoptionBusy} onChange={(event) => {
+                        setAdoptionShotId(event.target.value);
+                        setAdoptionPreview(null);
+                      }}>
+                        <option value="">自动查找匹配镜头</option>
+                        {shots.map((shot) => <option key={shot.id} value={shot.id}>{shot.name} · r{shot.revision}</option>)}
+                      </select>
+                    </label>}
                     <div className="material-button-row">
                       <button type="button" className="text-button" disabled={adoptionBusy}
                         onClick={() => void previewAdoption()}>用于这些镜头</button>
-                      {adoptionPreview && <button type="button" className="must-button" disabled={adoptionBusy}
+                      {adoptionPreview?.shots.some((row) => !row.conflict) && <button type="button" className="must-button" disabled={adoptionBusy}
                         onClick={() => void applyAdoption()}>确认采用到 {adoptionPreview.shots.filter((row) => !row.conflict).length} 个镜头</button>}
                     </div>
+                    {adoptionPreview?.shot_count === 0 && <p>未找到匹配镜头，请从列表选择具体镜头。</p>}
                     {adoptionPreview && <ul className="material-adoption-shots">
                       {adoptionPreview.shots.map((row) => <li key={row.shot_id}>
                         <b>{row.shot_name}</b>
                         <small>镜头 r{row.revision} · {row.already_bound ? '已绑定这个素材'
                           : row.conflict === 'SHOT_PRODUCTION_IN_FLIGHT'
                             ? `正在拍摄或结果未知（${row.production_status ?? '进行中'}）：先按原尝试收束`
-                            : row.conflict === 'SHOT_IN_CONFIRMED_PACKAGE'
+                            : row.conflict === 'ASSET_RIGHTS_NOT_APPROVED'
+                              ? row.rights?.message
+                              : row.conflict === 'SHOT_IN_CONFIRMED_PACKAGE'
                               ? '属于当前已确认导演包：先生成并确认新导演包'
                               : '将采用并生成新镜头版本'}</small>
                       </li>)}
@@ -843,10 +850,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   </div>}
                   {librarySearchRequirement === requirement.requirement_id && <div className="material-stage-body">
                     {librarySearchError && <p role="alert" className="required-text">{librarySearchError}</p>}
-                    {librarySearchBusy && <p className="material-hint">正在检查当前作品授权范围和全局正式版本…</p>}
-                    {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到当前作品授权可用的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
+                    {librarySearchBusy && <p className="material-hint">正在查找全局正式版本…</p>}
+                    {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到可分配的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
                     {librarySearchResults.map((result) => <div className="material-library-result" key={result.version.id}>
-                      <div><b>{result.asset.title} · V{result.version.ordinal}</b><small>{result.version.content_sha256.slice(0, 12)} · {result.version.rights?.license_kind ?? '授权待核对'}</small></div>
+                      <div><b>{result.asset.title} · V{result.version.ordinal}</b><small>{result.version.content_sha256.slice(0, 12)}</small></div>
                       <button type="button" className="must-button" disabled={librarySearchBusy}
                         onClick={() => void assignGlobalMaterial(requirement, result)}>分配到本项目</button>
                     </div>)}
@@ -951,7 +958,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             <div className={evaluation.materials_ready ? 'material-ready' : 'required-action'} role="status">
               {evaluation.materials_ready ? (
                 <><CircleCheck size={14} className="required-icon" />
-                  <div className="required-text"><b>素材齐备</b><small>每一项必需素材都已绑定已批准并锁定的主素材，可以继续冻结风格。</small></div>
+                  <div className="required-text"><b>素材齐备</b><small>每一项必需素材都已绑定已批准并锁定的主素材，可以继续准备导演包。</small></div>
                 </>
               ) : (
                 <>

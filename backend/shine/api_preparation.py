@@ -808,7 +808,7 @@ def candidates(project_id: str, db: DBSession):
 class Generate(Strict):
     family: str
     entity_id: str = Field(min_length=1, max_length=80)
-    rights_id: str
+    rights_id: str | None = None
     prompt: str = Field(min_length=1, max_length=4000)
     seed: int = 1
     workflow_id: str
@@ -820,7 +820,8 @@ class Generate(Strict):
 @router.post("/projects/{project_id}/candidate-assets/generate")
 def generate(project_id: str, body: Generate, request: Request, settings: SettingsDep, db: DBSession):
     project = require_project(db, project_id)
-    require_rights(db, project_id, body.rights_id)
+    if body.rights_id:
+        require_rights(db, project_id, body.rights_id)
     wf = get(db, WorkflowRevision, body.workflow_id)
     provider = getattr(request.app.state, "image_provider", None)
     if provider is None:
@@ -907,11 +908,10 @@ async def import_candidate(
     db: DBSession,
     family: Annotated[str, Form()],
     entity_id: Annotated[str, Form()],
-    rights_id: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
+    rights_id: Annotated[str | None, Form()] = None,
 ):
     project = require_project(db, project_id)
-    require_rights(db, project_id, rights_id)
     content = await file.read(settings.max_upload_bytes + 1)
     row = create_candidate(
         db,
@@ -977,8 +977,8 @@ class VoiceDesign(Strict):
     character: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=2000)
     text: str = Field(default="这是我的声音。", min_length=1, max_length=100)
-    rights_id: str
-    asset_rights_id: str
+    rights_id: str | None = None
+    asset_rights_id: str | None = None
     source: Literal["ORIGINAL_DESIGN", "AUTHORIZED_CLONE", "USER_IMPORT"] = "ORIGINAL_DESIGN"
     reference_id: str | None = None
     supersedes_voice_id: str | None = None
@@ -1070,6 +1070,8 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         else None
     )
     reference = authorize(db, project_id, body, actor, settings)
+    source_rights_id = reference.payload.get("rights_id") if reference else None
+    asset_rights_id = body.asset_rights_id or source_rights_id
     provider = TrackedProvider(voice_provider(request), request.app.state.session_factory, project_id)
     if body.source != "USER_IMPORT":
         check_provider_mode(provider, body.execution_mode)
@@ -1092,13 +1094,13 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
                 voice_budget(provider, "clone" if reference else "design"),
                 release_models=getattr(provider, "release_models", None),
             ):
-                # Recheck consent immediately before model execution, after scheduling.
-                require_rights(
-                    db,
-                    project_id,
-                    body.rights_id,
-                    "voice_clone" if body.source == "AUTHORIZED_CLONE" else "voice_design",
-                )
+                if body.rights_id:
+                    require_rights(
+                        db, project_id, body.rights_id,
+                        "voice_clone" if body.source == "AUTHORIZED_CLONE" else "voice_design",
+                    )
+                if source_rights_id:
+                    require_rights(db, project_id, source_rights_id)
                 result = (
                     provider.clone(verify_candidate(settings, reference), body.text, body.character)
                     if reference
@@ -1112,7 +1114,7 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         body.character,
         result["audio"],
         "voice.wav",
-        body.asset_rights_id,
+        asset_rights_id,
         {
             "is_mock": result["is_mock"],
             "source": body.source,
@@ -1120,8 +1122,22 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
             "provider": type(provider).__name__,
         },
     )
+    voice_rights_id = body.rights_id or None
+    if voice_rights_id is None:
+        # The frozen production manifest expects a project-local record for
+        # each voice. This records local use, without a licence declaration.
+        local_record = save(db, RightsRecord, {
+            "scope": "voice_clone" if body.source == "AUTHORIZED_CLONE" else "voice_design",
+            "license_id": "UNSPECIFIED",
+            "source": "local_voice_preview",
+            "reference_candidate_id": reference.id if reference else None,
+        }, "APPROVED", project_id=project_id)
+        voice_rights_id = local_record.id
     payload = {
         **body.model_dump(exclude={"execution_decision"}),
+        "rights_id": voice_rights_id,
+        "asset_rights_id": asset_rights_id,
+        "requires_legacy_execution_grant": bool(body.rights_id),
         "candidate_id": candidate.id,
         "conditioning_hash": candidate.payload["content_sha256"],
         "is_mock": result["is_mock"],
@@ -1148,12 +1164,13 @@ def freeze_voice(identity: str, body: Decision, actor: Operator, settings: Setti
     verify_candidate(settings, candidate)
     if candidate.status != "PROMOTED":
         raise HTTPException(409, "CANDIDATE_NOT_APPROVED")
-    require_rights(
-        db,
-        row.project_id,
-        row.payload["rights_id"],
-        "voice_clone" if row.payload["source"] == "AUTHORIZED_CLONE" else "voice_design",
-    )
+    if candidate.payload.get("rights_id"):
+        require_rights(db, row.project_id, candidate.payload["rights_id"])
+    if row.payload.get("rights_id"):
+        require_rights(
+            db, row.project_id, row.payload["rights_id"],
+            "voice_clone" if row.payload["source"] == "AUTHORIZED_CLONE" else "voice_design",
+        )
     if row.payload["is_mock"] and not body.offline:
         raise HTTPException(409, "MOCK_REQUIRES_OFFLINE_APPROVAL")
     row.status = "FROZEN"
@@ -1181,27 +1198,23 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
     row = get(db, VoiceProfile, identity)
     if row.status != "FROZEN" or row.payload["character"] != body.character or row.sha256 != body.voice_hash:
         raise HTTPException(409, "VOICE_NOT_FROZEN_OR_VERSION_MISMATCH")
-    require_rights(
-        db,
-        row.project_id,
-        row.payload["rights_id"],
+    conditioning = get(db, CandidateAsset, row.payload["candidate_id"])
+    if conditioning.payload.get("rights_id"):
+        require_rights(db, row.project_id, conditioning.payload["rights_id"])
+    rights = require_rights(
+        db, row.project_id, row.payload["rights_id"],
         "voice_clone" if row.payload["source"] == "AUTHORIZED_CLONE" else "voice_design",
     )
     if row.payload["source"] == "AUTHORIZED_CLONE":
         actor = operator(request, settings, request.headers.get("authorization", ""))
-        if not body.execution_decision:
-            raise HTTPException(409, "VOICE_EXECUTION_GRANT_REQUIRED")
-        consent = get(db, RightsRecord, row.payload["rights_id"])
-        decision = body.execution_decision
-        approval.consume(
-            db,
-            actor,
-            "voice_execute",
-            consent,
-            decision.grant_id,
-            decision.snapshot,
-            context={"voice_id": row.id, **body.model_dump(exclude={"execution_decision"})},
-        )
+        if rights.payload.get("source") != "local_voice_preview":
+            if not body.execution_decision:
+                raise HTTPException(409, "VOICE_EXECUTION_GRANT_REQUIRED")
+            decision = body.execution_decision
+            approval.consume(
+                db, actor, "voice_execute", rights, decision.grant_id, decision.snapshot,
+                context={"voice_id": row.id, **body.model_dump(exclude={"execution_decision"})},
+            )
     provider = TrackedProvider(voice_provider(request), request.app.state.session_factory, row.project_id)
     check_provider_mode(provider, body.execution_mode)
     project = require_project(db, row.project_id)
@@ -1219,9 +1232,8 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
             release_models=getattr(provider, "release_models", None),
         ):
             if hasattr(provider, "prepare_conditioning"):
-                reference = get(db, CandidateAsset, row.payload["candidate_id"])
                 provider.prepare_conditioning(
-                    verify_candidate(settings, reference), row.payload["conditioning_hash"], row.payload["text"]
+                    verify_candidate(settings, conditioning), row.payload["conditioning_hash"], row.payload["text"]
                 )
             result = provider.synthesize(
                 body.text, body.character, row.payload["conditioning_hash"], body.emotion, body.speed, body.pause
@@ -1239,7 +1251,7 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         body.character,
         result["audio"],
         "dialogue.wav",
-        get(db, CandidateAsset, row.payload["candidate_id"]).payload["rights_id"],
+        conditioning.payload.get("rights_id"),
         {"is_mock": result["is_mock"], "voice_id": row.id, "voice_hash": row.sha256},
     )
     measured_duration = (candidate.payload.get("media") or {}).get("duration_s")
@@ -1678,9 +1690,10 @@ def model_references():
 
 
 class RunPreparation(Strict):
-    asset_rights_id: str
+    asset_rights_id: str | None = None
     workflow_id: str
     voice_rights_id: str | None = None
+    execution_mode: Literal["fake", "local"] | None = None
     max_tasks: int = Field(default=20, ge=1, le=20)
 
 
@@ -1690,7 +1703,8 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
     from sqlalchemy import update
 
     require_project(db, project_id)
-    require_rights(db, project_id, body.asset_rights_id)
+    if body.asset_rights_id:
+        require_rights(db, project_id, body.asset_rights_id)
     plan = preproduction.current_plan(db, project_id)
     if not plan:
         raise HTTPException(409, "PREPRODUCTION_NOT_ANALYZED")
@@ -1748,6 +1762,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                             rights_id=body.asset_rights_id,
                             workflow_id=body.workflow_id,
                             prompt=f"Prepare {req['family']} for {req['entity_id']} from the locked script.",
+                            execution_mode=body.execution_mode,
                         ),
                         request,
                         settings,
@@ -1755,7 +1770,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                     )
                     item = qc(item["id"], request, settings, db)
                     generated.append({"requirement": req["id"], "candidate_id": item["id"], "status": item["status"]})
-                elif req["family"] == "voice" and body.voice_rights_id:
+                elif req["family"] == "voice":
                     item = voice_design(
                         project_id,
                         VoiceDesign(
@@ -1764,6 +1779,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                             text="这是用于确认角色普通话音色的原创试听样音。",
                             rights_id=body.voice_rights_id,
                             asset_rights_id=body.asset_rights_id,
+                            execution_mode=body.execution_mode,
                         ),
                         request,
                         settings,
@@ -1780,7 +1796,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
                         }
                     )
                 else:
-                    blocked.append({"requirement": req["id"], "code": "IMPORT_OR_RIGHTS_REQUIRED"})
+                    blocked.append({"requirement": req["id"], "code": "IMPORT_REQUIRED"})
             except HTTPException as exc:
                 db.rollback()
                 blocked.append({"requirement": req["id"], "code": str(exc.detail)})

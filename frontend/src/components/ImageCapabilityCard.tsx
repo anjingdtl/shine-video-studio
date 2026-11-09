@@ -95,27 +95,6 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     body: JSON.stringify(body),
   });
 
-  const ensureRights = async (): Promise<string> => {
-    const created = await jsonPost<{ id: string }>('/preparation/rights', {
-      project_id: projectId,
-      scope: 'asset',
-      license_id: 'local-research-and-evaluation',
-      evidence: '本地研究用途：由出图能力验证流程登记，用于本机生成三类小样。',
-      purpose: 'LOCAL_RESEARCH_AND_EVALUATION_ONLY',
-    });
-    const grant = await jsonPost<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
-      action: 'rights_approve',
-      target_id: created.id,
-    });
-    await jsonPost(`/preparation/rights/${created.id}/approve`, {
-      grant_id: grant.grant_id,
-      snapshot: grant.snapshot,
-      offline: true,
-      evidence: '本地研究用途授权：只用于本机评估，不产生商业授权。',
-    });
-    return created.id;
-  };
-
   const registerInstall = async () => {
     setWorking(true);
     setProblem(null);
@@ -174,12 +153,10 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     setProblem(null);
     setNote(null);
     try {
-      const rightsId = await ensureRights();
       const result = await jsonPost<{ run_id: string }>('/setup/image-runtime/validate', {
         project_id: projectId,
         idempotency_key: `image-validate-${projectId}`,
         families: ['character', 'scene', 'prop'],
-        rights_id: rightsId,
       });
       setNote(`三类真实小样已排队（批次 ${result.run_id}）。后台出图期间可以继续做别的；完成后这里会显示验证结果。`);
       await load();

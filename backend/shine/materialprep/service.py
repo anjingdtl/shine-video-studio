@@ -446,7 +446,7 @@ def create_batch(
     confirmation_hash: str,
     requirement_ids: list[str],
     idempotency_key: str,
-    rights_id: str,
+    rights_id: str | None,
     kind: str = "production",
     seeds: dict[str, int] | None = None,
     briefs: dict[str, dict[str, Any]] | None = None,
@@ -494,7 +494,8 @@ def create_batch(
     # a wasted render, so an unapproved licence must not reach the renderer.
     # A replayed request creates nothing and therefore keeps its original
     # answer: the same key with the same request hash returns the original run.
-    require_rights(db, project_id, rights_id)
+    if rights_id:
+        require_rights(db, project_id, rights_id)
 
     generate_ids = _select_generable(db, plan, requirement_ids)
     if new_revision:
@@ -564,12 +565,12 @@ def create_batch(
             },
             sha256=graph_hash({"requirement_id": requirement_id, "revision": revision, "seed": seed}),
         )
-        db.add(item)
         try:
-            db.flush()
+            with db.begin_nested():
+                db.add(item)
+                db.flush()
         except IntegrityError:
             # Another tab already queued this exact requirement revision.
-            db.rollback()
             refused.append({"requirement_id": requirement_id, "code": "MATERIAL_ITEM_ALREADY_QUEUED"})
             continue
         created.append(item.id)
@@ -622,11 +623,12 @@ def create_validation_batch(
     *,
     families: list[str],
     idempotency_key: str,
-    rights_id: str,
+    rights_id: str | None,
 ) -> dict[str, Any]:
     """Queue one real small-sample render per family through the same Worker path."""
     require_project(db, project_id)
-    require_rights(db, project_id, rights_id)
+    if rights_id:
+        require_rights(db, project_id, rights_id)
     request_payload = {
         "kind": "validation",
         "families": sorted(families),
@@ -946,7 +948,7 @@ def _require_run(db, run_id: str) -> MaterialRun:
 
 
 def public_item(db, item: MaterialItem) -> dict[str, Any]:
-    requirement = db.get(AssetRequirement, item.requirement_id)
+    requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
     attempts = db.scalars(
         select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == item.id)
         .order_by(MaterialImageAttempt.attempt_no)

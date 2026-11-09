@@ -87,19 +87,18 @@ it('没有绑定受管渲染器时说明原因，并且不排队验证', async (
   expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)).toHaveLength(0);
 });
 
-it('验证三类小样会先登记研究用途授权，再排队真实渲染', async () => {
+it('验证三类小样直接排队真实渲染', async () => {
   stub = new StudioStub(routes(READY));
   const user = userEvent.setup();
   render(<ImageCapabilityCard projectId="p1" busy={false} />);
   await screen.findByText('角色');
   await user.click(screen.getByRole('button', { name: /验证三类真实小样/ }));
   expect(await screen.findByText(/三类真实小样已排队/)).toBeTruthy();
-  expect(stub.callsOf('POST', /preparation\/rights$/)).toHaveLength(1);
+  expect(stub.callsOf('POST', /preparation\/rights$/)).toHaveLength(0);
   expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)).toHaveLength(1);
   expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)[0].body).toMatchObject({
     project_id: 'p1',
     families: ['character', 'scene', 'prop'],
-    rights_id: 'rights-1',
   });
 });
 

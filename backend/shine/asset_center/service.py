@@ -96,17 +96,19 @@ def rights_snapshot(rights: LibraryRights) -> dict[str, Any]:
 
 def require_rights(rights: LibraryRights | None, *, project_id: str | None = None, usage_scope: str | None = None):
     now = utcnow()
-    if rights is None or rights.status != "APPROVED" or rights.revoked_at is not None:
+    if rights is None or rights.status not in {"APPROVED", "DECLARED"} or rights.revoked_at is not None:
         raise HTTPException(409, {"code": "LIBRARY_RIGHTS_NOT_APPROVED", "message": "请先确认素材来源与授权范围"})
     if rights.expires_at is not None and rights.expires_at <= now:
         raise HTTPException(409, {"code": "LIBRARY_RIGHTS_EXPIRED", "message": "这项授权已过期，请更新授权后再使用"})
+    if usage_scope == "local":
+        return rights
     if (
         project_id is not None
         and "*" not in (rights.allowed_project_ids or [])
         and project_id not in (rights.allowed_project_ids or [])
     ):
         raise HTTPException(403, {"code": "LIBRARY_PROJECT_NOT_AUTHORIZED", "message": "这项素材没有授权给所选作品"})
-    if usage_scope == "commercial" and not rights.commercial_allowed:
+    if usage_scope == "commercial" and (rights.status != "APPROVED" or not rights.commercial_allowed):
         raise HTTPException(409, {"code": "COMMERCIAL_LICENSE_REQUIRED", "message": "当前授权不包含商业用途"})
     if usage_scope and usage_scope not in (rights.permitted_uses or []) and "all" not in (rights.permitted_uses or []):
         raise HTTPException(409, {"code": "LIBRARY_USAGE_NOT_AUTHORIZED", "message": "授权范围不包含所选用途"})

@@ -335,7 +335,7 @@ def _save_candidate(
                     else db.get(LibraryVersion, source_ref.get("version_id"))
                 )
                 source_rights = db.get(LibraryRights, source_row.rights_id) if source_row else None
-                service.require_rights(source_rights, usage_scope="research")
+                service.require_rights(source_rights, usage_scope="local")
                 if source_rights is None or canonical_hash(service.rights_snapshot(source_rights)) != canonical_hash(
                     source_ref.get("rights_snapshot") or {}
                 ):
@@ -527,7 +527,7 @@ def _read_reference(factory, settings, reference: dict[str, Any]) -> tuple[bytes
             content = service.media_bytes(settings, row)
             content_type = row.content_type
             digest = row.sha256
-            rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="research")
+            rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="local")
         else:
             row = db.get(LibraryVersion, reference.get("version_id"))
             if row is None or row.kind != "image" or row.status != "PROMOTED" or row.is_mock:
@@ -535,7 +535,7 @@ def _read_reference(factory, settings, reference: dict[str, Any]) -> tuple[bytes
             content = service.version_bytes(settings, row)
             content_type = row.content_type
             digest = row.content_sha256
-            rights = service.require_version_rights(db, row, usage_scope="research")
+            rights = service.require_version_rights(db, row, usage_scope="local")
         if canonical_hash(service.rights_snapshot(rights)) != canonical_hash(reference.get("rights_snapshot") or {}):
             raise RuntimeError("LIBRARY_RIGHTS_SNAPSHOT_CHANGED")
         if digest != reference.get("sha256") or hashlib.sha256(content).hexdigest() != digest:
@@ -550,7 +550,7 @@ def _read_mask(factory, settings, mask_info: dict[str, Any]) -> bytes:
         row = db.get(LibraryMedia, mask_info["media_id"])
         if row is None or row.kind != "image" or row.purpose != "mask":
             raise RuntimeError("LIBRARY_MASK_CHANGED")
-        rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="research")
+        rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="local")
         if canonical_hash(service.rights_snapshot(rights)) != canonical_hash(mask_info.get("rights_snapshot") or {}):
             raise RuntimeError("LIBRARY_MASK_RIGHTS_CHANGED")
         content = service.media_bytes(settings, row)
@@ -567,7 +567,7 @@ def _verify_parent_snapshot(factory, settings, payload: dict[str, Any]) -> None:
         version = db.get(LibraryVersion, snapshot.get("version_id"))
         if version is None or version.status != "PROMOTED" or version.is_mock:
             raise RuntimeError("LIBRARY_PARENT_VERSION_CHANGED")
-        rights = service.require_version_rights(db, version, usage_scope="research")
+        rights = service.require_version_rights(db, version, usage_scope="local")
         if version.content_sha256 != snapshot.get("sha256") or version.rights_id != snapshot.get("rights_id"):
             raise RuntimeError("LIBRARY_PARENT_VERSION_CHANGED")
         if canonical_hash(service.rights_snapshot(rights)) != canonical_hash(snapshot.get("rights_snapshot") or {}):
@@ -669,11 +669,11 @@ def _new_image_output_rights(db, payload: dict[str, Any]) -> LibraryRights:
         seen_source_ids.add(identity)
         source_row = db.get(LibraryMedia, media_id) if media_id else db.get(LibraryVersion, version_id)
         if isinstance(source_row, LibraryVersion):
-            source_rights = service.require_version_rights(db, source_row, usage_scope="research")
+            source_rights = service.require_version_rights(db, source_row, usage_scope="local")
         else:
             source_rights = service.require_rights(
                 db.get(LibraryRights, source_row.rights_id) if source_row else None,
-                usage_scope="research",
+                usage_scope="local",
             )
         expected_snapshot = source.get("rights_snapshot") or {}
         current_snapshot = canonical_hash(service.rights_snapshot(source_rights)) if source_rights else None

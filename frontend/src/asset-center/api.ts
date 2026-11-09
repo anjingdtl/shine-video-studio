@@ -52,32 +52,12 @@ export function patchLibraryAsset(id: string, body: Record<string, unknown>) {
 export function archiveLibraryAsset(id: string) {
   return api<LibraryAsset>(`/asset-center/assets/${id}/archive`, json('POST', {}));
 }
-export function uploadLibraryMedia(file: File, purpose: string, rights: {
-  source_type: string; license_kind: string; rights_statement: string; subject?: string;
-  allowed_project_ids?: string[]; permitted_uses?: string[]; commercial_allowed?: boolean; expires_at?: string;
-}) {
+export function uploadLibraryMedia(file: File, purpose: 'source' | 'reference' | 'mask' | 'audio_import' | 'voice_sample') {
   const form = new FormData();
   form.set('file', file);
-  form.set('asset_kind', file.type.startsWith('audio/') ? 'audio' : 'image');
+  form.set('asset_kind', purpose === 'audio_import' || purpose === 'voice_sample' ? 'audio' : 'image');
   form.set('purpose', purpose);
-  form.set('source_type', rights.source_type);
-  form.set('license_kind', rights.license_kind);
-  form.set('rights_statement', rights.rights_statement);
-  form.set('subject', rights.subject ?? '');
-  form.set('allowed_project_ids', JSON.stringify(rights.allowed_project_ids ?? []));
-  form.set('permitted_uses', JSON.stringify(rights.permitted_uses ?? ['research']));
-  form.set('commercial_allowed', String(rights.commercial_allowed ?? false));
-  if (rights.expires_at) form.set('expires_at', rights.expires_at);
   return api<Record<string, any>>('/asset-center/uploads', { method: 'POST', body: form });
-}
-export function approveLibraryRights(id: string, body: Record<string, unknown>) {
-  return api<LibraryRights>(`/asset-center/rights/${id}/approve`, json('POST', body));
-}
-export function updateLibraryRights(id: string, body: Record<string, unknown>) {
-  return api<LibraryRights>(`/asset-center/rights/${id}`, json('PATCH', body));
-}
-export function revokeLibraryRights(id: string, evidence: string) {
-  return api<LibraryRights>(`/asset-center/rights/${id}/revoke?evidence=${encodeURIComponent(evidence)}`, json('POST', {}));
 }
 export function createImageJobs(body: Record<string, unknown>) {
   return api<{ items: LibraryTask[]; capability: any; notice: string }>('/asset-center/image-jobs', json('POST', body));

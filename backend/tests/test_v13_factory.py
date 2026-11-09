@@ -501,6 +501,37 @@ def test_clone_dialogue_has_separate_request_bound_execution_grant(prep):
     assert client.get(f"/api/v1/voice-renders/{result['id']}/subtitles?format=srt", headers=HEADERS).status_code == 200
 
 
+def test_personal_voice_clone_uses_the_local_action_without_source_forms(prep):
+    from shine.voiceops.providers import fake_audio
+
+    client, _, _ = prep
+    project = create_project(client)
+    reference, _ = fake_audio("声音参考", "Lin")
+    imported = client.post(
+        f"/api/v1/projects/{project}/candidate-assets/import",
+        data={"family": "voice", "entity_id": "Lin"},
+        files={"file": ("reference.wav", reference, "audio/wav")},
+    )
+    assert imported.status_code == 200, imported.text
+    payload = {
+        "character": "Lin", "description": "fixture", "text": "声音参考",
+        "source": "AUTHORIZED_CLONE", "reference_id": imported.json()["id"], "execution_mode": "fake",
+    }
+    path = f"/projects/{project}/voice-profiles/clone"
+    post(client, path, payload, expected=403)
+    voice = post(client, path, payload, operator=True)
+    assert voice["payload"]["requires_legacy_execution_grant"] is False
+    candidate = post(client, f"/candidate-assets/{voice['payload']['candidate_id']}/qc")
+    approve(client, candidate, "promote", f"/candidate-assets/{candidate['id']}/promote")
+    voice = approve(client, voice, "voice_freeze", f"/voice-profiles/{voice['id']}/approve-and-freeze")
+
+    path = f"/voice-profiles/{voice['id']}/dialogue"
+    dialogue = {"character": "Lin", "text": "你好。", "voice_hash": voice["sha256"]}
+    post(client, path, dialogue, expected=403)
+    result = post(client, path, dialogue, operator=True)
+    assert result["status"] == "MOCK_VERIFIED"
+
+
 def test_unknown_asr_identity_requires_human_listening_without_invented_confidence(prep):
     from shine.voiceops.providers import FakeVoiceProvider
 

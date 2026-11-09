@@ -27,7 +27,6 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
   const [saveAssetId, setSaveAssetId] = useState('');
   const [saveTitle, setSaveTitle] = useState('');
   const [saveCategory, setSaveCategory] = useState('other');
-  const [saveRightsConfirmed, setSaveRightsConfirmed] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [saved, setSaved] = useState(false);
@@ -61,19 +60,18 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
     setSaveAssetId(asset.id);
     setSaveTitle(asset.entity_id || asset.filename.replace(/\.[^.]+$/, ''));
     setSaveCategory(category);
-    setSaveRightsConfirmed(false);
     setSaveError('');
     setSaved(false);
   }
 
   async function saveToLibrary(asset: Asset) {
-    if (!asset.project_id || !saveRightsConfirmed || !saveTitle.trim()) return;
+    if (!asset.project_id || !saveTitle.trim()) return;
     setSaveBusy(true);
     setSaveError('');
     try {
       await api(`/projects/${encodeURIComponent(asset.project_id)}/assets/${encodeURIComponent(asset.id)}/save-to-library`, {
         method: 'POST',
-        body: JSON.stringify({ title: saveTitle.trim(), category: saveCategory, tags: asset.tags ?? [], confirmed_rights: true }),
+        body: JSON.stringify({ title: saveTitle.trim(), category: saveCategory, tags: asset.tags ?? [] }),
       });
       setSaved(true);
     } catch (error) {
@@ -189,14 +187,13 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
             {asset.locked && <button className="text-button" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>}
             <button className="icon-button tiny" title="编辑元数据" aria-label={`编辑 ${asset.filename} 元数据`} onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
             {saveAssetId === asset.id && <div className="asset-library-save-form">
-              {saved ? <><p role="status">已保存为素材中心候选，当前授权仍仅限本项目。完成授权复核、技术检查和人工晋升后才能使用；跨项目使用需另行授权。</p><button className="text-button" onClick={onOpenLibrary}>打开全局素材库</button></> : <>
+              {saved ? <><p role="status">已保存为素材中心候选。通过技术检查并人工晋升后可分配给其他作品。</p><button className="text-button" onClick={onOpenLibrary}>打开全局素材库</button></> : <>
                 <label>全局素材名称<input value={saveTitle} maxLength={160} onChange={(event) => setSaveTitle(event.target.value)} /></label>
                 <label>素材分类<select value={saveCategory} onChange={(event) => setSaveCategory(event.target.value)}>
                   <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
                 </select></label>
-                <label className="asset-library-rights-confirm"><input type="checkbox" checked={saveRightsConfirmed} onChange={(event) => setSaveRightsConfirmed(event.target.checked)} />我确认已核对来源许可，允许把此锁定版本加入素材中心。它初始仍仅限当前项目，跨项目使用需另行授权。</label>
                 {saveError && <p role="alert" className="required-text">{saveError}</p>}
-                <button className="must-button" disabled={busy || saveBusy || !saveRightsConfirmed || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
+                <button className="must-button" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
                 <button className="text-button" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
               </>}
             </div>}

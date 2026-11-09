@@ -936,6 +936,7 @@ function App() {
                     key={`material-${projectId}`}
                     projectId={projectId}
                     documentsVersion={documentsVersion}
+                    shots={shots}
                     onMessage={report}
                     frozenStyle={currentStyle}
                     onPromoted={() => { refreshAll().catch(() => undefined); }}

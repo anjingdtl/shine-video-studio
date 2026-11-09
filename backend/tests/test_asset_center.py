@@ -384,12 +384,16 @@ def test_image_contracts_preserve_all_reference_slots_and_reject_fake_inputs():
     graph = build_qwen_edit_graph(
         prompt="keep the person's face and apply the selected clothing",
         uploaded_names=[f"input-{index}.png" for index in range(10)],
-        width=1024,
-        height=1024,
+        width=640,
+        height=448,
         seed=17,
     )
     assert graph["474"]["inputs"]["images.image_10"] == ["709", 0]
     assert graph["709"]["inputs"]["image"] == "input-9.png"
+    assert graph["474"]["inputs"]["resolution"] == 544
+    resize_node, _ = graph["461"]["inputs"]["images"]
+    assert graph[resize_node]["class_type"] == "ImageScale"
+    assert (graph[resize_node]["inputs"]["width"], graph[resize_node]["inputs"]["height"]) == (640, 448)
     assert not any("mask" in key.lower() for node in graph.values() for key in node.get("inputs", {}))
     assert validate_image_request(
         {"mode": "I2I", "prompt": "revise", "references": [{"version_id": "version-1", "order": 0, "role": "canvas"}]}
@@ -791,17 +795,7 @@ def test_authorized_voice_sample_can_be_reviewed_frozen_and_assigned_with_new_pr
     transcript = "你好，欢迎来到这个声音测试。"
     uploaded = client.post(
         "/api/v1/asset-center/uploads",
-        data={
-            "asset_kind": "audio",
-            "purpose": "voice_sample",
-            "source_type": "speaker_consent",
-            "license_kind": "VOICE_SAMPLE_CONSENT",
-            "rights_statement": "合成测试录音，仅用于授权声音流程验收。",
-            "subject": "合成测试说话人",
-            "allowed_project_ids": '["*"]',
-            "permitted_uses": '["research"]',
-            "commercial_allowed": "false",
-        },
+        data={"asset_kind": "audio", "purpose": "voice_sample"},
         files={"file": ("speaker.wav", _wav_fixture(), "audio/wav")},
     )
     assert uploaded.status_code == 201, uploaded.text
@@ -818,21 +812,19 @@ def test_authorized_voice_sample_can_be_reviewed_frozen_and_assigned_with_new_pr
     )
     assert asset.status_code == 201, asset.text
     version_id = asset.json()["versions"][0]["id"]
-    rights_id = uploaded.json()["rights_id"]
-    with factory() as db:
-        snapshot = service.canonical_hash(service.rights_snapshot(db.get(LibraryRights, rights_id)))
-    approved = client.post(
-        f"/api/v1/asset-center/rights/{rights_id}/approve",
-        headers=local_action,
+    assert uploaded.json()["rights_status"] == "DECLARED"
+    clone = client.post(
+        "/api/v1/asset-center/voice-jobs",
         json={
-            "expected_snapshot": snapshot,
-            "evidence": "合成测试录音的说话人授权有效。",
-            "allowed_project_ids": ["*"],
-            "permitted_uses": ["research"],
-            "commercial_allowed": False,
+            "idempotency_key": "local-voice-clone-01",
+            "mode": "AUTHORIZED_CLONE",
+            "title": "本机声音克隆",
+            "character": "旁白甲",
+            "reference_media_id": uploaded.json()["id"],
+            "reference_text": transcript,
         },
     )
-    assert approved.status_code == 200, approved.text
+    assert clone.status_code == 202, clone.text
     checked = client.post(f"/api/v1/asset-center/versions/{version_id}/qc")
     assert checked.status_code == 200 and checked.json()["status"] == "READY_FOR_REVIEW", checked.text
     grant = client.post(f"/api/v1/asset-center/versions/{version_id}/grant", headers=local_action)
@@ -874,9 +866,7 @@ def test_authorized_voice_sample_can_be_reviewed_frozen_and_assigned_with_new_pr
             "library_version_id": version_id,
             "role": "voice",
             "entity_id": "旁白甲",
-            "usage_scope": "research",
             "idempotency_key": "authorized-voice-project-use-01",
-            "confirmed": True,
         },
     )
     assert assigned.status_code == 201, assigned.text

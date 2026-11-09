@@ -1162,7 +1162,6 @@ html[data-theme='dark'] .material-library-result b{color:#ccd8ce}
 .asset-library-save-form{grid-column:1/-1;display:grid;gap:8px;padding:11px;border:1px solid #dce6dc;border-radius:8px;background:#f7faf6}
 .asset-library-save-form label{display:grid;gap:4px;font-size:10px;color:#536157}
 .asset-library-save-form input:not([type=checkbox]),.asset-library-save-form select{min-height:34px;padding:6px 8px;border:1px solid #d7ded5;border-radius:6px;background:#fff;color:#303830}
-.asset-library-save-form .asset-library-rights-confirm{display:flex;align-items:flex-start;gap:7px;line-height:1.5}
 .asset-library-save-form p{margin:0;font-size:10px;color:#526656}
 html[data-theme='dark'] .asset-library-save-form{border-color:#3b493d;background:#202a22}
 html[data-theme='dark'] .asset-library-save-form label,html[data-theme='dark'] .asset-library-save-form p{color:#ccd8ce}

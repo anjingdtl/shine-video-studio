@@ -29,8 +29,6 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
   const [evidence, setEvidence] = useState('');
   const [entity, setEntity] = useState('');
   const [family, setFamily] = useState('character');
-  const [rightsId, setRightsId] = useState('');
-  const [voiceRights, setVoiceRights] = useState('');
   const [workflowId, setWorkflowId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [text, setText] = useState('你好，这是对白试听。');
@@ -43,8 +41,6 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
   const [packageJson, setPackageJson] = useState('');
   const [draftJson, setDraftJson] = useState('');
   const [packageId, setPackageId] = useState('');
-  const [rightsScope, setRightsScope] = useState('asset');
-  const [license, setLicense] = useState('');
   const [scopeJson, setScopeJson] = useState('{}');
   const [scopeHash, setScopeHash] = useState('');
   const [instanceJson, setInstanceJson] = useState('{"name":"studio","action":"CREATE","port":8190,"source_package_id":"","package_ids":[]}');
@@ -92,11 +88,12 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
     finally { setBusy(false); }
   }
   async function approve(row: Row, action: string, path: string) {
-    if (!offline && !confirmed) throw new Error('请确认本地权限和操作风险。');
-    if (!evidence.trim()) throw new Error('请填写核验、权利和试听证据。');
+    if (view < 3 && !offline && !confirmed) throw new Error('请核对本机维护操作。');
+    if (view < 3 && !evidence.trim()) throw new Error('请填写核验证据。');
+    const decisionEvidence = evidence.trim() || '已在本机确认所选操作。';
     const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
       { action, target_id: row.id }, true);
-    return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline, listened: action === 'voice_freeze' || (action === 'promote' && dialogueListened), evidence }, true);
+    return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline, listened: action === 'voice_freeze' || (action === 'promote' && dialogueListened), evidence: decisionEvidence }, true);
   }
   return <section className="card" id="preproduction">
     <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>当前模式：{offline ? '模拟演练（不落真数据）' : '本地真跑'} · 结果真伪以后端返回为准</strong></div>
@@ -105,13 +102,11 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
     <nav className="button-row">{views.map((name, i) => <button key={name} onClick={() => setView(i)}
       disabled={busy} aria-pressed={view === i}>{name}</button>)}</nav>
     <p>本机操作无需密码。候选晋升、音色冻结与安装仍由你点击确认。</p>
-    <div className="form-grid">
-      <label>人工核验 / 试听 / 权利证据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>
-    </div>
+    {view < 3 && <label>核验证据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>}
     <label>操作模式<select value={mode} onChange={e => { setMode(e.target.value); setConfirmed(false); }}>
       <option value="fake">模拟 / 离线</option><option value="local">本地 / 生产证据</option></select></label>
-    {!offline && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />
-      我已核对服务器配置的范围、来源、许可和具体操作风险</label>}
+    {view < 3 && !offline && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />
+      我已核对本机维护的路径范围和操作内容</label>}
     <p>切换请求模式不会更改已有结果来源。模拟输出不能晋升为真实验证。</p>
     <button disabled={busy} onClick={() => act(load)}>刷新后端状态</button>
     {error && <p role="alert" className="error-text">{error}</p>}
@@ -205,21 +200,8 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
     {(view === 3 || view === 4) && <>
       <div className="form-grid">
         <label>角色 / 实体 ID<input value={entity} onChange={e => setEntity(e.target.value)} /></label>
-        <label>资产权利 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
         <label>说明 / 生成提示<textarea value={prompt} onChange={e => setPrompt(e.target.value)} /></label>
       </div>
-      <details><summary>登记权利与授权</summary>
-        <label>授权范围<select value={rightsScope} onChange={e => setRightsScope(e.target.value)}>
-          <option value="asset">素材使用</option><option value="voice_design">原创音色</option><option value="voice_clone">参考声音克隆（绑定下方音频候选）</option>
-        </select></label>
-        <label>许可证 / 权利依据<input value={license} onChange={e => setLicense(e.target.value)} /></label>
-        <button disabled={busy} onClick={() => act(async () => {
-          const r = await post<Row>('/preparation/rights', { project_id: projectId, scope: rightsScope,
-            license_id: license, purpose: prompt, evidence,
-            ...(rightsScope === 'voice_clone' ? { reference_candidate_id: referenceId } : {}) });
-          return approve(r, 'rights_approve', `/preparation/rights/${r.id}/approve`);
-        })}>登记并由操作员确认权利</button>
-      </details>
     </>}
     {view === 3 && <>
       <label><input type="checkbox" checked={dialogueListened} onChange={e => setDialogueListened(e.target.checked)} />我已逐句试听并核验待人工复核的对白、角色和语音</label>
@@ -228,46 +210,39 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
           .map(f => <option key={f}>{f}</option>)}</select></label>
       <label>已模拟执行的 Workflow ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
       {!offline && <label><input type="checkbox" checked={preview} onChange={e => setPreview(e.target.checked)} />授权此工作流的本地候选预览（生产发布仍需独立证据）</label>}
-      <button disabled={busy || (!offline && !confirmed)} onClick={() => act(async () => {
+      <button disabled={busy} onClick={() => act(async () => {
         let preview_decision;
         if (!offline && preview) {
           const g = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', { action: 'workflow_preview', target_id: workflowId }, true);
-          preview_decision = { grant_id: g.grant_id, snapshot: g.snapshot, offline: false, evidence };
+          preview_decision = { grant_id: g.grant_id, snapshot: g.snapshot, offline: false, evidence: '已选择执行本机工作流预览。' };
         }
         return post(`/projects/${projectId}/candidate-assets/generate`, {
-          family, entity_id: entity, rights_id: rightsId, prompt, workflow_id: workflowId, execution_mode: mode,
+          family, entity_id: entity, prompt, workflow_id: workflowId, execution_mode: mode,
           ...(preview_decision ? { preview_decision } : {}),
         }, !offline);
       })}>按所选执行器制作候选</button>
       <label>导入已有素材<input type="file" disabled={busy} onChange={e => {
         const file = e.target.files?.[0]; if (!file) return;
         const form = new FormData(); form.append('file', file); form.append('family', family);
-        form.append('entity_id', entity); form.append('rights_id', rightsId);
+        form.append('entity_id', entity);
         act(() => api(`/projects/${projectId}/candidate-assets/import`, { method: 'POST', body: form }));
       }} /></label>
     </>}
     {view === 4 && <>
       <label>音色来源<select value={voiceSource} onChange={e => setVoiceSource(e.target.value)}>
-        <option value="ORIGINAL_DESIGN">原创设计</option><option value="AUTHORIZED_CLONE">已授权录音克隆</option>
+        <option value="ORIGINAL_DESIGN">原创设计</option><option value="AUTHORIZED_CLONE">参考录音克隆</option>
         <option value="USER_IMPORT">已有音频导入</option></select></label>
-      <label>参考音频候选 ID<input value={referenceId} onChange={e => setReferenceId(e.target.value)} /></label>
-      <label>音色设计权利 ID<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>
+      {voiceSource !== 'ORIGINAL_DESIGN' && <label>参考音频候选 ID<input value={referenceId} onChange={e => setReferenceId(e.target.value)} /></label>}
       <label>情绪<input value={emotion} onChange={e => setEmotion(e.target.value)} /></label>
       <label>语速（0.5–2）<input type="number" min="0.5" max="2" step="0.1" value={speed} onChange={e => setSpeed(Number(e.target.value))} /></label>
       <label>停顿秒数（0–3）<input type="number" min="0" max="3" step="0.1" value={pause} onChange={e => setPause(Number(e.target.value))} /></label>
       <label>普通话对白 / 试听文本<textarea value={text} onChange={e => setText(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => act(async () => {
-        const body = { character: entity, description: prompt, text, rights_id: voiceRights, asset_rights_id: rightsId,
-          source: voiceSource, reference_id: referenceId || null, supersedes_voice_id: null, execution_mode: mode };
-        let execution_decision;
-        if (voiceSource === 'AUTHORIZED_CLONE') {
-          const grant = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
-            action: 'voice_execute', target_id: voiceRights, context: body,
-          }, true);
-          execution_decision = { grant_id: grant.grant_id, snapshot: grant.snapshot, evidence };
-        }
+      <button disabled={busy || !entity.trim() || !text.trim() || (voiceSource === 'ORIGINAL_DESIGN' ? !prompt.trim() : !referenceId.trim())} onClick={() => act(async () => {
+        const body = { character: entity.trim(), description: prompt.trim() || '项目音色参考', text,
+          source: voiceSource, reference_id: voiceSource === 'ORIGINAL_DESIGN' ? null : referenceId.trim(),
+          supersedes_voice_id: null, execution_mode: mode };
         return post(`/projects/${projectId}/voice-profiles/${voiceSource === 'AUTHORIZED_CLONE' ? 'clone' : voiceSource === 'USER_IMPORT' ? 'import' : 'design'}`,
-          { ...body, ...(execution_decision ? { execution_decision } : {}) }, voiceSource === 'AUTHORIZED_CLONE');
+          body, voiceSource === 'AUTHORIZED_CLONE');
       })}>制作候选试听（默认 Fake 测试音调）</button>
     </>}
     {view === 5 && <>
@@ -285,12 +260,9 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
         document_id: documentId, create_revision: true, review_scope: reviewScope,
       }))}>建立新的预检版本（保留历史冻结清单）</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline }))}>运行开机预检</button>
-      <label>已批准资产使用权 ID<input value={rightsId} onChange={e => setRightsId(e.target.value)} /></label>
-      <label>原创音色权利 ID（可选）<input value={voiceRights} onChange={e => setVoiceRights(e.target.value)} /></label>
       <label>已验证图像工作流 ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/run`, {
-        asset_rights_id: rightsId, workflow_id: workflowId,
-        ...(voiceRights ? { voice_rights_id: voiceRights } : {}),
+        workflow_id: workflowId, execution_mode: mode,
       }))}>按依赖自动制作缺失候选（等待人工晋升）</button>
       <button disabled={busy} onClick={() => act(async () => {
         const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, review_scope: reviewScope });
@@ -376,11 +348,12 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
           const body = { character: row.payload.character, text, voice_hash: row.sha256, emotion, speed, pause,
             audio_mode: 'VOICE_REFERENCE', execution_mode: mode };
           let execution_decision;
-          if (row.payload.source === 'AUTHORIZED_CLONE') {
+          if (row.payload.source === 'AUTHORIZED_CLONE' && row.payload.rights_id
+            && row.payload.requires_legacy_execution_grant !== false) {
             const g = await post<{ grant_id: string; snapshot: string }>('/preparation/approval-grants', {
               action: 'voice_execute', target_id: row.payload.rights_id, context: { voice_id: row.id, ...body },
             }, true);
-            execution_decision = { grant_id: g.grant_id, snapshot: g.snapshot, evidence };
+            execution_decision = { grant_id: g.grant_id, snapshot: g.snapshot, evidence: '已选择使用该项目的冻结音色。' };
           }
           return post(`/voice-profiles/${row.id}/dialogue`, { ...body, ...(execution_decision ? { execution_decision } : {}) }, row.payload.source === 'AUTHORIZED_CLONE');
         })())}>生成对白 / ASR / 逐字对齐 / SRT / ASS</button>}
