@@ -21,6 +21,18 @@ const ROLE_LABELS: Record<string, string> = {
   four_stage_bible_run: '全剧蓝图', four_stage_scene_script_run: '分场剧本',
 };
 
+/**
+ * One consent panel per project document, even when the workbench mounts the
+ * same panel more than once in a single tree. Mounting sixteen copies stacked
+ * sixteen identical "文字模型发送授权" folds above the real material list, so the
+ * operator could not reach the analysis button at all. The first instance owns
+ * the panel; every other instance of the same document renders nothing.
+ *
+ * The count is ref-counted on mount, so switching projects and coming back
+ * re-claims the slot instead of leaving the panel permanently invisible.
+ */
+const ACTIVE_PANELS = new Map<string, number>();
+
 export function ScriptTextConsent({ projectId, documentId, expanded = false, onScriptwriterAccess }: {
   projectId: string;
   documentId: string;
@@ -31,9 +43,23 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [problem, setProblem] = useState('');
+  const [primary, setPrimary] = useState(true);
+  const panelKey = `${projectId}:${documentId}`;
   const path = `/projects/${projectId}/material-preparation/text-consent`;
 
   useEffect(() => {
+    const next = (ACTIVE_PANELS.get(panelKey) ?? 0) + 1;
+    ACTIVE_PANELS.set(panelKey, next);
+    setPrimary(next === 1);
+    return () => {
+      const left = (ACTIVE_PANELS.get(panelKey) ?? 1) - 1;
+      if (left <= 0) ACTIVE_PANELS.delete(panelKey);
+      else ACTIVE_PANELS.set(panelKey, left);
+    };
+  }, [panelKey]);
+
+  useEffect(() => {
+    if (!primary) return;
     let current = true;
     void api<TextScope>(`${path}/${documentId}`).then((result) => {
       if (current) setScope(result);
@@ -41,7 +67,7 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
       if (current) setProblem(error.message);
     });
     return () => { current = false; };
-  }, [documentId, path]);
+  }, [documentId, path, primary]);
 
   const scriptwriterAllowed = scope?.roles.some((row) => row.role === 'scriptwriter' && row.allowed) ?? false;
   useEffect(() => { onScriptwriterAccess?.(scriptwriterAllowed); }, [onScriptwriterAccess, scriptwriterAllowed]);
@@ -63,6 +89,7 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
     }
   }
 
+  if (!primary) return null;
   return <details className="material-stage" open={expanded || undefined}>
     <summary>文字模型发送授权</summary>
     {scope ? <>

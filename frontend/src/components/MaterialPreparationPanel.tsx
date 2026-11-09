@@ -179,7 +179,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
   /** The stage the person has open; null means "follow the server". */
-  const [openStage, setOpenStage] = useState<number | null>(null);
+  // Which stage fold the page opens with. A person's own toggles are native and
+  // never written back here, so this only tracks "the server moved the journey".
+  const [openStage] = useState<number | null>(null);
   // The work the user is looking at right now. A response that belongs to the
   // previous work must never be written into the new one.
   const directionDirty = useRef(false);
@@ -361,7 +363,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       })
       .catch(() => undefined);
   }, [documentsVersion, projectId]);
-  useEffect(() => { setSelected({}); setBriefEdits({}); setOperationReport(''); setOpenStage(null); }, [projectId, state?.plan_revision_id]);
+  useEffect(() => { setSelected({}); setBriefEdits({}); setOperationReport(''); }, [projectId, state?.plan_revision_id]);
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -602,6 +604,19 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   // The person may open any stage and keep it open; the server stage only
   // decides where the page starts.
   const shownStage = openStage === null ? stageIndex : openStage;
+  const readScriptRef = useRef<HTMLDetailsElement>(null);
+  const confirmRef = useRef<HTMLDetailsElement>(null);
+  const selectRef = useRef<HTMLDetailsElement>(null);
+  // The server stage decides where the page starts, once. Binding the folds to
+  // a controlled `open` plus an onToggle handler made them fight each other, so
+  // "① 读剧本" could not be opened by hand and the "分析剧本" button inside it was
+  // unreachable — the material list could never be produced. The folds are now
+  // native: only a stage change moves them, and a person may open any of them.
+  useEffect(() => {
+    if (readScriptRef.current) readScriptRef.current.open = shownStage === 0;
+    if (confirmRef.current) confirmRef.current.open = shownStage === 1;
+    if (selectRef.current) selectRef.current.open = shownStage === 2;
+  }, [shownStage]);
   const promotable = Object.keys(selected).length > 0;
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
@@ -702,8 +717,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         ))}
       </ol>
 
-      <details className="material-stage" open={shownStage === 0}
-        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(0); else if (shownStage === 0) setOpenStage(-1); }}>
+      <details className="material-stage" ref={readScriptRef}>
         <summary>① 读剧本{state?.plan_status ? ` · ${PLAN_STATUS_LABELS[state.plan_status] ?? ''}` : ''}</summary>
         <div className="material-stage-body">
           {documents.length === 0 && (
@@ -744,8 +758,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         documentId={documentId} documentHash={documents.find((d) => d.id === documentId)?.sha256 ?? ''}
         styleFrozen={!!frozenStyle} onMaterials={() => { void load(); }} />}
 
-      <details className="material-stage" open={shownStage === 1}
-        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(1); else if (shownStage === 1) setOpenStage(-1); }}>
+      <details className="material-stage" ref={confirmRef}>
         <summary>② 确认需求 · {requirements.length} 项</summary>
         <div className="material-stage-body">
           {requirements.length === 0 ? (
@@ -859,8 +872,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         </div>
       </details>
 
-      <details className="material-stage" open={shownStage === 2}
-        onToggle={(event) => { if (event.currentTarget.open) setOpenStage(2); else if (shownStage === 2) setOpenStage(-1); }}>
+      <details className="material-stage" ref={selectRef}>
         <summary>③ 选择素材 · {tiles.length} 项候选</summary>
         <div className="material-stage-body">
           {runs.length === 0 && <p className="material-hint">还没有出图批次。确认清单后，生成的项目会在这里排队。</p>}
