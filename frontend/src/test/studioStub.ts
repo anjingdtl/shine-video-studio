@@ -143,11 +143,23 @@ export const FROZEN_STYLE = {
   impact: { affected_shot_ids: [], invalidated_job_ids: [] },
 };
 
-export const DIRECTOR_STYLE_CATALOG = [{
-  id: 'wong-kar-wai', name_zh: '王家卫参考风格', version: '1.0.0',
-  summary_zh: '城市情绪、前景遮挡与克制留白。', categories: ['urban', 'emotion'],
-  sha256: 'b'.repeat(64), source: 'builtin', technique_count: 7, availability: 'available',
-}];
+export const DIRECTOR_STYLE_CATALOG = [
+  {
+    id: 'wong-kar-wai', name_zh: '王家卫参考风格', version: '1.0.0',
+    summary_zh: '城市情绪、前景遮挡与克制留白。', categories: ['urban', 'emotion'],
+    sha256: 'b'.repeat(64), source: 'builtin', technique_count: 7, availability: 'available',
+  },
+  {
+    id: 'hayao-miyazaki', name_zh: '宫崎骏动画电影参考风格', version: '1.0.0',
+    summary_zh: '自然环境、清晰动作、温暖光线与富有手绘感的表面质地。', categories: ['animation', 'nature'],
+    sha256: 'c'.repeat(64), source: 'builtin', technique_count: 7, availability: 'available',
+  },
+  {
+    id: 'mamoru-oshii', name_zh: '押井守动画电影参考风格', version: '1.0.0',
+    summary_zh: '建筑空间、克制运镜、冷静色调、信息留白与低调环境声。', categories: ['animation', 'urban'],
+    sha256: 'd'.repeat(64), source: 'builtin', technique_count: 7, availability: 'available',
+  },
+];
 
 /** Baseline route table mirroring the loopback API contract for one project. */
 export function baseRoutes(project = baseProject()): Route[] {

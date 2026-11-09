@@ -1,6 +1,6 @@
 # Shine Director Style Engine V1 — Test Report
 
-Date: 2026-11-08
+Date: 2026-11-09
 Base: `0ff8f8d8c521dfeac1957a98af524cdd7045aacf`
 Branch: `feature/director-style-engine-v1-20261108`
 
@@ -17,7 +17,7 @@ Branch: `feature/director-style-engine-v1-20261108`
 | Isolated Alembic upgrade | **PASS** | Upgraded a temporary SQLite database to `f180b0060001`; no user data was used. |
 | Diff whitespace check | **PASS** | `git diff --check` |
 
-The DSE/API integration tests cover the server catalog, seven-field preview, CAS-protected draft adoption, explicit freeze, profile-version immutability, equal-seven-dimensions source changes, legacy styles, frozen-history isolation, camera materialization, official six-section prompt compilation, EditIntentPlan and delivery metadata. The fifth-template test discovers and resolves a new profile from JSON alone. The frontend test drives catalog selection, preview, seven-row diff, draft adoption, save, and explicit freeze.
+The DSE/API integration tests cover all six built-in profiles, seven-field preview, CAS-protected draft adoption, explicit freeze, profile-version immutability, equal-seven-dimensions source changes, legacy styles, frozen-history isolation, camera materialization, official six-section prompt compilation, EditIntentPlan and delivery metadata. The config-only extension test discovers and resolves a new profile from JSON alone. The frontend test drives catalog selection, confirms the Miyazaki and Oshii entries arrive from the dynamic catalog, previews the seven-row diff, adopts to draft, saves, and explicitly freezes.
 
 The Fake/Mock integration path simulates project selection → template preview/adoption → style freeze → director/camera/continuity/editor artifacts → `apply-camera` → `H3PromptCompiler`. It is an offline contract test, not a real H3 or visual-quality result. Existing R09 missing-material and revoked-master regressions were included in the full backend run and did not appear in its failure list.
 
@@ -30,6 +30,10 @@ The first full run exited nonzero with 18 failures. Three failures were stale as
 The remaining full-suite failures are outside the DSE path and depend on Windows execution or host capacity. A follow-up `--lf` run reported **14 failed, 5 deselected**. The failures include install-plan tests whose pinned variant requires `windows-x64` while this runner reports `linux-x64`, code paths guarded by `SERVICE_VALIDATION_WINDOWS_ONLY` / `IMAGE_RENDERER_WINDOWS_ONLY`, local installation tests that require an enabled Windows executor, and one image-weight plan that exceeds the runner's available disk budget. These tests were not bypassed, weakened, or relabeled as passing. The full backend suite therefore cannot be reported as green on this Linux runner; run the complete backend suite on the supported Windows host before merge.
 
 Several suite cases were skipped by their existing platform guards, including Windows bootstrap, Windows Job Objects, Windows entry points, and the opt-in real ComfyUI probe. A four-stage fixture case was skipped because its fixture has fewer than three scenes.
+
+### 2026-11-09 template follow-up
+
+After adding the Miyazaki and Oshii JSON profiles, reran the complete DSE test file (**15 passed**), full frontend Vitest (**29 files, 191 tests passed**), Ruff, and the frontend production build. The full backend suite was not rerun for this configuration-only follow-up; its latest full-run and Linux host-limit results above remain the repository-wide backend status.
 
 ## Not run
 

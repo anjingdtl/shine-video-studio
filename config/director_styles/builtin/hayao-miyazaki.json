@@ -1,0 +1,83 @@
+{
+  "schema_version": "director-style/1",
+  "id": "hayao-miyazaki",
+  "name_zh": "宫崎骏动画电影参考风格",
+  "version": "1.0.0",
+  "summary_zh": "自然环境、清晰动作、温暖光线与富有手绘感的表面质地。",
+  "categories": ["animation", "nature", "adventure", "emotion"],
+  "style_bible": {
+    "photography_language": "以清晰的环境全景和贴近人物的观察镜头，呈现人与自然空间的关系。",
+    "shot_blocking": "让人物动作和周围环境都易于辨认，保持走位连贯、画面方向清楚。",
+    "color_palette": "采用清新自然的绿色、天空色与克制的暖色点缀，避免过度饱和。",
+    "lighting_tone": "偏好柔和、有来源的日光与开阔阴影，同时保留面部和关键物件细节。",
+    "lens_texture": "保留细腻的手绘表面感、空气层次与清楚的主体轮廓。",
+    "editing_rhythm": "让动作过程一目了然，并为情绪反应留出空间，不改变镜头时长或对白。",
+    "sound_performance": "保留原定对白，以贴合场景的风、雨、水流或环境声建立空间感。"
+  },
+  "techniques": [
+    {
+      "id": "environment-and-character-scale",
+      "target": "camera",
+      "priority": 91,
+      "when": {"scene_tags_any": ["exterior", "architecture"]},
+      "instruction_en": "Compose a readable wide frame that lets the environment and small character actions share visual importance.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "gentle-action-follow",
+      "target": "camera",
+      "priority": 72,
+      "when": {"scene_tags_any": ["action", "emotion"]},
+      "instruction_en": "Follow visible movement with gentle camera motion while keeping direction and continuity clear.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "soft-open-daylight",
+      "target": "lighting",
+      "priority": 84,
+      "when": {"scene_tags_any": ["day", "exterior"]},
+      "instruction_en": "Use soft, motivated daylight with open shadows and readable faces.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "fresh-natural-color",
+      "target": "color",
+      "priority": 78,
+      "when": {"scene_tags_any": ["day", "exterior"]},
+      "instruction_en": "Use fresh natural colors with controlled saturation and distinct but calm landscape planes.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "handcrafted-surface-clarity",
+      "target": "texture",
+      "priority": 68,
+      "when": {"scene_tags_any": []},
+      "instruction_en": "Retain a hand-crafted surface with subtle texture while preserving facial and object identity.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "legible-action-and-emotion",
+      "target": "editing",
+      "priority": 76,
+      "when": {"scene_tags_any": ["action", "emotion"]},
+      "instruction_en": "Let each action beat read clearly and leave emotional space without changing locked duration or dialogue.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "natural-environment-bed",
+      "target": "sound",
+      "priority": 52,
+      "when": {"scene_tags_any": ["exterior", "day"]},
+      "instruction_en": "Layer scene-appropriate environmental sound beneath the original dialogue and preserve required silence.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    }
+  ],
+  "source_notes": ["Generalized visual principles for animated cinema; not a reproduction of a specific film scene."]
+}

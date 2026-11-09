@@ -37,6 +37,7 @@ def test_builtin_catalog_hashes_and_protocol_are_stable():
     entries = DirectorStyleCatalog().list_latest()
     assert {item.profile.id for item in entries} == {
         "wong-kar-wai", "alfred-hitchcock", "john-woo", "christopher-nolan",
+        "hayao-miyazaki", "mamoru-oshii",
     }
     assert all(item.source == "builtin" and len(item.sha256) == 64 for item in entries)
     assert [item.sha256 for item in entries] == [
@@ -45,11 +46,11 @@ def test_builtin_catalog_hashes_and_protocol_are_stable():
     assert all(len(item.profile.style_bible.model_dump()) == 7 for item in entries)
 
 
-def test_a_fifth_template_is_discovered_and_resolved_from_json_alone(tmp_path):
+def test_a_config_only_template_is_discovered_and_resolved_from_json_alone(tmp_path):
     source = DirectorStyleCatalog().get("wong-kar-wai")
     payload = source.profile.model_dump(mode="json")
-    payload["id"] = "fifth-template"
-    payload["name_zh"] = "第五套模板"
+    payload["id"] = "config-only-template"
+    payload["name_zh"] = "纯配置扩展模板"
     payload["summary_zh"] = "用于验证数据驱动发现的独立模板。"
     payload["categories"] = ["urban"]
     payload["techniques"] = [
@@ -63,10 +64,10 @@ def test_a_fifth_template_is_discovered_and_resolved_from_json_alone(tmp_path):
             "conflicts_with": [],
         },
     ]
-    (tmp_path / "fifth.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "config-only.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     catalog = DirectorStyleCatalog(tmp_path)
-    entry = catalog.get("fifth-template")
-    assert [row.profile.id for row in catalog.list_latest()] == ["fifth-template"]
+    entry = catalog.get("config-only-template")
+    assert [row.profile.id for row in catalog.list_latest()] == ["config-only-template"]
     assert DirectorStyleResolver().resolve(entry, scene_tags=["night"]).selected_technique_ids == [
         "night-camera-rule"
     ]
@@ -154,7 +155,7 @@ def test_resolver_is_deterministic_strength_sensitive_and_fail_closed_for_locks(
     assert any(item["reason"] == "STYLE_RESOLUTION_CONFLICT:strict-no-pause" for item in conflict_result.rejected)
 
 
-def test_four_profiles_produce_different_camera_and_edit_constraints_and_compile_official_sections():
+def test_six_profiles_produce_different_camera_and_edit_constraints_and_compile_official_sections():
     entries = DirectorStyleCatalog().list_latest()
     style = StyleBible(
         photography_language="Use grounded camera language.", shot_blocking="Keep screen direction clear.",
@@ -167,7 +168,14 @@ def test_four_profiles_produce_different_camera_and_edit_constraints_and_compile
     camera_texts = set()
     editing_texts = set()
     for entry in entries:
-        resolution = DirectorStyleResolver().resolve(entry, strength="strong")
+        resolution = DirectorStyleResolver().resolve(
+            entry,
+            strength="strong",
+            scene_tags=[
+                "action", "architecture", "day", "dialogue", "emotion", "exterior",
+                "interior", "mystery", "night", "urban",
+            ],
+        )
         camera_text = camera_style_text(resolution)
         camera_texts.add(camera_text)
         intent = EditIntentPlan(
@@ -192,11 +200,11 @@ def test_four_profiles_produce_different_camera_and_edit_constraints_and_compile
             spec=shot, style=style, manifest=manifest, project_language="English", mode_hint=GenerationMode.REF2VA,
         )
         compiled.append(result)
-    assert len(camera_texts) == 4
-    assert len(editing_texts) == 4
+    assert len(camera_texts) == 6
+    assert len(editing_texts) == 6
     assert all(tuple(item.sections) == REF_SECTION_ORDER for item in compiled)
     assert all("director style" in item.sections["detailed_description"].lower() for item in compiled)
-    assert len({item.prompt_sha256 for item in compiled}) == 4
+    assert len({item.prompt_sha256 for item in compiled}) == 6
 
 
 def test_project_api_preview_apply_cas_freeze_and_legacy_style_compatibility(studio):
@@ -206,6 +214,7 @@ def test_project_api_preview_apply_cas_freeze_and_legacy_style_compatibility(stu
     assert catalog_response.status_code == 200
     assert {row["id"] for row in catalog_response.json()} == {
         "wong-kar-wai", "alfred-hitchcock", "john-woo", "christopher-nolan",
+        "hayao-miyazaki", "mamoru-oshii",
     }
     entry = DirectorStyleCatalog().get("wong-kar-wai")
     state = client.get(f"/api/v1/projects/{project_id}/director-style").json()

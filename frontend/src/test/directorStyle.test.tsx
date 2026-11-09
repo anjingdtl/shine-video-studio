@@ -80,6 +80,8 @@ describe('director style picker', () => {
 
     render(<Harness onSave={onSave} onFreeze={onFreeze} />);
     const selector = await screen.findByRole('combobox', { name: '选择导演风格模板' });
+    expect(selector).toHaveTextContent('宫崎骏动画电影参考风格');
+    expect(selector).toHaveTextContent('押井守动画电影参考风格');
     await user.selectOptions(selector, 'wong-kar-wai');
     expect(screen.getByText('城市情绪、前景遮挡与克制留白。')).toBeInTheDocument();
 

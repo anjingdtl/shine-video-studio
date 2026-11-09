@@ -1,0 +1,83 @@
+{
+  "schema_version": "director-style/1",
+  "id": "mamoru-oshii",
+  "name_zh": "押井守动画电影参考风格",
+  "version": "1.0.0",
+  "summary_zh": "建筑空间、克制运镜、冷静色调、信息留白与低调环境声。",
+  "categories": ["animation", "urban", "mystery", "contemplative"],
+  "style_bible": {
+    "photography_language": "以稳定、克制的构图观察人物与建筑空间之间的关系。",
+    "shot_blocking": "利用清楚的几何线条、纵深和留白组织人物位置，不模糊行动方向。",
+    "color_palette": "采用低饱和冷色与有限的暖色信号，维持主体和背景的可读差异。",
+    "lighting_tone": "使用克制、具有现实来源的光线，让阴影保留层次而不吞没人脸。",
+    "lens_texture": "强调清晰的建筑细节、空间纵深和自然材质，不以效果遮盖主体。",
+    "editing_rhythm": "允许镜头在信息完成后短暂停留，保持既定顺序、时长与对白。",
+    "sound_performance": "保留原定对白，以稀疏的室内底噪和低调机械环境声表现空间。"
+  },
+  "techniques": [
+    {
+      "id": "architectural-frame-geometry",
+      "target": "camera",
+      "priority": 93,
+      "when": {"scene_tags_any": ["architecture", "urban"]},
+      "instruction_en": "Use balanced compositions that place figures within clear architectural geometry and readable depth.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "measured-camera-motion",
+      "target": "camera",
+      "priority": 70,
+      "when": {"scene_tags_any": ["mystery", "dialogue"]},
+      "instruction_en": "Keep camera motion deliberate and measured, preserving axis and the established screen direction.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "restrained-practical-light",
+      "target": "lighting",
+      "priority": 82,
+      "when": {"scene_tags_any": ["interior", "night"]},
+      "instruction_en": "Use motivated, restrained light with legible shadows and sufficient facial detail.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "muted-cool-color",
+      "target": "color",
+      "priority": 79,
+      "when": {"scene_tags_any": []},
+      "instruction_en": "Favor cool muted tones and restrained contrast while keeping skin and focal subjects readable.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "spatial-surface-detail",
+      "target": "texture",
+      "priority": 67,
+      "when": {"scene_tags_any": ["architecture", "urban"]},
+      "instruction_en": "Preserve natural surface detail and spatial clarity; avoid effects that obscure identity.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "deliberate-information-pause",
+      "target": "editing",
+      "priority": 81,
+      "when": {"scene_tags_any": ["mystery", "dialogue"]},
+      "instruction_en": "Hold on completed visual information for a measured pause without retiming dialogue or shot duration.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "quiet-mechanical-ambience",
+      "target": "sound",
+      "priority": 54,
+      "when": {"scene_tags_any": ["urban", "interior"]},
+      "instruction_en": "Use sparse room tone and low environmental mechanical ambience beneath original dialogue.",
+      "requires_capabilities": [],
+      "conflicts_with": []
+    }
+  ],
+  "source_notes": ["Generalized visual principles for animated cinema; not a reproduction of a specific film scene."]
+}
