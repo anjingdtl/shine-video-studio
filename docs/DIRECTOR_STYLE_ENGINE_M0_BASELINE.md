@@ -45,3 +45,10 @@ Working branch: `feature/director-style-engine-v1-20261108`
 | Template file changes could rewrite frozen projects | Freeze full profile and resolution snapshots with the existing StyleVersion in one transaction; old versions have null provenance and remain legacy/custom. |
 | Missing assets could become a style-specific blocker | Preserve current R09 notice/skip behavior and approved+locked binding checks unchanged. |
 | Added style could bypass H3 or trigger work | Do not modify H3 workflow or rule pack; preview, adoption, and freeze are local data operations and never queue generation or retry UNKNOWN work. |
+
+## Rebase review against latest main (2026-11-09)
+
+- Fetched and reviewed `origin/main` at `16cb072aac5de2e0b3a210da391be2f027c61de2`, which had advanced from the requested original base. The seven-stage journey, R09 material policy, StyleBible freeze contract, and `H3PromptCompiler` as the only official prompt entry point remain in force.
+- Preserved the new main changes for script basis, job-request fingerprints, and associated APIs/UI. The DSE migration now follows main's `f180b0050001` migration as `f180b0060001`; the migration graph has one head.
+- The feature branch was rebased as two commits on the fetched main SHA. The rebase has no unresolved conflict markers, `git diff --check` passes, and `origin/main` is an ancestor of the feature `HEAD`.
+- Post-rebase test results are recorded in [DIRECTOR_STYLE_ENGINE_TEST_REPORT.md](DIRECTOR_STYLE_ENGINE_TEST_REPORT.md) after the validation run.

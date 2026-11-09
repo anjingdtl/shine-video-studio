@@ -1,7 +1,8 @@
 # Shine Director Style Engine V1 — Test Report
 
 Date: 2026-11-09
-Base: `0ff8f8d8c521dfeac1957a98af524cdd7045aacf`
+Original implementation base: `0ff8f8d8c521dfeac1957a98af524cdd7045aacf`
+Synchronized base: `origin/main` at `16cb072aac5de2e0b3a210da391be2f027c61de2`
 Branch: `feature/director-style-engine-v1-20261108`
 
 ## Results
@@ -9,11 +10,12 @@ Branch: `feature/director-style-engine-v1-20261108`
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Director Style Engine tests | **PASS — 15 passed** | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_director_styles.py -ra` |
+| Full backend suite after sync | **NONZERO — 1,921 passed, 140 skipped, 14 failed** | `cd backend && .venv/bin/python -m pytest -c pyproject.toml -q -ra`; the 14 failing cases are listed and classified below. |
 | Combined DSE, film crew, storyboard, H3 compiler, StyleVersion, Alembic, and migration regressions | **PASS — exit 0** | `backend/.venv/bin/python -m pytest -c backend/pyproject.toml backend/tests/test_director_styles.py backend/tests/test_film_crew.py backend/tests/test_storyboard.py backend/tests/test_h3_compiler.py backend/tests/test_style_versions.py backend/tests/test_alembic.py backend/tests/test_global_workflow_name_migration.py backend/tests/test_migrations_windows.py -q -ra` |
 | Ruff | **PASS** | `backend/.venv/bin/ruff check backend/shine backend/tests` |
 | Python bytecode compilation | **PASS** | `backend/.venv/bin/python -m compileall -q backend/shine` |
-| Frontend Vitest | **PASS — 29 files, 191 tests** | `cd frontend && npm run test -- --run` |
-| Frontend production build | **PASS** | `cd frontend && npm run build`; TypeScript and Vite completed. Vite reports the existing >500 kB chunk advisory; the generated JS bundle is about 766 kB minified. |
+| Frontend Vitest after sync | **PASS — 30 files, 194 tests** | `cd frontend && npm run test -- --run` |
+| Frontend production build after sync | **PASS** | `cd frontend && npm run build`; TypeScript and Vite completed. Vite reports the >500 kB chunk advisory; the generated JS bundle is 786.69 kB minified. |
 | Isolated Alembic upgrade | **PASS** | Upgraded a temporary SQLite database to `f180b0060001`; no user data was used. |
 | Diff whitespace check | **PASS** | `git diff --check` |
 
@@ -21,7 +23,7 @@ The DSE/API integration tests cover all six built-in profiles, seven-field previ
 
 The Fake/Mock integration path simulates project selection → template preview/adoption → style freeze → director/camera/continuity/editor artifacts → `apply-camera` → `H3PromptCompiler`. It is an offline contract test, not a real H3 or visual-quality result. Existing R09 missing-material and revoked-master regressions were included in the full backend run and did not appear in its failure list.
 
-## Full backend suite and environment limits
+## Pre-sync full backend suite and environment limits (historical)
 
 Command: `cd backend && .venv/bin/python -m pytest -c pyproject.toml -q -ra`.
 
@@ -33,11 +35,17 @@ Several suite cases were skipped by their existing platform guards, including Wi
 
 ### 2026-11-09 template follow-up
 
-After adding the Miyazaki and Oshii JSON profiles, reran the complete DSE test file (**15 passed**), full frontend Vitest (**29 files, 191 tests passed**), Ruff, and the frontend production build. The full backend suite was not rerun for this configuration-only follow-up; its latest full-run and Linux host-limit results above remain the repository-wide backend status.
+After adding the Miyazaki and Oshii JSON profiles, reran the complete DSE test file (**15 passed**), full frontend Vitest (**29 files, 191 tests passed**), Ruff, and the frontend production build. Those counts are from before the latest-main synchronization.
+
+### 2026-11-09 latest-main synchronization
+
+After rebasing onto `16cb072aac5de2e0b3a210da391be2f027c61de2` and moving the DSE migration after main's `f180b0050001`, the DSE plus migration regression command exited 0. Ruff, `compileall`, `git diff --check`, `alembic heads`, and the feature-branch ancestry check passed. The frontend rerun passed **30 files / 194 tests**; `tsc -b && vite build` passed with the existing large-bundle advisory.
+
+The full backend run collected 2,075 cases and exited 1: **1,921 passed, 140 skipped, 14 failed**. The DSE, migration, and H3 compiler regressions are not among the failures. Re-running pytest's last-failed selection reproduced the same 14 failures. They are host/environment-bound: four expect a `windows-x64` host while this runner is `linux-x64`; six service-validation cases are blocked by the intentional `SERVICE_VALIDATION_WINDOWS_ONLY` gate; two director setup cases require enabled local execution; the managed-renderer test hits the `IMAGE_RENDERER_WINDOWS_ONLY` gate; and the image-weight installation plan is blocked by insufficient host disk. No platform guard or test was changed to make this run pass. Windows-host validation remains **NOT_RUN**.
 
 ## Not run
 
 - Real H3 generation or GPU inference: **NOT_RUN**.
 - Human visual/audio aesthetic review: **NOT_RUN**.
 - Real ComfyUI service validation or model installation: **NOT_RUN**.
-- Push, PR creation, or remote review: **NOT_PERFORMED** by explicit user direction.
+- Delivery path: direct push to `main` is authorized; a PR is not part of this direct-main delivery.
