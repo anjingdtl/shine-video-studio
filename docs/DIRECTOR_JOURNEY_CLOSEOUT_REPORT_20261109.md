@@ -4,12 +4,17 @@
 本轮把 [导演模式全旅程唯一性对抗审查](ADVERSARIAL_REVIEW_DIRECTOR_JOURNEY_12DD99B_20261109.md) 的 U01–U10
 从「可复现缺陷」改成「有回归测试的合同」，并逐项记录仍然只能在真机上完成的部分。
 
-**判定：`SOFTWARE_VERIFIED`。** 十项缺陷的反例都先在 `12dd99b` 上重现，修复版用同一组入口断言了正确行为；
-后端定向与全量、前端单测与构建、隔离浏览器验收、空库与旧库副本迁移、真实包构建均在本机执行并通过。
-远端 CI（[PR #11](https://github.com/anjingdtl/shine-video-studio/pull/11)）的 `frontend` 与 `web-e2e`
-通过，`backend`/`backend-windows` **没有新增产品失败**（Linux 13 个、Windows 3 个为基线既有平台限制，详见 §4.5）。
-`CLEAN_WINDOWS_INSTALL`、`REAL_DOWNLOAD`、`REAL_LLM`、`REAL_QWEN_IMAGE`、`REAL_VOICE`、`REAL_H3`、
-`VOLUME_DELIVERED`、`HUMAN_ACCEPTED` 为 `NOT_RUN`，具名阻塞与继续步骤见文末。本报告不把任何离线结果当作真实出片。
+**判定：`SOFTWARE_VERIFIED` + 本机 `REAL_H3` 已跑通。** 十项缺陷的反例都先在 `12dd99b` 上重现，
+修复版用同一组入口断言了正确行为；后端定向与全量、前端单测与构建、隔离浏览器验收、空库与旧库副本迁移、
+真实包构建均在本机执行并通过。远端 CI（[PR #11](https://github.com/anjingdtl/shine-video-studio/pull/11)）的
+`frontend` 与 `web-e2e` 通过，`backend`/`backend-windows` **没有新增产品失败**（Linux 13 个、Windows 3 个为
+基线既有平台限制，详见 §4.5）。
+
+**本机实机运行（§6）**：用这台 Windows 上已有的 ComfyUI（含完整 H3 权重）复用为零下载、零拷贝的实例，
+跑通「素材审核 → 冻结风格 → 镜头 → 真实 H3 出片 → 导演包 → Run → 交付 → 下载」，单镜 job `PASSED`、
+`quality_verification=real`、1344×768 / 5.17 s / 带 AAC 音频，交付成片带中文文件名下载。
+`CLEAN_WINDOWS_INSTALL`、`REAL_DOWNLOAD`、`REAL_LLM`、`REAL_QWEN_IMAGE`、`REAL_VOICE`、
+`VOLUME_DELIVERED`、`HUMAN_ACCEPTED` 仍为 `NOT_RUN`，具名阻塞与继续步骤见 §5。
 
 ## 1. 本轮基线核对
 
@@ -311,14 +316,47 @@ Windows 的既有 3 个是 `test_gpu_release_confirmation`（2）与 `test_image
 | `REAL_LLM` | `NOT_RUN` | 未提供获授权的文本模型 provider 与密钥 | 在「专业设置 → AI 助手」填入 provider、模型与密钥，跑一次文档分析/分集/分镜；密钥只存本机 |
 | `REAL_QWEN_IMAGE` | `NOT_RUN` | 未安装 Qwen Image 权重/节点，且没有正在运行的 ComfyUI | 安装 `qwen-image-2.1-windows-x64` 独立计划后，在素材中心跑一个真实样本，核对解码、尺寸、SHA 与回执 |
 | `REAL_VOICE` | `NOT_RUN` | 未启动本地 TTS/ASR 运行时，也未授权音色 | 启动语音运行时，走一次试听 → 冻结 → 发布；另验一条「语音可选」路径 |
-| `REAL_H3` | `NOT_RUN` | 本机没有已登记的 ComfyUI/H3 实例（无 8188 监听、无 GPU 租约），也未执行 60.8 GB 权重安装 | 先完成 `CLEAN_WINDOWS_INSTALL` 或只读复用已核验的现有安装，再按 `§3 U07/U08` 的 profile 要求登记工作流；由 UI 发起一次 Run，关浏览器后恢复，记录包/Run/Series/Job/Attempt/prompt ID/租约/EDL/SHA/五门 QC |
-| `VOLUME_DELIVERED` | `NOT_RUN` | 依赖 `REAL_H3` 的真实多集产出 | 至少两集、每集多镜（含有对白/无对白/跨批次连续性），逐集播放、下载并核对参考身份与对白语言 |
-| `HUMAN_ACCEPTED` | `NOT_RUN` | 依赖真实成片；本轮无真实成片 | 由真实操作者提交人验结论，证据包含所看版本与结论；`pending_review` 不升级为 `accepted` |
+| `REAL_H3` | **本机已跑通**（复用现有安装）；干净宿主仍 `NOT_RUN` | 干净宿主需先完成 `CLEAN_WINDOWS_INSTALL`。本机已用既有 ComfyUI 完成：1 镜真实出片（`PASSED`/`real`）+ 1 集 Run 交付，详见 §6 | 第二台机器或干净宿主上重复同一条链路，并补多镜多集；记录包/Run/Series/Job/Attempt/prompt ID/租约/EDL/SHA/五门 QC |
+| `VOLUME_DELIVERED` | **部分**：1 集 1 镜已交付 | 未达「≥2 集、每集多镜、含对白与无对白、跨批次连续性」 | 在同一实例上补第 2 集与多镜，验证跨批次连续性与逐集下载 |
+| `HUMAN_ACCEPTED` | `NOT_RUN` | 真实成片已产出（§6），但本轮没有人工验收结论 | 由真实操作者观看 `本机联调-第1集.mp4` 并提交结论；`pending_review` 不升级为 `accepted` |
 
 硬件不是阻塞：本机 RTX 5080 16,303 MiB 与 D 盘 554.9 GB 可用空间满足默认变体的门槛。阻塞是本轮**没有**
 已登记的 H3 实例与用户对 60.8 GB 下载/真实推理的授权。
 
-## 6. 交付、回滚与已知边界
+## 6. 本机实机运行（2026-11-09，零下载复用）
+
+目标改成「这台机器上真正跑通」。本机已有一套 ComfyUI（Mie 整合包），因此走**复用现有安装**这条路径，
+不下载、不拷贝、不接管用户的手工启动方式。
+
+| 步骤 | 命令 / 入口 | 结果 |
+| --- | --- | --- |
+| 服务常驻 | `scripts/start_shine.ps1 -Provider comfyui -AutoPorts`（数据目录 `F:\ClaudeWorkSpace\shine-workbench\data`） | API `127.0.0.1:8000`、Web `127.0.0.1:5173`、Worker 各一；`/health` 返回 `schema_head=f180b0050001`、`schema_up_to_date=true` |
+| 只读识别 | `POST /setup/existing-installations/inspect` | ComfyUI `b0b7435…`（与 catalog 期望一致）、`tracked_files_clean=true`、扫描 1880 文件、候选 43.98 GB |
+| 原地校验 | `POST /setup/existing-installations/verify` | `INSTALLED_VERIFIED`；H3 六个核心文件全部 `INSTALLED_HASH_MATCH`（diffusion 20.97 GB / text encoder 15.69 GB / video VAE 5.21 GB / audio VAE 0.61 GB / LoRA / PDD） |
+| 采用 | `POST /setup/existing-installations/adopt` | `ADOPTED`，实例 `22ea7c4e…`，复用 43,974,265,807 bytes，`copied_bytes=0`、`downloaded_bytes=0` |
+| 运行配置 | `POST /setup/configuration` → `POST /setup/profiles` → `POST /setup/services/validate` → `POST /setup/runtime/activate` | recipe `03343f92…`；服务验证 `READY`（**1281 个节点**、3 个 Ref2VA profile）；激活后 readiness L0–L4 `READY` |
+| 素材与风格 | 上传两张自有合成图 → 审批凭据 → `approve`/`lock`；七项风格 → `freeze` | 2 个素材 `approved=true, locked=true`；StyleVersion V1 |
+| 单镜真实出片 | `POST /projects/{id}/jobs`（`provider=comfyui`，profile `local-h3-ref2va-pdd8-2img-1aud`，`generation_mode=Ref2VA`） | prompt `dce364e4…`；GPU 99%、15.4/16.3 GB、63 °C；**job `PASSED` / `quality_verification=real`**；产物 1,768,550 bytes、SHA `5ad57319…`、**1344×768 / 24 fps / 5.166 s / AAC 32 kHz 双声道** |
+| 导演包与 Run | `POST /episode-plans` → confirm → `POST /director-packages` → readiness（`startable=true`，指纹 `0582db84…`）→ confirm → `POST /production-runs` | Run `827426e2-7a43-40b2-b502-152c4a9761a9`，范围 `ep-01`、1 镜；Series `14d1ba93…`；第二镜 prompt `c0bcd4f7…`，job `256e9298…` `PASSED` |
+| 交付 | Worker 自动装配 | Run `COMPLETED`，`ep-01 DELIVERED`，交付单 `457cb0bb…`；交付产物 1,728,232 bytes、SHA `409949af…`、5.187663 s；EDL 精确到 `job_id`/`attempt_id`/`in 0.0–out 5.166`/`CUT` |
+| 下载 | `GET /deliveries/{id}/media` | `200`、`video/mp4`、`content-disposition: attachment; filename*=utf-8''本机联调-第1集.mp4`；单镜 `GET /jobs/{id}/media` 同为 `video/mp4` |
+| UI | Chromium 打开 `#d/produce` | 7/7 阶段完成，文案「七个阶段全部完成 · 全部选定分集已交付」；2 个下载入口（单镜 / 交付） |
+
+**质量门（真实记录，不美化）**：`technical=passed`（ffprobe）；`semantic`/`audio` 因 VLM/ASR 权重与运行时
+未就绪而记为 `unavailable`（advisory，不伪造通过）；`style=not_run`；`final=needs_review` —— 等待人工验收，
+`pending_review` 没有被升级为 `accepted`。
+
+**耗时**：单镜从提交到 `PASSED` 约 2 分 40 秒（含首次模型加载）；Run 从创建到交付约 3 分 28 秒。
+
+**已知 UI 瑕疵（本机实测发现，未修）**：Run 已交付后，`#d/produce` 的排产区仍显示「还没有勾选镜头 /
+还没有生成方案 / 有 1 个角色未绑定参考图」三条提示，与顶部「7/7 阶段全部完成」不一致。原因是该区块读的是
+本次页面会话的勾选与「一键登记」状态，而不是已完成的 Run；重新勾选或刷新后消失。它不影响已交付产物，
+但会让人误以为还不能开拍，应在后续轮次修掉（同类问题：API 驱动的操作不会回填 UI 的本地选择状态）。
+
+**未跑的部分**：干净 Windows 安装（用户另找机器）、60.8 GB 真实下载、真实 LLM 剧本/分镜、Qwen Image 真实样本、
+语音授权与试听、多集多镜与跨批次连续性、人工验收。
+
+## 7. 交付、回滚与已知边界
 
 - **交付**：`codex/director-journey-closeout` 上的实现与测试；迁移 `f180b0040001`、`f180b0050001`；
   两份新回归文件；打包脚本与浏览器脚本的修正。
