@@ -156,7 +156,8 @@ def _split_pinned_tasks(tasks: list[AgentTaskRecord]) -> tuple[list[AgentTaskRec
 
     pinned, blocking = [], []
     for task in tasks:
-        (pinned if task.role_id in TASK_ROLE_CONSUMERS else blocking).append(task)
+        pinned_task = task.role_id in TASK_ROLE_CONSUMERS and bool(task.model_profile_id)
+        (pinned if pinned_task else blocking).append(task)
     return pinned, blocking
 
 
@@ -283,7 +284,7 @@ def _route_preview(db, assignments: list[dict[str, Any]], secrets: SecretStore) 
     active_tasks = []
     blocking_tasks = []
     for task in affected:
-        pinned = task.role_id in TASK_ROLE_CONSUMERS
+        pinned = task.role_id in TASK_ROLE_CONSUMERS and bool(task.model_profile_id) and bool(task.model_profile_id)
         row = {
             **_active_task_dict(task),
             # A task with a durable model snapshot continues on it; only the
