@@ -2,6 +2,9 @@
 
 日期：2026-11-09
 分支：`codex/w6a8-lowend-variant`（基线 `888956edeac6e98f032f0e883e3e83d1a7ca92bb`）
+已合入 `main` 并推送：`main` = `11d9b82`（`origin/main` 与 `origin/codex/w6a8-lowend-variant` 同点）
+安装包：`releases/ShineVideoStudio-20261109-11d9b82-win64.zip`
+（3,904,811 B，SHA-256 `4b97fd52d134baa6ea9b5d9f8a80db8aca28465e4f9f8bc9ee59092bc950d41a`，`-Verify` 逐文件校验 725 个文件通过）
 平台：Windows x64 · 本机 `F:\ClaudeWorkSpace\projects\shine-video-studio`
 
 ---
