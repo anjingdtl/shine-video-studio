@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from shine.models import AgentArtifact
+from shine.models import AgentArtifact, AgentTaskRecord
 
 SCRIPT = "场景一：\n林知远：你来了。\n\n场景二：\n林知远转身离开。\n"
 
@@ -182,3 +182,50 @@ def test_one_failed_scene_does_not_stop_the_others(api, monkeypatch):
     scenes = response.json()["scenes"]
     assert [scene["status"] for scene in scenes] == ["PREPARED", "NEEDS_REVIEW", "PREPARED"], scenes
     assert len(response.json()["preparations"]) == 2, response.json()
+
+
+def test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input(api, monkeypatch):
+    client, factory, settings = api
+    monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
+    project_id = client.post("/api/v1/projects", json={"title": "雾港"}).json()["id"]
+    profile = client.post(
+        "/api/v1/provider-profiles", json={"name": "writer-mock", "kind": "mock", "model": "writer"}
+    )
+    assert profile.status_code == 201, profile.text
+    route = client.put(
+        "/api/v1/agent-routes",
+        json={"role": "scriptwriter", "provider_profile_id": profile.json()["id"]},
+    )
+    assert route.status_code == 200, route.text
+    document = client.post(
+        f"/api/v1/projects/{project_id}/documents",
+        files={"file": ("剧本.txt", SCRIPT.encode("utf-8"), "text/plain")},
+    ).json()
+
+    calls: list = []
+
+    def responder(messages, schema):
+        calls.append(messages)
+        return _responder(messages, schema)
+
+    client.app.state.mock_llm_responder = responder
+    first = _prepare(client, project_id, document)
+    assert first.status_code == 200, first.text
+    assert len(calls) == 2
+    with factory() as db:
+        task = db.query(AgentTaskRecord).filter(AgentTaskRecord.role_id == "scriptwriter").first()
+        assert task.request_identity
+        task.status = "NEEDS_REVIEW"
+        task.error_code = "LLM_TIMEOUT"
+        task.trace = {**task.trace, "phase": "FAILED", "external_outcome": "UNKNOWN"}
+        db.commit()
+
+    # A fresh submission with a new locked fact is a different input.  The old
+    # UNKNOWN belongs to the old input and must not silence the new request.
+    second = _prepare(client, project_id, document,
+                      locked_story_facts=["The film uses cel animation."])
+    assert second.status_code == 200, second.text
+    assert len(calls) > 2, "the new input must actually be sent to the provider"
+    with factory() as db:
+        rows = db.query(AgentTaskRecord).filter(AgentTaskRecord.role_id == "scriptwriter").all()
+        assert len(rows) > 2

@@ -264,10 +264,15 @@ def prepare_scenes(
                     AgentTaskRecord.rulepack_id == RULEPACK_ID,
                     AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW"]),
                 ).order_by(AgentTaskRecord.created_at, AgentTaskRecord.id)).all()
+                # Only a genuinely legacy row (written before request
+                # identities existed) may be adopted without an identity match.
+                # A newer UNKNOWN belongs to a different input (facts, prompt,
+                # provider) and must never silence a fresh submission: the new
+                # submission keeps its own budget and its own request.
                 existing = next((t for t in prior
-                                 if t.trace.get("document_sha256") == document.sha256
-                                 and (t.request_identity is None
-                                      or _overlapping_source(t.trace.get("scene_key", ""), scene.key))
+                                 if t.request_identity is None
+                                 and t.trace.get("document_sha256") == document.sha256
+                                 and _overlapping_source(t.trace.get("scene_key", ""), scene.key)
                                  and (t.status == "RUNNING" or t.trace.get("external_outcome") == "UNKNOWN")), None)
             if existing is not None:
                 artifact = db.scalar(select(AgentArtifact).where(
