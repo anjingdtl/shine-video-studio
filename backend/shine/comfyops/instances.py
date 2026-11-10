@@ -39,6 +39,7 @@ from shine.comfyops.runtime_dependencies import (
     verified_built_wheels,
 )
 from shine.comfyops.storage import prepare_process_environment, process_environment
+from shine.http_env import build_client
 from shine.models import utcnow
 from shine.services import add_audit, require_project
 
@@ -344,7 +345,7 @@ def copy_package(source, target):
 def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None):
     checkpoint = checkpoint or (lambda stage: None)
     runner = runner or ProcessRunner()
-    http = http or httpx.Client(timeout=10, follow_redirects=False)
+    http = http or build_client("http://127.0.0.1", 10, follow_redirects=False)
     with factory() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         plan = db.get(InstallationPlan, identity)

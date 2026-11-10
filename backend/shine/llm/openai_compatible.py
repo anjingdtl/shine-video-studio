@@ -57,6 +57,64 @@ def _models_url(base_url: str) -> str:
     return f"{root}/v1/models"
 
 
+RATE_LIMIT_BACKOFF_SECONDS = (5.0, 10.0, 20.0, 30.0)
+"""How long a refused call waits before it tries the provider again.
+
+The provider answered "too many requests" and produced no answer at all, so
+waiting and asking again cannot buy a second copy of one answer.  The backoff
+grows because a throttled endpoint usually needs a longer pause, and it is
+capped so one refusal never stalls the workbench for minutes.
+"""
+
+_rate_limit_cooldowns: dict[str, float] = {}
+
+
+def _cooldown_key(base_url: str) -> str:
+    return _api_root(base_url)
+
+
+def note_rate_limit(base_url: str, seconds: float) -> None:
+    """Remember that this endpoint refused the client for a while.
+
+    A provider that answers 429 is throttling the whole client, not one
+    request.  Every later call to the same endpoint waits for the same
+    pause, so one refusal cannot turn into a dozen failed units.
+    """
+    key = _cooldown_key(base_url)
+    until = time.monotonic() + max(0.0, seconds)
+    _rate_limit_cooldowns[key] = max(_rate_limit_cooldowns.get(key, 0.0), until)
+
+
+def wait_for_rate_limit(base_url: str) -> None:
+    """Wait out a cooldown this endpoint is serving."""
+    key = _cooldown_key(base_url)
+    until = _rate_limit_cooldowns.get(key)
+    if until is None:
+        return
+    remaining = until - time.monotonic()
+    if remaining <= 0:
+        _rate_limit_cooldowns.pop(key, None)
+        return
+    time.sleep(min(remaining, RATE_LIMIT_BACKOFF_SECONDS[-1]))
+
+
+def clear_rate_limit_cooldowns() -> None:
+    """Forget every cooldown (used by tests and by a deliberate restart)."""
+    _rate_limit_cooldowns.clear()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The provider's own pause, when it states one."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
 class OpenAICompatibleProvider:
     """OpenAI-compatible chat completions with retries, timeouts, and JSON validation."""
 
@@ -73,6 +131,7 @@ class OpenAICompatibleProvider:
         last_error: LLMError | None = None
         attempts = max(0, self.config.max_retries) + 1
         for attempt in range(attempts):
+            wait_for_rate_limit(self.config.base_url)
             try:
                 client = build_client(url, self.config.timeout_s)
             except Exception as exc:  # noqa: BLE001 - construction precedes any socket
@@ -123,8 +182,22 @@ class OpenAICompatibleProvider:
                 if response.status_code < 400:
                     return response
                 last_error = self._classify(response)
-                if (not last_error.retryable or isinstance(last_error, LLMServerError)
-                        or (method == "POST" and isinstance(last_error, LLMRateLimit))):
+                if isinstance(last_error, LLMRateLimit):
+                    # A refused request produced no answer at all, so waiting
+                    # and asking again cannot buy a second copy of one
+                    # answer.  The unknown-outcome rule is untouched: a 5xx or
+                    # a timeout still never replays a sent request.
+                    pause = (_retry_after_seconds(response)
+                             or RATE_LIMIT_BACKOFF_SECONDS[
+                                 min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)])
+                    note_rate_limit(self.config.base_url, pause)
+                    last_error.details = {**last_error.details, "rate_limit_retries": attempt}
+                    budget = min(self.config.rate_limit_retry_attempts, attempts - 1)
+                    if attempt >= budget:
+                        raise last_error
+                    time.sleep(pause)
+                    continue
+                if not last_error.retryable or isinstance(last_error, LLMServerError):
                     raise last_error
             if attempt + 1 < attempts:
                 time.sleep(min(2.0, 0.25 * (2**attempt)))

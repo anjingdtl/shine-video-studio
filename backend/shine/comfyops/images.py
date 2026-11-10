@@ -3,9 +3,8 @@
 import base64
 from typing import Protocol
 
-import httpx
-
 from shine.comfyops.assets import fake_image
+from shine.http_env import build_client
 from shine.security import require_loopback_url
 
 
@@ -41,7 +40,7 @@ class LocalImageHTTPProvider:
 
     def __init__(self, base_url, client=None):
         self.base_url = require_loopback_url(base_url).rstrip("/")
-        self.client = client or httpx.Client(timeout=300, follow_redirects=False)
+        self.client = client or build_client(self.base_url, 300, follow_redirects=False)
 
     def generate(self, prompt, seed, workflow, references):
         response = self.client.post(

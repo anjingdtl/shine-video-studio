@@ -487,11 +487,11 @@ def test_a_bracketed_ipv6_no_proxy_does_not_break_a_remote_provider_call(monkeyp
     """
     import os
 
-    from shine.llm import transport
+    from shine import http_env
 
-    monkeypatch.setattr(transport, "_no_proxy_sanitized", False)
+    monkeypatch.setattr(http_env, "_no_proxy_sanitized", False)
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1],::1")
-    client = transport.build_client("https://api.minimax.cn/v1/chat/completions", 5)
+    client = http_env.build_client("https://api.minimax.cn/v1/chat/completions", 5)
     try:
         assert client.trust_env is True, "a remote call keeps the host proxy"
     finally:
@@ -501,11 +501,11 @@ def test_a_bracketed_ipv6_no_proxy_does_not_break_a_remote_provider_call(monkeyp
 
 def test_a_loopback_provider_still_ignores_the_host_proxy(monkeypatch):
     """Normalizing NO_PROXY must not change the loopback trust boundary."""
-    from shine.llm import transport
+    from shine import http_env
 
-    monkeypatch.setattr(transport, "_no_proxy_sanitized", False)
+    monkeypatch.setattr(http_env, "_no_proxy_sanitized", False)
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1]")
-    client = transport.build_client("http://127.0.0.1:11434/v1/chat/completions", 5)
+    client = http_env.build_client("http://127.0.0.1:11434/v1/chat/completions", 5)
     try:
         assert client.trust_env is False
     finally:

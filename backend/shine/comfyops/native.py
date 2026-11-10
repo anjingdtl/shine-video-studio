@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import ModelPackage, ResourceLease
+from shine.http_env import build_client
 from shine.models import AgentRoute, AgentTaskRecord, ProviderProfile
 from shine.quality.client_identity import review_client_identity
 from shine.quality.identity import ExecutorIdentity
@@ -190,7 +191,7 @@ def native_errors(db, payload, *, live=False, require_evidence=False, workflow_h
         if endpoint.endswith("/v1"):
             endpoint = endpoint[:-3]
         try:
-            with httpx.Client(timeout=10, follow_redirects=False) as client:
+            with build_client(endpoint, 10, follow_redirects=False) as client:
                 response = client.get(endpoint + "/identity")
             response.raise_for_status()
             health = response.json()

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from shine.http_env import build_client
+
 PROBES = (
     {
         "id": "huggingface",
@@ -74,9 +76,8 @@ def probe_upstreams(*, client=None, timeout: float = 8.0) -> dict:
     """Probe every upstream the installation plan depends on, sequentially."""
     owned = client is None
     if owned:
-        import httpx
 
-        client = httpx.Client(follow_redirects=False)
+        client = build_client("https://huggingface.co", 8.0, follow_redirects=False)
     try:
         results = [_probe_one(client, spec, timeout) for spec in PROBES]
     finally:

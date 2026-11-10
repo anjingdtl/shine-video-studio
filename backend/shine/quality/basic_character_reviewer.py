@@ -11,8 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 
-import httpx
-
+from shine.http_env import build_client
 from shine.quality.basic_review import CharacterReviewResponse, validate_character_response
 from shine.quality.semantic import (
     STRUCTURED_REVIEW_PROTOCOL,
@@ -91,9 +90,10 @@ class BasicCharacterReviewer(LocalVisionReviewer):
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         self.last_structured_output = self.last_executor_identity = self.last_isolation_receipt = None
-        with httpx.Client(timeout=self.config.timeout_s, follow_redirects=False,
+        endpoint = self._endpoint()
+        with build_client(endpoint, self.config.timeout_s, follow_redirects=False,
                           trust_env="X-Shine-Handoff-Token" not in headers) as client:
-            response = client.post(self._endpoint(), headers=headers, json=payload)
+            response = client.post(endpoint, headers=headers, json=payload)
         digest = hashlib.sha256(response.content).hexdigest()
         if response.status_code >= 500:
             # The server might have started inference before failing; the

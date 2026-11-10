@@ -110,15 +110,19 @@ def shot_reference_policy(db: Session, project_id: str, plan: dict) -> dict:
         missing = sorted(set(SHOT_REFERENCE_REQUIRED_ROLES) - set(roles))
         if not set(roles) & set(SHOT_REFERENCE_LOCATION_ROLES):
             missing.append("scene|picture")
+        excluded_used = [a["id"] for a in used if a["role"] in SHOT_REFERENCE_EXCLUDED_ROLES]
         shots.append({
             "shot_id": shot.get("id"),
             "asset_ids": list(shot.get("asset_ids", [])),
             "roles": roles,
             "missing_required_roles": missing,
-            "policy_compliant": not missing,
-            "excluded_assets_used": [
-                a["id"] for a in used if a["role"] in SHOT_REFERENCE_EXCLUDED_ROLES
-            ],
+            # A master the material stage has not prepared yet is a request for
+            # that stage, not a policy violation: the storyboard names what it
+            # needs, the shot lands anyway and H3 generates what is missing.
+            # Only a reference the policy forbids makes a shot non-compliant.
+            "policy_compliant": not excluded_used,
+            "material_request": missing,
+            "excluded_assets_used": excluded_used,
             "continuity_mode": (shot.get("continuity") or {}).get("mode"),
         })
     return {
@@ -130,6 +134,9 @@ def shot_reference_policy(db: Session, project_id: str, plan: dict) -> dict:
             "optional_roles": list(SHOT_REFERENCE_OPTIONAL_ROLES),
             "location_roles": list(SHOT_REFERENCE_LOCATION_ROLES),
             "excluded_from_shot_references": excluded,
+            "material_request": "the roles a shot still waits for. The material stage prepares them; "
+                                "the shot lands anyway and H3 generates what is missing, so a material "
+                                "request is never a continuity conflict.",
             "last_frame_mode": (
                 "a soft relation to the preceding shot: the shot continues from the previous shot's "
                 "last frame. It is not a frame anchor and it needs no reference image."
@@ -141,6 +148,44 @@ def shot_reference_policy(db: Session, project_id: str, plan: dict) -> dict:
         },
         "reference_set_status": shots,
     }
+
+
+_REFERENCE_MARKERS = ("缺少主素材", "主素材", "material_request", "missing_required_roles")
+"""The wording a report uses when it names a master the material stage owes.
+
+The markers are the product's own words for a master asset, so a report
+about a missing master is recognised without swallowing a report about the
+story, the timing or the dialogue.
+"""
+
+
+def material_request_issues(db: Session, project_id: str, plan: dict, issues: list[str]) -> list[str]:
+    """The supervisor's issues that only report a master the material stage must prepare.
+
+    A missing master is a request for the material step, never a continuity
+    conflict: the storyboard names what it needs, the shot lands anyway and
+    H3 generates what is missing.  An issue about the story, the timing or the
+    dialogue keeps its own text and still blocks the unit.
+
+    The classification uses the server's own facts: an issue that names only
+    shots whose gap is a material request, and that speaks about the reference
+    set, is a request.  Anything else stays a conflict, so an unclear report
+    keeps blocking rather than passing unnoticed.
+    """
+    status = shot_reference_policy(db, project_id, plan or {})
+    by_id = {row["shot_id"]: row for row in status.get("reference_set_status", []) if row.get("shot_id")}
+    requests = []
+    for issue in issues or []:
+        named = [shot_id for shot_id in by_id if shot_id in issue]
+        if not named:
+            continue
+        gaps = [by_id[shot_id].get("material_request") or [] for shot_id in named]
+        if not all(gaps):
+            continue
+        roles = {role for gap in gaps for role in gap}
+        if any(role in issue for role in roles) or any(marker in issue for marker in _REFERENCE_MARKERS):
+            requests.append(issue)
+    return requests
 
 
 def workflow_reference_budget(db: Session, project_id: str) -> list[dict]:
@@ -560,6 +605,7 @@ class FilmAgentDispatcher:
         storyboard_request_sha256: str | None = None,
         draft: bool = False,
         repair_visual_language: bool = False,
+        repair_contract_note: str | None = None,
         replace_interrupted_task_id: str | None = None,
         authorize_replay_task_id: str | None = None,
         repair_director: bool = False,
@@ -872,6 +918,10 @@ class FilmAgentDispatcher:
                 "descriptions in English, including every segment's cuts. Check for copied Chinese names, "
                 "stage directions and lyrics. Keep the original timeline, approved references and dialogue contract."
             )
+        if repair_contract_note:
+            # The refusal is named by the server, never by the provider's text:
+            # one targeted instruction, no answer text, no secret.
+            system_prompt += repair_contract_note
 
         try:
             if refusal:

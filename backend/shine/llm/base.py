@@ -91,6 +91,15 @@ class ProviderConfig:
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
     context_window_source: str = "provider_did_not_declare_limits"
+    rate_limit_retry_attempts: int = 0
+    """How often a throttled call may wait and ask again.
+
+    A 429 is a refusal: the provider answered and produced no answer, so
+    asking again after a real pause cannot buy a second copy of one answer.
+    The budget is zero by default, so a plain probe still never posts again
+    after a refusal; the agent lane raises it because a production step must
+    survive a throttled provider instead of losing a whole scene.
+    """
 
 
 def text_provider_snapshot(profile) -> dict:

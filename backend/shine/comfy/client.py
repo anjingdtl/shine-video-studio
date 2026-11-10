@@ -110,7 +110,21 @@ class ComfyUIClient:
         self.model_release_poll_interval_s = model_release_poll_interval_s
 
     def _client(self) -> httpx.Client:
-        kwargs: dict[str, Any] = {"timeout": self.timeout_s, "transport": self._transport, "trust_env": self.trust_env}
+        kwargs: dict[str, Any] = {"timeout": self.timeout_s, "transport": self._transport}
+        if self.trust_env:
+            # A renderer on this machine must never be routed through a system
+            # proxy, and a bracketed IPv6 NO_PROXY entry makes httpx refuse to
+            # build a client at all ("Invalid port: ':1]'").  The same rules the
+            # text providers use apply here.
+            from shine.http_env import is_local_endpoint, sanitize_no_proxy
+
+            if is_local_endpoint(self.base_url):
+                kwargs["trust_env"] = False
+            else:
+                sanitize_no_proxy()
+                kwargs["trust_env"] = True
+        else:
+            kwargs["trust_env"] = False
         return httpx.Client(**kwargs)
 
     def _get(

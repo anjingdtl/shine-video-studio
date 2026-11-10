@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
-
+from shine.http_env import build_client
 from shine.security import is_loopback_url
 
 
@@ -14,7 +13,7 @@ def release_text_model(config):
     if base.endswith("/v1"):
         base = base[:-3]
     headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
-    with httpx.Client(timeout=config.timeout_s, follow_redirects=False) as client:
+    with build_client(base, config.timeout_s, follow_redirects=False) as client:
         if config.kind == "ollama":
             unloaded = client.post(
                 base + "/api/generate", json={"model": config.model, "keep_alive": 0}, headers=headers

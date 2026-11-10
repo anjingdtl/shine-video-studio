@@ -26,6 +26,7 @@ from shine.comfyops.instances import (
 )
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, ModelPackage, NodePackage
 from shine.config import Settings
+from shine.http_env import build_client
 from shine.services import add_audit
 
 router = APIRouter(prefix="/api/v1/comfyops", tags=["controlled-instance-lifecycle"])
@@ -89,7 +90,9 @@ def instance_health(identity: str, actor: Operator, db: DBSession):
     if not row or "port" not in row.payload:
         raise HTTPException(409, "REGISTERED_MANAGED_INSTANCE_REQUIRED")
     try:
-        result = health(row.payload["port"], fake_http() if row.payload.get("is_mock") else httpx.Client(timeout=10))
+        port = row.payload["port"]
+        http = fake_http() if row.payload.get("is_mock") else build_client(f"http://127.0.0.1:{port}", 10)
+        result = health(port, http)
     except httpx.HTTPError as exc:
         return {"status": "OFFLINE", "is_mock": row.payload.get("is_mock"), "error": type(exc).__name__}
     if not row.payload.get("is_mock") and row.payload.get("managed"):
@@ -356,7 +359,7 @@ def external_backup_execute(
             identity,
             body.plan_hash,
             actor,
-            fake_http() if mock else httpx.Client(timeout=10, follow_redirects=False),
+            fake_http() if mock else build_client("http://127.0.0.1", 10, follow_redirects=False),
         )
     except (ValueError, OSError, httpx.HTTPError) as exc:
         raise HTTPException(409, str(exc)) from exc

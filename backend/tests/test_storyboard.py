@@ -962,3 +962,82 @@ def test_series_accepts_frozen_edit_intent_and_rejects_invalid(studio):
     })
     assert bad.status_code == 409 or bad.status_code == 422
     assert "EDIT_INTENT_ARTIFACT_INVALID" in bad.text or "ALREADY_QUEUED" in bad.text
+
+
+def test_a_missing_master_is_a_material_request_and_never_blocks_the_unit(studio):
+    """The storyboard names what it needs; the material stage prepares it.
+
+    A master that has not been prepared yet is a request for the material
+    step, not a continuity conflict: the shot lands anyway and H3 generates
+    what is missing.  A continuity report that reports the gap must therefore
+    neither be arbitrated nor block the unit.
+    """
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+    captured: dict = {}
+
+    def respond(messages, schema):
+        title = schema.get("title")
+        if title == "ContinuityReport":
+            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            return {
+                "issues": ["shot_I1：reference_set_status.policy_compliant=false，asset_ids 为空："
+                           "缺少主素材 character 与 scene|picture，无法形成参考 H3 Ref2VA 的开场参考绑定"],
+                "recommendation": "needs_review",
+            }
+        payload = original(messages, schema)
+        if title == "DirectorialPlan":
+            # The shot has no master yet: the material stage still owes it.
+            for shot in payload["shots"]:
+                shot["asset_ids"] = []
+        return payload
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "PROPOSED", body
+    assert "director_arbitration" not in (body.get("steps") or {}), body
+    statuses = captured["context"]["continuity_policy"]["reference_set_status"]
+    assert statuses and all(row["material_request"] for row in statuses)
+    assert all(row["policy_compliant"] is True for row in statuses)
+
+
+def test_a_real_continuity_conflict_still_blocks_the_unit(studio):
+    """The rule above must not swallow a conflict about the story itself."""
+    client, factory, tmp_path, settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    original = _responder(registry)
+
+    def respond(messages, schema):
+        title = schema.get("title")
+        if title == "ContinuityReport":
+            return {
+                "issues": ["shot_I1 的台词与原剧本矛盾：说出的名字在原剧本里没有出现"],
+                "recommendation": "needs_review",
+            }
+        if title == "ContinuityArbitration":
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            subject = context["arbitration_subject"]["issues"]
+            return {
+                "rulings": [
+                    {"issue_index": issue["index"], "issue": issue["text"], "verdict": "conflict",
+                     "rule_id": "H3_DIALOGUE",
+                     "rationale": "台词与原剧本矛盾，属于真实的连续性冲突。"}
+                    for issue in subject
+                ],
+                "recommendation": "needs_review",
+            }
+        payload = original(messages, schema)
+        if title == "DirectorialPlan":
+            for shot in payload["shots"]:
+                shot["asset_ids"] = []
+        return payload
+
+    client.app.state.mock_llm_responder = respond
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "NEEDS_REVIEW", body
+    assert body.get("continuity_issues"), body

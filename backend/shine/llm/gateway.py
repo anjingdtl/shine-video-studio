@@ -54,6 +54,15 @@ profile that declares or configures something smaller still wins through the
 min chain below.
 """
 
+AGENT_RATE_LIMIT_RETRY_ATTEMPTS = 2
+"""How often an agent call waits out a throttled provider and asks again.
+
+A 429 is a refusal: the provider answered and produced no answer, so a later
+attempt cannot buy a second copy of one answer.  The agent lane may wait for
+the provider instead of losing a whole scene to a momentary throttle; the
+plain connectivity probe keeps its own stricter budget.
+"""
+
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
@@ -197,6 +206,11 @@ class LLMGateway:
         else:
             config = agent_output_config(config)
             budget = None
+        # An agent step must survive a throttled provider: a 429 is a refusal
+        # that produced no answer, so waiting and asking again cannot buy a
+        # second copy of one answer.  The plain connectivity probe keeps its
+        # own stricter budget and never posts again after a refusal.
+        config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
         provider = self.provider_factory(config, self.mock_responder)
         if schema is not None:
             # The provider validates the answer against this schema, so the model

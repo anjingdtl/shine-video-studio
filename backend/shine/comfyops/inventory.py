@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from shine.comfyops.installer import safe_target
+from shine.http_env import build_client
 from shine.security import require_loopback_url
 
 
@@ -23,7 +24,7 @@ class WindowsHostProbe:
         self.roots = [p.resolve() for p in roots]
         self.ports = ports
         self.run = run or subprocess.run
-        self.http = http or httpx.Client(timeout=3, follow_redirects=False)
+        self.http = http or build_client("http://127.0.0.1", 3, follow_redirects=False)
 
     def scan(self):
         if platform.system() != "Windows" and self.run is subprocess.run:
@@ -140,7 +141,7 @@ class ComfyModelLifecycle:
 
     def __init__(self, base_url, *, client=None):
         self.base_url = require_loopback_url(base_url).rstrip("/")
-        self.http = client or httpx.Client(timeout=10, follow_redirects=False)
+        self.http = client or build_client(self.base_url, 10, follow_redirects=False)
 
     def release_models(self):
         from shine.comfy.client import ComfyError, ComfyUIClient
