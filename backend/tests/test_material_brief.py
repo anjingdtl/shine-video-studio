@@ -10,6 +10,7 @@ rather than retried.
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 from sqlalchemy import select
@@ -222,6 +223,35 @@ def test_a_schema_error_earns_exactly_one_correction(api, monkeypatch, transport
             select(AgentTaskRecord).where(AgentTaskRecord.role_id == "producer")
         ).all()
         assert tasks[0].trace["correction_count"] == 1
+
+
+def test_overlong_appearance_gets_one_length_correction_then_keeps_complete_sentences(api, monkeypatch):
+    client, factory, settings = api
+    project_id = _project(client)
+    _route(client)
+    sentence = "He wears a dark wool coat with a weathered brass clasp."
+    appearance = " ".join([sentence] * 40)
+    calls = _responder(monkeypatch, lambda _n: {**BRIEF_ANSWER, "appearance": appearance})
+    with factory() as db:
+        item = _item(db, project_id)
+        item_id, version = item.id, item.state_version
+
+    result = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)
+
+    assert result["ready"]
+    assert len(calls) == 2
+    correction, _ = json.JSONDecoder().raw_decode(calls[1][1].content)
+    assert correction["schema_errors"] == [{
+        "field": "appearance", "type": "string_too_long",
+        "actual_length": len(appearance), "max_length": 1600,
+    }]
+    shortened = result["brief"]["appearance"]
+    assert len(shortened) <= 1600 < len(shortened) + len(sentence) + 1
+    assert shortened.endswith(sentence)
+    with factory() as db:
+        task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.role_id == "producer"))
+        assert task.trace["appearance_truncated"] is True
+        assert task.trace["appearance_original_length"] == len(appearance)
 
 
 def test_a_second_schema_failure_is_refused_by_name(api, monkeypatch):

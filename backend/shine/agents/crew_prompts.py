@@ -168,6 +168,8 @@ def script_prepare_prompt() -> str:
 
 def material_image_brief_prompt() -> str:
     """The producer's system prompt for ONE confirmed material requirement."""
+    from shine.materialprep.contracts import APPEARANCE_MAX_LENGTH
+
     return (
         "You are Shine's producer. Turn the single confirmed script material requirement the server "
         "named into a short appearance description usable for image generation. "
@@ -196,7 +198,8 @@ def material_image_brief_prompt() -> str:
         "traits into avoid. "
         "Write appearance, must_keep and avoid in English visual prose; the Chinese description stays "
         "on the requirement. "
-        "Write the appearance as one flowing Qwen-Image-2.1 description: the subject first, then dress, "
+        f"Keep appearance within {APPEARANCE_MAX_LENGTH} characters, in short complete sentences. "
+        "Write it as a flowing Qwen-Image-2.1 description: the subject first, then dress, "
         "build and bearing, then surface materials and their textures. Use concrete nouns such as "
         "'brushed brass' or 'deep navy wool' instead of bare colours or bare materials, and never write "
         "quality slogans (masterpiece, best quality, 8k, highly detailed, award winning). The appearance "

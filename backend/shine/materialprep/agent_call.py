@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,7 @@ from pydantic import ValidationError
 
 from shine.llm.base import LLMError
 from shine.llm.output_budget import truncated_output, usage_summary
+from shine.materialprep.contracts import APPEARANCE_MAX_LENGTH, MaterialImageBrief
 
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window."""
@@ -47,7 +49,8 @@ MAX_OUTPUT_RESERVE_TOKENS = 131_072
 
 CORRECTION_RULE = (
     " Your previous answer did not satisfy the contract. Regenerate the complete "
-    "JSON object from the original task. Check the named fields against the schema."
+    "JSON object from the original task. Check the named fields against the schema. "
+    "For overlong fields, shorten from actual_length to max_length, preserving essential details."
 )
 
 
@@ -208,6 +211,17 @@ def call_material_agent(
     call and reports what happened.
     """
 
+    response_schema = schema
+    if contract is MaterialImageBrief:
+        # Keep the original string available for local validation and correction.
+        # The gateway otherwise discards it before we can measure or shorten it.
+        properties = schema["properties"]
+        response_schema = {**schema, "properties": {
+            **properties,
+            "appearance": {key: value for key, value in properties["appearance"].items()
+                           if key != "maxLength"},
+        }}
+
     def call(system_prompt: str, user_payload: str):
         # One gap before every provider call, in one place.  A long outline
         # makes one call per scene; two calls back to back share the provider
@@ -223,7 +237,7 @@ def call_material_agent(
                     role,
                     system=system_prompt,
                     user=user_payload,
-                    schema=schema,
+                    schema=response_schema,
                     on_progress=on_progress,
                     task_category=task_category,
                 )
@@ -268,10 +282,13 @@ def call_material_agent(
                      "status": exc.status_code},
         )
     except ValidationError as exc:
-        errors = [
-            {"field": ".".join(str(part) for part in error.get("loc", ())), "type": error.get("type")}
-            for error in exc.errors(include_input=False, include_url=False)
-        ]
+        errors = []
+        for error in exc.errors(include_url=False):
+            field_name = ".".join(str(part) for part in error["loc"])
+            entry = {"field": field_name, "type": error["type"]}
+            if error["type"] == "string_too_long":
+                entry.update(actual_length=len(error["input"]), max_length=error["ctx"]["max_length"])
+            errors.append(entry)
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
         return AgentCallOutcome(
             error_code="LLM_PROVIDER_FAULT",
@@ -282,10 +299,19 @@ def call_material_agent(
     correction = {"task": context, "schema_errors": errors, "validator": schema}
     try:
         corrected = call(system + CORRECTION_RULE, json.dumps(correction, ensure_ascii=False))
-        contract.model_validate(corrected.parsed)
-        return AgentCallOutcome(parsed=corrected.parsed, correction_used=True, schema_errors=errors,
-            details={"usage": usage_summary(corrected.usage),
-                     "output_budget": (corrected.raw_meta or {}).get("output_budget")})
+        parsed = corrected.parsed
+        details = {"usage": usage_summary(corrected.usage),
+                   "output_budget": (corrected.raw_meta or {}).get("output_budget")}
+        if contract is MaterialImageBrief and isinstance(parsed, dict):
+            appearance = parsed.get("appearance")
+            if isinstance(appearance, str) and len(appearance) > APPEARANCE_MAX_LENGTH:
+                prefix = appearance[:APPEARANCE_MAX_LENGTH + 1]
+                ends = list(re.finditer(r'[.!?]["\']?(?=\s)', prefix))
+                if ends:
+                    parsed = {**parsed, "appearance": appearance[:ends[-1].end()]}
+                    details.update(appearance_truncated=True, appearance_original_length=len(appearance))
+        contract.model_validate(parsed)
+        return AgentCallOutcome(parsed=parsed, correction_used=True, schema_errors=errors, details=details)
     except LLMError as second:
         external_outcome = classify_external_outcome(second)
         uncertain = external_outcome == "UNKNOWN"

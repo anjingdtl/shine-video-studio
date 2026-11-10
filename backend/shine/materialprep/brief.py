@@ -348,7 +348,8 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         row = db.get(AgentTaskRecord, task_id)
         row.status = "SUCCEEDED"
         row.trace = {**row.trace, "phase": "SUCCEEDED", "output_hash": artifact.sha256,
-                     "schema_valid": True, "correction_count": 1 if correction_used else 0}
+                     "schema_valid": True, "correction_count": 1 if correction_used else 0,
+                     "schema_errors": outcome.schema_errors, **outcome.details}
         add_audit(db, "worker", "MATERIAL_BRIEF_PRODUCED", "material_item", item_id,
                   {"artifact_id": artifact_id, "correction_used": correction_used,
                    "budget": budget}, project_id=data["project_id"])

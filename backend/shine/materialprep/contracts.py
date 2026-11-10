@@ -103,6 +103,9 @@ class ScriptPreparation(APIModel):
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=8)
 
 
+APPEARANCE_MAX_LENGTH = 1600
+
+
 class MaterialImageBrief(APIModel):
     """The producer's appearance description for ONE confirmed requirement.
 
@@ -112,7 +115,7 @@ class MaterialImageBrief(APIModel):
     """
 
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
-    appearance: str = Field(min_length=1, max_length=1200)
+    appearance: str = Field(min_length=1, max_length=APPEARANCE_MAX_LENGTH)
     must_keep: list[_KeepItem] = Field(default_factory=list, max_length=12)
     avoid: list[_KeepItem] = Field(default_factory=list, max_length=12)
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=6)
