@@ -233,7 +233,8 @@ def test_without_a_cut_table_the_director_may_still_give_a_dialogue_a_tail():
 
 def test_the_director_prompt_states_the_official_reference_rules():
     prompt = crew_prompt("director", tool="propose")
-    assert "approved prop or other master materially depicted" in prompt
+    assert "approved core prop whose exact appearance or readable content" in prompt
+    assert "Leave ordinary set dressing in the visual description" in prompt
     assert "shots[].cuts[].visual_description" in prompt
     assert "never list style or last-frame reference images as shot references" in prompt
     # The server treats a dialogue speaker as a required bound character even

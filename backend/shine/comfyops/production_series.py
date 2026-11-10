@@ -247,6 +247,15 @@ def _apply_clip_seconds(db, project: Project, shots: list[Shot], clip_seconds: f
 # ---------------------------------------------------------------------------
 
 
+def series_request_receipt_key(project_id: str, shot_ids: list[str], request_key: str) -> str:
+    import hashlib
+    import json
+
+    return "series-request:" + hashlib.sha256(json.dumps({
+        "project": project_id, "shots": shot_ids, "key": request_key,
+    }, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def create_series(
     db,
     project: Project,
@@ -306,13 +315,7 @@ def create_series(
         # The same request never starts a second series: the receipt points
         # at the one it already created, so a retry after a lost response
         # finds the same run instead of a second shoot of the same shots.
-        import hashlib
-        import json
-
-        receipt_key = "series-request:" + hashlib.sha256(json.dumps({
-            "project": project.id, "shots": [shot.id for shot in shots],
-            "key": body.request_key,
-        }, sort_keys=True).encode("utf-8")).hexdigest()
+        receipt_key = series_request_receipt_key(project.id, [shot.id for shot in shots], body.request_key)
         prior = db.get(AppSetting, receipt_key)
         if prior is not None:
             existing = db.get(ProductionSeries, (prior.value or {}).get("series_id"))

@@ -17,7 +17,7 @@ from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
-from shine.asset_identity import character_reference_key, resolve_character_asset, split_character_names
+from shine.asset_identity import resolve_character_asset, split_character_names
 from shine.director_styles.service import camera_style_text, resolve_frozen_binding, sound_style_text
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError, text_provider_snapshot
@@ -373,40 +373,10 @@ def artifacts(project_id: str, db: DBSession):
     ]
 
 
-def _approved_master_for_name(db, project_id: str, name: str):
-    """The approved, locked master a beat's character name refers to.
-
-    A beat says "程岩" while the requirement carries "程岩（罗兰·温布顿）", so the
-    match is by containment in either direction. Only an approved and locked
-    master may be bound: an unconfirmed byte must never reach the renderer.
-    """
-    from shine.materialprep.service import character_master_entity
-
-    name = character_master_entity(db, project_id, name)
-    candidates = db.scalars(select(Asset).where(
-        Asset.project_id == project_id,
-        Asset.kind == "image",
-        Asset.role == "character",
-        Asset.approved.is_(True),
-        Asset.locked.is_(True),
-    ).order_by(Asset.created_at.desc(), Asset.id.desc()))
-    by_entity = {}
-    for asset in candidates:
-        entity = (asset.entity_id or "").strip()
-        if entity and not (asset.provenance or {}).get("offline_only"):
-            by_entity.setdefault(entity, asset)
-    if name in by_entity:
-        return by_entity[name]
-    key = character_reference_key(name)
-    exact = [asset for entity, asset in by_entity.items() if key and key == character_reference_key(entity)]
-    if exact:
-        return exact[0] if len(exact) == 1 else None
-    compatible = [asset for entity, asset in by_entity.items() if name and (name in entity or entity in name)]
-    return compatible[0] if len(compatible) == 1 else None
-
-
 @router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
 def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
+    from shine.services import complete_character_bindings
+
     try:
         project = require_project(db, project_id)
         artifact, continuity = load_inputs(db, project_id, [artifact_id, body.continuity_artifact_id])
@@ -480,11 +450,10 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     line["start_s"], line["end_s"] = round(start, 3), round(end, 3)
                 dialogue.append(line)
             beat = {**beat, "dialogue": dialogue}
+            cast = list(dict.fromkeys(name for entry in beat["characters"] for name in split_character_names(entry)))
             bindings = []
             shot_notices: list[dict] = []
-            bound_asset_ids: list[str] = []
-            bound_character_entities: dict[str, ShotBindingInput] = {}
-            for identity in intent["asset_ids"]:
+            for identity in dict.fromkeys(intent["asset_ids"]):
                 asset = db.get(Asset, identity)
                 if (not asset or asset.project_id != project_id
                         or not asset.approved or not asset.locked):
@@ -507,28 +476,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 }[asset.kind]
                 binding = ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings))
                 bindings.append(binding)
-                if use_as == "subject" and asset.entity_id:
-                    bound_character_entities.setdefault(asset.entity_id, binding)
-                bound_asset_ids.append(identity)
-            # The director may list only the plate for a scene. Every character
-            # this beat names still needs its own subject slot, or the H3 label
-            # rule refuses the shot at production time with a reference that
-            # never resolved. Bind exactly the names this beat carries - never
-            # the whole cast - so one shot's references cannot leak into another.
-            for name in beat["characters"]:
-                asset = _approved_master_for_name(db, project_id, name)
-                if asset is None:
-                    continue
-                cast_role = name if len(name) <= 64 else None
-                existing = bound_character_entities.get(asset.entity_id)
-                if existing is not None:
-                    existing.role = existing.role or cast_role
-                    continue
-                binding = ShotBindingInput(asset_id=asset.id, use_as="subject", role=cast_role,
-                                           ordinal=len(bindings))
-                bindings.append(binding)
-                bound_character_entities[asset.entity_id] = binding
-                bound_asset_ids.append(asset.id)
+            bindings = complete_character_bindings(db, project_id, cast, bindings)
             camera_fields = {
                 "composition": camera.composition,
                 "movement": camera.movement,
@@ -570,8 +518,8 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 director_style_technique_ids=(style_resolution.selected_technique_ids if style_resolution else []),
                 # 只有真正绑上的素材才是这一镜的要求：缺的那个由 H3 自行
                 # 生成，它不再是落镜的前置条件。
-                required_asset_ids=bound_asset_ids,
-                characters=beat["characters"],
+                required_asset_ids=[binding.asset_id for binding in bindings],
+                characters=cast,
                 dialogue=beat["dialogue"],
                 locked_story_facts=script.payload_json["locked_story_facts"],
                 prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
@@ -595,14 +543,25 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             # in a fixed family order: subjects, then pictures, then the other
             # media families.  Inside the subject family the beat's own cast
             # order decides, so <Subject 1> really is the first described person.
-            ordered_assets = {identity: db.get(Asset, identity) for identity in intent["asset_ids"]}
-            bindings = order_bindings_for_cast(bindings, list(beat["characters"]), ordered_assets)
+            ordered_assets = {binding.asset_id: db.get(Asset, binding.asset_id) for binding in bindings}
+            bindings = order_bindings_for_cast(bindings, cast, ordered_assets)
             shot = create_shot_record(
                 db, project, name=f"{body.name_prefix}-{camera.intent_id}", spec=spec, bindings=bindings
             )
             db.flush()
-            # Preflight before committing any new shot; rollback the entire application on error.
-            make_render_request(db, project, shot, CreateJob(shot_id=shot.id))
+            # Character masters can be prepared after the storyboard lands.
+            # Render admission still requires the missing subjects.
+            try:
+                make_render_request(db, project, shot, CreateJob(shot_id=shot.id))
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                if detail.get("code") not in {"H3_CHARACTER_REFERENCE_MISSING", "H3_SPEAKER_REFERENCE_MISSING"}:
+                    raise
+                shot_notices.append({
+                    "code": detail["code"],
+                    "message": "镜头已落地，使用 Ref2VA 开拍前需补齐对应人物主体",
+                    "details": detail.get("details"),
+                })
             created.append(shot.id)
             material_notices.extend({**notice, "shot_id": shot.id} for notice in shot_notices)
         artifact.approved_by = "user"

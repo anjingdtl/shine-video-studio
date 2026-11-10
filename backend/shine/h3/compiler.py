@@ -26,7 +26,8 @@ from shine.schemas import (
 # Pinned official skill material from MiniMax-AI/MiniMax-H3 commit
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
 LEGACY_AUDIO_COMPILER_VERSION = "shine-h3-compiler/1.2.1"
-COMPILER_VERSION = "shine-h3-compiler/1.2.2"
+LEGACY_STYLE_COMPILER_VERSION = "shine-h3-compiler/1.2.2"
+COMPILER_VERSION = "shine-h3-compiler/1.2.3"
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -75,6 +76,7 @@ class _Context:
     speaker_order: list[str]
     project_language: str = "Chinese"
     legacy_audio: bool = False
+    legacy_style: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -103,7 +105,7 @@ def _style_sentences(style: StyleBible, style_version_id: str, include_sound: bo
     )
 
 
-def _prompt_style(spec: ShotSpec, style: StyleBible) -> StyleBible:
+def _prompt_style(spec: ShotSpec, style: StyleBible, *, legacy_style: bool = False) -> StyleBible:
     # The translated draft is part of the shot revision; the original frozen
     # style and its hash remain authoritative and unchanged.  The film type is
     # a project-wide contract, so a per-shot English style that predates it
@@ -111,7 +113,9 @@ def _prompt_style(spec: ShotSpec, style: StyleBible) -> StyleBible:
     prompt_style = spec.prompt_style
     if prompt_style is None:
         return style
-    if prompt_style.film_type is None and style.film_type is not None:
+    if not legacy_style and prompt_style.film_type != style.film_type:
+        return prompt_style.model_copy(update={"film_type": style.film_type})
+    if legacy_style and prompt_style.film_type is None and style.film_type is not None:
         return prompt_style.model_copy(update={"film_type": style.film_type})
     return prompt_style
 
@@ -263,18 +267,18 @@ def _speaker_mapping(spec: ShotSpec) -> tuple[dict[str, str], list[str]]:
     return {speaker: f"S{index + 1}" for index, speaker in enumerate(order)}, order
 
 
-def _label_for_character(
-    character: str, manifest: list[ReferenceManifestItem], style_roles: dict[str, str]
-) -> str | None:
-    for item in manifest:
-        if item.use_as not in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}:
-            continue
-        if (item.asset_id == character or item.role == character
-                or character_reference_matches(character, item.entity_id)):
-            return item.label
-        if item.role and style_roles.get(item.role) == character:
-            return item.label
-    return None
+def _label_for_character(character: str, ctx: _Context) -> str | None:
+    images = [item for item in ctx.manifest if item.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE}]
+    if ctx.legacy_style:
+        return next((item.label for item in images if item.asset_id == character or item.role == character
+                     or character_reference_matches(character, item.entity_id)), None)
+    subjects = [item for item in images if item.use_as == ReferenceUse.SUBJECT]
+    pool = subjects or images
+    matches = ([item for item in pool if item.asset_id == character]
+               or [item for item in pool if item.role == character]
+               or [item for item in pool if item.entity_id == character]
+               or [item for item in pool if character_reference_matches(character, item.entity_id)])
+    return matches[0].label if len(matches) == 1 else None
 
 
 def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
@@ -290,7 +294,7 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
         raise PromptCompilationError("H3_DURATION", "H3 supports 4 to 15 second clips")
     if len(ctx.speaker_order) and mode == GenerationMode.REF2VA:
         for speaker in ctx.speaker_order:
-            if not _label_for_character(speaker, ctx.manifest, {}):
+            if not _label_for_character(speaker, ctx):
                 raise PromptCompilationError(
                     "H3_SPEAKER_REFERENCE_MISSING",
                     f"Speaker {speaker} has no bound subject or picture reference",
@@ -302,19 +306,27 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
     if mode == GenerationMode.REF2VA and any(
         item.use_as == ReferenceUse.SUBJECT for item in ctx.manifest
     ):
-        for character in ctx.spec.characters:
-            if not _label_for_character(character, ctx.manifest, {}):
+        from shine.asset_identity import split_character_names
+
+        characters = (ctx.spec.characters if ctx.legacy_style else list(dict.fromkeys(
+            name for entry in ctx.spec.characters for name in split_character_names(entry)
+        )))
+        used: set[str] = set()
+        for character in characters:
+            label = _label_for_character(character, ctx)
+            if not label or (not ctx.legacy_style and label in used):
                 raise PromptCompilationError(
                     "H3_CHARACTER_REFERENCE_MISSING",
                     f"Character {character} appears in this shot but has no bound subject reference",
                     {"character": character, "characters": ctx.spec.characters},
                 )
+            used.add(label)
 
 
 def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     language = _language_tag(line.text, ctx.project_language)
     speakers = _speakers_of(line)
-    labels = [label for label in (_label_for_character(speaker, ctx.manifest, {}) for speaker in speakers) if label]
+    labels = [label for label in (_label_for_character(speaker, ctx) for speaker in speakers) if label]
     subject = ", ".join(labels) if labels else "The speaker"
     speaker = ", ".join(ctx.speaker_labels[name] for name in speakers)
     return (
@@ -335,7 +347,7 @@ def _camera_sentence(spec: ShotSpec) -> str:
 
 def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(
-        _prompt_style(ctx.spec, ctx.style), ctx.spec.style_version_id,
+        _prompt_style(ctx.spec, ctx.style, legacy_style=ctx.legacy_style), ctx.spec.style_version_id,
         include_sound=bool(ctx.spec.dialogue),
     )]
     cast = _cast_order(ctx)
@@ -598,9 +610,18 @@ def _summary(ctx: _Context) -> str:
     if any(item.use_as == ReferenceUse.AUDIO for item in ctx.manifest):
         task_types.append("audio reference")
     labels = ", ".join(item.label for item in ctx.manifest)
+    medium = ""
+    if not ctx.legacy_style and ctx.style.film_type is not None:
+        medium = (
+            f"{film_type_sentence(ctx.style.film_type)} "
+            "Keep this medium through every frame and internal cut. "
+            "Use visual references for the identities, composition or motion assigned below. "
+        )
+        if not any(item.frame_role for item in ctx.manifest):
+            medium += "Render those features in the frozen medium even when the source uses another medium. "
     return (
         f"[{' + '.join(task_types)}] The target video adapts the frozen story beat within the locked Style Bible. "
-        f"Reference labels used: {labels}."
+        f"{medium}Reference labels used: {labels}."
     )
 
 
@@ -653,6 +674,7 @@ class H3PromptCompiler:
         compiler_version: str = COMPILER_VERSION,
     ) -> CompiledPrompt:
         legacy_audio = compiler_version == LEGACY_AUDIO_COMPILER_VERSION
+        legacy_style = compiler_version in (LEGACY_AUDIO_COMPILER_VERSION, LEGACY_STYLE_COMPILER_VERSION)
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -674,6 +696,7 @@ class H3PromptCompiler:
             speaker_order=speaker_order,
             project_language=spoken_language,
             legacy_audio=legacy_audio,
+            legacy_style=legacy_style,
         )
         if language_fallback:
             ctx.warnings.append(
@@ -740,7 +763,7 @@ class H3PromptCompiler:
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         return CompiledPrompt(
             mode=mode,
-            compiler_version=LEGACY_AUDIO_COMPILER_VERSION if legacy_audio else COMPILER_VERSION,
+            compiler_version=compiler_version if legacy_style else COMPILER_VERSION,
             rule_version=RULE_VERSION,
             skill_sha256=SKILL_SHA256,
             base_rule_sha256=BASE_RULE_SHA256,

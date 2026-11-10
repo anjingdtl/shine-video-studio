@@ -408,7 +408,8 @@ def _declared_cast_roles(shot: Shot, bindings: list[ShotBindingInput],
 
 
 def set_shot_bindings(
-    db: Session, project: Project, shot: Shot, bindings: list[ShotBindingInput], *, actor: str = "user"
+    db: Session, project: Project, shot: Shot, bindings: list[ShotBindingInput], *,
+    actor: str = "user", bump_revision: bool = True,
 ) -> list[ShotAssetBinding]:
     assets = _validate_binding_inputs(db, project, bindings)
     cast_roles = _declared_cast_roles(shot, bindings, assets)
@@ -442,7 +443,8 @@ def set_shot_bindings(
     if merged != declared:
         spec_payload["required_asset_ids"] = merged
         shot.spec = spec_payload
-        shot.revision = (shot.revision or 1) + 1
+        if bump_revision:
+            shot.revision = (shot.revision or 1) + 1
     add_audit(
         db,
         actor,
@@ -485,6 +487,101 @@ def _binding_rows(db: Session, shot: Shot) -> list[ShotAssetBinding]:
 REFERENCE_FAMILY_ORDER = {"subject": 0, "picture": 1, "video": 2, "audio": 3}
 
 
+def complete_character_bindings(
+    db: Session, project_id: str, characters: list[str], bindings: list[ShotBindingInput],
+) -> list[ShotBindingInput]:
+    """Fill missing subject slots from the current project's approved masters."""
+    from shine.asset_identity import character_reference_matches, resolve_character_asset, split_character_names
+    from shine.comfyops.assets import rights_status
+    from shine.comfyops.models import AssetRequirement
+    from shine.comfyops.preproduction import current_material_plan
+
+    if not characters:
+        return bindings
+    candidates = db.scalars(select(Asset).where(
+        Asset.project_id == project_id, Asset.kind == "image", Asset.role == "character",
+        Asset.approved.is_(True), Asset.locked.is_(True),
+    ))
+    masters = {
+        asset.id: asset for asset in candidates
+        if not (asset.provenance or {}).get("offline_only") and not (asset.provenance or {}).get("is_mock")
+    }
+    identities = [{"id": asset.id, "kind": asset.kind, "role": asset.role, "entity_id": asset.entity_id}
+                  for asset in masters.values()]
+    plan = current_material_plan(db, project_id)
+    requirements = list(db.scalars(select(AssetRequirement).where(
+        AssetRequirement.plan_id == plan.id,
+        AssetRequirement.payload["family"].as_string() == "character",
+    ))) if plan else []
+    selection = {row.payload["entity_id"]: row.payload for row in requirements
+                 if row.payload.get("entity_id") and row.payload.get("bound_asset_id")}
+    result = [binding.model_copy() for binding in bindings]
+    by_asset = {binding.asset_id: binding for binding in result}
+    cast = dict.fromkeys(name for entry in characters for name in split_character_names(entry))
+    for name in cast:
+        if any(binding.use_as.value == "subject" and (
+            binding.role == name or binding.asset_id == name
+            or (binding.asset_id in masters
+                and character_reference_matches(name, masters[binding.asset_id].entity_id))
+        ) for binding in result):
+            continue
+        pinned = selection.get(name)
+        if pinned:
+            asset = masters.get(pinned["bound_asset_id"])
+            if (asset is None or asset.entity_id != (pinned.get("canonical_entity_id") or name)
+                    or pinned.get("bound_asset_sha256") not in (None, asset.sha256)):
+                continue
+        else:
+            exact = [row for row in identities if row["entity_id"] == name]
+            match = resolve_character_asset(name, identities if name in masters else exact or identities)
+            asset = masters[match["id"]] if match else None
+        if asset is None or not rights_status(db, project_id, (asset.provenance or {}).get("rights_id"))["approved"]:
+            continue
+        existing = by_asset.get(asset.id)
+        role = name if len(name) <= 64 else None
+        if existing:
+            if existing.use_as.value == "subject" and not existing.role:
+                existing.role = role
+            continue
+        if len(result) >= MAX_TOTAL_REFERENCES:
+            break
+        binding = ShotBindingInput(asset_id=asset.id, use_as="subject", role=role, ordinal=len(result))
+        result.append(binding)
+        by_asset[asset.id] = binding
+    return result
+
+
+def apply_missing_character_bindings(db: Session, project: Project, shots: list[Shot], *, actor: str) -> None:
+    """Persist new subject bindings only on shots that can still be revised."""
+    from shine.comfyops.ownership import shot_ownership
+    from shine.director.package import latest_package, package_episodes
+
+    package = latest_package(db, project.id)
+    frozen_ids = {
+        entry["shot_id"] for episode in package_episodes(db, package.id)
+        for entry in (episode.manifest or {}).get("shots", [])
+    } if package and package.status == "CONFIRMED" and not package.stale else set()
+    shot_ids = [shot.id for shot in shots if shot.id not in frozen_ids]
+    busy_ids = set(shot_ownership(db, project.id, shot_ids))
+    busy_ids.update(db.scalars(select(Job.shot_id).where(
+        Job.project_id == project.id, Job.shot_id.in_(shot_ids),
+        Job.status == "NEEDS_REVIEW", Job.failure_code.in_(UNKNOWN_SUBMISSION_CODES),
+    )))
+    for shot in shots:
+        if shot.id in frozen_ids or shot.id in busy_ids:
+            continue
+        spec = ShotSpec.model_validate(shot.spec)
+        current = [ShotBindingInput(asset_id=row.asset_id, use_as=row.use_as, role=row.role,
+                                    frame_role=row.frame_role, ordinal=row.ordinal)
+                   for row in _binding_rows(db, shot)]
+        completed = complete_character_bindings(db, project.id, spec.characters, current)
+        if completed == current:
+            continue
+        revise_shot_record(db, project, shot, spec=spec, bindings=completed, actor=actor)
+        db.flush()
+        db.expire(shot, ["bindings"])
+
+
 def order_bindings_for_cast(
     bindings: list[ShotBindingInput], characters: list[str], assets: dict[str, Asset],
 ) -> list[ShotBindingInput]:
@@ -496,13 +593,18 @@ def order_bindings_for_cast(
     the order the director happened to list the assets in.  Reordering happens
     at request time, so a shot applied by an older build is fixed as well.
     """
-    from shine.asset_identity import character_reference_matches
+    from shine.asset_identity import character_reference_matches, split_character_names
 
     rank: dict[str, int] = {}
-    for index, name in enumerate(characters):
-        rank.setdefault(name, index)
+    for entry in characters:
+        for name in split_character_names(entry):
+            rank.setdefault(name, len(rank))
 
     def subject_rank(binding: ShotBindingInput) -> int:
+        if binding.role in rank:
+            return rank[binding.role]
+        if binding.asset_id in rank:
+            return rank[binding.asset_id]
         asset = assets.get(binding.asset_id)
         if asset is None:
             return len(rank)
@@ -706,6 +808,15 @@ def make_render_request(
         profile = db.get(WorkflowProfile, body.workflow_profile_id)
         if not profile or (profile.project_id and profile.project_id != project.id):
             raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
+    if (profile is not None and profile.mode.lower() == "ref2va" and spec.characters
+            and not any(item.use_as == ReferenceUse.SUBJECT for item in manifest)):
+        raise HTTPException(status_code=422, detail={
+            "code": "H3_CHARACTER_REFERENCE_MISSING",
+            "message": "这一镜点名了人物，但没有任何人物主体参考",
+            "shot_id": shot.id,
+            "characters": list(spec.characters),
+            "action": "BIND_SUBJECT_REFERENCE",
+        })
     mode_hint = body.generation_mode
     if (mode_hint is None and profile is not None
             and profile.mode.lower() == GenerationMode.REF2VA.value.lower()
@@ -748,7 +859,10 @@ def make_render_request(
     except PromptCompilationError as exc:
         if pack:
             raise HTTPException(
-                status_code=422, detail=registry.compilation_failure(pack, exc).model_dump(mode="json")
+                status_code=422, detail={
+                    **registry.compilation_failure(pack, exc).model_dump(mode="json"),
+                    "code": exc.code, "message": str(exc), "details": exc.details,
+                },
             ) from exc
         raise HTTPException(
             status_code=422,
@@ -758,18 +872,6 @@ def make_render_request(
     workflow_hash = None
     transfer_warning_lines: list[str] = []
     if profile is not None:
-        if (profile.mode.lower() == "ref2va" and spec.characters
-                and not any(str(link.use_as).lower() == "subject" for link in shot.bindings)):
-            # A named character without a subject reference would compile into
-            # a text-only request: the face would be invented.  Name the gap
-            # and the entry that fixes it, instead of a generic mode mismatch.
-            raise HTTPException(status_code=422, detail={
-                "code": "H3_CHARACTER_REFERENCE_MISSING",
-                "message": "这一镜点名了人物，但没有任何人物主体参考；H3 会自行编造一张脸",
-                "shot_id": shot.id,
-                "characters": list(spec.characters),
-                "action": "BIND_SUBJECT_REFERENCE",
-            })
         if profile.mode.lower() != compiled.mode.value.lower():
             raise HTTPException(status_code=422, detail="Workflow profile does not support the compiled H3 mode")
         # A reference the profile has no slot for would be silently dropped by
@@ -1471,7 +1573,7 @@ def revise_shot_record(
             try_transition(job, "NEEDS_REVIEW")
     affected = mark_stale_descendants(db, old_ids, project_id=project.id)
     if bindings is not None:
-        set_shot_bindings(db, project, shot, bindings, actor=actor)
+        set_shot_bindings(db, project, shot, bindings, actor=actor, bump_revision=False)
     add_audit(
         db,
         actor,

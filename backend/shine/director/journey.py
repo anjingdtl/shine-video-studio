@@ -136,7 +136,7 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
     A character the shot names counts as a requirement: a name alone is not
     renderable, so the shot must carry the bound master.
     """
-    from shine.asset_identity import resolve_character_asset
+    from shine.asset_identity import resolve_character_asset, split_character_names
 
     problems: list[str] = []
     try:
@@ -152,15 +152,18 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
     if not list(shot.bindings) and spec.required_asset_ids:
         problems.append("SHOT_REQUIRED_ASSET_UNBOUND")
     bound = []
+    bound_roles = set()
     for link in shot.bindings:
         asset = db.get(Asset, link.asset_id)
-        if asset is None:
+        if (asset is None or link.use_as != "subject" or asset.role != "character"
+                or not asset.approved or not asset.locked):
             continue
         bound.append({"id": asset.id, "kind": asset.kind, "role": asset.role,
                       "entity_id": asset.entity_id})
-    for name in spec.characters:
-        reference = str(name or "").strip()
-        if reference and resolve_character_asset(reference, bound) is None:
+        if link.role:
+            bound_roles.add(link.role)
+    for reference in dict.fromkeys(name for entry in spec.characters for name in split_character_names(entry)):
+        if reference not in bound_roles and resolve_character_asset(reference, bound) is None:
             problems.append("SHOT_CHARACTER_MASTER_MISSING:" + reference)
     return problems
 

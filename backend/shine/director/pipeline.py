@@ -2321,7 +2321,8 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     from shine.director.contracts import EpisodePlanPayload
     from shine.director.models import DirectorEpisodePlan, DirectorPackageVersion
     from shine.director.package import build_package, confirm_package, package_readiness
-    from shine.models import Project
+    from shine.models import Project, Shot, WorkflowProfile
+    from shine.services import apply_missing_character_bindings
 
     plan = current_volume_plan(db, project_id)
     if plan is None:
@@ -2427,6 +2428,11 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     if problems:
         raise ValueError("PIPELINE_VOLUME_PLAN_SCOPE_INVALID:" + ",".join(problems)[:400])
     plan_dump = payload.model_dump(mode="json")
+    profile = db.get(WorkflowProfile, workflow_profile_id)
+    if profile and profile.project_id in (None, project_id) and profile.mode.lower() == "ref2va":
+        apply_missing_character_bindings(
+            db, project, [db.get(Shot, shot_id) for shot_id in planned], actor="local-user",
+        )
     handoff_digest = digest({
         "project": project_id, "volume": volume_id,
         "workflow_profile": workflow_profile_id,

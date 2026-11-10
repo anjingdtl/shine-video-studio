@@ -408,6 +408,7 @@ class CreateProductionSeries(APIModel):
     output: OutputSpec | None = None
     """The output size and clip length of this run; refused when the profile cannot honour it."""
     bindings: dict[str, list[ShotBindingInput]] | None = None
+    fill_missing_character_bindings: bool = False
     expected_shot_revisions: dict[str, int] | None = None
     request_key: str | None = Field(default=None, min_length=1, max_length=120)
     """The identity of this start request.

@@ -449,6 +449,7 @@ class PackageBody(APIModel):
     generation_mode: Literal["T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"] | None = None
     output: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None
+    fill_missing_character_bindings: bool = False
 
 
 @router.get("/projects/{project_id}/director-packages")
@@ -475,6 +476,7 @@ def create_package(project_id: str, body: PackageBody, request: Request,
         generation_mode=body.generation_mode,
         output=body.output,
         policy=body.policy,
+        fill_missing_character_bindings=body.fill_missing_character_bindings,
         created_by=actor,
     )
     add_audit(db, actor, "DIRECTOR_PACKAGE_CREATED", "director_package", package.id,

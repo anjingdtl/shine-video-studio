@@ -459,6 +459,27 @@ def test_a_per_shot_english_style_inherits_the_frozen_film_type():
     assert "2D cel-shaded animation" in compiled.prompt
 
 
+def test_ref2va_uses_frozen_animation_even_when_shot_projection_says_live_action():
+    from shine.h3.compiler import LEGACY_STYLE_COMPILER_VERSION
+
+    frozen = STYLE.model_copy(update={"film_type": FilmType.ANIMATION})
+    per_shot = STYLE.model_copy(update={"film_type": FilmType.LIVE_ACTION})
+    shot = spec(prompt_style=per_shot)
+    manifest = [item("<Subject 1>", ReferenceUse.SUBJECT)]
+    compiler = H3PromptCompiler()
+    compiled = compiler.compile(spec=shot, style=frozen, manifest=manifest)
+    assert "2D cel-shaded animation" in compiled.sections["summary"]
+    assert "every frame and internal cut" in compiled.sections["summary"]
+    assert "frozen medium even when the source uses another medium" in compiled.sections["summary"]
+    assert "2D cel-shaded animation" in compiled.sections["detailed_description"]
+    assert "The entire shot is photorealistic" not in compiled.prompt
+    historical = compiler.compile(
+        spec=shot, style=frozen, manifest=manifest, compiler_version=LEGACY_STYLE_COMPILER_VERSION,
+    )
+    assert historical.compiler_version == LEGACY_STYLE_COMPILER_VERSION
+    assert "The entire shot is photorealistic" in historical.sections["detailed_description"]
+
+
 def test_a_manual_shot_inherits_the_projects_english_style_prompt(api):
     client, _factory, _settings = api
     project_id = create_project(client, "手写镜头继承英文风格")

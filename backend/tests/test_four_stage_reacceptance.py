@@ -686,3 +686,39 @@ def test_r09_a_missing_material_is_a_notice_not_a_block(api):
     codes = {row["code"] for row in handoff.json()["readiness"]["blockers"]}
     assert "SHOT_CHARACTER_MASTER_MISSING" not in codes, codes
     assert handoff.json()["readiness"]["startable"] is True, handoff.json()["readiness"]
+
+
+def test_volume_handoff_pins_a_character_confirmed_after_the_storyboard_landed(api):
+    from shine.models import Asset, Shot
+    from tests.conftest import approve_lock
+
+    client, factory, _settings, project_id, _plan, volume_id, units = _prepare_handoff_fixture(
+        api, confirm_character_master=False,
+    )
+    shot_ids = []
+    for unit in units:
+        applied = client.post(
+            f"/api/v1/projects/{project_id}/film-artifacts/{unit['camera_artifact_id']}/apply-camera",
+            json={"continuity_artifact_id": unit["continuity_artifact_id"]}, headers=LOCAL,
+        )
+        assert applied.status_code == 200, applied.text
+        shot_ids.extend(applied.json()["shot_ids"])
+    with factory() as db:
+        master = db.scalar(select(Asset).where(Asset.project_id == project_id, Asset.entity_id == "Lin"))
+        master_id = master.id
+        assert all(not db.get(Shot, shot_id).bindings for shot_id in shot_ids)
+    approve_lock(client, master_id)
+    profile = register_workflow_profile(client, mode="Ref2VA")
+    url = f"/api/v1/projects/{project_id}/pipeline/volumes/{volume_id}/handoff"
+    first = client.post(url, json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
+    assert first.status_code == 201, first.text
+    assert first.json()["readiness"]["startable"] is True
+    with factory() as db:
+        for shot_id in shot_ids:
+            shot = db.get(Shot, shot_id)
+            assert shot.spec["required_asset_ids"] == [master_id]
+            assert [(binding.use_as, binding.asset_id) for binding in shot.bindings] == [("subject", master_id)]
+    replay = client.post(url, json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["package_id"] == first.json()["package_id"]
+    assert replay.json()["reused"] is True

@@ -639,7 +639,8 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     if not confirmation:
         raise HTTPException(409, "MATERIAL_PLAN_NOT_CONFIRMED")
     wanted = set(body.requirement_ids or [])
-    targets = [row for row in requirements if not wanted or row["requirement_id"] in wanted]
+    targets = [row for row in requirements if row.get("strategy") != "omit_prop"
+               and (not wanted or row["requirement_id"] in wanted)]
     if not targets:
         raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
     # A requirement already satisfied by a master is recorded as "reuse_master",

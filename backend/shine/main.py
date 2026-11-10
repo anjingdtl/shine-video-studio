@@ -1322,10 +1322,21 @@ def create_app(
         from the profile gate, the asset check or the series itself rolls all of
         them back - the workbench never leaves a half-applied binding plan (J08).
         """
-        from shine.comfyops.production_series import create_series, series_public
-        from shine.services import bindings_unchanged, set_shot_bindings, shot_static_blockers
+        from shine.comfyops.production_series import create_series, series_public, series_request_receipt_key
+        from shine.services import (
+            apply_missing_character_bindings,
+            bindings_unchanged,
+            set_shot_bindings,
+            shot_static_blockers,
+        )
 
         try:
+            if body.fill_missing_character_bindings and body.request_key:
+                receipt = db.get(AppSetting, series_request_receipt_key(project.id, body.shot_ids, body.request_key))
+                if receipt is not None:
+                    existing = db.get(ProductionSeries, (receipt.value or {}).get("series_id"))
+                    if existing is not None:
+                        return jsonable_encoder(series_public(db, existing))
             # The snapshot the person acted on must still be the current one:
             # another tab may have changed a shot since the workbench showed
             # it, and a start request never shoots what it did not show.
@@ -1353,6 +1364,8 @@ def create_app(
                         continue
                     set_shot_bindings(db, project, shot, planned, actor="user")
                 db.flush()
+            if body.fill_missing_character_bindings:
+                apply_missing_character_bindings(db, project, shots, actor="user")
             job_body = CreateJob(
                 shot_id=shots[0].id,
                 mock_scenario=body.mock_scenario,

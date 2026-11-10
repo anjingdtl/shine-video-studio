@@ -199,12 +199,13 @@ def build_package(
     creative_lineage: dict[str, Any] | None = None,
     created_by: str = "user",
     settings=None,
+    fill_missing_character_bindings: bool = False,
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
 
-    Building never mutates the underlying objects and never assumes that a state
-    is executable: an incomplete package is still built (so the person can see
-    exactly what is missing) and stays ``DRAFT``.
+    An incomplete package is still built so the person can see what is missing.
+    The interactive entry may explicitly fill unbound cast slots before the
+    new package snapshots the resulting shot revisions.
 
     ``creative_lineage`` is the four-stage pipeline's contract: when supplied,
     the package pins the exact scene scripts, blueprint and episode contracts
@@ -291,6 +292,12 @@ def build_package(
         "validated_against": profile.validated_against or {},
     }
     resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
+    if fill_missing_character_bindings and profile.mode.lower() == "ref2va":
+        from shine.services import apply_missing_character_bindings
+
+        apply_missing_character_bindings(
+            db, project, [by_id[shot_id] for shot_id in plan_payload.shot_order()], actor=created_by,
+        )
 
     revision = (db.scalars(
         select(DirectorPackageVersion.revision)

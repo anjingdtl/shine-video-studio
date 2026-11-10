@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, StringConstraints, ValidationInfo, field_validator
+from pydantic import Field, StringConstraints, ValidationInfo, field_validator, model_serializer
 
 from shine.schemas import APIModel
 
@@ -67,8 +67,17 @@ class ScriptPreparationRequirement(APIModel):
     carrier: MaterialCarrier | None = None
     """Props only: what carries the visual content.  Characters and scenes
     have no carrier and must leave this unset; the server normalises it."""
+    core_prop_reason: str = Field(default="", max_length=200)
+    """For a core prop, state the source-supported plot or continuity dependency."""
     source_span_ids: list[_SpanId] = Field(default_factory=list, max_length=8)
     questions: list[_ShortQuestion] = Field(default_factory=list, max_length=4)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_prop_reason(self, handler):
+        data = handler(self)
+        if self.family != "prop" or not self.core_prop_reason.strip():
+            data.pop("core_prop_reason", None)
+        return data
 
     @field_validator("carrier")
     @classmethod
@@ -157,7 +166,7 @@ class MaterialVisualDirection(APIModel):
     notes: str = Field(default="", max_length=600)
 
 
-RequirementStrategy = Literal["reuse_master", "upload", "generate"]
+RequirementStrategy = Literal["reuse_master", "upload", "generate", "omit_prop"]
 """What the user decided for one requirement.
 
 ``upload`` means a file is on its way or already pending approval, so the item

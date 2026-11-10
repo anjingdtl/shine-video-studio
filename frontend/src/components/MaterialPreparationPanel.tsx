@@ -19,7 +19,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   PARTIAL_FAILED: '部分失败', NEEDS_REVIEW: '待核对', CANCELLED: '已取消',
 };
 
-export type MaterialStrategy = 'reuse_master' | 'upload' | 'generate';
+export type MaterialStrategy = 'reuse_master' | 'upload' | 'generate' | 'omit_prop';
 
 export type MaterialRequirement = {
   requirement_id: string;
@@ -34,6 +34,7 @@ export type MaterialRequirement = {
   description: string;
   carrier?: string | null;
   carrier_variants?: string[];
+  core_prop_reason?: string;
 };
 
 export type MaterialCandidate = {
@@ -403,7 +404,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     strategy[requirement.requirement_id]
     ?? requirement.strategy
     ?? (assets.some((a) => a.role === requirement.family && a.entity_id === requirement.entity_id && !a.locked)
-      ? 'upload' : 'generate');
+      ? 'upload' : requirement.family === 'prop' && !requirement.core_prop_reason ? 'omit_prop' : 'generate');
+
+  const requirementDecision = (requirement: MaterialRequirement, promotedAssetId?: string) => {
+    const id = requirement.requirement_id;
+    const chosen = promotedAssetId ?? bindings[id];
+    const decision = strategy[id] === 'omit_prop' ? 'omit_prop' : chosen ? 'reuse_master' : defaultStrategy(requirement);
+    return {
+      requirement_id: id,
+      entity_id: requirement.entity_id,
+      strategy: decision,
+      asset_id: decision === 'omit_prop' ? null : chosen || requirement.bound_asset_id || null,
+      brief_note: requirement.brief_note ?? '',
+    };
+  };
 
   const analyseScript = () => run(async () => {
     const document = documents.find((row) => row.id === documentId);
@@ -447,15 +461,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (!state?.plan_revision_id || !state.expected_snapshot) {
       throw new Error('先分析剧本，生成需求清单。');
     }
-    const decisions = requirements.map((requirement) => ({
-      requirement_id: requirement.requirement_id,
-      // A chosen asset must be bound as a reused master, or the confirmation
-      // records "generate" and the uploaded picture is ignored.
-      strategy: bindings[requirement.requirement_id] ? 'reuse_master' : defaultStrategy(requirement),
-      entity_id: requirement.entity_id,
-      asset_id: bindings[requirement.requirement_id] ?? requirement.bound_asset_id ?? null,
-      brief_note: requirement.brief_note,
-    }));
+    const decisions = requirements.map((requirement) => requirementDecision(requirement));
     const confirmed = await jsonPost<{ confirmation_id: string; confirmation_hash: string }>(
       `/projects/${projectId}/material-preparation/confirm`,
       {
@@ -469,9 +475,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     // list does not mean a batch was created, so the page says which one
     // happened instead of announcing a single success.
     setStepReport((current) => ({ ...current, confirm: `清单已确认（${decisions.length} 项）。` }));
-    const generatable = requirements
-      .filter((requirement) => defaultStrategy(requirement) === 'generate')
-      .map((requirement) => requirement.requirement_id);
+    const generatable = decisions
+      .filter((decision) => decision.strategy === 'generate')
+      .map((decision) => decision.requirement_id);
     if (!generatable.length) {
       setStepReport((current) => ({
         ...current,
@@ -530,10 +536,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (Object.keys(promoted).length && state?.plan_revision_id && state.expected_snapshot) {
       await jsonPost(`/projects/${projectId}/material-preparation/confirm`, {
         plan_revision_id: state.plan_revision_id, expected_snapshot: state.expected_snapshot,
-        decisions: requirements.map((r) => ({ requirement_id: r.requirement_id, entity_id: r.entity_id,
-          strategy: promoted[r.requirement_id] ? 'reuse_master' : defaultStrategy(r),
-          asset_id: promoted[r.requirement_id] ?? bindings[r.requirement_id] ?? r.bound_asset_id,
-          brief_note: r.brief_note ?? '' })), visual_direction: direction,
+        decisions: requirements.map((r) => requirementDecision(r, promoted[r.requirement_id])),
+        visual_direction: direction,
       });
       setSelected({});
     }
@@ -850,6 +854,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   {requirement.family === 'prop' && requirement.carrier
                     && <small className="material-carrier">载体：{propCarrierLabels[requirement.carrier] ?? requirement.carrier}{(requirement.carrier_variants ?? []).length > 0 ? `（另有：${requirement.carrier_variants!.map((c) => propCarrierLabels[c] ?? c).join('、')}）` : ''}</small>}
                   <small>{requirement.description}</small>
+                  {requirement.core_prop_reason && <small>需要独立参考的原因 · {requirement.core_prop_reason}</small>}
                   <label className="material-field">
                     <span>素材来源</span>
                     <select
@@ -862,9 +867,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                       <option value="generate">生成候选（AI 出图）</option>
                       <option value="upload">我会上传</option>
                       <option value="reuse_master">已有主素材</option>
+                      {requirement.family === 'prop' && <option value="omit_prop">随场景生成（无需独立道具图）</option>}
                     </select>
                   </label>
-                  {(strategy[requirement.requirement_id] ?? requirement.strategy) !== 'generate' && <label className="material-field">
+                  {defaultStrategy(requirement) !== 'generate' && defaultStrategy(requirement) !== 'omit_prop' && <label className="material-field">
                     <span>本项目素材与版本 · {requirement.entity_id}</span>
                     <select value={bindings[requirement.requirement_id] ?? requirement.bound_asset_id ?? ''}
                       onChange={(event) => setBindings({ ...bindings, [requirement.requirement_id]: event.target.value })}>

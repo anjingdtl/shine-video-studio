@@ -94,24 +94,24 @@ function referenceLabels(shot: Shot) {
     const family = (FAMILY_ORDER[a.use_as] ?? 9) - (FAMILY_ORDER[b.use_as] ?? 9);
     if (family !== 0) return family;
     if (a.use_as === 'subject' && b.use_as === 'subject') {
-      const left = rank.get(a.entity_id ?? '') ?? 999;
-      const right = rank.get(b.entity_id ?? '') ?? 999;
+      const left = rank.get(a.role ?? '') ?? rank.get(a.entity_id ?? '') ?? 999;
+      const right = rank.get(b.role ?? '') ?? rank.get(b.entity_id ?? '') ?? 999;
       if (left !== right) return left - right;
     }
     return a.ordinal - b.ordinal || a.asset_id.localeCompare(b.asset_id);
   });
   let image = 0;
   let subject = 0;
-  const rows: Array<{ label: string; name: string; use_as: string; asset_id: string }> = [];
+  const rows: Array<{ label: string; name: string; role?: string | null; use_as: string; asset_id: string }> = [];
   for (const binding of ordered) {
     if (binding.use_as === 'subject' || binding.use_as === 'picture') image += 1;
     if (binding.use_as === 'subject') {
       subject += 1;
-      rows.push({ label: `<Subject ${subject}>`, name: binding.entity_id || binding.filename, use_as: binding.use_as, asset_id: binding.asset_id });
+      rows.push({ label: `<Subject ${subject}>`, name: binding.entity_id || binding.filename, role: binding.role, use_as: binding.use_as, asset_id: binding.asset_id });
     } else if (binding.use_as === 'picture') {
-      rows.push({ label: `<Picture ${image}>`, name: binding.entity_id || binding.filename, use_as: binding.use_as, asset_id: binding.asset_id });
+      rows.push({ label: `<Picture ${image}>`, name: binding.entity_id || binding.filename, role: binding.role, use_as: binding.use_as, asset_id: binding.asset_id });
     } else if (binding.use_as === 'audio') {
-      rows.push({ label: '音色参考', name: binding.entity_id || binding.filename, use_as: binding.use_as, asset_id: binding.asset_id });
+      rows.push({ label: '音色参考', name: binding.entity_id || binding.filename, role: binding.role, use_as: binding.use_as, asset_id: binding.asset_id });
     }
   }
   return rows;
@@ -119,53 +119,6 @@ function referenceLabels(shot: Shot) {
 
 function isMultipleOf32(value: number): boolean {
   return Number.isInteger(value) && value >= 256 && value <= 2048 && value % 32 === 0;
-}
-
-/** 从方案的 parameter_map 读出它声明的参考槽位（如 reference_picture_1 → picture×1）。
- *  一键开拍按这份声明自动补齐，不会多绑也不会静默缺绑。 */
-function declaredSlots(profile: WorkflowProfile): { subject: number; picture: number; audio: number } {
-  const slots = { subject: 0, picture: 0, audio: 0 };
-  for (const key of Object.keys(profile.parameter_map ?? {})) {
-    const match = key.match(/^reference_(subject|picture|audio)_(\d+)$/);
-    if (match) slots[match[1] as 'subject' | 'picture' | 'audio'] = Math.max(slots[match[1] as 'subject' | 'picture' | 'audio'], Number(match[2]));
-  }
-  return slots;
-}
-
-/** 一个镜头要开拍，真正缺的是什么。
- *
- * 方案声明的槽位是**容量**，不是义务：这些镜头只要已经绑定人物主体，空的画面
- * 槽位由 H3 自行生成，不再填写无关素材充数。人物主体缺位仍然具名拦住（那是
- * 身份漂移），没有任何参考的镜头也不能被静默改成 T2VA 蒙混过去。音色参考只在
- * 这一镜真的有对白且用户已绑定音频时使用，不自动补。
- */
-function shotReferenceReadiness(shot: Shot, profile: WorkflowProfile): {
-  bindings: AutoBinding[]; missing: string[]; notices: string[];
-} {
-  const bindings = shot.bindings.map((binding, index) => ({
-    asset_id: binding.asset_id,
-    use_as: binding.use_as,
-    role: binding.role ?? null,
-    frame_role: binding.frame_role ?? null,
-    ordinal: index,
-  }));
-  const boundSubjectNames = new Set(
-    shot.bindings.filter((row) => row.use_as === 'subject').map((row) => row.entity_id ?? ''),
-  );
-  const missing: string[] = [];
-  const notices: string[] = [];
-  const characters = [...new Set(shot.spec.characters ?? [])];
-  for (const name of characters) {
-    if (!boundSubjectNames.has(name)) missing.push(`${shot.name} 的人物主体「${name}」`);
-  }
-  const hasAnyReference = bindings.some((row) => row.use_as === 'subject' || row.use_as === 'picture');
-  if (!hasAnyReference) {
-    missing.push(`${shot.name} 没有任何参考（至少需要一张人物或画面参考）`);
-  }
-  if (declaredSlots(profile).picture > bindings.filter((row) => row.use_as === 'picture').length && hasAnyReference) {
-    notices.push(`${shot.name} 的画面参考槽位为空，将由 H3 自行生成`);
-  }
-  return { bindings, missing, notices };
 }
 
 export default function ProductionSeriesPanel({
@@ -376,7 +329,7 @@ export default function ProductionSeriesPanel({
       const refs = referenceLabels(shot);
       const subjects = refs.filter((row) => row.use_as === 'subject');
       const characters = [...new Set(shot.spec.characters ?? [])];
-      const unbound = characters.filter((name) => !subjects.some((row) => row.name === name));
+      const unbound = characters.filter((name) => !subjects.some((row) => row.role === name || row.name === name || row.asset_id === name));
       return { shot, refs, characters, unbound };
     });
   }, [shots, selected]);
@@ -396,7 +349,7 @@ export default function ProductionSeriesPanel({
   }
 
   async function start(options?: { shotIds?: string[]; profileOverride?: string;
-    bindings?: Record<string, Array<Record<string, unknown>>> }) {
+    fillMissingCharacters?: boolean }) {
     const effectiveProfile = options?.profileOverride ?? profileId;
     const effectiveSelected = options?.shotIds ?? selected;
     if (demoSelected || system?.production_mode?.mode !== 'READY' || working || busy) return;
@@ -455,12 +408,7 @@ export default function ProductionSeriesPanel({
       if (editIntentId) {
         body.edit_intent_artifact_id = editIntentId;
       }
-      if (options?.bindings && Object.keys(options.bindings).length > 0) {
-        // The references the person saw are part of the start request: the
-        // server applies them in the same transaction, so a refusal leaves no
-        // half-written bindings (J08).
-        body.bindings = options.bindings;
-      }
+      if (options?.fillMissingCharacters) body.fill_missing_character_bindings = true;
       // The revisions the workbench showed are part of the request too: a
       // shot that another tab changed in the meantime is refused instead of
       // being shot from a stale screen (R04).
@@ -496,11 +444,7 @@ export default function ProductionSeriesPanel({
     }
   }
 
-  /** 一键开拍：用用户选定的方案，先做一份不写库的计划，再一次性提交。
-   *
-   * 方案声明的槽位提供容量；引用义务只来自这一镜的人物与有效请求。空的画面槽
-   * 位不再是「缺素材」，已绑定人物主体的镜头可以直接开拍。全部镜头先一起判定，
-   * 有任何一镜缺关键参考就整批不提交，不会先写一串绑定再拒绝。 */
+  /** 一键开拍由后端在排产事务中补齐缺失的人物主体。 */
   async function oneClickStart() {
     if (working || busy) return;
     if (demoSelected) { onMessage('当前是演示状态：点上方「切回真实制作」后再一键开拍。', 'error'); return; }
@@ -531,24 +475,8 @@ export default function ProductionSeriesPanel({
     const shotIds = shots.filter((shot) => !busyShotIds.has(shot.id)).map((shot) => shot.id);
     if (shotIds.length === 0) { onMessage('还没有可制作的镜头：先在上方完成并应用分镜。', 'error'); return; }
 
-    const plans = shots
-      .filter((shot) => shotIds.includes(shot.id))
-      .map((shot) => ({ shot, readiness: shotReferenceReadiness(shot, profile) }));
-    const missing = plans.flatMap((row) => row.readiness.missing);
-    if (missing.length > 0) {
-      onMessage(`还不能开拍：${[...new Set(missing)].join('、')}。到「镜头与素材」页补齐对应人物主体后再点一次；没有任何参考的镜头不会被偷偷改成无参考模式。`, 'error');
-      return;
-    }
-    const notices = plans.flatMap((row) => row.readiness.notices);
-    const bindings: Record<string, Array<Record<string, unknown>>> = {};
-    for (const row of plans) {
-      if (row.readiness.bindings.length > 0) bindings[row.shot.id] = row.readiness.bindings;
-    }
     setSelected(shotIds);
-    await start({ shotIds, profileOverride: target, bindings });
-    if (notices.length > 0) {
-      onMessage(`已按方案「${profile.name}」开拍；${[...new Set(notices)].slice(0, 2).join('；')}。`, 'success');
-    }
+    await start({ shotIds, profileOverride: target, fillMissingCharacters: true });
   }
 
   async function act(seriesId: string, action: 'cancel' | 'pause' | 'resume' | 'assemble') {

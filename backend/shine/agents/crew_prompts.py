@@ -149,6 +149,11 @@ def script_prepare_prompt() -> str:
         "material; cite each item with source_span_ids taken from the input, never an invented span "
         "number; keep original names and never merge an ambiguous alias or a same-named character on "
         "your own; do not copy the whole cast into a scene just because a character appears elsewhere; "
+        "a prop needs its own reference only if its distinct appearance or readable content drives a plot beat "
+        "or must be recognized as the same specific object across shots. Explain that dependency in "
+        "core_prop_reason and cite the source span. Leave ordinary furniture, food, utensils and other "
+        "background dressing in the scene description unless the script makes that particular item essential; "
+        "being mentioned, used once, or present in several shots does not by itself qualify. "
         "for every prop, classify what physically carries its visual content and write it into the "
         "carrier field: object when the prop itself is the visual content (a watch, a vase, a tool), "
         "paper when the content lives on a flat written or printed carrier (a letter, a notice, a "
@@ -239,7 +244,8 @@ def crew_prompt(
             "one faithful English translation per fact in the same order; retain the original facts "
             "unchanged. Use English character descriptions instead of Chinese names in translations. "
             "For a frozen style written in Chinese, provide prompt_style with faithful English "
-            "translations of each of its seven fields. Never alter the frozen source style."
+            "translations of each of its seven fields. Leave prompt_style.film_type unset; the server "
+            "copies the frozen film type. Never alter the frozen source style."
         )
     parts.append(_NO_TOOLS)
     if role != "qc_reviewer":
@@ -253,7 +259,11 @@ def crew_prompt(
             "final H3 prompt."
         )
     else:
-        parts.append("Write visual, camera and sound descriptions in English.")
+        parts.append(
+            "Write visual, camera and sound descriptions in English. "
+            "Keep every shot and internal cut in the frozen film medium. "
+            "Describe the staging and camera without introducing a different rendering medium."
+        )
     if role == "scriptwriter" and dialogue_ratio_percent:
         parts.append(
             "Use human-readable character names or entity IDs in characters and dialogue.speaker_id. "
@@ -317,8 +327,9 @@ def crew_prompt(
             "project wants that exact timbre, and never treat its absence as a missing "
             "reference. Keep each shot's asset_ids to the working "
             "reference set: the character master, one location/picture master and, optionally, "
-            "the voice master and every approved prop or other master materially depicted in the "
-            "shot; never list style or last-frame reference images as shot references, and "
+            "the voice master and an approved core prop whose exact appearance or readable content "
+            "matters to the shot. Leave ordinary set dressing in the visual description; "
+            "never list style or last-frame reference images as shot references, and "
             "never list an asset twice."
         )
         if timing:
@@ -327,7 +338,7 @@ def crew_prompt(
             parts.append(reference_budget_note)
         parts.append(
             "List the character masters of a shot in the order the shot's beats list their "
-            "characters, so the compiled prompt states the cast order of that segment. "
+            "characters, and introduce the performers in that same order in visual prose. "
             "A dialogue speaker owns its line even when it never appears on screen: the approved "
             "character master of EVERY speaker whose line a segment contains must be in that "
             "segment's asset_ids, exactly as for a visible character."

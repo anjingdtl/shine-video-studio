@@ -106,6 +106,33 @@ it('素材页读取服务器的需求清单，刷新不会重新提交分析', a
   expect(stub.callsOf('GET', /material-preparation$/)).toHaveLength(1);
 });
 
+it('普通陈设默认随场景生成，核心道具才加入出图批次', async () => {
+  const prop = { ...STATE.requirements[0], family: 'prop', strategy: null, description: '' };
+  stub.add({
+    method: 'GET', pattern: /projects\/p1\/material-preparation$/,
+    respond: () => jsonResponse({
+      ...STATE, runs: [], requirements: [
+        { ...prop, requirement_id: 'stool', entity_id: '凳子' },
+        { ...prop, requirement_id: 'watch', entity_id: '怀表', core_prop_reason: '表盖刻字是破案线索' },
+      ],
+    }),
+  });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByText(/表盖刻字是破案线索/)).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '确认清单并补齐' }));
+  await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/generate$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /material-preparation\/confirm$/)[0].body).toMatchObject({
+    decisions: [
+      { requirement_id: 'stool', strategy: 'omit_prop', asset_id: null },
+      { requirement_id: 'watch', strategy: 'generate' },
+    ],
+  });
+  expect(stub.callsOf('POST', /material-preparation\/generate$/)[0].body).toMatchObject({
+    requirement_ids: ['watch'],
+  });
+});
+
 it('切换作品不会带出上一个作品的需求', async () => {
   const view = render(<MaterialPreparationPanel projectId="p1" />);
   expect((await screen.findAllByText(/林知远/)).length).toBeGreaterThan(0);

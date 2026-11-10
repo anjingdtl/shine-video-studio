@@ -134,3 +134,67 @@ def test_a_start_request_does_not_rewrite_what_it_did_not_change(api):
     })
     assert response.status_code == 201, response.text
     assert _bindings(client, bound["id"]) == before
+
+
+def test_late_character_master_is_bound_on_start_and_replay_keeps_the_same_series(api):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
+
+    client, factory, _settings = api
+    studio = _studio(client)
+    project = studio["project"]
+    lin = studio["subject"]["id"]
+    shot = create_shot(client, project, studio["style"]["id"], characters=["Mei", "Lin"],
+                       asset_ids=[lin], bindings=[{"asset_id": lin, "use_as": "subject"}])
+    master = upload_asset(client, project, content=PNG + b"-mei", filename="梅.png",
+                          role="character", entity_id="Mei Chen")
+    other_version = upload_asset(client, project, content=PNG + b"-new-mei", filename="梅-新版.png",
+                                 role="character", entity_id="Mei Chen")
+    approve_lock(client, master["id"])
+    approve_lock(client, other_version["id"])
+    with factory.begin() as db:
+        plan = PreProductionPlan(project_id=project, purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+                                 status="CONFIRMED", payload={}, sha256=graph_hash({}))
+        db.add(plan)
+        db.flush()
+        requirement = {"family": "character", "entity_id": "Mei", "canonical_entity_id": "Mei Chen",
+                       "bound_asset_id": master["id"], "bound_asset_sha256": master["sha256"]}
+        db.add(AssetRequirement(project_id=project, plan_id=plan.id, status="CONFIRMED",
+                                payload=requirement, sha256=graph_hash(requirement)))
+    options = {
+        "shot_ids": [shot["id"]],
+        "fill_missing_character_bindings": True,
+        "expected_shot_revisions": {shot["id"]: shot["revision"]},
+        "request_key": "late-master",
+    }
+    first = _series(client, studio, **options)
+    assert first.status_code == 201, first.text
+    assert set(_bindings(client, shot["id"])) == {lin, master["id"]}
+    with factory() as db:
+        job = db.scalar(select(Job).where(Job.shot_id == shot["id"]))
+        manifest = job.request["reference_manifest"]
+        assert [(item["label"], item["asset_id"], item["role"]) for item in manifest] == [
+            ("<Subject 1>", master["id"], "Mei"),
+            ("<Subject 2>", lin, "Lin"),
+        ]
+    replay = _series(client, studio, **options)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == first.json()["id"]
+
+
+def test_auto_binding_rolls_back_when_the_batch_contains_an_ambiguous_cast(api):
+    client, _factory, _settings = api
+    studio = _studio(client)
+    project = studio["project"]
+    first = create_shot(client, project, studio["style"]["id"], characters=["Lin"])
+    second = create_shot(client, project, studio["style"]["id"], characters=["Mei"])
+    for index in range(2):
+        master = upload_asset(client, project, content=PNG + f"-mei-{index}".encode(),
+                              filename=f"mei-{index}.png", role="character", entity_id="Mei")
+        approve_lock(client, master["id"])
+    response = _series(client, studio, shot_ids=[first["id"], second["id"]],
+                       fill_missing_character_bindings=True)
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["blocked"][0]["shot_id"] == second["id"]
+    assert _bindings(client, first["id"]) == []
+    assert _bindings(client, second["id"]) == []

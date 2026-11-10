@@ -134,6 +134,9 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
             carrier = requirement.get("carrier")
             if family == "prop" and carrier and carrier not in entry["carriers"]:
                 entry["carriers"].append(carrier)
+            reason = (requirement.get("core_prop_reason") or "").strip()
+            if family == "prop" and reason and requirement.get("source_span_ids"):
+                entry.setdefault("core_prop_reason", reason)
     for (family, name), entry in merged.items():
         if len(entry["descriptions"]) > 1:
             conflicts.append({"family": family, "entity_id": name, "descriptions": entry["descriptions"],
@@ -157,6 +160,7 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
                 "carrier_variants": entry["carriers"] if len(entry["carriers"]) > 1 else [],
                 "scene_keys": entry["scene_keys"],
                 "questions": entry["questions"],
+                **({"core_prop_reason": entry["core_prop_reason"]} if entry.get("core_prop_reason") else {}),
             }
             for (family, name), entry in sorted(merged.items())
         ],
@@ -369,6 +373,8 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
             raise HTTPException(409, "MATERIAL_PLAN_STALE")
         from shine.models import Asset
 
+        if decision.strategy == "omit_prop" and (requirement_payload.get("family") != "prop" or decision.asset_id):
+            raise HTTPException(422, "MATERIAL_OMIT_PROP_ONLY")
         canonical_entity = requirement_payload.get("canonical_entity_id")
         selected_id = canonical_selections.get(canonical_entity, decision.asset_id)
         selected = db.get(Asset, selected_id) if selected_id else None
@@ -422,6 +428,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         row.payload = {
             **(row.payload or {}),
             "strategy": decision["strategy"],
+            "critical": decision["strategy"] != "omit_prop",
             "bound_asset_id": decision["asset_id"],
             "bound_asset_sha256": decision["bound_asset_sha256"],
             "brief_note": decision["brief_note"],
@@ -1081,22 +1088,6 @@ def _allowed_actions(run: MaterialRun, statuses: list[str]) -> list[str]:
     return actions
 
 
-def character_master_entity(db, project_id: str, name: str) -> str:
-    """Read an explicit alias from the current project's material requirements."""
-    from shine.comfyops.preproduction import current_material_plan
-
-    plan = current_material_plan(db, project_id)
-    if plan is not None:
-        canonical = db.scalar(select(AssetRequirement.payload["canonical_entity_id"].as_string()).where(
-            AssetRequirement.plan_id == plan.id,
-            AssetRequirement.payload["family"].as_string() == "character",
-            AssetRequirement.payload["entity_id"].as_string() == name,
-        ))
-        if canonical:
-            return canonical
-    return name
-
-
 def bind_material_master(db, requirement, asset, actor: str, *, canonical_entity_id: str | None = None):
     payload = dict(requirement.payload)
     if canonical_entity_id:
@@ -1177,6 +1168,10 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         family = payload.get("family")
         entity_id = payload.get("entity_id")
         critical = bool(payload.get("critical", True))
+        if payload.get("strategy") == "omit_prop":
+            judged.append({"requirement_id": row.id, "family": family, "entity_id": entity_id,
+                           "asset_id": None, "status": "OMITTED", "reason": None})
+            continue
         bound = payload.get("bound_asset_id")
         # An explicit selection is authority. Never substitute another version
         # just because it has the same entity name, including when it is missing.
@@ -1259,6 +1254,7 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
             "bound_asset_id": payload.get("bound_asset_id"),
             "brief_note": payload.get("brief_note"),
             "description": payload.get("description") or "",
+            "core_prop_reason": payload.get("core_prop_reason") or "",
         })
     runs = [public_run(db, run.id) for run in db.scalars(
         select(MaterialRun).where(MaterialRun.project_id == project_id)

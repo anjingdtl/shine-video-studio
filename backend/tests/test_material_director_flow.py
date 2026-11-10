@@ -161,6 +161,47 @@ def test_confirm_accepts_the_snapshot_the_server_published(api):
     assert confirmed["confirmation_hash"], confirmed
 
 
+def test_omitted_prop_does_not_block_materials_or_enter_a_generation_batch(api):
+    client, _factory, _ = api
+    project_id = _project(client)
+    document = _document(client, project_id)
+    scene = {**SCENE, "requirements": [SCENE["requirements"][1]]}
+    analyzed = _analyze(client, project_id, document, scenes=[scene]).json()
+    prop = analyzed["requirements"][0]
+    prefix = f"/api/v1/projects/{project_id}/material-preparation"
+    response = client.post(f"{prefix}/confirm", headers=LOCAL_ACTION, json={
+        "plan_revision_id": analyzed["plan_revision_id"],
+        "expected_snapshot": analyzed["expected_snapshot"],
+        "decisions": [{"requirement_id": prop["requirement_id"], "entity_id": prop["entity_id"],
+                       "strategy": "omit_prop"}],
+    })
+    assert response.status_code == 200, response.text
+    checked = client.post(f"{prefix}/complete", headers=LOCAL_ACTION)
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["materials_ready"] is True
+    assert checked.json()["requirements"][0]["status"] == "OMITTED"
+    confirmed = response.json()
+    generated = client.post(f"{prefix}/generate", headers=LOCAL_ACTION, json={
+        "confirmation_id": confirmed["confirmation_id"],
+        "confirmation_hash": confirmed["confirmation_hash"],
+        "requirement_ids": [prop["requirement_id"]],
+        "idempotency_key": "omitted-prop",
+        "mode": "real",
+    })
+    assert generated.status_code == 409, generated.text
+    assert generated.json()["detail"] == {
+        "code": "MATERIAL_CONFIRMATION_REQUIRED",
+        "requirement_id": prop["requirement_id"],
+        "strategy": "omit_prop",
+    }
+    rerun = client.post(f"{prefix}/regenerate-all", headers=LOCAL_ACTION, json={
+        "idempotency_key": "omitted-prop-rerun",
+    })
+    assert rerun.status_code == 409, rerun.text
+    assert rerun.json()["detail"] == "MATERIAL_NO_REQUIREMENTS"
+    assert client.get(prefix).json()["runs"] == []
+
+
 def test_generate_requires_an_approved_rights_record(api):
     """A generation batch consumes a rights record, like every other asset path."""
     client, factory, _ = api
