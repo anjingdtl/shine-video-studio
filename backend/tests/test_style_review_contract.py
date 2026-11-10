@@ -8,7 +8,7 @@ import pytest
 
 from shine.llm.base import ProviderConfig
 from shine.quality.semantic import LocalVisionReviewer, ReceivedReviewError
-from shine.schemas import StyleBible
+from shine.schemas import STYLE_BIBLE_FIELDS
 from tests.review_fixtures import fixture_style_input_checks
 from tests.test_semantic_qc import context
 
@@ -67,7 +67,7 @@ def test_wire_requires_complete_style_input_comparison(tmp_path, monkeypatch, ca
         result = LocalVisionReviewer(cfg).review(context(tmp_path))
         assert result.verdict == "needs_review"
         assert len(result.style_input_checks) == 7
-        assert {check.field for check in result.style_input_checks} == set(StyleBible.model_fields)
+        assert {check.field for check in result.style_input_checks} == set(STYLE_BIBLE_FIELDS)
         assert "sk-private" not in json.dumps(result.model_dump(mode="json"))
         # The field the reviewer did not assess or declared is never passed,
         # and it is reported as a style finding.

@@ -143,6 +143,17 @@ export const FROZEN_STYLE = {
   impact: { affected_shot_ids: [], invalidated_job_ids: [] },
 };
 
+export const FILM_TYPES = [
+  {
+    id: 'live_action', label: '仿真人（写实实拍）',
+    instruction_en: 'The entire shot is photorealistic live-action footage: real human performers with natural skin texture and pores, practical sets, physically based lighting and a real camera lens; no illustration, no cel shading, and no cartoon or anime rendering.',
+  },
+  {
+    id: 'animation', label: '动画（2D 赛璐璐）',
+    instruction_en: 'The entire shot is 2D cel-shaded animation: hand-drawn line art with clean contours, flat color fills, hard-edged shading and painted backgrounds; no photorealistic skin, no live-action footage, and no 3D CGI rendering.',
+  },
+];
+
 export const DIRECTOR_STYLE_CATALOG = [
   {
     id: 'wong-kar-wai', name_zh: '王家卫参考风格', version: '1.0.0',
@@ -190,6 +201,7 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/assets$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/styles$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/director-styles$/, respond: () => jsonResponse(DIRECTOR_STYLE_CATALOG) },
+    { method: 'GET', pattern: /\/api\/v1\/film-types$/, respond: () => jsonResponse(FILM_TYPES) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({
       draft_sha256: 'c'.repeat(64), draft_source: null, frozen_source: null,
     }) },

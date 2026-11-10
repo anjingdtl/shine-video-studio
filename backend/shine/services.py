@@ -73,7 +73,7 @@ def canonical_json(value: Any) -> str:
 def _style_has_cjk(style: StyleBible) -> bool:
     import re
 
-    return bool(re.search(r"[一-鿿]", " ".join(style.model_dump().values())))
+    return bool(re.search(r"[一-鿿]", " ".join(str(value) for value in style.model_dump().values())))
 
 
 def add_audit(
@@ -734,6 +734,7 @@ def make_render_request(
 
         projected = english_style_bible(style.director_style_binding)
         if projected is not None:
+            projected = projected.model_copy(update={"film_type": style_model.film_type})
             spec = spec.model_copy(update={"prompt_style": projected})
     compiler = H3PromptCompiler()
     try:

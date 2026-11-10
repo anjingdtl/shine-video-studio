@@ -607,6 +607,25 @@ html[data-theme='dark'] .shot-form-error{color:#d49c8e;border-color:#5a4038;back
 .style-preset-label{font-size:11px;color:#898b82;display:flex;flex-direction:column;gap:5px}
 .style-preset-label select{width:220px}
 .style-preset-summary{flex:1;min-width:220px;margin:0;font-size:11px;color:#6f715f;line-height:1.7}
+.film-type-picker{border:1px solid #e5e7da;background:#fafbf6;border-radius:8px;padding:12px;margin:11px 0 6px}
+.film-type-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:9px}
+.film-type-heading b,.film-type-heading span{display:block}
+.film-type-heading b{font-size:12px;color:#45473f}
+.film-type-heading span{font-size:9px;color:#8a8d7c;margin-top:3px}
+.film-type-warning{font-size:9px;color:#a06a2c;text-align:right;max-width:280px;line-height:1.5}
+.film-type-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.film-type-option{display:flex;flex-direction:column;gap:5px;text-align:left;border:1px solid #dfe3d4;background:#fff;border-radius:7px;padding:10px;cursor:pointer}
+.film-type-option b{font-size:12px;color:#3f4238}
+.film-type-option small{font-size:9px;line-height:1.55;color:#7c7f70}
+.film-type-option.is-selected{border-color:#8aa36e;background:#f2f7e9;box-shadow:inset 0 0 0 1px #8aa36e}
+.film-type-option:disabled{opacity:.6;cursor:not-allowed}
+.film-type-fixed{margin:8px 0 0;font-size:9px;line-height:1.6;color:#6d705f}
+.film-type-fixed b{color:#55584b}
+html[data-theme='dark'] .film-type-picker{background:#24271f;border-color:#3d4231}
+html[data-theme='dark'] .film-type-option{background:#1f231b;border-color:#3d4231}
+html[data-theme='dark'] .film-type-option b{color:#d6d8ce}
+html[data-theme='dark'] .film-type-option small,html[data-theme='dark'] .film-type-fixed{color:#a4a698}
+html[data-theme='dark'] .film-type-option.is-selected{background:#2c3325;border-color:#8aa36e}
 .director-style-picker{border:1px solid #e5e7da;background:#fafbf6;border-radius:8px;padding:12px;margin:11px 0 6px}
 .director-style-picker-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:9px}
 .director-style-picker-heading b,.director-style-picker-heading span{display:block}

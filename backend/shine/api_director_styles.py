@@ -19,7 +19,9 @@ from shine.director_styles.service import (
     register_profile_revision,
 )
 from shine.h3.compiler import COMPILER_VERSION, RULE_VERSION
+from shine.h3.film_type import FILM_TYPE_INSTRUCTIONS, FILM_TYPE_LABELS
 from shine.models import DirectorStyleProfileRevision, Project, StyleVersion
+from shine.schemas import STYLE_BIBLE_FIELDS, FilmType
 from shine.services import add_audit, require_project, update_style_draft
 
 router = APIRouter(prefix="/api/v1", tags=["director styles"])
@@ -80,7 +82,8 @@ def _preview(
             "suggested": suggestion[key],
             "changed": baseline.get(key) != suggestion[key],
         }
-        for key in suggestion
+        for key in STYLE_BIBLE_FIELDS
+        if key in suggestion
     ]
     return {
         "profile": _profile_public(entry),
@@ -110,6 +113,19 @@ def _profile_public(entry: CatalogEntry, *, availability: str = "available") -> 
         "technique_count": len(profile.techniques),
         "availability": availability,
     }
+
+
+@router.get("/film-types")
+def list_film_types() -> list[dict[str, str]]:
+    """The two fixed H3 film-type contracts; labels stay Chinese, prompts English."""
+    return [
+        {
+            "id": film_type.value,
+            "label": FILM_TYPE_LABELS[film_type],
+            "instruction_en": FILM_TYPE_INSTRUCTIONS[film_type],
+        }
+        for film_type in FilmType
+    ]
 
 
 @router.get("/director-styles")

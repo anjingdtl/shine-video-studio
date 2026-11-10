@@ -473,3 +473,13 @@ def test_english_style_projection_uses_the_frozen_template_techniques():
     assert "light" in payload["lighting_tone"].lower()
     assert english_style_bible(None) is None
     assert english_style_bible({"profile_snapshot": {"techniques": []}}) is None
+
+
+def test_film_type_catalog_is_the_two_fixed_h3_contracts(api):
+    client, _factory, _settings = api
+    rows = client.get("/api/v1/film-types").json()
+    assert [row["id"] for row in rows] == ["live_action", "animation"]
+    assert all(row["instruction_en"].startswith("The entire shot is") for row in rows)
+    animation = next(row for row in rows if row["id"] == "animation")
+    assert "2D cel-shaded animation" in animation["instruction_en"]
+    assert "no 3D CGI rendering" in animation["instruction_en"]

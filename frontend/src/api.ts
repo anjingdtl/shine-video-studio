@@ -167,9 +167,16 @@ export const json = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-export type Style = {
-  photography_language: string; shot_blocking: string; color_palette: string;
-  lighting_tone: string; lens_texture: string; editing_rhythm: string; sound_performance: string;
+export type FilmTypeId = 'live_action' | 'animation';
+
+export type StyleDimension =
+  | 'photography_language' | 'shot_blocking' | 'color_palette' | 'lighting_tone'
+  | 'lens_texture' | 'editing_rhythm' | 'sound_performance';
+
+export type Style = Record<StyleDimension, string> & { film_type?: FilmTypeId | null };
+
+export type FilmTypeOption = {
+  id: FilmTypeId; label: string; instruction_en: string;
 };
 
 export type DirectorStyleSummary = {

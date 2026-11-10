@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shine.asset_identity import character_reference_matches
+from shine.h3.film_type import film_type_sentence
 from shine.h3.spoken_language import (
     DEFAULT_SPOKEN_LANGUAGE,
     canonical_spoken_language,
@@ -89,9 +90,11 @@ def _style_sentences(style: StyleBible, style_version_id: str, include_sound: bo
         if include_sound
         else "Performance and sound: no spoken dialogue in this shot."
     )
+    film_clause = film_type_sentence(style.film_type)
+    film_prefix = f"{film_clause} " if film_clause else ""
     return (
         "Visual style constraints from the frozen Style Bible "
-        f"(version {style_version_id}). Photography language: {style.photography_language}. "
+        f"(version {style_version_id}). {film_prefix}Photography language: {style.photography_language}. "
         f"Blocking: {style.shot_blocking}. Color palette: {style.color_palette}. "
         f"Lighting and tone: {style.lighting_tone}. Lens and texture: {style.lens_texture}. "
         f"Editing rhythm: {style.editing_rhythm}. {sound_clause}"
@@ -100,8 +103,15 @@ def _style_sentences(style: StyleBible, style_version_id: str, include_sound: bo
 
 def _prompt_style(spec: ShotSpec, style: StyleBible) -> StyleBible:
     # The translated draft is part of the shot revision; the original frozen
-    # style and its hash remain authoritative and unchanged.
-    return spec.prompt_style or style
+    # style and its hash remain authoritative and unchanged.  The film type is
+    # a project-wide contract, so a per-shot English style that predates it
+    # still inherits the frozen selection.
+    prompt_style = spec.prompt_style
+    if prompt_style is None:
+        return style
+    if prompt_style.film_type is None and style.film_type is not None:
+        return prompt_style.model_copy(update={"film_type": style.film_type})
+    return prompt_style
 
 
 def _format_timestamp(seconds: float) -> str:

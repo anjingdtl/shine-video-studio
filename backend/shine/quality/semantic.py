@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from shine.llm.base import ProviderConfig
 from shine.quality.client_identity import review_client_identity  # noqa: F401  # Capture at process startup.
 from shine.schemas import (
+    STYLE_BIBLE_FIELDS,
     FusedQCResult,
     HardFailure,
     SemanticFinding,
@@ -49,7 +50,7 @@ def vision_review_schema():
     schema["properties"]["verdict"] = {"type": "string", "enum": ["passed", "failed", "needs_review"]}
     schema["properties"]["style_input_checks"] = {
         "type": "array", "items": {"$ref": "#/$defs/StyleInputCheck"},
-        "minItems": len(StyleBible.model_fields), "maxItems": len(StyleBible.model_fields),
+        "minItems": len(STYLE_BIBLE_FIELDS), "maxItems": len(STYLE_BIBLE_FIELDS),
     }
     # Tighten only the current wire contract; stored historical records retain
     # their wider model limits and are never rewritten.
@@ -96,8 +97,8 @@ def require_style_input_checks(result: SemanticReviewResult):
     recorded, so a review that reaches this check is coherent.
     """
     checks = result.style_input_checks
-    if (checks is None or len(checks) != len(StyleBible.model_fields)
-            or {check.field for check in checks} != set(StyleBible.model_fields)):
+    if (checks is None or len(checks) != len(STYLE_BIBLE_FIELDS)
+            or {check.field for check in checks} != set(STYLE_BIBLE_FIELDS)):
         raise ValueError("STYLE_INPUT_COVERAGE_MISSING")
     for check in checks:
         if check.status != "consistent":
@@ -125,7 +126,7 @@ def bind_style_input_review(result: SemanticReviewResult) -> SemanticReviewResul
     by_field = {check.field: check for check in checks}
     findings = list(result.findings)
     normalized = []
-    for name in StyleBible.model_fields:
+    for name in STYLE_BIBLE_FIELDS:
         check = by_field.get(name)
         if check is None:
             check = StyleInputCheck(
@@ -158,7 +159,7 @@ def bind_style_input_review(result: SemanticReviewResult) -> SemanticReviewResul
         # reading is that the shot still needs a human.
         verdict = "needs_review"
     confidence = result.overall_confidence
-    if any(field not in by_field for field in StyleBible.model_fields):
+    if any(field not in by_field for field in STYLE_BIBLE_FIELDS):
         # The reviewer did not cover every frozen field, so the completeness
         # of this review was not established.
         confidence = 0.0

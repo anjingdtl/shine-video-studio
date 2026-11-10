@@ -6,10 +6,10 @@
  * text. Options match historical text by exact string equality, so catalog
  * upgrades never rewrite historical custom content.
  */
-import type { Style } from './api';
+import type { Style, StyleDimension } from './api';
 import { styleFields } from './constants';
 
-export type StyleDimension = keyof Style;
+export type { StyleDimension } from './api';
 
 export type StyleOption = { id: string; label: string; text: string };
 

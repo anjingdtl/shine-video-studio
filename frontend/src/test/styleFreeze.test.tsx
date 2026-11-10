@@ -88,6 +88,22 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
   });
 });
 
+describe('影片类型', () => {
+  it('选择动画后保存的草稿带上 film_type，并展示固定英文范例', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /剧本统筹/);
+    await fillSevenOptions(user);
+    await user.click(await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ }));
+    expect(screen.getAllByText(/2D cel-shaded animation/).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole('button', { name: '保存草稿' }));
+    await waitFor(() => {
+      expect(stub.callsOf('PUT', PUT_DRAFT)).toHaveLength(1);
+    });
+    expect(stub.callsOf('PUT', PUT_DRAFT)[0].body).toMatchObject({ film_type: 'animation' });
+  });
+});
+
 describe('风格冻结（下拉交互）', () => {
   it('免密冻结仍保持保存→授权→冻结顺序，授权后草稿变化被拒绝并保留选项', async () => {
     const user = userEvent.setup();

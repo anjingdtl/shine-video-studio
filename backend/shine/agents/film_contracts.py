@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from shine.schemas import APIModel, DialogueLine, ShotSpec, StyleBible, StyleInputCheck
+from shine.schemas import STYLE_BIBLE_FIELDS, APIModel, DialogueLine, ShotSpec, StyleBible, StyleInputCheck
 
 
 class SceneBeat(APIModel):
@@ -224,7 +224,7 @@ class StyleInputAssessment(APIModel):
 
     @model_validator(mode="after")
     def complete_and_consistent(self):
-        if {check.field for check in self.checks} != set(StyleBible.model_fields):
+        if {check.field for check in self.checks} != set(STYLE_BIBLE_FIELDS):
             raise ValueError("STYLE_INPUT_FIELD_COVERAGE")
         if self.recommendation == "proceed_to_preflight" and any(
             check.status != "consistent" or check.confidence < 0.7 for check in self.checks
@@ -253,7 +253,7 @@ class StyleInputWire(APIModel):
 
     @model_validator(mode="after")
     def complete_and_consistent(self):
-        if {check.field for check in self.checks} != set(StyleBible.model_fields):
+        if {check.field for check in self.checks} != set(STYLE_BIBLE_FIELDS):
             raise ValueError("STYLE_INPUT_FIELD_COVERAGE")
         if self.recommendation == "proceed_to_preflight" and any(
             check.status != "consistent" or check.confidence < 0.7 for check in self.checks

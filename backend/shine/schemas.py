@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 
 class APIModel(BaseModel):
@@ -52,7 +52,30 @@ class AssetMetadataUpdate(APIModel):
     tags: list[str] | None = Field(default=None, max_length=40)
 
 
+class FilmType(StrEnum):
+    LIVE_ACTION = "live_action"
+    ANIMATION = "animation"
+
+
+#: The seven artistic dimensions the semantic reviewer assesses.  ``film_type``
+#: is a deterministic prompt contract, not a VLM judgement, so it deliberately
+#: stays outside this list while remaining part of the frozen Style Bible.
+STYLE_BIBLE_FIELDS = (
+    "photography_language",
+    "shot_blocking",
+    "color_palette",
+    "lighting_tone",
+    "lens_texture",
+    "editing_rhythm",
+    "sound_performance",
+)
+
+
 class StyleBible(APIModel):
+    # Older frozen snapshots contain exactly the seven fields above.  Omitting
+    # ``film_type`` when it is unset keeps their canonical hash unchanged.
+    model_config = ConfigDict(extra="forbid")
+
     photography_language: str = Field(min_length=1, max_length=2000)
     shot_blocking: str = Field(min_length=1, max_length=2000)
     color_palette: str = Field(min_length=1, max_length=2000)
@@ -60,6 +83,20 @@ class StyleBible(APIModel):
     lens_texture: str = Field(min_length=1, max_length=2000)
     editing_rhythm: str = Field(min_length=1, max_length=2000)
     sound_performance: str = Field(min_length=1, max_length=2000)
+    film_type: FilmType | None = Field(
+        default=None,
+        description="Live-action or animation. The server writes the fixed English H3 clause; this is not free text.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_film_type(self, handler):
+        # Pydantic does not apply ``exclude_none`` from model_config to
+        # model_dump in this version, and nested ShotSpec serialization must
+        # keep the pre-film-type hash shape too.  A wrap serializer covers both.
+        data = handler(self)
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
 
 
 class StyleFreezeRequest(APIModel):

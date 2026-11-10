@@ -4,6 +4,7 @@ import pytest
 
 from shine.h3.compiler import H3PromptCompiler, PromptCompilationError
 from shine.schemas import (
+    FilmType,
     FrameRole,
     GenerationMode,
     ReferenceManifestItem,
@@ -409,6 +410,31 @@ def test_mode_hint_conflicting_with_references_is_rejected():
     with pytest.raises(PromptCompilationError) as exc:
         compile_prompt(manifest, mode=GenerationMode.T2VA)
     assert exc.value.code == "H3_MODE_REFERENCE_MISMATCH"
+
+
+def test_film_type_writes_one_fixed_english_sentence():
+    animation = STYLE.model_copy(update={"film_type": FilmType.ANIMATION})
+    compiled = H3PromptCompiler().compile(spec=spec(), style=animation, manifest=[])
+    assert "Film type: The entire shot is 2D cel-shaded animation" in compiled.prompt
+    assert "no photorealistic skin, no live-action footage, and no 3D CGI rendering" in compiled.prompt
+
+    live_action = STYLE.model_copy(update={"film_type": FilmType.LIVE_ACTION})
+    compiled = H3PromptCompiler().compile(spec=spec(), style=live_action, manifest=[])
+    assert "Film type: The entire shot is photorealistic live-action footage" in compiled.prompt
+    assert "no illustration, no cel shading, and no cartoon or anime rendering" in compiled.prompt
+
+
+def test_an_unset_film_type_does_not_change_the_legacy_style_hash_shape():
+    assert "film_type" not in STYLE.model_dump(mode="json")
+    selected = STYLE.model_copy(update={"film_type": FilmType.ANIMATION})
+    assert selected.model_dump(mode="json")["film_type"] == "animation"
+
+
+def test_a_per_shot_english_style_inherits_the_frozen_film_type():
+    frozen = STYLE.model_copy(update={"film_type": FilmType.ANIMATION})
+    shot = spec(prompt_style=STYLE)
+    compiled = H3PromptCompiler().compile(spec=shot, style=frozen, manifest=[])
+    assert "2D cel-shaded animation" in compiled.prompt
 
 
 def test_a_manual_shot_inherits_the_projects_english_style_prompt(api):

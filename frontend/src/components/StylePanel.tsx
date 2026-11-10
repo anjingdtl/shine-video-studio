@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, HelpCircle, History, LockKeyhole, LockOpen, Sparkles } from 'lucide-react';
-import { api, json, type DirectorStylePreview, type DirectorStyleProfile, type DirectorStyleSummary, type Style, type StyleVersion } from '../api';
+import { api, json, type DirectorStylePreview, type DirectorStyleProfile, type DirectorStyleSummary, type FilmTypeOption, type Style, type StyleVersion } from '../api';
 import { styleFields } from '../constants';
 import {
   matchStyleOption, presetForStyle, styleCatalogHash, STYLE_CATALOG_VERSION,
@@ -44,6 +44,12 @@ const AI_ERROR_HINTS: Array<[RegExp, string]> = [
 /** Roles allowed to emit a StyleProposal; the first routed role is used. */
 const STYLE_PROPOSAL_ROLES = ['director', 'cinematographer', 'scriptwriter', 'editor'];
 
+/** Labels remain usable if the catalog request fails; the server still owns the prompt text. */
+const FILM_TYPE_FALLBACK: FilmTypeOption[] = [
+  { id: 'live_action', label: '仿真人（写实实拍）', instruction_en: '' },
+  { id: 'animation', label: '动画（2D 赛璐璐）', instruction_en: '' },
+];
+
 function aiErrorText(message: string): string {
   for (const [pattern, hint] of AI_ERROR_HINTS) {
     if (pattern.test(message)) return hint;
@@ -78,6 +84,9 @@ export default function StylePanel({
   const [directorPreview, setDirectorPreview] = useState<DirectorStylePreview | null>(null);
   const [directorBusy, setDirectorBusy] = useState(false);
   const [directorError, setDirectorError] = useState('');
+  const [filmTypes, setFilmTypes] = useState<FilmTypeOption[] | null>(null);
+  const filmTypeOptions = filmTypes && filmTypes.length ? filmTypes : FILM_TYPE_FALLBACK;
+  const selectedFilmType = filmTypeOptions.find((option) => option.id === style.film_type) ?? null;
   const freshProposalRef = useRef(false);
 
   useEffect(() => {
@@ -99,6 +108,9 @@ export default function StylePanel({
     api<DirectorStyleProfile[]>('/director-styles')
       .then((rows) => { if (alive) setDirectorStyles(rows); })
       .catch((error) => { if (alive) { setDirectorStyles([]); setDirectorError(String((error as Error).message)); } });
+    api<FilmTypeOption[]>('/film-types')
+      .then((rows) => { if (alive) setFilmTypes(rows); })
+      .catch(() => { if (alive) setFilmTypes([]); });
     api<{
       draft_sha256: string; draft_source: DirectorStyleSummary | null; frozen_source: DirectorStyleSummary | null;
     }>(`/projects/${projectId}/director-style`)
@@ -130,7 +142,10 @@ export default function StylePanel({
   // available after the same content was saved as a draft; only saving needs a
   // draft change to be meaningful.
   const canFreeze = allSevenFilled;
-  const canSave = allSevenFilled && styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''));
+  const canSave = allSevenFilled && (
+    styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''))
+    || (style.film_type ?? null) !== (serverDraft?.film_type ?? null)
+  );
   const strengthLabel = (strength: DirectorStyleSummary['strength']) => ({
     subtle: '轻', balanced: '均衡', strong: '鲜明',
   })[strength];
@@ -143,7 +158,7 @@ export default function StylePanel({
     if (!preset) return;
     const hasEdits = styleFields.some(([field]) => String(style[field] ?? '').trim() && style[field] !== preset.values[field]);
     if (hasEdits && !window.confirm('当前草稿已有自定义修改，选择整套预设会覆盖这些修改。继续吗？')) return;
-    setStyle(() => ({ ...preset.values }));
+    setStyle(() => ({ ...preset.values, film_type: style.film_type ?? null }));
     setSelectedDirectorId('');
     setDirectorPreview(null);
     setCustomFields(new Set());
@@ -275,7 +290,10 @@ export default function StylePanel({
         strength: directorStrength,
         expected_draft_sha256: current.draft_sha256,
       }));
-      setStyle(() => result.style_draft);
+      setStyle(() => ({
+        ...result.style_draft,
+        film_type: style.film_type ?? result.style_draft.film_type ?? null,
+      }));
       setDirectorState((state) => state ? { ...state, draft_sha256: result.draft_sha256, draft_source: result.draft_source } : state);
       setCustomFields(new Set());
       onMessage(`已采用「${profile.name_zh}」到草稿；请检查七维内容后单独确认冻结。`);
@@ -305,6 +323,7 @@ export default function StylePanel({
         <div>
           <p><b>这一步要做什么：</b>选一套风格或逐项调整，然后点右下角的冻结按钮。第一次冻结会同时批准并绑定官方规则包，所以那一次按钮写的是「批准并冻结」；之后写的是「冻结为新版本」。</p>
           <p><b>为什么要冻结：</b>风格是七个维度的不可变版本，之后每个镜头都引用它；不冻结，下面的 AI 分镜会直接拒绝运行。</p>
+          <p><b>影片类型：</b>先选仿真人或动画。服务端会把对应的固定英文范例写进每条 H3 提示词；动画项目不选，模型可能自行拍成真人画面。</p>
         </div>
       </div>
 
@@ -323,6 +342,40 @@ export default function StylePanel({
         <p className="style-preset-summary">
           {matchedPreset ? matchedPreset.summary : '当前为自定义内容；可选一套整套风格作为起点，或在下方逐项调整。'}
         </p>
+      </div>
+
+      <div className="film-type-picker" aria-label="影片类型">
+        <div className="film-type-heading">
+          <div>
+            <b>影片类型</b>
+            <span>固定英文范例由服务端写入 H3 提示词，不随自由文本漂移</span>
+          </div>
+          {!style.film_type && <small className="film-type-warning">未选择时保持模型默认；动画项目请明确选择「动画」</small>}
+        </div>
+        <div className="film-type-options">
+          {filmTypeOptions.map((option) => {
+            const selected = style.film_type === option.id;
+            return (
+              <button
+                type="button"
+                key={option.id}
+                className={selected ? 'film-type-option is-selected' : 'film-type-option'}
+                aria-pressed={selected}
+                disabled={busy}
+                onClick={() => {
+                  setStyle((value) => ({ ...value, film_type: option.id }));
+                  setDirectorPreview(null);
+                }}
+              >
+                <b>{option.label}</b>
+                {option.instruction_en && <small>{option.instruction_en}</small>}
+              </button>
+            );
+          })}
+        </div>
+        {selectedFilmType?.instruction_en && (
+          <p className="film-type-fixed"><b>H3 固定范例：</b>{selectedFilmType.instruction_en}</p>
+        )}
       </div>
 
       <div className="director-style-picker" aria-label="导演风格模板">
