@@ -131,3 +131,57 @@ def test_two_scene_calls_keep_a_gap_between_them(api, monkeypatch):
     _prepare(client, project, doc)
     assert len(stamps) == 2, stamps
     assert stamps[1] - stamps[0] >= 0.3, "two provider calls must keep a real gap"
+
+
+def test_a_fresh_submission_gets_its_own_single_resend(api, monkeypatch):
+    """The resend budget belongs to one submission, not to the script forever.
+
+    A network timeout says nothing about the text. Counting the budget across
+    every historical submission made the scene permanently unretryable: cancel
+    and ask again, and the new run was born with its budget spent, so the only
+    way forward was editing the script. A fresh submission now carries its own
+    single resend, while one submission still cannot burn a series of calls.
+    """
+    import uuid
+
+    client, factory, project, doc, task_id, stuck_id = _blocked_outline(
+        api, monkeypatch, status="NEEDS_REVIEW", phase="WAITING_PROVIDER",
+        external_outcome="UNKNOWN", error_code="LLM_TIMEOUT")
+    with factory() as db:
+        version = db.get(AgentTaskRecord, task_id).state_version
+    first = client.post(f"/api/v1/projects/{project}/story-preparation/tasks/{task_id}/resend-unknown", json={
+        "expected_state_version": version, "subtask_id": stuck_id,
+        "evidence": "我确认重新提问这一场"}, headers=LOCAL)
+    assert first.status_code == 200, first.text
+
+    # A new submission after cancelling: same document, same stuck subcall,
+    # brand-new base identity.
+    with factory.begin() as db:
+        previous = db.get(AgentTaskRecord, task_id)
+        fresh = AgentTaskRecord(
+            project_id=project,
+            role_id=previous.role_id,
+            input_hash=previous.input_hash,
+            style_version_id=previous.style_version_id,
+            asset_manifest_hash=previous.asset_manifest_hash,
+            rulepack_id=previous.rulepack_id,
+            rulepack_hash=previous.rulepack_hash,
+            model_profile_id=previous.model_profile_id,
+            model_id=previous.model_id,
+            schema_version=previous.schema_version,
+            status="NEEDS_REVIEW",
+            error_code=previous.error_code,
+            trace={**previous.trace, "base_identity": uuid.uuid4().hex,
+                   "blocked_subtasks": [{
+                       "scene_key": "S1", "status": "NEEDS_REVIEW", "task_id": stuck_id,
+                       "error_code": "LLM_TIMEOUT", "external_outcome": "UNKNOWN"}]},
+            state_version=1,
+        )
+        db.add(fresh)
+        db.flush()
+        fresh_id, fresh_version = fresh.id, fresh.state_version
+
+    second = client.post(f"/api/v1/projects/{project}/story-preparation/tasks/{fresh_id}/resend-unknown", json={
+        "expected_state_version": fresh_version, "subtask_id": stuck_id,
+        "evidence": "取消后重新提交，再确认一次"}, headers=LOCAL)
+    assert second.status_code == 200, second.text

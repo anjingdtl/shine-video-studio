@@ -119,7 +119,19 @@ def queue_outline(db, project_id, document, gateway, facts):
 MAX_UNKNOWN_RESENDS = 1
 
 
-def unknown_resends_used(db, subtask):
+def unknown_resends_used(db, subtask, base_identity: str | None = None):
+    """How many authorized resends this scene already spent **in this run**.
+
+    The budget belongs to one submission attempt, not to the script forever.
+    Counting it against every historical task with the same content made the
+    scene permanently unretryable: once the single resend was spent, cancelling
+    the task and asking again produced a new submission that was born with its
+    budget already exhausted, so the only way forward was to edit the script -
+    even when the failure was a network timeout that says nothing about the
+    text. ``base_identity`` scopes the count to the current submission, so a
+    fresh, explicit submission gets its own single resend while one submission
+    can never burn a series of calls.
+    """
     trace = subtask.trace or {}
     identity = AgentTaskRecord.input_hash == subtask.input_hash
     if trace.get("document_id") and trace.get("scene_key"):
@@ -127,13 +139,20 @@ def unknown_resends_used(db, subtask):
             AgentTaskRecord.trace["document_id"].as_string() == trace["document_id"],
             AgentTaskRecord.trace["scene_key"].as_string() == trace["scene_key"],
         ))
+    query = select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == subtask.project_id,
+        AgentTaskRecord.role_id == subtask.role_id,
+        identity,
+    )
+    if base_identity:
+        # The authorized resend records the submission it belonged to, so the
+        # budget is counted per submission and never inherited by a later one.
+        query = query.where(
+            AgentTaskRecord.trace["reconciliation"]["base_identity"].as_string() == base_identity
+        )
     return sum(
         ((other.trace or {}).get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"
-        for other in db.scalars(select(AgentTaskRecord).where(
-            AgentTaskRecord.project_id == subtask.project_id,
-            AgentTaskRecord.role_id == subtask.role_id,
-            identity,
-        ))
+        for other in db.scalars(query)
     )
 
 
@@ -154,12 +173,22 @@ def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str
     sub = db.get(AgentTaskRecord, subtask_id)
     if sub is None or sub.project_id != row.project_id:
         raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_FOUND")
-    # One resend per scene: a scene must not be able to burn a series of calls.
-    used = unknown_resends_used(db, sub)
+    # One resend per scene **per submission**: a scene must not burn a series of
+    # calls, but a new submission after a cancel starts with its own single
+    # resend instead of inheriting a spent budget forever.
+    used = unknown_resends_used(db, sub, base_identity=(row.trace or {}).get("base_identity"))
     if used >= MAX_UNKNOWN_RESENDS:
         raise HTTPException(409, "STORY_UNKNOWN_RESEND_ALREADY_USED")
+    # A subcall that a person already replaced is retired as SUPERSEDED.  It
+    # must stay retryable for a later submission, otherwise the first authorized
+    # resend becomes the last one forever: the scene can never be asked again
+    # even though the new submission carries its own budget.
+    replaced_by_decision = (((sub.trace or {}).get("reconciliation") or {}).get("outcome")
+                            == "USER_AUTHORIZED_NEW_REQUEST")
+    retryable = (sub.status == "NEEDS_REVIEW" or scenes.is_dead_scene_task(sub)
+                 or (sub.status == "SUPERSEDED" and replaced_by_decision))
     if (row.status != "NEEDS_REVIEW" or (sub.trace or {}).get("external_outcome") != "UNKNOWN"
-            or (sub.status != "NEEDS_REVIEW" and not scenes.is_dead_scene_task(sub))):
+            or not retryable):
         raise HTTPException(409, "STORY_UNKNOWN_SUBTASK_NOT_RETRYABLE")
     previous_identity = sub.request_identity
     sub.status = "SUPERSEDED"
@@ -169,6 +198,7 @@ def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str
     sub.trace = {**(sub.trace or {}), "previous_request_identity": previous_identity,
                  "reconciliation": {"outcome": "USER_AUTHORIZED_NEW_REQUEST", "attempt": used + 1,
                                     "authorized_by": actor, "evidence": evidence,
+                                    "base_identity": (row.trace or {}).get("base_identity"),
                                     "checked_at": utcnow().isoformat()}}
     add_audit(db, actor, "STORY_UNKNOWN_SUBTASK_RESEND_AUTHORIZED", "agent_task", sub.id,
               {"scene_key": entry.get("scene_key"), "previous_request_identity": previous_identity,
