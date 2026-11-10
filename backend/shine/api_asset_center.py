@@ -1652,10 +1652,34 @@ def list_assignments(db: DBSession, project_id: str | None = None, asset_id: str
 
 @router.get("/projects/{project_id}/asset-center/search")
 def search_library_for_project(
-    project_id: str, db: DBSession, q: str = Query(default="", max_length=200), category: str | None = None
+    project_id: str, db: DBSession, q: str = Query(default="", max_length=200),
+    category: str | None = None, scope: str = Query(default="project", max_length=16),
 ):
+    """Search the library from inside one project's material step.
+
+    The default scope is this project. The library is shared on purpose - a good
+    plate or a coat can serve several productions - but a person preparing
+    materials for one film must not be shown another film's generated stills as
+    if they were candidates for this one. Anything this project never linked is
+    excluded unless the caller explicitly asks for the whole library.
+    """
     if db.get(Project, project_id) is None:
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "找不到所选影视项目"})
+    project_versions: set[str] = set()
+    if scope != "library":
+        project_versions = {
+            version_id
+            for version_id in db.scalars(
+                select(LibraryProjectLink.library_version_id).where(
+                    LibraryProjectLink.project_id == project_id,
+                    LibraryProjectLink.library_version_id.is_not(None),
+                )
+            )
+            if version_id
+        }
+        if not project_versions:
+            return {"items": [], "scope": "project",
+                    "note": "这个项目还没有用过素材库里的版本；如需跨项目挑选，请显式选择搜索全部素材库。"}
     stmt = select(LibraryAsset).where(LibraryAsset.status == "ACTIVE")
     if category:
         stmt = stmt.where(LibraryAsset.category == category)
@@ -1667,6 +1691,9 @@ def search_library_for_project(
             continue
         version = db.get(LibraryVersion, asset.current_version_id) if asset.current_version_id else None
         if version is None or version.status != "PROMOTED" or version.is_mock:
+            continue
+        if project_versions and version.id not in project_versions:
+            # Another production's still. It is not a candidate for this one.
             continue
         try:
             service.require_version_rights(db, version, project_id=project_id, usage_scope="local")

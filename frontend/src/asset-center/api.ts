@@ -99,8 +99,9 @@ export function listAssignments(projectId?: string) {
   const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
   return api<{ items: Array<Record<string, any>> }>(`/asset-center/assignments${query}`);
 }
-export function searchLibraryForProject(projectId: string, q: string, category?: string) {
-  const query = new URLSearchParams({ q });
+export function searchLibraryForProject(projectId: string, q: string, category?: string,
+                                         scope: 'project' | 'library' = 'project') {
+  const query = new URLSearchParams({ q, scope });
   if (category) query.set('category', category);
   return api<{ items: Array<{ asset: LibraryAsset; version: LibraryVersion }> }>(`/projects/${projectId}/asset-center/search?${query}`);
 }

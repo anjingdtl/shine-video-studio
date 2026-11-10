@@ -188,14 +188,24 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const activeProject = useRef(projectId);
   activeProject.current = projectId;
 
-  async function searchGlobalMaterial(requirement: MaterialRequirement) {
+  async function searchGlobalMaterial(requirement: MaterialRequirement,
+                                      scope: 'project' | 'library' = 'project') {
     setLibrarySearchRequirement(requirement.requirement_id);
     setLibrarySearchResults([]);
     setLibrarySearchError('');
     setLibrarySearchBusy(true);
     try {
-      const result = await searchLibraryForProject(projectId, requirement.entity_id, requirement.family);
-      if (activeProject.current === projectId) setLibrarySearchResults(result.items);
+      const result = await searchLibraryForProject(projectId, requirement.entity_id, requirement.family, scope);
+      if (activeProject.current === projectId) {
+        setLibrarySearchResults(result.items);
+        // Another production's stills are not candidates for this one, so the
+        // default search stays inside this project and says why it is empty.
+        if (!result.items.length) {
+          setLibrarySearchError(scope === 'project'
+            ? '本项目还没有用过素材库里的版本。需要借鉴其他作品的素材时，点「搜索全部素材库」。'
+            : '素材库里没有匹配的已审核版本。');
+        }
+      }
     } catch (error) {
       setLibrarySearchError(error instanceof Error ? error.message : String(error));
     } finally { setLibrarySearchBusy(false); }
@@ -845,6 +855,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   <button type="button" className="text-button" disabled={busy || librarySearchBusy}
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
+                  </button>
+                  <button type="button" className="text-button" disabled={busy || librarySearchBusy}
+                    title="素材库是跨项目共用的；默认只搜本项目，这里显式放宽到全部项目"
+                    onClick={() => void searchGlobalMaterial(requirement, 'library')}>
+                    搜索全部素材库（跨项目）
                   </button>
                   {assets.filter((asset) => asset.id === (bindings[requirement.requirement_id] ?? requirement.bound_asset_id)
                     && asset.approved && asset.locked && asset.role === requirement.family && asset.entity_id === requirement.entity_id)
