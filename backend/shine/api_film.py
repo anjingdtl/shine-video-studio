@@ -17,7 +17,7 @@ from shine.agents.film import FilmAgentDispatcher, asset_context, load_inputs
 from shine.agents.film_contracts import CameraPlan, FilmAgentRegistry, FilmRunRequest, StyleInputWire, StyleProposal
 from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
-from shine.asset_identity import resolve_character_asset, split_character_names
+from shine.asset_identity import character_reference_key, resolve_character_asset, split_character_names
 from shine.director_styles.service import camera_style_text, resolve_frozen_binding, sound_style_text
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError, text_provider_snapshot
@@ -364,7 +364,6 @@ def artifacts(project_id: str, db: DBSession):
     ]
 
 
-@router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
 def _approved_master_for_name(db, project_id: str, name: str):
     """The approved, locked master a beat's character name refers to.
 
@@ -372,20 +371,32 @@ def _approved_master_for_name(db, project_id: str, name: str):
     match is by containment in either direction. Only an approved and locked
     master may be bound: an unconfirmed byte must never reach the renderer.
     """
-    candidates = list(db.scalars(select(Asset).where(
+    from shine.materialprep.service import character_master_entity
+
+    name = character_master_entity(db, project_id, name)
+    candidates = db.scalars(select(Asset).where(
         Asset.project_id == project_id,
+        Asset.kind == "image",
+        Asset.role == "character",
         Asset.approved.is_(True),
         Asset.locked.is_(True),
-    )))
+    ).order_by(Asset.created_at.desc(), Asset.id.desc()))
+    by_entity = {}
     for asset in candidates:
         entity = (asset.entity_id or "").strip()
-        if not entity:
-            continue
-        if entity == name or name in entity or entity in name:
-            return asset
-    return None
+        if entity and not (asset.provenance or {}).get("offline_only"):
+            by_entity.setdefault(entity, asset)
+    if name in by_entity:
+        return by_entity[name]
+    key = character_reference_key(name)
+    exact = [asset for entity, asset in by_entity.items() if key and key == character_reference_key(entity)]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    compatible = [asset for entity, asset in by_entity.items() if name and (name in entity or entity in name)]
+    return compatible[0] if len(compatible) == 1 else None
 
 
+@router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
 def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
     try:
         project = require_project(db, project_id)
@@ -494,10 +505,13 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             # the whole cast - so one shot's references cannot leak into another.
             for name in beat["characters"]:
                 asset = _approved_master_for_name(db, project_id, name)
-                if asset is None or asset.id in bound_asset_ids:
+                if asset is None:
                     continue
-                use_as = "subject" if asset.role == "character" else "picture"
-                bindings.append(ShotBindingInput(asset_id=asset.id, use_as=use_as,
+                existing = next((binding for binding in bindings if binding.asset_id == asset.id), None)
+                if existing is not None:
+                    existing.role = existing.role or name
+                    continue
+                bindings.append(ShotBindingInput(asset_id=asset.id, use_as="subject", role=name,
                                                  ordinal=len(bindings)))
                 bound_asset_ids.append(asset.id)
             camera_fields = {

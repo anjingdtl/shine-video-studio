@@ -1068,6 +1068,63 @@ def _allowed_actions(run: MaterialRun, statuses: list[str]) -> list[str]:
     return actions
 
 
+def character_master_entity(db, project_id: str, name: str) -> str:
+    """Read an explicit alias from the current project's material requirements."""
+    from shine.comfyops.preproduction import current_material_plan
+
+    plan = current_material_plan(db, project_id)
+    if plan is not None:
+        canonical = db.scalar(select(AssetRequirement.payload["canonical_entity_id"].as_string()).where(
+            AssetRequirement.plan_id == plan.id,
+            AssetRequirement.payload["family"].as_string() == "character",
+            AssetRequirement.payload["entity_id"].as_string() == name,
+        ))
+        if canonical:
+            return canonical
+    return name
+
+
+def bind_material_master(db, requirement, asset, actor: str, *, canonical_entity_id: str | None = None):
+    payload = dict(requirement.payload)
+    if canonical_entity_id:
+        payload["canonical_entity_id"] = canonical_entity_id
+    requirement.payload = {
+        **payload,
+        "strategy": "reuse_master",
+        "bound_asset_id": asset.id,
+        "bound_asset_sha256": asset.sha256,
+        "confirmed_by": actor,
+    }
+    requirement.sha256 = graph_hash(requirement.payload)
+    add_audit(db, actor, "MATERIAL_MASTER_SELECTED", "asset_requirement", requirement.id,
+              {"previous_asset_id": payload.get("bound_asset_id"), "asset_id": asset.id,
+               "canonical_entity_id": payload.get("canonical_entity_id")}, project_id=asset.project_id)
+
+
+def retire_unused_masters(db, plan, selected, actor: str, *, entities: set[str]):
+    from shine.models import Asset, ShotAssetBinding
+
+    db.flush()
+    bound_ids = select(AssetRequirement.payload["bound_asset_id"].as_string()).where(
+        AssetRequirement.plan_id == plan.id,
+        AssetRequirement.payload["bound_asset_id"].as_string().is_not(None),
+    )
+    for previous in db.scalars(select(Asset).where(
+        Asset.project_id == selected.project_id,
+        Asset.id != selected.id,
+        Asset.role == selected.role,
+        Asset.entity_id.in_(entities),
+        Asset.approved.is_(True),
+        Asset.locked.is_(True),
+        Asset.id.not_in(bound_ids),
+        Asset.id.not_in(select(ShotAssetBinding.asset_id)),
+    )):
+        previous.locked = False
+        previous.locked_at = None
+        add_audit(db, actor, "MATERIAL_MASTER_ARCHIVED", "asset", previous.id,
+                  {"replacement_asset_id": selected.id}, project_id=previous.project_id)
+
+
 def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
     """The material completion condition.
 
@@ -1115,7 +1172,7 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         if match is None:
             reason = "ASSET_OR_VOICE_MISSING"
         else:
-            if match.role != family or match.entity_id != entity_id:
+            if match.role != family or match.entity_id != (payload.get("canonical_entity_id") or entity_id):
                 reason = "ASSET_IDENTITY_MISMATCH"
             if payload.get("bound_asset_sha256") and payload["bound_asset_sha256"] != match.sha256:
                 reason = "ASSET_HASH_CHANGED"

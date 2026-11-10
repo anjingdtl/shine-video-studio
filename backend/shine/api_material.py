@@ -515,6 +515,57 @@ def resume_run(project_id: str, run_id: str, body: ResumeBody, actor: Operator, 
                                                   idempotency_key=body.idempotency_key)}
 
 
+class MergeCharacterBody(APIModel):
+    canonical_requirement_id: str
+    alias_requirement_id: str
+    master_asset_id: str
+
+
+@router.post("/projects/{project_id}/material-preparation/merge-character")
+def merge_character(project_id: str, body: MergeCharacterBody, actor: Operator, db: DBSession,
+                    settings: SettingsDep):
+    from shine.api_preparation import locked
+    from shine.comfyops.assets import rights_status
+    from shine.comfyops.models import AssetRequirement
+    from shine.comfyops.preproduction import current_material_plan
+    from shine.media.artifacts import safe_asset_path
+    from shine.models import Asset
+    from shine.security import sha256_bytes
+
+    locked(db)
+    plan = current_material_plan(db, project_id)
+    canonical = db.get(AssetRequirement, body.canonical_requirement_id)
+    alias = db.get(AssetRequirement, body.alias_requirement_id)
+    if (plan is None or canonical is None or alias is None or canonical.id == alias.id
+            or any(row.project_id != project_id or row.plan_id != plan.id
+                   or row.payload.get("family") != "character" or row.status != "CONFIRMED"
+                   for row in (canonical, alias))):
+        raise HTTPException(409, "MATERIAL_CHARACTER_REQUIREMENTS_NOT_CURRENT")
+    entity = canonical.payload["entity_id"]
+    alias_entity = alias.payload["entity_id"]
+    if entity == alias_entity or canonical.payload.get("canonical_entity_id"):
+        raise HTTPException(409, "MATERIAL_CHARACTER_ALIAS_INVALID")
+    asset = db.get(Asset, body.master_asset_id)
+    if (asset is None or asset.project_id != project_id or asset.kind != "image" or asset.role != "character"
+            or asset.entity_id != entity or not asset.approved or not asset.locked):
+        raise HTTPException(409, "ASSET_IDENTITY_MISMATCH")
+    provenance = asset.provenance or {}
+    if (provenance.get("offline_only") or provenance.get("is_mock")
+            or not rights_status(db, project_id, provenance.get("rights_id"))["approved"]):
+        raise HTTPException(409, "ASSET_NOT_APPROVED_FOR_PRODUCTION")
+    try:
+        content = safe_asset_path(settings.data_dir, asset.storage_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(409, "ASSET_FILE_MISSING") from exc
+    if sha256_bytes(content) != asset.sha256:
+        raise HTTPException(409, "ASSET_HASH_CHANGED")
+    service.bind_material_master(db, canonical, asset, actor)
+    service.bind_material_master(db, alias, asset, actor, canonical_entity_id=entity)
+    service.retire_unused_masters(db, plan, asset, actor, entities={entity, alias_entity})
+    db.commit()
+    return {"asset_id": asset.id, "canonical_entity_id": entity, "alias_entity_id": alias_entity}
+
+
 @router.post("/projects/{project_id}/material-preparation/regenerate", status_code=202)
 def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operator, db: DBSession):
     """Generate another version of one requirement, keeping the old candidates.
