@@ -987,12 +987,6 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   {tile.first && tile.row.kind === 'validation' && <em>这是能力验证小样，不属于正式素材需求，不能在这里选用。</em>}
                   {tile.candidate?.is_mock && <em>离线测试候选，不能用于真实生产</em>}
                   {tile.first && tile.error && <em>{tile.error}</em>}
-                  {tile.first && tile.questions.length > 0 && (
-                    <p className="material-questions" role="alert">
-                      出品人需要澄清：{tile.questions.join('；')}。在「修改外观描述」里用英文回答，
-                      再点「再生成一版（保留旧图）」——重新生成会消费这些问题。
-                    </p>
-                  )}
                   {tile.candidate && tile.selectable && !tile.candidate.formal_asset_id && <label>
                     <input type="checkbox" disabled={tile.candidate.status !== 'READY_FOR_REVIEW'}
                       checked={selected[tile.item.requirement_id!] === tile.candidate.candidate_id}
