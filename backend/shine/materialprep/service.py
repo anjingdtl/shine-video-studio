@@ -458,6 +458,7 @@ def create_batch(
     seeds: dict[str, int] | None = None,
     briefs: dict[str, dict[str, Any]] | None = None,
     new_revision: bool = False,
+    trust_current_list: bool = False,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
 
@@ -468,7 +469,7 @@ def create_batch(
     """
     require_project(db, project_id)
     plan = _plan_for_confirmation(db, project_id, confirmation_id)
-    if plan.payload["confirmation"]["confirmation_hash"] != confirmation_hash:
+    if not trust_current_list and plan.payload["confirmation"]["confirmation_hash"] != confirmation_hash:
         raise HTTPException(409, "MATERIAL_PLAN_STALE")
 
     request_payload = {
@@ -735,11 +736,18 @@ def _validation_plan(db, project_id: str) -> PreProductionPlan:
 
 
 def _plan_for_confirmation(db, project_id: str, confirmation_id: str) -> PreProductionPlan:
+    """The newest plan carrying this confirmation.
+
+    A confirmation can survive several plan revisions (each re-confirmation
+    writes a new one), and the requirement rows always belong to the newest.
+    Returning the oldest made `_select_generable` reject every row with a bare
+    MATERIAL_PLAN_STALE, which is what broke "rerun every material".
+    """
     for plan in db.scalars(
         select(PreProductionPlan).where(
             PreProductionPlan.project_id == project_id,
             PreProductionPlan.purpose == PLAN_PURPOSE_ASSET_PREPARATION,
-        )
+        ).order_by(PreProductionPlan.created_at.desc())
     ).all():
         confirmation = (plan.payload or {}).get("confirmation") or {}
         if confirmation.get("confirmation_id") == confirmation_id:

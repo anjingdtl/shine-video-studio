@@ -584,10 +584,8 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     if not targets:
         raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
     # A requirement already satisfied by a master is recorded as "reuse_master",
-    # and a batch may not generate for it. Asking for a fresh picture therefore
-    # has to re-confirm the list first: the person is explicitly choosing "draw
-    # this again" over "keep what I have".
-    from shine.materialprep.contracts import MaterialVisualDirection
+    # and a batch may not generate for it, so the rows are switched back to
+    # generate below before the batch is queued.
     from shine.materialprep.models import MaterialItem
     from shine.materialprep.states import ITEM_IN_FLIGHT, ITEM_NEEDS_REVIEW, ITEM_QUEUED
 
@@ -609,37 +607,58 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     if blockers:
         db.flush()
 
-    decisions = [
-        {
-            "requirement_id": row["requirement_id"],
-            "entity_id": row["entity_id"],
+    # Re-confirming through the plan snapshot proved brittle for this route: the
+    # aggregate the plan carries and the requirement rows can drift apart after a
+    # long material session, and the confirm then refuses the whole rerun with a
+    # bare MATERIAL_PLAN_STALE. What this route needs is narrower than a new
+    # confirmation: every target must be asked to generate again. That is written
+    # onto the requirement rows directly, with an audit entry, and the existing
+    # confirmation keeps covering the batch.
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement
+    from shine.services import add_audit
+
+    for entry in targets:
+        requirement = db.get(AssetRequirement, entry["requirement_id"])
+        if requirement is None or requirement.project_id != project_id:
+            raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
+        requirement.payload = {
+            **(requirement.payload or {}),
             "strategy": "generate",
-            "asset_id": None,
-            "brief_note": row.get("brief_note") or "",
+            "bound_asset_id": None,
+            "bound_asset_sha256": None,
         }
-        for row in targets
-    ]
-    reconfirmed = service.confirm(
-        db, actor, project_id,
-        MaterialConfirmation(
-            plan_revision_id=state["plan_revision_id"],
-            expected_snapshot=state["expected_snapshot"],
-            decisions=decisions,
-            visual_direction=MaterialVisualDirection.model_validate(state.get("visual_direction") or {}),
-            notes="重跑全部素材：确认以新提示词重新出图",
-        ),
-    )
+        requirement.sha256 = graph_hash(requirement.payload)
+        requirement.status = "CONFIRMED"
+    db.flush()
+    add_audit(db, actor, "MATERIAL_FULL_RERUN_REQUESTED", "preproduction_plan",
+              state["plan_revision_id"], {"requirements": len(targets)},
+              project_id=project_id)
+
+    # The hash recorded on the plan is the one the batch is judged against.
+    # `plan_progress` recomputes a confirmation from the current requirement
+    # rows, so it moves the moment a strategy is switched back to generate -
+    # which this route does on purpose. Using the recomputed value would always
+    # look stale.
+    from shine.comfyops.models import PreProductionPlan
+
+    source_plan = db.get(PreProductionPlan, state["plan_revision_id"])
+    if source_plan is None:
+        raise HTTPException(409, "MATERIAL_PLAN_NOT_FOUND")
+    recorded_hash = ((source_plan.payload or {}).get("confirmation") or {}).get("confirmation_hash")
+    if not recorded_hash:
+        raise HTTPException(409, "MATERIAL_PLAN_NOT_CONFIRMED")
     result = service.create_batch(
         db,
         project_id,
-        confirmation_id=reconfirmed["confirmation_id"],
-        confirmation_hash=reconfirmed["confirmation_hash"],
+        confirmation_id=confirmation["confirmation_id"],
+        confirmation_hash=recorded_hash,
         requirement_ids=[row["requirement_id"] for row in targets],
         idempotency_key=body.idempotency_key,
         rights_id=None,
         new_revision=True,
     )
-    return {"status": "accepted", "reconfirmed": reconfirmed["confirmation_id"], **result}
+    return {"status": "accepted", **result}
 
 
 def _require_ownership(db, project_id: str, run_id: str) -> None:
