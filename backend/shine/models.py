@@ -394,6 +394,11 @@ class MediaArtifact(Base):
     is_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    # A deleted video keeps its ledger row: the job, delivery receipt and audit
+    # trail still name the same artifact instead of being rewritten.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    deleted_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RepairRecord(Base):

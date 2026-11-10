@@ -579,6 +579,7 @@ def run_delivery_order(
                 subtitle_ass=subtitle_ass,
                 subtitle_sha256=subtitle_sha256,
                 reuse_existing=True,
+                output_subdir="delivery/current",
             )
             work_db.commit()
         with session_factory.begin() as db:

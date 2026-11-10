@@ -10,13 +10,11 @@ when all of its source jobs were passed.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -25,7 +23,6 @@ from sqlalchemy.orm import Session
 from shine.media.artifacts import safe_asset_path
 from shine.media.probe import probe_file
 from shine.models import Job, JobAttempt, MediaArtifact, QualityGate, Shot
-from shine.security import sha256_bytes
 
 
 class DeliveryError(HTTPException):
@@ -222,6 +219,7 @@ class DeliveryAssembler:
         subtitle_sha256: str | None = None,
         reuse_existing: bool = False,
         page_size: int = 100,
+        output_subdir: str = "delivery/history",
     ) -> AssembledDelivery:
         """Render one reel from an ordered clip list.
 
@@ -348,17 +346,21 @@ class DeliveryAssembler:
             # Probe while the temporary directory still exists.
             probe = probe_file(final, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
 
-        digest = sha256_bytes(content)
-        relative = Path("artifacts") / project_id / "delivery" / f"{digest}.mp4"
-        target = self.asset_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            temporary = target.with_name(f"{target.name}.{uuid4().hex}.partial")
-            try:
-                temporary.write_bytes(content)
-                os.replace(temporary, target)
-            finally:
-                temporary.unlink(missing_ok=True)
+        from shine.media.artifacts import store_artifact
+        from shine.media.video_naming import delivery_filename
+        from shine.models import Project
+
+        project = db.get(Project, project_id)
+        source_jobs = [job for job in (db.get(Job, clip.job_id) for clip in clips) if job]
+        # The reel's real file name names the project, shot range and episode
+        # the ledger says these clips belong to; new colliding versions get a
+        # short _vN suffix instead of overwriting an earlier delivery.
+        reel_name = delivery_filename(db, project_id, project.title if project else None, source_jobs)
+        stored_path, digest, byte_size = store_artifact(
+            self.asset_root, project_id, "delivery", content, "video/mp4",
+            filename=reel_name, subdir=output_subdir,
+        )
+        relative = Path(stored_path)
 
         clip_records = [
             {

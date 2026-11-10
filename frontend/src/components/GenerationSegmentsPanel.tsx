@@ -41,12 +41,17 @@ export function VideoPreview({ poster, video, label }: { poster: string; video: 
     else node.setAttribute('open', '');
   }, [open]);
   return <>
-    <button type="button" className="media-preview-button segment-poster" aria-label={`预览 ${label}`} onClick={() => setOpen(true)}>
-      {posterFailed
-        ? <span className="media-preview-unavailable">预览不可用</span>
-        : <img src={poster} alt={label} loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />}
-      {!posterFailed && <span className="segment-poster-play" aria-hidden="true">▶</span>}
-    </button>
+    {posterFailed
+      // A missing poster does not mean the clip is unplayable: show the real
+      // player inline instead of a dead "preview unavailable" frame.
+      ? <div className="media-preview-fallback" aria-label={`预览 ${label}`}>
+          <video controls preload="metadata" src={video} aria-label={label} />
+          <small>封面不可用，可直接播放</small>
+        </div>
+      : <button type="button" className="media-preview-button segment-poster" aria-label={`预览 ${label}`} onClick={() => setOpen(true)}>
+          <img src={poster} alt={label} loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />
+          <span className="segment-poster-play" aria-hidden="true">▶</span>
+        </button>}
     {open && <dialog ref={dialog} className="media-preview-dialog" aria-label={`预览 ${label}`} onClose={() => setOpen(false)}>
       <button type="button" onClick={() => { dialog.current?.close(); setOpen(false); }}>关闭预览</button>
       <video controls autoPlay src={video} style={{ width: '100%', maxHeight: '75vh' }} />
@@ -124,7 +129,7 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
           </span>
         </div>
         {segment.artifact_id && segment.job_id ? <>
-          <VideoPreview poster={`${API}/jobs/${segment.job_id}/thumbnail`}
+          <VideoPreview poster={`${API}/jobs/${segment.job_id}/thumbnail?poster=1s`}
             video={`${API}/jobs/${segment.job_id}/media`}
             label={`生成段 ${segment.position} 当前版本`} />
           <div className="segment-card-foot">

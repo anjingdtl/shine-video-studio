@@ -6,13 +6,13 @@ import GenerationSegmentsPanel, { LazyVideo } from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 
 type Proposal = { id: string; kind: string; stale: boolean; created_at?: string; payload_json: Record<string, unknown> };
-type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string;
+type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string; deleted?: boolean;
   provenance: { review_state?: string; duration_s?: number; clips?: unknown[]; edl_source?: string } };
 type DeliveryOrder = {
   id: string; series_id: string; version: number; status: string;
   edl_source: string | null; artifact_id: string | null; sha256?: string;
   attempt_count: number; max_attempts: number; failure_code: string | null;
-  created_at: string; delivered_at: string | null;
+  created_at: string; delivered_at: string | null; artifact_deleted?: boolean;
 };
 
 const orderText: Record<string, string> = {
@@ -206,8 +206,9 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         );
         const body = <>
           {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
-          {order.status === 'DELIVERED' && order.artifact_id
-            && <LazyVideo src={`${API}/deliveries/${order.artifact_id}/media`} label={`完整成片 v${order.version}`} />}
+          {order.status === 'DELIVERED' && order.artifact_id && (order.artifact_deleted
+            ? <p className="failure">这份历史成片的文件已在「成片库」删除；交付回执仍保留，但不能再播放。</p>
+            : <LazyVideo src={`${API}/deliveries/${order.artifact_id}/media`} label={`完整成片 v${order.version}`} />)}
         </>;
         // 最新交付直接展开；历史交付折叠成一行，避免旧样片占据页面误导。
         return index === 0
@@ -252,7 +253,9 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
       {deliveries.filter(row => !orders.some(order => order.artifact_id === row.artifact_id)).map(row => <details className="settings-block" key={row.artifact_id}><summary>成片历史 · {row.created_at}</summary><article>
         <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
         <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
-        <LazyVideo src={`${API}/deliveries/${row.artifact_id}/media`} label="完整成片历史版本" />
+        {row.deleted
+          ? <p className="failure">文件已在「成片库」删除，历史记录保留。</p>
+          : <LazyVideo src={`${API}/deliveries/${row.artifact_id}/media`} label="完整成片历史版本" />}
         <p><OpenVideoFolderButton artifactId={row.artifact_id} /></p>
         <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
         <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>

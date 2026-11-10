@@ -389,42 +389,62 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
     data_dir = request.app.state.settings.data_dir
     if not recorded or not accepted_job(db, replacement, data_dir):
         raise HTTPException(409, "GENERATION_REPLACEMENT_NOT_ACCEPTED")
-    chosen = _selection(db, root)
-    if chosen.get(replacement.shot_id) != body.source_job_id:
-        raise HTTPException(409, "GENERATION_ASSEMBLY_SELECTION_STALE")
-    chosen[replacement.shot_id] = replacement.id
-    affected = sorted(mark_stale_descendants(db, [body.source_job_id], project_id=project_id))
-    key = f"assembly-selection:{root.id}"
-    setting = db.get(AppSetting, key)
-    if setting:
-        setting.value = chosen
-    else:
-        db.add(AppSetting(key=key, value=chosen))
-    ready = all(accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
-    assembly_id = None
-    if ready:
-        assembled = ProductionSeries(project_id=project_id, status="COMPLETED", provider="comfyui",
-            shot_count=len(root.items), completed_count=len(root.items), finalization_state="RELEASED",
-            workflow_profile_id=root.workflow_profile_id, generation_mode=root.generation_mode,
-            output_spec=root.output_spec, edit_intent_artifact_id=root.edit_intent_artifact_id, finished_at=utcnow())
-        db.add(assembled)
-        db.flush()
-        for original in root.items:
-            db.add(ProductionSeriesItem(
-                series_id=assembled.id, shot_id=original.shot_id, position=original.position,
-                job_id=chosen[original.shot_id], status="PASSED", continuity_mode=original.continuity_mode))
-        db.flush()
-        from shine.media.delivery_engine import enqueue_auto_delivery
-        order = enqueue_auto_delivery(db, assembled)
-        if order:
-            order.origin = "segment_revision"
-            order.version = 2 + sum(r.trace.get("root_series_id") == root.id
-                                    for r in _records(db, project_id, ASSEMBLY_ROLE))
-        assembly_id = assembled.id
-    payload = {"series_id": assembly_id, "root_series_id": root.id, "selection": chosen,
-               "invalidated_job_ids": affected, "assembly_pending_review": not ready}
-    _record(db, project_id, ASSEMBLY_ROLE, identity, payload)
-    add_audit(db, actor, "GENERATION_ASSEMBLY_VERSION_SELECTED", "production_series", root.id,
-              payload, project_id=project_id)
-    db.commit()
+    from shine.media.video_layout import move_adoption, revert_file_moves
+
+    # Move the files before the selection is recorded: the old adopted take
+    # goes to history and the replacement into the adopted folder.  A locked
+    # or unverifiable file leaves the bytes where they are; the ledger
+    # selection still proceeds, so production is never blocked by a cosmetic
+    # folder move.
+    asset_root = request.app.state.asset_root
+    moves: list[tuple[str, str]] = []
+    try:
+        moves = move_adoption(db, asset_root, shot_id=replacement.shot_id,
+                              replacement_job_id=replacement.id)
+    except (OSError, ValueError):
+        moves = []
+    try:
+        chosen = _selection(db, root)
+        if chosen.get(replacement.shot_id) != body.source_job_id:
+            raise HTTPException(409, "GENERATION_ASSEMBLY_SELECTION_STALE")
+        chosen[replacement.shot_id] = replacement.id
+        affected = sorted(mark_stale_descendants(db, [body.source_job_id], project_id=project_id))
+        key = f"assembly-selection:{root.id}"
+        setting = db.get(AppSetting, key)
+        if setting:
+            setting.value = chosen
+        else:
+            db.add(AppSetting(key=key, value=chosen))
+        ready = all(accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
+        assembly_id = None
+        if ready:
+            assembled = ProductionSeries(project_id=project_id, status="COMPLETED", provider="comfyui",
+                shot_count=len(root.items), completed_count=len(root.items), finalization_state="RELEASED",
+                workflow_profile_id=root.workflow_profile_id, generation_mode=root.generation_mode,
+                output_spec=root.output_spec, edit_intent_artifact_id=root.edit_intent_artifact_id,
+                finished_at=utcnow())
+            db.add(assembled)
+            db.flush()
+            for original in root.items:
+                db.add(ProductionSeriesItem(
+                    series_id=assembled.id, shot_id=original.shot_id, position=original.position,
+                    job_id=chosen[original.shot_id], status="PASSED", continuity_mode=original.continuity_mode))
+            db.flush()
+            from shine.media.delivery_engine import enqueue_auto_delivery
+            order = enqueue_auto_delivery(db, assembled)
+            if order:
+                order.origin = "segment_revision"
+                order.version = 2 + sum(r.trace.get("root_series_id") == root.id
+                                        for r in _records(db, project_id, ASSEMBLY_ROLE))
+            assembly_id = assembled.id
+        payload = {"series_id": assembly_id, "root_series_id": root.id, "selection": chosen,
+                   "invalidated_job_ids": affected, "assembly_pending_review": not ready}
+        _record(db, project_id, ASSEMBLY_ROLE, identity, payload)
+        add_audit(db, actor, "GENERATION_ASSEMBLY_VERSION_SELECTED", "production_series", root.id,
+                  payload, project_id=project_id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        revert_file_moves(asset_root, moves)
+        raise
     return {**payload, "replayed": False}

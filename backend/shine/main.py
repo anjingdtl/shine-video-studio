@@ -17,6 +17,7 @@ from shine.api_comfy import router as comfy_router
 from shine.api_delivery import router as delivery_router
 from shine.api_film import router as film_router
 from shine.api_instances import router as instances_router
+from shine.api_library import router as library_router
 from shine.api_llm import router as llm_router
 from shine.api_operator import Operator
 from shine.api_operator import router as operator_router
@@ -458,6 +459,7 @@ def create_app(
     app.include_router(film_router)
     app.include_router(review_router)
     app.include_router(delivery_router)
+    app.include_router(library_router)
     app.include_router(subtitles_router)
     app.include_router(operator_router)
     app.include_router(pipeline_router)
@@ -1221,6 +1223,8 @@ def create_app(
         artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
         if not artifact or artifact.job_id != job.id:
             raise HTTPException(status_code=404, detail="This job has no produced media yet")
+        if artifact.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="This video was deleted from the local library")
         return artifact
 
     @app.get("/api/v1/jobs/{job_id}/media")
@@ -1247,7 +1251,7 @@ def create_app(
 
         artifact = _produced_artifact(job_id, db)
         return thumbnail(safe_asset_path(actual_asset_root, artifact.storage_path), artifact.sha256,
-                         settings.ffmpeg_path, request.headers.get("if-none-match"))
+                         settings.ffmpeg_path, request.headers.get("if-none-match"), seek_s=1.0)
 
     @app.post("/api/v1/projects/{project_id}/production-series", status_code=201)
     def create_production_series(

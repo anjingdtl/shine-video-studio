@@ -169,6 +169,7 @@ def list_deliveries(project_id: str, db: DBSession) -> list[dict[str, Any]]:
             "storage_path": row.storage_path,
             "created_at": row.created_at,
             "provenance": row.provenance,
+            "deleted": row.deleted_at is not None,
         }
         for row in rows
     ]
@@ -187,7 +188,15 @@ def list_delivery_orders(project_id: str, db: DBSession) -> list[dict[str, Any]]
         .order_by(DeliveryOrder.created_at.desc(), DeliveryOrder.version.desc())
         .all()
     )
-    return [_order_public(order) for order in rows]
+    result = []
+    for order in rows:
+        payload = _order_public(order)
+        # A deleted history reel keeps its receipt; the UI must not offer a
+        # player for bytes that are gone, so the deleted state travels with it.
+        artifact = db.get(MediaArtifact, order.artifact_id) if order.artifact_id else None
+        payload["artifact_deleted"] = bool(artifact and artifact.deleted_at is not None)
+        result.append(payload)
+    return result
 
 
 @router.post("/delivery-orders/{order_id}/retry", status_code=202)
@@ -242,6 +251,8 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
     artifact = db.get(MediaArtifact, artifact_id)
     if not artifact or artifact.artifact_kind != "delivery":
         raise HTTPException(status_code=404, detail="Delivery artifact not found")
+    if artifact.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="VIDEO_DELETED")
     path: Path = safe_asset_path(request.app.state.asset_root, artifact.storage_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Delivery file is missing on disk")
@@ -252,6 +263,19 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
         media_type=artifact.content_type,
         filename=_delivery_download_filename(db, artifact),
     )
+
+
+@router.get("/deliveries/{artifact_id}/thumbnail")
+def delivery_thumbnail(artifact_id: str, request: Request, db: DBSession):
+    """A poster frame of one reel, for the project's video library."""
+    from shine.media.thumbnails import thumbnail
+
+    artifact = db.get(MediaArtifact, artifact_id)
+    if not artifact or artifact.artifact_kind != "delivery" or artifact.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Delivery artifact not found")
+    return thumbnail(safe_asset_path(request.app.state.asset_root, artifact.storage_path), artifact.sha256,
+                     request.app.state.settings.ffmpeg_path, request.headers.get("if-none-match"),
+                     seek_s=1.0)
 
 
 @router.post("/video-artifacts/{artifact_id}/open-folder", status_code=204, response_class=Response)

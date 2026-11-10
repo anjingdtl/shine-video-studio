@@ -25,6 +25,7 @@ import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
 import StoryboardPanel from './components/StoryboardPanel';
 import DeliveryPanel from './components/DeliveryPanel';
+import VideoLibraryPanel from './components/VideoLibraryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
@@ -82,10 +83,10 @@ const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
 ) as Record<ViewId, string>;
 
 /** 导演模式：项目管理 + 七阶段制作页 + 不占流程序号的基础配置页。 */
-type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'setup';
+type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'package' | 'run' | 'deliver' | 'library' | 'setup';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
   projects: '项目管理', creative: '创意与剧本', assets: '剧本统筹', produce: '镜头与素材', package: '导演包',
-  run: '全片生产', deliver: '成片中心', setup: '基础配置',
+  run: '全片生产', deliver: '成片中心', library: '成片库', setup: '基础配置',
 };
 /** 主线阶段。完成态一律来自服务端 /journey，不在前端另算一套。
  *  顺序遵守一条原则：素材是为剧本和分镜服务的，所以「拍摄素材准备」排在
@@ -667,6 +668,14 @@ function App() {
               <ModeStatusEntry system={system} onAction={handleModeAction} />
             </div>
             <div className="topbar-controls">
+              {ui === 'director' && <button
+                type="button"
+                className={`secondary-button compact library-entry ${directorPage === 'library' ? 'active' : ''}`}
+                onClick={() => goToDirectorPage('library')}
+                title="成片库：管理这部作品在本机落盘的全部视频（单镜、分集、成片与历史版本）"
+              >
+                <Film size={13} /><span>成片库</span>
+              </button>}
               <button type="button" className="secondary-button compact" onClick={() => goToAssets('home')} title="素材中心：图片、声音与全局素材库">
                 <Images size={13} />素材中心
               </button>
@@ -1126,6 +1135,23 @@ function App() {
                   onRefresh={() => refreshAll().catch(() => undefined)}
                 />}
                 <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={directorPage === 'deliver'} refreshEpoch={dataEpoch} />
+              </div>
+
+              <div className="director-page" id="library" hidden={directorPage !== 'library'}>
+                {directorPageIntro(
+                  '本机成片库',
+                  <>每一段视频，<em>都在你自己的盘上。</em></>,
+                  '按作品汇总实际落盘的单镜、分集与成片；预览播放的是本机原文件，历史版本可在这里清理。',
+                  <span className="head-chip">{project.title}</span>,
+                )}
+                {directorPage === 'library' && <VideoLibraryPanel
+                  key={`library-${projectId}`}
+                  projectId={projectId}
+                  projectTitle={project.title}
+                  active={directorPage === 'library'}
+                  refreshEpoch={dataEpoch}
+                  onMessage={report}
+                />}
               </div>
 
               {directorPage !== 'projects' && directorPage !== 'setup' && activeDirectorStage && (

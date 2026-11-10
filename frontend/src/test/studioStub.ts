@@ -209,6 +209,10 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/film-artifacts$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/deliveries$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/delivery-orders$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/video-library$/, respond: () => jsonResponse({
+      project_id: 'proj-1', project_title: project.title, entries: [],
+      summary: { total: 0, current: 0, history: 0, pending_review: 0, missing: 0, deletable: 0 },
+    }) },
     { method: 'PUT', pattern: /\/api\/v1\/projects\/proj-1\/style\/draft$/, respond: (_url, init) => jsonResponse({ project_id: 'proj-1', style_draft: JSON.parse(String(init?.body)), frozen: false }) },
     { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/, respond: () => jsonResponse(FROZEN_STYLE) },
     { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/shots$/, respond: (_url, init) => jsonResponse({ id: 'shot-new', project_id: 'proj-1', name: '镜头 1', revision: 1, spec: JSON.parse(String(init?.body)).spec, bindings: [] }, 201) },

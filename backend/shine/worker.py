@@ -2172,6 +2172,15 @@ def _finalize_comfy_attempt(
         remote_consent = bool(project and project.allow_remote_review)
         project_id = job.project_id
         existing = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        from shine.media.video_layout import shot_output_subdir
+        from shine.media.video_naming import clip_filename
+
+        # The real file on disk carries the project, shot and episode the
+        # ledger already knows; the hash remains the identity.  An adopted
+        # first take goes to the adopted folder, a retake waits in history
+        # until the person explicitly selects it.
+        clip_name = clip_filename(db, project, job)
+        clip_folder = shot_output_subdir(db, job)
         from shine.models import AppSetting
 
         recheck = db.get(AppSetting, "qc-recheck:" + job.id)
@@ -2234,7 +2243,8 @@ def _finalize_comfy_attempt(
                 )
             return job_id
         relative, digest, byte_size = store_artifact(
-            settings.data_dir, project_id, job_id, result.content, result.content_type
+            settings.data_dir, project_id, job_id, result.content, result.content_type,
+            filename=clip_name, subdir=clip_folder,
         )
         content_type = result.content_type
         artifact_path = settings.data_dir / relative
