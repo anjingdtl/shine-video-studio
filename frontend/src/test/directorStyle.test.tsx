@@ -134,4 +134,41 @@ describe('director style picker', () => {
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => expect(onFreeze).toHaveBeenCalledWith(true));
   });
+
+  it('shows the template diff as soon as a template is chosen, without a second click', async () => {
+    const user = userEvent.setup();
+    const preview: DirectorStylePreview = {
+      profile: DIRECTOR_STYLE_CATALOG[0],
+      style_bible: style,
+      diff: Object.entries(style).map(([field, suggested]) => ({
+        field: field as DirectorStylePreview['diff'][number]['field'],
+        current: '', suggested: String(suggested ?? ''), changed: true,
+      })),
+      resolution: {
+        selected_technique_ids: ['foreground-layering', 'motivated-practical-light'],
+        constraints: { camera: [], lighting: [], color: [], texture: [], editing: [], sound: [] },
+        warnings: [], resolution_sha256: 'd'.repeat(64),
+      },
+    };
+    stub = new StudioStub([
+      { method: 'GET', pattern: /\/api\/v1\/director-styles$/, respond: () => jsonResponse(DIRECTOR_STYLE_CATALOG) },
+      { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({ draft_sha256: 'c'.repeat(64), draft_source: null, frozen_source: null }) },
+      { method: 'GET', pattern: /\/api\/v1\/film-agents$/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/rulepack$/, respond: () => jsonResponse({ rulepack_id: null }) },
+      { method: 'GET', pattern: /\/api\/v1\/h3-rulebook$/, respond: () => jsonResponse({ packs: [{ id: 'shine-h3-rules/1.1.0' }] }) },
+      { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/film-artifacts$/, respond: () => jsonResponse([]) },
+      { method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/director-style\/preview$/, respond: () => jsonResponse(preview) },
+    ]);
+    render(<Harness onSave={vi.fn()} onFreeze={vi.fn()} />);
+    const selector = await screen.findByRole('combobox', { name: '选择导演风格模板' });
+    await user.selectOptions(selector, 'wong-kar-wai');
+
+    // Seven empty dimensions with disabled save buttons and no visible next
+    // step read as a dead end, so the read-only preview must open on its own.
+    expect(await screen.findByText('王家卫参考风格 · 已选 2 项适用技法')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '采用到草稿' })).toBeEnabled();
+    expect(stub.callsOf('POST', /director-style\/preview$/)).toHaveLength(1);
+    // A preview is not an application: nothing is written until the user adopts.
+    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled();
+  });
 });

@@ -17,6 +17,7 @@ appearance brief.  Both calls share the same discipline, so it lives here:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -30,6 +31,19 @@ from pydantic import ValidationError
 from shine.llm.base import LLMError
 from shine.llm.output_budget import truncated_output, usage_summary
 from shine.materialprep.contracts import APPEARANCE_MAX_LENGTH, MaterialImageBrief
+
+logger = logging.getLogger(__name__)
+
+PRE_REQUEST_PHASES = ("PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER")
+"""The phases that prove the provider request was never opened.
+
+The gateway writes ``WAITING_PROVIDER`` immediately before it opens the request,
+so a call that stopped at one of these owns no answer: the outcome is
+``NOT_SENT``, not an unknown one.  Classifying an unexpected local fault as
+``UNKNOWN`` without this evidence blocks a scene forever under the no-replay
+gate, which is how one local bug turned into an unrecoverable "provider result
+unknown".
+"""
 
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window."""
@@ -232,6 +246,37 @@ def call_material_agent(
                            if key != "maxLength"},
         }}
 
+    last_phase: list[str] = []
+
+    def report(phase: str) -> None:
+        # Remembered locally because the caller's own progress writer overwrites
+        # the durable phase with FAILED, which is exactly the evidence the
+        # unknown-outcome gate needs.
+        last_phase.append(phase)
+        if on_progress:
+            on_progress(phase)
+
+    def unexpected_fault(exc: Exception, *, correction_used: bool, schema_errors: list | None = None):
+        """Name a local fault honestly instead of asserting an unknown result.
+
+        The exception is logged with its traceback: swallowing it left the fault
+        undiagnosable, because neither the exception class nor the phase it
+        happened at survived into the durable trace.
+        """
+        phase = last_phase[-1] if last_phase else "PREPARING"
+        may_have_answered = phase not in PRE_REQUEST_PHASES
+        logger.exception("material_agent_fault role=%s phase=%s may_have_answered=%s",
+                         role, phase, may_have_answered)
+        return AgentCallOutcome(
+            error_code="LLM_PROVIDER_FAULT",
+            uncertain=may_have_answered,
+            correction_used=correction_used,
+            schema_errors=schema_errors or [],
+            details={"error_type": type(exc).__name__,
+                     "external_outcome": "UNKNOWN" if may_have_answered else "NOT_SENT",
+                     "last_phase": phase},
+        )
+
     def call(system_prompt: str, user_payload: str):
         # One gap before every provider call, in one place.  A long outline
         # makes one call per scene; two calls back to back share the provider
@@ -248,7 +293,7 @@ def call_material_agent(
                     system=system_prompt,
                     user=user_payload,
                     schema=response_schema,
-                    on_progress=on_progress,
+                    on_progress=report,
                     task_category=task_category,
                 )
         finally:
@@ -277,7 +322,17 @@ def call_material_agent(
                 details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
                          "response_status": exc.details.get("status"),
                          "provider_code": exc.details.get("provider_code"),
-                         "truncated": truncated_output(exc)},
+                         "truncated": truncated_output(exc),
+                         # The provider's own account of why the answer is
+                         # unusable.  A completion ceiling spent on reasoning and
+                         # a broken contract field are different failures with
+                         # different next steps, and "LLM_FORMAT" alone names
+                         # neither.
+                         "finish_reason": exc.details.get("finish_reason"),
+                         "completion_tokens": exc.details.get("completion_tokens"),
+                         "reasoning_tokens": exc.details.get("reasoning_tokens"),
+                         "provider_schema_path": exc.details.get("path"),
+                         "provider_schema_validator": validator},
             )
     except HTTPException as exc:
         # A refused stage never opened a provider request. That makes it
@@ -300,11 +355,7 @@ def call_material_agent(
                 entry.update(actual_length=len(error["input"]), max_length=error["ctx"]["max_length"])
             errors.append(entry)
     except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
-        return AgentCallOutcome(
-            error_code="LLM_PROVIDER_FAULT",
-            uncertain=True,
-            details={"error_type": type(exc).__name__, "external_outcome": "UNKNOWN"},
-        )
+        return unexpected_fault(exc, correction_used=False)
 
     correction = {"task": context, "schema_errors": errors, "validator": schema}
     try:
@@ -342,11 +393,5 @@ def call_material_agent(
             schema_errors=errors,
             details={"external_outcome": "RESPONSE_RECEIVED"},
         )
-    except Exception as second:  # noqa: BLE001 - an unexpected fault stays unknown
-        return AgentCallOutcome(
-            error_code="LLM_PROVIDER_FAULT",
-            uncertain=True,
-            correction_used=True,
-            schema_errors=errors,
-            details={"error_type": type(second).__name__, "external_outcome": "UNKNOWN"},
-        )
+    except Exception as second:  # noqa: BLE001 - an unexpected fault must not kill the batch
+        return unexpected_fault(second, correction_used=True, schema_errors=errors)

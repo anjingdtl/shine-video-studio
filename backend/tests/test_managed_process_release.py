@@ -10,6 +10,7 @@ process whose ownership is proven.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from shine.comfyops import renderer_release as release
 from shine.comfyops.models import ResourceLease
@@ -287,6 +288,117 @@ def test_an_orphan_lease_is_kept_when_any_recorded_renderer_is_still_alive(api, 
         lease_id = lease.id
     findings = handoff_startup.reconcile_dead_renderer_leases(factory)
     assert findings == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def _agent_orphan(factory, *, expires_at=None):
+    from datetime import timedelta
+
+    with factory.begin() as db:
+        lease = ResourceLease(owner="agent:" + "d" * 32, budget_mb=1, exclusive=True,
+                              priority=10, status="RECONCILE_REQUIRED",
+                              expires_at=expires_at or (utcnow() - timedelta(seconds=60)))
+        db.add(lease)
+        db.flush()
+        return lease.id
+
+
+def test_an_orphan_agent_text_lease_no_longer_deadlocks_the_gpu_ledger(api):
+    """The production failure: a workbench killed during a remote text call.
+
+    An ``agent:`` slot owns no renderer, so no startup journal ever matches it
+    and the renderer proof can never run.  Its lease stayed
+    ``RECONCILE_REQUIRED`` forever and one such row blocks every later
+    admission, so the whole ledger refused all work with ``GPU_BUSY_RETRY_OR_QUEUE``.
+    A remote-only text configuration has nothing resident to unload, so the
+    orphan is released and a fresh admission succeeds again.
+    """
+    from shine.comfyops import handoff_startup
+    from shine.comfyops.scheduler import ResourceScheduler
+    from shine.models import AuditEvent, ProviderProfile
+
+    client, factory, _settings = api
+    with factory.begin() as db:
+        db.add(ProviderProfile(name="remote-text", kind="openai_compatible",
+                               base_url="https://api.minimax.cn/v1", model="MiniMax-M3.1-flash",
+                               enabled=True))
+    lease_id = _agent_orphan(factory)
+
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+
+    assert [f["lease_id"] for f in findings] == [lease_id]
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+        audit = db.scalars(select(AuditEvent).where(
+            AuditEvent.event_type == "RESOURCE_ORPHAN_AGENT_LEASE_RELEASED")).one()
+        assert audit.entity_type == "resource_lease" and audit.entity_id == lease_id
+        assert audit.payload["resubmitted"] is False
+    # The deadlock is gone: a later serial model stage is admitted again.
+    with factory.begin() as db:
+        fresh = ResourceScheduler().enqueue(db, "agent:" + "e" * 32, 1, True, 10).id
+    with factory() as db:
+        assert ResourceScheduler().admit(db, fresh) is True
+
+
+def test_an_orphan_agent_lease_stays_blocked_when_a_local_text_model_cannot_confirm_unload(api, monkeypatch):
+    """A loopback text runtime that will not confirm its unload is uncertainty."""
+    from shine.comfyops import handoff_startup
+    from shine.llm import lifecycle
+    from shine.llm.gateway import LLMGateway
+    from shine.models import ProviderProfile
+
+    client, factory, _settings = api
+    with factory.begin() as db:
+        db.add(ProviderProfile(name="local-text", kind="openai_compatible",
+                               base_url="http://127.0.0.1:11434/v1", model="local", enabled=True))
+    lease_id = _agent_orphan(factory)
+    monkeypatch.setattr(LLMGateway, "config_for", lambda self, profile, **kw: object())
+    monkeypatch.setattr(lifecycle, "release_text_model",
+                        lambda config: (_ for _ in ()).throw(ValueError("LOCAL_LLM_RELEASE_UNCONFIRMED")))
+
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_a_local_text_model_that_confirms_its_unload_releases_the_orphan_agent_lease(api, monkeypatch):
+    """The proof is the slot's own declared protocol, so a confirmed unload releases."""
+    from shine.comfyops import handoff_startup
+    from shine.llm import lifecycle
+    from shine.llm.gateway import LLMGateway
+    from shine.models import ProviderProfile
+
+    client, factory, _settings = api
+    with factory.begin() as db:
+        db.add(ProviderProfile(name="local-text", kind="openai_compatible",
+                               base_url="http://127.0.0.1:11434/v1", model="local", enabled=True))
+    lease_id = _agent_orphan(factory)
+    calls = []
+    monkeypatch.setattr(LLMGateway, "config_for", lambda self, profile, **kw: object())
+    monkeypatch.setattr(lifecycle, "release_text_model", lambda config: calls.append(config))
+
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+
+    assert [f["lease_id"] for f in findings] == [lease_id] and len(calls) == 1
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
+def test_a_live_agent_lease_is_never_released_by_the_orphan_proof(api):
+    """An unexpired lease may still have its owner inside the call."""
+    from datetime import timedelta
+
+    from shine.comfyops import handoff_startup
+    from shine.models import ProviderProfile
+
+    client, factory, _settings = api
+    with factory.begin() as db:
+        db.add(ProviderProfile(name="remote-text", kind="openai_compatible",
+                               base_url="https://api.minimax.cn/v1", model="m", enabled=True))
+    lease_id = _agent_orphan(factory, expires_at=utcnow() + timedelta(seconds=60))
+
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
     with factory() as db:
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 

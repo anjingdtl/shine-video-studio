@@ -74,7 +74,19 @@ class OpenAICompatibleProvider:
         attempts = max(0, self.config.max_retries) + 1
         for attempt in range(attempts):
             try:
-                with build_client(url, self.config.timeout_s) as client:
+                client = build_client(url, self.config.timeout_s)
+            except Exception as exc:  # noqa: BLE001 - construction precedes any socket
+                # The client was never built, so no connection was opened and the
+                # request provably never left this machine.  httpx.InvalidURL is
+                # not an HTTPError, so without this handler one unparseable host
+                # NO_PROXY entry surfaced as a provider fault and blocked the
+                # scene under the unknown-outcome gate.
+                raise LLMConnectionError(
+                    "Provider client could not be constructed",
+                    details={"error": type(exc).__name__, "external_outcome": "NOT_SENT"},
+                ) from None
+            try:
+                with client:
                     response = client.request(method, url, headers=self._headers(), json=payload)
             except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
                 # The connection was never established, so the provider never

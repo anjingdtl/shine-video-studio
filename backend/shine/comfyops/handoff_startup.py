@@ -294,7 +294,81 @@ def _release_orphan_h3_lease(db, lease) -> bool:
     return True
 
 
-def release_dead_renderer_lease(db, lease) -> bool:
+def confirm_agent_text_unloaded(factory, settings=None) -> bool:
+    """Confirm no local text model is resident, through the declared protocol.
+
+    This runs *outside* any write transaction on purpose: confirming a loopback
+    text profile means an HTTP unload whose timeout is the provider's own, and
+    holding the SQLite writer across it would starve every heartbeat.  A
+    remote-only configuration has nothing an AGENT slot could ever have loaded,
+    so it confirms without any call at all.
+    """
+    from shine.llm.lifecycle import release_text_model
+    from shine.models import ProviderProfile
+    from shine.security import is_loopback_url
+
+    with factory() as db:
+        local = [
+            profile
+            for profile in db.scalars(select(ProviderProfile).where(ProviderProfile.enabled.is_(True)))
+            if profile.kind != "mock" and is_loopback_url(profile.base_url)
+        ]
+        if not local:
+            return True
+        from shine.config import Settings
+        from shine.llm.gateway import LLMGateway
+        from shine.llm.secrets import SecretStore
+
+        resolved = settings or Settings.from_env()
+        gateway = LLMGateway(SecretStore(resolved.secret_store_dir or resolved.data_dir / "secrets"))
+        configs = []
+        for profile in local:
+            try:
+                configs.append(gateway.config_for(profile))
+            except Exception:
+                return False  # an unreadable local profile is uncertainty
+    for config in configs:
+        try:
+            release_text_model(config)
+        except Exception:
+            return False  # an unconfirmed unload is uncertainty, never death
+    return True
+
+
+def release_orphan_agent_lease(db, lease, *, text_unloaded: bool) -> bool:
+    """Release an expired ``agent:`` lease that provably holds nothing resident.
+
+    An AGENT slot guards a *text* call, so it never owns a renderer process: no
+    startup journal can ever match it and the renderer proof can never run.  A
+    workbench killed during such a call therefore left the lease
+    ``RECONCILE_REQUIRED`` forever, and because one such row blocks every later
+    admission the whole GPU ledger deadlocked with no recovery path at all.
+
+    ``text_unloaded`` is established by :func:`confirm_agent_text_unloaded`
+    before the write transaction opens; without it the lease stays blocked.
+    """
+    owner = lease.owner or ""
+    if not owner.startswith("agent:"):
+        return False
+    if lease.expires_at is None or lease.expires_at > utcnow():
+        return False  # a live owner may still be inside the call
+    if not text_unloaded:
+        return False
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    add_audit(
+        db,
+        "comfy-worker",
+        "RESOURCE_ORPHAN_AGENT_LEASE_RELEASED",
+        "resource_lease",
+        lease.id,
+        {"owner": owner, "renderer_owned": False, "resubmitted": False},
+    )
+    return True
+
+
+def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bool:
     """Release one exclusive lease whose renderer is provably gone."""
     from shine.comfyops.scheduler import ResourceScheduler
 
@@ -302,14 +376,17 @@ def release_dead_renderer_lease(db, lease) -> bool:
     if record is None:
         # No journal was ever written for this lease: fall back to the
         # conservative orphan proof instead of deadlocking the GPU ledger.
-        return _release_orphan_h3_lease(db, lease)
+        if _release_orphan_h3_lease(db, lease):
+            return True
+        # A text slot owns no renderer, so the proof above can never match it.
+        return release_orphan_agent_lease(db, lease, text_unloaded=text_unloaded)
     if not renderer_is_gone(record):
         return False
     ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
     return True
 
 
-def reconcile_dead_renderer_leases(factory) -> list[dict]:
+def reconcile_dead_renderer_leases(factory, settings=None) -> list[dict]:
     """Release the exclusive lease of a renderer that is provably gone.
 
     A worker that died while it owned the GPU leaves an exclusive lease behind
@@ -324,6 +401,12 @@ def reconcile_dead_renderer_leases(factory) -> list[dict]:
             select(ResourceLease).where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"]))
         ).all()
         candidates = [(lease.id, lease.owner, lease.status) for lease in leases]
+    # A text slot owns no renderer, so its orphan proof is the declared unload
+    # protocol. Establish it once, outside every write transaction, and only
+    # when an agent orphan is actually waiting on it.
+    text_unloaded: bool | None = None
+    if any((owner or "").startswith("agent:") for _, owner, _ in candidates):
+        text_unloaded = confirm_agent_text_unloaded(factory, settings)
     for lease_id, owner, status in candidates:
         try:
             with factory.begin() as db:
@@ -331,7 +414,7 @@ def reconcile_dead_renderer_leases(factory) -> list[dict]:
                 lease = db.get(ResourceLease, lease_id)
                 if lease is None or lease.status not in {"ACTIVE", "RECONCILE_REQUIRED"}:
                     continue
-                if not release_dead_renderer_lease(db, lease):
+                if not release_dead_renderer_lease(db, lease, text_unloaded=bool(text_unloaded)):
                     continue
                 job_id = owner.removeprefix("h3:") if owner.startswith("h3:") else None
                 job = db.get(Job, job_id) if job_id else None

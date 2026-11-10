@@ -23,7 +23,7 @@ from shine.agents.crew_prompts import script_prepare_prompt
 from shine.h3.rulebook import digest
 from shine.llm.base import LLMError
 from shine.materialprep import text_consent
-from shine.materialprep.agent_call import budget_report, call_material_agent
+from shine.materialprep.agent_call import PRE_REQUEST_PHASES, budget_report, call_material_agent
 from shine.materialprep.contracts import ScriptPreparation
 from shine.materialprep.source_spans import Scene, known_span_ids, segment_document, unknown_span_ids
 from shine.models import AgentArtifact, AgentTaskRecord, utcnow
@@ -31,10 +31,6 @@ from shine.services import add_audit
 
 SCRIPTWRITER_ROLE = "scriptwriter"
 RULEPACK_ID = "material-script-prepare"
-
-#: The phases that prove the provider request was never opened.  A scene
-#: subcall that stopped here owns no answer, so the identity may be released.
-PRE_REQUEST_PHASES = ("PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER")
 
 #: A scene subcall is bounded by the provider timeout, and the profile allows
 #: at most 600 s.  A scene task that is still RUNNING long after that cannot
@@ -354,6 +350,20 @@ def prepare_scenes(
                                  "external_outcome": external_outcome,
                                  "response_status": outcome.details.get("response_status"),
                                  "provider_code": outcome.details.get("provider_code"),
+                                 # "phase" above is the task's own state, so the
+                                 # phase that proves whether the request was ever
+                                 # opened has to survive under its own key.
+                                 "last_phase": outcome.details.get("last_phase"),
+                                 "error_type": outcome.details.get("error_type"),
+                                 # Why the answer was unusable: a starved output
+                                 # budget and a broken contract field need
+                                 # different next steps, so both are durable.
+                                 "truncated": outcome.details.get("truncated"),
+                                 "finish_reason": outcome.details.get("finish_reason"),
+                                 "completion_tokens": outcome.details.get("completion_tokens"),
+                                 "reasoning_tokens": outcome.details.get("reasoning_tokens"),
+                                 "provider_schema_path": outcome.details.get("provider_schema_path"),
+                                 "provider_schema_validator": outcome.details.get("provider_schema_validator"),
                                  "automatic_replay": False}
             with db_factory() as db:
                 failed_task = db.get(AgentTaskRecord, task_id)

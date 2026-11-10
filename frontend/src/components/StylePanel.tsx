@@ -253,8 +253,9 @@ export default function StylePanel({
     onFreeze(Boolean(selectedDirectorId));
   }
 
-  async function previewDirectorStyle() {
-    const profile = directorStyles?.find((row) => row.id === selectedDirectorId);
+  async function previewDirectorStyle(profileId?: string) {
+    const id = profileId ?? selectedDirectorId;
+    const profile = directorStyles?.find((row) => row.id === id);
     if (!profile || directorBusy) return;
     setDirectorBusy(true);
     setDirectorError('');
@@ -421,7 +422,17 @@ export default function StylePanel({
             <select
               aria-label="选择导演风格模板"
               value={selectedDirectorId}
-              onChange={(event) => { setSelectedDirectorId(event.target.value); setDirectorPreview(null); setDirectorError(''); }}
+              onChange={(event) => {
+                const next = event.target.value;
+                setSelectedDirectorId(next);
+                setDirectorPreview(null);
+                setDirectorError('');
+                // Choosing a template must immediately show what it would change:
+                // a preview is read-only, so running it here cannot apply anything
+                // by itself, while leaving the seven fields empty with disabled
+                // save buttons and no visible next step reads as a dead end.
+                if (next) void previewDirectorStyle(next);
+              }}
               disabled={busy || directorBusy || directorStyles === null}
             >
               <option value="">选择一套导演风格…</option>
@@ -438,7 +449,7 @@ export default function StylePanel({
               <option value="subtle">轻</option><option value="balanced">均衡</option><option value="strong">鲜明</option>
             </select>
           </label>
-          <button type="button" className="secondary-button" disabled={!selectedDirectorId || directorBusy} onClick={previewDirectorStyle}>
+          <button type="button" className="secondary-button" disabled={!selectedDirectorId || directorBusy} onClick={() => previewDirectorStyle()}>
             {directorBusy && !directorPreview ? '正在预览…' : '预览差异'}
           </button>
         </div>

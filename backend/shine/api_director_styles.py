@@ -202,8 +202,14 @@ def apply_director_style_draft(
     entry = _entry_or_http(body.profile_id, body.profile_version)
     _check_selection(entry, body.profile_version, body.profile_sha256)
     _check_persisted_revision(db, entry)
+    current = _current_style(db, project) or {}
+    carried_film_type = current.get("film_type")
     style = body.style_overrides or entry.profile.style_bible.model_copy(update={
-        "dialogue_ratio_percent": (_current_style(db, project) or {}).get("dialogue_ratio_percent"),
+        "dialogue_ratio_percent": current.get("dialogue_ratio_percent"),
+        # The film type is a project-level H3 contract, not one of the seven
+        # dimensions a director template governs.  Adopting a template must never
+        # silently turn an animation project back into the model's default look.
+        "film_type": FilmType(carried_film_type) if carried_film_type else None,
     })
     try:
         register_profile_revision(db, entry)

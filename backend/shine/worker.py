@@ -3302,7 +3302,7 @@ def recover_expired_jobs(
     # The same proof releases the exclusive lease of a renderer that died with
     # its worker: the lease is a claim on a live process, and a process that
     # has really exited holds nothing.
-    reconcile_dead_renderer_leases(session_factory)
+    reconcile_dead_renderer_leases(session_factory, settings)
     with session_factory.begin() as db:
         now = utcnow()
         job_ids = list(

@@ -483,3 +483,31 @@ def test_film_type_catalog_is_the_two_fixed_h3_contracts(api):
     animation = next(row for row in rows if row["id"] == "animation")
     assert "2D cel-shaded animation" in animation["instruction_en"]
     assert "no 3D CGI rendering" in animation["instruction_en"]
+
+
+def test_adopting_a_director_template_keeps_the_chosen_film_type(studio):
+    """The film type is a project-level H3 contract, not a template dimension.
+
+    Adopting a director template rebuilt the draft from the template's seven
+    fields alone and silently dropped a chosen film type - exactly how an
+    animation project would end up rendered as the model's default live-action
+    look.  The seven dimensions still come from the template.
+    """
+    client, _factory, _root, _settings = studio
+    project_id = create_project(client, "动画影片类型项目")
+    draft = client.put(f"/api/v1/projects/{project_id}/style/draft", json={
+        "photography_language": "旧摄影", "shot_blocking": "旧调度", "color_palette": "旧色彩",
+        "lighting_tone": "旧灯光", "lens_texture": "旧质感", "editing_rhythm": "旧剪辑",
+        "sound_performance": "旧声音", "film_type": "animation",
+    })
+    assert draft.status_code == 200, draft.text
+    entry = DirectorStyleCatalog().get("mamoru-oshii")
+    state = client.get(f"/api/v1/projects/{project_id}/director-style").json()
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/director-style/apply-draft",
+        json=_style_request(entry, expected_draft_sha256=state["draft_sha256"]),
+    )
+    assert applied.status_code == 200, applied.text
+    body = applied.json()["style_draft"]
+    assert body["film_type"] == "animation"
+    assert body["photography_language"] != "旧摄影", "the seven dimensions come from the template"

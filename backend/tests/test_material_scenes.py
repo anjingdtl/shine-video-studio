@@ -229,3 +229,71 @@ def test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input(api
     with factory() as db:
         rows = db.query(AgentTaskRecord).filter(AgentTaskRecord.role_id == "scriptwriter").all()
         assert len(rows) > 2
+
+
+class _FaultGateway:
+    """Emits the gateway's own phases, then fails with a non-LLMError fault."""
+
+    def __init__(self, phases):
+        self.phases = phases
+
+    def complete_for_role(self, db, role, *, system, user, schema,
+                          on_progress=None, task_category="default"):
+        for phase in self.phases:
+            if on_progress:
+                on_progress(phase)
+        raise RuntimeError("local fault, not a provider answer")
+
+
+def _fault_outcome(phases, monkeypatch):
+    import contextlib
+
+    from shine.materialprep.agent_call import call_material_agent
+    from shine.materialprep.contracts import ScriptPreparation
+
+    monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
+    return call_material_agent(
+        _FaultGateway(phases), contextlib.nullcontext, "scriptwriter",
+        system="s", context={}, schema={"type": "object"}, contract=ScriptPreparation,
+    )
+
+
+def test_a_local_fault_before_the_request_is_not_sent_and_never_blocks_the_scene(monkeypatch, caplog):
+    """An unexpected local exception is not an unknown provider result.
+
+    The catch-all used to hardcode ``UNKNOWN``, so one local bug put the scene
+    under the no-replay gate forever.  The gateway writes ``WAITING_PROVIDER``
+    immediately before it opens the request, so a fault at an earlier phase
+    proves nothing was ever sent - and the exception must be logged, because
+    swallowing it left the fault with no diagnosable evidence at all.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="shine.materialprep.agent_call"):
+        outcome = _fault_outcome(("WAITING_RESOURCE", "PREPARING_PROVIDER"), monkeypatch)
+
+    assert outcome.error_code == "LLM_PROVIDER_FAULT"
+    assert outcome.uncertain is False
+    assert outcome.details["external_outcome"] == "NOT_SENT"
+    assert outcome.details["last_phase"] == "PREPARING_PROVIDER"
+    assert outcome.details["error_type"] == "RuntimeError"
+    assert "local fault, not a provider answer" in caplog.text
+
+
+def test_a_local_fault_after_the_request_opened_stays_unknown(monkeypatch):
+    """Once the request was opened the answer may exist upstream: never replay."""
+    outcome = _fault_outcome(("WAITING_RESOURCE", "PREPARING_PROVIDER", "WAITING_PROVIDER"), monkeypatch)
+
+    assert outcome.uncertain is True
+    assert outcome.details["external_outcome"] == "UNKNOWN"
+    assert outcome.details["last_phase"] == "WAITING_PROVIDER"
+    assert outcome.details["error_type"] == "RuntimeError"
+
+
+def test_a_fault_before_any_phase_is_reported_as_not_sent(monkeypatch):
+    """A fault in pacing or the consent guard happens before the gateway runs."""
+    outcome = _fault_outcome((), monkeypatch)
+
+    assert outcome.uncertain is False
+    assert outcome.details["external_outcome"] == "NOT_SENT"
+    assert outcome.details["last_phase"] == "PREPARING"

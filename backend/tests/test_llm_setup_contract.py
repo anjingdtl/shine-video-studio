@@ -472,3 +472,58 @@ def test_a_mock_provider_cannot_take_over_the_text_roles(api, fake_openai):
         "provider_profile_id": profile["id"], "roles": list(TEXT_ROLES)})
     assert response.status_code == 422, response.text
     assert client.get("/api/v1/agent-routes").json() == []
+
+
+def test_a_bracketed_ipv6_no_proxy_does_not_break_a_remote_provider_call(monkeypatch):
+    """One host environment detail must not break every remote text call.
+
+    httpx turns each ``NO_PROXY`` entry into a URL pattern and reads ``[::1]`` as
+    a host carrying the port ``:1]``, so ``httpx.Client(trust_env=True)`` raised
+    ``InvalidURL`` before a socket was ever opened.  Because ``InvalidURL`` is not
+    an ``httpx.HTTPError`` it escaped every transport handler and surfaced as a
+    provider fault, which blocked the scene under the unknown-outcome gate.  The
+    bracketed and unbracketed forms name the same host, so the entry is normalized
+    and the remote call keeps its proxy support.
+    """
+    import os
+
+    from shine.llm import transport
+
+    monkeypatch.setattr(transport, "_no_proxy_sanitized", False)
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1],::1")
+    client = transport.build_client("https://api.minimax.cn/v1/chat/completions", 5)
+    try:
+        assert client.trust_env is True, "a remote call keeps the host proxy"
+    finally:
+        client.close()
+    assert "[" not in (os.environ.get("NO_PROXY") or "")
+
+
+def test_a_loopback_provider_still_ignores_the_host_proxy(monkeypatch):
+    """Normalizing NO_PROXY must not change the loopback trust boundary."""
+    from shine.llm import transport
+
+    monkeypatch.setattr(transport, "_no_proxy_sanitized", False)
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1]")
+    client = transport.build_client("http://127.0.0.1:11434/v1/chat/completions", 5)
+    try:
+        assert client.trust_env is False
+    finally:
+        client.close()
+
+
+def test_a_client_construction_failure_is_reported_as_not_sent(monkeypatch):
+    """Construction precedes any socket, so nothing can have been sent."""
+    from shine.llm.base import ChatMessage, LLMConnectionError, ProviderConfig
+
+    def explode(*args, **kwargs):
+        raise httpx.InvalidURL("Invalid port: ':1]'")
+
+    monkeypatch.setattr(openai_compatible, "build_client", explode)
+    provider = openai_compatible.OpenAICompatibleProvider(ProviderConfig(
+        profile_id="p", name="remote", kind="openai_compatible",
+        base_url="https://api.minimax.cn/v1", model="m", api_key="k", timeout_s=5))
+    with pytest.raises(LLMConnectionError) as excinfo:
+        provider.complete([ChatMessage("user", "hi")], json_mode=False)
+    assert excinfo.value.details["external_outcome"] == "NOT_SENT"
+    assert excinfo.value.details["error"] == "InvalidURL"
