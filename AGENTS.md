@@ -1187,3 +1187,8 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   对本项目方案点「验证本机节点」（真实渲染器 object_info），再排产；不要用 API 绕过。
 - 回归：`backend/tests/test_material_budget_share.py`（2 项）、
   `test_director_styles.py::test_english_style_projection_uses_the_frozen_template_techniques`。
+
+- **新提交不得继承旧输入的 UNKNOWN**：`prepare_scenes` 的旧格式兼容查询只允许
+  `request_identity is None` 的旧行按文档/场次复用；带身份的 UNKNOWN 属于它自己的输入
+  （不同的锁定事实、提示词或 provider 就是另一份请求），新提交必须真正发出新请求。
+  回归见 `test_material_scenes.py::test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input`。
