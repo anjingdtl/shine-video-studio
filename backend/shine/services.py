@@ -24,9 +24,11 @@ from shine.models import (
     Shot,
     ShotAssetBinding,
     StyleVersion,
+    WorkflowProfile,
 )
 from shine.schemas import (
     CreateJob,
+    GenerationMode,
     ReferenceManifestItem,
     ReferenceUse,
     RenderProvider,
@@ -693,6 +695,19 @@ def make_render_request(
         ))
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     manifest = build_reference_manifest(ordered, assets)
+    profile = None
+    if body.workflow_profile_id:
+        profile = db.get(WorkflowProfile, body.workflow_profile_id)
+        if not profile or (profile.project_id and profile.project_id != project.id):
+            raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
+    mode_hint = body.generation_mode
+    if (mode_hint is None and profile is not None
+            and profile.mode.lower() == GenerationMode.REF2VA.value.lower()
+            and len(manifest) == 1 and manifest[0].use_as == ReferenceUse.PICTURE
+            and manifest[0].frame_role is None):
+        # An ordinary reference picture stays a reference when the caller
+        # selected Ref2VA. Unprofiled requests still infer I2VA as before.
+        mode_hint = GenerationMode.REF2VA
 
     from shine.h3.rulebook import H3RulebookRegistry
 
@@ -709,7 +724,7 @@ def make_render_request(
             style=StyleBible.model_validate(style.snapshot),
             manifest=manifest,
             project_language=project.language,
-            mode_hint=body.generation_mode,
+            mode_hint=mode_hint,
         )
     except PromptCompilationError as exc:
         if pack:
@@ -723,12 +738,7 @@ def make_render_request(
 
     workflow_hash = None
     transfer_warning_lines: list[str] = []
-    if body.workflow_profile_id:
-        from shine.models import WorkflowProfile
-
-        profile = db.get(WorkflowProfile, body.workflow_profile_id)
-        if not profile or (profile.project_id and profile.project_id != project.id):
-            raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
+    if profile is not None:
         if (profile.mode.lower() == "ref2va" and spec.characters
                 and not any(str(link.use_as).lower() == "subject" for link in shot.bindings)):
             # A named character without a subject reference would compile into
@@ -798,7 +808,7 @@ def make_render_request(
         transfer_warning_lines = [unbound_transfer_family_warning(family) for family in transfer_warnings]
 
     render_request = RenderRequest(
-        model_checkpoint_id=profile.checkpoint_id if body.workflow_profile_id else "MiniMax-H3-Base",
+        model_checkpoint_id=profile.checkpoint_id if profile is not None else "MiniMax-H3-Base",
         project_language=project.language,
         idempotency_key=idempotency_key or uuid4().hex,
         shot_id=shot.id,

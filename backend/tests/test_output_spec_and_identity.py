@@ -123,7 +123,7 @@ def test_voice_reference_is_optional_in_the_shot_reference_policy(api):
     assert "optional" in policy["shot_reference_set"]
 
 
-def _profile_with_size(client, *, with_size: bool):
+def _profile_with_size(client, *, with_size: bool, reference_slot: str = "reference_subject_1"):
     graph = {
         "31": {
             "class_type": "MiniMaxH3ReferenceToVideo",
@@ -134,7 +134,7 @@ def _profile_with_size(client, *, with_size: bool):
     parameter_map = {
         "positive_prompt": "31.inputs.prompt",
         "duration": "31.inputs.duration",
-        "reference_subject_1": "31.inputs.ref_images.ref_image_0",
+        reference_slot: "31.inputs.ref_images.ref_image_0",
     }
     if with_size:
         parameter_map |= {"width": "31.inputs.width", "height": "31.inputs.height"}
@@ -209,6 +209,26 @@ def test_series_carries_the_chosen_frame_into_the_job_request(api):
         request = json.loads(json.dumps(job.request))
     assert request["output_width"] == 1344
     assert request["output_height"] == 768
+
+
+def test_series_with_one_ordinary_picture_keeps_the_selected_ref2va_profile(api):
+    client, factory, _settings = api
+    project_id = create_project(client, "单图参考切镜")
+    style = freeze_style(client, project_id)
+    image = upload_asset(client, project_id, role="prop", entity_id="Red box")
+    approve_lock(client, image["id"])
+    shot = create_shot(client, project_id, style["id"], beat="An overhead view of the red box.",
+                       asset_ids=[image["id"]], bindings=[{"asset_id": image["id"], "use_as": "picture"}])
+    profile = _profile_with_size(client, with_size=True, reference_slot="reference_picture_1")
+    response = client.post(f"/api/v1/projects/{project_id}/production-series", json={
+        "shot_ids": [shot["id"]], "provider": "comfyui", "workflow_profile_id": profile["id"],
+    })
+    assert response.status_code == 201, response.text
+    with factory() as db:
+        request = db.scalar(select(Job).where(Job.shot_id == shot["id"])).request
+    assert request["generation_mode"] == "Ref2VA"
+    assert request["reference_manifest"][0]["frame_role"] is None
+    assert request["shot_spec"]["continuity"]["mode"] == "cut"
 
 
 def test_a_clip_length_that_cannot_hold_the_dialogue_is_refused_by_name(api):
