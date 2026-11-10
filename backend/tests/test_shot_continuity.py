@@ -46,13 +46,17 @@ def test_a_boundary_is_declared_without_revising_the_shot(studio):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["spec"]["continuity"]["mode"] == "last_frame"
+    # The boundary names the take it continues, so a cut that starts mid-scene
+    # (a rerun of the last five shots) can still find it.
+    assert body["spec"]["continuity"]["previous_shot_id"] == shots[0]["id"]
     assert body["revision"] == second["revision"]
 
     # Switching back is just as cheap, and leaves no stale source behind.
     back = client.post(f"/api/v1/shots/{second['id']}/continuity", json={"mode": "cut"},
-                         headers=LOCAL)
+                       headers=LOCAL)
     assert back.status_code == 200
     assert back.json()["spec"]["continuity"]["mode"] == "cut"
+    assert back.json()["spec"]["continuity"]["previous_shot_id"] is None
 
 
 def test_a_range_applies_one_boundary_and_keeps_its_first_shot(studio):

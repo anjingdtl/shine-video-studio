@@ -1026,11 +1026,18 @@ def run_production_series(
                                   failure_code="SERIES_OWNERSHIP_LOST")
             return {"status": "NEEDS_REVIEW", "shots": shots, "reason": "SERIES_OWNERSHIP_LOST"}
     except Exception as exc:
-        logger.error("production_series_failed series_id=%s error_type=%s", series_id, type(exc).__name__)
+        # The refusal that stopped the run is the only useful thing to report:
+        # "HTTPException" alone says nothing about which guard fired, and the
+        # operator cannot act on it.  Keep the named code and the traceback.
+        detail = getattr(exc, "detail", None)
+        named = detail if isinstance(detail, str) else (detail or {}).get("code") if isinstance(detail, dict) else None
+        reason = str(named or type(exc).__name__)[:120]
+        logger.error("production_series_failed series_id=%s error_type=%s reason=%s",
+                     series_id, type(exc).__name__, reason, exc_info=True)
         with session_factory.begin() as db:
             _set_series_state(db, series_id, worker_id, status="NEEDS_REVIEW",
-                              failure_code=f"SERIES_EXECUTION_FAILED:{type(exc).__name__}")
-        return {"status": "NEEDS_REVIEW", "shots": shots, "reason": type(exc).__name__}
+                              failure_code=f"SERIES_EXECUTION_FAILED:{reason}")
+        return {"status": "NEEDS_REVIEW", "shots": shots, "reason": reason}
 
     with session_factory.begin() as db:
         series = db.get(ProductionSeries, series_id)

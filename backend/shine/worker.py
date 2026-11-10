@@ -1478,52 +1478,63 @@ def _run_managed_loop(
     if next_job_id is not None and not callable(next_job_id):
         raise HTTPException(409, "COMFY_SERIES_CALLBACK_INVALID")
     scheduler = ResourceScheduler()
-    with session_factory.begin() as db:
-        if first_job_id:
-            candidate = db.get(Job, first_job_id)
-            if (candidate is None or candidate.status != "QUEUED" or candidate.paused
-                    or candidate.stale or candidate.provider != "comfyui"):
-                logger.info("managed_loop_no_start job=%s status=%s", first_job_id,
-                            candidate.status if candidate else None)
-                return []
-        else:
-            statement = (
-                select(Job)
-                .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
-                       Job.provider == "comfyui")
-            )
-            if exclude_series_jobs:
-                statement = statement.where(Job.id.not_in(_series_job_ids()))
-            candidate = db.scalar(statement.order_by(Job.created_at, Job.id).limit(1))
-            if not candidate:
-                return []
-        owner = "h3:" + candidate.id
-        lease = scheduler.enqueue(db, owner, 16384, True, 100)
-        if lease.status == "RELEASED":
-            lease.status = "WAITING"
-        db.commit()
-        lease_id, job_id = lease.id, candidate.id
-        project_id = candidate.project_id
-    with session_factory() as db:
-        if not scheduler.admit(db, lease_id):
-            logger.info("managed_loop_lease_not_admitted job=%s lease=%s", job_id, lease_id)
-            return []
-    with session_factory() as policy_db:
-        advisory_only = _project_policy(policy_db, project_id).advisory_model_reviews
-    if advisory_only:
-        # Advisory reviewers are evidence, never a production gate.
-        review_configs = {}
-    if series_id:
-        # The exclusive GPU lease is the proof of life of a running series.
-        # Persist it on the series so a crashed worker leaves a reconciliation
-        # trail instead of a series that can be re-queued under a live lease.
-        from shine.comfyops.production_series import record_series_lease
 
-        record_series_lease(session_factory, series_id, worker_id, lease_id)
-    history_dir = Path(settings.data_dir).resolve() / "comfyops" / "handoff-history"
-    continuation = _FirstManagedContinuation(
-        session_factory, settings, job_id=job_id, lease_id=lease_id, recipe=renderer_recipe,
-        review_configs=review_configs, history_dir=history_dir)
+    def begin(job_id_hint: str | None):
+        """Reserve the exclusive lease and take ownership of a fresh start.
+
+        Used for the first shot of a run and again whenever the renderer of the
+        previous shot was already shut down: a run that has to start the
+        renderer a second time is slower, but it is not a failed run.
+        """
+        with session_factory.begin() as db:
+            if job_id_hint:
+                candidate = db.get(Job, job_id_hint)
+                if (candidate is None or candidate.status != "QUEUED" or candidate.paused
+                        or candidate.stale or candidate.provider != "comfyui"):
+                    logger.info("managed_loop_no_start job=%s status=%s", job_id_hint,
+                                candidate.status if candidate else None)
+                    return None
+            else:
+                statement = (
+                    select(Job)
+                    .where(Job.status == "QUEUED", Job.paused.is_(False), Job.stale.is_(False),
+                           Job.provider == "comfyui")
+                )
+                if exclude_series_jobs:
+                    statement = statement.where(Job.id.not_in(_series_job_ids()))
+                candidate = db.scalar(statement.order_by(Job.created_at, Job.id).limit(1))
+                if not candidate:
+                    return None
+            owner = "h3:" + candidate.id
+            lease = scheduler.enqueue(db, owner, 16384, True, 100)
+            if lease.status == "RELEASED":
+                lease.status = "WAITING"
+            db.commit()
+            lease_id, job_id, project_id = lease.id, candidate.id, candidate.project_id
+        with session_factory() as db:
+            if not scheduler.admit(db, lease_id):
+                logger.info("managed_loop_lease_not_admitted job=%s lease=%s", job_id, lease_id)
+                return None
+        with session_factory() as policy_db:
+            advisory_only = _project_policy(policy_db, project_id).advisory_model_reviews
+        configs = {} if advisory_only else review_configs
+        if series_id:
+            # The exclusive GPU lease is the proof of life of a running series.
+            # Persist it on the series so a crashed worker leaves a reconciliation
+            # trail instead of a series that can be re-queued under a live lease.
+            from shine.comfyops.production_series import record_series_lease
+
+            record_series_lease(session_factory, series_id, worker_id, lease_id)
+        history_dir = Path(settings.data_dir).resolve() / "comfyops" / "handoff-history"
+        continuation = _FirstManagedContinuation(
+            session_factory, settings, job_id=job_id, lease_id=lease_id, recipe=renderer_recipe,
+            review_configs=configs, history_dir=history_dir)
+        return continuation, lease_id, job_id
+
+    started = begin(first_job_id)
+    if started is None:
+        return []
+    continuation, lease_id, job_id = started
     token = CURRENT_RESOURCE.set(lease_id)
     try:
         result = _run_one(session_factory, worker_id=worker_id, settings=settings,
@@ -1548,6 +1559,25 @@ def _run_managed_loop(
             elif target is None:
                 logger.info("managed_loop_no_next_job previous=%s", shots[-1])
                 break
+            elif getattr(coordinator, "keeper", None) is None:
+                # The renderer of the previous shot was already shut down -
+                # nothing held it in the idle handoff - so this shot cannot
+                # continue a live handoff.  Starting the renderer again is
+                # slower, but a run that has to do it is not a failed run.
+                restarted = begin(target)
+                if restarted is None:
+                    logger.info("managed_loop_restart_unavailable previous=%s", shots[-1])
+                    break
+                continuation, fresh_lease, fresh_job = restarted
+                token = CURRENT_RESOURCE.set(fresh_lease)
+                try:
+                    result = _run_one(session_factory, worker_id=worker_id, settings=settings,
+                                      comfy_service=comfy_service, comfy_client=comfy_client,
+                                      semantic_reviewer=semantic_reviewer, asr_reviewer=asr_reviewer,
+                                      expected_job_id=fresh_job, managed_continuation=continuation)
+                finally:
+                    CURRENT_RESOURCE.reset(token)
+                coordinator = continuation.coordinator
             else:
                 result, coordinator = run_managed_once(session_factory, worker_id, coordinator, settings=settings,
                                                         comfy_service=comfy_service, comfy_client=comfy_client,
@@ -2941,7 +2971,7 @@ def _run_comfy_job(
                      expected_state_version=ack_state_version, attempt_id=attempt_id,
                      lease_seconds=settings.worker_lease_seconds):
         return job_id
-    deadline = time.monotonic() + 600
+    deadline = time.monotonic() + max(60, int(settings.comfy_render_timeout_seconds))
     missing_since: float | None = None
     while True:
         if managed_guard is not None:
@@ -2968,7 +2998,10 @@ def _run_comfy_job(
             result = ComfyResult(status="timeout", error_code="COMFY_TIMEOUT")
             break
         time.sleep(1.0)
-    if result.status in {"running", "pending", "timeout"}:
+    if result.status in {"running", "pending"}:
+        # Still in flight: the attempt keeps its lease and the loop waits.
+        # A timeout is different - it means this worker stopped watching, and
+        # it must not be reported as if the shot had finished.
         with session_factory.begin() as db:
             job = db.get(Job, job_id)
             if (

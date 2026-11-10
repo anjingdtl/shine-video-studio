@@ -217,6 +217,14 @@ class ShotContinuityInput(APIModel):
     """
 
     mode: Literal["cut", "last_frame"]
+    previous_shot_id: str | None = Field(default=None, max_length=36)
+    """The earlier shot this one continues.
+
+    Normally the shot right before it in story order, which is what the switch
+    means.  Naming it explicitly is how a cut that starts mid-scene - a rerun
+    of the last five shots after the first one passed - still continues the
+    take that really exists.
+    """
     reference_start_s: float | None = Field(default=None, ge=0)
     reference_end_s: float | None = Field(default=None, gt=0)
     notes: str = Field(default="", max_length=500)

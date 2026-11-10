@@ -989,9 +989,9 @@ def create_app(
 
     def _apply_continuity(db: Session, shot: Shot, mode: str,
                           reference_start_s: float | None, reference_end_s: float | None,
-                          notes: str, actor: str, *, has_predecessor: bool) -> bool:
+                          notes: str, actor: str, *, predecessor: str | None) -> bool:
         """Write one boundary decision; returns whether the shot changed."""
-        if mode != "cut" and not has_predecessor:
+        if mode != "cut" and predecessor is None:
             raise HTTPException(status_code=422, detail={
                 "code": "SHOT_CONTINUITY_NEEDS_PREDECESSOR",
                 "message": f"「{shot.name}」是项目的第一个镜头，前面没有可承接的成片；第一镜只能独立开场。",
@@ -999,10 +999,11 @@ def create_app(
         spec = ShotSpec.model_validate(shot.spec)
         continuity = spec.continuity.model_copy(update={
             "mode": mode,
-            # Which take is continued is decided by the run that binds it.  A
-            # stored job id would point at whatever was shot last time.
+            # Naming the predecessor is what lets a cut that starts mid-scene
+            # continue the take that really exists.  Which *job* carries it is
+            # still decided by the run that binds it, never guessed here.
+            "previous_shot_id": predecessor if mode != "cut" else None,
             "previous_job_id": None,
-            "previous_shot_id": None,
             "reference_start_s": reference_start_s,
             "reference_end_s": reference_end_s,
             "notes": notes,
@@ -1032,9 +1033,18 @@ def create_app(
         require_project(db, shot.project_id)
         ordered = _ordered_shots(db, shot.project_id)
         position = next((index for index, row in enumerate(ordered) if row.id == shot.id), 0)
+        declared = body.previous_shot_id
+        if declared is not None:
+            earlier_ids = {row.id for row in ordered[:position]}
+            if declared not in earlier_ids:
+                raise HTTPException(status_code=422, detail={
+                    "code": "SHOT_CONTINUITY_PREDECESSOR_NOT_EARLIER",
+                    "message": "承接的镜头必须排在这一镜之前。",
+                })
+        predecessor = declared if declared is not None else (ordered[position - 1].id if position else None)
         _apply_continuity(db, shot, body.mode, body.reference_start_s,
                           body.reference_end_s, body.notes, actor,
-                          has_predecessor=position > 0)
+                          predecessor=predecessor)
         db.commit()
         db.refresh(shot)
         return jsonable_encoder(_shot_data(db, shot))
@@ -1053,8 +1063,10 @@ def create_app(
         targets = ordered[1:] if body.skip_first and len(ordered) > 1 else ordered
         changed, unchanged = [], []
         for shot in targets:
+            position = index_of[shot.id]
+            predecessor = full_order[position - 1].id if position else None
             if _apply_continuity(db, shot, body.mode, None, None, "", actor,
-                                 has_predecessor=index_of[shot.id] > 0):
+                                 predecessor=predecessor):
                 changed.append(shot.id)
             else:
                 unchanged.append(shot.id)
