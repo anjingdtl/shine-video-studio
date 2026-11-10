@@ -1168,3 +1168,22 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   含 `[::1]`，先 `env -u NO_PROXY`，否则 httpx 解析失败会被误判为发布失败。
 - 本轮修改了 `worker.py`，按 `client_review_identity` 约定旧 VLM revision 失效；真实正负校准
   仍未完成，不得声称已校准。两镜试拍与新单镜均为技术通过、`final=needs_review`，不是人工验收。
+
+## 2026-11-10 长文本 2/3 分块与手工镜头英文风格投影
+
+- **长文本按原尺寸的 2/3 切分**：大纲 `segment_document(..., max_scene_chars=MAX_SCENE_CHARS * 2 // 3)`
+  （4000→2666），长文本分镜 `max_scene_chars=1200`（原 1800）。切分仍由
+  `shine/materialprep/source_spans.py` 的 `segment_document` 完成，不新建分块器。
+- **预算控制器统一输入与输出**：`budget_report(..., input_share=2/3)` 用同一份
+  `context_window_tokens`、输出预留与 margin 计算可用预算；`scenes.prepare_scenes` 用
+  `input_share=2/3` 决定是否继续二分。不要另建一套 token 估算。
+- **手工镜头的中文冻结风格要被投射成英文**：`services.make_render_request` 在
+  `shot_spec.prompt_style` 为空且风格含 CJK 时，用
+  `shine/director_styles/service.py::english_style_bible` 读取冻结模板的
+  `instruction_en`，把结果附着到**请求的 shot_spec.prompt_style**（不是替换 style
+  snapshot），让 `H3_ENGLISH` 与 `SHINE_PROVENANCE` 同时通过；冻结风格 id/hash 不变。
+  不要只在编译时临时换 style，否则校验器重编译会报 provenance 不一致。
+- **新登记方案必须先在本机验证**：`PROFILE_NOT_VALIDATED` 时先到「基础配置 → 模型与生成方案」
+  对本项目方案点「验证本机节点」（真实渲染器 object_info），再排产；不要用 API 绕过。
+- 回归：`backend/tests/test_material_budget_share.py`（2 项）、
+  `test_director_styles.py::test_english_style_projection_uses_the_frozen_template_techniques`。
