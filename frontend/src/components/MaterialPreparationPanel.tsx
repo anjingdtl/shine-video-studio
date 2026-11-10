@@ -747,16 +747,21 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </div>
         </details>
       )}
-      {(state?.blockers ?? []).map((blocker) => (
-        <div className="required-action" key={blocker.code}>
-          <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text">
-            <b>{reasonText(blocker.code)}</b>
-            <small>{blocker.note}</small>
-            <small className="material-code">代码 {blocker.code}</small>
-          </div>
+      {!!(state?.blockers ?? []).length && <details className="material-stage">
+        <summary>还有 {state!.blockers.length} 项素材未绑定（点击展开清单）</summary>
+        <div className="material-stage-body material-blocker-list">
+          {(state?.blockers ?? []).map((blocker, index) => (
+            <div className="required-action" key={`${blocker.code}-${index}`}>
+              <AlertTriangle size={14} className="required-icon" />
+              <div className="required-text">
+                <b>{reasonText(blocker.code)}</b>
+                <small>{blocker.note}</small>
+                <small className="material-code">代码 {blocker.code}</small>
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      </details>}
 
       <ol className="material-stages" aria-label="素材准备阶段">
         {([
