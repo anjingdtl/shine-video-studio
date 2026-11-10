@@ -594,7 +594,15 @@ def test_storyboard_accepts_omitted_redundant_facts_and_optional_camera_details(
         assert script.payload_json["locked_story_facts"] == FACTS
 
 
-def test_director_is_instructed_to_include_materially_depicted_approved_props(studio):
+def test_director_is_instructed_to_reference_only_the_props_that_matter_to_the_shot(studio):
+    """The director names a core prop, not every approved master in the room.
+
+    The reference set of a shot is a product decision, so the prompt asks for
+    a prop only when its distinct appearance or readable content drives the
+    shot.  Ordinary furniture, food and set dressing stay in the visual
+    description; naming every approved master would fill the reference budget
+    the render needs.
+    """
     client, _factory, _tmp_path, _settings = studio
     project_id, _style, registry = _studio_with_chain(client)
     original = _responder(registry)
@@ -607,7 +615,8 @@ def test_director_is_instructed_to_include_materially_depicted_approved_props(st
 
     client.app.state.mock_llm_responder = capture
     assert _storyboard_request(client, project_id).json()["status"] == "PROPOSED"
-    assert "approved prop or other master materially depicted" in instructions[0]
+    assert "an approved core prop whose exact appearance or readable content" in instructions[0]
+    assert "approved prop or other master materially depicted" not in instructions[0]
 
 
 def test_chinese_locked_fact_translation_is_shown_and_kept_with_original(studio):

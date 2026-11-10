@@ -154,13 +154,19 @@ def test_ref2va_package_without_any_reference_is_not_startable(api):
     assert mismatch and mismatch[0]["shot_id"] == shot["id"]
     assert mismatch[0]["mode"] == "Ref2VA"
 
-    # The same shot through the single-shot entry is refused for the same reason.
+    # The same shot through the single-shot entry is refused, and the refusal
+    # names the missing subject and the action to take: a character master is
+    # required for a Ref2VA shot, so the reason is more specific than the
+    # generic mode mismatch the readiness reports.
     job = client.post(f"/api/v1/projects/{project}/jobs", json={
         "shot_id": shot["id"], "provider": "comfyui",
         "workflow_profile_id": profile["id"], "generation_mode": "Ref2VA",
     })
     assert job.status_code in {409, 422}, job.text
-    assert "H3_MODE_REFERENCE_MISMATCH" in job.text or "WORKFLOW_PROFILE" in job.text
+    detail = job.json()["detail"]
+    assert detail["code"] == "H3_CHARACTER_REFERENCE_MISSING"
+    assert detail["action"] == "BIND_SUBJECT_REFERENCE"
+    assert detail["characters"] == ["Lin"]
 
 
 def test_a_profile_without_a_reference_slot_is_named_before_a_run_starts(api):

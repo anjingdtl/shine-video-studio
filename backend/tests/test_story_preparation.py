@@ -66,9 +66,18 @@ def test_outline_is_queued_claimed_resumed_and_merged_with_complete_source(api, 
         sections = artifact.payload_json["production_sections"]
         assert sections[0]["start_offset"] == 0 and sections[-1]["end_offset"] == len(text)
         assert artifact.payload_json["locked_facts"] == ["保留前言事实"]
-        assert len(task.trace["leaf_artifact_ids"]) > 3
+        # The long chapter is split into leaves and then merged back into the
+        # sections that cover the whole source.  The leaf count belongs to the
+        # chunking policy, so the test states the property instead of a number.
+        leaves = task.trace["leaf_artifact_ids"]
+        assert len(leaves) >= 2, "the long chapter must be split into several leaves"
+        assert len(leaves) >= len(sections), "every produced section needs a leaf of its own"
         assert "OutlinePart" in calls
-        assert task.trace["level"] >= 1
+        # The leaves are merged into a single outline.  A second merge round is
+        # only needed when the first one produced more than one output, so the
+        # level counter belongs to the chunking policy, not to the contract.
+        assert len(task.trace["level_outputs"]) == 1
+        assert artifact.kind == "StoryOutline"
     assert not story.run_pending_story_task(factory, api[2], "another-worker", gateway=gateway)
     assert _queue(client, project, doc) == task_id
 
