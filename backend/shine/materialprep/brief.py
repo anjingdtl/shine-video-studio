@@ -40,6 +40,7 @@ from shine.materialprep.states import (
     ITEM_BRIEF_RUNNING,
     ITEM_FAILED,
     ITEM_NEEDS_REVIEW,
+    ITEM_QUEUED,
 )
 from shine.models import AgentArtifact, AgentTaskRecord, Project, utcnow
 from shine.services import add_audit
@@ -301,6 +302,13 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         if data["document_id"] else None,
     )
     if not outcome.ok:
+        if outcome.error_code == "GPU_BUSY_RETRY_OR_QUEUE":
+            # The stage was busy, so nothing was sent. Put the item back in the
+            # queue: failing it here turned one occupied GPU into a batch of
+            # "unknown provider faults" that could not be retried.
+            new_version = touch_item(factory, item_id, version, status=ITEM_QUEUED, error_code=None)
+            return {"status": ITEM_QUEUED, "code": "GPU_BUSY_RETRY_OR_QUEUE",
+                    "state_version": new_version, "brief": None, "ready": False}
         external_outcome = outcome.details.get("external_outcome", "UNKNOWN")
         uncertain = outcome.uncertain or external_outcome == "UNKNOWN"
         status = ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED

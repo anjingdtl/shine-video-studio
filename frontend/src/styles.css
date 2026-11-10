@@ -1830,3 +1830,11 @@ html[data-theme='dark'] .routing-workflow-options{background:#24251f;border-colo
   .agent-role-row{grid-template-columns:16px minmax(0,1fr)}
   .agent-role-name,.agent-role-current,.agent-role-select,.agent-role-status{grid-column:2}
 }
+
+/* Only one consent fold may ever be visible. The panel is mounted more than once
+   in one tree; the extra mounts used to stack up and push the material controls
+   off screen. The component keeps a single logical instance, and this is the
+   visual backstop in case an extra mount ever slips through again. */
+.material-stage[data-consent] ~ .material-stage[data-consent] {
+  display: none;
+}

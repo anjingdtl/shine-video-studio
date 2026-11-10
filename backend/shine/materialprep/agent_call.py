@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from shine.llm.base import LLMError
@@ -254,6 +255,18 @@ def call_material_agent(
                          "provider_code": exc.details.get("provider_code"),
                          "truncated": truncated_output(exc)},
             )
+    except HTTPException as exc:
+        # A refused stage never opened a provider request. That makes it
+        # NOT_SENT and retryable, the opposite of an unknown outcome; reporting
+        # it as LLM_PROVIDER_FAULT marked a whole batch uncertain because one
+        # stale lease from a killed worker was holding the GPU.
+        detail = exc.detail if isinstance(exc.detail, str) else "AGENT_STAGE_REFUSED"
+        return AgentCallOutcome(
+            error_code=detail,
+            uncertain=False,
+            details={"error_type": "HTTPException", "external_outcome": "NOT_SENT",
+                     "status": exc.status_code},
+        )
     except ValidationError as exc:
         errors = [
             {"field": ".".join(str(part) for part in error.get("loc", ())), "type": error.get("type")}

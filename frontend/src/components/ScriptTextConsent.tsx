@@ -44,7 +44,10 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
   const [notice, setNotice] = useState('');
   const [problem, setProblem] = useState('');
   const [primary, setPrimary] = useState(true);
-  const panelKey = `${projectId}:${documentId}`;
+  // One consent fold per PROJECT, not per document: the same panel was
+  // mounted with several document ids, so a per-document key still let
+  // several folds stack up and push the material controls off screen.
+  const panelKey = projectId;
   const path = `/projects/${projectId}/material-preparation/text-consent`;
 
   useEffect(() => {
@@ -90,7 +93,7 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
   }
 
   if (!primary) return null;
-  return <details className="material-stage" open={expanded || undefined}>
+  return <details className="material-stage" data-consent="script-text" open={expanded || undefined}>
     <summary>文字模型发送授权</summary>
     {scope ? <>
       <p>{scope.transmission}</p>
