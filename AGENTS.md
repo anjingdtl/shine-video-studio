@@ -1135,3 +1135,35 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `test_one_click_batch_admission.py`、`test_shoot_ownership.py`、
   `test_director_run_scope.py`；前端 `frontend/src/test/realWizard.test.tsx`（+2）。
   报告见 `docs/REACCEPT_R01_R07_REPORT_20261109.md`。
+
+## 2026-11-10 成片库、真实文件名与采用目录
+
+- **成片库是既有台账的只读视图，加上一条受保护的删除通道**。`GET/POST
+  /api/v1/projects/{id}/video-library` 只聚合 `media_artifacts` 的 `video` 与 `delivery`：
+  同一 artifact 的多个交付回执只出现一次，缩略图与连续性派生图不是成片条目。
+  采用判定来自 `shine/media/video_layout.py`：显式装配选择优先，否则最新的正常通过生产；
+  只有“选为当前装配版本”才会让重拍成为当前，重拍在选中前是历史。
+- **删除是墓碑，不是改写历史**。迁移 `f180b0070001` 增加 `deleted_at/deleted_by/deleted_reason`；
+  服务端只接受本项目 artifact ID，逐项阻止活动/待核对任务、当前采用、被有效成片或连续性关系引用、
+  哈希不一致与路径越界；同名共享文件只移除记录保留字节；文件已缺失可清理记录。
+  Job、attempt、交付回执与审计保留原 artifact 身份；媒体接口对已删除视频返回 404，
+  交付列表带 `artifact_deleted`。
+- **真实文件名即磁盘文件名**。`shine/media/video_naming.py` 生成
+  `《项目名称_003镜_02集》.mp4` / `《项目名称_001-006镜_02集》.mp4`；无集号写 `未分集`，
+  范围不明写 `镜号未登记`；非法字符、Windows 保留名、同名冲突（`_v2`）与 Unicode 都在此处理。
+  SHA-256 仍是身份，旧文件不改名、不批量迁移；只有用户显式选择重拍时才移动相关文件。
+- **采用与未采用分目录**：新单镜采用版本写 `artifacts/<项目>/current/`，重拍先写 `history/`，
+  显式选中时两文件互换并同步 attempt 输出路径与连续性来源路径（提交失败回滚文件移动）；
+  新的自动交付写 `delivery/current/`，手工装配写 `delivery/history/`。
+  既有正式文件保持原路径，正式六镜、三镜与 v2 不得在验收中删除或迁移。
+- **视频封面取 1 秒代表帧，封面失败仍可播放**。`thumbnail(..., seek_s=1.0)` 由视频接口使用，
+  图片接口保持首帧；封面 URL 带 `?poster=1s` 以绕过旧的 immutable 缓存。
+  `VideoPreview` 封面失败时内嵌 `<video>`，不显示死帧“预览不可用”。
+- **单张普通参考图 + 已选 Ref2VA 不再被推断成 I2VA**（`make_render_request` 的 `mode_hint`）；
+  显式工作流/检查点、无方案推断与帧角色校验不变。
+- 回归：`backend/tests/test_video_library.py`（12 项），以及 `test_delivery_assembly`、
+  `test_delivery_orders`、`test_generation_segments`、`test_job_media`、三个迁移测试；
+  前端 `videoLibrary.test.tsx`（7 项）。运行依赖真实 HTTP 的测试时，若本会话 `NO_PROXY`
+  含 `[::1]`，先 `env -u NO_PROXY`，否则 httpx 解析失败会被误判为发布失败。
+- 本轮修改了 `worker.py`，按 `client_review_identity` 约定旧 VLM revision 失效；真实正负校准
+  仍未完成，不得声称已校准。两镜试拍与新单镜均为技术通过、`final=needs_review`，不是人工验收。
