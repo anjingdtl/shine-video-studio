@@ -146,7 +146,7 @@ export const continuityLabels: Record<string, string> = {
   SOFT_REFERENCE_CONTINUITY: '软连续（参考上一镜）',
   HARD_FRAME_ANCHOR_CONTINUITY: '硬连续（锚定上一镜尾帧）',
   soft: '软连续（参考上一镜）', hard: '硬连续（锚定上一镜尾帧）',
-  last_frame: '软连续：承接上一镜末帧', cut: '独立镜头（不承接）',
+  last_frame: '软连续：参考上一镜末帧', cut: '独立镜头（不承接）',
   hard_frame_anchor: '硬连续：锚定上一镜末帧（能力待验证）',
   video_reference: '视频参考连续（传输未验收）',
 };

@@ -362,7 +362,7 @@ export function useStudio() {
     });
   }
 
-  /** 镜间衔接开关：决定这一镜是承接上一镜的末帧，还是独立开场。
+  /** 镜间衔接开关：决定这一镜参考上一镜的末帧构图，还是独立开场。
    *
    * 它只改镜头之间的边界声明，不改镜头内容，所以不产生新版本、也不让已通过的
    * 成片失效；下一次排产时，后续镜头才会拿到上一镜的末帧作为参考。 */
@@ -378,7 +378,7 @@ export function useStudio() {
       await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
       report(mode === 'cut'
         ? `已改为独立切镜：${ids.length} 镜从新画面开场。`
-        : `已改为承接上一镜：${ids.length} 镜从上一镜末帧续起。`);
+        : `已设置软连续，${ids.length} 镜会参考上一镜末帧构图。`);
     });
   }
 

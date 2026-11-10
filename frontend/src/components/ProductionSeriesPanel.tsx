@@ -390,11 +390,11 @@ export default function ProductionSeriesPanel({
   const continuingCount = shots.filter((shot) => String(shot.spec.continuity?.mode ?? 'cut') !== 'cut').length;
 
   /** 整段施加一种衔接：`skip_first` 让整段的第一镜保持原样，因为它在段内没有
-   *  前一镜可接；其余每一镜都改成「承接上一镜」。 */
+   *  前一镜可接；其余每一镜都改成软连续。 */
   async function applyContinuity(mode: 'cut' | 'last_frame') {
     const targets = mode === 'last_frame' ? orderedSelected.slice(1) : orderedSelected;
     if (targets.length === 0) {
-      onMessage('先勾选至少两个镜头，再设置「整段承接上一镜」。', 'error');
+      onMessage('先勾选至少两个镜头，再给选中段设置末帧参考。', 'error');
       return;
     }
     await onSetContinuity(targets.map((shot) => shot.id), mode);
@@ -836,7 +836,9 @@ export default function ProductionSeriesPanel({
 
       <div className="series-shots">
         {shots.map((shot) => {
-          const continues = String(shot.spec.continuity?.mode ?? 'cut') !== 'cut';
+          const mode = String(shot.spec.continuity?.mode ?? 'cut');
+          const continues = mode !== 'cut';
+          const modeLabel = mode === 'last_frame' ? '参考上一镜末帧' : label(continuityLabels, mode);
           return (
             <label key={shot.id} className={`series-shot ${busyShotIds.has(shot.id) ? 'is-busy' : ''}`}>
               <input
@@ -851,8 +853,8 @@ export default function ProductionSeriesPanel({
                 className={`continuity-switch ${continues ? 'is-on' : ''}`}
                 disabled={busy || working || busyShotIds.has(shot.id)}
                 title={continues
-                  ? '本镜承接上一镜的末帧开拍；点一下改成独立切镜'
-                  : '本镜独立开场；点一下改成承接上一镜的末帧'}
+                  ? `${modeLabel}；点一下改成独立切镜`
+                  : '本镜独立开场；点一下使用上一镜末帧作为构图参考'}
                 onClick={(event) => {
                   // 这一行本身就是 <label>：不拦下来，点开关会连带勾选/取消勾选。
                   event.preventDefault();
@@ -861,7 +863,7 @@ export default function ProductionSeriesPanel({
                 }}
               >
                 {continues ? <Link2 size={12} /> : <Scissors size={12} />}
-                {continues ? '承接上一镜' : '独立切镜'}
+                {continues ? modeLabel : '独立切镜'}
               </button>
               <small className="series-shot-length">{Number(shot.spec.duration_target_s ?? 0).toFixed(1)}s</small>
             </label>
@@ -870,8 +872,8 @@ export default function ProductionSeriesPanel({
         {shots.length === 0 && <span className="empty-inline">先创建分镜，才能排入生产序列。</span>}
       </div>
       {shots.length > 0 && <p className="series-hint">
-        镜头之间用开关决定是否接戏：承接上一镜的镜头会等上一镜拍完通过，把它的末帧作为起始参考，画面不会跳回另一种打光；
-        独立切镜则重新开画。现在有 {continuingCount} 镜承接上一镜，其余独立开场。
+        软连续会等上一镜通过，再用它的末帧参考下一镜的开场构图。首帧仍由模型生成，接点需要看片确认。
+        现在有 {continuingCount} 镜设置了衔接，其余独立开场。
       </p>}
       <div className="series-actions-row">
         <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
@@ -879,7 +881,7 @@ export default function ProductionSeriesPanel({
           className="secondary-button"
           disabled={busy || working || orderedSelected.length < 2}
           onClick={() => void applyContinuity('last_frame')}
-        >选中段首尾相接（{Math.max(0, orderedSelected.length - 1)} 个接点）</button>
+        >选中段参考上一镜末帧（{Math.max(0, orderedSelected.length - 1)} 个接点）</button>
         <button
           className="secondary-button"
           disabled={busy || working || orderedSelected.length === 0}
