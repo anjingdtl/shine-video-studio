@@ -1162,9 +1162,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `VideoPreview` 封面失败时内嵌 `<video>`，不显示死帧“预览不可用”。
 - **单张普通参考图 + 已选 Ref2VA 不再被推断成 I2VA**（`make_render_request` 的 `mode_hint`）；
   显式工作流/检查点、无方案推断与帧角色校验不变。
-- 回归：`backend/tests/test_video_library.py`（12 项），以及 `test_delivery_assembly`、
+- 回归：`backend/tests/test_video_library.py`（13 项），以及 `test_delivery_assembly`、
   `test_delivery_orders`、`test_generation_segments`、`test_job_media`、三个迁移测试；
-  前端 `videoLibrary.test.tsx`（7 项）。运行依赖真实 HTTP 的测试时，若本会话 `NO_PROXY`
+  前端 `videoLibrary.test.tsx`（8 项）。运行依赖真实 HTTP 的测试时，若本会话 `NO_PROXY`
   含 `[::1]`，先 `env -u NO_PROXY`，否则 httpx 解析失败会被误判为发布失败。
 - 本轮修改了 `worker.py`，按 `client_review_identity` 约定旧 VLM revision 失效；真实正负校准
   仍未完成，不得声称已校准。两镜试拍与新单镜均为技术通过、`final=needs_review`，不是人工验收。
