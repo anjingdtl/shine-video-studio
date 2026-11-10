@@ -580,21 +580,66 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     if not confirmation:
         raise HTTPException(409, "MATERIAL_PLAN_NOT_CONFIRMED")
     wanted = set(body.requirement_ids or [])
-    targets = [row["requirement_id"] for row in requirements
-               if not wanted or row["requirement_id"] in wanted]
+    targets = [row for row in requirements if not wanted or row["requirement_id"] in wanted]
     if not targets:
         raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
+    # A requirement already satisfied by a master is recorded as "reuse_master",
+    # and a batch may not generate for it. Asking for a fresh picture therefore
+    # has to re-confirm the list first: the person is explicitly choosing "draw
+    # this again" over "keep what I have".
+    from shine.materialprep.contracts import MaterialVisualDirection
+    from shine.materialprep.models import MaterialItem
+    from shine.materialprep.states import ITEM_IN_FLIGHT, ITEM_NEEDS_REVIEW, ITEM_QUEUED
+
+    # A queue item or an unreviewed result would otherwise block the whole
+    # rerun for every requirement at once. Retiring it keeps the row as history
+    # and lets the new revision exist; the person asking for a full rerun is
+    # explicitly choosing fresh pictures over whatever is still pending.
+    blockers = list(db.scalars(select(MaterialItem).where(
+        MaterialItem.project_id == project_id,
+        MaterialItem.requirement_id.in_([row["requirement_id"] for row in targets]),
+        MaterialItem.status.in_([*ITEM_IN_FLIGHT, ITEM_NEEDS_REVIEW, ITEM_QUEUED]),
+    )))
+    for stale in blockers:
+        # CANCELLED is a real terminal state; the row keeps its attempts and
+        # candidates as history, it only stops holding the requirement.
+        stale.status = "CANCELLED"
+        stale.error_code = "SUPERSEDED_BY_FULL_RERUN"
+        stale.state_version += 1
+    if blockers:
+        db.flush()
+
+    decisions = [
+        {
+            "requirement_id": row["requirement_id"],
+            "entity_id": row["entity_id"],
+            "strategy": "generate",
+            "asset_id": None,
+            "brief_note": row.get("brief_note") or "",
+        }
+        for row in targets
+    ]
+    reconfirmed = service.confirm(
+        db, actor, project_id,
+        MaterialConfirmation(
+            plan_revision_id=state["plan_revision_id"],
+            expected_snapshot=state["expected_snapshot"],
+            decisions=decisions,
+            visual_direction=MaterialVisualDirection.model_validate(state.get("visual_direction") or {}),
+            notes="重跑全部素材：确认以新提示词重新出图",
+        ),
+    )
     result = service.create_batch(
         db,
         project_id,
-        confirmation_id=confirmation["confirmation_id"],
-        confirmation_hash=confirmation["confirmation_hash"],
-        requirement_ids=targets,
+        confirmation_id=reconfirmed["confirmation_id"],
+        confirmation_hash=reconfirmed["confirmation_hash"],
+        requirement_ids=[row["requirement_id"] for row in targets],
         idempotency_key=body.idempotency_key,
         rights_id=None,
         new_revision=True,
     )
-    return {"status": "accepted", **result}
+    return {"status": "accepted", "reconfirmed": reconfirmed["confirmation_id"], **result}
 
 
 def _require_ownership(db, project_id: str, run_id: str) -> None:
