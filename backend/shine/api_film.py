@@ -186,6 +186,12 @@ def _registry(request: Request):
     return H3RulebookRegistry(request.app.state.settings.data_dir / "h3-source-cache")
 
 
+def _film_asset_root(request: Request, db):
+    from shine.media.output_layout import output_root_for_request
+
+    return output_root_for_request(request, db)
+
+
 class RuleLockRequest(APIModel):
     rulepack_id: str = PACK_ID
 
@@ -313,7 +319,10 @@ def run_role(
 ):
     try:
         return _artifact(
-            FilmAgentDispatcher(gateway, request.app.state.settings.data_dir).run(db, project_id, role, body)
+            FilmAgentDispatcher(
+                gateway, request.app.state.settings.data_dir,
+                asset_root=_film_asset_root(request, db),
+            ).run(db, project_id, role, body)
         )
     except LLMError as exc:
         raise HTTPException(status_code=422, detail=exc.code) from None
@@ -1029,7 +1038,10 @@ def generate_storyboard(
                 "resume_steps": dict(body.resume_steps or {}),
             }
 
-    dispatcher = FilmAgentDispatcher(gateway, request.app.state.settings.data_dir)
+    dispatcher = FilmAgentDispatcher(
+        gateway, request.app.state.settings.data_dir,
+        asset_root=_film_asset_root(request, db),
+    )
 
     # A definitive contract rejection is a per-sample property of a real text
     # model, not an uncertain external outcome: the guard keeps the rejected

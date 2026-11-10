@@ -83,7 +83,9 @@ def revalidate(job_id: str, body: RevalidateRequest, actor: Operator, settings: 
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    result = revalidate_job_against_current_plan(db, job, data_dir=settings.data_dir)
+    from shine.media.output_layout import output_root
+
+    result = revalidate_job_against_current_plan(db, job, data_dir=output_root(db, settings))
     from shine.services import add_audit
 
     add_audit(

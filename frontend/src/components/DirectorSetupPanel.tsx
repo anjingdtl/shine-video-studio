@@ -5,6 +5,7 @@ import { SetupPanel } from './SetupPanel';
 import { VariantReadinessCard } from './VariantReadinessCard';
 import { DeploymentRecommendationCard, type DeploymentChoice } from './DeploymentRecommendationCard';
 import { ImageCapabilityCard } from './ImageCapabilityCard';
+import OutputDirectoryPanel from './OutputDirectoryPanel';
 import SettingsPanel from './SettingsPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
 
@@ -153,6 +154,7 @@ export default function DirectorSetupPanel({
         </div>
       </div>
       <DeploymentRecommendationCard onChoice={setDeploymentChoice} />
+      <OutputDirectoryPanel />
       <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch}
         includeImageCapability={deploymentChoice.image_prep} />
       {deploymentChoice.image_prep

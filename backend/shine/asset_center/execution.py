@@ -41,7 +41,7 @@ from shine.materialprep import execution as image_execution
 from shine.materialprep import qwen_workflow
 from shine.models import utcnow
 from shine.security import probe_upload, verify_upload
-from shine.services import add_audit, store_asset_file
+from shine.services import add_audit
 
 _IMAGE_BUDGET_MB = image_execution.IMAGE_BUDGET_MB
 _POLL_INTERVAL_S = image_execution.POLL_INTERVAL_S
@@ -313,7 +313,23 @@ def _save_candidate(
     if payload.get("mask"):
         _read_mask(factory, settings, payload["mask"])
     _verify_parent_snapshot(factory, settings, payload)
-    storage_path = store_asset_file(settings.data_dir, digest, content)
+    from shine.media.output_layout import (
+        ensure_storage_writable,
+        output_root,
+        store_library_asset,
+    )
+
+    with factory() as db:
+        ensure_storage_writable(db)
+        root = output_root(db, settings)
+    storage_path, stored_name = store_library_asset(
+        None, settings, content, digest,
+        kind="image",
+        base=str(payload.get("title") or "图片候选"),
+        extension=".png",
+        root=root,
+    )
+    filename = stored_name
     expected = payload.get("output") or {}
     dimensions_match = media_info.width == expected.get("width") and media_info.height == expected.get("height")
 
@@ -326,6 +342,7 @@ def _save_candidate(
             if version.content_sha256 != digest or (version.provenance or {}).get("task_id") != task_id:
                 raise RuntimeError("LIBRARY_CANDIDATE_ADOPTION_CONFLICT")
             storage_path = version.storage_path
+            filename = version.filename
         else:
             if payload.get("alpha_operation") == "MASK_CUTOUT_V1":
                 source_ref = (payload.get("references") or [])[0]
@@ -461,7 +478,7 @@ def _save_candidate(
     from shine.media.artifacts import safe_asset_path
     from shine.quality.technical import _full_decode_check
 
-    path = safe_asset_path(settings.data_dir, storage_path)
+    path = safe_asset_path(root, storage_path)
     decoded = _full_decode_check(path, settings.ffmpeg_path)
     qc = {
         "technical": decoded.status,
@@ -524,7 +541,9 @@ def _read_reference(factory, settings, reference: dict[str, Any]) -> tuple[bytes
             row = db.get(LibraryMedia, reference["media_id"])
             if row is None or row.kind != "image" or row.purpose == "mask":
                 raise RuntimeError("LIBRARY_REFERENCE_CHANGED")
-            content = service.media_bytes(settings, row)
+            from shine.media.output_layout import output_root
+
+            content = service.media_bytes(settings, row, root=output_root(db, settings))
             content_type = row.content_type
             digest = row.sha256
             rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="local")
@@ -532,7 +551,9 @@ def _read_reference(factory, settings, reference: dict[str, Any]) -> tuple[bytes
             row = db.get(LibraryVersion, reference.get("version_id"))
             if row is None or row.kind != "image" or row.status != "PROMOTED" or row.is_mock:
                 raise RuntimeError("LIBRARY_REFERENCE_CHANGED")
-            content = service.version_bytes(settings, row)
+            from shine.media.output_layout import output_root
+
+            content = service.version_bytes(settings, row, root=output_root(db, settings))
             content_type = row.content_type
             digest = row.content_sha256
             rights = service.require_version_rights(db, row, usage_scope="local")
@@ -553,7 +574,9 @@ def _read_mask(factory, settings, mask_info: dict[str, Any]) -> bytes:
         rights = service.require_rights(db.get(LibraryRights, row.rights_id), usage_scope="local")
         if canonical_hash(service.rights_snapshot(rights)) != canonical_hash(mask_info.get("rights_snapshot") or {}):
             raise RuntimeError("LIBRARY_MASK_RIGHTS_CHANGED")
-        content = service.media_bytes(settings, row)
+        from shine.media.output_layout import output_root
+
+        content = service.media_bytes(settings, row, root=output_root(db, settings))
         if row.sha256 != mask_info.get("sha256") or hashlib.sha256(content).hexdigest() != row.sha256:
             raise RuntimeError("LIBRARY_MASK_HASH_CHANGED")
         return content
@@ -572,7 +595,9 @@ def _verify_parent_snapshot(factory, settings, payload: dict[str, Any]) -> None:
             raise RuntimeError("LIBRARY_PARENT_VERSION_CHANGED")
         if canonical_hash(service.rights_snapshot(rights)) != canonical_hash(snapshot.get("rights_snapshot") or {}):
             raise RuntimeError("LIBRARY_PARENT_RIGHTS_CHANGED")
-        service.version_bytes(settings, version)
+        from shine.media.output_layout import output_root
+
+        service.version_bytes(settings, version, root=output_root(db, settings))
 
 
 def _reference_prompt(prompt: str, references: list[dict[str, Any]]) -> str:

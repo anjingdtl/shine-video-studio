@@ -67,8 +67,10 @@ def create_delivery(
         )
         for clip in body.clips
     ]
+    from shine.media.output_layout import output_root_for_request
+
     assembler = DeliveryAssembler(
-        asset_root=request.app.state.asset_root,
+        asset_root=output_root_for_request(request, db),
         ffmpeg_path=settings.ffmpeg_path,
         ffprobe_path=settings.ffprobe_path,
     )
@@ -253,7 +255,9 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
         raise HTTPException(status_code=404, detail="Delivery artifact not found")
     if artifact.deleted_at is not None:
         raise HTTPException(status_code=404, detail="VIDEO_DELETED")
-    path: Path = safe_asset_path(request.app.state.asset_root, artifact.storage_path)
+    from shine.media.output_layout import output_root_for_request
+
+    path: Path = safe_asset_path(output_root_for_request(request, db), artifact.storage_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Delivery file is missing on disk")
     if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
@@ -273,7 +277,9 @@ def delivery_thumbnail(artifact_id: str, request: Request, db: DBSession):
     artifact = db.get(MediaArtifact, artifact_id)
     if not artifact or artifact.artifact_kind != "delivery" or artifact.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Delivery artifact not found")
-    return thumbnail(safe_asset_path(request.app.state.asset_root, artifact.storage_path), artifact.sha256,
+    from shine.media.output_layout import output_root_for_request
+
+    return thumbnail(safe_asset_path(output_root_for_request(request, db), artifact.storage_path), artifact.sha256,
                      request.app.state.settings.ffmpeg_path, request.headers.get("if-none-match"),
                      seek_s=1.0)
 
@@ -284,7 +290,9 @@ def open_video_folder(artifact_id: str, request: Request, db: DBSession, _actor:
     artifact = db.get(MediaArtifact, artifact_id)
     if not artifact or artifact.artifact_kind not in {"video", "delivery"}:
         raise HTTPException(404, "找不到这段视频的存储记录。")
-    path = safe_asset_path(request.app.state.asset_root, artifact.storage_path)
+    from shine.media.output_layout import output_root_for_request
+
+    path = safe_asset_path(output_root_for_request(request, db), artifact.storage_path)
     if not path.is_file():
         raise HTTPException(404, "视频文件已移动或缺失。")
     if not hasattr(os, "startfile"):

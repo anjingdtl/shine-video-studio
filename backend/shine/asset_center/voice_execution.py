@@ -27,7 +27,7 @@ from shine.comfy.workflow import graph_hash
 from shine.comfyops.scheduler import resource_slot
 from shine.models import utcnow
 from shine.security import probe_upload, verify_upload
-from shine.services import add_audit, store_asset_file
+from shine.services import add_audit
 from shine.voiceops.sdk_runtime import CURRENT_LIBRARY_VOICE_ATTEMPT
 
 
@@ -128,10 +128,13 @@ def _claim(factory, worker_id: str) -> str | None:
 
 
 def _claim_inputs(factory, settings, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    from shine.media.output_layout import output_root
+
     with factory() as db:
         task = db.get(LibraryRenderTask, task_id)
         if task is None or task.status != "RUNNING":
             raise RuntimeError("VOICE_TASK_CLAIM_LOST")
+        root = output_root(db, settings)
         payload = dict(task.payload or {})
         mode = task.mode
         context: dict[str, Any] = {}
@@ -145,7 +148,7 @@ def _claim_inputs(factory, settings, task_id: str) -> tuple[dict[str, Any], dict
             service.require_rights(rights, usage_scope="local")
             if rights.id != media.rights_id or rights.scope != "voice_clone":
                 raise RuntimeError("VOICE_CONSENT_SOURCE_MISMATCH")
-            reference = service.media_bytes(settings, media)
+            reference = service.media_bytes(settings, media, root=root)
             context.update(reference_media=media, reference_rights=rights, reference=reference)
         elif mode == "TTS":
             profile = db.get(LibraryVoiceProfile, payload.get("voice_profile_id"))
@@ -157,7 +160,7 @@ def _claim_inputs(factory, settings, task_id: str) -> tuple[dict[str, Any], dict
             if version is None or version.status != "PROMOTED" or version.is_mock:
                 raise RuntimeError("VOICE_PROFILE_VERSION_NOT_PROMOTED")
             service.require_version_rights(db, version, usage_scope="local")
-            conditioning = service.version_bytes(settings, version)
+            conditioning = service.version_bytes(settings, version, root=root)
             if hashlib.sha256(conditioning).hexdigest() != profile.voice_hash:
                 raise RuntimeError("VOICE_PROFILE_CONDITIONING_HASH_CHANGED")
             if not version.prompt.strip():
@@ -178,8 +181,11 @@ def _open_attempt(
     factory, settings, task_id: str, worker_id: str, lease_id: str, payload: dict[str, Any], runtime: dict[str, Any]
 ):
     snapshot = graph_hash({"task_id": task_id, "payload": payload, "runtime": runtime})
+    from shine.media.output_layout import output_root
+
     with factory.begin() as db:
         task = db.get(LibraryRenderTask, task_id)
+        root = output_root(db, settings)
         if task is None or task.status != "RUNNING" or task.worker_id != worker_id:
             raise RuntimeError("VOICE_TASK_CLAIM_LOST")
         if task.submit_intent_at is not None or task.external_outcome != "NOT_SENT":
@@ -192,7 +198,7 @@ def _open_attempt(
                 raise RuntimeError("VOICE_CONSENT_SOURCE_MISMATCH")
             if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
                 raise RuntimeError("VOICE_CONSENT_CHANGED_AFTER_QUEUE")
-            service.media_bytes(settings, media)
+            service.media_bytes(settings, media, root=root)
         elif task.mode == "TTS":
             profile = db.get(LibraryVoiceProfile, payload.get("voice_profile_id"))
             if profile is None or profile.status != "FROZEN" or profile.voice_hash != payload.get("voice_hash"):
@@ -205,7 +211,7 @@ def _open_attempt(
             if version is None or version.id != payload.get("voice_version_id") or version.status != "PROMOTED":
                 raise RuntimeError("VOICE_PROFILE_VERSION_CHANGED_AFTER_QUEUE")
             service.require_version_rights(db, version, usage_scope="local")
-            service.version_bytes(settings, version)
+            service.version_bytes(settings, version, root=root)
         attempt_no = (
             db.scalar(
                 select(LibraryTaskAttempt.attempt_no)
@@ -268,7 +274,10 @@ def _new_output_rights(db, mode: str, context: dict[str, Any]) -> LibraryRights:
 
 
 def _revalidate_output_sources(db, settings, payload: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    from shine.media.output_layout import output_root
+
     current = dict(context)
+    root = output_root(db, settings)
     mode = str(payload.get("mode"))
     if mode == "AUTHORIZED_CLONE":
         media = db.get(LibraryMedia, payload.get("reference_media_id"))
@@ -280,7 +289,7 @@ def _revalidate_output_sources(db, settings, payload: dict[str, Any], context: d
             raise RuntimeError("VOICE_REFERENCE_HASH_CHANGED_AFTER_INFERENCE")
         if service.rights_snapshot(rights) != payload.get("rights_snapshot"):
             raise RuntimeError("VOICE_CONSENT_CHANGED_AFTER_INFERENCE")
-        service.media_bytes(settings, media)
+        service.media_bytes(settings, media, root=root)
         current.update(reference_media=media, reference_rights=rights)
     elif mode == "TTS":
         profile = db.get(LibraryVoiceProfile, payload.get("voice_profile_id"))
@@ -294,7 +303,7 @@ def _revalidate_output_sources(db, settings, payload: dict[str, Any], context: d
         if version is None or version.id != payload.get("voice_version_id") or version.status != "PROMOTED":
             raise RuntimeError("VOICE_PROFILE_VERSION_CHANGED_AFTER_INFERENCE")
         service.require_version_rights(db, version, usage_scope="local")
-        conditioning = service.version_bytes(settings, version)
+        conditioning = service.version_bytes(settings, version, root=root)
         if hashlib.sha256(conditioning).hexdigest() != profile.voice_hash:
             raise RuntimeError("VOICE_PROFILE_CONDITIONING_HASH_CHANGED")
         current.update(profile=profile, profile_rights=rights, profile_version=version, conditioning=conditioning)
@@ -322,7 +331,23 @@ def _store_candidate(
     digest = hashlib.sha256(content).hexdigest()
     with factory() as db:
         context = _revalidate_output_sources(db, settings, payload, context)
-    storage_path = store_asset_file(settings.data_dir, digest, content)
+    from shine.media.output_layout import (
+        ensure_storage_writable,
+        output_root,
+        store_library_asset,
+    )
+
+    with factory() as db:
+        ensure_storage_writable(db)
+        root = output_root(db, settings)
+    storage_path, stored_name = store_library_asset(
+        None, settings, content, digest,
+        kind="audio",
+        base=str(payload.get("title") or "声音候选"),
+        extension=".wav",
+        root=root,
+    )
+    filename = stored_name
     mocked = bool(result.get("is_mock", getattr(provider, "is_mock", False)))
     mode = str(payload["mode"])
     category = "voice" if mode in {"DESIGN", "AUTHORIZED_CLONE"} else "dialogue"
@@ -363,7 +388,7 @@ def _store_candidate(
     from shine.media.artifacts import safe_asset_path
     from shine.quality.technical import _full_decode_check
 
-    path = safe_asset_path(settings.data_dir, storage_path)
+    path = safe_asset_path(root, storage_path)
     decoded = _full_decode_check(path, settings.ffmpeg_path)
     hard_errors = set((dialogue_qc or {}).get("hard_errors") or [])
     passed = decoded.status == "pass" and not hard_errors

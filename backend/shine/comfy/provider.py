@@ -299,8 +299,10 @@ class ComfyUIRenderService:
                 "A reference asset belongs to another project",
                 details={"asset_id": asset.id, "label": item.label},
             )
-        if (asset.sha256 != item.sha256 or asset.storage_path != item.storage_key
-                or asset.content_type != item.content_type):
+        # The manifest path is a historical storage location; the asset's
+        # SHA-256 is its identity.  An output-root change may have moved the
+        # file, so the path is not part of this equality.
+        if (asset.sha256 != item.sha256 or asset.content_type != item.content_type):
             raise ComfyReferenceError(
                 "The reference manifest hash does not match the current master asset",
                 details={"asset_id": asset.id, "label": item.label},
@@ -345,7 +347,7 @@ class ComfyUIRenderService:
     ) -> dict[str, str]:
         uploaded: dict[str, str] = {}
         graph_types = graph_class_types_ or set()
-        for logical, parameter_key, item in resolve_reference_slots(parameter_map, request.reference_manifest):
+        for _logical, parameter_key, item in resolve_reference_slots(parameter_map, request.reference_manifest):
             asset = assets.get(item.asset_id)
             if asset is None:
                 raise ComfyReferenceError(

@@ -11,10 +11,10 @@ from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import CandidateAsset, RightsRecord
-from shine.media.artifacts import safe_asset_path
+from shine.media.artifacts import artifact_suffix, safe_asset_path
 from shine.models import Asset, utcnow
 from shine.security import probe_upload, safe_filename, verify_upload
-from shine.services import add_audit, store_asset_file
+from shine.services import add_audit
 
 FAMILIES = {
     "character": "image",
@@ -160,15 +160,28 @@ def create_candidate(db, settings, project, family, entity, content, filename, r
     ).all()
     if any(c.payload.get("provenance", {}).get("is_mock", False) for c in known):
         provenance = {**provenance, "is_mock": True, "mock_source": "KNOWN_MOCK_CONTENT_HASH"}
+    from pathlib import Path
+
+    from shine.media.output_layout import ensure_storage_writable, store_project_asset
+    from shine.media.output_names import is_readable_ledger_name, readable_base
+
+    ensure_storage_writable(db)
+    base = entity or readable_base(filename, family)
+    storage_path, stored_name = store_project_asset(
+        db, settings, project, content, digest,
+        kind=kind,
+        base=base,
+        extension=Path(filename).suffix or artifact_suffix(content_type),
+    )
     payload = {
         "family": family,
         "entity_id": entity,
         "kind": kind,
-        "filename": filename,
+        "filename": filename if is_readable_ledger_name(filename) else stored_name,
         "content_type": content_type,
         "content_sha256": digest,
         "byte_size": len(content),
-        "storage_path": store_asset_file(settings.data_dir, digest, content),
+        "storage_path": storage_path,
         "rights_id": rights_id,
         "provenance": provenance,
         "parent_id": parent,
@@ -191,8 +204,8 @@ def create_candidate(db, settings, project, family, entity, content, filename, r
     return row
 
 
-def verify_candidate(settings, row):
-    path = safe_asset_path(settings.data_dir, row.payload["storage_path"])
+def verify_candidate(settings, row, *, root=None):
+    path = safe_asset_path(root or settings.data_dir, row.payload["storage_path"])
     try:
         content = path.read_bytes()
     except OSError as exc:
@@ -202,10 +215,10 @@ def verify_candidate(settings, row):
     return content
 
 
-def candidate_qc(settings, row, reviewer=None):
+def candidate_qc(settings, row, reviewer=None, *, root=None):
     if row.status == "PROMOTED":
         raise HTTPException(409, "CANDIDATE_VERSION_FROZEN")
-    content = verify_candidate(settings, row)
+    content = verify_candidate(settings, row, root=root)
     is_mock = row.payload["provenance"].get("is_mock", False)
     p = row.payload
     if p["kind"] != "text":
@@ -216,7 +229,7 @@ def candidate_qc(settings, row, reviewer=None):
     if p["kind"] == "text":
         decode = {"status": "pass", "detail": "UTF-8 subtitle structure checked"}
     else:
-        path = safe_asset_path(settings.data_dir, p["storage_path"])
+        path = safe_asset_path(root or settings.data_dir, p["storage_path"])
         decode = _full_decode_check(path, settings.ffmpeg_path).model_dump()
     qc = {
         "technical": decode["status"],
@@ -261,7 +274,9 @@ def promote(db, settings, row, actor, decision, *, offline):
         raise HTTPException(409, "CANDIDATE_NOT_APPROVED")
     if row.payload.get("rights_id"):
         require_rights(db, row.project_id, row.payload["rights_id"])
-    verify_candidate(settings, row)
+    from shine.media.output_layout import output_root
+
+    verify_candidate(settings, row, root=output_root(db, settings))
     p = row.payload
     if p.get("dialogue_review_errors"):
         if not decision.listened:
@@ -293,19 +308,9 @@ def promote(db, settings, row, actor, decision, *, offline):
     if existing:
         raise HTTPException(409, "ASSET_HASH_ALREADY_REGISTERED")
     media = p.get("media") or {}
+    # The candidate's stored file already carries 项目_类型_名称; promotion
+    # keeps that readable name instead of inventing a second one.
     filename = p["filename"]
-    generated = (p.get("provenance") or {}).get("source") == "material_preparation"
-    if generated and p.get("family") in {"character", "scene", "prop"}:
-        # A generated material carries the entity and its place in the script,
-        # so a person can match the picture to the script and the storyboard.
-        from pathlib import Path
-
-        from shine.materialprep.naming import material_filename
-
-        filename = material_filename(
-            db, row.project_id, p["family"], p["entity_id"],
-            extension=Path(p["filename"]).suffix or ".png",
-        )
     asset = Asset(
         project_id=row.project_id,
         filename=filename,

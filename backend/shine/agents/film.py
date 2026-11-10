@@ -528,9 +528,11 @@ def _plan_beat_ids(role: str, inputs: list[AgentArtifact]) -> list[str] | None:
 
 
 class FilmAgentDispatcher:
-    def __init__(self, gateway: LLMGateway, data_dir: Path | None = None):
+    def __init__(self, gateway: LLMGateway, data_dir: Path | None = None,
+                 asset_root: Path | None = None):
         self.gateway = gateway
         self.data_dir = data_dir
+        self.asset_root = asset_root or data_dir
 
     def run(
         self,
@@ -624,7 +626,9 @@ class FilmAgentDispatcher:
                                      else FilmAgentRegistry.roles[role][3]),
             "rulepack_id": pack.id,
             "rulepack_hash": pack.sha256,
-            "eligible_edits": eligible_edits(db, project_id, offline=body.offline_preview, artifact_root=self.data_dir)
+            "eligible_edits": eligible_edits(
+                db, project_id, offline=body.offline_preview, artifact_root=self.asset_root
+            )
             if role == "editor"
             else [],
         }
@@ -925,7 +929,7 @@ class FilmAgentDispatcher:
             load_inputs(db, project_id, body.input_revision_ids)
             if role == "editor" and body.tool == "propose":
                 context["eligible_edits"] = eligible_edits(
-                    db, project_id, offline=body.offline_preview, artifact_root=self.data_dir
+                    db, project_id, offline=body.offline_preview, artifact_root=self.asset_root
                 )
                 validate_output(role, proposal, body, inputs, context)
             payload = proposal.model_dump(mode="json")

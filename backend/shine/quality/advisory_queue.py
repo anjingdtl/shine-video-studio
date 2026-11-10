@@ -419,7 +419,10 @@ def _load_context(settings, factory, task_id):
         if job is None or artifact is None or project is None:
             context = None
         else:
-            path = safe_asset_path(Path(settings.data_dir), artifact.storage_path)
+            from shine.media.output_layout import output_root
+
+            root = output_root(db, settings)
+            path = safe_asset_path(Path(root), artifact.storage_path)
             try:
                 if path.stat().st_size != artifact.byte_size:
                     raise ValueError
@@ -429,8 +432,10 @@ def _load_context(settings, factory, task_id):
             except (OSError, ValueError):
                 _mark_task(factory, task_id, "SUPERSEDED", "ADVISORY_REVIEW_ARTIFACT_CHANGED")
                 return None
+            from shine.media.output_layout import refresh_reference_paths
             from shine.services import project_terminology_hint
 
+            request = refresh_reference_paths(db, RenderRequest.model_validate(job.request or {}))
             context = {
                 "task_id": task_id,
                 "kind": trace.get("kind"),
@@ -441,7 +446,8 @@ def _load_context(settings, factory, task_id):
                 "artifact_sha256": artifact.sha256,
                 "attempt_id": artifact.attempt_id,
                 "shot_revision": job.shot_revision,
-                "request": RenderRequest.model_validate(job.request or {}),
+                "asset_root": root,
+                "request": request,
                 "path": path,
                 "policy": QualityPolicy.from_dict(project.quality_policy),
                 "remote_consent": bool(project.allow_remote_review),
@@ -736,6 +742,7 @@ def _review_one(factory, settings, task_id: str, reviewers, used_kinds: set[str]
             semantic_reviewer=call_reviewer if kind == "VLM" else None,
             asr_reviewer=call_reviewer if kind == "ASR" else None,
             review_revision=None,
+            asset_root=context.get("asset_root"),
             terminology_hint=context["terminology"],
         )
     except Exception as exc:  # pragma: no cover - defensive

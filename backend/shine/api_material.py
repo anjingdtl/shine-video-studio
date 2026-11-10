@@ -146,7 +146,9 @@ def analyze_material(project_id: str, body: AnalyzeBody, actor: Operator, db: DB
 
 @router.get("/projects/{project_id}/material-preparation")
 def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
-    return service.plan_progress(db, project_id, data_dir=settings.data_dir)
+    from shine.media.output_layout import output_root
+
+    return service.plan_progress(db, project_id, data_dir=output_root(db, settings))
 
 
 @router.post("/projects/{project_id}/material-preparation/complete")
@@ -164,7 +166,9 @@ def complete_materials(project_id: str, actor: Operator, db: DBSession, settings
     from shine.services import add_audit, require_project
 
     require_project(db, project_id)
-    evaluation = service.evaluate_materials(db, project_id, data_dir=settings.data_dir)
+    from shine.media.output_layout import output_root
+
+    evaluation = service.evaluate_materials(db, project_id, data_dir=output_root(db, settings))
     plan = current_material_plan(db, project_id)
     if plan is not None and evaluation["materials_ready"] and plan.status != "MATERIALS_READY":
         plan.status = "MATERIALS_READY"
@@ -554,7 +558,9 @@ def merge_character(project_id: str, body: MergeCharacterBody, actor: Operator, 
             or not rights_status(db, project_id, provenance.get("rights_id"))["approved"]):
         raise HTTPException(409, "ASSET_NOT_APPROVED_FOR_PRODUCTION")
     try:
-        content = safe_asset_path(settings.data_dir, asset.storage_path).read_bytes()
+        from shine.media.output_layout import output_root
+
+        content = safe_asset_path(output_root(db, settings), asset.storage_path).read_bytes()
     except OSError as exc:
         raise HTTPException(409, "ASSET_FILE_MISSING") from exc
     if sha256_bytes(content) != asset.sha256:
@@ -625,7 +631,9 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     replay exactly the description that produced the rejected pictures, and a
     stored answer can also carry open questions the renderer refuses.
     """
-    state = service.plan_progress(db, project_id, data_dir=settings.data_dir)
+    from shine.media.output_layout import output_root
+
+    state = service.plan_progress(db, project_id, data_dir=output_root(db, settings))
     confirmation = state.get("confirmation") or {}
     requirements = state.get("requirements") or []
     if not confirmation:

@@ -1224,3 +1224,41 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   旧哈希形状、`test_director_styles.py` 的固定类型目录；前端
   `frontend/src/test/directorStyle.test.tsx`、`styleFreeze.test.tsx`。改动未触及
   `worker.py` / `preproduction.py`。
+
+## 2026-11-10 输出目录与可读文件名轮
+
+- **全机只有一个输出根目录**。未设置时沿用现有默认目录 `settings.data_dir`；设置后所有项目的
+  素材、视频、成片、音色都存放两级：`<根目录>/<项目名>/素材|视频|音色/...`。无项目的全局素材
+  放在 `<根目录>/素材中心/素材|视频|音色/...`。解析入口唯一：`shine/media/output_layout.py`
+  的 `output_root(db, settings)`；**不要**在别处再拼一套目录规则。
+- **文件名统一是 `项目_类型_名称.ext`**：项目、类型（素材/视频/音色）、可读名称。镜头视频为
+  `项目_视频_003镜_02集.mp4`，成片为 `项目_视频_001-006镜_02集.mp4`，素材为
+  `项目_素材_01-易千寒.png`，音色为 `项目_音色_易千寒.wav`；素材中心为
+  `素材中心_素材_...`。不再使用《》或内容哈希作为磁盘文件名；哈希仍是台账身份。
+  同名不同内容用 `_v2`、`_v3` 区分，绝不覆盖。
+- **调整目录是一次迁移，不是改一行设置**。`PUT /api/v1/settings/output-directory`：
+  先拒绝活动镜头/素材任务（`OUTPUT_DIRECTORY_BUSY`），写迁移锁；逐文件复制（同卷优先硬链接）
+  到新根并逐字节核验台账 SHA-256；全部通过后才在**一个事务**里切换 `storage_path`、
+  `JobAttempt.output_path`、连续性来源路径和 `output-directory` 设置；提交后才删除旧文件。
+  任一步失败都不切换目录（`OUTPUT_DIRECTORY_SOURCE_INVALID` / `TARGET_CONFLICT` / `COPY_FAILED`），
+  已复制的新文件只是无害的孤立副本。迁移锁期间的写入返回 `STORAGE_MIGRATION_IN_PROGRESS`。
+- **请求里的旧路径不是身份**：移动根目录后，已存 `job.request` 的 `storage_key` 会过时。
+  读取方必须调用 `refresh_reference_paths(db, request)`（worker 装载上下文、审片队列都用它）；
+  H3 引用校验只按 SHA-256 + content_type 认身份，**不再**把 `storage_key` 与
+  `asset.storage_path` 的不等视为身份变化。旧 Job 的 request 不被改写。
+- **默认目录也使用同一套命名**：新产物即使没有自定义目录，也写入
+  `<data_dir>/<项目>/素材|视频|音色`。旧文件不会自动搬动；把目录保存为默认（空路径）或
+  任意自定义目录都会把旧文件迁移进新布局。旧历史字节不重写。
+- **页面入口**：导演模式「基础配置 → 安装与下载」和专业设置都渲染 `OutputDirectoryPanel`，
+  显示当前根、两级结构、文件数、可用空间和活动阻塞；不存在只改设置不迁移的路径。
+- **迁移不信任未核验的共享文件**：`LibraryMedia` 与 `LibraryVersion` 可能共享同一物理文件，
+  迁移按台账逐行分配可读名；同名同哈希复用，同字节不同名各复制一份。候选删除前会再查
+  `JobAttempt`、连续性 lineage 和全部 `storage_path` 列，仍在引用的旧文件不删。
+- 本轮改了 `worker.py`（输出根解析、引用路径刷新），按 `client_review_identity` 约定旧 VLM
+  revision 已失效；真实正负校准**尚未**重做，不得声称已校准。
+- 回归按影响范围定向执行：`test_output_directory.py`（9 项）、`test_asset_center.py`、
+  `test_workflow.py`、`test_security_windows.py`、`test_material_image_jobs.py`、
+  `test_offline_e2e.py`、`test_video_library.py` 共 102 项通过；另跑媒体/系列、素材/剧组、
+  参考/门禁、迁移/模式四批定向用例。按用户要求**不跑全量后端套件**。前端
+  `OutputDirectoryPanel`、`npm.cmd run build` / `npm.cmd test`。证据见
+  `docs/ACCEPTANCE_20261110_OUTPUT_DIRECTORY.md`。

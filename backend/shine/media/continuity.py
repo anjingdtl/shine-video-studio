@@ -207,12 +207,37 @@ def prepare_continuity_artifact(
     from sqlalchemy import select, text
 
     from shine.media.artifacts import safe_asset_path, store_artifact
-    from shine.models import MediaArtifact
+    from shine.media.output_layout import (
+        ensure_storage_writable,
+        output_root,
+        project_folder_name,
+        project_type_dir,
+        type_for_artifact,
+    )
+    from shine.media.output_names import typed_filename
+    from shine.media.video_naming import shot_label
+    from shine.models import Job, MediaArtifact, Project
 
     with session_factory() as db:
         identity = _source_identity(db, project_id, job_id)
+        ensure_storage_writable(db)
+        root = output_root(db, settings)
+        job = db.get(Job, job_id)
+        project = db.get(Project, project_id)
+        if project is None:
+            raise ValueError("CONTINUITY_PROJECT_MISSING")
+        label = shot_label(db, job) if job is not None else "镜号未登记"
+        mode_type = {
+            "last_frame": "image/png",
+            "hard_frame_anchor": "image/png",
+            "video_reference": "video/mp4",
+            "audio_reference": "audio/wav",
+        }.get(mode, "")
+        type_label = type_for_artifact("continuity", mode_type)
+        directory = project_type_dir(db, project, type_label, subdir="连续性")
+        project_label = project_folder_name(db, project)
     media = derive_continuity_media(
-        safe_asset_path(settings.data_dir, identity["storage_path"]),
+        safe_asset_path(root, identity["storage_path"]),
         identity["sha256"],
         mode,
         start_s=start_s,
@@ -228,7 +253,15 @@ def prepare_continuity_artifact(
         "end_s": media.end_s,
         "duration_s": media.duration_s,
     }
-    path, digest, size = store_artifact(settings.data_dir, project_id, job_id, media.content, media.content_type)
+    from shine.media.artifacts import artifact_suffix
+
+    name = typed_filename(
+        project_label, type_label, f"连续性_{mode}_{label}", artifact_suffix(media.content_type)
+    )
+    path, digest, size = store_artifact(
+        root, project_id, job_id, media.content, media.content_type,
+        filename=name, directory=directory,
+    )
     with session_factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         if _source_identity(db, project_id, job_id) != identity:

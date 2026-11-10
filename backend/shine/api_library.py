@@ -121,41 +121,16 @@ def _current_shot_artifacts(db, project_id: str) -> set[str]:
     the generation-segments selection and the normal series are the two
     authorities, in that order.
     """
-    from shine.media.video_layout import current_job_ids
+    from shine.media.video_layout import current_shot_artifact_ids
 
-    artifacts = set()
-    for job_id in current_job_ids(db, project_id).values():
-        job = db.get(Job, job_id)
-        if job is not None and job.artifact_id:
-            artifacts.add(job.artifact_id)
-    return artifacts
+    return current_shot_artifact_ids(db, project_id)
 
 
 def _current_delivery_artifacts(db, project_id: str) -> set[str]:
     """One current reel per delivery scope, plus every episode's delivered reel."""
-    from shine.media.delivery_models import DeliveryOrder
+    from shine.media.video_layout import current_delivery_artifact_ids
 
-    latest: dict[tuple[str, str], tuple[int, str]] = {}
-    orders = db.scalars(
-        select(DeliveryOrder).where(
-            DeliveryOrder.project_id == project_id,
-            DeliveryOrder.artifact_id.is_not(None),
-        )
-    ).all()
-    for order in orders:
-        scope = (order.scope_kind, order.scope_id or order.series_id or "")
-        prior = latest.get(scope)
-        if prior is None or order.version >= prior[0]:
-            latest[scope] = (order.version, order.artifact_id)
-    current = {artifact_id for _version, artifact_id in latest.values()}
-    episodes = db.scalars(
-        select(ProductionRunEpisode).where(
-            ProductionRunEpisode.project_id == project_id,
-            ProductionRunEpisode.delivered_artifact_id.is_not(None),
-        )
-    ).all()
-    current.update(episode.delivered_artifact_id for episode in episodes if episode.delivered_artifact_id)
-    return current
+    return current_delivery_artifact_ids(db, project_id)
 
 
 def _take_numbers(db, project_id: str) -> dict[str, int]:
@@ -386,7 +361,9 @@ def _blockers(db, artifact, job, current_ids, references, asset_root) -> list[di
 def video_library(project_id: str, request: Request, db: DBSession,
                   include_deleted: bool = False) -> dict[str, Any]:
     project = require_project(db, project_id)
-    asset_root = request.app.state.asset_root
+    from shine.media.output_layout import output_root_for_request
+
+    asset_root = output_root_for_request(request, db)
     query = select(MediaArtifact).where(
         MediaArtifact.project_id == project_id,
         MediaArtifact.artifact_kind.in_(VIDEO_KINDS),
@@ -435,7 +412,9 @@ def _blockers_now(db, artifact, project_id, asset_root) -> list[dict[str, str]]:
 def delete_videos(project_id: str, body: DeleteVideosRequest, request: Request,
                   actor: Operator, db: DBSession) -> dict[str, Any]:
     project = require_project(db, project_id)
-    asset_root = request.app.state.asset_root
+    from shine.media.output_layout import output_root_for_request
+
+    asset_root = output_root_for_request(request, db)
     unique_ids = list(dict.fromkeys(body.artifact_ids))
     rows = [db.get(MediaArtifact, artifact_id) for artifact_id in unique_ids]
     if any(row is None or row.project_id != project.id or row.artifact_kind not in VIDEO_KINDS
@@ -535,7 +514,9 @@ def organize_current(project_id: str, request: Request, actor: Operator, db: DBS
     )
 
     project = require_project(db, project_id)
-    asset_root = request.app.state.asset_root
+    from shine.media.output_layout import output_root_for_request
+
+    asset_root = output_root_for_request(request, db)
     current_shot = _current_shot_artifacts(db, project_id)
     current_delivery = _current_delivery_artifacts(db, project_id)
     artifacts = db.scalars(

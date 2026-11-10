@@ -118,7 +118,7 @@ def test_sqlite_busy_timeout_waits_for_a_short_writer_lock(tmp_path):
 
 
 def test_path_traversal_filename_is_reduced_to_a_safe_leaf(studio):
-    client, _factory, root, settings = studio
+    client, factory, root, settings = studio
     project_id = create_project(client)
     response = client.post(
         f"/api/v1/projects/{project_id}/assets",
@@ -127,7 +127,12 @@ def test_path_traversal_filename_is_reduced_to_a_safe_leaf(studio):
     )
     assert response.status_code == 201
     assert response.json()["filename"] == "evil.png"
-    stored = settings.data_dir / "assets" / response.json()["sha256"][:2] / response.json()["sha256"]
+    with factory() as db:
+        from shine.models import Asset
+
+        asset = db.get(Asset, response.json()["id"])
+        stored = settings.data_dir / asset.storage_path
+        assert stored.parent.name == "素材"
     assert stored.is_file()
     assert "Windows" not in str(stored)
     _ = root

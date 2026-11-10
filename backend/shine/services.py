@@ -1244,13 +1244,14 @@ def create_render_job(
                 "style_input_assessment_sha256": assessment.sha256,
             })
     from shine.comfyops.preproduction import enforce
+    from shine.media.output_layout import output_root
 
     preproduction_hash = enforce(
         db,
         project.id,
         render_request=request_data,
         offline=(body.provider == RenderProvider.MOCK or offline),
-        data_dir=settings.data_dir,
+        data_dir=output_root(db, settings),
         workflow_profile_id=body.workflow_profile_id if body.provider == RenderProvider.COMFYUI else None,
     )
     parents, initial_status = dependencies_for_new_job(db, project.id, dependency_ids)

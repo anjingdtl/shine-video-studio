@@ -83,6 +83,14 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   EDIT_CUT_SHOT_NOT_IN_EPISODE: '剪辑合同里有不属于这一集的镜头。',
   EPISODE_SUBTITLE_NOT_APPROVED: '选择的字幕版本不存在或尚未批准。',
   EPISODE_ASSEMBLY_IN_PROGRESS: '这一集正在装配，等它结束后再修改剪辑合同。',
+  STORAGE_MIGRATION_IN_PROGRESS: '正在迁移输出目录，暂时不能写入新文件，请稍后重试。',
+  OUTPUT_DIRECTORY_ABSOLUTE_REQUIRED: '请输入完整的本机绝对路径，例如 D:\\ShineOutput。',
+  OUTPUT_DIRECTORY_DRIVE_ROOT_REFUSED: '请选择盘符下的专用文件夹，不要直接选择盘符根目录。',
+  OUTPUT_DIRECTORY_NOT_A_DIRECTORY: '该路径不是文件夹，请重新选择。',
+  OUTPUT_DIRECTORY_NOT_WRITABLE: '该目录无法写入，请选择有写入权限的文件夹。',
+  OUTPUT_DIRECTORY_SOURCE_INVALID: '有源文件与台账不一致，已停止迁移，输出目录未切换。',
+  OUTPUT_DIRECTORY_TARGET_CONFLICT: '目标目录里有同名但内容不同的文件，已停止迁移。',
+  OUTPUT_DIRECTORY_COPY_FAILED: '复制文件失败，已停止迁移，输出目录未切换。',
 };
 
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw
@@ -126,6 +134,14 @@ function describeDetail(detail: unknown): string {
     const runnable = payload.runnable_shot_ids ?? [];
     const tail = runnable.length ? `；其余 ${runnable.length} 个镜头仍可开拍` : '';
     return `${payload.message ?? '这一批里有镜头无法执行'}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
+  }
+  if (detail && typeof detail === 'object' && 'code' in detail
+      && typeof (detail as { code?: unknown }).code === 'string') {
+    const coded = detail as { code: string; message?: string; blockers?: string[] };
+    const base = coded.message || ERROR_CODE_LABELS[coded.code] || coded.code;
+    const blockers = Array.isArray(coded.blockers) && coded.blockers.length
+      ? `：${coded.blockers.join('；')}` : '';
+    return `${base}${blockers}（${coded.code}）`;
   }
   if (detail && typeof detail === 'object' && 'message' in detail) {
     const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';

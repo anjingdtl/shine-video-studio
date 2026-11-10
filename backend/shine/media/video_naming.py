@@ -10,38 +10,29 @@ guessed from sort order or an old file name.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-# Windows rejects these names regardless of extension.
-_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{index}" for index in range(1, 10)),
-    *(f"LPT{index}" for index in range(1, 10)),
-}
-_INVALID = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
-_WHITESPACE = re.compile(r"\s+")
-# Leaves room for the episode/shot suffix and a _vN disambiguator inside the
-# 255-character component limit, without depending on a long data directory.
-MAX_TITLE_LENGTH = 60
-# Keeps a worst-case local path (data dir + artifacts/<uuid>/current/ + name)
-# inside the classic Windows 260-character limit without enabling long paths.
-MAX_COMPONENT_LENGTH = 96
+from shine.media.output_names import (
+    MAX_COMPONENT_LENGTH,
+    MAX_TITLE_LENGTH,
+    TYPE_VIDEO,
+    sanitize_component,
+    typed_filename,
+)
 
-
-def sanitize_component(text: str | None, *, fallback: str = "未命名", limit: int = MAX_TITLE_LENGTH) -> str:
-    """A legal, non-reserved Windows path component that keeps its meaning."""
-    cleaned = _INVALID.sub("-", text or "")
-    cleaned = _WHITESPACE.sub(" ", cleaned).strip(" .")
-    if not cleaned:
-        return fallback
-    if cleaned.split(".")[0].upper() in _RESERVED:
-        cleaned = "_" + cleaned
-    cleaned = cleaned[:limit].strip(" .")
-    return cleaned or fallback
+__all__ = [
+    "MAX_COMPONENT_LENGTH",
+    "MAX_TITLE_LENGTH",
+    "clip_filename",
+    "delivery_filename",
+    "delivery_label",
+    "episode_for_job",
+    "project_shot_order",
+    "sanitize_component",
+    "shot_context",
+    "shot_label",
+]
 
 
 def project_shot_order(db: Session, project_id: str) -> list[str]:
@@ -90,7 +81,7 @@ def shot_context(db: Session, job, *, project_order: list[str] | None = None) ->
     number: int | None = None
     if episode_shots and job.shot_id in episode_shots:
         number = episode_shots.index(job.shot_id) + 1
-    else:
+    elif job.shot_id:
         order = project_order if project_order is not None else project_shot_order(db, job.project_id)
         if job.shot_id in order:
             number = order.index(job.shot_id) + 1
@@ -98,17 +89,21 @@ def shot_context(db: Session, job, *, project_order: list[str] | None = None) ->
     return number, label
 
 
+def shot_label(db: Session, job, *, project_order: list[str] | None = None) -> str:
+    """The readable part of one shot's name: ``003镜_02集``."""
+    number, episode = shot_context(db, job, project_order=project_order)
+    shot_part = f"{number:03d}镜" if number is not None else "镜号未登记"
+    return f"{shot_part}_{episode}"
+
+
 def clip_filename(db: Session, project, job) -> str:
     """The real file name for one produced shot."""
     title = sanitize_component(getattr(project, "title", None))
-    number, episode = shot_context(db, job)
-    shot_part = f"{number:03d}镜" if number is not None else "镜号未登记"
-    return _bounded(f"《{title}_{shot_part}_{episode}》.mp4")
+    return typed_filename(title, TYPE_VIDEO, shot_label(db, job), ".mp4")
 
 
-def delivery_filename(db: Session, project_id: str, project_title: str | None, jobs: list) -> str:
-    """The real file name for a reel assembled over the given source jobs."""
-    title = sanitize_component(project_title)
+def delivery_label(db: Session, project_id: str, jobs: list) -> str:
+    """The readable part of a reel name: ``001-006镜_02集``."""
     order = project_shot_order(db, project_id)
     numbers: list[int] = []
     episodes: set[int] = set()
@@ -124,12 +119,10 @@ def delivery_filename(db: Session, project_id: str, project_title: str | None, j
     else:
         shot_part = "镜号未登记"
     episode = f"{next(iter(episodes)):02d}集" if len(episodes) == 1 else "未分集"
-    return _bounded(f"《{title}_{shot_part}_{episode}》.mp4")
+    return f"{shot_part}_{episode}"
 
 
-def _bounded(name: str) -> str:
-    """Keep the file-name component short without cutting the extension."""
-    stem, suffix = Path(name).stem, Path(name).suffix
-    if len(stem) > MAX_COMPONENT_LENGTH:
-        stem = stem[:MAX_COMPONENT_LENGTH].rstrip(" .")
-    return stem + suffix
+def delivery_filename(db: Session, project_id: str, project_title: str | None, jobs: list) -> str:
+    """The real file name for a reel assembled over the given source jobs."""
+    title = sanitize_component(project_title)
+    return typed_filename(title, TYPE_VIDEO, delivery_label(db, project_id, jobs), ".mp4")

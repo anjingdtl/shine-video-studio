@@ -3,6 +3,7 @@ import { Activity, Check, Cpu, Plus, Server, ShieldCheck, Trash2, Wifi, X } from
 import type { AgentRoute, Project, ProviderProfile, SystemHealth, SystemStatus, WorkflowProfile } from '../api';
 import { DIALOGUE_LANGUAGES, label, statusLabels, workerPhaseLabels } from '../constants';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import OutputDirectoryPanel from './OutputDirectoryPanel';
 import StorageSettings from './StorageSettings';
 import WorkflowProfileImport from './WorkflowProfileImport';
 
@@ -78,6 +79,7 @@ export default function SettingsPanel({
 
       <div className="settings-grid">
         <StorageSettings />
+        <OutputDirectoryPanel />
         <div className="settings-block">
           <h3><ShieldCheck size={14} /> 项目策略</h3>
           {project ? <>

@@ -22,13 +22,15 @@ def artifact_suffix(content_type: str) -> str:
 
 
 def store_artifact(root: Path, project_id: str, job_id: str, content: bytes, content_type: str,
-                   *, filename: str | None = None, subdir: str = "shots") -> tuple[str, str, int]:
+                   *, filename: str | None = None, subdir: str = "shots",
+                   directory: Path | None = None) -> tuple[str, str, int]:
     """Write the bytes once and return their content-addressed identity.
 
     ``filename`` is only the on-disk name of new videos: the ledger identity is
     still the SHA-256, and an existing different file with the same name gets a
-    short ``_vN`` suffix instead of being overwritten.  Without a filename the
-    historical content-addressed layout is kept (continuity derivatives etc.).
+    short ``_vN`` suffix instead of being overwritten.  ``directory`` is the
+    output-layout folder (project/type[/state]); without it the historical
+    content-addressed layout is kept for callers that have not migrated.
     """
     digest = sha256_bytes(content)
     suffix = artifact_suffix(content_type)
@@ -38,9 +40,11 @@ def store_artifact(root: Path, project_id: str, job_id: str, content: bytes, con
             raise HTTPException(status_code=500, detail="A named artifact needs a file name")
         if Path(safe_name).suffix.lower() != suffix:
             safe_name = Path(safe_name).stem + suffix
-        relative = Path("artifacts") / project_id / subdir / safe_name
+        relative = (Path(directory) if directory is not None else Path("artifacts") / project_id / subdir) / safe_name
     else:
-        relative = Path("artifacts") / project_id / job_id / f"{digest}{suffix}"
+        relative = (
+            Path(directory) if directory is not None else Path("artifacts") / project_id / job_id
+        ) / f"{digest}{suffix}"
     target = root / relative
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -347,18 +347,24 @@ class DeliveryAssembler:
             probe = probe_file(final, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
 
         from shine.media.artifacts import store_artifact
+        from shine.media.output_layout import ensure_storage_writable, project_type_dir
+        from shine.media.output_names import TYPE_VIDEO
         from shine.media.video_naming import delivery_filename
         from shine.models import Project
 
+        ensure_storage_writable(db)
         project = db.get(Project, project_id)
+        if project is None:
+            raise DeliveryError(409, "DELIVERY_PROJECT_MISSING")
         source_jobs = [job for job in (db.get(Job, clip.job_id) for clip in clips) if job]
         # The reel's real file name names the project, shot range and episode
         # the ledger says these clips belong to; new colliding versions get a
         # short _vN suffix instead of overwriting an earlier delivery.
-        reel_name = delivery_filename(db, project_id, project.title if project else None, source_jobs)
+        reel_name = delivery_filename(db, project_id, project.title, source_jobs)
+        directory = project_type_dir(db, project, TYPE_VIDEO, subdir=output_subdir)
         stored_path, digest, byte_size = store_artifact(
             self.asset_root, project_id, "delivery", content, "video/mp4",
-            filename=reel_name, subdir=output_subdir,
+            filename=reel_name, subdir=output_subdir, directory=directory,
         )
         relative = Path(stored_path)
 

@@ -521,9 +521,10 @@ def _enforce_continuity_reference(db, project_id, request, ref, *, data_dir=None
         )
     except ValueError as exc:
         raise HTTPException(409, "PREPRODUCTION_CONTINUITY_OUTDATED") from exc
+    # The stored key is the path from request creation; an output-root change
+    # may move the derivative without changing its bytes or lineage.
     if (
         derived.sha256 != ref.sha256
-        or derived.storage_path != ref.storage_key
         or derived.content_type != ref.content_type
     ):
         raise HTTPException(409, "PREPRODUCTION_CONTINUITY_OUTDATED")
@@ -632,11 +633,13 @@ def enforce_job(db, job, settings=None):
     offline = job.provider == "mock" or (
         settings.offline_simulation if settings else bool(plan and plan.payload.get("offline"))
     )
+    from shine.media.output_layout import output_root
+
     pin = enforce(
         db,
         job.project_id,
         offline=offline,
-        data_dir=settings.data_dir if settings else None,
+        data_dir=output_root(db, settings) if settings else None,
         workflow_profile_id=job.workflow_profile_id if job.provider == "comfyui" else None,
         render_request=job.request,
     )

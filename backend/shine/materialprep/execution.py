@@ -476,8 +476,10 @@ def _technical_qc(factory, settings, candidate_id: str) -> dict[str, Any]:
     technical pass is never an artistic acceptance.
     """
     with factory.begin() as db:
+        from shine.media.output_layout import output_root
+
         row = db.get(candidate_assets.CandidateAsset, candidate_id)
-        qc = candidate_assets.candidate_qc(settings, row)
+        qc = candidate_assets.candidate_qc(settings, row, root=output_root(db, settings))
         status = row.status
     return {"qc": qc, "candidate_status": status}
 

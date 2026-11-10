@@ -53,6 +53,12 @@ router = APIRouter(prefix="/api/v1", tags=["shine-assets-center"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
 
 
+def _asset_root(db, settings):
+    from shine.media.output_layout import output_root
+
+    return output_root(db, settings)
+
+
 def _validated_library_task(
     db, mode: str, fingerprint: str | None, *, category_family: str | None = None, require_alpha: bool = False
 ):
@@ -531,7 +537,7 @@ def media_content(media_id: str, settings: SettingsDep, db: DBSession):
     row = db.get(LibraryMedia, media_id)
     if row is None:
         raise HTTPException(404, {"code": "LIBRARY_MEDIA_NOT_FOUND", "message": "素材不存在"})
-    path = safe_asset_path(settings.data_dir, row.storage_path)
+    path = safe_asset_path(_asset_root(db, settings), row.storage_path)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row.sha256:
         raise HTTPException(409, {"code": "LIBRARY_MEDIA_HASH_CHANGED", "message": "素材校验失败"})
     return FileResponse(path, media_type=row.content_type, headers={"Cache-Control": "no-store"})
@@ -735,9 +741,9 @@ def version_media(version_id: str, settings: SettingsDep, db: DBSession):
     row = db.get(LibraryVersion, version_id)
     if row is None:
         raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "素材版本不存在"})
-    service.version_bytes(settings, row)
+    service.version_bytes(settings, row, root=_asset_root(db, settings))
     return FileResponse(
-        safe_asset_path(settings.data_dir, row.storage_path),
+        safe_asset_path(_asset_root(db, settings), row.storage_path),
         media_type=row.content_type,
         headers={"Cache-Control": "no-store"},
     )
@@ -863,12 +869,12 @@ def qc_library_version(version_id: str, settings: SettingsDep, db: DBSession):
         raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "素材版本不存在"})
     if row.status == "PROMOTED":
         raise HTTPException(409, {"code": "LIBRARY_VERSION_IMMUTABLE", "message": "正式版本不可覆盖审核结果"})
-    data = service.version_bytes(settings, row)
+    data = service.version_bytes(settings, row, root=_asset_root(db, settings))
     verify_upload(row.kind, row.filename, data, settings.max_upload_bytes)
     media = probe_upload(row.kind, data, row.content_type)
     from shine.quality.technical import _full_decode_check
 
-    decoded = _full_decode_check(safe_asset_path(settings.data_dir, row.storage_path), settings.ffmpeg_path)
+    decoded = _full_decode_check(safe_asset_path(_asset_root(db, settings), row.storage_path), settings.ffmpeg_path)
     alpha: Any = "NOT_REQUESTED"
     if row.content_type == "image/png" and (row.provenance or {}).get("transparent"):
         alpha = validate_rgba_output(data)
@@ -914,7 +920,7 @@ def promote_version(version_id: str, body: PromoteVersion, actor: Operator, sett
     if row.status != "READY_FOR_REVIEW" or row.is_mock:
         raise HTTPException(409, {"code": "LIBRARY_VERSION_NOT_REVIEWABLE", "message": "候选版本还不能晋升"})
     service.require_version_rights(db, row)
-    service.version_bytes(settings, row)
+    service.version_bytes(settings, row, root=_asset_root(db, settings))
     row.status = "PROMOTED"
     row.approved_by = actor
     row.approved_at = utcnow()
@@ -1068,7 +1074,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
                 409, {"code": "IMAGE_PARENT_VERSION_NOT_PROMOTED", "message": "只能从已晋升的真实版本继续创作"}
             )
         parent_rights = service.require_version_rights(db, parent, usage_scope="local")
-        service.version_bytes(settings, parent)
+        service.version_bytes(settings, parent, root=_asset_root(db, settings))
         payload["target_asset_id"] = target_asset.id
         payload["parent_version_id"] = parent.id
         payload["expected_asset_state_version"] = target_asset.state_version
@@ -1095,7 +1101,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
                     404, {"code": "IMAGE_REFERENCE_NOT_FOUND", "message": "有一张参考图不存在或用途不正确"}
                 )
             rights = service.require_rights(db.get(LibraryRights, media.rights_id), usage_scope="local")
-            service.media_bytes(settings, media)
+            service.media_bytes(settings, media, root=_asset_root(db, settings))
             reference_rows.append(
                 {
                     **ref,
@@ -1113,7 +1119,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
                     404, {"code": "IMAGE_REFERENCE_NOT_FOUND", "message": "全局参考版本不存在或尚未晋升"}
                 )
             rights = service.require_version_rights(db, version, usage_scope="local")
-            service.version_bytes(settings, version)
+            service.version_bytes(settings, version, root=_asset_root(db, settings))
             reference_rows.append(
                 {
                     **ref,
@@ -1139,7 +1145,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
         mask_info = validate_aligned_mask(
             (source.width or 0),
             (source.height or 0),
-            service.media_bytes(settings, mask),
+            service.media_bytes(settings, mask, root=_asset_root(db, settings)),
         )
         mask_info["media_id"] = mask.id
         mask_info["rights_snapshot"] = service.rights_snapshot(mask_rights)
@@ -1727,10 +1733,23 @@ def save_project_asset_to_library(
     if project_rights_id:
         require_project_rights(db, project_id, project_rights_id)
     source_rights = project_rights.payload if project_rights else {}
-    path = safe_asset_path(settings.data_dir, asset.storage_path)
+    path = safe_asset_path(_asset_root(db, settings), asset.storage_path)
     content = path.read_bytes() if path.is_file() else b""
     if not content or hashlib.sha256(content).hexdigest() != asset.sha256:
         raise HTTPException(409, {"code": "PROJECT_ASSET_HASH_CHANGED", "message": "项目素材文件校验失败"})
+    from pathlib import Path
+
+    from shine.media.artifacts import artifact_suffix
+    from shine.media.output_layout import ensure_storage_writable, store_library_asset
+    from shine.media.output_names import readable_base
+
+    ensure_storage_writable(db)
+    library_storage, _library_name = store_library_asset(
+        db, settings, content, asset.sha256,
+        kind=asset.kind,
+        base=asset.entity_id or readable_base(asset.filename, body.category),
+        extension=Path(asset.filename).suffix or artifact_suffix(asset.content_type),
+    )
     global_rights = LibraryRights(
         source_type="project_asset",
         license_kind=str(source_rights.get("license_kind") or source_rights.get("license_id", "UNSPECIFIED")),
@@ -1753,7 +1772,7 @@ def save_project_asset_to_library(
         filename=asset.filename,
         content_type=asset.content_type,
         sha256=asset.sha256,
-        storage_path=asset.storage_path,
+        storage_path=library_storage,
         byte_size=asset.byte_size,
         width=asset.width,
         height=asset.height,
@@ -2257,7 +2276,7 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
         })
     if not entries:
         raise HTTPException(422, {"code": "ADOPTION_SHOTS_REQUIRED", "message": "请选择需要采用素材的镜头"})
-    path = safe_asset_path(settings.data_dir, asset.storage_path)
+    path = safe_asset_path(_asset_root(db, settings), asset.storage_path)
     try:
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()

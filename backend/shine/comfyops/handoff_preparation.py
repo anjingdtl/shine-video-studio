@@ -424,6 +424,8 @@ def prepare_review_handoff(factory, settings, job_id, attempt_id, lease_id, inst
     data_dir, history_dir = Path(settings.data_dir).resolve(), Path(history_dir).resolve()
     if not history_dir.is_relative_to(data_dir):
         raise HTTPException(409, "HANDOFF_HISTORY_DIRECTORY_INVALID")
+    from shine.media.output_layout import output_root
+
     with factory() as db:
         instance, job = db.get(ComfyInstance, instance_id), db.get(Job, job_id)
         artifact = db.get(MediaArtifact, job.artifact_id) if job and job.artifact_id else None
@@ -431,8 +433,9 @@ def prepare_review_handoff(factory, settings, job_id, attempt_id, lease_id, inst
             raise HTTPException(409, "HANDOFF_OUTPUT_NOT_PERSISTED")
         payload = dict(instance.payload)
         storage_path, digest, byte_size = artifact.storage_path, artifact.sha256, artifact.byte_size
+        asset_root = output_root(db, settings)
     _verify_preproduction(factory, job_id, settings)
-    _verify_artifact(data_dir, storage_path, digest, byte_size)
+    _verify_artifact(asset_root, storage_path, digest, byte_size)
     supervisor.require_closed_restart()
     supervisor.verify_binding(payload.get("url", ""), payload.get("process"))
     begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, worker_id, state_version, payload["url"],
@@ -445,7 +448,7 @@ def prepare_review_handoff(factory, settings, job_id, attempt_id, lease_id, inst
             **drained, "history_path": str(drained["history_path"]),
         }, settings=settings)
         _verify_preproduction(factory, job_id, settings)
-        _verify_artifact(data_dir, storage_path, digest, byte_size)
+        _verify_artifact(asset_root, storage_path, digest, byte_size)
         guard.check()
         record_handoff_stage(factory, attempt_id, "DRAINED", "STOP_INTENT", {}, settings=settings)
         stopped = supervisor.stop_after_drain()

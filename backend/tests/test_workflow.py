@@ -8,6 +8,7 @@ from datetime import timedelta
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from shine.config import Settings
 from shine.db import Base, make_engine, make_session_factory
@@ -168,14 +169,22 @@ def test_assets_require_user_approval_and_lock_before_shot_or_render(studio):
 
 
 def test_upload_is_content_addressed_and_filename_cannot_escape_storage(studio):
-    client, _factory, root = studio
+    client, factory, root = studio
     project_id = create_project(client)
     first = upload_asset(client, project_id, PNG, r"..\outside\hero.png")
     second = upload_asset(client, project_id, PNG + b"different", r"..\outside\hero.png")
     assert first["filename"] == second["filename"] == "hero.png"
     assert first["sha256"] != second["sha256"]
-    first_path = root / "素材库" / "assets" / first["sha256"][:2] / first["sha256"]
-    second_path = root / "素材库" / "assets" / second["sha256"][:2] / second["sha256"]
+    with factory() as db:
+        from shine.models import Asset
+
+        rows = {
+            row.sha256: row
+            for row in db.scalars(select(Asset).where(Asset.project_id == project_id)).all()
+        }
+        first_path = root / "素材库" / rows[first["sha256"]].storage_path
+        second_path = root / "素材库" / rows[second["sha256"]].storage_path
+    assert first_path.parent.name == "素材"
     assert first_path.read_bytes() == PNG
     assert second_path.read_bytes() == PNG + b"different"
     assert (

@@ -438,7 +438,8 @@ def _semantic_review(
     artifact_path: Path,
     artifact_sha256: str,
     settings: Settings,
-    remote_consent: bool,
+    asset_root: Path | None = None,
+    remote_consent: bool = False,
     project_id: str,
     transcript: Transcript | None,
     local_reference_frames=(),
@@ -449,12 +450,13 @@ def _semantic_review(
     """Run the semantic reviewer, classifying every failure mode separately."""
     if reviewer is None:
         return [], None
+    asset_root = asset_root or settings.data_dir
     if getattr(reviewer, "accepts_local_references", False) and reference_manifest:
         from shine.media.frames import reference_thumbnails
 
         try:
             local_reference_frames = reference_thumbnails(
-                settings.data_dir,
+                asset_root,
                 reference_manifest,
                 settings.data_dir / "evidence" / project_id / job_id / "references",
                 ffmpeg_path=settings.ffmpeg_path,
@@ -1664,13 +1666,14 @@ def _run_one(
             if not candidate:
                 return None
             from shine.comfyops.preproduction import enforce
+            from shine.media.output_layout import output_root
 
             try:
                 current_preproduction_hash = enforce(
                     db,
                     candidate.project_id,
                     offline=candidate.provider == "mock" or bool(settings and settings.offline_simulation),
-                    data_dir=settings.data_dir if settings else None,
+                    data_dir=output_root(db, settings) if settings else None,
                     workflow_profile_id=candidate.workflow_profile_id if candidate.provider == "comfyui" else None,
                     render_request=candidate.request,
                 )
@@ -2050,6 +2053,14 @@ def _load_comfy_context(
             raise ComfyReferenceError(
                 str(exc), details={"label": item.label, "asset_id": item.asset_id},
             ) from exc
+    # A stored request names the path its reference had when the job was
+    # created.  Moving the output root changes that path without changing the
+    # bytes or the asset identity, so the in-memory request is pointed at the
+    # current file before upload/QC reads it.
+    from shine.media.output_layout import refresh_reference_paths
+
+    request = refresh_reference_paths(db, request)
+    manifest = [ReferenceManifestItem.model_validate(item) for item in request.reference_manifest]
     project = db.get(Project, job.project_id)
     policy = QualityPolicy.from_dict(project.quality_policy if project else None)
     language = project.language if project else "Chinese"
@@ -2119,7 +2130,7 @@ def _handoff_preflight_allowed(settings, reviewers):
 
 
 def _collect_comfy_reviews(*, request, settings, artifact_path, digest, job_id, project_id, remote_consent,
-                           semantic_reviewer, asr_reviewer, review_revision, terminology_hint=""):
+                           semantic_reviewer, asr_reviewer, review_revision, asset_root=None, terminology_hint=""):
     technical = TechnicalQC(ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path).check(
         artifact_path,
         expectations=TechnicalExpectations(
@@ -2132,7 +2143,8 @@ def _collect_comfy_reviews(*, request, settings, artifact_path, digest, job_id, 
     )
     semantic_results, semantic_error = _semantic_review(
         reviewer=semantic_reviewer, job_id=job_id, spec=request.shot_spec, style=request.style_snapshot,
-        artifact_path=artifact_path, artifact_sha256=digest, settings=settings, remote_consent=remote_consent,
+        artifact_path=artifact_path, artifact_sha256=digest, settings=settings, asset_root=asset_root,
+        remote_consent=remote_consent,
         project_id=project_id, transcript=transcript, reference_manifest=request.reference_manifest,
         review_revision=review_revision,
         independent_input=({"artifact_id": request.style_input_assessment_id,
@@ -2172,6 +2184,13 @@ def _finalize_comfy_attempt(
         remote_consent = bool(project and project.allow_remote_review)
         project_id = job.project_id
         existing = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        from shine.media.artifacts import safe_asset_path
+        from shine.media.output_layout import (
+            ensure_storage_writable,
+            output_root,
+            project_type_dir,
+        )
+        from shine.media.output_names import TYPE_VIDEO
         from shine.media.video_layout import shot_output_subdir
         from shine.media.video_naming import clip_filename
 
@@ -2179,8 +2198,12 @@ def _finalize_comfy_attempt(
         # ledger already knows; the hash remains the identity.  An adopted
         # first take goes to the adopted folder, a retake waits in history
         # until the person explicitly selects it.
+
         clip_name = clip_filename(db, project, job)
         clip_folder = shot_output_subdir(db, job)
+        clip_directory = project_type_dir(db, project, TYPE_VIDEO, subdir=clip_folder)
+        root = output_root(db, settings)
+        ensure_storage_writable(db)
         from shine.models import AppSetting
 
         recheck = db.get(AppSetting, "qc-recheck:" + job.id)
@@ -2192,7 +2215,7 @@ def _finalize_comfy_attempt(
             # Preserve the distinction between an absent stored artifact and
             # a render that has not yet been collected. Never redownload an
             # existing attempt's missing or changed artifact during recheck.
-            artifact_path = settings.data_dir / existing.storage_path
+            artifact_path = safe_asset_path(root, existing.storage_path)
 
     relative: str
     digest: str
@@ -2243,11 +2266,11 @@ def _finalize_comfy_attempt(
                 )
             return job_id
         relative, digest, byte_size = store_artifact(
-            settings.data_dir, project_id, job_id, result.content, result.content_type,
-            filename=clip_name, subdir=clip_folder,
+            root, project_id, job_id, result.content, result.content_type,
+            filename=clip_name, subdir=clip_folder, directory=clip_directory,
         )
         content_type = result.content_type
-        artifact_path = settings.data_dir / relative
+        artifact_path = root / relative
         stored_digest = _file_digest(artifact_path)
         if stored_digest != digest:
             with session_factory.begin() as db:
@@ -2270,10 +2293,8 @@ def _finalize_comfy_attempt(
         content_type = str(existing.content_type)  # type: ignore[union-attr]
         # A previously collected artifact may have changed since recheck was
         # requested. Revalidate it before giving any bytes to a reviewer.
-        from shine.media.artifacts import safe_asset_path
-
         try:
-            artifact_path = safe_asset_path(settings.data_dir, relative)
+            artifact_path = safe_asset_path(root, relative)
             if artifact_path.stat().st_size != byte_size or _file_digest(artifact_path) != digest:
                 raise ValueError("artifact changed")
         except (OSError, ValueError, HTTPException):
@@ -2425,7 +2446,7 @@ def _finalize_comfy_attempt(
         reviewed = _collect_comfy_reviews(
             request=request, settings=settings, artifact_path=artifact_path, digest=digest, job_id=job_id,
             project_id=project_id, remote_consent=remote_consent, semantic_reviewer=semantic, asr_reviewer=asr,
-            review_revision=review_revision, terminology_hint=terminology_hint,
+            review_revision=review_revision, asset_root=root, terminology_hint=terminology_hint,
         )
         technical, transcript, transcript_findings, asr_error, semantic_results, semantic_error = reviewed
     if request.self_review_scope == "basic":
@@ -2638,7 +2659,14 @@ def _run_comfy_job(
 ) -> str:
     settings = settings or Settings.from_env()
     client = comfy_client or _renderer_client(settings)
-    service = comfy_service or ComfyUIRenderService(client, settings.data_dir)
+    if comfy_service is None:
+        from shine.media.output_layout import output_root
+
+        with session_factory() as db:
+            root = output_root(db, settings)
+        service = ComfyUIRenderService(client, root)
+    else:
+        service = comfy_service
     with session_factory.begin() as db:
         job = db.get(Job, job_id)
         attempt = db.get(JobAttempt, attempt_id)
@@ -2777,11 +2805,13 @@ def _run_comfy_job(
             submit_db.execute(text("BEGIN IMMEDIATE"))
             current = submit_db.get(Job, job_id)
             try:
+                from shine.media.output_layout import output_root
+
                 pin = enforce(
                     submit_db,
                     project_id,
                     offline=settings.offline_simulation,
-                    data_dir=settings.data_dir,
+                    data_dir=output_root(submit_db, settings),
                     workflow_profile_id=current.workflow_profile_id,
                     render_request=current.request,
                 )
@@ -3537,12 +3567,14 @@ def _recover_one_job(
                 return 0
             transition(job, "RUNNING")
             client = comfy_client or _renderer_client(settings)
+            from shine.media.output_layout import output_root
+
             finalize = {
                 "job_id": job.id,
                 "attempt_id": checked_attempt.id,
                 "expected_state_version": job.state_version,
                 "prompt_id": job.provider_job_id,
-                "service": ComfyUIRenderService(client, settings.data_dir),
+                "service": ComfyUIRenderService(client, output_root(db, settings)),
             }
         elif job.provider == "comfyui" and (
             job.provider_job_id
@@ -3714,9 +3746,10 @@ def _recover_from_persisted_artifact(
     # attempt recorded, so it must not leave an adoption record behind that
     # would stop a later recovery from looking at this attempt again.
     from shine.media.artifacts import safe_asset_path
+    from shine.media.output_layout import output_root
 
     try:
-        stored = safe_asset_path(settings.data_dir, str(artifact.storage_path))
+        stored = safe_asset_path(output_root(db, settings), str(artifact.storage_path))
         if stored.stat().st_size != int(artifact.byte_size) or _file_digest(stored) != artifact.sha256:
             raise ValueError("artifact changed")
     except (OSError, ValueError, HTTPException):
@@ -3786,7 +3819,7 @@ def _recover_from_persisted_artifact(
         "attempt_id": attempt.id,
         "expected_state_version": state_version,
         "prompt_id": job.provider_job_id,
-        "service": ComfyUIRenderService(client, settings.data_dir),
+        "service": ComfyUIRenderService(client, output_root(db, settings)),
     }
 
 
@@ -3822,7 +3855,9 @@ def _recover_comfy_job(
         )
 
     client = comfy_client or _renderer_client(settings)
-    service = ComfyUIRenderService(client, settings.data_dir)
+    from shine.media.output_layout import output_root
+
+    service = ComfyUIRenderService(client, output_root(db, settings))
     prompt_id = job.provider_job_id or (attempt.provider_job_id if attempt else None)
     graph_hash = attempt.prompt_graph_sha256 if attempt else None
     uncertain = job.failure_code == "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
@@ -4166,8 +4201,14 @@ def _advance_production_runs(session_factory, worker_id: str, *, settings) -> Ru
 
 
 def _run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
+    from shine.media.output_layout import storage_migration_active
     from shine.quality.runtime import configured_reviewers
 
+    with session_factory() as migration_db:
+        if storage_migration_active(migration_db):
+            # The output root is being switched; claiming work here would
+            # produce bytes with nowhere agreed to put them.
+            return "storage-migration"
     semantic, asr = configured_reviewers(session_factory, settings)
     if settings.render_provider == "comfyui" and not settings.offline_simulation:
         from shine.quality.advisory_queue import reconcile_review_leases
@@ -4191,9 +4232,12 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
         # that keeps reporting the same pending work as if it were progress.
         return f"run:{run_step.progressed}"
     from shine.media.delivery_engine import run_pending_deliveries
+    from shine.media.output_layout import output_root
 
+    with session_factory() as root_db:
+        delivery_root = output_root(root_db, settings)
     delivered = run_pending_deliveries(
-        session_factory, settings=settings, asset_root=settings.data_dir, worker_id=worker_id
+        session_factory, settings=settings, asset_root=delivery_root, worker_id=worker_id
     )
     if delivered:
         return f"delivery:{delivered}"

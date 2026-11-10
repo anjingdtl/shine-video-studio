@@ -50,6 +50,13 @@ from shine.models import AgentTaskRecord, Asset, Project, ProjectDocument, Workf
 from shine.services import add_audit, require_project
 from shine.voiceops.providers import FakeVoiceProvider, LocalVoiceHTTPProvider, subtitles, verify_dialogue
 
+
+def _candidate_root(db, settings):
+    from shine.media.output_layout import output_root
+
+    return output_root(db, settings)
+
+
 router = APIRouter(prefix="/api/v1", tags=["V1.3 preparation"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
 
@@ -864,7 +871,7 @@ def generate(project_id: str, body: Generate, request: Request, settings: Settin
         parent = get(db, CandidateAsset, body.parent_id)
         if parent.project_id != project_id:
             raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
-        references.append(verify_candidate(settings, parent))
+        references.append(verify_candidate(settings, parent, root=_candidate_root(db, settings)))
     with preparation_task(
         db, project, "asset_factory", body.model_dump(), "fake-image-v1" if provider.is_mock else "local-image-service"
     ) as task:
@@ -934,7 +941,7 @@ def qc(identity: str, request: Request, settings: SettingsDep, db: DBSession):
     reviewer = getattr(request.app.state, "candidate_reviewer", None)
     if reviewer:
         reviewer = TrackedProvider(reviewer, request.app.state.session_factory, row.project_id)
-    result = candidate_qc(settings, row, reviewer=reviewer)
+    result = candidate_qc(settings, row, reviewer=reviewer, root=_candidate_root(db, settings))
     audit(db, "candidate_qc", "CANDIDATE_QC_RECORDED", row, result)
     db.commit()
     return public(row)
@@ -943,11 +950,11 @@ def qc(identity: str, request: Request, settings: SettingsDep, db: DBSession):
 @router.get("/candidate-assets/{identity}/media")
 def candidate_media(identity: str, settings: SettingsDep, db: DBSession):
     row = get(db, CandidateAsset, identity)
-    verify_candidate(settings, row)
+    verify_candidate(settings, row, root=_candidate_root(db, settings))
     from shine.media.artifacts import safe_asset_path
 
     return FileResponse(
-        safe_asset_path(settings.data_dir, row.payload["storage_path"]),
+        safe_asset_path(_candidate_root(db, settings), row.payload["storage_path"]),
         media_type=row.payload["content_type"],
         headers={"Cache-Control": "no-store"},
     )
@@ -959,7 +966,7 @@ def candidate_thumbnail(identity: str, request: Request, settings: SettingsDep, 
     from shine.media.thumbnails import thumbnail
 
     row = get(db, CandidateAsset, identity)
-    return thumbnail(safe_asset_path(settings.data_dir, row.payload["storage_path"]),
+    return thumbnail(safe_asset_path(_candidate_root(db, settings), row.payload["storage_path"]),
                      row.payload["content_sha256"], settings.ffmpeg_path,
                      request.headers.get("if-none-match"))
 
@@ -1077,7 +1084,7 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
         check_provider_mode(provider, body.execution_mode)
     if body.source == "USER_IMPORT":
         result = {
-            "audio": verify_candidate(settings, reference),
+            "audio": verify_candidate(settings, reference, root=_candidate_root(db, settings)),
             "is_mock": reference.payload["provenance"].get("is_mock", False),
         }
     else:
@@ -1102,7 +1109,10 @@ def voice_design(project_id: str, body: VoiceDesign, request: Request, settings:
                 if source_rights_id:
                     require_rights(db, project_id, source_rights_id)
                 result = (
-                    provider.clone(verify_candidate(settings, reference), body.text, body.character)
+                    provider.clone(
+                        verify_candidate(settings, reference, root=_candidate_root(db, settings)),
+                        body.text, body.character,
+                    )
                     if reference
                     else provider.design(body.description, body.text, body.character)
                 )
@@ -1161,7 +1171,7 @@ def freeze_voice(identity: str, body: Decision, actor: Operator, settings: Setti
     if not body.listened:
         raise HTTPException(409, "VOICE_LISTENING_CONFIRMATION_REQUIRED")
     candidate = get(db, CandidateAsset, row.payload["candidate_id"])
-    verify_candidate(settings, candidate)
+    verify_candidate(settings, candidate, root=_candidate_root(db, settings))
     if candidate.status != "PROMOTED":
         raise HTTPException(409, "CANDIDATE_NOT_APPROVED")
     if candidate.payload.get("rights_id"):
@@ -1233,7 +1243,9 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
         ):
             if hasattr(provider, "prepare_conditioning"):
                 provider.prepare_conditioning(
-                    verify_candidate(settings, conditioning), row.payload["conditioning_hash"], row.payload["text"]
+                    verify_candidate(
+                        settings, conditioning, root=_candidate_root(db, settings)
+                    ), row.payload["conditioning_hash"], row.payload["text"]
                 )
             result = provider.synthesize(
                 body.text, body.character, row.payload["conditioning_hash"], body.emotion, body.speed, body.pause
@@ -1263,7 +1275,7 @@ def dialogue(identity: str, body: Dialogue, request: Request, settings: Settings
     hard_errors = [e for e in errors if e not in review_errors]
     if review_errors:
         candidate.payload = {**candidate.payload, "dialogue_review_errors": review_errors, "asr_evidence": transcript}
-    candidate_qc(settings, candidate)
+    candidate_qc(settings, candidate, root=_candidate_root(db, settings))
     if hard_errors:
         candidate.status = "QC_FAILED"
         candidate.payload = {**candidate.payload, "dialogue_errors": hard_errors}
@@ -1355,12 +1367,12 @@ class Readiness(Strict):
 
 @router.post("/projects/{project_id}/preproduction/readiness")
 def readiness(project_id: str, body: Readiness, settings: SettingsDep, db: DBSession):
-    return preproduction.readiness(db, project_id, offline=body.offline, data_dir=settings.data_dir)
+    return preproduction.readiness(db, project_id, offline=body.offline, data_dir=_candidate_root(db, settings))
 
 
 @router.get("/projects/{project_id}/preproduction/requirements")
 def requirements(project_id: str, settings: SettingsDep, db: DBSession):
-    return preproduction.readiness(db, project_id, data_dir=settings.data_dir)
+    return preproduction.readiness(db, project_id, data_dir=_candidate_root(db, settings))
 
 
 @router.post("/projects/{project_id}/preproduction/freeze")
@@ -1374,7 +1386,7 @@ def freeze_manifest(project_id: str, body: Decision, actor: Operator, settings: 
     if row.status == "FROZEN":
         raise HTTPException(409, "MANIFEST_ALREADY_FROZEN_CREATE_REVISION")
     approval.consume(db, actor, "manifest_freeze", row, body.grant_id, body.snapshot)
-    report = preproduction.readiness(db, project_id, offline=body.offline, data_dir=settings.data_dir)
+    report = preproduction.readiness(db, project_id, offline=body.offline, data_dir=_candidate_root(db, settings))
     if report["status"] != "SHOOT_READY":
         raise HTTPException(409, {"code": "PREPRODUCTION_NOT_READY", "blockers": report["blockers"]})
     row.payload = {**row.payload, "manifest": report["manifest"], "offline": body.offline, "approved_by": actor}
@@ -1533,7 +1545,7 @@ def local_evidence(identity: str, body: LocalEvidence, actor: Operator, settings
             or body.graph_sha256 != graph_hash(row.payload["graph"])
         ):
             raise HTTPException(409, "REAL_LOCAL_WORKFLOW_CANDIDATE_REQUIRED")
-        verify_candidate(settings, candidate)
+        verify_candidate(settings, candidate, root=_candidate_root(db, settings))
         row.status = "REAL_TESTED"
         audit(
             db,
@@ -1576,7 +1588,7 @@ def local_evidence(identity: str, body: LocalEvidence, actor: Operator, settings
         or profile.model_identity.get("family", "MiniMax-H3") != "MiniMax-H3"
     ):
         raise HTTPException(409, "CURRENT_REAL_MANUAL_H3_EVIDENCE_REQUIRED")
-    path = safe_asset_path(settings.data_dir, artifact.storage_path)
+    path = safe_asset_path(_candidate_root(db, settings), artifact.storage_path)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != artifact.sha256:
         raise HTTPException(409, "ARTIFACT_HASH_CHANGED")
     gates = db.scalars(
@@ -1619,7 +1631,7 @@ def export_subtitles(identity: str, db: DBSession, format: Literal["srt", "ass"]
 
 @router.get("/projects/{project_id}/comfyops/gaps")
 def capability_gaps(project_id: str, settings: SettingsDep, db: DBSession):
-    report = preproduction.readiness(db, project_id, offline=True, data_dir=settings.data_dir)
+    report = preproduction.readiness(db, project_id, offline=True, data_dir=_candidate_root(db, settings))
     model_rows = list(db.scalars(select(ModelPackage)))
     node_rows = list(db.scalars(select(NodePackage)))
     return {
@@ -1722,7 +1734,7 @@ def run_preparation(project_id: str, body: RunPreparation, request: Request, set
     db.commit()
     generated, blocked = [], []
     try:
-        report = preproduction.readiness(db, project_id, data_dir=settings.data_dir)
+        report = preproduction.readiness(db, project_id, data_dir=_candidate_root(db, settings))
         requirements = report["requirements"]
         satisfied = {r["id"] for r in requirements if r["status"] == "SATISFIED"}
         pending = list(db.scalars(select(CandidateAsset).where(CandidateAsset.project_id == project_id)))

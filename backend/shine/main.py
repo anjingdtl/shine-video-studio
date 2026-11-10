@@ -95,7 +95,6 @@ from shine.services import (
     require_shot,
     revise_shot_record,
     set_shot_bindings,
-    store_asset_file,
     transition,
     update_style_draft,
 )
@@ -438,6 +437,11 @@ def create_app(
     actual_asset_root = asset_root or settings.data_dir
     actual_asset_root.mkdir(parents=True, exist_ok=True)
 
+    def _asset_root(db) -> Path:
+        from shine.media.output_layout import output_root
+
+        return output_root(db, settings, default=actual_asset_root)
+
     app = FastAPI(
         title="Shine 视频工作台 API",
         version="0.2.0",
@@ -452,6 +456,18 @@ def create_app(
     app.state.settings = settings
     app.state.asset_root = actual_asset_root
     app.state.mock_llm_responder = None
+    # A migration runs inside an API request.  If the process died mid-way,
+    # the lock it left cannot belong to a live migration any more; clearing it
+    # here keeps a crash from refusing every write for the whole stale window.
+    try:
+        from shine.models import AppSetting
+
+        with session_factory.begin() as startup_db:
+            lock = startup_db.get(AppSetting, "output-directory:migration")
+            if lock is not None:
+                startup_db.delete(lock)
+    except Exception:  # noqa: BLE001 - a missing schema is reported elsewhere
+        pass
 
     app.include_router(llm_router)
     app.include_router(agent_router)
@@ -490,6 +506,9 @@ def create_app(
     from shine.api_freezes import router as freezes_router
 
     app.include_router(freezes_router)
+    from shine.api_output import router as output_router
+
+    app.include_router(output_router)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):
@@ -697,7 +716,25 @@ def create_app(
         if duplicate:
             return duplicate
         media = probe_upload(asset_kind, content, content_type)
-        storage_key = store_asset_file(actual_asset_root, digest, content)
+        from pathlib import Path as _Path
+
+        from shine.media.artifacts import artifact_suffix
+        from shine.media.output_layout import (
+            ensure_storage_writable,
+            output_root,
+            store_project_asset,
+        )
+        from shine.media.output_names import readable_base
+
+        ensure_storage_writable(db)
+        base = entity_id or readable_base(filename, "素材")
+        storage_key, _stored_name = store_project_asset(
+            db, settings, project, content, digest,
+            kind=asset_kind,
+            base=base,
+            extension=_Path(filename).suffix or artifact_suffix(content_type),
+            root=output_root(db, settings, default=actual_asset_root),
+        )
         asset = Asset(
             project_id=project.id,
             filename=filename,
@@ -766,7 +803,7 @@ def create_app(
                 and selected.sha256 == sha256_bytes(content)
                 and not (selected.provenance or {}).get("candidate_id")
                 and selected.role == family and selected.entity_id == entity):
-            path = safe_asset_path(actual_asset_root, selected.storage_path)
+            path = safe_asset_path(_asset_root(db), selected.storage_path)
             if not path.is_file() or sha256_bytes(path.read_bytes()) != selected.sha256:
                 raise HTTPException(409, "ASSET_HASH_CHANGED")
             return jsonable_encoder(_asset_data(selected))
@@ -777,7 +814,7 @@ def create_app(
             raise HTTPException(409, "相同图片已经用于其他素材身份，请选择对应图片。")
         if asset.provenance:
             raise HTTPException(409, "该图片已有素材来源记录，请通过已有主素材入口选择。")
-        path = safe_asset_path(actual_asset_root, asset.storage_path)
+        path = safe_asset_path(_asset_root(db), asset.storage_path)
         if not path.is_file() or sha256_bytes(path.read_bytes()) != asset.sha256:
             raise HTTPException(409, "ASSET_HASH_CHANGED")
         asset.approved = asset.locked = True
@@ -808,7 +845,7 @@ def create_app(
         asset = db.get(Asset, asset_id)
         if not asset:
             raise HTTPException(status_code=404, detail="Asset not found")
-        path = safe_asset_path(actual_asset_root, asset.storage_path)
+        path = safe_asset_path(_asset_root(db), asset.storage_path)
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Asset file is missing on disk")
         return FileResponse(path, media_type=asset.content_type, headers={"Cache-Control": "no-store"})
@@ -820,7 +857,7 @@ def create_app(
         asset = db.get(Asset, asset_id)
         if not asset:
             raise HTTPException(404, "Asset not found")
-        return thumbnail(safe_asset_path(actual_asset_root, asset.storage_path), asset.sha256,
+        return thumbnail(safe_asset_path(_asset_root(db), asset.storage_path), asset.sha256,
                          settings.ffmpeg_path, request.headers.get("if-none-match"))
 
     @app.patch("/api/v1/assets/{asset_id}/metadata")
@@ -858,7 +895,7 @@ def create_app(
         asset = db.get(Asset, asset_id)
         if not asset:
             raise HTTPException(404, "Asset not found")
-        approve_master(db, app.state.settings, asset, actor, body, locking=locking, asset_root=actual_asset_root)
+        approve_master(db, app.state.settings, asset, actor, body, locking=locking, asset_root=_asset_root(db))
         db.commit()
         return jsonable_encoder(_asset_data(asset))
 
@@ -1240,7 +1277,7 @@ def create_app(
         checked against the registered digest before they are served.
         """
         artifact = _produced_artifact(job_id, db)
-        path = safe_asset_path(actual_asset_root, artifact.storage_path)
+        path = safe_asset_path(_asset_root(db), artifact.storage_path)
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
         if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
@@ -1253,7 +1290,7 @@ def create_app(
         from shine.media.thumbnails import thumbnail
 
         artifact = _produced_artifact(job_id, db)
-        return thumbnail(safe_asset_path(actual_asset_root, artifact.storage_path), artifact.sha256,
+        return thumbnail(safe_asset_path(_asset_root(db), artifact.storage_path), artifact.sha256,
                          settings.ffmpeg_path, request.headers.get("if-none-match"), seek_s=1.0)
 
     @app.post("/api/v1/projects/{project_id}/production-series", status_code=201)
@@ -1655,7 +1692,7 @@ def create_app(
         attempt = db.get(JobAttempt, artifact.attempt_id) if artifact.attempt_id else None
         if attempt is None:
             raise HTTPException(status_code=409, detail="Artifact has no attempt record for QC")
-        path = safe_asset_path(actual_asset_root, artifact.storage_path)
+        path = safe_asset_path(_asset_root(db), artifact.storage_path)
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
         spec = ShotSpec.model_validate(job.request.get("shot_spec", {}))

@@ -386,7 +386,9 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
     replacement = db.get(Job, body.replacement_job_id)
     recorded = next((r for r in _records(db, project_id) if r.trace.get("source_job_id") == body.source_job_id
                      and r.trace.get("job_id") == body.replacement_job_id), None)
-    data_dir = request.app.state.settings.data_dir
+    from shine.media.output_layout import output_root_for_request
+
+    data_dir = output_root_for_request(request, db)
     if not recorded or not accepted_job(db, replacement, data_dir):
         raise HTTPException(409, "GENERATION_REPLACEMENT_NOT_ACCEPTED")
     from shine.media.video_layout import move_adoption, revert_file_moves
@@ -396,7 +398,7 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
     # or unverifiable file leaves the bytes where they are; the ledger
     # selection still proceeds, so production is never blocked by a cosmetic
     # folder move.
-    asset_root = request.app.state.asset_root
+    asset_root = output_root_for_request(request, db)
     moves: list[tuple[str, str]] = []
     try:
         moves = move_adoption(db, asset_root, shot_id=replacement.shot_id,

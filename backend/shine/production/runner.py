@@ -973,9 +973,10 @@ def advance_run(
     min_free = float(budget.get("min_free_gb") or 0)
     if min_free:
         from shine.comfyops.storage import disk_info
+        from shine.media.output_layout import output_root
 
         try:
-            free_gb = float(disk_info(settings.data_dir).get("free_gb") or 0)
+            free_gb = float(disk_info(output_root(db, settings)).get("free_gb") or 0)
         except OSError:
             free_gb = None
         if free_gb is not None and free_gb < min_free:

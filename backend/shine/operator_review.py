@@ -90,12 +90,14 @@ def context(db, settings, job_id: str):
     style = db.get(StyleVersion, job.style_version_id)
     project = db.get(Project, job.project_id)
     from shine.comfyops.preproduction import enforce
+    from shine.media.output_layout import output_root
 
+    root = output_root(db, settings)
     current_preproduction_hash = enforce(
         db,
         job.project_id,
         offline=bool(settings.offline_simulation),
-        data_dir=settings.data_dir,
+        data_dir=root,
         workflow_profile_id=job.workflow_profile_id if job.provider == "comfyui" else None,
         render_request=job.request,
     )
@@ -152,7 +154,7 @@ def context(db, settings, job_id: str):
     if not request.rulepack_id and lock:
         raise HTTPException(409, "Legacy request predates the current RulePack lock")
     try:
-        path = safe_asset_path(settings.data_dir, artifact.storage_path)
+        path = safe_asset_path(root, artifact.storage_path)
         with path.open("rb") as media:
             digest = hashlib.file_digest(media, "sha256").hexdigest()
         if digest != artifact.sha256 or path.stat().st_size != artifact.byte_size:

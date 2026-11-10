@@ -271,9 +271,11 @@ def storyboard_draft_route(
     only_section_ids = [str(item) for item in only] if isinstance(only, list) and only else None
     try:
         script_text = pipeline.serialize_volume_script(db, project_id, volume_id)
+        from shine.media.output_layout import output_root_for_request
+
         result = volume_storyboard_draft(
             db, project_id, volume_id, gateway,
-            data_dir=request.app.state.settings.data_dir,
+            data_dir=output_root_for_request(request, db),
             only_section_ids=only_section_ids)
         record = record_storyboard_draft(db, project_id, volume_id, result, script_text)
         db.commit()

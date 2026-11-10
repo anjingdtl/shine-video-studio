@@ -116,6 +116,51 @@ def shot_output_subdir(db: Session, job) -> str:
     return CURRENT
 
 
+def current_shot_artifact_ids(db: Session, project_id: str) -> set[str]:
+    """The adopted take per shot: selection first, else the normal series."""
+    from shine.models import Job
+
+    artifacts = set()
+    for job_id in current_job_ids(db, project_id).values():
+        job = db.get(Job, job_id)
+        if job is not None and job.artifact_id:
+            artifacts.add(job.artifact_id)
+    return artifacts
+
+
+def current_delivery_artifact_ids(db: Session, project_id: str) -> set[str]:
+    """One current reel per delivery scope, plus every episode's delivered reel."""
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.production.models import ProductionRunEpisode
+
+    latest: dict[tuple[str, str], tuple[int, str]] = {}
+    orders = db.scalars(
+        select(DeliveryOrder).where(
+            DeliveryOrder.project_id == project_id,
+            DeliveryOrder.artifact_id.is_not(None),
+        )
+    ).all()
+    for order in orders:
+        scope = (order.scope_kind, order.scope_id or order.series_id or "")
+        prior = latest.get(scope)
+        if prior is None or order.version >= prior[0]:
+            latest[scope] = (order.version, order.artifact_id)
+    current = {artifact_id for _version, artifact_id in latest.values()}
+    episodes = db.scalars(
+        select(ProductionRunEpisode).where(
+            ProductionRunEpisode.project_id == project_id,
+            ProductionRunEpisode.delivered_artifact_id.is_not(None),
+        )
+    ).all()
+    current.update(episode.delivered_artifact_id for episode in episodes if episode.delivered_artifact_id)
+    return current
+
+
+def delivery_subdir(db: Session, artifact) -> str:
+    current = current_delivery_artifact_ids(db, artifact.project_id)
+    return DELIVERY_CURRENT if artifact.id in current else DELIVERY_HISTORY
+
+
 def _digest(path: Path) -> str:
     with path.open("rb") as media:
         return hashlib.file_digest(media, "sha256").hexdigest()
@@ -138,11 +183,16 @@ def relocate_artifact(db: Session, root: Path, artifact, subdir: str) -> tuple[s
     Raises OSError/ValueError on an unverifiable file so a caller can refuse
     before recording anything.
     """
-    from shine.models import JobAttempt, MediaArtifact
+    from shine.media.output_layout import project_type_dir
+    from shine.media.output_names import TYPE_VIDEO
+    from shine.models import JobAttempt, MediaArtifact, Project
 
     old_rel = str(artifact.storage_path)
     source = safe_asset_path(root, old_rel)
-    folder = root / "artifacts" / artifact.project_id / subdir
+    project = db.get(Project, artifact.project_id)
+    if project is None:
+        raise ValueError("VIDEO_PROJECT_MISSING")
+    folder = root / project_type_dir(db, project, TYPE_VIDEO, subdir=subdir)
     target = folder / Path(old_rel).name
     if target.resolve() == source.resolve():
         return None

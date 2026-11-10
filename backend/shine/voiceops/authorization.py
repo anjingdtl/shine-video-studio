@@ -28,7 +28,9 @@ def authorize(db, project_id, body, actor, settings):
             raise HTTPException(409, "VOICE_SOURCE_CONSENT_MISMATCH")
         if reference.payload.get("rights_id"):
             require_rights(db, project_id, reference.payload["rights_id"])
-        verify_candidate(settings, reference)
+        from shine.media.output_layout import output_root
+
+        verify_candidate(settings, reference, root=output_root(db, settings))
         if body.source == "AUTHORIZED_CLONE":
             if not actor:
                 raise HTTPException(403, "VOICE_EXECUTION_OPERATOR_REQUIRED")

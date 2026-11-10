@@ -23,10 +23,10 @@ from shine.asset_center.models import (
 )
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.models import CandidateAsset, RightsRecord, VoiceProfile
-from shine.media.artifacts import safe_asset_path
+from shine.media.artifacts import artifact_suffix, safe_asset_path
 from shine.models import Asset, Project, utcnow
 from shine.security import probe_upload, verify_upload
-from shine.services import add_audit, store_asset_file
+from shine.services import add_audit
 
 ASSET_CATEGORIES = {
     "character",
@@ -53,8 +53,8 @@ ASSET_ROLES = {
 }
 
 
-def media_bytes(settings, row: LibraryMedia) -> bytes:
-    path = safe_asset_path(settings.data_dir, row.storage_path)
+def media_bytes(settings, row: LibraryMedia, *, root=None) -> bytes:
+    path = safe_asset_path(root or settings.data_dir, row.storage_path)
     try:
         content = path.read_bytes()
     except OSError as exc:
@@ -64,8 +64,8 @@ def media_bytes(settings, row: LibraryMedia) -> bytes:
     return content
 
 
-def version_bytes(settings, row: LibraryVersion) -> bytes:
-    path = safe_asset_path(settings.data_dir, row.storage_path)
+def version_bytes(settings, row: LibraryVersion, *, root=None) -> bytes:
+    path = safe_asset_path(root or settings.data_dir, row.storage_path)
     try:
         content = path.read_bytes()
     except OSError as exc:
@@ -280,7 +280,18 @@ def create_media(
     content_type = verify_upload(kind, filename, content, settings.max_upload_bytes)
     info = probe_upload(kind, content, content_type)
     digest = hashlib.sha256(content).hexdigest()
-    storage_path = store_asset_file(settings.data_dir, digest, content)
+    from pathlib import Path
+
+    from shine.media.output_layout import ensure_storage_writable, store_library_asset
+    from shine.media.output_names import readable_base
+
+    ensure_storage_writable(db)
+    storage_path, _stored_name = store_library_asset(
+        db, settings, content, digest,
+        kind=kind,
+        base=readable_base(filename, kind),
+        extension=Path(filename).suffix or artifact_suffix(content_type),
+    )
     rights = LibraryRights(
         source_type=source_type,
         license_kind=license_kind,
@@ -348,7 +359,9 @@ def create_version_from_media(
         parent = db.get(LibraryVersion, parent_version_id)
         if parent is None or parent.library_asset_id != asset.id:
             raise HTTPException(409, {"code": "LIBRARY_LINEAGE_MISMATCH", "message": "新版本必须来自同一项全局素材"})
-    media_bytes(settings, media)
+    from shine.media.output_layout import output_root
+
+    media_bytes(settings, media, root=output_root(db, settings))
     ordinal = (
         db.scalar(
             select(LibraryVersion.ordinal)
@@ -592,7 +605,9 @@ def assign_to_project(
             409, {"code": "LIBRARY_VERSION_NOT_ASSIGNABLE", "message": "只有人工晋升的真实版本可以进入项目"}
         )
     rights = require_version_rights(db, version, project_id=project_id, usage_scope=usage_scope)
-    content = version_bytes(settings, version)
+    from shine.media.output_layout import output_root
+
+    content = version_bytes(settings, version, root=output_root(db, settings))
     if version.kind not in {"image", "audio", "video"}:
         raise HTTPException(409, {"code": "PROJECT_ASSET_KIND_UNSUPPORTED", "message": "此文件类型不能分配到项目素材"})
     if role in {"voice", "dialogue", "sfx", "music"} and version.kind != "audio":
@@ -663,7 +678,9 @@ def assign_to_project(
             sample_rights = require_rights(
                 db.get(LibraryRights, sample.rights_id), project_id=project_id, usage_scope=usage_scope
             )
-            media_bytes(settings, sample)
+            from shine.media.output_layout import output_root
+
+            media_bytes(settings, sample, root=output_root(db, settings))
             sample_rights_payload = {
                 "scope": "asset",
                 "license_id": sample_rights.license_kind,
@@ -756,13 +773,24 @@ def assign_to_project(
             db.add(clone_rights)
             db.flush()
 
+    from pathlib import Path
+
+    from shine.media.output_layout import store_project_asset
+    from shine.media.output_names import readable_base
+
+    project_storage, project_filename = store_project_asset(
+        db, settings, project, content, digest,
+        kind=version.kind,
+        base=entity_id or readable_base(version.filename, role),
+        extension=Path(version.filename).suffix,
+    )
     project_asset = Asset(
         project_id=project.id,
-        filename=version.filename,
+        filename=project_filename,
         kind=version.kind,
         content_type=version.content_type,
         sha256=digest,
-        storage_path=version.storage_path,
+        storage_path=project_storage,
         byte_size=version.byte_size,
         role=role,
         entity_id=entity_id,

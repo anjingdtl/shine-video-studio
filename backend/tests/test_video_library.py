@@ -284,18 +284,18 @@ def test_naming_is_ledger_backed_and_windows_safe():
 def test_named_storage_keeps_content_identity_and_never_overwrites(tmp_path):
     first, digest, size = store_artifact(
         tmp_path, "project", "job-1", b"take-one", "video/mp4",
-        filename="《雾港_001镜_未分集》.mp4",
+        filename="雾港_视频_001镜_未分集.mp4",
     )
-    assert first.endswith("《雾港_001镜_未分集》.mp4")
+    assert first.endswith("雾港_视频_001镜_未分集.mp4")
     assert digest == hashlib.sha256(b"take-one").hexdigest() and size == len(b"take-one")
     second, _digest2, _ = store_artifact(
         tmp_path, "project", "job-2", b"take-two", "video/mp4",
-        filename="《雾港_001镜_未分集》.mp4",
+        filename="雾港_视频_001镜_未分集.mp4",
     )
-    assert second.endswith("《雾港_001镜_未分集》_v2.mp4")
+    assert second.endswith("雾港_视频_001镜_未分集_v2.mp4")
     same, _digest3, _ = store_artifact(
         tmp_path, "project", "job-3", b"take-one", "video/mp4",
-        filename="《雾港_001镜_未分集》.mp4",
+        filename="雾港_视频_001镜_未分集.mp4",
     )
     assert same == first
 
@@ -309,9 +309,9 @@ def test_clip_and_reel_names_come_from_the_shot_order(api):
         from shine.models import Project
 
         project = db.get(Project, project_id)
-        assert clip_filename(db, project, job_a) == "《雾港夜账_001镜_未分集》.mp4"
-        assert clip_filename(db, project, job_b) == "《雾港夜账_002镜_未分集》.mp4"
-        assert delivery_filename(db, project_id, project.title, [job_a, job_b]) == "《雾港夜账_001-002镜_未分集》.mp4"
+        assert clip_filename(db, project, job_a) == "雾港夜账_视频_001镜_未分集.mp4"
+        assert clip_filename(db, project, job_b) == "雾港夜账_视频_002镜_未分集.mp4"
+        assert delivery_filename(db, project_id, project.title, [job_a, job_b]) == "雾港夜账_视频_001-002镜_未分集.mp4"
 
 
 def test_episode_number_and_range_come_from_the_run_rows(api):
@@ -351,7 +351,7 @@ def test_episode_number_and_range_come_from_the_run_rows(api):
         from shine.models import Project
 
         project = db.get(Project, project_id)
-        assert clip_filename(db, project, job_b) == "《雾港夜账_001镜_02集》.mp4"
+        assert clip_filename(db, project, job_b) == "雾港夜账_视频_001镜_02集.mp4"
 
 
 def _series_with_item(db, project_id, shot, status="COMPLETED"):
@@ -421,8 +421,8 @@ def test_retake_is_history_until_selected_and_selection_moves_the_files(api):
                               replacement_job_id=job_replacement.id)
         db.flush()
         assert len(moves) == 2
-        assert replacement.storage_path == f"artifacts/{project_id}/current/replacement.mp4"
-        assert first.storage_path == f"artifacts/{project_id}/history/first.mp4"
+        assert replacement.storage_path == "雾港夜账/视频/current/replacement.mp4"
+        assert first.storage_path == "雾港夜账/视频/history/first.mp4"
         assert (settings.data_dir / replacement.storage_path).read_bytes() == b"replacement-take"
         assert (settings.data_dir / first.storage_path).read_bytes() == b"first-take"
         assert db.get(JobAttempt, attempt.id).output_path == first.storage_path
@@ -502,5 +502,5 @@ def test_organize_moves_current_and_history_into_their_folders(api):
                  "and event_type='VIDEO_LIBRARY_ORGANIZED'"),
             {"p": project_id},
         ).scalar() == 1
-    assert (settings.data_dir / "artifacts" / project_id / "current" / "current.mp4").is_file()
-    assert (settings.data_dir / "artifacts" / project_id / "history" / "old.mp4").is_file()
+    assert (settings.data_dir / "雾港夜账" / "视频" / "current" / "current.mp4").is_file()
+    assert (settings.data_dir / "雾港夜账" / "视频" / "history" / "old.mp4").is_file()
