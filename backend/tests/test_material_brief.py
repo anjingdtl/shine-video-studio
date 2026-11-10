@@ -26,6 +26,7 @@ from shine.llm.gateway import LLMGateway
 from shine.materialprep import brief, image_prompts
 from shine.materialprep.models import MaterialItem, MaterialRun
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument
+from tests.conftest import PNG
 
 BRIEF_ANSWER = {
     "schema_version": "1.0",
@@ -186,6 +187,31 @@ def test_the_producer_writes_the_brief_and_the_item_carries_it(api, monkeypatch)
         assert len(tasks) == 1
         assert tasks[0].status == "SUCCEEDED"
         assert tasks[0].trace["tool"] == "material_image_brief"
+
+
+def test_requirement_upload_binds_master_and_validates_format_before_reuse(api):
+    client, factory, _ = api
+    project_id = _project(client)
+    with factory() as db:
+        item = _item(db, project_id)
+        requirement = db.get(AssetRequirement, item.requirement_id)
+        requirement_id, requirement_hash = requirement.id, requirement.sha256
+    path = f"/api/v1/projects/{project_id}/material-preparation/requirements/{requirement_id}/upload"
+    action = {"x-shine-local-action": "1"}
+    data = {"expected_requirement_hash": requirement_hash}
+    first = client.post(path, headers=action, data=data, files={"file": ("test.png", PNG, "image/png")})
+    assert first.status_code == 201, first.text
+    asset = first.json()
+    assert asset["approved"] and asset["locked"]
+    replay = client.post(path, headers=action, data=data, files={"file": ("test.png", PNG, "image/png")})
+    assert replay.status_code == 201 and replay.json()["id"] == asset["id"]
+    wrong = client.post(path, headers=action, data=data, files={"file": ("test.jpg", PNG, "image/jpeg")})
+    assert wrong.status_code == 415
+    assert wrong.json()["detail"] == "File extension does not match the image signature"
+    with factory() as db:
+        requirement = db.get(AssetRequirement, requirement_id)
+        assert requirement.payload["bound_asset_id"] == asset["id"]
+        assert requirement.payload["bound_asset_sha256"] == asset["sha256"]
 
 
 @pytest.mark.parametrize("transport_validates", [False, True])

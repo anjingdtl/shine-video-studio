@@ -672,6 +672,11 @@ def create_app(
     ) -> dict[str, Any]:
         project = require_project(db, project_id)
         filename, content, content_type = await read_verified_upload(file, asset_kind, settings.max_upload_bytes)
+        asset = persist_upload(db, project, asset_kind, filename, content, content_type, role, entity_id, tags)
+        db.commit()
+        return jsonable_encoder(_asset_data(asset))
+
+    def persist_upload(db, project, asset_kind, filename, content, content_type, role, entity_id, tags=None):
         digest = sha256_bytes(content)
         from shine.comfyops.models import CandidateAsset
 
@@ -679,13 +684,13 @@ def create_app(
             select(CandidateAsset).where(CandidateAsset.payload["content_sha256"].as_string() == digest)
         ).all()
         if any(
-            c.project_id == project_id or c.payload.get("provenance", {}).get("is_mock", False)
+            c.project_id == project.id or c.payload.get("provenance", {}).get("is_mock", False)
             for c in known_candidates
         ):
             raise HTTPException(409, "CANDIDATE_REQUIRES_AUTHENTICATED_PROMOTION")
         duplicate = db.scalar(select(Asset).where(Asset.project_id == project.id, Asset.sha256 == digest))
         if duplicate:
-            return jsonable_encoder(_asset_data(duplicate))
+            return duplicate
         media = probe_upload(asset_kind, content, content_type)
         storage_key = store_asset_file(actual_asset_root, digest, content)
         asset = Asset(
@@ -722,9 +727,68 @@ def create_app(
             },
             project_id=project.id,
         )
+        return asset
+
+    @app.post("/api/v1/projects/{project_id}/material-preparation/requirements/{requirement_id}/upload",
+              status_code=201)
+    async def upload_requirement_master(
+        project_id: str, requirement_id: str, db: DBSession, actor: Operator,
+        file: Annotated[UploadFile, File()],
+        expected_requirement_hash: Annotated[str, Form()],
+    ) -> dict[str, Any]:
+        from shine.api_preparation import locked
+        from shine.comfyops.models import AssetRequirement
+        from shine.comfyops.preproduction import current_material_plan
+        from shine.materialprep.service import bind_material_master, retire_unused_masters
+
+        filename, content, content_type = await read_verified_upload(file, "image", settings.max_upload_bytes)
+        locked(db)
+        project = require_project(db, project_id)
+        plan = current_material_plan(db, project_id)
+        requirement = db.get(AssetRequirement, requirement_id)
+        if plan is None or requirement is None or requirement.project_id != project_id:
+            raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
+        if requirement.plan_id != plan.id:
+            raise HTTPException(409, "MATERIAL_PLAN_STALE")
+        payload = requirement.payload
+        family, entity = payload.get("family"), payload.get("entity_id")
+        if family not in {"character", "scene", "prop"} or not entity:
+            raise HTTPException(422, "MATERIAL_REQUIREMENT_IS_NOT_AN_IMAGE")
+        if payload.get("canonical_entity_id"):
+            raise HTTPException(409, "请在合并后的主角色需求上传替换图片。")
+        selected = db.get(Asset, payload.get("bound_asset_id")) if payload.get("bound_asset_id") else None
+        if (selected and selected.approved and selected.locked
+                and selected.sha256 == sha256_bytes(content)
+                and not (selected.provenance or {}).get("candidate_id")
+                and selected.role == family and selected.entity_id == entity):
+            path = safe_asset_path(actual_asset_root, selected.storage_path)
+            if not path.is_file() or sha256_bytes(path.read_bytes()) != selected.sha256:
+                raise HTTPException(409, "ASSET_HASH_CHANGED")
+            return jsonable_encoder(_asset_data(selected))
+        if requirement.sha256 != expected_requirement_hash:
+            raise HTTPException(409, "MATERIAL_REQUIREMENT_CHANGED")
+        asset = persist_upload(db, project, "image", filename, content, content_type, family, entity)
+        if asset.kind != "image" or asset.role != family or asset.entity_id != entity:
+            raise HTTPException(409, "相同图片已经用于其他素材身份，请选择对应图片。")
+        if asset.provenance:
+            raise HTTPException(409, "该图片已有素材来源记录，请通过已有主素材入口选择。")
+        path = safe_asset_path(actual_asset_root, asset.storage_path)
+        if not path.is_file() or sha256_bytes(path.read_bytes()) != asset.sha256:
+            raise HTTPException(409, "ASSET_HASH_CHANGED")
+        asset.approved = asset.locked = True
+        asset.approved_by = actor
+        asset.approved_at = asset.locked_at = utcnow()
+        bind_material_master(db, requirement, asset, actor)
+        for alias in db.scalars(select(AssetRequirement).where(
+            AssetRequirement.plan_id == plan.id,
+            AssetRequirement.payload["family"].as_string() == family,
+            AssetRequirement.payload["canonical_entity_id"].as_string() == entity,
+        )):
+            bind_material_master(db, alias, asset, actor)
+        retire_unused_masters(db, plan, asset, actor, entities={entity})
+        add_audit(db, actor, "UPLOADED_MATERIAL_APPROVED_AND_LOCKED", "asset", asset.id,
+                  {"requirement_id": requirement_id, "sha256": asset.sha256}, project_id=project_id)
         db.commit()
-        db.refresh(asset)
-        logger.info("asset_uploaded id=%s project_id=%s", asset.id, project.id)
         return jsonable_encoder(_asset_data(asset))
 
     @app.get("/api/v1/projects/{project_id}/assets")

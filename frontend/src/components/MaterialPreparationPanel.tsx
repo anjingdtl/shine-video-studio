@@ -556,23 +556,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       setBusy(true);
       setProblem(null);
       try {
+        const current = state?.requirements.find((row) => row.requirement_id === requirement.requirement_id);
+        if (!current) throw new Error('素材清单已变化，请刷新后重新上传。');
         const form = new FormData();
-        form.append('asset_kind', 'image');
         form.append('file', file);
-        form.append('role', requirement.family);
-        form.append('entity_id', requirement.entity_id);
-        const asset = await fetch(`${API}/projects/${projectId}/assets`, { method: 'POST', body: form })
-          .then((response) => {
-            if (!response.ok) throw new Error(`上传失败 ${response.status}`);
-            return response.json() as Promise<Asset>;
-          });
+        form.append('expected_requirement_hash', current.requirement_hash);
+        const asset = await api<Asset>(
+          `/projects/${projectId}/material-preparation/requirements/${requirement.requirement_id}/upload`,
+          { method: 'POST', body: form },
+        );
         setBindings((current) => ({ ...current, [requirement.requirement_id]: asset.id }));
         setStrategy((current) => ({ ...current, [requirement.requirement_id]: 'reuse_master' }));
-        setOperationReport(`已上传「${asset.filename}」，将作为「${requirement.entity_id}」的主素材。`
-          + '点下方「确认清单并补齐」把它绑定到这项需求。');
+        setOperationReport(`已上传、确认并锁定「${asset.filename}」，已绑定到「${requirement.entity_id}」。`);
         await load();
+        onPromoted?.();
       } catch (error) {
-        setProblem(error instanceof Error ? error.message : String(error));
+        const detail = error instanceof Error ? error.message : String(error);
+        setProblem(`${detail}。支持 PNG、JPG/JPEG、WebP。HEIC 等格式请先导出为 JPG 或 PNG。`);
       } finally {
         setBusy(false);
       }
@@ -876,8 +876,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     </select>
                   </label>}
                   <label className="material-field">
-                    <span>或直接上传你自己的素材替换</span>
-                    <input type="file" accept="image/*" disabled={busy}
+                    <span>上传并设为主素材（PNG、JPG/JPEG、WebP）</span>
+                    <input type="file" accept=".png,.jpg,.jpeg,.webp" disabled={busy}
                       onChange={(event) => void uploadOwnMaterial(requirement)(event)} />
                   </label>
                   <button type="button" className="text-button" disabled={busy || librarySearchBusy}
@@ -1003,7 +1003,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                       onClick={() => itemAction(tile.row, tile.item, action.action)}>{action.label}</button>)}
                   </div>}
                   {tile.item.requirement_id && <label className="material-tile-upload">
-                    <input type="file" accept="image/*" disabled={busy}
+                    <input type="file" accept=".png,.jpg,.jpeg,.webp" disabled={busy}
                       onChange={(event) => void uploadOwnMaterial({
                         requirement_id: tile.item.requirement_id!,
                         entity_id: String(tile.item.entity_id ?? ''),

@@ -55,12 +55,19 @@ def verify_upload(kind: str, filename: str, content: bytes, max_bytes: int) -> s
         raise HTTPException(status_code=415, detail="File extension does not match asset kind")
 
     if kind == "image":
+        content_type = None
         if content.startswith(b"\x89PNG\r\n\x1a\n"):
-            return "image/png"
-        if content.startswith(b"\xff\xd8\xff"):
-            return "image/jpeg"
-        if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-            return "image/webp"
+            content_type = "image/png"
+        elif content.startswith(b"\xff\xd8\xff"):
+            content_type = "image/jpeg"
+        elif len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            content_type = "image/webp"
+        expected_type = {".png": "image/png", ".jpg": "image/jpeg",
+                         ".jpeg": "image/jpeg", ".webp": "image/webp"}[suffix]
+        if content_type == expected_type:
+            return content_type
+        if content_type:
+            raise HTTPException(status_code=415, detail="File extension does not match the image signature")
     elif kind == "audio":
         if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WAVE":
             return "audio/wav"
