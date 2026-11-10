@@ -1760,6 +1760,7 @@ def volume_storyboard_state(db, project_id: str, volume_id: str) -> dict:
             "chunk_sha256": entry.get("chunk_sha256"),
             "rejections": entry.get("rejections") or [],
             "missing_characters": entry.get("missing_characters") or [],
+            "dialogue_coverage": entry.get("dialogue_coverage"),
             "updated_at": entry.get("updated_at"),
             **applied,
         })
@@ -1909,6 +1910,7 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
             # it by name instead of quietly shrinking the scope.
             receipts.append({**base, "status": "REJECTED", "steps": {},
                              "rejections": [rejection],
+                             "dialogue_coverage": None,
                              "camera_artifact_id": None, "camera_sha256": None,
                              "continuity_artifact_id": None,
                              "arbitration_artifact_id": None})
@@ -1926,6 +1928,7 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
             "status": result.get("status"),
             "steps": steps,
             "rejections": unit_rejections,
+            "dialogue_coverage": result.get("dialogue_coverage"),
             # What this design asks the material library for: the characters
             # it names that have no approved master yet.  The storyboard is
             # finished; these are what the material step has to answer.

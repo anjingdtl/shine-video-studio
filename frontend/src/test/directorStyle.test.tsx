@@ -84,7 +84,8 @@ describe('director style picker', () => {
       profile: DIRECTOR_STYLE_CATALOG[0],
       style_bible: style,
       diff: Object.entries(style).map(([field, suggested]) => ({
-        field: field as keyof Style, current: '', suggested: suggested ?? '', changed: true,
+        field: field as DirectorStylePreview['diff'][number]['field'],
+        current: '', suggested: String(suggested ?? ''), changed: true,
       })),
       resolution: {
         selected_technique_ids: ['foreground-layering', 'motivated-practical-light'],

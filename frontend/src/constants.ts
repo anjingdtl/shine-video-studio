@@ -58,6 +58,9 @@ export const advisoryReviewKindLabels: Record<string, string> = {
 };
 
 export const failureLabels: Record<string, string> = {
+  STORYBOARD_DIALOGUE_RATIO_CHANGED: '冻结的对白比例已修改，请从编剧重新生成分镜。',
+  ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT: '改编台词需由原文已有且在本节拍出场的人物说出。',
+  ADAPTED_DIALOGUE_OUTSIDE_BEAT_WINDOW: '改编台词超出节拍时间窗或与其他台词重叠。',
   PENDING_WORKFLOW_MAPPING: '参考素材还没接入工作流（缺参数映射）',
   PENDING_HARD_CONTINUITY_TEST: '硬性连续性测试还没做',
   QC_FAILED: '自动质检未通过',

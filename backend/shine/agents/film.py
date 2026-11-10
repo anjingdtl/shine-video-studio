@@ -33,9 +33,11 @@ from shine.agents.film_contracts import (
 )
 from shine.asset_identity import (
     canonical_character_name_for_asset_id,
+    split_character_names,
 )
 from shine.director_styles.service import bind_editing_style, validate_binding
 from shine.h3.rulebook import H3RulebookRegistry, digest
+from shine.h3.spoken_language import DEFAULT_SPOKEN_LANGUAGE, canonical_spoken_language
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.context_window import model_context_for_profile
 from shine.llm.gateway import LLMGateway
@@ -393,9 +395,23 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                 raise ValueError("H3_LOCKED_FACT_TRANSLATION_REQUIRED")
         if len({beat.id for beat in proposal.beats}) != len(proposal.beats):
             raise ValueError("DUPLICATE_BEAT")
-        for beat in proposal.beats:
-            if any(line.text not in body.brief for line in beat.dialogue):
-                raise ValueError("DIALOGUE_NOT_IN_USER_SCRIPT")
+        ratio = context.get("dialogue_ratio_percent")
+        timing = (context.get("editorial_timing_plan") or {}).get("editorial_shot_lengths_s") or []
+        for index, beat in enumerate(proposal.beats):
+            lines = sorted(beat.dialogue, key=lambda line: line.start_s)
+            for position, line in enumerate(lines):
+                if line.text in body.brief:
+                    continue
+                if not ratio:
+                    raise ValueError("DIALOGUE_NOT_IN_USER_SCRIPT")
+                speakers = split_character_names(line.speaker_id)
+                if not speakers or any(name not in beat.characters or name not in body.brief for name in speakers):
+                    raise ValueError("ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT")
+                window = timing[index] if index < len(timing) else 15
+                if (not line.text.strip() or line.end_s > window
+                        or position > 0 and line.start_s < lines[position - 1].end_s
+                        or position + 1 < len(lines) and line.end_s > lines[position + 1].start_s):
+                    raise ValueError("ADAPTED_DIALOGUE_OUTSIDE_BEAT_WINDOW")
     elif isinstance(proposal, DirectorialPlan):
         script = next(a for a in inputs if a.kind == "ScriptBreakdown")
         beats = {b["id"]: b for b in script.payload_json["beats"]}
@@ -632,6 +648,13 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if contract is ScriptBreakdown and project.frozen_style_version_id and style:
+            ratio = style.snapshot.get("dialogue_ratio_percent")
+            if ratio is not None:
+                context["dialogue_ratio_percent"] = ratio
+                context["project_spoken_language"] = (
+                    canonical_spoken_language(project.language) or DEFAULT_SPOKEN_LANGUAGE
+                )
         if body.production_context is not None:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
@@ -833,6 +856,7 @@ class FilmAgentDispatcher:
                 plan=context.get("editorial_timing_plan"),
                 reference_budget_note=reference_budget_note(context.get("workflow_reference_budget") or []),
                 repair_director=repair_director,
+                dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
             )
 
         def record_progress(phase: str) -> None:
@@ -955,6 +979,15 @@ class FilmAgentDispatcher:
                 "output_hash": artifact.sha256,
                 "schema_valid": True,
             }
+            if isinstance(proposal, ScriptBreakdown) and "dialogue_ratio_percent" in context:
+                task.trace = {**task.trace, "dialogue_coverage": {
+                    "target_percent": context["dialogue_ratio_percent"],
+                    "total_beats": len(proposal.beats),
+                    "dialogue_beats": sum(bool(beat.dialogue) for beat in proposal.beats),
+                    "adapted_lines": sum(
+                        line.text not in body.brief for beat in proposal.beats for line in beat.dialogue
+                    ),
+                }}
             if body.supersedes_artifact_id:
                 invalidate_artifact(db, project_id, body.supersedes_artifact_id)
             add_audit(

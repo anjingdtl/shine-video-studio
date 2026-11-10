@@ -289,12 +289,13 @@ export function useStudio() {
       const frozen = await api<StyleVersion>(`/projects/${projectId}/style/freeze`, {
         ...json('POST', { approval_note: '', grant_id: grant.grant_id, snapshot: grant.snapshot, expected_style: snapshot }),
       });
-      if (Object.entries(snapshot).some(([key, value]) => frozen.snapshot[key as keyof Style] !== value)) {
+      const confirmedFields = Object.keys({ ...snapshot, ...frozen.snapshot }) as (keyof Style)[];
+      if (confirmedFields.some((key) => (frozen.snapshot[key] ?? null) !== (snapshot[key] ?? null))) {
         throw new Error('冻结结果与本次确认的风格内容不一致，请核验版本记录；没有自动重试。');
       }
       if (activeProjectId.current !== projectId) return;
       await loadProject(projectId);
-      report(`已冻结第 ${frozen.version} 版（哈希 ${frozen.sha256.slice(0, 12)}…），与屏幕上确认的七项一致；${frozen.impact?.affected_shot_ids.length ?? 0} 个旧镜头仍引用老版本。`);
+      report(`已冻结第 ${frozen.version} 版（哈希 ${frozen.sha256.slice(0, 12)}…），与屏幕上确认的内容一致；${frozen.impact?.affected_shot_ids.length ?? 0} 个旧镜头仍引用老版本。`);
     });
   }
 

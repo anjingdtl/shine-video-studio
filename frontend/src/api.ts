@@ -189,7 +189,13 @@ export type StyleDimension =
   | 'photography_language' | 'shot_blocking' | 'color_palette' | 'lighting_tone'
   | 'lens_texture' | 'editing_rhythm' | 'sound_performance';
 
-export type Style = Record<StyleDimension, string> & { film_type?: FilmTypeId | null };
+export type Style = Record<StyleDimension, string> & {
+  film_type?: FilmTypeId | null;
+  dialogue_ratio_percent?: number | null;
+};
+export type DialogueCoverage = {
+  target_percent: number; dialogue_beats: number; total_beats: number; adapted_lines: number;
+};
 
 export type FilmTypeOption = {
   id: FilmTypeId; label: string; instruction_en: string;
@@ -209,7 +215,7 @@ export type DirectorStyleProfile = {
 export type DirectorStylePreview = {
   profile: DirectorStyleProfile;
   style_bible: Style;
-  diff: Array<{ field: keyof Style; current: string; suggested: string; changed: boolean }>;
+  diff: Array<{ field: StyleDimension; current: string; suggested: string; changed: boolean }>;
   resolution: {
     selected_technique_ids: string[];
     constraints: Record<string, string[]>;
@@ -893,6 +899,7 @@ export interface StoryboardUnit {
   rejections?: StoryboardUnitRejection[];
   /** The characters this design names that have no approved master yet. */
   missing_characters?: string[];
+  dialogue_coverage?: DialogueCoverage | null;
 }
 
 export interface StoryboardDraft {

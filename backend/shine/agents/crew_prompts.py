@@ -220,6 +220,7 @@ def crew_prompt(
     plan: dict | None = None,
     reference_budget_note: str = "",
     repair_director: bool = False,
+    dialogue_ratio_percent: int | None = None,
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "script_prepare":
@@ -253,7 +254,22 @@ def crew_prompt(
         )
     else:
         parts.append("Write visual, camera and sound descriptions in English.")
-    parts.append(_VERBATIM_DIALOGUE)
+    if role == "scriptwriter" and dialogue_ratio_percent:
+        parts.append(
+            "Use human-readable character names or entity IDs in characters and dialogue.speaker_id. "
+            "Opaque UUIDs belong only in explicit asset ID fields. "
+            f"Aim for dialogue in at least {dialogue_ratio_percent}% of the returned beats "
+            "(a beat counts once if it contains any dialogue). Preserve every original spoken line "
+            "verbatim, with its speaker and punctuation. Use those lines first. If more beats need "
+            "dialogue, adapt only intentions or facts already supported by this section into short, "
+            "natural on-screen lines for existing characters already present in those beats. "
+            "Write added lines in the project_spoken_language. Keep them in beat.dialogue with local "
+            "start_s/end_s that leave room for natural delivery and do not overlap. Never convert "
+            "exposition into narration, off-screen voice-over, or a new character or story event. "
+            "Leave beats silent where natural dialogue does not fit the action, source, or timing."
+        )
+    else:
+        parts.append(_VERBATIM_DIALOGUE)
     parts.append(_ASSET_SCOPE)
 
     if role == "scriptwriter":
@@ -293,7 +309,9 @@ def crew_prompt(
             "character identity through approved asset_ids. Example: 'The lead performer opens the door. "
             "The camera cranes upward.' Check every opening and cut description before returning JSON. "
             "Spoken lines live exclusively in the beats' dialogue structure and must never appear inside "
-            "visual_description, quoted or not. Every shot of a sequence must reference the "
+            "visual_description, quoted or not. Use visible action for narration and inner thoughts. "
+            "Keep unscripted speaking, lip movement, whispers, chants and vocal music out of visual descriptions; "
+            "only depict speaking for the matching structured dialogue. Every shot of a sequence must reference the "
             "approved character masters that appear in it. H3 speaks a line natively, so a "
             "voice master is optional: include an approved audio (voice) master only when the "
             "project wants that exact timbre, and never treat its absence as a missing "

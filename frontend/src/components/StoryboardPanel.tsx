@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
-import { API, ApiError, api, json } from '../api';
+import { API, ApiError, api, json, type DialogueCoverage } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
 import { AgentProgress, agentPhaseLabels, reusedRolesFromInputs, type AgentRunProgress } from './AgentProgress';
 
@@ -15,6 +15,7 @@ type StoryboardResult = {
   script_sha256?: string;
   steps: Record<string, Step>;
   missing_characters?: string[];
+  dialogue_coverage?: DialogueCoverage | null;
   rejections?: Array<{ role: string; code: string; rejection_reason_code?: string; task_id?: string; external_outcome?: string }>;
   continuity_issues?: string[];
   repair_failure?: { role: string; code: string } | null;
@@ -348,7 +349,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       setRequiresReconciliation(uncertain);
       setMessage(uncertain
         ? `生成请求未能返回：${String(e)}。后台可能仍在运行，请先核对 Agent 运行记录，不要重复提交。`
-        : `分镜请求被拒绝：${String(e)}。请处理提示后继续。`);
+        : `分镜请求被拒绝：${label(failureLabels, e.message)} 请处理提示后继续。`);
     }
     finally {
       polling = false; window.clearInterval(progressTimer);
@@ -620,6 +621,13 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     {applyError && !result && <p role="alert">{applyError}</p>}
 
     {result && <div className="storyboard-result">
+      {result.dialogue_coverage && <p>
+        对白节拍 {result.dialogue_coverage.dialogue_beats}/{result.dialogue_coverage.total_beats}
+        {result.dialogue_coverage.target_percent > 0 && <> · 目标 {result.dialogue_coverage.target_percent}%</>}
+        {' · '}改编台词 {result.dialogue_coverage.adapted_lines} 条
+        {result.dialogue_coverage.dialogue_beats * 100
+          < result.dialogue_coverage.target_percent * result.dialogue_coverage.total_beats && ' · 未达目标'}
+      </p>}
       {result.status === 'REJECTED' && <div className="blocked-callout">
         <AlertTriangle size={15} />
         <span>分镜链被拒绝：{(result.rejections ?? []).map(r => {

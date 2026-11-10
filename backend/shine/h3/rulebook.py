@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from shine.h3.compiler import (
     BASE_RULE_SHA256,
     BASE_SECTION_ORDER,
+    COMPILER_VERSION,
     REF_RULE_SHA256,
     REF_SECTION_ORDER,
     RULE_VERSION,
@@ -279,7 +280,7 @@ class H3RulebookRegistry:
         code = exc.code
         if code in {"H3_DURATION", "H3_REFERENCE_LIMIT", "H3_REFERENCE_DURATION", "H3_REFERENCE_DURATION_UNKNOWN"}:
             rule_id = "H3_LIMITS"
-        elif code in {"H3_DIALOGUE_TIMING", "H3_DIALOGUE_OVERLAP"}:
+        elif code in {"H3_DIALOGUE_TIMING", "H3_DIALOGUE_OVERLAP", "H3_DIALOGUE_TAGS"}:
             rule_id = "H3_TIMING"
         elif code in {"H3_FRAME_ROLE_MISMATCH", "H3_MODE_REFERENCE_MISMATCH"}:
             rule_id = "H3_KEYFRAMES"
@@ -338,6 +339,7 @@ class H3RulebookRegistry:
                 manifest=request.reference_manifest,
                 mode_hint=request.generation_mode,
                 project_language=request.project_language,
+                compiler_version=request.compiler_version or COMPILER_VERSION,
             )
             # The single compiler is also the verifier: arbitrary agent strings cannot be submitted.
             if (

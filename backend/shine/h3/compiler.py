@@ -25,7 +25,8 @@ from shine.schemas import (
 
 # Pinned official skill material from MiniMax-AI/MiniMax-H3 commit
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
-COMPILER_VERSION = "shine-h3-compiler/1.2.1"
+LEGACY_AUDIO_COMPILER_VERSION = "shine-h3-compiler/1.2.1"
+COMPILER_VERSION = "shine-h3-compiler/1.2.2"
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -73,6 +74,7 @@ class _Context:
     speaker_labels: dict[str, str]
     speaker_order: list[str]
     project_language: str = "Chinese"
+    legacy_audio: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -339,6 +341,14 @@ def _shot_text(ctx: _Context) -> str:
     cast = _cast_order(ctx)
     if cast:
         parts.append(cast)
+    if not ctx.legacy_audio:
+        parts.append(
+            "Perform speech only for the timed dialogue blocks below. Between those lines, "
+            "use silent reactions and non-vocal scene sounds."
+            if ctx.spec.dialogue else
+            "Show reactions through gaze, gestures and movement with no speaking or mouthing words. "
+            "Use only non-vocal scene sounds."
+        )
     parts.append(ctx.spec.story_beat.strip())
     camera = _camera_sentence(ctx.spec)
     if camera:
@@ -373,7 +383,11 @@ def _shot_text(ctx: _Context) -> str:
         elif continuity.mode == ContinuityMode.VIDEO_REFERENCE:
             parts.append(f"Continue the motion and framing in {continuation.label}, the source shot's video.")
         elif continuity.mode == ContinuityMode.AUDIO_REFERENCE:
-            parts.append(f"Continue the sound bed in {continuation.label}, the source shot's audio.")
+            parts.append(
+                f"Continue the sound bed in {continuation.label}, the source shot's audio."
+                if ctx.legacy_audio else
+                f"Use {continuation.label} for non-vocal ambience only."
+            )
     elif continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
         parts.append(
             f"The opening composition continues seamlessly from the approved final frame of shot "
@@ -385,7 +399,11 @@ def _shot_text(ctx: _Context) -> str:
             f"{continuity.previous_shot_id}."
         )
     elif continuity.mode == ContinuityMode.AUDIO_REFERENCE and continuity.previous_shot_id:
-        parts.append("The audio bed continues uninterrupted from the previous approved shot.")
+        parts.append(
+            "The audio bed continues uninterrupted from the previous approved shot."
+            if ctx.legacy_audio else
+            "Only non-vocal ambience continues from the previous approved shot."
+        )
     return " ".join(part.strip() for part in parts if part.strip())
 
 
@@ -444,7 +462,7 @@ def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "") -
     return " ".join(sentences)
 
 
-def _music(spec: ShotSpec) -> str:
+def _music(spec: ShotSpec, *, legacy_audio: bool) -> str:
     policy = (spec.sound.get("music") or spec.sound.get("music_policy") or "").strip()
     if not policy:
         return "N/A"
@@ -452,8 +470,11 @@ def _music(spec: ShotSpec) -> str:
     if lowered in {"none", "silent", "n/a", "no_music"}:
         return "N/A"
     if lowered in {"low_or_none", "low"}:
-        return "Sparse low strings at a slow tempo, kept well below the dialogue and fading out before the final frame."
-    return policy if policy.endswith(".") else policy + "."
+        policy = "Sparse low strings at a slow tempo, kept low in the mix and fading out before the final frame."
+        if legacy_audio or spec.dialogue:
+            policy = policy.replace("kept low in the mix", "kept well below the dialogue")
+    music = policy if policy.endswith(".") else policy + "."
+    return music if legacy_audio else music + " Instrumental only, with no vocals or lyrics."
 
 
 def _align_instruction(mode: GenerationMode, manifest: list[ReferenceManifestItem], duration: float) -> str:
@@ -537,7 +558,13 @@ def _subject_definitions(ctx: _Context) -> str:
         elif item.use_as == ReferenceUse.VIDEO:
             lines.append(f"{item.label} is an approved video reference for motion, framing, or continuation.")
         else:
-            lines.append(f"{item.label} is an approved audio reference.")
+            purpose = "non-vocal ambience"
+            if item.role != "continuity_derivative" and ctx.spec.dialogue:
+                purpose = "voice timbre for scripted lines and non-vocal sound"
+            lines.append(
+                f"{item.label} is an approved audio reference."
+                if ctx.legacy_audio else f"{item.label} is a reference for {purpose} only."
+            )
     return "\n".join(lines)
 
 
@@ -594,9 +621,13 @@ def _retention(ctx: _Context) -> str:
         elif item.use_as == ReferenceUse.VIDEO:
             lines.append(
                 f"{item.label} (continuation structure): {marker} - the approved motion and framing are retained."
+                + ("" if ctx.legacy_audio else " Use the visual track only.")
             )
         else:
-            lines.append(f"{item.label}: {marker} - the approved audio signal or timbre is referenced.")
+            lines.append(
+                f"{item.label}: {marker} - the approved audio signal or timbre is referenced."
+                if ctx.legacy_audio else f"{item.label}: {marker} - never carry over any words or vocals."
+            )
     return "\n".join(lines)
 
 
@@ -619,7 +650,9 @@ class H3PromptCompiler:
         manifest: list[ReferenceManifestItem],
         project_language: str = "Chinese",
         mode_hint: GenerationMode | None = None,
+        compiler_version: str = COMPILER_VERSION,
     ) -> CompiledPrompt:
+        legacy_audio = compiler_version == LEGACY_AUDIO_COMPILER_VERSION
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -640,6 +673,7 @@ class H3PromptCompiler:
             speaker_labels=speaker_labels,
             speaker_order=speaker_order,
             project_language=spoken_language,
+            legacy_audio=legacy_audio,
         )
         if language_fallback:
             ctx.warnings.append(
@@ -661,7 +695,7 @@ class H3PromptCompiler:
         if mode in {GenerationMode.T2VA, GenerationMode.I2VA, GenerationMode.FL2VA, GenerationMode.L2VA}:
             sections["integrated_multimodal_description"] = shots
             sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
-            sections["non_diegetic_music"] = _music(spec)
+            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio)
             instruction = _align_instruction(mode, manifest, spec.duration_target_s)
             body = "\n".join(f"{name}: {sections[name]}" for name in BASE_SECTION_ORDER)
             prompt = f"{instruction}\n\n{body}" if instruction else body
@@ -672,9 +706,12 @@ class H3PromptCompiler:
             sections["retention_analysis"] = _retention(ctx)
             sections["detailed_description"] = shots
             sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
-            sections["non_diegetic_music"] = _music(spec)
+            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio)
             prompt = "\n\n".join(f"{name}:\n{sections[name]}" for name in REF_SECTION_ORDER)
             section_order = REF_SECTION_ORDER
+
+        if not legacy_audio and re.findall(r"</?d\s*>", prompt, flags=re.I) != ["<d>", "</d>"] * len(spec.dialogue):
+            raise PromptCompilationError("H3_DIALOGUE_TAGS", "Only structured dialogue may emit dialogue tags")
 
         defined = {item.label for item in manifest}
         # Every reference image is presented to the model as <Picture i> in
@@ -703,7 +740,7 @@ class H3PromptCompiler:
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         return CompiledPrompt(
             mode=mode,
-            compiler_version=COMPILER_VERSION,
+            compiler_version=LEGACY_AUDIO_COMPILER_VERSION if legacy_audio else COMPILER_VERSION,
             rule_version=RULE_VERSION,
             skill_sha256=SKILL_SHA256,
             base_rule_sha256=BASE_RULE_SHA256,

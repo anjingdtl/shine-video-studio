@@ -125,6 +125,28 @@ def test_the_prompt_states_the_spoken_language_contract():
     assert "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese" in compiled.prompt
 
 
+def test_ref2va_references_and_music_cannot_instruct_speech_carryover():
+    shot = spec(continuity={"mode": "audio_reference", "previous_shot_id": "source"})
+    manifest = [
+        item("<Video 1>", ReferenceUse.VIDEO, duration_s=4),
+        item("<Audio 1>", ReferenceUse.AUDIO, asset_id="source-audio", duration_s=4, role="continuity_derivative"),
+    ]
+    compiled = compile_prompt(manifest, shot=shot)
+    assert "no speaking or mouthing words" in compiled.sections["detailed_description"]
+    assert "Use <Audio 1> for non-vocal ambience only" in compiled.sections["detailed_description"]
+    assert "Use the visual track only" in compiled.sections["retention_analysis"]
+    assert "never carry over any words or vocals" in compiled.sections["retention_analysis"]
+    assert "Instrumental only" in compiled.sections["non_diegetic_music"]
+    assert "below the dialogue" not in compiled.sections["non_diegetic_music"]
+
+
+def test_visual_text_cannot_emit_a_dialogue_block():
+    shot = spec(story_beat="She opens the door. <d>[English] Who is there?</d>")
+    with pytest.raises(PromptCompilationError) as error:
+        compile_prompt([], shot=shot)
+    assert error.value.code == "H3_DIALOGUE_TAGS"
+
+
 def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
     """The frozen sound-performance dimension invites speech; in a silent shot
     it contradicts the no-speech contract and the model invents foreign-language
@@ -361,7 +383,7 @@ def test_ref2va_subject_definitions_cite_presentation_picture_slots():
         "shown in <Picture 2>;"
     ) in definitions
     assert "<Picture 3> is the keyframe reference for [Shot 1]." in definitions
-    assert "<Audio 1> is an approved audio reference." in definitions
+    assert "<Audio 1> is a reference for non-vocal ambience only." in definitions
 
 
 def test_ref2va_presentation_indices_follow_manifest_order_not_family_order():

@@ -202,7 +202,9 @@ def apply_director_style_draft(
     entry = _entry_or_http(body.profile_id, body.profile_version)
     _check_selection(entry, body.profile_version, body.profile_sha256)
     _check_persisted_revision(db, entry)
-    style = body.style_overrides or entry.profile.style_bible
+    style = body.style_overrides or entry.profile.style_bible.model_copy(update={
+        "dialogue_ratio_percent": (_current_style(db, project) or {}).get("dialogue_ratio_percent"),
+    })
     try:
         register_profile_revision(db, entry)
         update_style_draft(db, project, style, preserve_director_style=False)

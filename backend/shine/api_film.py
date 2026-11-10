@@ -1059,6 +1059,10 @@ def generate_storyboard(
     if start_role not in (*STORYBOARD_CHAIN, "director_arbitration"):
         raise HTTPException(422, "STORYBOARD_RESUME_ROLE_UNKNOWN")
     if start_role != "scriptwriter":
+        frozen_style = (
+            db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
+        )
+        ratio = frozen_style.snapshot.get("dialogue_ratio_percent") if frozen_style else None
         prior_roles = (STORYBOARD_CHAIN if start_role == "director_arbitration"
                        else STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)])
         for role in prior_roles:
@@ -1075,6 +1079,11 @@ def generate_storyboard(
                 or artifact.kind != expected_kind
             ):
                 raise HTTPException(409, f"STORYBOARD_RESUME_STEP_INVALID:{role}")
+            if role == "scriptwriter":
+                task = db.get(AgentTaskRecord, artifact.source_task_id)
+                previous_ratio = (task.trace.get("dialogue_coverage") or {}).get("target_percent") if task else None
+                if previous_ratio != ratio:
+                    raise HTTPException(409, "STORYBOARD_DIALOGUE_RATIO_CHANGED")
             steps[step_name] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
 
     if start_role == "director_arbitration":
@@ -1218,7 +1227,9 @@ def generate_storyboard(
             "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         }
 
-    breakdown = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"]).payload_json
+    breakdown_artifact = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"])
+    breakdown = breakdown_artifact.payload_json
+    writer_task = db.get(AgentTaskRecord, breakdown_artifact.source_task_id)
     missing = _character_coverage(
         asset_context(db, project_id),
         breakdown,
@@ -1428,6 +1439,7 @@ def generate_storyboard(
         "continuity_issues": continuity.get("issues", []),
         "repair_failure": repair_failure,
         "editorial_timing_preview": editorial_timing_preview(script_text),
+        "dialogue_coverage": writer_task.trace.get("dialogue_coverage") if writer_task else None,
         "prompt_story_facts": breakdown.get("prompt_story_facts", []),
         "prompt_style": breakdown.get("prompt_style"),
         "continuity_arbitration": (

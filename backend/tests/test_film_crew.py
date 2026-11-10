@@ -12,6 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from shine.agents.film import eligible_edits
 from shine.agents.film_contracts import FilmAgentRegistry
 from shine.comfy.client import ComfyUIClient
+from shine.h3.compiler import LEGACY_AUDIO_COMPILER_VERSION, H3PromptCompiler
 from shine.h3.rulebook import PACK_ID, SOURCES, H3RulebookRegistry, builtin_manifest
 from shine.llm.base import LLMTimeout
 from shine.models import AgentArtifact, AgentTaskRecord, Job, MediaArtifact, Project, QualityGate, RulePack
@@ -653,6 +654,30 @@ def test_rulebook_verifies_all_five_compiler_modes(api, mode, frames):
         request = db.get(Job, job["id"]).request
         report = H3RulebookRegistry().validate(RenderRequest.model_validate(request), db.get(RulePack, PACK_ID))
         assert report.passed, report
+
+
+def test_rulebook_recompiles_a_persisted_request_with_the_legacy_audio_compiler(api):
+    client, factory, _ = api
+    project_id, style, _ = prepare(client)
+    shot = create_shot(client, project_id, style["id"], beat="A lamp flickers beside a sealed letter.")
+    job = create_job(client, project_id, shot["id"])
+    with factory() as db:
+        request = RenderRequest.model_validate(db.get(Job, job["id"]).request)
+        legacy = H3PromptCompiler().compile(
+            spec=request.shot_spec, style=request.style_snapshot, manifest=request.reference_manifest,
+            mode_hint=request.generation_mode, project_language=request.project_language,
+            compiler_version=LEGACY_AUDIO_COMPILER_VERSION,
+        )
+        historical = request.model_copy(update={
+            "compiler_version": legacy.compiler_version, "compiled_prompt": legacy.prompt,
+            "compiled_prompt_sections": legacy.sections, "prompt_sha256": legacy.prompt_sha256,
+        })
+        registry = H3RulebookRegistry()
+        pack = db.get(RulePack, PACK_ID)
+        assert request.prompt_sha256 != legacy.prompt_sha256
+        assert registry.validate(historical, pack).passed
+        mismatched = historical.model_copy(update={"compiler_version": request.compiler_version})
+        assert not registry.validate(mismatched, pack).passed
 
 
 def test_tampered_cache_blocks_agents_and_submission_without_fallback(api):

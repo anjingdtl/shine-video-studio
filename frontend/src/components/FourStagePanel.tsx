@@ -508,6 +508,13 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                           : '待应用镜头')
                         : '未完成：' + (unit.status ?? '未知')}
                     </span>
+                    {unit.dialogue_coverage && <span className="muted small">
+                      对白节拍 {unit.dialogue_coverage.dialogue_beats}/{unit.dialogue_coverage.total_beats}
+                      {unit.dialogue_coverage.target_percent > 0 && <> · 目标 {unit.dialogue_coverage.target_percent}%</>}
+                      {' · '}改编台词 {unit.dialogue_coverage.adapted_lines} 条
+                      {unit.dialogue_coverage.dialogue_beats * 100
+                        < unit.dialogue_coverage.target_percent * unit.dialogue_coverage.total_beats && ' · 未达目标'}
+                    </span>}
                     {(unit.missing_characters ?? []).length > 0 && (
                       <span className="muted small">
                         分镜已定稿，这一场要用的主素材还没备齐：

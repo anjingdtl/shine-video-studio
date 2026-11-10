@@ -72,8 +72,7 @@ STYLE_BIBLE_FIELDS = (
 
 
 class StyleBible(APIModel):
-    # Older frozen snapshots contain exactly the seven fields above.  Omitting
-    # ``film_type`` when it is unset keeps their canonical hash unchanged.
+    # Omit unset settings to keep the canonical hash of older snapshots.
     model_config = ConfigDict(extra="forbid")
 
     photography_language: str = Field(min_length=1, max_length=2000)
@@ -87,9 +86,13 @@ class StyleBible(APIModel):
         default=None,
         description="Live-action or animation. The server writes the fixed English H3 clause; this is not free text.",
     )
+    dialogue_ratio_percent: int | None = Field(
+        default=None, strict=True, ge=0, le=100,
+        description="Target percentage of storyboard beats with dialogue. A positive value allows script adaptation.",
+    )
 
     @model_serializer(mode="wrap")
-    def _omit_unset_film_type(self, handler):
+    def _omit_unset_settings(self, handler):
         # Pydantic does not apply ``exclude_none`` from model_config to
         # model_dump in this version, and nested ShotSpec serialization must
         # keep the pre-film-type hash shape too.  A wrap serializer covers both.

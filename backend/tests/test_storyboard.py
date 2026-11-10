@@ -136,6 +136,67 @@ def _storyboard_request(client, project_id, **overrides):
     return client.post(f"/api/v1/projects/{project_id}/storyboard/generate", json=payload)
 
 
+@pytest.mark.parametrize(("ratio", "speaker", "end_s", "failure"), [
+    (80, "Lin", 2, None),
+    (0, "Lin", 2, "DIALOGUE_NOT_IN_USER_SCRIPT"),
+    (80, "Narrator", 2, "ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT"),
+    (80, "Lin", 16, "ADAPTED_DIALOGUE_OUTSIDE_BEAT_WINDOW"),
+])
+def test_frozen_dialogue_ratio_controls_script_adaptation(studio, ratio, speaker, end_s, failure):
+    client, factory, *_ = studio
+    project_id, original_style, registry = _studio_with_chain(client)
+    base = f"/api/v1/projects/{project_id}"
+    style = {**original_style["snapshot"], "dialogue_ratio_percent": ratio}
+    saved = client.put(f"{base}/style/draft", json=style)
+    assert saved.status_code == 200, saved.text
+    frozen = client.post(f"{base}/style/freeze", json={"expected_style": style})
+    assert frozen.status_code == 201, frozen.text
+    assert frozen.json()["snapshot"]["dialogue_ratio_percent"] == ratio
+    assert frozen.json()["sha256"] != original_style["sha256"]
+    assert "dialogue_ratio_percent" not in original_style["snapshot"]
+    # Draft edits alone have no influence on an already-frozen run.
+    assert client.put(f"{base}/style/draft", json={**style, "dialogue_ratio_percent": 100 - ratio}).status_code == 200
+    responder = _responder(registry)
+    added = {"speaker_id": speaker, "text": "信还没拆。", "start_s": 1, "end_s": end_s}
+
+    def respond(messages, schema):
+        data = responder(messages, schema)
+        if schema["title"] == "ScriptBreakdown":
+            context = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            assert context["dialogue_ratio_percent"] == ratio
+            assert context["project_spoken_language"] == "Chinese"
+            assert ("Aim for dialogue in at least 80%" in messages[0].content) == bool(ratio)
+            data["beats"][1]["dialogue"] = [added]
+        return data
+
+    client.app.state.mock_llm_responder = respond
+    result = _storyboard_request(client, project_id, text=f"{BRIEF}\nLin glances at the sealed letter.").json()
+    if failure:
+        assert result["status"] == "REJECTED", result
+        assert result["rejections"][0]["rejection_reason_code"] == failure
+        return
+    assert result["status"] == "PROPOSED", result
+    assert result["dialogue_coverage"] == {
+        "target_percent": 80, "total_beats": 2, "dialogue_beats": 2, "adapted_lines": 1,
+    }
+    apply = result["next"]["apply_camera"]
+    applied = client.post(
+        f"{base}/film-artifacts/{apply['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": apply["continuity_artifact_id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    shots = client.get(f"{base}/shots").json()
+    assert {line["text"] for shot in shots for line in shot["spec"]["dialogue"]} == {"你来了。", added["text"]}
+    with factory() as db:
+        assert db.get(AgentArtifact, result["steps"]["scriptwriter"]["artifact_id"]).payload_json["beats"][1][
+            "dialogue"][0]["text"] == added["text"]
+    assert client.post(f"{base}/style/freeze", json={}).status_code == 201
+    resumed = _storyboard_request(
+        client, project_id, start_role="director", resume_steps=result["resume_steps"],
+    )
+    assert resumed.status_code == 409 and resumed.json()["detail"] == "STORYBOARD_DIALOGUE_RATIO_CHANGED"
+
+
 def test_verified_interrupted_director_unknown_cannot_be_replaced(studio):
     client, factory, *_ = studio
     project_id, _, registry = _studio_with_chain(client)

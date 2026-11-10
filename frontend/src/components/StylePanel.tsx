@@ -147,6 +147,7 @@ export default function StylePanel({
   const canSave = allSevenFilled && (
     styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''))
     || (style.film_type ?? null) !== (serverDraft?.film_type ?? null)
+    || (style.dialogue_ratio_percent ?? null) !== (serverDraft?.dialogue_ratio_percent ?? null)
   );
   const strengthLabel = (strength: DirectorStyleSummary['strength']) => ({
     subtle: '轻', balanced: '均衡', strong: '鲜明',
@@ -160,7 +161,7 @@ export default function StylePanel({
     if (!preset) return;
     const hasEdits = styleFields.some(([field]) => String(style[field] ?? '').trim() && style[field] !== preset.values[field]);
     if (hasEdits && !window.confirm('当前草稿已有自定义修改，选择整套预设会覆盖这些修改。继续吗？')) return;
-    setStyle(() => ({ ...preset.values, film_type: style.film_type ?? null }));
+    setStyle((value) => ({ ...value, ...preset.values }));
     setSelectedDirectorId('');
     setDirectorPreview(null);
     setCustomFields(new Set());
@@ -295,6 +296,7 @@ export default function StylePanel({
       setStyle(() => ({
         ...result.style_draft,
         film_type: style.film_type ?? result.style_draft.film_type ?? null,
+        dialogue_ratio_percent: style.dialogue_ratio_percent ?? null,
       }));
       setDirectorState((state) => state ? { ...state, draft_sha256: result.draft_sha256, draft_source: result.draft_source } : state);
       setCustomFields(new Set());
@@ -388,6 +390,32 @@ export default function StylePanel({
             · {strengthLabel(directorState.frozen_source.strength)}
           </small>}
         </div>
+        <div className="director-style-controls">
+          <label>对白比例（%）
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              placeholder="沿用原剧本"
+              value={style.dialogue_ratio_percent ?? ''}
+              disabled={busy || directorBusy}
+              onChange={(event) => {
+                const value = event.currentTarget.valueAsNumber;
+                if (event.currentTarget.validity.badInput) return;
+                if (Number.isNaN(value) || (Number.isInteger(value) && value >= 0 && value <= 100)) {
+                  setStyle((previous) => ({ ...previous, dialogue_ratio_percent: Number.isNaN(value) ? null : value }));
+                }
+              }}
+            />
+          </label>
+        </div>
+        <p className="style-preset-summary">
+          冻结后用于新生成的分镜。按含对白的分镜节拍计数，原台词优先保留。
+          大于 0 时，编剧可根据原文为出场人物补写短对白。留空或填 0 时只用原文台词。
+          {currentStyle && <> 当前冻结：{currentStyle.snapshot?.dialogue_ratio_percent
+            ? `${currentStyle.snapshot.dialogue_ratio_percent}%` : '仅原文台词'}。</>}
+        </p>
         <div className="director-style-controls">
           <label>选择模板
             <select

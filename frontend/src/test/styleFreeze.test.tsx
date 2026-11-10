@@ -39,11 +39,12 @@ async function fillSevenOptions(user: ReturnType<typeof userEvent.setup>) {
 
 
 describe('风格冻结：批准内容必须等于冻结快照', () => {
-  it('未保存修改直接冻结：先保存当前表单再冻结（原反例）', async () => {
+  it.each([70, null])('未保存修改直接冻结，核对正文与对白比例 %s', async (ratio) => {
     const user = userEvent.setup();
     const custom = {
       photography_language: '手持近景，缓慢推近。（未保存的新修改）', shot_blocking: 'A调度', color_palette: 'A色',
       lighting_tone: 'A影调', lens_texture: 'A质感', editing_rhythm: 'A节奏', sound_performance: 'A声音',
+      dialogue_ratio_percent: 45,
     };
     const project = baseProject({ style_draft: custom });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([project]) });
@@ -58,7 +59,10 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     });
     stub.add({
       method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse({ ...FROZEN_STYLE, snapshot: savedDraft }),
+      respond: () => jsonResponse({
+        ...FROZEN_STYLE,
+        snapshot: Object.fromEntries(Object.entries(savedDraft as object).filter(([, value]) => value !== null)),
+      }),
     });
 
     render(<App />);
@@ -70,6 +74,9 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
 
     await user.clear(textarea);
     await user.type(textarea, '固定远景，禁止推近。（准备批准的最终修改）');
+    const ratioInput = screen.getByRole('spinbutton', { name: '对白比例（%）' });
+    await user.clear(ratioInput);
+    if (ratio !== null) await user.type(ratioInput, String(ratio));
 
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => {
@@ -80,7 +87,10 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
     const freezes = stub.callsOf('POST', /style\/freeze$/);
     expect(freezes).toHaveLength(1);
     expect(freezes[0].body).toMatchObject({ expected_style: savedDraft });
-    expect(draftPuts[0].body).toMatchObject({ photography_language: '固定远景，禁止推近。（准备批准的最终修改）' });
+    expect(draftPuts[0].body).toMatchObject({
+      photography_language: '固定远景，禁止推近。（准备批准的最终修改）',
+      dialogue_ratio_percent: ratio,
+    });
     const putIndex = stub.calls.findIndex((call) => call.method === 'PUT' && /style\/draft$/.test(call.url));
     const postIndex = stub.calls.findIndex((call) => call.method === 'POST' && /style\/freeze$/.test(call.url));
     expect(putIndex).toBeLessThan(postIndex);
