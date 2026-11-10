@@ -197,7 +197,13 @@ def resource_slot(factory, kind, budget_mb, *, release_models=None, wait_seconds
                     requires_reconciliation = False
                     with factory.begin() as db:
                         lease = db.get(ResourceLease, identity)
-                        if (heartbeat_errors or thread.is_alive() or lease.status != "ACTIVE"
+                        # The heartbeat thread only renews the lease; whether it has
+                        # finished unwinding says nothing about whether the model was
+                        # released. Treating "thread still alive" as uncertainty marked
+                        # an ordinary, successful release as RECONCILE_REQUIRED, and one
+                        # such row blocks every later admission - which is how a healthy
+                        # renderer ended up refusing all material work.
+                        if (heartbeat_errors or lease.status != "ACTIVE"
                                 or lease.expires_at <= utcnow()):
                             lease.status = "RECONCILE_REQUIRED"
                             requires_reconciliation = True
