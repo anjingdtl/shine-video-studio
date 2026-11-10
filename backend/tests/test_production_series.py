@@ -269,11 +269,11 @@ def test_the_next_shot_is_only_created_after_its_source_passed(api, monkeypatch)
 
 
 def test_a_continuity_shot_binds_the_real_previous_job(api, monkeypatch):
-    """A soft continuity shot consumes the passed job of the shot before it."""
+    """Only the storyboard's soft continuity shot consumes the previous take."""
     from shine.comfyops import production_series as ps
 
     client, factory, settings = api
-    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=3)
     profile = _register_ref2va_profile(client)
 
     # The second shot declares a soft continuity relation to the first one.
@@ -326,6 +326,11 @@ def test_a_continuity_shot_binds_the_real_previous_job(api, monkeypatch):
         assert second.request["shot_spec"]["continuity"]["previous_shot_id"] == shots[0]["id"]
         edge = db.scalar(select(JobDependency).where(JobDependency.child_job_id == second.id))
         assert edge.kind == "continuity:last_frame"
+        third = db.get(Job, items[2].job_id)
+        assert items[2].continuity_mode == "cut"
+        assert third.request["shot_spec"]["continuity"]["mode"] == "cut"
+        assert third.request["shot_spec"]["continuity"]["previous_job_id"] is None
+        assert db.scalar(select(JobDependency).where(JobDependency.child_job_id == third.id)) is None
 
 
 def test_a_failed_shot_blocks_only_its_dependents(api, monkeypatch):

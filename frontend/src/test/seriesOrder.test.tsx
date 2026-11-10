@@ -82,6 +82,7 @@ describe('Web 发起生产序列（P04）', () => {
     );
     await screen.findByText('选择全部可制作镜头');
     expect(screen.getByText(/首帧仍由模型生成，接点需要看片确认/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /选中段.*末帧|选中段.*切镜/ })).not.toBeInTheDocument();
     await user.click(screen.getByText('选择全部可制作镜头'));
     await user.click(screen.getByRole('button', { name: /开始制作影片/ }));
     await waitFor(() => {

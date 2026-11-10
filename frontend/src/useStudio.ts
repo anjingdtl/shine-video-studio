@@ -366,19 +366,13 @@ export function useStudio() {
    *
    * 它只改镜头之间的边界声明，不改镜头内容，所以不产生新版本、也不让已通过的
    * 成片失效；下一次排产时，后续镜头才会拿到上一镜的末帧作为参考。 */
-  async function setShotContinuity(shotId: string | string[], mode: 'cut' | 'last_frame') {
-    const ids = Array.isArray(shotId) ? shotId : [shotId];
+  async function setShotContinuity(shotId: string, mode: 'cut' | 'last_frame') {
     await withBusyReturn(async () => {
-      if (Array.isArray(shotId)) {
-        // 整段统一：一个请求写完，避免逐镜刷新把界面拖住。
-        await api(`/projects/${projectId}/shots/continuity`, json('POST', { shot_ids: ids, mode }));
-      } else {
-        await api(`/shots/${shotId}/continuity`, json('POST', { mode }));
-      }
+      await api(`/shots/${shotId}/continuity`, json('POST', { mode }));
       await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
       report(mode === 'cut'
-        ? `已改为独立切镜：${ids.length} 镜从新画面开场。`
-        : `已设置软连续，${ids.length} 镜会参考上一镜末帧构图。`);
+        ? '已改为独立切镜，本镜从新画面开场。'
+        : '已设置软连续，本镜会参考上一镜末帧构图。');
     });
   }
 

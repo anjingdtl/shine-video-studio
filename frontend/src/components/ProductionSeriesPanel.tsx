@@ -25,7 +25,7 @@ type Props = {
   /** 保存某镜的完整引用绑定（一键开拍用它自动补齐场景图/音色等参考）。 */
   onSaveBindings: (shotId: string, bindings: AutoBinding[]) => Promise<void>;
   /** 镜间衔接开关：改这一镜与前一镜的边界（承接末帧 / 独立切镜）。 */
-  onSetContinuity: (shotId: string | string[], mode: 'cut' | 'last_frame') => Promise<void>;
+  onSetContinuity: (shotId: string, mode: 'cut' | 'last_frame') => Promise<void>;
   /** 模式入口动作：enable_real 打开启用向导，check_fix 打开检查修复。 */
   onModeAction: (action: 'enable_real' | 'check_fix') => void;
   /** 缺生成方案/宽高映射时，引导回基础配置。 */
@@ -382,23 +382,7 @@ export default function ProductionSeriesPanel({
   }, [shots, selected]);
   const unboundCount = identityRows.reduce((sum, row) => sum + row.unbound.length, 0);
 
-  /** 选中的镜头按故事顺序排列：衔接关系只按这个顺序成立，不按勾选顺序。 */
-  const orderedSelected = useMemo(
-    () => shots.filter((shot) => selected.includes(shot.id)),
-    [shots, selected],
-  );
   const continuingCount = shots.filter((shot) => String(shot.spec.continuity?.mode ?? 'cut') !== 'cut').length;
-
-  /** 整段施加一种衔接：`skip_first` 让整段的第一镜保持原样，因为它在段内没有
-   *  前一镜可接；其余每一镜都改成软连续。 */
-  async function applyContinuity(mode: 'cut' | 'last_frame') {
-    const targets = mode === 'last_frame' ? orderedSelected.slice(1) : orderedSelected;
-    if (targets.length === 0) {
-      onMessage('先勾选至少两个镜头，再给选中段设置末帧参考。', 'error');
-      return;
-    }
-    await onSetContinuity(targets.map((shot) => shot.id), mode);
-  }
 
   function toggle(shotId: string) {
     setSelected((current) => current.includes(shotId)
@@ -872,21 +856,12 @@ export default function ProductionSeriesPanel({
         {shots.length === 0 && <span className="empty-inline">先创建分镜，才能排入生产序列。</span>}
       </div>
       {shots.length > 0 && <p className="series-hint">
-        软连续会等上一镜通过，再用它的末帧参考下一镜的开场构图。首帧仍由模型生成，接点需要看片确认。
-        现在有 {continuingCount} 镜设置了衔接，其余独立开场。
+        排产逐镜沿用分镜的切镜与接续设置。只有需要延续同一动作或机位时，才逐镜启用末帧参考。
+        软连续会等上一镜通过，再参考它的末帧构图。首帧仍由模型生成，接点需要看片确认。
+        当前 {continuingCount} 镜设置了衔接，其余独立切镜。
       </p>}
       <div className="series-actions-row">
         <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
-        <button
-          className="secondary-button"
-          disabled={busy || working || orderedSelected.length < 2}
-          onClick={() => void applyContinuity('last_frame')}
-        >选中段参考上一镜末帧（{Math.max(0, orderedSelected.length - 1)} 个接点）</button>
-        <button
-          className="secondary-button"
-          disabled={busy || working || orderedSelected.length === 0}
-          onClick={() => void applyContinuity('cut')}
-        >选中段全部独立切镜</button>
         {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
       <button className="primary-button" disabled={busy || working || !canStart} onClick={() => void start()}>
