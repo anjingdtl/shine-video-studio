@@ -165,7 +165,8 @@ function App() {
     setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
     realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
-    createShot, saveBindings, setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
+    createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze, unlockAsset,
+    setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters, abandonJob,
@@ -881,6 +882,8 @@ function App() {
                   busy={busy}
                   onSave={saveStyle}
                   onFreeze={freezeStyle}
+                  onApplyStyleToAllShots={() => void applyStyleToAllShots()}
+                  onRefreshFreeze={() => void refreshStyleFreeze()}
                   onDraftApplied={() => { refreshAll().catch(() => undefined); }}
                   onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
                   onMessage={report}
@@ -959,6 +962,7 @@ function App() {
                     busy={busy}
                     onUpload={uploadAsset}
                     onConfirm={confirmAssets}
+                    onUnlock={unlockAsset}
                     onPatchMetadata={patchAssetMetadata}
                     onOpenLibrary={() => goToAssets('library')}
                   />
@@ -1045,6 +1049,7 @@ function App() {
                     onQueue={queueShot}
                     onCreate={createShot}
                     onSaveBindings={saveBindings}
+                    onAdoptStyle={adoptShotStyle}
                     setPreview={setPreview}
                   />
                 </details>
@@ -1227,6 +1232,7 @@ function App() {
                   busy={busy}
                   onUpload={uploadAsset}
                   onConfirm={confirmAssets}
+                  onUnlock={unlockAsset}
                   onPatchMetadata={patchAssetMetadata}
                   onOpenLibrary={() => goToAssets('library')}
                 />
@@ -1242,6 +1248,8 @@ function App() {
                   busy={busy}
                   onSave={saveStyle}
                   onFreeze={freezeStyle}
+                  onApplyStyleToAllShots={() => void applyStyleToAllShots()}
+                  onRefreshFreeze={() => void refreshStyleFreeze()}
                   onDraftApplied={() => { refreshAll().catch(() => undefined); }}
                   onNavigate={goTo}
                   onMessage={report}
@@ -1310,6 +1318,7 @@ function App() {
                     onQueue={queueShot}
                     onCreate={createShot}
                     onSaveBindings={saveBindings}
+                    onAdoptStyle={adoptShotStyle}
                     setPreview={setPreview}
                   />
                   <ProductionPanel

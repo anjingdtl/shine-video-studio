@@ -1192,3 +1192,35 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `request_identity is None` 的旧行按文档/场次复用；带身份的 UNKNOWN 属于它自己的输入
   （不同的锁定事实、提示词或 provider 就是另一份请求），新提交必须真正发出新请求。
   回归见 `test_material_scenes.py::test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input`。
+
+## 2026-11-10 影片类型与手动解锁/应用新冻结（本轮新增）
+
+- **影片类型是服务端固定的 H3 合同，不是自由文本**：`StyleBible.film_type` 只接受
+  `live_action` / `animation`；固定英文范例在 `shine/h3/film_type.py`，由
+  `H3PromptCompiler` 写进每条提示词。`The entire shot is 2D cel-shaded animation...`
+  这类句子不得交给模型自由改写；动画项目不选影片类型，模型可能自行拍成真人画面。
+- **旧风格快照的哈希形状不能变**：`film_type` 未设置时序列化必须省略该键。Pydantic 的
+  `model_config.exclude_none` 在本版本不会作用于 `model_dump`，因此 `StyleBible` 用
+  `model_serializer` 过滤 `None`；嵌套 `ShotSpec.prompt_style` 也一样，旧风格/旧请求哈希
+  保持可复验。语义审片仍只审七维（`STYLE_BIBLE_FIELDS`），影片类型是确定性提示词合同。
+- **手工镜头与分镜镜头的英文风格都要继承冻结影片类型**：`_prompt_style` 为旧
+  `prompt_style` 补上冻结的 `film_type`；`services.make_render_request` 的英文风格投射
+  也显式带上它。不要只改 style snapshot，否则请求与编译哈希不一致。
+- **每个冻结设置都有用户手动解锁入口，且旧历史不重写**：
+  `POST /projects/{id}/freeze/style/refresh` 冻结当前草稿并把所有旧镜头修订到新风格；
+  `POST /projects/{id}/freeze/shots/style` 只把当前已冻结风格应用到旧镜头；
+  `POST /projects/{id}/freeze/assets/{asset_id}/unlock` 解除主素材的 approved/locked，
+  修改后走既有「确认使用」重新冻结；`POST /projects/{id}/freeze/episode-plans/{version}/unlock`
+  把已确认分集退回 DRAFT 并将其已确认导演包标记 stale；
+  `POST /projects/{id}/freeze/director-packages/{package_id}/unlock` 只把包标记 stale，
+  不重写已确认快照。
+- **有活生产时拒绝解锁**：风格/镜头/素材/分集/导演包的解锁都先查活动 Job、活动 series 或
+  活动 run；返回具名 409，不打断正在上传或生成的镜头。旧产物、旧风格版本、旧导演包
+  全部保留，重拍/重冻产生新 revision/version。
+- **素材候选列表缺省不是丢失**：直接上传并确认的素材没有生成批次，素材页的
+  「③ 选择素材 · 0 项候选」是真实事实；页面现在明确提示「先在 ① 分析剧本、② 确认需求」，
+  不伪造候选，也不把直接上传的主素材混进候选网格。
+- 回归：`backend/tests/test_freeze_unlock.py`（4 项）、`test_h3_compiler.py` 的影片类型/
+  旧哈希形状、`test_director_styles.py` 的固定类型目录；前端
+  `frontend/src/test/directorStyle.test.tsx`、`styleFreeze.test.tsx`。改动未触及
+  `worker.py` / `preproduction.py`。

@@ -16,12 +16,13 @@ type Props = {
   onQueue: (shot: Shot) => void;
   onCreate: (payload: Record<string, unknown>) => Promise<void>;
   onSaveBindings: (shotId: string, bindings: SaveBinding[]) => Promise<void>;
+  onAdoptStyle: (shotId: string) => Promise<void>;
   setPreview: (preview: PromptPreview | null) => void;
 };
 
 const emptyDraft = (): DraftBinding => ({ asset_id: '', use_as: 'picture', role: '', frame_role: '' });
 
-export default function ShotPanel({ assets, shots, currentStyle, busy, preview, onPreview, onQueue, onCreate, onSaveBindings, setPreview }: Props) {
+export default function ShotPanel({ assets, shots, currentStyle, busy, preview, onPreview, onQueue, onCreate, onSaveBindings, onAdoptStyle, setPreview }: Props) {
   const [shotName, setShotName] = useState('第一镜');
   const [storyBeat, setStoryBeat] = useState('');
   const [duration, setDuration] = useState(6);
@@ -268,6 +269,12 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
               </div>
               <button className="small-action" onClick={() => onPreview(shot.id)}><Eye size={12} /> 预览提示词</button>
               <button className="small-action" onClick={() => beginBindings(shot)}><Link2 size={12} /> 绑定</button>
+              {currentStyle && shot.spec.style_version_id !== currentStyle.id && (
+                <button className="small-action" disabled={busy} onClick={() => void onAdoptStyle(shot.id)}
+                  title="把本镜修订到当前冻结风格；旧成片保留为历史，不会被改写">
+                  采用当前风格
+                </button>
+              )}
               <button className="small-action" disabled={!currentStyle || busy} onClick={() => onQueue(shot)}><ArrowUpRight size={12} /> 加入队列</button>
             </div>
             {editingShot === shot.id && <div className="binding-editor">

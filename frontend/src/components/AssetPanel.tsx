@@ -9,11 +9,12 @@ type Props = {
   busy: boolean;
   onUpload: (file: File, meta: { kind: string; role: string; entityId: string; tags: string }) => void;
   onConfirm: (assetIds: string[]) => void;
+  onUnlock: (assetId: string) => void;
   onPatchMetadata: (assetId: string, patch: { role?: string | null; entity_id?: string; tags?: string[] }) => void;
   onOpenLibrary: () => void;
 };
 
-export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchMetadata, onOpenLibrary }: Props) {
+export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock, onPatchMetadata, onOpenLibrary }: Props) {
   const [role, setRole] = useState('character');
   const [entityId, setEntityId] = useState('');
   const [tags, setTags] = useState('');
@@ -184,7 +185,10 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onPatchM
             {!asset.locked && <label><input type="checkbox" aria-label={`选择上传素材 ${asset.filename}`} checked={selection.includes(asset.id)}
               onChange={(e) => setSelection((old) => e.target.checked ? [...old, asset.id] : old.filter((id) => id !== asset.id))} />选择</label>}
             {!asset.locked && <button className="text-button" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
-            {asset.locked && <button className="text-button" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>}
+            {asset.locked && <>
+              <button className="text-button" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>
+              <button className="text-button" disabled={busy} onClick={() => onUnlock(asset.id)}>解锁修改</button>
+            </>}
             <button className="icon-button tiny" title="编辑元数据" aria-label={`编辑 ${asset.filename} 元数据`} onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
             {saveAssetId === asset.id && <div className="asset-library-save-form">
               {saved ? <><p role="status">已保存为素材中心候选。通过技术检查并人工晋升后可分配给其他作品。</p><button className="text-button" onClick={onOpenLibrary}>打开全局素材库</button></> : <>

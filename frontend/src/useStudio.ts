@@ -298,6 +298,50 @@ export function useStudio() {
     });
   }
 
+  /** Apply the already-frozen style to every shot still on an older version. */
+  async function applyStyleToAllShots() {
+    if (!projectId || !currentStyle) return;
+    await withBusy(async () => {
+      const result = await api<{ revised_shot_ids: string[] }>(
+        `/projects/${projectId}/freeze/shots/style`,
+        json('POST', { reason: '用户在风格面板应用当前冻结风格' }),
+      );
+      await loadProject(projectId);
+      report(result.revised_shot_ids.length
+        ? `已把当前冻结风格应用到 ${result.revised_shot_ids.length} 个旧镜头；旧成片保留为历史。`
+        : '所有镜头都已经使用当前冻结风格。');
+    });
+  }
+
+  /** Save the screen exactly as shown, freeze it, then apply it to old shots. */
+  async function refreshStyleFreeze() {
+    if (!projectId || !currentStyle) return;
+    await withBusy(async () => {
+      const snapshot: Style = { ...style };
+      await api(`/projects/${projectId}/style/draft`, json('PUT', snapshot));
+      const result = await api<{ style: { id: string; version: number }; revised_shot_ids: string[] }>(
+        `/projects/${projectId}/freeze/style/refresh`,
+        json('POST', {
+          expected_style_version_id: currentStyle.id,
+          approval_note: '用户在风格面板手动解锁并应用新冻结',
+          reason: '用户手动解锁并应用新冻结',
+        }),
+      );
+      await loadProject(projectId);
+      report(`已解锁并冻结第 ${result.style.version} 版，${result.revised_shot_ids.length} 个旧镜头已采用新风格；旧成片保留为历史。`);
+    });
+  }
+
+  async function unlockAsset(assetId: string) {
+    if (!projectId) return;
+    await withBusy(async () => {
+      await api(`/projects/${projectId}/freeze/assets/${assetId}/unlock`,
+        json('POST', { reason: '用户手动解锁素材以修改后重新确认' }));
+      await loadProject(projectId);
+      report('素材已解锁；修改完成后重新点「确认使用」即可冻结新版本。');
+    });
+  }
+
   async function uploadAsset(file: File, meta: { kind: string; role: string; entityId: string; tags: string }) {
     if (!projectId) return;
     await withBusy(async () => {
@@ -359,6 +403,20 @@ export function useStudio() {
       await api(`/shots/${shotId}/bindings`, json('PUT', { bindings }));
       await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
       setPreview(null); report('镜头绑定的素材已更新。');
+    });
+  }
+
+  async function adoptShotStyle(shotId: string) {
+    await withBusyReturn(async () => {
+      const shot = shots.find((row) => row.id === shotId);
+      if (!shot || !currentStyle) throw new Error('镜头或当前冻结风格不可用，请刷新后重试。');
+      if (shot.spec.style_version_id === currentStyle.id) return;
+      await api(`/shots/${shotId}/revise`, json('POST', {
+        ...shot.spec, style_version_id: currentStyle.id,
+      }));
+      await loadProject(projectId).catch((refreshError: Error) => report(refreshError.message, 'error'));
+      setPreview(null);
+      report('已把该镜头修订到当前冻结风格；旧成片保留为历史，重拍会产生新版本。');
     });
   }
 
@@ -581,7 +639,8 @@ export function useStudio() {
     loadAudit, refreshAll,
     // actions
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
-    createShot, saveBindings, setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
+    createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze, unlockAsset,
+    setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters,

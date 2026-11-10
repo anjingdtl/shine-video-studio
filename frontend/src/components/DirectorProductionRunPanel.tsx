@@ -4,9 +4,9 @@ import {
   ShieldAlert, Sparkles, Square, Video,
 } from 'lucide-react';
 import {
-  API, ApiError, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
+  API, ApiError, api, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
-  listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
+  json, listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
   type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness, type ProductionRun,
   type RunEvent, type WorkflowProfile,
 } from '../api';
@@ -247,6 +247,13 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     return act('plan-confirm', () => confirmEpisodePlan(projectId, latestPlan.version, latestPlan.sha256),
       '分集方案已确认');
   };
+  const unlockPlan = () => {
+    if (!latestPlan || latestPlan.status !== 'CONFIRMED') return;
+    return act('plan-unlock', () => api(
+      `/projects/${projectId}/freeze/episode-plans/${latestPlan.version}/unlock`,
+      json('POST', { reason: '用户手动解锁分集方案' }),
+    ), '分集方案已解锁为草案；依赖它的已确认导演包已标记失效，请重新生成');
+  };
   const buildPackage = () => {
     if (!profileId) {
       onMessage('先在基础配置里登记本机生成方案，再生成导演包', 'error');
@@ -269,6 +276,13 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     if (!latestPackage) return;
     return act('package-confirm', () => confirmDirectorPackage(latestPackage.id, latestPackage.manifest_sha256),
       '导演包已确认，可以启动整部作品生产');
+  };
+  const unlockPackage = () => {
+    if (!latestPackage || latestPackage.status !== 'CONFIRMED') return;
+    return act('package-unlock', () => api(
+      `/projects/${projectId}/freeze/director-packages/${latestPackage.id}/unlock`,
+      json('POST', { reason: '用户手动解锁导演包' }),
+    ), '导演包已标记失效，不能再开拍；请按当前内容生成新版本并重新确认');
   };
   const startRun = () => {
     if (!latestPackage) return;
@@ -349,6 +363,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           </div>
           {latestPlan.status !== 'CONFIRMED' && <button className="must-button" disabled={busy !== ''} onClick={confirmPlan}>
             <Check size={13} /> 确认分集方案
+          </button>}
+          {latestPlan.status === 'CONFIRMED' && <button className="secondary-button" disabled={busy !== ''}
+            title="把这一版退回草案；依赖它的已确认导演包会标记失效，旧数据保留"
+            onClick={unlockPlan}>
+            解锁分集方案
           </button>}
           {latestPlanIsSections && !latestPlanMaterialized && <button className="secondary-button" disabled={busy !== ''}
             title="各场次在「镜头拆解」应用分镜后，把每集落到它们真实拆出的镜头"
@@ -438,6 +457,12 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             {latestPackage.status !== 'CONFIRMED' && <button className="must-button"
               disabled={busy !== '' || !readiness?.ready} onClick={confirmPackage}>
               <Check size={13} /> 确认导演包
+            </button>}
+            {latestPackage.status === 'CONFIRMED' && <button className="secondary-button"
+              disabled={busy !== '' || latestPackage.stale}
+              title="确认后的导演包保持只读；解锁会把它标记失效，请生成新版本再确认"
+              onClick={unlockPackage}>
+              解锁导演包
             </button>}
           </div>
 

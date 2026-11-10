@@ -19,6 +19,8 @@ type Props = {
   busy: boolean;
   onSave: (preserveDirectorStyle?: boolean) => void;
   onFreeze: (preserveDirectorStyle?: boolean) => void;
+  onApplyStyleToAllShots: () => void;
+  onRefreshFreeze: () => void;
   onDraftApplied: () => void;
   onNavigate: (id: string) => void;
   onMessage: (text: string, kind?: 'success' | 'error') => void;
@@ -59,7 +61,7 @@ function aiErrorText(message: string): string {
 
 export default function StylePanel({
   projectId, style, setStyle, serverDraft, currentStyle, styles,
-  busy, onSave, onFreeze, onDraftApplied, onNavigate, onMessage,
+  busy, onSave, onFreeze, onApplyStyleToAllShots, onRefreshFreeze, onDraftApplied, onNavigate, onMessage,
 }: Props) {
   const matchedPreset = presetForStyle(style);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -567,6 +569,20 @@ export default function StylePanel({
           </button>
         </div>}
       <p className="freeze-hint">点击冻结会先把屏幕上这七项<strong>原样保存</strong>，再申请一次性授权并冻结这份快照——你批准的内容和最终冻结的内容始终一致；失败时表单内容不会丢失。</p>
+      {currentStyle && (
+        <div className="style-freeze-tools">
+          <div>
+            <b>手动解锁 / 应用新冻结</b>
+            <span>旧风格、旧镜头和旧成片都保留为历史；有镜头正在拍摄时会拒绝。</span>
+          </div>
+          <button type="button" className="secondary-button" disabled={busy} onClick={onApplyStyleToAllShots}>
+            应用当前风格到全部镜头
+          </button>
+          <button type="button" className="must-button" disabled={busy} onClick={onRefreshFreeze}>
+            解锁并应用新冻结
+          </button>
+        </div>
+      )}
       {styles.length > 0 && <div className="version-row">
         <span className="version-label"><History size={12} /> 版本记录</span>
         {styles.map((version) => (

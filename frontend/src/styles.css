@@ -590,6 +590,13 @@ html[data-theme='dark'] .nav-view-title{color:#c9cbc0}
 /* Freeze/shot/delivery helper text (2026-11 fix round) */
 .freeze-hint{margin:9px 0 0;color:#8a8d7c;font-size:9px;line-height:1.6}
 .freeze-hint strong{color:#6f774f}
+.style-freeze-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid #eceee4;margin-top:10px;padding-top:10px}
+.style-freeze-tools>div{flex:1;min-width:220px}
+.style-freeze-tools b{display:block;font-size:11px;color:#45473f}
+.style-freeze-tools span{display:block;font-size:9px;color:#8a8d7c;margin-top:3px}
+html[data-theme='dark'] .style-freeze-tools{border-top-color:#3d4231}
+html[data-theme='dark'] .style-freeze-tools b{color:#d6d8ce}
+html[data-theme='dark'] .style-freeze-tools span{color:#a4a698}
 .shot-form-error{grid-column:1/-1;margin:0;color:#a95e4f;font-size:9px;border:1px solid #ecd8d2;background:#faf1ef;border-radius:5px;padding:8px 10px}
 .empty-setup-hint{font-size:10px;color:#8a8b84;margin:14px 0 0}
 .empty-setup-hint .text-button{font-size:10px}

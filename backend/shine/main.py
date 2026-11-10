@@ -487,6 +487,9 @@ def create_app(
     from shine.api_asset_center import router as asset_center_router
 
     app.include_router(asset_center_router)
+    from shine.api_freezes import router as freezes_router
+
+    app.include_router(freezes_router)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):

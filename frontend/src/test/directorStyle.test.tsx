@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DirectorStylePreview, DirectorStyleSummary, Style } from '../api';
 import StylePanel from '../components/StylePanel';
-import { DIRECTOR_STYLE_CATALOG, StudioStub, jsonResponse } from './studioStub';
+import { DIRECTOR_STYLE_CATALOG, FROZEN_STYLE, StudioStub, jsonResponse } from './studioStub';
 
 const style: Style = {
   photography_language: '缓慢横移，观察人物。',
@@ -36,11 +36,42 @@ function Harness({ onSave, onFreeze }: { onSave: ReturnType<typeof vi.fn>; onFre
     busy={false}
     onSave={onSave}
     onFreeze={onFreeze}
+    onApplyStyleToAllShots={vi.fn()}
+    onRefreshFreeze={vi.fn()}
     onDraftApplied={vi.fn()}
     onNavigate={vi.fn()}
     onMessage={vi.fn()}
   />;
 }
+
+describe('manual freeze controls', () => {
+  it('offers apply-to-shots and unlock-and-refreeze when a style is frozen', async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    const onRefresh = vi.fn();
+    const frozen = { ...FROZEN_STYLE, snapshot: style };
+    render(<StylePanel
+      projectId="proj-1"
+      style={style}
+      setStyle={vi.fn()}
+      serverDraft={style}
+      currentStyle={frozen}
+      styles={[frozen]}
+      busy={false}
+      onSave={vi.fn()}
+      onFreeze={vi.fn()}
+      onApplyStyleToAllShots={onApply}
+      onRefreshFreeze={onRefresh}
+      onDraftApplied={vi.fn()}
+      onNavigate={vi.fn()}
+      onMessage={vi.fn()}
+    />);
+    await user.click(screen.getByRole('button', { name: '应用当前风格到全部镜头' }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: '解锁并应用新冻结' }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('director style picker', () => {
   let stub: StudioStub;

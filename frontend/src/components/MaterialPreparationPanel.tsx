@@ -965,7 +965,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       <details className="material-stage" ref={selectRef}>
         <summary>③ 选择素材 · {tiles.length} 项候选</summary>
         <div className="material-stage-body">
-          {runs.length === 0 && <p className="material-hint">还没有出图批次。确认清单后，生成的项目会在这里排队。</p>}
+          {state?.stage === 'no_plan' && <p className="material-hint" role="status">
+            本项目还没有逐场素材清单：上方「项目素材」里是直接上传并确认的主素材，所以这里没有生成候选。
+            需要 AI 候选时，先在 ① 读剧本点「分析剧本」，再在 ② 确认需求；确认后 ③ 才会排队出图。
+          </p>}
+          {state && runs.length === 0 && state.stage !== 'no_plan' && <p className="material-hint">还没有出图批次。确认清单后，生成的项目会在这里排队。</p>}
           {tiles.length > 0 && <>
             <div className="material-toolbar">
               <label className="material-field"><span>候选素材分组</span><select value={candidateGroup} onChange={(e) => setCandidateGroup(e.target.value)}>
