@@ -1022,6 +1022,28 @@ def select_outline_revision(db, project_id, outline):
     return sorted(changed)
 
 
+def approved_outline_for(db, project_id: str, document_id: str | None = None):
+    """The current approved outline of a project, or ``None``.
+
+    A long script may only be analysed scene by scene after the durable outline
+    of the whole story has been confirmed: that confirmation is what ties every
+    later scene call back to an approved story. The character count alone says
+    nothing about whether that happened.
+    """
+    query = select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == "StoryOutline",
+        AgentArtifact.approved_at.is_not(None),
+        AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at.desc())
+    rows = list(db.scalars(query.limit(20)))
+    if document_id:
+        for row in rows:
+            if (row.payload_json or {}).get("document_id") == document_id:
+                return row
+    return rows[0] if rows else None
+
+
 def confirm_outline_artifact(db, project_id, row, *, expected_sha256, acknowledge_questions_sha256,
                              actor) -> dict:
     """The one outline confirmation: sha gate, questions gate, invalidation.

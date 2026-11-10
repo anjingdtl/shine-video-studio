@@ -308,10 +308,21 @@ def prepare_material_scenes(
     if body.replace_unknown_task_id or body.replacement_key:
         raise HTTPException(409, "MATERIAL_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
     if len(document.text or "") > 4000:
-        raise HTTPException(409, {"code": "STORY_DURABLE_OUTLINE_REQUIRED",
-                                  "message": "这份剧本太长，一次性分析会丢掉细节。请改用「总体大纲与生产段落」："
-                                             "后台提取并归并全剧大纲，你确认后只为你勾选的段落准备正式分镜。",
-                                  "note": "长剧本请使用后台总体大纲任务，再选择生产段落。"})
+        # A long script is analysed one real call per scene, so the size itself
+        # is not what makes the analysis unsafe.  What a long script needs is a
+        # confirmed durable outline first: without it the scenes cannot be tied
+        # back to an approved story.  The gate is therefore the confirmation,
+        # not the character count - the previous unconditional refusal told the
+        # operator to build and confirm an outline and then refused the analysis
+        # anyway, which left the material list impossible to produce.
+        from shine.materialprep import story as story_outline
+
+        if story_outline.approved_outline_for(db, project_id, document.id) is None:
+            raise HTTPException(409, {"code": "STORY_DURABLE_OUTLINE_REQUIRED",
+                                      "message": "这份剧本太长，需要先确认总体大纲，再逐场分析。"
+                                                 "请用「总体大纲与生产段落」：后台提取并归并全剧大纲，"
+                                                 "确认之后回到这里点击「分析剧本」。",
+                                      "note": "长剧本请先确认后台总体大纲任务，确认后即可逐场分析。"})
     result = scenes.prepare_scenes(
         gateway,
         request.app.state.session_factory,
