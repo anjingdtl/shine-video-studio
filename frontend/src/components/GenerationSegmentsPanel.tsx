@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { API, api, json } from '../api';
+import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 
 type Segment = {
   shot_id: string; position: number; story_beat: string; duration_s: number;
@@ -128,7 +129,7 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
             label={`生成段 ${segment.position} 当前版本`} />
           <div className="segment-card-foot">
             <small>{segment.editorial_cuts?.length ? `段内 ${segment.editorial_cuts.length} 个剪辑点` : '整段一次生成'}</small>
-            <a href={`${API}/jobs/${segment.job_id}/media`} download>下载此段</a>
+            <OpenVideoFolderButton artifactId={segment.artifact_id} />
           </div>
         </> : <p className="material-hint">尚无视频：等待前序通过、生成或质检完成。</p>}
         <details className="segment-detail">

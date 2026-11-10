@@ -3,6 +3,7 @@ import { HelpCircle } from 'lucide-react';
 import { API, api, json, type Job } from '../api';
 import { failureLabels, label } from '../constants';
 import GenerationSegmentsPanel, { LazyVideo } from './GenerationSegmentsPanel';
+import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 
 type Proposal = { id: string; kind: string; stale: boolean; created_at?: string; payload_json: Record<string, unknown> };
 type Delivery = { artifact_id: string; sha256: string; byte_size: number; created_at: string;
@@ -197,10 +198,10 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
           <>
             <b>自动交付 v{order.version} · {orderText[order.status] ?? order.status}{index === 0 && <em className="latest-badge">最新</em>}</b>
             <p>{timeLabel && <>交付于 {timeLabel} · </>}{order.edl_source === 'frozen_edit_intent' ? '剪辑来源：冻结剪辑意图' : '剪辑来源：默认剪辑规则'}
-              {order.artifact_id && <> · <a href={`${API}/deliveries/${order.artifact_id}/media`} download>下载 MP4</a></>}
               {order.attempt_count > 0 && <> · 尝试 {order.attempt_count}/{order.max_attempts}</>}
               {order.failure_code && <span className="failure"> · {label(failureLabels, order.failure_code)}</span>}
             </p>
+            {order.artifact_id && <OpenVideoFolderButton artifactId={order.artifact_id} />}
           </>
         );
         const body = <>
@@ -252,7 +253,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         <b>{row.provenance.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}</b>
         <p>{row.created_at} · {row.provenance.duration_s?.toFixed(2)} 秒 · {(row.byte_size / 1024 / 1024).toFixed(1)} MB</p>
         <LazyVideo src={`${API}/deliveries/${row.artifact_id}/media`} label="完整成片历史版本" />
-        <p><a href={`${API}/deliveries/${row.artifact_id}/media`} download>下载 MP4</a></p>
+        <p><OpenVideoFolderButton artifactId={row.artifact_id} /></p>
         <small>校验指纹（SHA-256）：<code>{row.sha256.slice(0, 16)}…</code>，用于核对文件未被改动</small>
         <details><summary>镜头来源与装配记录</summary><pre>{JSON.stringify(row.provenance, null, 2)}</pre></details>
       </article></details>)}

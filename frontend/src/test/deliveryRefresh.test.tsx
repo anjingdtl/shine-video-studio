@@ -45,6 +45,23 @@ async function expectOrderVisible(timeout = 3000) {
 }
 
 describe('新交付订单自动出现在页面', () => {
+  it('从交付卡直接打开已有视频目录', async () => {
+    stub.add({
+      method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/delivery-orders$/,
+      respond: () => jsonResponse([{ ...SYNTHETIC_BLOCKED_ORDER, status: 'DELIVERED', artifact_id: 'delivery-1' }]),
+    });
+    stub.add({
+      method: 'POST', pattern: /video-artifacts\/delivery-1\/open-folder$/,
+      respond: () => new Response(null, { status: 204 }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /后期成片/);
+    await user.click(await screen.findByRole('button', { name: '打开所在文件夹' }));
+    expect(stub.callsOf('POST', /video-artifacts\/delivery-1\/open-folder$/)).toHaveLength(1);
+    expect(screen.queryByRole('link', { name: '下载 MP4' })).not.toBeInTheDocument();
+  });
+
   it('ASR 不可用或未运行时明确提示交付音频尚未完整核对', async () => {
     const unavailableJob = {
         id: 'job-1', project_id: 'proj-1', shot_id: 'shot-1', shot_name: '无对白镜头', shot_revision: 1,

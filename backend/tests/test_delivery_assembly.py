@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from uuid import uuid4
@@ -16,6 +17,34 @@ import pytest
 
 from shine.models import Job, JobAttempt, MediaArtifact, QualityGate
 from tests.conftest import create_project, create_shot, freeze_style, make_test_video_bytes
+
+
+def test_open_video_folder_only_opens_registered_local_video_directory(api, monkeypatch):
+    client, factory, settings = api
+    project = create_project(client, "目录入口")
+    relative = "artifacts/测试 项目/video.mp4"
+    path = settings.data_dir / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"fixture")
+    with factory.begin() as db:
+        artifact = MediaArtifact(project_id=project, artifact_kind="delivery", storage_path=relative,
+                                 sha256=hashlib.sha256(b"fixture").hexdigest(),
+                                 byte_size=7, content_type="video/mp4")
+        db.add(artifact)
+        db.flush()
+        artifact_id = artifact.id
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda path, verb: opened.append((path, verb)), raising=False)
+    endpoint = f"/api/v1/video-artifacts/{artifact_id}/open-folder"
+    headers = {"X-Shine-Local-Action": "1"}
+
+    assert client.post(endpoint, headers={**headers, "Origin": "https://other.example"}).status_code == 403
+    assert client.post(endpoint, headers=headers).status_code == 204
+    assert opened == [(str(path.parent.resolve()), "explore")]
+
+    path.unlink()
+    assert client.post(endpoint, headers=headers).status_code == 404
+    assert len(opened) == 1
 
 
 def _ffprobe(path, settings) -> dict:

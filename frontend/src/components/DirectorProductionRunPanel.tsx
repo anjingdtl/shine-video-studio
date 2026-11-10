@@ -12,6 +12,7 @@ import {
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { EpisodePostEditor } from './EpisodePostEditor';
+import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 
 type Mode = 'plan' | 'package' | 'run' | 'post';
@@ -562,7 +563,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             </div>}
             {episode.delivered_artifact_id && <div className="run-ep-media">
               <video src={`${API}/deliveries/${episode.delivered_artifact_id}/media`} controls preload="none" />
-              <a href={`${API}/deliveries/${episode.delivered_artifact_id}/media`} download>下载这一集 MP4</a>
+              <OpenVideoFolderButton artifactId={episode.delivered_artifact_id} />
             </div>}
           </li>)}
         </ol>
