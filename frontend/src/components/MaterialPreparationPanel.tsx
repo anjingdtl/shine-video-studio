@@ -438,7 +438,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     }
     const decisions = requirements.map((requirement) => ({
       requirement_id: requirement.requirement_id,
-      strategy: defaultStrategy(requirement),
+      // A chosen asset must be bound as a reused master, or the confirmation
+      // records "generate" and the uploaded picture is ignored.
+      strategy: bindings[requirement.requirement_id] ? 'reuse_master' : defaultStrategy(requirement),
       entity_id: requirement.entity_id,
       asset_id: bindings[requirement.requirement_id] ?? requirement.bound_asset_id ?? null,
       brief_note: requirement.brief_note,
@@ -533,6 +535,47 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     setEvaluation(judged);
     await load();
     onPromoted?.();
+  });
+
+  /** Let the operator replace one requirement with their own prepared picture. */
+  const uploadOwnMaterial = (requirement: { requirement_id: string; entity_id: string; family: string }) =>
+    async (event: { target: HTMLInputElement }) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      setBusy(true);
+      setProblem(null);
+      try {
+        const form = new FormData();
+        form.append('asset_kind', 'image');
+        form.append('file', file);
+        form.append('role', requirement.family);
+        form.append('entity_id', requirement.entity_id);
+        const asset = await fetch(`${API}/projects/${projectId}/assets`, { method: 'POST', body: form })
+          .then((response) => {
+            if (!response.ok) throw new Error(`上传失败 ${response.status}`);
+            return response.json() as Promise<Asset>;
+          });
+        setBindings((current) => ({ ...current, [requirement.requirement_id]: asset.id }));
+        setStrategy((current) => ({ ...current, [requirement.requirement_id]: 'reuse_master' }));
+        setOperationReport(`已上传「${asset.filename}」，将作为「${requirement.entity_id}」的主素材。`
+          + '点下方「确认清单并补齐」把它绑定到这项需求。');
+        await load();
+      } catch (error) {
+        setProblem(error instanceof Error ? error.message : String(error));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+  /** One new generation revision for every requirement, keeping old candidates. */
+  const regenerateAll = () => run(async () => {
+    const row = await jsonPost<{ items?: string[]; run_id?: string }>(
+      `/projects/${projectId}/material-preparation/regenerate-all`,
+      { idempotency_key: `material-regen-all-${Date.now()}` },
+    );
+    setOperationReport(`已为 ${row.items?.length ?? 0} 项需求排队重新出图；旧候选保留，可对比后再选用。`);
+    await load();
   });
 
   const cancelRun = (runId: string) => run(async () => {
@@ -794,6 +837,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                         <option key={a.id} value={a.id}>{a.filename} · {a.sha256.slice(0, 8)} · {a.locked ? '已确认' : '待确认上传'}</option>)}
                     </select>
                   </label>}
+                  <label className="material-field">
+                    <span>或直接上传你自己的素材替换</span>
+                    <input type="file" accept="image/*" disabled={busy}
+                      onChange={(event) => void uploadOwnMaterial(requirement)(event)} />
+                  </label>
                   <button type="button" className="text-button" disabled={busy || librarySearchBusy}
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
@@ -941,6 +989,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </>}
           <button type="button" className="must-button" disabled={busy || !promotable} onClick={promoteSelected}>
             确认使用所选素材
+          </button>
+          <button type="button" className="text-button" disabled={busy || !runs.length} onClick={regenerateAll}>
+            重跑全部素材（保留旧候选）
           </button>
           {evaluation && (
             <div className={evaluation.materials_ready ? 'material-ready' : 'required-action'} role="status">

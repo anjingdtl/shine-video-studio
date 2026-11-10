@@ -555,6 +555,48 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
     return {"status": "accepted", **result}
 
 
+class RegenerateAllBody(APIModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    requirement_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+@router.post("/projects/{project_id}/material-preparation/regenerate-all", status_code=202)
+def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor: Operator,
+                                db: DBSession, settings: SettingsDep):
+    """Queue one fresh generation revision for every confirmed requirement.
+
+    A batch whose pictures miss the brief is a normal outcome, not an error to
+    repair by hand: the cure is one new call per requirement with the current
+    prompt template and the frozen style, which is what this does. The older
+    candidates are kept, so the person can still compare and promote either.
+
+    No brief is supplied on purpose. Passing the previous answers forward would
+    replay exactly the description that produced the rejected pictures, and a
+    stored answer can also carry open questions the renderer refuses.
+    """
+    state = service.plan_progress(db, project_id, data_dir=settings.data_dir)
+    confirmation = state.get("confirmation") or {}
+    requirements = state.get("requirements") or []
+    if not confirmation:
+        raise HTTPException(409, "MATERIAL_PLAN_NOT_CONFIRMED")
+    wanted = set(body.requirement_ids or [])
+    targets = [row["requirement_id"] for row in requirements
+               if not wanted or row["requirement_id"] in wanted]
+    if not targets:
+        raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
+    result = service.create_batch(
+        db,
+        project_id,
+        confirmation_id=confirmation["confirmation_id"],
+        confirmation_hash=confirmation["confirmation_hash"],
+        requirement_ids=targets,
+        idempotency_key=body.idempotency_key,
+        rights_id=None,
+        new_revision=True,
+    )
+    return {"status": "accepted", **result}
+
+
 def _require_ownership(db, project_id: str, run_id: str) -> None:
     from shine.materialprep.models import MaterialRun
 
