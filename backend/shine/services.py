@@ -382,13 +382,25 @@ def set_shot_bindings(
         )
         db.add(row)
         rows.append(row)
+    # The shot's own declaration follows what is bound to it.  A shot that names
+    # three people used to keep `required_asset_ids` holding only the plate, so
+    # the H3 compiler built a reference manifest with one slot and the label rule
+    # refused the shot at production time - long after everything looked fine.
+    # Binding IS the request: exactly these assets, nothing from another shot.
+    spec_payload = dict(shot.spec or {})
+    declared = list(spec_payload.get("required_asset_ids") or [])
+    merged = list(dict.fromkeys([*declared, *[asset_id for asset_id in assets]]))
+    if merged != declared:
+        spec_payload["required_asset_ids"] = merged
+        shot.spec = spec_payload
+        shot.revision = (shot.revision or 1) + 1
     add_audit(
         db,
         actor,
         "SHOT_BINDINGS_UPDATED",
         "shot",
         shot.id,
-        {"binding_count": len(rows), "asset_ids": sorted(assets)},
+        {"binding_count": len(rows), "asset_ids": sorted(assets), "declared": merged},
         project_id=project.id,
     )
     return rows

@@ -365,6 +365,27 @@ def artifacts(project_id: str, db: DBSession):
 
 
 @router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
+def _approved_master_for_name(db, project_id: str, name: str):
+    """The approved, locked master a beat's character name refers to.
+
+    A beat says "程岩" while the requirement carries "程岩（罗兰·温布顿）", so the
+    match is by containment in either direction. Only an approved and locked
+    master may be bound: an unconfirmed byte must never reach the renderer.
+    """
+    candidates = list(db.scalars(select(Asset).where(
+        Asset.project_id == project_id,
+        Asset.approved.is_(True),
+        Asset.locked.is_(True),
+    )))
+    for asset in candidates:
+        entity = (asset.entity_id or "").strip()
+        if not entity:
+            continue
+        if entity == name or name in entity or entity in name:
+            return asset
+    return None
+
+
 def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
     try:
         project = require_project(db, project_id)
@@ -466,6 +487,19 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as,
                                                  ordinal=len(bindings)))
                 bound_asset_ids.append(identity)
+            # The director may list only the plate for a scene. Every character
+            # this beat names still needs its own subject slot, or the H3 label
+            # rule refuses the shot at production time with a reference that
+            # never resolved. Bind exactly the names this beat carries - never
+            # the whole cast - so one shot's references cannot leak into another.
+            for name in beat["characters"]:
+                asset = _approved_master_for_name(db, project_id, name)
+                if asset is None or asset.id in bound_asset_ids:
+                    continue
+                use_as = "subject" if asset.role == "character" else "picture"
+                bindings.append(ShotBindingInput(asset_id=asset.id, use_as=use_as,
+                                                 ordinal=len(bindings)))
+                bound_asset_ids.append(asset.id)
             camera_fields = {
                 "composition": camera.composition,
                 "movement": camera.movement,
