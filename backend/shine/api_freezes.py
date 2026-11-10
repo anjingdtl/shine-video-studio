@@ -212,6 +212,7 @@ def unlock_asset(
     previous = {"approved": asset.approved, "locked": asset.locked}
     asset.approved = False
     asset.locked = False
+    asset.approved_by = None
     asset.approved_at = None
     asset.locked_at = None
     add_audit(
@@ -279,7 +280,7 @@ def unlock_episode_plan(
                 409,
                 {
                     "code": "FREEZE_UNLOCK_RUN_ACTIVE",
-                    "message": "这部作品还在按这份分集方案运行，先暂停或取消再解锁",
+                    "message": "这部作品还在按这份分集方案运行，先取消或结束再解锁",
                     "run_id": active_run.id,
                 },
             )
@@ -337,7 +338,7 @@ def unlock_director_package(
             409,
             {
                 "code": "FREEZE_UNLOCK_RUN_ACTIVE",
-                "message": "这部作品还在按这个导演包运行，先暂停或取消再解锁",
+                "message": "这部作品还在按这个导演包运行，先取消或结束再解锁",
                 "run_id": active_run.id,
             },
         )
