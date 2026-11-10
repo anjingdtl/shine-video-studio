@@ -152,3 +152,67 @@ def binding_summary(binding: dict[str, Any] | None) -> dict[str, Any] | None:
         "strength": binding.get("strength"),
         "resolution_sha256": binding.get("resolution_sha256"),
     }
+
+
+def english_style_bible(binding: dict[str, Any] | None) -> StyleBible | None:
+    """Render a frozen director template's English techniques as a StyleBible.
+
+    The official H3 rule accepts only English visual description outside the
+    tagged dialogue.  A manually created shot carries no per-shot English
+    ``prompt_style``, while the visible Style Bible may be Chinese; the same
+    frozen template already declares English ``instruction_en`` for each
+    technique, so the compiler can use that faithful projection instead of
+    copying CJK into the prompt.  The frozen version and hash stay unchanged.
+    """
+    if not isinstance(binding, dict):
+        return None
+    snapshot = binding.get("profile_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    for item in snapshot.get("techniques") or []:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "")
+        instruction = str(item.get("instruction_en") or "").strip()
+        if not target or not instruction:
+            continue
+        grouped.setdefault(target, []).append(
+            (int(item.get("priority") or 0), str(item.get("id") or ""), instruction)
+        )
+    if not grouped:
+        return None
+    ordered = {
+        target: [text for _priority, _key, text in sorted(items, key=lambda row: (-row[0], row[1]))]
+        for target, items in grouped.items()
+    }
+
+    def join(target: str, fallback: str) -> str:
+        return " ".join(ordered.get(target, [])[:2]) or fallback
+
+    camera = ordered.get("camera", [])
+    return StyleBible(
+        photography_language=join(
+            "camera", "Use restrained, balanced compositions with readable spatial depth."
+        ),
+        shot_blocking=(
+            camera[1] if len(camera) > 1 else join(
+                "camera", "Keep the subject's movement direction and screen axis clear."
+            )
+        ),
+        color_palette=join(
+            "color", "Use muted, coherent colors with a readable subject-background contrast."
+        ),
+        lighting_tone=join(
+            "lighting", "Use motivated light with legible shadows and facial detail."
+        ),
+        lens_texture=join(
+            "texture", "Preserve natural surface detail and spatial clarity."
+        ),
+        editing_rhythm=join(
+            "editing", "Let each shot hold briefly after its information lands."
+        ),
+        sound_performance=join(
+            "sound", "Keep sparse room tone and low ambient texture; preserve scripted dialogue."
+        ),
+    )

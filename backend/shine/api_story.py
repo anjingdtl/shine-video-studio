@@ -374,7 +374,10 @@ def queue_sections(project_id: str, body: SectionRequest, actor: Operator, db: D
                                               prior["production_section_id"] if prior else None})
         raw = document.text[section["start_offset"]:section["end_offset"]]
         offset = section["start_offset"]
-        for fragment in segment_document(raw, max_scene_chars=1800):
+        # Long sections are split into thirds so one storyboard unit cannot
+        # spend the whole provider timeout; the per-unit budget is still the
+        # shared context controller.
+        for fragment in segment_document(raw, max_scene_chars=1200):
             units.append({"production_section_id": section["production_section_id"], "start_offset": offset,
                           "end_offset": offset + len(fragment.text), "continuity_facts": facts,
                           "continuity": basis or {"basis": "user_supplied_unverified"}})

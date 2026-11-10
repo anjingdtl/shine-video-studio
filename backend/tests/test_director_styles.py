@@ -457,3 +457,19 @@ def test_new_profile_can_be_frozen_with_identical_seven_dimensions_and_binding_i
         project = db.get(Project, broken_project)
         assert project.frozen_style_version_id is None
         assert db.query(StyleVersion).filter_by(project_id=broken_project).count() == 0
+
+
+def test_english_style_projection_uses_the_frozen_template_techniques():
+    from shine.director_styles.service import english_style_bible, make_binding
+
+    entry = DirectorStyleCatalog().get("mamoru-oshii")
+    binding = make_binding(entry, "balanced", entry.profile.style_bible)
+    projected = english_style_bible(binding)
+    assert projected is not None
+    payload = projected.model_dump()
+    assert all(value.strip() for value in payload.values())
+    assert not any("\u4e00" <= char <= "\u9fff" for value in payload.values() for char in value)
+    assert "composition" in payload["photography_language"].lower()
+    assert "light" in payload["lighting_tone"].lower()
+    assert english_style_bible(None) is None
+    assert english_style_bible({"profile_snapshot": {"techniques": []}}) is None

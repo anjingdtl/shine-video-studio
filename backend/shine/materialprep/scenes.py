@@ -204,7 +204,7 @@ def prepare_scenes(
                 spans = remaining[:count]
                 fragment = Scene(scene.key, scene.title, "".join(s.text for s in spans), tuple(spans))
                 if budget_report(build_scene_context(scene=fragment, locked_story_facts=facts),
-                                 schema, system_prompt, config)["fits"]:
+                                 schema, system_prompt, config, input_share=2 / 3)["fits"]:
                     break
                 count = max(1, count // 2)
             spans = remaining[:count]

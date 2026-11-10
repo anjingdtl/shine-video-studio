@@ -70,6 +70,12 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _style_has_cjk(style: StyleBible) -> bool:
+    import re
+
+    return bool(re.search(r"[一-鿿]", " ".join(style.model_dump().values())))
+
+
 def add_audit(
     db: Session,
     actor: str,
@@ -717,11 +723,23 @@ def make_render_request(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    style_model = StyleBible.model_validate(style.snapshot)
+    if spec.prompt_style is None and _style_has_cjk(style_model):
+        # A manually created shot has no per-shot English prompt style.  The
+        # frozen director template already declares English techniques; attach
+        # that faithful projection to the request's shot spec so both the
+        # compiler and the provenance verifier see the same bytes.  The frozen
+        # style id/hash are unchanged.
+        from shine.director_styles.service import english_style_bible
+
+        projected = english_style_bible(style.director_style_binding)
+        if projected is not None:
+            spec = spec.model_copy(update={"prompt_style": projected})
     compiler = H3PromptCompiler()
     try:
         compiled: CompiledPrompt = compiler.compile(
             spec=spec,
-            style=StyleBible.model_validate(style.snapshot),
+            style=style_model,
             manifest=manifest,
             project_language=project.language,
             mode_hint=mode_hint,

@@ -133,8 +133,15 @@ def estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text.encode("utf-8")) / 3))
 
 
-def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt: str, config) -> dict[str, Any]:
-    """Prove the request fits the window before it is sent."""
+def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt: str, config,
+                  *, input_share: float = 1.0) -> dict[str, Any]:
+    """Prove the request fits the window before it is sent.
+
+    ``input_share`` lets a long-running chain spend only a fraction of the same
+    window on one unit (a third, for the outline/storyboard chunks).  The
+    input estimate, output reserve and margin stay in one controller so a
+    smaller chunk is a scheduling decision, not a second budget model.
+    """
     input_tokens = sum(
         estimate_tokens(part)
         for part in (
@@ -151,6 +158,7 @@ def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt
         max(MIN_OUTPUT_RESERVE_TOKENS, int(config.max_output_tokens or 0)),
     )
     total = input_tokens + output_reserve + CONTEXT_MARGIN_TOKENS
+    available = int(window * input_share)
     return {
         "input_tokens_estimated": input_tokens,
         "output_reserve_tokens": output_reserve,
@@ -158,7 +166,9 @@ def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt
         "total_tokens_estimated": total,
         "context_window_tokens": window,
         "context_window_source": source,
-        "fits": total <= window,
+        "input_share": input_share,
+        "available_tokens": available,
+        "fits": total <= available,
     }
 
 

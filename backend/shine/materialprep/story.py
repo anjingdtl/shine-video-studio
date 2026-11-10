@@ -24,7 +24,7 @@ from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import scenes, text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent
-from shine.materialprep.source_spans import HEADING, segment_document
+from shine.materialprep.source_spans import HEADING, MAX_SCENE_CHARS, segment_document
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, ProviderProfile, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit
@@ -622,7 +622,7 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 # or options): the queued request no longer describes the same
                 # provider, so it stops by name rather than silently switching.
                 raise HTTPException(409, "STORY_PROVIDER_CHANGED")
-            source = segment_document(document.text)
+            source = segment_document(document.text, max_scene_chars=(MAX_SCENE_CHARS * 2) // 3)
             # The number of source units is part of the progress the person
             # waits for; it is recorded once and reused after a restart.
             if state.get("segment_total") != len(source):
