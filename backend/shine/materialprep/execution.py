@@ -108,10 +108,21 @@ def claim_next_item(factory, worker_id: str) -> str | None:
     ``reconcile_item`` instead.
     """
     with factory() as db:
+        # A capability validation must run before the production items that depend
+        # on it: a production item refuses to render until its family has one
+        # verified sample, so queueing them oldest-first made every production
+        # item fail one round before the validation that would have unblocked it
+        # was ever claimed. Validation first, then oldest-first as before.
+        from sqlalchemy import case
+
         row = db.scalar(
             select(MaterialItem)
+            .join(MaterialRun, MaterialRun.id == MaterialItem.run_id)
             .where(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)))
-            .order_by(MaterialItem.created_at, MaterialItem.id)
+            .order_by(
+                case((MaterialRun.payload["kind"].as_string() == "validation", 0), else_=1),
+                MaterialItem.created_at, MaterialItem.id,
+            )
             .limit(1)
         )
         if row is None:
