@@ -675,7 +675,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
   // work that needs the person never disappears from the grid.
-  const tiles = runs.flatMap((row) => row.items.flatMap((item) => {
+  // One slot per requirement. A requirement that was regenerated three times used
+  // to occupy four frames in the same grid - the three failed attempts plus the
+  // newest - which reads as four different materials. Only the newest revision
+  // keeps the slot; the older attempts stay in the batch history.
+  const newestRunForRequirement = new Map<string, string>();
+  for (const row of runs) {
+    for (const item of row.items) {
+      const requirementId = item.requirement_id;
+      if (requirementId && !newestRunForRequirement.has(requirementId)) {
+        newestRunForRequirement.set(requirementId, row.run_id);
+      }
+    }
+  }
+  const currentItems = (row: typeof runs[number]) => row.items.filter((item) =>
+    !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id);
+
+  const tiles = runs.flatMap((row) => currentItems(row).flatMap((item) => {
     const base = {
       row,
       item,
@@ -985,6 +1001,15 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     {tile.actions.map((action) => <button type="button" key={action.action} disabled={busy}
                       onClick={() => itemAction(tile.row, tile.item, action.action)}>{action.label}</button>)}
                   </div>}
+                  {tile.item.requirement_id && <label className="material-tile-upload">
+                    <input type="file" accept="image/*" disabled={busy}
+                      onChange={(event) => void uploadOwnMaterial({
+                        requirement_id: tile.item.requirement_id!,
+                        entity_id: String(tile.item.entity_id ?? ''),
+                        family: String(tile.item.family ?? ''),
+                      })(event)} />
+                    上传我的图片替换
+                  </label>}
                   {tile.first && tile.brief && <details className="material-tile-brief"><summary>修改外观描述</summary>
                     <label className="material-field">
                       <span>修改 {tile.item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
