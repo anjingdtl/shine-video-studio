@@ -4145,9 +4145,17 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
 
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.
-    if _text_preparation_ticks < TEXT_PREPARATION_BURST and _advance_text_preparation(
-            session_factory, settings, worker_id):
-        return "text-preparation"
+    # The bound must stay a bound and never become a freeze: the counter is only
+    # reset inside the block it guards, so a counter that reaches the limit kept
+    # every text queue - the outline, the global blueprint and the per-scene
+    # scripts - blocked forever, and a queued blueprint simply sat there.
+    # Yielding one tick to the H3 queue and breaking the streak keeps the H3
+    # queue fair while the text queues stay reachable.
+    if _text_preparation_ticks < TEXT_PREPARATION_BURST:
+        if _advance_text_preparation(session_factory, settings, worker_id):
+            return "text-preparation"
+    else:
+        _text_preparation_ticks = 0
     try:
         with session_factory() as runtime_db:
             current = resolve_runtime(runtime_db, settings)

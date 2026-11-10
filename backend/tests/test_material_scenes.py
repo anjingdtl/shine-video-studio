@@ -290,10 +290,17 @@ def test_a_local_fault_after_the_request_opened_stays_unknown(monkeypatch):
     assert outcome.details["error_type"] == "RuntimeError"
 
 
-def test_a_fault_before_any_phase_is_reported_as_not_sent(monkeypatch):
-    """A fault in pacing or the consent guard happens before the gateway runs."""
+def test_a_fault_without_any_phase_evidence_stays_unknown(monkeypatch):
+    """A missing phase record is not evidence that nothing was sent.
+
+    Only a phase that proves the request was never opened may weaken the
+    outcome to ``NOT_SENT``.  When the failure happened before the gateway
+    reported anything, the answer may still exist upstream, so the outcome
+    stays unknown and the scene is not replayed.
+    """
     outcome = _fault_outcome((), monkeypatch)
 
-    assert outcome.uncertain is False
-    assert outcome.details["external_outcome"] == "NOT_SENT"
-    assert outcome.details["last_phase"] == "PREPARING"
+    assert outcome.uncertain is True
+    assert outcome.details["external_outcome"] == "UNKNOWN"
+    assert outcome.details["last_phase"] is None
+    assert outcome.details["error_type"] == "RuntimeError"

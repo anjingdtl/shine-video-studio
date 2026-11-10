@@ -998,3 +998,45 @@ def test_bible_queue_only_reads_this_project_outlines(api):
     assert [r["id"] for r in refs] != [], "this project's outline must be referenced"
     assert all(r["id"] != other_outline.id for r in refs), \
         "another project's outline must never enter the bible synthesis"
+
+
+def test_a_burst_counter_at_the_limit_does_not_lock_the_text_queues_out(api, monkeypatch):
+    """The burst limit must stay a bound, never a permanent freeze.
+
+    The counter is reset only inside the block it guards, so a counter that had
+    reached the limit kept every text queue - the outline, the global blueprint
+    and the per-scene scripts - blocked forever, and a queued blueprint simply
+    sat there.  One tick has to be yielded to the H3 queue and the streak
+    broken, so a queued text task is still picked up.
+    """
+    from shine import worker
+
+    client, factory, settings = api
+    _route_mock(client, "scriptwriter")
+    pid = create_project(client, "不冻结")
+    text = "第一章 甲\n浪。\n第二章 乙\n浪。"
+    doc = _make_doc(factory, pid, text)
+    gw = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_bible_responder())
+    from shine.materialprep.story import queue_outline
+    with factory() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        task = queue_outline(db, pid, doc_r, gw, facts=[])
+        db.commit()
+        task_id = task.id
+
+    from shine.comfyops import runtime_configuration
+    monkeypatch.setattr(runtime_configuration, "resolve_runtime", lambda *a, **k: settings)
+    worker._text_preparation_ticks = worker.TEXT_PREPARATION_BURST
+    try:
+        # The tick that hits the limit yields to the H3 queue and breaks the
+        # streak, instead of skipping the text queues forever.
+        worker.run_configured_once(factory, None, "w-nofreeze", settings=settings)
+        assert worker._text_preparation_ticks == 0, "the burst must break its own streak"
+        # The next tick reaches the text queues again.
+        worker.run_configured_once(factory, None, "w-nofreeze", settings=settings)
+    finally:
+        worker._text_preparation_ticks = 0
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        assert row.status != "QUEUED", "the queued text task must be claimed"
+        assert row.state_version > 1

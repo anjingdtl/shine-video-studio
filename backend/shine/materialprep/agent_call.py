@@ -262,9 +262,15 @@ def call_material_agent(
         The exception is logged with its traceback: swallowing it left the fault
         undiagnosable, because neither the exception class nor the phase it
         happened at survived into the durable trace.
+
+        Only positive evidence may weaken the claim: a fault at a phase that
+        proves the request was never opened is ``NOT_SENT``.  With no phase at
+        all the outcome stays ``UNKNOWN`` - a missing record is not evidence
+        that nothing was sent, and guessing the other way would replay a
+        request whose answer may already exist upstream.
         """
-        phase = last_phase[-1] if last_phase else "PREPARING"
-        may_have_answered = phase not in PRE_REQUEST_PHASES
+        phase = last_phase[-1] if last_phase else None
+        may_have_answered = phase is None or phase not in PRE_REQUEST_PHASES
         logger.exception("material_agent_fault role=%s phase=%s may_have_answered=%s",
                          role, phase, may_have_answered)
         return AgentCallOutcome(
