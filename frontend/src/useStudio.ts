@@ -19,6 +19,8 @@ export function useStudio() {
   activeProjectId.current = projectId;
   const projectsRequest = useRef(0);
   const [assets, setAssets] = useState<Asset[]>([]);
+  /** The production whose lists are currently loaded; guards cross-project residue. */
+  const loadedProject = useRef<string | null>(null);
   const [styles, setStyles] = useState<StyleVersion[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -131,6 +133,13 @@ export function useStudio() {
 
   const loadProject = useCallback(async (id: string) => {
     const signal = AbortSignal.timeout(8000);
+    if (loadedProject.current !== id) {
+      // Switching productions: the previous list belongs to another film. A
+      // material step that keeps showing it - even for the moment the new one
+      // takes to load - reads as "these are candidates for this project".
+      setAssets([]); setStyles([]); setShots([]); setJobs([]);
+      loadedProject.current = id;
+    }
     const selected = await api<Project>(`/projects/${id}`, { signal });
     if (activeProjectId.current !== id) return;
     setProjects((rows) => rows.map((row) => row.id === id ? selected : row));
