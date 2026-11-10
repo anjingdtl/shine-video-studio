@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from shine.agents.film_contracts import EditDecisionList
 from shine.api_common import DBSession, app_settings
+from shine.api_operator import Operator
 from shine.config import Settings
 from shine.media.artifacts import safe_asset_path
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
@@ -209,6 +210,30 @@ def retry_delivery_order(order_id: str, db: DBSession) -> dict[str, Any]:
               project_id=order.project_id)
     db.commit()
     return {"id": order.id, "status": order.status}
+
+
+@router.post("/projects/{project_id}/production-series/{series_id}/assemble", status_code=202)
+def assemble_completed_series(project_id: str, series_id: str, actor: Operator, db: DBSession):
+    from shine.api_preparation import locked
+    from shine.media.delivery_engine import DeliveryBlock, _order_public, enqueue_auto_delivery
+    from shine.models import ProductionSeries
+
+    locked(db)
+    series = db.get(ProductionSeries, series_id)
+    if series is None or series.project_id != project_id:
+        raise HTTPException(404, "PRODUCTION_SERIES_NOT_FOUND")
+    if series.status != "COMPLETED":
+        raise HTTPException(409, "PRODUCTION_SERIES_NOT_COMPLETED")
+    try:
+        order = enqueue_auto_delivery(db, series)
+    except DeliveryBlock as exc:
+        raise HTTPException(409, exc.code) from exc
+    if order is None:
+        raise HTTPException(409, "DELIVERY_MANAGED_BY_PRODUCTION_RUN_OR_RETAKE")
+    add_audit(db, actor, "AUTO_DELIVERY_REQUESTED", "delivery_order", order.id,
+              {"series_id": series_id, "version": order.version}, project_id=project_id)
+    db.commit()
+    return _order_public(order)
 
 
 @router.get("/deliveries/{artifact_id}/media")

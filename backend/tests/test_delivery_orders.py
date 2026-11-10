@@ -184,6 +184,27 @@ def test_completed_series_auto_delivers_and_is_idempotent(api):
     assert reel.status_code == 200
 
 
+def test_auto_delivery_includes_passed_predecessor_from_interrupted_series(api):
+    state = _finished_two_shot_series(api)
+    factory, settings = state["factory"], state["settings"]
+    with factory.begin() as db:
+        interrupted = db.get(ProductionSeries, state["series"])
+        interrupted.status = "NEEDS_REVIEW"
+        interrupted.items[1].status = "PENDING"
+        interrupted.items[1].job_id = None
+        successor = db.get(Job, state["jobs"][1]["job"])
+        successor.request = {"shot_spec": {"continuity": {
+            "mode": "last_frame", "previous_shot_id": state["shots"][0],
+            "previous_job_id": state["jobs"][0]["job"],
+        }}}
+    series_id = _seed_completed_series(factory, state["project"], state["shots"][1:],
+                                       [state["jobs"][1]["job"]])
+    with factory() as db:
+        series = db.get(ProductionSeries, series_id)
+        edl, _, _ = build_auto_edl(db, series, asset_root=settings.data_dir)
+        assert [clip["job_id"] for clip in edl["clips"]] == [job["job"] for job in state["jobs"]]
+
+
 def test_rework_produces_a_new_version_and_keeps_history(api):
     state = _finished_two_shot_series(api)
     factory, settings = state["factory"], state["settings"]

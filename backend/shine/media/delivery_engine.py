@@ -29,6 +29,7 @@ from shine.models import (
     Job,
     MediaArtifact,
     ProductionSeries,
+    Shot,
     SubtitleTrack,
     utcnow,
 )
@@ -49,19 +50,45 @@ class DeliveryBlock(Exception):
         super().__init__(code)
 
 
-def _shots_digest(items: list, jobs: dict[str, Job]) -> str:
-    """The content identity of one series version: order, shots, jobs, artifacts."""
-    payload = []
-    for item in sorted(items, key=lambda row: row.position):
-        job = jobs.get(item.job_id or "")
-        payload.append(
-            [
-                item.position,
-                item.shot_id,
-                item.job_id or "",
-                job.artifact_id or "" if job is not None else "",
-            ]
-        )
+def _delivery_jobs(db: Session, series: ProductionSeries) -> list[Job]:
+    """Follow the first shot's pinned continuity takes back to the opening cut."""
+    items = sorted(series.items, key=lambda row: row.position)
+    if not items:
+        raise DeliveryBlock("DELIVERY_SERIES_HAS_NO_ITEMS")
+    jobs = []
+    for item in items:
+        job = db.get(Job, item.job_id) if item.job_id else None
+        if (item.status != "PASSED" or job is None or job.status != "PASSED" or job.stale
+                or job.project_id != series.project_id or job.shot_id != item.shot_id):
+            raise DeliveryBlock("DELIVERY_SHOT_NOT_PASSED")
+        jobs.append(job)
+
+    seen_shots = {job.shot_id for job in jobs}
+    prefix = []
+    first = jobs[0]
+    while True:
+        continuity = ((first.request or {}).get("shot_spec") or {}).get("continuity") or {}
+        if continuity.get("mode") in {None, "cut"}:
+            break
+        previous_id = continuity.get("previous_job_id")
+        previous = db.get(Job, previous_id) if previous_id else None
+        if (previous is None or previous.project_id != series.project_id
+                or previous.shot_id != continuity.get("previous_shot_id")
+                or previous.shot_id in seen_shots or previous.status != "PASSED"
+                or previous.stale or previous.provider != series.provider):
+            raise DeliveryBlock("DELIVERY_CONTINUITY_SOURCE_NOT_CURRENT")
+        shot = db.get(Shot, previous.shot_id)
+        if shot is None or shot.revision != previous.shot_revision:
+            raise DeliveryBlock("DELIVERY_CONTINUITY_SOURCE_NOT_CURRENT")
+        seen_shots.add(previous.shot_id)
+        prefix.append(previous)
+        first = previous
+    return [*reversed(prefix), *jobs]
+
+
+def _shots_digest(jobs: list[Job]) -> str:
+    """Pin the order and exact take for each shot in the delivery."""
+    payload = [[position, job.shot_id, job.id, job.artifact_id or ""] for position, job in enumerate(jobs)]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -92,26 +119,7 @@ def enqueue_auto_delivery(db: Session, series: ProductionSeries) -> DeliveryOrde
     if any(row.trace.get("series_id") == series.id for row in retakes):
         return None
 
-    items = list(series.items)
-    if not items:
-        raise DeliveryBlock("DELIVERY_SERIES_HAS_NO_ITEMS")
-    job_ids = [item.job_id for item in items if item.job_id]
-    jobs = {
-        job.id: job
-        for job in db.scalars(select(Job).where(Job.id.in_(job_ids))).all()
-    }
-    unpassed = [
-        item.position
-        for item in items
-        if item.status != "PASSED"
-        or not item.job_id
-        or item.job_id not in jobs
-        or jobs[item.job_id].status != "PASSED"
-        or jobs[item.job_id].stale
-    ]
-    if unpassed:
-        raise DeliveryBlock("DELIVERY_SHOT_NOT_PASSED")
-    digest = _shots_digest(items, jobs)
+    digest = _shots_digest(_delivery_jobs(db, series))
     orders = db.scalars(
         select(DeliveryOrder).where(DeliveryOrder.series_id == series.id)
     ).all()
@@ -197,8 +205,8 @@ def build_auto_edl(
 ) -> tuple[dict, str, dict]:
     """Generate the structured EditDecisionList for a finished series.
 
-    The clip order is the confirmed series order (``position``), never the
-    creation time.  Every clip must reference the current passed attempt and
+    Pinned continuity predecessors come first, followed by the confirmed
+    series order. Every clip must reference the current passed attempt and
     a real artifact whose bytes still match its registered hash; the out
     point is the real media duration measured with FFprobe.
     """
@@ -208,11 +216,11 @@ def build_auto_edl(
     intent, rules = _edit_intent(db, series)
     intent_source = "frozen_edit_intent" if intent else "default_cut_rules"
     clips = []
-    items = sorted(list(series.items), key=lambda row: row.position)
-    for item in items:
-        job = db.get(Job, item.job_id) if item.job_id else None
-        if item.status != "PASSED" or job is None or job.status != "PASSED" or job.stale:
-            raise DeliveryBlock("DELIVERY_SHOT_NOT_PASSED")
+    jobs = _delivery_jobs(db, series)
+    prefix_count = len(jobs) - len(series.items)
+    if prefix_count:
+        rules = {**rules, "order": "pinned_continuity_predecessors_then_series_position"}
+    for position, job in enumerate(jobs):
         attempts = list(job.attempts)
         if not attempts:
             raise DeliveryBlock("DELIVERY_SHOT_ATTEMPT_MISSING")
@@ -240,14 +248,18 @@ def build_auto_edl(
                 "in_s": 0.0,
                 "out_s": round(info.duration_s, 3),
                 "transition": "CUT",
-                "reason": f"Series position {item.position}: passed real take, full take",
+                "reason": (
+                    "Pinned continuity predecessor: passed real take, full take"
+                    if position < prefix_count else
+                    f"Series position {position - prefix_count}: passed real take, full take"
+                ),
             }
         )
     if not clips:
         raise DeliveryBlock("DELIVERY_EMPTY_EDIT")
-    if intent and intent.get("clips") and len(intent["clips"]) == len(clips):
+    if intent and intent.get("clips") and len(intent["clips"]) == len(clips) - prefix_count:
         planned = sorted(intent["clips"], key=lambda row: row.get("order", 0))
-        for clip, plan in zip(clips, planned, strict=False):
+        for clip, plan in zip(clips[prefix_count:], planned, strict=True):
             clip["reason"] = (
                 f"Series position {plan.get('order', '?')}: frozen edit intent"
                 f" (planned {plan.get('planned_duration_s')}s, {plan.get('transition')});"

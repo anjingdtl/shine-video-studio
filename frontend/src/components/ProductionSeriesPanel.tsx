@@ -567,12 +567,21 @@ export default function ProductionSeriesPanel({
     }
   }
 
-  async function act(seriesId: string, action: 'cancel' | 'pause' | 'resume') {
+  async function act(seriesId: string, action: 'cancel' | 'pause' | 'resume' | 'assemble') {
     setWorking(true);
     try {
-      await api(`/production-series/${seriesId}/${action}`, json('POST', {}));
+      if (action === 'assemble') {
+        const order = await api<{ version: number; status: string }>(
+          `/projects/${projectId}/production-series/${seriesId}/assemble`, json('POST', {}),
+        );
+        onMessage(order.status === 'DELIVERED'
+          ? `成片 v${order.version} 已可在交付区查看。`
+          : `成片 v${order.version} 已排队。将按镜头顺序纳入开场及本批所承接的已通过镜头。`, 'success');
+      } else {
+        await api(`/production-series/${seriesId}/${action}`, json('POST', {}));
+        onMessage(`已${{ cancel: '取消', pause: '暂停', resume: '恢复' }[action]}该生产序列。`, 'success');
+      }
       await reload();
-      onMessage(`已${{ cancel: '取消', pause: '暂停', resume: '恢复' }[action]}该生产序列。`, 'success');
     } catch (error) {
       onMessage(String(error), 'error');
     } finally {
@@ -924,6 +933,9 @@ export default function ProductionSeriesPanel({
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
             </div>
             <div className="series-actions">
+              {row.status === 'COMPLETED' && row.provider === 'comfyui'
+                && <button className="secondary-button" disabled={working}
+                  onClick={() => void act(row.id, 'assemble')}>合成连续成片</button>}
               {row.status === 'QUEUED' && <button className="secondary-button" disabled={working} onClick={() => act(row.id, 'pause')}>暂停</button>}
               {['PAUSED', 'PAUSE_REQUESTED'].includes(row.status) && <button className="secondary-button" disabled={working} onClick={() => act(row.id, 'resume')}>恢复</button>}
               {['QUEUED', 'PAUSED', 'PAUSE_REQUESTED', 'NEEDS_REVIEW'].includes(row.status)
