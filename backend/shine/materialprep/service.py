@@ -339,8 +339,14 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         raise HTTPException(409, {"code": "MATERIAL_PLAN_STALE", "actual_snapshot": actual})
 
     aggregated = aggregated_requirements(db, source)
-    if aggregated["conflicts"]:
-        raise HTTPException(409, {"code": "MATERIAL_IDENTITY_AMBIGUOUS", "conflicts": aggregated["conflicts"]})
+    # Several descriptions of one name used to block the confirmation outright.
+    # That is the normal shape of a script: the same person is introduced one
+    # way in the first scene ("a pale old man in a white robe") and another way
+    # later ("the minister's assistant who brings the coin"). Refusing made the
+    # list impossible to confirm, so no material was ever produced for a real
+    # script. The variants stay on the requirement for the person to read and
+    # adjust; they are no longer a gate.
+    identity_notes = list(aggregated["conflicts"])
 
     known = {(r["family"], r["entity_id"]) for r in aggregated["requirements"]}
     decisions: list[dict[str, Any]] = []
@@ -423,6 +429,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
     db.commit()
     return {"plan_revision_id": plan.id, "confirmation_id": confirmation_id,
             "confirmation_hash": graph_hash(confirmation_payload), "decisions": decisions,
+            "identity_notes": identity_notes,
             "status": plan.status}
 
 
