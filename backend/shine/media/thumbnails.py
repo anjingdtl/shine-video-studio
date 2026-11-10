@@ -21,7 +21,7 @@ def thumbnail(path: Path, expected_sha256: str, ffmpeg_path: str = "ffmpeg",
         raise HTTPException(404, "ASSET_FILE_MISSING") from exc
     if hashlib.sha256(content).hexdigest() != expected_sha256:
         raise HTTPException(409, "ASSET_HASH_CHANGED")
-    etag = f'"{expected_sha256}:{seek_s:g}"'
+    etag = f'"{expected_sha256}"'
     if if_none_match and etag in {part.strip() for part in if_none_match.split(",")}:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": CACHE_CONTROL})
     poster = _grab_frame(content, ffmpeg_path, seek_s)
