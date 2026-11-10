@@ -27,7 +27,9 @@ _WHITESPACE = re.compile(r"\s+")
 # Leaves room for the episode/shot suffix and a _vN disambiguator inside the
 # 255-character component limit, without depending on a long data directory.
 MAX_TITLE_LENGTH = 60
-MAX_COMPONENT_LENGTH = 120
+# Keeps a worst-case local path (data dir + artifacts/<uuid>/current/ + name)
+# inside the classic Windows 260-character limit without enabling long paths.
+MAX_COMPONENT_LENGTH = 96
 
 
 def sanitize_component(text: str | None, *, fallback: str = "未命名", limit: int = MAX_TITLE_LENGTH) -> str:

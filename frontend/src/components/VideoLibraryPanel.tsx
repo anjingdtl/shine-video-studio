@@ -108,6 +108,7 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [organizing, setOrganizing] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<DeleteResult | null>(null);
@@ -192,6 +193,26 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
     }
   }
 
+  async function organizeCurrent() {
+    if (organizing || busy) return;
+    setOrganizing(true);
+    try {
+      const outcome = await api<{ files_moved: number; errors: Array<{ message: string }> }>(
+        `/projects/${projectId}/video-library/organize-current`, json('POST', {}));
+      await reload();
+      onMessage(
+        outcome.errors.length
+          ? `已整理 ${outcome.files_moved} 个文件，${outcome.errors.length} 个文件被占用未能移动（可稍后重试）。`
+          : `已整理 ${outcome.files_moved} 个文件：当前采用版本在 current/，未采用版本在 history/。`,
+        outcome.errors.length ? 'error' : 'success',
+      );
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      setOrganizing(false);
+    }
+  }
+
   const summary = library?.summary;
 
   return <div className="video-library" aria-label="成片库">
@@ -232,6 +253,11 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
           {blockedSelected.length > 0 && <>，{blockedSelected.length} 条受保护</>}
         </span>
         <span className="library-page-note">第 {pageFirst}–{pageLast} 条 / 共 {entries.length} 条</span>
+        <button type="button" className="secondary-button" disabled={busy || organizing}
+          title="把当前采用版本移入 current/，把未采用版本移入 history/；只移动文件，不删除、不改 SHA"
+          onClick={() => void organizeCurrent()}>
+          <FolderOpen size={14} /> {organizing ? '正在整理…' : '整理采用目录'}
+        </button>
         <button type="button" className="danger-button must-button" disabled={busy || deletableSelected.length === 0}
           onClick={() => { setResult(null); setConfirming(true); }}>
           <Trash2 size={14} /> 批量删除（{deletableSelected.length}）

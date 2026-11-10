@@ -138,6 +138,20 @@ describe('成片库', () => {
     expect((await screen.findAllByText(/已删除 12 条/)).length).toBeGreaterThan(0);
   });
 
+  it('「整理采用目录」只移动文件并回报数量', async () => {
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/video-library$/, respond: () => jsonResponse(library([entry(1)])) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/video-library\/organize-current$/, respond: () => jsonResponse({
+      project_id: 'proj-1', moved: [{ artifact_id: 'art-1', storage_path: 'current/x.mp4', target: 'current' }],
+      errors: [], files_moved: 1,
+    }) });
+    const user = userEvent.setup();
+    render(<App />);
+    await openLibrary(user);
+    await user.click(await screen.findByRole('button', { name: /整理采用目录/ }));
+    await waitFor(() => expect(stub.callsOf('POST', /organize-current$/)).toHaveLength(1));
+    expect((await screen.findAllByText(/已整理 1 个文件/)).length).toBeGreaterThan(0);
+  });
+
   it('受保护条目不会进入删除请求，并明确显示原因', async () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/video-library$/, respond: () => jsonResponse(library([
       entry(1),

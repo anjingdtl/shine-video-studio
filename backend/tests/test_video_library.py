@@ -277,6 +277,8 @@ def test_naming_is_ledger_backed_and_windows_safe():
     assert sanitize_component("CON") == "_CON"
     assert sanitize_component("LPT9.report") == "_LPT9.report"
     assert sanitize_component("  ") == "未命名"
+    long_title = "很长" * 80
+    assert len(sanitize_component(long_title)) <= 60
 
 
 def test_named_storage_keeps_content_identity_and_never_overwrites(tmp_path):
@@ -462,3 +464,43 @@ def test_video_thumbnail_uses_a_representative_frame(tmp_path):
     representative = thumbnail(video, digest, ffmpeg, seek_s=1.0).body
     assert average_red(early) < 60
     assert average_red(representative) > 150
+
+
+def test_organize_moves_current_and_history_into_their_folders(api):
+    client, factory, settings, project_id, style, shot_a, _shot_b = _setup(api)
+    with factory() as db:
+        old = _video(db, project_id, shot_job=None, content=b"old",
+                     path=f"artifacts/{project_id}/shots/old.mp4")
+        _write(db, settings, old, b"old")
+        _passed_job(db, project_id, shot_a, style["id"], old, created=datetime(2026, 1, 1))
+        current = _video(db, project_id, shot_job=None, content=b"current",
+                         path=f"artifacts/{project_id}/shots/current.mp4")
+        _write(db, settings, current, b"current")
+        _passed_job(db, project_id, shot_a, style["id"], current, created=datetime(2026, 1, 2))
+        reel = _video(db, project_id, shot_job=None, content=b"reel", kind="delivery",
+                      path=f"artifacts/{project_id}/delivery/reel.mp4")
+        _write(db, settings, reel, b"reel")
+        reel.provenance = {"clips": [{"job_id": db.get(Job, current.job_id).id}] if False else []}
+        db.add(DeliveryOrder(project_id=project_id, scope_kind="series", scope_id="scope-1",
+                             version=1, status="DELIVERED", artifact_id=reel.id))
+        db.commit()
+        ids = {"old": old.id, "current": current.id, "reel": reel.id}
+
+    response = client.post(f"/api/v1/projects/{project_id}/video-library/organize-current",
+                           headers={"X-Shine-Local-Action": "1"}, json={})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["files_moved"] == 3
+    with factory() as db:
+        assert db.get(MediaArtifact, ids["current"]).storage_path.endswith("/current/current.mp4")
+        assert db.get(MediaArtifact, ids["old"]).storage_path.endswith("/history/old.mp4")
+        assert db.get(MediaArtifact, ids["reel"]).storage_path.endswith("/delivery/current/reel.mp4")
+        from sqlalchemy import text
+
+        assert db.execute(
+            text("select count(*) from audit_events where project_id=:p "
+                 "and event_type='VIDEO_LIBRARY_ORGANIZED'"),
+            {"p": project_id},
+        ).scalar() == 1
+    assert (settings.data_dir / "artifacts" / project_id / "current" / "current.mp4").is_file()
+    assert (settings.data_dir / "artifacts" / project_id / "history" / "old.mp4").is_file()

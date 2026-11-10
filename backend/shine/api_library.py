@@ -516,6 +516,65 @@ def delete_videos(project_id: str, body: DeleteVideosRequest, request: Request,
     return result
 
 
+@router.post("/projects/{project_id}/video-library/organize-current")
+def organize_current(project_id: str, request: Request, actor: Operator, db: DBSession) -> dict[str, Any]:
+    """Move adopted videos into the adopted folder, unadopted ones to history.
+
+    This is an explicit user action: it never touches bytes other than moving
+    the file, keeps the SHA identity, and does not delete anything.  It is the
+    only way existing files are reorganised; ordinary production and library
+    loads never move a file on their own.
+    """
+    from shine.media.video_layout import (
+        CURRENT,
+        DELIVERY_CURRENT,
+        DELIVERY_HISTORY,
+        HISTORY,
+        relocate_artifact,
+        revert_file_moves,
+    )
+
+    project = require_project(db, project_id)
+    asset_root = request.app.state.asset_root
+    current_shot = _current_shot_artifacts(db, project_id)
+    current_delivery = _current_delivery_artifacts(db, project_id)
+    artifacts = db.scalars(
+        select(MediaArtifact).where(
+            MediaArtifact.project_id == project_id,
+            MediaArtifact.artifact_kind.in_(VIDEO_KINDS),
+            MediaArtifact.deleted_at.is_(None),
+        )
+    ).all()
+    moves: list[tuple[str, str]] = []
+    moved: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for artifact in artifacts:
+        if artifact.artifact_kind == "video":
+            target = CURRENT if artifact.id in current_shot else HISTORY
+        else:
+            target = DELIVERY_CURRENT if artifact.id in current_delivery else DELIVERY_HISTORY
+        try:
+            result = relocate_artifact(db, asset_root, artifact, target)
+        except (OSError, ValueError) as exc:
+            errors.append({"artifact_id": artifact.id, "message": str(exc)[:200]})
+            continue
+        if result:
+            moves.append(result)
+            moved.append({"artifact_id": artifact.id, "storage_path": result[1], "target": target})
+    add_audit(
+        db, actor, "VIDEO_LIBRARY_ORGANIZED", "project", project.id,
+        {"moved": moved, "errors": errors}, project_id=project_id,
+    )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        revert_file_moves(asset_root, moves)
+        raise
+    return {"project_id": project.id, "moved": moved, "errors": errors,
+            "files_moved": len(moved)}
+
+
 def _digest(path) -> str:
     with path.open("rb") as media:
         return hashlib.file_digest(media, "sha256").hexdigest()

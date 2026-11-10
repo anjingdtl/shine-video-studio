@@ -1155,7 +1155,8 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - **采用与未采用分目录**：新单镜采用版本写 `artifacts/<项目>/current/`，重拍先写 `history/`，
   显式选中时两文件互换并同步 attempt 输出路径与连续性来源路径（提交失败回滚文件移动）；
   新的自动交付写 `delivery/current/`，手工装配写 `delivery/history/`。
-  既有正式文件保持原路径，正式六镜、三镜与 v2 不得在验收中删除或迁移。
+  库页的「整理采用目录」是唯一会批量移动既有文件的动作（Operator，只移动、不删除、不改 SHA，
+  失败逐条报告）；普通加载与生产不自动迁移。正式六镜、三镜与 v2 不得在验收中删除或迁移。
 - **视频封面取 1 秒代表帧，封面失败仍可播放**。`thumbnail(..., seek_s=1.0)` 由视频接口使用，
   图片接口保持首帧；封面 URL 带 `?poster=1s` 以绕过旧的 immutable 缓存。
   `VideoPreview` 封面失败时内嵌 `<video>`，不显示死帧“预览不可用”。
