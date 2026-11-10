@@ -250,7 +250,10 @@ def test_an_over_budget_request_is_refused_before_any_model_call(api, monkeypatc
     _route(client)
     calls = _responder(monkeypatch, lambda _n: copy.deepcopy(BRIEF_ANSWER))
     with factory() as db:
-        item = _item(db, project_id, description="字" * 60000)
+        # The budget baseline is a 1M-context reasoning model, so "over budget"
+        # now means genuinely more than a million tokens rather than a few
+        # thousand characters.
+        item = _item(db, project_id, description="字" * 1_200_000)
         item_id, version = item.id, item.state_version
 
     result = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)

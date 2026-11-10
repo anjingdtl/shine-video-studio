@@ -230,18 +230,26 @@ def test_an_over_long_prompt_is_refused_and_never_truncated():
     assert excinfo.value.details["chars"] > image_prompts.MAX_COMPOSED_PROMPT_CHARS
 
 
-def test_unanswered_questions_block_the_render():
-    """A clarification the user has not answered must not be invented."""
-    from shine.materialprep.execution import ImageExecutionError, _compose_prompt
+def test_an_unanswered_question_still_renders_a_candidate():
+    """A question is information for the person, not a stop sign.
+
+    The producer may answer with a question instead of a look. Refusing there
+    left a real list unrenderable whenever the producer wanted one more detail,
+    so the first confirmed description is used to make one candidate - which the
+    person still has to promote before it becomes a master.
+    """
+    from shine.materialprep.execution import _compose_prompt
 
     context = {
         "item_id": "i",
-        "item_payload": {"brief": {**_brief(questions=["coat material?"]).model_dump(), "schema_version": "1.0"}},
-        "requirement_payload": {"family": "character", "entity_id": "Lin"},
+        "item_payload": {"brief": {**_brief(questions=["coat material?"]).model_dump(),
+                                   "schema_version": "1.0"}},
+        "requirement_payload": {"family": "character", "entity_id": "Lin",
+                                "description": "A thin young man in a worn grey coat."},
     }
-    with pytest.raises(ImageExecutionError) as excinfo:
-        _compose_prompt(context)
-    assert excinfo.value.code == "MATERIAL_BRIEF_NEEDS_CLARIFICATION"
+    prompt = _compose_prompt(context)
+    # The produced look is used as-is; the open question no longer stops it.
+    assert "grey wool coat" in prompt.prompt
 
 
 # --- submission outcome mapping -------------------------------------------

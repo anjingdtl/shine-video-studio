@@ -332,8 +332,13 @@ def test_the_scenes_route_publishes_the_server_segmentation(api):
     assert body["scenes"][0]["scene_key"] == "S1"
     assert body["span_ids"], body
 
-def test_an_ambiguous_identity_is_reported_and_blocks_the_confirmation(api):
-    """The same name under two descriptions is a question for the user, not a merge."""
+def test_an_ambiguous_identity_is_reported_but_does_not_block(api):
+    """The same name under two descriptions is reported, never a silent merge.
+
+    It is also not a stop sign: a script introduces one person differently in
+    different scenes, and refusing the whole list there made a real script
+    impossible to confirm, so no material was ever produced.
+    """
     client, factory, _ = api
     project_id = _project(client)
     document = _document(client, project_id, "场景一：\n林知远：你来了。\n\n场景二：\n林知远转身。\n")
@@ -355,7 +360,7 @@ def test_an_ambiguous_identity_is_reported_and_blocks_the_confirmation(api):
     assert analyzed["conflicts"], analyzed
     assert analyzed["conflicts"][0]["code"] == "MATERIAL_IDENTITY_AMBIGUOUS"
 
-    refused = client.post(
+    confirmed = client.post(
         f"/api/v1/projects/{project_id}/material-preparation/confirm",
         json={
             "plan_revision_id": analyzed["plan_revision_id"],
@@ -368,12 +373,14 @@ def test_an_ambiguous_identity_is_reported_and_blocks_the_confirmation(api):
                 }
                 for requirement in analyzed["requirements"]
             ],
-            "visual_direction": {"era": "1930年代"},
+            "visual_direction": {"era": "1930s Shanghai"},
         },
         headers=LOCAL_ACTION,
     )
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"]["code"] == "MATERIAL_IDENTITY_AMBIGUOUS"
+    assert confirmed.status_code == 200, confirmed.text
+    # The variants stay visible to the person instead of being collapsed.
+    assert confirmed.json()["identity_notes"], confirmed.json()
+    assert confirmed.json()["identity_notes"][0]["entity_id"] == "林知远"
 
 
 def test_a_requirement_from_another_project_is_refused(api):

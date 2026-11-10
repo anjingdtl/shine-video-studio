@@ -321,14 +321,21 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
     if not brief_raw:
         raise ImageExecutionError("MATERIAL_BRIEF_MISSING", item_id=context["item_id"])
     brief = MaterialImageBrief.model_validate(brief_raw)
-    if brief.questions:
-        # An unanswered clarification means the user has not confirmed the look;
-        # rendering it would invent an answer.
-        raise ImageExecutionError(
-            "MATERIAL_BRIEF_NEEDS_CLARIFICATION", questions=brief.questions, item_id=context["item_id"]
-        )
-    direction = MaterialVisualDirection.model_validate(payload.get("visual_direction") or {})
     requirement = context["requirement_payload"]
+    direction = MaterialVisualDirection.model_validate(payload.get("visual_direction") or {})
+    if not (brief.appearance or "").strip():
+        # The producer may answer with a question instead of a look when a fact
+        # is missing. That question is worth showing the person, but it must not
+        # stop the render: the first confirmed description of the requirement is
+        # enough to make one candidate, and a candidate is only a proposal the
+        # person still has to promote. Blocking on the question left a real list
+        # unrenderable whenever the producer wanted one more detail.
+        fallback = str(requirement.get("description") or "").strip()
+        if not fallback:
+            raise ImageExecutionError(
+                "MATERIAL_BRIEF_EMPTY_APPEARANCE", questions=brief.questions, item_id=context["item_id"]
+            )
+        brief = brief.model_copy(update={"appearance": fallback})
     family = requirement.get("family") or payload.get("family")
     if family not in image_prompts.COMPOSITION_RULES:
         raise ImageExecutionError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
