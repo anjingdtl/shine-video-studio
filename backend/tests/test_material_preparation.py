@@ -283,10 +283,10 @@ def test_prop_carrier_typing_roundtrip():
     })
     paper_prompt = compose("prop", brief, requirement_name="告示", carrier="paper")
     object_prompt = compose("prop", brief, requirement_name="告示", carrier="object")
-    assert "no text, no typography" not in paper_prompt.negative_prompt
+    assert "no lettering" not in paper_prompt.negative_prompt
     assert "no watermark" in paper_prompt.negative_prompt
-    assert "no text, no typography" in object_prompt.negative_prompt
-    assert "paper content carrier" in paper_prompt.prompt
+    assert "no lettering" in object_prompt.negative_prompt
+    assert "flat paper carrier" in paper_prompt.prompt
 
 
 def test_material_image_brief_carries_no_execution_authority():

@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from shine.materialprep import qwen_image_standard as standard
 from shine.materialprep.contracts import (
     MaterialCarrier,
     MaterialFamily,
@@ -39,8 +40,14 @@ from shine.materialprep.contracts import (
     MaterialVisualDirection,
 )
 
-PROMPT_TEMPLATE_VERSION = "material-image-v2"
-"""Bump when a composition rule changes; readiness evidence is bound to it."""
+PROMPT_TEMPLATE_VERSION = "material-image-v3-qwen21"
+"""Bump when a composition rule changes; readiness evidence is bound to it.
+
+v3 composes the prompt as layered prose under the Qwen-Image 2.1 standard
+(``qwen_image_standard``) instead of joining ``appearance:``/``must keep``/``era:``
+labels: that model reads the prompt as a sentence, and the label form diluted the
+script description and the confirmed film style it was supposed to carry.
+"""
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 """Same deterministic script test the H3 rule pack uses for ``H3_ENGLISH``."""
@@ -48,9 +55,41 @@ _CJK = re.compile(r"[\u4e00-\u9fff]")
 MAX_COMPOSED_PROMPT_CHARS = 4000
 MAX_COMPOSED_NEGATIVE_CHARS = 1200
 
-_NO_TEXT_WATERMARK = "no text, no typography, no letters, no words, no numbers, no captions, no logo, no watermark"
-_NO_WATERMARK_ONLY = "no watermark"
-_NO_COLLAGE = "no collage, no split panel, no multiple views, no character sheet, no border, no frame overlay"
+FRAMING_SENTENCES: dict[MaterialFamily, str] = {
+    "character": (
+        "The subject is framed from the waist up, the whole head inside the frame, the face unobstructed and "
+        "turned towards the camera with a calm neutral expression, and no other people appear."
+    ),
+    "scene": (
+        "The framing is a wide establishing view of the whole space with a consistent perspective and horizon, "
+        "and no people, figures or silhouettes appear anywhere in it."
+    ),
+    "prop": (
+        "The object is shown whole, its entire outline inside the frame, with nothing holding or wearing it and "
+        "no second copy of it in the picture."
+    ),
+}
+"""The family's fixed composition, written as the sentence the standard asks for."""
+
+CARRIER_FRAMING: dict[MaterialCarrier, str] = {
+    "paper": (
+        "The carrier is shown complete and face-on, its written or printed content legible as the brief "
+        "describes it, with no person, hands or body parts in the frame and no second copy."
+    ),
+    "screen": (
+        "The display is shown complete and face-on, its on-screen content legible as the brief describes it, "
+        "with no person, hands or body parts in the frame and no second copy."
+    ),
+}
+
+_NO_TEXT_SENTENCE = "Nothing in the frame is written text, lettering, numbering, a caption, a logo or a watermark"
+_NO_COLLAGE_SENTENCE = "The picture is a single view, never a collage, split panel, character sheet or bordered sheet"
+_NO_WATERMARK_SHORT = "no watermark"
+_NO_TEXT_SHORT = "no text, no lettering, no captions, no logo"
+_NO_COLLAGE_SHORT = "no collage, no split panel, no character sheet, no border overlay"
+
+_TEXT_EXCLUSION_SENTENCES = (_NO_TEXT_SENTENCE, _NO_COLLAGE_SENTENCE)
+"""Composition rules that must survive even after the studio sentences are joined."""
 
 COMPOSITION_RULES: dict[MaterialFamily, str] = {
     "character": (
@@ -165,21 +204,25 @@ def compose(
     if family not in COMPOSITION_RULES:
         raise ImagePromptError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
 
-    composition = COMPOSITION_RULES[family]
-    text_exclusion = _NO_TEXT_WATERMARK
-    if family == "prop" and carrier in PROP_CARRIER_RULES:
-        composition = PROP_CARRIER_RULES[carrier]
+    framing = FRAMING_SENTENCES[family]
+    text_sentences = list(_TEXT_EXCLUSION_SENTENCES)
+    if family == "prop" and carrier in CARRIER_FRAMING:
+        framing = CARRIER_FRAMING[carrier]
         if carrier in ("paper", "screen"):
-            text_exclusion = _NO_WATERMARK_ONLY
+            # For these carriers the written or on-screen content IS the
+            # material, so only the watermark and collage bans still apply.
+            text_sentences = [_NO_COLLAGE_SENTENCE]
 
-    appearance = _require_prompt_language(brief.appearance, field="appearance")
+    appearance = standard.strip_quality_slogans(
+        _require_prompt_language(brief.appearance, field="appearance"))
     if not appearance:
         raise ImagePromptError("MATERIAL_BRIEF_EMPTY", field="appearance")
-    must_keep = [_require_prompt_language(item, field="must_keep") for item in brief.must_keep]
-    avoid = [_require_prompt_language(item, field="avoid") for item in brief.avoid]
+    must_keep = [standard.strip_quality_slogans(_require_prompt_language(item, field="must_keep"))
+                 for item in brief.must_keep]
+    avoid = [standard.strip_quality_slogans(_require_prompt_language(item, field="avoid"))
+             for item in brief.avoid]
 
     direction = visual_direction or MaterialVisualDirection()
-    direction_parts = []
     for label, value in (
         ("era", direction.era),
         ("palette", direction.palette),
@@ -187,9 +230,8 @@ def compose(
         ("texture", direction.texture),
         ("notes", direction.notes),
     ):
-        cleaned = _require_prompt_language(value, field=f"visual_direction.{label}") if value else ""
-        if cleaned:
-            direction_parts.append(f"{label}: {cleaned}")
+        if value:
+            _require_prompt_language(value, field=f"visual_direction.{label}")
 
     subject = ""
     subject_omitted: str | None = None
@@ -203,18 +245,36 @@ def compose(
             subject_omitted = "not_prompt_language"
         else:
             subject = requirement_name.strip()
-    positive = _join(
-        [
-            composition,
-            f"subject: {subject}" if subject else "",
-            f"appearance: {appearance}",
-            "; ".join(f"must keep {item}" for item in must_keep),
-            "; ".join(direction_parts),
-            text_exclusion,
-            _NO_COLLAGE,
-        ]
-    )
-    negative = _join([*avoid, text_exclusion, _NO_COLLAGE])
+
+    # The standard's order: anchor, subject, environment, lighting, material,
+    # framing, then a closing line.  A must-keep fact already carried by the
+    # appearance prose is not repeated - repetition pushed the script
+    # description out of the model's attention instead of reinforcing it.
+    lowered = appearance.casefold()
+    extra = [item for item in must_keep if item and item.casefold()[:40] not in lowered]
+    if extra:
+        extra_sentence = "Fixed details that must not drift: " + "; ".join(extra)
+    else:
+        extra_sentence = ""
+
+    layers = [
+        standard.anchor_sentence(family, carrier, direction),
+        f"{subject + ', ' if subject else ''}{appearance}",
+        standard.environment_sentence(family, direction),
+        standard.lighting_sentence(direction),
+        standard.material_sentence(direction),
+        framing,
+        extra_sentence,
+        *text_sentences,
+        standard.closing_sentence(family),
+    ]
+    positive = standard.join_layers(layers)
+    # A paper or screen carrier IS its legible content, so the text ban must not
+    # reach its negative prompt; only the watermark and collage bans apply.
+    negative_exclusions = [_NO_WATERMARK_SHORT, _NO_COLLAGE_SHORT]
+    if not (family == "prop" and carrier in ("paper", "screen")):
+        negative_exclusions.insert(0, _NO_TEXT_SHORT)
+    negative = _join([*avoid, *negative_exclusions])
 
     if len(positive) > MAX_COMPOSED_PROMPT_CHARS:
         # Never truncate: a cut composition rule or must-keep fact would render
@@ -260,4 +320,7 @@ def template_evidence() -> dict[str, Any]:
         "prop_carriers": sorted(PROP_CARRIER_RULES),
         "max_prompt_chars": MAX_COMPOSED_PROMPT_CHARS,
         "max_negative_chars": MAX_COMPOSED_NEGATIVE_CHARS,
+        # The provider's prompt standard travels with the template identity, so
+        # readiness evidence names both the rules and how they are written.
+        "prompt_standard": standard.standard_evidence(),
     }

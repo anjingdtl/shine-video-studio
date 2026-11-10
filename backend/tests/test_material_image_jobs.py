@@ -181,9 +181,11 @@ def test_composition_rules_are_fixed_per_family_and_deterministic():
     assert first.prompt == second.prompt
     assert first.sha256 == second.sha256
     assert first.template_version == image_prompts.PROMPT_TEMPLATE_VERSION
-    assert "half-body" in first.prompt and "grey-white" in first.prompt
+    # v3 writes the family framing as a sentence under the Qwen-Image 2.1
+    # standard, not as a keyword list.
+    assert "framed from the waist up" in first.prompt and "grey-white" in first.prompt
     assert "no people" in image_prompts.compose("scene", _brief()).prompt
-    assert "no person holding it" in image_prompts.compose("prop", _brief()).prompt
+    assert "nothing holding or wearing it" in image_prompts.compose("prop", _brief()).prompt
 
 
 def test_avoid_becomes_the_negative_prompt_and_never_the_positive():

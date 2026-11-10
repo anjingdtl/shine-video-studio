@@ -87,6 +87,8 @@ def build_context(
     visual_direction: dict[str, Any],
     locked_facts: list[str],
     project_language: str,
+    style_bible: dict[str, Any] | None = None,
+    style_version: int | None = None,
 ) -> dict[str, Any]:
     """The server envelope the model receives.
 
@@ -103,6 +105,8 @@ def build_context(
             "user_note": requirement_payload.get("brief_note") or "",
         },
         "visual_direction": visual_direction or {},
+        "frozen_style_bible": style_bible or {},
+        "frozen_style_version": style_version,
         "locked_story_facts": list(locked_facts),
         "script_language": project_language,
         "output_contract": BRIEF_CONTRACT.__name__,
@@ -114,6 +118,17 @@ def build_context(
             "not a style choice.",
             "Add no new plot fact and change no confirmed identity.",
             "Put a missing fact that affects the picture into questions instead of deciding it yourself.",
+            "The appearance must visibly belong to the frozen style bible: carry its colour palette, "
+            "lighting tone, lens and texture language, and the production genre, into the English prose. "
+            "The style bible is written in the script language; translate its intent, never paste it.",
+            "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
+            "subject first, then its dress and build, then the surface materials and their textures. Use "
+            "concrete nouns ('brushed brass', 'deep navy wool'), not bare colours or bare materials.",
+            "Never write quality slogans such as masterpiece, best quality, 8k, 4k, highly detailed, "
+            "award winning or trending on artstation: the provider guidance rules them out and they add "
+            "no picture information.",
+            "Describe only what is in the picture. The negative field exists, but the appearance prose "
+            "itself must stay positive and observational.",
         ],
     }
 
@@ -129,7 +144,10 @@ class BriefError(RuntimeError):
 
 def _load_context(factory, item_id: str) -> dict[str, Any]:
     """Everything the brief envelope is built from, read once."""
+    from sqlalchemy import select
+
     from shine.comfyops.models import AssetRequirement, PreProductionPlan
+    from shine.models import StyleVersion
 
     with factory() as db:
         item = db.get(MaterialItem, item_id)
@@ -148,7 +166,17 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
             for fact in scene.get("locked_facts") or []:
                 if fact not in locked_facts:
                     locked_facts.append(fact)
+        # The frozen style bible is the director's look. A material brief that
+        # never sees it can only invent a different film, which is exactly how a
+        # reference still ends up not matching the production it belongs to.
+        style = db.scalar(
+            select(StyleVersion)
+            .where(StyleVersion.project_id == item.project_id, StyleVersion.frozen_at.is_not(None))
+            .order_by(StyleVersion.version.desc())
+        )
         return {
+            "style_bible": dict((style.snapshot or {}) if style else {}),
+            "style_version": style.version if style else None,
             "document_id": (plan.payload or {}).get("document_id") if plan else None,
             "document_sha256": (plan.payload or {}).get("script_hash") if plan else None,
             "item_id": item.id,
@@ -191,6 +219,8 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         visual_direction=data["visual_direction"],
         locked_facts=data["locked_facts"],
         project_language=data["project_language"],
+        style_bible=data.get("style_bible"),
+        style_version=data.get("style_version"),
     )
     system_prompt = material_image_brief_prompt()
     schema = BRIEF_CONTRACT.model_json_schema()

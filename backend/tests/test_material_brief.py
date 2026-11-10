@@ -318,5 +318,7 @@ def test_the_chinese_script_name_does_not_break_the_prompt():
     assert composed.subject_omitted == "not_prompt_language"
     assert composed.as_evidence()["subject_omitted"] == "not_prompt_language"
     latin = image_prompts.compose("character", answer, requirement_name="Lin Zhiyuan")
-    assert "subject: Lin Zhiyuan" in latin.prompt
+    # v3 carries the Latin name as the opening of the subject sentence instead
+    # of a "subject:" label, which the provider reads as literal text.
+    assert "Lin Zhiyuan," in latin.prompt
     assert latin.subject_omitted is None
