@@ -797,8 +797,12 @@ def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1
     """
     from shine.asset_center.execution import recover_stale_projectless_tasks
     from shine.materialprep import service
+    from shine.materialprep.brief import reconcile_orphan_brief_tasks
 
     recover_stale_projectless_tasks(factory)
+    # A brief task row left RUNNING by a lost worker still counts as a live
+    # task for its provider profile, which locks the text model configuration.
+    reconcile_orphan_brief_tasks(factory)
 
     processed = 0
     for _ in range(max(1, limit)):

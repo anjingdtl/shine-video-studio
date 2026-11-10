@@ -274,6 +274,9 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
                 "budget": budget,
                 "is_mock": profile.kind == "mock",
                 "requirement_id": data["requirement_id"],
+                # The owning item decides whether this row is still alive, so
+                # an orphan left by a lost worker can be recognised later.
+                "item_id": item_id,
                 "worker_id": worker_id,
                 "phase": "PREPARING",
             },
@@ -359,3 +362,68 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
                              brief_artifact_id=artifact_id, payload=item_payload)
     return {"status": ITEM_BRIEF_READY, "code": None, "state_version": new_version,
             "brief": payload, "artifact_id": artifact_id, "correction_used": correction_used, "ready": True}
+
+
+def reconcile_orphan_brief_tasks(factory) -> int:
+    """Close brief task rows whose owning item has already moved on.
+
+    A brief task row is written inside the owning item's own execution: the
+    item goes to ``BRIEF_RUNNING``, the row is created, and the same path
+    finishes it.  A worker killed between those writes leaves the row
+    ``RUNNING`` forever.  Such a row counts as a live task for its provider
+    profile, so it locks the text model configuration for good - one lost
+    worker retired every model setting on the machine.
+
+    The phase decides what the orphan means.  A phase that proves the request
+    was never opened releases the row; a phase at or after the request leaves
+    the outcome unknown, so the row becomes reviewable instead.
+    """
+    from sqlalchemy import select
+
+    from shine.materialprep.agent_call import PRE_REQUEST_PHASES
+
+    closed = 0
+    with factory.begin() as db:
+        rows = db.scalars(
+            select(AgentTaskRecord).where(
+                AgentTaskRecord.role_id == BRIEF_ROLE,
+                AgentTaskRecord.status == "RUNNING",
+            )
+        ).all()
+        for row in rows:
+            trace = dict(row.trace or {})
+            item_id = trace.get("item_id")
+            requirement_id = trace.get("requirement_id")
+            if item_id:
+                item = db.get(MaterialItem, item_id)
+                alive = item is not None and item.status == ITEM_BRIEF_RUNNING
+            else:
+                # A row from before the item was recorded: the requirement
+                # still owns the work, so the row is alive while any of its
+                # items is running its brief.
+                items = db.scalars(
+                    select(MaterialItem).where(MaterialItem.requirement_id == requirement_id)
+                ).all()
+                alive = any(item.status == ITEM_BRIEF_RUNNING for item in items)
+            if alive:
+                continue
+            phase = trace.get("phase")
+            never_sent = phase in PRE_REQUEST_PHASES
+            row.status = "REJECTED" if never_sent else "NEEDS_REVIEW"
+            row.error_code = "BRIEF_ORPHAN_WORKER_LOST"
+            row.trace = {
+                **trace,
+                "phase": "FAILED" if never_sent else "NEEDS_REVIEW",
+                "external_outcome": "NOT_SENT" if never_sent else "UNKNOWN",
+                "reconciliation": {
+                    "outcome": "NOT_SENT_PROVEN" if never_sent else "UNCONFIRMABLE",
+                    "last_phase": phase,
+                    "checked_at": utcnow().isoformat(),
+                },
+            }
+            row.state_version += 1
+            add_audit(db, "worker", "MATERIAL_BRIEF_ORPHAN_RECONCILED", "agent_task", row.id,
+                      {"phase": phase, "never_sent": never_sent,
+                       "external_calls": 0}, project_id=row.project_id)
+            closed += 1
+    return closed

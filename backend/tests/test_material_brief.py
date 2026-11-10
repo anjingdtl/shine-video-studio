@@ -378,3 +378,74 @@ def test_the_chinese_script_name_does_not_break_the_prompt():
     # of a "subject:" label, which the provider reads as literal text.
     assert "Lin Zhiyuan," in latin.prompt
     assert latin.subject_omitted is None
+
+
+def _orphan_brief_task(db, item, *, phase):
+    row = AgentTaskRecord(
+        project_id=item.project_id,
+        role_id=brief.BRIEF_ROLE,
+        input_hash="h" * 64,
+        style_version_id=None,
+        asset_manifest_hash="h" * 64,
+        rulepack_id=brief.RULEPACK_ID,
+        rulepack_hash="x",
+        model_profile_id="p",
+        model_id="m",
+        schema_version="1.0",
+        status="RUNNING",
+        trace={"tool": "material_image_brief", "phase": phase,
+               "requirement_id": item.requirement_id, "item_id": item.id},
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def test_a_brief_row_left_by_a_lost_worker_stops_locking_the_model_configuration(api):
+    """An orphan brief row must not count as a live task for its profile.
+
+    The row is written inside the owning item's own execution, so a worker
+    killed in between leaves it RUNNING forever.  It then counted as a live
+    task for its provider profile and locked the text model configuration for
+    good.  The phase decides what the orphan means.
+    """
+    client, factory, _settings = api
+    project_id = _project(client)
+    with factory() as db:
+        item = _item(db, project_id)
+        item_id = item.id
+    with factory.begin() as db:
+        item = db.get(MaterialItem, item_id)
+        item.status = "CANDIDATE_READY"  # the item moved on; the row did not
+        never_sent = _orphan_brief_task(db, item, phase="WAITING_RESOURCE")
+        uncertain = _orphan_brief_task(db, item, phase="WAITING_PROVIDER")
+
+    closed = brief.reconcile_orphan_brief_tasks(factory)
+
+    assert closed == 2
+    with factory() as db:
+        released = db.get(AgentTaskRecord, never_sent.id)
+        assert released.status == "REJECTED"
+        assert released.trace["external_outcome"] == "NOT_SENT"
+        assert released.trace["reconciliation"]["outcome"] == "NOT_SENT_PROVEN"
+        review = db.get(AgentTaskRecord, uncertain.id)
+        assert review.status == "NEEDS_REVIEW"
+        assert review.trace["external_outcome"] == "UNKNOWN"
+        assert review.trace["reconciliation"]["outcome"] == "UNCONFIRMABLE"
+
+
+def test_a_brief_row_whose_item_is_still_running_is_left_alone(api):
+    """A live item owns its brief row; the reconciliation must not close it."""
+    client, factory, _settings = api
+    project_id = _project(client)
+    with factory() as db:
+        item = _item(db, project_id)
+        item_id = item.id
+    with factory.begin() as db:
+        item = db.get(MaterialItem, item_id)
+        item.status = "BRIEF_RUNNING"
+        alive = _orphan_brief_task(db, item, phase="WAITING_PROVIDER")
+
+    assert brief.reconcile_orphan_brief_tasks(factory) == 0
+    with factory() as db:
+        assert db.get(AgentTaskRecord, alive.id).status == "RUNNING"
