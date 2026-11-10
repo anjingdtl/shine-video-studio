@@ -681,7 +681,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   // newest - which reads as four different materials. Only the newest revision
   // keeps the slot; the older attempts stay in the batch history.
   const newestRunForRequirement = new Map<string, string>();
-  for (const row of runs) {
+  const productionRuns = runs.filter((row) => row.kind === 'production');
+  for (const row of productionRuns) {
     for (const item of row.items) {
       const requirementId = item.requirement_id;
       if (requirementId && !newestRunForRequirement.has(requirementId)) {
@@ -694,12 +695,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   // proof that the renderer works, never candidates for a requirement, and
   // showing them here made the project look like it had "materials" while the
   // real ones were still unrendered.
-  const currentItems = (row: typeof runs[number]) => row.kind === 'production'
-    ? row.items.filter((item) =>
-        !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id)
-    : [];
+  const currentItems = (row: typeof runs[number]) => row.items.filter((item) =>
+    !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id);
 
-  const tiles = runs.flatMap((row) => currentItems(row).flatMap((item) => {
+  const tiles = productionRuns.flatMap((row) => currentItems(row).flatMap((item) => {
     const base = {
       row,
       item,
@@ -707,20 +706,17 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         FAMILY_LABELS[item.family ?? ''] ?? item.family,
         item.entity_id,
         item.family === 'prop' && item.carrier ? `载体：${propCarrierLabels[item.carrier] ?? item.carrier}` : '',
-      ].filter(Boolean).join(' · ') || '能力验证小样',
+      ].filter(Boolean).join(' · ') || '素材需求',
       error: item.error_code ? reasonText(item.error_code) : '',
-      questions: row.kind === 'production' ? (item.brief?.questions ?? []) : [],
-      brief: row.kind === 'production' && item.allowed_actions?.includes('regenerate') ? item.brief ?? null : null,
-      selectable: row.kind === 'production' && !!item.requirement_id
-        && requirements.some((r) => r.requirement_id === item.requirement_id),
-      actions: row.kind === 'production'
-        ? (item.allowed_actions ?? [])
-          .filter((a) => ['resume', 'reconcile', 'regenerate'].includes(a) && (a !== 'regenerate' || item.brief))
-          .map((a) => ({
-            action: a as 'resume' | 'reconcile' | 'regenerate',
-            label: a === 'resume' ? '恢复此项' : a === 'reconcile' ? '核对此项未知结果' : '再生成一版（保留旧图）',
-          }))
-        : [],
+      questions: item.brief?.questions ?? [],
+      brief: item.allowed_actions?.includes('regenerate') ? item.brief ?? null : null,
+      selectable: !!item.requirement_id && requirements.some((r) => r.requirement_id === item.requirement_id),
+      actions: (item.allowed_actions ?? [])
+        .filter((a) => ['resume', 'reconcile', 'regenerate'].includes(a) && (a !== 'regenerate' || item.brief))
+        .map((a) => ({
+          action: a as 'resume' | 'reconcile' | 'regenerate',
+          label: a === 'resume' ? '恢复此项' : a === 'reconcile' ? '核对此项未知结果' : '再生成一版（保留旧图）',
+        })),
     };
     const list = item.candidates.length ? item.candidates : [null];
     return list.map((candidate, index) => ({
@@ -734,7 +730,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         : `第 ${item.generation_revision} 版 · 尚未出图`,
     }));
   })).filter((tile) => candidateGroup === 'all' || tile.item.family === candidateGroup);
-  const totals = runs.reduce((acc, row) => ({
+  const totals = productionRuns.reduce((acc, row) => ({
     total: acc.total + (row.counts?.total ?? 0),
     ready: acc.ready + (row.counts?.candidate_ready ?? 0),
     failed: acc.failed + (row.counts?.failed ?? 0),
@@ -751,7 +747,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       </div>
 
       {operationReport && <p role="status">{operationReport}</p>}
-      {documentId && <ScriptTextConsent key={`${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}
+      {documentId && <ScriptTextConsent key={`consent:${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}
       {problem && (
         <div className="required-action" role="alert">
           <AlertTriangle size={14} className="required-icon" />
@@ -987,9 +983,12 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     : <div className="material-tile-empty">尚未出图</div>}
                   <b>{tile.title}</b>
                   <small>{tile.meta}</small>
-                  {tile.first && tile.row.kind === 'validation' && <em>这是能力验证小样，不属于正式素材需求，不能在这里选用。</em>}
                   {tile.candidate?.is_mock && <em>离线测试候选，不能用于真实生产</em>}
                   {tile.first && tile.error && <em>{tile.error}</em>}
+                  {tile.first && tile.questions.length > 0 && <div>
+                    <b>出品人需要澄清</b>
+                    <ul>{tile.questions.map((question, index) => <li key={index}>{question}</li>)}</ul>
+                  </div>}
                   {tile.candidate && tile.selectable && !tile.candidate.formal_asset_id && <label>
                     <input type="checkbox" disabled={tile.candidate.status !== 'READY_FOR_REVIEW'}
                       checked={selected[tile.item.requirement_id!] === tile.candidate.candidate_id}

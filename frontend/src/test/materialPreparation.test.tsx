@@ -277,7 +277,8 @@ it('验证批次不能混入正式候选选择，来源策略从服务器恢复'
   await screen.findAllByText(/林知远/);
   expect(screen.getByLabelText('素材来源')).toHaveValue('upload');
   expect(screen.queryByRole('checkbox', { name: /选择 林知远/ })).toBeNull();
-  expect(screen.getByText(/这是能力验证小样/)).toBeTruthy();
+  expect(screen.queryByRole('img', { name: /林知远.*生成/ })).toBeNull();
+  expect(screen.getByText(/③ 选择素材/, { selector: 'summary' })).toHaveTextContent('0 项候选');
 });
 
 it('澄清问题可见，重新生成把回答并入描述并消费问题', async () => {
