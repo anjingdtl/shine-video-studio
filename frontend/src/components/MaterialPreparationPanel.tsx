@@ -688,8 +688,15 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       }
     }
   }
-  const currentItems = (row: typeof runs[number]) => row.items.filter((item) =>
-    !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id);
+  // Only production batches fill the picker. A capability validation renders the
+  // same three synthetic samples again after every renderer restart; those are
+  // proof that the renderer works, never candidates for a requirement, and
+  // showing them here made the project look like it had "materials" while the
+  // real ones were still unrendered.
+  const currentItems = (row: typeof runs[number]) => row.kind === 'production'
+    ? row.items.filter((item) =>
+        !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id)
+    : [];
 
   const tiles = runs.flatMap((row) => currentItems(row).flatMap((item) => {
     const base = {

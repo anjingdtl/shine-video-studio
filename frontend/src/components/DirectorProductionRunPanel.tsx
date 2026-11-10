@@ -130,10 +130,14 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const outlineConfirmed = Boolean(
     journey?.stages.find((stage) => stage.id === 'script')?.facts?.['outline_confirmed'],
   );
-  const [planEntry, setPlanEntry] = useState<'sections' | 'shots'>('sections');
+  // `null` means "nobody has chosen yet", so the entry follows the work that
+  // already exists. A project whose shots are already built gets the shot
+  // grouping by default; asking it to plan by section first is what forced a
+  // detour back to "materialise the plan" after the shots were done.
+  const [planEntry, setPlanEntry] = useState<'sections' | 'shots' | null>(null);
   const planMode: 'sections' | 'shots' = outlineConfirmed
-    ? (shotCount > 0 ? planEntry : 'sections')
-    : 'shots';
+    ? (shotCount > 0 ? (planEntry ?? 'shots') : 'sections')
+    : 'sections';
   const canPlan = planMode === 'sections' ? outlineConfirmed : shotCount > 0;
   const latestPlan = plans[0] ?? null;
   const confirmedPlan = plans.find((row) => row.status === 'CONFIRMED') ?? null;
@@ -307,7 +311,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           </div>
           <div className="run-head-actions">
             {outlineConfirmed && shotCount > 0 && <label className="run-inline-field">分集依据
-              <select value={planEntry} onChange={(event) => setPlanEntry(event.target.value as 'sections' | 'shots')}>
+              <select value={planMode} onChange={(event) => setPlanEntry(event.target.value as 'sections' | 'shots')}>
                 <option value="sections">按剧本场次（推荐）</option>
                 <option value="shots">按已有镜头分组（兼容）</option>
               </select>
