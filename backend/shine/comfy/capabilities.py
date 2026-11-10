@@ -116,7 +116,8 @@ def profile_metadata(graph, mode, parameter_map, media_transfers):
         "source": "registered_graph_and_explicit_mapping",
         "continuity_modes": [SOFT]
         if mode == "Ref2VA"
-        and any(k.startswith("reference_subject_") or k.startswith("reference_picture_") for k in parameter_map)
+        and any(k.startswith(("reference_subject_", "reference_picture_", "reference_image_"))
+                for k in parameter_map)
         else [],
         "hard_continuity": "PENDING_HARD_CONTINUITY_TEST",
         "video_reference": "SUPPORTED_NODE_UNVERIFIED_TRANSFER" if mode == "Ref2VA" else "unverified",

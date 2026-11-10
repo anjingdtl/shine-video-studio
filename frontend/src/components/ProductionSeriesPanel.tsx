@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Clapperboard, Info, Layers, Play, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
+import { AlertTriangle, Clapperboard, Info, Layers, Link2, Play, Scissors, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
@@ -24,6 +24,8 @@ type Props = {
   onMessage: (message: string, kind?: 'success' | 'error') => void;
   /** 保存某镜的完整引用绑定（一键开拍用它自动补齐场景图/音色等参考）。 */
   onSaveBindings: (shotId: string, bindings: AutoBinding[]) => Promise<void>;
+  /** 镜间衔接开关：改这一镜与前一镜的边界（承接末帧 / 独立切镜）。 */
+  onSetContinuity: (shotId: string | string[], mode: 'cut' | 'last_frame') => Promise<void>;
   /** 模式入口动作：enable_real 打开启用向导，check_fix 打开检查修复。 */
   onModeAction: (action: 'enable_real' | 'check_fix') => void;
   /** 缺生成方案/宽高映射时，引导回基础配置。 */
@@ -169,6 +171,7 @@ function shotReferenceReadiness(shot: Shot, profile: WorkflowProfile): {
 export default function ProductionSeriesPanel({
   projectId, shots, jobs, workflowProfiles, system, busy, reviewWidth, reviewHeight,
   onStarted, onMessage, onModeAction, onGoSetup, demoSelected = false, onSelectReal,
+  onSetContinuity,
 }: Props) {
   const [series, setSeries] = useState<ProductionSeries[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -378,6 +381,24 @@ export default function ProductionSeriesPanel({
     });
   }, [shots, selected]);
   const unboundCount = identityRows.reduce((sum, row) => sum + row.unbound.length, 0);
+
+  /** 选中的镜头按故事顺序排列：衔接关系只按这个顺序成立，不按勾选顺序。 */
+  const orderedSelected = useMemo(
+    () => shots.filter((shot) => selected.includes(shot.id)),
+    [shots, selected],
+  );
+  const continuingCount = shots.filter((shot) => String(shot.spec.continuity?.mode ?? 'cut') !== 'cut').length;
+
+  /** 整段施加一种衔接：`skip_first` 让整段的第一镜保持原样，因为它在段内没有
+   *  前一镜可接；其余每一镜都改成「承接上一镜」。 */
+  async function applyContinuity(mode: 'cut' | 'last_frame') {
+    const targets = mode === 'last_frame' ? orderedSelected.slice(1) : orderedSelected;
+    if (targets.length === 0) {
+      onMessage('先勾选至少两个镜头，再设置「整段承接上一镜」。', 'error');
+      return;
+    }
+    await onSetContinuity(targets.map((shot) => shot.id), mode);
+  }
 
   function toggle(shotId: string) {
     setSelected((current) => current.includes(shotId)
@@ -805,23 +826,56 @@ export default function ProductionSeriesPanel({
       </details>
 
       <div className="series-shots">
-        {shots.map((shot) => (
-          <label key={shot.id} className={`series-shot ${busyShotIds.has(shot.id) ? 'is-busy' : ''}`}>
-            <input
-              type="checkbox"
-              checked={selected.includes(shot.id)}
-              disabled={busyShotIds.has(shot.id)}
-              onChange={() => toggle(shot.id)}
-            />
-            <span className="series-shot-name">{shot.name}</span>
-            <small>{label(continuityLabels, String(shot.spec.continuity?.mode ?? 'cut'))}</small>
-            <small className="series-shot-length">{Number(shot.spec.duration_target_s ?? 0).toFixed(1)}s</small>
-          </label>
-        ))}
+        {shots.map((shot) => {
+          const continues = String(shot.spec.continuity?.mode ?? 'cut') !== 'cut';
+          return (
+            <label key={shot.id} className={`series-shot ${busyShotIds.has(shot.id) ? 'is-busy' : ''}`}>
+              <input
+                type="checkbox"
+                checked={selected.includes(shot.id)}
+                disabled={busyShotIds.has(shot.id)}
+                onChange={() => toggle(shot.id)}
+              />
+              <span className="series-shot-name">{shot.name}</span>
+              <button
+                type="button"
+                className={`continuity-switch ${continues ? 'is-on' : ''}`}
+                disabled={busy || working || busyShotIds.has(shot.id)}
+                title={continues
+                  ? '本镜承接上一镜的末帧开拍；点一下改成独立切镜'
+                  : '本镜独立开场；点一下改成承接上一镜的末帧'}
+                onClick={(event) => {
+                  // 这一行本身就是 <label>：不拦下来，点开关会连带勾选/取消勾选。
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void onSetContinuity(shot.id, continues ? 'cut' : 'last_frame');
+                }}
+              >
+                {continues ? <Link2 size={12} /> : <Scissors size={12} />}
+                {continues ? '承接上一镜' : '独立切镜'}
+              </button>
+              <small className="series-shot-length">{Number(shot.spec.duration_target_s ?? 0).toFixed(1)}s</small>
+            </label>
+          );
+        })}
         {shots.length === 0 && <span className="empty-inline">先创建分镜，才能排入生产序列。</span>}
       </div>
+      {shots.length > 0 && <p className="series-hint">
+        镜头之间用开关决定是否接戏：承接上一镜的镜头会等上一镜拍完通过，把它的末帧作为起始参考，画面不会跳回另一种打光；
+        独立切镜则重新开画。现在有 {continuingCount} 镜承接上一镜，其余独立开场。
+      </p>}
       <div className="series-actions-row">
         <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
+        <button
+          className="secondary-button"
+          disabled={busy || working || orderedSelected.length < 2}
+          onClick={() => void applyContinuity('last_frame')}
+        >选中段首尾相接（{Math.max(0, orderedSelected.length - 1)} 个接点）</button>
+        <button
+          className="secondary-button"
+          disabled={busy || working || orderedSelected.length === 0}
+          onClick={() => void applyContinuity('cut')}
+        >选中段全部独立切镜</button>
         {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
       <button className="primary-button" disabled={busy || working || !canStart} onClick={() => void start()}>

@@ -207,6 +207,31 @@ class CreateShot(APIModel):
     bindings: list[ShotBindingInput] = Field(default_factory=list, max_length=12)
 
 
+class ShotContinuityInput(APIModel):
+    """The boundary this shot has with the shot before it.
+
+    `cut` starts an independent shot.  `last_frame` continues the previous take
+    from its closing frame.  The declaration belongs to the cut, not to a take:
+    changing it never rewrites a shot that already passed, it decides what the
+    next shot is given when it starts.
+    """
+
+    mode: Literal["cut", "last_frame"]
+    reference_start_s: float | None = Field(default=None, ge=0)
+    reference_end_s: float | None = Field(default=None, gt=0)
+    notes: str = Field(default="", max_length=500)
+
+
+class ShotContinuityBulkInput(APIModel):
+    """Apply one boundary decision to a whole selected range of shots."""
+
+    shot_ids: list[str] = Field(min_length=1, max_length=200)
+    mode: Literal["cut", "last_frame"]
+    # The first shot of a range has no predecessor inside it: it keeps whatever
+    # boundary it already had unless the caller insists.
+    skip_first: bool = True
+
+
 class MockScenario(StrEnum):
     SUCCESS = "success"
     DELAY = "delay"

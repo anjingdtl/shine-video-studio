@@ -2,7 +2,7 @@
   "name": "local-h3-ref2va-pdd8-6img",
   "mode": "Ref2VA",
   "checkpoint_id": "Minimax-H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-  "description": "Real local MiniMax-H3 Ref2VA, PDD 8 steps, model-native 1344x768 at 24 fps. Derived from the canonical local-h3-ref2va-pdd8-2img graph by adding the real node's COMFY_AUTOGROW_V3 image slots: one subject image plus five picture images (the live MiniMaxH3ReferenceToVideo node declares ref_images max=9). Image media transfers only; H3 speaks the dialogue natively, so no audio slot is declared and no voice master is required. Duration is snapped to the H3 17k+5 frame grid by ComfyMathExpression.",
+  "description": "Six reference images in one positional sequence: any cast composition (one lead, several people, plates) fits as long as the total is six or fewer.",
   "required_nodes": [
     "MiniMaxH3ReferenceToVideo",
     "MiniMaxH3SigmaShift",
@@ -27,14 +27,14 @@
     "positive_prompt": "31.inputs.prompt",
     "duration": "30.inputs.values.a",
     "seed": "51.inputs.noise_seed",
-    "reference_subject_1": "40.inputs.image",
-    "reference_picture_1": "41.inputs.image",
     "width": "31.inputs.width",
     "height": "31.inputs.height",
-    "reference_picture_2": "42.inputs.image",
-    "reference_picture_3": "43.inputs.image",
-    "reference_picture_4": "44.inputs.image",
-    "reference_picture_5": "45.inputs.image"
+    "reference_image_1": "40.inputs.image",
+    "reference_image_2": "41.inputs.image",
+    "reference_image_3": "42.inputs.image",
+    "reference_image_4": "43.inputs.image",
+    "reference_image_5": "44.inputs.image",
+    "reference_image_6": "45.inputs.image"
   },
   "graph": {
     "10": {

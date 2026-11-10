@@ -159,7 +159,11 @@ def workflow_reference_budget(db: Session, project_id: str) -> list[dict]:
                 "id": profile.id,
                 "name": profile.name,
                 "validated": bool(profile.validated_against),
-                "image_slots": sum(1 for k in keys if k.startswith(("reference_subject_", "reference_picture_"))),
+                # A profile may carry images as one positional sequence
+                # (`reference_image_1..n`) instead of per-family slots; either
+                # spelling is the same capacity to the director.
+                "image_slots": sum(1 for k in keys
+                                   if k.startswith(("reference_subject_", "reference_picture_", "reference_image_"))),
                 "audio_slots": sum(1 for k in keys if k.startswith("reference_audio_")),
             }
         )

@@ -164,7 +164,7 @@ function App() {
     setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
     realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
-    createShot, saveBindings, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
+    createShot, saveBindings, setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters, abandonJob,
@@ -979,6 +979,7 @@ function App() {
                     onStarted={() => refreshAll().catch(() => undefined)}
                     onMessage={report}
                     onSaveBindings={saveBindings}
+                    onSetContinuity={setShotContinuity}
                     onModeAction={handleModeAction}
                     onGoSetup={() => goToDirectorSetup('models')}
                   />
@@ -1317,6 +1318,7 @@ function App() {
                   onStarted={() => refreshAll().catch(() => undefined)}
                   onMessage={report}
                   onSaveBindings={saveBindings}
+                  onSetContinuity={setShotContinuity}
                   onModeAction={handleModeAction}
                   onGoSetup={() => goToDirectorPage('setup')}
                 />

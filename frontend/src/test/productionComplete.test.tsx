@@ -47,6 +47,7 @@ function renderPanel(jobs: Job[]) {
     onStarted={vi.fn()}
     onMessage={vi.fn()}
     onSaveBindings={vi.fn(async () => undefined)}
+    onSetContinuity={vi.fn(async () => undefined)}
     onModeAction={vi.fn()}
   />);
 }

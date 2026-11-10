@@ -922,6 +922,15 @@ fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}
 .identity-chip.muted{color:#9a9b90;background:#f4f4ef}
 .identity-missing{color:#a26a3f;background:#faf0e4;border-radius:5px;padding:3px 6px}
 .series-shot-length{font:9px var(--mono);color:#9a9b90}
+/* 镜间衔接开关：一行胶囊里的一个小开关，开着表示这一镜接过上一镜的末帧。 */
+.continuity-switch{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+  border:1px solid #d8d6cb;border-radius:999px;background:#fff;color:#6f7064;
+  font-size:9px;line-height:1.5;cursor:pointer;white-space:nowrap}
+.continuity-switch:hover:enabled{border-color:#b9b29a;color:#3f4038}
+.continuity-switch.is-on{background:#eef3e4;border-color:#b9c79a;color:#4a5a2c}
+.continuity-switch:disabled{opacity:.5;cursor:not-allowed}
+html[data-theme='dark'] .continuity-switch{background:#26271f;border-color:#3d3e33;color:#b9baae}
+html[data-theme='dark'] .continuity-switch.is-on{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
 .blocked-callout .text-button{white-space:nowrap}
 
 html[data-theme='dark'] .setup-entry{background:#24251f;border-color:#3a3b31;color:#c9cac0}

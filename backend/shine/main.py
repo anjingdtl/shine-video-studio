@@ -67,6 +67,8 @@ from shine.schemas import (
     RenderProvider,
     RepairPlan,
     ReplaceBindings,
+    ShotContinuityBulkInput,
+    ShotContinuityInput,
     ShotSpec,
     StyleBible,
     StyleFreezeRequest,
@@ -935,7 +937,8 @@ def create_app(
     @app.get("/api/v1/projects/{project_id}/shots")
     def list_shots(project_id: str, db: DBSession) -> list[dict[str, Any]]:
         require_project(db, project_id)
-        shots = db.scalars(select(Shot).where(Shot.project_id == project_id).order_by(Shot.created_at)).all()
+        shots = db.scalars(select(Shot).where(Shot.project_id == project_id)
+                           .order_by(Shot.created_at, Shot.name)).all()
         return jsonable_encoder([_shot_data(db, shot) for shot in shots])
 
     @app.post("/api/v1/shots/{shot_id}/revise")
@@ -972,6 +975,98 @@ def create_app(
         db.commit()
         db.refresh(shot)
         return jsonable_encoder(_shot_data(db, shot)["bindings"])
+
+    def _ordered_shots(db: Session, project_id: str) -> list[Shot]:
+        """The project's shots in story order.
+
+        Storyboard materialisation writes a whole plan in one transaction, so
+        `created_at` ties are the normal case, not the exception.  The name is
+        the tiebreaker (`b01`, `b02` ...), which keeps "the shot before it"
+        stable instead of letting the database's row order decide the cut.
+        """
+        rows = list(db.scalars(select(Shot).where(Shot.project_id == project_id)))
+        return sorted(rows, key=lambda row: (row.created_at, row.name))
+
+    def _apply_continuity(db: Session, shot: Shot, mode: str,
+                          reference_start_s: float | None, reference_end_s: float | None,
+                          notes: str, actor: str, *, has_predecessor: bool) -> bool:
+        """Write one boundary decision; returns whether the shot changed."""
+        if mode != "cut" and not has_predecessor:
+            raise HTTPException(status_code=422, detail={
+                "code": "SHOT_CONTINUITY_NEEDS_PREDECESSOR",
+                "message": f"「{shot.name}」是项目的第一个镜头，前面没有可承接的成片；第一镜只能独立开场。",
+            })
+        spec = ShotSpec.model_validate(shot.spec)
+        continuity = spec.continuity.model_copy(update={
+            "mode": mode,
+            # Which take is continued is decided by the run that binds it.  A
+            # stored job id would point at whatever was shot last time.
+            "previous_job_id": None,
+            "previous_shot_id": None,
+            "reference_start_s": reference_start_s,
+            "reference_end_s": reference_end_s,
+            "notes": notes,
+        })
+        if continuity == spec.continuity:
+            return False
+        shot.spec = spec.model_copy(update={"continuity": continuity}).model_dump(mode="json")
+        add_audit(db, actor, "SHOT_CONTINUITY_SET", "shot", shot.id,
+                  {"mode": mode, "reference_start_s": reference_start_s,
+                   "reference_end_s": reference_end_s},
+                  project_id=shot.project_id)
+        return True
+
+    @app.post("/api/v1/shots/{shot_id}/continuity")
+    def set_shot_continuity(shot_id: str, body: ShotContinuityInput, actor: Operator,
+                            db: DBSession) -> dict[str, Any]:
+        """Decide whether this shot continues the one before it.
+
+        The declaration is the switch between two shots, not a rewrite of a
+        shot's content: a take that already passed stays valid, because what
+        changes is what the *next* shot is handed when it starts.  No revision
+        is bumped for that reason - the shots in a cut keep their identities.
+        """
+        shot = db.get(Shot, shot_id)
+        if not shot:
+            raise HTTPException(status_code=404, detail="Shot not found")
+        require_project(db, shot.project_id)
+        ordered = _ordered_shots(db, shot.project_id)
+        position = next((index for index, row in enumerate(ordered) if row.id == shot.id), 0)
+        _apply_continuity(db, shot, body.mode, body.reference_start_s,
+                          body.reference_end_s, body.notes, actor,
+                          has_predecessor=position > 0)
+        db.commit()
+        db.refresh(shot)
+        return jsonable_encoder(_shot_data(db, shot))
+
+    @app.post("/api/v1/projects/{project_id}/shots/continuity")
+    def set_shots_continuity(project_id: str, body: ShotContinuityBulkInput, actor: Operator,
+                             db: DBSession) -> dict[str, Any]:
+        """Apply one boundary decision to a selected range in a single write."""
+        project = require_project(db, project_id)
+        full_order = _ordered_shots(db, project.id)
+        index_of = {shot.id: position for position, shot in enumerate(full_order)}
+        wanted = set(body.shot_ids)
+        ordered = [shot for shot in full_order if shot.id in wanted]
+        if not ordered:
+            raise HTTPException(status_code=404, detail="No such shot in this project")
+        targets = ordered[1:] if body.skip_first and len(ordered) > 1 else ordered
+        changed, unchanged = [], []
+        for shot in targets:
+            if _apply_continuity(db, shot, body.mode, None, None, "", actor,
+                                 has_predecessor=index_of[shot.id] > 0):
+                changed.append(shot.id)
+            else:
+                unchanged.append(shot.id)
+        skipped = [shot.id for shot in ordered if shot not in targets]
+        db.commit()
+        return {
+            "mode": body.mode,
+            "updated": changed,
+            "unchanged": unchanged,
+            "skipped_first": skipped,
+            "shots": jsonable_encoder([_shot_data(db, shot) for shot in ordered]),
+        }
 
     @app.post("/api/v1/shots/{shot_id}/compile")
     def compile_shot_prompt(shot_id: str, db: DBSession) -> dict[str, Any]:

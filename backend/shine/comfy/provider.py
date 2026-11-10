@@ -94,6 +94,39 @@ def reference_slots(manifest) -> list[tuple[str, Any]]:
     return slots
 
 
+def resolve_reference_slots(parameter_map: dict[str, str], manifest) -> list[tuple[str, str, Any]]:
+    """Pair every reference with the parameter that actually carries it.
+
+    A profile can declare a slot per reference family (``reference_subject_1``,
+    ``reference_picture_1``) or one positional image sequence
+    (``reference_image_1..n``).  The positional form is what lets one profile
+    carry any cast composition: H3 numbers every image in a single sequence, and
+    the graph wires its image loaders in that same order, so a two-hander and a
+    one-hander are the same request with a different number of images.  Without
+    it, every cast mix needed its own hand-made profile, and a shot naming two
+    people was refused by the only profiles a project had.
+
+    The family name stays the logical identity (it is what every message and
+    test names); only the parameter that carries it changes.
+    """
+    counters: dict[str, int] = {}
+    image_position = 0
+    resolved: list[tuple[str, str, Any]] = []
+    for item in manifest:
+        family = item.use_as.value
+        counters[family] = counters.get(family, 0) + 1
+        logical = f"reference_{family}_{counters[family]}"
+        key = logical
+        if family in {"subject", "picture"}:
+            image_position += 1
+            if key not in parameter_map:
+                positional = f"reference_image_{image_position}"
+                if positional in parameter_map:
+                    key = positional
+        resolved.append((logical, key, item))
+    return resolved
+
+
 def validate_required_parameters(parameter_map: dict[str, str], *, needs_seed: bool) -> None:
     missing = [name for name in REQUIRED_LOGICAL_PARAMETERS if name not in parameter_map]
     if needs_seed and "seed" not in parameter_map:
@@ -111,8 +144,8 @@ def validate_reference_slots(parameter_map: dict[str, str], manifest) -> list[tu
     Silently dropping a reference is forbidden: the render would silently lose
     a user-approved asset.
     """
-    slots = reference_slots(manifest)
-    missing = [logical for logical, _item in slots if logical not in parameter_map]
+    slots = resolve_reference_slots(parameter_map, manifest)
+    missing = [logical for logical, key, _item in slots if key not in parameter_map]
     if missing:
         raise ComfyPendingWorkflowMapping(
             "The workflow profile has no mapping for one or more required references",
@@ -312,7 +345,7 @@ class ComfyUIRenderService:
     ) -> dict[str, str]:
         uploaded: dict[str, str] = {}
         graph_types = graph_class_types_ or set()
-        for logical, item in reference_slots(request.reference_manifest):
+        for logical, parameter_key, item in resolve_reference_slots(parameter_map, request.reference_manifest):
             asset = assets.get(item.asset_id)
             if asset is None:
                 raise ComfyReferenceError(
@@ -361,7 +394,7 @@ class ComfyUIRenderService:
                     },
                 )
             subfolder = response.get("subfolder") or ""
-            uploaded[logical] = f"{subfolder}/{name}" if subfolder else str(name)
+            uploaded[parameter_key] = f"{subfolder}/{name}" if subfolder else str(name)
         if len(uploaded) != len(request.reference_manifest):
             raise ComfyReferenceError(
                 "Not every reference in the manifest was transferred to ComfyUI",

@@ -207,13 +207,15 @@
   "workflow_profile_ids": [
     "local-h3-ref2va-pdd8-2img-1aud",
     "local-h3-ref2va-pdd8-2img-1aud-portrait",
-    "local-h3-ref2va-2img-1aud"
+    "local-h3-ref2va-2img-1aud",
+    "local-h3-ref2va-pdd8-6img"
   ],
   "graph_sha256": {
     "local-h3-ref2va-pdd8-2img-1aud": "ea979fba2d3ad02493ee28d7126a624ca8afde06b1895a0e81a6bd50a193ca64",
     "local-h3-ref2va-pdd8-2img-1aud-portrait": "d6178d8640e480fd40e795d509b34a920d25e7285b8cdb29c9a50fbe4be0c924",
     "local-h3-ref2va-2img-1aud": "7d86f7b6d994b0b38cc379a4fe0268f68776c4a43e80fb0f7651a3005f57dcd6",
-    "local-h3-ref2va-2img": "6f7a5fb19c548ca945f8a2169e05c836d7c06f03466cf2b893b3be599505d112"
+    "local-h3-ref2va-2img": "6f7a5fb19c548ca945f8a2169e05c836d7c06f03466cf2b893b3be599505d112",
+    "local-h3-ref2va-pdd8-6img": "3632d8f38ad46e6708d4a1d04296dc5fb02a6876bdf7ed3028cb69033fcc9bd4"
   },
   "compatibility": {
     "pdd": {

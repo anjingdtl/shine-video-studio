@@ -110,6 +110,7 @@ function renderPanel(onMessage: (message: string, kind?: 'success' | 'error') =>
       onStarted={() => undefined}
       onMessage={onMessage}
       onSaveBindings={() => Promise.resolve()}
+      onSetContinuity={() => Promise.resolve()}
       onModeAction={() => undefined}
     />,
   );

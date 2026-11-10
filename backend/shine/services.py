@@ -360,10 +360,50 @@ def bindings_unchanged(shot: Shot, planned: list[ShotBindingInput]) -> bool:
     return current == proposed
 
 
+def _declared_cast_roles(shot: Shot, bindings: list[ShotBindingInput],
+                         assets: dict[str, Any]) -> dict[str, str]:
+    """Which declared character each bound master plays in this shot.
+
+    A shot names a performer the way the script does ("程岩"); the approved
+    master is labelled with the fuller identity ("程岩（罗兰·温布顿）").  The
+    binding is the one place both identities meet, so it records the name the
+    shot declared - that is what lets the H3 label rule resolve a subject for
+    every person the shot says it shows.
+
+    Only an unambiguous claim counts.  A name that could belong to two masters,
+    or a master two names could claim, stays unassigned rather than binding the
+    wrong face.
+    """
+    try:
+        declared = list(ShotSpec.model_validate(shot.spec).characters)
+    except ValueError:
+        return {}
+    if not declared:
+        return {}
+    subjects = [(binding.asset_id, assets[binding.asset_id].entity_id or "")
+                for binding in bindings
+                if binding.use_as.value == "subject" and binding.asset_id in assets]
+    best: dict[str, tuple[int, int, str]] = {}
+    for name in declared:
+        exact = [asset_id for asset_id, entity in subjects if entity == name]
+        candidates = exact or [
+            asset_id for asset_id, entity in subjects
+            if entity and name and (name in entity or entity in name)
+        ]
+        if len(candidates) != 1:
+            continue
+        rank = (2 if exact else 1, len(name), name)
+        asset_id = candidates[0]
+        if asset_id not in best or rank > best[asset_id]:
+            best[asset_id] = rank
+    return {asset_id: rank[2] for asset_id, rank in best.items()}
+
+
 def set_shot_bindings(
     db: Session, project: Project, shot: Shot, bindings: list[ShotBindingInput], *, actor: str = "user"
 ) -> list[ShotAssetBinding]:
     assets = _validate_binding_inputs(db, project, bindings)
+    cast_roles = _declared_cast_roles(shot, bindings, assets)
     required = set(ShotSpec.model_validate(shot.spec).required_asset_ids)
     if not required.issubset(set(assets)):
         raise HTTPException(status_code=422, detail="Bindings are missing assets required by the shot")
@@ -376,7 +416,8 @@ def set_shot_bindings(
             shot_id=shot.id,
             asset_id=binding.asset_id,
             use_as=binding.use_as.value,
-            role=binding.role,
+            # An explicit role always wins; the cast name only fills the gap.
+            role=binding.role or cast_roles.get(binding.asset_id),
             frame_role=binding.frame_role.value if binding.frame_role else None,
             ordinal=index,
         )
