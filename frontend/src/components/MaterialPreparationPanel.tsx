@@ -26,6 +26,7 @@ export type MaterialRequirement = {
   requirement_hash: string;
   family: 'character' | 'scene' | 'prop';
   entity_id: string;
+  canonical_entity_id?: string | null;
   strategy: MaterialStrategy | null;
   status: string;
   bound_asset_id: string | null;
@@ -849,6 +850,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               {requirements.map((requirement) => (
                 <li key={requirement.requirement_id}>
                   <b>{FAMILY_LABELS[requirement.family] ?? requirement.family} · {requirement.entity_id}</b>
+                  {requirement.canonical_entity_id && <small>与「{requirement.canonical_entity_id}」共用主素材</small>}
                   {requirement.family === 'prop' && requirement.carrier
                     && <small className="material-carrier">载体：{propCarrierLabels[requirement.carrier] ?? requirement.carrier}{(requirement.carrier_variants ?? []).length > 0 ? `（另有：${requirement.carrier_variants!.map((c) => propCarrierLabels[c] ?? c).join('、')}）` : ''}</small>}
                   <small>{requirement.description}</small>
@@ -871,15 +873,16 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <select value={bindings[requirement.requirement_id] ?? requirement.bound_asset_id ?? ''}
                       onChange={(event) => setBindings({ ...bindings, [requirement.requirement_id]: event.target.value })}>
                       <option value="">请选择具体素材；未确认上传不会自动生成</option>
-                      {assets.filter((a) => a.role === requirement.family && a.entity_id === requirement.entity_id).map((a) =>
+                      {assets.filter((a) => a.role === requirement.family
+                        && a.entity_id === (requirement.canonical_entity_id ?? requirement.entity_id)).map((a) =>
                         <option key={a.id} value={a.id}>{a.filename} · {a.sha256.slice(0, 8)} · {a.locked ? '已确认' : '待确认上传'}</option>)}
                     </select>
                   </label>}
-                  <label className="material-field">
+                  {!requirement.canonical_entity_id && <label className="material-field">
                     <span>上传并设为主素材（PNG、JPG/JPEG、WebP）</span>
                     <input type="file" accept=".png,.jpg,.jpeg,.webp" disabled={busy}
                       onChange={(event) => void uploadOwnMaterial(requirement)(event)} />
-                  </label>
+                  </label>}
                   <button type="button" className="text-button" disabled={busy || librarySearchBusy}
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
@@ -1014,7 +1017,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   {tile.first && tile.brief && <details className="material-tile-brief"><summary>修改外观描述</summary>
                     <label className="material-field">
                       <span>修改 {tile.item.entity_id} 的外观描述后生成新版本（外观描述用英文填写）</span>
-                      <textarea value={briefEdits[tile.item.item_id] ?? tile.brief.appearance} maxLength={1200}
+                      <textarea value={briefEdits[tile.item.item_id] ?? tile.brief.appearance} maxLength={1600}
                         onChange={(e) => setBriefEdits({ ...briefEdits, [tile.item.item_id]: e.target.value })} />
                     </label>
                   </details>}

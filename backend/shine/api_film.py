@@ -474,6 +474,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             bindings = []
             shot_notices: list[dict] = []
             bound_asset_ids: list[str] = []
+            bound_character_entities: dict[str, ShotBindingInput] = {}
             for identity in intent["asset_ids"]:
                 asset = db.get(Asset, identity)
                 if (not asset or asset.project_id != project_id
@@ -495,8 +496,10 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "audio": "audio",
                     "video": "video",
                 }[asset.kind]
-                bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as,
-                                                 ordinal=len(bindings)))
+                binding = ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings))
+                bindings.append(binding)
+                if use_as == "subject" and asset.entity_id:
+                    bound_character_entities.setdefault(asset.entity_id, binding)
                 bound_asset_ids.append(identity)
             # The director may list only the plate for a scene. Every character
             # this beat names still needs its own subject slot, or the H3 label
@@ -507,12 +510,15 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 asset = _approved_master_for_name(db, project_id, name)
                 if asset is None:
                     continue
-                existing = next((binding for binding in bindings if binding.asset_id == asset.id), None)
+                cast_role = name if len(name) <= 64 else None
+                existing = bound_character_entities.get(asset.entity_id)
                 if existing is not None:
-                    existing.role = existing.role or name
+                    existing.role = existing.role or cast_role
                     continue
-                bindings.append(ShotBindingInput(asset_id=asset.id, use_as="subject", role=name,
-                                                 ordinal=len(bindings)))
+                binding = ShotBindingInput(asset_id=asset.id, use_as="subject", role=cast_role,
+                                           ordinal=len(bindings))
+                bindings.append(binding)
+                bound_character_entities[asset.entity_id] = binding
                 bound_asset_ids.append(asset.id)
             camera_fields = {
                 "composition": camera.composition,

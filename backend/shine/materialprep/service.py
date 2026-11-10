@@ -350,6 +350,13 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
 
     known = {(r["family"], r["entity_id"]) for r in aggregated["requirements"]}
     decisions: list[dict[str, Any]] = []
+    canonical_selections = {}
+    for decision in body.decisions:
+        row = db.get(AssetRequirement, decision.requirement_id)
+        if (row is not None and row.plan_id == source.id and row.payload.get("family") == "character"
+                and not row.payload.get("canonical_entity_id") and decision.asset_id):
+            canonical_selections[row.payload["entity_id"]] = decision.asset_id
+
     for decision in body.decisions:
         row = db.get(AssetRequirement, decision.requirement_id)
         if row is None or row.project_id != project_id:
@@ -362,10 +369,12 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
             raise HTTPException(409, "MATERIAL_PLAN_STALE")
         from shine.models import Asset
 
-        selected = db.get(Asset, decision.asset_id) if decision.asset_id else None
-        if decision.asset_id and (selected is None or selected.project_id != project_id
-                                  or selected.role != requirement_payload.get("family")
-                                  or selected.entity_id != requirement_payload.get("entity_id")):
+        canonical_entity = requirement_payload.get("canonical_entity_id")
+        selected_id = canonical_selections.get(canonical_entity, decision.asset_id)
+        selected = db.get(Asset, selected_id) if selected_id else None
+        if selected_id and (selected is None or selected.project_id != project_id
+                            or selected.role != requirement_payload.get("family")
+                            or selected.entity_id != (canonical_entity or requirement_payload.get("entity_id"))):
             raise HTTPException(409, "ASSET_IDENTITY_MISMATCH")
         if decision.strategy == "reuse_master" and selected is None:
             raise HTTPException(422, "MATERIAL_EXPLICIT_ASSET_REQUIRED")
@@ -375,7 +384,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
             "family": requirement_payload.get("family"),
             "entity_id": requirement_payload.get("entity_id"),
             "strategy": decision.strategy,
-            "asset_id": decision.asset_id,
+            "asset_id": selected_id,
             "brief_note": decision.brief_note,
         })
 
@@ -422,6 +431,10 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         row.sha256 = graph_hash(row.payload)
         row.status = "CONFIRMED"
     db.flush()
+    for asset_id in set(canonical_selections.values()):
+        selected = db.get(Asset, asset_id)
+        if selected and selected.approved and selected.locked and not (selected.provenance or {}).get("offline_only"):
+            retire_unused_masters(db, plan, selected, actor, entities={selected.entity_id})
     add_audit(db, actor, "MATERIAL_PLAN_CONFIRMED", "preproduction_plan", plan.id,
               {"confirmation_id": confirmation_id, "decisions": len(decisions),
                "generate": sum(1 for d in decisions if d["strategy"] == "generate")},
@@ -1240,6 +1253,7 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
             "requirement_hash": row.sha256,
             "family": payload.get("family"),
             "entity_id": payload.get("entity_id"),
+            "canonical_entity_id": payload.get("canonical_entity_id"),
             "strategy": payload.get("strategy"),
             "status": row.status,
             "bound_asset_id": payload.get("bound_asset_id"),

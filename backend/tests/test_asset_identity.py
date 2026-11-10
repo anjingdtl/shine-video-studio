@@ -1,9 +1,9 @@
+from shine.api_film import _approved_master_for_name
 from shine.asset_identity import (
     canonical_character_name_for_asset_id,
     character_reference_matches,
     resolve_character_asset,
 )
-from shine.api_film import _approved_master_for_name
 from shine.models import Asset
 
 
