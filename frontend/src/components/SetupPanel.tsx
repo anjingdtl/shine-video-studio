@@ -1031,7 +1031,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           </p>}
           <div className="settings-block managed-processes">
             <h3>本机后台进程（ComfyUI / 审片服务）</h3>
-            <p className="module-guide">这些后台由本工作台启动，模型会一直占着显存。不用时可以在这里一键关闭并释放内存；正在出片的进程不会被强行中断。</p>
+            <p className="notice">这些后台由本工作台启动，模型会一直占着显存。不用时可以在这里一键关闭并释放内存；正在出片的进程不会被强行中断。</p>
             {managed.length === 0 ? <div className="empty-inline">没有记录到本机后台进程。</div> : <div className="worker-row-list">
               {managed.map(item => (
                 <div className="worker-row" key={`${item.kind}-${item.id ?? item.pid}`}>

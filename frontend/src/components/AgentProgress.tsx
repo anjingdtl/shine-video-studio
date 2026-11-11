@@ -75,7 +75,7 @@ export function AgentProgress({ runs, completedRoles = [], awaitingCharacters = 
       <button className="btn-secondary" type="button" onClick={onConfirmCharacters}>{charactersConfirmed ? '去继续导演' : '去确认人物并继续导演'}</button>
     </div>}
     {active && paused && <p role="status">实时进度不可确认。计时已暂停，下方保留最后读取的记录。</p>}
-    {active && !paused && <div className="module-guide">
+    {active && !paused && <div className="notice">
       <div><b>后台当前阶段：{agentPhaseLabels[active.trace?.phase ?? ''] ?? '任务已登记，正在等待后台更新具体阶段'}</b>
         {active.model_id && <p>当前模型：{active.model_id}</p>}
         {active.trace?.network_timeout_s && <p>单次网络等待设置为 {active.trace.network_timeout_s} 秒；它不是整条制作流程的总时限。</p>}

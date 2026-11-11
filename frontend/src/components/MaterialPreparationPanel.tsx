@@ -761,7 +761,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   }), { total: 0, ready: 0, failed: 0, review: 0 });
   return (
     <section className="material-panel" aria-label="AI 素材准备">
-      <div className="module-guide">
+      <div className="notice">
         <Sparkles size={13} />
         <div>
           <p><b>先读剧本、备素材，再冻结风格。</b>这一步只调用文字模型，不占用显卡；真正出图在「选择素材」阶段排队。</p>

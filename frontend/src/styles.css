@@ -947,11 +947,10 @@ html[data-theme='dark'] .wizard-stage.blocked{background:#33241e;border-color:#5
 .required-action small{display:block;font-size:var(--fs-caption);color:var(--warn-2);margin-top:4px;line-height:1.6}
 .btn-primary{border-radius:6px;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .btn-primary.wide{width:100%}
-.module-guide{display:flex;gap:8px;align-items:flex-start;border-left:3px solid var(--olive-line);background:var(--surface-3);border-radius:0 6px 6px 0;padding:9px 12px;margin:11px 0;font-size:var(--fs-caption);color:var(--ink-2);line-height:1.65}
-.module-guide svg{color:var(--olive-soft);flex-shrink:0;margin-top:1px}
-.module-guide b{color:var(--ink-mid)}
-.module-guide p{margin:0 0 4px}
-.module-guide p:last-child{margin-bottom:0}
+.notice>div{flex:1;min-width:0}
+.notice p{margin:0 0 var(--sp-1)}
+.notice p:last-child{margin-bottom:0}
+.notice b{color:var(--ink-mid)}
 
 /* ---- 非阻断提示卡（降级自硬阻滞的调度/瞬时说明） ---- */
 .series-hint-card{display:flex;align-items:flex-start;gap:9px;border:1px solid var(--warn-line);background:var(--warn-bg-3);border-radius:8px;padding:10px 13px;margin:11px 0;color:var(--ink-2)}
@@ -997,9 +996,7 @@ html[data-theme='dark'] .required-action{border-color:#8a5a25;background:#33261a
 html[data-theme='dark'] .required-action b{color:#e3b483}
 html[data-theme='dark'] .required-action small{color:#c39a73}
 html[data-theme='dark'] .required-action .required-icon{color:#d99b56}
-html[data-theme='dark'] .module-guide{border-left-color:#5a6045;background:#25261f;color:#a9aa9c}
-html[data-theme='dark'] .module-guide b{color:#cdcec0}
-html[data-theme='dark'] .module-guide svg{color:#9aa171}
+html[data-theme='dark'] .notice b{color:#cdcec0}
 html[data-theme='dark'] .asset-thumb{border-color:#3d3e34;background:#2a2b23}
 html[data-theme='dark'] .asset-thumb-fallback{background:#332f26;color:#b7a37c}
 html[data-theme='dark'] .binding-row{border-color:#3a3b31;background:#25261f}
@@ -1617,7 +1614,7 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 
 /* ---- 导演模式页面骨架 ---- */
 .ui-director .page-wrap{max-width:1180px;padding:20px 32px 40px}
-.ui-director .module-guide{margin:9px 0;padding:8px 11px;line-height:1.55}
+.ui-director .notice{margin:var(--sp-2) 0}
 .ui-director .director-page{display:flex;flex-direction:column;gap:16px;min-width:0}
 .ui-director .director-page:not([hidden]){animation:director-page-in .24s ease}
 @keyframes director-page-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}

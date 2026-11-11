@@ -216,7 +216,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   }, [overview, selectedVolumeId]);
 
   if (!overview) {
-    return <section className="card" id="four-stage"><div className="module-guide"><CircleHelp size={13} />
+    return <section className="card" id="four-stage"><div className="notice"><CircleHelp size={13} />
       {loadFailed
         ? <><p>四阶段进度读取失败。</p><button type="button" className="btn-secondary"
             onClick={() => void refresh()}>重新读取</button></>
@@ -368,7 +368,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     <section className="card" id="four-stage">
       <header className="stage-head"><ListChecks size={17} /><h3>AI 编导四阶段</h3>
         <span className="muted">导入 → 大纲 → 剧本 → 分镜</span></header>
-      <div className="module-guide"><CircleHelp size={13} /><div>
+      <div className="notice"><CircleHelp size={13} /><div>
         <p><b>四步做完一部作品：</b>①选择母本并确认分卷 → ②逐卷提取大纲并确认全局故事蓝图 →
           ③逐场生成并确认剧本 → ④逐场生成分镜草案、应用镜头并交付本卷。</p>
         <p>每一步的「确认」都需要你亲自点击；任务详情、Token 与 JSON 收纳在专业模式。</p>

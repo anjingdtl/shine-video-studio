@@ -169,7 +169,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
 
   return <section className="card delivery-panel" id="delivery">
     <div className="panel-header"><h2>成片与导出</h2><button type="button" className="btn-secondary" disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
-    <div className="module-guide">
+    <div className="notice">
       <HelpCircle size={13} />
       <div>
         <p><b>镜头全部通过后，这里自动出现成片；没出现就回上一步看卡住的镜头。</b></p>

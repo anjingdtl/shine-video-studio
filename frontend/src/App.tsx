@@ -943,7 +943,7 @@ function App() {
                 )}
                 <nav className="produce-focus-bar" aria-label="制作分区聚焦">
                   {([
-                    { id: 'storyboard', label: '① 剧本分镜', done: stageDone.storyboard ?? shots.length > 0, blocked: (stageBlockers.storyboard ?? 0) > 0 },
+                    { id: 'storyboard', label: '① 剧本分镜', done: stageDone.storyboard ?? false, blocked: (stageBlockers.storyboard ?? 0) > 0 },
                     { id: 'assets', label: '② 素材准备', done: stageDone.assets ?? false, blocked: (stageBlockers.assets ?? 0) > 0 },
                     { id: 'produce', label: '③ 排产制作', done: deliverableReady, blocked: (stageBlockers.production ?? 0) > 0 },
                     { id: 'monitor', label: '④ 进度与结果', done: deliverableReady, blocked: false },
@@ -1119,7 +1119,7 @@ function App() {
                       ? `④ 进度与结果 · ${productionScopeLabel}`
                       : jobs.length === 0 ? '④ 进度与结果 · 暂无任务'
                       : makingNow ? '④ 进度与结果 · 制作中（点击查看）'
-                        : jobs.every((job) => job.status === 'PASSED' || job.status === 'CANCELLED')
+                        : deliverableReady
                           ? <><Check size={13} className="stage-done-mark" /> ④ 进度与结果 · 全部完成</>
                           : `④ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
                     </span>

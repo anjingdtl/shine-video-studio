@@ -570,7 +570,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <div className="section-icon plum"><Sparkles size={17} /></div>
     </div>
 
-    <div className="module-guide">
+    <div className="notice">
       <HelpCircle size={13} />
       <div>
         <p><b>这一步要做什么：</b>导入剧本 → 勾选同意发送文本 → 点下面的橙色按钮，然后等 AI 逐个工种完成。</p>
@@ -671,7 +671,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       paused={progressPaused || !busy}
       onConfirmCharacters={() => document.getElementById(`character-confirmation-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
 
-    {!result && recoveredApply && !busy && <div className="module-guide">
+    {!result && recoveredApply && !busy && <div className="notice">
       <div>
         <b>已有一套完成的分镜方案保存在本机（{recoveredApply.shot_count} 个镜头）</b>
         <p>五个工种都已完成真实调用。可以直接应用为正式分镜，不需要再次调用模型；应用后可到镜头列表逐条核对。</p>
@@ -850,7 +850,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             </p>
           ))}
         </div>}
-        {!!result.editorial_timing_preview?.segments.length && <div className="module-guide">
+        {!!result.editorial_timing_preview?.segments.length && <div className="notice">
           <div>
             <b>剪辑时长分组建议 · 保留 {result.editorial_timing_preview.editorial_shot_count} 镜，共 {result.editorial_timing_preview.total_s} 秒</b>
             <ol>{result.editorial_timing_preview.segments.map(segment => <li key={segment.first_shot}>

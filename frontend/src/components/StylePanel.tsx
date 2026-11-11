@@ -337,7 +337,7 @@ export default function StylePanel({
         </div>
       </div>
 
-      <div className="module-guide">
+      <div className="notice">
         <HelpCircle size={13} />
         <div>
           <p><b>这一步要做什么：</b>选一套风格或逐项调整，然后点右下角的冻结按钮。第一次冻结会同时批准并绑定官方规则包，所以那一次按钮写的是「批准并冻结」；之后写的是「冻结为新版本」。</p>

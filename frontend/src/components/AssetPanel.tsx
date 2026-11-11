@@ -104,7 +104,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
         </div>
         <div className="section-icon"><Film size={17} /></div>
       </div>
-      <div className="module-guide">
+      <div className="notice">
         <HelpCircle size={13} />
         <div>
           <p><b>这一步要做什么：</b>上传你有权使用的素材并选好用途。人物名字可以先不填；在「AI 导演制作」由编剧提出名字和名图对应，再由你二次确认。</p>

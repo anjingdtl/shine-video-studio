@@ -252,7 +252,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
         </div>
       )}
       {note && (
-        <div className="module-guide" role="status">
+        <div className="notice" role="status">
           <Check size={13} />
           <div><p>{note}</p></div>
         </div>
@@ -266,7 +266,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
       </div>
 
       {plan && (
-        <div className="module-guide" role="status">
+        <div className="notice" role="status">
           <Check size={13} />
           <div>
             <p>
@@ -291,7 +291,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
       <button type="button" className="btn-primary" disabled={working || busy || !state?.configured} onClick={validate}>
         {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 验证三类真实小样
       </button>
-      {!state?.configured && state?.binding_candidate && <div className="module-guide">
+      {!state?.configured && state?.binding_candidate && <div className="notice">
         <p>可复用已登记的本机实例，模型目录为 {state.binding_candidate.model_root}。绑定后核验固定权重。</p>
         <button type="button" className="btn-primary" disabled={working || busy} onClick={bindRenderer}>
           {working ? '正在核验出图权重…' : '绑定现有实例用于出图'}

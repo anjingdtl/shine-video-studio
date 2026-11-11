@@ -110,7 +110,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
   }, [documents.length]);
 
   return <section className="card script-entry" id="script-entry">
-    <div className="module-guide">
+    <div className="notice">
       <Lightbulb size={13} />
       <div>
         <p><b>两条入口，一条链路：</b>写下想法让 AI 写剧本，或直接导入现成剧本。两边最终都进入同一份

@@ -223,7 +223,7 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
           <RefreshCw size={13} /> 刷新
         </button>
       </div>
-      <div className="module-guide">
+      <div className="notice">
         <FolderOpen size={13} />
         <div>
           <p><b>这里管理这部作品在本机落盘的全部视频</b>：单镜、分段、分集与成片，含历史与重拍版本。预览读取的是本机原文件，不会下载或复制第二份。</p>

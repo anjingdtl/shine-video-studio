@@ -146,7 +146,7 @@ export default function DirectorSetupPanel({
     </section>}
 
     {tab === 'env' && <div className="setup-tab-body">
-      <div className="module-guide">
+      <div className="notice">
         <Sparkles size={13} />
         <div>
           <p><b>第一次使用：</b>点「检测本机」看已有环境；没有 ComfyUI 或 H3 模型时，按页面给出的安装计划下载。安装会先让你确认体积与目录，不会静默下载。</p>
@@ -163,7 +163,7 @@ export default function DirectorSetupPanel({
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">
-      <div className="module-guide">
+      <div className="notice">
         <Settings2 size={13} />
         <div>
           <p><b>文本模型</b>负责写分镜、导演、摄影与剪辑方案；一个模型可以承担全部文本工种。密钥只存在本机。</p>
