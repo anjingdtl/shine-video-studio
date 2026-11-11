@@ -1080,3 +1080,47 @@ export const grantTextConsent = (
     `/projects/${projectId}/material-preparation/text-consent`,
     json('POST', { document_id: documentId, expected_document_hash: documentSha256,
                    expected_scope_hash: scopeHash, granted }));
+
+// ============ 统一运行调度控制面（Runtime Orchestrator） ============
+
+/** 本地制作引擎统一快照：唯一状态源，页面不得自行拼接多个「真相」。 */
+export type RuntimeSnapshot = {
+  schema_version: number;
+  orchestrator_enabled: boolean;
+  installation_id: string;
+  state: 'NOT_BOUND' | 'STOPPED' | 'STARTING' | 'READY_IDLE' | 'BUSY' | 'DEGRADED'
+    | 'RECONCILING' | 'BLOCKED_UNVERIFIED' | 'EXTERNAL_CONFLICT' | string;
+  health: { worker?: string; comfy_http?: string };
+  ownership: { managed: boolean; verified: boolean; port?: number | null; pid?: number | null };
+  current: { owner_kind?: string | null; task?: string | null; operation_id?: string | null };
+  resource: { active_leases: number; waiting_leases: number; reconcile_leases: number };
+  recovery: {
+    required: boolean;
+    reason_code: string | null;
+    safe_action: 'ensure' | 'stop' | 'probe' | 'reconcile' | null;
+    advice: string | null;
+  };
+  last_observed_at: string | null;
+  state_version: number;
+};
+
+export type ControlOperation = {
+  operation_id: string;
+  action: string;
+  installation_id: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REFUSED' | string;
+  state_version: number;
+  failure_code: string | null;
+  result: Record<string, unknown>;
+};
+
+export const fetchRuntimeStatus = () => api<RuntimeSnapshot>('/runtime-orchestrator/status');
+
+export const submitRuntimeControl = (action: 'ensure' | 'stop' | 'probe' | 'reconcile',
+                                     installationId: string) =>
+  api<ControlOperation>(`/runtime-orchestrator/${action}`,
+    json('POST', {
+      installation_id: installationId,
+      idempotency_key: `${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      reason: 'web-engine-status',
+    }));

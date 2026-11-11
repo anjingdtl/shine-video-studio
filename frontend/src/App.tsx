@@ -10,6 +10,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useStudio } from './useStudio';
 import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
+import { EngineStatusEntry } from './components/EngineStatusEntry';
 import { RealProductionWizard } from './components/RealProductionWizard';
 import AssetPanel from './components/AssetPanel';
 import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
@@ -667,6 +668,7 @@ function App() {
                 title="后端未启动时，请先启动本机工作台"
                 onClick={reconnectWorkbench}>{reconnecting ? reconnectLabel : '重连工作台'}</button>}
               <ModeStatusEntry system={system} onAction={handleModeAction} />
+              <EngineStatusEntry apiOnline={apiOnline} />
             </div>
             <div className="topbar-controls">
               {ui === 'director' && <button

@@ -288,7 +288,7 @@ def _renderer_answers(base_url: str) -> bool:
     """Is the renderer still there?  Used to tell "nothing is loaded" from
     "the release could not be confirmed"."""
     try:
-        httpx.get(f"{base_url}/system_stats", timeout=3.0)
+        httpx.get(f"{base_url}/system_stats", timeout=3.0, trust_env=False)
     except Exception:  # noqa: BLE001 - an unreachable renderer holds no model
         return False
     return True

@@ -469,3 +469,41 @@ def test_orchestrator_flag_restores_the_direct_path(api, installation_row, tmp_p
     ensure_image_renderer(factory, settings, instance_id=INSTALLATION)
     assert called["n"] == 1
     monkeypatch.delenv(contracts.ENV_FLAG, raising=False)
+
+
+# --- unified snapshot (P3) ------------------------------------------------------
+
+
+def test_snapshot_states_and_recovery_advice(api, installation_row, tmp_path):
+    import os
+
+    from shine.comfyops.installer import process_identity
+    from shine.runtime_orchestrator.status import runtime_snapshot
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    with factory() as db:
+        snap = runtime_snapshot(db, settings)
+    # Nothing runs and no listener can be claimed: STOPPED with a safe ensure.
+    assert snap["state"] in ("STOPPED", "NOT_BOUND")
+    assert snap["recovery"]["safe_action"] in (None, "ensure")
+    assert snap["health"]["worker"] == "DOWN"
+
+    with factory.begin() as db:
+        _image_record(db, stage="INTENT", owner_pid=os.getpid(),
+                      owner_birth=process_identity(os.getpid()))
+    with factory() as db:
+        snap = runtime_snapshot(db, settings)
+    assert snap["state"] == "STARTING"
+    assert snap["recovery"]["reason_code"] == "START_IN_PROGRESS"
+    assert snap["recovery"]["safe_action"] is None  # never a second start
+
+    from shine.models import AppSetting as _AppSetting
+
+    with factory.begin() as db:
+        row = db.get(_AppSetting, "renderer-startup:image:" + INSTALLATION)
+        row.value = {**row.value, "stage": "RECONCILE_REQUIRED"}
+    with factory() as db:
+        snap = runtime_snapshot(db, settings)
+    assert snap["state"] == "BLOCKED_UNVERIFIED"
+    assert snap["recovery"]["safe_action"] == "reconcile"

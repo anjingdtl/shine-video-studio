@@ -785,7 +785,7 @@ def _probe_object_info(config, settings) -> dict | None:
     except HTTPException:
         return None
     try:
-        response = httpx.get(f"{base_url}/object_info", timeout=3.0)
+        response = httpx.get(f"{base_url}/object_info", timeout=3.0, trust_env=False)
         response.raise_for_status()
         payload = response.json()
     except Exception:  # noqa: BLE001 - an unreachable renderer only leaves a layer unproven

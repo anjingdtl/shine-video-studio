@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 
 from shine.api_operator import Operator
 from shine.runtime_orchestrator.contracts import OperationError, orchestrator_enabled
-from shine.runtime_orchestrator.identity import installation_activity
 from shine.runtime_orchestrator.operations import (
     any_worker_online,
     create_or_get_operation,
@@ -108,33 +107,14 @@ def submit_control_intent(
 
 @router.get("/status")
 def runtime_status(request: Request):
-    """Read-only snapshot; never triggers a process or a model load."""
+    """The unified read-only snapshot; never starts, stops or loads anything."""
     factory = request.app.state.session_factory
     settings = request.app.state.settings
-    from shine.comfyops.image_renderer import image_renderer_state
-    from shine.comfyops.runtime_configuration import resolve_runtime
+    from shine.runtime_orchestrator.status import runtime_snapshot
 
-    snapshot: dict[str, Any] = {
-        "schema_version": 1,
-        "orchestrator_enabled": orchestrator_enabled(),
-        "installations": [],
-    }
     with factory() as session:
-        runtime = resolve_runtime(session, settings)
-        installation_id = getattr(runtime, "instance_id", "") or ""
-        if installation_id:
-            activity = installation_activity(session, installation_id)
-            renderer = image_renderer_state(session, settings, installation_id)
-            snapshot["installations"].append(
-                {
-                    "installation_id": installation_id,
-                    "renderer_state": activity["renderer_state"],
-                    "image_renderer": renderer,
-                    "gpu_leases": activity["gpu_leases"],
-                    "in_flight_h3_jobs": len(activity["in_flight_h3_jobs"]),
-                    "in_flight_image_work": len(activity["in_flight_image_work"]),
-                }
-            )
+        snapshot = runtime_snapshot(session, settings)
+    snapshot["orchestrator_enabled"] = orchestrator_enabled()
     return snapshot
 
 

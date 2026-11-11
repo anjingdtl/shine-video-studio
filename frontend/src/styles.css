@@ -1943,3 +1943,17 @@ html[data-theme='dark'] .library-confirm-files{border-color:#3b493d;background:#
 #output-directory code{font:9px var(--mono);background:#f6f6f1;border:1px solid #ebebe3;border-radius:4px;padding:1px 4px}
 html[data-theme='dark'] .output-folder-preview .chip{background:#31322a;color:#b6bd97}
 html[data-theme='dark'] #output-directory code{background:#26271f;border-color:#3b3c32;color:#c8c9bd}
+
+/* ===== 本地制作引擎状态条（统一运行调度控制面） ===== */
+.engine-status{display:inline-flex;align-items:center;gap:6px;position:relative}
+.engine-entry{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:16px;border:1px solid var(--line);background:#fbfbf8;font-size:11px;font-weight:600;color:var(--ink);cursor:pointer;transition:border-color .15s,background .15s}
+.engine-entry.tone-busy{border-color:#b7c98a;background:#f3f6e9}
+.engine-entry.tone-starting{border-color:#d8c89a;background:#faf5e6}
+.engine-entry.tone-warn{border-color:#dcb27f;background:#faf1e3}
+.engine-entry.tone-idle{border-color:#a9c5b4;background:#eef6f1}
+.engine-entry.tone-off{opacity:.9}
+.engine-entry-label{white-space:nowrap}
+.engine-stop{color:#8a4b3a;border-color:#cf9c8a}
+.engine-detail{position:absolute;top:calc(100% + 8px);right:0;z-index:60;display:flex;flex-direction:column;gap:6px;min-width:280px;max-width:360px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fffdf7;box-shadow:0 10px 28px rgba(60,50,20,.14);font-size:11px;line-height:1.6;color:var(--ink)}
+.engine-detail-health{color:#6b6a60;font-family:var(--mono);font-size:10px}
+.engine-detail-error{color:#a2452c}
