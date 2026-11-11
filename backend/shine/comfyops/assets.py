@@ -215,6 +215,29 @@ def verify_candidate(settings, row, *, root=None):
     return content
 
 
+MEDIA_OVERLAY_CODES = {
+    "WATERMARK_PRESENT", "WATERMARK", "LOGO_PRESENT", "LOGO",
+    "SIGNATURE_PRESENT", "SIGNATURE", "TEXT_IN_FRAME", "CAPTION_PRESENT",
+    "UI_OVERLAY_PRESENT", "PLATFORM_BADGE_PRESENT", "TIMESTAMP_PRESENT",
+}
+"""Reviewer finding codes that disqualify a picture as a reference master.
+
+The prompt already forbids every one of these marks; this set is the server-side
+half of the same rule, so a marked picture is refused rather than retouched.
+"""
+
+
+def overlay_findings(findings) -> list[str]:
+    """The reviewer findings that disqualify a picture as a reference master.
+
+    Kept as a pure function so the rule is testable without a reviewer, a file
+    or a database: the prompt forbids these marks, and this is the same rule
+    applied to whatever came back.
+    """
+    return [finding.code for finding in findings
+            if finding.result == "FAIL" and finding.code.upper() in MEDIA_OVERLAY_CODES]
+
+
 def candidate_qc(settings, row, reviewer=None, *, root=None):
     if row.status == "PROMOTED":
         raise HTTPException(409, "CANDIDATE_VERSION_FROZEN")
@@ -237,6 +260,7 @@ def candidate_qc(settings, row, reviewer=None, *, root=None):
         "semantic": "MOCK_VERIFIED" if is_mock else "PENDING_HUMAN_REVIEW",
         "is_mock": is_mock,
         "content_sha256": p["content_sha256"],
+        "watermark": "UNVERIFIED",
         "limitations": "No real semantic quality, identity, voice or lip-sync acceptance.",
     }
     semantic_failed = False
@@ -246,7 +270,16 @@ def candidate_qc(settings, row, reviewer=None, *, root=None):
         assessment = CandidateAssessment.model_validate(reviewer.review(content, p))
         assessment.is_mock = assessment.is_mock or reviewer.is_mock or is_mock
         qc["semantic_evidence"] = assessment.model_dump()
-        semantic_failed = any(f.result == "FAIL" for f in assessment.findings)
+        # An overlay is a material defect, not a stylistic note: a picture that
+        # carries a watermark, logo, signature, badge or timestamp can never be
+        # used as a reference master, and cropping it by hand is not a repair the
+        # product may assume.  Such a finding fails QC so the material is
+        # regenerated from the prompt instead of silently entering a shot.
+        overlays = overlay_findings(assessment.findings)
+        qc["watermark"] = "FAIL" if overlays else "PASS"
+        if overlays:
+            qc["overlay_findings"] = overlays
+        semantic_failed = bool(overlays) or any(f.result == "FAIL" for f in assessment.findings)
         uncertain = any(f.result == "UNCERTAIN" or f.confidence < 0.9 for f in assessment.findings)
         qc["semantic"] = (
             "FAILED"

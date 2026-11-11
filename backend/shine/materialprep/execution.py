@@ -28,6 +28,7 @@ may adopt bytes that are already on disk after verifying them; it never resubmit
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -59,6 +60,7 @@ from shine.materialprep.states import (
     ATTEMPT_SUCCEEDED,
     ATTEMPT_UNKNOWN,
     EXECUTION_MODE_REAL,
+    ITEM_BRIEF_RUNNING,
     ITEM_CANDIDATE_READY,
     ITEM_CLAIMABLE,
     ITEM_FAILED,
@@ -89,6 +91,18 @@ POLL_LIMIT = 1800
 CLAIM_SECONDS = 60
 
 
+def _blocking_code(exc: ImageExecutionError) -> str:
+    """The reason a person can act on, never just the outer "not ready" envelope.
+
+    ``IMAGE_RUNTIME_NOT_READY`` covers a missing binding, unverified weights, a
+    graph the live renderer does not declare, and a family that has never
+    produced a real sample.  Only the inner code says which of those it is, and
+    the panel shows this value, so the actionable one wins.
+    """
+    detail = exc.details.get("code_detail")
+    return detail if isinstance(detail, str) and detail else exc.code
+
+
 class ImageExecutionError(RuntimeError):
     def __init__(self, code: str, **details: Any) -> None:
         super().__init__(code)
@@ -97,6 +111,14 @@ class ImageExecutionError(RuntimeError):
 
 
 # --- claiming --------------------------------------------------------------
+
+
+STALE_ITEM_LEASE = timedelta(minutes=10)
+"""How long a claimed item may go without progress before another Worker may take it.
+
+Ten minutes is longer than one brief generation and than one image submit, so a
+healthy Worker never loses its row; a dead one stops blocking the batch.
+"""
 
 
 def claim_next_item(factory, worker_id: str) -> str | None:
@@ -113,12 +135,24 @@ def claim_next_item(factory, worker_id: str) -> str | None:
         # verified sample, so queueing them oldest-first made every production
         # item fail one round before the validation that would have unblocked it
         # was ever claimed. Validation first, then oldest-first as before.
-        from sqlalchemy import case
+        from sqlalchemy import and_, case, or_
 
+        # A Worker that died mid-item left its row in BRIEF_RUNNING or
+        # WAITING_GPU with a stale heartbeat and nothing to move it on: the batch
+        # then reported "generating" forever, and every later retry joined the
+        # same dead queue.  Those two states have no external submission yet, so
+        # re-claiming one is safe; SUBMIT_INTENT and RUNNING stay excluded
+        # because an answer may really be in flight for them.
+        stale_after = utcnow() - STALE_ITEM_LEASE
+        stale = and_(
+            MaterialItem.status.in_((ITEM_BRIEF_RUNNING, ITEM_WAITING_GPU)),
+            or_(MaterialItem.heartbeat_at.is_(None),
+                MaterialItem.heartbeat_at < stale_after),
+        )
         row = db.scalar(
             select(MaterialItem)
             .join(MaterialRun, MaterialRun.id == MaterialItem.run_id)
-            .where(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)))
+            .where(or_(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)), stale))
             .order_by(
                 case((MaterialRun.payload["kind"].as_string() == "validation", 0), else_=1),
                 MaterialItem.created_at, MaterialItem.id,
@@ -145,7 +179,7 @@ def claim_next_item(factory, worker_id: str) -> str | None:
             .where(
                 MaterialItem.id == item_id,
                 MaterialItem.state_version == expected,
-                MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)),
+                or_(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)), stale),
             )
             .values(
                 status=ITEM_WAITING_GPU,
@@ -532,7 +566,7 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
     try:
         prompt = _compose_prompt(context)
     except ImageExecutionError as exc:
-        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=_blocking_code(exc))
         _audit(factory, context, "MATERIAL_IMAGE_BLOCKED", {"code": exc.code, **exc.details})
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 
@@ -595,7 +629,7 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
     except ImageExecutionError as exc:
-        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=_blocking_code(exc))
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 
 
@@ -663,7 +697,7 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
                        outcome=OUTCOME_UNKNOWN if uncertain else OUTCOME_FAILED,
                        error_code=exc.code, details=exc.details, release_intent=not uncertain)
         touch_item(factory, item_id, version,
-                    status=ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED, error_code=exc.code)
+                    status=ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED, error_code=_blocking_code(exc))
         _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN" if uncertain else "MATERIAL_IMAGE_EXECUTION_FAILED",
                {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": exc.code})
         return {"item_id": item_id, "status": ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED,

@@ -2530,7 +2530,8 @@ def volume_production_state(db, project_id: str, volume_id: str) -> dict:
 
 
 def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None,
-                            only_section_ids: list[str] | None = None) -> dict:
+                            only_section_ids: list[str] | None = None,
+                            authorize_replay_ids: list[str] | None = None) -> dict:
     """Run the draft crew chain over every confirmed scene, one unit at a time.
 
     Each unit is one bounded crew input, so a project-length volume is written
@@ -2573,7 +2574,13 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
     previous_ending = None
     last_steps: dict = {}
     last_apply: dict = {}
+    # A refused answer that really arrived may be replaced once, but only when a
+    # person names that exact record.  The authorisation is consumed per unit in
+    # the order the units run; a mismatched id cannot unlock a different answer
+    # because the guard still compares the record's own identity.
+    pending_authorizations = list(authorize_replay_ids or [])
     for unit in units:
+        authorized_replay = pending_authorizations.pop(0) if pending_authorizations else None
         request_text = unit["text"]
         if previous_ending:
             # The previous scene's closing state is the explicit boundary a
@@ -2588,6 +2595,7 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
                     allow_remote_text=True,
                     consent_document_id=master.id,
                     consent_document_sha256=master.sha256,
+                    authorize_replay_task_id=authorized_replay,
                 ),
                 namespace, db, gateway,
             )

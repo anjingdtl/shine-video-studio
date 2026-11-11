@@ -1161,10 +1161,16 @@ class FilmAgentDispatcher:
                               "rejection_reason_code": task.error_code,
                               **({"pre_request_error_code": safe_detail} if safe_detail else {})}
             else:
+                # The answer arrived but something after it broke.  Only the
+                # exception *type* is persisted: a class name carries no prompt
+                # and no secret, and without it this record used to say nothing
+                # more useful than "the call failed".
+                logger.exception("film_crew_fault role=%s task=%s phase=%s", role, task.id, phase)
                 task.status = "NEEDS_REVIEW" if unknown else "FAILED"
                 task.state_version += 1
                 task.error_code = "AGENT_CALL_FAILED"
                 task.trace = {**task.trace, "automatic_replay": False,
+                              "error_type": type(exc).__name__,
                               **({"external_outcome": "UNKNOWN"} if unknown else {})}
             db.commit()
             raise ValueError(task.error_code) from None

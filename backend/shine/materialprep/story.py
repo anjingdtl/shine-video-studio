@@ -669,6 +669,15 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 state["cursor"] += 1
             elif state["stage"] == "EXTRACT":
                 state.update(stage="MERGE", cursor=0, level_inputs=state["leaf_artifact_ids"], level_outputs=[])
+            elif (state["stage"] == "MERGE" and state["level"] == 0
+                  and len(state["level_inputs"]) == 1 and not state["level_outputs"]):
+                # A volume that was read in one pass already *is* the outline: the
+                # single leaf carries every section, event and citation.  Asking a
+                # model to merge one part into itself costs a full round trip per
+                # volume and can only lose facts, so the leaf is published as the
+                # final answer and the skip is recorded.
+                state["level_outputs"] = list(state["level_inputs"])
+                state["merge_skipped"] = "single_leaf"
             elif state["stage"] == "MERGE" and state["cursor"] < len(state["level_inputs"]):
                 ids = state["level_inputs"][state["cursor"]:state["cursor"] + 3]
                 merged = _merge(factory, gateway, project_id, document, ids, state["locked_facts"])

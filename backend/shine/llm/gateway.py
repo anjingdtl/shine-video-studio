@@ -265,30 +265,45 @@ class LLMGateway:
         from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
         from shine.db import make_session_factory
         from shine.llm.lifecycle import release_text_model
+        from shine.security import is_loopback_url
 
-        # All roles share the same stage admission as H3/VLM/ASR. A textual
-        # provider never silently runs beside a local GPU model.
-        if CURRENT_RESOURCE.get() is not None:
-            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
-        if on_progress:
-            on_progress("WAITING_RESOURCE")
-        with resource_slot(
-            make_session_factory(db.get_bind()),
-            "AGENT",
-            1,
-            release_models=partial(release_text_model, config),
-            wait_seconds=0 if profile.kind == "mock" else 300,
-            on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
-        ):
+        def send() -> LLMResponse:
             if on_progress:
                 on_progress("WAITING_PROVIDER")
-            response = provider.complete(
+            answer = provider.complete(
                 [ChatMessage("system", system), ChatMessage("user", user)],
                 schema=schema,
                 json_mode=True,
             )
             if on_progress:
                 on_progress("RELEASING_PROVIDER")
+            return answer
+
+        # A remote text provider costs no local VRAM, so it must not queue behind
+        # the local renderer's GPU admission.  Sharing that single queue meant one
+        # slow worker call held the slot for its whole timeout, and every other
+        # request died with GPU_BUSY after waiting five minutes - an outage caused
+        # purely by bookkeeping, observed live with two scenes of one volume.
+        # Local providers (ollama, a local OpenAI-compatible server) still take
+        # the slot, because they do use the same GPU as the renderer.
+        needs_local_gpu = profile.kind != "mock" and (
+            profile.kind == "ollama" or is_loopback_url(config.base_url))
+        if CURRENT_RESOURCE.get() is not None and needs_local_gpu:
+            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
+        if not needs_local_gpu:
+            response = send()
+        else:
+            if on_progress:
+                on_progress("WAITING_RESOURCE")
+            with resource_slot(
+                make_session_factory(db.get_bind()),
+                "AGENT",
+                1,
+                release_models=partial(release_text_model, config),
+                wait_seconds=300,
+                on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
+            ):
+                response = send()
         if on_progress:
             on_progress("VALIDATING_RESULT")
         if budget_evidence is not None:
