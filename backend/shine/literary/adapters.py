@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 SCENE_TEXT_FIELD = "text"
 SCENE_TEXT_ALIASES = {"content": "text", "script": "text", "scene_text": "text",
@@ -53,6 +53,14 @@ class SceneDraft(BaseModel):
 
     text: str = Field(min_length=1)
     continuity_out: str = Field(default="", max_length=CONTINUITY_LIMIT)
+
+    @field_validator("text")
+    @classmethod
+    def _must_carry_prose(cls, value: str) -> str:
+        """Whitespace is not a scene: an empty answer must be retried, not saved."""
+        if not value.strip():
+            raise ValueError("scene text is empty")
+        return value
 
 
 @dataclass

@@ -28,6 +28,7 @@ SOURCE_MASTER_KIND = "FourStageSourceMaster"
 VOLUME_PLAN_KIND = "FourStageVolumePlan"
 BIBLE_KIND = "FourStageGlobalStoryBible"
 SCENE_SCRIPT_KIND = "FourStageSceneScript"
+SCENE_BEAT_KIND = "FourStageSceneBeat"
 BIBLE_RUN_ROLE = "four_stage_bible_run"
 SCENE_SCRIPT_RUN_ROLE = "four_stage_scene_script_run"
 
@@ -941,6 +942,31 @@ def _persist_candidate(factory, *, task_id: str, project_id: str, target_kind: s
         return None
 
 
+def _blueprint_request_context(db, project_id: str, trace: dict, outlines: list) -> dict:
+    """The merged digest input one blueprint call receives.
+
+    The merge keeps every event id, compresses prose when the budget is tight and
+    reports a volume whose outline does not cover its own source range.  A
+    missing coverage is a named warning for the person who confirms the
+    blueprint, never a silent gap.
+    """
+    from shine.literary.blueprint import blueprint_context, digest_from_outline, merge_digests
+
+    plan = db.get(AgentArtifact, trace.get("plan_artifact_id") or "")
+    volumes = {}
+    if plan is not None and plan.project_id == project_id:
+        volumes = {volume.get("volume_id"): volume
+                   for volume in (plan.payload_json.get("volumes") or [])}
+    digests = []
+    for ref, outline in zip(trace.get("outline_refs") or [], outlines, strict=False):
+        volume = volumes.get(ref.get("volume_id")) or {
+            "volume_id": ref.get("volume_id"), "order": ref.get("order")}
+        digests.append(digest_from_outline({**outline.payload_json, "_sha256": outline.sha256},
+                                           volume=volume))
+    merged = merge_digests(digests, token_budget=3_000)
+    return blueprint_context(merged)
+
+
 def run_bible_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one bible synthesis task under the fenced claim."""
     from shine.literary.governor import UnitBudget
@@ -993,18 +1019,7 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             outlines.append(outline)
         context = {
             "master": {"char_count": len(master_doc.text or ""), "outline_count": len(outlines)},
-            "outline_summaries": [
-                {"order": index + 1,
-                 "story_line": o.payload_json.get("story_line", []),
-                 "timeline": o.payload_json.get("timeline", []),
-                 "characters": o.payload_json.get("characters", []),
-                 "questions": o.payload_json.get("questions", []),
-                 "sections": [
-                     {"scene_key": s.get("scene_key", s.get("production_section_id")),
-                      "title": s.get("title"), "summary": s.get("summary", "")}
-                     for s in (o.payload_json.get("production_sections") or [])],
-                 }
-                for index, o in enumerate(outlines)],
+            **_blueprint_request_context(db, project_id, trace, outlines),
         }
         schema = GlobalStoryBiblePayload.model_json_schema()
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
@@ -1430,6 +1445,197 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
     return created
 
 
+def _scene_beat_plan(db, gateway, section: dict, source_text: str, schema: dict) -> list:
+    """How the section's source is split, measured against the real budget.
+
+    A section that fits is one beat, so the caller has a single code path.  This
+    is a *decision*, not a model call: the target size comes from the same
+    approved budget the send path uses.
+    """
+    from shine.literary import beats as beat_lib
+    from shine.literary.budget import plan_call_budget
+    from shine.literary.dryrun import SCENE_CONTEXT_OVERHEAD_TOKENS
+    from shine.literary.requests import compile_request
+
+    if not (source_text or "").strip():
+        return []
+    profile = gateway.profile_for_role(db, SCENE_SCRIPT_RUN_ROLE)
+    config = gateway.config_for(profile)
+    probe = compile_request(system=SCENE_SYSTEM_PROMPT,
+                            user='{"section":{}, "source_text":""}', schema=schema)
+    budget = plan_call_budget(config, probe, purpose="scene")
+    target = max(2_000, budget.burst_input_limit - SCENE_CONTEXT_OVERHEAD_TOKENS)
+    return beat_lib.plan_beats(source_text, section_id=str(section.get("section_id") or "section"),
+                               target_chars=target)
+
+
+def _beat_artifacts(db, task_id: str, project_id: str) -> dict[str, AgentArtifact]:
+    """Beat answers this task already paid for, by beat id."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.source_task_id == task_id,
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == SCENE_BEAT_KIND)).all()
+    return {row.payload_json.get("beat_id"): row for row in rows if row.payload_json.get("beat_id")}
+
+
+def _save_beat(factory, *, project_id: str, task_id: str, beat, text: str,
+               continuity_out: str) -> None:
+    """Persist one beat's text the moment it arrives, in its own transaction."""
+    from shine.models import AgentArtifact
+
+    payload = {"beat_id": beat.beat_id, "ordinal": beat.ordinal,
+               "section_id": beat.section_id, "text": text,
+               "continuity_out": continuity_out[:400],
+               "source_sha256": beat.source_sha256,
+               "start": beat.start, "end": beat.end}
+    with factory.begin() as db:
+        db.add(AgentArtifact(project_id=project_id, kind=SCENE_BEAT_KIND, schema_version="1.0",
+                             payload_json=payload, sha256=digest(payload),
+                             producer_role=SCENE_SCRIPT_RUN_ROLE, source_task_id=task_id,
+                             input_revision_ids=[]))
+        add_audit(db, "local-user", "PIPELINE_SCENE_BEAT_SAVED", "agent_task", task_id,
+                  {"beat_id": beat.beat_id, "ordinal": beat.ordinal,
+                   "chars": len(text)}, project_id=project_id)
+
+
+def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id: str,
+                     project_id: str, trace: dict, section: dict, source_text: str,
+                     context: dict, schema: dict, plan: list) -> bool:
+    from shine.literary.models import LiteraryUnit
+
+    """Write one long scene beat by beat, then assemble it verbatim.
+
+    Each beat is paid for once and persisted immediately, so a later beat's
+    failure keeps the earlier beats' text.  A failed beat marks only its
+    dependants as ``WAITING_DEPENDENCY``; the scene becomes a candidate draft,
+    never a confirmed script.
+    """
+    from shine.literary import beats as beat_lib
+    from shine.literary.adapters import SceneDraft, adapt_scene_script
+    from shine.literary.governor import UnitBudget
+    from shine.materialprep import text_consent
+    from shine.materialprep.agent_call import call_material_agent
+
+    before_call = text_consent.guard(
+        project_id, trace["master_document_id"], trace["master_document_sha256"],
+        SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway)
+    unit_budget = UnitBudget(max_calls=len(plan) + 1, max_repair_rounds=len(plan),
+                             max_completion_tokens=600_000)
+    with factory.begin() as db:
+        units = beat_lib.save_units(db, project_id=project_id,
+                                    section_id=str(section.get("section_id") or "section"),
+                                    beats=plan, task_id=task_id)
+        # Keep ids, not detached rows: every later write opens its own session.
+        unit_ids = {unit.ordinal: unit.id for unit in units}
+    with factory() as db:
+        done = _beat_artifacts(db, task_id, project_id)
+
+    failure = None
+    for beat in plan:
+        existing = done.get(beat.beat_id)
+        if existing is not None and (existing.payload_json.get("text") or "").strip():
+            continue
+        beat_context = {**context,
+                        "source_text": source_text[beat.start:beat.end],
+                        "beat": {"ordinal": beat.ordinal, "total": len(plan),
+                                 "section_id": beat.section_id,
+                                 "note": "只写这一段，结尾写 continuity_out"}}
+        outcome = call_material_agent(
+            gateway, factory, SCENE_SCRIPT_RUN_ROLE,
+            system=SCENE_SYSTEM_PROMPT,
+            context=beat_context, schema=schema, contract=SceneDraft,
+            task_category="creative", purpose="scene",
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}:b{beat.ordinal}",
+            unit_budget=unit_budget,
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
+            before_call=before_call)
+        if not outcome.ok:
+            failure = outcome
+            with factory.begin() as db:
+                unit = db.get(LiteraryUnit, unit_ids.get(beat.ordinal, ""))
+                if unit is not None:
+                    beat_lib.mark(db, unit, "FAILED", error_code=outcome.error_code,
+                                  external_outcome=outcome.details.get("external_outcome"))
+                rows = [db.get(LiteraryUnit, unit_id) for unit_id in unit_ids.values()]
+                beat_lib.propagate([row for row in rows if row is not None],
+                                   failed_ordinal=beat.ordinal)
+            break
+        piece = adapt_scene_script(outcome.parsed, section=section)
+        _save_beat(factory, project_id=project_id, task_id=task_id, beat=beat,
+                   text=piece.payload["text"], continuity_out=piece.payload["continuity_out"])
+        with factory.begin() as db:
+            unit = db.get(LiteraryUnit, unit_ids.get(beat.ordinal, ""))
+            if unit is not None:
+                beat_lib.mark(db, unit, "PASSED", chars=len(piece.payload["text"]))
+            for unit_id in unit_ids.values():
+                other = db.get(LiteraryUnit, unit_id)
+                if (other is not None and other.ordinal > beat.ordinal
+                        and other.status == "WAITING_DEPENDENCY"):
+                    other.status = "PENDING"
+            db.flush()
+
+    with factory() as db:
+        done = _beat_artifacts(db, task_id, project_id)
+        pieces = [{"beat": beat,
+                   "text": (done.get(beat.beat_id).payload_json.get("text") if beat.beat_id in done else ""),
+                   "continuity_out": (done.get(beat.beat_id).payload_json.get("continuity_out")
+                                      if beat.beat_id in done else "")}
+                  for beat in plan]
+    assembly = beat_lib.assemble(str(section.get("section_id") or "section"), pieces)
+    coverage = beat_lib.coverage(plan, len(source_text))
+
+    if failure is not None or not assembly.complete:
+        candidate_id = _persist_candidate(
+            factory, task_id=task_id, project_id=project_id, target_kind=SCENE_SCRIPT_KIND,
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+            text=assembly.text, payload={"section_id": section.get("section_id"),
+                                         "partial_beats": assembly.as_dict(),
+                                         "coverage": coverage},
+            findings=(failure.findings if failure is not None else []),
+            notes=[*assembly.notes, f"missing_beats={assembly.missing_ordinals}"],
+            input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]])
+        blocked = {**trace, "stage": "NEEDS_REVIEW",
+                   "blocked_reason": (failure.error_code if failure is not None
+                                      else "PIPELINE_SCENE_BEATS_INCOMPLETE"),
+                   "external_outcome": (failure.details.get("external_outcome")
+                                        if failure is not None else "RESPONSE_RECEIVED"),
+                   "schema_errors": (failure.schema_errors if failure is not None else []),
+                   "truncated": (failure.details.get("truncated")
+                                 if failure is not None else False),
+                   "review": (failure.review if failure is not None
+                              else {"state": "LOCAL_REVIEW",
+                                    "message": "部分节拍未完成，已保存其余正文。",
+                                    "next_action": "retry_failed_beat"}),
+                   "candidate_artifact_id": candidate_id,
+                   "beats": [beat.as_dict() for beat in plan],
+                   "beat_assembly": assembly.as_dict(), "beat_coverage": coverage,
+                   "output_budget": (failure.details.get("output_budget")
+                                     if failure is not None else None)}
+        _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW",
+                              blocked["blocked_reason"])
+        return True
+
+    adapted = adapt_scene_script({"text": assembly.text,
+                                  "continuity_out": assembly.continuity[-1] if assembly.continuity else ""},
+                                 section=section)
+    payload = dict(adapted.payload)
+    payload["source_refs"] = {"volume_id": trace["volume_id"],
+                              "volume_document_id": trace["volume_document_id"],
+                              "start_offset": section.get("start_offset"),
+                              "end_offset": section.get("end_offset"),
+                              "outline_sha256": trace["outline_sha256"],
+                              "bible_sha256": trace["bible_sha256"]}
+    _commit_pipeline_result(
+        factory, task_id=task_id, version=version, worker_id=worker_id,
+        project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
+        payload={**payload, "beats": [beat.as_dict() for beat in plan],
+                 "beat_coverage": coverage},
+        input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
+        trace={**trace, "beats": [beat.as_dict() for beat in plan],
+               "beat_assembly": assembly.as_dict(), "beat_coverage": coverage, "review": {}})
+    return True
+
+
 def run_scene_script_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one scene-script task under the fenced claim."""
     from shine.literary.adapters import SceneDraft
@@ -1506,10 +1712,17 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
         if memory_view is not None:
             context["memory"] = memory_view
         schema = SceneDraft.model_json_schema()
+        beat_plan = _scene_beat_plan(db, gateway, section, source_text, schema)
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
         if sent is None:
             return True
         trace = sent
+        if len(beat_plan) > 1:
+            return _run_scene_beats(
+                factory=factory, gateway=gateway, task_id=task_id, version=version,
+                worker_id=worker_id, project_id=project_id, trace=trace,
+                section=section, source_text=source_text, context=context,
+                schema=schema, plan=beat_plan)
         outcome = call_material_agent(
             gateway, factory, SCENE_SCRIPT_RUN_ROLE,
             system=SCENE_SYSTEM_PROMPT,

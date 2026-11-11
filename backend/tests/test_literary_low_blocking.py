@@ -215,3 +215,69 @@ def test_a_scene_that_says_content_instead_of_text_is_read_locally(api):
         artifact = db.get(AgentArtifact, tasks[0].trace["artifact_id"])
         assert artifact.payload_json["text"] == "德明：我回来了。"
         assert artifact.payload_json["section_id"] == sections[0]["production_section_id"]
+
+
+def test_a_long_scene_is_written_beat_by_beat_and_a_failed_beat_keeps_the_rest(api, monkeypatch):
+    """The failure of beat 2 must not delete beat 1, nor stop the next scene."""
+    from shine.literary import beats as beat_lib
+    from shine.literary.models import LiteraryUnit
+
+    pid, plan_artifact, volume, sections, settings = _prepared(api)
+    _client, factory, _ = api
+    first_section = sections[0]["production_section_id"]
+    real = beat_lib.plan_beats
+
+    def fake_plan(db, gateway, section, source_text, schema):
+        if section["section_id"] == first_section:
+            return real(source_text, section_id=section["section_id"],
+                        target_chars=max(1, len(source_text) // 3), min_chars=1)
+        return real(source_text, section_id=section["section_id"], target_chars=len(source_text) + 1)
+
+    monkeypatch.setattr(pipeline, "_scene_beat_plan", fake_plan)
+    calls: list[int] = []
+
+    def responder(messages, schema):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"text": "德明站在船头。", "continuity_out": "准备出海"}
+        if len(calls) <= 3:
+            # Beat 2 keeps failing, including its one correction.
+            return {"text": "   ", "continuity_out": "无"}
+        return {"text": "德明回来了。", "continuity_out": "到家"}
+
+    with factory() as db:
+        gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
+        tasks = pipeline.queue_scene_scripts(db, pid, volume["volume_id"], gateway)
+        db.commit()
+        assert len(tasks) == len(sections)
+
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
+    for _ in range(6):
+        pipeline.run_pending_pipeline_task(factory, settings, "w-beats", gateway)
+
+    with factory() as db:
+        rows = db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == pid,
+            AgentTaskRecord.role_id == pipeline.SCENE_SCRIPT_RUN_ROLE,
+        ).order_by(AgentTaskRecord.created_at)).all()
+        states = [row.status for row in rows]
+        assert "SUCCEEDED" in states, states
+        reviewed = [row for row in rows if row.status == "NEEDS_REVIEW"]
+        assert len(reviewed) == 1, states
+        trace = reviewed[0].trace
+        assert trace["blocked_reason"] == "SCHEMA_VALIDATION_FAILED"
+        assert trace["beat_coverage"]["complete"] is True, "the split itself still covers the source"
+        candidate = db.get(AgentArtifact, trace["candidate_artifact_id"])
+        assert candidate.payload_json["text"] == "德明站在船头。", \
+            "the beat that really arrived is kept verbatim"
+        beat_rows = db.scalars(select(AgentArtifact).where(
+            AgentArtifact.source_task_id == reviewed[0].id,
+            AgentArtifact.kind == pipeline.SCENE_BEAT_KIND)).all()
+        assert [row.payload_json["ordinal"] for row in beat_rows] == [1]
+        units = sorted(db.scalars(select(LiteraryUnit).where(
+            LiteraryUnit.project_id == pid,
+            LiteraryUnit.parent_id == first_section)).all(), key=lambda row: row.ordinal)
+        statuses = [unit.status for unit in units]
+        assert statuses[0] == "PASSED", statuses
+        assert statuses[1] == "FAILED", statuses
+        assert all(status == "WAITING_DEPENDENCY" for status in statuses[2:]), statuses
