@@ -62,72 +62,12 @@ def _asset_root(db, settings):
 def _validated_library_task(
     db, mode: str, fingerprint: str | None, *, category_family: str | None = None, require_alpha: bool = False
 ):
-    if not fingerprint:
-        return None
-    from shine.asset_center.contracts import qwen_edit_adapter_hash
+    """Thin alias - the rule itself lives in ``shine.asset_center.evidence``."""
+    from shine.asset_center.evidence import validated_library_task
 
-    modes = {mode}
-    if mode == "RGBA":
-        modes.add("T2I")
-    rows = db.scalars(
-        select(LibraryRenderTask)
-        .where(
-            LibraryRenderTask.kind == "image",
-            LibraryRenderTask.mode.in_(modes),
-            LibraryRenderTask.status == "CANDIDATE_READY",
-            LibraryRenderTask.external_outcome == "SUCCEEDED",
-            LibraryRenderTask.runtime_fingerprint == fingerprint,
-        )
-        .order_by(LibraryRenderTask.updated_at.desc(), LibraryRenderTask.id)
-    ).all()
-    for task in rows:
-        payload = task.payload or {}
-        if not payload.get("validation_only"):
-            continue
-        if category_family:
-            category = str(payload.get("category") or "")
-            family = "character" if category in {"character", "costume"} else category
-            if family != category_family:
-                continue
-        if task.mode != "T2I" and payload.get("validation_adapter_hash") != qwen_edit_adapter_hash(mode):
-            continue
-        if require_alpha and not payload.get("transparent"):
-            continue
-        if mode == "INPAINT" and not (payload.get("mask") or {}).get("sha256"):
-            continue
-        if mode == "WARDROBE":
-            roles = {str(row.get("role")) for row in payload.get("references") or []}
-            if not {"subject", "garment"}.issubset(roles):
-                continue
-        if mode == "MULTIREF" and len(payload.get("references") or []) < 2:
-            continue
-        version = db.get(LibraryVersion, task.result_version_id) if task.result_version_id else None
-        if version is None or version.is_mock or version.status not in {"READY_FOR_REVIEW", "PROMOTED"}:
-            continue
-        qc = version.qc or {}
-        if qc.get("technical") != "pass" or qc.get("sha256") != version.content_sha256:
-            continue
-        if mode == "INPAINT" and (qc.get("mask_composite") or {}).get("applied_sha256") != (
-            payload.get("mask") or {}
-        ).get("sha256"):
-            continue
-        if require_alpha and not (qc.get("alpha") or {}).get("transparent_pixels", 0):
-            continue
-        attempt = db.scalar(
-            select(LibraryTaskAttempt)
-            .where(LibraryTaskAttempt.task_id == task.id, LibraryTaskAttempt.external_outcome == "SUCCEEDED")
-            .order_by(LibraryTaskAttempt.attempt_no.desc())
-            .limit(1)
-        )
-        if (
-            attempt is not None
-            and attempt.output_sha256 == version.content_sha256
-            and (attempt.payload or {}).get("renderer_owned") is True
-            and (mode == "T2I" or (attempt.payload or {}).get("adapter_hash") == qwen_edit_adapter_hash(mode))
-            and (attempt.payload or {}).get("graph_sha256") == task.workflow_revision_hash
-        ):
-            return task
-    return None
+    return validated_library_task(
+        db, mode, fingerprint, category_family=category_family, require_alpha=require_alpha
+    )
 
 
 def _validated_2k_task(db, fingerprint: str | None):

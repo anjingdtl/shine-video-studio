@@ -1620,3 +1620,85 @@ def test_stale_worker_recovery_keeps_uncertain_external_tasks_out_of_queue(api):
     assert _claim_next(factory, "worker-new") == not_sent_id
     with factory() as db:
         assert db.get(LibraryRenderTask, unknown_id).status == "UNKNOWN"
+
+
+def test_a_validation_sample_in_the_library_clears_the_material_family_gate(api):
+    """Two doors, one renderer: validating in the workshop must count everywhere.
+
+    A user who runs the single local validation sample in the asset centre has
+    already produced the bytes the material queue wants as evidence.  Refusing
+    them there - with no way to tell why - was the dead end this test pins shut.
+    """
+    _client, factory, _settings = api
+    fingerprint = "9" * 64
+    graph_sha = "8" * 64
+    digest = "7" * 64
+    with factory.begin() as db:
+        rights = LibraryRights(
+            source_type="authorized_local_upload",
+            license_kind="USER_OWNED_FIXTURE",
+            scope="asset",
+            statement="Synthetic test fixture owned by the test author.",
+            allowed_project_ids=["*"],
+            permitted_uses=["research"],
+            status="APPROVED",
+            recorded_actor="test-user",
+            approved_by="test-user",
+        )
+        asset = LibraryAsset(title="验证图", kind="image", category="character", created_by="test-user")
+        db.add_all([rights, asset])
+        db.flush()
+        version = LibraryVersion(
+            library_asset_id=asset.id,
+            ordinal=1,
+            filename="verified.png",
+            kind="image",
+            content_type="image/png",
+            content_sha256=digest,
+            storage_path="unused-test-fixture.png",
+            byte_size=64,
+            width=16,
+            height=16,
+            source_mode="T2I",
+            rights_id=rights.id,
+            provenance={},
+            qc={"technical": "pass", "sha256": digest},
+            status="READY_FOR_REVIEW",
+            is_mock=False,
+            created_by="test-user",
+        )
+        db.add(version)
+        db.flush()
+        task = LibraryRenderTask(
+            idempotency_key="material-gate-from-library:1",
+            request_hash="6" * 64,
+            kind="image",
+            mode="T2I",
+            payload={"validation_only": True, "category": "character"},
+            workflow_revision_hash=graph_sha,
+            runtime_fingerprint=fingerprint,
+            status="CANDIDATE_READY",
+            external_outcome="SUCCEEDED",
+            result_version_id=version.id,
+        )
+        db.add(task)
+        db.flush()
+        db.add(
+            LibraryTaskAttempt(
+                task_id=task.id,
+                attempt_no=1,
+                snapshot_hash="5" * 64,
+                submit_stage="OUTPUT_STORED",
+                status="SUCCEEDED",
+                external_outcome="SUCCEEDED",
+                output_sha256=digest,
+                payload={"renderer_owned": True, "graph_sha256": graph_sha},
+            )
+        )
+
+    with factory() as db:
+        verified = image_runtime.render_verified_families(db, fingerprint)
+    assert verified == {"character": task.id}, verified
+    # ... and it must not leak into a different runtime identity.
+    with factory() as db:
+        assert image_runtime.render_verified_families(db, "4" * 64) == {}

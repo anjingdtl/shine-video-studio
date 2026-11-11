@@ -210,7 +210,15 @@ def verify_graph_against_object_info(object_info: dict[str, Any]) -> dict[str, A
 
 
 def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, Any] | None = None) -> str:
-    """The identity readiness evidence is bound to."""
+    """The identity readiness evidence is bound to.
+
+    Only the configuration is identity. Whether the bound renderer answered the
+    ``object_info`` probe a moment ago is readiness - a layer above this hash -
+    and must never leak into it: a single unreachable probe would otherwise
+    rewrite the fingerprint and silently invalidate every family that was
+    already rendered for real.
+    """
+    del graph_report  # kept in the signature for callers that just probed; not identity
     return qwen_workflow.runtime_fingerprint(
         graph_sha256=config.graph_sha256 or qwen_workflow.BASE_GRAPH_SHA256,
         model_files=[
@@ -226,7 +234,6 @@ def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, A
         instance_identity={
             "instance_id": config.instance_id,
             "base_url": config.base_url,
-            "graph_verified": bool((graph_report or {}).get("complete")),
         },
         prompt_template_version=template_evidence()["template_version"],
     )
@@ -235,11 +242,11 @@ def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, A
 def render_verified_families(db, fingerprint: str) -> dict[str, str]:
     """Families with a real successful sample under this exact fingerprint.
 
-    The evidence is the ledger itself: a SUCCEEDED image attempt whose recorded
-    runtime fingerprint still matches, whose candidate is not a mock, whose run
-    was a validation run, and whose renderer was one this installation owns.
-    A stand-in renderer may prove that the chain works; its bytes are never
-    counted as real verification.
+    There are two doors into a real sample and they must agree: the material
+    queue's validation batch and the asset centre's "run one local validation"
+    task. Both render through the same bound renderer and record the same
+    fingerprint, so both count - otherwise a user who validated in one place
+    would still be refused in the other with no way out.
     """
     from sqlalchemy import select
 
@@ -266,7 +273,21 @@ def render_verified_families(db, fingerprint: str) -> dict[str, str]:
         family = (item.payload or {}).get("family")
         if family in FAMILIES and family not in verified:
             verified[family] = attempt.id
+
+    for family, task_id in _library_validation_families(db, fingerprint).items():
+        verified.setdefault(family, task_id)
     return verified
+
+
+def _library_validation_families(db, fingerprint: str) -> dict[str, str]:
+    """Validation samples the asset centre produced under this fingerprint.
+
+    The rule for "this task really wrote bytes" lives in
+    ``shine.asset_center.evidence`` so both workspaces read the same evidence.
+    """
+    from shine.asset_center.evidence import validated_families
+
+    return validated_families(db, fingerprint)
 
 
 def _renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
