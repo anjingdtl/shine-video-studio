@@ -33,6 +33,7 @@ import { DirectorProductionRunPanel } from './components/DirectorProductionRunPa
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
 import type { RailBlocker } from './components/ActionRail';
+import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
@@ -259,10 +260,32 @@ function App() {
   const stageBlockers: Record<string, number> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.blockers.length]),
   ), [journey]);
-  /** 操作栏待办来自服务端 /journey 的 blocker，前端不另造完成态或阻塞。 */
+  /** 操作栏待办来自服务端 /journey 的 blocker，前端不另造完成态或阻塞。
+   *  错误码经 errorActions 映射为「一句原因 + 去处理」，未知码保留原文。 */
   const railBlockers = (stageId: string): RailBlocker[] =>
     (journey?.stages.find((stage) => stage.id === stageId)?.blockers ?? [])
-      .map((blocker) => ({ code: blocker.code, reason: blocker.message }));
+      .map((blocker) => {
+        const described = describeBlocker(blocker.code, blocker.message);
+        return {
+          code: blocker.code,
+          reason: described.reason,
+          action: described.action ? { label: described.action.label, go: resolveBlockerTarget(described.action.target) } : undefined,
+        };
+      });
+  function resolveBlockerTarget(target: ErrorActionTarget): () => void {
+    switch (target) {
+      case 'setup-models': return () => goToDirectorSetup('models');
+      case 'setup-env': return () => goToDirectorSetup('env');
+      case 'assets-stage': return () => goToDirectorPage('produce', 'assets');
+      case 'package-stage': return () => goToDirectorPage('package');
+      case 'storyboard-stage': return () => goToDirectorPage('creative');
+      case 'run-stage': return () => goToDirectorPage('run');
+      case 'library': return () => goToDirectorPage('library');
+      case 'consent': return () => goToDirectorPage('creative');
+      case 'retry-scene': return () => goToDirectorPage('produce', 'assets');
+      case 'split-plan': return () => goToDirectorPage('produce', 'assets');
+    }
+  }
   /** 生产阶段完成 = 本次范围内每个镜头都有当前有效成片，不是“有一个视频”。 */
   const deliverableReady = stageDone.production ?? false;
   /** 素材阶段的“还缺几项”：来自服务端 facts，缺图不堵流程但要让用户看见。 */

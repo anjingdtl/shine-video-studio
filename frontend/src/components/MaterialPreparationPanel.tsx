@@ -1002,6 +1002,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </select></label>
               <small>已选用 {Object.keys(selected).length} 项 · 候选 {totals.ready}/{totals.total} · 失败 {totals.failed} · 待核对 {totals.review}</small>
             </div>
+            <div className="batch-bar">
+              <button type="button" className="btn-secondary" disabled={busy} onClick={() => {
+                const next = { ...selected };
+                for (const tile of tiles) {
+                  if (tile.candidate && tile.selectable && !tile.candidate.formal_asset_id
+                    && tile.candidate.status === 'READY_FOR_REVIEW' && tile.item.requirement_id) {
+                    next[tile.item.requirement_id] = tile.candidate.candidate_id;
+                  }
+                }
+                setSelected(next);
+              }}>全选可用候选</button>
+              <button type="button" className="btn-text" disabled={busy || Object.keys(selected).length === 0}
+                onClick={() => setSelected({})}>清空选择</button>
+            </div>
             <div className="media-grid material-grid" aria-label="候选素材预览">
               {tiles.slice(0, visibleCandidates).map((tile) => (
                 <article className="media-card material-tile" key={tile.candidate?.candidate_id ?? tile.item.item_id}>

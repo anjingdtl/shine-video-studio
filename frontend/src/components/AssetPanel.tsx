@@ -156,6 +156,16 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
         {!railPresent && <button className="btn-primary" disabled={busy || !selection.length}
           onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>}
       </div>}
+      {pending.length > 0 && <div className="batch-bar">
+        <label>
+          <input type="checkbox" aria-label="全选待确认素材"
+            checked={pending.length > 0 && selection.length === pending.length}
+            onChange={(event) => setSelection(event.target.checked ? pending.map((asset) => asset.id) : [])} />
+          全选待确认（{pending.length}）
+        </label>
+        <span className="batch-count">已选 {selection.length} 项</span>
+        {selection.length > 0 && <button type="button" className="btn-text" onClick={() => setSelection([])}>清空</button>}
+      </div>}
       <label className="material-field"><span>素材分组</span><select value={group} onChange={(e) => { setGroup(e.target.value); setVisible(24); }}>
         <option value="all">全部素材</option><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option><option value="voice">声音</option>
       </select></label>

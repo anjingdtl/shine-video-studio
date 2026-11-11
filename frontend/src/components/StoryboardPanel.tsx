@@ -721,6 +721,18 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       {binding && <div className="binding-panel" id={`character-confirmation-${projectId}`}>
         <div className="section-kicker">人物对照（剧本人物 ↔ 你的素材）</div>
         <p className="binding-intro">系统按名字、标签和上传顺序给出了建议，只作参考。以缩略图为准逐条核对；名字会写进素材本身，五个 Agent 就靠它把剧本人物和你的图对上。</p>
+        <div className="batch-bar">
+          <button type="button" className="btn-secondary" disabled={requiresReconciliation || bindingBusy}
+            onClick={() => {
+              setConfirmedBreakdownId(null);
+              const choices: Record<string, { asset_id: string; name: string }> = {};
+              for (const row of binding.characters) {
+                if (row.suggested_asset_id) choices[row.script_name] = { asset_id: row.suggested_asset_id, name: row.suggested_name };
+              }
+              setBindingChoice(choices);
+            }}>一键采纳全部推荐映射</button>
+          <span className="batch-count">已对照 {Object.values(bindingChoice).filter((choice) => choice.asset_id).length}/{binding.characters.length}</span>
+        </div>
         <fieldset className="binding-list" disabled={requiresReconciliation}>
           {binding.characters.map((row) => {
             const choice = bindingChoice[row.script_name];

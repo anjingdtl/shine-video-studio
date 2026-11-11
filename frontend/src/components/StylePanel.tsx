@@ -71,7 +71,6 @@ export default function StylePanel({
   const [rulepackId, setRulepackId] = useState<string | null>(null);
   const [rulepacks, setRulepacks] = useState<Array<{ id: string }>>([]);
   const [aiHint, setAiHint] = useState('');
-  const [aiConsent, setAiConsent] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [adoptBusy, setAdoptBusy] = useState(false);
   const [aiError, setAiError] = useState('');
@@ -204,7 +203,9 @@ export default function StylePanel({
         json('POST', {
           tool: 'style_proposal',
           brief: aiHint.trim(),
-          allow_remote_text: aiConsent,
+          // 文本发送授权归口项目级一次同意；后端按 grant 裁决，未授权会返回
+          // REMOTE_AGENT_CONSENT_REQUIRED，前端不再逐流程勾选。
+          allow_remote_text: true,
           input_revision_ids: [],
         }),
       );
@@ -551,10 +552,7 @@ export default function StylePanel({
           <label className="style-ai-hint">给 AI 的补充说明（可留空）
             <input value={aiHint} maxLength={2000} onChange={(event) => setAiHint(event.target.value)} placeholder="例如：更接近夜戏质感的风格" />
           </label>
-          <label className="check-label style-ai-consent">
-            <input type="checkbox" checked={aiConsent} onChange={(event) => setAiConsent(event.target.checked)} />
-            <span>我同意把项目设置与补充说明文本发给已配置的 AI 文字服务（不发送素材文件）。</span>
-          </label>
+          <p className="notice"><Sparkles size={13} /><span className="notice-body">发送文本遵循项目级一次同意（基础配置可撤回）；不发送素材文件。</span></p>
           <button type="button" className="btn-secondary" disabled={aiBusy} onClick={recommend}>
             <Sparkles size={13} /> {aiBusy ? '正在请求 AI 建议…' : '请求 AI 风格建议'}
             <span className="style-ai-catalog">目录 {STYLE_CATALOG_VERSION} · {styleCatalogHash()}</span>
