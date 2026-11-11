@@ -182,6 +182,11 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "last_observed_at": None,
         "state_version": 0,
     }
+    # Worker liveness is stack-level truth, independent of any installation
+    # binding: it must be filled even on the NOT_BOUND early return.
+    from shine.runtime_orchestrator.operations import any_worker_online
+
+    snapshot["health"]["worker"] = "UP" if any_worker_online(db) else "DOWN"
     if not installation_id:
         return snapshot
     from shine.models import utcnow
@@ -189,7 +194,10 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     snapshot["last_observed_at"] = utcnow().isoformat()
     activity = installation_activity(db, installation_id)
     renderer_facts = image_renderer_state(db, settings, installation_id)
-    port = renderer_facts.get("port")
+    # The startup record carries the port while a renderer was started; a
+    # stopped/unstarted installation still owns the recipe's port claim, and
+    # an external listener there is exactly the conflict to report.
+    port = renderer_facts.get("port") or recipe_port(settings)
     http_up = _http_up(base_url) if activity["renderer_state"] != "NONE" else None
     state = _classify(activity, http_up=http_up)
     if state == "STOPPED" and _external_conflict(port):
@@ -197,10 +205,6 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     snapshot["state"] = state
     snapshot["recovery"] = _recovery_for(state)
     snapshot["health"]["comfy_http"] = "UP" if http_up else ("DOWN" if http_up is False else "UNKNOWN")
-    # Worker liveness from the existing heartbeat table.
-    from shine.runtime_orchestrator.operations import any_worker_online
-
-    snapshot["health"]["worker"] = "UP" if any_worker_online(db) else "DOWN"
     image_record = activity.get("image_record")
     active_h3 = next((r for r in activity["h3_records"] if r["state"] == "ACTIVE"), None)
     owner_kind = "h3" if active_h3 else ("image" if image_record else None)

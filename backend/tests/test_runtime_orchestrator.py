@@ -474,14 +474,19 @@ def test_orchestrator_flag_restores_the_direct_path(api, installation_row, tmp_p
 # --- unified snapshot (P3) ------------------------------------------------------
 
 
-def test_snapshot_states_and_recovery_advice(api, installation_row, tmp_path):
+def test_snapshot_states_and_recovery_advice(api, installation_row, tmp_path, monkeypatch):
     import os
 
     from shine.comfyops.installer import process_identity
+    from shine.runtime_orchestrator import status as status_module
     from shine.runtime_orchestrator.status import runtime_snapshot
 
     _, factory, settings = api
     _write_recipe(api, tmp_path)
+    # The port-probe outcome depends on whatever else this machine runs (a
+    # real ComfyUI on 8188 is EXTERNAL_CONFLICT, which is a different test):
+    # pin it to "no listener" for the STOPPED classification.
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
     with factory() as db:
         snap = runtime_snapshot(db, settings)
     # Nothing runs and no listener can be claimed: STOPPED with a safe ensure.
@@ -507,3 +512,21 @@ def test_snapshot_states_and_recovery_advice(api, installation_row, tmp_path):
         snap = runtime_snapshot(db, settings)
     assert snap["state"] == "BLOCKED_UNVERIFIED"
     assert snap["recovery"]["safe_action"] == "reconcile"
+
+
+def test_snapshot_reports_external_conflict_on_recipe_port(api, installation_row, tmp_path, monkeypatch):
+    """A listener on the recipe port that no record owns is EXTERNAL_CONFLICT.
+
+    The snapshot must not claim the port, start anything, or offer a stop
+    action: the process is not ours (audit R15 / plan §3.3).
+    """
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path, port=8188)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: True)
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["state"] == "EXTERNAL_CONFLICT"
+    assert snap["recovery"]["safe_action"] is None
+    assert snap["recovery"]["reason_code"] == "EXTERNAL_INSTANCE_ON_PORT"
