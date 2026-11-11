@@ -76,7 +76,7 @@ describe('四阶段面板', () => {
                respond: () => jsonResponse({ confirmed: true }) });
     const user = userEvent.setup();
     render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
-    await screen.findByText(/场次 S1 的剧本已生成/);
+    await screen.findByText(/「S1 出海」这一幕的剧本已生成/);
     await user.click(screen.getByRole('button', { name: '确认这一场' }));
     await waitForConfirmation(stub);
   });
@@ -133,7 +133,7 @@ describe('四阶段面板', () => {
                })) });
     const user = userEvent.setup();
     render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
-    await screen.findByText(/场次 S1 的剧本已生成/);
+    await screen.findByText(/「S1 出海」这一幕的剧本已生成/);
     // The reason is readable, the raw check code is not the message.
     expect(screen.getAllByText(/未通过终校：这一场引用的原文范围无效/).length).toBeGreaterThan(0);
     const confirm = screen.getByRole('button', { name: '确认这一场' });
