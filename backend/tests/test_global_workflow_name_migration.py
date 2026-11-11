@@ -7,7 +7,7 @@ import pytest
 from alembic import command
 from tests.test_alembic import alembic_config
 
-HEAD_REVISION = "f180b0070001"
+HEAD_REVISION = "f180b0080001"
 
 
 def previous_database(tmp_path, monkeypatch):

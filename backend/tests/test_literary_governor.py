@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 
 import pytest
 
@@ -61,7 +62,9 @@ class ScriptedGateway:
             raise answer
         if isinstance(answer, LLMResponse):
             return answer
-        return LLMResponse(answer.get("text", ""), answer.get("parsed"), "test", 1,
+        parsed = answer.get("parsed", answer)
+        text = answer.get("text") or json.dumps(parsed, ensure_ascii=False)
+        return LLMResponse(text, parsed, "test", 1,
                            usage=answer.get("usage") or {"completion_tokens": 100})
 
 
@@ -227,9 +230,11 @@ def test_the_attempt_record_carries_the_fingerprint_and_the_budget():
     governor.execute(system=BASE_SYSTEM, context=BASE_CONTEXT,
                      schema=SceneDraft.model_json_schema(), contract=SceneDraft,
                      purpose="scene", session_factory=contextlib.nullcontext)
-    assert records[0]["request_fingerprint"]
-    assert records[0]["output_request_tokens"] > 0
-    assert records[0]["unit_budget"]["calls"] == 1
+    # Two rows per physical request: the durable intent, then the outcome.
+    assert [row["phase"] for row in records] == ["SENDING", "FINISHED"]
+    assert records[0]["request_fingerprint"] == records[1]["request_fingerprint"]
+    assert records[1]["output_request_tokens"] > 0
+    assert records[1]["unit_budget"]["calls"] == 1
 
 
 def test_the_gateway_double_detection_keeps_legacy_doubles_working():

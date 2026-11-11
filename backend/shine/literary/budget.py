@@ -31,6 +31,7 @@ from typing import Any
 from shine.literary.requests import CompiledRequest
 from shine.llm.base import ProviderConfig
 from shine.llm.output_budget import CREATIVE_COMPLETION_SHARE, creative_completion_cap
+from shine.llm.transport_policy import streaming_enabled
 
 SAFETY_MARGIN_TOKENS = 512
 """Room kept free in the window for the provider's own accounting."""
@@ -88,6 +89,7 @@ class CallBudget:
     soft_input_limit: int
     burst_input_limit: int
     fits: bool
+    streaming: bool = False
     refusal: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
@@ -115,6 +117,7 @@ class CallBudget:
             "reasoning_reserve_tokens": self.reasoning_reserve_tokens,
             "reasoning_reserve_known": self.reasoning_reserve_known,
             "soft_input_limit": self.soft_input_limit,
+            "streaming": self.streaming,
             "burst_input_limit": self.burst_input_limit,
             "total_tokens_estimated": self.total_tokens_estimated,
             "fits": self.fits,
@@ -221,6 +224,7 @@ def plan_call_budget(
         refusal=refusal,
         warnings=warnings,
         sources=sources,
+        streaming=streaming_enabled(config),
     )
 
 

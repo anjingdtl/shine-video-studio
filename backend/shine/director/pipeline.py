@@ -815,6 +815,26 @@ def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: s
         return None
 
 
+def _attempt_recorder(factory, project_id: str, task_id: str):
+    """A durable physical-call recorder for one task.
+
+    The governor calls it twice per request: once before the request leaves and
+    once with the real outcome.  A ledger fault is logged and swallowed - the
+    literary work must not fail because bookkeeping did.
+    """
+    from shine.literary import ledger
+
+    def record(attempt: dict) -> None:
+        try:
+            with factory.begin() as db:
+                ledger.record(db, project_id=project_id, attempt=attempt, task_id=task_id)
+        except Exception:  # noqa: BLE001 - bookkeeping never fails a scene
+            logger.exception("literary_attempt_ledger_failed task=%s unit=%s",
+                             task_id, attempt.get("unit_id"))
+
+    return record
+
+
 def _compact_attempts(attempts) -> list[dict]:
     """The bounded physical-call ledger one task keeps in its trace."""
     if not isinstance(attempts, list):
@@ -938,6 +958,7 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             purpose="outline",
             unit_id=f"bible:{project_id}",
             unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
             before_call=text_consent.guard(project_id, trace["document_id"], trace["document_sha256"],
                                            BIBLE_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
@@ -1430,6 +1451,7 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             purpose="scene",
             unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
             unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
             before_call=text_consent.guard(
                 project_id, trace["master_document_id"], trace["master_document_sha256"],
                 SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway),

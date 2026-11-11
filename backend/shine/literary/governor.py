@@ -374,7 +374,11 @@ class CallGovernor:
             "output_request_tokens": budget.output_request_tokens,
             "corrective": corrective,
             "attempt_no": self.budget.calls + 1,
+            "output_budget": budget.as_dict(),
         }
+        # The intent is durable *before* the request leaves: a crash between
+        # this row and the answer is reconcilable, not a guess.
+        self._emit({**attempt, "phase": "SENDING"})
         self.budget.charge_call(repair=corrective)
         phases: list[str] = []
 
@@ -419,8 +423,8 @@ class CallGovernor:
                 self.role, self.unit_id, phase, sent)
             attempt.update({"external_outcome": "UNKNOWN" if sent else "NOT_SENT",
                             "error_type": type(exc).__name__, "last_phase": phase,
-                            "finished": True})
-            self._emit(attempt)
+                            "error_code": "LLM_PROVIDER_FAULT", "finished": True})
+            self._emit({**attempt, "phase": "FINISHED"})
             finding = triage.classify_failure(
                 "LLM_PROVIDER_FAULT", unit_ids=(self.unit_id,),
                 evidence={"last_phase": phase, "error_type": type(exc).__name__})
@@ -432,14 +436,19 @@ class CallGovernor:
 
         usage = _usage_tokens(response.usage)
         self.budget.charge_tokens(usage["completion_tokens"])
+        meta = response.raw_meta or {}
         attempt.update({
             "external_outcome": "RESPONSE_RECEIVED", "finished": True,
             "latency_ms": response.latency_ms,
             "completion_tokens": usage["completion_tokens"],
             "reasoning_tokens": usage["reasoning_tokens"],
-            "finish_reason": (response.raw_meta or {}).get("finish_reason"),
+            "finish_reason": meta.get("finish_reason"),
+            "http_status": meta.get("http_status"),
+            "first_event_ms": meta.get("first_event_ms"),
+            "last_event_ms": meta.get("last_event_ms"),
+            "streamed": bool(meta.get("streamed")),
         })
-        self._emit(attempt)
+        self._emit({**attempt, "phase": "FINISHED"})
         parsed = response.parsed
         text = response.text or ""
         findings: list[triage.Finding] = []
@@ -506,7 +515,7 @@ class CallGovernor:
                         "provider_code": exc.details.get("provider_code"),
                         "finish_reason": exc.details.get("finish_reason"),
                         "last_phase": phases[-1] if phases else None, "finished": True})
-        self._emit(attempt)
+        self._emit({**attempt, "phase": "FINISHED"})
         recovered = salvage.salvage_answer(raw, aliases=aliases) if raw else None
         parsed: dict[str, Any] | None = None
         if recovered is not None and recovered.payload is not None and contract is not None:
@@ -554,5 +563,10 @@ class CallGovernor:
             finish_reason=exc.details.get("finish_reason"))
 
     def _emit(self, attempt: dict[str, Any]) -> None:
-        if self._record_attempt:
-            self._record_attempt({**attempt, "unit_budget": self.budget.as_dict()})
+        if not self._record_attempt:
+            return
+        try:
+            self._record_attempt({**attempt, "unit_budget": self.budget.as_dict(),
+                                  "output_budget": attempt.get("output_budget")})
+        except Exception:  # noqa: BLE001 - a ledger write must never fail a call
+            logger.exception("literary_attempt_record_failed unit=%s", self.unit_id)

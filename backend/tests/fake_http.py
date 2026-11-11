@@ -49,6 +49,12 @@ class FakeOpenAIServer(_BaseServer):
         self.models_content_type: str = "application/json"
         # Forces the chat endpoint to answer with a specific status.
         self.chat_status: int | None = None
+        # SSE behaviour for stream=true requests:
+        #   None      - answer as one JSON body (a provider without streaming)
+        #   "ok"      - send the content as two deltas, then [DONE]
+        #   "broken"  - send one delta, then close the socket mid-answer
+        #   "empty"   - accept the request and close without any event
+        self.stream_mode: str | None = None
         super().__init__()
 
     def _handler(self):
@@ -100,6 +106,32 @@ class FakeOpenAIServer(_BaseServer):
                     return
                 self._json(404, {"error": "not found"})
 
+            def _sse(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                mode = outer.stream_mode
+
+                def event(payload: Any) -> None:
+                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+
+                if mode == "empty":
+                    self.close_connection = True
+                    return
+                text = outer.response_content
+                half = max(1, len(text) // 2)
+                event({"choices": [{"delta": {"content": text[:half]}}]})
+                if mode == "broken":
+                    self.close_connection = True
+                    return
+                event({"choices": [{"delta": {"content": text[half:]}}]})
+                event({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                       "usage": {"prompt_tokens": 3, "completion_tokens": 4}})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
@@ -125,6 +157,9 @@ class FakeOpenAIServer(_BaseServer):
                     time.sleep(0.6)
                 if outer.mode == "status_400":
                     self._json(400, {"error": "response_format unsupported"})
+                    return
+                if outer.stream_mode is not None and json.loads(raw or b"{}").get("stream"):
+                    self._sse()
                     return
                 if outer.mode == "reject_json_mode":
                     body = json.loads(raw or b"{}")
@@ -292,6 +327,32 @@ class FakeComfyServer(_BaseServer):
                     self.wfile.write(outer.output_bytes)
                     return
                 self._json(404, {"error": "not found"})
+
+            def _sse(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                mode = outer.stream_mode
+
+                def event(payload: Any) -> None:
+                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+
+                if mode == "empty":
+                    self.close_connection = True
+                    return
+                text = outer.response_content
+                half = max(1, len(text) // 2)
+                event({"choices": [{"delta": {"content": text[:half]}}]})
+                if mode == "broken":
+                    self.close_connection = True
+                    return
+                event({"choices": [{"delta": {"content": text[half:]}}]})
+                event({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                       "usage": {"prompt_tokens": 3, "completion_tokens": 4}})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
