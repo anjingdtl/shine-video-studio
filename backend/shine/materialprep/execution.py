@@ -604,7 +604,10 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             # The same holds when the unified controller refuses a renderer
             # start because H3 (or another start) owns the installation now.
             touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
-            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": code}
+            # The generic ledger wait keeps its historical "GPU" marker; the
+            # renderer-busy refusals name their specific reason.
+            waiting = "GPU" if code == "GPU_BUSY_RETRY_OR_QUEUE" else code
+            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": waiting}
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
     except ImageExecutionError as exc:
