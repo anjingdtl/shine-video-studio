@@ -915,8 +915,12 @@ class FilmAgentDispatcher:
         if repair_visual_language:
             system_prompt += (
                 " The previous proposal failed the visual language check. Rewrite all visual and camera "
-                "descriptions in English, including every segment's cuts. Check for copied Chinese names, "
-                "stage directions and lyrics. Keep the original timeline, approved references and dialogue contract."
+                "descriptions in English, including every segment's cuts. Never copy a Chinese name, title, "
+                "stage direction or lyric into a visual or camera field: refer to a person by an English "
+                "role label such as 'the lead performer', 'the woman in the grey cloak' or 'the guard', and "
+                "describe what they do instead of naming them. A name belongs in the asset ids and the "
+                "character fields, never in the prose the renderer reads. Keep the original timeline, "
+                "approved references and dialogue contract exactly."
             )
         if repair_contract_note:
             # The refusal is named by the server, never by the provider's text:

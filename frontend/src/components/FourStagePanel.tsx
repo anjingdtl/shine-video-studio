@@ -7,7 +7,8 @@ import {
   editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
   getTextConsentScope, grantTextConsent, importPipelineSource, listScriptDocuments,
   openDirectorPackage, queueBible, queueVolumeOutline, queueVolumeScripts,
-  reconcileFilmTask, reconcilePipelineTask, requestVolumeHandoff, resumePipelineTask, startPipelineNewAttempt,
+  reconcileFilmTask,
+  resendUnknownFilmTask, reconcilePipelineTask, requestVolumeHandoff, resumePipelineTask, startPipelineNewAttempt,
   type PipelineOverview, type PipelineTaskSummary, type StoryboardUnit,
   type WorkflowProfileLite,
 } from '../api';
@@ -181,12 +182,15 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
    * Reconcile one failed unit and continue only that unit.
    *
    * The film ledger decides whether each call is safe to repeat.
-   * An unknown outcome is reported as it is.
+   * A call whose outcome stays unknown needs the person's decision: this
+   * button is that decision, so the unknown attempt is retired and the scene
+   * is asked exactly once more.
    */
   async function reconcileUnit(unit: StoryboardUnit) {
     setBusy(true);
     try {
       const conclusions: string[] = [];
+      const unknown: Array<{ task_id: string; state_version: number }> = [];
       const rejections = unit.rejections ?? [];
       let mayContinue = rejections.length > 0;
       for (const rejection of rejections) {
@@ -199,11 +203,25 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         conclusions.push(result.note ?? (result.outcome === 'UNCONFIRMABLE'
           ? '无法确认服务商是否已处理这次调用，原任务已保留。'
           : result.outcome));
+        if (result.outcome === 'UNKNOWN_REQUIRES_NEW_ATTEMPT') {
+          unknown.push({ task_id: rejection.task_id, state_version: result.state_version });
+        }
         mayContinue = mayContinue && result.resubmittable;
       }
       if (conclusions.length === 0) {
         onMessage('这一项没有可核对的调用记录，请查看任务详情', 'error');
         return;
+      }
+      if (unknown.length > 0) {
+        // The person asked for this scene to be redone; an attempt whose
+        // outcome cannot be confirmed is retired by that decision and the
+        // scene is asked once more with a new request.
+        for (const entry of unknown) {
+          const resent = await resendUnknownFilmTask(
+            projectId, entry.task_id, entry.state_version);
+          conclusions.push(resent.note ?? '已登记你的确认，将以一次新的模型请求重问这一场。');
+        }
+        mayContinue = true;
       }
       await refresh();
       if (!mayContinue) {

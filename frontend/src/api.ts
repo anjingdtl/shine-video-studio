@@ -937,6 +937,15 @@ export const reconcileFilmTask = (projectId: string, taskId: string, expectedSta
     `/projects/${projectId}/film-runs/${taskId}/reconcile`,
     json('POST', { expected_state_version: expectedStateVersion }));
 
+/**
+ * Ask one unknown crew call again.  The old request may still own an answer
+ * upstream, so this only happens because the person decided to.
+ */
+export const resendUnknownFilmTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
+  api<{ outcome: string; resubmittable: boolean; state_version: number; note?: string }>(
+    `/projects/${projectId}/film-runs/${taskId}/resend-unknown`,
+    json('POST', { expected_state_version: expectedStateVersion }));
+
 export const confirmVolumeOutline = (
     projectId: string, volumeId: string, outlineArtifactId: string, sha256: string,
     questionsSha256: string | null) =>

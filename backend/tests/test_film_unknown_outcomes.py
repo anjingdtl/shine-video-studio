@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from shine.llm.base import LLMConnectionError, LLMTimeout
 from shine.models import AgentTaskRecord, AuditEvent, utcnow
+from tests.conftest import create_project
 from tests.test_style_input_assessment import setup_inputs
 from tests.test_v13_preparation import HEADERS, post, prep  # noqa: F401
 
@@ -347,3 +348,73 @@ def test_a_refused_answer_that_arrived_allows_one_authorized_new_request(prep, m
             guard_request(db, project, task.role_id, task.input_hash, profile, text_hash=text_hash,
                           authorize_replay_task_id="00000000-0000-0000-0000-000000000000")
     assert len(calls) == 1
+
+
+def _dead_crew_task(factory, project_id: str, *, phase: str, age_s: int = 4000):
+    """A crew task left RUNNING by a process that died."""
+    with factory.begin() as db:
+        task = AgentTaskRecord(
+            project_id=project_id, role_id="scriptwriter", input_hash="dead-input",
+            asset_manifest_hash="assets", rulepack_id="rules", rulepack_hash="rules",
+            model_profile_id="profile", model_id="test-model", schema_version="1.1",
+            status="RUNNING",
+            trace={"phase": phase, "network_timeout_s": 300.0,
+                   "phase_started_at": (utcnow() - timedelta(seconds=age_s)).isoformat()})
+        db.add(task)
+        db.flush()
+        return task.id, task.state_version
+
+
+def test_a_dead_crew_task_is_reconciled_instead_of_blocking_the_scene(prep):  # noqa: F811
+    """A call whose owner died can no longer be in flight.
+
+    The provider call cannot outlive its own timeout, so the attempt is
+    finished.  A request that may have reached the provider keeps its unknown
+    outcome, and only the person can decide to ask again.
+    """
+    client, factory, _ = prep
+    project_id = create_project(client, "死亡任务核对")
+    task_id, version = _dead_crew_task(factory, project_id, phase="WAITING_PROVIDER")
+    reconciled = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                             json={"expected_state_version": version},
+                             headers={"x-shine-local-action": "1"})
+    assert reconciled.status_code == 200, reconciled.text
+    body = reconciled.json()
+    assert body["outcome"] == "UNKNOWN_REQUIRES_NEW_ATTEMPT", body
+    assert body["resubmittable"] is False
+    resent = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/resend-unknown",
+                         json={"expected_state_version": body["state_version"]},
+                         headers={"x-shine-local-action": "1"})
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["outcome"] == "USER_AUTHORIZED_NEW_REQUEST"
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "SUPERSEDED"
+        assert task.trace["reconciliation"]["outcome"] == "USER_AUTHORIZED_NEW_REQUEST"
+        assert task.trace["external_outcome"] == "UNKNOWN"
+
+
+def test_a_dead_crew_task_that_never_left_is_released(prep):  # noqa: F811
+    """A pre-request phase proves the request never reached the provider."""
+    client, factory, _ = prep
+    project_id = create_project(client, "死亡任务核对")
+    task_id, version = _dead_crew_task(factory, project_id, phase="WAITING_RESOURCE")
+    reconciled = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                             json={"expected_state_version": version},
+                             headers={"x-shine-local-action": "1"})
+    assert reconciled.status_code == 200, reconciled.text
+    body = reconciled.json()
+    assert body["outcome"] == "NOT_SENT_PROVEN", body
+    assert body["resubmittable"] is True
+
+
+def test_a_live_crew_task_is_still_running(prep):  # noqa: F811
+    """A call inside its own timeout may still be in flight."""
+    client, factory, _ = prep
+    project_id = create_project(client, "死亡任务核对")
+    task_id, version = _dead_crew_task(factory, project_id, phase="WAITING_PROVIDER", age_s=10)
+    reconciled = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                             json={"expected_state_version": version},
+                             headers={"x-shine-local-action": "1"})
+    assert reconciled.status_code == 409, reconciled.text
+    assert reconciled.json()["detail"] == "FILM_AGENT_TASK_STILL_RUNNING"

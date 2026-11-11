@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -56,6 +57,7 @@ router = APIRouter(prefix="/api/v1", tags=["film-crew", "rulebook"])
 #: provider answered without a usable answer.  The budget keeps a role the
 #: model can never satisfy from burning calls.
 MAX_RECONCILE_ATTEMPTS = 2
+CREW_TASK_DEAD_MARGIN_S = 60.0
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +84,33 @@ def abandon_remote(project_id: str, task_id: str, body: AbandonRemoteResponse, a
     return abandon_remote_response(db, row, actor, body.grant_id, body.snapshot, body.evidence)
 
 
+def _crew_task_dead(task) -> bool:
+    """True when a RUNNING crew task cannot still be in flight.
+
+    The provider call cannot outlive its own timeout, so a task that has been
+    running longer than that timeout belongs to a process that died.  The
+    attempt is finished, not running: it has to be reconciled like any other.
+    """
+    trace = task.trace or {}
+    timeout = trace.get("network_timeout_s")
+    started = trace.get("phase_started_at")
+    if not isinstance(timeout, int | float) or isinstance(timeout, bool):
+        return False
+    if not isinstance(started, str):
+        return False
+    try:
+        age = (utcnow() - datetime.fromisoformat(started)).total_seconds()
+    except ValueError:
+        return False
+    return age > float(timeout) + CREW_TASK_DEAD_MARGIN_S
+
+
 @router.post("/projects/{project_id}/film-runs/{task_id}/reconcile")
 def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
                         actor: Operator, db: DBSession):
     """Inspect a film-agent result without contacting the provider."""
     from shine.h3.rulebook import digest
+    from shine.materialprep.agent_call import PRE_REQUEST_PHASES
     from shine.models import AgentArtifact
     from shine.services import add_audit
 
@@ -97,7 +121,39 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
     if task.state_version != body.expected_state_version:
         raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
     if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
-        raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
+        if not _crew_task_dead(task):
+            raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
+        # The process that owned this call is gone.  A call that provably never
+        # left this machine is released; a call that may have reached the
+        # provider keeps its unknown outcome and waits for the person.
+        phase = (task.trace or {}).get("phase")
+        if phase in PRE_REQUEST_PHASES:
+            task.status = "SUPERSEDED"
+            task.error_code = None
+            task.state_version += 1
+            task.trace = {**task.trace, "external_outcome": "NOT_SENT", "reconciliation": {
+                "outcome": "NOT_SENT_PROVEN", "dead_worker": True, "resubmittable": True,
+                "checked_at": utcnow().isoformat()}}
+            add_audit(db, actor, "FILM_AGENT_NOT_SENT_PROVEN", "agent_task", task.id,
+                      {"role": task.role_id, "resubmittable": True, "external_calls": 0,
+                       "dead_worker": True}, project_id=project_id)
+            db.commit()
+            return {"outcome": "NOT_SENT_PROVEN", "task_id": task.id,
+                    "state_version": task.state_version, "resubmittable": True,
+                    "note": "持有这次调用的进程已经结束，请求确定没有发出；可以重做这一场。"}
+        task.status = "NEEDS_REVIEW"
+        task.state_version += 1
+        task.trace = {**task.trace, "external_outcome": "UNKNOWN", "reconciliation": {
+            "outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "dead_worker": True, "resubmittable": False,
+            "checked_at": utcnow().isoformat()}}
+        add_audit(db, actor, "FILM_AGENT_DEAD_WORKER_UNCONFIRMABLE", "agent_task", task.id,
+                  {"role": task.role_id, "resubmittable": False, "external_calls": 0,
+                   "dead_worker": True, "external_outcome": "UNKNOWN"}, project_id=project_id)
+        db.commit()
+        return {"outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": False,
+                "note": "持有这次调用的进程已经结束，但请求可能已经发出、结果无法取回；"
+                        "需要你明确重发这一场，系统才会以一次新的模型请求重问。"}
 
     decided = (task.trace.get("reconciliation") or {}).get("outcome")
     if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}:
@@ -185,6 +241,44 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
     db.commit()
     return {"outcome": "UNCONFIRMABLE", "task_id": task.id, "state_version": task.state_version,
             "external_outcome": external_outcome, "resubmittable": False}
+
+
+@router.post("/projects/{project_id}/film-runs/{task_id}/resend-unknown")
+def resend_unknown_film_run(project_id: str, task_id: str, body: ReconcileFilmTask,
+                            actor: Operator, db: DBSession):
+    """The person asks one unknown crew call again, because they decided to.
+
+    The old request may still own an answer upstream, so this never happens by
+    itself: the person confirms, the decision is audited, and the call is
+    made exactly once more.  The old row stays what it is - an unknown
+    outcome that a person overrode, never a "not sent".
+    """
+    from shine.services import add_audit
+
+    require_project(db, project_id)
+    task = db.get(AgentTaskRecord, task_id)
+    if not task or task.project_id != project_id or task.role_id not in FilmAgentRegistry.roles:
+        raise HTTPException(404, "FILM_AGENT_TASK_NOT_FOUND")
+    if task.state_version != body.expected_state_version:
+        raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
+    decided = (task.trace.get("reconciliation") or {}).get("outcome")
+    if decided != "UNKNOWN_REQUIRES_NEW_ATTEMPT":
+        raise HTTPException(409, "FILM_AGENT_UNKNOWN_RESEND_NOT_ALLOWED")
+    task.status = "SUPERSEDED"
+    task.error_code = None
+    task.state_version += 1
+    task.trace = {**task.trace, "reconciliation": {
+        "outcome": "USER_AUTHORIZED_NEW_REQUEST", "resubmittable": True,
+        "previous_external_outcome": task.trace.get("external_outcome"),
+        "checked_at": utcnow().isoformat()}}
+    add_audit(db, actor, "FILM_AGENT_UNKNOWN_RESEND_AUTHORIZED", "agent_task", task.id,
+              {"role": task.role_id, "resubmitted": True, "external_calls": 1,
+               "previous_external_outcome": task.trace.get("external_outcome")},
+              project_id=project_id)
+    db.commit()
+    return {"outcome": "USER_AUTHORIZED_NEW_REQUEST", "task_id": task.id,
+            "state_version": task.state_version, "resubmittable": True,
+            "note": "已登记你的确认：这一场会以一次新的模型请求重问；旧请求的结果仍然未知，不会被自动采用。"}
 
 
 def _registry(request: Request):
