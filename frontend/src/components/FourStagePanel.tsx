@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleHelp, ListChecks } from 'lucide-react';
 import {
   ERROR_CODE_LABELS,
-  adjustVolumeBoundaries, applyCameraPlan, buildEpisodeScript, confirmBible,
+  adjustVolumeBoundaries, applyCameraPlan, authorizeBlockedScene, buildEpisodeScript, confirmBible,
   confirmEpisodeScript, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
   editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
   getTextConsentScope, grantTextConsent, importPipelineSource, listScriptDocuments,
@@ -337,6 +337,20 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                       void run(() => startPipelineNewAttempt(projectId, task.task_id, task.state_version));
                     }}>
                     核对后重新发送一次
+                  </button>
+                )}
+                {!inFlight && task.blocked_scene?.task_id && (
+                  <button type="button" className="must-button" disabled={busy}
+                    title="这一幕的模型请求可能已经被回答过。授权只会对这一幕再发一次，原来那次保留为历史。"
+                    onClick={() => {
+                      const key = task.blocked_scene?.scene_key ? `（${task.blocked_scene.scene_key}）` : '';
+                      if (!window.confirm(
+                        `这一幕${key}的请求结果无法确认：服务商可能已经回答过。\n`
+                        + '授权后会为这一幕再发一次模型请求，原来那一次保留为历史记录。确认继续？')) return;
+                      void run(() => authorizeBlockedScene(
+                        projectId, task.task_id, task.blocked_scene!.task_id, task.state_version));
+                    }}>
+                    授权重新发送这一幕
                   </button>
                 )}
               </div>

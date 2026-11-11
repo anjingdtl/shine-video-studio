@@ -1100,12 +1100,29 @@ export interface PipelineTaskSummary {
   consent_document_id: string | null;
   consent_document_sha256: string | null;
   consent_role: string;
+  /** The one sub-scene whose unknown outcome stopped a whole volume, if any. */
+  blocked_scene?: {
+    task_id: string; scene_key?: string | null; status?: string | null;
+    error_code?: string | null; external_outcome?: string | null;
+  } | null;
 }
 
 export const resumePipelineTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string }>(
     `/projects/${projectId}/pipeline/tasks/${taskId}/resume`,
     json('POST', { expected_state_version: expectedStateVersion }));
+
+/**
+ * Authorise one more model call for a scene whose send outcome is unknown.
+ *
+ * Retiring that scene is a person's decision: the provider may already have
+ * answered. The old row keeps its UNKNOWN as history and the volume re-runs.
+ */
+export const authorizeBlockedScene = (
+  projectId: string, taskId: string, sceneTaskId: string, expectedStateVersion: number,
+) => api<{ task_id: string; scene_task_id: string; status: string }>(
+  `/projects/${projectId}/pipeline/tasks/${taskId}/scenes/${sceneTaskId}/new-attempt`,
+  json('POST', { expected_state_version: expectedStateVersion }));
 
 /**
  * Authorise a physically separate retry after an unknown send outcome.  The

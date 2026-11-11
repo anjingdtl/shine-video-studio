@@ -487,6 +487,29 @@ def resume_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DB
     return result
 
 
+@router.post("/projects/{project_id}/pipeline/tasks/{task_id}/scenes/{scene_task_id}/new-attempt")
+def authorize_blocked_scene_route(project_id: str, task_id: str, scene_task_id: str, body: dict,
+                                  db: DBSession, operator: Operator) -> dict:
+    """Authorise one more model call for the scene whose outcome is unknown.
+
+    This is the only way past a batch stopped by an unprovable scene outcome:
+    it retires that scene's request identity (history keeps the UNKNOWN) and
+    re-queues the volume.  The next run creates a genuinely new request.
+    """
+    require_project(db, project_id)
+    try:
+        result = pipeline.authorize_blocked_scene_new_attempt(
+            db, project_id, task_id, scene_task_id,
+            (body or {}).get("expected_state_version"),
+            actor=_local_actor(operator),
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return result
+
+
 @router.post("/projects/{project_id}/pipeline/tasks/{task_id}/reconcile")
 def reconcile_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DBSession,
                                    operator: Operator) -> dict:

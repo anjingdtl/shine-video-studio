@@ -3557,8 +3557,30 @@ def pipeline_task_summary(db, project_id: str) -> list[dict]:
             "consent_document_id": trace.get("document_id") or trace.get("master_document_id"),
             "consent_document_sha256": trace.get("document_sha256") or trace.get("master_document_sha256"),
             "consent_role": row.role_id if row.role_id != "story_outline_run" else "scriptwriter",
+            "blocked_scene": _blocked_scene_summary(trace),
         })
     return summary
+
+
+def _blocked_scene_summary(trace: dict) -> dict | None:
+    """The one sub-scene whose outcome blocks this task, if there is one.
+
+    A volume read is a batch of independent scene calls.  When one of them ends
+    in an unprovable outcome the whole volume stops - correctly - but the row
+    itself has nothing to offer: only the scene has an identity that can be
+    re-issued.  The panel needs to name that scene to ask for authorisation.
+    """
+    for entry in trace.get("blocked_subtasks") or []:
+        if not isinstance(entry, dict) or not entry.get("task_id"):
+            continue
+        return {
+            "task_id": entry.get("task_id"),
+            "scene_key": entry.get("scene_key"),
+            "status": entry.get("status"),
+            "error_code": entry.get("error_code"),
+            "external_outcome": entry.get("external_outcome"),
+        }
+    return None
 
 
 def task_available_actions(row) -> list[str]:
@@ -3623,6 +3645,65 @@ def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_versi
     add_audit(db, "local-user", "PIPELINE_TASK_RESUMED", "agent_task", task_id,
               {"expected_state_version": expected_state_version}, project_id=project_id)
     return {"task_id": task_id, "status": "QUEUED"}
+
+
+def authorize_blocked_scene_new_attempt(db, project_id: str, task_id: str, scene_task_id: str,
+                                        expected_state_version: int, actor: str = "local-user") -> dict:
+    """Let a person buy one more call for the one scene that ended unknown.
+
+    A volume is read as a batch of independent scene calls, so a single
+    unprovable outcome stops the whole volume.  Retiring that scene is a
+    decision only a person may take: the provider may already have answered,
+    and the second call may cost a second answer.  The old row keeps its
+    UNKNOWN outcome as history; the new request gets its own identity when the
+    outline runs again, which is why clearing ``request_identity`` here is the
+    whole mechanism rather than a cosmetic flag.
+    """
+    from shine.models import AgentTaskRecord, utcnow
+
+    row = db.get(AgentTaskRecord, task_id)
+    if row is None or row.project_id != project_id or row.role_id != "story_outline_run":
+        raise ValueError("PIPELINE_TASK_NOT_FOUND")
+    if row.state_version != expected_state_version:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    if row.status not in {"NEEDS_REVIEW", "FAILED", "PAUSED"}:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    blocked = [entry for entry in (row.trace or {}).get("blocked_subtasks") or []
+               if isinstance(entry, dict)]
+    if not any(entry.get("task_id") == scene_task_id for entry in blocked):
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_BLOCKED")
+    scene = db.get(AgentTaskRecord, scene_task_id)
+    if scene is None or scene.project_id != project_id or scene.role_id != "scriptwriter":
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_FOUND")
+    if scene.status not in {"NEEDS_REVIEW", "FAILED", "REJECTED"}:
+        raise ValueError("PIPELINE_TASK_SCENE_STATE_CHANGED")
+    unknown = (scene.trace or {}).get("external_outcome") in {None, "UNKNOWN"}
+    if not unknown:
+        # A finished answer (or a proven "not sent") does not need a second
+        # paid call; it needs the ordinary repair path.
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_UNKNOWN")
+
+    previous_identity = scene.request_identity
+    scene.status = "SUPERSEDED"
+    scene.error_code = None
+    scene.request_identity = None
+    scene.lease_owner, scene.lease_expires_at = None, None
+    scene.state_version += 1
+    scene.trace = {**(scene.trace or {}), "external_outcome": "SUPERSEDED",
+                   "new_attempt_authorization": {
+                       "previous_request_identity": previous_identity,
+                       "authorized_by": actor,
+                       "authorized_at": utcnow().isoformat(),
+                   }}
+    remaining = [entry for entry in blocked if entry.get("task_id") != scene_task_id]
+    row.trace = {**(row.trace or {}), "blocked_subtasks": remaining}
+    row.status = "QUEUED"
+    row.error_code = None
+    row.state_version += 1
+    add_audit(db, actor, "PIPELINE_SCENE_NEW_ATTEMPT_AUTHORIZED", "agent_task", scene.id,
+              {"outline_task_id": row.id, "previous_request_identity": previous_identity,
+               "scene_key": (scene.trace or {}).get("scene_key")}, project_id=project_id)
+    return {"task_id": row.id, "scene_task_id": scene.id, "status": "QUEUED", "authorized": True}
 
 
 def _new_attempt_receipt(db, row, authorization: dict) -> dict | None:
