@@ -413,6 +413,28 @@ def retrieve(
                      snapshot_id=latest.id if latest else None)
 
 
+def storyboard_view(db, project_id: str, *, token_budget: int = 900,
+                    include_secrets: bool = False) -> dict[str, Any] | None:
+    """The compact fact view a storyboard role may receive.
+
+    S4 consumes the script, not the whole book: it gets identities, current
+    items, what the audience already knows and - when the caller says so - what
+    must not be revealed visually yet.  Mainline prose and full character dossiers
+    stay out of every five-role prompt.
+    """
+    retrieval = retrieve(
+        db, project_id,
+        token_budget=token_budget,
+        kinds=("character", "relationship", "clue", "foreshadow"),
+        max_secret_lines=3 if include_secrets else 0,
+    )
+    if not retrieval.fact_ids and not retrieval.context_text.strip():
+        return None
+    return {"facts": retrieval.context_text, "fact_ids": retrieval.fact_ids,
+            "omitted": retrieval.omitted, "snapshot_id": retrieval.snapshot_id,
+            "warnings": retrieval.warnings}
+
+
 def context_block(retrieval: Retrieval) -> dict[str, Any]:
     """The shape a scene request embeds; empty views are legal."""
     return {"facts": retrieval.context_text, "fact_ids": retrieval.fact_ids,

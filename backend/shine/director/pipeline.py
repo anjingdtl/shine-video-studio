@@ -816,6 +816,128 @@ def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: s
         return None
 
 
+def _scene_qa(*, factory, gateway, project_id: str, task_id: str, trace: dict,
+               section: dict, source_text: str, payload: dict,
+               unit_budget=None) -> dict | None:
+    """L0 first; L1 only for a doubt L0 could not settle.
+
+    Nothing here can rewrite the scene and nothing here can fail it: a QA fault
+    is recorded as ``QA_PENDING`` and the script keeps the state it earned.  The
+    verdict is a separate artifact, so a later re-review never touches the text.
+    """
+    from shine.literary import flags, qa
+    from shine.literary.governor import UnitBudget
+    from shine.materialprep.agent_call import call_material_agent
+
+    unit_id = f"scene:{trace.get('volume_id')}:{section.get('section_id')}"
+    # Imported here (not at module scope) so the module keeps its existing import
+    # graph; the session factory is the caller's, never a new engine.
+    from shine.models import ProjectDocument
+    try:
+        with factory() as db:
+            mode = flags.mode("qa", db, project_id)
+            if mode == "off":
+                # The switch means what it says: no local report either.
+                return None
+            guards = qa.memory_guards(db, project_id)
+            # The authoritative length of the document the offsets point into.
+            document = db.get(ProjectDocument, trace.get("volume_document_id") or "")
+            document_length = len(document.text or "") if document is not None else None
+        report = qa.check_scene_script(
+            payload, unit_id=unit_id, section=section, source_text=source_text,
+            source_length=document_length,
+            known_characters=guards["known_characters"],
+            secret_statements=guards["secret_statements"])
+        summary = {"mode": mode, **report.as_dict()}
+        if mode != "on" or not report.needs_semantic_review:
+            return summary
+        request = qa.semantic_request(report, text=str(payload.get("text") or ""),
+                                      section=section, guards=guards)
+        if request is None:
+            return summary
+        context, question = request
+        outcome = call_material_agent(
+            gateway, factory, SCENE_SCRIPT_RUN_ROLE,
+            system=qa.SEMANTIC_SYSTEM_PROMPT,
+            context=context,
+            schema=qa.SemanticReview.model_json_schema(),
+            contract=qa.SemanticReview,
+            purpose="qa",
+            unit_id=f"qa:{trace.get('volume_id')}:{section.get('section_id')}",
+            unit_budget=unit_budget or UnitBudget(max_calls=1, max_repair_rounds=0),
+            record_attempt=_attempt_recorder(factory, project_id, task_id))
+        report = qa.merge_semantic_report(report, outcome)
+        return {"mode": mode, **report.as_dict(),
+                "semantic_question": question,
+                "semantic_cost": qa.estimate_semantic_cost(question, context["excerpt"]),
+                "semantic_error": outcome.error_code}
+    except Exception:  # noqa: BLE001 - a review never fails a written scene
+        logger.exception("literary_qa_failed task=%s unit=%s", task_id, unit_id)
+        return {"mode": "error", "state": "WARNING", "level": "L0",
+                "checks": [{"code": "QA_PENDING", "severity": "WARNING",
+                            "message": "终校未能完成，已记录；不影响本场正文。",
+                            "evidence": {}, "unit_id": unit_id}]}
+
+
+def _persist_qa_report(*, factory, project_id: str, task_id: str, script_artifact_id: str,
+                       script_sha256: str, section: dict, summary: dict,
+                       volume_id: str | None = None) -> str | None:
+    """Store one QA verdict as a versioned artifact bound to the text it judged."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    payload = {
+        "volume_id": volume_id,
+        "section_id": section.get("section_id"),
+        "script_artifact_id": script_artifact_id,
+        "script_sha256": script_sha256,
+        **summary,
+    }
+    try:
+        with factory.begin() as db:
+            artifact = AgentArtifact(
+                project_id=project_id, kind=qa.REPORT_KIND, schema_version="1.0",
+                payload_json=payload, sha256=digest(payload),
+                producer_role=SCENE_SCRIPT_RUN_ROLE, source_task_id=task_id,
+                input_revision_ids=[script_artifact_id])
+            db.add(artifact)
+            db.flush()
+            return artifact.id
+    except Exception:  # noqa: BLE001 - the verdict is a side record
+        logger.exception("literary_qa_report_failed task=%s", task_id)
+        return None
+
+
+def latest_section_qa_report(db, project_id: str, volume_id: str, section_id: str):
+    """The newest verdict on one section, whichever revision it judged."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+    ).order_by(AgentArtifact.created_at.desc()).limit(40)).all()
+    return next((row for row in rows
+                 if (row.payload_json or {}).get("section_id") == section_id
+                 and (row.payload_json or {}).get("source") != "storyboard"
+                 and ((row.payload_json or {}).get("volume_id") in (None, volume_id))), None)
+
+
+def latest_qa_report(db, project_id: str, script_sha256: str):
+    """The newest verdict on exactly this text, or None."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    if not script_sha256:
+        return None
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+    ).order_by(AgentArtifact.created_at.desc()).limit(12)).all()
+    return next((row for row in rows
+                 if (row.payload_json or {}).get("script_sha256") == script_sha256), None)
+
+
 def _scene_memory_view(factory, project_id: str, bible_payload: dict) -> dict | None:
     """The bounded five-dimension view a scene writer may receive.
 
@@ -1500,7 +1622,7 @@ def _save_beat(factory, *, project_id: str, task_id: str, beat, text: str,
 
 def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id: str,
                      project_id: str, trace: dict, section: dict, source_text: str,
-                     context: dict, schema: dict, plan: list) -> bool:
+                     context: dict, schema: dict, plan: list, unit_budget=None) -> bool:
     from shine.literary.models import LiteraryUnit
 
     """Write one long scene beat by beat, then assemble it verbatim.
@@ -1519,8 +1641,9 @@ def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id:
     before_call = text_consent.guard(
         project_id, trace["master_document_id"], trace["master_document_sha256"],
         SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway)
-    unit_budget = UnitBudget(max_calls=len(plan) + 1, max_repair_rounds=len(plan),
-                             max_completion_tokens=600_000)
+    if unit_budget is None:
+        unit_budget = UnitBudget(max_calls=len(plan) + 1, max_repair_rounds=len(plan),
+                                 max_completion_tokens=600_000)
     with factory.begin() as db:
         units = beat_lib.save_units(db, project_id=project_id,
                                     section_id=str(section.get("section_id") or "section"),
@@ -1625,7 +1748,7 @@ def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id:
                               "end_offset": section.get("end_offset"),
                               "outline_sha256": trace["outline_sha256"],
                               "bible_sha256": trace["bible_sha256"]}
-    _commit_pipeline_result(
+    committed = _commit_pipeline_result(
         factory, task_id=task_id, version=version, worker_id=worker_id,
         project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
         payload={**payload, "beats": [beat.as_dict() for beat in plan],
@@ -1633,6 +1756,19 @@ def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id:
         input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
         trace={**trace, "beats": [beat.as_dict() for beat in plan],
                "beat_assembly": assembly.as_dict(), "beat_coverage": coverage, "review": {}})
+    if committed is not None:
+        artifact_id, sha256 = committed
+        # The assembled scene is judged as one text: the beats were already
+        # reviewed against their own bounds, this is the whole-scene verdict.
+        summary = _scene_qa(factory=factory, gateway=gateway, project_id=project_id,
+                            task_id=task_id, trace=trace, section=section,
+                            source_text=source_text, payload=payload,
+                            unit_budget=unit_budget)
+        if summary is not None:
+            _persist_qa_report(factory=factory, project_id=project_id, task_id=task_id,
+                               script_artifact_id=artifact_id, script_sha256=sha256,
+                               section=section, summary=summary,
+                               volume_id=trace.get("volume_id"))
     return True
 
 
@@ -1717,12 +1853,15 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
         if sent is None:
             return True
         trace = sent
+        # One logical unit, one budget: the writer, its single correction and the
+        # QA reviewer all spend from the same three calls.
+        unit_budget = UnitBudget(max_calls=3, max_repair_rounds=1)
         if len(beat_plan) > 1:
             return _run_scene_beats(
                 factory=factory, gateway=gateway, task_id=task_id, version=version,
                 worker_id=worker_id, project_id=project_id, trace=trace,
                 section=section, source_text=source_text, context=context,
-                schema=schema, plan=beat_plan)
+                schema=schema, plan=beat_plan, unit_budget=unit_budget)
         outcome = call_material_agent(
             gateway, factory, SCENE_SCRIPT_RUN_ROLE,
             system=SCENE_SYSTEM_PROMPT,
@@ -1732,7 +1871,7 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             task_category="creative",
             purpose="scene",
             unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
-            unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
+            unit_budget=unit_budget,
             record_attempt=_attempt_recorder(factory, project_id, task_id),
             before_call=text_consent.guard(
                 project_id, trace["master_document_id"], trace["master_document_sha256"],
@@ -1774,7 +1913,7 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                                   "end_offset": section.get("end_offset"),
                                   "outline_sha256": trace["outline_sha256"],
                                   "bible_sha256": trace["bible_sha256"]}
-        _commit_pipeline_result(
+        committed = _commit_pipeline_result(
             factory, task_id=task_id, version=version, worker_id=worker_id,
             project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
             payload=payload,
@@ -1783,6 +1922,19 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
                    "output_budget": outcome.details.get("output_budget"),
                    "review": outcome.review, "adaptation": adapted.as_dict(),
                    "attempts": _compact_attempts(outcome.details.get("attempts"))})
+        if committed is not None:
+            # The text is durable first; the review judges the stored revision,
+            # never a copy that could differ from it.
+            artifact_id, sha256 = committed
+            summary = _scene_qa(factory=factory, gateway=gateway, project_id=project_id,
+                                task_id=task_id, trace=trace, section=section,
+                                source_text=source_text, payload=payload,
+                                unit_budget=unit_budget)
+            if summary is not None:
+                _persist_qa_report(factory=factory, project_id=project_id, task_id=task_id,
+                                   script_artifact_id=artifact_id, script_sha256=sha256,
+                                   section=section, summary=summary,
+                                   volume_id=trace.get("volume_id"))
         return True
 
 
@@ -1810,6 +1962,13 @@ def confirm_scene_script(db, project_id: str, artifact_id: str, expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_SHA_MISMATCH")
+    # A hard QA verdict blocks delivery, never the text: the scene stays in the
+    # ledger, the editor can fix it, and the refusal names the exact reasons.
+    verdict = latest_qa_report(db, project_id, artifact.sha256)
+    if verdict is not None and (verdict.payload_json or {}).get("state") == "HARD_BLOCK":
+        codes = [str(check.get("code")) for check in (verdict.payload_json or {}).get("checks") or []
+                 if check.get("severity") == "HARD_BLOCK"]
+        raise ValueError("PIPELINE_SCENE_SCRIPT_QA_BLOCKED:" + ",".join(codes[:3]))
     refs = artifact.payload_json.get("source_refs") or {}
     volume_id = str(refs.get("volume_id"))
     section_id = str(artifact.payload_json.get("section_id"))

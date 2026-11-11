@@ -223,6 +223,20 @@ def queue_scripts_route(
         "task_ids": [t.id for t in tasks]})
 
 
+@router.get("/projects/{project_id}/pipeline/volumes/{volume_id}/sections/{section_id}/qa")
+def section_qa_route(project_id: str, volume_id: str, section_id: str, db: DBSession) -> dict:
+    """The latest literary review of one section, or an honest NOT_RUN.
+
+    A review is evidence, not state: it never changes whether a script exists.
+    """
+    require_project(db, project_id)
+    report = pipeline.latest_section_qa_report(db, project_id, volume_id, section_id)
+    if report is None:
+        return {"state": "NOT_RUN", "checks": []}
+    return {"artifact_id": report.id, "sha256": report.sha256,
+            **(report.payload_json or {})}
+
+
 @router.post("/projects/{project_id}/pipeline/scene-scripts/{artifact_id}/confirm", status_code=200)
 def confirm_script_route(project_id: str, artifact_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
     require_project(db, project_id)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -588,6 +589,27 @@ def _plan_beat_ids(role: str, inputs: list[AgentArtifact]) -> list[str] | None:
     return None
 
 
+logger = logging.getLogger(__name__)
+
+
+def _storyboard_memory_view(db, project_id: str, *, role: str) -> dict | None:
+    """The bounded fact view one storyboard role may receive.
+
+    Only in ``on``: ``shadow`` records facts but must not change a paid request.
+    A memory fault returns ``None`` and the crew works exactly as before V2.1.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        if not flags.affects_request("memory", db, project_id):
+            return None
+        return memory.storyboard_view(
+            db, project_id, token_budget=900 if role == "scriptwriter" else 600)
+    except Exception:  # noqa: BLE001 - guidance never blocks the crew
+        logger.exception("storyboard_memory_view_failed project=%s role=%s", project_id, role)
+        return None
+
+
 class FilmAgentDispatcher:
     def __init__(self, gateway: LLMGateway, data_dir: Path | None = None,
                  asset_root: Path | None = None):
@@ -705,6 +727,10 @@ class FilmAgentDispatcher:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
                 db, project_id, body.brief, body.production_context)
+        if role in {"scriptwriter", "director"}:
+            memory_view = _storyboard_memory_view(db, project_id, role=role)
+            if memory_view is not None:
+                context["memory"] = memory_view
         refusal: dict | None = None
         if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
             timing = editorial_timing_preview(body.brief)

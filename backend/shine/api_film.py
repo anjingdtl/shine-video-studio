@@ -983,6 +983,47 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
 
 
 
+def _storyboard_qa(db, project_id: str, steps: dict, *, draft: bool) -> dict | None:
+    """L0 review of a generated storyboard, stored as its own versioned verdict.
+
+    A draft is not a deliverable, so it is not judged as one.  The verdict never
+    rewrites the plan and never fails the chain: an uncovered beat decides
+    whether the result may be called ``PROPOSED`` or must be ``NEEDS_REVIEW``.
+    """
+    from shine.literary import flags, qa
+
+    if draft or not {"scriptwriter", "director"} <= set(steps):
+        return None
+    try:
+        mode = flags.mode("qa", db, project_id)
+        if mode == "off":
+            return None
+        breakdown = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"])
+        plan = db.get(AgentArtifact, steps["director"]["artifact_id"])
+        if breakdown is None or plan is None:
+            return None
+        report = qa.check_beat_coverage(breakdown.payload_json, plan.payload_json)
+        payload = {"source": "storyboard", "mode": mode,
+                   "breakdown_artifact_id": breakdown.id,
+                   "breakdown_sha256": breakdown.sha256,
+                   "plan_artifact_id": plan.id, "plan_sha256": plan.sha256,
+                   **report.as_dict()}
+        artifact = AgentArtifact(
+            project_id=project_id, kind=qa.REPORT_KIND, schema_version="1.0",
+            payload_json=payload, sha256=digest(payload), producer_role="continuity_supervisor",
+            source_task_id=plan.source_task_id,
+            input_revision_ids=[breakdown.id, plan.id])
+        db.add(artifact)
+        db.flush()
+        return {"mode": mode, "state": report.state, "artifact_id": artifact.id,
+                "checks": [check.as_dict() for check in report.checks]}
+    except Exception:  # noqa: BLE001 - a review never fails the chain
+        logger.exception("storyboard_qa_failed project=%s", project_id)
+        return {"state": "WARNING", "checks": [
+            {"code": "QA_PENDING", "severity": "WARNING",
+             "message": "分镜终校未能完成，已记录。", "evidence": {}}]}
+
+
 @router.post("/projects/{project_id}/storyboard/generate", status_code=201)
 def generate_storyboard(
     project_id: str,
@@ -1416,6 +1457,7 @@ def generate_storyboard(
         return _run(role, **kwargs)
 
     active_role = "director"
+    storyboard_qa: dict | None = None
     try:
         steps["director"] = _run_step(
             "director", "director",
@@ -1424,6 +1466,7 @@ def generate_storyboard(
             locked_story_facts=body.locked_story_facts,
             allow_remote_text=body.allow_remote_text,
         )
+        storyboard_qa = _storyboard_qa(db, project_id, steps, draft=body.draft)
         active_role = "cinematographer"
         steps["cinematographer"] = _run_step(
             "cinematographer", "cinematographer",
@@ -1565,6 +1608,8 @@ def generate_storyboard(
                 arbitration = db.get(AgentArtifact, steps["director_arbitration"]["artifact_id"]).payload_json
             blocked = (bool(issues) and not _arbitration_releases(arbitration, issues)) or (
                 not issues and not requests and continuity.get("recommendation") != "proceed_to_preflight")
+            if (storyboard_qa or {}).get("state") == "HARD_BLOCK":
+                blocked = True
         except (ValueError, LLMError) as exc:
             db.rollback()
             failure = _rejection("director" if repair_role == "director_arbitration" else repair_role, exc)
@@ -1605,6 +1650,7 @@ def generate_storyboard(
         "rejections": [],
         "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),
+        "qa": storyboard_qa,
         "repair_failure": repair_failure,
         "editorial_timing_preview": editorial_timing_preview(script_text),
         "dialogue_coverage": writer_task.trace.get("dialogue_coverage") if writer_task else None,
