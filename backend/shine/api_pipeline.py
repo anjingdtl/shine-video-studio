@@ -213,7 +213,8 @@ def queue_bible_route(project_id: str, db: DBSession, gateway: Annotated[LLMGate
 def confirm_bible_route(project_id: str, artifact_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
     require_project(db, project_id)
     try:
-        artifact = pipeline.confirm_bible(db, project_id, artifact_id, body.get("expected_sha256"))
+        artifact = pipeline.confirm_bible(db, project_id, artifact_id, body.get("expected_sha256"),
+                                          scope_volume_id=(body or {}).get("scope_volume_id") or None)
         db.commit()
     except ValueError as exc:
         db.rollback()

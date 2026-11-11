@@ -1383,15 +1383,18 @@ def bible_basis_blockers(db, project_id: str, artifact) -> list[str]:
     return []
 
 
-def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
+def bible_confirmation_blockers(db, project_id: str, artifact, *, scope_volume_id: str | None = None) -> list[str]:
     """Why a blueprint may not yet be confirmed, decided from durable evidence.
 
-    Confirming a blueprint is the cross-volume decision, so it needs the full
-    ordered set of the *current* plan's volumes.  A blueprint synthesized from
-    a partial set stays a usable draft and is refused here by name instead of
-    being confirmed as if every volume had been read.  A blueprint a person
-    wrote themselves needs no provider coverage evidence, but it is held to
-    the same rule about the plan's volumes.
+    Confirming a blueprint for the whole plan is the cross-volume decision, so it
+    needs the full ordered set of the *current* plan's volumes.  A blueprint
+    synthesized from a partial set stays a usable draft and is refused here by
+    name instead of being confirmed as if every volume had been read.
+
+    ``scope_volume_id`` is the one-volume exception: a person may confirm the
+    blueprint for a single volume whose outline really was read, so a volume can
+    be produced before the whole book is outlined.  The confirmation is recorded
+    as volume-scoped and no other volume may be published from it.
     """
     from shine.models import AgentTaskRecord
 
@@ -1402,6 +1405,19 @@ def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
     coverage = trace.get("outline_coverage") or {}
     if task is None and not authored_by_person:
         return ["PIPELINE_BIBLE_SOURCE_TASK_MISSING"]
+    if scope_volume_id:
+        plan = current_volume_plan(db, project_id)
+        if plan is None:
+            return ["PIPELINE_VOLUME_PLAN_NOT_CONFIRMED"]
+        if not any(v.get("volume_id") == scope_volume_id for v in plan.payload_json.get("volumes") or []):
+            return ["PIPELINE_VOLUME_NOT_IN_PLAN"]
+        if coverage.get("plan_sha256") and coverage["plan_sha256"] != plan.sha256:
+            return ["PIPELINE_BIBLE_PLAN_SUPERSEDED"]
+        outline = _volume_outline(db, project_id, scope_volume_id)
+        if outline is None:
+            return ["PIPELINE_OUTLINE_NOT_CONFIRMED"]
+        blockers.extend(bible_basis_blockers(db, project_id, artifact))
+        return blockers
     if not authored_by_person and not coverage.get("complete"):
         missing = coverage.get("missing_volumes") or []
         blockers.append("PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE:"
@@ -1422,7 +1438,8 @@ def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
     return blockers
 
 
-def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -> AgentArtifact:
+def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str,
+                  *, scope_volume_id: str | None = None) -> AgentArtifact:
     """A person confirms the global story bible; the pointer names it."""
     from shine.models import AgentArtifact, AppSetting
 
@@ -1431,19 +1448,20 @@ def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -
         raise ValueError("PIPELINE_BIBLE_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_BIBLE_SHA_MISMATCH")
-    blockers = bible_confirmation_blockers(db, project_id, artifact)
+    blockers = bible_confirmation_blockers(db, project_id, artifact, scope_volume_id=scope_volume_id)
     if blockers:
         raise ValueError(blockers[0])
     open_questions = list(artifact.payload_json.get("open_questions") or [])
+    scope = {"kind": "volume", "volume_id": scope_volume_id} if scope_volume_id else {"kind": "plan"}
     row = AppSetting(key=_pointer_key(project_id, "story-bible"),
                      value={"artifact_id": artifact.id, "sha256": artifact.sha256,
-                            "open_questions": open_questions[:48]})
+                            "open_questions": open_questions[:48], "scope": scope})
     db.merge(row)
     artifact.approved_by = "local-user"
     artifact.approved_at = utcnow()
     db.flush()
     add_audit(db, "local-user", "PIPELINE_BIBLE_CONFIRMED", "agent_artifact", artifact.id,
-              {"sha256": artifact.sha256, "open_questions": open_questions[:48]},
+              {"sha256": artifact.sha256, "open_questions": open_questions[:48], "scope": scope},
               project_id=project_id)
     return artifact
 
@@ -3030,6 +3048,13 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     bible = current_bible(db, project_id)
     if bible is None:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
+    # A blueprint confirmed for one volume only is a real basis for that volume
+    # and for nothing else: producing another volume from it would publish a
+    # story whose outline was never read.
+    bible_scope = (_read_pointer(db, _pointer_key(project_id, "story-bible")) or {}).get("scope") or {
+        "kind": "plan"}
+    if bible_scope.get("kind") == "volume" and bible_scope.get("volume_id") != volume_id:
+        raise ValueError("PIPELINE_BIBLE_SCOPE_OTHER_VOLUME")
     basis_problems = bible_basis_blockers(db, project_id, bible)
     if basis_problems:
         # The blueprint must still describe the current work before a volume

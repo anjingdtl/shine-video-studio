@@ -77,6 +77,38 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const [boundaryMode, setBoundaryMode] = useState(false);
   /** The blocked scene a first click armed; the second click really re-sends. */
   const [armedScene, setArmedScene] = useState<string | null>(null);
+  /** The whole-plan confirmation was refused for missing volume outlines. */
+  const [bibleScopeOffer, setBibleScopeOffer] = useState(false);
+
+  /**
+   * Confirm the blueprint, and when the only obstacle is that other volumes
+   * were never outlined, offer the one-volume scope instead of dead-ending.
+   */
+  async function confirmPendingBible(scopeVolumeId?: string) {
+    const pending = overview?.pending_bible;
+    if (!pending || actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusy(true);
+    try {
+      await confirmBible(projectId, pending.artifact_id, pending.sha256, scopeVolumeId);
+      setBibleScopeOffer(false);
+      await refresh();
+      onMessage(scopeVolumeId
+        ? '蓝图已按单卷范围确认：这份蓝图只能交付当前卷。'
+        : '蓝图已确认。', 'success');
+    } catch (error) {
+      const text = (error as Error).message;
+      if (!scopeVolumeId && text.includes('PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE')) {
+        setBibleScopeOffer(true);
+        onMessage('还有别的卷没有读过大纲，整书蓝图暂时不能确认；可以只为当前卷确认一次。', 'error');
+      } else {
+        onMessage(text, 'error');
+      }
+    } finally {
+      actionInFlight.current = false;
+      setBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     setLoadFailed(false);
@@ -443,36 +475,46 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
       <div className="pipeline-step">
         <b>② 故事大纲与全局蓝图</b>
         {!overview.volume_plan_confirmed && <span className="muted">先完成第①步。</span>}
-        {overview.volume_plan_confirmed && volumes.length > 0 && (
-          <ul className="volume-list">
-            {volumes.map((v) => (
-              <li key={v.volume_id}>
-                <span>{v.title}{v.volume_id === currentVolumeId ? '（当前）' : ''}</span>
-                <span className="muted">大纲{v.outline_confirmed ? '已确认' : '未确认'}</span>
-                <button type="button" className="secondary-button" disabled={busy}
-                  onClick={() => run(() => queueVolumeOutline(projectId, v.volume_id))}>
-                  {v.outline_confirmed ? '重新提取大纲' : '提取大纲'}
+        {overview.volume_plan_confirmed && volumes.length > 0 && (() => {
+          // 84 volumes each rendered a button row: the current volume's script
+          // and storyboard steps ended up thousands of pixels below the fold.
+          // The volume being worked on stays visible; the rest waits in a fold.
+          const current = volumes.find((v) => v.volume_id === currentVolumeId) ?? volumes[0];
+          const others = volumes.filter((v) => v.volume_id !== current.volume_id);
+          const row = (v: (typeof volumes)[number]) => (
+            <li key={v.volume_id}>
+              <span>{v.title}{v.volume_id === currentVolumeId ? '（当前）' : ''}</span>
+              <span className="muted">大纲{v.outline_confirmed ? '已确认' : '未确认'}</span>
+              <button type="button" className="secondary-button" disabled={busy}
+                onClick={() => run(() => queueVolumeOutline(projectId, v.volume_id))}>
+                {v.outline_confirmed ? '重新提取大纲' : '提取大纲'}
+              </button>
+              {v.latest_outline && !v.outline_confirmed && (
+                <button type="button" className="must-button" disabled={busy}
+                  title={v.latest_outline.questions.length
+                    ? '待确认问题：' + v.latest_outline.questions.join('；')
+                    : ''}
+                  onClick={() => run(() => confirmVolumeOutline(
+                    projectId, v.volume_id, v.latest_outline!.artifact_id,
+                    v.latest_outline!.sha256, v.latest_outline!.questions_sha256))}>
+                  确认本卷大纲
                 </button>
-                {v.latest_outline && !v.outline_confirmed && (
-                  <button type="button" className="must-button" disabled={busy}
-                    title={v.latest_outline.questions.length
-                      ? '待确认问题：' + v.latest_outline.questions.join('；')
-                      : ''}
-                    onClick={() => run(() => confirmVolumeOutline(
-                      projectId, v.volume_id, v.latest_outline!.artifact_id,
-                      v.latest_outline!.sha256, v.latest_outline!.questions_sha256))}>
-                    确认本卷大纲
-                  </button>
-                )}
-                {v.latest_outline && !v.outline_confirmed && v.latest_outline.questions.length > 0 && (
-                  <div className="muted small">
-                    大纲提出了 {v.latest_outline.questions.length} 个待确认问题，按钮上的提示列出全文；确认即视为已读并接受。
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+              )}
+              {v.latest_outline && !v.outline_confirmed && v.latest_outline.questions.length > 0 && (
+                <div className="muted small">
+                  大纲提出了 {v.latest_outline.questions.length} 个待确认问题，按钮上的提示列出全文；确认即视为已读并接受。
+                </div>
+              )}
+            </li>
+          );
+          return <>
+            <ul className="volume-list">{row(current)}</ul>
+            {others.length > 0 && <details className="volume-fold">
+              <summary>其他 {others.length} 卷的大纲（按需展开，不影响当前卷）</summary>
+              <ul className="volume-list">{others.map(row)}</ul>
+            </details>}
+          </>;
+        })()}
         {overview.volume_plan_confirmed && bibleNeedsConfirmation && (
           <div className="row">
             <button type="button" className="must-button" disabled={busy}
@@ -484,8 +526,19 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
           <div className="row">
             <span>全局故事蓝图已生成，请阅读后确认。</span>
             <button type="button" className="must-button" disabled={busy}
-              onClick={() => run(() => confirmBible(projectId, overview.pending_bible!.artifact_id, overview.pending_bible!.sha256))}>
+              onClick={() => void confirmPendingBible()}>
               确认蓝图</button>
+          </div>
+        )}
+        {bibleScopeOffer && overview.pending_bible && (
+          <div className="row">
+            <button type="button" className="secondary-button" disabled={busy}
+              onClick={() => void confirmPendingBible(currentVolumeId)}>
+              只为{volumes.find((v) => v.volume_id === currentVolumeId)?.title ?? '当前卷'}确认蓝图</button>
+            <span className="muted small">
+              整书蓝图需要每一卷都读过大纲；其余卷还没读，所以只能按「单卷范围」确认一次：
+              这份蓝图只能交付这一卷，别的卷仍要重新生成并确认。
+            </span>
           </div>
         )}
         {!bibleNeedsConfirmation && <span className="muted">全局故事蓝图已确认。</span>}

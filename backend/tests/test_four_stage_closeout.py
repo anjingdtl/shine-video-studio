@@ -778,3 +778,56 @@ def test_f05_the_crew_lane_really_consults_the_persisted_consent(api, monkeypatc
     assert after.status_code == 201, after.text
     assert after.json()["status"] == "INCOMPLETE"
     assert len(sent) == granted_calls, "a revoked consent must stop further sends"
+
+
+def test_a_blueprint_can_be_confirmed_for_one_volume_without_reading_the_rest(api):
+    """F12: "先做一卷" must not require outlining the whole book first.
+
+    The whole-plan confirmation is right to demand every volume's outline.  But
+    it used to be the *only* way to confirm anything, so a person who wanted to
+    finish volume 1 had to buy 83 more extraction calls.  A volume-scoped
+    confirmation names exactly one volume, keeps the whole-plan refusal intact,
+    and is refused at delivery time for every other volume.
+    """
+    _client, factory, _settings = api
+    pid = create_project(_client, "单卷蓝图")
+
+    doc = _make_doc(factory, pid, _multi_volume_master())
+    with factory.begin() as db:
+        doc_r = db.get(ProjectDocument, doc.id)
+        plan = pipeline.plan_volumes(db, pid, doc_r)
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+        volumes = plan.payload_json["volumes"]
+        assert len(volumes) >= 2, volumes
+        first, second = volumes[0], volumes[1]
+        # Only the first volume is read.
+        volume_doc = pipeline._volume_document(db, pid, first["volume_id"])
+        pipeline_artifact_outline(db, pid, volume_doc)
+        payload = dict(BIBLE_PAYLOAD)
+        task_id = _authoring_task(db, pid, pipeline.BIBLE_RUN_ROLE, {"fixture": "single-volume"})
+        bible = AgentArtifact(project_id=pid, kind=pipeline.BIBLE_KIND, schema_version="1.0",
+                              payload_json=payload, sha256=digest(payload),
+                              producer_role=pipeline.BIBLE_RUN_ROLE, source_task_id=task_id)
+        db.add(bible)
+        db.flush()
+        bible_id, bible_sha = bible.id, bible.sha256
+        first_id, second_id = first["volume_id"], second["volume_id"]
+
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.confirm_bible(db, pid, bible_id, bible_sha)
+    assert "PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE" in str(err.value)
+
+    with factory.begin() as db:
+        pipeline.confirm_bible(db, pid, bible_id, bible_sha, scope_volume_id=first_id)
+    with factory() as db:
+        pointer = pipeline._read_pointer(db, pipeline._pointer_key(pid, "story-bible"))
+        assert pointer["scope"] == {"kind": "volume", "volume_id": first_id}
+        assert pipeline.current_bible(db, pid).id == bible_id
+
+    # The scoped blueprint produces its own volume and nothing else.
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.build_volume_handoff(db, pid, second_id, "wf", settings=None)
+    assert "PIPELINE_BIBLE_SCOPE_OTHER_VOLUME" in str(err.value)

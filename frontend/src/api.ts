@@ -905,10 +905,11 @@ export const queueVolumeOutline = (projectId: string, volumeId: string) =>
 export const queueBible = (projectId: string) =>
   api<{ task_id: string }>(`/projects/${projectId}/pipeline/bible`, json('POST', {}));
 
-export const confirmBible = (projectId: string, artifactId: string, sha256: string) =>
+export const confirmBible = (projectId: string, artifactId: string, sha256: string, scopeVolumeId?: string) =>
   api<{ confirmed: boolean; sha256: string }>(
     `/projects/${projectId}/pipeline/bibles/${artifactId}/confirm`,
-    json('POST', { expected_sha256: sha256 }));
+    json('POST', scopeVolumeId ? { expected_sha256: sha256, scope_volume_id: scopeVolumeId }
+      : { expected_sha256: sha256 }));
 
 export const queueVolumeScripts = (projectId: string, volumeId: string) =>
   api<{ queued: number; task_ids: string[] }>(
