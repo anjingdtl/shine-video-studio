@@ -2262,13 +2262,19 @@ GLOBAL_STORYBOARD_STOPS = {
 }
 
 
-def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
+def serialize_volume_script(db, project_id: str, volume_id: str,
+                            only_section_ids: list[str] | None = None) -> str:
     """The volume's confirmed scripts, serialized in section order.
 
     This projection is the volume's *identity*, not one crew input: the crew
     chain runs per scene (see ``storyboard_units``), so a project-length
     volume is never refused by an inline character limit.  Its sha256 is what
     the storyboard receipts and the package lineage pin.
+
+    ``only_section_ids`` narrows the projection to the scenes being drafted.
+    Without it, drafting one confirmed scene demanded that every other scene of
+    the volume was confirmed too - which made the panel's own "生成已确认场次
+    的分镜草案" button impossible to use until the whole volume was written.
     """
     outline = _volume_outline(db, project_id, volume_id)
     if outline is None:
@@ -2276,11 +2282,15 @@ def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
     if _volume_document(db, project_id, volume_id) is None:
         raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
     sections = outline.payload_json.get("production_sections") or []
+    wanted = set(only_section_ids or [])
     parts = []
     for section in sections:
-        script = current_scene_script(db, project_id, volume_id, section["production_section_id"])
+        section_id = section["production_section_id"]
+        if wanted and section_id not in wanted:
+            continue
+        script = current_scene_script(db, project_id, volume_id, section_id)
         if script is None:
-            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section["production_section_id"])
+            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section_id)
         title = section.get("title", "")
         parts.append(f"第{section.get('order', '?')}场 {title}\n{script.payload_json.get('text', '')}")
     return "\n\n".join(parts)
@@ -2317,7 +2327,8 @@ def _split_scene_text(text: str, limit: int) -> list[str]:
     return result
 
 
-def storyboard_units(db, project_id: str, volume_id: str) -> list[dict]:
+def storyboard_units(db, project_id: str, volume_id: str,
+                     only_section_ids: list[str] | None = None) -> list[dict]:
     """One bounded crew input per scene, in plan order.
 
     Whole scenes are the unit because the per-scene mapping is exactly what
@@ -2332,8 +2343,13 @@ def storyboard_units(db, project_id: str, volume_id: str) -> list[dict]:
     if _volume_document(db, project_id, volume_id) is None:
         raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
     units: list[dict] = []
+    wanted = set(only_section_ids or [])
     for section in outline.payload_json.get("production_sections") or []:
         section_id = section["production_section_id"]
+        if wanted and section_id not in wanted:
+            # Drafting a subset must not demand the rest of the volume: the
+            # caller asked for these scenes only.
+            continue
         script = current_scene_script(db, project_id, volume_id, section_id)
         if script is None:
             raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section_id)
@@ -2577,10 +2593,8 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
     master = db.get(ProjectDocument, plan.payload_json["source_master"]["document_id"])
     if master is None or master.project_id != project_id:
         raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
-    units = storyboard_units(db, project_id, volume_id)
-    if only_section_ids:
-        selected = set(only_section_ids)
-        units = [unit for unit in units if unit["section_id"] in selected]
+    units = storyboard_units(db, project_id, volume_id,
+                             only_section_ids=only_section_ids)
     if not units:
         raise ValueError("PIPELINE_STORYBOARD_UNITS_EMPTY")
     namespace = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(

@@ -797,8 +797,12 @@ export interface SectionQa {
 
 export interface PipelineVolumeScriptEntry {
   section_id: string;
-  scene_key: string;
+  scene_key: string | null;
+  /** What a person reads: the title, else "第 N 场" - never a bare uuid. */
+  scene_label?: string | null;
   title: string | null;
+  /** Planning estimate (chars/5); not an H3 duration. */
+  estimated_duration_s?: number | null;
   confirmed: boolean;
   qa?: SectionQa | null;
 }
@@ -879,7 +883,8 @@ export interface PipelineOverview {
   active_tasks: PipelineTaskSummary[];
   pending_scripts: Array<{
     volume_id: string; section_id: string; artifact_id: string; sha256: string;
-    scene_key: string; title: string | null; text: string;
+    scene_key: string | null; scene_label?: string | null;
+    title: string | null; text: string;
     qa?: SectionQa | null;
   }>;
   volumes: PipelineVolume[];

@@ -30,6 +30,23 @@ def _http_from_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(422, {"code": code, "message": code})
 
 
+def _section_label(section: dict[str, Any], order: int) -> str:
+    """The one human name of a production section.
+
+    ``scene_key`` is an identity (sometimes a uuid), never a label.  A section
+    without a title of its own is still somebody's "第 N 场": printing an id
+    where a scene name belongs is what made the script list unreadable.
+    """
+    title = str(section.get("title") or "").strip()
+    if title:
+        return title
+    key = str(section.get("scene_key") or "").strip()
+    looks_like_uuid = len(key) >= 32 and key.count("-") >= 4
+    if key and not looks_like_uuid:
+        return key
+    return f"第 {order} 场"
+
+
 @router.get("/projects/{project_id}/pipeline")
 def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
     """The pipeline's real state: master, plan, bible, per-volume progress."""
@@ -48,13 +65,19 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
             scripts = [
                 {
                     "section_id": s["production_section_id"],
-                    "scene_key": s.get("scene_key", s["production_section_id"]),
+                    "scene_key": s.get("scene_key"),
+                    # A section key is often a bare uuid: it identifies the span,
+                    # it is not something a person can read.  The label is what
+                    # every list prints, so it never degrades to an id.
+                    "scene_label": _section_label(s, index),
                     "title": s.get("title"),
+                    # A planning estimate only; it never claims an H3 duration.
+                    "estimated_duration_s": s.get("estimated_duration_s"),
                     "confirmed": pipeline.current_scene_script(
                         db, project_id, volume_id, s["production_section_id"]) is not None,
                     "qa": qa_states.get(s["production_section_id"]),
                 }
-                for s in sections
+                for index, s in enumerate(sections, start=1)
             ]
             latest_outline_row = None
             volume_doc = pipeline._volume_document(db, project_id, volume_id)
@@ -108,6 +131,7 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     "section_id": entry["section_id"],
                     "artifact_id": script.id, "sha256": script.sha256,
                     "scene_key": entry["scene_key"], "title": entry["title"],
+                    "scene_label": entry.get("scene_label"),
                     "text": (script.payload_json or {}).get("text", ""),
                     "qa": qa_states.get(entry["section_id"]),
                 })
@@ -305,7 +329,8 @@ def storyboard_draft_route(
     authorize_replay_ids = ([str(item) for item in replay_ids if item]
                             if isinstance(replay_ids, list) and replay_ids else None)
     try:
-        script_text = pipeline.serialize_volume_script(db, project_id, volume_id)
+        script_text = pipeline.serialize_volume_script(
+            db, project_id, volume_id, only_section_ids=only_section_ids)
         from shine.media.output_layout import output_root_for_request
 
         result = volume_storyboard_draft(

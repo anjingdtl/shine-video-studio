@@ -42,7 +42,11 @@ const STORYBOARD_STATUS_LABELS: Record<string, string> = {
 };
 
 /** What a person should read for one scene: its title, else a short key, else a word. */
-function sceneLabel(item: { scene_key?: string | null; title?: string | null }): string {
+function sceneLabel(item: {
+  scene_key?: string | null; scene_label?: string | null; title?: string | null;
+}): string {
+  const label = (item.scene_label ?? '').trim();
+  if (label) return label;
   const title = (item.title ?? '').trim();
   const key = (item.scene_key ?? '').trim();
   if (title) return key && !UUID_LIKE.test(key) ? `${key} ${title}` : title;
@@ -73,6 +77,8 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   // one the person is looking at.
   const [selectedVolumeId, setSelectedVolumeId] = useState<string>('');
   const [episodeTitle, setEpisodeTitle] = useState('');
+  /** Per-episode target in seconds; the recommendation packs scenes up to it. */
+  const [episodeTarget, setEpisodeTarget] = useState(60);
   const [episodeSections, setEpisodeSections] = useState<string[]>([]);
   const [boundaryMode, setBoundaryMode] = useState(false);
   /** The blocked scene a first click armed; the second click really re-sends. */
@@ -181,6 +187,29 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     }
   }
 
+  // A person should not have to invent the next episode out of a blank list.
+  // The first render of a volume with confirmed scripts names the recommended
+  // set; every click afterwards is the person's own decision.
+  useEffect(() => {
+    if (!overview) return;
+    const volume = overview.volumes.find(
+      (v) => v.volume_id === (selectedVolumeId || overview.volumes[0]?.volume_id));
+    if (!volume || volume.scripts_confirmed === 0) return;
+    setEpisodeSections((current) => {
+      if (current.length) return current;
+      const assigned = new Set(volume.episode_contracts.flatMap((contract) => contract.sections));
+      const picked: string[] = [];
+      let seconds = 0;
+      for (const script of volume.scripts) {
+        if (!script.confirmed || assigned.has(script.section_id)) continue;
+        picked.push(script.section_id);
+        seconds += script.estimated_duration_s ?? 0;
+        if (seconds >= 60) break;
+      }
+      return picked;
+    });
+  }, [overview, selectedVolumeId]);
+
   if (!overview) {
     return <section className="card" id="four-stage"><div className="module-guide"><CircleHelp size={13} />
       {loadFailed
@@ -197,6 +226,30 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     ? selectedVolumeId : volumes[0]?.volume_id ?? '';
   const currentVolume = volumes.find((v) => v.volume_id === currentVolumeId);
   const bibleNeedsConfirmation = !overview.bible_confirmed || !!overview.bible_status?.blockers.length;
+  // Scene -> episode assignment the server already holds.  A recommendation
+  // must not re-offer a scene that is already in another episode contract.
+  const assignedSections = new Set(
+    (currentVolume?.episode_contracts ?? []).flatMap((contract) => contract.sections));
+  const selectedEpisodeSeconds = (currentVolume?.scripts ?? [])
+    .filter((script) => episodeSections.includes(script.section_id))
+    .reduce((total, script) => total + (script.estimated_duration_s ?? 0), 0);
+  /**
+   * The next episode, recommended rather than invented by the user: walk the
+   * confirmed scenes in order, skip the ones already assigned, and stop when
+   * the planning estimate reaches the target.  One scene is always included -
+   * a scene longer than the target still has to go somewhere.
+   */
+  const suggestedEpisodeSections = (() => {
+    const picked: string[] = [];
+    let seconds = 0;
+    for (const script of currentVolume?.scripts ?? []) {
+      if (!script.confirmed || assignedSections.has(script.section_id)) continue;
+      picked.push(script.section_id);
+      seconds += script.estimated_duration_s ?? 0;
+      if (seconds >= episodeTarget) break;
+    }
+    return picked;
+  })();
   // The draft is read from the server, never from local state: a refresh, a
   // crash or a restart must show the same pending work.
   // The plan draft is local state while generating, and a server field after a
@@ -600,7 +653,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
           const blocked = s.qa?.state === 'HARD_BLOCK';
           return (
             <div className="row" key={s.artifact_id}>
-              <span>场次 {s.scene_key} 的剧本已生成，请确认或编辑。</span>
+              <span>「{sceneLabel(s)}」这一幕的剧本已生成，请确认或编辑。</span>
               {blocked && (
                 <span className="pending">
                   未通过终校：{s.qa?.message ?? '请复核这一场'}。正文已保存，可编辑后重新确认。
@@ -733,18 +786,39 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                 <label htmlFor="four-stage-episode-title">按场分集：</label>
                 <input id="four-stage-episode-title" aria-label="分集标题" value={episodeTitle}
                   onChange={(event) => setEpisodeTitle(event.target.value)}
-                  placeholder="例如：第1集" />
-                <span className="muted small">勾选要归入这一集的场次</span>
-                {currentVolume.scripts.map((script) => (
-                  <label key={script.section_id} className="muted small">
-                    <input type="checkbox" checked={episodeSections.includes(script.section_id)}
-                      onChange={(event) => setEpisodeSections((previous) => (
-                        event.target.checked
-                          ? [...previous, script.section_id]
-                          : previous.filter((id) => id !== script.section_id)))} />
-                    {sceneLabel(script)}
-                  </label>
-                ))}
+                  placeholder={'第' + (currentVolume.episode_contracts.length + 1) + '集'} />
+                <label className="muted small">每集目标
+                  <input type="number" min={10} max={3600} aria-label="每集目标秒数"
+                    value={episodeTarget}
+                    onChange={(event) => setEpisodeTarget(Number(event.target.value) || 60)} />
+                  秒
+                </label>
+                <button type="button" className="secondary-button" disabled={busy}
+                  onClick={() => setEpisodeSections(suggestedEpisodeSections)}
+                  title="从未分集的已确认场次开始，按顺序装到目标时长为止；你仍可逐场改勾选">
+                  推荐勾选下一集
+                </button>
+                <span className="muted small">
+                  已选 {episodeSections.length} 场 · 约 {Math.round(selectedEpisodeSeconds)} 秒
+                  （估算按原文字数/5，只用于规划）
+                </span>
+                {currentVolume.scripts.map((script) => {
+                  const used = assignedSections.has(script.section_id);
+                  return (
+                    <label key={script.section_id} className="muted small">
+                      <input type="checkbox" checked={episodeSections.includes(script.section_id)}
+                        disabled={used && !episodeSections.includes(script.section_id)}
+                        onChange={(event) => setEpisodeSections((previous) => (
+                          event.target.checked
+                            ? [...previous, script.section_id]
+                            : previous.filter((id) => id !== script.section_id)))} />
+                      {sceneLabel(script)}
+                      {script.estimated_duration_s
+                        ? '（约 ' + Math.round(script.estimated_duration_s) + ' 秒）' : ''}
+                      {used ? ' · 已归入别集' : ''}
+                    </label>
+                  );
+                })}
                 <button type="button" className="secondary-button"
                   disabled={busy || !episodeTitle.trim() || episodeSections.length === 0}
                   onClick={() => run(async () => {
