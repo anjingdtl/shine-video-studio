@@ -994,7 +994,7 @@ def qa_states_by_section(db, project_id: str) -> dict[str, dict]:
     rows = db.scalars(select(AgentArtifact).where(
         AgentArtifact.project_id == project_id,
         AgentArtifact.kind == qa.REPORT_KIND,
-    ).order_by(AgentArtifact.created_at.desc()).limit(200)).all()
+    ).order_by(AgentArtifact.created_at.desc()).limit(500)).all()
     result: dict[str, dict] = {}
     for row in rows:
         payload = row.payload_json or {}
@@ -1021,14 +1021,11 @@ def latest_section_qa_report(db, project_id: str, volume_id: str, section_id: st
     from shine.literary import qa
     from shine.models import AgentArtifact
 
-    rows = db.scalars(select(AgentArtifact).where(
+    return db.scalar(select(AgentArtifact).where(
         AgentArtifact.project_id == project_id,
         AgentArtifact.kind == qa.REPORT_KIND,
-    ).order_by(AgentArtifact.created_at.desc()).limit(40)).all()
-    return next((row for row in rows
-                 if (row.payload_json or {}).get("section_id") == section_id
-                 and (row.payload_json or {}).get("source") != "storyboard"
-                 and ((row.payload_json or {}).get("volume_id") in (None, volume_id))), None)
+        AgentArtifact.payload_json["section_id"].as_string() == section_id,
+    ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
 
 
 def latest_qa_report(db, project_id: str, script_sha256: str):
@@ -1038,12 +1035,13 @@ def latest_qa_report(db, project_id: str, script_sha256: str):
 
     if not script_sha256:
         return None
-    rows = db.scalars(select(AgentArtifact).where(
+    # Filtered in SQL: a busy project has hundreds of verdicts, and the one that
+    # judges *this* text must never fall outside a read window.
+    return db.scalar(select(AgentArtifact).where(
         AgentArtifact.project_id == project_id,
         AgentArtifact.kind == qa.REPORT_KIND,
-    ).order_by(AgentArtifact.created_at.desc()).limit(12)).all()
-    return next((row for row in rows
-                 if (row.payload_json or {}).get("script_sha256") == script_sha256), None)
+        AgentArtifact.payload_json["script_sha256"].as_string() == script_sha256,
+    ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
 
 
 def _scene_memory_view(factory, project_id: str, bible_payload: dict) -> dict | None:
