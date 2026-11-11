@@ -138,3 +138,32 @@ def test_the_four_stage_chain_records_a_review_for_every_scene_it_wrote(api):
     overview = _client.get(f"/api/v1/projects/{pid}/pipeline").json()
     entries = next(v for v in overview["volumes"] if v["volume_id"] == volume_id)["scripts"]
     assert entries and all("qa" in entry for entry in entries), entries
+
+
+def test_a_local_fault_is_named_and_the_queue_keeps_serving(api, monkeypatch):
+    """One broken unit must not leave the task RUNNING until its lease expires."""
+    from shine.llm.gateway import LLMGateway
+    from shine.llm.secrets import SecretStore
+    from tests.test_literary_low_blocking import _prepared
+
+    _client, factory, settings = api
+    pid, _plan, volume, _sections, _ = _prepared(api)
+    with factory() as db:
+        gateway = LLMGateway(SecretStore(settings.secret_store_dir))
+        tasks = pipeline.queue_scene_scripts(db, pid, volume["volume_id"], gateway)
+        db.commit()
+        task_id = tasks[0].id
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("a local bug, not a provider answer")
+
+    monkeypatch.setattr(pipeline, "run_scene_script_task", explode)
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir))
+    assert pipeline.run_pending_pipeline_task(factory, settings, "bug-worker", gateway) is True
+
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "NEEDS_REVIEW", task.status
+        assert task.trace["blocked_reason"] == "PIPELINE_LOCAL_FAULT"
+        assert task.trace["error_type"] == "RuntimeError"
+        assert task.lease_owner is None, "the lease is released, not left dangling"

@@ -2173,6 +2173,17 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
                                   {"stage": "NEEDS_REVIEW", "blocked_reason": str(exc.detail)},
                                   "NEEDS_REVIEW", str(exc.detail))
             return True
+        except Exception as exc:  # noqa: BLE001 - one local fault must not kill the queue
+            # A local bug used to leave the task RUNNING until its lease expired,
+            # blocking that unit and hiding the reason.  It is named and handed
+            # back for review instead, and the worker keeps serving other units.
+            logger.exception("pipeline_task_fault role=%s task=%s", role, task_id)
+            _finish_pipeline_task(
+                factory, task_id, version, worker_id,
+                {"stage": "NEEDS_REVIEW", "blocked_reason": "PIPELINE_LOCAL_FAULT",
+                 "error_type": type(exc).__name__},
+                "NEEDS_REVIEW", "PIPELINE_LOCAL_FAULT")
+            return True
         finally:
             gateway.pin_role(role, None)
     return False

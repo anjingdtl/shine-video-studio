@@ -89,7 +89,9 @@
   内部检查项、调用台账、事实 id 不进普通界面。
 - 旧数据：没有任何 V2 记录的项目照常读取，`qa` 为 `null`，终校接口如实返回 `NOT_RUN`；
   旧 trace 的任务仍能进入任务摘要。
-- 通过的用例：`tests/test_literary_acceptance.py`（4）、
+- 局部故障隔离：任务内的本地异常不再让记录一直停在 `RUNNING` 直到租约过期，
+  而是具名 `PIPELINE_LOCAL_FAULT`、释放租约、交回核对；工作进程继续服务其它单元。
+- 通过的用例：`tests/test_literary_acceptance.py`（5）、
   `tests/test_pipeline.py::test_oversized_single_chapter_volume_carries_a_warning`
   （断言按新契约更新：硬切警告或超限警告必须出现，覆盖必须完整）。
 
@@ -107,7 +109,7 @@
 | `test_literary_transport_and_ledger.py` | 6 | PASS |
 | `test_literary_low_blocking.py` | 4 | PASS |
 | `test_literary_qa.py` | 15 | PASS |
-| `test_literary_acceptance.py` | 4 | PASS |
+| `test_literary_acceptance.py` | 5 | PASS |
 | `test_pipeline.py` | 19 | PASS |
 | `test_four_stage_closeout.py` | 16 | PASS |
 | `test_storyboard.py` | 33 | PASS |
