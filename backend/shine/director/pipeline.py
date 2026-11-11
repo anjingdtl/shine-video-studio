@@ -815,6 +815,69 @@ def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: s
         return None
 
 
+def _scene_memory_view(factory, project_id: str, bible_payload: dict) -> dict | None:
+    """The bounded five-dimension view a scene writer may receive.
+
+    Returns ``None`` in ``off``/``shadow``: shadow computes and records new facts
+    but never changes the request the user pays for.  A memory fault returns
+    ``None`` as well - the scene is written from the bible and the source, which
+    is exactly what happened before V2.1.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        with factory() as db:
+            if not flags.affects_request("memory", db, project_id):
+                return None
+            names = tuple(
+                str(character.get("name")).strip()
+                for character in (bible_payload.get("characters") or [])[:8]
+                if isinstance(character, dict) and str(character.get("name") or "").strip())
+            retrieval = memory.retrieve(db, project_id=project_id, token_budget=1_200,
+                                        subject_names=names)
+        if not retrieval.fact_ids:
+            # A legitimate empty view: no authoritative fact touches this scene.
+            return None
+        return {"facts": retrieval.context_text, "fact_ids": retrieval.fact_ids,
+                "warnings": retrieval.warnings}
+    except Exception:  # noqa: BLE001 - guidance never blocks the writer
+        logger.exception("literary_memory_retrieval_failed project=%s", project_id)
+        return None
+
+
+def _ingest_memory(factory, *, project_id: str, task_id: str, payload: dict,
+                   document_sha256: str | None) -> dict:
+    """Archive the optional five-dimension observations of a blueprint answer.
+
+    This is a side ledger, never a gate: an invalid observation is a warning
+    about that observation, and a memory fault cannot fail the outline that was
+    successfully written.  Nothing here is promoted to authoritative.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        with factory() as db:
+            if not flags.enabled("memory", db, project_id):
+                return {"mode": "off"}
+            mode = flags.mode("memory", db, project_id)
+        observations, findings = memory.parse_observations(payload, unit_id="bible")
+        if not observations:
+            return {"mode": mode, "saved": 0, "findings": [item.as_dict() for item in findings]}
+        with factory.begin() as db:
+            result = memory.record_observations(
+                db, project_id=project_id, observations=observations,
+                unit_id="bible", source_task_id=task_id, document_sha256=document_sha256)
+            snapshot = memory.snapshot(db, project_id, upstream={"task_id": task_id})
+            summary = result.as_dict()
+            summary["snapshot_sha256"] = snapshot.sha256
+            summary["mode"] = mode
+            summary["findings"] = [item.as_dict() for item in [*findings, *result.findings]]
+            return summary
+    except Exception:  # noqa: BLE001 - a side ledger never fails the outline
+        logger.exception("literary_memory_ingest_failed task=%s", task_id)
+        return {"mode": "error"}
+
+
 def _attempt_recorder(factory, project_id: str, task_id: str):
     """A durable physical-call recorder for one task.
 
@@ -993,6 +1056,9 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             "plan_artifact_id": trace.get("plan_artifact_id"),
             "plan_sha256": trace.get("plan_sha256"),
         }}
+        payload["memory_ingest"] = _ingest_memory(
+            factory, project_id=project_id, task_id=task_id, payload=payload,
+            document_sha256=trace.get("document_sha256"))
         _commit_pipeline_result(
             factory, task_id=task_id, version=version, worker_id=worker_id,
             project_id=project_id, kind=BIBLE_KIND, role=BIBLE_RUN_ROLE, payload=payload,
@@ -1436,6 +1502,9 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             "previous_ending": (previous_script.payload_json.get("continuity_out", "")
                                 if previous_script else None),
         }
+        memory_view = _scene_memory_view(factory, project_id, bible.payload_json)
+        if memory_view is not None:
+            context["memory"] = memory_view
         schema = SceneDraft.model_json_schema()
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
         if sent is None:
