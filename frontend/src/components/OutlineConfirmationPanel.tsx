@@ -4,6 +4,7 @@ import { ScriptTextConsent } from './ScriptTextConsent';
 import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
+import { Meter } from './Meter';
 
 type Section = { production_section_id: string; order: number; title: string };
 type Outline = {
@@ -148,7 +149,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         （{outlineTask.summary?.done ?? outlineTask.progress.cursor}/{outlineTask.summary?.total ?? '?'}，
         {outlineTask.summary?.percent ?? 0}%）
       </p>
-      <progress aria-label="大纲任务进度" max={100} value={outlineTask.summary?.percent ?? 0} />
+      <Meter label="大纲任务进度" value={outlineTask.summary?.percent ?? 0} count={`${outlineTask.summary?.percent ?? 0}%`} tone="busy" />
       {outlineTask.retry && <OutlineTaskRetry retry={outlineTask.retry} busy={busy}
         disabled={running || !scriptwriterAllowed}
         onRetry={(fields) => void act(() => api(

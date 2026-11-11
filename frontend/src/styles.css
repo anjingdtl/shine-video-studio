@@ -939,12 +939,7 @@ html[data-theme='dark'] .wizard-stage{background:#22231d;border-color:#3a3b31}
 html[data-theme='dark'] .wizard-stage.ok{background:#262d1f;border-color:#41502f}
 html[data-theme='dark'] .wizard-stage.blocked{background:#33241e;border-color:#5c3c30}
 
-/* ---- 必做操作的高对比引导（每页必须点击的那一步） ---- */
-.required-action{display:flex;align-items:center;gap:11px;flex-wrap:wrap;border:1px solid var(--warn-strong);background:var(--warn-bg);border-radius:8px;padding:12px 13px;margin:11px 0}
-.required-action .required-icon{color:var(--warn-ink);flex-shrink:0}
-.required-action .required-text{flex:1;min-width:190px}
-.required-action b{display:block;font-size:var(--fs-caption);color:var(--warn-deep);letter-spacing:.2px}
-.required-action small{display:block;font-size:var(--fs-caption);color:var(--warn-2);margin-top:4px;line-height:1.6}
+/* ---- 必做操作的高对比引导：归入三件套 blocker-item 的 is-action 变体（见文末） ---- */
 .btn-primary{border-radius:6px;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .btn-primary.wide{width:100%}
 .notice>div{flex:1;min-width:0}
@@ -992,10 +987,10 @@ html[data-theme='dark'] .wizard-stage.blocked{background:#33241e;border-color:#5
 .agent-step-row b{font-size:var(--fs-caption);color:var(--ink-mid)}
 .agent-step-row .step-when{margin-left:auto;font:var(--fs-caption) var(--mono);color:var(--faint)}
 
-html[data-theme='dark'] .required-action{border-color:#8a5a25;background:#33261a}
-html[data-theme='dark'] .required-action b{color:#e3b483}
-html[data-theme='dark'] .required-action small{color:#c39a73}
-html[data-theme='dark'] .required-action .required-icon{color:#d99b56}
+html[data-theme='dark'] .blocker-item.is-action{border-color:#8a5a25;background:#33261a}
+html[data-theme='dark'] .blocker-item.is-action b{color:#e3b483}
+html[data-theme='dark'] .blocker-item.is-action small{color:#c39a73}
+html[data-theme='dark'] .blocker-item.is-action>svg{color:#d99b56}
 html[data-theme='dark'] .notice b{color:#cdcec0}
 html[data-theme='dark'] .asset-thumb{border-color:#3d3e34;background:#2a2b23}
 html[data-theme='dark'] .asset-thumb-fallback{background:#332f26;color:#b7a37c}
@@ -2106,6 +2101,12 @@ html[data-theme='dark'] #output-directory code{background:#26271f;border-color:#
 .blocker-item .blocker-reason{flex:1;min-width:0;overflow-wrap:anywhere}
 .blocker-item .blocker-code{font-family:var(--mono);font-size:var(--fs-caption);color:var(--faint)}
 .blocker-item .btn-text,.blocker-item .btn-secondary{flex:none}
+/* is-action：独立的高对比必做引导块（三件套 blocker-item 的强调变体） */
+.blocker-item.is-action{align-items:flex-start;flex-wrap:wrap;border:1px solid var(--warn-strong);background:var(--warn-bg);border-radius:var(--radius-sm);padding:var(--sp-3);margin:var(--sp-2) 0}
+.blocker-item.is-action>svg{color:var(--warn-ink)}
+.blocker-item.is-action .blocker-reason{flex:1;min-width:190px}
+.blocker-item.is-action b{display:block;font-size:var(--fs-caption);color:var(--warn-deep);letter-spacing:.2px}
+.blocker-item.is-action small{display:block;font-size:var(--fs-caption);color:var(--warn-2);margin-top:var(--sp-1);line-height:var(--lh-body)}
 .blocker-more{font-size:var(--fs-caption);color:var(--olive);cursor:pointer;background:none;border:0;padding:var(--sp-1) 0;text-align:left}
 .blocker-more:hover{text-decoration:underline}
 

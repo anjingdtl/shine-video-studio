@@ -578,9 +578,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       </div>
     </div>
 
-    {rulepackId === null && <div className="required-action">
+    {rulepackId === null && <div className="blocker-item is-action">
       <ShieldCheck size={17} className="required-icon" />
-      <div className="required-text">
+      <div className="blocker-reason">
         <b>还差一步：本项目还没绑定官方规则包</b>
         <small>五个 Agent 需要同一套官方规范；到「剧本统筹」冻结风格时会一并绑定。</small>
       </div>
@@ -632,14 +632,14 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <input type="checkbox" checked={consent} disabled={busy} onChange={e => setConsent(e.target.checked)} />
       <span>我同意把该剧本的文本内容发送给已配置的 AI 文字服务用于分镜（媒体文件不会上传）。</span>
     </label>
-    {scriptTooLong && <div className="required-action" role="alert">
-      <div className="required-text"><b>长剧本请分段制作</b>
+    {scriptTooLong && <div className="blocker-item is-action" role="alert">
+      <div className="blocker-reason"><b>长剧本请分段制作</b>
         <small>单次分镜最多处理 20000 字。请在素材准备中选择已确认大纲的生产段落，逐段生成分镜；不会截断原文。</small></div>
       {!railPresent && onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
     </div>}
-    <div className="required-action">
+    <div className="blocker-item is-action">
       <Sparkles size={17} className="required-icon" />
-      <div className="required-text">
+      <div className="blocker-reason">
         <b>{requiresReconciliation ? '前次模型请求结果待核对' : '必做：生成 AI 分镜方案'}</b>
         <small>{requiresReconciliation ? '系统会先检查前次调用。确认请求未送达时，复用已保存的编剧结果并自动从导演继续。' : '需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。'}</small>
       </div>
@@ -789,23 +789,23 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             </div>;
           })}
         </fieldset>
-        {!requiresReconciliation && !consent && <div className="required-action">
-          <div className="required-text">
+        {!requiresReconciliation && !consent && <div className="blocker-item is-action">
+          <div className="blocker-reason">
             <b>导演还未启动：需要同意发送剧本文本</b>
             <label><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
               同意把当前剧本文本发送给已配置的 AI 文字服务，继续导演（不上传媒体）
             </label>
           </div>
         </div>}
-        {!requiresReconciliation && !selectedDoc && !inlineText.trim() && <div className="required-action">
-          <div className="required-text"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
+        {!requiresReconciliation && !selectedDoc && !inlineText.trim() && <div className="blocker-item is-action">
+          <div className="blocker-reason"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
           {!railPresent && <button type="button" className="btn-primary" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>}
         </div>}
         {requiresReconciliation ? (!railPresent && onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('assets')}>
           去剧本统筹核对风格
-        </button>) : <div className="required-action">
+        </button>) : <div className="blocker-item is-action">
           <CheckCircle2 size={17} className="required-icon" />
-          <div className="required-text">
+          <div className="blocker-reason">
             <b>{confirmedBreakdownId ? '人物名字已经保存，可以继续导演' : '必做：确认名图对应'}</b>
             <small>{confirmedBreakdownId ? '将复用已确认的人物，不再重复写入名字，也不重跑编剧。' : '确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。'}</small>
           </div>
@@ -871,8 +871,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             ))}
           </ol>
         </details>
-        {result.status === 'NEEDS_REVIEW' && <div className="required-action">
-          <div className="required-text">
+        {result.status === 'NEEDS_REVIEW' && <div className="blocker-item is-action">
+          <div className="blocker-reason">
             <b>分镜有待解决的问题，暂不能应用</b>
             <small>{result.repair_failure ? '本轮自动修复未通过检查，原方案已保留。可以再次尝试修复。'
               : 'AI 会复用已完成的步骤，尝试修订冲突并重新检查，不会修改已冻结风格或素材。'}</small>

@@ -147,9 +147,9 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
         </div>
         <span className="upload-hint">支持图片、视频和音频，自动识别类型。仅上传你有权使用的素材。</span>
       </div>
-      {pending.length > 0 && <div className="required-action">
+      {pending.length > 0 && <div className="blocker-item is-action">
         <LockKeyhole size={17} className="required-icon" />
-        <div className="required-text">
+        <div className="blocker-reason">
           <b>有 {pending.length} 项上传素材待你选择</b>
           <small>确认会固定素材版本，AI 不能替你确认或替换。确认后这张素材才能被分镜引用。</small>
         </div>
@@ -218,7 +218,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
                 <label>素材分类<select value={saveCategory} onChange={(event) => setSaveCategory(event.target.value)}>
                   <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
                 </select></label>
-                {saveError && <p role="alert" className="required-text">{saveError}</p>}
+                {saveError && <p role="alert" className="blocker-reason">{saveError}</p>}
                 <button className="btn-secondary" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
                 <button className="btn-text" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
               </>}

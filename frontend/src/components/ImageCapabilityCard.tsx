@@ -237,18 +237,18 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
       </ul>
 
       {(state?.blockers ?? []).map((blocker) => (
-        <div className="required-action" key={`${blocker.code}-${blocker.layer ?? ''}`}>
+        <div className="blocker-item is-action" key={`${blocker.code}-${blocker.layer ?? ''}`}>
           <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text">
+          <div className="blocker-reason">
             <b>{BLOCKER_LABELS[blocker.code] ?? blocker.code}</b>
             <small>{blocker.detail ?? blocker.remediation ?? '按上面的提示处理后再试。'}</small>
           </div>
         </div>
       ))}
       {problem && (
-        <div className="required-action" role="alert">
+        <div className="blocker-item is-action" role="alert">
           <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text"><b>这一步没有完成</b><small>{problem}</small></div>
+          <div className="blocker-reason"><b>这一步没有完成</b><small>{problem}</small></div>
         </div>
       )}
       {note && (

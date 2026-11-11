@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Meter } from './Meter';
 
 export type AgentRunProgress = {
   id: string; role_id: string; status: string; created_at: string;
@@ -67,8 +68,8 @@ export function AgentProgress({ runs, completedRoles = [], awaitingCharacters = 
     return `${state} · ${codes.length ? codes.join(' · ') : '尚无返回码'}${elapsed}`;
   };
   return <div aria-label="Agent 调用进度">
-    {awaitingCharacters && <div className="required-action" role="region" aria-label="分镜交接状态" aria-live="polite">
-      <div className="required-text">
+    {awaitingCharacters && <div className="blocker-item is-action" role="region" aria-label="分镜交接状态" aria-live="polite">
+      <div className="blocker-reason">
         <b>{charactersConfirmed ? '人物已确认，导演尚未启动' : '等待你确认人物，导演尚未启动'}</b>
         <small>{charactersConfirmed ? '请完成下方的剧本选择和发送同意，再点「复用已确认人物，继续导演」。已保存的名字无需重写。' : '编剧已完成。请核对每个人物的名字和素材；确认后才会调用导演，不会重跑编剧。继续等待不会自动进入下一步。'}</small>
       </div>
@@ -83,7 +84,7 @@ export function AgentProgress({ runs, completedRoles = [], awaitingCharacters = 
     </div>}
     {lastCheckedAt && <p>最近一次成功查询后台：{new Date(lastCheckedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}。下列状态来自已保存的运行记录。</p>}
     <p>角色完成 {completed}/5；进度按已完成角色计算，不能代表当前模型的内部进度。</p>
-    <progress aria-label="已完成的 Agent" max={5} value={completed} />
+    <Meter label="已完成的 Agent" value={completed} max={5} count={`${completed}/5`} />
     {active && !paused && <p>正在等待模型返回。长时间无响应时请查看运行记录。</p>}
     <ul>{roles.map(([role, label]) => {
       const matching = normalRuns.filter(run => run.role_id === role);

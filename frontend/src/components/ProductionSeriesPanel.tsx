@@ -820,9 +820,9 @@ export default function ProductionSeriesPanel({
       <ul>{hints.map((hint) => <li key={hint}>{hint}</li>)}</ul>
     </div>}
 
-    {!productionLive && blockers.length > 0 && <div className="required-action" role="status" aria-label="开始制作前还需完成">
+    {!productionLive && blockers.length > 0 && <div className="blocker-item is-action" role="status" aria-label="开始制作前还需完成">
       <AlertTriangle size={17} className="required-icon" />
-      <div className="required-text">
+      <div className="blocker-reason">
         <b>现在为什么不能开始制作</b>
         <ul>{blockers.slice(0, 4).map(reason => <li key={reason}>{reason}</li>)}</ul>
         {blockers.length > 4 && <small>还有 {blockers.length - 4} 项前置条件，处理完上面的会自动刷新。</small>}

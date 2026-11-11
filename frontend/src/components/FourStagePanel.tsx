@@ -13,6 +13,7 @@ import {
   type WorkflowProfileLite,
 } from '../api';
 import { failureLabels } from '../constants';
+import { Meter } from './Meter';
 
 type Props = {
   projectId: string;
@@ -392,9 +393,9 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             return (
               <div className="progress-row" key={task.task_id}>
                 <span className="progress-name">{ROLE_LABELS[task.role] ?? task.role}</span>
-                {inFlight && <progress
-                  aria-label={(ROLE_LABELS[task.role] ?? task.role) + '进度'}
-                  value={pct ?? undefined} max={100} />}
+                {inFlight && <Meter
+                  label={(ROLE_LABELS[task.role] ?? task.role) + '进度'}
+                  value={pct ?? 0} max={100} tone="busy" />}
                 <span className="progress-detail">
                   {task.status === 'NEEDS_REVIEW'
                     ? '待核对：' + (task.error_code ?? task.stage_label)
@@ -604,7 +605,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         )}
         {!bibleNeedsConfirmation && <span className="muted">全局故事蓝图已确认。</span>}
         {overview.bible_confirmed && (overview.bible_status?.blockers ?? []).length > 0 && (
-          <div className="required-action">
+          <div className="blocker-item is-action">
             <b>蓝图与当前大纲已不一致：</b>
             <ul>
               {(overview.bible_status?.blockers ?? []).map((code) => <li key={code}>{code}</li>)}

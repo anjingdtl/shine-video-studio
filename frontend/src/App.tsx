@@ -32,6 +32,7 @@ import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
+import { Meter } from './components/Meter';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
@@ -602,7 +603,7 @@ function App() {
     <button type="button" className="btn-secondary" disabled={reconnecting} onClick={reconnectWorkbench}>
       {reconnecting ? reconnectLabel : '重新连接'}
     </button>
-    {reconnecting && <div role="status"><progress aria-label={reconnectLabel} /></div>}
+    {reconnecting && <div role="status"><Meter label={reconnectLabel} value={0} tone="busy" /></div>}
     {reconnectError && <p role="alert">{reconnectError}</p>}
   </div>;
 

@@ -606,9 +606,9 @@ export default function StylePanel({
             </button>
           </div>
         </div>
-        : !railPresent && <div className="required-action">
+        : !railPresent && <div className="blocker-item is-action">
           <LockKeyhole size={17} className="required-icon" />
-          <div className="required-text">
+          <div className="blocker-reason">
             <b>必做：冻结这一版风格</b>
             <small>{rulepackId === null && rulepacks.length > 0
               ? '冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照；本作品还没绑定官方规则包，这次冻结会一并完成（一次性）。'

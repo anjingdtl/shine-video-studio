@@ -772,9 +772,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       {operationReport && <p role="status">{operationReport}</p>}
       {documentId && <ScriptTextConsent key={`consent:${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}
       {problem && (
-        <div className="required-action" role="alert">
+        <div className="blocker-item is-action" role="alert">
           <AlertTriangle size={14} className="required-icon" />
-          <div className="required-text"><b>这一步没有完成</b><small>{problem}</small></div>
+          <div className="blocker-reason"><b>这一步没有完成</b><small>{problem}</small></div>
         </div>
       )}
       {styleRows.length > 0 && (
@@ -794,9 +794,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         <summary>还有 {state!.blockers.length} 项素材未绑定（点击展开清单）</summary>
         <div className="material-stage-body material-blocker-list">
           {(state?.blockers ?? []).map((blocker, index) => (
-            <div className="required-action" key={`${blocker.code}-${index}`}>
+            <div className="blocker-item is-action" key={`${blocker.code}-${index}`}>
               <AlertTriangle size={14} className="required-icon" />
-              <div className="required-text">
+              <div className="blocker-reason">
                 <b>{reasonText(blocker.code)}</b>
                 <small>{blocker.note}</small>
                 <small className="material-code">代码 {blocker.code}</small>
@@ -953,7 +953,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     {adoptionReport && <p role="status" className="material-hint">{adoptionReport}</p>}
                   </div>}
                   {librarySearchRequirement === requirement.requirement_id && <div className="material-stage-body">
-                    {librarySearchError && <p role="alert" className="required-text">{librarySearchError}</p>}
+                    {librarySearchError && <p role="alert" className="blocker-reason">{librarySearchError}</p>}
                     {librarySearchBusy && <p className="material-hint">正在查找全局正式版本…</p>}
                     {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到可分配的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
                     {librarySearchResults.map((result) => <div className="material-library-result" key={result.version.id}>
@@ -1085,15 +1085,15 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             重跑全部素材（保留旧候选）
           </button>
           {evaluation && (
-            <div className={evaluation.materials_ready ? 'material-ready' : 'required-action'} role="status">
+            <div className={evaluation.materials_ready ? 'material-ready' : 'blocker-item is-action'} role="status">
               {evaluation.materials_ready ? (
                 <><CircleCheck size={14} className="required-icon" />
-                  <div className="required-text"><b>素材齐备</b><small>每一项必需素材都已绑定已批准并锁定的主素材，可以继续准备导演包。</small></div>
+                  <div className="blocker-reason"><b>素材齐备</b><small>每一项必需素材都已绑定已批准并锁定的主素材，可以继续准备导演包。</small></div>
                 </>
               ) : (
                 <>
                   <AlertTriangle size={14} className="required-icon" />
-                  <div className="required-text">
+                  <div className="blocker-reason">
                     <b>还有必需项没有绑定有效主素材</b>
                     <small>
                       {evaluation.missing.map((entry) => (

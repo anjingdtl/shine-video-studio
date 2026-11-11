@@ -94,22 +94,24 @@
 ## 排查项 7：进度组件是否唯一（除 .meter 外不得有第二套自绘进度）
 
 **证据**
-- 统一进度组件 `.meter`（`styles.css`）用于 `ActionRail.tsx`（阶段进度 + 运行进度态），`actionRail.test.tsx:44-50` 守护运行进度态。
+- 统一进度组件 `Meter.tsx`（渲染 `.meter`，保留 `role="progressbar"` + aria-label）。
+- 已归一：`ActionRail.tsx`（阶段/运行进度）、`OutlineConfirmationPanel.tsx:151`、`AgentProgress.tsx:86`、`FourStagePanel.tsx:395`、`App.tsx:605`（重连指示）均由原生 `<progress>` 改为 `Meter`。`grep "<progress" frontend/src` → **0 处**。
+- `modeEntry.test.tsx` 守护重连 progressbar 角色与名称（迁移后仍通过）。
 
-**结论：部分合规。**
-**允许的例外 + 理由**：遗留进度表示保留——`ProductionSeriesPanel.tsx` 的 `series-progress-bar` + 镜头圆点（0.2.0 轮既有制作进度卡，`seriesOrder`/`productionComplete` 契约守护）、`StoryPreparationPanel.tsx` `run-progress-track`、`OutlineConfirmationPanel.tsx`/`AgentProgress.tsx`/`FourStagePanel.tsx` 的原生 `<progress>`、`App.tsx` 重连 `<progress>`。理由：这些是既有契约守护的生产/任务进度卡，镜头圆点网格与 `.meter` 细条形态不同；把它们全部并入 `.meter` 需重做进度卡视觉与契约，超出本轮零回归边界。建议后续单列「进度卡统一 meter 化」专项。
+**结论：合规（通用完成度/任务进度已全部 .meter 化）。**
+**允许的例外 + 理由**：`ProductionSeriesPanel.tsx` 的 `series-progress-bar` + 镜头圆点网格、`StoryPreparationPanel.tsx` `run-progress-track` 保留。理由：这是 0.2.0 轮既有、`seriesOrder`/`productionComplete` 契约守护的**生产进度卡**，镜头圆点网格是区别于细条的专用可视化（设计 §2.3 亦要求镜头圆点复用统一组件，但其网格形态与 .meter 细条不同）；全量并入需重做进度卡视觉与契约，建议后续单列「生产进度卡 meter 化」专项。
 
 ---
 
 ## 排查项 8：提示是否只有三件套（.notice/.blocker-item/.meter）
 
 **证据**
-- `module-guide` 已全量归并为 `.notice`：12 个组件的 `module-guide` 类改名 `notice`，`styles.css` 的 `.module-guide` 定义删除并补 `.notice` 多段样式。`grep module-guide frontend/src` → **0 处**。
-- 9px/9.5px/8px/7px/10px 字号残留 → **0 处**（P0 全站最小 11px）。
-- 错误码结构化：`errorActions.ts` 把服务端 blocker 映射为「一句原因 + 去处理」，`App.railBlockers` 渲染为 `.blocker-item`（`ActionRail.tsx` rail-blockers）。
+- `module-guide` 已全量归并 `.notice`（12 组件 + CSS 定义删除）。`grep module-guide frontend/src` → **0 处**。
+- `required-action` 已全量归并三件套 `blocker-item` 的 `is-action` 强调变体（8 组件改名 `blocker-item is-action`、`required-text`→`blocker-reason`；CSS 删除旧 `.required-action` 定义，新增 `.blocker-item.is-action` 警示变体 + 暗色覆盖）。`grep required-action frontend/src` → **0 处**。
+- 9px/9.5px/8px/7px/10px 字号残留 → **0 处**（全站最小 11px）。
+- 错误码结构化：`errorActions.ts` → `App.railBlockers` → `.blocker-item`（原因 + 去处理）。
 
-**结论：部分合规。**
-**允许的例外 + 理由**：`required-action` 容器在专家/基础配置面板（`ImageCapabilityCard.tsx`、`SetupPanel.tsx`、`MaterialPreparationPanel.tsx` 等）与旅程上下文块（`StoryboardPanel.tsx`、`AssetPanel.tsx:150`、`StylePanel.tsx:609`）保留。理由：`required-action` 是「图标 + 原因 + 动作」的结构化阻塞变体（已 token 化、字号 11px），在旅程页其 primary 按钮已收进 rail（`!railPresent` 隐藏），剩余为说明性上下文；在专家面板它是该分区的主调用块。全量改名 `blocker-item` 会改变这些块的布局语义且无测试按类名守护，收益低风险高。建议后续把 `required-action` 视觉与 `blocker-item` 对齐为同一组件。
+**结论：合规。** 提示统一为 `.notice`（信息）/`.blocker-item`（含 `is-action` 强调）/`.meter`（进度）三件套；旧 `module-guide`/`required-action` 类零残留。
 
 ---
 
