@@ -87,6 +87,8 @@ runtime_identity（H3 每 attempt 的 run 行，非锁键）、process_identity�
 ## 5. 测试与命令记录（最终树）
 
 - 定向套件：`pytest backend/tests/test_startup_guard.py test_stack_operations.py test_installation_scripts.py test_powershell_runtime_compat.py test_package_entrypoints.py test_runtime_orchestrator.py test_managed_process_release.py test_v13_instances.py test_production_series.py test_comfy_handoff_*.py test_managed_startup.py test_comfy_recovery.py test_setup_workflow_profiles.py test_reference_slot_pruning.py test_image_managed_renderer.py test_reference_transfer.py` → 全部通过（含新增 28 守卫/28 控制面用例）。
+- **全量后端（并行分片）**：`pytest backend/tests -q -n 8 --dist loadfile`（16 核机器，8 worker，按文件分片保证同文件状态隔离；真机 GPU/external_service tier 默认排除，另按仓库惯例单独执行）→ **2286 passed / 2 skipped / 0 failed**（基线 `f897b26` 为 2258 passed / 2 skipped；净增 28 例全部来自本轮守卫与控制面用例，零回归）。
+  - 附注：首轮并行跑出 `test_weight_verification_receipts` 1 例失败，串行复跑 6/6 通过——该用例是「写文件后立即读回」的 Windows 磁盘时序敏感测试，8 路并行 + 本机在用工作台 I/O 负载下可抖动；该文件本轮零改动，第二轮全量并行复跑通过，判定为环境性 flake 而非缺陷。
 - Ruff：`ruff check backend/shine backend/tests` → All checks passed。
 - Alembic：`upgrade head` 到 `f180c0010001` + `alembic check` 无 drift。
 - 前端：`tsc --noEmit` 0 错、`vitest run src/test/engineStatus.test.tsx` 4/4、`npm run build` 成功。
