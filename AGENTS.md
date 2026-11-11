@@ -1262,3 +1262,38 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   参考/门禁、迁移/模式四批定向用例。按用户要求**不跑全量后端套件**。前端
   `OutputDirectoryPanel`、`npm.cmd run build` / `npm.cmd test`。证据见
   `docs/ACCEPTANCE_20261110_OUTPUT_DIRECTORY.md`。
+
+## 2026-11-11 穿测修复轮（限流、宿主代理、素材缺口、崩溃遗留任务）
+
+浏览器实测《放开那个女巫1-10章》④ 分镜编写阶段暴露了七个缺陷，全部已修：
+
+- **服务商 429 不再直接判死一场分镜**：`openai_compatible._request` 过去对 POST 的 429
+  立即抛出，一次限流就让整场失败。现在按 `Retry-After`/指数退避重试
+  （`RATE_LIMIT_BACKOFF_SECONDS`），并把冷却记在**同一端点**上（`note_rate_limit`），
+  后续调用共享等待。预算由 `ProviderConfig.rate_limit_retry_attempts` 决定：
+  **agent 通道 2 次**（`AGENT_RATE_LIMIT_RETRY_ATTEMPTS`），连通性探测仍是 0 次。
+  429 是「拒绝且没有答案」，因此重试不会买到第二份答案；5xx 与超时的未知结论仍不重放。
+- **剧组链的重试要带具名原因**：`RETRYABLE_REJECTIONS` 增加 `LLM_RATE_LIMIT` 与
+  `LLM_FORMAT`；合同拒绝（对白非原文、格式不符等）重试时由
+  `CONTRACT_REPAIR_NOTES` 给出可执行的做法，而不是让模型原样再错一次。
+  纠错说明只写规则与做法，**不携带服务商文本**。
+- **宿主代理环境不得打倒本机客户端**：`[::1]` 这类带方括号的 `NO_PROXY` 条目会让 httpx
+  拒绝建客户端（`InvalidURL: Invalid port: ':1]'`），此前只有文字通道规整过，渲染器、
+  本地文本模型、实例健康检查仍会失败。规则统一到 `shine/http_env.py`：
+  **环回端点一律 `trust_env=False`**，远端调用先规整 `NO_PROXY`。
+- **素材缺口不是连续性冲突**：`shot_reference_policy` 现在区分「策略违规」与
+  「素材请求」：`policy_compliant` 只由被禁用的引用决定，`material_request` 列出还缺的
+  主素材。连续性报告里只报告素材缺口的条目由 `material_request_issues` 判为素材请求，
+  **不进仲裁也不阻塞单元**（与 2026-11-08 的「素材是可选类需求」一致）。
+- **崩溃遗留的剧组任务必须能核对**：服务商调用活不过它自己的超时，因此超过该超时仍处于
+  `RUNNING` 的剧组任务属于已死进程：请求阶段证明没发出的按 `NOT_SENT_PROVEN` 释放，
+  可能已发出的保持 `UNKNOWN_REQUIRES_NEW_ATTEMPT`，由
+  `POST /projects/{id}/film-runs/{task_id}/resend-unknown` 记录人的明确授权
+  （旧行退役为 `USER_AUTHORIZED_NEW_REQUEST`，**不得**写成「未发出」）。
+- **核对必须幂等**：结论一旦写入就不可再被版本挡住（已核对的结论在版本检查之前返回）；
+  请求开始前的「先前未决任务」拒绝必须带上 `state_version`，否则面板永远重做不了这一场。
+- **面板要能解释**：剧组的拒绝原因、素材提示与缺项都在 ④ 面板如实显示；镜头描述含中文被
+  拒时，重试的纠错说明要求用角色标签代替中文专名。
+- 回归：`backend/tests/test_agent_retry_and_rate_limit.py`（新增）、
+  `test_film_unknown_outcomes.py`（新增 4 条）、`test_storyboard.py`（新增 2 条）、
+  `test_llm_setup_contract.py`（NO_PROXY 断言迁到共用模块）。
