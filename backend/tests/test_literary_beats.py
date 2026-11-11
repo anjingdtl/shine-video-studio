@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
 
 from shine.literary import beats as beat_lib
 from shine.literary.blueprint import digest_from_outline, merge_digests
-from shine.literary.models import LiteraryUnit
 
 pytestmark = pytest.mark.unit
 
