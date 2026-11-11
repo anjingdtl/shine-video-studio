@@ -928,7 +928,7 @@ function App() {
                   <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
                     backendDisconnected={systemChecked && !apiOnline}
                     visible={directorPage === 'produce' && focusStage === 'storyboard'}
-                    onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
+                    onNavigate={(page) => page === 'long-story' ? goToDirectorPage('produce', 'assets') : goToDirectorPage(page as DirectorPage)} />
                   {routes.length === 0 && <div className="blocked-callout">
                     <Sparkles size={15} />
                     <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>

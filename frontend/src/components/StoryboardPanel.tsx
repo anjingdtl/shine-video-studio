@@ -82,6 +82,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
   const [selectedDoc, setSelectedDoc] = useState('');
   const [inlineText, setInlineText] = useState('');
+  const scriptTooLong = selectedDoc
+    ? (documents.find(doc => doc.id === selectedDoc)?.text_length ?? 0) > 20000
+    : Array.from(inlineText.trim()).length > 20000;
   const [consent, setConsent] = useState(false);
   const [facts, setFacts] = useState('');
   const [busy, setBusy] = useState(false);
@@ -223,6 +226,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     if (chainInFlight.current) return;
     if (requiresReconciliation && !options?.verifiedUnsent && !options?.replaceInterruptedTaskId) return;
     if (backendDisconnected) { setMessage('工作台后端失联，请先使用顶栏的重连按钮。'); return; }
+    if (scriptTooLong) { setMessage('剧本超过单次分镜的 20000 字限制，请使用长剧本分段制作。'); return; }
     if (!consent) { setMessage('需要先勾选同意把剧本文本发给已配置的 LLM 服务商。'); return; }
     if (!selectedDoc && !inlineText.trim()) {
       setMessage('请先从“已导入剧本”中选择一份，或导入/粘贴剧本。');
@@ -575,6 +579,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       <input type="checkbox" checked={consent} disabled={busy} onChange={e => setConsent(e.target.checked)} />
       <span>我同意把该剧本的文本内容发送给已配置的 AI 文字服务用于分镜（媒体文件不会上传）。</span>
     </label>
+    {scriptTooLong && <div className="required-action" role="alert">
+      <div className="required-text"><b>长剧本请分段制作</b>
+        <small>单次分镜最多处理 20000 字。请在素材准备中选择已确认大纲的生产段落，逐段生成分镜；不会截断原文。</small></div>
+      {onNavigate && <button type="button" className="must-button" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
+    </div>}
     <div className="required-action">
       <Sparkles size={17} className="required-icon" />
       <div className="required-text">
@@ -587,7 +596,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       : requiresReconciliation ? <button type="button" className="must-button" disabled={backendDisconnected || checkingPreviousRun || busy}
         onClick={() => void checkAndResumeDirector()}>
         {checkingPreviousRun ? '正在核对前次请求…' : '检查并自动继续导演'}
-      </button> : <button className="must-button" disabled={backendDisconnected || busy || bindingBusy || !!binding} onClick={generate}>
+      </button> : <button className="must-button" disabled={backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong} onClick={generate}>
         {busy ? <Loader2 size={14} /> : <Sparkles size={14} />}
         生成 AI 分镜方案
       </button>}

@@ -97,6 +97,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
     <summary>总体大纲与生产段落（长剧本分步制作）</summary>
     <div className="material-stage-body">
       <p>生产段落是章节或场群；H3 生成分段是一次 4–15 秒输出。先提取全文并逐层归并大纲，由你确认后，只为勾选的段落准备素材和正式分镜。</p>
+      <button type="button" disabled={busy} onClick={() => void load().catch(() => setMessage('读取大纲状态失败，请重试。'))}>刷新大纲与段落状态</button>
       <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新大纲输入）</span>
         <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3} />
       </label>

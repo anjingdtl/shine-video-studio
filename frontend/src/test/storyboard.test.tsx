@@ -5,6 +5,24 @@ import StoryboardPanel from '../components/StoryboardPanel';
 import App from '../App';
 import { StudioStub, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
+it('长剧本在提交前引导到分段制作，不发送整篇', async () => {
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/projects\/proj-1\/documents$/, respond: () => jsonResponse([{
+      id: 'long', filename: '长篇.txt', sha256: 'a'.repeat(64), source_format: 'text',
+      text_preview: '', text_length: 24551, created_at: '',
+    }]) },
+  ]);
+  const navigate = vi.fn();
+  const user = userEvent.setup();
+  render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} onNavigate={navigate} />);
+  expect(await screen.findByText('长剧本请分段制作')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '生成 AI 分镜方案' })).toBeDisabled();
+  await user.click(screen.getByRole('button', { name: '去选择生产段落' }));
+  expect(navigate).toHaveBeenCalledWith('long-story');
+  expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(0);
+  stub.restore();
+});
+
 it('锁定剧情事实可以逐行输入并完整发送给分镜流程', async () => {
   const submit = vi.fn<(body: Record<string, unknown>) => void>();
   const stub = new StudioStub([
