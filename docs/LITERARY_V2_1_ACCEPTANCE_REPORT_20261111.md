@@ -115,9 +115,13 @@
 | `test_storyboard.py` | 33 | PASS |
 | `test_film_unknown_outcomes.py` | 24 | PASS |
 | `test_film_crew.py` | 32 | PASS |
-| 材料 / 故事 / LLM 回归（13 个模块） | 141 | PASS |
+| 材料 / 故事 / LLM 回归（15 个模块，含 `test_material_director_flow.py`） | 全部通过（退出码 0，无 FAILED） | PASS |
 
 静态检查：`ruff check shine tests` → All checks passed。
+
+说明：本会话内尝试过全仓库 `pytest -q`，36 分 43 秒仍未结束，已终止；因此上表是
+「本次改动涉及的全部模块」的完整回归，而不是全仓库全绿。未运行的模块按纪律计为
+NOT_RUN，不得视为通过。
 
 前端（`frontend/`，TypeScript 5.8 / Vitest 2.1.9 / Vite 6.4.5）：
 
