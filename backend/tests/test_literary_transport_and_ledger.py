@@ -7,10 +7,10 @@ import contextlib
 import pytest
 from sqlalchemy import select
 
-from shine.llm.base import ProviderConfig
-from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.literary import ledger
 from shine.literary.models import LLMCallAttempt
+from shine.llm.base import ProviderConfig
+from shine.llm.openai_compatible import OpenAICompatibleProvider
 from tests.fake_http import FakeOpenAIServer
 
 pytestmark = pytest.mark.integration

@@ -114,7 +114,7 @@ class FakeOpenAIServer(_BaseServer):
                 mode = outer.stream_mode
 
                 def event(payload: Any) -> None:
-                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
                     self.wfile.flush()
 
                 if mode == "empty":
@@ -336,7 +336,7 @@ class FakeComfyServer(_BaseServer):
                 mode = outer.stream_mode
 
                 def event(payload: Any) -> None:
-                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
                     self.wfile.flush()
 
                 if mode == "empty":

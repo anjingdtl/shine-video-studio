@@ -679,13 +679,13 @@ from shine.comfyops import models as preparation_models  # noqa: E402,F401
 # runtime (run/episode/batch) are the same one ledger, never a second database.
 from shine.director import models as director_models  # noqa: E402,F401
 
+# The V2.1 literary engine's own ledger (calls, memory, units) is the same
+# metadata database, never a second store.
+from shine.literary import models as literary_models  # noqa: E402,F401
+
 # Director AI material preparation rides the same metadata ledger too.
 from shine.materialprep import models as materialprep_models  # noqa: E402,F401
 
 # Auto delivery orders ride the same metadata ledger (V1.4).
 from shine.media import delivery_models  # noqa: E402,F401
 from shine.production import models as production_models  # noqa: E402,F401
-
-# The V2.1 literary engine's own ledger (calls, memory, units) is the same
-# metadata database, never a second store.
-from shine.literary import models as literary_models  # noqa: E402,F401
