@@ -57,10 +57,20 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
     if (activeProject.current !== requested) return;
     if (announced.current === null) announced.current = new Set(finishedDocuments(briefRows));
     setBriefs(briefRows);
-    setDocuments(docRows);
-    setSelectedDocumentId((current) => (
-      current && docRows.some((row) => row.id === current) ? current : (docRows[0]?.id ?? '')
-    ));
+    // A confirmed volume plan materialises one document per volume, newest
+    // first.  This panel's outline is written from the WHOLE script, so a
+    // volume must never look like the basis: it used to become the default
+    // selection and then the list sliced the real master away, leaving the
+    // page claiming a random chapter was 当前依据.
+    const ordered = [...docRows].sort(
+      (a, b) => Number(a.source_format === 'volume') - Number(b.source_format === 'volume'));
+    const master = ordered.find((row) => row.source_format !== 'volume');
+    setDocuments(ordered);
+    setSelectedDocumentId((current) => {
+      const picked = docRows.find((row) => row.id === current);
+      if (picked && picked.source_format !== 'volume') return current;
+      return master?.id ?? current ?? docRows[0]?.id ?? '';
+    });
   }, [projectId]);
 
   useEffect(() => { void load().catch(() => undefined); }, [load]);
@@ -184,7 +194,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
               aria-pressed={selectedDocumentId === row.id}
               onClick={() => setSelectedDocumentId(row.id)}>
               <b>{row.filename}</b>
-              <span>{row.source_format === 'idea' ? '（由创意简报生成）' : ''} {row.sha256.slice(0, 8)}</span>
+              <span>{row.source_format === 'idea' ? '（由创意简报生成）' : row.source_format === 'volume' ? '（分卷）' : ''} {row.sha256.slice(0, 8)}</span>
               {selectedDocumentId === row.id && <em>当前依据</em>}
             </button>
           </li>)}

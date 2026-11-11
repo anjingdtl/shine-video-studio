@@ -75,6 +75,8 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const [episodeTitle, setEpisodeTitle] = useState('');
   const [episodeSections, setEpisodeSections] = useState<string[]>([]);
   const [boundaryMode, setBoundaryMode] = useState(false);
+  /** The blocked scene a first click armed; the second click really re-sends. */
+  const [armedScene, setArmedScene] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoadFailed(false);
@@ -340,17 +342,22 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   </button>
                 )}
                 {!inFlight && task.blocked_scene?.task_id && (
+                  // Two steps inside the page: a native confirm() blocks the
+                  // whole tab (and any automation driving it), while a paid
+                  // retry still must not be one stray click away.
                   <button type="button" className="must-button" disabled={busy}
                     title="这一幕的模型请求可能已经被回答过。授权只会对这一幕再发一次，原来那次保留为历史。"
                     onClick={() => {
-                      const key = task.blocked_scene?.scene_key ? `（${task.blocked_scene.scene_key}）` : '';
-                      if (!window.confirm(
-                        `这一幕${key}的请求结果无法确认：服务商可能已经回答过。\n`
-                        + '授权后会为这一幕再发一次模型请求，原来那一次保留为历史记录。确认继续？')) return;
-                      void run(() => authorizeBlockedScene(
-                        projectId, task.task_id, task.blocked_scene!.task_id, task.state_version));
+                      if (armedScene === task.blocked_scene!.task_id) {
+                        setArmedScene(null);
+                        void run(() => authorizeBlockedScene(
+                          projectId, task.task_id, task.blocked_scene!.task_id, task.state_version));
+                        return;
+                      }
+                      setArmedScene(task.blocked_scene!.task_id);
+                      onMessage('再点一次即确认为这一幕重发一次模型请求；原来那一次会作为历史保留。', 'success');
                     }}>
-                    授权重新发送这一幕
+                    {armedScene === task.blocked_scene!.task_id ? '再点一次确认重发' : '授权重新发送这一幕'}
                   </button>
                 )}
               </div>
