@@ -464,6 +464,14 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                     <li key={s.section_id}>
                       <span>{s.scene_key} {s.title ?? ''}</span>
                       <span className={s.confirmed ? 'ok' : 'pending'}>{s.confirmed ? '已确认' : '未确认'}</span>
+                      {/* 终校只是一句中文结论：内部检查项与账本不进普通界面。 */}
+                      {!s.confirmed && s.qa?.state === 'HARD_BLOCK' && (
+                        <span className="pending">未通过终校：{s.qa.message ?? '请复核这一场'}</span>
+                      )}
+                      {!s.confirmed && s.qa && s.qa.state !== 'HARD_BLOCK'
+                        && s.qa.state !== 'INFO' && (
+                        <span className="muted small">终校建议：{s.qa.message ?? '请复核这一场'}</span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -471,15 +479,30 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             ))}
           </div>
         )}
-        {pendingScripts.map((s) => (
-          <div className="row" key={s.artifact_id}>
-            <span>场次 {s.scene_key} 的剧本已生成，请确认或编辑。</span>
-            <button type="button" className="must-button" disabled={busy}
-              onClick={() => run(() => confirmSceneScript(projectId, s.artifact_id, s.sha256))}>确认这一场</button>
-            <button type="button" className="secondary-button" disabled={busy}
-              onClick={() => { setEditTarget(s.artifact_id); setEditText(s.text); }}>编辑</button>
-          </div>
-        ))}
+        {pendingScripts.map((s) => {
+          // A hard verdict does not delete the scene: it refuses to publish it.
+          // The person still has the two real exits - read it, or edit it.
+          const blocked = s.qa?.state === 'HARD_BLOCK';
+          return (
+            <div className="row" key={s.artifact_id}>
+              <span>场次 {s.scene_key} 的剧本已生成，请确认或编辑。</span>
+              {blocked && (
+                <span className="pending">
+                  未通过终校：{s.qa?.message ?? '请复核这一场'}。正文已保存，可编辑后重新确认。
+                </span>
+              )}
+              {!blocked && s.qa && s.qa.state !== 'INFO' && (
+                <span className="muted small">终校建议：{s.qa.message ?? '请复核这一场'}</span>
+              )}
+              <button type="button" className="must-button" disabled={busy || blocked}
+                title={blocked ? '先按终校提示修改正文，再确认这一场。' : ''}
+                onClick={() => run(() => confirmSceneScript(projectId, s.artifact_id, s.sha256))}>
+                确认这一场</button>
+              <button type="button" className="secondary-button" disabled={busy}
+                onClick={() => { setEditTarget(s.artifact_id); setEditText(s.text); }}>编辑</button>
+            </div>
+          );
+        })}
         {editTarget && (
           <div className="edit-box">
             <textarea aria-label="编辑剧本" value={editText} rows={8}

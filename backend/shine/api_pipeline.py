@@ -36,6 +36,9 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
     require_project(db, project_id)
     plan = pipeline.current_volume_plan(db, project_id)
     bible = pipeline.current_bible(db, project_id)
+    # One query for the whole project: the panel shows one Chinese line per
+    # section, never the internal check list.
+    qa_states = pipeline.qa_states_by_section(db, project_id)
     volumes = []
     if plan:
         for volume in plan.payload_json["volumes"]:
@@ -49,6 +52,7 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     "title": s.get("title"),
                     "confirmed": pipeline.current_scene_script(
                         db, project_id, volume_id, s["production_section_id"]) is not None,
+                    "qa": qa_states.get(s["production_section_id"]),
                 }
                 for s in sections
             ]
@@ -99,6 +103,7 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     "artifact_id": script.id, "sha256": script.sha256,
                     "scene_key": entry["scene_key"], "title": entry["title"],
                     "text": (script.payload_json or {}).get("text", ""),
+                    "qa": qa_states.get(entry["section_id"]),
                 })
     return {
         "master": master_ref,

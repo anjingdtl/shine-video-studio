@@ -61,6 +61,11 @@ SINGLE_VOLUME_MAX_CHARS = 45_000
 #: The working budget of one volume: sections are grouped at narrative
 #: boundaries within this budget, never mid-section.
 TARGET_VOLUME_CHARS = 45_000
+HARD_SPLIT_MIN_CHARS = 55_000
+"""A single section bigger than this cannot be one volume.
+
+It is the same limit the storyboard lane names as its inline input ceiling, so a
+chapter below it keeps the old plan - one volume, no cut."""
 #: The pipeline's own claims follow the story tasks' convention.
 PIPELINE_CLAIM_SECONDS = 120
 PIPELINE_VERSION = "four-stage-pipeline-v1"
@@ -208,6 +213,37 @@ def build_source_master(db, project_id: str, document) -> AgentArtifact:
     return artifact
 
 
+HARD_SPLIT_PREFERRED_ENDINGS = ("\n\n", "\n", "。", "！", "？", "；", ".", "!", "?")
+"""Where a forced cut may land, best first.  A cut is only forced when one
+section alone is bigger than a volume target, which happens for manuscripts with
+no headings at all."""
+
+
+def _hard_split_ranges(text: str, start: int, end: int, target: int) -> list[tuple[int, int]]:
+    """Cut one oversized run at the best boundary, never mid-sentence if avoidable.
+
+    The ranges are contiguous and cover ``[start, end)`` exactly: a hard split
+    moves a boundary, it never drops or duplicates a character.
+    """
+    ranges: list[tuple[int, int]] = []
+    cursor = start
+    while end - cursor > target:
+        window = text[cursor:cursor + target]
+        cut = 0
+        for marker in HARD_SPLIT_PREFERRED_ENDINGS:
+            at = window.rfind(marker)
+            if at >= target // 2:
+                cut = cursor + at + len(marker)
+                break
+        if cut <= cursor:
+            cut = cursor + target
+        ranges.append((cursor, cut))
+        cursor = cut
+    if cursor < end:
+        ranges.append((cursor, end))
+    return ranges
+
+
 def detect_volume_boundaries(text: str, sections: list[dict]) -> list[dict]:
     """Group the master's sections into volume candidates.
 
@@ -233,17 +269,39 @@ def detect_volume_boundaries(text: str, sections: list[dict]) -> list[dict]:
             current_size = 0
         groups[-1].append(section)
         current_size += size
-    return [
-        {
-            "order": index + 1,
-            "title": f"第{index + 1}卷",
+    boundaries: list[dict] = []
+    for group in (item for item in groups if item):
+        size = sum(s["end_offset"] - s["start_offset"] for s in group)
+        reason = "volume_marker" if group[0]["start_offset"] in hard else "budget_grouping"
+        if len(group) == 1 and size > HARD_SPLIT_MIN_CHARS:
+            # A manuscript without headings is one long section.  The plan may
+            # not pretend it fits: it is cut, and the cut is recorded so the
+            # person can see exactly where and why.
+            section = group[0]
+            for start, end in _hard_split_ranges(text, section["start_offset"],
+                                                 section["end_offset"], TARGET_VOLUME_CHARS):
+                boundaries.append({
+                    "start_offset": start, "end_offset": end,
+                    "section_ids": [section["production_section_id"]],
+                    "char_count": end - start,
+                    "boundary_reason": "hard_split",
+                    "split_note": (
+                        f"原文《{section.get('title') or '未命名段落'}》超过单卷可承载的"
+                        f"{HARD_SPLIT_MIN_CHARS} 字，且没有可用的章节边界，"
+                        f"已按 {TARGET_VOLUME_CHARS} 字目标在段落处硬切；"
+                        f"原文范围 [{start}, {end}) 与前一段连续，没有删字。"),
+                })
+            continue
+        boundaries.append({
             "start_offset": group[0]["start_offset"],
             "end_offset": group[-1]["end_offset"],
             "section_ids": [s["production_section_id"] for s in group],
-            "char_count": sum(s["end_offset"] - s["start_offset"] for s in group),
-            "boundary_reason": "volume_marker" if group[0]["start_offset"] in hard else "budget_grouping",
-        }
-        for index, group in enumerate(groups) if group
+            "char_count": size,
+            "boundary_reason": reason,
+        })
+    return [
+        {"order": index + 1, "title": f"第{index + 1}卷", **boundary}
+        for index, boundary in enumerate(boundaries)
     ]
 
 
@@ -287,6 +345,9 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
             "section_ids": boundary["section_ids"],
             "char_count": boundary.get("char_count", boundary["end_offset"] - boundary["start_offset"]),
             "boundary_reason": boundary["boundary_reason"],
+            # A forced cut travels with the plan: the person who confirms the
+            # plan must be able to read where it was cut and why.
+            **({"split_note": boundary["split_note"]} if boundary.get("split_note") else {}),
         })
     payload = {
         "source_master": {"document_id": document.id, "sha256": document.sha256},
@@ -300,6 +361,10 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
              "detail": "该卷超过 55,000 字，分镜草案可能超出链路单次输入上限；"
                        "请在源文拆分该章或手动调整分卷边界"}
             for v in volumes if v["char_count"] > 55_000
+        ] + [
+            {"volume_id": v["volume_id"], "code": "VOLUME_HARD_SPLIT",
+             "detail": v.get("split_note") or "这一卷是硬切出来的，请确认切口。"}
+            for v in volumes if v.get("boundary_reason") == "hard_split"
         ],
         "status": "DRAFT",
     }
@@ -906,6 +971,49 @@ def _persist_qa_report(*, factory, project_id: str, task_id: str, script_artifac
     except Exception:  # noqa: BLE001 - the verdict is a side record
         logger.exception("literary_qa_report_failed task=%s", task_id)
         return None
+
+
+QA_MESSAGES = {
+    "SCENE_TEXT_MISSING": "这一场没有正文，不能确认。",
+    "SCENE_SOURCE_RANGE_INVALID": "这一场引用的原文范围无效，不能确认。",
+    "SCENE_CHARACTER_UNKNOWN": "出现了蓝图里没有的人物，请确认是否为新角色。",
+    "SCENE_SECRET_LEAK_RISK": "可能提前说出了尚未揭晓的秘密，请复核。",
+    "SCENE_CONTINUITY_OUT_MISSING": "没有写下收尾状态，下一场会缺少接续信息。",
+    "STORYBOARD_BEAT_UNCOVERED": "有剧情节拍没有被镜头覆盖。",
+    "STORYBOARD_BEAT_UNKNOWN": "有镜头引用了剧本里不存在的节拍。",
+    "QA_PENDING": "终校未完成，已记录；不影响正文。",
+}
+"""One Chinese sentence per check, so no raw code reaches the normal UI."""
+
+
+def qa_states_by_section(db, project_id: str) -> dict[str, dict]:
+    """The newest verdict per section, as the panel needs it: state + one line."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+    ).order_by(AgentArtifact.created_at.desc()).limit(200)).all()
+    result: dict[str, dict] = {}
+    for row in rows:
+        payload = row.payload_json or {}
+        section_id = payload.get("section_id")
+        if not section_id or payload.get("source") == "storyboard" or section_id in result:
+            continue
+        blocking = [str(check.get("code")) for check in payload.get("checks") or []
+                    if check.get("severity") in {"HARD_BLOCK", "LOCAL_REVIEW"}]
+        result[section_id] = {
+            "state": payload.get("state"),
+            "level": payload.get("level"),
+            "codes": blocking[:4],
+            "message": "；".join(QA_MESSAGES.get(code, "请复核这一场。")
+                                for code in blocking[:2]) or None,
+            "artifact_id": row.id,
+            "script_sha256": payload.get("script_sha256"),
+            "script_artifact_id": payload.get("script_artifact_id"),
+        }
+    return result
 
 
 def latest_section_qa_report(db, project_id: str, volume_id: str, section_id: str):

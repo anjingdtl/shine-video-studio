@@ -12,6 +12,18 @@ const FIELD_LABELS: Record<string, string> = {
   title: '项目名称',
 };
 
+/** One Chinese sentence per literary review check; the raw code stays for support. */
+export const QA_CHECK_LABELS: Record<string, string> = {
+  SCENE_TEXT_MISSING: '这一场没有正文',
+  SCENE_SOURCE_RANGE_INVALID: '引用的原文范围无效',
+  SCENE_CHARACTER_UNKNOWN: '出现了蓝图里没有的人物',
+  SCENE_SECRET_LEAK_RISK: '可能提前说出了尚未揭晓的秘密',
+  SCENE_CONTINUITY_OUT_MISSING: '没有写下收尾状态',
+  STORYBOARD_BEAT_UNCOVERED: '有剧情节拍没有被镜头覆盖',
+  STORYBOARD_BEAT_UNKNOWN: '有镜头引用了剧本里不存在的节拍',
+  QA_PENDING: '终校未完成，已记录',
+};
+
 export const ERROR_CODE_LABELS: Record<string, string> = {
   INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
@@ -104,6 +116,13 @@ function describeDetail(detail: unknown): string {
     }
   }
   if (typeof detail === 'string') {
+    if (detail.startsWith('PIPELINE_SCENE_SCRIPT_QA_BLOCKED:')) {
+      const codes = detail.split(':').slice(1).join(':').split(',').filter(Boolean);
+      const reasons = codes.map((code) => QA_CHECK_LABELS[code] ?? '').filter(Boolean);
+      return '这一场没有通过终校'
+        + (reasons.length ? '：' + reasons.join('；') : '')
+        + '。正文已保存，可以编辑修改后重新确认。';
+    }
     if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
     if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
     if (ERROR_CODE_LABELS[detail]) return `${ERROR_CODE_LABELS[detail]}（${detail}）`;
@@ -750,11 +769,22 @@ export const getDeploymentRecommendation = (reuseInstalled = true) =>
     json('POST', { reuse_installed: reuseInstalled }));
 
 // ============ 四阶段流水线（AI 编导） ============
+/** One review verdict, already reduced to what a person needs to decide. */
+export interface SectionQa {
+  state: 'INFO' | 'WARNING' | 'LOCAL_REVIEW' | 'HARD_BLOCK' | string;
+  level: string | null;
+  codes: string[];
+  message: string | null;
+  artifact_id: string;
+  script_sha256: string | null;
+}
+
 export interface PipelineVolumeScriptEntry {
   section_id: string;
   scene_key: string;
   title: string | null;
   confirmed: boolean;
+  qa?: SectionQa | null;
 }
 
 export interface PipelineVolumeStoryboard {
@@ -825,6 +855,7 @@ export interface PipelineOverview {
   pending_scripts: Array<{
     volume_id: string; section_id: string; artifact_id: string; sha256: string;
     scene_key: string; title: string | null; text: string;
+    qa?: SectionQa | null;
   }>;
   volumes: PipelineVolume[];
 }

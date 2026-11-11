@@ -768,7 +768,13 @@ def test_overlong_volume_is_batched_and_the_editor_limit_is_named(api):
 
 
 def test_oversized_single_chapter_volume_carries_a_warning(api):
-    """One chapter past the inline budget makes the plan warn by name."""
+    """One chapter past the inline budget never passes silently.
+
+    The plan now cuts such a chapter at paragraph boundaries instead of handing
+    an oversized volume to the storyboard lane, so the warning that has to
+    appear is the one naming the cut.  Either way the person is told by name and
+    coverage stays complete: the chapter is never quietly dropped or truncated.
+    """
     client, factory, settings = api
     pid = create_project(client, "单章超长")
     text = "第一章 巨章\n" + "海。" * 30_000
@@ -776,9 +782,14 @@ def test_oversized_single_chapter_volume_carries_a_warning(api):
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
         plan = pipeline.plan_volumes(db, pid, doc_r)
-        codes = [w["code"] for w in plan.payload_json.get("warnings", [])]
-        assert "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes
-        assert plan.payload_json["coverage"]["complete"] is True
+        payload = plan.payload_json
+        codes = [w["code"] for w in payload.get("warnings", [])]
+        assert ("VOLUME_HARD_SPLIT" in codes
+                or "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes), codes
+        assert payload["coverage"]["complete"] is True
+        assert sum(v["char_count"] for v in payload["volumes"]) == len(text)
+        assert all(v["char_count"] <= pipeline.HARD_SPLIT_MIN_CHARS
+                   for v in payload["volumes"])
 
 
 def test_episode_script_contract_with_continuity_check(api):
