@@ -40,8 +40,13 @@ from shine.materialprep.contracts import (
     MaterialVisualDirection,
 )
 
-PROMPT_TEMPLATE_VERSION = "material-image-v3-qwen21"
+PROMPT_TEMPLATE_VERSION = "material-image-v4-qwen21"
 """Bump when a composition rule changes; readiness evidence is bound to it.
+
+v4 states the no-overlay rule as an explicit list - watermark, logo, signature, platform
+badge, timestamp, user-interface overlay - because a single "no watermark" phrase left the
+generator free to add a service mark, and post-processing the picture afterwards is not a
+fix: a marked picture must never be produced, and if one arrives it is refused at QC.
 
 v3 composes the prompt as layered prose under the Qwen-Image 2.1 standard
 (``qwen_image_standard``) instead of joining ``appearance:``/``must keep``/``era:``
@@ -82,10 +87,22 @@ CARRIER_FRAMING: dict[MaterialCarrier, str] = {
     ),
 }
 
-_NO_TEXT_SENTENCE = "Nothing in the frame is written text, lettering, numbering, a caption, a logo or a watermark"
+_NO_WATERMARK_TERMS = ("watermark, logo, signature, platform badge, timestamp, service mark "
+                       "or user-interface overlay")
+"""Every mark a generator or a service may stamp onto a picture, named explicitly.
+
+A single "no watermark" phrase is not enough: a generator can honour the letter
+of it and still add a badge, and the picture then has to be cropped or retouched
+by hand - which is exactly the manual work the product must not depend on.
+"""
+
+_NO_TEXT_SENTENCE = (
+    "Nothing in the frame is written text, lettering, numbering, a caption, a logo, a watermark, "
+    "a signature, a platform badge, a timestamp or any user-interface overlay"
+)
 _NO_COLLAGE_SENTENCE = "The picture is a single view, never a collage, split panel, character sheet or bordered sheet"
-_NO_WATERMARK_SHORT = "no watermark"
-_NO_TEXT_SHORT = "no text, no lettering, no captions, no logo"
+_NO_WATERMARK_SHORT = f"no {_NO_WATERMARK_TERMS}"
+_NO_TEXT_SHORT = f"no text, no lettering, no captions, no {_NO_WATERMARK_TERMS}"
 _NO_COLLAGE_SHORT = "no collage, no split panel, no character sheet, no border overlay"
 
 _TEXT_EXCLUSION_SENTENCES = (_NO_TEXT_SENTENCE, _NO_COLLAGE_SENTENCE)

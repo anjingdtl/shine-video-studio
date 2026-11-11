@@ -12,6 +12,18 @@ const FIELD_LABELS: Record<string, string> = {
   title: '项目名称',
 };
 
+/** One Chinese sentence per literary review check; the raw code stays for support. */
+export const QA_CHECK_LABELS: Record<string, string> = {
+  SCENE_TEXT_MISSING: '这一场没有正文',
+  SCENE_SOURCE_RANGE_INVALID: '引用的原文范围无效',
+  SCENE_CHARACTER_UNKNOWN: '出现了蓝图里没有的人物',
+  SCENE_SECRET_LEAK_RISK: '可能提前说出了尚未揭晓的秘密',
+  SCENE_CONTINUITY_OUT_MISSING: '没有写下收尾状态',
+  STORYBOARD_BEAT_UNCOVERED: '有剧情节拍没有被镜头覆盖',
+  STORYBOARD_BEAT_UNKNOWN: '有镜头引用了剧本里不存在的节拍',
+  QA_PENDING: '终校未完成，已记录',
+};
+
 export const ERROR_CODE_LABELS: Record<string, string> = {
   INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
@@ -48,6 +60,9 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   MATERIAL_BATCH_CONFLICT: '这个批次键已经被别的请求占用，请刷新后重试。',
   LICENSE_NOT_APPROVED: '还没有已批准的生成授权（研究用途），请先登记并批准一次生成授权。',
   IMAGE_RUNTIME_NOT_READY: '本机的出图环境还没就绪，无法真正出图。请先到基础配置完成出图环境准备。',
+  IMAGE_FAMILY_NOT_RENDER_VERIFIED: '这一类素材还没有在本机真实出过一张小样，所以正式生成被拦住了。请到「素材中心 → 图片工坊」点一次「运行一次本机验证样例」（基础配置里的「验证三类真实小样」也可以），出图成功后再回来生成。',
+  IMAGE_GRAPH_NOT_VERIFIED: '本机渲染器没有通过节点与参数核对。请确认渲染器已启动，并让它在基础配置里完成一次核对。',
+  IMAGE_MODEL_FILES_NOT_VERIFIED: '出图权重没有通过固定清单校验，请到基础配置核对缺失或损坏的那一份。',
   IMAGE_REAL_PROVIDER_REQUIRED: '出图入口只接受真实渲染，不接受模拟。',
   IMAGE_SUBMISSION_OUTCOME_UNKNOWN: '这次提交的结果未知，需要先对账，不能直接重试。',
   IMAGE_OUTCOME_RECONCILIATION_REQUIRED: '这次提交的结果未知，需要先对账，不能直接重试。',
@@ -104,6 +119,13 @@ function describeDetail(detail: unknown): string {
     }
   }
   if (typeof detail === 'string') {
+    if (detail.startsWith('PIPELINE_SCENE_SCRIPT_QA_BLOCKED:')) {
+      const codes = detail.split(':').slice(1).join(':').split(',').filter(Boolean);
+      const reasons = codes.map((code) => QA_CHECK_LABELS[code] ?? '').filter(Boolean);
+      return '这一场没有通过终校'
+        + (reasons.length ? '：' + reasons.join('；') : '')
+        + '。正文已保存，可以编辑修改后重新确认。';
+    }
     if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
     if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
     if (ERROR_CODE_LABELS[detail]) return `${ERROR_CODE_LABELS[detail]}（${detail}）`;
@@ -134,6 +156,19 @@ function describeDetail(detail: unknown): string {
     const runnable = payload.runnable_shot_ids ?? [];
     const tail = runnable.length ? `；其余 ${runnable.length} 个镜头仍可开拍` : '';
     return `${payload.message ?? '这一批里有镜头无法执行'}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
+  }
+  if (detail && typeof detail === 'object' && 'code' in detail
+      && (detail as { code?: unknown }).code === 'STORYBOARD_BEAT_UNCOVERED') {
+    // A hard gate before rendering: say how much is uncovered and what to do,
+    // without handing the person a raw check code.
+    const payload = detail as { message?: string;
+      details?: { beats_total?: number; beats_covered?: number; beat_ids?: string[] } };
+    const total = payload.details?.beats_total;
+    const covered = payload.details?.beats_covered;
+    const count = typeof total === 'number' && typeof covered === 'number'
+      ? `（${total} 个节拍中还有 ${total - covered} 个没有镜头）` : '';
+    return `${payload.message ?? '有剧情节拍没有被任何镜头覆盖，不能落镜'}${count}`
+      + '请补镜头后重新生成分镜。';
   }
   if (detail && typeof detail === 'object' && 'code' in detail
       && typeof (detail as { code?: unknown }).code === 'string') {
@@ -750,11 +785,26 @@ export const getDeploymentRecommendation = (reuseInstalled = true) =>
     json('POST', { reuse_installed: reuseInstalled }));
 
 // ============ 四阶段流水线（AI 编导） ============
+/** One review verdict, already reduced to what a person needs to decide. */
+export interface SectionQa {
+  state: 'INFO' | 'WARNING' | 'LOCAL_REVIEW' | 'HARD_BLOCK' | string;
+  level: string | null;
+  codes: string[];
+  message: string | null;
+  artifact_id: string;
+  script_sha256: string | null;
+}
+
 export interface PipelineVolumeScriptEntry {
   section_id: string;
-  scene_key: string;
+  scene_key: string | null;
+  /** What a person reads: the title, else "第 N 场" - never a bare uuid. */
+  scene_label?: string | null;
   title: string | null;
+  /** Planning estimate (chars/5); not an H3 duration. */
+  estimated_duration_s?: number | null;
   confirmed: boolean;
+  qa?: SectionQa | null;
 }
 
 export interface PipelineVolumeStoryboard {
@@ -817,6 +867,15 @@ export interface PipelineOverview {
     artifact_id: string; sha256: string;
     volumes: Array<{ title: string; start_offset: number; end_offset: number }>;
   } | null;
+  /**
+   * A plan that was generated but not confirmed yet. It lives on the server so
+   * a refresh, a project switch or a restart still offers "confirm this plan"
+   * instead of silently dropping the step and asking for a second generation.
+   */
+  pending_volume_plan: {
+    artifact_id: string; sha256: string;
+    volumes: Array<{ title: string; start_offset: number; end_offset: number }>;
+  } | null;
   bible_confirmed: boolean;
   pending_bible: { artifact_id: string; sha256: string } | null;
   /** Why the confirmed blueprint no longer matches the current work. */
@@ -824,7 +883,9 @@ export interface PipelineOverview {
   active_tasks: PipelineTaskSummary[];
   pending_scripts: Array<{
     volume_id: string; section_id: string; artifact_id: string; sha256: string;
-    scene_key: string; title: string | null; text: string;
+    scene_key: string | null; scene_label?: string | null;
+    title: string | null; text: string;
+    qa?: SectionQa | null;
   }>;
   volumes: PipelineVolume[];
 }
@@ -849,10 +910,11 @@ export const queueVolumeOutline = (projectId: string, volumeId: string) =>
 export const queueBible = (projectId: string) =>
   api<{ task_id: string }>(`/projects/${projectId}/pipeline/bible`, json('POST', {}));
 
-export const confirmBible = (projectId: string, artifactId: string, sha256: string) =>
+export const confirmBible = (projectId: string, artifactId: string, sha256: string, scopeVolumeId?: string) =>
   api<{ confirmed: boolean; sha256: string }>(
     `/projects/${projectId}/pipeline/bibles/${artifactId}/confirm`,
-    json('POST', { expected_sha256: sha256 }));
+    json('POST', scopeVolumeId ? { expected_sha256: sha256, scope_volume_id: scopeVolumeId }
+      : { expected_sha256: sha256 }));
 
 export const queueVolumeScripts = (projectId: string, volumeId: string) =>
   api<{ queued: number; task_ids: string[] }>(
@@ -1044,12 +1106,29 @@ export interface PipelineTaskSummary {
   consent_document_id: string | null;
   consent_document_sha256: string | null;
   consent_role: string;
+  /** The one sub-scene whose unknown outcome stopped a whole volume, if any. */
+  blocked_scene?: {
+    task_id: string; scene_key?: string | null; status?: string | null;
+    error_code?: string | null; external_outcome?: string | null;
+  } | null;
 }
 
 export const resumePipelineTask = (projectId: string, taskId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string }>(
     `/projects/${projectId}/pipeline/tasks/${taskId}/resume`,
     json('POST', { expected_state_version: expectedStateVersion }));
+
+/**
+ * Authorise one more model call for a scene whose send outcome is unknown.
+ *
+ * Retiring that scene is a person's decision: the provider may already have
+ * answered. The old row keeps its UNKNOWN as history and the volume re-runs.
+ */
+export const authorizeBlockedScene = (
+  projectId: string, taskId: string, sceneTaskId: string, expectedStateVersion: number,
+) => api<{ task_id: string; scene_task_id: string; status: string }>(
+  `/projects/${projectId}/pipeline/tasks/${taskId}/scenes/${sceneTaskId}/new-attempt`,
+  json('POST', { expected_state_version: expectedStateVersion }));
 
 /**
  * Authorise a physically separate retry after an unknown send outcome.  The

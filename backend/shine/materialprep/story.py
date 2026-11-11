@@ -215,6 +215,30 @@ def authorize_unknown_resend(db, row, subtask_id: str, actor: str, evidence: str
             "resend_allowed": True}
 
 
+def _extract_segment_chars(gateway, profile) -> int:
+    """How much source one outline extraction may read.
+
+    The historical window (2.7k characters) came from small-context models: at
+    1M tokens a 44k-character volume fits in one request, and reading it whole
+    keeps the cross-chapter continuity that seventeen separate reads lose.  The
+    ceiling is measured from the same approved budget the send path uses, so a
+    narrower provider gets a narrower window instead of a refusal.
+    """
+    from shine.literary.budget import plan_call_budget
+    from shine.literary.requests import compile_request
+
+    try:
+        config = gateway.config_for(profile)
+        probe = compile_request(system="outline", user='{"source_text":""}',
+                                schema=OutlinePart.model_json_schema())
+        budget = plan_call_budget(config, probe, purpose="outline")
+    except Exception:  # noqa: BLE001 - fall back to the historical window
+        return (MAX_SCENE_CHARS * 2) // 3
+    # One Chinese character costs about one token; 0.8 leaves room for the
+    # instruction, the locked facts and the JSON envelope.
+    return max(MAX_SCENE_CHARS, min(200_000, int(budget.burst_input_limit * 0.8)))
+
+
 def _merge(factory, gateway, project_id, document, ids, facts):
     with factory() as db:
         profile = gateway.profile_for_role(db, "scriptwriter")
@@ -265,6 +289,7 @@ def _merge(factory, gateway, project_id, document, ids, facts):
 
     result = call_material_agent(gateway, factory, "scriptwriter", system=system, context=context, schema=schema,
         contract=OutlinePart, on_progress=record_progress,
+        project_id=project_id, task_id=task_id, purpose="outline",
         before_call=text_consent.guard(project_id, document.id, document.sha256,
                                        "scriptwriter", fingerprint, gateway))
     with factory.begin() as db:
@@ -622,7 +647,8 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 # or options): the queued request no longer describes the same
                 # provider, so it stops by name rather than silently switching.
                 raise HTTPException(409, "STORY_PROVIDER_CHANGED")
-            source = segment_document(document.text, max_scene_chars=(MAX_SCENE_CHARS * 2) // 3)
+            segment_chars = _extract_segment_chars(gateway, profile)
+            source = segment_document(document.text, max_scene_chars=segment_chars)
             # The number of source units is part of the progress the person
             # waits for; it is recorded once and reused after a restart.
             if state.get("segment_total") != len(source):
@@ -630,7 +656,8 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
             if state["stage"] == "EXTRACT" and state["cursor"] < len(source):
                 current = source[state["cursor"]]
                 result = scenes.prepare_scenes(gateway, factory, project_id, document,
-                    locked_story_facts=state["locked_facts"], scene_keys=[current.key])
+                    locked_story_facts=state["locked_facts"], scene_keys=[current.key],
+                    segment_chars=segment_chars)
                 successful = {"PREPARED", "REUSED"}
                 if result.get("error_code") or any(s["status"] not in successful for s in result["scenes"]):
                     state["blocked_subtasks"] = result.get("scenes", [])
@@ -642,6 +669,15 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
                 state["cursor"] += 1
             elif state["stage"] == "EXTRACT":
                 state.update(stage="MERGE", cursor=0, level_inputs=state["leaf_artifact_ids"], level_outputs=[])
+            elif (state["stage"] == "MERGE" and state["level"] == 0
+                  and len(state["level_inputs"]) == 1 and not state["level_outputs"]):
+                # A volume that was read in one pass already *is* the outline: the
+                # single leaf carries every section, event and citation.  Asking a
+                # model to merge one part into itself costs a full round trip per
+                # volume and can only lose facts, so the leaf is published as the
+                # final answer and the skip is recorded.
+                state["level_outputs"] = list(state["level_inputs"])
+                state["merge_skipped"] = "single_leaf"
             elif state["stage"] == "MERGE" and state["cursor"] < len(state["level_inputs"]):
                 ids = state["level_inputs"][state["cursor"]:state["cursor"] + 3]
                 merged = _merge(factory, gateway, project_id, document, ids, state["locked_facts"])

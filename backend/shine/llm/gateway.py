@@ -42,7 +42,16 @@ GENERATION_PROBE_SCHEMA = {
 }
 
 
-DEFAULT_AGENT_OUTPUT_TOKENS = 131_072
+DEFAULT_AGENT_OUTPUT_TOKENS = 16_384
+"""The output ceiling for an ordinary agent call.
+
+A reasoning model decides how long to think, and a 131k ceiling lets it decide
+"very long": a live structured extraction ran past fifteen minutes with nothing
+placeholder-shaped to show for it.  16k is ample for a structured role answer
+(outline part, scene preparation, one shot breakdown) while bounding the worst
+case to minutes.  Creative scene writing keeps its own measured budget in
+``shine.literary.budget``, so this ceiling never truncates a scene.
+"""
 """The completion ceiling one typed agent reply is budgeted against.
 
 A current 1M-context reasoning model bills its thinking as completion, so a
@@ -66,17 +75,26 @@ plain connectivity probe keeps its own stricter budget.
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
-    limits = [DEFAULT_AGENT_OUTPUT_TOKENS]
     configured = config.generation_options.get("max_completion_tokens")
     if configured:
-        limits.append(configured)
-    if config.max_output_tokens:
-        limits.append(config.max_output_tokens)
-    output_limit = min(limits)
+        # An explicit operator choice is respected: this function only bounds
+        # the default, it never overrules a stated budget.
+        output_limit = int(configured)
+    elif config.max_output_tokens:
+        output_limit = min(DEFAULT_AGENT_OUTPUT_TOKENS, int(config.max_output_tokens))
+    else:
+        output_limit = DEFAULT_AGENT_OUTPUT_TOKENS
     if config.kind == "openai_compatible":
-        return replace(config, generation_options={
-            **config.generation_options, "max_completion_tokens": output_limit,
-        })
+        options = {**config.generation_options, "max_completion_tokens": output_limit}
+        # A structured role reads and answers; it is not asked to deliberate for
+        # minutes.  Measured on the live provider: the same request with
+        # ``reasoning_effort=low`` spent 17 reasoning tokens instead of 152 and
+        # returned twice as fast, and a 44k-character outline read that used to
+        # spend 300s timing out now fits the same wall clock.  Creative writing
+        # (``task_category="creative"``) does NOT pass through here and keeps the
+        # model's own deliberation budget.
+        options.setdefault("reasoning_effort", "low")
+        return replace(config, generation_options=options)
     if config.kind == "ollama":
         return replace(config, generation_options={
             **config.generation_options, "max_tokens": output_limit,
@@ -185,34 +203,52 @@ class LLMGateway:
         db: Session,
         role: str,
         *,
-        system: str,
-        user: str,
+        system: str = "",
+        user: str = "",
         schema: dict[str, Any] | None = None,
         on_progress: Callable[[str], None] | None = None,
         task_category: str = "default",
+        precompiled: Any | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """One role call, either planned here or compiled by the caller.
+
+        ``precompiled`` is the Call Governor's rendered request.  It is sent
+        verbatim: the schema was already rendered into the user message and the
+        budget was already approved against those exact bytes, so appending it
+        again would send a request larger than the one that was approved.  That
+        single-appendix rule is what makes "追加 Schema 不改变已检验预算"
+        observable.
+        """
+        if precompiled is not None:
+            system, user, schema = precompiled.system, precompiled.user, precompiled.schema
         profile = self.profile_for_role(db, role)
         config = self.config_for(profile)
-        if task_category == "creative":
-            input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
-            overflow = context_overflow(config, input_estimate)
-            if overflow is not None:
-                # The request provably never left the workbench: the refusal
-                # is a named, local fact, not an unknown provider outcome.
-                raise LLMError("Creative request exceeds the shared context window",
-                               details=dict(overflow))
-            budget = creative_completion_cap(config, estimated_input_tokens=input_estimate)
+        budget_evidence = None
+        if precompiled is None:
+            if task_category == "creative":
+                input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
+                overflow = context_overflow(config, input_estimate)
+                if overflow is not None:
+                    # The request provably never left the workbench: the refusal
+                    # is a named, local fact, not an unknown provider outcome.
+                    raise LLMError("Creative request exceeds the shared context window",
+                                   details=dict(overflow))
+                budget_evidence = creative_completion_cap(
+                    config, estimated_input_tokens=input_estimate)
+                config = apply_output_budget(config, budget_evidence)
+            else:
+                config = agent_output_config(config)
+        elif budget is not None:
             config = apply_output_budget(config, budget)
-        else:
-            config = agent_output_config(config)
-            budget = None
+            budget_evidence = budget
         # An agent step must survive a throttled provider: a 429 is a refusal
         # that produced no answer, so waiting and asking again cannot buy a
         # second copy of one answer.  The plain connectivity probe keeps its
         # own stricter budget and never posts again after a refusal.
         config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
         provider = self.provider_factory(config, self.mock_responder)
-        if schema is not None:
+        if schema is not None and precompiled is None:
             # The provider validates the answer against this schema, so the model
             # has to be told the contract it must satisfy. The schema is used
             # for validation only otherwise, and an instruction such as "return
@@ -229,34 +265,51 @@ class LLMGateway:
         from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
         from shine.db import make_session_factory
         from shine.llm.lifecycle import release_text_model
+        from shine.security import is_loopback_url
 
-        # All roles share the same stage admission as H3/VLM/ASR. A textual
-        # provider never silently runs beside a local GPU model.
-        if CURRENT_RESOURCE.get() is not None:
-            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
-        if on_progress:
-            on_progress("WAITING_RESOURCE")
-        with resource_slot(
-            make_session_factory(db.get_bind()),
-            "AGENT",
-            1,
-            release_models=partial(release_text_model, config),
-            wait_seconds=0 if profile.kind == "mock" else 300,
-            on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
-        ):
+        def send() -> LLMResponse:
             if on_progress:
                 on_progress("WAITING_PROVIDER")
-            response = provider.complete(
+            answer = provider.complete(
                 [ChatMessage("system", system), ChatMessage("user", user)],
                 schema=schema,
                 json_mode=True,
             )
             if on_progress:
                 on_progress("RELEASING_PROVIDER")
+            return answer
+
+        # A remote text provider costs no local VRAM, so it must not queue behind
+        # the local renderer's GPU admission.  Sharing that single queue meant one
+        # slow worker call held the slot for its whole timeout, and every other
+        # request died with GPU_BUSY after waiting five minutes - an outage caused
+        # purely by bookkeeping, observed live with two scenes of one volume.
+        # Local providers (ollama, a local OpenAI-compatible server) still take
+        # the slot, because they do use the same GPU as the renderer.
+        needs_local_gpu = profile.kind != "mock" and (
+            profile.kind == "ollama" or is_loopback_url(config.base_url))
+        if CURRENT_RESOURCE.get() is not None and needs_local_gpu:
+            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
+        if not needs_local_gpu:
+            response = send()
+        else:
+            if on_progress:
+                on_progress("WAITING_RESOURCE")
+            with resource_slot(
+                make_session_factory(db.get_bind()),
+                "AGENT",
+                1,
+                release_models=partial(release_text_model, config),
+                wait_seconds=300,
+                on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
+            ):
+                response = send()
         if on_progress:
             on_progress("VALIDATING_RESULT")
-        if budget is not None:
-            response.raw_meta["output_budget"] = budget
+        if budget_evidence is not None:
+            response.raw_meta["output_budget"] = budget_evidence
+            if precompiled is not None:
+                response.raw_meta["precompiled_request"] = precompiled.fingerprint
         return response
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:

@@ -494,6 +494,45 @@ def artifacts(project_id: str, db: DBSession):
     ]
 
 
+def _require_beat_coverage(db, project_id: str, script, direction, camera_plan) -> None:
+    """Refuse to shoot a plan that leaves a scripted beat on the floor.
+
+    This is the last gate before money is spent on rendering, so it is the right
+    place to insist that every beat the breakdown names is carried by a shot
+    that actually lands.  Coverage is therefore measured on the *camera* plan,
+    not on the director's intent list: an intent nobody filmed is exactly the
+    hole this gate exists to catch.  Each landed camera shot names an intent, and
+    the intent names its beat, so the mapping is read - never inferred.
+
+    The check is local and touches no model, and a correct plan never pays
+    anything for it.  ``qa=off`` is the declared escape hatch for an operator;
+    ``shadow`` is not: an uncovered beat is a fact, not an opinion.
+    """
+    from shine.literary import flags, qa, triage
+
+    if flags.mode("qa", db, project_id) == "off":
+        return
+    intents = {str(shot.get("id")): shot for shot in direction.payload_json.get("shots") or []}
+    landed = []
+    for camera in camera_plan.shots:
+        intent = intents.get(str(camera.intent_id)) or {}
+        landed.append({"beat_id": intent.get("beat_id"),
+                       "cuts": intent.get("cuts") or []})
+    report = qa.check_beat_coverage(script.payload_json, {"shots": landed})
+    blocking = [check for check in report.checks if check.severity == triage.HARD_BLOCK]
+    if not blocking:
+        return
+    check = blocking[0]
+    logger.warning("apply_camera_beat_coverage_blocked project=%s code=%s evidence=%s",
+                   project_id, check.code, check.evidence)
+    raise HTTPException(status_code=409, detail={
+        "code": check.code,
+        "message": "有剧情节拍没有被任何镜头覆盖，不能落镜。请补镜头后重新生成分镜。",
+        "details": check.evidence,
+        "next_action": "regenerate_storyboard",
+    })
+
+
 @router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
 def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
     from shine.services import complete_character_bindings
@@ -535,12 +574,14 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             else None
         )
         director_binding = frozen_style.director_style_binding if frozen_style else None
+        camera_plan = CameraPlan.model_validate(artifact.payload_json)
+        _require_beat_coverage(db, project_id, script, direction, camera_plan)
         beats = {b["id"]: b for b in script.payload_json["beats"]}
         intents = {s["id"]: s for s in direction.payload_json["shots"]}
         created = []
         material_notices: list[dict] = []
         style_warnings: list[dict] = []
-        for camera in CameraPlan.model_validate(artifact.payload_json).shots:
+        for camera in camera_plan.shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
             cuts = intent.get("cuts", [])
@@ -983,6 +1024,47 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
 
 
 
+def _storyboard_qa(db, project_id: str, steps: dict, *, draft: bool) -> dict | None:
+    """L0 review of a generated storyboard, stored as its own versioned verdict.
+
+    A draft is not a deliverable, so it is not judged as one.  The verdict never
+    rewrites the plan and never fails the chain: an uncovered beat decides
+    whether the result may be called ``PROPOSED`` or must be ``NEEDS_REVIEW``.
+    """
+    from shine.literary import flags, qa
+
+    if draft or not {"scriptwriter", "director"} <= set(steps):
+        return None
+    try:
+        mode = flags.mode("qa", db, project_id)
+        if mode == "off":
+            return None
+        breakdown = db.get(AgentArtifact, steps["scriptwriter"]["artifact_id"])
+        plan = db.get(AgentArtifact, steps["director"]["artifact_id"])
+        if breakdown is None or plan is None:
+            return None
+        report = qa.check_beat_coverage(breakdown.payload_json, plan.payload_json)
+        payload = {"source": "storyboard", "mode": mode,
+                   "breakdown_artifact_id": breakdown.id,
+                   "breakdown_sha256": breakdown.sha256,
+                   "plan_artifact_id": plan.id, "plan_sha256": plan.sha256,
+                   **report.as_dict()}
+        artifact = AgentArtifact(
+            project_id=project_id, kind=qa.REPORT_KIND, schema_version="1.0",
+            payload_json=payload, sha256=digest(payload), producer_role="continuity_supervisor",
+            source_task_id=plan.source_task_id,
+            input_revision_ids=[breakdown.id, plan.id])
+        db.add(artifact)
+        db.flush()
+        return {"mode": mode, "state": report.state, "artifact_id": artifact.id,
+                "checks": [check.as_dict() for check in report.checks]}
+    except Exception:  # noqa: BLE001 - a review never fails the chain
+        logger.exception("storyboard_qa_failed project=%s", project_id)
+        return {"state": "WARNING", "checks": [
+            {"code": "QA_PENDING", "severity": "WARNING",
+             "message": "分镜终校未能完成，已记录。", "evidence": {}}]}
+
+
 @router.post("/projects/{project_id}/storyboard/generate", status_code=201)
 def generate_storyboard(
     project_id: str,
@@ -1416,6 +1498,7 @@ def generate_storyboard(
         return _run(role, **kwargs)
 
     active_role = "director"
+    storyboard_qa: dict | None = None
     try:
         steps["director"] = _run_step(
             "director", "director",
@@ -1424,6 +1507,7 @@ def generate_storyboard(
             locked_story_facts=body.locked_story_facts,
             allow_remote_text=body.allow_remote_text,
         )
+        storyboard_qa = _storyboard_qa(db, project_id, steps, draft=body.draft)
         active_role = "cinematographer"
         steps["cinematographer"] = _run_step(
             "cinematographer", "cinematographer",
@@ -1565,6 +1649,8 @@ def generate_storyboard(
                 arbitration = db.get(AgentArtifact, steps["director_arbitration"]["artifact_id"]).payload_json
             blocked = (bool(issues) and not _arbitration_releases(arbitration, issues)) or (
                 not issues and not requests and continuity.get("recommendation") != "proceed_to_preflight")
+            if (storyboard_qa or {}).get("state") == "HARD_BLOCK":
+                blocked = True
         except (ValueError, LLMError) as exc:
             db.rollback()
             failure = _rejection("director" if repair_role == "director_arbitration" else repair_role, exc)
@@ -1605,6 +1691,7 @@ def generate_storyboard(
         "rejections": [],
         "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
         "continuity_issues": continuity.get("issues", []),
+        "qa": storyboard_qa,
         "repair_failure": repair_failure,
         "editorial_timing_preview": editorial_timing_preview(script_text),
         "dialogue_coverage": writer_task.trace.get("dialogue_coverage") if writer_task else None,

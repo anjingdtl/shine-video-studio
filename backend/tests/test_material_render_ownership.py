@@ -143,3 +143,33 @@ def test_an_owned_renderer_grants_the_fourth_readiness_layer(api, tmp_path, monk
             assert attempt.payload["renderer_owned"] is True
             report = runtime.readiness(db, settings, object_info=object_info_fixture())
         assert report["families"]["character"]["can_generate"] is True, report
+
+
+def test_a_flaky_graph_probe_cannot_rewrite_the_runtime_fingerprint(tmp_path):
+    """Identity is configuration; a probe result is readiness, not identity.
+
+    The fingerprint used to include whether the object_info probe had just
+    succeeded.  One unreachable moment therefore rewrote it and silently
+    downgraded every family that had already rendered - a validation that
+    evaporated by being looked at.
+    """
+    models = tmp_path / "models"
+    (models / "diffusion_models").mkdir(parents=True)
+    weight = models / "diffusion_models" / "qwen.safetensors"
+    weight.write_bytes(b"pinned-weight-bytes")
+    config = runtime.ImageRuntimeConfig(
+        instance_id="managed-instance",
+        base_url="http://127.0.0.1:8188",
+        model_root=str(models),
+        model_files=[{
+            "role": "unet",
+            "folder": "diffusion_models",
+            "filename": "qwen.safetensors",
+            "bytes": weight.stat().st_size,
+            "sha256": hashlib.sha256(weight.read_bytes()).hexdigest(),
+            "required": True,
+        }],
+    )
+    probed = runtime.current_fingerprint(config, graph_report={"complete": True})
+    unreachable = runtime.current_fingerprint(config, graph_report=None)
+    assert probed == unreachable

@@ -323,8 +323,17 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
             "listener": listener,
         }
     except Exception as exc:
+        # The exception class alone says nothing about what to fix: a missing
+        # model file, a busy port and a refused recipe all arrive here as
+        # HTTPException.  The named reason (a stable code, never a message that
+        # could carry a path or a secret) is what the panel shows and what a
+        # later diagnosis reads.
+        detail = getattr(exc, "detail", None)
+        reason = (detail if isinstance(detail, str)
+                  else (detail or {}).get("code") if isinstance(detail, dict) else None)
         _record(factory, key, {
             **intent, "stage": "FAILED", "error": type(exc).__name__,
+            **({"error_code": reason} if isinstance(reason, str) and reason else {}),
             "failed_at": utcnow().isoformat(),
         })
         if group is not None:

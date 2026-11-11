@@ -6,7 +6,7 @@ process truth is persisted here: jobs, attempts, leases and OS identities
 stay authoritative in their existing tables.
 
 Revision ID: f180c0010001
-Revises: f180b0070001
+Revises: f180b0080001
 Create Date: 2026-11-11
 """
 
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "f180c0010001"
-down_revision = "f180b0070001"
+down_revision = "f180b0080001"
 branch_labels = None
 depends_on = None
 

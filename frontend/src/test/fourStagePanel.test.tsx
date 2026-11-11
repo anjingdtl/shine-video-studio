@@ -110,6 +110,59 @@ describe('四阶段面板', () => {
     expect(stub.callsOf('POST', new RegExp('/pipeline/volumes/v1/handoff$'))).toHaveLength(0);
   });
 
+  it('终校硬阻断时用中文说明并保留编辑出口，确认按钮不可点', async () => {
+    stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/(documents|pipeline)$'),
+               respond: () => jsonResponse(baseOverview({
+                 volume_plan_confirmed: true, bible_confirmed: true,
+                 volumes: [{ volume_id: 'v1', order: 1, title: '第1卷', char_count: 100,
+                             outline_confirmed: true,
+                             scripts: [{ section_id: 's1', scene_key: 'S1', title: '出海',
+                                         confirmed: false,
+                                         qa: { state: 'HARD_BLOCK', level: 'L0',
+                                               codes: ['SCENE_SOURCE_RANGE_INVALID'],
+                                               message: '这一场引用的原文范围无效，不能确认。',
+                                               artifact_id: 'qa-1', script_sha256: 'd'.repeat(64) } }],
+                             scripts_confirmed: 0, scripts_total: 1 }],
+                 pending_scripts: [{ volume_id: 'v1', section_id: 's1', artifact_id: 'art-9',
+                                     sha256: 'c'.repeat(64), scene_key: 'S1', title: '出海',
+                                     text: '林岚：你来了。',
+                                     qa: { state: 'HARD_BLOCK', level: 'L0',
+                                           codes: ['SCENE_SOURCE_RANGE_INVALID'],
+                                           message: '这一场引用的原文范围无效，不能确认。',
+                                           artifact_id: 'qa-1', script_sha256: 'd'.repeat(64) } }],
+               })) });
+    const user = userEvent.setup();
+    render(<FourStagePanel projectId={PROJECT} onMessage={vi.fn()} />);
+    await screen.findByText(/场次 S1 的剧本已生成/);
+    // The reason is readable, the raw check code is not the message.
+    expect(screen.getAllByText(/未通过终校：这一场引用的原文范围无效/).length).toBeGreaterThan(0);
+    const confirm = screen.getByRole('button', { name: '确认这一场' });
+    expect(confirm).toBeDisabled();
+    // The two real exits remain: read it, or edit it.
+    expect(screen.getByRole('button', { name: '编辑' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: '编辑' }));
+    expect(screen.getByLabelText('编辑剧本')).toHaveValue('林岚：你来了。');
+  });
+
+  it('刷新后仍能确认已生成的分卷方案（方案存在服务端，不只在内存）', async () => {
+    // The plan was generated in an earlier visit. Nothing is set in component
+    // state after a reload, so the confirmation step has to come from the
+    // server field - otherwise the person is asked to generate it again.
+    stub.add({ method: 'GET', pattern: /\/projects\/proj-1\/(documents|pipeline)$/,
+               respond: () => jsonResponse(baseOverview({
+                 pending_volume_plan: {
+                   artifact_id: 'plan-9', sha256: 'e'.repeat(64),
+                   volumes: [{ title: '第1卷', start_offset: 0, end_offset: 1200 }],
+                 },
+               })) });
+    const onMessage = vi.fn();
+    render(<FourStagePanel projectId={PROJECT} onMessage={onMessage} />);
+    expect(await screen.findByText(/分卷方案已生成（1 卷），请确认/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认分卷方案' })).toBeEnabled();
+    // It must not ask for a second generation while one waits for confirmation.
+    expect(screen.queryByRole('button', { name: '生成分卷方案' })).toBeNull();
+  });
+
   it('未知发送结果只提供核对与显式新尝试，不提供普通继续', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     stub.add({ method: 'GET', pattern: new RegExp('/projects/proj-1/documents$'),

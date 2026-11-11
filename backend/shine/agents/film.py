@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -588,6 +589,27 @@ def _plan_beat_ids(role: str, inputs: list[AgentArtifact]) -> list[str] | None:
     return None
 
 
+logger = logging.getLogger(__name__)
+
+
+def _storyboard_memory_view(db, project_id: str, *, role: str) -> dict | None:
+    """The bounded fact view one storyboard role may receive.
+
+    Only in ``on``: ``shadow`` records facts but must not change a paid request.
+    A memory fault returns ``None`` and the crew works exactly as before V2.1.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        if not flags.affects_request("memory", db, project_id):
+            return None
+        return memory.storyboard_view(
+            db, project_id, token_budget=900 if role == "scriptwriter" else 600)
+    except Exception:  # noqa: BLE001 - guidance never blocks the crew
+        logger.exception("storyboard_memory_view_failed project=%s role=%s", project_id, role)
+        return None
+
+
 class FilmAgentDispatcher:
     def __init__(self, gateway: LLMGateway, data_dir: Path | None = None,
                  asset_root: Path | None = None):
@@ -705,6 +727,10 @@ class FilmAgentDispatcher:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
                 db, project_id, body.brief, body.production_context)
+        if role in {"scriptwriter", "director"}:
+            memory_view = _storyboard_memory_view(db, project_id, role=role)
+            if memory_view is not None:
+                context["memory"] = memory_view
         refusal: dict | None = None
         if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
             timing = editorial_timing_preview(body.brief)
@@ -1096,6 +1122,16 @@ class FilmAgentDispatcher:
                               "provider_schema_validator": exc.details["validator"]}
                              if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
                              and isinstance(exc.details.get("path"), str) else {}),
+                          # Why the envelope failed is diagnosable without
+                          # storing the answer: a length stop means the budget
+                          # truncated it, an empty path means malformed JSON.
+                          # Neither the text nor a prompt is ever persisted.
+                          **({"provider_finish_reason": exc.details["finish_reason"]}
+                             if isinstance(exc, LLMError)
+                             and isinstance(exc.details.get("finish_reason"), str) else {}),
+                          **({"provider_text_chars": len(exc.details["provider_text"])}
+                             if isinstance(exc, LLMError)
+                             and isinstance(exc.details.get("provider_text"), str) else {}),
                           "external_outcome": external_outcome,
                           "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
@@ -1125,10 +1161,16 @@ class FilmAgentDispatcher:
                               "rejection_reason_code": task.error_code,
                               **({"pre_request_error_code": safe_detail} if safe_detail else {})}
             else:
+                # The answer arrived but something after it broke.  Only the
+                # exception *type* is persisted: a class name carries no prompt
+                # and no secret, and without it this record used to say nothing
+                # more useful than "the call failed".
+                logger.exception("film_crew_fault role=%s task=%s phase=%s", role, task.id, phase)
                 task.status = "NEEDS_REVIEW" if unknown else "FAILED"
                 task.state_version += 1
                 task.error_code = "AGENT_CALL_FAILED"
                 task.trace = {**task.trace, "automatic_replay": False,
+                              "error_type": type(exc).__name__,
                               **({"external_outcome": "UNKNOWN"} if unknown else {})}
             db.commit()
             raise ValueError(task.error_code) from None

@@ -205,6 +205,104 @@ class OpenAICompatibleProvider:
             raise LLMConnectionError("Provider request failed")
         raise last_error
 
+    def _complete_stream(self, url: str, payload: dict[str, Any], *,
+                         json_mode: bool = True) -> LLMResponse | None:
+        """Read one SSE completion with separated deadlines.
+
+        Returns ``None`` only when the provider produced no event at all - that
+        is the single case where falling back to a non-streaming request cannot
+        buy a second answer.  Once a byte has arrived, the answer exists and is
+        returned (or raised as a partial, with the visible text kept).
+        """
+        from shine.llm.transport_policy import policy_for
+
+        policy = policy_for(self.config, streaming=True)
+        started = time.perf_counter()
+        first_event_ms: int | None = None
+        last_event_ms: int | None = None
+        chunks: list[str] = []
+        finish_reason: str | None = None
+        saw_done = False
+        usage: dict[str, Any] = {}
+        body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+        try:
+            client = build_client(url, policy.first_event_s)
+        except Exception:
+            return None
+        try:
+            with client:
+                with client.stream("POST", url, headers={**self._headers(),
+                                                         "Accept": "text/event-stream"},
+                                   json=body) as response:
+                    if response.status_code >= 400:
+                        # Nothing was generated: leave the fallback to the caller.
+                        response.read()
+                        return None
+                    for line in response.iter_lines():
+                        if time.perf_counter() - started > policy.total_s:
+                            break
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            saw_done = True
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        now_ms = int((time.perf_counter() - started) * 1000)
+                        if first_event_ms is None:
+                            first_event_ms = now_ms
+                        last_event_ms = now_ms
+                        if isinstance(event.get("usage"), dict):
+                            usage = event["usage"]
+                        for choice in event.get("choices") or []:
+                            delta = choice.get("delta") or {}
+                            piece = delta.get("content")
+                            if isinstance(piece, str) and piece:
+                                chunks.append(piece)
+                            if choice.get("finish_reason"):
+                                finish_reason = choice["finish_reason"]
+                                saw_done = True
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError):
+            return None
+        except httpx.HTTPError:
+            if not chunks:
+                return None
+            raise LLMConnectionError("Provider stream broke", details={
+                "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
+                "streamed": True, "first_event_ms": first_event_ms,
+            }) from None
+        text = "".join(chunks)
+        if not text:
+            return None
+        if not saw_done:
+            # The socket ended without a terminal event: the provider may still
+            # be generating, so this is an unknown outcome, not a bad answer.
+            raise LLMConnectionError("Provider stream ended without a terminal event", details={
+                "external_outcome": "UNKNOWN", "provider_text": text,
+                "streamed": True, "first_event_ms": first_event_ms,
+                "last_event_ms": last_event_ms, "partial": True,
+            })
+        meta = {"http_status": 200, "streamed": True, "finish_reason": finish_reason,
+                "first_event_ms": first_event_ms, "last_event_ms": last_event_ms}
+        if finish_reason in {"length", "max_tokens", "content_filter"}:
+            raise LLMFormatError("Provider completion is truncated or filtered",
+                                 details={**meta, "provider_text": text})
+        parsed = None
+        if json_mode:
+            try:
+                parsed = parse_json_object(text)
+            except LLMFormatError as exc:
+                exc.details.update({**meta, "provider_text": text})
+                raise
+        return LLMResponse(
+            text=text, parsed=parsed, model=self.config.model,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            usage=usage, raw_meta=meta,
+        )
+
     @staticmethod
     def _classify(response: httpx.Response) -> LLMError:
         text = response.text[:500]
@@ -228,15 +326,31 @@ class OpenAICompatibleProvider:
         json_mode: bool = True,
     ) -> LLMResponse:
         started = time.perf_counter()
+        options = dict(self.config.generation_options)
+        if ("max_completion_tokens" in options and "max_tokens" not in options
+                and "api.openai.com" not in self.config.base_url):
+            # OpenAI renamed the ceiling; several OpenAI-compatible providers
+            # still read only the classic field.  Without it they generate until
+            # they decide to stop - a live call spent 16k completion tokens
+            # against a 5.8k budget and took two and a half minutes.  Sending
+            # both keeps the declared ceiling enforceable everywhere.
+            options["max_tokens"] = options["max_completion_tokens"]
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [{"role": message.role, "content": message.content} for message in messages],
             "temperature": self.config.temperature,
-            **self.config.generation_options,
+            **options,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         url = _chat_url(self.config.base_url)
+        if self.config.streaming:
+            streamed = self._complete_stream(url, payload, json_mode=json_mode)
+            if streamed is not None:
+                return streamed
+            # No event arrived: the provider refused the streaming shape before
+            # producing anything, so one plain request is safe and is not a
+            # replay of an answer.
         try:
             response = self._request("POST", url, payload=payload)
         except LLMError as exc:
@@ -282,7 +396,15 @@ class OpenAICompatibleProvider:
         if not choices:
             raise LLMFormatError("Provider returned no completions", details=format_details)
         if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:
-            raise LLMFormatError("Provider completion is truncated or filtered", details=format_details)
+            # Keep the visible prefix: a truncated scene is not a finished
+            # scene, but the text that did arrive is still the person's material
+            # and is saved as a candidate rather than thrown away.
+            partial = choices[0].get("message", {}).get("content", "")
+            if isinstance(partial, list):
+                partial = "".join(part.get("text", "") for part in partial if isinstance(part, dict))
+            raise LLMFormatError("Provider completion is truncated or filtered",
+                                 details={**format_details,
+                                          "provider_text": partial if isinstance(partial, str) else ""})
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
@@ -291,7 +413,10 @@ class OpenAICompatibleProvider:
         try:
             parsed = parse_json_object(content) if json_mode else None
         except LLMFormatError as exc:
-            exc.details.update(response_details)
+            # The answer arrived.  Carry it with the error so the governor can
+            # read the literary body out of a broken envelope instead of
+            # reporting "the model returned nothing".
+            exc.details.update({**response_details, **format_details, "provider_text": content})
             raise
         if parsed is not None and schema is not None:
             validator = Draft202012Validator(schema)
@@ -300,8 +425,12 @@ class OpenAICompatibleProvider:
                 first = errors[0]
                 raise LLMFormatError(
                     "Model JSON does not match the required schema",
-                    details={**response_details, "path": "/".join(str(part) for part in first.path),
-                             "validator": first.validator},
+                    details={**response_details, **format_details,
+                             "path": "/".join(str(part) for part in first.path),
+                             "validator": first.validator,
+                             # The complete answer travels with the failure: one
+                             # missing optional field must not destroy a scene.
+                             "provider_text": content},
                 )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(

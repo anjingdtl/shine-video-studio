@@ -30,12 +30,32 @@ def _http_from_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(422, {"code": code, "message": code})
 
 
+def _section_label(section: dict[str, Any], order: int) -> str:
+    """The one human name of a production section.
+
+    ``scene_key`` is an identity (sometimes a uuid), never a label.  A section
+    without a title of its own is still somebody's "第 N 场": printing an id
+    where a scene name belongs is what made the script list unreadable.
+    """
+    title = str(section.get("title") or "").strip()
+    if title:
+        return title
+    key = str(section.get("scene_key") or "").strip()
+    looks_like_uuid = len(key) >= 32 and key.count("-") >= 4
+    if key and not looks_like_uuid:
+        return key
+    return f"第 {order} 场"
+
+
 @router.get("/projects/{project_id}/pipeline")
 def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
     """The pipeline's real state: master, plan, bible, per-volume progress."""
     require_project(db, project_id)
     plan = pipeline.current_volume_plan(db, project_id)
     bible = pipeline.current_bible(db, project_id)
+    # One query for the whole project: the panel shows one Chinese line per
+    # section, never the internal check list.
+    qa_states = pipeline.qa_states_by_section(db, project_id)
     volumes = []
     if plan:
         for volume in plan.payload_json["volumes"]:
@@ -45,12 +65,19 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
             scripts = [
                 {
                     "section_id": s["production_section_id"],
-                    "scene_key": s.get("scene_key", s["production_section_id"]),
+                    "scene_key": s.get("scene_key"),
+                    # A section key is often a bare uuid: it identifies the span,
+                    # it is not something a person can read.  The label is what
+                    # every list prints, so it never degrades to an id.
+                    "scene_label": _section_label(s, index),
                     "title": s.get("title"),
+                    # A planning estimate only; it never claims an H3 duration.
+                    "estimated_duration_s": s.get("estimated_duration_s"),
                     "confirmed": pipeline.current_scene_script(
                         db, project_id, volume_id, s["production_section_id"]) is not None,
+                    "qa": qa_states.get(s["production_section_id"]),
                 }
-                for s in sections
+                for index, s in enumerate(sections, start=1)
             ]
             latest_outline_row = None
             volume_doc = pipeline._volume_document(db, project_id, volume_id)
@@ -86,6 +113,12 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                 "handoff": pipeline.volume_handoff_receipt(db, project_id, volume_id),
             })
     master_ref = plan.payload_json["source_master"] if plan else {"document_id": None, "sha256": None}
+    # A generated-but-unconfirmed plan lives on the server, not only in the
+    # panel's memory: a refresh, a project switch or a restart must still offer
+    # the "confirm this plan" step instead of asking the person to generate the
+    # same plan a second time.
+    pending_plan = (pipeline.latest_unconfirmed(db, project_id, pipeline.VOLUME_PLAN_KIND)
+                    if plan is None else None)
     pending_bible = pipeline.latest_unconfirmed(db, project_id, pipeline.BIBLE_KIND)
     pending_scripts = []
     for volume in volumes:
@@ -98,7 +131,9 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                     "section_id": entry["section_id"],
                     "artifact_id": script.id, "sha256": script.sha256,
                     "scene_key": entry["scene_key"], "title": entry["title"],
+                    "scene_label": entry.get("scene_label"),
                     "text": (script.payload_json or {}).get("text", ""),
+                    "qa": qa_states.get(entry["section_id"]),
                 })
     return {
         "master": master_ref,
@@ -108,6 +143,9 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
         "volume_plan": ({"artifact_id": plan.id, "sha256": plan.sha256,
                          "volumes": plan.payload_json.get("volumes") or []}
                         if plan is not None else None),
+        "pending_volume_plan": ({"artifact_id": pending_plan.id, "sha256": pending_plan.sha256,
+                                 "volumes": pending_plan.payload_json.get("volumes") or []}
+                                if pending_plan is not None else None),
         "bible_confirmed": bible is not None,
         # Whether the confirmed blueprint still describes the current work.
         # The read path, the confirmation and the production path read the
@@ -199,7 +237,8 @@ def queue_bible_route(project_id: str, db: DBSession, gateway: Annotated[LLMGate
 def confirm_bible_route(project_id: str, artifact_id: str, body: dict, db: DBSession, operator: Operator) -> dict:
     require_project(db, project_id)
     try:
-        artifact = pipeline.confirm_bible(db, project_id, artifact_id, body.get("expected_sha256"))
+        artifact = pipeline.confirm_bible(db, project_id, artifact_id, body.get("expected_sha256"),
+                                          scope_volume_id=(body or {}).get("scope_volume_id") or None)
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -221,6 +260,20 @@ def queue_scripts_route(
         raise _http_from_value_error(exc) from None
     return JSONResponse(status_code=202, content={"queued": len(tasks),
         "task_ids": [t.id for t in tasks]})
+
+
+@router.get("/projects/{project_id}/pipeline/volumes/{volume_id}/sections/{section_id}/qa")
+def section_qa_route(project_id: str, volume_id: str, section_id: str, db: DBSession) -> dict:
+    """The latest literary review of one section, or an honest NOT_RUN.
+
+    A review is evidence, not state: it never changes whether a script exists.
+    """
+    require_project(db, project_id)
+    report = pipeline.latest_section_qa_report(db, project_id, volume_id, section_id)
+    if report is None:
+        return {"state": "NOT_RUN", "checks": []}
+    return {"artifact_id": report.id, "sha256": report.sha256,
+            **(report.payload_json or {})}
 
 
 @router.post("/projects/{project_id}/pipeline/scene-scripts/{artifact_id}/confirm", status_code=200)
@@ -269,14 +322,22 @@ def storyboard_draft_route(
     require_project(db, project_id)
     only = (body or {}).get("section_ids")
     only_section_ids = [str(item) for item in only] if isinstance(only, list) and only else None
+    # A refused answer is replaced only by naming it.  The panel passes the
+    # task ids it was shown, in unit order; an id that does not belong to the
+    # unit being run simply leaves the refusal standing.
+    replay_ids = (body or {}).get("authorize_replay_task_ids")
+    authorize_replay_ids = ([str(item) for item in replay_ids if item]
+                            if isinstance(replay_ids, list) and replay_ids else None)
     try:
-        script_text = pipeline.serialize_volume_script(db, project_id, volume_id)
+        script_text = pipeline.serialize_volume_script(
+            db, project_id, volume_id, only_section_ids=only_section_ids)
         from shine.media.output_layout import output_root_for_request
 
         result = volume_storyboard_draft(
             db, project_id, volume_id, gateway,
             data_dir=output_root_for_request(request, db),
-            only_section_ids=only_section_ids)
+            only_section_ids=only_section_ids,
+            authorize_replay_ids=authorize_replay_ids)
         record = record_storyboard_draft(db, project_id, volume_id, result, script_text)
         db.commit()
     except ValueError as exc:
@@ -445,6 +506,29 @@ def resume_pipeline_task_route(project_id: str, task_id: str, body: dict, db: DB
     try:
         result = pipeline.resume_pipeline_task(db, project_id, task_id,
                                                (body or {}).get("expected_state_version"))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _http_from_value_error(exc) from None
+    return result
+
+
+@router.post("/projects/{project_id}/pipeline/tasks/{task_id}/scenes/{scene_task_id}/new-attempt")
+def authorize_blocked_scene_route(project_id: str, task_id: str, scene_task_id: str, body: dict,
+                                  db: DBSession, operator: Operator) -> dict:
+    """Authorise one more model call for the scene whose outcome is unknown.
+
+    This is the only way past a batch stopped by an unprovable scene outcome:
+    it retires that scene's request identity (history keeps the UNKNOWN) and
+    re-queues the volume.  The next run creates a genuinely new request.
+    """
+    require_project(db, project_id)
+    try:
+        result = pipeline.authorize_blocked_scene_new_attempt(
+            db, project_id, task_id, scene_task_id,
+            (body or {}).get("expected_state_version"),
+            actor=_local_actor(operator),
+        )
         db.commit()
     except ValueError as exc:
         db.rollback()

@@ -91,6 +91,14 @@ class ProviderConfig:
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
     context_window_source: str = "provider_did_not_declare_limits"
+    streaming: bool = False
+    """Whether this request may use the streaming transport.
+
+    Off unless the operator switches ``SHINE_LLM_STREAMING`` on: a provider that
+    was never probed must not receive a streaming shape just because the adapter
+    supports SSE.
+    """
+
     rate_limit_retry_attempts: int = 0
     """How often a throttled call may wait and ask again.
 

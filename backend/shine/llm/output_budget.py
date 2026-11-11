@@ -202,20 +202,21 @@ def apply_output_budget(config: ProviderConfig, budget: dict) -> ProviderConfig:
     overhead and any reasoning tokens the provider bills as completion).
     """
     cap = budget.get("completion_cap")
+    streaming = bool(budget.get("streaming"))
     if isinstance(config.kind, str) and cap:
         if config.kind == "openai_compatible":
             from dataclasses import replace
             return replace(config, generation_options={
-                **config.generation_options, "max_completion_tokens": cap})
+                **config.generation_options, "max_completion_tokens": cap}, streaming=streaming)
         if config.kind == "ollama":
             from dataclasses import replace
             return replace(config, generation_options={
-                **config.generation_options, "max_tokens": cap})
+                **config.generation_options, "max_tokens": cap}, streaming=streaming)
         if config.kind == "anthropic":
             from dataclasses import replace
             return replace(config, generation_options={
-                **config.generation_options, "max_tokens": cap})
-    return config
+                **config.generation_options, "max_tokens": cap}, streaming=streaming)
+    return replace(config, streaming=streaming)
 
 
 def estimate_input_tokens(text: str) -> int:

@@ -34,7 +34,10 @@ class MockLLMProvider:
             try:
                 parsed = json.loads(value)
             except json.JSONDecodeError as exc:
-                raise LLMFormatError("Mock model returned malformed JSON") from exc
+                # Mirror the real adapters: the answer travels with the error so
+                # the governor can keep the literary body instead of discarding it.
+                raise LLMFormatError("Mock model returned malformed JSON",
+                                     details={"provider_text": text}) from exc
         else:
             parsed = value
             text = json.dumps(value, ensure_ascii=False)

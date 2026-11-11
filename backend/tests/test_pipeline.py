@@ -768,7 +768,13 @@ def test_overlong_volume_is_batched_and_the_editor_limit_is_named(api):
 
 
 def test_oversized_single_chapter_volume_carries_a_warning(api):
-    """One chapter past the inline budget makes the plan warn by name."""
+    """One chapter past the inline budget never passes silently.
+
+    The plan now cuts such a chapter at paragraph boundaries instead of handing
+    an oversized volume to the storyboard lane, so the warning that has to
+    appear is the one naming the cut.  Either way the person is told by name and
+    coverage stays complete: the chapter is never quietly dropped or truncated.
+    """
     client, factory, settings = api
     pid = create_project(client, "单章超长")
     text = "第一章 巨章\n" + "海。" * 30_000
@@ -776,9 +782,14 @@ def test_oversized_single_chapter_volume_carries_a_warning(api):
     with factory.begin() as db:
         doc_r = db.get(ProjectDocument, doc.id)
         plan = pipeline.plan_volumes(db, pid, doc_r)
-        codes = [w["code"] for w in plan.payload_json.get("warnings", [])]
-        assert "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes
-        assert plan.payload_json["coverage"]["complete"] is True
+        payload = plan.payload_json
+        codes = [w["code"] for w in payload.get("warnings", [])]
+        assert ("VOLUME_HARD_SPLIT" in codes
+                or "VOLUME_MAY_EXCEED_STORYBOARD_INLINE_LIMIT" in codes), codes
+        assert payload["coverage"]["complete"] is True
+        assert sum(v["char_count"] for v in payload["volumes"]) == len(text)
+        assert all(v["char_count"] <= pipeline.HARD_SPLIT_MIN_CHARS
+                   for v in payload["volumes"])
 
 
 def test_episode_script_contract_with_continuity_check(api):
@@ -1040,3 +1051,102 @@ def test_a_burst_counter_at_the_limit_does_not_lock_the_text_queues_out(api, mon
         row = db.get(AgentTaskRecord, task_id)
         assert row.status != "QUEUED", "the queued text task must be claimed"
         assert row.state_version > 1
+
+
+def test_a_volume_stopped_by_an_unknown_scene_can_be_authorised_once(api):
+    """A batch stop caused by one unprovable scene must have a way forward.
+
+    The rule "never replay a request whose outcome is unknown" is right, but it
+    left the volume with no exit at all: the panel offered "修复后继续", which
+    re-ran the batch and met the same blocked scene without a single new call.
+    The only honest exit is a person's authorisation for THAT scene, with the
+    old row kept as history and its request identity released so the next run
+    creates a genuinely new request.
+    """
+    from shine.models import AgentTaskRecord
+
+    _client, factory, _settings = api
+    pid = create_project(_client, "授权重发")
+    with factory.begin() as db:
+        scene = AgentTaskRecord(
+            project_id=pid, role_id="scriptwriter", input_hash="h" * 64,
+            asset_manifest_hash="h" * 64, rulepack_id="rp", rulepack_hash="r" * 64,
+            model_profile_id="p", model_id="m", schema_version="1.1",
+            status="NEEDS_REVIEW", error_code="LLM_CONNECTION",
+            request_identity="i" * 64,
+            trace={"scene_key": "S1", "tool": "script_prepare",
+                   "external_outcome": "UNKNOWN"},
+        )
+        db.add(scene)
+        db.flush()
+        outline = AgentTaskRecord(
+            project_id=pid, role_id="story_outline_run", input_hash="o" * 64,
+            asset_manifest_hash="o" * 64, rulepack_id="rp", rulepack_hash="r" * 64,
+            model_profile_id="p", model_id="m", schema_version="1.1",
+            status="NEEDS_REVIEW", error_code="STORY_EXTRACTION_NEEDS_REVIEW",
+            trace={"stage": "EXTRACT", "cursor": 0, "document_id": "d",
+                   "document_sha256": "s" * 64,
+                   "blocked_subtasks": [{"scene_key": "S1", "status": "NEEDS_REVIEW",
+                                         "task_id": scene.id, "error_code": "LLM_CONNECTION",
+                                         "external_outcome": "UNKNOWN"}]},
+        )
+        db.add(outline)
+        db.flush()
+        outline_id, scene_id = outline.id, scene.id
+        version = outline.state_version
+
+    # A stale view buys nothing.
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.authorize_blocked_scene_new_attempt(db, pid, outline_id, scene_id, version + 7)
+    assert "PIPELINE_TASK_STATE_CHANGED" in str(err.value)
+
+    with factory() as db:
+        result = pipeline.authorize_blocked_scene_new_attempt(db, pid, outline_id, scene_id, version)
+        db.commit()
+    assert result["status"] == "QUEUED"
+
+    with factory() as db:
+        scene_row = db.get(AgentTaskRecord, scene_id)
+        outline_row = db.get(AgentTaskRecord, outline_id)
+        # The old call stays in the ledger as history, without its identity.
+        assert scene_row.status == "SUPERSEDED"
+        assert scene_row.request_identity is None
+        assert scene_row.trace["external_outcome"] == "SUPERSEDED"
+        assert scene_row.trace["new_attempt_authorization"]["previous_request_identity"] == "i" * 64
+        # The volume is re-queued and no longer names the retired scene.
+        assert outline_row.status == "QUEUED"
+        assert outline_row.error_code is None
+        assert outline_row.trace["blocked_subtasks"] == []
+
+
+def test_an_unrelated_scene_cannot_be_retired_through_an_outline(api):
+    """The authorisation names one scene; it must not release other work."""
+    from shine.models import AgentTaskRecord
+
+    _client, factory, _settings = api
+    pid = create_project(_client, "无关场次")
+    with factory.begin() as db:
+        stranger = AgentTaskRecord(
+            project_id=pid, role_id="scriptwriter", input_hash="z" * 64,
+            asset_manifest_hash="z" * 64, rulepack_id="rp", rulepack_hash="r" * 64,
+            model_profile_id="p", model_id="m", schema_version="1.1",
+            status="NEEDS_REVIEW", request_identity="y" * 64,
+            trace={"scene_key": "S9", "external_outcome": "UNKNOWN"},
+        )
+        outline = AgentTaskRecord(
+            project_id=pid, role_id="story_outline_run", input_hash="x" * 64,
+            asset_manifest_hash="x" * 64, rulepack_id="rp", rulepack_hash="r" * 64,
+            model_profile_id="p", model_id="m", schema_version="1.1",
+            status="NEEDS_REVIEW", trace={"stage": "EXTRACT", "blocked_subtasks": []},
+        )
+        db.add_all([stranger, outline])
+        db.flush()
+        stranger_id, outline_id, version = stranger.id, outline.id, outline.state_version
+
+    with pytest.raises(ValueError) as err:
+        with factory.begin() as db:
+            pipeline.authorize_blocked_scene_new_attempt(db, pid, outline_id, stranger_id, version)
+    assert "PIPELINE_TASK_SCENE_NOT_BLOCKED" in str(err.value)
+    with factory() as db:
+        assert db.get(AgentTaskRecord, stranger_id).status == "NEEDS_REVIEW"

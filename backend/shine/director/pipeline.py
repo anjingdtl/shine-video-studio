@@ -9,6 +9,7 @@ episode plans, packages or runs: the pipeline prepares their inputs.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
 from datetime import timedelta
@@ -21,10 +22,13 @@ from shine.h3.rulebook import digest
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
 from shine.services import add_audit
 
+logger = logging.getLogger(__name__)
+
 SOURCE_MASTER_KIND = "FourStageSourceMaster"
 VOLUME_PLAN_KIND = "FourStageVolumePlan"
 BIBLE_KIND = "FourStageGlobalStoryBible"
 SCENE_SCRIPT_KIND = "FourStageSceneScript"
+SCENE_BEAT_KIND = "FourStageSceneBeat"
 BIBLE_RUN_ROLE = "four_stage_bible_run"
 SCENE_SCRIPT_RUN_ROLE = "four_stage_scene_script_run"
 
@@ -32,12 +36,46 @@ SCENE_SCRIPT_RUN_ROLE = "four_stage_scene_script_run"
 #: share this number, so an edit is refused by name instead of being truncated
 #: into a scene that silently lost its ending.
 SCENE_SCRIPT_TEXT_LIMIT = 24_000
+"""One scene's script text limit, shared by the writer contract and the editor."""
+
+BIBLE_SYSTEM_PROMPT = (
+    "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
+    "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
+    "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
+    "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
+    "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
+    "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
+    "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。"
+    "\n\n另外输出 observations：这是全书事实清单，供后续每一场写作时查证，最多 40 条。"
+    "每条形如 {\"kind\":\"character|relationship|mainline|clue|foreshadow\","
+    "\"subjects\":[\"人物或物件名\"],\"statement\":\"一句话事实\","
+    "\"dimensions\":[\"这条事实同时属于的其它维度\"],"
+    "\"visibility\":{\"scope\":\"audience_known\"或\"production_only\"},"
+    "\"evidence_span_ids\":[\"来源分卷或段落 id，可留空\"]}。"
+    "只写原文确实发生、可核对的事实：人物身份与外貌、关系变化、主线推进、"
+    "关键线索、已经埋下的伏笔。不要写推测、评价或剧情建议。"
+    "观众已经知道的用 audience_known；必须留到后面才揭晓的真相用 production_only。"
+    "只输出 JSON。"
+)
+"""The one blueprint prompt.  The dry-run planner measures this exact text."""
+
+SCENE_SYSTEM_PROMPT = (
+    "你是剧集编剧。基于全书故事蓝图、本段原文与上一场的收尾状态，写出这一场的完整剧本："
+    "对白、动作、场景与时间空间。text 写完整正文；continuity_out 用一两句写本场结束后的关键状态。"
+    "不要输出场次编号、来源范围或版本，这些由系统填写。只输出 JSON。"
+)
+"""The one scene prompt.  Shared by the worker and the dry-run planner."""
 
 #: A single volume keeps the whole master when the master fits the budget.
 SINGLE_VOLUME_MAX_CHARS = 45_000
 #: The working budget of one volume: sections are grouped at narrative
 #: boundaries within this budget, never mid-section.
 TARGET_VOLUME_CHARS = 45_000
+HARD_SPLIT_MIN_CHARS = 55_000
+"""A single section bigger than this cannot be one volume.
+
+It is the same limit the storyboard lane names as its inline input ceiling, so a
+chapter below it keeps the old plan - one volume, no cut."""
 #: The pipeline's own claims follow the story tasks' convention.
 PIPELINE_CLAIM_SECONDS = 120
 PIPELINE_VERSION = "four-stage-pipeline-v1"
@@ -185,6 +223,37 @@ def build_source_master(db, project_id: str, document) -> AgentArtifact:
     return artifact
 
 
+HARD_SPLIT_PREFERRED_ENDINGS = ("\n\n", "\n", "。", "！", "？", "；", ".", "!", "?")
+"""Where a forced cut may land, best first.  A cut is only forced when one
+section alone is bigger than a volume target, which happens for manuscripts with
+no headings at all."""
+
+
+def _hard_split_ranges(text: str, start: int, end: int, target: int) -> list[tuple[int, int]]:
+    """Cut one oversized run at the best boundary, never mid-sentence if avoidable.
+
+    The ranges are contiguous and cover ``[start, end)`` exactly: a hard split
+    moves a boundary, it never drops or duplicates a character.
+    """
+    ranges: list[tuple[int, int]] = []
+    cursor = start
+    while end - cursor > target:
+        window = text[cursor:cursor + target]
+        cut = 0
+        for marker in HARD_SPLIT_PREFERRED_ENDINGS:
+            at = window.rfind(marker)
+            if at >= target // 2:
+                cut = cursor + at + len(marker)
+                break
+        if cut <= cursor:
+            cut = cursor + target
+        ranges.append((cursor, cut))
+        cursor = cut
+    if cursor < end:
+        ranges.append((cursor, end))
+    return ranges
+
+
 def detect_volume_boundaries(text: str, sections: list[dict]) -> list[dict]:
     """Group the master's sections into volume candidates.
 
@@ -210,17 +279,39 @@ def detect_volume_boundaries(text: str, sections: list[dict]) -> list[dict]:
             current_size = 0
         groups[-1].append(section)
         current_size += size
-    return [
-        {
-            "order": index + 1,
-            "title": f"第{index + 1}卷",
+    boundaries: list[dict] = []
+    for group in (item for item in groups if item):
+        size = sum(s["end_offset"] - s["start_offset"] for s in group)
+        reason = "volume_marker" if group[0]["start_offset"] in hard else "budget_grouping"
+        if len(group) == 1 and size > HARD_SPLIT_MIN_CHARS:
+            # A manuscript without headings is one long section.  The plan may
+            # not pretend it fits: it is cut, and the cut is recorded so the
+            # person can see exactly where and why.
+            section = group[0]
+            for start, end in _hard_split_ranges(text, section["start_offset"],
+                                                 section["end_offset"], TARGET_VOLUME_CHARS):
+                boundaries.append({
+                    "start_offset": start, "end_offset": end,
+                    "section_ids": [section["production_section_id"]],
+                    "char_count": end - start,
+                    "boundary_reason": "hard_split",
+                    "split_note": (
+                        f"原文《{section.get('title') or '未命名段落'}》超过单卷可承载的"
+                        f"{HARD_SPLIT_MIN_CHARS} 字，且没有可用的章节边界，"
+                        f"已按 {TARGET_VOLUME_CHARS} 字目标在段落处硬切；"
+                        f"原文范围 [{start}, {end}) 与前一段连续，没有删字。"),
+                })
+            continue
+        boundaries.append({
             "start_offset": group[0]["start_offset"],
             "end_offset": group[-1]["end_offset"],
             "section_ids": [s["production_section_id"] for s in group],
-            "char_count": sum(s["end_offset"] - s["start_offset"] for s in group),
-            "boundary_reason": "volume_marker" if group[0]["start_offset"] in hard else "budget_grouping",
-        }
-        for index, group in enumerate(groups) if group
+            "char_count": size,
+            "boundary_reason": reason,
+        })
+    return [
+        {"order": index + 1, "title": f"第{index + 1}卷", **boundary}
+        for index, boundary in enumerate(boundaries)
     ]
 
 
@@ -264,6 +355,9 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
             "section_ids": boundary["section_ids"],
             "char_count": boundary.get("char_count", boundary["end_offset"] - boundary["start_offset"]),
             "boundary_reason": boundary["boundary_reason"],
+            # A forced cut travels with the plan: the person who confirms the
+            # plan must be able to read where it was cut and why.
+            **({"split_note": boundary["split_note"]} if boundary.get("split_note") else {}),
         })
     payload = {
         "source_master": {"document_id": document.id, "sha256": document.sha256},
@@ -277,6 +371,10 @@ def plan_volumes(db, project_id: str, document) -> AgentArtifact:
              "detail": "该卷超过 55,000 字，分镜草案可能超出链路单次输入上限；"
                        "请在源文拆分该章或手动调整分卷边界"}
             for v in volumes if v["char_count"] > 55_000
+        ] + [
+            {"volume_id": v["volume_id"], "code": "VOLUME_HARD_SPLIT",
+             "detail": v.get("split_note") or "这一卷是硬切出来的，请确认切口。"}
+            for v in volumes if v.get("boundary_reason") == "hard_split"
         ],
         "status": "DRAFT",
     }
@@ -386,6 +484,10 @@ def materialize_volume_documents(db, project_id: str, plan_artifact_id: str) -> 
 class GlobalStoryBiblePayload(BaseModel):
     """The cross-volume blueprint: who, where, what is promised, what is open."""
     schema_version: str = "1.0"
+    # The five-dimension memory is fed from this one list.  It is optional so a
+    # terse answer stays valid, and it is tolerated item-by-item at ingest time,
+    # so one malformed observation can never cost the blueprint.
+    observations: list[dict] = Field(default_factory=list, max_length=200)
     mainline: str = Field(min_length=1, max_length=2000)
     characters: list[dict] = Field(default_factory=list, max_length=64)
     world: str = Field(default="", max_length=2000)
@@ -793,8 +895,323 @@ def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: s
         return None
 
 
+def _scene_qa(*, factory, gateway, project_id: str, task_id: str, trace: dict,
+               section: dict, source_text: str, payload: dict,
+               unit_budget=None) -> dict | None:
+    """L0 first; L1 only for a doubt L0 could not settle.
+
+    Nothing here can rewrite the scene and nothing here can fail it: a QA fault
+    is recorded as ``QA_PENDING`` and the script keeps the state it earned.  The
+    verdict is a separate artifact, so a later re-review never touches the text.
+    """
+    from shine.literary import flags, qa
+    from shine.literary.governor import UnitBudget
+    from shine.materialprep.agent_call import call_material_agent
+
+    unit_id = f"scene:{trace.get('volume_id')}:{section.get('section_id')}"
+    # Imported here (not at module scope) so the module keeps its existing import
+    # graph; the session factory is the caller's, never a new engine.
+    from shine.models import ProjectDocument
+    try:
+        with factory() as db:
+            mode = flags.mode("qa", db, project_id)
+            if mode == "off":
+                # The switch means what it says: no local report either.
+                return None
+            guards = qa.memory_guards(db, project_id)
+            # The authoritative length of the document the offsets point into.
+            document = db.get(ProjectDocument, trace.get("volume_document_id") or "")
+            document_length = len(document.text or "") if document is not None else None
+        report = qa.check_scene_script(
+            payload, unit_id=unit_id, section=section, source_text=source_text,
+            source_length=document_length,
+            known_characters=guards["known_characters"],
+            secret_statements=guards["secret_statements"])
+        summary = {"mode": mode, **report.as_dict()}
+        if mode != "on" or not report.needs_semantic_review:
+            return summary
+        request = qa.semantic_request(report, text=str(payload.get("text") or ""),
+                                      section=section, guards=guards)
+        if request is None:
+            return summary
+        context, question = request
+        outcome = call_material_agent(
+            gateway, factory, SCENE_SCRIPT_RUN_ROLE,
+            system=qa.SEMANTIC_SYSTEM_PROMPT,
+            context=context,
+            schema=qa.SemanticReview.model_json_schema(),
+            contract=qa.SemanticReview,
+            purpose="qa",
+            unit_id=f"qa:{trace.get('volume_id')}:{section.get('section_id')}",
+            unit_budget=unit_budget or UnitBudget(max_calls=1, max_repair_rounds=0),
+            record_attempt=_attempt_recorder(factory, project_id, task_id))
+        report = qa.merge_semantic_report(report, outcome)
+        return {"mode": mode, **report.as_dict(),
+                "semantic_question": question,
+                "semantic_cost": qa.estimate_semantic_cost(question, context["excerpt"]),
+                "semantic_error": outcome.error_code}
+    except Exception:  # noqa: BLE001 - a review never fails a written scene
+        logger.exception("literary_qa_failed task=%s unit=%s", task_id, unit_id)
+        return {"mode": "error", "state": "WARNING", "level": "L0",
+                "checks": [{"code": "QA_PENDING", "severity": "WARNING",
+                            "message": "终校未能完成，已记录；不影响本场正文。",
+                            "evidence": {}, "unit_id": unit_id}]}
+
+
+def _persist_qa_report(*, factory, project_id: str, task_id: str, script_artifact_id: str,
+                       script_sha256: str, section: dict, summary: dict,
+                       volume_id: str | None = None) -> str | None:
+    """Store one QA verdict as a versioned artifact bound to the text it judged."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    payload = {
+        "volume_id": volume_id,
+        "section_id": section.get("section_id"),
+        "script_artifact_id": script_artifact_id,
+        "script_sha256": script_sha256,
+        **summary,
+    }
+    try:
+        with factory.begin() as db:
+            artifact = AgentArtifact(
+                project_id=project_id, kind=qa.REPORT_KIND, schema_version="1.0",
+                payload_json=payload, sha256=digest(payload),
+                producer_role=SCENE_SCRIPT_RUN_ROLE, source_task_id=task_id,
+                input_revision_ids=[script_artifact_id])
+            db.add(artifact)
+            db.flush()
+            return artifact.id
+    except Exception:  # noqa: BLE001 - the verdict is a side record
+        logger.exception("literary_qa_report_failed task=%s", task_id)
+        return None
+
+
+QA_MESSAGES = {
+    "SCENE_TEXT_MISSING": "这一场没有正文，不能确认。",
+    "SCENE_SOURCE_RANGE_INVALID": "这一场引用的原文范围无效，不能确认。",
+    "SCENE_CHARACTER_UNKNOWN": "出现了蓝图里没有的人物，请确认是否为新角色。",
+    "SCENE_SECRET_LEAK_RISK": "可能提前说出了尚未揭晓的秘密，请复核。",
+    "SCENE_CONTINUITY_OUT_MISSING": "没有写下收尾状态，下一场会缺少接续信息。",
+    "STORYBOARD_BEAT_UNCOVERED": "有剧情节拍没有被镜头覆盖。",
+    "STORYBOARD_BEAT_UNKNOWN": "有镜头引用了剧本里不存在的节拍。",
+    "QA_PENDING": "终校未完成，已记录；不影响正文。",
+}
+"""One Chinese sentence per check, so no raw code reaches the normal UI."""
+
+
+def qa_states_by_section(db, project_id: str) -> dict[str, dict]:
+    """The newest verdict per section, as the panel needs it: state + one line."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+    ).order_by(AgentArtifact.created_at.desc()).limit(500)).all()
+    result: dict[str, dict] = {}
+    for row in rows:
+        payload = row.payload_json or {}
+        section_id = payload.get("section_id")
+        if not section_id or payload.get("source") == "storyboard" or section_id in result:
+            continue
+        blocking = [str(check.get("code")) for check in payload.get("checks") or []
+                    if check.get("severity") in {"HARD_BLOCK", "LOCAL_REVIEW"}]
+        result[section_id] = {
+            "state": payload.get("state"),
+            "level": payload.get("level"),
+            "codes": blocking[:4],
+            "message": "；".join(QA_MESSAGES.get(code, "请复核这一场。")
+                                for code in blocking[:2]) or None,
+            "artifact_id": row.id,
+            "script_sha256": payload.get("script_sha256"),
+            "script_artifact_id": payload.get("script_artifact_id"),
+        }
+    return result
+
+
+def latest_section_qa_report(db, project_id: str, volume_id: str, section_id: str):
+    """The newest verdict on one section, whichever revision it judged."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    return db.scalar(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+        AgentArtifact.payload_json["section_id"].as_string() == section_id,
+    ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
+
+
+def latest_qa_report(db, project_id: str, script_sha256: str):
+    """The newest verdict on exactly this text, or None."""
+    from shine.literary import qa
+    from shine.models import AgentArtifact
+
+    if not script_sha256:
+        return None
+    # Filtered in SQL: a busy project has hundreds of verdicts, and the one that
+    # judges *this* text must never fall outside a read window.
+    return db.scalar(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == qa.REPORT_KIND,
+        AgentArtifact.payload_json["script_sha256"].as_string() == script_sha256,
+    ).order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc()).limit(1))
+
+
+def _scene_memory_view(factory, project_id: str, bible_payload: dict) -> dict | None:
+    """The bounded five-dimension view a scene writer may receive.
+
+    Returns ``None`` in ``off``/``shadow``: shadow computes and records new facts
+    but never changes the request the user pays for.  A memory fault returns
+    ``None`` as well - the scene is written from the bible and the source, which
+    is exactly what happened before V2.1.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        with factory() as db:
+            if not flags.affects_request("memory", db, project_id):
+                return None
+            names = tuple(
+                str(character.get("name")).strip()
+                for character in (bible_payload.get("characters") or [])[:8]
+                if isinstance(character, dict) and str(character.get("name") or "").strip())
+            retrieval = memory.retrieve(db, project_id=project_id, token_budget=1_200,
+                                        subject_names=names)
+        if not retrieval.fact_ids:
+            # A legitimate empty view: no authoritative fact touches this scene.
+            return None
+        return {"facts": retrieval.context_text, "fact_ids": retrieval.fact_ids,
+                "warnings": retrieval.warnings}
+    except Exception:  # noqa: BLE001 - guidance never blocks the writer
+        logger.exception("literary_memory_retrieval_failed project=%s", project_id)
+        return None
+
+
+def _ingest_memory(factory, *, project_id: str, task_id: str, payload: dict,
+                   document_sha256: str | None) -> dict:
+    """Archive the optional five-dimension observations of a blueprint answer.
+
+    This is a side ledger, never a gate: an invalid observation is a warning
+    about that observation, and a memory fault cannot fail the outline that was
+    successfully written.  Nothing here is promoted to authoritative.
+    """
+    from shine.literary import flags, memory
+
+    try:
+        with factory() as db:
+            if not flags.enabled("memory", db, project_id):
+                return {"mode": "off"}
+            mode = flags.mode("memory", db, project_id)
+        observations, findings = memory.parse_observations(payload, unit_id="bible")
+        if not observations:
+            return {"mode": mode, "saved": 0, "findings": [item.as_dict() for item in findings]}
+        with factory.begin() as db:
+            result = memory.record_observations(
+                db, project_id=project_id, observations=observations,
+                unit_id="bible", source_task_id=task_id, document_sha256=document_sha256)
+            snapshot = memory.snapshot(db, project_id, upstream={"task_id": task_id})
+            summary = result.as_dict()
+            summary["snapshot_sha256"] = snapshot.sha256
+            summary["mode"] = mode
+            summary["findings"] = [item.as_dict() for item in [*findings, *result.findings]]
+            return summary
+    except Exception:  # noqa: BLE001 - a side ledger never fails the outline
+        logger.exception("literary_memory_ingest_failed task=%s", task_id)
+        return {"mode": "error"}
+
+
+def _attempt_recorder(factory, project_id: str, task_id: str):
+    """A durable physical-call recorder for one task.
+
+    The governor calls it twice per request: once before the request leaves and
+    once with the real outcome.  A ledger fault is logged and swallowed - the
+    literary work must not fail because bookkeeping did.
+    """
+    from shine.literary import ledger
+
+    def record(attempt: dict) -> None:
+        try:
+            with factory.begin() as db:
+                ledger.record(db, project_id=project_id, attempt=attempt, task_id=task_id)
+        except Exception:  # noqa: BLE001 - bookkeeping never fails a scene
+            logger.exception("literary_attempt_ledger_failed task=%s unit=%s",
+                             task_id, attempt.get("unit_id"))
+
+    return record
+
+
+def _compact_attempts(attempts) -> list[dict]:
+    """The bounded physical-call ledger one task keeps in its trace."""
+    if not isinstance(attempts, list):
+        return []
+    keep = ("attempt_no", "request_fingerprint", "input_tokens_estimated",
+            "output_request_tokens", "completion_tokens", "reasoning_tokens",
+            "latency_ms", "finish_reason", "external_outcome", "error_code",
+            "http_status", "corrective", "purpose", "role")
+    return [{key: item.get(key) for key in keep if key in item} for item in attempts[-6:]
+            if isinstance(item, dict)]
+
+
+def _persist_candidate(factory, *, task_id: str, project_id: str, target_kind: str,
+                       unit_id: str, text: str, payload: dict | None,
+                       findings, notes: list[str] | None = None,
+                       input_revision_ids: list[str] | None = None) -> str | None:
+    """Save the literary text a rejected answer still carried.
+
+    This is the "收到有效内容先持久化" rule in code: the task may end in
+    review, but the chapter it produced is not deleted.  The draft is its own
+    artifact kind, so no confirmed-pointer or orphan-adoption path can promote
+    it into an accepted stage result.
+    """
+    from shine.literary.drafts import save_candidate
+    from shine.models import AgentTaskRecord
+
+    if not (text or "").strip() and not isinstance(payload, dict):
+        return None
+    try:
+        with factory.begin() as db:
+            task = db.get(AgentTaskRecord, task_id)
+            if task is None or task.project_id != project_id:
+                return None
+            candidate = save_candidate(
+                db, project_id=project_id, task=task, target_kind=target_kind,
+                unit_id=unit_id, text=text, payload=payload, findings=list(findings or []),
+                notes=list(notes or []), input_revision_ids=input_revision_ids)
+            return candidate.artifact.id
+    except Exception:  # noqa: BLE001 - losing a draft must never fail the task path
+        logger.exception("literary_candidate_write_failed task=%s unit=%s", task_id, unit_id)
+        return None
+
+
+def _blueprint_request_context(db, project_id: str, trace: dict, outlines: list) -> dict:
+    """The merged digest input one blueprint call receives.
+
+    The merge keeps every event id, compresses prose when the budget is tight and
+    reports a volume whose outline does not cover its own source range.  A
+    missing coverage is a named warning for the person who confirms the
+    blueprint, never a silent gap.
+    """
+    from shine.literary.blueprint import blueprint_context, digest_from_outline, merge_digests
+
+    plan = db.get(AgentArtifact, trace.get("plan_artifact_id") or "")
+    volumes = {}
+    if plan is not None and plan.project_id == project_id:
+        volumes = {volume.get("volume_id"): volume
+                   for volume in (plan.payload_json.get("volumes") or [])}
+    digests = []
+    for ref, outline in zip(trace.get("outline_refs") or [], outlines, strict=False):
+        volume = volumes.get(ref.get("volume_id")) or {
+            "volume_id": ref.get("volume_id"), "order": ref.get("order")}
+        digests.append(digest_from_outline({**outline.payload_json, "_sha256": outline.sha256},
+                                           volume=volume))
+    merged = merge_digests(digests, token_budget=3_000)
+    return blueprint_context(merged)
+
+
 def run_bible_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one bible synthesis task under the fenced claim."""
+    from shine.literary.governor import UnitBudget
     from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentTaskRecord
@@ -844,18 +1261,7 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             outlines.append(outline)
         context = {
             "master": {"char_count": len(master_doc.text or ""), "outline_count": len(outlines)},
-            "outline_summaries": [
-                {"order": index + 1,
-                 "story_line": o.payload_json.get("story_line", []),
-                 "timeline": o.payload_json.get("timeline", []),
-                 "characters": o.payload_json.get("characters", []),
-                 "questions": o.payload_json.get("questions", []),
-                 "sections": [
-                     {"scene_key": s.get("scene_key", s.get("production_section_id")),
-                      "title": s.get("title"), "summary": s.get("summary", "")}
-                     for s in (o.payload_json.get("production_sections") or [])],
-                 }
-                for index, o in enumerate(outlines)],
+            **_blueprint_request_context(db, project_id, trace, outlines),
         }
         schema = GlobalStoryBiblePayload.model_json_schema()
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
@@ -864,29 +1270,42 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
         trace = sent
         outcome = call_material_agent(
             gateway, factory, BIBLE_RUN_ROLE,
-            system=(
-                "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
-                "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
-                "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
-                "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
-                "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
-                "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
-                "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。只输出 JSON。"
-            ),
+            system=BIBLE_SYSTEM_PROMPT,
             context=context,
             schema=schema,
             contract=GlobalStoryBiblePayload,
             task_category="creative",
+            purpose="outline",
+            unit_id=f"bible:{project_id}",
+            unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
             before_call=text_consent.guard(project_id, trace["document_id"], trace["document_sha256"],
                                            BIBLE_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
+            from shine.literary.adapters import Adapted, adapt_bible
+            salvage = outcome.candidate_payload if isinstance(outcome.candidate_payload, dict) else None
+            has_answer = bool(salvage) or bool((outcome.candidate_text or "").strip())
+            # A request that never left - consent, budget, refused route - owns
+            # no answer.  Saving an empty "candidate" for it would tell the
+            # person a blueprint was kept when nothing was ever written.
+            adapted = adapt_bible(salvage or {}) if has_answer else Adapted(payload={})
+            candidate_id = _persist_candidate(
+                factory, task_id=task_id, project_id=project_id, target_kind=BIBLE_KIND,
+                unit_id="bible", text=outcome.candidate_text or adapted.payload.get("text", ""),
+                payload=adapted.payload if has_answer else None,
+                findings=outcome.findings,
+                notes=[*adapted.notes, *adapted.gaps],
+                input_revision_ids=trace.get("input_revision_ids") or []) if has_answer else None
             blocked = {**trace, "stage": "NEEDS_REVIEW",
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
                        "schema_errors": outcome.schema_errors,
-                       "truncated": outcome.details.get("truncated")}
+                       "truncated": outcome.details.get("truncated"),
+                       "review": outcome.review,
+                       "candidate_artifact_id": candidate_id,
+                       "output_budget": outcome.details.get("output_budget")}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
         # The blueprint carries the ordered outline identity it was written
@@ -899,6 +1318,9 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
             "plan_artifact_id": trace.get("plan_artifact_id"),
             "plan_sha256": trace.get("plan_sha256"),
         }}
+        payload["memory_ingest"] = _ingest_memory(
+            factory, project_id=project_id, task_id=task_id, payload=payload,
+            document_sha256=trace.get("document_sha256"))
         _commit_pipeline_result(
             factory, task_id=task_id, version=version, worker_id=worker_id,
             project_id=project_id, kind=BIBLE_KIND, role=BIBLE_RUN_ROLE, payload=payload,
@@ -961,15 +1383,18 @@ def bible_basis_blockers(db, project_id: str, artifact) -> list[str]:
     return []
 
 
-def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
+def bible_confirmation_blockers(db, project_id: str, artifact, *, scope_volume_id: str | None = None) -> list[str]:
     """Why a blueprint may not yet be confirmed, decided from durable evidence.
 
-    Confirming a blueprint is the cross-volume decision, so it needs the full
-    ordered set of the *current* plan's volumes.  A blueprint synthesized from
-    a partial set stays a usable draft and is refused here by name instead of
-    being confirmed as if every volume had been read.  A blueprint a person
-    wrote themselves needs no provider coverage evidence, but it is held to
-    the same rule about the plan's volumes.
+    Confirming a blueprint for the whole plan is the cross-volume decision, so it
+    needs the full ordered set of the *current* plan's volumes.  A blueprint
+    synthesized from a partial set stays a usable draft and is refused here by
+    name instead of being confirmed as if every volume had been read.
+
+    ``scope_volume_id`` is the one-volume exception: a person may confirm the
+    blueprint for a single volume whose outline really was read, so a volume can
+    be produced before the whole book is outlined.  The confirmation is recorded
+    as volume-scoped and no other volume may be published from it.
     """
     from shine.models import AgentTaskRecord
 
@@ -980,6 +1405,19 @@ def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
     coverage = trace.get("outline_coverage") or {}
     if task is None and not authored_by_person:
         return ["PIPELINE_BIBLE_SOURCE_TASK_MISSING"]
+    if scope_volume_id:
+        plan = current_volume_plan(db, project_id)
+        if plan is None:
+            return ["PIPELINE_VOLUME_PLAN_NOT_CONFIRMED"]
+        if not any(v.get("volume_id") == scope_volume_id for v in plan.payload_json.get("volumes") or []):
+            return ["PIPELINE_VOLUME_NOT_IN_PLAN"]
+        if coverage.get("plan_sha256") and coverage["plan_sha256"] != plan.sha256:
+            return ["PIPELINE_BIBLE_PLAN_SUPERSEDED"]
+        outline = _volume_outline(db, project_id, scope_volume_id)
+        if outline is None:
+            return ["PIPELINE_OUTLINE_NOT_CONFIRMED"]
+        blockers.extend(bible_basis_blockers(db, project_id, artifact))
+        return blockers
     if not authored_by_person and not coverage.get("complete"):
         missing = coverage.get("missing_volumes") or []
         blockers.append("PIPELINE_BIBLE_OUTLINE_COVERAGE_INCOMPLETE:"
@@ -1000,7 +1438,8 @@ def bible_confirmation_blockers(db, project_id: str, artifact) -> list[str]:
     return blockers
 
 
-def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -> AgentArtifact:
+def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str,
+                  *, scope_volume_id: str | None = None) -> AgentArtifact:
     """A person confirms the global story bible; the pointer names it."""
     from shine.models import AgentArtifact, AppSetting
 
@@ -1009,19 +1448,20 @@ def confirm_bible(db, project_id: str, artifact_id: str, expected_sha256: str) -
         raise ValueError("PIPELINE_BIBLE_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_BIBLE_SHA_MISMATCH")
-    blockers = bible_confirmation_blockers(db, project_id, artifact)
+    blockers = bible_confirmation_blockers(db, project_id, artifact, scope_volume_id=scope_volume_id)
     if blockers:
         raise ValueError(blockers[0])
     open_questions = list(artifact.payload_json.get("open_questions") or [])
+    scope = {"kind": "volume", "volume_id": scope_volume_id} if scope_volume_id else {"kind": "plan"}
     row = AppSetting(key=_pointer_key(project_id, "story-bible"),
                      value={"artifact_id": artifact.id, "sha256": artifact.sha256,
-                            "open_questions": open_questions[:48]})
+                            "open_questions": open_questions[:48], "scope": scope})
     db.merge(row)
     artifact.approved_by = "local-user"
     artifact.approved_at = utcnow()
     db.flush()
     add_audit(db, "local-user", "PIPELINE_BIBLE_CONFIRMED", "agent_artifact", artifact.id,
-              {"sha256": artifact.sha256, "open_questions": open_questions[:48]},
+              {"sha256": artifact.sha256, "open_questions": open_questions[:48], "scope": scope},
               project_id=project_id)
     return artifact
 
@@ -1270,8 +1710,215 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
     return created
 
 
+def _scene_beat_plan(db, gateway, section: dict, source_text: str, schema: dict) -> list:
+    """How the section's source is split, measured against the real budget.
+
+    A section that fits is one beat, so the caller has a single code path.  This
+    is a *decision*, not a model call: the target size comes from the same
+    approved budget the send path uses.
+    """
+    from shine.literary import beats as beat_lib
+    from shine.literary.budget import plan_call_budget
+    from shine.literary.dryrun import SCENE_CONTEXT_OVERHEAD_TOKENS
+    from shine.literary.requests import compile_request
+
+    if not (source_text or "").strip():
+        return []
+    profile = gateway.profile_for_role(db, SCENE_SCRIPT_RUN_ROLE)
+    config = gateway.config_for(profile)
+    probe = compile_request(system=SCENE_SYSTEM_PROMPT,
+                            user='{"section":{}, "source_text":""}', schema=schema)
+    budget = plan_call_budget(config, probe, purpose="scene")
+    target = max(2_000, budget.burst_input_limit - SCENE_CONTEXT_OVERHEAD_TOKENS)
+    return beat_lib.plan_beats(source_text, section_id=str(section.get("section_id") or "section"),
+                               target_chars=target)
+
+
+def _beat_artifacts(db, task_id: str, project_id: str) -> dict[str, AgentArtifact]:
+    """Beat answers this task already paid for, by beat id."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.source_task_id == task_id,
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == SCENE_BEAT_KIND)).all()
+    return {row.payload_json.get("beat_id"): row for row in rows if row.payload_json.get("beat_id")}
+
+
+def _save_beat(factory, *, project_id: str, task_id: str, beat, text: str,
+               continuity_out: str) -> None:
+    """Persist one beat's text the moment it arrives, in its own transaction."""
+    from shine.models import AgentArtifact
+
+    payload = {"beat_id": beat.beat_id, "ordinal": beat.ordinal,
+               "section_id": beat.section_id, "text": text,
+               "continuity_out": continuity_out[:400],
+               "source_sha256": beat.source_sha256,
+               "start": beat.start, "end": beat.end}
+    with factory.begin() as db:
+        db.add(AgentArtifact(project_id=project_id, kind=SCENE_BEAT_KIND, schema_version="1.0",
+                             payload_json=payload, sha256=digest(payload),
+                             producer_role=SCENE_SCRIPT_RUN_ROLE, source_task_id=task_id,
+                             input_revision_ids=[]))
+        add_audit(db, "local-user", "PIPELINE_SCENE_BEAT_SAVED", "agent_task", task_id,
+                  {"beat_id": beat.beat_id, "ordinal": beat.ordinal,
+                   "chars": len(text)}, project_id=project_id)
+
+
+def _run_scene_beats(*, factory, gateway, task_id: str, version: int, worker_id: str,
+                     project_id: str, trace: dict, section: dict, source_text: str,
+                     context: dict, schema: dict, plan: list, unit_budget=None) -> bool:
+    from shine.literary.models import LiteraryUnit
+
+    """Write one long scene beat by beat, then assemble it verbatim.
+
+    Each beat is paid for once and persisted immediately, so a later beat's
+    failure keeps the earlier beats' text.  A failed beat marks only its
+    dependants as ``WAITING_DEPENDENCY``; the scene becomes a candidate draft,
+    never a confirmed script.
+    """
+    from shine.literary import beats as beat_lib
+    from shine.literary.adapters import SceneDraft, adapt_scene_script
+    from shine.literary.governor import UnitBudget
+    from shine.materialprep import text_consent
+    from shine.materialprep.agent_call import call_material_agent
+
+    before_call = text_consent.guard(
+        project_id, trace["master_document_id"], trace["master_document_sha256"],
+        SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway)
+    if unit_budget is None:
+        unit_budget = UnitBudget(max_calls=len(plan) + 1, max_repair_rounds=len(plan),
+                                 max_completion_tokens=600_000)
+    with factory.begin() as db:
+        units = beat_lib.save_units(db, project_id=project_id,
+                                    section_id=str(section.get("section_id") or "section"),
+                                    beats=plan, task_id=task_id)
+        # Keep ids, not detached rows: every later write opens its own session.
+        unit_ids = {unit.ordinal: unit.id for unit in units}
+    with factory() as db:
+        done = _beat_artifacts(db, task_id, project_id)
+
+    failure = None
+    for beat in plan:
+        existing = done.get(beat.beat_id)
+        if existing is not None and (existing.payload_json.get("text") or "").strip():
+            continue
+        beat_context = {**context,
+                        "source_text": source_text[beat.start:beat.end],
+                        "beat": {"ordinal": beat.ordinal, "total": len(plan),
+                                 "section_id": beat.section_id,
+                                 "note": "只写这一段，结尾写 continuity_out"}}
+        outcome = call_material_agent(
+            gateway, factory, SCENE_SCRIPT_RUN_ROLE,
+            system=SCENE_SYSTEM_PROMPT,
+            context=beat_context, schema=schema, contract=SceneDraft,
+            task_category="creative", purpose="scene",
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}:b{beat.ordinal}",
+            unit_budget=unit_budget,
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
+            before_call=before_call)
+        if not outcome.ok:
+            failure = outcome
+            with factory.begin() as db:
+                unit = db.get(LiteraryUnit, unit_ids.get(beat.ordinal, ""))
+                if unit is not None:
+                    beat_lib.mark(db, unit, "FAILED", error_code=outcome.error_code,
+                                  external_outcome=outcome.details.get("external_outcome"))
+                rows = [db.get(LiteraryUnit, unit_id) for unit_id in unit_ids.values()]
+                beat_lib.propagate([row for row in rows if row is not None],
+                                   failed_ordinal=beat.ordinal)
+            break
+        piece = adapt_scene_script(outcome.parsed, section=section)
+        _save_beat(factory, project_id=project_id, task_id=task_id, beat=beat,
+                   text=piece.payload["text"], continuity_out=piece.payload["continuity_out"])
+        with factory.begin() as db:
+            unit = db.get(LiteraryUnit, unit_ids.get(beat.ordinal, ""))
+            if unit is not None:
+                beat_lib.mark(db, unit, "PASSED", chars=len(piece.payload["text"]))
+            for unit_id in unit_ids.values():
+                other = db.get(LiteraryUnit, unit_id)
+                if (other is not None and other.ordinal > beat.ordinal
+                        and other.status == "WAITING_DEPENDENCY"):
+                    other.status = "PENDING"
+            db.flush()
+
+    with factory() as db:
+        done = _beat_artifacts(db, task_id, project_id)
+        pieces = [{"beat": beat,
+                   "text": (done.get(beat.beat_id).payload_json.get("text") if beat.beat_id in done else ""),
+                   "continuity_out": (done.get(beat.beat_id).payload_json.get("continuity_out")
+                                      if beat.beat_id in done else "")}
+                  for beat in plan]
+    assembly = beat_lib.assemble(str(section.get("section_id") or "section"), pieces)
+    coverage = beat_lib.coverage(plan, len(source_text))
+
+    if failure is not None or not assembly.complete:
+        candidate_id = _persist_candidate(
+            factory, task_id=task_id, project_id=project_id, target_kind=SCENE_SCRIPT_KIND,
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+            text=assembly.text, payload={"section_id": section.get("section_id"),
+                                         "partial_beats": assembly.as_dict(),
+                                         "coverage": coverage},
+            findings=(failure.findings if failure is not None else []),
+            notes=[*assembly.notes, f"missing_beats={assembly.missing_ordinals}"],
+            input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]])
+        blocked = {**trace, "stage": "NEEDS_REVIEW",
+                   "blocked_reason": (failure.error_code if failure is not None
+                                      else "PIPELINE_SCENE_BEATS_INCOMPLETE"),
+                   "external_outcome": (failure.details.get("external_outcome")
+                                        if failure is not None else "RESPONSE_RECEIVED"),
+                   "schema_errors": (failure.schema_errors if failure is not None else []),
+                   "truncated": (failure.details.get("truncated")
+                                 if failure is not None else False),
+                   "review": (failure.review if failure is not None
+                              else {"state": "LOCAL_REVIEW",
+                                    "message": "部分节拍未完成，已保存其余正文。",
+                                    "next_action": "retry_failed_beat"}),
+                   "candidate_artifact_id": candidate_id,
+                   "beats": [beat.as_dict() for beat in plan],
+                   "beat_assembly": assembly.as_dict(), "beat_coverage": coverage,
+                   "output_budget": (failure.details.get("output_budget")
+                                     if failure is not None else None)}
+        _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW",
+                              blocked["blocked_reason"])
+        return True
+
+    adapted = adapt_scene_script({"text": assembly.text,
+                                  "continuity_out": assembly.continuity[-1] if assembly.continuity else ""},
+                                 section=section)
+    payload = dict(adapted.payload)
+    payload["source_refs"] = {"volume_id": trace["volume_id"],
+                              "volume_document_id": trace["volume_document_id"],
+                              "start_offset": section.get("start_offset"),
+                              "end_offset": section.get("end_offset"),
+                              "outline_sha256": trace["outline_sha256"],
+                              "bible_sha256": trace["bible_sha256"]}
+    committed = _commit_pipeline_result(
+        factory, task_id=task_id, version=version, worker_id=worker_id,
+        project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
+        payload={**payload, "beats": [beat.as_dict() for beat in plan],
+                 "beat_coverage": coverage},
+        input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
+        trace={**trace, "beats": [beat.as_dict() for beat in plan],
+               "beat_assembly": assembly.as_dict(), "beat_coverage": coverage, "review": {}})
+    if committed is not None:
+        artifact_id, sha256 = committed
+        # The assembled scene is judged as one text: the beats were already
+        # reviewed against their own bounds, this is the whole-scene verdict.
+        summary = _scene_qa(factory=factory, gateway=gateway, project_id=project_id,
+                            task_id=task_id, trace=trace, section=section,
+                            source_text=source_text, payload=payload,
+                            unit_budget=unit_budget)
+        if summary is not None:
+            _persist_qa_report(factory=factory, project_id=project_id, task_id=task_id,
+                               script_artifact_id=artifact_id, script_sha256=sha256,
+                               section=section, summary=summary,
+                               volume_id=trace.get("volume_id"))
+    return True
+
+
 def run_scene_script_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one scene-script task under the fenced claim."""
+    from shine.literary.adapters import SceneDraft
+    from shine.literary.governor import UnitBudget
     from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument
@@ -1340,52 +1987,97 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             "previous_ending": (previous_script.payload_json.get("continuity_out", "")
                                 if previous_script else None),
         }
-        schema = SceneScriptPayload.model_json_schema()
+        memory_view = _scene_memory_view(factory, project_id, bible.payload_json)
+        if memory_view is not None:
+            context["memory"] = memory_view
+        schema = SceneDraft.model_json_schema()
+        beat_plan = _scene_beat_plan(db, gateway, section, source_text, schema)
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
         if sent is None:
             return True
         trace = sent
+        # One logical unit, one budget: the writer, its single correction and the
+        # QA reviewer all spend from the same three calls.
+        unit_budget = UnitBudget(max_calls=3, max_repair_rounds=1)
+        if len(beat_plan) > 1:
+            return _run_scene_beats(
+                factory=factory, gateway=gateway, task_id=task_id, version=version,
+                worker_id=worker_id, project_id=project_id, trace=trace,
+                section=section, source_text=source_text, context=context,
+                schema=schema, plan=beat_plan, unit_budget=unit_budget)
         outcome = call_material_agent(
             gateway, factory, SCENE_SCRIPT_RUN_ROLE,
-            system=(
-                "你是剧集编剧。基于全书故事蓝图、本段原文与上一场的收尾状态，写出这一场的完整剧本："
-                "对白、动作、场景与时间空间，并把收尾状态写入 continuity_out。"
-                "原样复制 section_id 和 scene_key。dialogue 是含 speaker、line 字符串的对象数组；"
-                "characters 与 questions 均为字符串数组。只输出 JSON。"
-            ),
+            system=SCENE_SYSTEM_PROMPT,
             context=context,
             schema=schema,
-            contract=SceneScriptPayload,
+            contract=SceneDraft,
             task_category="creative",
+            purpose="scene",
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+            unit_budget=unit_budget,
+            record_attempt=_attempt_recorder(factory, project_id, task_id),
             before_call=text_consent.guard(
                 project_id, trace["master_document_id"], trace["master_document_sha256"],
                 SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
+            from shine.literary.adapters import adapt_scene_script
+            adapted = adapt_scene_script(
+                outcome.candidate_payload or {}, section=section,
+                fallback_text="" if (outcome.candidate_payload or {}).get("text")
+                else outcome.candidate_text)
+            candidate_id = _persist_candidate(
+                factory, task_id=task_id, project_id=project_id, target_kind=SCENE_SCRIPT_KIND,
+                unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+                text=adapted.payload.get("text", "") or outcome.candidate_text,
+                payload=adapted.payload,
+                findings=outcome.findings,
+                notes=[*adapted.notes, *adapted.gaps],
+                input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]])
             blocked = {**trace, "stage": "NEEDS_REVIEW",
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
                        "schema_errors": outcome.schema_errors,
-                       "truncated": outcome.details.get("truncated")}
+                       "truncated": outcome.details.get("truncated"),
+                       "review": outcome.review,
+                       "candidate_artifact_id": candidate_id,
+                       "output_budget": outcome.details.get("output_budget"),
+                       "attempts": _compact_attempts(outcome.details.get("attempts"))}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
-        payload = dict(outcome.parsed)
-        payload["scene_key"] = section.get("scene_key", section["section_id"])
-        payload["section_id"] = section["section_id"]
+        from shine.literary.adapters import adapt_scene_script
+        adapted = adapt_scene_script(outcome.parsed, section=section,
+                                     fallback_text=outcome.candidate_text)
+        payload = dict(adapted.payload)
         payload["source_refs"] = {"volume_id": trace["volume_id"],
                                   "volume_document_id": trace["volume_document_id"],
                                   "start_offset": section.get("start_offset"),
                                   "end_offset": section.get("end_offset"),
                                   "outline_sha256": trace["outline_sha256"],
                                   "bible_sha256": trace["bible_sha256"]}
-        _commit_pipeline_result(
+        committed = _commit_pipeline_result(
             factory, task_id=task_id, version=version, worker_id=worker_id,
             project_id=project_id, kind=SCENE_SCRIPT_KIND, role=SCENE_SCRIPT_RUN_ROLE,
             payload=payload,
             input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
             trace={**trace, "usage": outcome.details.get("usage"),
-                   "output_budget": outcome.details.get("output_budget")})
+                   "output_budget": outcome.details.get("output_budget"),
+                   "review": outcome.review, "adaptation": adapted.as_dict(),
+                   "attempts": _compact_attempts(outcome.details.get("attempts"))})
+        if committed is not None:
+            # The text is durable first; the review judges the stored revision,
+            # never a copy that could differ from it.
+            artifact_id, sha256 = committed
+            summary = _scene_qa(factory=factory, gateway=gateway, project_id=project_id,
+                                task_id=task_id, trace=trace, section=section,
+                                source_text=source_text, payload=payload,
+                                unit_budget=unit_budget)
+            if summary is not None:
+                _persist_qa_report(factory=factory, project_id=project_id, task_id=task_id,
+                                   script_artifact_id=artifact_id, script_sha256=sha256,
+                                   section=section, summary=summary,
+                                   volume_id=trace.get("volume_id"))
         return True
 
 
@@ -1413,6 +2105,13 @@ def confirm_scene_script(db, project_id: str, artifact_id: str, expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_FOUND")
     if artifact.sha256 != expected_sha256:
         raise ValueError("PIPELINE_SCENE_SCRIPT_SHA_MISMATCH")
+    # A hard QA verdict blocks delivery, never the text: the scene stays in the
+    # ledger, the editor can fix it, and the refusal names the exact reasons.
+    verdict = latest_qa_report(db, project_id, artifact.sha256)
+    if verdict is not None and (verdict.payload_json or {}).get("state") == "HARD_BLOCK":
+        codes = [str(check.get("code")) for check in (verdict.payload_json or {}).get("checks") or []
+                 if check.get("severity") == "HARD_BLOCK"]
+        raise ValueError("PIPELINE_SCENE_SCRIPT_QA_BLOCKED:" + ",".join(codes[:3]))
     refs = artifact.payload_json.get("source_refs") or {}
     volume_id = str(refs.get("volume_id"))
     section_id = str(artifact.payload_json.get("section_id"))
@@ -1511,6 +2210,17 @@ def run_pending_pipeline_task(factory, settings, worker_id: str, gateway=None) -
                                   {"stage": "NEEDS_REVIEW", "blocked_reason": str(exc.detail)},
                                   "NEEDS_REVIEW", str(exc.detail))
             return True
+        except Exception as exc:  # noqa: BLE001 - one local fault must not kill the queue
+            # A local bug used to leave the task RUNNING until its lease expired,
+            # blocking that unit and hiding the reason.  It is named and handed
+            # back for review instead, and the worker keeps serving other units.
+            logger.exception("pipeline_task_fault role=%s task=%s", role, task_id)
+            _finish_pipeline_task(
+                factory, task_id, version, worker_id,
+                {"stage": "NEEDS_REVIEW", "blocked_reason": "PIPELINE_LOCAL_FAULT",
+                 "error_type": type(exc).__name__},
+                "NEEDS_REVIEW", "PIPELINE_LOCAL_FAULT")
+            return True
         finally:
             gateway.pin_role(role, None)
     return False
@@ -1552,13 +2262,19 @@ GLOBAL_STORYBOARD_STOPS = {
 }
 
 
-def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
+def serialize_volume_script(db, project_id: str, volume_id: str,
+                            only_section_ids: list[str] | None = None) -> str:
     """The volume's confirmed scripts, serialized in section order.
 
     This projection is the volume's *identity*, not one crew input: the crew
     chain runs per scene (see ``storyboard_units``), so a project-length
     volume is never refused by an inline character limit.  Its sha256 is what
     the storyboard receipts and the package lineage pin.
+
+    ``only_section_ids`` narrows the projection to the scenes being drafted.
+    Without it, drafting one confirmed scene demanded that every other scene of
+    the volume was confirmed too - which made the panel's own "生成已确认场次
+    的分镜草案" button impossible to use until the whole volume was written.
     """
     outline = _volume_outline(db, project_id, volume_id)
     if outline is None:
@@ -1566,11 +2282,15 @@ def serialize_volume_script(db, project_id: str, volume_id: str) -> str:
     if _volume_document(db, project_id, volume_id) is None:
         raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
     sections = outline.payload_json.get("production_sections") or []
+    wanted = set(only_section_ids or [])
     parts = []
     for section in sections:
-        script = current_scene_script(db, project_id, volume_id, section["production_section_id"])
+        section_id = section["production_section_id"]
+        if wanted and section_id not in wanted:
+            continue
+        script = current_scene_script(db, project_id, volume_id, section_id)
         if script is None:
-            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section["production_section_id"])
+            raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section_id)
         title = section.get("title", "")
         parts.append(f"第{section.get('order', '?')}场 {title}\n{script.payload_json.get('text', '')}")
     return "\n\n".join(parts)
@@ -1607,7 +2327,8 @@ def _split_scene_text(text: str, limit: int) -> list[str]:
     return result
 
 
-def storyboard_units(db, project_id: str, volume_id: str) -> list[dict]:
+def storyboard_units(db, project_id: str, volume_id: str,
+                     only_section_ids: list[str] | None = None) -> list[dict]:
     """One bounded crew input per scene, in plan order.
 
     Whole scenes are the unit because the per-scene mapping is exactly what
@@ -1622,8 +2343,13 @@ def storyboard_units(db, project_id: str, volume_id: str) -> list[dict]:
     if _volume_document(db, project_id, volume_id) is None:
         raise ValueError("PIPELINE_VOLUME_DOCUMENT_MISSING")
     units: list[dict] = []
+    wanted = set(only_section_ids or [])
     for section in outline.payload_json.get("production_sections") or []:
         section_id = section["production_section_id"]
+        if wanted and section_id not in wanted:
+            # Drafting a subset must not demand the rest of the volume: the
+            # caller asked for these scenes only.
+            continue
         script = current_scene_script(db, project_id, volume_id, section_id)
         if script is None:
             raise ValueError("PIPELINE_SCENE_SCRIPT_NOT_CONFIRMED:" + section_id)
@@ -1838,7 +2564,8 @@ def volume_production_state(db, project_id: str, volume_id: str) -> dict:
 
 
 def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_dir=None,
-                            only_section_ids: list[str] | None = None) -> dict:
+                            only_section_ids: list[str] | None = None,
+                            authorize_replay_ids: list[str] | None = None) -> dict:
     """Run the draft crew chain over every confirmed scene, one unit at a time.
 
     Each unit is one bounded crew input, so a project-length volume is written
@@ -1866,10 +2593,8 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
     master = db.get(ProjectDocument, plan.payload_json["source_master"]["document_id"])
     if master is None or master.project_id != project_id:
         raise ValueError("PIPELINE_MASTER_DOCUMENT_NOT_FOUND")
-    units = storyboard_units(db, project_id, volume_id)
-    if only_section_ids:
-        selected = set(only_section_ids)
-        units = [unit for unit in units if unit["section_id"] in selected]
+    units = storyboard_units(db, project_id, volume_id,
+                             only_section_ids=only_section_ids)
     if not units:
         raise ValueError("PIPELINE_STORYBOARD_UNITS_EMPTY")
     namespace = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
@@ -1881,7 +2606,13 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
     previous_ending = None
     last_steps: dict = {}
     last_apply: dict = {}
+    # A refused answer that really arrived may be replaced once, but only when a
+    # person names that exact record.  The authorisation is consumed per unit in
+    # the order the units run; a mismatched id cannot unlock a different answer
+    # because the guard still compares the record's own identity.
+    pending_authorizations = list(authorize_replay_ids or [])
     for unit in units:
+        authorized_replay = pending_authorizations.pop(0) if pending_authorizations else None
         request_text = unit["text"]
         if previous_ending:
             # The previous scene's closing state is the explicit boundary a
@@ -1896,6 +2627,7 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
                     allow_remote_text=True,
                     consent_document_id=master.id,
                     consent_document_sha256=master.sha256,
+                    authorize_replay_task_id=authorized_replay,
                 ),
                 namespace, db, gateway,
             )
@@ -2330,6 +3062,13 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     bible = current_bible(db, project_id)
     if bible is None:
         raise ValueError("PIPELINE_BIBLE_NOT_CONFIRMED")
+    # A blueprint confirmed for one volume only is a real basis for that volume
+    # and for nothing else: producing another volume from it would publish a
+    # story whose outline was never read.
+    bible_scope = (_read_pointer(db, _pointer_key(project_id, "story-bible")) or {}).get("scope") or {
+        "kind": "plan"}
+    if bible_scope.get("kind") == "volume" and bible_scope.get("volume_id") != volume_id:
+        raise ValueError("PIPELINE_BIBLE_SCOPE_OTHER_VOLUME")
     basis_problems = bible_basis_blockers(db, project_id, bible)
     if basis_problems:
         # The blueprint must still describe the current work before a volume
@@ -2857,8 +3596,30 @@ def pipeline_task_summary(db, project_id: str) -> list[dict]:
             "consent_document_id": trace.get("document_id") or trace.get("master_document_id"),
             "consent_document_sha256": trace.get("document_sha256") or trace.get("master_document_sha256"),
             "consent_role": row.role_id if row.role_id != "story_outline_run" else "scriptwriter",
+            "blocked_scene": _blocked_scene_summary(trace),
         })
     return summary
+
+
+def _blocked_scene_summary(trace: dict) -> dict | None:
+    """The one sub-scene whose outcome blocks this task, if there is one.
+
+    A volume read is a batch of independent scene calls.  When one of them ends
+    in an unprovable outcome the whole volume stops - correctly - but the row
+    itself has nothing to offer: only the scene has an identity that can be
+    re-issued.  The panel needs to name that scene to ask for authorisation.
+    """
+    for entry in trace.get("blocked_subtasks") or []:
+        if not isinstance(entry, dict) or not entry.get("task_id"):
+            continue
+        return {
+            "task_id": entry.get("task_id"),
+            "scene_key": entry.get("scene_key"),
+            "status": entry.get("status"),
+            "error_code": entry.get("error_code"),
+            "external_outcome": entry.get("external_outcome"),
+        }
+    return None
 
 
 def task_available_actions(row) -> list[str]:
@@ -2923,6 +3684,65 @@ def resume_pipeline_task(db, project_id: str, task_id: str, expected_state_versi
     add_audit(db, "local-user", "PIPELINE_TASK_RESUMED", "agent_task", task_id,
               {"expected_state_version": expected_state_version}, project_id=project_id)
     return {"task_id": task_id, "status": "QUEUED"}
+
+
+def authorize_blocked_scene_new_attempt(db, project_id: str, task_id: str, scene_task_id: str,
+                                        expected_state_version: int, actor: str = "local-user") -> dict:
+    """Let a person buy one more call for the one scene that ended unknown.
+
+    A volume is read as a batch of independent scene calls, so a single
+    unprovable outcome stops the whole volume.  Retiring that scene is a
+    decision only a person may take: the provider may already have answered,
+    and the second call may cost a second answer.  The old row keeps its
+    UNKNOWN outcome as history; the new request gets its own identity when the
+    outline runs again, which is why clearing ``request_identity`` here is the
+    whole mechanism rather than a cosmetic flag.
+    """
+    from shine.models import AgentTaskRecord, utcnow
+
+    row = db.get(AgentTaskRecord, task_id)
+    if row is None or row.project_id != project_id or row.role_id != "story_outline_run":
+        raise ValueError("PIPELINE_TASK_NOT_FOUND")
+    if row.state_version != expected_state_version:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    if row.status not in {"NEEDS_REVIEW", "FAILED", "PAUSED"}:
+        raise ValueError("PIPELINE_TASK_STATE_CHANGED")
+    blocked = [entry for entry in (row.trace or {}).get("blocked_subtasks") or []
+               if isinstance(entry, dict)]
+    if not any(entry.get("task_id") == scene_task_id for entry in blocked):
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_BLOCKED")
+    scene = db.get(AgentTaskRecord, scene_task_id)
+    if scene is None or scene.project_id != project_id or scene.role_id != "scriptwriter":
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_FOUND")
+    if scene.status not in {"NEEDS_REVIEW", "FAILED", "REJECTED"}:
+        raise ValueError("PIPELINE_TASK_SCENE_STATE_CHANGED")
+    unknown = (scene.trace or {}).get("external_outcome") in {None, "UNKNOWN"}
+    if not unknown:
+        # A finished answer (or a proven "not sent") does not need a second
+        # paid call; it needs the ordinary repair path.
+        raise ValueError("PIPELINE_TASK_SCENE_NOT_UNKNOWN")
+
+    previous_identity = scene.request_identity
+    scene.status = "SUPERSEDED"
+    scene.error_code = None
+    scene.request_identity = None
+    scene.lease_owner, scene.lease_expires_at = None, None
+    scene.state_version += 1
+    scene.trace = {**(scene.trace or {}), "external_outcome": "SUPERSEDED",
+                   "new_attempt_authorization": {
+                       "previous_request_identity": previous_identity,
+                       "authorized_by": actor,
+                       "authorized_at": utcnow().isoformat(),
+                   }}
+    remaining = [entry for entry in blocked if entry.get("task_id") != scene_task_id]
+    row.trace = {**(row.trace or {}), "blocked_subtasks": remaining}
+    row.status = "QUEUED"
+    row.error_code = None
+    row.state_version += 1
+    add_audit(db, actor, "PIPELINE_SCENE_NEW_ATTEMPT_AUTHORIZED", "agent_task", scene.id,
+              {"outline_task_id": row.id, "previous_request_identity": previous_identity,
+               "scene_key": (scene.trace or {}).get("scene_key")}, project_id=project_id)
+    return {"task_id": row.id, "scene_task_id": scene.id, "status": "QUEUED", "authorized": True}
 
 
 def _new_attempt_receipt(db, row, authorization: dict) -> dict | None:
