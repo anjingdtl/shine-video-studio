@@ -209,4 +209,4 @@ Write-Output ('ALIVE=' + (Test-ShineRecordedProcessAlive $entry))
     lines = result.stdout.strip().splitlines()
     # The regression is only meaningful when the engine really parsed the date.
     assert "TYPE_DATETIME" in lines or "TYPE_STRING" in lines
-    assert f"ALIVE=True" in lines
+    assert "ALIVE=True" in lines
