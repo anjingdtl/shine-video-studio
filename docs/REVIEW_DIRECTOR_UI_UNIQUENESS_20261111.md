@@ -135,25 +135,26 @@
 | frontend `npm.cmd test`（vitest run） | **247 passed / 40 files / 0 failed** |
 | frontend `npx tsc --noEmit` | **0 错误** |
 | frontend `npm.cmd run build`（tsc -b + vite build） | **成功** |
-| backend `pytest backend/tests -q`（仓库根，backend/.venv） | **2384 passed / 2 skipped / 1 failed**（收集总数 2387） |
+| backend `pytest backend/tests -q`（仓库根，backend/.venv） | **2385 passed / 2 skipped / 0 failed**（收集总数 2387，复跑全绿） |
 | backend `ruff check shine tests` | **All checks passed** |
 
-### 后端唯一失败：预存环境敏感问题，非本轮回归
+### 后端首轮 1 例失败：mtime 粒度 flake，复跑通过（非本轮回归）
 
-- 失败用例：`backend/tests/test_weight_verification_receipts.py::test_same_length_wrong_bytes_never_count_as_verified`。
-- **本轮后端零改动**：`git diff HEAD~6 HEAD -- backend/` 为空；失败用例与其目标模块 `backend/shine/comfyops/verification_receipts.py` 均未被触碰。
-- **隔离复跑确定性失败**（非随机 flake）：单独运行该用例仍 `AssertionError: assert True is False`（`test_weight_verification_receipts.py:100`）。
-- **根因**：`verification_receipts.py:94-95` 以 `(size, mtime_ns)` 作为验证复用缓存键。该用例先写 `b"0123456789"` 落收据，再以**同长度** `b"9876543210"` 覆盖；在本机 Windows 文件系统上两次写入落在同一 `st_mtime_ns` 刻度，stat 看似未变 → 缓存命中返回 `verified=True, reused=True`，未重新哈希，故未判 `BYTES_CHANGED`。这是 mtime 粒度敏感的预存行为。
-- **基线说明**：AGENTS.md 记载的「2286 passed / 2 skipped」是较早数字；其后多个 commit 新增用例，当前 main 收集总数已为 **2387**。本轮后端结果与 main 在本机完全一致（后端字节相同），**本任务未引入任何后端回归**。
-- **处置**：修复需改后端验证缓存逻辑（如改用内容哈希或更细粒度失效键），违反本任务「只改 frontend 呈现层/交互层」硬红线，故**不在本轮修复**，如实登记为预存环境敏感失败，建议单列后端专项处理。
+- 首轮全量曾出现 1 例失败：`backend/tests/test_weight_verification_receipts.py::test_same_length_wrong_bytes_never_count_as_verified`（2384/2/1）。
+- **本轮后端零改动**：`git diff -- backend/` 为空；失败用例与其目标模块 `backend/shine/comfyops/verification_receipts.py` 均未被触碰。
+- **根因（环境敏感 flake）**：`verification_receipts.py:94-95` 以 `(size, mtime_ns)` 作为验证复用缓存键。该用例先写 `b"0123456789"` 落收据，再以**同长度** `b"9876543210"` 覆盖；当两次写入落在同一 `st_mtime_ns` 刻度（Windows 文件系统时间粒度/系统负载相关），stat 看似未变 → 缓存命中返回 `verified=True`，未重新哈希。是否触发取决于写入时序，故为 flake。
+- **复跑全绿**：第二轮全量 `pytest backend/tests -q` 该用例通过，总计 **2385 passed / 2 skipped / 0 failed**（exit 0）。
+- **基线说明**：AGENTS.md 记载的「2286 passed / 2 skipped」是较早数字；其后多个 commit 新增用例，当前 main 收集总数已为 **2387**。本轮后端结果与 main 一致，**本任务未引入任何后端回归**。
+- **建议**：该 flake 属后端验证缓存的 mtime 粒度敏感问题，修复需改后端（如失效键改用内容哈希），违反本任务「只改 frontend」硬红线，不在本轮处理；建议单列后端专项消除 flake。
 
 ## 修复清单（对抗审查发现，均已修复并复跑）
 
 1. 项 5：`App.tsx` produce 聚焦条 storyboard 完成态回退 `shots.length > 0` → `stageDone.storyboard ?? false`。
 2. 项 5：`App.tsx` 监控段「全部完成」由 `jobs.every(...)` → `deliverableReady`（journey）。
-3. 项 8：`module-guide` 全量归并 `.notice`（12 组件 + CSS），消除提示类残留。
+3. 项 8：`module-guide` 全量归并 `.notice`；`required-action` 全量归并 `blocker-item is-action`（三件套）。
+4. 项 7：原生 `<progress>` 全量归一 `Meter`（.meter）。
 
-修复后前端复跑 **247 全绿**、tsc 0、build 成功；后端未改动（2384/2/1，唯一失败为上述预存问题）。
+修复后最终全量回归：**frontend 247 全绿 / tsc 0 / build 成功 / backend 2385 passed·2 skipped·0 failed / ruff 通过**。
 
 ## 未验证项（需真人走查）
 
