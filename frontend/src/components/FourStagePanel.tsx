@@ -557,16 +557,18 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
       <div className="pipeline-step">
         <b>③ 剧本编写</b>
         {!overview.bible_confirmed && <span className="muted">先确认全局故事蓝图（第②步）。</span>}
-        {overview.bible_confirmed && volumes.length > 0 && (
-          <div className="scripts-grid">
-            {volumes.map((v) => (
-              <div key={v.volume_id} className="volume-scripts">
-                <div><b>{v.title}</b><span className="muted"> 剧本 {v.scripts_confirmed}/{v.scripts_total} 场已确认</span></div>
-                <button type="button" className="secondary-button" disabled={busy}
-                  onClick={() => run(() => queueVolumeScripts(projectId, v.volume_id))}>
-                  {v.scripts_total === 0 ? '先提取大纲再写剧本' : '生成未确认场次的剧本'}
-                </button>
-                <ul className="script-list">
+        {overview.bible_confirmed && volumes.length > 0 && (() => {
+          // Same reason as step ②: 84 volume blocks bury the storyboard step.
+          const current = volumes.find((v) => v.volume_id === currentVolumeId) ?? volumes[0];
+          const others = volumes.filter((v) => v.volume_id !== current.volume_id);
+          const block = (v: (typeof volumes)[number]) => (
+            <div key={v.volume_id} className="volume-scripts">
+              <div><b>{v.title}</b><span className="muted"> 剧本 {v.scripts_confirmed}/{v.scripts_total} 场已确认</span></div>
+              <button type="button" className="secondary-button" disabled={busy}
+                onClick={() => run(() => queueVolumeScripts(projectId, v.volume_id))}>
+                {v.scripts_total === 0 ? '先提取大纲再写剧本' : '生成未确认场次的剧本'}
+              </button>
+              <ul className="script-list">
                   {v.scripts.map((s) => (
                     <li key={s.section_id}>
                       <span>{sceneLabel(s)}</span>
@@ -582,10 +584,16 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                     </li>
                   ))}
                 </ul>
-              </div>
-            ))}
-          </div>
-        )}
+            </div>
+          );
+          return <>
+            <div className="scripts-grid">{block(current)}</div>
+            {others.length > 0 && <details className="volume-fold">
+              <summary>其他 {others.length} 卷的剧本（按需展开）</summary>
+              <div className="scripts-grid">{others.map(block)}</div>
+            </details>}
+          </>;
+        })()}
         {pendingScripts.map((s) => {
           // A hard verdict does not delete the scene: it refuses to publish it.
           // The person still has the two real exits - read it, or edit it.
