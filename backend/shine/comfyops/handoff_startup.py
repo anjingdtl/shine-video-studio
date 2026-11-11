@@ -270,7 +270,11 @@ def _release_orphan_h3_lease(db, lease) -> bool:
             except (OSError, ValueError):
                 return False
     for instance in db.scalars(select(ComfyInstance)).all():
-        port = getattr(instance, "port", None)
+        # The port lives in the row payload, not as a column attribute; the
+        # previous getattr(instance, "port", ...) was always None, so this
+        # port-free proof never actually ran (audit R11).
+        payload = instance.payload if isinstance(instance.payload, dict) else {}
+        port = payload.get("port")
         if not port:
             continue
         try:
@@ -771,7 +775,11 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
         pending = []
         for row in rows:
             value = row.value if isinstance(row.value, dict) else {}
-            if value.get("stage") in COMPLETE_STAGES | TERMINAL_STAGES:
+            if value.get("stage") in COMPLETE_STAGES | TERMINAL_STAGES | {"FAILED"}:
+                # ``FAILED`` is terminal for the image renderer's own start
+                # path (it already terminated its group and dropped the
+                # process field); rewriting it into RECONCILE_REQUIRED only
+                # produced a phantom blocker (audit R10).
                 continue
             prefix = REVIEW_PREFIX if row.key.startswith(REVIEW_PREFIX) else STARTUP_PREFIX
             pending.append((row.key.removeprefix(prefix), prefix, dict(value)))

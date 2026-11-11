@@ -25,6 +25,7 @@ from shine.comfyops.instances import (
     plan_operation,
 )
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, ModelPackage, NodePackage
+from shine.comfyops.renderer_supervisor import windows_loopback_listener_pid
 from shine.config import Settings
 from shine.http_env import build_client
 from shine.services import add_audit
@@ -95,10 +96,31 @@ def instance_health(identity: str, actor: Operator, db: DBSession):
         result = health(port, http)
     except httpx.HTTPError as exc:
         return {"status": "OFFLINE", "is_mock": row.payload.get("is_mock"), "error": type(exc).__name__}
-    if not row.payload.get("is_mock") and row.payload.get("managed"):
-        row.status = "ONLINE"
-        db.commit()
-    return {"status": "ONLINE", "is_mock": row.payload.get("is_mock"), "evidence": result}
+    # A GET must never mutate lifecycle state: an HTTP 200 on the port does
+    # not prove the listener is *this* installation's renderer, and marking a
+    # managed row ONLINE used to lock H3/image starts and activation behind
+    # IMAGE_RENDERER_INSTANCE_NOT_STOPPED until a release fixed the row
+    # (audit R9).  Only the legacy unmanaged instance-plan flow, whose row
+    # records the very process it started, keeps its state write.
+    if row.payload.get("managed"):
+        return {"status": "ONLINE", "is_mock": row.payload.get("is_mock"),
+                "evidence": result, "lifecycle_state": row.status, "read_only": True}
+    if not row.payload.get("is_mock"):
+        recorded = row.payload.get("process") or {}
+        try:
+            listener_pid = windows_loopback_listener_pid(port)
+        except (OSError, ValueError):
+            listener_pid = None
+        listener_matches = bool(
+            isinstance(recorded.get("pid"), int) and listener_pid == recorded.get("pid")
+        )
+        if listener_matches:
+            row.status = "ONLINE"
+            db.commit()
+            return {"status": "ONLINE", "is_mock": False, "evidence": result}
+        return {"status": "ONLINE", "is_mock": False, "evidence": result,
+                "listener_verified": False, "read_only": True}
+    return {"status": "ONLINE", "is_mock": True, "evidence": result}
 
 
 @router.post("/packages/{identity}/offline-files")

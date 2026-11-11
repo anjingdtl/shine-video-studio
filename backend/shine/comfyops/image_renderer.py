@@ -39,10 +39,10 @@ from shine.comfyops.owned_process import OwnedProcessGroup, terminate_named_grou
 from shine.comfyops.renderer_release import live_process_facts, managed_process_state
 from shine.comfyops.renderer_supervisor import RendererSupervisor, windows_port_listeners
 from shine.models import AppSetting, utcnow
+from shine.runtime_orchestrator.contracts import IMAGE_STARTUP_PREFIX
 from shine.services import add_audit
 
-IMAGE_STARTUP_PREFIX = "renderer-startup:image:"
-"""Same prefix as the H3 renderer, so one release path stops both."""
+__all__ = ["IMAGE_STARTUP_PREFIX"]
 
 RECIPE_RELATIVE_PATH = ("setup", "managed_recipe.json")
 """The recipe ``generate_configuration`` wrote for this installation."""
@@ -122,12 +122,95 @@ def image_renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
     }
 
 
-def start_image_renderer(factory, settings, *, instance_id: str, actor: str) -> dict[str, Any]:
+def _owner_alive(record: dict[str, Any]) -> bool:
+    """Whether the process that wrote this startup record still exists.
+
+    An interrupted start leaves an INTENT/LAUNCHED record behind.  If its
+    owner process is gone the record is stale history; if the owner is alive
+    another start is genuinely in progress and must not be doubled.
+    An unreadable identity counts as alive: uncertainty refuses, never races.
+    """
+    owner_pid = record.get("owner_pid")
+    owner_birth = record.get("owner_birth")
+    if not isinstance(owner_pid, int) or not isinstance(owner_birth, str):
+        return False
+    try:
+        return process_identity(owner_pid) == owner_birth
+    except (OSError, ValueError):
+        return True
+
+
+def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str | None = None) -> None:
+    """One physical installation, one managed renderer, one controller.
+
+    The image runtime and H3 share the adopted instance row and the recipe
+    port.  A start that ignores a live H3 run, an in-flight image job or an
+    active GPU lease is exactly how two renderers used to end up fighting
+    over one port (audit R3/R4).
+    """
+    from shine.runtime_orchestrator.identity import (
+        h3_records_for_installation,
+        image_record_for_installation,
+        lease_facts,
+    )
+
+    for record in h3_records_for_installation(db, instance_id):
+        if record["state"] in ("ACTIVE", "STARTING"):
+            raise HTTPException(409, {
+                "code": "IMAGE_RENDERER_INSTALLATION_BUSY_H3",
+                "detail": "H3 受管渲染器正在此安装上运行；按现有租约串行，等待它完成。",
+                "run_id": record["run_id"],
+                "job_id": record.get("job_id"),
+            })
+        if record["state"] == "UNCERTAIN":
+            raise HTTPException(409, {
+                "code": "IMAGE_RENDERER_INSTALLATION_UNCERTAIN",
+                "detail": "此安装上有结果未核对的 H3 启动记录；先对账再启动。",
+                "run_id": record["run_id"],
+            })
+    image = image_record_for_installation(db, instance_id)
+    if image and image["state"] in ("STARTING", "UNCERTAIN"):
+        # A live STARTING intent means another executor is mid-launch right
+        # now; doubling it is the duplicate-process bug this guard exists for.
+        if image["state"] == "STARTING" and image.get("stage") in ("INTENT", "LAUNCHED", "LISTENING"):
+            record_row = image
+            raw = db.get(AppSetting, record_row["key"])
+            raw_value = raw.value if raw is not None and isinstance(raw.value, dict) else {}
+            if _owner_alive(raw_value):
+                raise HTTPException(409, {
+                    "code": "IMAGE_RENDERER_START_IN_PROGRESS",
+                    "detail": "另一个启动者正在启动此渲染器；本次不再重复启动。",
+                })
+        elif image["state"] == "UNCERTAIN":
+            raise HTTPException(409, {
+                "code": "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED",
+                "detail": "既有渲染器记录无法证明归属；先核对或释放，再启动。",
+            })
+    for lease in lease_facts(db, exclude_lease_id=held_lease_id):
+        # A lease the caller itself holds (the Worker renders inside its own
+        # slot) is the reason this start is allowed; anyone else's lease means
+        # the GPU is mid-model-work and a second renderer is not admitted.
+        raise HTTPException(409, {
+            "code": "IMAGE_RENDERER_GPU_LEASE_ACTIVE",
+            "detail": "GPU 租约被占用；渲染器启动会与在途模型阶段冲突。",
+            "lease_id": lease["lease_id"],
+            "lease_owner": lease["owner"],
+            "lease_status": lease["status"],
+        })
+
+
+def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
+                         held_lease_id: str | None = None) -> dict[str, Any]:
     """Start the managed renderer that serves the image runtime.
 
     The renderer is started closed and is opened for the image queue only after
     the adapter proved its own identity, so a renderer that does not belong to
     this installation never accepts a prompt.
+
+    The conflict checks and the durable intent write happen inside the
+    installation lifecycle guard; the process launch itself stays outside it
+    (nothing long is ever held under the OS lock), protected by the intent
+    record the guard section wrote.
     """
     recipe = load_image_recipe(settings)
     renderer = recipe["renderer"]
@@ -141,35 +224,43 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str) -> 
     port = int(renderer["port"])
     key = image_startup_key(instance_id)
     recipe_sha256 = graph_hash(renderer)
-    with factory.begin() as db:
-        db.execute(text("BEGIN IMMEDIATE"))
-        instance = db.get(ComfyInstance, instance_id)
-        if instance is None or not instance.payload.get("managed") or instance.payload.get("is_mock"):
-            raise HTTPException(409, "IMAGE_RENDERER_MANAGED_INSTANCE_REQUIRED")
-        if instance.payload.get("process"):
-            raise HTTPException(409, "IMAGE_RENDERER_ALREADY_STARTED")
-        if instance.status not in {"STOPPED", "CREATED", "MOCK_VERIFIED"}:
-            raise HTTPException(409, "IMAGE_RENDERER_INSTANCE_NOT_STOPPED")
-        existing = db.get(AppSetting, key)
-        if existing is not None and isinstance(existing.value, dict):
-            if managed_process_state(existing.value) == "RUNNING":
-                raise HTTPException(409, "IMAGE_RENDERER_ALREADY_RUNNING")
-        intent = {
-            "stage": "INTENT",
-            "instance_id": instance_id,
-            "startup_id": str(uuid4()),
-            "port": port,
-            "owner_pid": os.getpid(),
-            "owner_birth": process_identity(os.getpid()),
-            "recipe_sha256": recipe_sha256,
-            "recorded_at": utcnow().isoformat(),
-            "actor": actor,
-            "purpose": "image",
-        }
-        if existing is None:
-            db.add(AppSetting(key=key, value=intent))
-        else:
-            existing.value = intent
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+
+    with renderer_lifecycle_guard(instance_id):
+        with factory() as db:
+            _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            instance = db.get(ComfyInstance, instance_id)
+            if instance is None or not instance.payload.get("managed") or instance.payload.get("is_mock"):
+                raise HTTPException(409, "IMAGE_RENDERER_MANAGED_INSTANCE_REQUIRED")
+            if instance.payload.get("process"):
+                raise HTTPException(409, "IMAGE_RENDERER_ALREADY_STARTED")
+            if instance.status not in {"STOPPED", "CREATED", "MOCK_VERIFIED"}:
+                raise HTTPException(409, "IMAGE_RENDERER_INSTANCE_NOT_STOPPED")
+            existing = db.get(AppSetting, key)
+            if existing is not None and isinstance(existing.value, dict):
+                if managed_process_state(existing.value) == "RUNNING":
+                    raise HTTPException(409, "IMAGE_RENDERER_ALREADY_RUNNING")
+                if (existing.value.get("stage") in ("INTENT", "LAUNCHED", "LISTENING")
+                        and _owner_alive(existing.value)):
+                    raise HTTPException(409, "IMAGE_RENDERER_START_IN_PROGRESS")
+            intent = {
+                "stage": "INTENT",
+                "instance_id": instance_id,
+                "startup_id": str(uuid4()),
+                "port": port,
+                "owner_pid": os.getpid(),
+                "owner_birth": process_identity(os.getpid()),
+                "recipe_sha256": recipe_sha256,
+                "recorded_at": utcnow().isoformat(),
+                "actor": actor,
+                "purpose": "image",
+            }
+            if existing is None:
+                db.add(AppSetting(key=key, value=intent))
+            else:
+                existing.value = intent
     argv, cwd, env, pins, token, port = build_renderer_launch(renderer)
     group = None
     try:
@@ -248,15 +339,22 @@ def ensure_image_renderer(factory, settings, *, instance_id: str) -> dict[str, A
     """Make sure the image runtime's renderer is up, and that it is ours.
 
     A renderer that is already running and provably owned is reused; a renderer
-    that cannot be proven is never adopted and never restarted blindly.
+    that cannot be proven is never adopted and never restarted blindly.  The
+    Worker calls this inside its own GPU lease; that lease is the caller's own
+    admission and must not read as someone else's conflict.
     """
+    from shine.comfyops.scheduler import CURRENT_RESOURCE
+
     with factory() as db:
         row = db.get(AppSetting, image_startup_key(instance_id))
         record = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
     if record and managed_process_state(record) == "RUNNING":
         return {"status": "RUNNING", "reused": True, "instance_id": instance_id,
                 "base_url": f"http://127.0.0.1:{record.get('port')}"}
-    result = start_image_renderer(factory, settings, instance_id=instance_id, actor="worker")
+    result = start_image_renderer(
+        factory, settings, instance_id=instance_id, actor="worker",
+        held_lease_id=CURRENT_RESOURCE.get(),
+    )
     return {**result, "reused": False}
 
 
@@ -318,6 +416,7 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
             "detail": "记录里的进程身份无法证明属于本工作台，因此没有停止它。",
             "state": state,
         })
+    _refuse_stop_under_in_flight_work(factory, instance_id)
     evidence = terminate_named_group(job_name, timeout=20)
     if evidence.get("active_processes") != 0:
         raise HTTPException(409, {
@@ -326,6 +425,36 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
         })
     _mark_stopped(factory, instance_id, record)
     return {"status": "STOPPED", "instance_id": instance_id, "outcome": "stopped", "evidence": evidence}
+
+
+def _refuse_stop_under_in_flight_work(factory, instance_id: str) -> None:
+    """A stop must never kill a renderer that is serving real work (R6).
+
+    In-flight image items render inside ``image:*`` leases; a library render
+    task holds a submit intent or an external prompt id.  Stopping under them
+    turns live external submissions into unknown outcomes.  An H3 lease does
+    NOT block this stop: stopping an idle image renderer while H3 waits is
+    exactly the coordination the unified controller is for.
+    """
+    from shine.runtime_orchestrator.identity import in_flight_image_work, lease_facts
+
+    with factory() as db:
+        work = in_flight_image_work(db)
+        image_leases = [
+            lease for lease in lease_facts(db) if str(lease.get("owner") or "").startswith("image:")
+        ]
+    if work:
+        raise HTTPException(409, {
+            "code": "IMAGE_RENDERER_BUSY_TASK_IN_FLIGHT",
+            "detail": "有正在执行的出图任务使用此渲染器；等它完成或先取消任务。",
+            "work": work[:5],
+        })
+    if image_leases:
+        raise HTTPException(409, {
+            "code": "IMAGE_RENDERER_BUSY_LEASE_ACTIVE",
+            "detail": "出图租约仍在执行中；渲染器此刻不能停止。",
+            "leases": image_leases[:3],
+        })
 
 
 def _without_image_marks(payload: dict[str, Any]) -> dict[str, Any]:

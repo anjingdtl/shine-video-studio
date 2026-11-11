@@ -41,7 +41,22 @@ STOPPED_STAGES = {"STOPPED", "RECONCILE_COMPLETE", "RELEASED", "FAILED"}
 UNCERTAIN_STAGES = {"RECONCILE_REQUIRED"}
 # A job in one of these states owns the renderer while it runs.  A renderer
 # that is serving an attempt is never stopped under the operator's feet.
-IN_FLIGHT_JOB_STATUSES = {"RUNNING", "SUBMITTED"}
+# ``SUBMITTING`` holds the renderer between the claim and the external
+# submission; ``QC_PENDING`` holds it between the artifact and the gates.
+# Missing either of them let a "release" kill a renderer whose attempt had
+# an unknown external outcome (audit R5).
+IN_FLIGHT_JOB_STATUSES = {"SUBMITTING", "SUBMITTED", "RUNNING", "QC_PENDING"}
+
+
+def _image_work_in_flight(db) -> bool:
+    """Whether any image item or library render task owns renderer time.
+
+    The image startup record carries no lease id, so the lease lookup alone
+    can never mark the image renderer busy; the work itself is the proof.
+    """
+    from shine.runtime_orchestrator.identity import in_flight_image_work
+
+    return bool(in_flight_image_work(db))
 
 
 def _valid_process(process: Any) -> bool:
@@ -426,6 +441,11 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
         if lease.get("in_flight"):
             entry["outcome"] = "busy"
             entry["reason"] = "an attempt is running on this renderer"
+            refused.append(entry)
+            continue
+        if record.get("purpose") == "image" and _image_work_in_flight(db):
+            entry["outcome"] = "busy"
+            entry["reason"] = "an image task is running on this renderer"
             refused.append(entry)
             continue
         if state == "GONE":

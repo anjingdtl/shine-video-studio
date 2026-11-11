@@ -671,6 +671,35 @@ class ProductionSeriesItem(Base):
     job: Mapped[Job | None] = relationship()
 
 
+
+
+class RuntimeControlOperation(Base):
+    """One durable lifecycle control intent (start/stop/probe/reconcile/release).
+
+    Defined here, in the shared ledger, so model registration never imports
+    the control plane package (which reads comfyops facts) and no import
+    cycle can form.  The runtime_orchestrator package owns all behaviour.
+    """
+
+    __tablename__ = "runtime_control_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    installation_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    request: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    state_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    owner_worker_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    owner_birth: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None, nullable=True)
+
+
 # V1.3 extends this same metadata/SQLite ledger.
 from shine.asset_center import models as asset_center_models  # noqa: E402,F401
 from shine.comfyops import models as preparation_models  # noqa: E402,F401

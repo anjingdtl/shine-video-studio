@@ -96,6 +96,17 @@ class ImageExecutionError(RuntimeError):
         self.details = details
 
 
+# Renderer refusals that mean "busy right now", not "broken": the item goes
+# back to the queue instead of failing (H3 owns the installation, another
+# start is in progress, or a GPU lease is active).
+RENDERER_BUSY_CODES = frozenset({
+    "IMAGE_RENDERER_INSTALLATION_BUSY_H3",
+    "IMAGE_RENDERER_INSTALLATION_UNCERTAIN",
+    "IMAGE_RENDERER_START_IN_PROGRESS",
+    "IMAGE_RENDERER_GPU_LEASE_ACTIVE",
+})
+
+
 # --- claiming --------------------------------------------------------------
 
 
@@ -587,14 +598,23 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             )
     except HTTPException as exc:
         code = exc.detail if isinstance(exc.detail, str) else str((exc.detail or {}).get("code", "GPU_UNAVAILABLE"))
-        if code == "GPU_BUSY_RETRY_OR_QUEUE":
+        if code == "GPU_BUSY_RETRY_OR_QUEUE" or code in RENDERER_BUSY_CODES:
             # Waiting for the GPU is not a failure. Put the item back so a later
             # pass retries it, and never fail a batch because the ledger is busy.
+            # The same holds when the unified controller refuses a renderer
+            # start because H3 (or another start) owns the installation now.
             touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
-            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": "GPU"}
+            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": code}
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
     except ImageExecutionError as exc:
+        detail_code = str((exc.details or {}).get("code_detail") or "")
+        if detail_code in RENDERER_BUSY_CODES:
+            # The renderer was refused for a named busy reason (H3 owns the
+            # installation, a start is in progress, a GPU lease is active):
+            # requeue instead of failing the item (audit R3/R4 fallout).
+            touch_item(factory, item_id, version, status=ITEM_QUEUED, lease_id=None, lease_owner=None)
+            return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": detail_code}
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
 

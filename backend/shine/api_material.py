@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
@@ -813,6 +814,32 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
             "detail": "出图运行时只能绑定本工作台受管的实例。",
         })
     base_url = require_loopback_url(body.base_url, allow_remote=bool(settings.allow_remote_comfyui))
+    # The bound URL and the managed recipe must agree on the port: a mismatch
+    # used to start a renderer on the recipe port while submitting prompts to
+    # whatever answered on base_url (audit R13).  A missing recipe (binding
+    # before the local configuration was generated) keeps the old behaviour.
+    from shine.comfyops.image_renderer import load_image_recipe
+
+    try:
+        recipe = load_image_recipe(settings)
+    except HTTPException:
+        recipe = None
+    if recipe is not None and recipe["renderer"].get("instance_id") == body.instance_id:
+        recipe_port = int(recipe["renderer"].get("port") or 0)
+        bound_port = 0
+        try:
+            from urllib.parse import urlparse
+
+            bound_port = int(urlparse(base_url).port or 0)
+        except ValueError:
+            bound_port = 0
+        if recipe_port and bound_port and recipe_port != bound_port:
+            raise HTTPException(409, {
+                "code": "IMAGE_RUNTIME_URL_MISMATCH",
+                "detail": "绑定的 base_url 端口与受管运行配置的渲染端口不一致；请绑定同一端口。",
+                "recipe_port": recipe_port,
+                "bound_port": bound_port,
+            })
     current = runtime.load_config(settings)
     if body.expected_config_revision and current.config_revision != body.expected_config_revision:
         raise HTTPException(409, {"code": "IMAGE_RUNTIME_CONFIG_STALE", "actual": current.config_revision})
@@ -834,33 +861,89 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
             "readiness": runtime.readiness(db, settings)}
 
 
+def _control_operation_response(operation) -> dict:
+    """Map a terminal control operation onto the legacy route's shape."""
+    if operation.status == "SUCCEEDED":
+        result = dict(operation.result or {})
+        result.setdefault("operation_id", operation.id)
+        return result
+    if operation.status in ("FAILED", "REFUSED"):
+        raise HTTPException(409, {
+            "code": operation.failure_code or operation.status,
+            "detail": operation.failure_code or operation.status,
+            "operation_id": operation.id,
+        })
+    # Still PENDING: the Worker has not picked the intent up within the
+    # bounded wait.  Report it instead of pretending an outcome.
+    raise HTTPException(409, {
+        "code": "RUNTIME_OPERATION_PENDING",
+        "detail": "控制意图已受理，但 Worker 尚未执行完成；稍后用 operation_id 查询。",
+        "operation_id": operation.id,
+    })
+
+
 @router.post("/setup/image-runtime/start")
 def start_image_runtime_renderer(request: Request, actor: Operator, settings: SettingsDep):
     """Start the managed renderer that serves the bound image runtime.
 
     ComfyUI belongs to the workbench: a renderer that a script started would
     keep the weights resident in GPU memory and could not be released later.
-    The renderer is started here, inside a named owned group, so the workbench
-    can prove that it owns it and can stop it again.
+    Under the unified control plane the request thread only records the
+    intent; the resident Worker starts the renderer inside the installation
+    lifecycle guard (audit R3).  With the orchestrator flag off, the legacy
+    direct call keeps working exactly as before — one path at a time.
     """
-    from shine.comfyops.image_renderer import start_image_renderer
-
     config = runtime.load_config(settings)
     if not config.instance_id or not config.base_url:
         raise HTTPException(409, {"code": "IMAGE_RUNTIME_NOT_BOUND", "detail": "IMAGE_RUNTIME_NOT_BOUND"})
     factory = request.app.state.session_factory
+    from shine.runtime_orchestrator.contracts import orchestrator_enabled
+
+    if orchestrator_enabled():
+        from shine.runtime_orchestrator.api import submit_control_intent
+
+        operation = submit_control_intent(
+            request, actor,
+            action="ensure",
+            installation_id=config.instance_id,
+            idempotency_key=f"image-ensure:{config.instance_id}:{uuid4().hex[:12]}",
+            reason="image-runtime/start",
+            wait_seconds=240.0,
+        )
+        return _control_operation_response(operation)
+    from shine.comfyops.image_renderer import start_image_renderer
+
     return start_image_renderer(factory, settings, instance_id=config.instance_id, actor=actor)
 
 
 @router.post("/setup/image-runtime/stop")
 def stop_image_runtime_renderer(request: Request, actor: Operator, settings: SettingsDep):
-    """Stop the managed image renderer and give the GPU memory back."""
-    from shine.comfyops.image_renderer import stop_image_renderer
+    """Stop the managed image renderer and give the GPU memory back.
 
+    Executed by the resident Worker through the control plane, so a stop can
+    never run concurrently with a start on the same installation and can never
+    bypass the in-flight work protection (audit R6).
+    """
     config = runtime.load_config(settings)
     if not config.instance_id:
         return {"status": "NOT_STARTED", "instance_id": ""}
+    from shine.runtime_orchestrator.contracts import orchestrator_enabled
+
+    if orchestrator_enabled():
+        from shine.runtime_orchestrator.api import submit_control_intent
+
+        operation = submit_control_intent(
+            request, actor,
+            action="stop",
+            installation_id=config.instance_id,
+            idempotency_key=f"image-stop:{config.instance_id}:{uuid4().hex[:12]}",
+            reason="image-runtime/stop",
+            wait_seconds=90.0,
+        )
+        return _control_operation_response(operation)
     factory = request.app.state.session_factory
+    from shine.comfyops.image_renderer import stop_image_renderer
+
     return stop_image_renderer(factory, settings, instance_id=config.instance_id, actor=actor)
 
 

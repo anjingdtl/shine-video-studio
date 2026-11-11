@@ -503,6 +503,9 @@ def create_app(
     from shine.api_asset_center import router as asset_center_router
 
     app.include_router(asset_center_router)
+    from shine.runtime_orchestrator.api import router as runtime_orchestrator_router
+
+    app.include_router(runtime_orchestrator_router)
     from shine.api_freezes import router as freezes_router
 
     app.include_router(freezes_router)

@@ -1117,6 +1117,37 @@ class _ManagedContinuation(_ManagedAttemptContext):
         )
 
 
+def _worker_birth() -> str:
+    """This worker process's OS birth identity, for control-operation claims."""
+    from shine.comfyops.installer import process_identity
+
+    return str(process_identity(os.getpid()))
+
+
+def _retire_idle_image_renderer(factory, settings, installation_id):
+    """An idle image renderer yields its GPU to an admitted H3 lease (R4).
+
+    The image renderer stays resident between items, which used to deadlock
+    H3 behind COMFY_INSTALLATION_BINDING_CHANGED with no automatic way out.
+    Now: the image record is not ACTIVE -> nothing to do; it is ACTIVE and
+    idle -> stop it through the ordinary evidence-checked path; it is busy ->
+    stop_image_renderer refuses with a named busy code and the H3 attempt
+    fails for a later retry instead of looping.
+    """
+    from shine.comfyops.image_renderer import stop_image_renderer
+    from shine.runtime_orchestrator.identity import image_record_for_installation
+
+    with factory() as db:
+        record = image_record_for_installation(db, installation_id)
+    if not record or record.get("state") != "ACTIVE":
+        return None
+    result = stop_image_renderer(
+        factory, settings, instance_id=installation_id, actor="worker:h3-coordination"
+    )
+    logger.info("idle image renderer retired for H3 start: %s", result)
+    return result
+
+
 class _FirstManagedContinuation(_ManagedAttemptContext):
     """In-process authority for the first managed attempt of a fresh startup.
 
@@ -1158,6 +1189,12 @@ class _FirstManagedContinuation(_ManagedAttemptContext):
             raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
         recipe = self.recipe
         installation, runtime_id = managed_run_binding(recipe, attempt_id)
+        if installation:
+            # One physical installation, one managed renderer (audit R4): an
+            # idle image renderer on the same install yields the GPU now that
+            # the H3 lease is admitted; a busy one refuses by name instead of
+            # the cryptic binding-changed blocker.
+            _retire_idle_image_renderer(self.factory, self.settings, installation["id"])
         argv, cwd, env, pins, token, port = build_renderer_launch(recipe)
         self.renderer = start_managed_renderer(
             self.factory, self.settings,
@@ -4217,6 +4254,19 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
             # The output root is being switched; claiming work here would
             # produce bytes with nowhere agreed to put them.
             return "storage-migration"
+    # Lifecycle control intents (start/stop/probe/release from the unified
+    # control plane) are short and claimed first; this worker is their only
+    # executor, and a control-plane failure must never kill the loop.
+    try:
+        from shine.runtime_orchestrator.executor import advance_control_operations
+
+        advance_control_operations(
+            session_factory, settings,
+            worker_id=worker_id,
+            worker_birth=_worker_birth(),
+        )
+    except Exception:  # noqa: BLE001 - defensive: the executor guards itself
+        logger.exception("runtime control operations tick failed")
     semantic, asr = configured_reviewers(session_factory, settings)
     if settings.render_provider == "comfyui" and not settings.offline_simulation:
         from shine.quality.advisory_queue import reconcile_review_leases

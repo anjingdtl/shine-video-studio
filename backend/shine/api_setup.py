@@ -11,7 +11,7 @@ import threading
 from collections import Counter
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from shine.api_common import DBSession, app_settings, secret_store
@@ -511,18 +511,58 @@ def managed_processes(db: DBSession):
 
 
 @router.post('/managed-processes/release')
-def release_managed_processes(actor: Operator, db: DBSession):
+def release_managed_processes(request: Request, actor: Operator, db: DBSession):
     """Stop the owned renderer and reviewers and give the GPU memory back.
 
     This is the workbench's own "close the backend" action: ComfyUI and the
     local reviewers are started by this installation, so closing the workbench
     closes them.  A process that serves a running attempt, or whose ownership
     cannot be proven, is reported and left alone.
+
+    Under the unified control plane the release runs through the resident
+    Worker so it can never race a lifecycle start; when no worker is online
+    (a half-dead stack is exactly when this button matters) the API executes
+    the same evidence-checked release itself as the executor of last resort.
     """
     from shine.comfyops.renderer_release import release_managed_processes as release
+    from shine.runtime_orchestrator.contracts import orchestrator_enabled
+
+    if orchestrator_enabled() and _any_worker_online(db):
+        from uuid import uuid4
+
+        from shine.runtime_orchestrator.api import submit_control_intent
+
+        operation = submit_control_intent(
+            request, actor,
+            action="release",
+            installation_id="workbench",
+            idempotency_key=f"managed-release:{uuid4().hex[:12]}",
+            reason="managed-processes/release",
+            wait_seconds=120.0,
+        )
+        if operation.status == "SUCCEEDED":
+            report = dict(operation.result or {})
+            report.setdefault("operation_id", operation.id)
+            return report
+        if operation.status in ("FAILED", "REFUSED"):
+            raise HTTPException(409, {
+                "code": operation.failure_code or operation.status,
+                "operation_id": operation.id,
+            })
+        raise HTTPException(409, {
+            "code": "RUNTIME_OPERATION_PENDING",
+            "detail": "释放意图已受理，但 Worker 尚未执行完成。",
+            "operation_id": operation.id,
+        })
     report = release(db, actor=actor, reason="operator_release")
     db.commit()
     return report
+
+
+def _any_worker_online(db) -> bool:
+    from shine.runtime_orchestrator.operations import any_worker_online
+
+    return any_worker_online(db)
 
 
 @router.post('/runtime/activate')

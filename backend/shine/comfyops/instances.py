@@ -342,6 +342,27 @@ def copy_package(source, target):
     tree_manifest(target)
 
 
+def _refuse_start_under_managed_lifecycle(factory, installation_id: str) -> None:
+    """Refuse a bare-Popen START that would fight a managed renderer.
+
+    The instance-plan START path predates the managed lifecycle: its process
+    has no Job Object and no startup record, so neither the H3 nor the image
+    runtime can see or release it.  Running it while a managed renderer is
+    starting/running on the same installation, or while a GPU lease is held,
+    is refused with a named error instead (audit R12).
+    """
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+    from shine.runtime_orchestrator.identity import installation_activity
+
+    with renderer_lifecycle_guard(installation_id):
+        with factory() as db:
+            activity = installation_activity(db, installation_id)
+        if activity["renderer_state"] in ("IMAGE", "H3", "UNCERTAIN_H3"):
+            raise HTTPException(409, "INSTANCE_LIFECYCLE_LOCKED")
+        if activity["gpu_leases"]:
+            raise HTTPException(409, "INSTANCE_LIFECYCLE_LEASE_ACTIVE")
+
+
 def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None):
     checkpoint = checkpoint or (lambda stage: None)
     runner = runner or ProcessRunner()
@@ -521,6 +542,10 @@ def execute_operation(factory, settings, identity, digest, actor, *, runner=None
             elif op.action == "START":
                 if previous.get("process"):
                     raise ValueError("INSTANCE_ALREADY_STARTED")
+                # A bare-Popen start is invisible to the managed lifecycle
+                # records (no Job Object, no startup record), so it must not
+                # race a managed renderer on the same installation (audit R12).
+                _refuse_start_under_managed_lifecycle(factory, identity)
                 result["process"] = runner.start(payload["commands"][0], cwd=root)
                 with factory.begin() as started_db:
                     started = started_db.get(InstallationAttempt, attempt_id)
