@@ -116,7 +116,10 @@ def save_candidate(
         "unit_id": unit_id,
         "text": text,
         "text_sha256": text_sha,
-        "content_saved": True,
+        # "Content saved" is a promise about prose.  A structured candidate
+        # with no body must not claim it, or the panel would tell the person a
+        # scene was kept when nothing literary arrived.
+        "content_saved": bool(text.strip()),
         "accepted": False,
         "review": summary,
         "notes": list(notes or []),

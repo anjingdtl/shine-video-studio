@@ -25,7 +25,7 @@ from shine.llm.base import LLMError
 from shine.materialprep import text_consent
 from shine.materialprep.agent_call import PRE_REQUEST_PHASES, budget_report, call_material_agent
 from shine.materialprep.contracts import ScriptPreparation
-from shine.materialprep.source_spans import Scene, known_span_ids, segment_document, unknown_span_ids
+from shine.materialprep.source_spans import MAX_SCENE_CHARS, Scene, known_span_ids, segment_document, unknown_span_ids
 from shine.models import AgentArtifact, AgentTaskRecord, utcnow
 from shine.services import add_audit
 
@@ -140,6 +140,7 @@ def prepare_scenes(
     replace_unknown_task_id: str | None = None,
     replacement_key: str | None = None,
     scene_keys: list[str] | None = None,
+    segment_chars: int | None = None,
 ) -> dict[str, Any]:
     """Run the scriptwriter over every scene of one document.
 
@@ -147,7 +148,11 @@ def prepare_scenes(
     its reason and the other scenes still run, because a long script must not
     lose the scenes that did work.
     """
-    scenes = segment_document(document.text or "")
+    # The caller and this function must cut the document the same way: a scene
+    # key only names the same bytes if both used the same window.  Two different
+    # windows silently re-read overlapping text and pay for it twice.
+    scenes = segment_document(document.text or "",
+                              max_scene_chars=segment_chars or MAX_SCENE_CHARS)
     catalogue = known_span_ids(scenes)
     if scene_keys is not None:
         scenes = [scene for scene in scenes if scene.key in scene_keys]
@@ -330,6 +335,7 @@ def prepare_scenes(
             schema=schema,
             contract=ScriptPreparation,
             on_progress=record_progress,
+            project_id=project_id, task_id=task_id, purpose="scene_prep",
             before_call=text_consent.guard(project_id, document.id, document.sha256, SCRIPTWRITER_ROLE,
                                            text_consent.fingerprint(profile), gateway),
         )

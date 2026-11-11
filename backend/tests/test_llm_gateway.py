@@ -93,7 +93,11 @@ def test_provider_error_code_in_http_200_is_not_a_success(monkeypatch, fake_open
 
 
 @pytest.mark.parametrize(("configured", "model_limit", "expected"), [
-    (None, None, 131_072), (200_000, None, 131_072),
+    # No explicit budget: the bounded default applies instead of letting a
+    # reasoning model decide for itself how long to think.
+    (None, None, 16_384),
+    # An explicit operator budget is respected, never silently shrunk.
+    (200_000, None, 200_000),
     (4096, None, 4096), (None, 8192, 8192),
 ])
 def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, model_limit, expected):
@@ -106,11 +110,16 @@ def test_agent_output_budget_respects_smaller_limits(fake_openai, configured, mo
 
 @pytest.mark.parametrize("model", ["MiniMax-M3.1-Flash", "MiniMax-M3-1-Flash"])
 def test_minimax_m31_flash_uses_bounded_default_output_budget(fake_openai, model):
-    """A 1M-context reasoning model is budgeted at its 128K output ceiling."""
+    """A 1M-context reasoning model is bounded, not left to think for minutes.
+
+    Live measurement: with a 131k ceiling one structured extraction ran past
+    fifteen minutes; the same shape of request with a 16k ceiling finished in
+    under three.
+    """
     original = config(fake_openai, model=model, generation_options={"reasoning_effort": "medium"})
     bounded = agent_output_config(original)
     assert bounded.generation_options == {
-        "reasoning_effort": "medium", "max_completion_tokens": 131_072,
+        "reasoning_effort": "medium", "max_completion_tokens": 16_384,
     }
 
 

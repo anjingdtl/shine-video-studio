@@ -30,8 +30,22 @@ HEADING = re.compile(
 )
 
 MAX_SCENE_CHARS = 4000
-MAX_SPANS_PER_SCENE = 200
+"""The floor for one extraction unit.  The real ceiling is measured from the
+provider's own budget in ``story._extract_segment_chars``; this constant only
+keeps a small-window model from being asked for more than it can read."""
+
+MAX_SPANS_PER_SCENE = 1_024
+"""How many citable fragments one unit may contain.
+
+The old value (200) capped a unit at 200 x 256 = 51k characters, but line
+boundaries make each fragment shorter, so a 44k-character volume was split into
+17 requests.  Reading a whole volume once is both cheaper and better: the model
+sees every chapter instead of a ninth of the arc.  With 1,024 fragments the same
+volume is one request, and every event keeps a citable span id."""
+
 MAX_SPAN_CHARS = 256
+"""Evidence granularity.  Kept small on purpose: a cited span must be short
+enough to check by eye."""
 
 
 @dataclass(frozen=True)

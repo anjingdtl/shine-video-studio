@@ -326,11 +326,20 @@ class OpenAICompatibleProvider:
         json_mode: bool = True,
     ) -> LLMResponse:
         started = time.perf_counter()
+        options = dict(self.config.generation_options)
+        if ("max_completion_tokens" in options and "max_tokens" not in options
+                and "api.openai.com" not in self.config.base_url):
+            # OpenAI renamed the ceiling; several OpenAI-compatible providers
+            # still read only the classic field.  Without it they generate until
+            # they decide to stop - a live call spent 16k completion tokens
+            # against a 5.8k budget and took two and a half minutes.  Sending
+            # both keeps the declared ceiling enforceable everywhere.
+            options["max_tokens"] = options["max_completion_tokens"]
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [{"role": message.role, "content": message.content} for message in messages],
             "temperature": self.config.temperature,
-            **self.config.generation_options,
+            **options,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}

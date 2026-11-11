@@ -42,7 +42,16 @@ GENERATION_PROBE_SCHEMA = {
 }
 
 
-DEFAULT_AGENT_OUTPUT_TOKENS = 131_072
+DEFAULT_AGENT_OUTPUT_TOKENS = 16_384
+"""The output ceiling for an ordinary agent call.
+
+A reasoning model decides how long to think, and a 131k ceiling lets it decide
+"very long": a live structured extraction ran past fifteen minutes with nothing
+placeholder-shaped to show for it.  16k is ample for a structured role answer
+(outline part, scene preparation, one shot breakdown) while bounding the worst
+case to minutes.  Creative scene writing keeps its own measured budget in
+``shine.literary.budget``, so this ceiling never truncates a scene.
+"""
 """The completion ceiling one typed agent reply is budgeted against.
 
 A current 1M-context reasoning model bills its thinking as completion, so a
@@ -66,17 +75,26 @@ plain connectivity probe keeps its own stricter budget.
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
-    limits = [DEFAULT_AGENT_OUTPUT_TOKENS]
     configured = config.generation_options.get("max_completion_tokens")
     if configured:
-        limits.append(configured)
-    if config.max_output_tokens:
-        limits.append(config.max_output_tokens)
-    output_limit = min(limits)
+        # An explicit operator choice is respected: this function only bounds
+        # the default, it never overrules a stated budget.
+        output_limit = int(configured)
+    elif config.max_output_tokens:
+        output_limit = min(DEFAULT_AGENT_OUTPUT_TOKENS, int(config.max_output_tokens))
+    else:
+        output_limit = DEFAULT_AGENT_OUTPUT_TOKENS
     if config.kind == "openai_compatible":
-        return replace(config, generation_options={
-            **config.generation_options, "max_completion_tokens": output_limit,
-        })
+        options = {**config.generation_options, "max_completion_tokens": output_limit}
+        # A structured role reads and answers; it is not asked to deliberate for
+        # minutes.  Measured on the live provider: the same request with
+        # ``reasoning_effort=low`` spent 17 reasoning tokens instead of 152 and
+        # returned twice as fast, and a 44k-character outline read that used to
+        # spend 300s timing out now fits the same wall clock.  Creative writing
+        # (``task_category="creative"``) does NOT pass through here and keeps the
+        # model's own deliberation budget.
+        options.setdefault("reasoning_effort", "low")
+        return replace(config, generation_options=options)
     if config.kind == "ollama":
         return replace(config, generation_options={
             **config.generation_options, "max_tokens": output_limit,

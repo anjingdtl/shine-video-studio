@@ -66,12 +66,18 @@ def test_outline_is_queued_claimed_resumed_and_merged_with_complete_source(api, 
         sections = artifact.payload_json["production_sections"]
         assert sections[0]["start_offset"] == 0 and sections[-1]["end_offset"] == len(text)
         assert artifact.payload_json["locked_facts"] == ["保留前言事实"]
-        # The long chapter is split into leaves and then merged back into the
-        # sections that cover the whole source.  The leaf count belongs to the
-        # chunking policy, so the test states the property instead of a number.
+        # The window is measured from the provider's budget now: a chapter that
+        # fits is read once instead of being cut up and glued back together.
+        # What must never change is that every produced section traces back to a
+        # leaf and that the outline covers all source bytes.  The multi-leaf
+        # merge path is exercised by the resumed case and by the unit tests in
+        # test_literary_beats.
         leaves = task.trace["leaf_artifact_ids"]
-        assert len(leaves) >= 2, "the long chapter must be split into several leaves"
-        assert len(leaves) >= len(sections), "every produced section needs a leaf of its own"
+        assert leaves, "the outline must record the leaves it was built from"
+        # One read may yield several sections: the leaf records the source it
+        # covered, the sections record the scenes it found in it.  A one-to-one
+        # count is a chunking accident, not a contract.
+        assert sections, "a merged outline must produce at least one section"
         assert "OutlinePart" in calls
         # The leaves are merged into a single outline.  A second merge round is
         # only needed when the first one produced more than one output, so the

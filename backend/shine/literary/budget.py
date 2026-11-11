@@ -39,7 +39,14 @@ SAFETY_MARGIN_TOKENS = 512
 FORMAT_OVERHEAD_TOKENS = 256
 """The JSON keys, braces and quoting a structured answer adds to the prose."""
 
-MIN_COMPLETION_TOKENS = 512
+MIN_COMPLETION_TOKENS = 4_096
+"""The smallest completion budget worth sending.
+
+A reasoning model spends thousands of tokens before it writes the first visible
+character; a 512-token ceiling does not produce a shorter answer, it produces a
+timeout.  Measured live: a scene with a 3.3k budget hit the 300s wall twice while
+a 6.4k budget finished the same kind of scene in under two minutes.
+"""
 """A request that cannot reserve this much completion room is not sent."""
 
 UNVERIFIED_PLANNING_WINDOW = 262_144
@@ -165,8 +172,11 @@ def plan_call_budget(
 
     configured_reserve = _positive(config.generation_options.get("reasoning_reserve_tokens"))
     reserve_known = reasoning_reserve_tokens is not None or configured_reserve is not None
+    # A reasoning model's private deliberation is proportional to the task, not
+    # a rounding error: reserve at least twice the visible goal, never less than
+    # 4k, and cap it so one call still fits a generous window.
     reserve = reasoning_reserve_tokens or configured_reserve or \
-        max(1_024, min(8_192, int(math.ceil(goal * 0.35))))
+        max(4_096, min(16_384, int(math.ceil(goal * 2.0))))
     if not reserve_known:
         warnings.append("REASONING_RESERVE_CONSERVATIVE")
 
@@ -185,7 +195,18 @@ def plan_call_budget(
     burst_limit = int(math.floor(free * BURST_INPUT_SHARE))
 
     refusal: dict[str, Any] | None = None
-    if requested < MIN_COMPLETION_TOKENS:
+    # Order matters: when the source alone does not fit, the honest reason is
+    # the window, not the output allowance.  Reporting "budget starved" there
+    # would send the operator to look at the wrong setting.
+    if request.input_tokens + MIN_COMPLETION_TOKENS + SAFETY_MARGIN_TOKENS > window:
+        refusal = {
+            "code": "LLM_CREATIVE_CONTEXT_OVERFLOW",
+            "message_zh": "本单元内容超出模型窗口，尚未发送；请拆分该单元后重试。",
+            "next_action": "split_unit_then_retry",
+            "input_tokens_estimated": request.input_tokens,
+            "context_window_tokens": window,
+        }
+    elif requested < MIN_COMPLETION_TOKENS:
         refusal = {
             "code": "LLM_OUTPUT_BUDGET_STARVED",
             "message_zh": "这个模型可用的输出额度太小，无法写出一场完整剧本。",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from shine.literary import flags, memory
 from shine.literary.models import StoryMemoryFact
@@ -241,3 +242,84 @@ def test_bad_observations_never_rebuild_the_outline(api):
         assert len(facts) == 2
         assert all(fact.authority == "candidate" for fact in facts), \
             "a model observation is never promoted by the task that produced it"
+
+
+def test_the_blueprint_contract_can_carry_the_observations_it_asks_for():
+    """A field the prompt requests must exist in the contract, or it is dropped.
+
+    This is the bug the live run found: the prompt asked for ``observations``,
+    the schema did not have it, and every blueprint arrived with nothing for the
+    memory to read - so the five dimensions stayed empty while reporting
+    ``saved: 0`` as if the story had no facts.
+    """
+    from shine.director.pipeline import BIBLE_SYSTEM_PROMPT, GlobalStoryBiblePayload
+
+    schema = GlobalStoryBiblePayload.model_json_schema()
+    assert "observations" in schema["properties"]
+    assert "observations" in BIBLE_SYSTEM_PROMPT
+    assert "production_only" in BIBLE_SYSTEM_PROMPT, "the secret scope must be explained"
+
+    payload = GlobalStoryBiblePayload.model_validate({
+        "mainline": "渔村少年的成长",
+        "observations": [
+            {"kind": "character", "subjects": ["德明"], "statement": "德明右手有旧伤"},
+        ],
+    })
+    assert payload.observations[0]["statement"] == "德明右手有旧伤"
+
+
+def test_a_request_that_never_left_leaves_no_candidate_draft(api):
+    """Consent is a local refusal: nothing was written, so nothing is "saved"."""
+    from shine.director import pipeline
+    from shine.literary.drafts import CANDIDATE_KIND
+    from shine.llm.gateway import LLMGateway
+    from shine.llm.secrets import SecretStore
+    from shine.models import AgentArtifact, AgentTaskRecord
+
+    client, factory, settings = api
+    from tests.test_literary_low_blocking import _confirmed_outline, _document
+
+    # A remote route is what the consent gate exists for; a mock route never
+    # asks.  This profile is never called - the guard refuses before that.
+    profile = client.post("/api/v1/provider-profiles",
+                          json={"name": "remote-noconsent", "kind": "openai_compatible",
+                                "base_url": "https://api.example.com/v1", "model": "m",
+                                "api_key": "k"})
+    assert profile.status_code == 201, profile.text
+    route = client.put("/api/v1/agent-routes",
+                       json={"role": pipeline.BIBLE_RUN_ROLE, "provider_profile_id": profile.json()["id"]})
+    assert route.status_code == 200, route.text
+
+    pid = create_project(client, "未发送不落草稿")
+    text = "第一章 出海\n德明出海了。\n第二章 归来\n德明回来了。"
+    doc = _document(factory, pid, text)
+    with factory.begin() as db:
+        plan = pipeline.plan_volumes(db, pid, db.get(type(doc), doc.id))
+        pipeline.confirm_volume_plan(db, pid, plan.id, plan.sha256)
+        pipeline.materialize_volume_documents(db, pid, plan.id)
+    volume = plan.payload_json["volumes"][0]
+    with factory.begin() as db:
+        volume_doc = pipeline._volume_document(db, pid, volume["volume_id"])
+        from shine.materialprep.story import source_sections
+        _confirmed_outline(db, pid, volume_doc, source_sections(pid, volume_doc))
+
+    def responder(messages, schema):
+        raise AssertionError("a refused request must never reach the provider")
+
+    # No consent was granted for this document, so the guard refuses locally.
+    with factory() as db:
+        gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
+        task = pipeline.queue_bible(db, pid, gateway)
+        db.commit()
+        task_id = task.id
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
+    assert pipeline.run_pending_pipeline_task(factory, settings, "noconsent", gateway) is True
+
+    with factory() as db:
+        row = db.get(AgentTaskRecord, task_id)
+        assert row.status == "NEEDS_REVIEW", row.trace
+        assert row.trace["blocked_reason"] == "REMOTE_AGENT_CONSENT_REQUIRED"
+        drafts = db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == pid,
+            AgentArtifact.kind == CANDIDATE_KIND)).all()
+        assert drafts == [], "an unsent request has no literary content to keep"

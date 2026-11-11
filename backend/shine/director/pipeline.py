@@ -45,7 +45,17 @@ BIBLE_SYSTEM_PROMPT = (
     "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
     "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
     "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
-    "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。只输出 JSON。"
+    "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。"
+    "\n\n另外输出 observations：这是全书事实清单，供后续每一场写作时查证，最多 40 条。"
+    "每条形如 {\"kind\":\"character|relationship|mainline|clue|foreshadow\","
+    "\"subjects\":[\"人物或物件名\"],\"statement\":\"一句话事实\","
+    "\"dimensions\":[\"这条事实同时属于的其它维度\"],"
+    "\"visibility\":{\"scope\":\"audience_known\"或\"production_only\"},"
+    "\"evidence_span_ids\":[\"来源分卷或段落 id，可留空\"]}。"
+    "只写原文确实发生、可核对的事实：人物身份与外貌、关系变化、主线推进、"
+    "关键线索、已经埋下的伏笔。不要写推测、评价或剧情建议。"
+    "观众已经知道的用 audience_known；必须留到后面才揭晓的真相用 production_only。"
+    "只输出 JSON。"
 )
 """The one blueprint prompt.  The dry-run planner measures this exact text."""
 
@@ -474,6 +484,10 @@ def materialize_volume_documents(db, project_id: str, plan_artifact_id: str) -> 
 class GlobalStoryBiblePayload(BaseModel):
     """The cross-volume blueprint: who, where, what is promised, what is open."""
     schema_version: str = "1.0"
+    # The five-dimension memory is fed from this one list.  It is optional so a
+    # terse answer stays valid, and it is tolerated item-by-item at ingest time,
+    # so one malformed observation can never cost the blueprint.
+    observations: list[dict] = Field(default_factory=list, max_length=200)
     mainline: str = Field(min_length=1, max_length=2000)
     characters: list[dict] = Field(default_factory=list, max_length=64)
     world: str = Field(default="", max_length=2000)
@@ -1269,15 +1283,20 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
                                            BIBLE_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
-            from shine.literary.adapters import adapt_bible
-            adapted = adapt_bible(outcome.candidate_payload or {})
+            from shine.literary.adapters import Adapted, adapt_bible
+            salvage = outcome.candidate_payload if isinstance(outcome.candidate_payload, dict) else None
+            has_answer = bool(salvage) or bool((outcome.candidate_text or "").strip())
+            # A request that never left - consent, budget, refused route - owns
+            # no answer.  Saving an empty "candidate" for it would tell the
+            # person a blueprint was kept when nothing was ever written.
+            adapted = adapt_bible(salvage or {}) if has_answer else Adapted(payload={})
             candidate_id = _persist_candidate(
                 factory, task_id=task_id, project_id=project_id, target_kind=BIBLE_KIND,
                 unit_id="bible", text=outcome.candidate_text or adapted.payload.get("text", ""),
-                payload=adapted.payload,
+                payload=adapted.payload if has_answer else None,
                 findings=outcome.findings,
                 notes=[*adapted.notes, *adapted.gaps],
-                input_revision_ids=trace.get("input_revision_ids") or [])
+                input_revision_ids=trace.get("input_revision_ids") or []) if has_answer else None
             blocked = {**trace, "stage": "NEEDS_REVIEW",
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),

@@ -229,6 +229,8 @@ def call_material_agent(
     purpose: str | None = None,
     visible_goal_tokens: int | None = None,
     record_attempt=None,
+    project_id: str | None = None,
+    task_id: str | None = None,
 ) -> AgentCallOutcome:
     """Ask one role for one contract through the shared Call Governor.
 
@@ -269,6 +271,13 @@ def call_material_agent(
                 profile_id="unresolved", name="unresolved", kind="mock", base_url="",
                 model="unresolved", api_key=None)
     goal = purpose or ("scene" if task_category == "creative" else "structured")
+    if record_attempt is None and project_id:
+        # No caller-side recorder: use the shared one so no money is spent
+        # outside the ledger.  Every stage - outline, preparation, crew, scene -
+        # writes the same rows, which is what makes cross-stage questions
+        # answerable in one place.
+        from shine.literary.ledger import recorder
+        record_attempt = recorder(session_factory, project_id, task_id)
     governor = CallGovernor(
         gateway, config, role=role, unit_id=unit_id or role,
         budget=unit_budget, record_attempt=record_attempt)

@@ -16,12 +16,33 @@ reconcilable instead of a guess.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
 
 from shine.literary.models import LLMCallAttempt
 from shine.models import utcnow
+
+logger = logging.getLogger(__name__)
+
+
+def recorder(factory, project_id: str, task_id: str | None = None):
+    """A durable recorder for one task, safe to attach to any governor.
+
+    A ledger fault is logged and swallowed: the literary work must not fail
+    because bookkeeping did.  Every path that can spend money on a provider gets
+    the same recorder, so the ledger never has blind spots between stages.
+    """
+    def record(attempt: dict[str, Any]) -> None:
+        try:
+            with factory.begin() as db:
+                record_row(db, project_id=project_id, attempt=attempt, task_id=task_id)
+        except Exception:  # noqa: BLE001 - bookkeeping never fails a scene
+            logger.exception("literary_attempt_ledger_failed task=%s unit=%s",
+                             task_id, attempt.get("unit_id"))
+
+    return record
 
 
 def _as_int(value: Any) -> int | None:
@@ -30,7 +51,8 @@ def _as_int(value: Any) -> int | None:
     return value
 
 
-def record(db, *, project_id: str, attempt: dict[str, Any], task_id: str | None = None) -> LLMCallAttempt:
+def record_row(db, *, project_id: str, attempt: dict[str, Any],
+               task_id: str | None = None) -> LLMCallAttempt:
     """Insert or update one attempt row.  Never raises into the caller."""
     phase = str(attempt.get("phase") or "FINISHED")
     unit_id = str(attempt.get("unit_id") or "unknown")[:160]
@@ -79,6 +101,12 @@ def record(db, *, project_id: str, attempt: dict[str, Any], task_id: str | None 
     row.finished_at = now
     db.flush()
     return row
+
+
+def record(db, *, project_id: str, attempt: dict[str, Any],
+           task_id: str | None = None) -> LLMCallAttempt:
+    """Compatibility name for the row writer."""
+    return record_row(db, project_id=project_id, attempt=attempt, task_id=task_id)
 
 
 def unknown_attempts(db, project_id: str) -> list[LLMCallAttempt]:

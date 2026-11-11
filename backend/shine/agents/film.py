@@ -1122,6 +1122,16 @@ class FilmAgentDispatcher:
                               "provider_schema_validator": exc.details["validator"]}
                              if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
                              and isinstance(exc.details.get("path"), str) else {}),
+                          # Why the envelope failed is diagnosable without
+                          # storing the answer: a length stop means the budget
+                          # truncated it, an empty path means malformed JSON.
+                          # Neither the text nor a prompt is ever persisted.
+                          **({"provider_finish_reason": exc.details["finish_reason"]}
+                             if isinstance(exc, LLMError)
+                             and isinstance(exc.details.get("finish_reason"), str) else {}),
+                          **({"provider_text_chars": len(exc.details["provider_text"])}
+                             if isinstance(exc, LLMError)
+                             and isinstance(exc.details.get("provider_text"), str) else {}),
                           "external_outcome": external_outcome,
                           "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
