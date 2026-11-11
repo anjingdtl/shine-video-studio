@@ -146,3 +146,23 @@ scripts/release_residual_backends.py  （调 renderer_release.release_managed_pr
   recovery / contracts）+ installation_identity 控制锁 + 操作表 + 五入口收束。
 - P3 = R15–R17：RuntimeSnapshot 聚合 API + 前端状态条 + DEGRADED 退避探活 + 统一恢复
   建议映射。
+
+## 8. P1 真机复现补充（2026-11-11，三路并发启动冒烟）
+
+静态审计之外，P1 的并发启动冒烟在本机复现了两个此前只有推演的缺陷（均已修复，
+见提交「feat(P1)」）：
+
+1. **pwsh 7 清单日期反序列化误判活进程**：`ConvertFrom-Json` 在 PowerShell 7 下把
+   `processes.json` 的 ISO `start_time` 解析成 `[datetime]`，旧比较
+   `$process.StartTime.ToString('o') -eq $Entry.start_time` 按当前文化把右侧转成
+   `2026/11/11 20:13:48` 一类字符串 → 活着的 worker 被判死 → 每次启动都触发
+   「半死栈」重整（停掉健康栈再重启）。存量 `test_installation_scripts.py` 用
+   `powershell`（5.1）跑 harness，而 5.1 不解析日期字符串，因此从未暴露。这是
+   「重复启动/状态异常」类用户现象的一个真实根源。修复：
+   `Test-ShineRecordedProcessAlive` 双侧归一化为 'o' 格式（pwsh 7 回归已加入
+   `test_startup_guard.py`）。
+2. **`File.Replace` 第三参数编组**：PowerShell 把 `$null` 字符串参数编组成空串，
+   `.NET` 拒绝空 backup 路径；清单原子替换首写即抛错。修复：`[NullString]::Value`。
+3. 冒烟同时证实了互斥锁链路（Python/PS 同名推导、等待-释放、以及启动器内嵌套
+   停止需要豁免标记 `SHINE_STARTUP_GUARD_HELD=1`，否则 120s 超时后有效清单被
+   错误归档）。
