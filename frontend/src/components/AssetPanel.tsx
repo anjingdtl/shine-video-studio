@@ -3,6 +3,7 @@ import { Check, Clock3, Film, HelpCircle, LockKeyhole, Pencil, Upload, X } from 
 import { API, api, type Asset } from '../api';
 import { ImagePreview } from './ImagePreview';
 import { roleLabels, roleOptions } from '../constants';
+import { useStageRail, useRailPresent } from './StageRail';
 
 type Props = {
   assets: Asset[];
@@ -37,6 +38,17 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
 
 
   const pending = assets.filter(asset => !asset.locked);
+  const railPresent = useRailPresent();
+  // 有待确认上传素材时，「确认使用」就是这一步最该做的一件事（优先于素材清单分析）。
+  useStageRail('asset-confirm', {
+    priority: 0,
+    primary: pending.length > 0 ? {
+      label: selection.length ? `确认使用所选 ${selection.length} 项素材` : '确认使用所选待确认素材',
+      onClick: () => onConfirm(selection), disabled: busy || !selection.length,
+      disabledReason: selection.length ? undefined : '先在下方勾选要确认的素材',
+      icon: <LockKeyhole size={14} />,
+    } : null,
+  }, [pending.length, selection, busy]);
 
   function beginEdit(asset: Asset) {
     setEditingId(asset.id);
@@ -141,8 +153,8 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
           <b>有 {pending.length} 项上传素材待你选择</b>
           <small>确认会固定素材版本，AI 不能替你确认或替换。确认后这张素材才能被分镜引用。</small>
         </div>
-        <button className="btn-primary" disabled={busy || !selection.length}
-          onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>
+        {!railPresent && <button className="btn-primary" disabled={busy || !selection.length}
+          onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>}
       </div>}
       <label className="material-field"><span>素材分组</span><select value={group} onChange={(e) => { setGroup(e.target.value); setVisible(24); }}>
         <option value="all">全部素材</option><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option><option value="voice">声音</option>
@@ -197,7 +209,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
                   <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
                 </select></label>
                 {saveError && <p role="alert" className="required-text">{saveError}</p>}
-                <button className="btn-primary" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
+                <button className="btn-secondary" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
                 <button className="btn-text" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
               </>}
             </div>}

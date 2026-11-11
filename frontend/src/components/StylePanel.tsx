@@ -6,6 +6,7 @@ import {
   matchStyleOption, presetForStyle, styleCatalogHash, STYLE_CATALOG_VERSION,
   STYLE_DIMENSION_OPTIONS, STYLE_PRESETS, type StyleDimension,
 } from '../styleCatalog';
+import { useStageRail, useRailPresent } from './StageRail';
 
 type Props = {
   projectId: string;
@@ -144,6 +145,18 @@ export default function StylePanel({
   // available after the same content was saved as a draft; only saving needs a
   // draft change to be meaningful.
   const canFreeze = allSevenFilled;
+  const railPresent = useRailPresent();
+  // plan 页的顺序主操作：分集确认（priority 1）之后轮到冻结风格（priority 2）。
+  // 已冻结时不再注册 primary；专家模式无栏时面板照常渲染自己的冻结按钮。
+  useStageRail('style-freeze', {
+    priority: 2,
+    primary: currentStyle ? null : {
+      label: '批准并冻结风格', onClick: () => void freezeNow(), loading: busy,
+      disabled: busy || !canFreeze,
+      disabledReason: canFreeze ? undefined : '先把七项风格约定填完整',
+      icon: <LockKeyhole size={14} />,
+    },
+  }, [currentStyle, busy, canFreeze, selectedDirectorId, rulepackId, rulepacks, style, onFreeze]);
   const canSave = allSevenFilled && (
     styleFields.some(([field]) => style[field] !== (serverDraft?.[field] ?? ''))
     || (style.film_type ?? null) !== (serverDraft?.film_type ?? null)
@@ -595,7 +608,7 @@ export default function StylePanel({
             </button>
           </div>
         </div>
-        : <div className="required-action">
+        : !railPresent && <div className="required-action">
           <LockKeyhole size={17} className="required-icon" />
           <div className="required-text">
             <b>必做：冻结这一版风格</b>
@@ -617,7 +630,7 @@ export default function StylePanel({
           <button type="button" className="btn-secondary" disabled={busy} onClick={onApplyStyleToAllShots}>
             应用当前风格到全部镜头
           </button>
-          <button type="button" className="btn-primary" disabled={busy} onClick={onRefreshFreeze}>
+          <button type="button" className="btn-secondary" disabled={busy} onClick={onRefreshFreeze}>
             解锁并应用新冻结
           </button>
         </div>

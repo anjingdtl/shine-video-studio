@@ -100,7 +100,7 @@ export function JourneyRail<P extends string>({
               {!nextIsCurrent && <span>{nextStage.hint}</span>}
             </div>
             {nextStage.page !== currentPage && currentPage !== 'projects' && (
-              <button type="button" className="btn-primary" onClick={() => onNavigate(nextStage)}>
+              <button type="button" className="btn-secondary" onClick={() => onNavigate(nextStage)}>
                 去这一步 <ChevronRight size={14} />
               </button>
             )}

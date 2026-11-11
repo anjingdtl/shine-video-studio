@@ -6,6 +6,7 @@ import {
   type CreativeBrief,
 } from '../api';
 import { OutlineConfirmationPanel } from './OutlineConfirmationPanel';
+import { useStageRail } from './StageRail';
 
 const TASK_STATUS_LABELS: Record<string, string> = {
   QUEUED: '排队中（常驻 Worker 会接着处理）',
@@ -99,6 +100,15 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
   const latest = briefs[0] ?? null;
   const lockedFacts = extra.split('\n').map((row) => row.trim()).filter(Boolean);
 
+  // 无剧本时引导用户先导入或撰写；有剧本后主操作交给大纲确认（priority 1）。
+  useStageRail('script-entry', {
+    priority: 3,
+    primary: documents.length === 0 ? {
+      label: '导入或撰写剧本',
+      onClick: () => document.querySelector<HTMLTextAreaElement>('#script-entry textarea')?.focus(),
+    } : null,
+  }, [documents.length]);
+
   return <section className="card script-entry" id="script-entry">
     <div className="module-guide">
       <Lightbulb size={13} />
@@ -131,12 +141,12 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
           <p className="brief-idea">{latest.payload.idea}</p>
           {latest.payload.locked_facts?.length ? <p>锁定：{latest.payload.locked_facts.join('；')}</p> : null}
           <div className="brief-actions">
-            {!latest.confirmed && <button type="button" className="btn-primary" disabled={busy}
+            {!latest.confirmed && <button type="button" className="btn-secondary" disabled={busy}
               onClick={() => run(async () => {
                 await confirmCreativeBrief(projectId, latest.id, latest.sha256);
                 onMessage?.('创意简报已确认。');
               })}>确认这一版</button>}
-            {latest.confirmed && <button type="button" className="btn-primary" disabled={busy || generating}
+            {latest.confirmed && <button type="button" className="btn-secondary" disabled={busy || generating}
               onClick={() => run(async () => {
                 try {
                   await generateScriptFromBrief(projectId, latest.id, false);

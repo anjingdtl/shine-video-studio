@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, json } from '../api';
 import { ScriptTextConsent } from './ScriptTextConsent';
 import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
+import { useStageRail, useRailPresent } from './StageRail';
+import type { RailAction } from './ActionRail';
 
 type Section = { production_section_id: string; order: number; title: string };
 type Outline = {
@@ -83,6 +85,42 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     }
   }
 
+  const railPresent = useRailPresent();
+  const extractOutline = () => void act(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
+    document_id: documentId,
+    expected_document_hash: documentHash,
+    locked_facts: lockedFacts,
+  })), '大纲任务已排队；关掉页面也会由常驻 Worker 继续。');
+  const confirmOutline = () => void act(() => api(
+    `/projects/${projectId}/story-preparation/outlines/${outline?.artifact_id}/confirm`,
+    json('POST', { expected_sha256: outline?.sha256 })), '大纲已确认，可以进入第 2 阶段分集。');
+  const resumeOutline = () => void act(() => api(
+    `/projects/${projectId}/story-preparation/tasks/${outlineTask?.task_id}/resume`,
+    json('POST', { expected_state_version: outlineTask?.state_version })), '大纲任务已恢复。');
+
+  // ① 创意与剧本的顺序主操作：提取大纲 → 确认大纲 → （已确认后为空）。
+  const needsConsentResume = outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry
+    && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED';
+  let outlinePrimary: RailAction | null = null;
+  if (needsConsentResume) {
+    outlinePrimary = { label: '恢复大纲任务', onClick: resumeOutline, loading: busy, disabled: busy || !scriptwriterAllowed,
+      disabledReason: scriptwriterAllowed ? undefined : '先在上方授权剧本文字发送' };
+  } else if (!outline) {
+    outlinePrimary = { label: '后台提取并归并总体大纲', onClick: extractOutline, loading: busy,
+      disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
+      disabledReason: !scriptwriterAllowed ? '先在上方授权剧本文字发送'
+        : blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined };
+  } else if (!outline.approved) {
+    outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
+      disabled: busy || outline.stale || outline.payload.questions.length > 0,
+      disabledReason: outline.payload.questions.length > 0 ? '有创作问题待你过目（可在内容区按当前设定确认）' : undefined };
+  }
+  useStageRail('outline-confirm', {
+    priority: 1,
+    primary: outlinePrimary,
+    running: running ? { label: '大纲提取中', done: outlineTask?.summary?.done, total: outlineTask?.summary?.total } : null,
+  }, [outline, outlineTask, busy, running, blockedSameInput, scriptwriterAllowed, lockedFacts, documentId, documentHash]);
+
   return <section className="card section-card outline-confirm" id="outline-confirm">
     <div className="section-heading compact">
       <div>
@@ -99,14 +137,10 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新的大纲输入）</span>
       <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
     </label>
-    <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
-      onClick={() => void act(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
-        document_id: documentId,
-        expected_document_hash: documentHash,
-        locked_facts: lockedFacts,
-      })), '大纲任务已排队；关掉页面也会由常驻 Worker 继续。')}>
+    {!railPresent && <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
+      onClick={extractOutline}>
       {busy ? '提交中…' : '后台提取并归并总体大纲'}
-    </button>
+    </button>}
     {outlineTask && <>
       <p className="run-hint">
         大纲任务 {outlineTask.task_id.slice(0, 8)} · {TASK_STATUS_LABELS[outlineTask.status] ?? outlineTask.status}
@@ -127,12 +161,9 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         ? '大纲等待剧本文字授权。请查看上方模型和发送范围，授权后恢复该任务。'
         : `大纲任务需要处理（${outlineTask.error_code}）。可在素材准备的总体大纲区核对已有结果。`}
     </p>}
-    {outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED' && (
+    {!railPresent && outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED' && (
       <button type="button" className="btn-primary" disabled={busy || !scriptwriterAllowed}
-        onClick={() => void act(() => api(
-          `/projects/${projectId}/story-preparation/tasks/${outlineTask.task_id}/resume`,
-          json('POST', { expected_state_version: outlineTask.state_version }),
-        ), '大纲任务已恢复。')}>
+        onClick={resumeOutline}>
         恢复大纲任务
       </button>
     )}
@@ -152,13 +183,11 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         <p>补充锁定事实后重新生成；如果这些疑问是你有意保留的悬念，可以按当前设定确认，确认记录会写下你接受的全部疑问。</p>
       </div>}
       {!outline.approved && <div className="outline-actions">
-        <button type="button" className="btn-primary"
+        {!railPresent && <button type="button" className="btn-primary"
           disabled={busy || outline.stale || outline.payload.questions.length > 0}
-          onClick={() => void act(() => api(
-            `/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`,
-            json('POST', { expected_sha256: outline.sha256 })), '大纲已确认，可以进入第 2 阶段分集。')}>
+          onClick={confirmOutline}>
           确认这版总体大纲
-        </button>
+        </button>}
         {outline.payload.questions.length > 0 && <button type="button" className="btn-secondary"
           disabled={busy || outline.stale || !outline.questions_sha256}
           onClick={() => void act(() => api(

@@ -4,6 +4,7 @@ import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
+import { useStageRail, useRailPresent } from './StageRail';
 
 type AutoBinding = { asset_id: string; use_as: string; role: string | null; frame_role: string | null; ordinal: number };
 
@@ -543,6 +544,21 @@ export default function ProductionSeriesPanel({
   const productionLive = !!activeSeries
     || jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
 
+  const railPresent = useRailPresent();
+  // ⑥ 排产制作：唯一主操作是一键开拍；有活跃 series 时主操作变为不可点的进度态。
+  useStageRail('series-one-click', {
+    priority: 1,
+    primary: activeSeries ? null : {
+      label: '一键开拍（自动适配）', onClick: () => void oneClickStart(), loading: working,
+      disabled: busy || working || registering || demoSelected || !!activeSeries,
+      disabledReason: demoSelected ? '连续制作只支持真实 H3，先切回真实制作'
+        : !profileId ? '先为本作品登记生成方案' : undefined,
+      icon: <Wand2 size={14} />,
+    },
+    running: activeSeries ? { label: `拍摄进行中 · ${statusLabels[activeSeries.status] ?? activeSeries.status}`,
+      done: activeSeries.completed_count, total: activeSeries.shot_count } : null,
+  }, [busy, working, registering, demoSelected, activeSeries, profileId, shots.length]);
+
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">
       <div>
@@ -578,11 +594,11 @@ export default function ProductionSeriesPanel({
             ? `用你选定的方案「${userChosenProfile.name}」；自动补齐参考、勾选镜头。`
             : '自动选方案、补齐参考、勾选镜头；高级设置一般不用改。'}</small>
         </div>
-        <button type="button" className="btn-primary" disabled={busy || working || registering || demoSelected || !!activeSeries}
+        {!railPresent && <button type="button" className="btn-primary" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
           {working ? <Loader2 size={15} /> : <Wand2 size={15} />}
           {working ? '正在自动适配…' : '一键开拍（自动适配）'}
-        </button>
+        </button>}
       </div>
       <div className="quality-picker" role="radiogroup" aria-label="拍摄质量">
         {QUALITY_TIERS.map((tier) => {
@@ -811,12 +827,12 @@ export default function ProductionSeriesPanel({
         {blockers.length > 4 && <small>还有 {blockers.length - 4} 项前置条件，处理完上面的会自动刷新。</small>}
         {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
       </div>
-      {shots.length === 0 && <button type="button" className="btn-primary"
+      {shots.length === 0 && <button type="button" className="btn-secondary"
         onClick={() => document.getElementById('storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
         去完成并应用分镜
       </button>}
       {!profileId && <>
-        <button type="button" className="btn-primary" disabled={busy || working || registering} onClick={() => void registerProfiles()}>
+        <button type="button" className="btn-secondary" disabled={busy || working || registering} onClick={() => void registerProfiles()}>
           {registering ? '正在登记生成方案…' : '为本作品一键登记生成方案'}
         </button>
         <button type="button" className="btn-text" onClick={() => onModeAction('check_fix')}>检查生成方案</button>

@@ -14,6 +14,8 @@ import { rememberProductionProfile, storedProductionProfile } from '../productio
 import { EpisodePostEditor } from './EpisodePostEditor';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
+import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
+import type { RailAction } from './ActionRail';
 
 type Mode = 'plan' | 'package' | 'run' | 'post';
 
@@ -82,9 +84,12 @@ type Props = {
   workflowProfiles: WorkflowProfile[];
   onMessage: (text: string, kind: 'success' | 'error') => void;
   onRefresh?: () => void;
+  /** post 页：全部交付后去成片库。 */
+  onOpenLibrary?: () => void;
 };
 
-export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, workflowProfiles, onMessage, onRefresh }: Props) {
+export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, workflowProfiles, onMessage, onRefresh, onOpenLibrary }: Props) {
+  const railPresent = useRailPresent();
   const [journey, setJourney] = useState<Journey | null>(null);
   const [plans, setPlans] = useState<EpisodePlan[]>([]);
   const [packages, setPackages] = useState<DirectorPackage[]>([]);
@@ -305,6 +310,51 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
 
   const selectedGate = profileId ? gates[profileId] : undefined;
 
+  // 主操作收敛到页面吸顶栏：按模式与真实状态算出当前唯一 primary。
+  const busyAny = busy !== '';
+  const confirmPlanAction: RailAction | null = latestPlan && latestPlan.status !== 'CONFIRMED'
+    ? { label: '确认分集方案', onClick: () => void confirmPlan(), loading: busy === 'plan-confirm', disabled: busyAny, icon: <Check size={14} /> }
+    : null;
+  const buildPackageAction: RailAction = {
+    label: '生成导演包', onClick: () => void buildPackage(), loading: busy === 'package',
+    disabled: busyAny || !confirmedPlan || !profileId,
+    disabledReason: !profileId ? '先在基础配置登记本机生成方案' : !confirmedPlan ? '先确认分集方案，才能生成导演包' : undefined,
+    icon: <LockKeyhole size={14} />,
+  };
+  const confirmPackageAction: RailAction | null = latestPackage && latestPackage.status !== 'CONFIRMED'
+    ? { label: '确认导演包', onClick: () => void confirmPackage(), loading: busy === 'package-confirm',
+        disabled: busyAny || !readiness?.ready,
+        disabledReason: !readiness?.ready ? '就绪检查未通过，先处理下方阻塞' : undefined, icon: <Check size={14} /> }
+    : null;
+  const canStartRun = !!latestPackage && latestPackage.status === 'CONFIRMED' && !!readiness?.startable
+    && (!run || !RUN_ACTIVE.includes(run.status));
+  const startRunAction: RailAction | null = canStartRun
+    ? { label: latestPackage && latestPackage.episode_count > 1 ? `启动整部作品生产（${latestPackage.episode_count} 集）` : '启动整部作品生产',
+        onClick: () => void startRun(), loading: busy === 'run', disabled: busyAny, icon: <Play size={14} /> }
+    : null;
+
+  let registration: StageRegistration = { priority: 1, primary: null };
+  if (mode === 'plan') {
+    registration = { priority: 1, primary: confirmPlanAction };
+  } else if (mode === 'package') {
+    registration = { priority: 1, primary: !latestPackage ? buildPackageAction : (confirmPackageAction ?? startRunAction) };
+  } else if (mode === 'run') {
+    registration = {
+      priority: 1,
+      primary: !activeRun ? startRunAction : null,
+      running: activeRun && RUN_ACTIVE.includes(activeRun.status)
+        ? { label: `整部作品${statusText(activeRun.status)}`, done: activeRun.progress.passed_shot_count, total: activeRun.scope.shot_count }
+        : null,
+    };
+  } else if (mode === 'post') {
+    registration = {
+      priority: 1,
+      primary: onOpenLibrary ? { label: '打开成片库', onClick: onOpenLibrary, icon: <Film size={14} /> } : null,
+    };
+  }
+  useStageRail(`run-panel-${mode}`, registration,
+    [mode, busy, latestPlan, confirmedPlan, latestPackage, readiness, run, profileId, onOpenLibrary, gates, workflowProfiles]);
+
   // 就绪检查是即时事实（会随风格/绑定/文件变化）；七阶段摘要只在没有包时兜底。
   const shownBlockers = (readiness?.blockers
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
@@ -362,7 +412,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             <span>{statusText(latestPlan.status)} · 目标 {latestPlan.payload.target_seconds} 秒
               ± {latestPlan.payload.tolerance_seconds} 秒</span>
           </div>
-          {latestPlan.status !== 'CONFIRMED' && <button className="btn-primary" disabled={busy !== ''} onClick={confirmPlan}>
+          {!railPresent && latestPlan.status !== 'CONFIRMED' && <button className="btn-primary" disabled={busy !== ''} onClick={confirmPlan}>
             <Check size={13} /> 确认分集方案
           </button>}
           {latestPlan.status === 'CONFIRMED' && <button className="btn-secondary" disabled={busy !== ''}
@@ -443,9 +493,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
-          <button className="btn-secondary" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
+          {!railPresent && <button className="btn-secondary" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
             <LockKeyhole size={13} /> 生成导演包
-          </button>
+          </button>}
           {!confirmedPlan && <span className="run-hint">先确认分集方案，才能生成导演包。</span>}
         </div>
 
@@ -455,7 +505,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               <b>第 {latestPackage.revision} 版 · {latestPackage.episode_count} 集 · {latestPackage.shot_count} 镜</b>
               <span>{statusText(latestPackage.status)}{latestPackage.stale ? ' · 已失效，需要重新生成' : ''}</span>
             </div>
-            {latestPackage.status !== 'CONFIRMED' && <button className="btn-primary"
+            {!railPresent && latestPackage.status !== 'CONFIRMED' && <button className="btn-primary"
               disabled={busy !== '' || !readiness?.ready} onClick={confirmPackage}>
               <Check size={13} /> 确认导演包
             </button>}
@@ -500,7 +550,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             </div>
           </details>
 
-          {latestPackage.status === 'CONFIRMED' && readiness?.startable
+          {!railPresent && latestPackage.status === 'CONFIRMED' && readiness?.startable
             && (!run || !RUN_ACTIVE.includes(run.status)) && <button className="btn-primary btn-wide"
               disabled={busy !== ''} onClick={startRun}>
               <Play size={14} /> 启动整部作品生产

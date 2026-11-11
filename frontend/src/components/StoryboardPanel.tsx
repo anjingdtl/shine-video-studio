@@ -3,6 +3,8 @@ import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, 
 import { API, ApiError, api, json, type DialogueCoverage } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
 import { AgentProgress, agentPhaseLabels, reusedRolesFromInputs, type AgentRunProgress } from './AgentProgress';
+import { useStageRail, useRailPresent } from './StageRail';
+import type { RailAction } from './ActionRail';
 
 type DocumentRow = {
   id: string; filename: string; sha256: string; source_format: string;
@@ -507,6 +509,57 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   const replayTarget = result?.rejections?.find(
     rejection => rejection.code === 'AGENT_RESPONSE_RECEIVED_NO_REPLAY' && rejection.task_id);
 
+  const railPresent = useRailPresent();
+  // ③ 镜头拆解的唯一主操作随状态机切换；禁用时用 guide 给出「去补齐」出口。
+  const generateGuide = rulepackId === null && onNavigate
+    ? { label: '去启用官方规则包', go: () => onNavigate('assets') }
+    : scriptTooLong && onNavigate
+      ? { label: '去选择生产段落', go: () => onNavigate('long-story') }
+      : undefined;
+  let storyboardPrimary: RailAction | null = null;
+  if (binding) {
+    storyboardPrimary = {
+      label: confirmedBreakdownId ? '复用已确认人物，继续导演' : '确认并写入名字',
+      onClick: () => void applyBinding(), loading: bindingBusy,
+      disabled: busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim()),
+      disabledReason: !consent ? '先勾选同意发送剧本文本'
+        : (!selectedDoc && !inlineText.trim()) ? '先选择这份人物对照对应的剧本' : undefined,
+      guide: (!selectedDoc && !inlineText.trim()) ? { label: '去选择剧本', go: () => document.getElementById('storyboard-doc')?.focus() } : undefined,
+      icon: <CheckCircle2 size={14} />,
+    };
+  } else if (requiresReconciliation && replacement) {
+    storyboardPrimary = { label: '开始新一轮导演', loading: busy, disabled: backendDisconnected || busy,
+      onClick: () => void runChain({ start_role: 'director', resume_steps: { scriptwriter: replacement.scriptwriter }, replaceInterruptedTaskId: replacement.taskId }) };
+  } else if (requiresReconciliation) {
+    storyboardPrimary = { label: '检查并自动继续导演', loading: checkingPreviousRun, disabled: backendDisconnected || checkingPreviousRun || busy,
+      onClick: () => void checkAndResumeDirector() };
+  } else if (result?.status === 'NEEDS_REVIEW') {
+    storyboardPrimary = { label: 'AI 修复并重新检查', loading: busy, disabled: busy || backendDisconnected,
+      onClick: () => void resumeFrom('director_arbitration', Object.fromEntries(Object.entries(result.steps).map(([role, step]) => [role, step.artifact_id]))) };
+  } else if (result?.status === 'PROPOSED' && result.next) {
+    storyboardPrimary = { label: '应用为正式分镜（人工确认）', loading: applying, disabled: applying, onClick: () => void apply(), icon: <Sparkles size={14} /> };
+  } else if (result?.status === 'REJECTED' && replayTarget) {
+    storyboardPrimary = { label: '重新生成（新请求，会再次计费）', loading: busy, disabled: busy, danger: true,
+      onClick: () => runChain({ authorizeReplayTaskId: replayTarget.task_id }) };
+  } else if (result?.status === 'REJECTED' && failedRole) {
+    storyboardPrimary = { label: `从「${stepLabels[failedRole] ?? failedRole}」这一步重试`, loading: busy, disabled: busy || requiresReconciliation,
+      onClick: () => resumeFrom(failedRole, resumeSteps) };
+  } else {
+    storyboardPrimary = { label: '生成 AI 分镜方案', onClick: generate, loading: busy,
+      disabled: backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong,
+      disabledReason: backendDisconnected ? '服务未连接，重试连接'
+        : scriptTooLong ? '剧本超长，去拆分场次' : undefined,
+      icon: <Sparkles size={14} /> };
+  }
+  useStageRail('storyboard', {
+    priority: 1,
+    primary: storyboardPrimary,
+    secondary: generateGuide ? [{ label: generateGuide.label, onClick: generateGuide.go }] : [],
+    running: busy && !progressPaused ? { label: '分镜链进行中（切换页面不中断）' } : null,
+  }, [rulepackId, scriptTooLong, binding, confirmedBreakdownId, requiresReconciliation, replacement, result,
+    replayTarget, failedRole, resumeSteps, busy, bindingBusy, consent, selectedDoc, inlineText,
+    backendDisconnected, checkingPreviousRun, applying, progressPaused]);
+
   return <section className="card section-card" id="storyboard">
     <div className="section-heading compact">
       <div>
@@ -531,7 +584,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         <b>还差一步：本项目还没绑定官方规则包</b>
         <small>五个 Agent 需要同一套官方规范；到「剧本统筹」冻结风格时会一并绑定。</small>
       </div>
-      {onNavigate && <button className="btn-primary" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
+      {!railPresent && onNavigate && <button className="btn-primary" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
     </div>}
 
     <div className="storyboard-import">
@@ -582,7 +635,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     {scriptTooLong && <div className="required-action" role="alert">
       <div className="required-text"><b>长剧本请分段制作</b>
         <small>单次分镜最多处理 20000 字。请在素材准备中选择已确认大纲的生产段落，逐段生成分镜；不会截断原文。</small></div>
-      {onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
+      {!railPresent && onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
     </div>}
     <div className="required-action">
       <Sparkles size={17} className="required-icon" />
@@ -590,7 +643,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         <b>{requiresReconciliation ? '前次模型请求结果待核对' : '必做：生成 AI 分镜方案'}</b>
         <small>{requiresReconciliation ? '系统会先检查前次调用。确认请求未送达时，复用已保存的编剧结果并自动从导演继续。' : '需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。'}</small>
       </div>
-      {requiresReconciliation && replacement ? <button type="button" className="btn-primary" disabled={backendDisconnected || busy}
+      {!railPresent && (requiresReconciliation && replacement ? <button type="button" className="btn-primary" disabled={backendDisconnected || busy}
         onClick={() => void runChain({ start_role: 'director', resume_steps: { scriptwriter: replacement.scriptwriter },
           replaceInterruptedTaskId: replacement.taskId })}>开始新一轮导演</button>
       : requiresReconciliation ? <button type="button" className="btn-primary" disabled={backendDisconnected || checkingPreviousRun || busy}
@@ -599,7 +652,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       </button> : <button className="btn-primary" disabled={backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong} onClick={generate}>
         {busy ? <Loader2 size={14} /> : <Sparkles size={14} />}
         生成 AI 分镜方案
-      </button>}
+      </button>)}
     </div>
     {message && <p role="status">{busy && progressPaused
       ? '本次任务状态待核对，等待计时已暂停。' : message}</p>}
@@ -652,18 +705,18 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       {result.status === 'REJECTED' && replayTarget && <div className="step-retry">
         <RefreshCw size={14} />
         <span>上一次已收到服务商响应但答案被拒绝，结果确定不可用。发起新请求会重新调用模型并再次计费；被拒绝的记录会保留为历史。</span>
-        <button className="btn-primary" disabled={busy}
+        {!railPresent && <button className="btn-primary" disabled={busy}
           onClick={() => runChain({ authorizeReplayTaskId: replayTarget.task_id })}>
           重新生成（新请求，会再次计费）
-        </button>
+        </button>}
       </div>}
       {result.status === 'REJECTED' && failedRole && !replayTarget && <div className="step-retry">
         <RefreshCw size={14} />
         <span>这一步已经完成的部分不会重跑。</span>
-        <button className="btn-primary" disabled={busy || requiresReconciliation}
+        {!railPresent && <button className="btn-primary" disabled={busy || requiresReconciliation}
           onClick={() => resumeFrom(failedRole, resumeSteps)}>
           从「{stepLabels[failedRole] ?? failedRole}」这一步重试
-        </button>
+        </button>}
       </div>}
       {binding && <div className="binding-panel" id={`character-confirmation-${projectId}`}>
         <div className="section-kicker">人物对照（剧本人物 ↔ 你的素材）</div>
@@ -734,20 +787,20 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         </div>}
         {!requiresReconciliation && !selectedDoc && !inlineText.trim() && <div className="required-action">
           <div className="required-text"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
-          <button type="button" className="btn-primary" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
+          {!railPresent && <button type="button" className="btn-primary" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>}
         </div>}
-        {requiresReconciliation ? onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('assets')}>
+        {requiresReconciliation ? (!railPresent && onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('assets')}>
           去剧本统筹核对风格
-        </button> : <div className="required-action">
+        </button>) : <div className="required-action">
           <CheckCircle2 size={17} className="required-icon" />
           <div className="required-text">
             <b>{confirmedBreakdownId ? '人物名字已经保存，可以继续导演' : '必做：确认名图对应'}</b>
             <small>{confirmedBreakdownId ? '将复用已确认的人物，不再重复写入名字，也不重跑编剧。' : '确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。'}</small>
           </div>
-          <button className="btn-primary" disabled={busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim())} onClick={applyBinding}>
+          {!railPresent && <button className="btn-primary" disabled={busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim())} onClick={applyBinding}>
             {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />}
             {confirmedBreakdownId ? '复用已确认人物，继续导演' : '确认并写入名字'}
-          </button>
+          </button>}
         </div>}
       </div>}
       {(result.status === 'PROPOSED' || result.status === 'NEEDS_REVIEW') && <>
@@ -812,11 +865,11 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             <small>{result.repair_failure ? '本轮自动修复未通过检查，原方案已保留。可以再次尝试修复。'
               : 'AI 会复用已完成的步骤，尝试修订冲突并重新检查，不会修改已冻结风格或素材。'}</small>
           </div>
-          <button className="btn-primary" type="button" disabled={busy || backendDisconnected}
+          {!railPresent && <button className="btn-primary" type="button" disabled={busy || backendDisconnected}
             onClick={() => void resumeFrom('director_arbitration', Object.fromEntries(
               Object.entries(result.steps).map(([role, step]) => [role, step.artifact_id])))}>
             AI 修复并重新检查
-          </button>
+          </button>}
         </div>}
         {result.status === 'PROPOSED' && result.next && <button className="btn-secondary" disabled={applying} onClick={apply}>
           {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）

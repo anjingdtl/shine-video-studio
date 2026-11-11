@@ -31,6 +31,8 @@ import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
+import { StageRailProvider } from './components/StageRail';
+import type { RailBlocker } from './components/ActionRail';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getJourney, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
@@ -257,6 +259,10 @@ function App() {
   const stageBlockers: Record<string, number> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.blockers.length]),
   ), [journey]);
+  /** 操作栏待办来自服务端 /journey 的 blocker，前端不另造完成态或阻塞。 */
+  const railBlockers = (stageId: string): RailBlocker[] =>
+    (journey?.stages.find((stage) => stage.id === stageId)?.blockers ?? [])
+      .map((blocker) => ({ code: blocker.code, reason: blocker.message }));
   /** 生产阶段完成 = 本次范围内每个镜头都有当前有效成片，不是“有一个视频”。 */
   const deliverableReady = stageDone.production ?? false;
   /** 素材阶段的“还缺几项”：来自服务端 facts，缺图不堵流程但要让用户看见。 */
@@ -824,6 +830,7 @@ function App() {
               </div>}
 
               <div className="director-page" id="creative" hidden={directorPage !== 'creative'}>
+                <StageRailProvider stageId="script" stageLabel="第①步 · 创意与剧本" blockers={railBlockers('script')}>
                 {directorPageIntro(
                   '第 1 阶段',
                   <>先有一个<em>能开拍的故事。</em></>,
@@ -853,9 +860,11 @@ function App() {
                     onMessage={report}
                   />
                 </details>
+                </StageRailProvider>
               </div>
 
               <div className="director-page director-plan" id="plan-stage" hidden={directorPage !== 'assets'}>
+                <StageRailProvider stageId="plan" stageLabel="第②步 · 剧本统筹" blockers={railBlockers('plan')}>
                 {directorPageIntro(
                   '第 2 阶段',
                   <>把剧本切成<em>能拍的集。</em></>,
@@ -890,6 +899,7 @@ function App() {
                   onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
                   onMessage={report}
                 />
+                </StageRailProvider>
               </div>
 
               <div className="director-page" id="produce" hidden={directorPage !== 'produce'}>
@@ -927,6 +937,7 @@ function App() {
                       ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · {storyboardScopeLabel}（点击展开修改）</>
                       : '① 剧本分镜 · 当前任务'}
                   </summary>
+                  <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
                   <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
                     backendDisconnected={systemChecked && !apiOnline}
                     visible={directorPage === 'produce' && focusStage === 'storyboard'}
@@ -936,6 +947,7 @@ function App() {
                     <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
                     <button type="button" className="btn-text" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
                   </div>}
+                  </StageRailProvider>
                 </details>
                 <details className="stage-dock" id="assets-dock" open={focusStage === 'assets'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('assets'); }}>
@@ -946,6 +958,7 @@ function App() {
                         ? <><Check size={13} className="stage-done-mark" /> ② 素材准备 · 需求已核对（点击展开）</>
                         : '② 素材准备 · 等待分镜定稿'}
                   </summary>
+                  <StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备" blockers={railBlockers('assets')}>
                   {materialMissing > 0 && <div className="blocked-callout">
                     <AlertTriangle size={15} />
                     <span>分镜要求的素材还没有全部确认为主素材。可以逐项补齐，也可以直接继续——缺的那个图片由 H3 自行生成。</span>
@@ -968,6 +981,7 @@ function App() {
                     onPatchMetadata={patchAssetMetadata}
                     onOpenLibrary={() => goToAssets('library')}
                   />
+                  </StageRailProvider>
                 </details>
                 <details className="stage-dock" id="series-dock" open={focusStage === 'produce'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('produce'); }}>
@@ -978,6 +992,7 @@ function App() {
                         ? <><Check size={13} className="stage-done-mark" /> ③ 排产制作 · {productionScopeLabel ? `本次 ${productionScopeLabel}` : '已出片'}（点击展开再拍）</>
                         : '③ 排产制作 · 当前任务'}
                   </summary>
+                  <StageRailProvider stageId="production" stageLabel="第⑥步 · 排产制作" blockers={railBlockers('production')}>
                   <ProductionSeriesPanel
                     key={`series-${projectId}`}
                     projectId={projectId}
@@ -1055,6 +1070,7 @@ function App() {
                     setPreview={setPreview}
                   />
                 </details>
+                  </StageRailProvider>
                 </details>
                 <details className="stage-dock" id="production-monitor" open={focusStage === 'monitor'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('monitor'); }}>
@@ -1088,6 +1104,7 @@ function App() {
               </div>
 
               <div className="director-page" id="package" hidden={directorPage !== 'package'}>
+                <StageRailProvider stageId="package" stageLabel="第⑤步 · 导演包" blockers={railBlockers('package')}>
                 {directorPageIntro(
                   '第 5 阶段',
                   <>把这次要拍的<em>固定下来。</em></>,
@@ -1104,9 +1121,11 @@ function App() {
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
                 />}
+                </StageRailProvider>
               </div>
 
               <div className="director-page" id="run" hidden={directorPage !== 'run'}>
+                <StageRailProvider stageId="production" stageLabel="第⑥步 · 视频生产" blockers={railBlockers('production')}>
                 {directorPageIntro(
                   '第 6 阶段',
                   <>一次启动，<em>后台跑完全片。</em></>,
@@ -1123,9 +1142,11 @@ function App() {
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
                 />}
+                </StageRailProvider>
               </div>
 
               <div className="director-page" id="deliver" hidden={directorPage !== 'deliver'}>
+                <StageRailProvider stageId="post" stageLabel="第⑦步 · 后期成片" blockers={railBlockers('post')}>
                 {directorPageIntro(
                   '第 7 阶段',
                   <>逐集播放，<em>确认后交付。</em></>,
@@ -1140,8 +1161,10 @@ function App() {
                   workflowProfiles={workflowProfiles}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
+                  onOpenLibrary={() => goToDirectorPage('library')}
                 />}
                 <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={directorPage === 'deliver'} refreshEpoch={dataEpoch} />
+                </StageRailProvider>
               </div>
 
               <div className="director-page" id="library" hidden={directorPage !== 'library'}>

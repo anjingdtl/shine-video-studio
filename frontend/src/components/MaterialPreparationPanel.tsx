@@ -5,6 +5,8 @@ import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { ScriptTextConsent } from './ScriptTextConsent';
 import { API, api, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
+import { useStageRail, useRailPresent } from './StageRail';
+import type { RailAction } from './ActionRail';
 import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
 
 /** Plan and batch states in the words of the page, not the words of the ledger. */
@@ -676,6 +678,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (selectRef.current) selectRef.current.open = shownStage === 2;
   }, [shownStage]);
   const promotable = Object.keys(selected).length > 0;
+  const railPresent = useRailPresent();
+  // ④ 拍摄素材准备的顺序主操作：分析剧本 → 确认清单并出图 → 晋升所选素材。
+  let materialPrimary: RailAction | null = null;
+  if (stage === 'confirm_requirements') {
+    materialPrimary = { label: confirmLabel, onClick: confirmAndGenerate, loading: busy,
+      disabled: busy || requirements.length === 0, disabledReason: requirements.length === 0 ? '先分析剧本生成需求清单' : undefined,
+      icon: <Sparkles size={14} /> };
+  } else if (stage === 'select_materials' || stage === 'materials_ready') {
+    materialPrimary = promotable ? { label: '确认使用所选素材为正式素材', onClick: promoteSelected, loading: busy,
+      disabled: busy || !promotable, icon: <CircleCheck size={14} /> } : null;
+  } else {
+    materialPrimary = { label: '分析剧本生成素材清单', onClick: analyseScript, loading: busy,
+      disabled: busy || !documentId, disabledReason: documentId ? undefined : '先在上方选择剧本文件',
+      icon: <Sparkles size={14} /> };
+  }
+  useStageRail('material-prep', { priority: 1, primary: materialPrimary },
+    [stage, busy, documentId, requirements.length, promotable, confirmLabel]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -814,9 +833,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          <button type="button" className="btn-primary" disabled={busy || !documentId} onClick={analyseScript}>
+          {!railPresent && <button type="button" className="btn-primary" disabled={busy || !documentId} onClick={analyseScript}>
             {busy ? <Loader2 size={13} /> : <Sparkles size={13} />} 分析剧本
-          </button>
+          </button>}
           {sceneReport.length > 0 && (
             <ul className="material-scene-list">
               {sceneReport.map((scene) => (
@@ -914,7 +933,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <div className="material-button-row">
                       <button type="button" className="btn-text" disabled={adoptionBusy}
                         onClick={() => void previewAdoption()}>用于这些镜头</button>
-                      {adoptionPreview?.shots.some((row) => !row.conflict) && <button type="button" className="btn-primary" disabled={adoptionBusy}
+                      {adoptionPreview?.shots.some((row) => !row.conflict) && <button type="button" className="btn-secondary" disabled={adoptionBusy}
                         onClick={() => void applyAdoption()}>确认采用到 {adoptionPreview.shots.filter((row) => !row.conflict).length} 个镜头</button>}
                     </div>
                     {adoptionPreview?.shot_count === 0 && <p>未找到匹配镜头，请从列表选择具体镜头。</p>}
@@ -939,7 +958,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到可分配的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
                     {librarySearchResults.map((result) => <div className="material-library-result" key={result.version.id}>
                       <div><b>{result.asset.title} · V{result.version.ordinal}</b><small>{result.version.content_sha256.slice(0, 12)}</small></div>
-                      <button type="button" className="btn-primary" disabled={librarySearchBusy}
+                      <button type="button" className="btn-secondary" disabled={librarySearchBusy}
                         onClick={() => void assignGlobalMaterial(requirement, result)}>分配到本项目</button>
                     </div>)}
                   </div>}
@@ -962,9 +981,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </fieldset>
           {stepReport.confirm && <p className="material-step-report">{stepReport.confirm}</p>}
           {stepReport.generate && <p className="material-step-report">{stepReport.generate}</p>}
-          <button type="button" className="btn-primary" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
+          {!railPresent && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
             {confirmLabel}
-          </button>
+          </button>}
         </div>
       </details>
 
@@ -1045,9 +1064,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </p>)}
             </details>
           </>}
-          <button type="button" className="btn-primary" disabled={busy || !promotable} onClick={promoteSelected}>
+          {!railPresent && <button type="button" className="btn-primary" disabled={busy || !promotable} onClick={promoteSelected}>
             确认使用所选素材
-          </button>
+          </button>}
           <button type="button" className="btn-text" disabled={busy || !runs.length} onClick={regenerateAll}>
             重跑全部素材（保留旧候选）
           </button>

@@ -298,7 +298,9 @@ it('切换素材步骤再返回时保留正在运行的分镜请求和最终结�
   await gotoDirectorPage(user, /剧本统筹/);
   await gotoDirectorPage(user, /镜头拆解/);
   expect(screen.getByLabelText('粘贴完整剧本文本')).toHaveValue('剧本不会因切页丢失');
-  expect(screen.getByRole('button', { name: /生成 AI 分镜方案/ })).toBeDisabled();
+  // 新 UI：运行中主操作变为吸顶栏的进度态（不再是禁用按钮），请求仍在跑且不可重提交。
+  expect(screen.getByText(/分镜链进行中/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /生成 AI 分镜方案/ })).toBeNull();
   await act(async () => { finish(jsonResponse({ status: 'PROPOSED', steps: {}, script_source: 'inline' })); });
   expect(await screen.findByText(/五个 Agent 已完成真实调用/)).toBeInTheDocument();
   expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1);

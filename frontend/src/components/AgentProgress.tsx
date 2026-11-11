@@ -72,7 +72,7 @@ export function AgentProgress({ runs, completedRoles = [], awaitingCharacters = 
         <b>{charactersConfirmed ? '人物已确认，导演尚未启动' : '等待你确认人物，导演尚未启动'}</b>
         <small>{charactersConfirmed ? '请完成下方的剧本选择和发送同意，再点「复用已确认人物，继续导演」。已保存的名字无需重写。' : '编剧已完成。请核对每个人物的名字和素材；确认后才会调用导演，不会重跑编剧。继续等待不会自动进入下一步。'}</small>
       </div>
-      <button className="btn-primary" type="button" onClick={onConfirmCharacters}>{charactersConfirmed ? '去继续导演' : '去确认人物并继续导演'}</button>
+      <button className="btn-secondary" type="button" onClick={onConfirmCharacters}>{charactersConfirmed ? '去继续导演' : '去确认人物并继续导演'}</button>
     </div>}
     {active && paused && <p role="status">实时进度不可确认。计时已暂停，下方保留最后读取的记录。</p>}
     {active && !paused && <div className="module-guide">
