@@ -194,12 +194,12 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
       const rejections = unit.rejections ?? [];
       let mayContinue = rejections.length > 0;
       for (const rejection of rejections) {
-        if (!rejection.task_id || rejection.state_version === undefined) {
+        if (!rejection.task_id) {
           mayContinue = false;
           continue;
         }
         const result = await reconcileFilmTask(
-          projectId, rejection.task_id, rejection.state_version);
+          projectId, rejection.task_id, rejection.state_version ?? 0);
         conclusions.push(result.note ?? (result.outcome === 'UNCONFIRMABLE'
           ? '无法确认服务商是否已处理这次调用，原任务已保留。'
           : result.outcome));

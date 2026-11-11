@@ -418,3 +418,26 @@ def test_a_live_crew_task_is_still_running(prep):  # noqa: F811
                              headers={"x-shine-local-action": "1"})
     assert reconciled.status_code == 409, reconciled.text
     assert reconciled.json()["detail"] == "FILM_AGENT_TASK_STILL_RUNNING"
+
+
+def test_a_reconciliation_is_idempotent_with_the_version_the_panel_holds(prep):  # noqa: F811
+    """A second click must not be refused because the version moved.
+
+    The panel keeps the version it saw when the unit failed.  The first
+    reconciliation advances the task, so the second click would carry a stale
+    version and be refused forever.
+    """
+    client, factory, _ = prep
+    project_id = create_project(client, "核对幂等")
+    task_id, version = _dead_crew_task(factory, project_id, phase="WAITING_RESOURCE")
+    first = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                        json={"expected_state_version": version},
+                        headers={"x-shine-local-action": "1"})
+    assert first.status_code == 200, first.text
+    assert first.json()["outcome"] == "NOT_SENT_PROVEN"
+    second = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                         json={"expected_state_version": version},
+                         headers={"x-shine-local-action": "1"})
+    assert second.status_code == 200, second.text
+    assert second.json()["outcome"] == "NOT_SENT_PROVEN"
+    assert second.json()["resubmittable"] is True

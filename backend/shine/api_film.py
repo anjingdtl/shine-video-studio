@@ -118,11 +118,21 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
     task = db.get(AgentTaskRecord, task_id)
     if not task or task.project_id != project_id or task.role_id not in FilmAgentRegistry.roles:
         raise HTTPException(404, "FILM_AGENT_TASK_NOT_FOUND")
-    if task.state_version != body.expected_state_version:
-        raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
+    decided = (task.trace.get("reconciliation") or {}).get("outcome")
+    if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER",
+                   "USER_AUTHORIZED_NEW_REQUEST"}:
+        # Reconciling twice must never turn a released task back into an
+        # unconfirmable one, and the version the caller holds is allowed to be
+        # the one it had before the first reconciliation.
+        return {"outcome": decided, "task_id": task.id, "state_version": task.state_version,
+                "resubmittable": decided != "RESULT_ADOPTED",
+                "note": "这一项已经核对过，结论不变。"}
     if task.status == "RUNNING" or task.lease_expires_at and task.lease_expires_at > utcnow():
         if not _crew_task_dead(task):
             raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
+        # A dead task is a finished attempt: its version is not a live cursor
+        # anymore, so the version the caller holds may be the one it had when
+        # the attempt started.
         # The process that owned this call is gone.  A call that provably never
         # left this machine is released; a call that may have reached the
         # provider keeps its unknown outcome and waits for the person.
@@ -154,14 +164,8 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
                 "state_version": task.state_version, "resubmittable": False,
                 "note": "持有这次调用的进程已经结束，但请求可能已经发出、结果无法取回；"
                         "需要你明确重发这一场，系统才会以一次新的模型请求重问。"}
-
-    decided = (task.trace.get("reconciliation") or {}).get("outcome")
-    if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}:
-        # Reconciling twice must never turn a released task back into an
-        # unconfirmable one.
-        return {"outcome": decided, "task_id": task.id, "state_version": task.state_version,
-                "resubmittable": decided != "RESULT_ADOPTED",
-                "note": "这一项已经核对过，结论不变。"}
+    if task.state_version != body.expected_state_version:
+        raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
 
     artifact = db.scalar(select(AgentArtifact).where(
         AgentArtifact.source_task_id == task.id, AgentArtifact.stale.is_(False),
@@ -1128,7 +1132,11 @@ def generate_storyboard(
                 "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
                 "steps": {},
                 "missing_characters": [],
-                "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id}],
+                # The version travels with the task: the panel reconciles this
+                # exact record, and without the version it could not ask.
+                "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id,
+                                "state_version": prior.state_version,
+                                "external_outcome": prior.trace.get("external_outcome")}],
                 "failed_role": prior.role_id,
                 # Keep the validated resume selection so reconciliation can
                 # inspect the original task without changing its identity.
