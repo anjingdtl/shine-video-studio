@@ -310,9 +310,20 @@ function App() {
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
   const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
   const focusStage = stageOverride ?? autoStage;
+  // 拍摄进行中离开进度段（排产/监控）需要确认，避免误切走正在跑的运行。
+  const [focusGuard, setFocusGuard] = useState<ProduceStageFocus | null>(null);
+  function requestFocus(target: ProduceStageFocus) {
+    if (makingNow && (focusStage === 'produce' || focusStage === 'monitor')
+      && target !== 'produce' && target !== 'monitor') {
+      setFocusGuard(target);
+      return;
+    }
+    setFocusGuard(null);
+    setStageOverride(target);
+  }
   // The person's own stage choice is theirs: it survives a page switch and the
   // auto advance, and only a new work replaces it.
-  useEffect(() => { setStageOverride(null); }, [projectId]);
+  useEffect(() => { setStageOverride(null); setFocusGuard(null); }, [projectId]);
 
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
@@ -389,11 +400,6 @@ function App() {
     setDirectorPage('setup');
     window.history.pushState(null, '', '#d/setup');
     window.scrollTo({ top: 0 });
-  }
-
-  /** 制作页内三个阶段的锚点滚动（面板保持挂载，运行中的任务不中断）。 */
-  function scrollToStage(id: string) {
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   /** 滚动侦测：板块进入视口上部条带时菜单联动高亮（仅当前视图内的锚点会交叉）。
@@ -912,30 +918,36 @@ function App() {
                     <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
                   </>,
                 )}
-                <nav className="produce-stages" aria-label="制作分区">
+                <nav className="produce-focus-bar" aria-label="制作分区聚焦">
                   {([
-                    { id: 'storyboard', icon: PenLine, label: '① 剧本分镜', done: stageDone.storyboard ?? shots.length > 0, dock: 'storyboard-dock' },
-                    { id: 'assets', icon: Images, label: '② 素材准备', done: stageDone.assets ?? false, dock: 'assets-dock' },
-                    { id: 'produce', icon: Video, label: '③ 排产制作', done: deliverableReady, dock: 'series-dock' },
-                    { id: 'monitor', icon: Activity, label: '④ 进度与结果', done: deliverableReady, dock: 'production-monitor' },
-                  ] as const).map((stage) => {
-                    const Icon = stage.icon;
-                    return (
-                      <button type="button" key={stage.id}
-                        className={focusStage === stage.id ? 'active' : ''}
-                        onClick={() => { setStageOverride(stage.id); scrollToStage(stage.dock); }}>
-                        <Icon size={13} />{stage.label}
-                        {stage.done && <Check size={12} className="stage-done-mark" />}
-                      </button>
-                    );
-                  })}
+                    { id: 'storyboard', label: '① 剧本分镜', done: stageDone.storyboard ?? shots.length > 0, blocked: (stageBlockers.storyboard ?? 0) > 0 },
+                    { id: 'assets', label: '② 素材准备', done: stageDone.assets ?? false, blocked: (stageBlockers.assets ?? 0) > 0 },
+                    { id: 'produce', label: '③ 排产制作', done: deliverableReady, blocked: (stageBlockers.production ?? 0) > 0 },
+                    { id: 'monitor', label: '④ 进度与结果', done: deliverableReady, blocked: false },
+                  ] as const).map((stage) => (
+                    <button type="button" key={stage.id}
+                      className={`produce-focus-item ${focusStage === stage.id ? 'active' : ''} ${stage.done ? 'done' : ''} ${stage.blocked && !stage.done ? 'blocked' : ''}`}
+                      aria-current={focusStage === stage.id ? 'step' : undefined}
+                      onClick={() => requestFocus(stage.id)}>
+                      <span className="produce-focus-dot" aria-hidden="true" />{stage.label}
+                    </button>
+                  ))}
+                  {focusGuard && (
+                    <span className="produce-focus-guard" role="alert">
+                      <AlertTriangle size={13} /> 拍摄进行中，确定离开进度段？
+                      <button type="button" className="btn-text" onClick={() => { setStageOverride(focusGuard); setFocusGuard(null); }}>继续切换</button>
+                      <button type="button" className="btn-text" onClick={() => { setFocusGuard(null); setStageOverride('monitor'); }}>去看进度</button>
+                    </span>
+                  )}
                 </nav>
-                <details className="stage-dock" id="storyboard-dock" open={focusStage === 'storyboard'}
+                <details className="stage-dock produce-focus-section" id="storyboard-dock" open={focusStage === 'storyboard'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('storyboard'); }}>
-                  <summary>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
                     {shots.length > 0
                       ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · {storyboardScopeLabel}（点击展开修改）</>
                       : '① 剧本分镜 · 当前任务'}
+                    </span>
                   </summary>
                   <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
                   <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
@@ -949,14 +961,16 @@ function App() {
                   </div>}
                   </StageRailProvider>
                 </details>
-                <details className="stage-dock" id="assets-dock" open={focusStage === 'assets'}
+                <details className="stage-dock produce-focus-section" id="assets-dock" open={focusStage === 'assets'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('assets'); }}>
-                  <summary>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
                     {materialMissing > 0
                       ? `② 素材准备 · 还有 ${materialMissing} 项待确认（缺的那个图片由 H3 自行生成）`
                       : (stageDone.assets ?? false)
                         ? <><Check size={13} className="stage-done-mark" /> ② 素材准备 · 需求已核对（点击展开）</>
                         : '② 素材准备 · 等待分镜定稿'}
+                    </span>
                   </summary>
                   <StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备" blockers={railBlockers('assets')}>
                   {materialMissing > 0 && <div className="blocked-callout">
@@ -983,14 +997,16 @@ function App() {
                   />
                   </StageRailProvider>
                 </details>
-                <details className="stage-dock" id="series-dock" open={focusStage === 'produce'}
+                <details className="stage-dock produce-focus-section" id="series-dock" open={focusStage === 'produce'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('produce'); }}>
-                  <summary>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
                     {makingNow
                       ? `③ 排产制作 · 制作进行中 ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.filter((job) => job.status !== 'CANCELLED').length} 镜（点击查看进度）`
                       : deliverableReady
                         ? <><Check size={13} className="stage-done-mark" /> ③ 排产制作 · {productionScopeLabel ? `本次 ${productionScopeLabel}` : '已出片'}（点击展开再拍）</>
                         : '③ 排产制作 · 当前任务'}
+                    </span>
                   </summary>
                   <StageRailProvider stageId="production" stageLabel="第⑥步 · 排产制作" blockers={railBlockers('production')}>
                   <ProductionSeriesPanel
@@ -1072,16 +1088,18 @@ function App() {
                 </details>
                   </StageRailProvider>
                 </details>
-                <details className="stage-dock" id="production-monitor" open={focusStage === 'monitor'}
+                <details className="stage-dock produce-focus-section" id="production-monitor" open={focusStage === 'monitor'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('monitor'); }}>
-                  <summary>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
                     {productionScopeLabel
                       ? `④ 进度与结果 · ${productionScopeLabel}`
                       : jobs.length === 0 ? '④ 进度与结果 · 暂无任务'
-                      : makingNow ? `④ 进度与结果 · 制作中（点击查看）`
+                      : makingNow ? '④ 进度与结果 · 制作中（点击查看）'
                         : jobs.every((job) => job.status === 'PASSED' || job.status === 'CANCELLED')
                           ? <><Check size={13} className="stage-done-mark" /> ④ 进度与结果 · 全部完成</>
                           : `④ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
+                    </span>
                   </summary>
                   {productionScopeLabel && <div className="empty-inline">
                     本次确认范围：{scopeShotCount} 镜，{productionScopeLabel}。以下服务统计与任务列表包含工作台/项目历史记录及本次范围外镜头；本次成片状态以“全片生产”和“成片中心”为准。
