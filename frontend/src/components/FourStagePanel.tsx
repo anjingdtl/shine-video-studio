@@ -21,6 +21,36 @@ type Props = {
   onMessage: (message: string, kind?: 'error' | 'success') => void;
 };
 
+/**
+ * Scene identifiers are not always readable.
+ *
+ * A scene whose key never got a short name falls back to the section UUID, and
+ * the panel used to print that UUID beside the title - the person saw a
+ * 36-character id where a scene name belongs. The title is what they read; the
+ * key is shown only when it is a real short key.
+ */
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-/i;
+
+/** A storyboard unit's state in words, never the raw enum. */
+const STORYBOARD_STATUS_LABELS: Record<string, string> = {
+  REJECTED: '这一场被拒绝',
+  NEEDS_REVIEW: '这一场待人工核对',
+  INCOMPLETE: '这一场还没完成',
+  FAILED: '这一场失败了',
+  RUNNING: '这一场生成中',
+  WAITING_DEPENDENCY: '等前面的部分先完成',
+};
+
+/** What a person should read for one scene: its title, else a short key, else a word. */
+function sceneLabel(item: { scene_key?: string | null; title?: string | null }): string {
+  const title = (item.title ?? '').trim();
+  const key = (item.scene_key ?? '').trim();
+  if (title) return key && !UUID_LIKE.test(key) ? `${key} ${title}` : title;
+  if (key && !UUID_LIKE.test(key)) return key;
+  return '这一场';
+}
+
+
 const ROLE_LABELS: Record<string, string> = {
   story_outline_run: '提取大纲',
   four_stage_bible_run: '生成全局故事蓝图',
@@ -33,7 +63,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const actionInFlight = useRef(false);
-  const [volumePlanDraft, setVolumePlanDraft] = useState<{ id: string; sha256: string; volumes: unknown[] } | null>(null);
+  const [volumePlanDraft, setVolumePlanDraft] = useState<{ artifact_id: string; sha256: string; volumes: unknown[] } | null>(null);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string }>>([]);
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
@@ -135,6 +165,9 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const bibleNeedsConfirmation = !overview.bible_confirmed || !!overview.bible_status?.blockers.length;
   // The draft is read from the server, never from local state: a refresh, a
   // crash or a restart must show the same pending work.
+  // The plan draft is local state while generating, and a server field after a
+  // refresh. Either way the person must still be able to confirm it.
+  const pendingPlan = volumePlanDraft ?? overview.pending_volume_plan ?? null;
   const draftUnits = currentVolume?.storyboard?.units ?? [];
   const draftStatus = currentVolume?.storyboard?.status ?? null;
   const receipt = currentVolume?.handoff ?? null;
@@ -317,7 +350,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         <b>① 文本导入与分卷</b>
         {!overview.volume_plan_confirmed && documents.length === 0 &&
           <p className="muted">请先在上方上传母本，或从创意简报生成剧本。</p>}
-        {!overview.volume_plan_confirmed && (
+        {!overview.volume_plan_confirmed && !pendingPlan && (
           <div className="row">
             <select aria-label="选择母本文档" defaultValue="">
               <option value="" disabled>选择已导入的母本文档</option>
@@ -331,7 +364,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                 setBusy(true);
                 try {
                   const draft = await importPipelineSource(projectId, doc.id, doc.sha256);
-                  setVolumePlanDraft({ id: draft.volume_plan_id, sha256: draft.sha256, volumes: draft.volumes });
+                  setVolumePlanDraft({ artifact_id: draft.volume_plan_id, sha256: draft.sha256, volumes: draft.volumes });
                   await refresh();
                 } catch (error) {
                   onMessage((error as Error).message, 'error');
@@ -339,11 +372,11 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
               }}>生成分卷方案</button>
           </div>
         )}
-        {volumePlanDraft && !overview.volume_plan_confirmed && (
+        {pendingPlan && !overview.volume_plan_confirmed && (
           <div className="row">
-            <span>分卷方案已生成（{volumePlanDraft.volumes.length} 卷），请确认。</span>
+            <span>分卷方案已生成（{pendingPlan.volumes.length} 卷），请确认。</span>
             <button type="button" className="must-button" disabled={busy}
-              onClick={() => run(() => confirmVolumePlan(projectId, volumePlanDraft.id, volumePlanDraft.sha256),
+              onClick={() => run(() => confirmVolumePlan(projectId, pendingPlan.artifact_id, pendingPlan.sha256),
                 () => setVolumePlanDraft(null))}>确认分卷方案</button>
           </div>
         )}
@@ -462,7 +495,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                 <ul className="script-list">
                   {v.scripts.map((s) => (
                     <li key={s.section_id}>
-                      <span>{s.scene_key} {s.title ?? ''}</span>
+                      <span>{sceneLabel(s)}</span>
                       <span className={s.confirmed ? 'ok' : 'pending'}>{s.confirmed ? '已确认' : '未确认'}</span>
                       {/* 终校只是一句中文结论：内部检查项与账本不进普通界面。 */}
                       {!s.confirmed && s.qa?.state === 'HARD_BLOCK' && (
@@ -528,10 +561,18 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             <div className="row">
               <span>{currentVolume.title}</span>
               <button type="button" className="secondary-button"
-                disabled={busy || !currentVolume.scripts_confirmed}
-                title={currentVolume.scripts_confirmed ? '' : '先确认该卷全部场次剧本'}
+                disabled={busy || currentVolume.scripts_confirmed === 0}
+                title={currentVolume.scripts_confirmed === 0
+                  ? '先确认至少一场剧本；草案只覆盖已确认的场次'
+                  : `草案只覆盖已确认的 ${currentVolume.scripts_confirmed}/${currentVolume.scripts_total} 场`
+                    + (currentVolume.scripts_confirmed < currentVolume.scripts_total
+                      ? '；其余场次确认后再生成一次即可补齐' : '')}
                 onClick={() => draftAndRecord(currentVolume.volume_id)}>
-                {draftUnits.length > 0 ? '重新生成本卷分镜草案' : '生成分镜草案'}
+                {draftUnits.length > 0
+                  ? '重新生成本卷分镜草案'
+                  : currentVolume.scripts_confirmed < currentVolume.scripts_total
+                    ? '生成已确认场次的分镜草案'
+                    : '生成分镜草案'}
               </button>
               <span className="muted small">按场逐次调用五个工种；项目再长也不会被单次输入上限卡住。</span>
             </div>
@@ -547,7 +588,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                         ? (unit.applied
                           ? '镜头已应用（' + (unit.shot_ids?.length ?? 0) + ' 个）'
                           : '待应用镜头')
-                        : '未完成：' + (unit.status ?? '未知')}
+                        : (STORYBOARD_STATUS_LABELS[unit.status ?? ''] ?? ('未完成：' + (unit.status ?? '未知')))}
                     </span>
                     {unit.dialogue_coverage && <span className="muted small">
                       对白节拍 {unit.dialogue_coverage.dialogue_beats}/{unit.dialogue_coverage.total_beats}
@@ -560,14 +601,15 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                       <span className="muted small">
                         分镜已定稿，这一场要用的主素材还没备齐：
                         {(unit.missing_characters ?? []).join('、')}
-                        '（可以先落镜；缺的那个图片将由 H3 自行生成）'
+                        。可以先落镜，但正式出片前要在「素材准备」里补齐；
+                        缺人物参考时 H3 会拒绝提交，不会自行生成参考图。
                       </span>
                     )}
                     {unit.status === 'PROPOSED' && !unit.applied && (
                       <button type="button" className="must-button" disabled={busy}
                         title={(unit.missing_characters ?? []).length > 0
                           ? '这一场要用的主素材还没备齐：' + (unit.missing_characters ?? []).join('、')
-                          + '。缺的那个图片将由 H3 自行生成，可以先落镜。'
+                          + '。可以先落镜，但出片前要补齐；缺人物参考时 H3 会拒绝提交。'
                           : ''}
                         onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
                     )}
@@ -578,7 +620,10 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                     )}
                     {unit.status !== 'PROPOSED' && (unit.rejections ?? []).length > 0 && (
                       <span className="muted small">
-                        {(unit.rejections ?? []).map((row) => row.rejection_reason_code ?? row.code).join('；')}
+                        {(unit.rejections ?? []).map((row) => {
+                          const code = row.rejection_reason_code ?? row.code ?? '';
+                          return ERROR_CODE_LABELS[code] ?? code;
+                        }).join('；')}
                       </span>
                     )}
                   </li>
@@ -615,7 +660,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                         event.target.checked
                           ? [...previous, script.section_id]
                           : previous.filter((id) => id !== script.section_id)))} />
-                    {script.scene_key} {script.title ?? ''}
+                    {sceneLabel(script)}
                   </label>
                 ))}
                 <button type="button" className="secondary-button"

@@ -90,6 +90,12 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
                 "handoff": pipeline.volume_handoff_receipt(db, project_id, volume_id),
             })
     master_ref = plan.payload_json["source_master"] if plan else {"document_id": None, "sha256": None}
+    # A generated-but-unconfirmed plan lives on the server, not only in the
+    # panel's memory: a refresh, a project switch or a restart must still offer
+    # the "confirm this plan" step instead of asking the person to generate the
+    # same plan a second time.
+    pending_plan = (pipeline.latest_unconfirmed(db, project_id, pipeline.VOLUME_PLAN_KIND)
+                    if plan is None else None)
     pending_bible = pipeline.latest_unconfirmed(db, project_id, pipeline.BIBLE_KIND)
     pending_scripts = []
     for volume in volumes:
@@ -113,6 +119,9 @@ def pipeline_overview(project_id: str, db: DBSession) -> dict[str, Any]:
         "volume_plan": ({"artifact_id": plan.id, "sha256": plan.sha256,
                          "volumes": plan.payload_json.get("volumes") or []}
                         if plan is not None else None),
+        "pending_volume_plan": ({"artifact_id": pending_plan.id, "sha256": pending_plan.sha256,
+                                 "volumes": pending_plan.payload_json.get("volumes") or []}
+                                if pending_plan is not None else None),
         "bible_confirmed": bible is not None,
         # Whether the confirmed blueprint still describes the current work.
         # The read path, the confirmation and the production path read the
@@ -288,6 +297,12 @@ def storyboard_draft_route(
     require_project(db, project_id)
     only = (body or {}).get("section_ids")
     only_section_ids = [str(item) for item in only] if isinstance(only, list) and only else None
+    # A refused answer is replaced only by naming it.  The panel passes the
+    # task ids it was shown, in unit order; an id that does not belong to the
+    # unit being run simply leaves the refusal standing.
+    replay_ids = (body or {}).get("authorize_replay_task_ids")
+    authorize_replay_ids = ([str(item) for item in replay_ids if item]
+                            if isinstance(replay_ids, list) and replay_ids else None)
     try:
         script_text = pipeline.serialize_volume_script(db, project_id, volume_id)
         from shine.media.output_layout import output_root_for_request
@@ -295,7 +310,8 @@ def storyboard_draft_route(
         result = volume_storyboard_draft(
             db, project_id, volume_id, gateway,
             data_dir=output_root_for_request(request, db),
-            only_section_ids=only_section_ids)
+            only_section_ids=only_section_ids,
+            authorize_replay_ids=authorize_replay_ids)
         record = record_storyboard_draft(db, project_id, volume_id, result, script_text)
         db.commit()
     except ValueError as exc:

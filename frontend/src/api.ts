@@ -860,6 +860,15 @@ export interface PipelineOverview {
     artifact_id: string; sha256: string;
     volumes: Array<{ title: string; start_offset: number; end_offset: number }>;
   } | null;
+  /**
+   * A plan that was generated but not confirmed yet. It lives on the server so
+   * a refresh, a project switch or a restart still offers "confirm this plan"
+   * instead of silently dropping the step and asking for a second generation.
+   */
+  pending_volume_plan: {
+    artifact_id: string; sha256: string;
+    volumes: Array<{ title: string; start_offset: number; end_offset: number }>;
+  } | null;
   bible_confirmed: boolean;
   pending_bible: { artifact_id: string; sha256: string } | null;
   /** Why the confirmed blueprint no longer matches the current work. */
