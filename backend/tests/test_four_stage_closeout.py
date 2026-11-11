@@ -520,6 +520,80 @@ def test_f06_a_scene_without_shots_blocks_the_handoff_by_name(api):
     assert "PIPELINE_STORYBOARD_NOT_APPLIED" in response.text, response.text
 
 
+# --------------------------------------------------------------------------- F07
+
+
+def test_f07_an_uncovered_beat_blocks_the_camera_handoff_by_name(api):
+    """The last gate before rendering refuses a plan that drops a scripted beat.
+
+    Coverage is read from the two stored artifacts, so the test edits the plan
+    the way a broken crew run would leave it: one shot missing, its beat now
+    carried by nothing.  The refusal must name the fact and keep the project
+    usable - nothing is approved, no shot is created.
+    """
+    from tests.test_pipeline import _prepare_handoff_fixture
+
+    client, factory, settings, pid, plan, volume_id, units = _prepare_handoff_fixture(api)
+    camera_id = units[0]["camera_artifact_id"]
+    with factory.begin() as db:
+        artifact = db.get(AgentArtifact, camera_id)
+        payload = dict(artifact.payload_json)
+        shots = list(payload["shots"])
+        assert len(shots) >= 2, shots
+        direction = next(a for a in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.id.in_(artifact.input_revision_ids))).all()
+            if a.kind == "DirectorialPlan")
+        breakdown = next(a for a in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.id.in_(direction.input_revision_ids))).all()
+            if a.kind == "ScriptBreakdown")
+        intents = {str(shot["id"]): shot for shot in direction.payload_json["shots"]}
+
+        def beats_of(camera_shot) -> list[str]:
+            # A camera shot carries a beat only through the intent it films.
+            intent = intents.get(str(camera_shot.get("intent_id"))) or {}
+            found = [str(intent["beat_id"])] if intent.get("beat_id") else []
+            found.extend(str(cut["beat_id"]) for cut in intent.get("cuts") or []
+                         if cut.get("beat_id"))
+            return found
+
+        # Find a beat whose every landed shot can be dropped without emptying
+        # the plan: that beat then has no shot at all.
+        orphaned = None
+        for beat in breakdown.payload_json["beats"]:
+            beat_id = str(beat["id"])
+            kept = [shot for shot in shots if beat_id not in beats_of(shot)]
+            if kept and len(kept) < len(shots):
+                orphaned, shots = beat_id, kept
+                break
+        assert orphaned, "the fixture must have a beat that one shot can carry alone"
+        payload["shots"] = shots
+        artifact.payload_json = payload
+        artifact.sha256 = digest(payload)
+
+    response = client.post(
+        f"/api/v1/projects/{pid}/film-artifacts/{camera_id}/apply-camera",
+        json={"continuity_artifact_id": units[0]["continuity_artifact_id"]}, headers=LOCAL)
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "STORYBOARD_BEAT_UNCOVERED", detail
+    assert detail["next_action"] == "regenerate_storyboard"
+    assert detail["details"]["beats_covered"] < detail["details"]["beats_total"]
+    assert detail["details"]["beat_ids"], "the refusal names the beats that have no shot"
+
+    with factory() as db:
+        artifact = db.get(AgentArtifact, camera_id)
+        assert artifact.approved_at is None, "a refused plan is never approved"
+        assert db.get(AppSetting, f"film-apply:{camera_id}") is None
+    # The project is not stuck: the untouched second scene still lands.
+    applied = client.post(
+        f"/api/v1/projects/{pid}/film-artifacts/{units[1]['camera_artifact_id']}/apply-camera",
+        json={"continuity_artifact_id": units[1]["continuity_artifact_id"]}, headers=LOCAL)
+    assert applied.status_code == 200, applied.text
+
+
+# --------------------------------------------------------------------------- F07
+
+
 # --------------------------------------------------------------------------- F08
 
 

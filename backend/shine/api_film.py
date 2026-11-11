@@ -494,6 +494,45 @@ def artifacts(project_id: str, db: DBSession):
     ]
 
 
+def _require_beat_coverage(db, project_id: str, script, direction, camera_plan) -> None:
+    """Refuse to shoot a plan that leaves a scripted beat on the floor.
+
+    This is the last gate before money is spent on rendering, so it is the right
+    place to insist that every beat the breakdown names is carried by a shot
+    that actually lands.  Coverage is therefore measured on the *camera* plan,
+    not on the director's intent list: an intent nobody filmed is exactly the
+    hole this gate exists to catch.  Each landed camera shot names an intent, and
+    the intent names its beat, so the mapping is read - never inferred.
+
+    The check is local and touches no model, and a correct plan never pays
+    anything for it.  ``qa=off`` is the declared escape hatch for an operator;
+    ``shadow`` is not: an uncovered beat is a fact, not an opinion.
+    """
+    from shine.literary import flags, qa, triage
+
+    if flags.mode("qa", db, project_id) == "off":
+        return
+    intents = {str(shot.get("id")): shot for shot in direction.payload_json.get("shots") or []}
+    landed = []
+    for camera in camera_plan.shots:
+        intent = intents.get(str(camera.intent_id)) or {}
+        landed.append({"beat_id": intent.get("beat_id"),
+                       "cuts": intent.get("cuts") or []})
+    report = qa.check_beat_coverage(script.payload_json, {"shots": landed})
+    blocking = [check for check in report.checks if check.severity == triage.HARD_BLOCK]
+    if not blocking:
+        return
+    check = blocking[0]
+    logger.warning("apply_camera_beat_coverage_blocked project=%s code=%s evidence=%s",
+                   project_id, check.code, check.evidence)
+    raise HTTPException(status_code=409, detail={
+        "code": check.code,
+        "message": "有剧情节拍没有被任何镜头覆盖，不能落镜。请补镜头后重新生成分镜。",
+        "details": check.evidence,
+        "next_action": "regenerate_storyboard",
+    })
+
+
 @router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
 def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
     from shine.services import complete_character_bindings
@@ -535,12 +574,14 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             else None
         )
         director_binding = frozen_style.director_style_binding if frozen_style else None
+        camera_plan = CameraPlan.model_validate(artifact.payload_json)
+        _require_beat_coverage(db, project_id, script, direction, camera_plan)
         beats = {b["id"]: b for b in script.payload_json["beats"]}
         intents = {s["id"]: s for s in direction.payload_json["shots"]}
         created = []
         material_notices: list[dict] = []
         style_warnings: list[dict] = []
-        for camera in CameraPlan.model_validate(artifact.payload_json).shots:
+        for camera in camera_plan.shots:
             intent = intents[camera.intent_id]
             beat = beats[intent["beat_id"]]
             cuts = intent.get("cuts", [])

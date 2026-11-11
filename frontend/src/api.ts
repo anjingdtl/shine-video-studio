@@ -155,6 +155,19 @@ function describeDetail(detail: unknown): string {
     return `${payload.message ?? '这一批里有镜头无法执行'}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
   }
   if (detail && typeof detail === 'object' && 'code' in detail
+      && (detail as { code?: unknown }).code === 'STORYBOARD_BEAT_UNCOVERED') {
+    // A hard gate before rendering: say how much is uncovered and what to do,
+    // without handing the person a raw check code.
+    const payload = detail as { message?: string;
+      details?: { beats_total?: number; beats_covered?: number; beat_ids?: string[] } };
+    const total = payload.details?.beats_total;
+    const covered = payload.details?.beats_covered;
+    const count = typeof total === 'number' && typeof covered === 'number'
+      ? `（${total} 个节拍中还有 ${total - covered} 个没有镜头）` : '';
+    return `${payload.message ?? '有剧情节拍没有被任何镜头覆盖，不能落镜'}${count}`
+      + '请补镜头后重新生成分镜。';
+  }
+  if (detail && typeof detail === 'object' && 'code' in detail
       && typeof (detail as { code?: unknown }).code === 'string') {
     const coded = detail as { code: string; message?: string; blockers?: string[] };
     const base = coded.message || ERROR_CODE_LABELS[coded.code] || coded.code;

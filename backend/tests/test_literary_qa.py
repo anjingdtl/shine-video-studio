@@ -160,8 +160,9 @@ def _run_scenes(api, responder, *, runs: int = 6, plant_secret: bool = False):
     return pid, plan, volume, sections
 
 
-def test_shadow_records_a_verdict_without_a_second_call(api):
-    """Default mode: L0 is computed and stored, and nothing extra is bought."""
+def test_shadow_records_a_verdict_without_a_second_call(api, monkeypatch):
+    """Shadow: L0 is computed and stored, and nothing extra is bought."""
+    monkeypatch.setenv("SHINE_LITERARY_QA", "shadow")
     calls: list[str] = []
     text = "德明：起风了，收帆！\n阿娘：早去早回。"
     pid, _plan, _volume, sections = _run_scenes(api, _scene_responder(text, calls=calls))

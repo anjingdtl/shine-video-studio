@@ -149,9 +149,21 @@ def test_an_empty_retrieval_is_a_named_empty_view_not_a_failure(api):
     assert "MEMORY_EMPTY" in view.warnings
 
 
-def test_shadow_records_facts_but_never_changes_the_request(api):
+def test_shadow_records_facts_but_never_changes_the_request(api, monkeypatch):
     _client, factory, _settings = api
     pid, _ = _project(api, "灰度")
+    # V2.1 ships ``on``: a fresh project gets the full engine.
+    with factory() as db:
+        assert flags.mode("memory", db, pid) == "on"
+        assert flags.affects_request("memory", db, pid) is True
+    # The environment wins over the project override, and shadow still means
+    # "record it, do not send it".
+    monkeypatch.setenv("SHINE_LITERARY_MEMORY", "shadow")
+    with factory() as db:
+        assert flags.affects_request("memory", db, pid) is False
+    monkeypatch.delenv("SHINE_LITERARY_MEMORY")
+    with factory.begin() as db:
+        flags.set_mode(db, pid, "memory", "shadow")
     with factory() as db:
         assert flags.mode("memory", db, pid) == "shadow"
         assert flags.affects_request("memory", db, pid) is False
@@ -222,7 +234,7 @@ def test_bad_observations_never_rebuild_the_outline(api):
         artifact = db.get(AgentArtifact, row.trace["artifact_id"])
         summary = artifact.payload_json["memory_ingest"]
         assert summary["saved"] == 2, summary
-        assert summary["mode"] == "shadow"
+        assert summary["mode"] == "on"
         assert any(item["reason_code"] == "MEMORY_OBSERVATION_INVALID"
                    for item in summary["findings"])
         facts = db.query(StoryMemoryFact).filter(StoryMemoryFact.project_id == pid).all()

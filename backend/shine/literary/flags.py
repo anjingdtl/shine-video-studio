@@ -18,9 +18,12 @@ from sqlalchemy import select
 MODES = ("off", "shadow", "on")
 
 FEATURES = {
-    "memory": ("SHINE_LITERARY_MEMORY", "shadow"),
+    # V2.1 ships enabled.  ``shadow`` and ``off`` remain as escape hatches for an
+    # operator who needs to stop paying for guidance or review on one project;
+    # a fresh project gets the full engine without anyone flipping a switch.
+    "memory": ("SHINE_LITERARY_MEMORY", "on"),
     "beats": ("SHINE_LITERARY_BEATS", "on"),
-    "qa": ("SHINE_LITERARY_QA", "shadow"),
+    "qa": ("SHINE_LITERARY_QA", "on"),
     "governor": ("SHINE_LITERARY_GOVERNOR", "on"),
 }
 
