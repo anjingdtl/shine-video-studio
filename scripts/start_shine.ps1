@@ -99,6 +99,12 @@ $env:SHINE_DATA_DIR = if ($resolvedDataDir) { $resolvedDataDir.Path } else { [Sy
 # block-buffered pipe would hide a stall until the process ends.
 $env:PYTHONUNBUFFERED = '1'
 New-Item -ItemType Directory -Force -Path $env:SHINE_DATA_DIR | Out-Null
+# One data directory, one launcher at a time: the manifest check, the
+# reconcile, the port decision, the dependency installation, the process
+# start and the manifest write all happen inside one cross-process critical
+# section, so two double-clicks can never observe "no manifest" together.
+. (Join-Path $PSScriptRoot 'shine_startup_guard.ps1')
+
 function Get-PortOwner([int]$Port) {
     $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -172,12 +178,8 @@ function Test-RecordedApiAlive($Record) {
 }
 
 function Test-RecordedProcessAlive($Entry) {
-    # The recorded pid is only trusted together with its recorded birth.
-    if (-not $Entry -or -not $Entry.pid) { return $false }
-    $process = Get-Process -Id ([int]$Entry.pid) -ErrorAction SilentlyContinue
-    if (-not $process) { return $false }
-    if ($Entry.start_time) { return ($process.StartTime.ToString('o') -eq $Entry.start_time) }
-    return $true
+    # Shared implementation (culture-safe against JSON-roundtripped dates).
+    return (Test-ShineRecordedProcessAlive $Entry)
 }
 
 function Test-RecordedWorkerAlive($Record) {
@@ -198,325 +200,367 @@ function Test-RecordedWebAlive($Record) {
 }
 
 $manifestPath = Join-Path $env:SHINE_DATA_DIR 'run/processes.json'
-if (Test-Path $manifestPath) {
-    $record = $null
-    try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
-    $apiAlive = $false
-    $webAlive = $false
-    $workerAlive = $false
-    if ($record) {
-        $apiAlive = Test-RecordedApiAlive $record
-        $webAlive = Test-RecordedWebAlive $record
-        $workerAlive = Test-RecordedWorkerAlive $record
+
+function Save-StackManifest([string]$Path, [object[]]$Entries) {
+    # Write the manifest atomically (temp file on the same volume, then a
+    # replace), so a reader never observes a half-written record even after
+    # an interrupted launch. Every launcher reads it under the startup guard.
+    $doc = [ordered]@{
+        recorded_at = (Get-Date).ToString('o')
+        repo_root = $repoRoot
+        data_dir = $env:SHINE_DATA_DIR
+        database_url = $databaseUrl
+        render_provider = $Provider
+        api_port = $ApiPort
+        web_port = $WebPort
+        review_port = if ($startReview) { $ReviewPort } else { $null }
+        additional_review_port = if ($AdditionalReviewManifest) { $AdditionalReviewPort } else { $null }
+        processes = @($Entries)
     }
-    if ($record -and $apiAlive -and $webAlive -and $workerAlive) {
-        Write-Host "The workbench is already running: http://127.0.0.1:$($record.web_port)/"
-        if ($OpenBrowser) { Start-Process "http://127.0.0.1:$($record.web_port)/" }
-        exit 0
-    }
-    # A half-dead stack must not brick the only start button. Stop what this
-    # record really owns; if its identity cannot be proven, archive the record
-    # and let the port check below decide whether a real conflict remains.
-    $missing = @()
-    if (-not $apiAlive) { $missing += 'API' }
-    if (-not $webAlive) { $missing += 'Web' }
-    if (-not $workerAlive) { $missing += 'Worker' }
-    Write-Warning ("The previous run did not leave a complete stack (missing: " + ($missing -join ', ') + '); reconciling it first.')
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR } finally { $ErrorActionPreference = $previous }
-    if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $manifestPath)) {
-        $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        Move-Item -LiteralPath $manifestPath -Destination $archived -Force
-        Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
-    }
-    if (Test-Path -LiteralPath $manifestPath) {
-        throw 'This data directory still has a process manifest. Stop or reconcile that stack before restarting.'
-    }
-}
-$env:SHINE_RENDER_PROVIDER = $Provider
-
-# Installed copies and the packaged START_APP use -AutoPorts: a busy 8000 must
-# not make the only start button unusable. The chosen ports are printed and
-# recorded, so the browser and the stop command use the same ones.
-if ($AutoPorts) {
-    $resolvedApiPort = if (Get-PortOwner $ApiPort) { Get-FreeShinePort $ApiPort } else { $ApiPort }
-    $reserved = @($resolvedApiPort)
-    if ($startReview) { $reserved += $ReviewPort }
-    if ($AdditionalReviewManifest) { $reserved += $AdditionalReviewPort }
-    $resolvedWebPort = if ((Get-PortOwner $WebPort) -or ($reserved -contains $WebPort)) {
-        Get-FreeShinePort $WebPort $reserved
-    } else { $WebPort }
-    if ($resolvedApiPort -ne $ApiPort -or $resolvedWebPort -ne $WebPort) {
-        Write-Host "Requested ports are busy; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
-    }
-    $ApiPort = $resolvedApiPort
-    $WebPort = $resolvedWebPort
-}
-$env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
-
-$backendLock = Join-Path $repoRoot 'backend/uv.lock'
-$backendFingerprint = Get-FileFingerprint $backendLock
-if ($Install -or -not (Test-Path $backendEnv) -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
-    Invoke-Native 'Python dependency installation' {
-        & uv sync --project (Join-Path $repoRoot 'backend') --locked
-    }
-    Save-ShineReceipt 'backend_dependencies' @{ fingerprint = $backendFingerprint; command = 'uv sync --locked' }
-}
-$frontendLock = Join-Path $repoRoot 'frontend/package-lock.json'
-$frontendFingerprint = Get-FileFingerprint $frontendLock
-if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules')) -or
-    -not (Test-ShineReceipt 'frontend_dependencies' $frontendFingerprint)) {
-    $frontendInstallRoot = Join-Path $repoRoot 'frontend'
-    if ($env:SHINE_BOOTSTRAP_ROOT) {
-        $frontendInstallRoot = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'app/frontend'
-        if ((Get-Item -LiteralPath (Join-Path $repoRoot 'frontend')).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw 'Frontend directory link requires reconciliation before relocating dependencies.'
-        }
-        New-Item -ItemType Directory -Force -Path $frontendInstallRoot | Out-Null
-        Copy-Item -LiteralPath (Join-Path $repoRoot 'frontend/package.json'), (Join-Path $repoRoot 'frontend/package-lock.json') -Destination $frontendInstallRoot -Force
-        $modules = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend/node_modules'))
-        $externalModules = [IO.Path]::GetFullPath((Join-Path $frontendInstallRoot 'node_modules'))
-        if (Test-Path -LiteralPath $modules) {
-            $item = Get-Item -LiteralPath $modules -Force
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                if ([IO.Path]::GetFullPath($item.Target) -ne $externalModules) { throw 'Existing node_modules link requires reconciliation.' }
-            } else {
-                $backupModules = $modules + '.before-storage-' + [Guid]::NewGuid().ToString('N')
-                $frontendRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend')) + [IO.Path]::DirectorySeparatorChar
-                if (-not $modules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase) -or
-                    -not $backupModules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw 'Dependency backup escaped the frontend directory.'
-                }
-                Move-Item -LiteralPath $modules -Destination $backupModules
-                Write-Host "Preserved previous dependencies: $backupModules"
-            }
-        }
-        if (-not (Test-Path -LiteralPath $modules)) {
-            New-Item -ItemType Directory -Force -Path $externalModules | Out-Null
-            New-Item -ItemType Junction -Path $modules -Target $externalModules | Out-Null
-        }
-    }
-    Invoke-Native 'Frontend dependency installation' {
-        & npm --prefix $frontendInstallRoot ci --fetch-retries=4 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000 --fetch-timeout=300000
-    }
-    Save-ShineReceipt 'frontend_dependencies' @{ fingerprint = $frontendFingerprint; command = 'npm ci' }
-}
-
-$runDir = Join-Path $env:SHINE_DATA_DIR 'run'
-$logDir = Join-Path $runDir 'logs'
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-
-# The database that is actually migrated and used. It is derived from the
-# resolved data directory, so a copy database never points back at production
-# media while still sharing the production database file.
-$databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
-if (-not $databaseUrl.StartsWith('sqlite:///')) { throw 'The local launcher requires a SQLite database URL.' }
-$env:SHINE_DATABASE_URL = $databaseUrl
-$checkPorts = @($ApiPort, $WebPort)
-if ($startReview) { $checkPorts += $ReviewPort }
-if ($AdditionalReviewManifest) { $checkPorts += $AdditionalReviewPort }
-& (Join-Path $PSScriptRoot 'check_environment.ps1') -Ports $checkPorts
-
-Write-Host "Data directory: $env:SHINE_DATA_DIR"
-Write-Host "Database:       $databaseUrl"
-
-$migrationLog = Join-Path $env:TEMP 'shine-alembic-upgrade.log'
-Invoke-Native 'Database migration' {
-    & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
-}
-Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-Save-ShineReceipt 'database_migration' @{
-    fingerprint = Get-FileFingerprint $migrationLog
-    database = $databaseUrl
-    command = 'alembic upgrade head'
-}
-
-$uvicornArgs = @(
-    '-m', 'uvicorn', 'shine.main:app',
-    '--host', '127.0.0.1', '--port', "$ApiPort"
-)
-$viteArgs = @(
-    (Join-Path $repoRoot 'frontend/node_modules/vite/bin/vite.js'),
-    '--host', '127.0.0.1', '--port', "$WebPort", '--strictPort'
-)
-
-$started = @()
-
-# A port that is already in use makes the new API die with a bind error while the
-# old server keeps serving, which looks like the new configuration being ignored.
-$busy = @()
-$requestedPorts = @($ApiPort, $WebPort)
-if ($startReview) { $requestedPorts += $ReviewPort }
-if ($AdditionalReviewManifest) { $requestedPorts += $AdditionalReviewPort }
-foreach ($port in $requestedPorts) {
-    $owner = Get-PortOwner $port
-    if ($owner) { $busy += "  port $port is already in use by pid $owner" }
-}
-if ($busy) {
-    Write-Host 'Cannot start: the requested ports are not free.' -ForegroundColor Red
-    $busy | ForEach-Object { Write-Host $_ -ForegroundColor Red }
-    Write-Host 'Stop the previous stack first, for example:' -ForegroundColor Yellow
-    Write-Host "  `"$venvPython`" scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`"" -ForegroundColor Yellow
-    exit 1
-}
-
-# ComfyUI and the local reviewers belong to this workbench. A renderer or a
-# reviewer that outlived an earlier run keeps the model in GPU memory and
-# blocks the next run, so a clean start begins by releasing what is left.
-Write-Host 'Releasing leftover backends of this installation...' -ForegroundColor Gray
-$residualScript = Join-Path $repoRoot 'scripts/release_residual_backends.py'
-if (Test-Path -LiteralPath $residualScript) {
-    $residualArgs = @($residualScript, '--data-dir', $env:SHINE_DATA_DIR, '--review-port', "$ReviewPort")
-    if ($AdditionalReviewManifest) { $residualArgs += @('--review-port', "$AdditionalReviewPort") }
-    & $venvPython @residualArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'A leftover backend could not be released; see the lines above.' -ForegroundColor Yellow
+    $json = $doc | ConvertTo-Json -Depth 6
+    $tmp = "$Path.new-$PID"
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($true)))
+    if (Test-Path -LiteralPath $Path) {
+        # PowerShell marshals a bare $null string argument to an empty string,
+        # which File.Replace rejects as an invalid backup path; [NullString]
+        # carries a real null so the replace stays atomic.
+        [System.IO.File]::Replace($tmp, $Path, [NullString]::Value)
+    } else {
+        [System.IO.File]::Move($tmp, $Path)
     }
 }
 
-function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
-    $stdout = Join-Path $logDir "$Name.out.log"
-    $stderr = Join-Path $logDir "$Name.err.log"
-    $process = Start-Process -PassThru -WindowStyle Hidden -FilePath $FilePath `
-        -ArgumentList ($Arguments | ForEach-Object { '"' + $_ + '"' }) -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    $info = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
-    $script:started += [ordered]@{
-        name = $Name
-        pid = $process.Id
-        start_time = if ($info) { $info.StartTime.ToString('o') } else { $null }
-        birth = if ($info) { $info.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } else { $null }
-        working_dir = $WorkingDirectory
-        stdout_log = $stdout
-        stderr_log = $stderr
-        command = "$FilePath $($Arguments -join ' ')"
-    }
-    Write-Host "Started $Name (pid $($process.Id))"
-}
-
-try {
-Start-ShineProcess 'api' $venvPython $uvicornArgs $repoRoot
-if ($startReview) {
-    $reviewScript = if ($IsolatedReviewProcess) { 'scripts/local_review_isolated_server.py' } else { 'scripts/local_review_server.py' }
-    Start-ShineProcess 'review' $ReviewPython @(
-        (Join-Path $repoRoot $reviewScript),
-        '--manifest', $ReviewManifest, '--runtime-packages', $ReviewRuntimePackages, '--port', "$ReviewPort"
-    ) $repoRoot
-    $reviewReady = $false
-    for ($i = 0; $i -lt 120; $i++) {
-        try {
-            $reviewHealth = Invoke-RestMethod "http://127.0.0.1:$ReviewPort/health" -TimeoutSec 2
-            if ($reviewHealth.status -eq 'ok') { $reviewReady = $true; break }
-        } catch { }
-        $reviewEntry = $started | Where-Object name -EQ 'review'
-        if (-not (Get-Process -Id $reviewEntry.pid -ErrorAction SilentlyContinue)) { break }
-        Start-Sleep -Milliseconds 500
-    }
-    if (-not $reviewReady) { throw "Hash-verified local reviewer did not start on port $ReviewPort" }
-}
-if ($AdditionalReviewManifest) {
-    Start-ShineProcess 'review-additional' $ReviewPython @(
-        (Join-Path $repoRoot 'scripts/local_review_isolated_server.py'),
-        '--manifest', $AdditionalReviewManifest, '--runtime-packages', $ReviewRuntimePackages,
-        '--port', "$AdditionalReviewPort"
-    ) $repoRoot
-    $additionalReady = $false
-    for ($i = 0; $i -lt 120; $i++) {
-        try {
-            $additionalHealth = Invoke-RestMethod "http://127.0.0.1:$AdditionalReviewPort/health" -TimeoutSec 2
-            if ($additionalHealth.status -eq 'ok') { $additionalReady = $true; break }
-        } catch { }
-        $additionalEntry = $started | Where-Object name -EQ 'review-additional'
-        if (-not (Get-Process -Id $additionalEntry.pid -ErrorAction SilentlyContinue)) { break }
-        Start-Sleep -Milliseconds 500
-    }
-    if (-not $additionalReady) { throw "Additional hash-verified local reviewer did not start on port $AdditionalReviewPort" }
-}
-if (-not $NoWorker) {
-    Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
-}
-Start-ShineProcess 'web' (Get-Command node).Source $viteArgs (Join-Path $repoRoot 'frontend')
-
-# The launcher and the process that actually owns the socket are not the same
-# pid: a uv managed virtual environment re-executes the base interpreter as a
-# child. Record the real listener so the stop command can end it.
-$listenerPid = $null
-for ($i = 0; $i -lt 60; $i++) {
-    Start-Sleep -Milliseconds 500
-    $listenerPid = Get-PortOwner $ApiPort
-    if ($listenerPid) { break }
-    if (-not (Get-Process -Id $started[0].pid -ErrorAction SilentlyContinue)) { break }
-}
-if (-not $listenerPid) {
-    Write-Host "The API did not start listening on port $ApiPort." -ForegroundColor Red
-    Get-Content $started[0].stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
-    throw "API startup failed on port $ApiPort"
-}
-$started[0].listener_pid = $listenerPid
-Write-Host "API is listening on port $ApiPort (pid $listenerPid)"
-
-$webEntry = $started | Where-Object name -EQ 'web'
-$webListener = $null
-for ($i = 0; $i -lt 60; $i++) {
-    $webListener = Get-PortOwner $WebPort
-    if ($webListener) { break }
-    if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
-    Start-Sleep -Milliseconds 500
-}
-if (-not $webListener) { throw "Web startup failed on port $WebPort" }
-$webEntry.listener_pid = $webListener
-
-# A bound port is not a usable page: wait until Vite answers the document so the
-# browser never opens on ERR_CONNECTION_REFUSED.
-$webReady = $false
-for ($i = 0; $i -lt 60; $i++) {
-    try {
-        $page = Invoke-WebRequest "http://127.0.0.1:$WebPort/" -TimeoutSec 2 -UseBasicParsing
-        if ($page.StatusCode -ge 200 -and $page.StatusCode -lt 500) { $webReady = $true; break }
-    } catch { }
-    if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
-    Start-Sleep -Milliseconds 500
-}
-if (-not $webReady) {
-    Get-Content $webEntry.stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
-    throw "Web did not serve a page on port $WebPort"
-}
-
-# Capture verified birth identities for launchers and all descendants, including
-# the worker's re-executed interpreter (which has no listening socket).
-foreach ($entry in $started) {
-    $identities = & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $entry.pid $entry.birth
-    if ($LASTEXITCODE -ne 0) { throw "Cannot identify $($entry.name) process tree" }
+function Add-ProcessOwners([object]$Entry) {
+    # Capture the verified birth identities of the launcher tree immediately,
+    # not only at the end: a launcher that dies mid-start leaves a manifest
+    # whose entries can still be reconciled process by process.
+    $identities = & $venvPython (Join-Path $PSScriptRoot 'shine_processes.py') $Entry.pid $Entry.birth
+    if ($LASTEXITCODE -ne 0) { throw "Cannot identify $($Entry.name) process tree" }
     # Windows PowerShell 5.1 pipes a top-level JSON array as one array object,
     # which ConvertTo-Json serializes as { value: [...], Count: n }. Parse the
     # complete JSON input directly so the manifest always contains owner rows.
     $identityJson = ($identities -join [Environment]::NewLine).Trim()
     $parsedIdentities = ConvertFrom-Json -InputObject $identityJson
-    $entry.owners = @($parsedIdentities)
+    $Entry.owners = @($parsedIdentities)
 }
 
-$manifestPath = Join-Path $runDir 'processes.json'
-[ordered]@{
-    recorded_at = (Get-Date).ToString('o')
-    repo_root = $repoRoot
-    data_dir = $env:SHINE_DATA_DIR
-    database_url = $databaseUrl
-    render_provider = $Provider
-    api_port = $ApiPort
-    web_port = $WebPort
-    review_port = if ($startReview) { $ReviewPort } else { $null }
-    additional_review_port = if ($AdditionalReviewManifest) { $AdditionalReviewPort } else { $null }
-    processes = $started
-} | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
-# The stack is only healthy when the API, the Web and the Worker are all up.
-Save-ShineReceipt 'service_health' @{
-    fingerprint = (Get-FileFingerprint $manifestPath)
-    api_port = $ApiPort
-    web_port = $WebPort
-    worker = (-not $NoWorker)
-    command = 'start_shine'
-}
+$startupGuard = Enter-ShineStartupGuard -DataDir $env:SHINE_DATA_DIR
+$existingWebPort = $null
+$started = @()
+try {
+    if (Test-Path $manifestPath) {
+        $record = $null
+        try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
+        $apiAlive = $false
+        $webAlive = $false
+        $workerAlive = $false
+        if ($record) {
+            $apiAlive = Test-RecordedApiAlive $record
+            $webAlive = Test-RecordedWebAlive $record
+            $workerAlive = Test-RecordedWorkerAlive $record
+        }
+        if ($record -and $apiAlive -and $webAlive -and $workerAlive) {
+            # Deliberately no exit here: the guard must be released in the
+            # finally below before this process may terminate.
+            $existingWebPort = [int]$record.web_port
+        } else {
+            # A half-dead stack must not brick the only start button. Stop what this
+            # record really owns; if its identity cannot be proven, archive the record
+            # and let the port check below decide whether a real conflict remains.
+            $missing = @()
+            if (-not $apiAlive) { $missing += 'API' }
+            if (-not $webAlive) { $missing += 'Web' }
+            if (-not $workerAlive) { $missing += 'Worker' }
+            Write-Warning ("The previous run did not leave a complete stack (missing: " + ($missing -join ', ') + '); reconciling it first.')
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            # This stop runs inside the critical section this script already
+            # holds; the marker keeps stop_shine.py from deadlocking on the
+            # same named mutex (nested acquisition of one's own guard).
+            $env:SHINE_STARTUP_GUARD_HELD = '1'
+            try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR } finally {
+                Remove-Item Env:\SHINE_STARTUP_GUARD_HELD -ErrorAction SilentlyContinue
+                $ErrorActionPreference = $previous
+            }
+            if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $manifestPath)) {
+                $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                Move-Item -LiteralPath $manifestPath -Destination $archived -Force
+                Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
+            }
+            if (Test-Path -LiteralPath $manifestPath) {
+                throw 'This data directory still has a process manifest. Stop or reconcile that stack before restarting.'
+            }
+        }
+    }
+    if (-not $existingWebPort) {
+        $env:SHINE_RENDER_PROVIDER = $Provider
+
+        # Installed copies and the packaged START_APP use -AutoPorts: a busy 8000 must
+        # not make the only start button unusable. The chosen ports are printed and
+        # recorded, so the browser and the stop command use the same ones.
+        if ($AutoPorts) {
+            $resolvedApiPort = if (Get-PortOwner $ApiPort) { Get-FreeShinePort $ApiPort } else { $ApiPort }
+            $reserved = @($resolvedApiPort)
+            if ($startReview) { $reserved += $ReviewPort }
+            if ($AdditionalReviewManifest) { $reserved += $AdditionalReviewPort }
+            $resolvedWebPort = if ((Get-PortOwner $WebPort) -or ($reserved -contains $WebPort)) {
+                Get-FreeShinePort $WebPort $reserved
+            } else { $WebPort }
+            if ($resolvedApiPort -ne $ApiPort -or $resolvedWebPort -ne $WebPort) {
+                Write-Host "Requested ports are busy; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
+            }
+            $ApiPort = $resolvedApiPort
+            $WebPort = $resolvedWebPort
+        }
+        $env:SHINE_VITE_API_TARGET = "http://127.0.0.1:$ApiPort"
+
+        $backendLock = Join-Path $repoRoot 'backend/uv.lock'
+        $backendFingerprint = Get-FileFingerprint $backendLock
+        if ($Install -or -not (Test-Path $backendEnv) -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
+            Invoke-Native 'Python dependency installation' {
+                & uv sync --project (Join-Path $repoRoot 'backend') --locked
+            }
+            Save-ShineReceipt 'backend_dependencies' @{ fingerprint = $backendFingerprint; command = 'uv sync --locked' }
+        }
+        $frontendLock = Join-Path $repoRoot 'frontend/package-lock.json'
+        $frontendFingerprint = Get-FileFingerprint $frontendLock
+        if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules')) -or
+            -not (Test-ShineReceipt 'frontend_dependencies' $frontendFingerprint)) {
+            $frontendInstallRoot = Join-Path $repoRoot 'frontend'
+            if ($env:SHINE_BOOTSTRAP_ROOT) {
+                $frontendInstallRoot = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'app/frontend'
+                if ((Get-Item -LiteralPath (Join-Path $repoRoot 'frontend')).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    throw 'Frontend directory link requires reconciliation before relocating dependencies.'
+                }
+                New-Item -ItemType Directory -Force -Path $frontendInstallRoot | Out-Null
+                Copy-Item -LiteralPath (Join-Path $repoRoot 'frontend/package.json'), (Join-Path $repoRoot 'frontend/package-lock.json') -Destination $frontendInstallRoot -Force
+                $modules = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend/node_modules'))
+                $externalModules = [IO.Path]::GetFullPath((Join-Path $frontendInstallRoot 'node_modules'))
+                if (Test-Path -LiteralPath $modules) {
+                    $item = Get-Item -LiteralPath $modules -Force
+                    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                        if ([IO.Path]::GetFullPath($item.Target) -ne $externalModules) { throw 'Existing node_modules link requires reconciliation.' }
+                    } else {
+                        $backupModules = $modules + '.before-storage-' + [Guid]::NewGuid().ToString('N')
+                        $frontendRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'frontend')) + [IO.Path]::DirectorySeparatorChar
+                        if (-not $modules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                            -not $backupModules.StartsWith($frontendRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw 'Dependency backup escaped the frontend directory.'
+                        }
+                        Move-Item -LiteralPath $modules -Destination $backupModules
+                        Write-Host "Preserved previous dependencies: $backupModules"
+                    }
+                }
+                if (-not (Test-Path -LiteralPath $modules)) {
+                    New-Item -ItemType Directory -Force -Path $externalModules | Out-Null
+                    New-Item -ItemType Junction -Path $modules -Target $externalModules | Out-Null
+                }
+            }
+            Invoke-Native 'Frontend dependency installation' {
+                & npm --prefix $frontendInstallRoot ci --fetch-retries=4 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000 --fetch-timeout=300000
+            }
+            Save-ShineReceipt 'frontend_dependencies' @{ fingerprint = $frontendFingerprint; command = 'npm ci' }
+        }
+
+        $runDir = Join-Path $env:SHINE_DATA_DIR 'run'
+        $logDir = Join-Path $runDir 'logs'
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+        # The database that is actually migrated and used. It is derived from the
+        # resolved data directory, so a copy database never points back at production
+        # media while still sharing the production database file.
+        $databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
+        if (-not $databaseUrl.StartsWith('sqlite:///')) { throw 'The local launcher requires a SQLite database URL.' }
+        $env:SHINE_DATABASE_URL = $databaseUrl
+        $checkPorts = @($ApiPort, $WebPort)
+        if ($startReview) { $checkPorts += $ReviewPort }
+        if ($AdditionalReviewManifest) { $checkPorts += $AdditionalReviewPort }
+        & (Join-Path $PSScriptRoot 'check_environment.ps1') -Ports $checkPorts
+
+        Write-Host "Data directory: $env:SHINE_DATA_DIR"
+        Write-Host "Database:       $databaseUrl"
+
+        $migrationLog = Join-Path $env:TEMP 'shine-alembic-upgrade.log'
+        Invoke-Native 'Database migration' {
+            & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+        }
+        Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        Save-ShineReceipt 'database_migration' @{
+            fingerprint = Get-FileFingerprint $migrationLog
+            database = $databaseUrl
+            command = 'alembic upgrade head'
+        }
+
+        $uvicornArgs = @(
+            '-m', 'uvicorn', 'shine.main:app',
+            '--host', '127.0.0.1', '--port', "$ApiPort"
+        )
+        $viteArgs = @(
+            (Join-Path $repoRoot 'frontend/node_modules/vite/bin/vite.js'),
+            '--host', '127.0.0.1', '--port', "$WebPort", '--strictPort'
+        )
+
+        # A port that is already in use makes the new API die with a bind error while the
+        # old server keeps serving, which looks like the new configuration being ignored.
+        $busy = @()
+        $requestedPorts = @($ApiPort, $WebPort)
+        if ($startReview) { $requestedPorts += $ReviewPort }
+        if ($AdditionalReviewManifest) { $requestedPorts += $AdditionalReviewPort }
+        foreach ($port in $requestedPorts) {
+            $owner = Get-PortOwner $port
+            if ($owner) { $busy += "  port $port is already in use by pid $owner" }
+        }
+        if ($busy) {
+            Write-Host 'Cannot start: the requested ports are not free.' -ForegroundColor Red
+            $busy | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+            Write-Host 'Stop the previous stack first, for example:' -ForegroundColor Yellow
+            Write-Host "  `"$venvPython`" scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`"" -ForegroundColor Yellow
+            exit 1
+        }
+
+        # ComfyUI and the local reviewers belong to this workbench. A renderer or a
+        # reviewer that outlived an earlier run keeps the model in GPU memory and
+        # blocks the next run, so a clean start begins by releasing what is left.
+        Write-Host 'Releasing leftover backends of this installation...' -ForegroundColor Gray
+        $residualScript = Join-Path $repoRoot 'scripts/release_residual_backends.py'
+        if (Test-Path -LiteralPath $residualScript) {
+            $residualArgs = @($residualScript, '--data-dir', $env:SHINE_DATA_DIR, '--review-port', "$ReviewPort")
+            if ($AdditionalReviewManifest) { $residualArgs += @('--review-port', "$AdditionalReviewPort") }
+            & $venvPython @residualArgs
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host 'A leftover backend could not be released; see the lines above.' -ForegroundColor Yellow
+            }
+        }
+
+        function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
+            $stdout = Join-Path $logDir "$Name.out.log"
+            $stderr = Join-Path $logDir "$Name.err.log"
+            $process = Start-Process -PassThru -WindowStyle Hidden -FilePath $FilePath `
+                -ArgumentList ($Arguments | ForEach-Object { '"' + $_ + '"' }) -WorkingDirectory $WorkingDirectory `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $info = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+            $entry = [ordered]@{
+                name = $Name
+                pid = $process.Id
+                start_time = if ($info) { $info.StartTime.ToString('o') } else { $null }
+                birth = if ($info) { $info.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } else { $null }
+                working_dir = $WorkingDirectory
+                stdout_log = $stdout
+                stderr_log = $stderr
+                command = "$FilePath $($Arguments -join ' ')"
+            }
+            $script:started += $entry
+            Write-Host "Started $Name (pid $($process.Id))"
+            # Persist incrementally: every launcher reader holds the startup
+            # guard, so a mid-start interruption leaves a reconcilable record
+            # instead of four anonymous processes.
+            Add-ProcessOwners $entry
+            Save-StackManifest $script:manifestPath ([object[]]$script:started)
+        }
+
+        Start-ShineProcess 'api' $venvPython $uvicornArgs $repoRoot
+        if ($startReview) {
+            $reviewScript = if ($IsolatedReviewProcess) { 'scripts/local_review_isolated_server.py' } else { 'scripts/local_review_server.py' }
+            Start-ShineProcess 'review' $ReviewPython @(
+                (Join-Path $repoRoot $reviewScript),
+                '--manifest', $ReviewManifest, '--runtime-packages', $ReviewRuntimePackages, '--port', "$ReviewPort"
+            ) $repoRoot
+            $reviewReady = $false
+            for ($i = 0; $i -lt 120; $i++) {
+                try {
+                    $reviewHealth = Invoke-RestMethod "http://127.0.0.1:$ReviewPort/health" -TimeoutSec 2
+                    if ($reviewHealth.status -eq 'ok') { $reviewReady = $true; break }
+                } catch { }
+                $reviewEntry = $started | Where-Object name -EQ 'review'
+                if (-not (Get-Process -Id $reviewEntry.pid -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $reviewReady) { throw "Hash-verified local reviewer did not start on port $ReviewPort" }
+        }
+        if ($AdditionalReviewManifest) {
+            Start-ShineProcess 'review-additional' $ReviewPython @(
+                (Join-Path $repoRoot 'scripts/local_review_isolated_server.py'),
+                '--manifest', $AdditionalReviewManifest, '--runtime-packages', $ReviewRuntimePackages,
+                '--port', "$AdditionalReviewPort"
+            ) $repoRoot
+            $additionalReady = $false
+            for ($i = 0; $i -lt 120; $i++) {
+                try {
+                    $additionalHealth = Invoke-RestMethod "http://127.0.0.1:$AdditionalReviewPort/health" -TimeoutSec 2
+                    if ($additionalHealth.status -eq 'ok') { $additionalReady = $true; break }
+                } catch { }
+                $additionalEntry = $started | Where-Object name -EQ 'review-additional'
+                if (-not (Get-Process -Id $additionalEntry.pid -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $additionalReady) { throw "Additional hash-verified local reviewer did not start on port $AdditionalReviewPort" }
+        }
+        if (-not $NoWorker) {
+            Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
+        }
+        Start-ShineProcess 'web' (Get-Command node).Source $viteArgs (Join-Path $repoRoot 'frontend')
+
+        # The launcher and the process that actually owns the socket are not the same
+        # pid: a uv managed virtual environment re-executes the base interpreter as a
+        # child. Record the real listener so the stop command can end it.
+        $listenerPid = $null
+        for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            $listenerPid = Get-PortOwner $ApiPort
+            if ($listenerPid) { break }
+            if (-not (Get-Process -Id $started[0].pid -ErrorAction SilentlyContinue)) { break }
+        }
+        if (-not $listenerPid) {
+            Write-Host "The API did not start listening on port $ApiPort." -ForegroundColor Red
+            Get-Content $started[0].stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+            throw "API startup failed on port $ApiPort"
+        }
+        $started[0].listener_pid = $listenerPid
+        Save-StackManifest $manifestPath ([object[]]$started)
+        Write-Host "API is listening on port $ApiPort (pid $listenerPid)"
+
+        $webEntry = $started | Where-Object name -EQ 'web'
+        $webListener = $null
+        for ($i = 0; $i -lt 60; $i++) {
+            $webListener = Get-PortOwner $WebPort
+            if ($webListener) { break }
+            if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $webListener) { throw "Web startup failed on port $WebPort" }
+        $webEntry.listener_pid = $webListener
+
+        # A bound port is not a usable page: wait until Vite answers the document so the
+        # browser never opens on ERR_CONNECTION_REFUSED.
+        $webReady = $false
+        for ($i = 0; $i -lt 60; $i++) {
+            try {
+                $page = Invoke-WebRequest "http://127.0.0.1:$WebPort/" -TimeoutSec 2 -UseBasicParsing
+                if ($page.StatusCode -ge 200 -and $page.StatusCode -lt 500) { $webReady = $true; break }
+            } catch { }
+            if (-not (Get-Process -Id $webEntry.pid -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $webReady) {
+            Get-Content $webEntry.stderr_log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+            throw "Web did not serve a page on port $WebPort"
+        }
+
+        # Capture verified birth identities for launchers and all descendants, including
+        # the worker's re-executed interpreter (which has no listening socket).
+        foreach ($entry in $started) {
+            Add-ProcessOwners $entry
+        }
+        Save-StackManifest $manifestPath ([object[]]$started)
+        # The stack is only healthy when the API, the Web and the Worker are all up.
+        Save-ShineReceipt 'service_health' @{
+            fingerprint = (Get-FileFingerprint $manifestPath)
+            api_port = $ApiPort
+            web_port = $WebPort
+            worker = (-not $NoWorker)
+            command = 'start_shine'
+        }
+    }
 } catch {
     # Roll back only still-owned launcher trees created during this invocation.
     foreach ($entry in $started) {
@@ -526,6 +570,14 @@ Save-ShineReceipt 'service_health' @{
         }
     }
     throw
+} finally {
+    Exit-ShineStartupGuard $startupGuard
+}
+
+if ($existingWebPort) {
+    Write-Host "The workbench is already running: http://127.0.0.1:$existingWebPort/"
+    if ($OpenBrowser) { Start-Process "http://127.0.0.1:$existingWebPort/" }
+    exit 0
 }
 
 Write-Host ''

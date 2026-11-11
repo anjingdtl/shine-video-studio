@@ -161,59 +161,80 @@ $manifestPath = Join-Path $runDir 'processes.json'
 $logDir = Join-Path $runDir 'logs'
 
 # Already running: never start a second stack, just bring the browser back.
-if (Test-Path -LiteralPath $manifestPath) {
-    $record = $null
-    try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
-    $recordedApiAlive = $false
-    $recordedWebAlive = $false
-    if ($record) {
-        $recordedApiAlive = Test-RecordedApiAlive $record
-        $recordedWebAlive = Test-WebAlive ([int]$record.web_port)
-    }
-    if ($record -and $recordedApiAlive -and $recordedWebAlive) {
-        $url = "http://127.0.0.1:$($record.web_port)/"
-        Write-Ok "工作台已在运行（API $($record.api_port) / Web $($record.web_port)）"
-        Write-Host "  正在打开：$url" -ForegroundColor Green
-        Start-Process $url
-        Write-Host ''
-        Write-Host '  停止服务请双击桌面「Shine 停止」或执行 scripts\stop_shine.py' -ForegroundColor Gray
-        if (-not $KeepOpen) { Start-Sleep -Seconds ([Math]::Max(3, $CloseAfterSeconds)) }
-        exit 0
-    }
-    if ($record -and ($recordedApiAlive -or $recordedWebAlive)) {
-        # One half of the stack answered while the other did not. Opening the
-        # browser here would show ERR_CONNECTION_REFUSED; stop what this record
-        # owns and start a complete stack again.
-        Write-Warn '上次只启动了一部分服务（API 与网页没有同时在线），正在收尾并重启'
-    } else {
-        Write-Warn '上次运行没有正常退出，正在安全收尾（只结束身份匹配的进程）'
-    }
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { & $backendPython $stopScript --data-dir $dataDir } finally { $ErrorActionPreference = $previous }
-    if ($LASTEXITCODE -ne 0) {
-        # 仍有进程身份无法核对。这里绝不盲杀进程，但也不能让一条无法核对的
-        # 残留记录永久卡死唯一入口：上面已确认 API 不在运行，下面还会再确认
-        # 端口空闲，因此把无法核对的记录归档后继续启动。
-        Write-Warn '部分进程身份无法确认，已原样保留且不会盲杀它们；本次继续启动。'
-        try {
-            if (Test-Path -LiteralPath $manifestPath) {
-                $archived = Join-Path $runDir ('processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-                Move-Item -LiteralPath $manifestPath -Destination $archived -Force
-                Write-Host "  未核对记录已归档：$archived" -ForegroundColor Gray
-                # 只保留最近 5 份归档，避免个人机器上无限堆积。
-                Get-ChildItem -LiteralPath $runDir -Filter 'processes.unresolved-*.json' -File -ErrorAction SilentlyContinue |
-                    Sort-Object Name -Descending | Select-Object -Skip 5 |
-                    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-            }
-        } catch {
-            Write-Fail "未核对记录归档失败：$($_.Exception.Message)"
-            if (-not $KeepOpen) { Read-Host '按回车关闭' | Out-Null }
-            exit 3
+# The manifest decision runs inside the startup guard: another launcher may be
+# mid-start with a partial manifest on disk, and this check must observe the
+# same critical section. The guard is released before start_shine.ps1 takes
+# it again, so the nested call never deadlocks on itself.
+. (Join-Path $PSScriptRoot 'shine_startup_guard.ps1')
+$devGuard = Enter-ShineStartupGuard -DataDir $dataDir
+$alreadyRunningUrl = $null
+try {
+    if (Test-Path -LiteralPath $manifestPath) {
+        $record = $null
+        try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
+        $recordedApiAlive = $false
+        $recordedWebAlive = $false
+        if ($record) {
+            $recordedApiAlive = Test-RecordedApiAlive $record
+            $recordedWebAlive = Test-WebAlive ([int]$record.web_port)
         }
-    } else {
-        Write-Ok '陈旧记录已清理'
+        if ($record -and $recordedApiAlive -and $recordedWebAlive) {
+            $alreadyRunningUrl = "http://127.0.0.1:$($record.web_port)/"
+        } else {
+            if ($record -and ($recordedApiAlive -or $recordedWebAlive)) {
+                # One half of the stack answered while the other did not. Opening the
+                # browser here would show ERR_CONNECTION_REFUSED; stop what this record
+                # owns and start a complete stack again.
+                Write-Warn '上次只启动了一部分服务（API 与网页没有同时在线），正在收尾并重启'
+            } else {
+                Write-Warn '上次运行没有正常退出，正在安全收尾（只结束身份匹配的进程）'
+            }
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            # This stop runs inside the critical section this script already
+            # holds; the marker keeps stop_shine.py from deadlocking on the
+            # same named mutex (nested acquisition of one's own guard).
+            $env:SHINE_STARTUP_GUARD_HELD = '1'
+            try { & $backendPython $stopScript --data-dir $dataDir } finally {
+                Remove-Item Env:\SHINE_STARTUP_GUARD_HELD -ErrorAction SilentlyContinue
+                $ErrorActionPreference = $previous
+            }
+            if ($LASTEXITCODE -ne 0) {
+                # 仍有进程身份无法核对。这里绝不盲杀进程，但也不能让一条无法核对的
+                # 残留记录永久卡死唯一入口：上面已确认 API 不在运行，下面还会再确认
+                # 端口空闲，因此把无法核对的记录归档后继续启动。
+                Write-Warn '部分进程身份无法确认，已原样保留且不会盲杀它们；本次继续启动。'
+                try {
+                    if (Test-Path -LiteralPath $manifestPath) {
+                        $archived = Join-Path $runDir ('processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                        Move-Item -LiteralPath $manifestPath -Destination $archived -Force
+                        Write-Host "  未核对记录已归档：$archived" -ForegroundColor Gray
+                        # 只保留最近 5 份归档，避免个人机器上无限堆积。
+                        Get-ChildItem -LiteralPath $runDir -Filter 'processes.unresolved-*.json' -File -ErrorAction SilentlyContinue |
+                            Sort-Object Name -Descending | Select-Object -Skip 5 |
+                            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+                    }
+                } catch {
+                    Write-Fail "未核对记录归档失败：$($_.Exception.Message)"
+                    if (-not $KeepOpen) { Read-Host '按回车关闭' | Out-Null }
+                    exit 3
+                }
+            } else {
+                Write-Ok '陈旧记录已清理'
+            }
+        }
     }
+} finally {
+    Exit-ShineStartupGuard $devGuard
+}
+if ($alreadyRunningUrl) {
+    Write-Ok "工作台已在运行：$alreadyRunningUrl"
+    Write-Host "  正在打开：$alreadyRunningUrl" -ForegroundColor Green
+    Start-Process $alreadyRunningUrl
+    Write-Host ''
+    Write-Host '  停止服务请双击桌面「Shine 停止」或执行 scripts\stop_shine.py' -ForegroundColor Gray
+    if (-not $KeepOpen) { Start-Sleep -Seconds ([Math]::Max(3, $CloseAfterSeconds)) }
+    exit 0
 }
 
 Write-Step '选择端口'

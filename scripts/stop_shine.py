@@ -33,6 +33,63 @@ from shine.comfyops.process_probe import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / ".local-data"
 
+STARTUP_GUARD_TIMEOUT_SECONDS = 120.0
+
+
+class StartupGuardBusy(RuntimeError):
+    """A launcher holds the startup critical section for this data directory."""
+
+
+def startup_guard_name(data_dir: Path) -> str:
+    """Same derivation as scripts/shine_startup_guard.ps1 (Get-ShineStartupGuardName)."""
+    import hashlib
+
+    canonical = os.path.abspath(data_dir).rstrip("\\").upper()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:40]
+    return f"Global\\ShineStackStartup-{digest}"
+
+
+def _acquire_startup_guard(data_dir: Path, timeout_s: float = STARTUP_GUARD_TIMEOUT_SECONDS):
+    """Coordinate with a concurrent launcher; a stop must not race a start.
+
+    Returns an opaque guard to release, or ``None`` when no launcher is active
+    (no named mutex exists).  Best effort on non-Windows platforms, where the
+    launcher mutex does not exist either.  A caller that already holds the
+    launcher's critical section (start_shine.ps1 reconciling a stale stack)
+    sets SHINE_STARTUP_GUARD_HELD=1 so the nested stop cannot deadlock on the
+    very mutex its caller owns.
+    """
+    if os.name != "nt" or os.environ.get("SHINE_STARTUP_GUARD_HELD") == "1":
+        return None
+    import ctypes
+
+    SYNCHRONIZE = 0x00100000
+    name = startup_guard_name(data_dir)
+    handle = ctypes.windll.kernel32.OpenMutexW(SYNCHRONIZE, False, name)
+    if not handle:
+        return None  # No launcher holds the section; nothing to coordinate with.
+    try:
+        wait = ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout_s * 1000))
+        if wait not in (0, 0x80):  # WAIT_OBJECT_0 or WAIT_ABANDONED
+            raise StartupGuardBusy(
+                "A Shine launcher is still starting this data directory; "
+                "stop it or wait for it to finish first."
+            )
+    except Exception:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        raise
+    return ("mutex", handle)
+
+
+def _release_startup_guard(guard) -> None:
+    if not guard or os.name != "nt":
+        return
+    import ctypes
+
+    handle = guard[1]
+    ctypes.windll.kernel32.ReleaseMutex(handle)
+    ctypes.windll.kernel32.CloseHandle(handle)
+
 
 def _process_owners(value):
     """Normalize verified process identities from current and PS 5.1 manifests.
@@ -160,6 +217,18 @@ def main() -> int:
     )
     args = parser.parse_args()
     data_dir = Path(args.data_dir)
+    guard = None
+    try:
+        # The stop and a concurrent launcher share one critical section keyed by
+        # the data directory, so a stop never tears down a stack the launcher
+        # is halfway through recording (or vice versa).
+        guard = _acquire_startup_guard(data_dir)
+        return _stop_with_manifest(data_dir)
+    finally:
+        _release_startup_guard(guard)
+
+
+def _stop_with_manifest(data_dir: Path) -> int:
     manifest = data_dir / "run" / "processes.json"
     if not manifest.is_file():
         print(f"No process manifest at {manifest}; nothing to stop.")

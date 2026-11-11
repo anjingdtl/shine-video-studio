@@ -17,6 +17,7 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows launcher script
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
 START_SHINE = SCRIPTS / "start_shine.ps1"
+STARTUP_GUARD = SCRIPTS / "shine_startup_guard.ps1"
 BOOTSTRAP = SCRIPTS / "bootstrap.ps1"
 INSTALL_ONCE = SCRIPTS / "install_once.ps1"
 
@@ -28,6 +29,9 @@ FUNCTIONS = (
     "Test-RecordedWorkerAlive",
     "Test-RecordedWebAlive",
 )
+# Shared helpers the extracted functions delegate to; without them the
+# standalone harness would call a function that was never defined.
+SHARED_FUNCTIONS = ("Test-ShineRecordedProcessAlive",)
 
 
 def extract_functions(script: Path, names) -> str:
@@ -54,7 +58,12 @@ def extract_functions(script: Path, names) -> str:
 
 def run_harness(tmp_path: Path, manifest: dict) -> dict:
     module = tmp_path / "checks.ps1"
-    module.write_text(extract_functions(START_SHINE, FUNCTIONS), encoding="utf-8-sig")
+    module.write_text(
+        extract_functions(START_SHINE, FUNCTIONS)
+        + "\n"
+        + extract_functions(STARTUP_GUARD, SHARED_FUNCTIONS),
+        encoding="utf-8-sig",
+    )
     harness = tmp_path / "harness.ps1"
     harness.write_text(
         "$ErrorActionPreference='Stop'\n"
