@@ -66,7 +66,7 @@ export function DemoRibbon({ production, onEnable }: { production: ProductionMod
       <span>{production.mode === 'DEMO'
         ? '演示体验：当前只演练流程，不会生成真实影片。'
         : '真实制作配置尚未完成，当前仍是演示体验。'}</span>
-      <button type="button" className="text-button" onClick={onEnable}>
+      <button type="button" className="btn-text" onClick={onEnable}>
         {production.mode === 'DEMO' ? '启用真实制作' : '继续完成配置'}
       </button>
     </div>

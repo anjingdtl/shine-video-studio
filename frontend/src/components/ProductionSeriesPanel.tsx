@@ -557,14 +557,14 @@ export default function ProductionSeriesPanel({
       <AlertTriangle size={15} />
       <span>{system?.production_mode?.detail ?? '暂无法确认制作模式。'}</span>
       {system?.production_mode?.action === 'enable_real'
-        && <button type="button" className="text-button" onClick={() => onModeAction('enable_real')}>启用真实制作</button>}
+        && <button type="button" className="btn-text" onClick={() => onModeAction('enable_real')}>启用真实制作</button>}
       {system?.production_mode?.action === 'check_fix'
-        && <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查并修复</button>}
+        && <button type="button" className="btn-text" onClick={() => onModeAction('check_fix')}>检查并修复</button>}
     </div>}
 
     {demoSelected && <div className="blocked-callout">
       <span>当前选择演示；连续制作只支持真实 H3，演示态不能启动。</span>
-      <button type="button" className="text-button" onClick={onSelectReal}>切回真实制作</button>
+      <button type="button" className="btn-text" onClick={onSelectReal}>切回真实制作</button>
     </div>}
 
     <div className="one-click-card">
@@ -578,7 +578,7 @@ export default function ProductionSeriesPanel({
             ? `用你选定的方案「${userChosenProfile.name}」；自动补齐参考、勾选镜头。`
             : '自动选方案、补齐参考、勾选镜头；高级设置一般不用改。'}</small>
         </div>
-        <button type="button" className="must-button" disabled={busy || working || registering || demoSelected || !!activeSeries}
+        <button type="button" className="btn-primary" disabled={busy || working || registering || demoSelected || !!activeSeries}
           onClick={() => void oneClickStart()}>
           {working ? <Loader2 size={15} /> : <Wand2 size={15} />}
           {working ? '正在自动适配…' : '一键开拍（自动适配）'}
@@ -660,7 +660,7 @@ export default function ProductionSeriesPanel({
         </label>
         {selectedGate && !selectedGate.selectable && <p className="series-hint">
           <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
-          {onGoSetup && <>· <button type="button" className="text-button" onClick={onGoSetup}>去基础配置</button></>}
+          {onGoSetup && <>· <button type="button" className="btn-text" onClick={onGoSetup}>去基础配置</button></>}
         </p>}
         {blockedProfiles.length > 0 && <div className="series-hint" role="note" aria-label="暂不可用的生成方案">
           {blockedProfiles.map(([id, gate]) => <p key={id}>
@@ -723,7 +723,7 @@ export default function ProductionSeriesPanel({
         {sizeBlocked && <div className="blocked-callout">
           <AlertTriangle size={15} />
           <span>当前生成方案没有接住界面的宽高设置。补齐后才会按你选的分辨率渲染。</span>
-          {onGoSetup && <button type="button" className="text-button" onClick={onGoSetup}>去基础配置补齐</button>}
+          {onGoSetup && <button type="button" className="btn-text" onClick={onGoSetup}>去基础配置补齐</button>}
         </div>}
       </div>
 
@@ -789,10 +789,10 @@ export default function ProductionSeriesPanel({
         当前 {continuingCount} 镜设置了衔接，其余独立切镜。
       </p>}
       <div className="series-actions-row">
-        <button className="secondary-button" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
+        <button className="btn-secondary" disabled={shots.length === 0} onClick={selectAllProducible}>选择全部可制作镜头</button>
         {busyShotIds.size > 0 && <small className="series-excluded-note">已在生产中被排除 {busyShotIds.size} 镜，不重复提交。</small>}
       </div>
-      <button className="primary-button" disabled={busy || working || !canStart} onClick={() => void start()}>
+      <button className="btn-secondary" disabled={busy || working || !canStart} onClick={() => void start()}>
         {working ? <Loader2 size={14} /> : <Play size={14} />} 开始制作影片（{selected.length} 镜）
       </button>
     </div>
@@ -811,15 +811,15 @@ export default function ProductionSeriesPanel({
         {blockers.length > 4 && <small>还有 {blockers.length - 4} 项前置条件，处理完上面的会自动刷新。</small>}
         {shots.length === 0 && <small>生成分镜方案只是草稿；人工复核并应用后，这里才会出现可勾选的镜头。</small>}
       </div>
-      {shots.length === 0 && <button type="button" className="must-button"
+      {shots.length === 0 && <button type="button" className="btn-primary"
         onClick={() => document.getElementById('storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
         去完成并应用分镜
       </button>}
       {!profileId && <>
-        <button type="button" className="must-button" disabled={busy || working || registering} onClick={() => void registerProfiles()}>
+        <button type="button" className="btn-primary" disabled={busy || working || registering} onClick={() => void registerProfiles()}>
           {registering ? '正在登记生成方案…' : '为本作品一键登记生成方案'}
         </button>
-        <button type="button" className="text-button" onClick={() => onModeAction('check_fix')}>检查生成方案</button>
+        <button type="button" className="btn-text" onClick={() => onModeAction('check_fix')}>检查生成方案</button>
       </>}
     </div>}
 
@@ -839,12 +839,12 @@ export default function ProductionSeriesPanel({
             </div>
             <div className="series-actions">
               {row.status === 'COMPLETED' && row.provider === 'comfyui'
-                && <button className="secondary-button" disabled={working}
+                && <button className="btn-secondary" disabled={working}
                   onClick={() => void act(row.id, 'assemble')}>合成连续成片</button>}
-              {row.status === 'QUEUED' && <button className="secondary-button" disabled={working} onClick={() => act(row.id, 'pause')}>暂停</button>}
-              {['PAUSED', 'PAUSE_REQUESTED'].includes(row.status) && <button className="secondary-button" disabled={working} onClick={() => act(row.id, 'resume')}>恢复</button>}
+              {row.status === 'QUEUED' && <button className="btn-secondary" disabled={working} onClick={() => act(row.id, 'pause')}>暂停</button>}
+              {['PAUSED', 'PAUSE_REQUESTED'].includes(row.status) && <button className="btn-secondary" disabled={working} onClick={() => act(row.id, 'resume')}>恢复</button>}
               {['QUEUED', 'PAUSED', 'PAUSE_REQUESTED', 'NEEDS_REVIEW'].includes(row.status)
-                && <button className="subtle-button" disabled={working} onClick={() => act(row.id, 'cancel')}><Square size={12} /> 取消</button>}
+                && <button className="btn-secondary" disabled={working} onClick={() => act(row.id, 'cancel')}><Square size={12} /> 取消</button>}
             </div>
           </div>
           <ol className="series-items">

@@ -84,7 +84,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
   return <>
     <section className="panel" id="film-crew">
       <div className="panel-header"><h2>影视制片团队 <small>V1.1</small></h2>
-        <button disabled={busy} onClick={() => act(reload)}>刷新运行记录</button></div>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(reload)}>刷新运行记录</button></div>
       <p>编剧 → 导演 → 摄影 → 场记 → 规则预检 → 唯一 Worker → QC → 剪辑。所有工种仅产出建议，审批由你操作。</p>
       <div className="crew-grid">{roles.map(r => <article className="settings-block" key={r.role}>
         <h3>{r.label}</h3><p>{r.output_kind}</p><p>{r.permissions}</p>
@@ -112,7 +112,7 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           允许剪辑预览使用 mock / 部分技术验证镜头（不进入正式交付）</label>
         <label><input type="checkbox" checked={remoteText} onChange={e => setRemoteText(e.target.checked)} />
           允许本次工种向所选远端模型发送剧本、风格与资产元数据（不发送媒体字节）</label>
-        <button disabled={busy || !pin || !current?.profile_id || (role === 'qc_reviewer' && !reviewShot)} onClick={() => act(() => api(
+        <button type="button" className="btn-secondary" disabled={busy || !pin || !current?.profile_id || (role === 'qc_reviewer' && !reviewShot)} onClick={() => act(() => api(
           `/projects/${projectId}/film-agents/${role}/run`, json('POST', {
             brief, locked_story_facts: facts.split('\n').filter(Boolean), input_revision_ids: role === 'qc_reviewer' ? [] : inputs,
             tool, offline_preview: offline, allow_remote_text: remoteText,
@@ -126,9 +126,9 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
           onChange={e => setInputs(v => e.target.checked ? [...v, a.id] : v.filter(id => id !== a.id))} />
           {a.kind} · {a.id.slice(0, 8)} · {a.stale ? '依赖已失效' : a.approved_by ? '用户已应用' : '待用户审查'}</summary>
         <pre>{JSON.stringify(a.payload_json, null, 2)}</pre><small>SHA-256 {a.sha256}</small>
-        {a.kind === 'StyleProposal' && <button disabled={busy || a.stale} onClick={() => act(() => api(
+        {a.kind === 'StyleProposal' && <button type="button" className="btn-secondary" disabled={busy || a.stale} onClick={() => act(() => api(
           `/projects/${projectId}/film-artifacts/${a.id}/style-draft`, { method: 'POST' }))}>应用为风格草案（仍需人工冻结）</button>}
-        {a.kind === 'CameraPlan' && <button disabled={busy || a.stale} onClick={() => act(() => api(
+        {a.kind === 'CameraPlan' && <button type="button" className="btn-secondary" disabled={busy || a.stale} onClick={() => act(() => api(
           `/projects/${projectId}/film-artifacts/${a.id}/apply-camera`, json('POST', {
             continuity_artifact_id: artifacts.find(r => inputs.includes(r.id) && r.kind === 'ContinuityReport')?.id ?? '',
           })))}>人工应用摄影方案（需勾选对应场记报告）</button>}
@@ -144,21 +144,21 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       {runs.map(r => <details key={r.id}>
         <summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
         {needsRemoteReconciliation(r) &&
-          <button
+          <button type="button" className="btn-danger"
             disabled={busy || (reconcileCredential.length > 0 && reconcileCredential.length < 32) || !reconcileEvidence.trim()}
             onClick={() => abandonRemote(r)}>放弃远端未知响应（不重试）</button>}
         <pre>{JSON.stringify(r, null, 2)}</pre></details>)}
     </section>
     <section className="panel" id="h3-rulebook">
-      <div className="panel-header"><h2>H3 官方规范中心</h2><button disabled={busy} onClick={() => act(
+      <div className="panel-header"><h2>H3 官方规范中心</h2><button type="button" className="btn-secondary" disabled={busy} onClick={() => act(
         () => api('/h3-rulebook/recheck', { method: 'POST' }))}>重新校验来源文件</button></div>
       <p>五种模式：T2VA / I2VA / FL2VA / L2VA / Ref2VA。本机支持情况以各工作流档案与实测证据为准。</p>
       <p>可执行规则由 Shine 自编并固定版本；官方原文未缓存时显示 SOURCE_UNAVAILABLE，许可未确认前不提供原文分发。</p>
       {hub?.packs.map(p => <article className="settings-block" key={p.id}>
         <b>{p.id}</b><p>SHA-256 {p.sha256}</p><p>{p.approved_at ? '规则包已批准' : '候选版本待人工批准'}</p>
-        <button disabled={busy || !!pin || !p.approved_at} onClick={() => act(() => api(
+        <button type="button" className="btn-secondary" disabled={busy || !!pin || !p.approved_at} onClick={() => act(() => api(
           `/projects/${projectId}/rulepack/freeze`, json('POST', { rulepack_id: p.id })))}>冻结到本项目</button>
-        {!p.approved_at && <button disabled={busy} onClick={() => act(() => api(
+        {!p.approved_at && <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(() => api(
           `/h3-rulebook/packs/${p.id}/approve`, { method: 'POST' }))}>人工批准此规则包</button>}
         <details><summary>版本与来源元数据</summary><pre>{JSON.stringify(p.manifest, null, 2)}</pre></details>
       </article>)}
@@ -174,14 +174,14 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       <label>检索机器规则<input value={query} onChange={e => setQuery(e.target.value)} placeholder="标签、字段名或规则 ID" /></label>
       {filteredRules.map(r => <p key={r.id}><b>{r.origin} · {r.id}</b> — {r.summary}<br /><small>{r.source_path} · {r.locator}</small></p>)}
       <h3>确定性镜头预检</h3>
-      {shots.map(s => <button key={s.id} disabled={busy || !pin} onClick={() => act(() => api(
+      {shots.map(s => <button type="button" className="btn-secondary" key={s.id} disabled={busy || !pin} onClick={() => act(() => api(
         `/shots/${s.id}/compile`, { method: 'POST' }))}>{s.name}：预检并生成提示词</button>)}
       <h3>本机 Workflow 能力</h3>
       {hub?.local_workflow_capabilities.map(w => <p key={w.name}>{w.name} · {label(modeLabels, w.mode)} · {label(serviceStatusLabels, w.status)}</p>)}
       <details><summary>提交候选规则包 / 差异审查</summary>
         <p>仅支持经过当前代码校验的固定官方版本；上游版本或机器规则变化需要开发、测试后才能批准。</p>
         <textarea rows={5} value={candidate} onChange={e => setCandidate(e.target.value)} placeholder="候选 manifest JSON" />
-        <button disabled={busy || !candidate} onClick={() => act(() => api('/h3-rulebook/candidates', json('POST', {
+        <button type="button" className="btn-secondary" disabled={busy || !candidate} onClick={() => act(() => api('/h3-rulebook/candidates', json('POST', {
           manifest: JSON.parse(candidate),
         })))}>生成差异并提交候选</button></details>
     </section>

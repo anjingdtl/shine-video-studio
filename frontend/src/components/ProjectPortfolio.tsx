@@ -121,7 +121,7 @@ export function ProjectPortfolio({
           placeholder="新作品名称"
           onKeyDown={(event) => event.key === 'Enter' && onCreate()}
           aria-label="新作品名称" />
-        <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={onCreate}>
+        <button className="btn-primary" disabled={busy || !projectTitle.trim()} onClick={onCreate}>
           <Plus size={15} aria-hidden="true" />新建作品
         </button>
       </div>

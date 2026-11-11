@@ -102,7 +102,7 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
       {safeAction && actionLabel && (
         <button
           type="button"
-          className={`secondary-button compact${canStop ? ' engine-stop' : ''}`}
+          className={`btn-secondary${canStop ? ' engine-stop' : ''}`}
           disabled={busy}
           title={snapshot?.recovery?.advice || actionLabel}
           onClick={() => act(safeAction)}

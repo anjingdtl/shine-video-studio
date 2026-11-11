@@ -564,7 +564,7 @@ function App() {
   }
 
   const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting}>
-    <button type="button" className="primary-button" disabled={reconnecting} onClick={reconnectWorkbench}>
+    <button type="button" className="btn-secondary" disabled={reconnecting} onClick={reconnectWorkbench}>
       {reconnecting ? reconnectLabel : '重新连接'}
     </button>
     {reconnecting && <div role="status"><progress aria-label={reconnectLabel} /></div>}
@@ -663,7 +663,7 @@ function App() {
                 <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
                 <span className="service-status-text">{apiOnline ? '工作台后端在线' : systemChecked ? '工作台后端失联' : '正在检查工作台后端'}</span>
               </span>
-              {systemChecked && (!apiOnline || reconnecting || !!projectsLoadError) && <button type="button" className="secondary-button compact"
+              {systemChecked && (!apiOnline || reconnecting || !!projectsLoadError) && <button type="button" className="btn-secondary"
                 disabled={reconnecting}
                 title="后端未启动时，请先启动本机工作台"
                 onClick={reconnectWorkbench}>{reconnecting ? reconnectLabel : '重连工作台'}</button>}
@@ -673,13 +673,13 @@ function App() {
             <div className="topbar-controls">
               {ui === 'director' && <button
                 type="button"
-                className={`secondary-button compact library-entry ${directorPage === 'library' ? 'active' : ''}`}
+                className={`btn-secondary library-entry ${directorPage === 'library' ? 'active' : ''}`}
                 onClick={() => goToDirectorPage('library')}
                 title="成片库：管理这部作品在本机落盘的全部视频（单镜、分集、成片与历史版本）"
               >
                 <Film size={13} /><span>成片库</span>
               </button>}
-              <button type="button" className="secondary-button compact" onClick={() => goToAssets('home')} title="素材中心：图片、声音与全局素材库">
+              <button type="button" className="btn-secondary" onClick={() => goToAssets('home')} title="素材中心：图片、声音与全局素材库">
                 <Images size={13} />素材中心
               </button>
               {ui === 'director' && <button
@@ -755,12 +755,12 @@ function App() {
                 </ol>
                 <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-                  <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
+                  <button className="btn-secondary" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建作品</button>
                 </div>
                 <div className="first-run-setup">
                   <b>第一次使用？先花两分钟把机器调好。</b>
                   <span>配置文本模型、检测/安装本机 ComfyUI 与 H3、登记生成方案——都在导演模式内完成。</span>
-                  <button className="secondary-button" onClick={() => goToDirectorSetup('env')}>
+                  <button className="btn-secondary" onClick={() => goToDirectorSetup('env')}>
                     <Settings2 size={13} /> 打开基础配置
                   </button>
                 </div>
@@ -803,7 +803,7 @@ function App() {
                       ? heroGuidance.hint
                       : '所有作品的进度和产出物都在这里；选中哪部就继续。'}</p>
                   </div>
-                  <button className="primary-button big" disabled={journeyState === 'loading' && !journey}
+                  <button className="btn-primary" disabled={journeyState === 'loading' && !journey}
                     onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>{heroGuidance.cta}</button>
                 </section>
                 <ProjectPortfolio
@@ -934,7 +934,7 @@ function App() {
                   {routes.length === 0 && <div className="blocked-callout">
                     <Sparkles size={15} />
                     <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
-                    <button type="button" className="text-button" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
+                    <button type="button" className="btn-text" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
                   </div>}
                 </details>
                 <details className="stage-dock" id="assets-dock" open={focusStage === 'assets'}
@@ -1192,11 +1192,11 @@ function App() {
                   : '所有内容都保存在你自己电脑上：项目、素材、风格、任务和操作记录。'}</p>
                 {projectsLoaded && <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给项目起个名字" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-                  <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
+                  <button className="btn-secondary" disabled={busy || !projectTitle.trim()} onClick={createProject}>新建项目</button>
                 </div>}
                 {!projectsLoaded && workspaceReconnect}
                 {projectsLoaded && view !== 'setup' && <p className="empty-setup-hint">
-                  还没装机？<button className="text-button" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「制作环境」检查本机</button>——不需要先建项目。
+                  还没装机？<button className="btn-text" onClick={() => { switchView('setup'); window.history.pushState(null, '', '#v/setup'); }}>先去「制作环境」检查本机</button>——不需要先建项目。
                 </p>}
               </section>
             </>}
@@ -1219,7 +1219,7 @@ function App() {
                   <select aria-label="切换项目" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}</select>
                   <div className="selector-divider" />
                   <input className="new-project-inline" value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="新项目名称" />
-                  <button className="new-project-button" disabled={busy || !projectTitle.trim()} onClick={createProject}><Plus size={15} aria-hidden="true" />新建项目</button>
+                  <button className="btn-primary" disabled={busy || !projectTitle.trim()} onClick={createProject}><Plus size={15} aria-hidden="true" />新建项目</button>
                 </section>
 
                 <section className="metrics-grid">

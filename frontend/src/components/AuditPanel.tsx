@@ -33,7 +33,7 @@ export default function AuditPanel({ page, busy, onLoad, onMore }: Props) {
           ))}
           {page.items.length === 0 && <div className="empty-inline">还没有操作记录。</div>}
         </div>
-        {page.items.length < page.total && <button className="secondary-button load-more" disabled={busy} onClick={onMore}>加载更多</button>}
+        {page.items.length < page.total && <button className="btn-secondary load-more" disabled={busy} onClick={onMore}>加载更多</button>}
       </>}
     </section>
   );

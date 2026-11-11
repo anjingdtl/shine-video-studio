@@ -82,7 +82,7 @@ export function DeploymentRecommendationCard({ onChoice }: { onChoice?: (choice:
         <h2>按这台电脑的能力推荐完整组合</h2>
         <p>只读检测，不下载、不加载模型。估算与实测分开标注；多张显卡的显存不会相加。</p>
       </div>
-      <button className="secondary-button" disabled={state === 'loading'} onClick={() => { void detect(); }}>
+      <button className="btn-secondary" disabled={state === 'loading'} onClick={() => { void detect(); }}>
         {state === 'loading' ? <RefreshCw size={13} className="spin" /> : <Cpu size={13} />}
         {state === 'ready' ? '重新检测' : '检测并推荐'}
       </button>

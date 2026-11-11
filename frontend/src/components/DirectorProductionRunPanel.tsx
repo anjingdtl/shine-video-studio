@@ -342,7 +342,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
                 onChange={(event) => setToleranceSeconds(Number(event.target.value) || 0)} />
               <span>秒</span>
             </label>
-            <button className="secondary-button" disabled={busy !== '' || !canPlan}
+            <button className="btn-secondary" disabled={busy !== '' || !canPlan}
               title={canPlan ? (planMode === 'sections' ? '按已确认剧本的场次分集，每场恰好一次' : '按镜头顺序覆盖全部分镜')
                 : '先在「创意与剧本」确认剧本大纲'}
               onClick={derivePlan}>
@@ -362,15 +362,15 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             <span>{statusText(latestPlan.status)} · 目标 {latestPlan.payload.target_seconds} 秒
               ± {latestPlan.payload.tolerance_seconds} 秒</span>
           </div>
-          {latestPlan.status !== 'CONFIRMED' && <button className="must-button" disabled={busy !== ''} onClick={confirmPlan}>
+          {latestPlan.status !== 'CONFIRMED' && <button className="btn-primary" disabled={busy !== ''} onClick={confirmPlan}>
             <Check size={13} /> 确认分集方案
           </button>}
-          {latestPlan.status === 'CONFIRMED' && <button className="secondary-button" disabled={busy !== ''}
+          {latestPlan.status === 'CONFIRMED' && <button className="btn-secondary" disabled={busy !== ''}
             title="把这一版退回草案；依赖它的已确认导演包会标记失效，旧数据保留"
             onClick={unlockPlan}>
             解锁分集方案
           </button>}
-          {latestPlanIsSections && !latestPlanMaterialized && <button className="secondary-button" disabled={busy !== ''}
+          {latestPlanIsSections && !latestPlanMaterialized && <button className="btn-secondary" disabled={busy !== ''}
             title="各场次在「镜头拆解」应用分镜后，把每集落到它们真实拆出的镜头"
             onClick={materializePlan}>
             把分集落到镜头
@@ -411,7 +411,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             <h2>把这次要拍的东西固定下来</h2>
             <p>导演包会冻结剧本版本、分集、镜头、素材版本、风格、生成方案和生产政策。确认之后才能开拍。</p>
           </div>
-          <button className="secondary-button" disabled={busy !== ''} onClick={load}>
+          <button className="btn-secondary" disabled={busy !== ''} onClick={load}>
             <RefreshCw size={13} /> 重新检查
           </button>
         </div>
@@ -443,7 +443,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
-          <button className="primary-button" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
+          <button className="btn-secondary" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
             <LockKeyhole size={13} /> 生成导演包
           </button>
           {!confirmedPlan && <span className="run-hint">先确认分集方案，才能生成导演包。</span>}
@@ -455,11 +455,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               <b>第 {latestPackage.revision} 版 · {latestPackage.episode_count} 集 · {latestPackage.shot_count} 镜</b>
               <span>{statusText(latestPackage.status)}{latestPackage.stale ? ' · 已失效，需要重新生成' : ''}</span>
             </div>
-            {latestPackage.status !== 'CONFIRMED' && <button className="must-button"
+            {latestPackage.status !== 'CONFIRMED' && <button className="btn-primary"
               disabled={busy !== '' || !readiness?.ready} onClick={confirmPackage}>
               <Check size={13} /> 确认导演包
             </button>}
-            {latestPackage.status === 'CONFIRMED' && <button className="secondary-button"
+            {latestPackage.status === 'CONFIRMED' && <button className="btn-secondary"
               disabled={busy !== '' || latestPackage.stale}
               title="确认后的导演包保持只读；解锁会把它标记失效，请生成新版本再确认"
               onClick={unlockPackage}>
@@ -501,7 +501,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           </details>
 
           {latestPackage.status === 'CONFIRMED' && readiness?.startable
-            && (!run || !RUN_ACTIVE.includes(run.status)) && <button className="must-button wide"
+            && (!run || !RUN_ACTIVE.includes(run.status)) && <button className="btn-primary btn-wide"
               disabled={busy !== ''} onClick={startRun}>
               <Play size={14} /> 启动整部作品生产
               {latestPackage.episode_count > 1 ? `（${latestPackage.episode_count} 集一次跑完）` : ''}
@@ -520,7 +520,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             ? '这里只展示真实装配完成的分集；缺片段的一集不会出现在成片里。'
             : '运行状态来自服务端记录：心跳只代表后台还活着，最近进展才代表真的拍出了东西。'}</p>
         </div>
-        <button className="secondary-button" disabled={busy !== ''} onClick={load}>
+        <button className="btn-secondary" disabled={busy !== ''} onClick={load}>
           <RefreshCw size={13} /> 刷新
         </button>
       </div>
@@ -536,18 +536,18 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             <span>成片 {seconds(activeRun.progress.delivered_seconds)}</span>
           </div>
           <div className="run-controls">
-            {['QUEUED', 'RUNNING'].includes(activeRun.status) && <button className="subtle-button"
+            {['QUEUED', 'RUNNING'].includes(activeRun.status) && <button className="btn-secondary"
               disabled={busy !== ''} onClick={() => control('pause')}><Pause size={12} /> 暂停</button>}
-            {activeRun.status === 'PAUSED' && <button className="subtle-button"
+            {activeRun.status === 'PAUSED' && <button className="btn-secondary"
               disabled={busy !== ''} onClick={() => control('resume')}><Play size={12} /> 继续</button>}
             {activeRun.status === 'NEEDS_REVIEW' && <>
-              <button className="secondary-button" disabled={busy !== ''}
+              <button className="btn-secondary" disabled={busy !== ''}
                 onClick={() => control('reconcile')}><RefreshCw size={12} /> 核对真实结果</button>
-              <button className="subtle-button" disabled={busy !== ''}
+              <button className="btn-secondary" disabled={busy !== ''}
                 title="只恢复服务端能够证明尚未提交到 H3 的批次；其他阻塞保持待处理"
                 onClick={() => control('resume')}><Play size={12} /> 继续安全可恢复批次</button>
             </>}
-            {!['COMPLETED', 'CANCELLED'].includes(activeRun.status) && <button className="subtle-button danger"
+            {!['COMPLETED', 'CANCELLED'].includes(activeRun.status) && <button className="btn-danger"
               disabled={busy !== ''} onClick={() => control('cancel')}><Square size={12} /> 取消</button>}
           </div>
         </div>
@@ -594,10 +594,10 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           </li>)}
         </ol>
         {(activeRun.episodes?.length ?? 0) > 8 && <div className="run-pager">
-          <button className="subtle-button" disabled={episodePage === 0}
+          <button className="btn-secondary" disabled={episodePage === 0}
             onClick={() => setEpisodePage((page) => Math.max(0, page - 1))}>上一页</button>
           <span>第 {episodePage + 1} / {Math.ceil((activeRun.episodes?.length ?? 0) / 8)} 页</span>
-          <button className="subtle-button"
+          <button className="btn-secondary"
             disabled={(episodePage + 1) * 8 >= (activeRun.episodes?.length ?? 0)}
             onClick={() => setEpisodePage((page) => page + 1)}>下一页</button>
         </div>}

@@ -73,7 +73,7 @@ export function EpisodePostEditor({ runId, episode, onDone }: {
           onChange={(event) => setSubtitle(event.target.value)} />
       </label>
       <p className="run-hint">字幕的时间轴必须对应这一集剪辑后的长度；超出时服务端会拒绝装配，而不是把字幕压到错误的画面上。音量混音尚未实现。</p>
-      <button type="button" className="secondary-button" disabled={busy} onClick={() => { void submit(); }}>
+      <button type="button" className="btn-secondary" disabled={busy} onClick={() => { void submit(); }}>
         {busy ? '提交中…' : '按新合同重新装配'}
       </button>
       {problem && <p className="form-error">{problem}</p>}

@@ -120,7 +120,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
           <textarea className="compact" value={extra} rows={3} placeholder="例：主角叫老周"
             onChange={(event) => setExtra(event.target.value)} />
         </label>
-        <button type="button" className="secondary-button" disabled={busy || !idea.trim()}
+        <button type="button" className="btn-secondary" disabled={busy || !idea.trim()}
           onClick={() => run(async () => {
             await saveCreativeBrief(projectId, { idea: idea.trim(), locked_facts: lockedFacts });
             onMessage?.('已保存创意简报新版本；确认后即可生成剧本。');
@@ -131,12 +131,12 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
           <p className="brief-idea">{latest.payload.idea}</p>
           {latest.payload.locked_facts?.length ? <p>锁定：{latest.payload.locked_facts.join('；')}</p> : null}
           <div className="brief-actions">
-            {!latest.confirmed && <button type="button" className="must-button" disabled={busy}
+            {!latest.confirmed && <button type="button" className="btn-primary" disabled={busy}
               onClick={() => run(async () => {
                 await confirmCreativeBrief(projectId, latest.id, latest.sha256);
                 onMessage?.('创意简报已确认。');
               })}>确认这一版</button>}
-            {latest.confirmed && <button type="button" className="must-button" disabled={busy || generating}
+            {latest.confirmed && <button type="button" className="btn-primary" disabled={busy || generating}
               onClick={() => run(async () => {
                 try {
                   await generateScriptFromBrief(projectId, latest.id, false);
@@ -172,7 +172,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
         <h3>入口 B · 我已有剧本</h3>
         <p>上传剧本原文（.txt / .md / .json / .docx / .pdf）。原文与内容哈希先完整入库；
           场次拆分、人物/对白整理与歧义确认在「总体大纲」里完成，改写锁定内容前会先显示差异。</p>
-        <label className="upload-button">
+        <label className="btn-secondary upload-button">
           <FileUp size={14} />
           <span>{busy ? '上传中…' : '选择并上传剧本'}</span>
           <input type="file" accept=".txt,.md,.json,.docx,.pdf" hidden disabled={busy}
@@ -199,7 +199,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
             </button>
           </li>)}
         </ul>}
-        <button type="button" className="subtle-button" disabled={busy}
+        <button type="button" className="btn-secondary" disabled={busy}
           onClick={() => { void load().catch(() => undefined); }}>
           <RefreshCw size={12} /> 刷新
         </button>

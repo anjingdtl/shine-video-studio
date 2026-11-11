@@ -139,9 +139,9 @@ export function AgentModelRouting({
         <option value="">选择已启用并可用的模型</option>
         {enabledProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name} · {profile.model}</option>)}
       </select></label>
-      <button className="secondary-button" type="button" disabled={busy || !bulkProfile || selectedRoles.length === 0}
+      <button className="btn-secondary" type="button" disabled={busy || !bulkProfile || selectedRoles.length === 0}
         onClick={() => bulkAssign(selectedRoles)}>分配给选中角色（{selectedRoles.length}）</button>
-      <button className="text-button" type="button" disabled={busy || !bulkProfile || !roles.some(role => !(currentRoutes.get(role.role) ?? ''))}
+      <button className="btn-text" type="button" disabled={busy || !bulkProfile || !roles.some(role => !(currentRoutes.get(role.role) ?? ''))}
         onClick={fillMissing}>只补齐未配置角色</button>
       <details className="routing-workflow-picker"><summary><WandSparkles size={13} /> 按工作阶段选择</summary>
         <div className="routing-workflow-options">{workflows.map(workflow => <button type="button" key={workflow.id} disabled={busy}
@@ -152,7 +152,7 @@ export function AgentModelRouting({
     {groups.map(([group, groupRoles]) => <section className="agent-role-group" key={group}>
       <div className="agent-role-group-title">
         <h4>{group}</h4>
-        <button type="button" className="text-button" disabled={busy}
+        <button type="button" className="btn-text" disabled={busy}
           onClick={() => selectRoles(selectedRoles.length === roles.length
             ? [] : [...selectedRoles.filter(role => !groupRoles.some(item => item.role === role)), ...groupRoles.map(item => item.role)])}>
           选择本组
@@ -185,10 +185,10 @@ export function AgentModelRouting({
     </section>)}
 
     <div className="agent-route-actions">
-      <button className="secondary-button" type="button" disabled={busy || previewBusy || updates.length === 0} onClick={() => void previewChanges()}>
+      <button className="btn-secondary" type="button" disabled={busy || previewBusy || updates.length === 0} onClick={() => void previewChanges()}>
         <Eye size={14} /> 预览改派影响（{updates.length}）
       </button>
-      {updates.length > 0 && <button className="text-button" type="button" disabled={busy || previewBusy} onClick={() => {
+      {updates.length > 0 && <button className="btn-text" type="button" disabled={busy || previewBusy} onClick={() => {
         setDraft(Object.fromEntries(roles.map(role => [role.role, currentRoutes.get(role.role) ?? ''])));
         setPreview(null); setPreviewError('');
       }}><RotateCcw size={13} /> 撤销未保存改动</button>}
@@ -205,7 +205,7 @@ export function AgentModelRouting({
         <span>有 {preview.affected_tasks.length} 个排队、运行或待核对任务受影响，当前批次不能保存。它们的已绑定模型不会被改动。</span>
       </div>}
       {preview.blockers.map(blocker => <p className="route-preview-blocker" key={`${blocker.role}-${blocker.code}`}>{roleDisplay(roles.find(role => role.role === blocker.role) ?? { role: blocker.role } as LlmRole)}：{blocker.message}</p>)}
-      {preview.can_apply && <button className="primary-button" type="button" disabled={busy} onClick={() => void saveChanges()}>
+      {preview.can_apply && <button className="btn-secondary" type="button" disabled={busy} onClick={() => void saveChanges()}>
         <Save size={14} /> 确认保存 {preview.changed_role_count} 项分配
       </button>}
     </div>}

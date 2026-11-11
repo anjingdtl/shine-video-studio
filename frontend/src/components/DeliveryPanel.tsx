@@ -168,7 +168,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
   }
 
   return <section className="card delivery-panel" id="delivery">
-    <div className="panel-header"><h2>成片与导出</h2><button disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
+    <div className="panel-header"><h2>成片与导出</h2><button type="button" className="btn-secondary" disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
     <div className="module-guide">
       <HelpCircle size={13} />
       <div>
@@ -205,7 +205,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
           </>
         );
         const body = <>
-          {order.status === 'FAILED' && <button disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
+          {order.status === 'FAILED' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
           {order.status === 'DELIVERED' && order.artifact_id && (order.artifact_deleted
             ? <p className="failure">这份历史成片的文件已在「成片库」删除；交付回执仍保留，但不能再播放。</p>
             : <LazyVideo src={`${API}/deliveries/${order.artifact_id}/media`} label={`完整成片 v${order.version}`} />)}
@@ -246,7 +246,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
     {clips.length > 0 && <ol aria-label="装配镜头顺序">{clips.map((clip, index) => <li key={index}>
       {jobs.find(job => job.id === clip?.job_id)?.shot_name ?? '未知镜头（提交时会校验）'} · {String(clip?.in_s)}–{String(clip?.out_s)} 秒
     </li>)}</ol>}
-    <button disabled={busy || !edl.trim()} onClick={assemble}>{busy ? '正在装配…' : '校验并装配成片（人工修订）'}</button>
+    <button type="button" className="btn-secondary" disabled={busy || !edl.trim()} onClick={assemble}>{busy ? '正在装配…' : '校验并装配成片（人工修订）'}</button>
     {message && <p role="status">{message}</p>}
     {!loadError && !deliveries.length && !orders.some(o => o.status === 'DELIVERED') && <p>暂无交付成片。</p>}
     <div className="delivery-list">

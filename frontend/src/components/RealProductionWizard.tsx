@@ -615,24 +615,24 @@ export function RealProductionWizard({
               ? `发现已安装的 ComfyUI${reuseOffer.totalBytes ? `，另有约 ${fmtBytes(reuseOffer.totalBytes)} 权重待核验` : ''}。核验会直接读取原文件；大文件可能需要几分钟，不会复制、覆盖或下载。再次打开时会查询已完成的核验结果。`
               : `发现可复用的已有模型（约 ${fmtBytes(reuseOffer.totalBytes)}）。核验后只复制与固定清单一致的模型到本机缓存，原安装不会被修改。`}</p>
             <div className="wizard-actions">
-          <button type="button" className="primary-button" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验并确认复用' : '校验并复用模型'}</button>
-              {!reuseHasInstalledSoftware && <button type="button" className="subtle-button" onClick={declineReuse}>不复用，直接继续</button>}
+          <button type="button" className="btn-secondary" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验并确认复用' : '校验并复用模型'}</button>
+              {!reuseHasInstalledSoftware && <button type="button" className="btn-secondary" onClick={declineReuse}>不复用，直接继续</button>}
             </div>
           </div>
         )}
         {needProject && (
           <div className="wizard-reuse">
             <p>先创建一个作品，再回来启用真实制作。</p>
-            <div className="wizard-actions"><button type="button" className="primary-button" onClick={() => { cancelled.current = true; onClose(); }}>去创建作品</button></div>
+            <div className="wizard-actions"><button type="button" className="btn-secondary" onClick={() => { cancelled.current = true; onClose(); }}>去创建作品</button></div>
           </div>
         )}
         {finished && (
           <div className={`wizard-result ${finished.ok ? 'ok' : 'bad'}`} data-testid="wizard-result">
             <p>{finished.summary}</p>
             <div className="wizard-actions">
-              {finished.ok && <button type="button" className="primary-button" onClick={onFinished}>返回作品，开始制作</button>}
-              {!finished.ok && <button type="button" className="subtle-button" onClick={onOpenExpertSetup}>到专业设置处理</button>}
-              <button type="button" className="subtle-button" onClick={() => void safely(run)}>
+              {finished.ok && <button type="button" className="btn-secondary" onClick={onFinished}>返回作品，开始制作</button>}
+              {!finished.ok && <button type="button" className="btn-secondary" onClick={onOpenExpertSetup}>到专业设置处理</button>}
+              <button type="button" className="btn-secondary" onClick={() => void safely(run)}>
                 <RefreshCw size={13} /> 重新检查
               </button>
             </div>

@@ -82,7 +82,7 @@ export function JourneyRail<P extends string>({
               <b>进度暂时不可用</b>
               <span>{error || '服务未响应'}。读取成功前不会显示任何“已完成”结论。</span>
             </div>
-            {onRetry && <button type="button" className="secondary-button" onClick={onRetry}>重试读取</button>}
+            {onRetry && <button type="button" className="btn-secondary" onClick={onRetry}>重试读取</button>}
           </>
         ) : state !== 'ready' ? (
           <>
@@ -100,7 +100,7 @@ export function JourneyRail<P extends string>({
               {!nextIsCurrent && <span>{nextStage.hint}</span>}
             </div>
             {nextStage.page !== currentPage && currentPage !== 'projects' && (
-              <button type="button" className="must-button" onClick={() => onNavigate(nextStage)}>
+              <button type="button" className="btn-primary" onClick={() => onNavigate(nextStage)}>
                 去这一步 <ChevronRight size={14} />
               </button>
             )}

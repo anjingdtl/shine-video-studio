@@ -119,15 +119,15 @@ export default function OutputDirectoryPanel() {
         onChange={(event) => setPath(event.target.value)} />
     </label>
     <div className="inline-actions">
-      <button className="secondary-button" disabled={busy || blockers.length > 0}
+      <button className="btn-secondary" disabled={busy || blockers.length > 0}
         onClick={() => void save(path.trim() || null)}>
         {busy ? '正在迁移文件…' : '保存并迁移'}
       </button>
-      {state.custom && <button className="subtle-button" disabled={busy || blockers.length > 0}
+      {state.custom && <button className="btn-secondary" disabled={busy || blockers.length > 0}
         onClick={() => void save(null)}>
         恢复默认目录
       </button>}
-      <button className="subtle-button" disabled={busy} onClick={() => void load()}>刷新</button>
+      <button className="btn-secondary" disabled={busy} onClick={() => void load()}>刷新</button>
     </div>
     <p className="guardrail-note">
       调整目录会先复制并逐个核验文件，全部通过后才切换台账，最后清理旧位置；任何一步失败都不会切换。

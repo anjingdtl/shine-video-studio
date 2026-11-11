@@ -834,7 +834,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
       <div className="settings-block">
-        <button className="primary-button" disabled={busy} onClick={detectEnvironment}>{checked ? '重新检测' : '检测本机'}</button>
+        <button className="btn-secondary" disabled={busy} onClick={detectEnvironment}>{checked ? '重新检测' : '检测本机'}</button>
         {!checked && <p role="status">还没有检测结果。检测是只读的：不会下载、复制或启动任何东西，也不需要项目。</p>}
         {checked && <>
           <div className="env-summary-grid">
@@ -860,11 +860,11 @@ function activateRuntime() {    const candidate = runtime?.candidate;
               </div>
             ))}
   </div>
-          <button className="secondary-button" disabled={busy} onClick={installOptionalReviewers}>补装建议审片模型（可选）</button>
+          <button className="btn-secondary" disabled={busy} onClick={installOptionalReviewers}>补装建议审片模型（可选）</button>
           <fieldset className="setup-existing" disabled={busy}>
             <legend>已有 ComfyUI 与模型复用</legend>
             <p>{existingRoots.length ? `发现 ${existingRoots.length} 个已有安装。` : '常见目录未发现安装，可手动指定；不会遍历整个磁盘。'}</p>
-            {existingRoots.map(root => <p key={root}><button className="secondary-button" onClick={() => {
+            {existingRoots.map(root => <p key={root}><button className="btn-secondary" onClick={() => {
               setExistingPath(root); setExistingChoice('reuse'); setExistingResolved(false);
               setExistingScan(null); setImportResult(''); setResolvedMode('none');
             }}>{root}</button></p>)}
@@ -879,7 +879,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
                 setExistingPath(e.target.value); setExistingScan(null); setExistingResolved(false); setImportResult('');
               setResolvedMode('none');
               }} placeholder="包含 main.py 的目录或整合包目录" /></label>
-              <button className="secondary-button" disabled={!existingPath.trim()} onClick={inspectExisting}>检查已有目录</button>
+              <button className="btn-secondary" disabled={!existingPath.trim()} onClick={inspectExisting}>检查已有目录</button>
               {existingScan && <>
                 <p>已识别：{existingScan.root} · 扫描 {existingScan.scanned_files} 个文件。</p>
                 {existingScan.software?.installed && <p role="status">
@@ -891,7 +891,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
                 <ul>{existingScan.matches.map(row => <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path}：{row.status === 'INSTALLED_HASH_MATCH' ? '已安装，哈希匹配' : row.status === 'CACHED' ? '已校验并缓存' : row.status === 'HASH_MISMATCH' || row.status === 'HASH_MISMATCH_OR_CHANGED' ? '哈希不匹配或文件已变化' : existingResolved ? '哈希结果待确认' : '待哈希校验'}</li>)}</ul>
                 <details><summary>查看未找到的固定版本模型</summary><ul>{existingScan.missing.map(row =>
                   <li key={`${row.component_id}:${row.relative_path}`}>{row.component_id} / {row.relative_path} · {fmtBytes(row.size)}</li>)}</ul></details>
-                <button className="secondary-button" disabled={existingResolved}
+                <button className="btn-secondary" disabled={existingResolved}
                   onClick={existingScan.software?.installed ? verifyExistingInstallation : reuseExisting}>
                   {existingScan.software?.installed ? '确认已安装并核验' : '校验并复用匹配模型'}
                 </button>
@@ -905,7 +905,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           {existingComfyInstalled && <p role="status">{existingResolved
             ? '已确认本机软件与权重安装；当前版本尚不能直接接管外部目录，因此自动安装已停用，不会重复下载。请先在专业设置完成运行兼容性检查。'
             : '已发现本机 ComfyUI。先核验原目录的软件版本与模型哈希；确认之前不会另行下载或复制。'}</p>}
-          <button className="primary-button" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
+          <button className="btn-secondary" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
             || !existingResolved
             || existingComfyInstalled
             || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
@@ -970,7 +970,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             </div>}
           </>}
           <div className="inline-form">
-            <button className="secondary-button" disabled={busy} onClick={checkConnectivity}>检查上游可达性</button>
+            <button className="btn-secondary" disabled={busy} onClick={checkConnectivity}>检查上游可达性</button>
           </div>
         </div>
 
@@ -1009,14 +1009,14 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             {storage?.requires_selection && ' 请先选择非系统盘目录，才能自动安装。'}
           </p>
           <div className="inline-form">
-            <button className="primary-button" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
-            <button className="secondary-button" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
-            <button className="secondary-button" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
-            <button className="secondary-button" disabled={busy || !projectId} onClick={validateProfiles}>验证本项目工作流</button>
-            <button className="secondary-button" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
-            <button className="secondary-button" disabled={busy || runtime?.candidate?.project_id !== projectId}
+            <button className="btn-secondary" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
+            <button className="btn-secondary" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
+            <button className="btn-secondary" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
+            <button className="btn-secondary" disabled={busy || !projectId} onClick={validateProfiles}>验证本项目工作流</button>
+            <button className="btn-secondary" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
+            <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
               onClick={validateServices}>验证服务与工作流</button>
-            <button className="secondary-button" disabled={busy || runtime?.candidate?.project_id !== projectId}
+            <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
               onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
           {!projectId && <p className="guardrail-note">计划生成、Profile 登记、配置生成与激活需要先创建一个项目（本页下方即可创建）；环境检查、上游可达性与部署清单无需项目。</p>}
@@ -1045,7 +1045,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
                 </div>
               ))}
             </div>}
-            <button className="must-button" disabled={busy} onClick={releaseManagedProcesses}>
+            <button className="btn-primary" disabled={busy} onClick={releaseManagedProcesses}>
               关闭本机后台并释放显存
             </button>
           </div>
@@ -1054,9 +1054,9 @@ function activateRuntime() {    const candidate = runtime?.candidate;
               <div className="worker-row" key={plan.plan_id}>
                 <div><b>{plan.action ?? plan.kind}</b><span>编号 {plan.plan_id.slice(0, 8)}… · {label(prepRowLabels, plan.status)} · 层级 {plan.tier ?? '—'}</span></div>
                 {['NEEDS_REVIEW', 'INSTALLING'].includes(plan.status)
-                  ? <button className="text-button" disabled={busy} onClick={() => reconcileInstall(plan)}>整理中断的安装</button>
+                  ? <button className="btn-text" disabled={busy} onClick={() => reconcileInstall(plan)}>整理中断的安装</button>
                   : ['AWAITING_APPROVAL', 'APPROVED'].includes(plan.status)
-                    ? <button className="text-button" disabled={busy} onClick={() => void runPlan(plan)}>
+                    ? <button className="btn-text" disabled={busy} onClick={() => void runPlan(plan)}>
                       {plan.status === 'APPROVED' ? '执行已批准计划' : '批准并执行'}</button>
                     : null}
               </div>
@@ -1078,13 +1078,13 @@ function activateRuntime() {    const candidate = runtime?.candidate;
               </div>
               <div className="worker-row-actions">
                 {!attempt.terminal && !attempt.pause_requested
-                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('pause')}>暂停</button>
+                  ? <button className="btn-text" disabled={busy} onClick={() => void attemptAction('pause')}>暂停</button>
                   : null}
                 {(attempt.pause_requested || attempt.stage === 'PAUSED' || attempt.stage === 'FAILED_RETRYABLE')
-                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('resume')}>继续</button>
+                  ? <button className="btn-text" disabled={busy} onClick={() => void attemptAction('resume')}>继续</button>
                   : null}
                 {!attempt.terminal
-                  ? <button className="text-button" disabled={busy} onClick={() => void attemptAction('cancel')}>取消</button>
+                  ? <button className="btn-text" disabled={busy} onClick={() => void attemptAction('cancel')}>取消</button>
                   : null}
               </div>
             </div>

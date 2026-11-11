@@ -531,7 +531,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         <b>还差一步：本项目还没绑定官方规则包</b>
         <small>五个 Agent 需要同一套官方规范；到「剧本统筹」冻结风格时会一并绑定。</small>
       </div>
-      {onNavigate && <button className="must-button" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
+      {onNavigate && <button className="btn-primary" onClick={() => onNavigate('assets')}>去启用官方规则包</button>}
     </div>}
 
     <div className="storyboard-import">
@@ -582,7 +582,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     {scriptTooLong && <div className="required-action" role="alert">
       <div className="required-text"><b>长剧本请分段制作</b>
         <small>单次分镜最多处理 20000 字。请在素材准备中选择已确认大纲的生产段落，逐段生成分镜；不会截断原文。</small></div>
-      {onNavigate && <button type="button" className="must-button" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
+      {onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
     </div>}
     <div className="required-action">
       <Sparkles size={17} className="required-icon" />
@@ -590,13 +590,13 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         <b>{requiresReconciliation ? '前次模型请求结果待核对' : '必做：生成 AI 分镜方案'}</b>
         <small>{requiresReconciliation ? '系统会先检查前次调用。确认请求未送达时，复用已保存的编剧结果并自动从导演继续。' : '需要先导入剧本并勾选上面的同意。五个 Agent 会依次真实调用模型，每步之间留有间隔。'}</small>
       </div>
-      {requiresReconciliation && replacement ? <button type="button" className="must-button" disabled={backendDisconnected || busy}
+      {requiresReconciliation && replacement ? <button type="button" className="btn-primary" disabled={backendDisconnected || busy}
         onClick={() => void runChain({ start_role: 'director', resume_steps: { scriptwriter: replacement.scriptwriter },
           replaceInterruptedTaskId: replacement.taskId })}>开始新一轮导演</button>
-      : requiresReconciliation ? <button type="button" className="must-button" disabled={backendDisconnected || checkingPreviousRun || busy}
+      : requiresReconciliation ? <button type="button" className="btn-primary" disabled={backendDisconnected || checkingPreviousRun || busy}
         onClick={() => void checkAndResumeDirector()}>
         {checkingPreviousRun ? '正在核对前次请求…' : '检查并自动继续导演'}
-      </button> : <button className="must-button" disabled={backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong} onClick={generate}>
+      </button> : <button className="btn-primary" disabled={backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong} onClick={generate}>
         {busy ? <Loader2 size={14} /> : <Sparkles size={14} />}
         生成 AI 分镜方案
       </button>}
@@ -606,7 +606,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     {requiresReconciliation && <details>
       <summary>前次请求详情</summary>
       <p>任务编号 {result?.rejections?.find(rejection => rejection.task_id)?.task_id ?? '暂未取得'}。远端结果待核对。</p>
-      <button type="button" className="secondary-button" disabled={backendDisconnected || checkingPreviousRun || busy}
+      <button type="button" className="btn-secondary" disabled={backendDisconnected || checkingPreviousRun || busy}
         onClick={() => void checkAndResumeDirector(true)}>检查后从头重跑</button>
     </details>}
     {pollError && <p role="alert">{pollError}</p>}
@@ -623,7 +623,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         <b>已有一套完成的分镜方案保存在本机（{recoveredApply.shot_count} 个镜头）</b>
         <p>五个工种都已完成真实调用。可以直接应用为正式分镜，不需要再次调用模型；应用后可到镜头列表逐条核对。</p>
       </div>
-      <button className="primary-button" type="button" disabled={applying} onClick={apply}>
+      <button className="btn-secondary" type="button" disabled={applying} onClick={apply}>
         {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）
       </button>
     </div>}
@@ -652,7 +652,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       {result.status === 'REJECTED' && replayTarget && <div className="step-retry">
         <RefreshCw size={14} />
         <span>上一次已收到服务商响应但答案被拒绝，结果确定不可用。发起新请求会重新调用模型并再次计费；被拒绝的记录会保留为历史。</span>
-        <button className="must-button" disabled={busy}
+        <button className="btn-primary" disabled={busy}
           onClick={() => runChain({ authorizeReplayTaskId: replayTarget.task_id })}>
           重新生成（新请求，会再次计费）
         </button>
@@ -660,7 +660,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       {result.status === 'REJECTED' && failedRole && !replayTarget && <div className="step-retry">
         <RefreshCw size={14} />
         <span>这一步已经完成的部分不会重跑。</span>
-        <button className="must-button" disabled={busy || requiresReconciliation}
+        <button className="btn-primary" disabled={busy || requiresReconciliation}
           onClick={() => resumeFrom(failedRole, resumeSteps)}>
           从「{stepLabels[failedRole] ?? failedRole}」这一步重试
         </button>
@@ -734,9 +734,9 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         </div>}
         {!requiresReconciliation && !selectedDoc && !inlineText.trim() && <div className="required-action">
           <div className="required-text"><b>导演还未启动：需要选择对应剧本</b><small>已确认的人物不会丢失。请在上方选择这份人物对照对应的剧本。</small></div>
-          <button type="button" className="must-button" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
+          <button type="button" className="btn-primary" onClick={() => document.getElementById('storyboard-doc')?.focus()}>去选择剧本</button>
         </div>}
-        {requiresReconciliation ? onNavigate && <button type="button" className="must-button" onClick={() => onNavigate('assets')}>
+        {requiresReconciliation ? onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('assets')}>
           去剧本统筹核对风格
         </button> : <div className="required-action">
           <CheckCircle2 size={17} className="required-icon" />
@@ -744,7 +744,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             <b>{confirmedBreakdownId ? '人物名字已经保存，可以继续导演' : '必做：确认名图对应'}</b>
             <small>{confirmedBreakdownId ? '将复用已确认的人物，不再重复写入名字，也不重跑编剧。' : '确认后会把名字写进素材、冻结素材，并从导演这一步继续生成分镜。'}</small>
           </div>
-          <button className="must-button" disabled={busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim())} onClick={applyBinding}>
+          <button className="btn-primary" disabled={busy || bindingBusy || !consent || (!selectedDoc && !inlineText.trim())} onClick={applyBinding}>
             {bindingBusy ? <Loader2 size={14} /> : <CheckCircle2 size={14} />}
             {confirmedBreakdownId ? '复用已确认人物，继续导演' : '确认并写入名字'}
           </button>
@@ -812,13 +812,13 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
             <small>{result.repair_failure ? '本轮自动修复未通过检查，原方案已保留。可以再次尝试修复。'
               : 'AI 会复用已完成的步骤，尝试修订冲突并重新检查，不会修改已冻结风格或素材。'}</small>
           </div>
-          <button className="must-button" type="button" disabled={busy || backendDisconnected}
+          <button className="btn-primary" type="button" disabled={busy || backendDisconnected}
             onClick={() => void resumeFrom('director_arbitration', Object.fromEntries(
               Object.entries(result.steps).map(([role, step]) => [role, step.artifact_id])))}>
             AI 修复并重新检查
           </button>
         </div>}
-        {result.status === 'PROPOSED' && result.next && <button className="primary-button" disabled={applying} onClick={apply}>
+        {result.status === 'PROPOSED' && result.next && <button className="btn-secondary" disabled={applying} onClick={apply}>
           {applying ? <Loader2 size={14} /> : <Sparkles size={14} />} 应用为正式分镜（人工确认）
         </button>}
         {applyError && <p role="alert">{applyError}</p>}

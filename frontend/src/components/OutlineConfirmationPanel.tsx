@@ -99,7 +99,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新的大纲输入）</span>
       <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
     </label>
-    <button type="button" className="must-button" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
+    <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
       onClick={() => void act(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
         document_id: documentId,
         expected_document_hash: documentHash,
@@ -128,7 +128,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         : `大纲任务需要处理（${outlineTask.error_code}）。可在素材准备的总体大纲区核对已有结果。`}
     </p>}
     {outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED' && (
-      <button type="button" className="must-button" disabled={busy || !scriptwriterAllowed}
+      <button type="button" className="btn-primary" disabled={busy || !scriptwriterAllowed}
         onClick={() => void act(() => api(
           `/projects/${projectId}/story-preparation/tasks/${outlineTask.task_id}/resume`,
           json('POST', { expected_state_version: outlineTask.state_version }),
@@ -152,14 +152,14 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         <p>补充锁定事实后重新生成；如果这些疑问是你有意保留的悬念，可以按当前设定确认，确认记录会写下你接受的全部疑问。</p>
       </div>}
       {!outline.approved && <div className="outline-actions">
-        <button type="button" className="must-button"
+        <button type="button" className="btn-primary"
           disabled={busy || outline.stale || outline.payload.questions.length > 0}
           onClick={() => void act(() => api(
             `/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`,
             json('POST', { expected_sha256: outline.sha256 })), '大纲已确认，可以进入第 2 阶段分集。')}>
           确认这版总体大纲
         </button>
-        {outline.payload.questions.length > 0 && <button type="button" className="secondary-button"
+        {outline.payload.questions.length > 0 && <button type="button" className="btn-secondary"
           disabled={busy || outline.stale || !outline.questions_sha256}
           onClick={() => void act(() => api(
             `/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`,

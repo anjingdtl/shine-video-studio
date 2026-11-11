@@ -122,7 +122,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         </div>}
         {!outline.approved && <button type="button" disabled={busy || outline.stale || !!outline.payload.questions.length}
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', { expected_sha256: outline.sha256 })))}>确认这版总体大纲</button>}
-        {!outline.approved && !!outline.payload.questions.length && <button type="button" className="must-button"
+        {!outline.approved && !!outline.payload.questions.length && <button type="button" className="btn-primary"
           disabled={busy || outline.stale || !outline.questions_sha256}
           onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`, json('POST', {
             expected_sha256: outline.sha256, acknowledge_questions_sha256: outline.questions_sha256,
@@ -188,7 +188,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         )}
         {task.progress.blocked_subtasks?.map((item) => (
           !task.retry?.can_retry && !task.retry?.exhausted && canExplicitlyResend(item) ? (
-            <button key={item.task_id} type="button" className="text-button" disabled={busy}
+            <button key={item.task_id} type="button" className="btn-text" disabled={busy}
               onClick={() => {
                 const which = item.scene_key ? '「' + item.scene_key + '」' : '这一场';
                 if (!window.confirm(which + '的旧请求可能仍有答案，可能多花一次模型调用。确认以一次新的请求重问？')) return;

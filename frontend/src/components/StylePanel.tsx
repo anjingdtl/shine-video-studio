@@ -449,7 +449,7 @@ export default function StylePanel({
               <option value="subtle">轻</option><option value="balanced">均衡</option><option value="strong">鲜明</option>
             </select>
           </label>
-          <button type="button" className="secondary-button" disabled={!selectedDirectorId || directorBusy} onClick={() => previewDirectorStyle()}>
+          <button type="button" className="btn-secondary" disabled={!selectedDirectorId || directorBusy} onClick={() => previewDirectorStyle()}>
             {directorBusy && !directorPreview ? '正在预览…' : '预览差异'}
           </button>
         </div>
@@ -471,14 +471,14 @@ export default function StylePanel({
           </table>
           <div className="section-footer">
             <span>采用只更新草稿；人物、对白和镜头时长仍由现有合同保护。</span>
-            <button type="button" className="primary-button" disabled={directorBusy || !directorState} onClick={applyDirectorStyle}>
+            <button type="button" className="btn-secondary" disabled={directorBusy || !directorState} onClick={applyDirectorStyle}>
               {directorBusy ? '正在采用…' : '采用到草稿'}
             </button>
           </div>
         </div>}
       </div>
 
-      <button type="button" className="text-button style-details-toggle" onClick={() => setDetailsOpen((open) => !open)} aria-expanded={detailsOpen}>
+      <button type="button" className="btn-text style-details-toggle" onClick={() => setDetailsOpen((open) => !open)} aria-expanded={detailsOpen}>
         <ChevronDown size={13} /> {detailsOpen ? '收起细节' : '调整细节'}
       </button>
       {detailsOpen && <div className="style-grid">
@@ -529,7 +529,7 @@ export default function StylePanel({
         </div>
         {aiRoles !== null && !aiConfigured && <p className="style-ai-empty">
           尚未配置 AI 助手，预设和手工选择照常可用。
-          <button type="button" className="text-button" onClick={() => onNavigate('settings')}>去配置 AI 助手</button>
+          <button type="button" className="btn-text" onClick={() => onNavigate('settings')}>去配置 AI 助手</button>
         </p>}
         {aiConfigured && rulepackId === null && rulepacks.length > 0 && <p className="style-ai-empty">
           本作品还没绑定官方规则包：点下方「批准并冻结」时会一并完成绑定（一次性），不用单独操作。
@@ -542,7 +542,7 @@ export default function StylePanel({
             <input type="checkbox" checked={aiConsent} onChange={(event) => setAiConsent(event.target.checked)} />
             <span>我同意把项目设置与补充说明文本发给已配置的 AI 文字服务（不发送素材文件）。</span>
           </label>
-          <button type="button" className="secondary-button" disabled={aiBusy} onClick={recommend}>
+          <button type="button" className="btn-secondary" disabled={aiBusy} onClick={recommend}>
             <Sparkles size={13} /> {aiBusy ? '正在请求 AI 建议…' : '请求 AI 风格建议'}
             <span className="style-ai-catalog">目录 {STYLE_CATALOG_VERSION} · {styleCatalogHash()}</span>
             <span className="style-ai-catalog">{aiRole?.label}</span>
@@ -554,7 +554,7 @@ export default function StylePanel({
       {aiProposal && <div className="style-ai-proposal">
         <div className="style-ai-proposal-head">
           <b>AI 建议{aiProposal.fromHistory ? '（上次生成，可能基于旧内容）' : ''}</b>
-          <button type="button" className="text-button" onClick={() => setAiProposal(null)}>不采用</button>
+          <button type="button" className="btn-text" onClick={() => setAiProposal(null)}>不采用</button>
         </div>
         <p className="style-ai-rationale">{aiProposal.rationale}</p>
         <table className="style-diff">
@@ -571,7 +571,7 @@ export default function StylePanel({
         <div className="section-footer">
           <span>采纳只写入草稿；冻结是单独的确认步骤。</span>
           <div>
-            <button type="button" className="primary-button" disabled={adoptBusy} onClick={adopt}>
+            <button type="button" className="btn-secondary" disabled={adoptBusy} onClick={adopt}>
               {adoptBusy ? '正在采纳…' : '采纳到草稿'}
             </button>
           </div>
@@ -581,7 +581,7 @@ export default function StylePanel({
       <div className="section-footer">
         <span>{currentStyle ? <><Check size={13} /> 已冻结 V{currentStyle.version}：所有新镜头都按这一版执行</> : '保存后冻结：冻结的就是屏幕上这七项'}</span>
         <div>
-          <button className="secondary-button" disabled={busy || !canSave} onClick={() => onSave(Boolean(selectedDirectorId))}>保存草稿</button>
+          <button className="btn-secondary" disabled={busy || !canSave} onClick={() => onSave(Boolean(selectedDirectorId))}>保存草稿</button>
         </div>
       </div>
       {currentStyle
@@ -590,7 +590,7 @@ export default function StylePanel({
             ? '本作品还没绑定规则包：这次冻结会一并完成绑定。'
             : '冻结会生成新版本并写审计；只影响新镜头，旧镜头和历史任务继续用原版本。'}</span>
           <div>
-            <button className="primary-button" disabled={busy || !canFreeze} onClick={freezeNow}>
+            <button className="btn-secondary" disabled={busy || !canFreeze} onClick={freezeNow}>
               <LockKeyhole size={14} /> 冻结为新版本
             </button>
           </div>
@@ -603,7 +603,7 @@ export default function StylePanel({
               ? '冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照；本作品还没绑定官方规则包，这次冻结会一并完成（一次性）。'
               : '冻结前会先把屏幕上这七项原样保存，再申请一次性授权并冻结这份快照。'}</small>
           </div>
-          <button className="must-button" disabled={busy || !canFreeze} onClick={freezeNow}>
+          <button className="btn-primary" disabled={busy || !canFreeze} onClick={freezeNow}>
             <LockKeyhole size={14} /> 批准并冻结
           </button>
         </div>}
@@ -614,10 +614,10 @@ export default function StylePanel({
             <b>手动解锁 / 应用新冻结</b>
             <span>旧风格、旧镜头和旧成片都保留为历史；有镜头正在拍摄时会拒绝。</span>
           </div>
-          <button type="button" className="secondary-button" disabled={busy} onClick={onApplyStyleToAllShots}>
+          <button type="button" className="btn-secondary" disabled={busy} onClick={onApplyStyleToAllShots}>
             应用当前风格到全部镜头
           </button>
-          <button type="button" className="must-button" disabled={busy} onClick={onRefreshFreeze}>
+          <button type="button" className="btn-primary" disabled={busy} onClick={onRefreshFreeze}>
             解锁并应用新冻结
           </button>
         </div>

@@ -111,7 +111,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
               {roleOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </div>
-          <label className="upload-button"><Upload size={15} /> 上传到本机
+          <label className="btn-secondary upload-button"><Upload size={15} /> 上传到本机
             <input
               type="file"
               disabled={busy}
@@ -141,7 +141,7 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
           <b>有 {pending.length} 项上传素材待你选择</b>
           <small>确认会固定素材版本，AI 不能替你确认或替换。确认后这张素材才能被分镜引用。</small>
         </div>
-        <button className="must-button" disabled={busy || !selection.length}
+        <button className="btn-primary" disabled={busy || !selection.length}
           onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>
       </div>}
       <label className="material-field"><span>素材分组</span><select value={group} onChange={(e) => { setGroup(e.target.value); setVisible(24); }}>
@@ -174,8 +174,8 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
                 </select>
                 <input value={editEntity} placeholder="人物名称" onChange={(event) => setEditEntity(event.target.value)} />
                 <input value={editTags} placeholder="标签, 逗号分隔" onChange={(event) => setEditTags(event.target.value)} />
-                <button className="text-button" onClick={() => saveEdit(asset.id)}><Check size={12} /> 保存</button>
-                <button className="text-button" onClick={() => setEditingId('')}><X size={12} /> 取消</button>
+                <button className="btn-text" onClick={() => saveEdit(asset.id)}><Check size={12} /> 保存</button>
+                <button className="btn-text" onClick={() => setEditingId('')}><X size={12} /> 取消</button>
               </div>}
             </div>
             <div className="asset-state">
@@ -184,21 +184,21 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
             </div>
             {!asset.locked && <label><input type="checkbox" aria-label={`选择上传素材 ${asset.filename}`} checked={selection.includes(asset.id)}
               onChange={(e) => setSelection((old) => e.target.checked ? [...old, asset.id] : old.filter((id) => id !== asset.id))} />选择</label>}
-            {!asset.locked && <button className="text-button" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
+            {!asset.locked && <button className="btn-text" disabled={busy} onClick={() => onConfirm([asset.id])}>确认使用</button>}
             {asset.locked && <>
-              <button className="text-button" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>
-              <button className="text-button" disabled={busy} onClick={() => onUnlock(asset.id)}>解锁修改</button>
+              <button className="btn-text" disabled={busy || saveBusy} onClick={() => beginLibrarySave(asset)}>收藏到素材中心</button>
+              <button className="btn-text" disabled={busy} onClick={() => onUnlock(asset.id)}>解锁修改</button>
             </>}
             <button className="icon-button tiny" title="编辑元数据" aria-label={`编辑 ${asset.filename} 元数据`} onClick={() => beginEdit(asset)} disabled={busy}><Pencil size={12} /></button>
             {saveAssetId === asset.id && <div className="asset-library-save-form">
-              {saved ? <><p role="status">已保存为素材中心候选。通过技术检查并人工晋升后可分配给其他作品。</p><button className="text-button" onClick={onOpenLibrary}>打开全局素材库</button></> : <>
+              {saved ? <><p role="status">已保存为素材中心候选。通过技术检查并人工晋升后可分配给其他作品。</p><button className="btn-text" onClick={onOpenLibrary}>打开全局素材库</button></> : <>
                 <label>全局素材名称<input value={saveTitle} maxLength={160} onChange={(event) => setSaveTitle(event.target.value)} /></label>
                 <label>素材分类<select value={saveCategory} onChange={(event) => setSaveCategory(event.target.value)}>
                   <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option>
                 </select></label>
                 {saveError && <p role="alert" className="required-text">{saveError}</p>}
-                <button className="must-button" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
-                <button className="text-button" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
+                <button className="btn-primary" disabled={busy || saveBusy || !saveTitle.trim()} onClick={() => void saveToLibrary(asset)}>{saveBusy ? '正在保存…' : '保存为待审核候选'}</button>
+                <button className="btn-text" disabled={saveBusy} onClick={() => setSaveAssetId('')}>取消</button>
               </>}
             </div>}
           </div>

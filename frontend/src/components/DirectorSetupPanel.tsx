@@ -106,7 +106,7 @@ export default function DirectorSetupPanel({
         <h1>先把机器调好，<em>再让 AI 开工。</em></h1>
         <p>这三步不需要专业模式：装好本机环境、配置文本模型、选一个生成方案。任何一步没完成，制作页都会明确告诉你缺什么。</p>
       </div>
-      <button className="secondary-button" onClick={() => void onRefresh()}>刷新全部状态</button>
+      <button className="btn-secondary" onClick={() => void onRefresh()}>刷新全部状态</button>
     </section>
 
     <section className="setup-status-grid">
@@ -141,7 +141,7 @@ export default function DirectorSetupPanel({
       <div className="create-project">
         <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)}
           placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-        <button className="primary-button" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建并继续</button>
+        <button className="btn-secondary" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建并继续</button>
       </div>
     </section>}
 
@@ -190,9 +190,9 @@ export default function DirectorSetupPanel({
             const sized = 'width' in (profile.parameter_map ?? {}) && 'height' in (profile.parameter_map ?? {});
             return <div className="workflow-row" key={profile.id}>
               <div><b>{profile.name}</b><span>{profile.mode} · SHA {profile.graph_sha256.slice(0, 10)}…</span></div>
-              {sized ? <span className="workflow-size-ok">宽高可调</span> : <button className="small-action" disabled={busy}
+              {sized ? <span className="workflow-size-ok">宽高可调</span> : <button className="btn-secondary" disabled={busy}
                 onClick={() => onBindStandardParameters(profile.id)}>补齐宽高参数</button>}
-              <button className="small-action" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
+              <button className="btn-secondary" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
             </div>;
           })}
           <div className="workflow-row">
@@ -201,7 +201,7 @@ export default function DirectorSetupPanel({
               <span>Ref2VA · 官方 W6A8 候选 · 宽高可调 · {lowendRegistered ? '已登记' : '未登记'}</span>
             </div>
             <span className="chip warn">候选</span>
-            <button type="button" className="small-action"
+            <button type="button" className="btn-secondary"
               onClick={() => document.getElementById('variant-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
               查看就绪状态
             </button>
@@ -252,7 +252,7 @@ export default function DirectorSetupPanel({
           <p>不绑定音色时，每个镜头的对白由 H3 原生生成；音色会在镜头之间自由变化，这是当前方案的已知取舍。</p>
           <p>需要固定音色：在专业模式「制片准备 → 音色」里设计并冻结音色，再把它作为音频参考绑定到镜头。音色参考同样受 2–15 秒时长限制。</p>
         </div>
-        <button type="button" className="secondary-button" onClick={onOpenExpert}>去专业模式配置音色</button>
+        <button type="button" className="btn-secondary" onClick={onOpenExpert}>去专业模式配置音色</button>
       </section>
     </div>}
 

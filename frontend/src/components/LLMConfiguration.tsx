@@ -110,7 +110,7 @@ function ProfileEditor({
         </div>
         <small>等待时间不改变任务的输入上下文检查、创作输出预算或远端发送授权。</small>
       </details>
-      <button className="secondary-button" type="submit" disabled={busy || !name.trim() || !baseUrl.trim() || !model.trim()}><Save size={13} /> 保存修改</button>
+      <button className="btn-secondary" type="submit" disabled={busy || !name.trim() || !baseUrl.trim() || !model.trim()}><Save size={13} /> 保存修改</button>
     </form>
   </details>;
 }
@@ -123,7 +123,7 @@ function DuplicateForm({
   const [copyCredential, setCopyCredential] = useState(false);
   const [open, setOpen] = useState(false);
   return <div className="llm-duplicate">
-    <button className="text-button" type="button" disabled={busy} onClick={() => setOpen(value => !value)}><Copy size={13} /> 复制配置</button>
+    <button className="btn-text" type="button" disabled={busy} onClick={() => setOpen(value => !value)}><Copy size={13} /> 复制配置</button>
     {open && <form className="llm-duplicate-form" onSubmit={event => {
       event.preventDefault();
       const outcome = onDuplicate(profile.id, { name, model, copy_credential: copyCredential });
@@ -134,7 +134,7 @@ function DuplicateForm({
       <label className="llm-copy-key"><input type="checkbox" checked={copyCredential} onChange={event => setCopyCredential(event.target.checked)} />
         由本机安全存储创建独立密钥副本</label>
       <p>副本默认不共享可删除的密钥引用。也可以不复制密钥，之后单独填写。</p>
-      <button className="secondary-button" type="submit" disabled={busy || !name.trim() || !model.trim()}>创建副本</button>
+      <button className="btn-secondary" type="submit" disabled={busy || !name.trim() || !model.trim()}>创建副本</button>
     </form>}
   </div>;
 }
@@ -200,7 +200,7 @@ export function LLMConfiguration({
           </div>
           <small>回复上限是生成输出预算；输入上下文仍按模型能力检查。</small>
         </details>
-        <button className="primary-button" type="submit" disabled={busy || !draft.name.trim() || !draft.base_url.trim() || !draft.model.trim()}><Plus size={13} /> 添加</button>
+        <button className="btn-secondary" type="submit" disabled={busy || !draft.name.trim() || !draft.base_url.trim() || !draft.model.trim()}><Plus size={13} /> 添加</button>
       </form>
     </details>
 
@@ -228,8 +228,8 @@ export function LLMConfiguration({
             : <p className="llm-context-note">输入上下文由模型能力检查；每次创作仍会执行上下文预算校验。</p>}
           {routeUses.length > 0 && <p className="llm-route-usage">当前服务 {routeUses.length} 个 Agent</p>}
           <div className="llm-model-actions">
-            <button className="text-button" type="button" disabled={busy} onClick={() => onTestProfile(profile.id)}><FlaskConical size={13} /> 测试连接</button>
-            <button className="text-button" type="button" disabled={busy} onClick={() => onTestGeneration(profile.id)}><CheckCircle2 size={13} /> 测试结构化生成</button>
+            <button className="btn-text" type="button" disabled={busy} onClick={() => onTestProfile(profile.id)}><FlaskConical size={13} /> 测试连接</button>
+            <button className="btn-text" type="button" disabled={busy} onClick={() => onTestGeneration(profile.id)}><CheckCircle2 size={13} /> 测试结构化生成</button>
             <label className="llm-enabled-toggle"><Power size={13} />
               <input type="checkbox" checked={profile.enabled} disabled={busy} aria-label={'启用模型 ' + profile.name}
                 onChange={event => void onUpdateProfile(profile.id, { enabled: event.target.checked })} /> {profile.enabled ? '启用中' : '已停用'}
@@ -242,14 +242,14 @@ export function LLMConfiguration({
               <input aria-label={'更新密钥 ' + profile.name} type="password" autoComplete="new-password" placeholder="输入新密钥；不会显示旧密钥"
                 disabled={busy} value={keyDrafts[profile.id] ?? ''}
                 onChange={event => setKeyDrafts(values => ({ ...values, [profile.id]: event.target.value }))} />
-              <button className="secondary-button" type="button" disabled={busy || !keyDrafts[profile.id]}
+              <button className="btn-secondary" type="button" disabled={busy || !keyDrafts[profile.id]}
                 onClick={() => clearWhenSaved(onSetKey(profile.id, keyDrafts[profile.id]), () => setKeyDrafts(values => ({ ...values, [profile.id]: '' })))}>
                 保存新密钥
               </button>
             </div>
           </details>
           <DuplicateForm profile={profile} busy={busy} onDuplicate={onDuplicateProfile} />
-          <button className="text-button llm-delete" type="button" disabled={busy} onClick={() => {
+          <button className="btn-text llm-delete" type="button" disabled={busy} onClick={() => {
             const roles = routeUses.map(route => route.role).join('、');
             const note = routeUses.length ? `当前还有 Agent 指向此模型：${roles}。` : '';
             if (window.confirm(`${note}删除模型配置？仍被 Agent 或未结束任务使用时，服务端会阻止删除。`)) onDeleteProfile(profile.id);

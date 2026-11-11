@@ -148,7 +148,7 @@ export function VariantRecommendationCard() {
         <h2>这台电脑能用哪套 H3 变体</h2>
         <p>只读检测，不下载、不加载模型。候选变体在真机验收之前只是候选，不会被当成生产可用。</p>
       </div>
-      <button className="secondary-button" disabled={state === 'loading'} onClick={() => { void detect(); }}>
+      <button className="btn-secondary" disabled={state === 'loading'} onClick={() => { void detect(); }}>
         {state === 'loading' ? <RefreshCw size={13} className="spin" /> : <Cpu size={13} />}
         {state === 'ready' ? '重新检测' : '重新检测'}
       </button>

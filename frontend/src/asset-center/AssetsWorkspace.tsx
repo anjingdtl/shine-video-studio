@@ -224,12 +224,12 @@ function HomePage({ capabilities, onNavigate }: { capabilities: CapabilityReport
       <div className="asset-card asset-status-card"><div className="asset-card-heading"><div><h2>本机能力</h2><p>模型能力和真实推理状态分开显示。</p></div><CircleHelp size={17} /></div>
         <CapabilityRows capabilities={capabilities} />
       </div>
-      <div className="asset-card"><div className="asset-card-heading"><div><h2>最近任务</h2><p>刷新页面后仍可继续查看任务状态。</p></div><button className="asset-text-button" onClick={() => onNavigate('images')}>打开工坊</button></div>
+      <div className="asset-card"><div className="asset-card-heading"><div><h2>最近任务</h2><p>刷新页面后仍可继续查看任务状态。</p></div><button className="btn-text" onClick={() => onNavigate('images')}>打开工坊</button></div>
         {taskError && <p className="asset-error-text">{taskError}</p>}
         {tasks.length ? <div className="asset-task-list">{tasks.slice(0, 5).map((task) => <TaskRow key={task.id} task={task} />)}</div> : <div className="asset-empty-small">{capabilities ? '还没有任务。' : '正在读取任务状态…'}</div>}
       </div>
     </section>
-    <section className="asset-card asset-recent-card"><div className="asset-card-heading"><div><h2>最近素材</h2><p>全局库中的素材及版本，不依赖任何影视项目。</p></div><button className="asset-text-button" onClick={() => onNavigate('library')}>查看全部 <ArrowRight size={14} /></button></div>
+    <section className="asset-card asset-recent-card"><div className="asset-card-heading"><div><h2>最近素材</h2><p>全局库中的素材及版本，不依赖任何影视项目。</p></div><button className="btn-text" onClick={() => onNavigate('library')}>查看全部 <ArrowRight size={14} /></button></div>
       {loading ? <p className="asset-muted">正在读取素材…</p> : error ? <p className="asset-error-text">{error}</p> : assets.length ? <div className="asset-compact-grid">{assets.slice(0, 6).map((asset) => <MiniAsset key={asset.id} asset={asset} />)}</div> : <div className="asset-empty-small">素材库是空的。可以先在图片工坊导入一张图片。</div>}
     </section>
   </>;
@@ -506,7 +506,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       </div>
       {(requiresReferences || mode === 'RGBA' || references.length > 0) && <div className="asset-reference-block">
         <div className="asset-reference-heading"><div><b>底图和参考图</b><span>{mode === 'INPAINT' ? '局部修订还会把遮罩作为一张输入图；底图与参考图最多 9 张。' : '最多 10 张；第 1 张是编辑底图。'}</span></div>
-          <button type="button" className="asset-secondary-button" disabled={busy || references.length >= maxReferenceCount} onClick={() => { fileInput.current?.click(); }}><Upload size={15} />导入图片</button>
+          <button type="button" className="btn-secondary" disabled={busy || references.length >= maxReferenceCount} onClick={() => { fileInput.current?.click(); }}><Upload size={15} />导入图片</button>
           <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file, 'reference'); event.target.value = ''; }} />
         </div>
         {references.length > 0 && <div className="asset-reference-list">{references.map((row, index) => <div key={row.id} className="asset-reference-row">
@@ -525,7 +525,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       {pendingIntent && <div className="asset-capability-notice pending" role="status">
         <span><i />有一项图片请求尚未收到确认</span>
         <p>刷新或断网后可以用原请求编号核对并恢复；恢复不会再次提交同一任务。</p>
-        <button type="button" className="asset-secondary-button" disabled={busy} onClick={() => void recoverPendingIntent()}>核对并恢复上次请求</button>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => void recoverPendingIntent()}>核对并恢复上次请求</button>
       </div>}
       {manualCutoutReady ? <div className="asset-capability-notice ready"><span><i />遮罩去背景可用</span><p>白色区域保留主体，黑色区域生成透明像素；这是确定性本机像素处理，不依赖或冒充 Qwen 分割模型。</p></div>
         : selectedCapability && <div className={`asset-capability-notice ${selectedCapability.can_generate ? 'ready' : 'pending'}`}>
@@ -534,11 +534,11 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       {canValidate && !canGenerate && <div className="asset-validation-note">本机验证会真实提交一张样例到当前 ComfyUI，并生成待审核候选；不会自动晋升或开放正式生成。</div>}
       {error && <div className="asset-inline-error" role="alert">{error}</div>}
       {notice && <div className="asset-success-note" role="status"><Check size={15} />{notice}</div>}
-      <button className="asset-primary-button" disabled={busy || (mode === 'T2I' && references.length > 0) || (!canGenerate && !canValidate) || (mode !== 'RGBA' && !prompt.trim()) || (mode === 'RGBA' && !manualCutoutReady && !prompt.trim())} onClick={() => void submit(!manualCutoutReady && !canGenerate && canValidate)}>
+      <button className="btn-primary btn-wide" disabled={busy || (mode === 'T2I' && references.length > 0) || (!canGenerate && !canValidate) || (mode !== 'RGBA' && !prompt.trim()) || (mode === 'RGBA' && !manualCutoutReady && !prompt.trim())} onClick={() => void submit(!manualCutoutReady && !canGenerate && canValidate)}>
         {busy ? <><LoaderCircle className="asset-spin" size={16} />正在保存请求…</> : manualCutoutReady ? <><Eraser size={16} />生成透明 PNG 候选</> : canGenerate ? <><WandSparkles size={16} />生成图片候选</> : canValidate ? <><ShieldCheck size={16} />运行一次本机验证样例</> : <><ShieldCheck size={16} />等待本机能力验证</>}
       </button>
       {capabilities && !canGenerate && !canValidate && !manualCutoutReady && onOpenImageSetup && (
-        <button type="button" className="asset-secondary-button" onClick={onOpenImageSetup}>打开本机出图配置</button>
+        <button type="button" className="btn-secondary" onClick={onOpenImageSetup}>打开本机出图配置</button>
       )}
     </section>
     <aside className="asset-workshop-side">
@@ -682,7 +682,7 @@ function MaskCanvas({ source, existingMask, savedMask, busy, semantics, onSave, 
       <canvas ref={canvasRef} aria-label="绘制局部修改区域，白色是修改区域" onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end} />
     </div>
     {error && <div className="asset-inline-error" role="alert">{error}</div>}
-    <div className="asset-mask-actions"><span>{savedMask ? '遮罩已保存' : '遮罩尚未保存'}</span><button type="button" className="asset-secondary-button" disabled={!dimensions || busy} onClick={() => void save()}><Check size={14} />导出并保存遮罩</button></div>
+    <div className="asset-mask-actions"><span>{savedMask ? '遮罩已保存' : '遮罩尚未保存'}</span><button type="button" className="btn-secondary" disabled={!dimensions || busy} onClick={() => void save()}><Check size={14} />导出并保存遮罩</button></div>
   </div>;
 }
 
@@ -860,20 +860,20 @@ function VoiceWorkshop({ capabilities, onNavigate }: { capabilities: CapabilityR
         <label className="asset-field"><span>分类</span><select value={category} onChange={(event) => setCategory(event.target.value)}><option value="dialogue">对白</option><option value="voice">音色 / 参考样本</option><option value="sfx">音效</option><option value="music">音乐</option></select></label>
         <label className="asset-field"><span>素材名称</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="音频名称" /></label>
         {category === 'voice' && <label className="asset-field"><span>录音中的对白原文</span><textarea value={sampleTranscript} onChange={(event) => setSampleTranscript(event.target.value)} rows={3} placeholder="逐字填写样本中实际说出的内容" /></label>}
-        <div className="asset-upload-line"><input type="file" accept={category === 'voice' ? 'audio/wav' : 'audio/wav,audio/mpeg,audio/flac'} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><button className="asset-secondary-button" disabled={busy || !file || !title.trim()} onClick={() => void importAudio()}><Upload size={14} />导入音频</button></div>
+        <div className="asset-upload-line"><input type="file" accept={category === 'voice' ? 'audio/wav' : 'audio/wav,audio/mpeg,audio/flac'} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><button className="btn-secondary" disabled={busy || !file || !title.trim()} onClick={() => void importAudio()}><Upload size={14} />导入音频</button></div>
         {category === 'voice' && <small>请使用单声道 16-bit PCM WAV，并填写样本中的对白原文。</small>}
       </div>
       {error && <div className="asset-inline-error" role="alert">{error}</div>}{notice && <div className="asset-success-note" role="status"><Check size={15} />{notice}</div>}
       {pendingIntent && <div className="asset-capability-notice pending" role="status">
         <span><i />有一项声音请求尚未收到确认</span>
         <p>刷新或断网后可用原请求编号核对并恢复；恢复不会重复创建任务。</p>
-        <button type="button" className="asset-secondary-button" disabled={busy} onClick={() => void recoverPendingIntent()}>核对并恢复上次请求</button>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => void recoverPendingIntent()}>核对并恢复上次请求</button>
       </div>}
-      <button className="asset-primary-button" disabled={busy || cap?.can_queue === false || !text.trim() || (mode === 'AUTHORIZED_CLONE' && !sample)} onClick={() => void submitVoice()}><Mic2 size={16} />保存声音任务</button>
+      <button className="btn-primary btn-wide" disabled={busy || cap?.can_queue === false || !text.trim() || (mode === 'AUTHORIZED_CLONE' && !sample)} onClick={() => void submitVoice()}><Mic2 size={16} />保存声音任务</button>
     </div>
     <aside className="asset-workshop-side">
       <div className="asset-card"><div className="asset-card-heading"><div><h2>我的音色</h2><p>冻结前必须实际试听并确认。</p></div><AudioLines size={16} /></div>
-        {voices.length ? <div className="asset-task-list">{voices.map((voice) => <div key={voice.id} className="asset-voice-row"><div><b>{voice.title}</b><small>{LABELS[voice.status] ?? voice.status} · {voice.voice_hash.slice(0, 10)}</small></div><audio controls src={voice.media_url} onPlay={() => setHeardVoiceId(voice.id)} />{voice.status === 'PREVIEW' && <button className="asset-text-button" disabled={busy || heardVoiceId !== voice.id} onClick={() => void freezeVoice(voice)}>试听后冻结</button>}</div>)}</div> : <div className="asset-empty-small">还没有全局音色。</div>}
+        {voices.length ? <div className="asset-task-list">{voices.map((voice) => <div key={voice.id} className="asset-voice-row"><div><b>{voice.title}</b><small>{LABELS[voice.status] ?? voice.status} · {voice.voice_hash.slice(0, 10)}</small></div><audio controls src={voice.media_url} onPlay={() => setHeardVoiceId(voice.id)} />{voice.status === 'PREVIEW' && <button className="btn-text" disabled={busy || heardVoiceId !== voice.id} onClick={() => void freezeVoice(voice)}>试听后冻结</button>}</div>)}</div> : <div className="asset-empty-small">还没有全局音色。</div>}
       </div>
       <div className="asset-card"><h2>最近声音任务</h2>{tasks.length ? <div className="asset-task-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onLibrary={() => onNavigate('library')} />)}</div> : <div className="asset-empty-small">声音任务会保留在这里，等待本机服务验证。</div>}</div>
     </aside>
@@ -974,7 +974,7 @@ function LibraryPage() {
   return <div className="asset-library-layout">
     <section className="asset-library-main">
       <div className="asset-card"><div className="asset-library-toolbar"><div><div className="asset-eyebrow">全局素材库</div><h2>所有素材和版本都在这里</h2></div>
-        <button type="button" className="asset-secondary-button" disabled={busy} onClick={() => imageInput.current?.click()}><Upload size={15} />导入图片</button>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => imageInput.current?.click()}><Upload size={15} />导入图片</button>
         <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => {
           const file = event.target.files?.[0];
           event.target.value = '';
@@ -1001,7 +1001,7 @@ function LibraryPage() {
           <label className="asset-field"><span>分类</span><select value={editCategory} onChange={(event) => setEditCategory(event.target.value)}><option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="voice">音色</option><option value="dialogue">对白</option><option value="sfx">音效</option><option value="music">音乐</option><option value="other">其他</option></select></label>
           <label className="asset-field"><span>标签（逗号分隔）</span><input value={editTags} onChange={(event) => setEditTags(event.target.value)} /></label>
           <label className="asset-field"><span>素材组</span><input value={editCollection} onChange={(event) => setEditCollection(event.target.value)} maxLength={120} /></label>
-          <button className="asset-secondary-button full" disabled={busy || !editTitle.trim()} onClick={() => void saveMetadata()}>保存素材信息</button>
+          <button className="btn-secondary btn-wide" disabled={busy || !editTitle.trim()} onClick={() => void saveMetadata()}>保存素材信息</button>
         </details>
         {selected.versions?.map((version) => <div className="asset-version-card" key={version.id}>
           <div className="asset-version-heading"><b>V{version.ordinal} · {LABELS[version.status] ?? version.status}</b><small>{version.width && version.height ? `${version.width} × ${version.height} · ` : ''}{version.content_sha256.slice(0, 12)}</small></div>
@@ -1012,7 +1012,7 @@ function LibraryPage() {
           {version.prompt && <p className="asset-prompt-preview">{version.prompt}</p>}
           {version.kind === 'audio' && <audio className="asset-version-audio" controls preload="none" src={version.media_url}>当前浏览器不支持音频播放。</audio>}
           {version.qc && <details className="asset-diagnostics"><summary>技术检查详情</summary><pre>{JSON.stringify(version.qc, null, 2)}</pre></details>}
-          {version.status !== 'PROMOTED' && !version.is_mock && <button className="asset-secondary-button full" disabled={busy} onClick={() => void reviewVersion(version)}><BadgeCheck size={14} />检查并人工晋升</button>}
+          {version.status !== 'PROMOTED' && !version.is_mock && <button className="btn-secondary btn-wide" disabled={busy} onClick={() => void reviewVersion(version)}><BadgeCheck size={14} />检查并人工晋升</button>}
           {version.status === 'PROMOTED' && <div className="asset-promoted-note"><Check size={13} />已人工晋升；项目版本引用不会随全局升级而改变。</div>}
         </div>)}
         <div className="asset-use-list"><b>项目使用记录</b>{selected.usage?.length ? selected.usage.map((use) => <small key={use.project_asset_id}>{use.project_id.slice(0, 8)} · {use.role} · {use.entity_id || '未指定身份'} · V{selected.versions?.find((v) => v.id === use.version_id)?.ordinal}</small>) : <small>尚未分配给影视项目。</small>}</div>
@@ -1081,7 +1081,7 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
         </select></label>
         <div className="asset-field-row"><label className="asset-field"><span>作品中的用途</span><select value={role} onChange={(event) => setRole(event.target.value)}><option value="character">人物</option><option value="costume">服装</option><option value="scene">场景</option><option value="prop">道具</option><option value="voice">音色</option><option value="dialogue">对白音频</option><option value="sfx">音效</option><option value="music">音乐</option><option value="generic">其他</option></select></label>
           <label className="asset-field"><span>作品内身份名称</span><input value={entity} onChange={(event) => setEntity(event.target.value)} placeholder="例如：林岚" /></label></div>
-        <button className="asset-primary-button" disabled={saving || !selectedVersion} onClick={() => void assign()}><ArrowRight size={16} />{saving ? '正在分配…' : '分配到作品'}</button>
+        <button className="btn-primary btn-wide" disabled={saving || !selectedVersion} onClick={() => void assign()}><ArrowRight size={16} />{saving ? '正在分配…' : '分配到作品'}</button>
       </> : <div className="asset-empty-small">尚无影视项目。可以先独立整理素材，创建作品后再分配。</div>}
       {error && <div className="asset-inline-error" role="alert">{error}</div>}{notice && <div className="asset-success-note" role="status"><Check size={14} />{notice}</div>}
     </div>
@@ -1089,7 +1089,7 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
       {projectAssets.filter((asset) => asset.approved && asset.locked).length ? <>
         <div className="asset-task-list">{projectAssets.filter((asset) => asset.approved && asset.locked).map((asset) => <div key={asset.id} className="asset-project-save-row">
         <div><b>{asset.filename}</b><small>{asset.role ?? '其他'} · {asset.sha256.slice(0, 12)} · {asset.locked ? '已锁定' : '未锁定'}</small></div>
-        <button className="asset-secondary-button" disabled={!!savingProjectAsset} onClick={() => void saveProjectAsset(asset)}><Copy size={14} />{savingProjectAsset === asset.id ? '正在保存…' : '收藏到全局库'}</button>
+        <button className="btn-secondary" disabled={!!savingProjectAsset} onClick={() => void saveProjectAsset(asset)}><Copy size={14} />{savingProjectAsset === asset.id ? '正在保存…' : '收藏到全局库'}</button>
       </div>)}</div>
       </> : <div className="asset-empty-small">当前作品没有已批准并锁定的素材，或尚未选择作品。</div>}
     </div>
@@ -1126,11 +1126,11 @@ function TaskRow({ task, onLibrary }: { task: LibraryTask; onLibrary?: () => voi
   </span><div><b>{task.mode === 'T2I' ? '图片候选' : task.kind === 'voice' ? '声音任务' : task.mode}</b><small>{taskLabel(task)}{task.external_prompt_id ? ` · ${task.external_prompt_id.slice(0, 8)}` : ''}</small>
     {reconcileMessage && <small role="status">{reconcileMessage}</small>}</div>
     {task.kind === 'image' && ['UNKNOWN', 'RECONCILE_REQUIRED'].includes(task.status)
-      ? <button className="asset-text-button" disabled={reconciling} title="只读取已有任务结果，不会重新提交" onClick={() => void reconcile()}>{reconciling ? '核对中…' : '对账'}</button>
+      ? <button className="btn-text" disabled={reconciling} title="只读取已有任务结果，不会重新提交" onClick={() => void reconcile()}>{reconciling ? '核对中…' : '对账'}</button>
       : task.can_new_attempt
-        ? <button className="asset-text-button" disabled={reconciling} onClick={() => void createNewAttempt()}>{reconciling ? '创建中…' : '创建新任务'}</button>
+        ? <button className="btn-text" disabled={reconciling} onClick={() => void createNewAttempt()}>{reconciling ? '创建中…' : '创建新任务'}</button>
         : task.result_version_id && onLibrary
-        ? <button className="asset-text-button" onClick={onLibrary}>审核候选</button>
+        ? <button className="btn-text" onClick={onLibrary}>审核候选</button>
         : <span className={`asset-task-status ${task.status === 'BLOCKED_CAPABILITY' ? 'pending' : ''}`}>{LABELS[task.status] ?? task.status}</span>}
   </div>;
 }

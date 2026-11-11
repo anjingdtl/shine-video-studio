@@ -23,7 +23,7 @@ export function OutlineTaskRetry({ retry, busy, disabled = false, onRetry }: {
       {failure.http_status != null && ` · HTTP ${failure.http_status}`}
       {failure.provider_code != null && ` · 服务商错误码 ${failure.provider_code}`} · {reason}
       {failure.outcome === 'UNKNOWN' && ' · 服务商结果未知'}</p>
-    {retry.can_retry && <button type="button" className="must-button" disabled={busy || disabled} onClick={() => {
+    {retry.can_retry && <button type="button" className="btn-primary" disabled={busy || disabled} onClick={() => {
       if (!retry.unknown_subtask_id) { onRetry({}); return; }
       if (window.confirm('上一次模型请求的结果仍未知，发起一次新请求可能多计一次调用。确认重试？')) {
         onRetry({ subtask_id: retry.unknown_subtask_id, evidence: '本机用户确认对结果未知的子任务发起一次新请求' });

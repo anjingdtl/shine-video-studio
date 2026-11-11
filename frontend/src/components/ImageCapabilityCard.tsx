@@ -277,23 +277,23 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
           </div>
         </div>
       )}
-      <button type="button" className="subtle-button" disabled={working || busy} onClick={registerInstall}>
+      <button type="button" className="btn-secondary" disabled={working || busy} onClick={registerInstall}>
         登记出图权重安装计划
       </button>
-      <button type="button" className="subtle-button" disabled={working || busy || !state?.configured}
+      <button type="button" className="btn-secondary" disabled={working || busy || !state?.configured}
         onClick={startRenderer}>
         {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 启动本机出图渲染器
       </button>
-      <button type="button" className="subtle-button" disabled={working || busy || rendererState !== 'RUNNING'}
+      <button type="button" className="btn-secondary" disabled={working || busy || rendererState !== 'RUNNING'}
         onClick={stopRenderer}>
         停止出图渲染器并释放显存
       </button>
-      <button type="button" className="must-button" disabled={working || busy || !state?.configured} onClick={validate}>
+      <button type="button" className="btn-primary" disabled={working || busy || !state?.configured} onClick={validate}>
         {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 验证三类真实小样
       </button>
       {!state?.configured && state?.binding_candidate && <div className="module-guide">
         <p>可复用已登记的本机实例，模型目录为 {state.binding_candidate.model_root}。绑定后核验固定权重。</p>
-        <button type="button" className="must-button" disabled={working || busy} onClick={bindRenderer}>
+        <button type="button" className="btn-primary" disabled={working || busy} onClick={bindRenderer}>
           {working ? '正在核验出图权重…' : '绑定现有实例用于出图'}
         </button>
       </div>}

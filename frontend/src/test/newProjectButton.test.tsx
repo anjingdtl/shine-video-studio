@@ -21,8 +21,8 @@ describe('我的作品页的新建入口', () => {
   it('新建作品是一个醒目的主操作按钮，而不是白底弱化按钮', async () => {
     render(<App />);
     const button = await screen.findByRole('button', { name: '新建作品' });
-    expect(button.className).toContain('new-project-button');
-    expect(button.className).not.toContain('subtle-button');
+    expect(button.className).toContain('btn-primary');
+    expect(button.className).not.toContain('btn-secondary');
     // 图标不进入可访问名称：脚本按这个名字找按钮。
     expect(button.textContent).toBe('新建作品');
   });
@@ -31,6 +31,6 @@ describe('我的作品页的新建入口', () => {
     render(<App />);
     const button = await screen.findByRole('button', { name: '新建作品' });
     expect(button).toBeDisabled();
-    expect(button.className).toContain('new-project-button');
+    expect(button.className).toContain('btn-primary');
   });
 });

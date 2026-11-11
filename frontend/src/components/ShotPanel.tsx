@@ -195,7 +195,7 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
               disabled={!currentStyle}
             />
             <button
-              className="subtle-button"
+              className="btn-secondary"
               disabled={!currentStyle || !newCharacter.trim() || selectedCharacters.includes(newCharacter.trim())}
               onClick={() => { setSelectedCharacters((current) => [...current, newCharacter.trim()]); setNewCharacter(''); }}
             >
@@ -247,10 +247,10 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
               <button className="icon-button tiny" onClick={() => setDraft((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}><X size={12} /></button>
             </div>
           ))}
-          <button className="subtle-button builder-add" onClick={addBinding} disabled={!currentStyle}><Plus size={13} /> 添加引用</button>
+          <button className="btn-secondary builder-add" onClick={addBinding} disabled={!currentStyle}><Plus size={13} /> 添加引用</button>
         </div>
         {formError && <p className="shot-form-error" role="alert">{formError}</p>}
-        <button className="primary-button wide-button" disabled={busy || submitting || !currentStyle || !storyBeat.trim()} onClick={submitShot}><Plus size={14} /> {submitting ? '正在保存…' : '保存分镜'}</button>
+        <button className="btn-secondary wide-button" disabled={busy || submitting || !currentStyle || !storyBeat.trim()} onClick={submitShot}><Plus size={14} /> {submitting ? '正在保存…' : '保存分镜'}</button>
       </div>
       <div className="shot-list">
         {shots.map((shot) => (
@@ -267,15 +267,15 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
                   ))}
                 </div>
               </div>
-              <button className="small-action" onClick={() => onPreview(shot.id)}><Eye size={12} /> 预览提示词</button>
-              <button className="small-action" onClick={() => beginBindings(shot)}><Link2 size={12} /> 绑定</button>
+              <button className="btn-secondary" onClick={() => onPreview(shot.id)}><Eye size={12} /> 预览提示词</button>
+              <button className="btn-secondary" onClick={() => beginBindings(shot)}><Link2 size={12} /> 绑定</button>
               {currentStyle && shot.spec.style_version_id !== currentStyle.id && (
-                <button className="small-action" disabled={busy} onClick={() => void onAdoptStyle(shot.id)}
+                <button className="btn-secondary" disabled={busy} onClick={() => void onAdoptStyle(shot.id)}
                   title="把本镜修订到当前冻结风格；旧成片保留为历史，不会被改写">
                   采用当前风格
                 </button>
               )}
-              <button className="small-action" disabled={!currentStyle || busy} onClick={() => onQueue(shot)}><ArrowUpRight size={12} /> 加入队列</button>
+              <button className="btn-secondary" disabled={!currentStyle || busy} onClick={() => onQueue(shot)}><ArrowUpRight size={12} /> 加入队列</button>
             </div>
             {editingShot === shot.id && <div className="binding-editor">
               {approved.length === 0 && <span className="empty-inline">没有已批准并锁定的素材。</span>}
@@ -309,8 +309,8 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
                 </div>
               ))}
               <div className="editor-actions">
-                <button className="primary-button" disabled={bindingSaving} onClick={() => saveBindings(shot.id)}><Save size={13} /> {bindingSaving ? '正在保存…' : '保存绑定'}</button>
-                <button className="secondary-button" disabled={bindingSaving} onClick={() => setEditingShot('')}>取消</button>
+                <button className="btn-secondary" disabled={bindingSaving} onClick={() => saveBindings(shot.id)}><Save size={13} /> {bindingSaving ? '正在保存…' : '保存绑定'}</button>
+                <button className="btn-secondary" disabled={bindingSaving} onClick={() => setEditingShot('')}>取消</button>
               </div>
             </div>}
           </div>

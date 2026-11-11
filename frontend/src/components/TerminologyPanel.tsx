@@ -110,7 +110,7 @@ export default function TerminologyPanel({ projectId, busy, onMessage }: Props) 
       </div>
 
       <div className="terminology-actions">
-        <button type="button" className="subtle-button" onClick={() => setRows([...rows, emptyRow()])}>
+        <button type="button" className="btn-secondary" onClick={() => setRows([...rows, emptyRow()])}>
           <Plus size={13} /> 添加一行
         </button>
         <label className="terminology-notes">
@@ -122,7 +122,7 @@ export default function TerminologyPanel({ projectId, busy, onMessage }: Props) 
             onChange={(event) => setNotes(event.target.value)}
           />
         </label>
-        <button type="button" className="primary-button" disabled={busy || working} onClick={save}>
+        <button type="button" className="btn-secondary" disabled={busy || working} onClick={save}>
           {working ? <Loader2 size={14} /> : <Save size={14} />} 保存为新版本
         </button>
       </div>
@@ -233,12 +233,12 @@ export function SubtitlePanel({ projectId, busy, onMessage }: Props) {
       <div className="terminology-actions">
         <button
           type="button"
-          className="subtle-button"
+          className="btn-secondary"
           onClick={() => setCues([...cues, { index: cues.length + 1, start_s: 0, end_s: 2, text: '' }])}
         >
           <Plus size={13} /> 添加一行字幕
         </button>
-        <button type="button" className="primary-button" disabled={busy || working} onClick={save}>
+        <button type="button" className="btn-secondary" disabled={busy || working} onClick={save}>
           <Save size={14} /> 保存为新版本
         </button>
       </div>
@@ -256,7 +256,7 @@ export function SubtitlePanel({ projectId, busy, onMessage }: Props) {
                 {row.status !== 'APPROVED' && (
                   <button
                     type="button"
-                    className="small-action"
+                    className="btn-secondary"
                     disabled={busy || working}
                     onClick={() => approve(row.revision)}
                   >

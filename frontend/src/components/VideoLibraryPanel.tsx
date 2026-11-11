@@ -219,7 +219,7 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
     <section className="card">
       <div className="panel-header">
         <h2><Film size={18} aria-hidden="true" /> 成片库 · {library?.project_title ?? projectTitle}</h2>
-        <button type="button" className="secondary-button" disabled={busy} onClick={() => void reload().catch((error: Error) => setLoadError(String(error.message || error)))}>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => void reload().catch((error: Error) => setLoadError(String(error.message || error)))}>
           <RefreshCw size={13} /> 刷新
         </button>
       </div>
@@ -253,12 +253,12 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
           {blockedSelected.length > 0 && <>，{blockedSelected.length} 条受保护</>}
         </span>
         <span className="library-page-note">第 {pageFirst}–{pageLast} 条 / 共 {entries.length} 条</span>
-        <button type="button" className="secondary-button" disabled={busy || organizing}
+        <button type="button" className="btn-secondary" disabled={busy || organizing}
           title="把当前采用版本移入 current/，把未采用版本移入 history/；只移动文件，不删除、不改 SHA"
           onClick={() => void organizeCurrent()}>
           <FolderOpen size={14} /> {organizing ? '正在整理…' : '整理采用目录'}
         </button>
-        <button type="button" className="danger-button must-button" disabled={busy || deletableSelected.length === 0}
+        <button type="button" className="btn-danger" disabled={busy || deletableSelected.length === 0}
           onClick={() => { setResult(null); setConfirming(true); }}>
           <Trash2 size={14} /> 批量删除（{deletableSelected.length}）
         </button>
@@ -310,10 +310,10 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
         })}
       </div>
       <div className="library-pager">
-        <button type="button" className="secondary-button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</button>
+        <button type="button" className="btn-secondary" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</button>
         <span>第 {currentPage + 1} / {pageCount} 页</span>
-        <button type="button" className="secondary-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)}>下一页</button>
-        {selected.size > 0 && <button type="button" className="subtle-button" onClick={() => setSelected(new Set())}>清空勾选</button>}
+        <button type="button" className="btn-secondary" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)}>下一页</button>
+        {selected.size > 0 && <button type="button" className="btn-secondary" onClick={() => setSelected(new Set())}>清空勾选</button>}
       </div>
     </section>}
 
@@ -355,8 +355,8 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
       </div>}
       <p className="library-confirm-note">删除只清理本机视频文件；Job、交付回执与审计保留，并记录这次删除。此操作不可撤销。</p>
       <div className="library-actions">
-        <button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
-        <button type="button" className="danger-button" disabled={busy || deletableSelected.length === 0} onClick={() => void confirmDelete()}>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
+        <button type="button" className="btn-danger" disabled={busy || deletableSelected.length === 0} onClick={() => void confirmDelete()}>
           {busy ? '正在删除…' : `确认删除 ${deletableSelected.length} 条`}
         </button>
       </div>

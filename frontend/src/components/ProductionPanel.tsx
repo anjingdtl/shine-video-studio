@@ -162,8 +162,8 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
         <div className="detail-head">
           <div><b>{selectedJob.shot_name}</b><span>编号 {selectedJob.id.slice(0, 12)}… · 状态版本 {selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
           <div className="detail-actions">
-            {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="secondary-button" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>只重跑机器审片（保留视频）</button>}
-            <button className="subtle-button" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 给修复建议</button>
+            {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="btn-secondary" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>只重跑机器审片（保留视频）</button>}
+            <button className="btn-secondary" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 给修复建议</button>
           </div>
         </div>
         <div className="detail-grid">
@@ -233,7 +233,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
           <div><b>问题归类：{label(failureLabels, suggestion.error_category)}</b><span>建议动作：{label(repairActionLabels, String(suggestion.plan.action))}{suggestion.plan.root_cause ? ` · 原因：${label(failureLabels, String(suggestion.plan.root_cause))}` : ''}</span></div>
           <div className="repair-actions">
             <small>{suggestion.auto_apply ? '可以自动重试' : '需要人工确认后再动'}</small>
-            {!suggestion.auto_apply && String(suggestion.plan.action) !== 'wait_for_human' && <button className="secondary-button" onClick={() => onRepair(selectedJob.id, suggestion.plan)}>按建议重试</button>}
+            {!suggestion.auto_apply && String(suggestion.plan.action) !== 'wait_for_human' && <button className="btn-secondary" onClick={() => onRepair(selectedJob.id, suggestion.plan)}>按建议重试</button>}
           </div>
         </div>}
         {selectedJob.status === 'NEEDS_REVIEW' && <div className="repair-card">
@@ -242,7 +242,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
             <span>系统不会自动重投。放弃只会结束这次任务，已经生成的产物仍按原样保留在作品里。</span>
           </div>
           <div className="repair-actions">
-            <button className="secondary-button" disabled={busy} onClick={() => onAbandon(selectedJob.id)}>放弃这次生成（保留产物，不重投）</button>
+            <button className="btn-secondary" disabled={busy} onClick={() => onAbandon(selectedJob.id)}>放弃这次生成（保留产物，不重投）</button>
           </div>
         </div>}
       </div>}

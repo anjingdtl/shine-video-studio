@@ -814,7 +814,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          <button type="button" className="must-button" disabled={busy || !documentId} onClick={analyseScript}>
+          <button type="button" className="btn-primary" disabled={busy || !documentId} onClick={analyseScript}>
             {busy ? <Loader2 size={13} /> : <Sparkles size={13} />} 分析剧本
           </button>
           {sceneReport.length > 0 && (
@@ -826,7 +826,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                   {scene.error_code && <em>{reasonText(scene.error_code)}</em>}
                   {(scene.status === 'NEEDS_REVIEW'
                     || ['UNKNOWN', 'NOT_SENT'].includes(scene.external_outcome ?? '')) && scene.task_id
-                    && <button type="button" className="text-button"
+                    && <button type="button" className="btn-text"
                       disabled={busy || scene.state_version === undefined}
                       onClick={() => reconcileUnknownScene(scene)}>核对已有结果</button>}
                 </li>
@@ -885,18 +885,18 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <input type="file" accept=".png,.jpg,.jpeg,.webp" disabled={busy}
                       onChange={(event) => void uploadOwnMaterial(requirement)(event)} />
                   </label>}
-                  <button type="button" className="text-button" disabled={busy || librarySearchBusy}
+                  <button type="button" className="btn-text" disabled={busy || librarySearchBusy}
                     onClick={() => void searchGlobalMaterial(requirement)}>
                     {librarySearchBusy && librarySearchRequirement === requirement.requirement_id ? '正在搜索…' : '从素材中心查找已审核版本'}
                   </button>
-                  <button type="button" className="text-button" disabled={busy || librarySearchBusy}
+                  <button type="button" className="btn-text" disabled={busy || librarySearchBusy}
                     title="素材库是跨项目共用的；默认只搜本项目，这里显式放宽到全部项目"
                     onClick={() => void searchGlobalMaterial(requirement, 'library')}>
                     搜索全部素材库（跨项目）
                   </button>
                   {assets.filter((asset) => asset.id === (bindings[requirement.requirement_id] ?? requirement.bound_asset_id)
                     && asset.approved && asset.locked && asset.role === requirement.family && asset.entity_id === requirement.entity_id)
-                    .map((asset) => <button key={asset.id} type="button" className="text-button" disabled={adoptionBusy}
+                    .map((asset) => <button key={asset.id} type="button" className="btn-text" disabled={adoptionBusy}
                       onClick={() => openProjectAdoption(requirement, asset)}>绑定已选主素材到镜头</button>)}
                   {adoptionReceipt?.requirementId === requirement.requirement_id && <div className="material-stage-body material-adoption">
                     <b>选择镜头并核对版本</b>
@@ -912,9 +912,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                       </select>
                     </label>}
                     <div className="material-button-row">
-                      <button type="button" className="text-button" disabled={adoptionBusy}
+                      <button type="button" className="btn-text" disabled={adoptionBusy}
                         onClick={() => void previewAdoption()}>用于这些镜头</button>
-                      {adoptionPreview?.shots.some((row) => !row.conflict) && <button type="button" className="must-button" disabled={adoptionBusy}
+                      {adoptionPreview?.shots.some((row) => !row.conflict) && <button type="button" className="btn-primary" disabled={adoptionBusy}
                         onClick={() => void applyAdoption()}>确认采用到 {adoptionPreview.shots.filter((row) => !row.conflict).length} 个镜头</button>}
                     </div>
                     {adoptionPreview?.shot_count === 0 && <p>未找到匹配镜头，请从列表选择具体镜头。</p>}
@@ -939,7 +939,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     {!librarySearchBusy && !librarySearchError && librarySearchResults.length === 0 && <p className="material-hint">没有找到可分配的已晋升版本。你可以先去素材中心导入、审核并晋升。</p>}
                     {librarySearchResults.map((result) => <div className="material-library-result" key={result.version.id}>
                       <div><b>{result.asset.title} · V{result.version.ordinal}</b><small>{result.version.content_sha256.slice(0, 12)}</small></div>
-                      <button type="button" className="must-button" disabled={librarySearchBusy}
+                      <button type="button" className="btn-primary" disabled={librarySearchBusy}
                         onClick={() => void assignGlobalMaterial(requirement, result)}>分配到本项目</button>
                     </div>)}
                   </div>}
@@ -962,7 +962,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </fieldset>
           {stepReport.confirm && <p className="material-step-report">{stepReport.confirm}</p>}
           {stepReport.generate && <p className="material-step-report">{stepReport.generate}</p>}
-          <button type="button" className="must-button" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
+          <button type="button" className="btn-primary" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
             {confirmLabel}
           </button>
         </div>
@@ -1035,7 +1035,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             </div>
             {tiles.length > visibleCandidates && <button type="button" onClick={() => setVisibleCandidates((n) => n + 24)}>加载更多候选</button>}
             {runs.filter((row) => row.allowed_actions.includes('cancel')).map((row) => (
-              <button type="button" className="subtle-button" key={row.run_id} disabled={busy}
+              <button type="button" className="btn-secondary" key={row.run_id} disabled={busy}
                 onClick={() => cancelRun(row.run_id)}>停止这个批次</button>
             ))}
             <details className="material-tech"><summary>批次与技术信息</summary>
@@ -1045,10 +1045,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </p>)}
             </details>
           </>}
-          <button type="button" className="must-button" disabled={busy || !promotable} onClick={promoteSelected}>
+          <button type="button" className="btn-primary" disabled={busy || !promotable} onClick={promoteSelected}>
             确认使用所选素材
           </button>
-          <button type="button" className="text-button" disabled={busy || !runs.length} onClick={regenerateAll}>
+          <button type="button" className="btn-text" disabled={busy || !runs.length} onClick={regenerateAll}>
             重跑全部素材（保留旧候选）
           </button>
           {evaluation && (

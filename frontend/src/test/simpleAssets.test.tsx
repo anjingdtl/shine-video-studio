@@ -79,7 +79,7 @@ it('图片素材显示缩略图，待确认素材用高对比按钮提示必做'
   expect(thumb).toHaveAttribute('src', '/api/v1/assets/asset-1/thumbnail');
   // The one action the user must take here is loud, not a grey text link.
   const must = screen.getByRole('button', { name: /确认使用所选待确认素材/ });
-  expect(must.className).toContain('must-button');
+  expect(must.className).toContain('btn-primary');
   expect(screen.getByText(/有 1 项上传素材待你选择/)).toBeInTheDocument();
   expect(screen.getByText(/人物对照确认后才调用导演/)).toBeInTheDocument();
 });

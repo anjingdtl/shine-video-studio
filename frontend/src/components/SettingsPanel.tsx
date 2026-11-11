@@ -106,7 +106,7 @@ export default function SettingsPanel({
           <h3><Wifi size={14} /> ComfyUI 生成引擎连接</h3>
           <div className="inline-form">
             <input value={comfyUrl} onChange={(event) => setComfyUrl(event.target.value)} />
-            <button className="secondary-button" disabled={busy} onClick={async () => setComfyResult(await onTestComfy(comfyUrl))}>测试连接</button>
+            <button className="btn-secondary" disabled={busy} onClick={async () => setComfyResult(await onTestComfy(comfyUrl))}>测试连接</button>
           </div>
           {comfyResult && <div className={`comfy-result ${comfyResult.ok ? 'ok' : 'bad'}`}>
             {comfyResult.ok ? <Check size={13} /> : <X size={13} />}
@@ -129,7 +129,7 @@ export default function SettingsPanel({
       </div>
 
       <div className="advanced-toggle">
-        <button className="text-button" onClick={() => setAdvanced((value) => !value)}>{advanced ? '收起' : '展开'} 工作流 Profile 注册</button>
+        <button className="btn-text" onClick={() => setAdvanced((value) => !value)}>{advanced ? '收起' : '展开'} 工作流 Profile 注册</button>
       </div>
       {advanced && <div className="workflow-editor">
         <WorkflowProfileImport onLoad={(candidate) => {
@@ -155,7 +155,7 @@ export default function SettingsPanel({
           <label>参数映射（逻辑名 → node.inputs.field）<textarea value={mapText} rows={10} onChange={(event) => setMapText(event.target.value)} /></label>
           <label>媒体传输配置 JSON（音频或视频引用需要明确配置）<textarea value={transferText} rows={5} onChange={(event) => setTransferText(event.target.value)} /></label>
         </div>
-        <button className="primary-button" disabled={busy} onClick={registerWorkflow}><Plus size={13} /> 注册工作流</button>
+        <button className="btn-secondary" disabled={busy} onClick={registerWorkflow}><Plus size={13} /> 注册工作流</button>
         <div className="workflow-list">
           {workflowProfiles.map((profile) => {
             const sizeMapped = 'width' in (profile.parameter_map ?? {}) && 'height' in (profile.parameter_map ?? {});
@@ -167,10 +167,10 @@ export default function SettingsPanel({
                 <p>提示：引用槽位超容量或缺映射时，任务会被拦下并提示「参考素材还没接入工作流」；动态槽位关闭；视频传输未验收；硬接续待测试。</p>
               </details>
               {!sizeMapped && onBindStandardParameters
-                && <button className="small-action" disabled={busy} title="把这个 H3 节点自带的 width/height 输入接入界面画幅设置"
+                && <button className="btn-secondary" disabled={busy} title="把这个 H3 节点自带的 width/height 输入接入界面画幅设置"
                   onClick={() => onBindStandardParameters(profile.id)}>补齐宽高参数</button>}
               {sizeMapped && <span className="workflow-size-ok">宽高可调</span>}
-              <button className="small-action" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
+              <button className="btn-secondary" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
               <button className="icon-button tiny" onClick={() => onDeleteWorkflow(profile.id)}><Trash2 size={12} /></button>
             </div>
             );

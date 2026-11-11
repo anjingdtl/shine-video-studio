@@ -213,7 +213,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   if (!overview) {
     return <section className="card" id="four-stage"><div className="module-guide"><CircleHelp size={13} />
       {loadFailed
-        ? <><p>四阶段进度读取失败。</p><button type="button" className="secondary-button"
+        ? <><p>四阶段进度读取失败。</p><button type="button" className="btn-secondary"
             onClick={() => void refresh()}>重新读取</button></>
         : <p>正在读取四阶段进度…</p>}
     </div></section>;
@@ -398,26 +398,26 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                 </span>
                 {errorReason && <span className="progress-detail">{errorReason}</span>}
                 {consentBlocked && (
-                  <button type="button" className="must-button" disabled={busy}
+                  <button type="button" className="btn-primary" disabled={busy}
                     onClick={() => authorizeAndContinue(task)}>
                     授权本机文本发送并继续
                   </button>
                 )}
                 {!inFlight && actions.includes('reconcile') && !consentBlocked && (
-                  <button type="button" className="secondary-button" disabled={busy}
+                  <button type="button" className="btn-secondary" disabled={busy}
                     onClick={() => run(() => reconcilePipelineTask(
                       projectId, task.task_id, task.state_version))}>
                     核对这一项
                   </button>
                 )}
                 {!inFlight && actions.includes('resume') && !consentBlocked && (
-                  <button type="button" className="secondary-button" disabled={busy}
+                  <button type="button" className="btn-secondary" disabled={busy}
                     onClick={() => run(() => resumePipelineTask(projectId, task.task_id, task.state_version))}>
                     修复后继续
                   </button>
                 )}
                 {!inFlight && actions.includes('new_attempt') && (
-                  <button type="button" className="must-button" disabled={busy}
+                  <button type="button" className="btn-primary" disabled={busy}
                     title="上一次可能已经发出去了。再次发送会多一次调用，上一次的结果会作为历史保留。"
                     onClick={() => {
                       if (!window.confirm('上一次模型请求的结果仍未知。确认发起一次新请求？')) return;
@@ -430,7 +430,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   // Two steps inside the page: a native confirm() blocks the
                   // whole tab (and any automation driving it), while a paid
                   // retry still must not be one stray click away.
-                  <button type="button" className="must-button" disabled={busy}
+                  <button type="button" className="btn-primary" disabled={busy}
                     title="这一幕的模型请求可能已经被回答过。授权只会对这一幕再发一次，原来那次保留为历史。"
                     onClick={() => {
                       if (armedScene === task.blocked_scene!.task_id) {
@@ -462,7 +462,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
               <option value="" disabled>选择已导入的母本文档</option>
               {(documents ?? []).map((d) => <option key={d.id} value={d.id}>{d.filename}</option>)}
             </select>
-            <button type="button" className="primary-button" disabled={busy}
+            <button type="button" className="btn-secondary" disabled={busy}
               onClick={async (event) => {
                 const select = event.currentTarget.previousElementSibling as HTMLSelectElement;
                 const doc = (documents ?? []).find((d) => d.id === select.value);
@@ -481,7 +481,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         {pendingPlan && !overview.volume_plan_confirmed && (
           <div className="row">
             <span>分卷方案已生成（{pendingPlan.volumes.length} 卷），请确认。</span>
-            <button type="button" className="must-button" disabled={busy}
+            <button type="button" className="btn-primary" disabled={busy}
               onClick={() => run(() => confirmVolumePlan(projectId, pendingPlan.artifact_id, pendingPlan.sha256),
                 () => setVolumePlanDraft(null))}>确认分卷方案</button>
           </div>
@@ -489,7 +489,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         {overview.volume_plan_confirmed && <span className="muted">母本已导入，分卷方案已确认。</span>}
         {overview.volume_plan_confirmed && (
           <div className="row">
-            <button type="button" className="secondary-button" disabled={busy}
+            <button type="button" className="btn-secondary" disabled={busy}
               onClick={() => setBoundaryMode(!boundaryMode)}>
               {boundaryMode ? '收起卷界调整' : '调整卷界'}
             </button>
@@ -538,12 +538,12 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             <li key={v.volume_id}>
               <span>{v.title}{v.volume_id === currentVolumeId ? '（当前）' : ''}</span>
               <span className="muted">大纲{v.outline_confirmed ? '已确认' : '未确认'}</span>
-              <button type="button" className="secondary-button" disabled={busy}
+              <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => run(() => queueVolumeOutline(projectId, v.volume_id))}>
                 {v.outline_confirmed ? '重新提取大纲' : '提取大纲'}
               </button>
               {v.latest_outline && !v.outline_confirmed && (
-                <button type="button" className="must-button" disabled={busy}
+                <button type="button" className="btn-primary" disabled={busy}
                   title={v.latest_outline.questions.length
                     ? '待确认问题：' + v.latest_outline.questions.join('；')
                     : ''}
@@ -570,7 +570,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         })()}
         {overview.volume_plan_confirmed && bibleNeedsConfirmation && (
           <div className="row">
-            <button type="button" className="must-button" disabled={busy}
+            <button type="button" className="btn-primary" disabled={busy}
               onClick={() => run(() => queueBible(projectId))}>生成全局故事蓝图</button>
             <span className="muted small">蓝图按当前计划的每一卷大纲合成；缺卷会如实标为草稿，不能作为正式发布依据。</span>
           </div>
@@ -578,14 +578,14 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
         {overview.pending_bible && bibleNeedsConfirmation && (
           <div className="row">
             <span>全局故事蓝图已生成，请阅读后确认。</span>
-            <button type="button" className="must-button" disabled={busy}
+            <button type="button" className="btn-primary" disabled={busy}
               onClick={() => void confirmPendingBible()}>
               确认蓝图</button>
           </div>
         )}
         {bibleScopeOffer && overview.pending_bible && (
           <div className="row">
-            <button type="button" className="secondary-button" disabled={busy}
+            <button type="button" className="btn-secondary" disabled={busy}
               onClick={() => void confirmPendingBible(currentVolumeId)}>
               只为{volumes.find((v) => v.volume_id === currentVolumeId)?.title ?? '当前卷'}确认蓝图</button>
             <span className="muted small">
@@ -617,7 +617,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
           const block = (v: (typeof volumes)[number]) => (
             <div key={v.volume_id} className="volume-scripts">
               <div><b>{v.title}</b><span className="muted"> 剧本 {v.scripts_confirmed}/{v.scripts_total} 场已确认</span></div>
-              <button type="button" className="secondary-button" disabled={busy}
+              <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => run(() => queueVolumeScripts(projectId, v.volume_id))}>
                 {v.scripts_total === 0 ? '先提取大纲再写剧本' : '生成未确认场次的剧本'}
               </button>
@@ -662,11 +662,11 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
               {!blocked && s.qa && s.qa.state !== 'INFO' && (
                 <span className="muted small">终校建议：{s.qa.message ?? '请复核这一场'}</span>
               )}
-              <button type="button" className="must-button" disabled={busy || blocked}
+              <button type="button" className="btn-primary" disabled={busy || blocked}
                 title={blocked ? '先按终校提示修改正文，再确认这一场。' : ''}
                 onClick={() => run(() => confirmSceneScript(projectId, s.artifact_id, s.sha256))}>
                 确认这一场</button>
-              <button type="button" className="secondary-button" disabled={busy}
+              <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => { setEditTarget(s.artifact_id); setEditText(s.text); }}>编辑</button>
             </div>
           );
@@ -676,10 +676,10 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             <textarea aria-label="编辑剧本" value={editText} rows={8}
               onChange={(event) => setEditText(event.target.value)} />
             <div className="row">
-              <button type="button" className="must-button" disabled={busy || !editText.trim()}
+              <button type="button" className="btn-primary" disabled={busy || !editText.trim()}
                 onClick={() => run(() => editSceneScript(projectId, editTarget, editText),
                   () => { setEditTarget(null); setEditText(''); })}>保存为新版本</button>
-              <button type="button" className="secondary-button" disabled={busy}
+              <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => setEditTarget(null)}>取消</button>
             </div>
           </div>
@@ -695,7 +695,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
           <>
             <div className="row">
               <span>{currentVolume.title}</span>
-              <button type="button" className="secondary-button"
+              <button type="button" className="btn-secondary"
                 disabled={busy || currentVolume.scripts_confirmed === 0}
                 title={currentVolume.scripts_confirmed === 0
                   ? '先确认至少一场剧本；草案只覆盖已确认的场次'
@@ -741,7 +741,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                       </span>
                     )}
                     {unit.status === 'PROPOSED' && !unit.applied && (
-                      <button type="button" className="must-button" disabled={busy}
+                      <button type="button" className="btn-primary" disabled={busy}
                         title={(unit.missing_characters ?? []).length > 0
                           ? '这一场要用的主素材还没备齐：' + (unit.missing_characters ?? []).join('、')
                           + '。可以先落镜，但出片前要补齐；缺人物参考时 H3 会拒绝提交。'
@@ -749,7 +749,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                         onClick={() => applyUnit(unit)}>应用这一场的镜头</button>
                     )}
                     {unit.status !== 'PROPOSED' && (
-                      <button type="button" className="secondary-button" disabled={busy}
+                      <button type="button" className="btn-secondary" disabled={busy}
                         title="核对每条调用记录，服务端确认可以重做后才继续。"
                         onClick={() => reconcileUnit(unit)}>核对并只重做这一场</button>
                     )}
@@ -793,7 +793,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                     onChange={(event) => setEpisodeTarget(Number(event.target.value) || 60)} />
                   秒
                 </label>
-                <button type="button" className="secondary-button" disabled={busy}
+                <button type="button" className="btn-secondary" disabled={busy}
                   onClick={() => setEpisodeSections(suggestedEpisodeSections)}
                   title="从未分集的已确认场次开始，按顺序装到目标时长为止；你仍可逐场改勾选">
                   推荐勾选下一集
@@ -819,7 +819,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                     </label>
                   );
                 })}
-                <button type="button" className="secondary-button"
+                <button type="button" className="btn-secondary"
                   disabled={busy || !episodeTitle.trim() || episodeSections.length === 0}
                   onClick={() => run(async () => {
                     const drafted = await buildEpisodeScript(
@@ -843,7 +843,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   <option key={p.id} value={p.id}>{p.name}（{p.mode}）</option>
                 ))}
               </select>
-              <button type="button" className="must-button" disabled={busy || !handoffProfile}
+              <button type="button" className="btn-primary" disabled={busy || !handoffProfile}
                 onClick={() => run(
                   () => requestVolumeHandoff(projectId, currentVolume.volume_id, handoffProfile),
                   (result) => {
@@ -870,7 +870,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   {receipt.shots} 个镜头 · {receipt.episode_basis ?? '未知依据'}）
                 </div>
                 <div className="row">
-                  <button type="button" className="secondary-button" disabled={busy}
+                  <button type="button" className="btn-secondary" disabled={busy}
                     onClick={() => openDirectorPackage(receipt.package_id)}>打开这个导演包</button>
                 </div>
                 {receipt.readiness.blockers.length > 0 && (
@@ -917,7 +917,7 @@ function VolumeBoundaryEditor({ projectId, plan, busy, onMessage, onDone }: {
         </div>
       ))}
       <div className="row">
-        <button type="button" className="must-button" disabled={busy}
+        <button type="button" className="btn-primary" disabled={busy}
           onClick={async () => {
             try {
               const adjusted = await adjustVolumeBoundaries(projectId, plan.artifact_id, rows);

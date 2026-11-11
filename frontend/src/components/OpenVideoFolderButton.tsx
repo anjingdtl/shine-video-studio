@@ -19,7 +19,7 @@ export function OpenVideoFolderButton({ artifactId }: { artifactId: string }) {
   }
 
   return <>
-    <button type="button" className="subtle-button" disabled={busy} onClick={() => void openFolder()}>
+    <button type="button" className="btn-secondary" disabled={busy} onClick={() => void openFolder()}>
       <FolderOpen size={14} aria-hidden="true" /> 打开所在文件夹
     </button>
     {problem && <span className="failure" role="alert">{problem}</span>}

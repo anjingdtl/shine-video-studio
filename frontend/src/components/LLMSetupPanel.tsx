@@ -180,7 +180,7 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
         : mutationStatus === 'succeeded' ? '已保存'
           : mutationStatus === 'failed' ? '未完成' : '结果未知，请重新检查'}
       <span>状态刷新：{refreshStatus === 'idle' ? '尚未刷新' : refreshStatus === 'succeeded' ? '已刷新' : '刷新失败'}</span>
-      <button className="text-button" type="button" disabled={busy} onClick={() => void run(async () => {
+      <button className="btn-text" type="button" disabled={busy} onClick={() => void run(async () => {
         await load();
       }, { successMessage: '已重新读取模型与路由状态。' })}>重新读取模型状态</button>
     </div>

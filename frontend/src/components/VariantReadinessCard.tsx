@@ -165,7 +165,7 @@ export function VariantReadinessCard({ projectId, variantId, title, onNeedImport
         <p>官方 W6A8 低显存候选：官方 pinned 的 DiT + INT8 ConvRot 视频 VAE + FP32 音频 VAE + NVFP4 文本编码器。
           官方没有公布这一组合的显存门槛，所以它在本机能不能跑通必须真机验证。</p>
       </div>
-      <button className="secondary-button" disabled={state === 'loading'} onClick={() => { void detect(); }}>
+      <button className="btn-secondary" disabled={state === 'loading'} onClick={() => { void detect(); }}>
         {state === 'loading' ? <RefreshCw size={13} className="spin" /> : <Cpu size={13} />}
         重新检查
       </button>
@@ -202,7 +202,7 @@ export function VariantReadinessCard({ projectId, variantId, title, onNeedImport
         <div>
           <b>当前唯一下一步：{next.label}</b>
           <p>{next.reason}</p>
-          {next.action && <button className="must-button" disabled={working}
+          {next.action && <button className="btn-primary" disabled={working}
             onClick={() => { void runAction(next.action as string); }}>
             {working ? '处理中…' : next.label}
           </button>}
