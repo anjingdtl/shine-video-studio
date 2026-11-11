@@ -1,17 +1,20 @@
-"""One material-side agent call: budgeted, corrected once, never replayed.
+"""One material-side agent call, delegated to the Call Governor.
 
 The material path talks to a text model twice: once per scene for the
 pre-production scriptwriter, and once per requirement for the producer's
-appearance brief.  Both calls share the same discipline, so it lives here:
+appearance brief.  Both calls are executed by
+:class:`shine.literary.governor.CallGovernor`, so the whole product shares one
+request compiler, one budget and one failure matrix:
 
-* the context is budgeted before the call, and an over-budget request is
-  refused by name instead of being truncated;
-* a schema error earns at most ONE targeted correction carrying the broken
-  fields, the validator and the original task;
-* an uncertain external outcome is reported as uncertain and is never
-  replayed by the caller;
-* the provider text is never stored: only the validated object leaves this
-  module.
+* the final request is compiled (schema included) and measured before it is
+  sent, and the gateway sends exactly those bytes;
+* an over-budget request is refused by name without being truncated;
+* a complete answer is kept even when its envelope breaks the contract, because
+  the governor salvages the text before it classifies the failure;
+* an uncertain external outcome is reported as uncertain and is never replayed
+  by the caller;
+* the provider text is never returned as a validated object unless it really
+  validates - it is returned as a *candidate* draft instead.
 """
 
 from __future__ import annotations
@@ -25,37 +28,34 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import HTTPException
 from pydantic import ValidationError
 
-from shine.llm.base import LLMError
-from shine.llm.output_budget import truncated_output, usage_summary
+from shine.literary import triage
+from shine.literary.governor import (
+    PRE_REQUEST_PHASES,
+    CallGovernor,
+    UnitBudget,
+    classify_external_outcome,
+)
+from shine.llm.base import LLMError, ProviderConfig
 from shine.materialprep.contracts import APPEARANCE_MAX_LENGTH, MaterialImageBrief
+
+__all__ = [
+    "PRE_REQUEST_PHASES", "AgentCallOutcome", "budget_report", "call_material_agent",
+    "classify_external_outcome", "estimate_tokens", "pace_provider_call",
+]
 
 logger = logging.getLogger(__name__)
 
-PRE_REQUEST_PHASES = ("PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER")
-"""The phases that prove the provider request was never opened.
-
-The gateway writes ``WAITING_PROVIDER`` immediately before it opens the request,
-so a call that stopped at one of these owns no answer: the outcome is
-``NOT_SENT``, not an unknown one.  Classifying an unexpected local fault as
-``UNKNOWN`` without this evidence blocks a scene forever under the no-replay
-gate, which is how one local bug turned into an unrecoverable "provider result
-unknown".
-"""
-
 CONTEXT_MARGIN_TOKENS = 512
-"""The safety margin kept free in the context window."""
+"""The safety margin kept free in the context window (planning estimate)."""
 
 CONSERVATIVE_CONTEXT_WINDOW = 1_000_000
-"""The window assumed when the provider declares none.
+"""The planning window used by :func:`budget_report` when none is declared.
 
-The plan refuses an unbounded window.  Current 1M-context reasoning models are
-the budget baseline: the window is 1M tokens and the output ceiling is 128K, so
-the estimate starts from that class instead of a small legacy window that
-refuses ordinary scripts.  A provider that declares its own smaller window still
-overrides this default and is recorded by name.
+This is a *queue-time* estimate used to decide whether a unit is too large to
+queue.  It never authorises a send: the Call Governor computes the approved
+budget from the rendered request and refuses an oversized one by name.
 """
 
 MIN_OUTPUT_RESERVE_TOKENS = 4_096
@@ -78,10 +78,25 @@ class AgentCallOutcome:
     error_code: str | None = None
     uncertain: bool = False
     details: dict[str, Any] = field(default_factory=dict)
+    candidate_text: str = ""
+    """The complete literary text that really arrived, even when the envelope
+    was rejected.  The caller persists it as a candidate draft: an unapproved
+    answer is still a chapter, and a person may accept it after review."""
+    candidate_payload: dict[str, Any] | None = None
+    findings: list[triage.Finding] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.error_code is None and self.parsed is not None
+
+    @property
+    def review(self) -> dict[str, Any]:
+        return triage.summarize(self.findings)
+
+    @property
+    def severity(self) -> str:
+        return self.review.get("state") or triage.INFO
+
 
 
 STEP_DELAY_MS_ENV = "SHINE_AGENT_STEP_DELAY_MS"
@@ -186,33 +201,15 @@ def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt
     }
 
 
-def classify_external_outcome(exc: LLMError) -> str:
-    """Name what the provider actually did, without guessing.
-
-    * NOT_SENT: no provider request was ever opened - a local configuration
-      error, a refused consent, or a transport failure before the request
-      left this machine.
-    * RESPONSE_RECEIVED: the provider answered.  A 4xx refusal carries no
-      answer at all; a 2xx answer that broke the contract arrived but is
-      unusable.
-    * UNKNOWN: the provider may have answered and the answer was lost (a
-      timeout, a 5xx, a connection that broke after the request).
-
-    The distinction matters: a request that produced no answer can be asked
-    again, while an unknown outcome may still own an answer upstream and must
-    never be replayed.
-    """
-    recorded = exc.details.get("external_outcome")
-    if recorded in {"NOT_SENT", "UNKNOWN"}:
-        return recorded
-    if exc.code in {"LLM_NOT_CONFIGURED", "LLM_CAPABILITY"}:
-        # The provider was never asked.
-        return "NOT_SENT"
-    status = exc.details.get("status")
-    if isinstance(status, int) and not isinstance(status, bool) and status < 500:
-        # The provider answered: a refusal (4xx) or an unusable answer (2xx).
-        return "RESPONSE_RECEIVED"
-    return "UNKNOWN"
+def _shorten_appearance(payload: dict[str, Any]) -> dict[str, Any] | None:
+    appearance = payload.get("appearance")
+    if not isinstance(appearance, str) or len(appearance) <= APPEARANCE_MAX_LENGTH:
+        return None
+    prefix = appearance[:APPEARANCE_MAX_LENGTH + 1]
+    ends = list(re.finditer(r'[.!?]["\']?(?=\s)', prefix))
+    if not ends:
+        return None
+    return {**payload, "appearance": appearance[:ends[-1].end()]}
 
 
 def call_material_agent(
@@ -227,18 +224,22 @@ def call_material_agent(
     on_progress=None,
     before_call=None,
     task_category: str = "default",
+    unit_id: str | None = None,
+    unit_budget: UnitBudget | None = None,
+    purpose: str | None = None,
+    visible_goal_tokens: int | None = None,
+    record_attempt=None,
 ) -> AgentCallOutcome:
-    """Ask one role for one contract, correcting at most once.
+    """Ask one role for one contract through the shared Call Governor.
 
     ``session_factory`` yields the database session the gateway needs.  The
-    caller keeps the durable task bookkeeping; this module only performs the
-    call and reports what happened.
+    caller keeps the durable task bookkeeping; this module performs the call
+    and reports what really happened - including the text that arrived when the
+    envelope did not validate.
     """
-
     response_schema = schema
     if contract is MaterialImageBrief:
         # Keep the original string available for local validation and correction.
-        # The gateway otherwise discards it before we can measure or shorten it.
         properties = schema["properties"]
         response_schema = {**schema, "properties": {
             **properties,
@@ -246,158 +247,102 @@ def call_material_agent(
                            if key != "maxLength"},
         }}
 
-    last_phase: list[str] = []
-
-    def report(phase: str) -> None:
-        # Remembered locally because the caller's own progress writer overwrites
-        # the durable phase with FAILED, which is exactly the evidence the
-        # unknown-outcome gate needs.
-        last_phase.append(phase)
-        if on_progress:
-            on_progress(phase)
-
-    def unexpected_fault(exc: Exception, *, correction_used: bool, schema_errors: list | None = None):
-        """Name a local fault honestly instead of asserting an unknown result.
-
-        The exception is logged with its traceback: swallowing it left the fault
-        undiagnosable, because neither the exception class nor the phase it
-        happened at survived into the durable trace.
-
-        Only positive evidence may weaken the claim: a fault at a phase that
-        proves the request was never opened is ``NOT_SENT``.  With no phase at
-        all the outcome stays ``UNKNOWN`` - a missing record is not evidence
-        that nothing was sent, and guessing the other way would replay a
-        request whose answer may already exist upstream.
-        """
-        phase = last_phase[-1] if last_phase else None
-        may_have_answered = phase is None or phase not in PRE_REQUEST_PHASES
-        logger.exception("material_agent_fault role=%s phase=%s may_have_answered=%s",
-                         role, phase, may_have_answered)
-        return AgentCallOutcome(
-            error_code="LLM_PROVIDER_FAULT",
-            uncertain=may_have_answered,
-            correction_used=correction_used,
-            schema_errors=schema_errors or [],
-            details={"error_type": type(exc).__name__,
-                     "external_outcome": "UNKNOWN" if may_have_answered else "NOT_SENT",
-                     "last_phase": phase},
-        )
-
-    def call(system_prompt: str, user_payload: str):
-        # One gap before every provider call, in one place.  A long outline
-        # makes one call per scene; two calls back to back share the provider
-        # connection and the rate limit, and that is how a run of scenes ends
-        # in a rate-limit failure that looks like a stall.
-        pace_provider_call()
+    with session_factory() as db:
         try:
-            with session_factory() as db:
-                if before_call:
-                    before_call(db)
-                return gateway.complete_for_role(
-                    db,
-                    role,
-                    system=system_prompt,
-                    user=user_payload,
-                    schema=response_schema,
-                    on_progress=report,
-                    task_category=task_category,
-                )
-        finally:
-            # The anchor is the call's completion, so the gap to the next call
-            # is measured from the real boundary, not from the pacing entry.
-            note_provider_call_finished()
-
-    try:
-        response = call(system, json.dumps(context, ensure_ascii=False))
-        contract.model_validate(response.parsed)
-        return AgentCallOutcome(parsed=response.parsed, details={
-            "usage": usage_summary(response.usage),
-            "output_budget": (response.raw_meta or {}).get("output_budget"),
-        })
-    except LLMError as exc:
-        external_outcome = classify_external_outcome(exc)
-        validator = exc.details.get("validator")
-        if external_outcome == "RESPONSE_RECEIVED" and exc.code == "LLM_FORMAT" and validator:
-            # The transport validates the JSON schema before Pydantic sees it.
-            # Only a response with a known contract violation earns a correction.
-            errors = [{"field": exc.details.get("path", ""), "type": validator}]
-        else:
+            profile = gateway.profile_for_role(db, role)
+            config = gateway.config_for(profile)
+        except LLMError as exc:
+            # The provider was never reachable: name it locally instead of
+            # letting an unconfigured profile escape as an unhandled exception.
+            finding = triage.classify_failure(
+                exc.code, unit_ids=(unit_id or role,),
+                evidence={"role": role, "message": str(exc)[:200]})
             return AgentCallOutcome(
-                error_code=exc.code,
-                uncertain=external_outcome == "UNKNOWN",
-                details={"error_type": type(exc).__name__, "external_outcome": external_outcome,
-                         "response_status": exc.details.get("status"),
-                         "provider_code": exc.details.get("provider_code"),
-                         "truncated": truncated_output(exc),
-                         # The provider's own account of why the answer is
-                         # unusable.  A completion ceiling spent on reasoning and
-                         # a broken contract field are different failures with
-                         # different next steps, and "LLM_FORMAT" alone names
-                         # neither.
-                         "finish_reason": exc.details.get("finish_reason"),
-                         "completion_tokens": exc.details.get("completion_tokens"),
-                         "reasoning_tokens": exc.details.get("reasoning_tokens"),
-                         "provider_schema_path": exc.details.get("path"),
-                         "provider_schema_validator": validator},
-            )
-    except HTTPException as exc:
-        # A refused stage never opened a provider request. That makes it
-        # NOT_SENT and retryable, the opposite of an unknown outcome; reporting
-        # it as LLM_PROVIDER_FAULT marked a whole batch uncertain because one
-        # stale lease from a killed worker was holding the GPU.
-        detail = exc.detail if isinstance(exc.detail, str) else "AGENT_STAGE_REFUSED"
-        return AgentCallOutcome(
-            error_code=detail,
-            uncertain=False,
-            details={"error_type": "HTTPException", "external_outcome": "NOT_SENT",
-                     "status": exc.status_code},
-        )
-    except ValidationError as exc:
-        errors = []
-        for error in exc.errors(include_url=False):
-            field_name = ".".join(str(part) for part in error["loc"])
-            entry = {"field": field_name, "type": error["type"]}
-            if error["type"] == "string_too_long":
-                entry.update(actual_length=len(error["input"]), max_length=error["ctx"]["max_length"])
-            errors.append(entry)
-    except Exception as exc:  # noqa: BLE001 - an unexpected fault must not kill the batch
-        return unexpected_fault(exc, correction_used=False)
-
-    correction = {"task": context, "schema_errors": errors, "validator": schema}
-    try:
-        corrected = call(system + CORRECTION_RULE, json.dumps(correction, ensure_ascii=False))
-        parsed = corrected.parsed
-        details = {"usage": usage_summary(corrected.usage),
-                   "output_budget": (corrected.raw_meta or {}).get("output_budget")}
-        if contract is MaterialImageBrief and isinstance(parsed, dict):
-            appearance = parsed.get("appearance")
-            if isinstance(appearance, str) and len(appearance) > APPEARANCE_MAX_LENGTH:
-                prefix = appearance[:APPEARANCE_MAX_LENGTH + 1]
-                ends = list(re.finditer(r'[.!?]["\']?(?=\s)', prefix))
-                if ends:
-                    parsed = {**parsed, "appearance": appearance[:ends[-1].end()]}
-                    details.update(appearance_truncated=True, appearance_original_length=len(appearance))
-        contract.model_validate(parsed)
-        return AgentCallOutcome(parsed=parsed, correction_used=True, schema_errors=errors, details=details)
-    except LLMError as second:
-        external_outcome = classify_external_outcome(second)
-        uncertain = external_outcome == "UNKNOWN"
-        return AgentCallOutcome(
-            error_code=second.code,
-            uncertain=uncertain,
-            correction_used=True,
-            schema_errors=errors,
-            details={"error_type": type(second).__name__, "external_outcome": external_outcome,
-                     "response_status": second.details.get("status"),
-                     "provider_code": second.details.get("provider_code"),
-                     "truncated": truncated_output(second)},
-        )
-    except ValidationError:
-        return AgentCallOutcome(
-            error_code="SCHEMA_VALIDATION_FAILED",
-            correction_used=True,
-            schema_errors=errors,
-            details={"external_outcome": "RESPONSE_RECEIVED"},
-        )
-    except Exception as second:  # noqa: BLE001 - an unexpected fault must not kill the batch
-        return unexpected_fault(second, correction_used=True, schema_errors=errors)
+                error_code=exc.code, uncertain=False, findings=[finding],
+                details={"external_outcome": "NOT_SENT", "provider_error": str(exc)[:400],
+                         "review": triage.summarize([finding])})
+        except AttributeError:
+            # A gateway double that exposes only ``complete_for_role`` (tests and
+            # offline probes) has no profile: plan against the conservative
+            # default profile rather than failing the unit.
+            config = ProviderConfig(
+                profile_id="unresolved", name="unresolved", kind="mock", base_url="",
+                model="unresolved", api_key=None)
+    goal = purpose or ("scene" if task_category == "creative" else "structured")
+    governor = CallGovernor(
+        gateway, config, role=role, unit_id=unit_id or role,
+        budget=unit_budget, record_attempt=record_attempt)
+    qualified = governor.execute(
+        system=system,
+        context=context,
+        schema=schema,
+        response_schema=response_schema,
+        contract=contract,
+        purpose=goal,
+        task_category=task_category,
+        visible_goal_tokens=visible_goal_tokens,
+        before_call=before_call,
+        on_progress=on_progress,
+        session_factory=session_factory,
+        repair_rule=CORRECTION_RULE,
+        aliases={"content": "text", "script": "text", "scene_text": "text"},
+        error_logger=logger,
+        # Keep the project-wide gap between two real provider calls: a model
+        # that is asked twice back to back shares one rate limit.
+        before_send=pace_provider_call,
+        after_send=note_provider_call_finished,
+    )
+    if contract is MaterialImageBrief and not qualified.ok and isinstance(qualified.payload, dict):
+        # Last local resort for the producer's appearance: the provider's own
+        # correction could not shorten it, so cut at a sentence boundary and
+        # validate again.  This is metadata, never literary prose.
+        shortened = _shorten_appearance(qualified.payload)
+        if shortened is not None:
+            original_length = len(qualified.payload.get("appearance") or "")
+            try:
+                contract.model_validate(shortened)
+            except ValidationError:
+                pass
+            else:
+                qualified.parsed = shortened
+                qualified.payload = shortened
+                qualified.error_code = None
+                qualified.details["appearance_truncated"] = True
+                qualified.details["appearance_original_length"] = original_length
+                qualified.findings.append(triage.Finding(
+                    severity=triage.INFO, reason_code="SCHEMA_LOCAL_REPAIR",
+                    message_zh="外观描述过长，已在本机按完整句子截短。",
+                    next_action="continue_with_independent_units",
+                    affected_unit_ids=(unit_id or role,), content_saved=True))
+    outcome = AgentCallOutcome(
+        parsed=qualified.parsed,
+        correction_used=qualified.corrective,
+        schema_errors=[error for error in qualified.details.get("schema_errors") or []
+                       if isinstance(error, dict)],
+        error_code=qualified.error_code,
+        uncertain=qualified.uncertain,
+        candidate_text=qualified.text if not qualified.ok else "",
+        candidate_payload=qualified.payload if not qualified.ok else None,
+        findings=qualified.findings,
+        details={
+            **{key: value for key, value in qualified.details.items() if key != "schema_errors"},
+            "external_outcome": qualified.external_outcome,
+            "truncated": qualified.finish_reason in {"length", "max_tokens", "content_filter"},
+            "usage": qualified.usage,
+            "output_budget": qualified.budget,
+            "review": qualified.review,
+            "request": qualified.request,
+            "attempts": qualified.attempts,
+            "candidate_chars": len(qualified.text) if not qualified.ok else 0,
+        },
+    )
+    if contract is MaterialImageBrief and outcome.ok and isinstance(outcome.parsed, dict):
+        appearance = outcome.parsed.get("appearance")
+        if isinstance(appearance, str) and len(appearance) > APPEARANCE_MAX_LENGTH:
+            prefix = appearance[:APPEARANCE_MAX_LENGTH + 1]
+            ends = list(re.finditer(r'[.!?]["\']?(?=\s)', prefix))
+            if ends:
+                outcome.parsed = {**outcome.parsed, "appearance": appearance[:ends[-1].end()]}
+                outcome.details.update(appearance_truncated=True,
+                                       appearance_original_length=len(appearance))
+    return outcome

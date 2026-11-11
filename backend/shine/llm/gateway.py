@@ -185,34 +185,52 @@ class LLMGateway:
         db: Session,
         role: str,
         *,
-        system: str,
-        user: str,
+        system: str = "",
+        user: str = "",
         schema: dict[str, Any] | None = None,
         on_progress: Callable[[str], None] | None = None,
         task_category: str = "default",
+        precompiled: Any | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """One role call, either planned here or compiled by the caller.
+
+        ``precompiled`` is the Call Governor's rendered request.  It is sent
+        verbatim: the schema was already rendered into the user message and the
+        budget was already approved against those exact bytes, so appending it
+        again would send a request larger than the one that was approved.  That
+        single-appendix rule is what makes "追加 Schema 不改变已检验预算"
+        observable.
+        """
+        if precompiled is not None:
+            system, user, schema = precompiled.system, precompiled.user, precompiled.schema
         profile = self.profile_for_role(db, role)
         config = self.config_for(profile)
-        if task_category == "creative":
-            input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
-            overflow = context_overflow(config, input_estimate)
-            if overflow is not None:
-                # The request provably never left the workbench: the refusal
-                # is a named, local fact, not an unknown provider outcome.
-                raise LLMError("Creative request exceeds the shared context window",
-                               details=dict(overflow))
-            budget = creative_completion_cap(config, estimated_input_tokens=input_estimate)
+        budget_evidence = None
+        if precompiled is None:
+            if task_category == "creative":
+                input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
+                overflow = context_overflow(config, input_estimate)
+                if overflow is not None:
+                    # The request provably never left the workbench: the refusal
+                    # is a named, local fact, not an unknown provider outcome.
+                    raise LLMError("Creative request exceeds the shared context window",
+                                   details=dict(overflow))
+                budget_evidence = creative_completion_cap(
+                    config, estimated_input_tokens=input_estimate)
+                config = apply_output_budget(config, budget_evidence)
+            else:
+                config = agent_output_config(config)
+        elif budget is not None:
             config = apply_output_budget(config, budget)
-        else:
-            config = agent_output_config(config)
-            budget = None
+            budget_evidence = budget
         # An agent step must survive a throttled provider: a 429 is a refusal
         # that produced no answer, so waiting and asking again cannot buy a
         # second copy of one answer.  The plain connectivity probe keeps its
         # own stricter budget and never posts again after a refusal.
         config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
         provider = self.provider_factory(config, self.mock_responder)
-        if schema is not None:
+        if schema is not None and precompiled is None:
             # The provider validates the answer against this schema, so the model
             # has to be told the contract it must satisfy. The schema is used
             # for validation only otherwise, and an instruction such as "return
@@ -255,8 +273,10 @@ class LLMGateway:
                 on_progress("RELEASING_PROVIDER")
         if on_progress:
             on_progress("VALIDATING_RESULT")
-        if budget is not None:
-            response.raw_meta["output_budget"] = budget
+        if budget_evidence is not None:
+            response.raw_meta["output_budget"] = budget_evidence
+            if precompiled is not None:
+                response.raw_meta["precompiled_request"] = precompiled.fingerprint
         return response
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:

@@ -9,6 +9,7 @@ episode plans, packages or runs: the pipeline prepares their inputs.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
 from datetime import timedelta
@@ -21,6 +22,8 @@ from shine.h3.rulebook import digest
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
 from shine.services import add_audit
 
+logger = logging.getLogger(__name__)
+
 SOURCE_MASTER_KIND = "FourStageSourceMaster"
 VOLUME_PLAN_KIND = "FourStageVolumePlan"
 BIBLE_KIND = "FourStageGlobalStoryBible"
@@ -32,6 +35,25 @@ SCENE_SCRIPT_RUN_ROLE = "four_stage_scene_script_run"
 #: share this number, so an edit is refused by name instead of being truncated
 #: into a scene that silently lost its ending.
 SCENE_SCRIPT_TEXT_LIMIT = 24_000
+"""One scene's script text limit, shared by the writer contract and the editor."""
+
+BIBLE_SYSTEM_PROMPT = (
+    "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
+    "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
+    "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
+    "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
+    "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
+    "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
+    "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。只输出 JSON。"
+)
+"""The one blueprint prompt.  The dry-run planner measures this exact text."""
+
+SCENE_SYSTEM_PROMPT = (
+    "你是剧集编剧。基于全书故事蓝图、本段原文与上一场的收尾状态，写出这一场的完整剧本："
+    "对白、动作、场景与时间空间。text 写完整正文；continuity_out 用一两句写本场结束后的关键状态。"
+    "不要输出场次编号、来源范围或版本，这些由系统填写。只输出 JSON。"
+)
+"""The one scene prompt.  Shared by the worker and the dry-run planner."""
 
 #: A single volume keeps the whole master when the master fits the budget.
 SINGLE_VOLUME_MAX_CHARS = 45_000
@@ -793,8 +815,52 @@ def _commit_pipeline_result(factory, *, task_id: str, version: int, worker_id: s
         return None
 
 
+def _compact_attempts(attempts) -> list[dict]:
+    """The bounded physical-call ledger one task keeps in its trace."""
+    if not isinstance(attempts, list):
+        return []
+    keep = ("attempt_no", "request_fingerprint", "input_tokens_estimated",
+            "output_request_tokens", "completion_tokens", "reasoning_tokens",
+            "latency_ms", "finish_reason", "external_outcome", "error_code",
+            "http_status", "corrective", "purpose", "role")
+    return [{key: item.get(key) for key in keep if key in item} for item in attempts[-6:]
+            if isinstance(item, dict)]
+
+
+def _persist_candidate(factory, *, task_id: str, project_id: str, target_kind: str,
+                       unit_id: str, text: str, payload: dict | None,
+                       findings, notes: list[str] | None = None,
+                       input_revision_ids: list[str] | None = None) -> str | None:
+    """Save the literary text a rejected answer still carried.
+
+    This is the "收到有效内容先持久化" rule in code: the task may end in
+    review, but the chapter it produced is not deleted.  The draft is its own
+    artifact kind, so no confirmed-pointer or orphan-adoption path can promote
+    it into an accepted stage result.
+    """
+    from shine.literary.drafts import save_candidate
+    from shine.models import AgentTaskRecord
+
+    if not (text or "").strip() and not isinstance(payload, dict):
+        return None
+    try:
+        with factory.begin() as db:
+            task = db.get(AgentTaskRecord, task_id)
+            if task is None or task.project_id != project_id:
+                return None
+            candidate = save_candidate(
+                db, project_id=project_id, task=task, target_kind=target_kind,
+                unit_id=unit_id, text=text, payload=payload, findings=list(findings or []),
+                notes=list(notes or []), input_revision_ids=input_revision_ids)
+            return candidate.artifact.id
+    except Exception:  # noqa: BLE001 - losing a draft must never fail the task path
+        logger.exception("literary_candidate_write_failed task=%s unit=%s", task_id, unit_id)
+        return None
+
+
 def run_bible_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one bible synthesis task under the fenced claim."""
+    from shine.literary.governor import UnitBudget
     from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentTaskRecord
@@ -864,29 +930,36 @@ def run_bible_task(factory, settings, gateway, task_id: str, version: int, worke
         trace = sent
         outcome = call_material_agent(
             gateway, factory, BIBLE_RUN_ROLE,
-            system=(
-                "你是总编剧与连续性总管。基于给出的逐卷大纲摘要，提炼全书级故事蓝图："
-                "主线、人物（姓名/身份/弧线）、世界观、时间线、跨卷伏笔、必须保持的锁定事实、"
-                "开放问题与结局方向。锁定事实（locked_facts）与结局方向（ending_direction）必须用英文写，"
-                "其余字段用中文。characters 是含 name、identity、arc_summary 字符串的对象数组；"
-                "open_questions 是含 question 字符串的对象数组。timeline、foreshadowing 与 locked_facts "
-                "均为字符串数组。mainline 和 world 各用一小段，最多 1000 字符；"
-                "ending_direction 只写一句英文，最多 200 字符。依据未覆盖结局时，请注明待定。只输出 JSON。"
-            ),
+            system=BIBLE_SYSTEM_PROMPT,
             context=context,
             schema=schema,
             contract=GlobalStoryBiblePayload,
             task_category="creative",
+            purpose="outline",
+            unit_id=f"bible:{project_id}",
+            unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
             before_call=text_consent.guard(project_id, trace["document_id"], trace["document_sha256"],
                                            BIBLE_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
+            from shine.literary.adapters import adapt_bible
+            adapted = adapt_bible(outcome.candidate_payload or {})
+            candidate_id = _persist_candidate(
+                factory, task_id=task_id, project_id=project_id, target_kind=BIBLE_KIND,
+                unit_id="bible", text=outcome.candidate_text or adapted.payload.get("text", ""),
+                payload=adapted.payload,
+                findings=outcome.findings,
+                notes=[*adapted.notes, *adapted.gaps],
+                input_revision_ids=trace.get("input_revision_ids") or [])
             blocked = {**trace, "stage": "NEEDS_REVIEW",
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
                        "schema_errors": outcome.schema_errors,
-                       "truncated": outcome.details.get("truncated")}
+                       "truncated": outcome.details.get("truncated"),
+                       "review": outcome.review,
+                       "candidate_artifact_id": candidate_id,
+                       "output_budget": outcome.details.get("output_budget")}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
         # The blueprint carries the ordered outline identity it was written
@@ -1272,6 +1345,8 @@ def queue_scene_scripts(db, project_id: str, volume_id: str, gateway) -> list:
 
 def run_scene_script_task(factory, settings, gateway, task_id: str, version: int, worker_id: str) -> bool:
     """Execute one scene-script task under the fenced claim."""
+    from shine.literary.adapters import SceneDraft
+    from shine.literary.governor import UnitBudget
     from shine.materialprep import text_consent
     from shine.materialprep.agent_call import call_material_agent
     from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument
@@ -1340,39 +1415,55 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             "previous_ending": (previous_script.payload_json.get("continuity_out", "")
                                 if previous_script else None),
         }
-        schema = SceneScriptPayload.model_json_schema()
+        schema = SceneDraft.model_json_schema()
         sent = _persist_pipeline_sending(factory, task_id, version, worker_id, trace)
         if sent is None:
             return True
         trace = sent
         outcome = call_material_agent(
             gateway, factory, SCENE_SCRIPT_RUN_ROLE,
-            system=(
-                "你是剧集编剧。基于全书故事蓝图、本段原文与上一场的收尾状态，写出这一场的完整剧本："
-                "对白、动作、场景与时间空间，并把收尾状态写入 continuity_out。"
-                "原样复制 section_id 和 scene_key。dialogue 是含 speaker、line 字符串的对象数组；"
-                "characters 与 questions 均为字符串数组。只输出 JSON。"
-            ),
+            system=SCENE_SYSTEM_PROMPT,
             context=context,
             schema=schema,
-            contract=SceneScriptPayload,
+            contract=SceneDraft,
             task_category="creative",
+            purpose="scene",
+            unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+            unit_budget=UnitBudget(max_calls=3, max_repair_rounds=1),
             before_call=text_consent.guard(
                 project_id, trace["master_document_id"], trace["master_document_sha256"],
                 SCENE_SCRIPT_RUN_ROLE, trace["provider_fingerprint"], gateway),
         )
         if not outcome.ok:
+            from shine.literary.adapters import adapt_scene_script
+            adapted = adapt_scene_script(
+                outcome.candidate_payload or {}, section=section,
+                fallback_text="" if (outcome.candidate_payload or {}).get("text")
+                else outcome.candidate_text)
+            candidate_id = _persist_candidate(
+                factory, task_id=task_id, project_id=project_id, target_kind=SCENE_SCRIPT_KIND,
+                unit_id=f"scene:{trace['volume_id']}:{section['section_id']}",
+                text=adapted.payload.get("text", "") or outcome.candidate_text,
+                payload=adapted.payload,
+                findings=outcome.findings,
+                notes=[*adapted.notes, *adapted.gaps],
+                input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]])
             blocked = {**trace, "stage": "NEEDS_REVIEW",
                        "blocked_reason": outcome.error_code,
                        "external_outcome": outcome.details.get("external_outcome"),
                        "response_status": outcome.details.get("response_status"),
                        "schema_errors": outcome.schema_errors,
-                       "truncated": outcome.details.get("truncated")}
+                       "truncated": outcome.details.get("truncated"),
+                       "review": outcome.review,
+                       "candidate_artifact_id": candidate_id,
+                       "output_budget": outcome.details.get("output_budget"),
+                       "attempts": _compact_attempts(outcome.details.get("attempts"))}
             _finish_pipeline_task(factory, task_id, version, worker_id, blocked, "NEEDS_REVIEW", outcome.error_code)
             return True
-        payload = dict(outcome.parsed)
-        payload["scene_key"] = section.get("scene_key", section["section_id"])
-        payload["section_id"] = section["section_id"]
+        from shine.literary.adapters import adapt_scene_script
+        adapted = adapt_scene_script(outcome.parsed, section=section,
+                                     fallback_text=outcome.candidate_text)
+        payload = dict(adapted.payload)
         payload["source_refs"] = {"volume_id": trace["volume_id"],
                                   "volume_document_id": trace["volume_document_id"],
                                   "start_offset": section.get("start_offset"),
@@ -1385,7 +1476,9 @@ def run_scene_script_task(factory, settings, gateway, task_id: str, version: int
             payload=payload,
             input_revision_ids=[trace["bible_artifact_id"], trace["outline_artifact_id"]],
             trace={**trace, "usage": outcome.details.get("usage"),
-                   "output_budget": outcome.details.get("output_budget")})
+                   "output_budget": outcome.details.get("output_budget"),
+                   "review": outcome.review, "adaptation": adapted.as_dict(),
+                   "attempts": _compact_attempts(outcome.details.get("attempts"))})
         return True
 
 

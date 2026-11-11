@@ -282,7 +282,15 @@ class OpenAICompatibleProvider:
         if not choices:
             raise LLMFormatError("Provider returned no completions", details=format_details)
         if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:
-            raise LLMFormatError("Provider completion is truncated or filtered", details=format_details)
+            # Keep the visible prefix: a truncated scene is not a finished
+            # scene, but the text that did arrive is still the person's material
+            # and is saved as a candidate rather than thrown away.
+            partial = choices[0].get("message", {}).get("content", "")
+            if isinstance(partial, list):
+                partial = "".join(part.get("text", "") for part in partial if isinstance(part, dict))
+            raise LLMFormatError("Provider completion is truncated or filtered",
+                                 details={**format_details,
+                                          "provider_text": partial if isinstance(partial, str) else ""})
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
@@ -291,7 +299,10 @@ class OpenAICompatibleProvider:
         try:
             parsed = parse_json_object(content) if json_mode else None
         except LLMFormatError as exc:
-            exc.details.update(response_details)
+            # The answer arrived.  Carry it with the error so the governor can
+            # read the literary body out of a broken envelope instead of
+            # reporting "the model returned nothing".
+            exc.details.update({**response_details, **format_details, "provider_text": content})
             raise
         if parsed is not None and schema is not None:
             validator = Draft202012Validator(schema)
@@ -300,8 +311,12 @@ class OpenAICompatibleProvider:
                 first = errors[0]
                 raise LLMFormatError(
                     "Model JSON does not match the required schema",
-                    details={**response_details, "path": "/".join(str(part) for part in first.path),
-                             "validator": first.validator},
+                    details={**response_details, **format_details,
+                             "path": "/".join(str(part) for part in first.path),
+                             "validator": first.validator,
+                             # The complete answer travels with the failure: one
+                             # missing optional field must not destroy a scene.
+                             "provider_text": content},
                 )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(
