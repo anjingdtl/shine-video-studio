@@ -36,7 +36,11 @@ def test_explicit_budget_reaches_exact_request_without_unset_options(monkeypatch
     monkeypatch.setattr(provider, "_request", request)
     assert provider.complete([ChatMessage("user", "bounded check")]).parsed == {"ok": True}
     assert len(seen) == 1 and seen[0]["max_completion_tokens"] == 8192 and seen[0]["reasoning_effort"] == "low"
-    assert "max_tokens" not in seen[0]
+    # The long-form budget round (0fc07d3) sends the classic max_tokens field
+    # as a mirror of max_completion_tokens on non-OpenAI endpoints: real
+    # providers that only read the classic field generated 16,345 tokens
+    # against a 5,786 budget.  The OpenAI endpoint itself is exempt.
+    assert seen[0]["max_tokens"] == 8192
 
 
 @pytest.mark.parametrize("options", [

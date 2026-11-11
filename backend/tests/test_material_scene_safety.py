@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import select
 
-from shine.materialprep.source_spans import segment_document
+from shine.materialprep.source_spans import MAX_SPANS_PER_SCENE, segment_document
 from shine.models import AgentTaskRecord
 from tests.test_material_scenes import _prepare, _responder
 
@@ -86,7 +86,11 @@ def test_source_coverage_offsets_and_limits(script):
     for left, right in zip(spans, spans[1:], strict=False):
         assert left.end_offset == right.start_offset
     assert all(span.text == script[span.start_offset:span.end_offset] for span in spans)
-    assert all(len(scene.text) <= 4000 and len(scene.spans) <= 200 for scene in scenes)
+    # The span ceiling is the implementation's own contract (raised from 200
+    # to 1024 by the long-form budget round); asserting the constant instead
+    # of a magic number keeps test and implementation from drifting apart
+    # again.  The 4000-character scene ceiling stays a fixed hard limit.
+    assert all(len(scene.text) <= 4000 and len(scene.spans) <= MAX_SPANS_PER_SCENE for scene in scenes)
     assert scenes == segment_document(script)
 
 

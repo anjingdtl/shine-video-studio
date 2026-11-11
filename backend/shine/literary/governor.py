@@ -62,7 +62,12 @@ def accepts_precompiled(method) -> bool:
         return False
     if "precompiled" in parameters:
         return True
-    return any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values())
+    # A **kwargs sink is NOT precompiled support: a legacy double accepts the
+    # whole keyword set through it, but handing it a precompiled request
+    # object breaks its expectations (its kwargs["user"] raised KeyError and
+    # the governor misclassified the double as a provider fault).  Legacy
+    # keyword doubles take the legacy branch below, exactly as documented.
+    return False
 
 
 @dataclass
