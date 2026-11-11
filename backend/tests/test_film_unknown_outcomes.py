@@ -441,3 +441,32 @@ def test_a_reconciliation_is_idempotent_with_the_version_the_panel_holds(prep): 
     assert second.status_code == 200, second.text
     assert second.json()["outcome"] == "NOT_SENT_PROVEN"
     assert second.json()["resubmittable"] is True
+
+
+def test_an_unknown_outcome_can_be_replaced_by_one_authorised_new_request(prep, monkeypatch):  # noqa: F811
+    """A lost answer is not a refusal: only the person may ask again.
+
+    The timeout of a real provider leaves the outcome unknown.  The request
+    is never replayed by itself, but the panel's "核对并只重做这一场" is the
+    person's decision, and it buys exactly one new request.
+    """
+    client, factory, project_id, task_id, path, body, calls = uncertain(prep, monkeypatch)
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        version = task.state_version
+    reconciled = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/reconcile",
+                             json={"expected_state_version": version},
+                             headers={"x-shine-local-action": "1"})
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()["outcome"] == "UNKNOWN_REQUIRES_NEW_ATTEMPT"
+    assert reconciled.json()["resubmittable"] is False
+    resent = client.post(f"/api/v1/projects/{project_id}/film-runs/{task_id}/resend-unknown",
+                         json={"expected_state_version": reconciled.json()["state_version"]},
+                         headers={"x-shine-local-action": "1"})
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["outcome"] == "USER_AUTHORIZED_NEW_REQUEST"
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "SUPERSEDED"
+        assert task.trace["external_outcome"] == "UNKNOWN"
+    assert len(calls) == 1

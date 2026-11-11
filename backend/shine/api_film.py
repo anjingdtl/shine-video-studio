@@ -239,6 +239,24 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
                 "note": "服务商已经答复但没有可用结果；再次提交时会创建一次新的模型请求。"}
 
     external_outcome = task.trace.get("external_outcome") or "UNKNOWN"
+    if (external_outcome == "UNKNOWN"
+            and task.status in {"NEEDS_REVIEW", "REJECTED", "FAILED"}):
+        # The provider may have answered and the answer may have been lost.
+        # The outcome stays unknown, so only the person can decide to ask
+        # again: the panel's "核对并只重做这一场" is that decision.
+        task.trace = {**task.trace, "reconciliation": {
+            "outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "resubmittable": False,
+            "external_outcome": "UNKNOWN", "checked_at": utcnow().isoformat()}}
+        task.state_version += 1
+        add_audit(db, actor, "FILM_AGENT_UNKNOWN_REQUIRES_NEW_ATTEMPT", "agent_task", task.id,
+                  {"status": task.status, "external_outcome": external_outcome,
+                   "resubmittable": False, "external_calls": 0}, project_id=project_id)
+        db.commit()
+        return {"outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "task_id": task.id,
+                "state_version": task.state_version, "resubmittable": False,
+                "external_outcome": "UNKNOWN",
+                "note": "上一次调用可能已经发出、结果无法取回；需要你明确重发这一场，"
+                        "系统才会以一次新的模型请求重问。"}
     add_audit(db, actor, "FILM_AGENT_RECONCILIATION_UNCONFIRMABLE", "agent_task", task.id,
               {"status": task.status, "external_outcome": external_outcome,
                "resubmittable": False, "external_calls": 0}, project_id=project_id)
