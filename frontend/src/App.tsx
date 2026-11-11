@@ -164,7 +164,7 @@ function App() {
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
-    notice, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
+    notices, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
     setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
     realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
     createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
@@ -1482,7 +1482,15 @@ function App() {
         </div>
       </div>}
 
-      {notice && <div className={`toast ${notice.kind}`}><span>{notice.kind === 'success' ? <Check size={15} /> : <X size={15} />}</span>{notice.text}<button onClick={dismissNotice}><X size={14} /></button></div>}
+      {notices.length > 0 && <div className="toast-stack" aria-live="polite">
+        {notices.map((toast) => (
+          <div key={toast.id} className={`toast ${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'}>
+            <span>{toast.kind === 'success' ? <Check size={15} /> : <X size={15} />}</span>
+            <span className="toast-text">{toast.text}{toast.count > 1 && <em className="toast-count">×{toast.count}</em>}</span>
+            <button type="button" aria-label="关闭通知" onClick={() => dismissNotice(toast.id)}><X size={14} /></button>
+          </div>
+        ))}
+      </div>}
       {busy && <div className="busy-indicator"><ArrowDownToLine size={14} />处理中</div>}
     </div>
   );

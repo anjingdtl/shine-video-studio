@@ -16,6 +16,7 @@ import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
 import type { RailAction } from './ActionRail';
+import { ArmedButton } from './ArmedButton';
 
 type Mode = 'plan' | 'package' | 'run' | 'post';
 
@@ -597,8 +598,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
                 title="只恢复服务端能够证明尚未提交到 H3 的批次；其他阻塞保持待处理"
                 onClick={() => control('resume')}><Play size={12} /> 继续安全可恢复批次</button>
             </>}
-            {!['COMPLETED', 'CANCELLED'].includes(activeRun.status) && <button className="btn-danger"
-              disabled={busy !== ''} onClick={() => control('cancel')}><Square size={12} /> 取消</button>}
+            {!['COMPLETED', 'CANCELLED'].includes(activeRun.status) && <ArmedButton
+              label="取消" armedLabel="再点一次确认取消" disabled={busy !== ''}
+              icon={<Square size={12} />} onConfirm={() => control('cancel')} />}
           </div>
         </div>
 

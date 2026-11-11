@@ -383,7 +383,8 @@ export default function ProductionSeriesPanel({
         onMessage(`这些镜头的对白装不进 ${clipSeconds} 秒：${tooTight.join('、')}。请改回「按分镜计划」或加长片段。`, 'error');
         return;
       }
-      if (!window.confirm(`把选中的 ${effectiveSelected.length} 个镜头统一改为 ${clipSeconds} 秒？\n这会重新编译这些镜头，已生成的同镜成片会失效。`)) return;
+      // 统一秒数是本地重编译：一次点击生效，结果由后续 toast 告知（不再阻塞式 confirm）。
+      onMessage(`将把 ${effectiveSelected.length} 个镜头统一改为 ${clipSeconds} 秒并重编译；已生成的同镜成片会失效。`, 'success');
     }
     setWorking(true);
     try {

@@ -36,7 +36,11 @@ export function useStudio() {
   const [workflowProfiles, setWorkflowProfiles] = useState<WorkflowProfile[]>([]);
   const [audit, setAudit] = useState<AuditPage | null>(null);
   const [preview, setPreview] = useState<PromptPreview | null>(null);
-  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [notices, setNotices] = useState<Array<{ id: number; kind: 'success' | 'error'; text: string; count: number }>>([]);
+  const toastId = useRef(0);
+  const toastTimers = useRef<Map<number, number>>(new Map());
+  /** 兼容旧读取方：最近一条通知。队列渲染用 notices。 */
+  const notice = notices.at(-1) ?? null;
   const [busy, setBusy] = useState(false);
   /** One request key per pending single-shot submission.
    *
@@ -74,12 +78,38 @@ export function useStudio() {
   const queueProvider: 'mock' | 'comfyui' = demoOverride || (!hasSeenReal.current && !realSubmissionAllowed && production?.mode === 'DEMO'
     && localStorage.getItem('shine.productionIntent') !== 'comfyui') ? 'mock' : 'comfyui';
 
+  /** toast 队列：最多 3 条堆叠；同一动作重复错误合并计数；success 4s 自动消失，
+   *  error 常驻直到手动关闭。结果性反馈走这里，上下文性状态走内联 .notice。 */
   function report(text: string, kind: 'success' | 'error' = 'success') {
-    setNotice({ text, kind });
-    window.setTimeout(() => setNotice(null), 5200);
+    setNotices((current) => {
+      const existing = current.find((toast) => toast.text === text && toast.kind === kind);
+      if (existing) {
+        return current.map((toast) => toast.id === existing.id ? { ...toast, count: toast.count + 1 } : toast);
+      }
+      const next = [...current, { id: ++toastId.current, kind, text, count: 1 }];
+      while (next.length > 3) {
+        const index = next.findIndex((toast) => toast.kind === 'success');
+        next.splice(index >= 0 ? index : 0, 1);
+      }
+      return next;
+    });
   }
 
-  function dismissNotice() { setNotice(null); }
+  function dismissNotice(id?: number) {
+    setNotices((current) => id === undefined ? [] : current.filter((toast) => toast.id !== id));
+  }
+
+  useEffect(() => {
+    for (const toast of notices) {
+      if (toast.kind === 'success' && !toastTimers.current.has(toast.id)) {
+        const timer = window.setTimeout(() => {
+          toastTimers.current.delete(toast.id);
+          setNotices((current) => current.filter((row) => row.id !== toast.id));
+        }, 4000);
+        toastTimers.current.set(toast.id, timer);
+      }
+    }
+  }, [notices]);
 
   async function withBusy(action: () => Promise<void>) {
     setBusy(true);
@@ -169,7 +199,7 @@ export function useStudio() {
         setProjects(rows);
         setProjectsLoaded(true);
         setProjectsLoadError('');
-        setNotice((current) => current?.kind === 'error' ? null : current);
+        setNotices((current) => current.filter((toast) => toast.kind !== 'error'));
         const remembered = window.localStorage.getItem('shine-project');
         const currentId = activeProjectId.current;
         const preferred = currentId || remembered;
@@ -631,7 +661,7 @@ export function useStudio() {
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
-    notice, report, dismissNotice, busy, dataEpoch, apiOnline,
+    notices, notice, report, dismissNotice, busy, dataEpoch, apiOnline,
     // generation settings
     queueProvider, queueProfile, setQueueProfile, reviewScope, setReviewScope,
     reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
