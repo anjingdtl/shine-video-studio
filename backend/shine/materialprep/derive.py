@@ -78,6 +78,20 @@ def derive_preparations(db, gateway, session_factory, project_id: str):
                 by_scene[scene.key].append(sid)
                 break
 
+    # The name the shots actually use must be the master's entity_id, or the
+    # binding cannot resolve it.  Prefer the alias that appears in the cast /
+    # speakers over a catalog display name like "程岩／罗兰·温布顿".
+    all_raw_names: set[str] = set()
+    for sids in by_scene.values():
+        for sid in sids:
+            payload = scripts[sid]
+            for entry in payload.get("characters") or []:
+                raw = entry if isinstance(entry, str) else str(entry.get("name") or "")
+                all_raw_names.update(split_character_names(raw))
+            for line in payload.get("dialogue") or []:
+                all_raw_names.update(split_character_names(
+                    line.get("speaker") or line.get("speaker_id") or ""))
+
     preparations = []
     for scene in scenes:
         sids = by_scene[scene.key]
@@ -99,8 +113,10 @@ def derive_preparations(db, gateway, session_factory, project_id: str):
             names = {character.get("name"), *(character.get("aliases") or [])}
             if not (sid_set & set(character.get("section_ids") or [])) and not (names & raw_names):
                 continue
+            display = next((n for n in [character.get("name"), *(character.get("aliases") or [])]
+                            if n in all_raw_names), character["name"])
             requirements.append({
-                "family": "character", "name": character["name"],
+                "family": "character", "name": display,
                 "description": (character.get("identity") or "")[:600],
                 "source_span_ids": span_ids, "questions": []})
         for key_scene in catalog.get("scenes") or []:

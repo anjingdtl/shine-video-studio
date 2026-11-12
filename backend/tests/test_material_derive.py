@@ -17,7 +17,7 @@ def _catalog(sections):
     return {
         "schema_version": "1.0",
         "characters": [{
-            "name": "德明", "aliases": ["阿明"], "identity": "出海的男人，短发。",
+            "name": "德明／阿明", "aliases": ["德明", "阿明"], "identity": "出海的男人，短发。",
             "variants": [{"section_id": sections[0], "appearance": "披着旧雨衣。"}],
             "section_ids": list(sections),
         }],
@@ -69,6 +69,7 @@ def test_derive_consolidates_identities_and_reuses_the_catalog(api):
     assert by_name["铜怀表"]["family"] == "prop"
     assert by_name["铜怀表"]["core_prop_reason"] == "表盖刻字是线索。"
     assert "阿明" not in by_name, "aliases never become a second master"
+    assert "德明／阿明" not in by_name, "the entity_id must be the name the shots use"
 
     again = client.post(f"/api/v1/projects/{pid}/material-preparation/derive", headers=LOCAL)
     assert again.status_code == 202
