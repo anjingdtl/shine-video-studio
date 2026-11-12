@@ -159,9 +159,10 @@ def derive_material(project_id: str, actor: Operator, db: DBSession, request: Re
     from shine.services import require_project
 
     project = require_project(db, project_id)
-    document, preparations = derive.derive_preparations(
+    document, preparations, catalog = derive.derive_preparations(
         db, gateway, request.app.state.session_factory, project_id)
     plan, replayed = service.create_draft_plan(db, project, document, preparations, actor=actor)
+    derive.enrich_character_definitions(db, plan, catalog)
     aggregated = service.aggregated_requirements(db, plan)
     db.commit()
     return {
@@ -175,6 +176,27 @@ def derive_material(project_id: str, actor: Operator, db: DBSession, request: Re
         "open_questions": aggregated["open_questions"],
         "expected_snapshot": service.confirmation_snapshot_hash(plan),
     }
+
+
+@router.get("/projects/{project_id}/material-preparation/entity-catalog")
+def material_entity_catalog(project_id: str, db: DBSession):
+    """The project-wide character/scene/prop consolidation, for display.
+
+    The material centre joins this to each requirement so a character shows its
+    canonical full name, stable identity and per-scene variants - the whole
+    person, not a fragment.
+    """
+    from shine.materialprep.catalog import CATALOG_KIND
+    from shine.models import AgentArtifact
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    row = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == CATALOG_KIND,
+        AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at.desc())).first()
+    return {"catalog": (row.payload_json if row is not None else None)}
 
 
 @router.get("/projects/{project_id}/material-preparation")

@@ -35,8 +35,10 @@ def catalog_prompt() -> str:
         "你是全项目统揽的制片实体核对员。输入是全局故事圣经与本次已确认分集的全部场次剧本。"
         "只输出一个 JSON 对象，合同为 MaterialEntityCatalog。规则：\n"
         "1. 人物全项目只定义一次：同一个人（穿越前后、本名与头衔、简称与全称）必须合并为一个条目，"
-        "其余写法放入 aliases；不同人物不得合并。\n"
-        "2. identity 写稳定身份与核心外貌（性别、年龄、发色、标志性特征），不写某一场临时服装。\n"
+        "其余写法放入 aliases；不同人物不得合并。name 用后续剧情通用的完整姓名"
+        "（如「罗兰·温布顿」），不要用斜杠把两个名字拼在一起；穿越前的本名（如「程岩」）放 aliases。\n"
+        "2. identity 写这个人的全貌：是谁（含穿越/身份背景）、稳定外貌（性别、年龄、发色、瞳色、标志性特征），"
+        "以后续剧情的主体形象为准，不写某一场临时服装。\n"
         "3. 同一人物在不同场次的衣服/外貌变化写入 variants（section_id + appearance），不要另建人物。\n"
         "4. scenes 只列关键场景：反复出现或剧情关键的发生地；描述写空间与光线特征，不写剧情。\n"
         "5. props 只列关键道具：有剧情/连续性依赖的物件（信物、文书、武器等），写明 core_prop_reason 与 carrier；"
@@ -49,6 +51,8 @@ def catalog_prompt() -> str:
 def _basis(bible, scripts: dict[str, dict]) -> dict:
     return {
         "bible_sha256": bible.sha256 if bible is not None else None,
+        # A prompt improvement must re-consolidate, not reuse an older catalog.
+        "prompt_sha256": digest(catalog_prompt()),
         "sections": sorted(
             ({"section_id": sid, "sha256": payload.get("_sha256")}
              for sid, payload in scripts.items()),

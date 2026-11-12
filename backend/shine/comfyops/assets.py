@@ -341,6 +341,18 @@ def promote(db, settings, row, actor, decision, *, offline):
     if existing:
         raise HTTPException(409, "ASSET_HASH_ALREADY_REGISTERED")
     media = p.get("media") or {}
+    # The full-picture character definition travels with the master so the
+    # asset centre keeps the accurate whole character, not just a short name.
+    character_definition = None
+    item_id = (p.get("provenance") or {}).get("item_id")
+    if item_id:
+        from shine.comfyops.models import AssetRequirement
+        from shine.materialprep.models import MaterialItem
+        item = db.get(MaterialItem, item_id)
+        if item is not None and item.requirement_id:
+            requirement = db.get(AssetRequirement, item.requirement_id)
+            if requirement is not None:
+                character_definition = (requirement.payload or {}).get("character_definition")
     # The candidate's stored file already carries 项目_类型_名称; promotion
     # keeps that readable name instead of inventing a second one.
     filename = p["filename"]
@@ -363,6 +375,7 @@ def promote(db, settings, row, actor, decision, *, offline):
             "candidate_id": row.id,
             "rights_id": p["rights_id"],
             "offline_only": mock or unowned_renderer or offline,
+            **({"character_definition": character_definition} if character_definition else {}),
         },
         approved=True,
         locked=True,

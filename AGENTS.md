@@ -1363,3 +1363,11 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   的固定英文句）作为提示词层，动画/实拍各加对应 negative 排除；brief 上下文加
   `film_style_instruction` 与媒介规则。模板版本绑定 readiness 指纹 → 升版后必须
   重新「验证三类真实小样」再出图。回归 `test_material_no_overlay_rule.py`（+1）。
+- **人物定义全貌化（2026-11-12 用户裁定）**：程岩即罗兰·温布顿，素材中心必须
+  拿到准确的全貌定义而非碎片短名。统揽提示词要求 name 用后续通用完整姓名、
+  identity 写全貌（含穿越背景）、aliases 收本名/简称、variants 按场记外貌；
+  目录复用键加入 prompt_sha256（提示词改进即重新统揽）。derive 把
+  character_definition（canonical_name/aliases/identity/variants）附着到人物
+  需求 payload 与计划；绑定键 entity_id 仍用镜头用名（零绑定风险）。新增
+  `GET …/material-preparation/entity-catalog` 只读接口；素材中心展示规范全名+
+  全貌+按场变体；晋升时定义随主素材 provenance 入库。回归 test_material_derive（+断言）。

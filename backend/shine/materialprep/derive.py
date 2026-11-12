@@ -141,4 +141,44 @@ def derive_preparations(db, gateway, session_factory, project_id: str):
             "locked_facts": [], "requirements": requirements[:32], "questions": []})
     if not preparations:
         raise HTTPException(409, "MATERIAL_DERIVE_EMPTY")
-    return document, preparations
+    return document, preparations, catalog
+
+
+def enrich_character_definitions(db, plan, catalog) -> None:
+    """Attach the full-picture character definition to each character requirement.
+
+    The binding key (entity_id) stays the name the shots use; the canonical
+    full name, aliases, stable identity and per-scene variants travel alongside
+    so the material centre shows the accurate whole character, not a fragment.
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement
+
+    by_name: dict[str, dict] = {}
+    for character in catalog.get("characters") or []:
+        for name in [character.get("name"), *(character.get("aliases") or [])]:
+            if name:
+                by_name.setdefault(name, character)
+    requirements = [dict(row) for row in (plan.payload.get("requirements") or [])]
+    changed = False
+    for requirement in requirements:
+        if requirement.get("family") != "character":
+            continue
+        character = by_name.get(requirement.get("entity_id"))
+        if not character:
+            continue
+        definition = {
+            "canonical_name": character.get("name"),
+            "aliases": character.get("aliases") or [],
+            "identity": character.get("identity") or "",
+            "variants": character.get("variants") or [],
+        }
+        requirement["character_definition"] = definition
+        changed = True
+        row = db.get(AssetRequirement, requirement.get("requirement_id")) \
+            if requirement.get("requirement_id") else None
+        if row is not None:
+            row.payload = {**(row.payload or {}), "character_definition": definition}
+    if changed:
+        plan.payload = {**plan.payload, "requirements": requirements}
+        plan.sha256 = graph_hash(plan.payload)

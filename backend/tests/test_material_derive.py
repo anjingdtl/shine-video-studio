@@ -70,6 +70,12 @@ def test_derive_consolidates_identities_and_reuses_the_catalog(api):
     assert by_name["铜怀表"]["core_prop_reason"] == "表盖刻字是线索。"
     assert "阿明" not in by_name, "aliases never become a second master"
     assert "德明／阿明" not in by_name, "the entity_id must be the name the shots use"
+    definition = by_name["德明"].get("character_definition")
+    assert definition, "the full-picture definition travels with the requirement"
+    assert definition["canonical_name"] == "德明／阿明"
+    assert "阿明" in definition["aliases"]
+    assert definition["identity"] == "出海的男人，短发。"
+    assert definition["variants"][0]["appearance"] == "披着旧雨衣。"
 
     again = client.post(f"/api/v1/projects/{pid}/material-preparation/derive", headers=LOCAL)
     assert again.status_code == 202

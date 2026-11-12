@@ -37,6 +37,12 @@ export type MaterialRequirement = {
   carrier?: string | null;
   carrier_variants?: string[];
   core_prop_reason?: string;
+  character_definition?: {
+    canonical_name?: string;
+    aliases?: string[];
+    identity?: string;
+    variants?: { section_id: string; appearance: string }[];
+  } | null;
 };
 
 export type MaterialCandidate = {
@@ -1005,6 +1011,28 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               {requirements.map((requirement) => (
                 <li key={requirement.requirement_id}>
                   <b>{FAMILY_LABELS[requirement.family] ?? requirement.family} · {requirement.entity_id}</b>
+                  {requirement.family === 'character' && requirement.character_definition && (
+                    <div className="material-character-definition">
+                      <small className="material-canonical-name">
+                        人物定义 · {requirement.character_definition.canonical_name || requirement.entity_id}
+                        {(requirement.character_definition.aliases ?? []).length > 0
+                          ? `（又称：${(requirement.character_definition.aliases ?? []).join('、')}）` : ''}
+                      </small>
+                      {requirement.character_definition.identity && (
+                        <small>{requirement.character_definition.identity}</small>
+                      )}
+                      {(requirement.character_definition.variants ?? []).length > 0 && (
+                        <details>
+                          <summary>按场外貌/服装变体（{requirement.character_definition.variants!.length}）</summary>
+                          <ul>
+                            {requirement.character_definition.variants!.map((variant, index) => (
+                              <li key={index}>{variant.appearance}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  )}
                   {requirement.canonical_entity_id && <small>与「{requirement.canonical_entity_id}」共用主素材</small>}
                   {requirement.family === 'prop' && requirement.carrier
                     && <small className="material-carrier">载体：{propCarrierLabels[requirement.carrier] ?? requirement.carrier}{(requirement.carrier_variants ?? []).length > 0 ? `（另有：${requirement.carrier_variants!.map((c) => propCarrierLabels[c] ?? c).join('、')}）` : ''}</small>}

@@ -2240,4 +2240,7 @@ html[data-theme='dark'] .produce-focus-bar{background:#24251f;border-color:#3a3b
 html[data-theme='dark'] .produce-focus-item{background:#24251f;border-color:#3f4036;color:#c9cac0}
 html[data-theme='dark'] .produce-focus-item.active{background:#2c3325;border-color:#4d553b;color:#c4d2ae}
 html[data-theme='dark'] .produce-focus-summary{background:#24251f;border-color:#3a3b31;color:#c9cac0}
-html[data-theme='dark'] .toast{background:#2a2b23;border-color:#3f4036;color:#d6d7cc;box-shadow:0 12px 40px #00000066}
+html[data-theme='dark'] .toast{background:#2a2b23;border-color:#3f4036;color:#d6d7cc;box-shadow:0 12px 40px #00000066}.material-character-definition{display:flex;flex-direction:column;gap:4px;margin:4px 0 6px;padding:6px 8px;border:1px solid var(--line-soft,var(--line));border-radius:8px;background:var(--paper-2,var(--paper))}
+.material-character-definition .material-canonical-name{font-weight:600;color:var(--ink-mid)}
+.material-character-definition details summary{cursor:pointer;font-size:var(--fs-caption);color:var(--ink-mid)}
+.material-character-definition ul{margin:4px 0 0;padding-left:16px;font-size:var(--fs-caption)}
