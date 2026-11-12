@@ -469,6 +469,56 @@ def reconcile_material_scene(project_id: str, task_id: str, body: ReconcileScene
             "note": "没有结果或未发送证据；保留原 UNKNOWN，不能创建替代请求。"}
 
 
+@router.get("/projects/{project_id}/material-preparation/scenes/status")
+def material_scene_status(project_id: str, document_id: str, db: DBSession):
+    """Live per-scene analysis progress, readable after any refresh.
+
+    The prepare request is synchronous and long; this read path lets the page
+    show each scene's durable state while it runs and after a restart, instead
+    of keeping the outcome only in the browser's memory.
+    """
+    from shine.materialprep import scenes
+    from shine.models import ProjectDocument
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    document = db.get(ProjectDocument, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    return scenes.scene_status(db, project_id, document)
+
+
+class ResendSceneBody(APIModel):
+    expected_state_version: int = Field(ge=0)
+    evidence: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/projects/{project_id}/material-preparation/scenes/{task_id}/resend-unknown")
+def resend_unknown_material_scene(project_id: str, task_id: str, body: ResendSceneBody,
+                                  actor: Operator, db: DBSession):
+    """One person's explicit decision to ask one unknown material scene again.
+
+    The old request may still own an answer upstream, so this never happens by
+    itself: the person confirms, the decision is audited with their evidence,
+    and the next analysis asks the scene exactly once more.  The old task is
+    never recorded as "not sent".
+    """
+    from shine.materialprep import scenes
+    from shine.models import AgentTaskRecord
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    task = db.get(AgentTaskRecord, task_id)
+    if (task is None or task.project_id != project_id or task.role_id != "scriptwriter"
+            or (task.trace or {}).get("tool") != "script_prepare"):
+        raise HTTPException(404, "MATERIAL_SCENE_TASK_NOT_FOUND")
+    if task.state_version != body.expected_state_version:
+        raise HTTPException(409, "MATERIAL_SCENE_TASK_STATE_CHANGED")
+    result = scenes.authorize_scene_unknown_resend(db, task, actor, body.evidence)
+    db.commit()
+    return result
+
+
 @router.post("/projects/{project_id}/material-preparation/confirm")
 def confirm_material(project_id: str, body: MaterialConfirmation, actor: Operator, db: DBSession):
     return service.confirm(db, actor, project_id, body)

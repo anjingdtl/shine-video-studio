@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MaterialPreparationPanel } from '../components/MaterialPreparationPanel';
 import { StudioStub, jsonResponse, type StubResponse } from './studioStub';
 
@@ -66,6 +66,7 @@ function routes() {
     { method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse(STATE) },
     { method: 'GET', pattern: /projects\/p[12]\/assets$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /projects\/p1\/documents$/, respond: () => jsonResponse([{ id: 'doc-1', filename: '剧本.txt', sha256: 'a'.repeat(64) }]) },
+    { method: 'GET', pattern: /material-preparation\/scenes\/status/, respond: () => jsonResponse({ scenes: [] }) },
     { method: 'GET', pattern: /projects\/p2\/material-preparation$/, respond: () => jsonResponse({ ...STATE, project_id: 'p2', requirements: [], runs: [] }) },
     { method: 'GET', pattern: /projects\/p2\/documents$/, respond: () => jsonResponse([]) },
     { method: 'POST', pattern: /material-preparation\/scenes\/prepare$/, respond: () => jsonResponse({ preparations: [], scenes: [{ scene_key: 'S1', status: 'PREPARED' }] }) },
@@ -155,7 +156,12 @@ it('服务器拒绝时给出可读原因，而不是只显示错误码', async (
   expect(await screen.findByText(/还没有给这个角色配置模型服务/)).toBeTruthy();
 });
 
-it('UNKNOWN 分场只核对原任务，不显示替代请求入口', async () => {
+it('UNKNOWN 分场只核对原任务，重发必须用户明确确认', async () => {
+  stub.add({ method: 'GET', pattern: /material-preparation\/scenes\/status/, respond: () => jsonResponse({
+    scenes: [{ scene_key: 'S1', title: '房间', task_id: 'scene-task', status: 'NEEDS_REVIEW',
+      error_code: 'LLM_CONNECTION', external_outcome: 'UNKNOWN', phase: 'FAILED',
+      state_version: 4, reconciliation: null, dead_worker: false, created_at: null }],
+  }) });
   stub.add({ method: 'POST', pattern: /material-preparation\/scenes\/prepare$/, respond: () => jsonResponse({
     preparations: [], scenes: [{ scene_key: 'S1', status: 'NEEDS_REVIEW', task_id: 'scene-task',
       state_version: 4, external_outcome: 'UNKNOWN' }],
@@ -164,18 +170,61 @@ it('UNKNOWN 分场只核对原任务，不显示替代请求入口', async () =>
     outcome: 'UNCONFIRMABLE', external_outcome: 'UNKNOWN', resubmittable: false,
   }) });
   const user = userEvent.setup();
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
   render(<MaterialPreparationPanel projectId="p1" />);
   await screen.findAllByText(/林知远/);
+  expect(await screen.findByText(/逐场分析 0\/1 场完成/)).toBeTruthy();
+  expect(screen.getByText(/结果未知 · 待核对/)).toBeTruthy();
   await user.selectOptions(await screen.findByLabelText('剧本文件'), 'doc-1');
   await user.click(screen.getByRole('button', { name: /分析剧本/ }));
   const inspect = await screen.findByRole('button', { name: '核对已有结果' });
   expect(screen.queryByRole('button', { name: /重新请求此场/ })).toBeNull();
+  await user.click(screen.getByRole('button', { name: '明确重发这一场' }));
+  expect(confirmSpy).toHaveBeenCalled();
+  expect(stub.callsOf('POST', /resend-unknown$/)).toHaveLength(0);
   await user.click(inspect);
   await waitFor(() => expect(stub.callsOf('POST', /scenes\/scene-task\/reconcile$/)).toHaveLength(1));
   expect(stub.callsOf('POST', /scenes\/scene-task\/reconcile$/)[0].body).toEqual({ expected_state_version: 4 });
   expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(1);
   expect(stub.callsOf('POST', /replace_unknown|replacement_key/)).toHaveLength(0);
   expect(await screen.findByText(/仍为 UNKNOWN；原任务保留，不会创建新请求/)).toBeTruthy();
+  confirmSpy.mockRestore();
+});
+
+it('刷新后仍能看到逐场进度，分析进行中禁止重复提交', async () => {
+  stub.add({ method: 'GET', pattern: /material-preparation\/scenes\/status/, respond: () => jsonResponse({
+    scenes: [{ scene_key: 'S1', title: '房间', task_id: 'scene-task', status: 'RUNNING',
+      error_code: null, external_outcome: 'UNKNOWN', phase: 'WAITING_PROVIDER',
+      state_version: 1, reconciliation: null, dead_worker: false, created_at: null }],
+  }) });
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByText(/逐场分析 0\/1 场完成/)).toBeTruthy();
+  expect(screen.getByText(/分析中 · 等待模型回答/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: /分析剧本/ })).toBeDisabled();
+  expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(0);
+  expect(stub.callsOf('GET', /scenes\/status/).length).toBeGreaterThanOrEqual(1);
+});
+
+it('用户确认后登记一次授权重发，旧任务保持未知历史', async () => {
+  let scene: Record<string, unknown> = { scene_key: 'S1', title: '房间', task_id: 'scene-task',
+    status: 'NEEDS_REVIEW', error_code: 'LLM_CONNECTION', external_outcome: 'UNKNOWN', phase: 'FAILED',
+    state_version: 4, reconciliation: null, dead_worker: false, created_at: null };
+  stub.add({ method: 'GET', pattern: /material-preparation\/scenes\/status/, respond: () => jsonResponse({ scenes: [scene] }) });
+  stub.add({ method: 'POST', pattern: /material-preparation\/scenes\/scene-task\/resend-unknown$/, respond: () => {
+    scene = { ...scene, status: 'SUPERSEDED', state_version: 5, reconciliation: 'USER_AUTHORIZED_NEW_REQUEST' };
+    return jsonResponse({ task_id: 'scene-task', state_version: 5, outcome: 'USER_AUTHORIZED_NEW_REQUEST',
+      note: '已登记你的确认：再次「分析剧本」时这一场会以一次新的模型请求重问。' });
+  } });
+  const user = userEvent.setup();
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  render(<MaterialPreparationPanel projectId="p1" />);
+  await screen.findAllByText(/林知远/);
+  await user.click(await screen.findByRole('button', { name: '明确重发这一场' }));
+  await waitFor(() => expect(stub.callsOf('POST', /resend-unknown$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /resend-unknown$/)[0].body).toMatchObject({ expected_state_version: 4 });
+  expect(await screen.findByText(/已授权重发 · 点「分析剧本」继续/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '明确重发这一场' })).toBeNull();
+  confirmSpy.mockRestore();
 });
 
 it('停止批次带上服务端给的状态版本', async () => {

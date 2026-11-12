@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from fastapi import HTTPException
 from sqlalchemy import func, select, text
 
 from shine.agents.crew_prompts import script_prepare_prompt
@@ -127,6 +128,98 @@ def retire_dead_scene_task(db, task: AgentTaskRecord, scene_key: str) -> bool:
                "previous_request_identity": previous_identity, "external_calls": 0},
               project_id=task.project_id)
     return True
+
+
+#: One person may override one unknown scene result with one new request.
+MAX_SCENE_UNKNOWN_RESENDS = 1
+
+
+def scene_unknown_resends_used(db, task: AgentTaskRecord) -> int:
+    return sum(
+        ((other.trace or {}).get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"
+        for other in db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == task.project_id,
+            AgentTaskRecord.role_id == SCRIPTWRITER_ROLE,
+            AgentTaskRecord.rulepack_id == RULEPACK_ID,
+            AgentTaskRecord.input_hash == task.input_hash,
+        ))
+    )
+
+
+def authorize_scene_unknown_resend(db, task: AgentTaskRecord, actor: str, evidence: str) -> dict:
+    """Let one person ask one unknown material scene again, on the record.
+
+    Mirrors the story-outline rule: the old request may still own an answer
+    upstream, so this never happens automatically; the old row is retired as
+    ``USER_AUTHORIZED_NEW_REQUEST`` - never as "not sent" - and the next
+    analysis creates exactly one new request for the scene.
+    """
+    trace = task.trace or {}
+    if task.status != "NEEDS_REVIEW" or trace.get("external_outcome") != "UNKNOWN":
+        raise HTTPException(409, "MATERIAL_SCENE_NOT_UNKNOWN")
+    if (trace.get("reconciliation") or {}).get("outcome") in {
+            "RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER"}:
+        raise HTTPException(409, "MATERIAL_SCENE_ALREADY_RECONCILED")
+    if scene_unknown_resends_used(db, task) >= MAX_SCENE_UNKNOWN_RESENDS:
+        raise HTTPException(409, "MATERIAL_SCENE_UNKNOWN_RESEND_ALREADY_USED")
+    previous_identity = task.request_identity
+    task.status = "SUPERSEDED"
+    task.request_identity = None
+    task.lease_owner, task.lease_expires_at = None, None
+    task.state_version += 1
+    task.trace = {**trace, "reconciliation": {
+        "outcome": "USER_AUTHORIZED_NEW_REQUEST",
+        "previous_request_identity": previous_identity,
+        "evidence": evidence, "checked_at": utcnow().isoformat()}}
+    add_audit(db, actor, "MATERIAL_SCENE_UNKNOWN_RESEND_AUTHORIZED", "agent_task", task.id,
+              {"scene_key": trace.get("scene_key"),
+               "previous_request_identity": previous_identity,
+               "external_calls": 0, "automatic_replay": False},
+              project_id=task.project_id)
+    return {"task_id": task.id, "state_version": task.state_version,
+            "outcome": "USER_AUTHORIZED_NEW_REQUEST", "resubmitted": False,
+            "note": "已登记你的确认：再次「分析剧本」时这一场会以一次新的模型请求重问；"
+                    "旧请求的结果仍然未知，不会被自动采用。"}
+
+
+def scene_status(db, project_id: str, document) -> dict:
+    """Read-only per-scene progress, so the page can show the analysis live.
+
+    The prepare call is one long synchronous request; without this read path
+    the page only learns the outcome when that request returns, and a refresh
+    loses it entirely.  The ledger is the source of truth, not the response.
+    """
+    scenes = segment_document(document.text or "")
+    latest: dict[str, AgentTaskRecord] = {}
+    for row in db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == SCRIPTWRITER_ROLE,
+        AgentTaskRecord.rulepack_id == RULEPACK_ID,
+    ).order_by(AgentTaskRecord.created_at, AgentTaskRecord.id)):
+        trace = row.trace or {}
+        if trace.get("document_id") != document.id:
+            continue
+        key = str(trace.get("scene_key") or "").split("@")[0]
+        if key:
+            latest[key] = row
+    entries = []
+    for scene in scenes:
+        row = latest.get(scene.key)
+        trace = (row.trace or {}) if row is not None else {}
+        entries.append({
+            "scene_key": scene.key, "title": scene.title,
+            "task_id": row.id if row is not None else None,
+            "status": row.status if row is not None else "NOT_STARTED",
+            "error_code": row.error_code if row is not None else None,
+            "external_outcome": trace.get("external_outcome"),
+            "phase": trace.get("phase"),
+            "state_version": row.state_version if row is not None else None,
+            "reconciliation": (trace.get("reconciliation") or {}).get("outcome"),
+            "dead_worker": is_dead_scene_task(row) if row is not None else False,
+            "created_at": row.created_at.isoformat() if row is not None else None,
+        })
+    return {"document_id": document.id, "document_sha256": document.sha256,
+            "scenes": entries}
 
 
 def prepare_scenes(

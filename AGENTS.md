@@ -1297,3 +1297,26 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 回归：`backend/tests/test_agent_retry_and_rate_limit.py`（新增）、
   `test_film_unknown_outcomes.py`（新增 4 条）、`test_storyboard.py`（新增 2 条）、
   `test_llm_setup_contract.py`（NO_PROXY 断言迁到共用模块）。
+
+## 2026-11-12 素材分析进度透传与 UNKNOWN 分场授权重发（穿测缺陷修复）
+
+- **逐场素材分析的进度必须从台账透传，而不是只活在浏览器内存里**。`POST
+  /material-preparation/scenes/prepare` 是同步长请求；旧面板把返回的 `scenes`
+  存在本地 state，刷新即丢，运行中也没有逐场进度。新增只读
+  `GET /projects/{id}/material-preparation/scenes/status?document_id=`
+  （`scenes.scene_status`，按分割顺序返回每场最新任务的状态/phase/外部结果/
+  核对结论），面板挂载即读、分析期间 5s 轮询；分析进行中禁用「分析剧本」，
+  避免并发重复提交。读路径不发模型调用、不建任务。
+- **素材分场的 UNKNOWN 也要有用户授权的一次性重发入口**。发送后断连
+  （`LLM_CONNECTION`/UNKNOWN）的分场此前既不能 dead-worker 退休（状态是
+  NEEDS_REVIEW 而非 RUNNING），reconcile 又只回 UNCONFIRMABLE，story 的
+  resend 入口不接收素材任务——永久阻塞。新增
+  `POST /projects/{id}/material-preparation/scenes/{task_id}/resend-unknown`
+  （`scenes.authorize_scene_unknown_resend`）：镜像 story 语义，一次、带证据、
+  审计 `MATERIAL_SCENE_UNKNOWN_RESEND_AUTHORIZED`，旧行退役为
+  `USER_AUTHORIZED_NEW_REQUEST` 且**保持 UNKNOWN，不得写成未发送**；预算按
+  同 input_hash 计，第二次授权 409 `MATERIAL_SCENE_UNKNOWN_RESEND_ALREADY_USED`；
+  下一次「分析剧本」才创建那一次新请求。
+- 回归：`backend/tests/test_material_scene_progress.py`（3 项）+
+  `test_material_scenes.py`/`test_scene_dead_worker.py`/`test_material_scene_safety.py`
+  共 25 项；前端 `materialPreparation.test.tsx` 17 项、全量 261 项、tsc/build。

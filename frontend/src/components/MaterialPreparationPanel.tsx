@@ -79,6 +79,20 @@ export type MaterialEvaluation = {
   reason: string | null;
 };
 
+export type SceneStatus = {
+  scene_key: string;
+  title: string;
+  task_id: string | null;
+  status: string;
+  error_code: string | null;
+  external_outcome: string | null;
+  phase: string | null;
+  state_version: number | null;
+  reconciliation: string | null;
+  dead_worker: boolean;
+  created_at: string | null;
+};
+
 export type MaterialState = {
   project_id: string;
   stage: string;
@@ -137,6 +151,26 @@ function reasonText(code: string | null | undefined): string {
   return ERROR_CODE_LABELS[code] ?? `这一步没有完成（${code}）。请到专业设置查看专业日志。`;
 }
 
+const SCENE_PHASE_LABELS: Record<string, string> = {
+  PREPARING: '准备中', WAITING_RESOURCE: '等待资源', PREPARING_PROVIDER: '准备调用',
+  WAITING_PROVIDER: '等待模型回答',
+};
+
+function sceneStatusLabel(scene: SceneStatus): string {
+  switch (scene.status) {
+    case 'NOT_STARTED': return '未分析';
+    case 'RUNNING': return `分析中 · ${SCENE_PHASE_LABELS[scene.phase ?? ''] ?? '进行中'}`;
+    case 'SUCCEEDED': return '已拆解';
+    case 'NEEDS_REVIEW': return scene.external_outcome === 'UNKNOWN' ? '结果未知 · 待核对' : '待核对';
+    case 'REJECTED': case 'FAILED': return '失败';
+    case 'SUPERSEDED':
+      if (scene.reconciliation === 'USER_AUTHORIZED_NEW_REQUEST') return '已授权重发 · 点「分析剧本」继续';
+      if (scene.reconciliation === 'NOT_SENT_PROVEN') return '已证明未发送 · 点「分析剧本」继续';
+      return '已退役';
+    default: return scene.status;
+  }
+}
+
 function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [] }: {
   projectId: string;
   onMessage?: (message: string) => void;
@@ -161,8 +195,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [direction, setDirection] = useState({ era: '', palette: '', lighting: '', texture: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [sceneReport, setSceneReport] = useState<{ scene_key: string; status: string; error_code?: string;
-    task_id?: string; state_version?: number; external_outcome?: string }[]>([]);
+  const [sceneStatus, setSceneStatus] = useState<SceneStatus[] | null>(null);
+  const [analysing, setAnalysing] = useState(false);
   const [promotionReport, setPromotionReport] = useState<{ entity: string; ok: boolean; note: string }[]>([]);
   const [librarySearchRequirement, setLibrarySearchRequirement] = useState<string | null>(null);
   const [librarySearchResults, setLibrarySearchResults] = useState<Array<{ asset: LibraryAsset; version: LibraryVersion }>>([]);
@@ -346,6 +380,25 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     setDocumentId((current) => current || material.document_id || docs[0]?.id || '');
   }, [projectId]);
 
+  // The scene analysis is one long synchronous request on the server. Its
+  // per-scene state lives in the ledger, so the page reads it live and after
+  // any refresh instead of keeping the outcome only in browser memory.
+  const loadScenes = useCallback(async () => {
+    if (!documentId) return;
+    const requested = projectId;
+    const result = await api<{ scenes: SceneStatus[] }>(
+      `/projects/${requested}/material-preparation/scenes/status?document_id=${documentId}`);
+    if (activeProject.current !== requested) return;
+    setSceneStatus(result.scenes);
+  }, [projectId, documentId]);
+  useEffect(() => { void loadScenes().catch(() => undefined); }, [loadScenes]);
+  const scenesRunning = (sceneStatus ?? []).some((scene) => scene.status === 'RUNNING');
+  useEffect(() => {
+    if (!analysing && !scenesRunning) return undefined;
+    const timer = window.setInterval(() => { void loadScenes().catch(() => undefined); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [analysing, scenesRunning, loadScenes]);
+
   // Switching works must not carry the previous work's state into the new one.
   useEffect(() => {
     setState(null);
@@ -357,7 +410,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     directionDirty.current = false;
     setPromotionReport([]);
     setProblem(null);
-    setSceneReport([]);
+    setSceneStatus(null);
     setStrategy({});
     setEvaluation(null);
     setStepReport({});
@@ -424,26 +477,29 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const analyseScript = () => run(async () => {
     const document = documents.find((row) => row.id === documentId);
     if (!document) throw new Error('先导入或选择一份剧本文件，再分析剧本。');
-    const prepared = await jsonPost<{
-      preparations: unknown[];
-      scenes: { scene_key: string; status: string; error_code?: string; task_id?: string;
-        state_version?: number; external_outcome?: string }[];
-    }>(`/projects/${projectId}/material-preparation/scenes/prepare`, {
-      document_id: document.id,
-      expected_document_hash: document.sha256,
-    });
-    setSceneReport(prepared.scenes);
-    await jsonPost(`/projects/${projectId}/material-preparation/analyze`, {
-      document_id: document.id,
-      expected_document_hash: document.sha256,
-      idempotency_key: `material-analyze-${document.sha256.slice(0, 16)}`,
-      scene_preparations: prepared.preparations,
-    });
-    await load();
+    setAnalysing(true);
+    try {
+      const prepared = await jsonPost<{ preparations: unknown[] }>(
+        `/projects/${projectId}/material-preparation/scenes/prepare`, {
+          document_id: document.id,
+          expected_document_hash: document.sha256,
+        });
+      await loadScenes();
+      await jsonPost(`/projects/${projectId}/material-preparation/analyze`, {
+        document_id: document.id,
+        expected_document_hash: document.sha256,
+        idempotency_key: `material-analyze-${document.sha256.slice(0, 16)}`,
+        scene_preparations: prepared.preparations,
+      });
+      await load();
+    } finally {
+      setAnalysing(false);
+      await loadScenes().catch(() => undefined);
+    }
   });
 
-  const reconcileUnknownScene = (scene: { scene_key: string; task_id?: string; state_version?: number }) => run(async () => {
-    if (!scene.task_id || scene.state_version === undefined) throw new Error('这一场缺少可核对的任务版本。');
+  const reconcileUnknownScene = (scene: { scene_key: string; task_id?: string | null; state_version?: number | null }) => run(async () => {
+    if (!scene.task_id || scene.state_version === undefined || scene.state_version === null) throw new Error('这一场缺少可核对的任务版本。');
     const result = await jsonPost<{ outcome: string; external_outcome?: string; resubmittable: boolean }>(
       `/projects/${projectId}/material-preparation/scenes/${scene.task_id}/reconcile`,
       { expected_state_version: scene.state_version },
@@ -453,11 +509,22 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       : result.outcome === 'RESULT_ADOPTED'
         ? `场 ${scene.scene_key} 的已落库结果已核对并采用。`
         : `场 ${scene.scene_key} 仍为 ${result.external_outcome ?? 'UNKNOWN'}；原任务保留，不会创建新请求。`);
-    setSceneReport((old) => old.map((item) => item.task_id === scene.task_id
-      ? { ...item, status: result.outcome, external_outcome: result.external_outcome ?? item.external_outcome }
-      : item));
+    await loadScenes();
     await load();
   });
+
+  const resendUnknownScene = (scene: SceneStatus) => {
+    if (!window.confirm(`「${scene.scene_key}」的旧请求可能仍有答案，可能多花一次模型调用。确认以一次新的请求重问？`)) return;
+    void run(async () => {
+      const result = await jsonPost<{ note: string }>(
+        `/projects/${projectId}/material-preparation/scenes/${scene.task_id}/resend-unknown`,
+        { expected_state_version: scene.state_version,
+          evidence: '用户确认对结果未知的素材分场发起一次新请求' },
+      );
+      setOperationReport(result.note);
+      await loadScenes();
+    });
+  };
 
   const confirmAndGenerate = () => run(async () => {
     if (!state?.plan_revision_id || !state.expected_snapshot) {
@@ -648,6 +715,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   ).length;
   const confirmLabel = pendingGeneration > 0 ? '确认清单并补齐' : '确认清单并继续';
   const running = runs.some((row) => !['COMPLETED', 'PARTIAL_FAILED', 'NEEDS_REVIEW', 'CANCELLED'].includes(row.status));
+  const sceneDone = (sceneStatus ?? []).filter((scene) => scene.status === 'SUCCEEDED').length;
+  const sceneReview = (sceneStatus ?? []).filter((scene) => scene.status === 'NEEDS_REVIEW').length;
 
   // A batch runs for minutes. The page re-queries the durable ledger instead
   // of guessing, and stops polling once nothing is in flight.
@@ -689,12 +758,14 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     materialPrimary = promotable ? { label: '确认使用所选素材为正式素材', onClick: promoteSelected, loading: busy,
       disabled: busy || !promotable, icon: <CircleCheck size={14} /> } : null;
   } else {
-    materialPrimary = { label: '分析剧本生成素材清单', onClick: analyseScript, loading: busy,
-      disabled: busy || !documentId, disabledReason: documentId ? undefined : '先在上方选择剧本文件',
+    materialPrimary = { label: '分析剧本生成素材清单', onClick: analyseScript, loading: busy || analysing,
+      disabled: busy || !documentId || analysing || scenesRunning,
+      disabledReason: !documentId ? '先在上方选择剧本文件'
+        : (analysing || scenesRunning) ? '逐场分析进行中，等当前请求落定后再继续' : undefined,
       icon: <Sparkles size={14} /> };
   }
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
-    [stage, busy, documentId, requirements.length, promotable, confirmLabel]);
+    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -833,24 +904,39 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          {!railPresent && <button type="button" className="btn-primary" disabled={busy || !documentId} onClick={analyseScript}>
-            {busy ? <Loader2 size={13} /> : <Sparkles size={13} />} 分析剧本
+          {!railPresent && <button type="button" className="btn-primary"
+            disabled={busy || !documentId || analysing || scenesRunning} onClick={analyseScript}>
+            {busy || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 分析剧本
           </button>}
-          {sceneReport.length > 0 && (
-            <ul className="material-scene-list">
-              {sceneReport.map((scene) => (
-                <li key={scene.scene_key}>
-                  <span>{scene.scene_key}</span>
-                  <span>{scene.status === 'PREPARED' || scene.status === 'REUSED' ? '已拆解' : scene.status}</span>
-                  {scene.error_code && <em>{reasonText(scene.error_code)}</em>}
-                  {(scene.status === 'NEEDS_REVIEW'
-                    || ['UNKNOWN', 'NOT_SENT'].includes(scene.external_outcome ?? '')) && scene.task_id
-                    && <button type="button" className="btn-text"
-                      disabled={busy || scene.state_version === undefined}
-                      onClick={() => reconcileUnknownScene(scene)}>核对已有结果</button>}
-                </li>
-              ))}
-            </ul>
+          {(analysing || scenesRunning) && <p className="material-hint" role="status">
+            逐场分析进行中：每一场是一次独立的模型调用，进度实时来自服务端台账，刷新页面不会中断。
+          </p>}
+          {sceneStatus && sceneStatus.length > 0 && (
+            <div className="notice" role="status" aria-label="逐场分析进度">
+              {scenesRunning || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}
+              <div>
+                <p><b>逐场分析 {sceneDone}/{sceneStatus.length} 场完成</b>
+                  {sceneReview > 0 ? ` · ${sceneReview} 场待核对` : ''}</p>
+                <ul className="material-scene-list">
+                  {sceneStatus.map((scene) => (
+                    <li key={scene.scene_key}>
+                      <span>{scene.scene_key}{scene.title ? ` · ${scene.title}` : ''}</span>
+                      <span>{sceneStatusLabel(scene)}</span>
+                      {scene.error_code && <em>{reasonText(scene.error_code)}</em>}
+                      {scene.task_id && scene.state_version !== null
+                        && (scene.status === 'NEEDS_REVIEW'
+                          || ['UNKNOWN', 'NOT_SENT'].includes(scene.external_outcome ?? ''))
+                        && <button type="button" className="btn-text" disabled={busy}
+                          onClick={() => reconcileUnknownScene(scene)}>核对已有结果</button>}
+                      {scene.task_id && scene.state_version !== null
+                        && scene.status === 'NEEDS_REVIEW' && scene.external_outcome === 'UNKNOWN'
+                        && <button type="button" className="btn-text" disabled={busy}
+                          onClick={() => resendUnknownScene(scene)}>明确重发这一场</button>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
           )}
         </div>
       </details>
