@@ -75,4 +75,24 @@ def test_the_overlay_code_set_covers_the_prompt_terms():
 
 def test_the_template_version_moved_with_the_rule():
     """Readiness evidence is bound to the template version, so it must change."""
-    assert image_prompts.PROMPT_TEMPLATE_VERSION == "material-image-v4-qwen21"
+    assert image_prompts.PROMPT_TEMPLATE_VERSION == "material-image-v5-qwen21"
+
+
+def test_the_frozen_film_type_travels_into_the_image_prompt():
+    """An animation film's reference stills must not come back photoreal."""
+    from shine.h3.film_type import film_type_sentence
+    from shine.materialprep.contracts import MaterialImageBrief
+    from shine.schemas import FilmType
+
+    brief = MaterialImageBrief(appearance="A young woman with long black hair.",
+                               must_keep=[], avoid=[], questions=[])
+    animated = image_prompts.compose("character", brief,
+                                     film_style=film_type_sentence(FilmType.ANIMATION))
+    assert "2D cel-shaded animation" in animated.prompt
+    assert "photorealistic" in animated.negative_prompt
+    live = image_prompts.compose("character", brief,
+                                 film_style=film_type_sentence(FilmType.LIVE_ACTION))
+    assert "photorealistic live-action" in live.prompt
+    assert "cel shading" in live.negative_prompt
+    neutral = image_prompts.compose("character", brief)
+    assert "cel-shaded" not in neutral.prompt

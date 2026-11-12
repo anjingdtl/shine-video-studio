@@ -90,6 +90,7 @@ def build_context(
     project_language: str,
     style_bible: dict[str, Any] | None = None,
     style_version: int | None = None,
+    film_style: str = "",
 ) -> dict[str, Any]:
     """The server envelope the model receives.
 
@@ -108,6 +109,7 @@ def build_context(
         "visual_direction": visual_direction or {},
         "frozen_style_bible": style_bible or {},
         "frozen_style_version": style_version,
+        "film_style_instruction": film_style,
         "locked_story_facts": list(locked_facts),
         "script_language": project_language,
         "output_contract": BRIEF_CONTRACT.__name__,
@@ -122,6 +124,9 @@ def build_context(
             "The appearance must visibly belong to the frozen style bible: carry its colour palette, "
             "lighting tone, lens and texture language, and the production genre, into the English prose. "
             "The style bible is written in the script language; translate its intent, never paste it.",
+            "The picture's medium is fixed by film_style_instruction: apply it to every surface "
+            "(cel-shaded flat fills and clean line art for animation; real skin and lens texture for "
+            "live-action). A photoreal portrait for an animation film is a refused brief, not a style choice.",
             "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
             "subject first, then its dress and build, then the surface materials and their textures. Use "
             "concrete nouns ('brushed brass', 'deep navy wool'), not bare colours or bare materials.",
@@ -175,9 +180,18 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
             .where(StyleVersion.project_id == item.project_id, StyleVersion.frozen_at.is_not(None))
             .order_by(StyleVersion.version.desc())
         )
+        film_style = ""
+        if style is not None:
+            from shine.h3.film_type import film_type_sentence
+            from shine.schemas import FilmType
+            try:
+                film_style = film_type_sentence(FilmType((style.snapshot or {}).get("film_type")))
+            except ValueError:
+                film_style = ""
         return {
             "style_bible": dict((style.snapshot or {}) if style else {}),
             "style_version": style.version if style else None,
+            "film_style": film_style,
             "document_id": (plan.payload or {}).get("document_id") if plan else None,
             "document_sha256": (plan.payload or {}).get("script_hash") if plan else None,
             "item_id": item.id,
@@ -222,6 +236,7 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         project_language=data["project_language"],
         style_bible=data.get("style_bible"),
         style_version=data.get("style_version"),
+        film_style=data.get("film_style") or "",
     )
     system_prompt = material_image_brief_prompt()
     schema = BRIEF_CONTRACT.model_json_schema()

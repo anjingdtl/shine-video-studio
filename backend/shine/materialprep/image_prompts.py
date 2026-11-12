@@ -40,8 +40,12 @@ from shine.materialprep.contracts import (
     MaterialVisualDirection,
 )
 
-PROMPT_TEMPLATE_VERSION = "material-image-v4-qwen21"
+PROMPT_TEMPLATE_VERSION = "material-image-v5-qwen21"
 """Bump when a composition rule changes; readiness evidence is bound to it.
+
+v5 carries the frozen film type as a server-owned English sentence (the same
+clause the H3 compiler uses): an animation project's reference stills must not
+come back photoreal because the brief producer omitted the medium.
 
 v4 states the no-overlay rule as an explicit list - watermark, logo, signature, platform
 badge, timestamp, user-interface overlay - because a single "no watermark" phrase left the
@@ -203,6 +207,7 @@ def compose(
     visual_direction: MaterialVisualDirection | None = None,
     requirement_name: str = "",
     carrier: MaterialCarrier | None = None,
+    film_style: str = "",
 ) -> ImagePrompt:
     """Build the deterministic prompt pair for one confirmed requirement.
 
@@ -276,6 +281,7 @@ def compose(
 
     layers = [
         standard.anchor_sentence(family, carrier, direction),
+        film_style.strip(),
         f"{subject + ', ' if subject else ''}{appearance}",
         standard.environment_sentence(family, direction),
         standard.lighting_sentence(direction),
@@ -291,6 +297,10 @@ def compose(
     negative_exclusions = [_NO_WATERMARK_SHORT, _NO_COLLAGE_SHORT]
     if not (family == "prop" and carrier in ("paper", "screen")):
         negative_exclusions.insert(0, _NO_TEXT_SHORT)
+    if "cel-shaded" in film_style:
+        negative_exclusions.append("photorealistic, live-action footage, 3D CGI rendering")
+    elif "live-action" in film_style:
+        negative_exclusions.append("illustration, cel shading, cartoon, anime rendering")
     negative = _join([*avoid, *negative_exclusions])
 
     if len(positive) > MAX_COMPOSED_PROMPT_CHARS:

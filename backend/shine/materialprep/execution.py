@@ -209,6 +209,12 @@ def claim_next_item(factory, worker_id: str) -> str | None:
 
 
 def _load_context(factory, item_id: str) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from shine.h3.film_type import film_type_sentence
+    from shine.models import StyleVersion
+    from shine.schemas import FilmType
+
     with factory() as db:
         item = db.get(MaterialItem, item_id)
         if item is None:
@@ -217,6 +223,17 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
         plan = db.get(PreProductionPlan, run.plan_id) if run else None
         project = db.get(Project, item.project_id)
+        style = db.scalar(
+            select(StyleVersion)
+            .where(StyleVersion.project_id == item.project_id, StyleVersion.frozen_at.is_not(None))
+            .order_by(StyleVersion.version.desc())
+        )
+        film_style = ""
+        if style is not None:
+            try:
+                film_style = film_type_sentence(FilmType((style.snapshot or {}).get("film_type")))
+            except ValueError:
+                film_style = ""
         return {
             "item_id": item.id,
             "item_status": item.status,
@@ -232,6 +249,7 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
             "plan_purpose": plan.purpose if plan else None,
             "project_id": project.id if project else None,
             "project_title": project.title if project else "",
+            "film_style": film_style,
         }
 
 
@@ -401,6 +419,7 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
         visual_direction=direction,
         requirement_name=str(requirement.get("entity_id") or ""),
         carrier=requirement.get("carrier") or payload.get("carrier"),
+        film_style=str(context.get("film_style") or ""),
     )
 
 

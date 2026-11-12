@@ -1357,3 +1357,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   从目录映射到素材分割生成清单；人物描述只用稳定 identity（变体在目录与镜头
   视觉描述里），避免跨场描述差异造成假冲突。回归 `test_material_derive.py`
   重写 3 项（含 UNKNOWN 核对+一次重发）、前端 265 项。
+- **素材小样必须携带冻结影片类型（2026-11-12 穿测目检发现）**：动画项目的
+  参考图曾出成写实照片——brief 只拿到中文七维+film_type 代码，模型漏了媒介。
+  `image_prompts` 升 v5：compose 接收 `film_style`（`h3.film_type.film_type_sentence`
+  的固定英文句）作为提示词层，动画/实拍各加对应 negative 排除；brief 上下文加
+  `film_style_instruction` 与媒介规则。模板版本绑定 readiness 指纹 → 升版后必须
+  重新「验证三类真实小样」再出图。回归 `test_material_no_overlay_rule.py`（+1）。
