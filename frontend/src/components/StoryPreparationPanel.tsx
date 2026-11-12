@@ -125,14 +125,12 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
         ? '分集时已经确认过每集的场次，这里不再重复勾选：素材「分析剧本」按整份剧本逐场分析，分镜与排产走四阶段流程。'
         : '生产段落是章节或场群；H3 生成分段是一次 4–15 秒输出。先提取全文并逐层归并大纲，由你确认后，只为勾选的段落准备素材和正式分镜。'}</p>
       <button type="button" disabled={busy} onClick={() => void load().catch(() => setMessage('读取大纲状态失败，请重试。'))}>刷新大纲与段落状态</button>
-      {!lockedScope && <>
-        <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新大纲输入）</span>
-          <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3} />
-        </label>
-        <button type="button" disabled={busy || !documentId} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
-          document_id: documentId, expected_document_hash: documentHash, locked_facts: facts.split('\n').map((s) => s.trim()).filter(Boolean),
-        })))}>后台提取并归并总体大纲</button>
-      </>}
+      <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新大纲输入）</span>
+        <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3} />
+      </label>
+      <button type="button" disabled={busy || !documentId} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
+        document_id: documentId, expected_document_hash: documentHash, locked_facts: facts.split('\n').map((s) => s.trim()).filter(Boolean),
+      })))}>后台提取并归并总体大纲</button>
       {outlineTask && <p>大纲任务 {outlineTask.task_id.slice(0, 8)} · {TASK_STATUS_LABELS[outlineTask.status] ?? outlineTask.status} · {outlineTask.summary?.label ?? outlineTask.progress.stage} · 已完成 {outlineTask.summary?.done ?? outlineTask.progress.cursor}/{outlineTask.summary?.total ?? '?'}（{outlineTask.summary?.percent ?? 0}%）</p>}
       <p>关闭页面后由常驻 Worker 继续；刷新只查询进度。未知模型结果只核对，不自动重发。</p>
       {outline && <>

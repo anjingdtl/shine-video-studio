@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { StoryPreparationPanel } from '../components/StoryPreparationPanel';
 import { OutlineConfirmationPanel } from '../components/OutlineConfirmationPanel';
+import { StageRailProvider } from '../components/StageRail';
 import { StudioStub, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
@@ -140,5 +141,29 @@ describe('大纲任务卡在提取剧情要点', () => {
     renderPanel();
     expect(await screen.findByText(/已经重试到上限，需要修改输入或取消/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '恢复未完成工作' })).toBeDisabled();
+  });
+});
+
+describe('已确认大纲的修订路径', () => {
+  it('补充锁定事实的输入与重新提取入口在已确认后仍然存在', async () => {
+    stub.add({ method: 'GET', pattern: /text-consent\/doc-1$/, respond: () => jsonResponse({
+      roles: [{ role: 'scriptwriter', configured: true, allowed: true }],
+    }) });
+    stub.add({ method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([{
+      task_id: 'task-1', role: 'story_outline_run', status: 'SUCCEEDED', state_version: 5,
+      error_code: null,
+      summary: { label: '归并大纲', done: 6, total: 6, percent: 100 },
+      progress: { stage: 'AWAITING_OUTLINE_CONFIRMATION', cursor: 6 },
+      outline: { artifact_id: 'o1', sha256: 'e'.repeat(64), approved: true, stale: false,
+        questions_sha256: 'q'.repeat(64),
+        payload: { summary: '故事摘要', story_line: [], timeline: [], relationships: [],
+          locked_facts: [], characters: [], questions: ['悬念一？'], production_sections: [] } },
+    }]) });
+    render(<StageRailProvider stageId="script">
+      <OutlineConfirmationPanel projectId="p1" documentId="doc-1" documentHash={'b'.repeat(64)} />
+    </StageRailProvider>);
+    expect(await screen.findByLabelText(/补充锁定事实/)).toBeInTheDocument();
+    const button = await screen.findByRole('button', { name: '补充锁定事实后重新提取大纲' });
+    await waitFor(() => expect(button).toBeEnabled());
   });
 });

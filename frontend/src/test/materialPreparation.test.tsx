@@ -253,7 +253,9 @@ it('分集合同已确认时，素材页不再重复勾选生产段落', async (
   expect(screen.queryByRole('button', { name: '准备所选段落的素材清单' })).toBeNull();
   expect(screen.queryByRole('button', { name: '为所选生产段落生成正式分镜' })).toBeNull();
   expect(screen.queryByText('可选择本次工作范围')).toBeNull();
-  expect(screen.queryByRole('button', { name: '后台提取并归并总体大纲' })).toBeNull();
+  // 修订路径保留：补充锁定事实 + 重新提取大纲不是冗余勾选。
+  expect(screen.getByRole('button', { name: '后台提取并归并总体大纲' })).toBeTruthy();
+  expect(screen.getByLabelText(/补充锁定事实/)).toBeTruthy();
 });
 
 it('没有分集合同的作品保留旧的段落勾选入口', async () => {

@@ -115,6 +115,13 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
       disabled: busy || outline.stale || outline.payload.questions.length > 0,
       disabledReason: outline.payload.questions.length > 0 ? '有创作问题待你过目（可在内容区按当前设定确认）' : undefined };
+  } else {
+    // 已确认后仍要留修订路径：补充锁定事实 → 重新提取。否则「补充锁定事实后
+    // 重新生成」的提示没有可点的入口。
+    outlinePrimary = { label: '补充锁定事实后重新提取大纲', onClick: extractOutline, loading: busy,
+      disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
+      disabledReason: !scriptwriterAllowed ? '先在上方授权剧本文字发送'
+        : blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined };
   }
   useStageRail('outline-confirm', {
     priority: 1,
