@@ -1324,3 +1324,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `finish_reason=length` 截断、重试表现为「卡」。`DEFAULT_AGENT_OUTPUT_TOKENS`
   提至 32_768（agent 通道默认 ceiling；显式配置更小仍优先；创作通道
   `literary.budget` 不受影响）。回归 `test_llm_gateway.py` 等 6 批 100 项。
+- **分集勾选只做一次（2026-11-12 用户裁定）**：四阶段分集合同已确认的作品，
+  素材页内嵌的 `StoryPreparationPanel` 不再显示旧链路的生产段落勾选网格与
+  「准备所选段落的素材清单 / 为所选生产段落生成正式分镜」按钮，改为只读
+  「总体大纲与分集范围 · 已确认（无需再勾选）」摘要（逐集列出已确认场次）；
+  范围由 `GET /projects/{id}/pipeline` 的 confirmed episode_contracts 推导。
+  无合同的作品保留旧勾选入口。回归 `materialPreparation.test.tsx`（+2）。

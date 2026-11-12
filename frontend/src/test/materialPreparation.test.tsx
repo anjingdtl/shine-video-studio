@@ -227,6 +227,51 @@ it('用户确认后登记一次授权重发，旧任务保持未知历史', asyn
   confirmSpy.mockRestore();
 });
 
+it('分集合同已确认时，素材页不再重复勾选生产段落', async () => {
+  stub.add({ method: 'GET', pattern: /projects\/p1\/pipeline$/, respond: () => jsonResponse({
+    volumes: [{
+      scripts: [{ section_id: 'sec-a', title: '卷标题场' }, { section_id: 'sec-b', title: '第0002章' }],
+      episode_contracts: [
+        { title: '第1集', sections: ['sec-a', 'sec-b'], confirmed: true },
+      ],
+    }],
+  }) });
+  stub.add({ method: 'GET', pattern: /projects\/p1\/story-preparation/, respond: () => jsonResponse([{
+    task_id: 'outline-1', role: 'story_outline_run', status: 'SUCCEEDED', state_version: 1, error_code: null,
+    progress: { stage: 'AWAITING_OUTLINE_CONFIRMATION', cursor: 1 },
+    outline: { artifact_id: 'o'.repeat(64), sha256: 'e'.repeat(64), approved: true, stale: false,
+      payload: { summary: '女巫与王子的故事。', story_line: [], timeline: [], relationships: [],
+        locked_facts: [], characters: [], questions: [],
+        production_sections: [{ production_section_id: 'sec-a', order: 1, title: '卷标题场',
+          start_offset: 0, end_offset: 100, estimated_duration_s: 5 }] } },
+  }]) });
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByText(/总体大纲与分集范围 · 已确认（无需再勾选）/)).toBeTruthy();
+  expect(await screen.findByText(/分集时已经确认过每集的场次/)).toBeTruthy();
+  expect(screen.getByText('第1集')).toBeTruthy();
+  expect(screen.getByText(/卷标题场、第0002章/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '准备所选段落的素材清单' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '为所选生产段落生成正式分镜' })).toBeNull();
+  expect(screen.queryByText('可选择本次工作范围')).toBeNull();
+  expect(screen.queryByRole('button', { name: '后台提取并归并总体大纲' })).toBeNull();
+});
+
+it('没有分集合同的作品保留旧的段落勾选入口', async () => {
+  stub.add({ method: 'GET', pattern: /projects\/p1\/pipeline$/, respond: () => jsonResponse({ volumes: [] }) });
+  stub.add({ method: 'GET', pattern: /projects\/p1\/story-preparation/, respond: () => jsonResponse([{
+    task_id: 'outline-1', role: 'story_outline_run', status: 'SUCCEEDED', state_version: 1, error_code: null,
+    progress: { stage: 'AWAITING_OUTLINE_CONFIRMATION', cursor: 1 },
+    outline: { artifact_id: 'o'.repeat(64), sha256: 'e'.repeat(64), approved: true, stale: false,
+      payload: { summary: '女巫与王子的故事。', story_line: [], timeline: [], relationships: [],
+        locked_facts: [], characters: [], questions: [],
+        production_sections: [{ production_section_id: 'sec-a', order: 1, title: '卷标题场',
+          start_offset: 0, end_offset: 100, estimated_duration_s: 5 }] } },
+  }]) });
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByRole('button', { name: '准备所选段落的素材清单' })).toBeTruthy();
+  expect(screen.getByText('可选择本次工作范围')).toBeTruthy();
+});
+
 it('停止批次带上服务端给的状态版本', async () => {
   const user = userEvent.setup();
   render(<MaterialPreparationPanel projectId="p1" />);
