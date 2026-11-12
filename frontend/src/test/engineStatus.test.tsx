@@ -75,4 +75,133 @@ describe('EngineStatusEntry', () => {
     const { container } = render(<EngineStatusEntry apiOnline={false} />);
     expect(container.textContent).toBe('');
   });
+
+  it('passes the snapshot state version as the compare-and-set when submitting', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({ state_version: 4 }) },
+      { method: 'POST', pattern: /runtime-orchestrator\/ensure$/, respond: () => jsonResponse({
+        operation_id: 'op-1', action: 'ensure', installation_id: 'inst-1',
+        status: 'SUCCEEDED', state_version: 5, failure_code: null, result: { outcome: 'STARTED' },
+      }, 202) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    await user.click(await screen.findByText('启动引擎'));
+    // 本次操作的结论要当场说出来，不是只默默刷新快照。
+    expect(await screen.findByText('引擎已启动。')).toBeTruthy();
+    const call = stub.calls.find((entry) => entry.method === 'POST' && /runtime-orchestrator\/ensure$/.test(entry.url));
+    expect(call?.body).toMatchObject({ expected_state_version: 4 });
+  });
+
+  it('refreshes the snapshot instead of leaking the stale-version code on 409', async () => {
+    let statusCalls = 0;
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => {
+        statusCalls += 1;
+        return snapshot({ state_version: statusCalls > 1 ? 1 : 0 });
+      } },
+      { method: 'POST', pattern: /runtime-orchestrator\/ensure$/, respond: () => jsonResponse(
+        { detail: { code: 'RUNTIME_STATE_VERSION_STALE', detail: 'expected 0, current 1' } }, 409) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    await user.click(await screen.findByText('启动引擎'));
+    expect(await screen.findByText('引擎状态已更新，请确认后再操作。')).toBeTruthy();
+    // 自动重拉：一次初始轮询 + 一次过期后的刷新。
+    expect(statusCalls).toBe(2);
+    expect(screen.queryByText(/RUNTIME_STATE_VERSION_STALE/)).toBeNull();
+  });
+
+  it('says a manual check is still needed when reconcile returns NEEDS_REVIEW', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+        state: 'BLOCKED_UNVERIFIED',
+        recovery: { required: true, reason_code: 'OWNERSHIP_UNVERIFIED', safe_action: 'reconcile',
+          advice: '渲染器归属或外部提交结果未核对。' },
+      }) },
+      { method: 'POST', pattern: /runtime-orchestrator\/reconcile$/, respond: () => jsonResponse({
+        operation_id: 'op-2', action: 'reconcile', installation_id: 'inst-1',
+        status: 'SUCCEEDED', state_version: 1, failure_code: null,
+        result: { outcome: 'NEEDS_REVIEW' },
+      }, 202) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    await user.click(await screen.findByText('核对恢复'));
+    expect(await screen.findByText(/仍需人工核对/)).toBeTruthy();
+    expect(screen.queryByText(/NEEDS_REVIEW/)).toBeNull();
+  });
+
+  it('disables the action while a control operation is already running', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+        current: { owner_kind: null, task: null, operation_id: 'op-9',
+          operation_action: 'ensure', operation_status: 'PENDING' },
+      }) },
+    ]);
+    render(<EngineStatusEntry apiOnline />);
+    const button = (await screen.findByText('处理中…')).closest('button') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.queryByText('启动引擎')).toBeNull();
+    expect(stub.callsOf('POST', /runtime-orchestrator/)).toHaveLength(0);
+  });
+
+  it('keeps the read-only probe usable while a control operation is running', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+        state: 'DEGRADED',
+        current: { owner_kind: null, task: null, operation_id: 'op-9',
+          operation_action: 'stop', operation_status: 'RUNNING' },
+        recovery: { required: false, reason_code: 'TRANSPORT_DEGRADED', safe_action: 'probe',
+          advice: '进程仍在但 HTTP 暂时不可达。' },
+      }) },
+      { method: 'POST', pattern: /runtime-orchestrator\/probe$/, respond: () => jsonResponse({
+        operation_id: 'op-10', action: 'probe', installation_id: 'inst-1',
+        status: 'SUCCEEDED', state_version: 2, failure_code: null, result: { probed: true },
+      }, 202) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    const probe = (await screen.findByText('检查连接')).closest('button') as HTMLButtonElement;
+    expect(probe.disabled).toBe(false);
+    await user.click(probe);
+    expect(await screen.findByText('已重新检查连接，结果见上方状态。')).toBeTruthy();
+  });
+
+  it('explains a refusal in plain Chinese without the machine code', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({}) },
+      { method: 'POST', pattern: /runtime-orchestrator\/ensure$/, respond: () => jsonResponse({
+        operation_id: 'op-3', action: 'ensure', installation_id: 'inst-1',
+        status: 'REFUSED', state_version: 1,
+        failure_code: 'IMAGE_RENDERER_BUSY_TASK_IN_FLIGHT', result: {},
+      }, 202) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    await user.click(await screen.findByText('启动引擎'));
+    expect(await screen.findByText(/现在还不能执行这个操作：引擎正在制作/)).toBeTruthy();
+    expect(screen.queryByText(/IMAGE_RENDERER_BUSY_TASK_IN_FLIGHT/)).toBeNull();
+  });
+
+  it('reports the running configuration of the engine in the detail panel', async () => {
+    const cases: Array<[string, string]> = [
+      ['VERIFIED', '运行配置：工作流已固定'],
+      ['MISMATCH', '运行配置：工作流与配置不一致'],
+      ['NOT_RUNNING', '运行配置：未核对'],
+    ];
+    const user = userEvent.setup();
+    for (const [workflow, expected] of cases) {
+      stub?.restore();
+      stub = new StudioStub([
+        { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+          health: { worker: 'UP', comfy_http: 'UP', workflow },
+        }) },
+      ]);
+      const { unmount } = render(<EngineStatusEntry apiOnline />);
+      await user.click(await screen.findByText('引擎已停止'));
+      expect(await screen.findByText(expected)).toBeTruthy();
+      unmount();
+    }
+  });
 });

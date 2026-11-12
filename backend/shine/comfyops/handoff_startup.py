@@ -554,6 +554,37 @@ def _installation_binding(db, settings, binding, *, instance_id, job_id, cwd, po
     return dict(binding)
 
 
+def _make_way_for_h3(factory, settings, installation_id: str) -> None:
+    """Clear the image runtime off this physical installation before H3 starts.
+
+    H3 and the image renderer share one adopted install.  The Worker retires an
+    idle image renderer before it asks for the H3 renderer, but that check and
+    the H3 intent used to sit outside any common lock, so an image start that
+    landed in between produced two renderers on one port.  This runs *inside*
+    the installation guard, immediately before the H3 intent is written.
+
+    A renderer that is provably running and idle is stopped (the ordinary
+    evidence-checked path).  One whose ownership cannot be proven is refused by
+    name instead of being killed or ignored.
+    """
+    from shine.comfyops.image_renderer import retire_idle_image_renderer
+    from shine.runtime_orchestrator.identity import image_record_for_installation
+
+    with factory() as db:
+        record = image_record_for_installation(db, installation_id)
+    if record is None:
+        return
+    live = record.get("live_state")
+    if live == "RUNNING":
+        retire_idle_image_renderer(factory, settings, installation_id)
+        return
+    if live == "UNVERIFIED":
+        raise HTTPException(409, {
+            "code": "COMFY_INSTALLATION_IMAGE_RENDERER_UNVERIFIED",
+            "detail": "此安装上有一份无法证明归属的出图渲染器记录；请先核对或释放，再启动 H3。",
+        })
+
+
 def start_managed_renderer(
     factory,
     settings,
@@ -593,60 +624,68 @@ def start_managed_renderer(
             or type(min_vram_mb) is not int or min_vram_mb <= 0):
         raise HTTPException(409, "COMFY_STARTUP_ARGUMENTS_INVALID")
     key = startup_key(instance_id)
-    with factory.begin() as db:
-        db.execute(text("BEGIN IMMEDIATE"))
-        if db.get(AppSetting, key):
-            raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
-        lease, job = _bind_lease(db, lease_id, job_id)
-        if installation is not None:
-            _installation_binding(db, settings, installation, instance_id=instance_id, job_id=job_id,
-                                  cwd=cwd, port=port)
-        owner_birth = process_identity(os.getpid())
-        if not owner_birth:
-            raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
-        pins = {}
-        for source in pinned_files:
-            path = os.path.abspath(str(source))
-            try:
-                with open(path, "rb") as stream:
-                    pins[path] = hashlib.file_digest(stream, "sha256").hexdigest()
-            except OSError as exc:
-                raise HTTPException(409, "COMFY_STARTUP_SOURCE_INVALID") from exc
-        intent = {
-            "stage": "INTENT",
-            "instance_id": instance_id,
-            "startup_id": str(uuid4()),
-            "lease_id": lease_id,
-            "job_id": job_id,
-            "worker_id": worker_id,
-            "owner_pid": os.getpid(),
-            "owner_birth": owner_birth,
-            "argv_sha256": _digest(" ".join(str(arg) for arg in argv)),
-            "cwd": str(cwd),
-            "pins": pins,
-            "port": port,
-            "gpu_uuid": gpu_uuid,
-            "min_ram_mb": min_ram_mb,
-            "min_vram_mb": min_vram_mb,
-            # The control token itself never reaches SQLite; only its digest.
-            "handoff_token_sha256": _digest(handoff_token),
-            "adapter_sha256": adapter_sha256,
-            "recorded_at": utcnow().isoformat(),
-            "installation": installation,
-        }
-        _write_startup(db, instance_id, intent)
-        add_audit(db, "comfy-worker", "COMFY_STARTUP_INTENT", "job", job_id,
-                  {"instance_id": instance_id, "port": port}, project_id=job.project_id)
-        if installation is not None:
-            # The run identity and the installation it uses are one durable
-            # fact; neither may be established without the other.
-            add_audit(db, "comfy-worker", "COMFY_INSTALLATION_BOUND", "comfy_instance",
-                      installation["id"],
-                      {"instance_id": instance_id, "installation_id": installation["id"],
-                       "installation_sha256": installation["sha256"],
-                       "attempt_id": installation["attempt_id"]},
-                      project_id=job.project_id)
-        startup_id = intent["startup_id"]
+    # The lifecycle section is keyed by the *physical installation*, never by
+    # the per-attempt run identity: an H3 run and an image renderer have
+    # different run identities on the same install (audit R3).
+    physical_id = (installation or {}).get("id") or instance_id
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+
+    with renderer_lifecycle_guard(physical_id):
+        _make_way_for_h3(factory, settings, physical_id)
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            if db.get(AppSetting, key):
+                raise HTTPException(409, "COMFY_STARTUP_ALREADY_RECORDED")
+            lease, job = _bind_lease(db, lease_id, job_id)
+            if installation is not None:
+                _installation_binding(db, settings, installation, instance_id=instance_id, job_id=job_id,
+                                      cwd=cwd, port=port)
+            owner_birth = process_identity(os.getpid())
+            if not owner_birth:
+                raise HTTPException(409, "COMFY_STARTUP_IDENTITY_UNVERIFIED")
+            pins = {}
+            for source in pinned_files:
+                path = os.path.abspath(str(source))
+                try:
+                    with open(path, "rb") as stream:
+                        pins[path] = hashlib.file_digest(stream, "sha256").hexdigest()
+                except OSError as exc:
+                    raise HTTPException(409, "COMFY_STARTUP_SOURCE_INVALID") from exc
+            intent = {
+                "stage": "INTENT",
+                "instance_id": instance_id,
+                "startup_id": str(uuid4()),
+                "lease_id": lease_id,
+                "job_id": job_id,
+                "worker_id": worker_id,
+                "owner_pid": os.getpid(),
+                "owner_birth": owner_birth,
+                "argv_sha256": _digest(" ".join(str(arg) for arg in argv)),
+                "cwd": str(cwd),
+                "pins": pins,
+                "port": port,
+                "gpu_uuid": gpu_uuid,
+                "min_ram_mb": min_ram_mb,
+                "min_vram_mb": min_vram_mb,
+                # The control token itself never reaches SQLite; only its digest.
+                "handoff_token_sha256": _digest(handoff_token),
+                "adapter_sha256": adapter_sha256,
+                "recorded_at": utcnow().isoformat(),
+                "installation": installation,
+            }
+            _write_startup(db, instance_id, intent)
+            add_audit(db, "comfy-worker", "COMFY_STARTUP_INTENT", "job", job_id,
+                      {"instance_id": instance_id, "port": port}, project_id=job.project_id)
+            if installation is not None:
+                # The run identity and the installation it uses are one durable
+                # fact; neither may be established without the other.
+                add_audit(db, "comfy-worker", "COMFY_INSTALLATION_BOUND", "comfy_instance",
+                          installation["id"],
+                          {"instance_id": instance_id, "installation_id": installation["id"],
+                           "installation_sha256": installation["sha256"],
+                           "attempt_id": installation["attempt_id"]},
+                          project_id=job.project_id)
+            startup_id = intent["startup_id"]
 
     group = None
     try:

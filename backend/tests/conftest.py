@@ -6,6 +6,7 @@ import tempfile
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -586,7 +587,12 @@ def create_job(client: TestClient, project_id: str, shot_id: str, **kwargs) -> d
 
 def register_workflow_profile(client: TestClient, **overrides) -> dict:
     body = {
-        "name": overrides.pop("name", f"test-profile-{id(overrides)}"),
+        # A workflow profile name is unique per database.  `id(overrides)` was
+        # used here and can repeat once a dict is freed and a new one lands on
+        # the same address, which made a long test process fail with
+        # "a workflow profile with this name already exists" depending on
+        # allocation order.  A uuid is what the test actually means: a fresh name.
+        "name": overrides.pop("name", f"test-profile-{uuid4().hex[:12]}"),
         # Default is text-only: a test that binds references must ask for the
         # multi-reference profile explicitly, exactly like a real project must.
         "mode": "T2VA",

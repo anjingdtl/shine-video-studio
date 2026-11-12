@@ -199,6 +199,52 @@ def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str |
         })
 
 
+def _provably_gone(record: dict[str, Any]) -> bool:
+    """Whether every physical fact says the recorded renderer no longer runs.
+
+    Two shapes qualify: the recorded PID/birth is readable and no longer
+    matches while its named group is empty and the port is free, or a record
+    that reached RUNNING carries no process at all and its port is provably
+    free.  An unreadable identity, a busy port or a non-empty owned group is
+    never "gone", and a start still in flight (INTENT/LAUNCHED/LISTENING) is
+    never "gone" either — that is another executor's live section.
+    """
+    if not record:
+        return False
+    if managed_process_state(record) == "GONE":
+        return True
+    if record.get("stage") != "RUNNING" or record.get("process"):
+        return False
+    port = record.get("port")
+    if not isinstance(port, int) or port <= 0:
+        return False
+    try:
+        return not windows_port_listeners(port)
+    except (OSError, ValueError):
+        return False
+
+
+def _normalize_provably_dead_record(factory, settings, instance_id: str) -> bool:
+    """Clear a record whose renderer is proven gone, so a start is not blocked.
+
+    A renderer that died while its record said RUNNING left the shared instance
+    row in RUNNING_PENDING_HEALTH; every later start was refused with
+    IMAGE_RENDERER_INSTANCE_NOT_STOPPED and nothing could clear it (R8).  The
+    only thing cleared here is a *proven* death — uncertainty keeps refusing.
+    """
+    with factory() as db:
+        row = db.get(AppSetting, image_startup_key(instance_id))
+        record = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
+    if not record or record.get("stage") in ("STOPPED", None):
+        return False
+    if not _provably_gone(record):
+        return False
+    stop_image_renderer(
+        factory, settings, instance_id=instance_id, actor="controller:recorded-gone",
+    )
+    return True
+
+
 def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                          held_lease_id: str | None = None) -> dict[str, Any]:
     """Start the managed renderer that serves the image runtime.
@@ -227,6 +273,10 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
     from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
 
     with renderer_lifecycle_guard(instance_id):
+        # A record whose renderer is proven gone is history, not a lock: clear
+        # it before the conflict checks so a dead process never blocks the
+        # installation forever.  Uncertainty is untouched and still refuses.
+        _normalize_provably_dead_record(factory, settings, instance_id)
         with factory() as db:
             _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
         with factory.begin() as db:
@@ -253,6 +303,10 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                 "owner_pid": os.getpid(),
                 "owner_birth": process_identity(os.getpid()),
                 "recipe_sha256": recipe_sha256,
+                # Pinned with the intent so a later read can tell whether the
+                # renderer that is listening still runs the adapter the recipe
+                # names, without hashing the installation on every status poll.
+                "adapter_sha256": renderer.get("adapter_sha256"),
                 "recorded_at": utcnow().isoformat(),
                 "actor": actor,
                 "purpose": "image",
@@ -395,8 +449,18 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
     """Stop the managed image renderer and give the GPU memory back.
 
     The recorded identity and the named group must both agree; a process this
-    installation cannot prove it owns is reported and left alone.
+    installation cannot prove it owns is reported and left alone.  The whole
+    decision and the termination run inside the installation lifecycle guard:
+    a stop that races a start on the same physical install is how a "stopped"
+    renderer used to come back to life under a newer PID.
     """
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+
+    with renderer_lifecycle_guard(instance_id):
+        return _stop_image_renderer_locked(factory, settings, instance_id=instance_id, actor=actor)
+
+
+def _stop_image_renderer_locked(factory, settings, *, instance_id: str, actor: str) -> dict[str, Any]:
     key = image_startup_key(instance_id)
     with factory() as db:
         row = db.get(AppSetting, key)
@@ -434,6 +498,24 @@ def stop_image_renderer(factory, settings, *, instance_id: str, actor: str) -> d
         })
     _mark_stopped(factory, instance_id, record)
     return {"status": "STOPPED", "instance_id": instance_id, "outcome": "stopped", "evidence": evidence}
+
+
+def retire_idle_image_renderer(factory, settings, installation_id: str, *,
+                               actor: str = "worker:h3-coordination") -> dict[str, Any] | None:
+    """An idle image renderer yields its GPU to an admitted H3 lease (R4).
+
+    Shared by the Worker's H3 startup and by the H3 startup section itself, so
+    the "make way" step and the "start H3" decision cannot be separated by a
+    competing image start.  Only a *proven running* renderer is stopped; a
+    stale or unverifiable record is left for reconciliation, never killed.
+    """
+    from shine.runtime_orchestrator.identity import image_record_for_installation
+
+    with factory() as db:
+        record = image_record_for_installation(db, installation_id)
+    if not record or record.get("live_state") != "RUNNING":
+        return None
+    return stop_image_renderer(factory, settings, instance_id=installation_id, actor=actor)
 
 
 def _refuse_stop_under_in_flight_work(factory, instance_id: str) -> None:

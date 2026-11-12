@@ -33,6 +33,11 @@ class ControlBody(BaseModel):
     installation_id: str = Field(min_length=1, max_length=96)
     idempotency_key: str = Field(min_length=1, max_length=160)
     reason: str = Field(default="", max_length=200)
+    # The engine state the page was showing when the user clicked.  Omitting
+    # it keeps the legacy clients working; sending it turns the request into a
+    # real compare-and-set, so a stale tab cannot stop an engine that a newer
+    # action just started.
+    expected_state_version: int | None = Field(default=None, ge=0)
 
 
 def _serialize(operation) -> dict[str, Any]:
@@ -57,6 +62,7 @@ def _submit_and_wait(request: Request, actor: str, body: ControlBody, *, action:
         idempotency_key=body.idempotency_key,
         reason=body.reason,
         wait_seconds=wait_seconds,
+        expected_state_version=body.expected_state_version,
     )
 
 
@@ -69,6 +75,7 @@ def submit_control_intent(
     idempotency_key: str,
     reason: str = "",
     wait_seconds: float = 60.0,
+    expected_state_version: int | None = None,
 ):
     """Record a control intent and wait (bounded) for the Worker to execute it.
 
@@ -84,6 +91,7 @@ def submit_control_intent(
             installation_id=installation_id,
             idempotency_key=idempotency_key,
             request={"actor": actor, "params": {"reason": reason}},
+            expected_state_version=expected_state_version,
         )
         operation_id = operation.id
         # Without a live Worker an intent can never leave PENDING; report it

@@ -524,7 +524,7 @@ def release_managed_processes(request: Request, actor: Operator, db: DBSession):
     (a half-dead stack is exactly when this button matters) the API executes
     the same evidence-checked release itself as the executor of last resort.
     """
-    from shine.comfyops.renderer_release import release_managed_processes as release
+    from shine.comfyops.renderer_release import release_managed_processes_guarded as release
     from shine.runtime_orchestrator.contracts import orchestrator_enabled
 
     if orchestrator_enabled() and _any_worker_online(db):
@@ -554,8 +554,11 @@ def release_managed_processes(request: Request, actor: Operator, db: DBSession):
             "detail": "释放意图已受理，但 Worker 尚未执行完成。",
             "operation_id": operation.id,
         })
-    report = release(db, actor=actor, reason="operator_release")
-    db.commit()
+    # End the liveness read before the guarded release opens its own write
+    # transaction: the release takes every involved installation's lifecycle
+    # mutex *before* it writes, so it must not inherit a transaction here.
+    db.rollback()
+    report = release(request.app.state.session_factory, actor=actor, reason="operator_release")
     return report
 
 

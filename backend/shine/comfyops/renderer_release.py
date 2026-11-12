@@ -403,6 +403,46 @@ def _release_lease(db, lease_id: str | None) -> str | None:
     return "released"
 
 
+def installation_ids_of_managed_processes(db) -> list[str]:
+    """Every physical installation a managed process record belongs to.
+
+    Sorted, so a global release can take several lifecycle guards without any
+    chance of two executors acquiring them in opposite orders.
+    """
+    found: set[str] = set()
+    for record in managed_processes(db):
+        bound = (record.get("installation") or {}).get("id")
+        if isinstance(bound, str) and bound:
+            found.add(bound)
+        if record.get("purpose") == "image":
+            instance = record.get("instance_id")
+            if isinstance(instance, str) and instance:
+                found.add(instance)
+    return sorted(found)
+
+
+def release_managed_processes_guarded(factory, *, actor: str, reason: str) -> dict[str, Any]:
+    """Release every managed process while owning each installation's section.
+
+    The plain ``release_managed_processes`` receives an already-open write
+    transaction.  Taking the lifecycle mutex there would invert the lock order
+    (mutex inside a transaction); this wrapper reads the affected installations
+    first, takes their guards in sorted order, and only then opens the one
+    transaction the release needs.
+    """
+    from contextlib import ExitStack
+
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+
+    with factory() as db:
+        installation_ids = installation_ids_of_managed_processes(db)
+    with ExitStack() as stack:
+        for installation_id in installation_ids:
+            stack.enter_context(renderer_lifecycle_guard(installation_id))
+        with factory.begin() as db:
+            return release_managed_processes(db, actor=actor, reason=reason)
+
+
 def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
     """Stop every managed process this installation owns and free the memory.
 
