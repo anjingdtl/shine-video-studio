@@ -235,9 +235,16 @@ class OpenAICompatibleProvider:
                                                          "Accept": "text/event-stream"},
                                    json=body) as response:
                     if response.status_code >= 400:
-                        # Nothing was generated: leave the fallback to the caller.
+                        # A shape refusal (400/422) means the provider does not
+                        # accept the streaming shape: one plain fallback cannot
+                        # buy a second answer.  Any other refusal (429/5xx) is
+                        # definitive about the request itself: classify it
+                        # instead of posting again through the fallback.
+                        if response.status_code in (400, 422):
+                            response.read()
+                            return None
                         response.read()
-                        return None
+                        raise self._classify(response)
                     for line in response.iter_lines():
                         if time.perf_counter() - started > policy.total_s:
                             break
@@ -345,7 +352,21 @@ class OpenAICompatibleProvider:
             payload["response_format"] = {"type": "json_object"}
         url = _chat_url(self.config.base_url)
         if self.config.streaming:
-            streamed = self._complete_stream(url, payload, json_mode=json_mode)
+            budget = max(0, self.config.rate_limit_retry_attempts)
+            streamed = None
+            for attempt in range(budget + 1):
+                try:
+                    streamed = self._complete_stream(url, payload, json_mode=json_mode)
+                    break
+                except LLMRateLimit:
+                    # A 429 is a refusal with no answer: waiting and asking
+                    # again cannot buy a second copy of one answer.
+                    if attempt >= budget:
+                        raise
+                    pause = RATE_LIMIT_BACKOFF_SECONDS[
+                        min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+                    note_rate_limit(self.config.base_url, pause)
+                    time.sleep(pause)
             if streamed is not None:
                 return streamed
             # No event arrived: the provider refused the streaming shape before

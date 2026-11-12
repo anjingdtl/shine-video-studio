@@ -15,6 +15,7 @@ import { RealProductionWizard } from './components/RealProductionWizard';
 import AssetPanel from './components/AssetPanel';
 import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
 import { FourStagePanel } from './components/FourStagePanel';
+import { DirectorStoryboardStage } from './components/StoryboardDraftSection';
 import { ScriptEntryPanel } from './components/ScriptEntryPanel';
 import { SchemaNotice } from './components/SchemaNotice';
 import StylePanel from './components/StylePanel';
@@ -335,9 +336,9 @@ function App() {
       ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
       : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出；艺术验收仍需你确认。' };
   /** 制作页只承载③镜头拆解与④素材准备；排产与进度归⑥视频生产页。
-   *  自动聚焦：没镜头→分镜；有镜头→备料。 */
+   *  自动聚焦跟随服务端旅程：③没完成就停在③，历史镜头再多也不把用户送进备料。 */
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
-  const autoStage: ProduceStageFocus = !project || shots.length === 0 ? 'storyboard' : 'assets';
+  const autoStage: ProduceStageFocus = !project || !stageDone.storyboard ? 'storyboard' : 'assets';
   const focusStage = stageOverride ?? autoStage;
   // The person's own stage choice is theirs: it survives a page switch and the
   // auto advance, and only a new work replaces it.
@@ -955,6 +956,8 @@ function App() {
                     <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
                     <button type="button" className="btn-text" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
                   </div>}
+                  <DirectorStoryboardStage projectId={projectId} onMessage={report}
+                    onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
                   </StageRailProvider>
                 </details>
                 <details className="stage-dock produce-focus-section" id="assets-dock" open={focusStage === 'assets'}
@@ -980,6 +983,7 @@ function App() {
                     shots={shots}
                     onMessage={report}
                     frozenStyle={currentStyle}
+                    storyboardReady={!!stageDone.storyboard}
                     onPromoted={() => { refreshAll().catch(() => undefined); }}
                   />
                   <AssetPanel
@@ -1296,6 +1300,9 @@ function App() {
                   backendDisconnected={systemChecked && !apiOnline}
                   visible={view === 'production'}
                   onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
+
+                <DirectorStoryboardStage projectId={projectId} onMessage={report}
+                  onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
 
                 <TerminologyPanel
                   key={`terminology-${projectId}`}

@@ -17,7 +17,7 @@ it('长剧本在提交前引导到分段制作，不发送整篇', async () => {
   render(<StoryboardPanel projectId="proj-1" onRefresh={vi.fn()} onNavigate={navigate} />);
   expect(await screen.findByText('长剧本请分段制作')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '生成 AI 分镜方案' })).toBeDisabled();
-  await user.click(screen.getByRole('button', { name: '去选择生产段落' }));
+  await user.click(screen.getByRole('button', { name: '去按场拆镜' }));
   expect(navigate).toHaveBeenCalledWith('long-story');
   expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(0);
   stub.restore();

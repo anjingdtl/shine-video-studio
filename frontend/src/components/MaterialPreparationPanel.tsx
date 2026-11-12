@@ -177,7 +177,7 @@ function sceneStatusLabel(scene: SceneStatus): string {
   }
 }
 
-function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [] }: {
+function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [], storyboardReady = true }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onPromoted?: () => void;
@@ -186,6 +186,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   /** Bumped when a script was imported or generated, so the list reloads. */
   documentsVersion?: number;
   shots?: Shot[];
+  /** ③ 镜头拆解是否完成：素材按定稿分镜准备，分镜没定稿不先备料。 */
+  storyboardReady?: boolean;
 }) {
   const [state, setState] = useState<MaterialState | null>(null);
   const [documents, setDocuments] = useState<{ id: string; filename: string; sha256: string }[]>([]);
@@ -810,8 +812,12 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         : (analysing || scenesRunning) ? '逐场分析进行中，等当前请求落定后再继续' : undefined,
       icon: <Sparkles size={14} /> };
   }
+  if (!storyboardReady && materialPrimary) {
+    materialPrimary = { ...materialPrimary, disabled: true,
+      disabledReason: '先完成③镜头拆解：分镜定稿后才按清单备料' };
+  }
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
-    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts]);
+    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts, storyboardReady]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -887,6 +893,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       </div>
 
       {operationReport && <p role="status">{operationReport}</p>}
+      {!storyboardReady && (
+        <div className="blocker-item is-action" role="alert">
+          <AlertTriangle size={14} className="required-icon" />
+          <div className="blocker-reason">
+            <b>③ 镜头拆解还没有完成：素材按定稿分镜准备</b>
+            <small>先到③逐场生成并应用分镜、确认分集；分镜定稿前本页的清单与出图按钮暂停。</small>
+          </div>
+          <button type="button" className="btn-primary" onClick={() => {
+            const dock = document.getElementById('storyboard-dock') as HTMLDetailsElement | null;
+            if (dock) dock.open = true;
+            document.getElementById('four-stage-storyboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }}>去③镜头拆解</button>
+        </div>
+      )}
       {documentId && <ScriptTextConsent key={`consent:${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}
       {problem && (
         <div className="blocker-item is-action" role="alert">
@@ -950,7 +970,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          {hasContracts && !railPresent && <button type="button" className="btn-primary" disabled={busy} onClick={deriveFromAnalysis}>
+          {hasContracts && !railPresent && <button type="button" className="btn-primary" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
             {busy ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 复用分镜分析生成素材清单
           </button>}
           {hasContracts && <p className="material-hint">分集与分镜已由四阶段链路分析过；这里用一次全项目统揽生成清单：同一人物（含别名）只定义一次，衣服/外貌变化按场记为变体，场景与道具只取关键项。依据不变时复用统揽目录，不重复调用模型。</p>}
@@ -961,7 +981,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               onClick={() => resendUnknownScene({ scene_key: '全项目统揽', task_id: catalogBlock.task_id, state_version: catalogBlock.state_version } as SceneStatus)}>明确重发统揽任务</button>
           </div>}
           {!railPresent && !hasContracts && <button type="button" className="btn-primary"
-            disabled={busy || !documentId || analysing || scenesRunning} onClick={analyseScript}>
+            disabled={busy || !documentId || analysing || scenesRunning || !storyboardReady} onClick={analyseScript}>
             {busy || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 分析剧本
           </button>}
           {!hasContracts && (analysing || scenesRunning) && <p className="material-hint" role="status">
@@ -1145,10 +1165,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </fieldset>
           {stepReport.confirm && <p className="material-step-report">{stepReport.confirm}</p>}
           {stepReport.generate && <p className="material-step-report">{stepReport.generate}</p>}
-          {hasContracts && <button type="button" className="btn-text" disabled={busy} onClick={deriveFromAnalysis}>
+          {hasContracts && <button type="button" className="btn-text" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
             复用分镜分析重新生成清单
           </button>}
-          {!railPresent && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
+          {!railPresent && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0 || !storyboardReady} onClick={confirmAndGenerate}>
             {confirmLabel}
           </button>}
         </div>

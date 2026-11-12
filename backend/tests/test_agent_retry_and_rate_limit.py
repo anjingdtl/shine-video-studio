@@ -161,7 +161,7 @@ def test_a_refused_contract_is_retried_with_a_named_correction(api):
                 "beats": [{
                     "id": "B1", "description": "The woman waits beside a sealed letter.",
                     "characters": ["Lin"],
-                    "dialogue": [{"speaker_id": "Lin", "text": "我来了。", "start_s": 1, "end_s": 2}],
+                    "dialogue": [{"speaker_id": "Narrator", "text": "我来了。", "start_s": 1, "end_s": 2}],
                 }],
             }
         return _responder(registry)(messages, schema)
@@ -171,7 +171,7 @@ def test_a_refused_contract_is_retried_with_a_named_correction(api):
         "text": BRIEF, "allow_remote_text": True, "locked_story_facts": FACTS})
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "PROPOSED", response.json()
-    assert any("not in the user's script" in system for system in calls)
+    assert any("someone the beat does not contain" in system for system in calls)
 
 
 def test_a_schema_failure_is_retried_with_the_failing_field_named(api):

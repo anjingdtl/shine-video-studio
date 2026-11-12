@@ -94,9 +94,10 @@ class ProviderConfig:
     streaming: bool = False
     """Whether this request may use the streaming transport.
 
-    Off unless the operator switches ``SHINE_LLM_STREAMING`` on: a provider that
-    was never probed must not receive a streaming shape just because the adapter
-    supports SSE.
+    The agent lane sets it from ``streaming_enabled`` (on by default for
+    SSE-capable adapters): long idle non-streaming connections get cut by
+    proxies/gateways.  A stream that never emits an event falls back to one
+    plain request, so an unprobed provider cannot buy a second answer.
     """
 
     rate_limit_retry_attempts: int = 0

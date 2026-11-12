@@ -1427,7 +1427,13 @@ def generate_storyboard(
                 "field, including all cuts: no Chinese names, titles, stage directions or lyrics "
                 "outside dialogue blocks; refer to people by English role labels."
             )
-        return CONTRACT_REPAIR_NOTES.get(reason or "")
+        note = CONTRACT_REPAIR_NOTES.get(reason or "")
+        if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):
+            note += (
+                f" The refused line was: «{failure['offending_line']}». It does not appear in the "
+                "script text; either replace it with the exact source line or remove it."
+            )
+        return note
 
     def _rejection(role: str, exc: Exception) -> dict:
         rejection = {"role": role, "code": getattr(exc, "code", None) or str(exc) or "AGENT_CALL_FAILED"}
@@ -1455,7 +1461,8 @@ def generate_storyboard(
             # Which field of the contract the answer missed, named by the
             # record itself.  A JSON pointer and a validator name are not
             # provider text, so a retry may be told exactly what to repair.
-            for key in ("provider_schema_path", "provider_schema_validator", "visual_field"):
+            for key in ("provider_schema_path", "provider_schema_validator", "visual_field",
+                        "offending_line"):
                 value = task.trace.get(key)
                 if isinstance(value, str) and value:
                     rejection[key] = value

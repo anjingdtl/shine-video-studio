@@ -26,13 +26,18 @@ TOTAL_TIMEOUT_MULTIPLE = 6.0
 
 
 def streaming_enabled(config: ProviderConfig) -> bool:
-    """Whether streaming is explicitly switched on for this process.
+    """Whether the streaming transport is used for this provider.
 
-    Off by default: a provider that was never probed must not be sent a
-    streaming request just because the adapter happens to support SSE.
+    On by default for SSE-capable adapters: a long non-streaming completion
+    sits idle for minutes while the model thinks, and proxies/gateways cut
+    such connections (LLM_CONNECTION with an unknown outcome).  SSE keeps the
+    connection alive with events and the separated deadlines below bound the
+    thinking time.  A provider that never emits an event falls back to exactly
+    one plain request, so an unprobed provider cannot buy a second answer.
+    ``SHINE_LLM_STREAMING=off`` restores the old transport.
     """
-    mode = os.getenv("SHINE_LLM_STREAMING", "off").strip().casefold()
-    if mode not in {"on", "1", "true", "yes"}:
+    mode = os.getenv("SHINE_LLM_STREAMING", "on").strip().casefold()
+    if mode in {"off", "0", "false", "no"}:
         return False
     return config.kind in {"openai_compatible", "ollama"}
 

@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from shine.comfy.client import (
     ComfyPromptRejected,
@@ -66,6 +66,7 @@ from shine.materialprep.states import (
     ITEM_FAILED,
     ITEM_NEEDS_REVIEW,
     ITEM_QUEUED,
+    ITEM_RUNNING,
     ITEM_SUBMIT_INTENT,
     ITEM_TERMINAL,
     ITEM_WAITING_GPU,
@@ -76,7 +77,7 @@ from shine.materialprep.states import (
     OUTCOME_UNKNOWN,
     RECONCILE_REQUIRED,
 )
-from shine.models import Project, utcnow
+from shine.models import Project, WorkerInstance, utcnow
 from shine.security import require_loopback_url
 from shine.services import add_audit
 
@@ -864,6 +865,46 @@ def _close_attempt(factory, attempt_id: str, *, status: str, outcome: str | None
             attempt.reconciliation_state = RECONCILE_REQUIRED
 
 
+def recover_lost_image_items(factory) -> int:
+    """Hand a render whose worker died after /prompt but before harvest to the person.
+
+    The attempt was acknowledged by a renderer that may since have exited; the
+    bytes were never harvested, so the outcome is unknown.  Record it as unknown
+    (never resubmit) and move the item to NEEDS_REVIEW, where the explicit
+    regenerate action is the only way to ask again.  A live owner's render is
+    never touched.
+    """
+    recovered = 0
+    with factory.begin() as db:
+        stale_after = utcnow() - STALE_ITEM_LEASE
+        items = db.scalars(select(MaterialItem).where(
+            MaterialItem.status == ITEM_RUNNING,
+            or_(MaterialItem.heartbeat_at.is_(None), MaterialItem.heartbeat_at < stale_after),
+        )).all()
+        for item in items:
+            owner = db.get(WorkerInstance, item.worker_id) if item.worker_id else None
+            if owner is not None and owner.last_heartbeat_at >= stale_after:
+                continue
+            attempt = db.scalars(
+                select(MaterialImageAttempt)
+                .where(MaterialImageAttempt.item_id == item.id)
+                .order_by(MaterialImageAttempt.attempt_no.desc())
+            ).first()
+            if attempt is None or attempt.status != ATTEMPT_SUBMITTED or attempt.candidate_id:
+                continue
+            attempt.status = ATTEMPT_UNKNOWN
+            attempt.external_outcome = OUTCOME_UNKNOWN
+            attempt.reconciliation_state = "worker_lost_before_harvest"
+            item.status = ITEM_NEEDS_REVIEW
+            item.error_code = "IMAGE_WORKER_LOST"
+            item.state_version += 1
+            recovered += 1
+            add_audit(db, "comfy-worker", "MATERIAL_IMAGE_WORKER_LOST", "material_item", item.id,
+                      {"attempt_id": attempt.id, "prompt_id": attempt.prompt_id,
+                       "resubmitted": False}, project_id=item.project_id)
+    return recovered
+
+
 def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1) -> int:
     """Claim and execute image items, one lease at a time.
 
@@ -879,6 +920,9 @@ def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1
     # A brief task row left RUNNING by a lost worker still counts as a live
     # task for its provider profile, which locks the text model configuration.
     reconcile_orphan_brief_tasks(factory)
+    # A render acknowledged by a renderer whose worker then died has no live
+    # owner to harvest it; record the unknown outcome instead of queueing forever.
+    recover_lost_image_items(factory)
 
     processed = 0
     for _ in range(max(1, limit)):

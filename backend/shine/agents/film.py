@@ -412,6 +412,15 @@ def _visual_language_error(field: str) -> ValueError:
     return error
 
 
+def _normalised_dialogue(text: str) -> str:
+    """Typography-insensitive form of a line: whitespace and ellipsis/dash
+    variants carry no content, so a faithful copy must not fail on them."""
+    text = re.sub(r"\s+", "", text or "")
+    text = text.replace("……", "…").replace("...", "…")
+    text = text.replace("——", "—").replace("--", "—")
+    return text
+
+
 def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[AgentArtifact], context: dict):
     if isinstance(proposal, StyleInputAssessment):
         def text_values(value):
@@ -455,8 +464,20 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
             for position, line in enumerate(lines):
                 if line.text in body.brief:
                     continue
-                if not ratio:
-                    raise ValueError("DIALOGUE_NOT_IN_USER_SCRIPT")
+                if _normalised_dialogue(line.text) in _normalised_dialogue(body.brief):
+                    # Faithful copies that only differ in whitespace or in
+                    # ellipsis/dash variants are still the user's line; the
+                    # no-invention contract is about content, not typography.
+                    continue
+                if ratio == 0:
+                    # The user explicitly asked for no dialogue: any line the
+                    # script does not contain is a refusal.
+                    error = ValueError("DIALOGUE_NOT_IN_USER_SCRIPT")
+                    error.details = {"offending_line": line.text, "speaker": line.speaker_id}
+                    raise error
+                # With no ratio stated (or a positive one) an adapted line is
+                # allowed, but its speaker must belong to the beat and the
+                # source, and its timecodes must stay inside the beat window.
                 speakers = split_character_names(line.speaker_id)
                 if not speakers or any(name not in beat.characters or name not in body.brief for name in speakers):
                     raise ValueError("ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT")
@@ -1136,6 +1157,12 @@ class FilmAgentDispatcher:
                           **({"visual_field": exc.details["visual_field"]}
                              if isinstance(getattr(exc, "details", None), dict)
                              and isinstance(exc.details.get("visual_field"), str) else {}),
+                          # The single refused line is the repair target: without
+                          # it a retry cannot know which line to copy or drop.
+                          **({"offending_line": exc.details["offending_line"][:200],
+                              "offending_speaker": exc.details.get("speaker")}
+                             if isinstance(getattr(exc, "details", None), dict)
+                             and isinstance(exc.details.get("offending_line"), str) else {}),
                           # Why the envelope failed is diagnosable without
                           # storing the answer: a length stop means the budget
                           # truncated it, an empty path means malformed JSON.

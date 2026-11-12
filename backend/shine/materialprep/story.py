@@ -829,32 +829,70 @@ def _shot_state(db, project_id, shot_id, position):
     return row
 
 
-def section_storyboard_shot_ids(db, project_id, production_section_id):
-    """The shots the newest applied storyboard of one section really created.
+def _section_apply_evidence(db, project_id, production_section_id):
+    """The applied shots of one section, from whichever ledger produced them.
 
-    Read from the section run's own results and the apply receipts the
-    storyboard apply wrote, so an episode plan materialises to exactly the
-    shots the person applied for that section — never to shots that merely
-    exist in the project.  Returns ``{"shot_ids": [...], "missing": [...]}``.
+    Two entries write storyboards: the section runner (story_section_run) and
+    the four-stage per-volume draft ledger.  Both end in the same apply
+    receipts, so the newer evidence wins; a section neither entry applied
+    stays missing instead of borrowing shots that merely exist in the project.
     """
     from shine.models import AppSetting
 
     run = _latest_section_run(db, project_id, production_section_id)
-    if run is None:
-        return {"shot_ids": [], "missing": [{"reason": "SECTION_RUN_MISSING"}]}
-    units = [u for u in run.trace.get("units", []) if u.get("production_section_id") == production_section_id]
-    results = {(r.get("unit") or {}).get("start_offset"): r for r in run.trace.get("results", [])}
-    shot_ids: list[str] = []
-    missing: list[dict] = []
-    for unit in units:
-        result = results.get(unit.get("start_offset"))
-        camera = ((result or {}).get("storyboard") or {}).get("steps", {}).get("cinematographer") or {}
-        receipt = db.get(AppSetting, f"film-apply:{camera.get('artifact_id')}") if camera.get("artifact_id") else None
-        if receipt is None:
-            missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
+    run_shots: list[str] = []
+    run_missing: list[dict] = []
+    run_at = run.created_at.isoformat() if run is not None else ""
+    if run is not None:
+        units = [u for u in run.trace.get("units", []) if u.get("production_section_id") == production_section_id]
+        results = {(r.get("unit") or {}).get("start_offset"): r for r in run.trace.get("results", [])}
+        for unit in units:
+            result = results.get(unit.get("start_offset"))
+            camera = ((result or {}).get("storyboard") or {}).get("steps", {}).get("cinematographer") or {}
+            camera_id = camera.get("artifact_id")
+            receipt = db.get(AppSetting, f"film-apply:{camera_id}") if camera_id else None
+            if receipt is None:
+                run_missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
+                continue
+            run_shots.extend(str(shot_id) for shot_id in receipt.value.get("shot_ids", []))
+    four_units: list[dict] = []
+    for ledger in db.scalars(select(AppSetting).where(
+            AppSetting.key.like(f"four-stage-storyboard-units:{project_id}:%"))).all():
+        for unit in ((ledger.value or {}).get("units") or {}).values():
+            if unit.get("section_id") == production_section_id:
+                four_units.append(unit)
+    four_units.sort(key=lambda u: (u.get("order") is None, u.get("order") or 0, u.get("chunk_index") or 1))
+    four_shots: list[str] = []
+    four_missing: list[dict] = []
+    four_at = ""
+    for unit in four_units:
+        camera_id = unit.get("camera_artifact_id")
+        receipt = db.get(AppSetting, f"film-apply:{camera_id}") if camera_id else None
+        if receipt is None or not (receipt.value or {}).get("shot_ids"):
+            four_missing.append({"unit_id": unit.get("unit_id"), "reason": "STORYBOARD_NOT_APPLIED"})
             continue
-        shot_ids.extend(str(shot_id) for shot_id in receipt.value.get("shot_ids", []))
-    return {"shot_ids": shot_ids, "missing": missing}
+        four_shots.extend(str(shot_id) for shot_id in (receipt.value or {}).get("shot_ids", []))
+        four_at = max(four_at, unit.get("updated_at") or "")
+    if four_shots and (not run_shots or four_at > run_at):
+        return {"shot_ids": four_shots, "missing": four_missing, "run": run}
+    if run is not None:
+        return {"shot_ids": run_shots, "missing": run_missing, "run": run}
+    if four_units:
+        return {"shot_ids": [], "missing": four_missing, "run": run}
+    return {"shot_ids": [], "missing": [{"reason": "SECTION_RUN_MISSING"}], "run": run}
+
+
+def section_storyboard_shot_ids(db, project_id, production_section_id):
+    """The shots the newest applied storyboard of one section really created.
+
+    Read from the section run's own results or the four-stage unit ledger,
+    plus the apply receipts the storyboard apply wrote, so an episode plan
+    materialises to exactly the shots the person applied for that section —
+    never to shots that merely exist in the project.
+    Returns ``{"shot_ids": [...], "missing": [...]}``.
+    """
+    evidence = _section_apply_evidence(db, project_id, production_section_id)
+    return {"shot_ids": evidence["shot_ids"], "missing": evidence["missing"]}
 
 
 def compute_section_continuity(db, project_id, production_section_id):
@@ -866,24 +904,14 @@ def compute_section_continuity(db, project_id, production_section_id):
     the same production always hashes to the same continuity identity and any
     later retake changes the hash.
     """
-    run = _latest_section_run(db, project_id, production_section_id)
-    if run is None:
+    evidence = _section_apply_evidence(db, project_id, production_section_id)
+    if evidence["run"] is None and not evidence["shot_ids"] and all(
+            item.get("reason") == "SECTION_RUN_MISSING" for item in evidence["missing"]):
         return {"schema_version": "1.0", "production_section_id": production_section_id,
                 "status": "NOT_PRODUCED", "shots": [], "missing": ["SECTION_RUN_MISSING"]}
-    units = [u for u in run.trace.get("units", []) if u.get("production_section_id") == production_section_id]
-    results = {(r.get("unit") or {}).get("start_offset"): r for r in run.trace.get("results", [])}
-    shots, missing = [], []
-    for unit in units:
-        result = results.get(unit.get("start_offset"))
-        camera = ((result or {}).get("storyboard") or {}).get("steps", {}).get("cinematographer") or {}
-        from shine.models import AppSetting
-
-        receipt = db.get(AppSetting, f"film-apply:{camera.get('artifact_id')}") if camera.get("artifact_id") else None
-        if receipt is None:
-            missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
-            continue
-        for position, shot_id in enumerate(receipt.value.get("shot_ids", [])):
-            shots.append(_shot_state(db, project_id, shot_id, position))
+    shots, missing = [], list(evidence["missing"])
+    for position, shot_id in enumerate(evidence["shot_ids"]):
+        shots.append(_shot_state(db, project_id, shot_id, position))
     missing.extend({"shot_id": s["shot_id"], "reason": s["state"]} for s in shots if s["state"] != "ACCEPTED")
     verified = bool(shots) and not missing
     end_state = None
@@ -924,6 +952,10 @@ def freeze_section_continuity(db, project_id, production_section_id):
     if rows and max(rows, key=lambda r: r.created_at).sha256 == current:
         return max(rows, key=lambda r: r.created_at), payload
     run = _latest_section_run(db, project_id, production_section_id)
+    if run is None:
+        # The frozen carry-over artifact belongs to the section-run entry; the
+        # four-stage ledger has no parent task to name, so it stays a live view.
+        return None, payload
     artifact = AgentArtifact(project_id=project_id, kind=CONTINUITY_KIND, schema_version="1.0",
         payload_json=payload, sha256=current, producer_role="continuity_derivation",
         source_task_id=run.id, input_revision_ids=[max(rows, key=lambda r: r.created_at).id] if rows else [])

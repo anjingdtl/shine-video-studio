@@ -138,7 +138,12 @@ def shot_script_evidence(db: Session, project_id: str,
             AgentTaskRecord.role_id == SECTION_RUN_ROLE,
         )
     ).all()
-    if not runs:
+    ledgers = db.scalars(
+        select(AppSetting).where(
+            AppSetting.key.like(f"four-stage-storyboard-units:{project_id}:%"),
+        )
+    ).all()
+    if not runs and not ledgers:
         result["unknown"] = sorted(wanted)
         return result
 
@@ -156,6 +161,22 @@ def shot_script_evidence(db: Session, project_id: str,
 
     claimed: dict[str, str] = {}
     ambiguous: set[str] = set()
+
+    def claim(outline_id: str, camera_id: str | None) -> None:
+        if not camera_id:
+            return
+        receipt = db.get(AppSetting, f"film-apply:{camera_id}")
+        if receipt is None:
+            return
+        for shot_id in (receipt.value or {}).get("shot_ids") or []:
+            shot_id = str(shot_id)
+            if shot_id not in wanted:
+                continue
+            previous = claimed.get(shot_id)
+            if previous is not None and previous != outline_id:
+                ambiguous.add(shot_id)
+            claimed[shot_id] = outline_id
+
     for run in runs:
         trace = run.trace or {}
         explicit = (trace.get("outline_artifact_id")
@@ -176,20 +197,15 @@ def shot_script_evidence(db: Session, project_id: str,
         for result_row in (trace.get("results") or []):
             camera = (((result_row or {}).get("storyboard") or {})
                       .get("steps", {}).get("cinematographer") or {})
-            artifact_id = camera.get("artifact_id")
-            if not artifact_id:
+            claim(outline_id, camera.get("artifact_id"))
+    # The four-stage draft ledger is the same kind of evidence: a unit names
+    # its script section, and the apply receipt names the shots it produced.
+    for ledger in ledgers:
+        for unit in ((ledger.value or {}).get("units") or {}).values():
+            outline_ids = by_section.get(str(unit.get("section_id") or ""), set())
+            if len(outline_ids) != 1:
                 continue
-            receipt = db.get(AppSetting, f"film-apply:{artifact_id}")
-            if receipt is None:
-                continue
-            for shot_id in (receipt.value or {}).get("shot_ids") or []:
-                shot_id = str(shot_id)
-                if shot_id not in wanted:
-                    continue
-                previous = claimed.get(shot_id)
-                if previous is not None and previous != outline_id:
-                    ambiguous.add(shot_id)
-                claimed[shot_id] = outline_id
+            claim(next(iter(outline_ids)), unit.get("camera_artifact_id"))
 
     for shot_id in sorted(wanted):
         if shot_id in ambiguous:

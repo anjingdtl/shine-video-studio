@@ -377,6 +377,16 @@ def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bo
     from shine.comfyops.scheduler import ResourceScheduler
 
     record = startup_record_for_lease(db, lease.id)
+    if record is None and (lease.owner or "").startswith("image:"):
+        # Image journals written before lease linking carry no lease_id.  The
+        # newest image startup record names the renderer this lease protects;
+        # the same three-fact death proof below applies to it.
+        row = db.scalars(
+            select(AppSetting)
+            .where(AppSetting.key.like(STARTUP_PREFIX + "image:%"))
+            .order_by(literal_column("app_settings.rowid").desc())
+        ).first()
+        record = dict(row.value) if row is not None and isinstance(row.value, dict) else None
     if record is None:
         # No journal was ever written for this lease: fall back to the
         # conservative orphan proof instead of deadlocking the GPU ledger.

@@ -511,10 +511,19 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
 
   const railPresent = useRailPresent();
   // ③ 镜头拆解的唯一主操作随状态机切换；禁用时用 guide 给出「去补齐」出口。
+  // 长剧本的出口是同页的按场拆镜工作区（四阶段），不再指向已被分集归并
+  // 隐藏的段落勾选入口。
+  const goToSceneStoryboard = () => {
+    const dock = document.getElementById('storyboard-dock') as HTMLDetailsElement | null;
+    if (dock) dock.open = true;
+    const target = document.getElementById('four-stage-storyboard');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else if (onNavigate) onNavigate('long-story');
+  };
   const generateGuide = rulepackId === null && onNavigate
     ? { label: '去启用官方规则包', go: () => onNavigate('assets') }
-    : scriptTooLong && onNavigate
-      ? { label: '去选择生产段落', go: () => onNavigate('long-story') }
+    : scriptTooLong
+      ? { label: '去按场拆镜', go: goToSceneStoryboard }
       : undefined;
   let storyboardPrimary: RailAction | null = null;
   if (binding) {
@@ -548,7 +557,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     storyboardPrimary = { label: '生成 AI 分镜方案', onClick: generate, loading: busy,
       disabled: backendDisconnected || busy || bindingBusy || !!binding || scriptTooLong,
       disabledReason: backendDisconnected ? '服务未连接，重试连接'
-        : scriptTooLong ? '剧本超长，去拆分场次' : undefined,
+        : scriptTooLong ? '剧本超长，去下方按场拆镜' : undefined,
       icon: <Sparkles size={14} /> };
   }
   useStageRail('storyboard', {
@@ -634,8 +643,8 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     </label>
     {scriptTooLong && <div className="blocker-item is-action" role="alert">
       <div className="blocker-reason"><b>长剧本请分段制作</b>
-        <small>单次分镜最多处理 20000 字。请在素材准备中选择已确认大纲的生产段落，逐段生成分镜；不会截断原文。</small></div>
-      {!railPresent && onNavigate && <button type="button" className="btn-primary" onClick={() => onNavigate('long-story')}>去选择生产段落</button>}
+        <small>单次分镜最多处理 20000 字。长剧本在下方「按场拆镜」逐场生成并应用分镜，不会截断原文；应用完成后分集自动落到镜头。</small></div>
+      {!railPresent && <button type="button" className="btn-primary" onClick={goToSceneStoryboard}>去按场拆镜</button>}
     </div>}
     <div className="blocker-item is-action">
       <Sparkles size={17} className="required-icon" />

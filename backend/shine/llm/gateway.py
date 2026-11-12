@@ -28,6 +28,7 @@ from shine.llm.output_budget import (
     estimate_input_tokens,
 )
 from shine.llm.secrets import SecretStore
+from shine.llm.transport_policy import streaming_enabled
 from shine.models import AgentRoute, ProviderProfile
 
 #: The generation probe is fixed, synthetic and empty of project material.
@@ -87,11 +88,12 @@ def agent_output_config(config: ProviderConfig) -> ProviderConfig:
         # (``task_category="creative"``) does NOT pass through here and keeps the
         # model's own deliberation budget.
         options.setdefault("reasoning_effort", "low")
-        return replace(config, generation_options=options)
+        return replace(config, generation_options=options,
+                       streaming=streaming_enabled(config))
     if config.kind == "ollama":
         return replace(config, generation_options={
             **config.generation_options, "max_tokens": output_limit,
-        })
+        }, streaming=streaming_enabled(config))
     return config  # Anthropic adapter already uses 4096; mock has no external output.
 
 
