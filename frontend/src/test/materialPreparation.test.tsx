@@ -461,3 +461,23 @@ it('澄清问题可见，重新生成把回答并入描述并消费问题', asyn
   expect(body.brief.questions).toEqual([]);
   expect(body.brief.appearance).toContain('lid closed');
 });
+
+it('人物需求展示全貌定义：规范全名、别名、稳定身份与按场变体', async () => {
+  stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation$/, respond: () => jsonResponse({
+    ...STATE,
+    requirements: [{
+      ...STATE.requirements[0],
+      character_definition: {
+        canonical_name: '罗兰·温布顿',
+        aliases: ['程岩', '罗兰', '殿下'],
+        identity: '现代绘图员程岩穿越为边陲镇王子罗兰·温布顿，黑短发、蓝眼。',
+        variants: [{ section_id: 's1', appearance: '现代加班衬衫。' }, { section_id: 's2', appearance: '王子礼服。' }],
+      },
+    }],
+  }) });
+  render(<MaterialPreparationPanel projectId="p1" />);
+  expect(await screen.findByText(/人物定义 · 罗兰·温布顿/)).toBeTruthy();
+  expect(screen.getByText(/又称：程岩、罗兰、殿下/)).toBeTruthy();
+  expect(screen.getByText(/现代绘图员程岩穿越为边陲镇王子/)).toBeTruthy();
+  expect(screen.getByText(/按场外貌\/服装变体（2）/)).toBeTruthy();
+});
