@@ -289,6 +289,7 @@ it('已有分集合同时复用四阶段分析，不再提供二次逐场分析'
   await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/derive$/)).toHaveLength(1));
   expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(0);
   expect(await screen.findByText(/已复用四阶段分镜分析生成需求清单/)).toBeTruthy();
+  expect(await screen.findByRole('button', { name: '复用分镜分析重新生成清单' })).toBeTruthy();
 });
 
 it('停止批次带上服务端给的状态版本', async () => {

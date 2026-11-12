@@ -1099,6 +1099,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           </fieldset>
           {stepReport.confirm && <p className="material-step-report">{stepReport.confirm}</p>}
           {stepReport.generate && <p className="material-step-report">{stepReport.generate}</p>}
+          {hasContracts && <button type="button" className="btn-text" disabled={busy} onClick={deriveFromAnalysis}>
+            复用分镜分析重新生成清单
+          </button>}
           {!railPresent && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0} onClick={confirmAndGenerate}>
             {confirmLabel}
           </button>}
