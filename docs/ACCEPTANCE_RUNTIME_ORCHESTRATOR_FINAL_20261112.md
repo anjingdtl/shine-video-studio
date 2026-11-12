@@ -1,4 +1,4 @@
-# Shine Runtime Orchestrator V1.0 — 最终工程收尾与全 PASS 验收（2026-11-12）
+# Shine Runtime Orchestrator V1.0 — 最终工程收尾与本机复验（2026-11-12）
 
 > 分支：`fix/runtime-orchestrator-final-hardening-20261112`（独立 worktree `F:\ClaudeWorkSpace\projects\shine-orc-hardening`，未触碰 main）
 > 基线：`a363a7242412775b3f913ab3110ace252bd43310`（上轮验收基线 `23c57f4` 已在其历史中）
@@ -231,3 +231,64 @@ python scripts\stop_shine.py --data-dir <上一步输出的数据目录>
 - 安全硬门槛全部满足：0 重复受管进程、0 错误重投、0 误杀、0 同安装生命周期并发冲突；全量测试与静态检查全绿。
 
 建议合入前在用户桌面环境执行 §6.2 的一次真实小样；若产出 artifact 且技术 QC 通过，即可把 D 项与 ORC-05/06/07/10 的真机部分补记为 PASS，届时可标记为全 PASS。
+
+
+## 9. 2026-11-12 本机独立复验
+
+本节记录合入后独立复验。§1–§8 保留上一轮的历史结果。
+
+- 基线 `main@21ef05b4d13ec56a6e220cce94681a0eb7e6f22f`，重新 fetch 后与 `origin/main` 一致。
+- 本地分支 `codex/runtime-orchestrator-local-acceptance-20261112`。控制和迁移修复 `54cda1eed0f4982c6345a04aad761ad380e2b6fb`，H3 转出图修复 `c5a47ff1eb19bc79f8849133e5bbcd7e183e7c1f`。用 `git diff --stat 21ef05b..c5a47ff` 查看代码与测试文件清单。
+- Windows 11、RTX 5080 16 GB。复用已登记的本机 ComfyUI、MiniMax-H3 Ref2VA INT8 和 Qwen-Image-2.1。测试栈使用独立 worktree 和历史验收库的 SQLite 副本，输出保存在 worktree 下 `.local-acceptance/orc-local-20261112/`。
+
+### 9.1 收尾修复
+
+1. 核对操作在安装锁内重新验证进程死亡，只有失效记录能被清理。启动失败且退出未确认时，保留 PID/birth 和 Job Object 证据，记录为 `RECONCILE_REQUIRED`。释放按安装锁顺序执行，并跳过锁发现后新增的安装。外部监听存在时，在写启动意图前拒绝。
+2. 控制 API 在短 SQLite 写事务中完成幂等键、版本和冲突检查。正在制作时直接拒绝 STOP，并返回相关任务和租约。Worker 接管中断的生命周期操作时核对原记录，返回 `RUNTIME_OPERATION_INTERRUPTED`，原操作不会重放。
+3. 快照用监听 PID、进程出生标识和 Job Object 验证归属，HTTP 探活按实际进程归属缓存。图片就绪还要求实际 `object_info` 验证固定工作流，H3 显示已检查的节点库存。Web 会读取已受理操作的最终结论，区分过期、忙碌和中断。
+4. 第一次真机两镜生产已完成并释放租约，随后排队的图片任务却以 `NOT_SENT` 失败。首次 H3 启动记录仍停在 `RUNNING`，遮住了已释放的事实。现在出图准入要求原租约已释放、原进程和最新 handoff 进程均已退出、各 Job Object 为空且端口空闲，随后在安装锁内归档旧启动记录。图片执行前置失败会保存具名原因。
+5. 旧 SQLite 库升级后缺少 `production_series_items.job_id → jobs.id` 外键。迁移 `f180c0020001` 只修复缺失的约束。旧库副本、空库和带数据的历史库副本均通过 `alembic check` 与 `PRAGMA foreign_key_check`。带数据副本中的 8 条序列、30 条镜头项、28 条 Job、20 条 attempt 和 38 条媒体记录逐行相同。对于原来已不存在的 Job，迁移依照 `ON DELETE SET NULL` 清理悬空链接。
+
+### 9.2 真机生产与输出
+
+- 两镜生产序列 `01b9c056-2a56-4a46-a3fc-1d97e974dc14` 完成并释放。两镜真实 H3 均为 `PASSED`，MP4 时长为 6.583 秒和 5.166 秒。交接前的图片产物也已落盘。此轮保留了交接后图片提交前失败的证据。
+- 修复后序列 `445940a5-1aa9-4685-bbd1-321711a2f01e` 走完 Qwen-Image → H3 → Qwen-Image。第二个图片请求在 H3 工作期间为 `QUEUED`，序列释放后自动执行，两个图片任务均到达 `CANDIDATE_READY`。旧 H3 启动记录以 `h3_released_and_gone` 结案。
+- 三次真实 H3 推理各有一个持久化外部 prompt ID 和一条提交确认。三个 MP4 的磁盘 SHA-256、attempt 和 artifact 摘要一致，FFmpeg 解码通过。视频为 H.264 + AAC，1344 × 768，24 fps。三个 Qwen 候选 PNG 为 512 × 512，实物摘要一致且可解码。
+- 真实 API 通过 Vite 代理发起控制和生产操作。浏览器刷新前后均恢复「引擎制作中」。图片和 H3 在途 STOP 均返回 `409 RUNTIME_WORK_IN_FLIGHT`，旧快照 STOP 返回 `409 RUNTIME_STATE_VERSION_STALE`。任务完成后 STOP 成功，`8188` 监听退出，GPU 台账中 `ACTIVE` 和 `RECONCILE_REQUIRED` 均为 0，隔离栈已关闭。
+- H3 技术门通过，最终门为 `needs_review`。本次验收覆盖运行调度和可解码产物，人工观感与建议模型评审仍待核对。
+
+### 9.3 ORC-01～ORC-16 本机复验矩阵
+
+| 编号 | 本轮结果 | 本轮证据 |
+|---|---|---|
+| ORC-01 | Windows PASS | 10 路并发启动 30.4 秒，1 次创建、9 次复用，13 项断言通过 |
+| ORC-02 | Windows PASS | 20/20 启停循环，清单和端口均按轮次释放 |
+| ORC-03 | Windows PASS | API 外部端口冲突 4 项断言通过。另在真实 Windows 端口 8188 放置外部监听，快照为 `EXTERNAL_CONFLICT`，启动具名拒绝，原监听存活且无启动意图 |
+| ORC-04 | 定向回归 PASS | PID 回收、出生标识和不明归属保护 |
+| ORC-05 | Windows/GPU PASS | 两轮真实推理验证资源交接。修复后 H3 运行期间排队的出图任务在租约释放后执行 |
+| ORC-06 | Windows/GPU PASS | 真机两镜序列、封闭队列 handoff、技术 QC、租约释放 |
+| ORC-07 | 故障注入 PASS | 已发送但结果未知的提交保留原证据，重投保护通过。真实 GPU 推理期间未注入 `/prompt` 响应丢失 |
+| ORC-08 | Windows/Web PASS | 真实生产中浏览器刷新后恢复制作中，重新连接读取到同一图片任务 |
+| ORC-09 | Windows + 故障注入 PASS | 半死栈 8 项、Worker 意外退出 6 项、控制接管保留原证据。真实模型加载中断仍未实测 |
+| ORC-10 | Windows/GPU PASS | 真机出图与 H3 在途 STOP 均拒绝，关联任务仍完成 |
+| ORC-11 | Windows + 定向回归 PASS | 真机就绪状态具有监听、HTTP 和工作流证据。缺能力或无归属时降级 |
+| ORC-12 | 定向回归 PASS | 安装冲突及受管生命周期拦截。三类 SQLite 副本迁移验证通过 |
+| ORC-13 | 全量回归 PASS | 见 §9.4 |
+| ORC-14 | PASS | 独立 worktree 收尾，素材中心只改前置失败原因的持久化 |
+| ORC-15 | Windows PASS | 无绑定时 `NOT_BOUND`，Web/API/Worker 仍正常启动 |
+| ORC-16 | Windows PASS | 启动器回归使用明确的 mock 模式，生产复测使用明确的 comfyui 模式 |
+
+### 9.4 最终回归
+
+| 命令 | 结果 |
+|---|---|
+| `python -m pytest tests -n 8 --dist loadfile` | 2421 passed，2 skipped，0 failed（278.85 秒） |
+| `pytest` 调度、镜头生产、恢复、实例、质检及离线 E2E 定向回归 | 375 passed，0 failed（81.06 秒） |
+| `npm.cmd test` | 256 passed（状态入口 13 条） |
+| `npm.cmd run build` | TypeScript 与 Vite 通过 |
+| `ruff check backend/shine backend/tests backend/alembic/versions/f180c0020001_restore_series_item_job_fk.py scripts/release_residual_backends.py` | 通过 |
+| `alembic upgrade head`、`alembic check`、`PRAGMA foreign_key_check` | 三类副本均通过，head `f180c0020001` |
+
+运行证据在 `orc01-evidence.json`、`cycles-evidence.json`、`renderer-port-conflict.json`、`live-final.json`、`live-handoff-retest.json`、两个 `*-media.json` 和 `migration-evidence.json`。全量后端日志为 `pytest-final.log`。
+
+**结论：本机生产交接通过。严格全场景验收为 PARTIAL。** `/prompt` 实际响应丢失和真实模型加载阶段的 Worker 中断目前有故障注入覆盖。人工最终审片待核对。代码与报告仅提交到本地验收分支。
