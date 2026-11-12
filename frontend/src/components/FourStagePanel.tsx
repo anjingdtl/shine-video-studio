@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CircleHelp, ListChecks } from 'lucide-react';
 import {
   ERROR_CODE_LABELS,
-  adjustVolumeBoundaries, applyCameraPlan, authorizeBlockedScene, buildEpisodeScript, confirmBible,
+  adjustVolumeBoundaries, api, applyCameraPlan, authorizeBlockedScene, buildEpisodeScript, confirmBible,
   confirmEpisodeScript, confirmSceneScript, confirmVolumeOutline, confirmVolumePlan,
   editSceneScript, generateStoryboardDraft, generateStoryboardDraftFor, getPipelineOverview,
   getTextConsentScope, grantTextConsent, importPipelineSource, listScriptDocuments,
@@ -13,6 +13,7 @@ import {
   type WorkflowProfileLite,
 } from '../api';
 import { failureLabels } from '../constants';
+import { AgentProgress, type AgentRunProgress } from './AgentProgress';
 import { Meter } from './Meter';
 
 type Props = {
@@ -62,6 +63,9 @@ const ROLE_LABELS: Record<string, string> = {
   four_stage_scene_script_run: '编写场次剧本',
 };
 
+/** The draft chain's five crew roles; their live tasks are the draft's progress. */
+const CREW_ROLES = ['scriptwriter', 'director', 'cinematographer', 'continuity_supervisor', 'editor'];
+
 /** The four-stage creative pipeline in one place: import, outline, script, storyboard. */
 export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, onMessage }: Props) {
   const [overview, setOverview] = useState<PipelineOverview | null>(null);
@@ -86,6 +90,12 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   const [armedScene, setArmedScene] = useState<string | null>(null);
   /** The whole-plan confirmation was refused for missing volume outlines. */
   const [bibleScopeOffer, setBibleScopeOffer] = useState(false);
+  /** Live crew tasks of the storyboard draft chain. The draft runs inside one
+   *  long request and only writes its unit ledger at the end, so without this
+   *  the panel would show no progress at all while the chain works. */
+  const [crewRuns, setCrewRuns] = useState<AgentRunProgress[]>([]);
+  const crewActive = crewRuns.some((run) => CREW_ROLES.includes(run.role_id)
+    && ['QUEUED', 'RUNNING'].includes(run.status));
 
   /**
    * Confirm the blueprint, and when the only obstacle is that other volumes
@@ -144,7 +154,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   // 有活跃任务时每 4 秒轮询真实进度；空闲时停止，避免无谓请求。
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    const active = (overview?.active_tasks ?? []).some(
+    const active = crewActive || (overview?.active_tasks ?? []).some(
       (t) => ['QUEUED', 'RUNNING'].includes(t.status));
     if (active && pollRef.current === null) {
       pollRef.current = setInterval(() => { refresh(); }, 4000);
@@ -155,7 +165,27 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     return () => {
       if (pollRef.current !== null) { clearInterval(pollRef.current); pollRef.current = null; }
     };
-  }, [overview, refresh]);
+  }, [overview, refresh, crewActive]);
+
+  // The draft chain has no parent task row in the overview; read its crew
+  // tasks directly so a refresh mid-chain still shows live progress.
+  const loadCrew = useCallback(() => {
+    api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) })
+      .then(setCrewRuns).catch(() => undefined);
+  }, [projectId]);
+  useEffect(() => { void loadCrew(); }, [loadCrew]);
+  const crewPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if ((busy || crewActive) && crewPollRef.current === null) {
+      crewPollRef.current = setInterval(() => { void loadCrew(); }, 5000);
+    } else if (!busy && !crewActive && crewPollRef.current !== null) {
+      clearInterval(crewPollRef.current);
+      crewPollRef.current = null;
+    }
+    return () => {
+      if (crewPollRef.current !== null) { clearInterval(crewPollRef.current); crewPollRef.current = null; }
+    };
+  }, [busy, crewActive, loadCrew]);
 
   async function authorizeAndContinue(task: PipelineTaskSummary) {
     if (!task.consent_document_id || !task.consent_document_sha256) return;
@@ -705,7 +735,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
             <div className="row">
               <span>{currentVolume.title}</span>
               <button type="button" className="btn-secondary"
-                disabled={busy || currentVolume.scripts_confirmed === 0}
+                disabled={busy || crewActive || currentVolume.scripts_confirmed === 0}
                 title={currentVolume.scripts_confirmed === 0
                   ? '先确认至少一场剧本；草案只覆盖已确认的场次'
                   : `草案只覆盖已确认的 ${currentVolume.scripts_confirmed}/${currentVolume.scripts_total} 场`
@@ -720,6 +750,26 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
               </button>
               <span className="muted small">按场逐次调用五个工种；项目再长也不会被单次输入上限卡住。</span>
             </div>
+            {crewActive && (
+              <div className="notice" role="status" aria-label="分镜草案后台进度">
+                <div>
+                  <b>分镜草案后台生成中：{currentVolume.title}</b>
+                  <span className="muted small">
+                    整卷已完成 {crewRuns.filter((run) => run.role_id === 'editor' && run.status === 'SUCCEEDED').length}
+                    /{currentVolume.scripts_total} 场；下面是当前一场五个工种的实时状态。
+                  </span>
+                  <AgentProgress runs={(() => {
+                    const crewOnly = crewRuns.filter((run) => CREW_ROLES.includes(run.role_id));
+                    const sceneStart = crewOnly.filter((run) => run.role_id === 'scriptwriter')
+                      .map((run) => run.created_at).sort().at(-1) ?? '';
+                    return crewOnly.filter((run) => run.created_at >= sceneStart);
+                  })()} />
+                  <span className="muted small">
+                    整卷链完成后，下方会列出各场的「应用这一场的镜头」；刷新页面不会中断后台链。
+                  </span>
+                </div>
+              </div>
+            )}
             {draftUnits.length > 0 && (
               <ul className="volume-list">
                 {draftUnits.map((unit) => (
