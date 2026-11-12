@@ -7,6 +7,8 @@ is reconciled or explicitly resent, never replayed automatically.
 """
 from __future__ import annotations
 
+from sqlalchemy import select
+
 from tests.test_four_stage_reacceptance import _confirm_episode, _volume_sections
 from tests.test_pipeline import LOCAL, _prepare_handoff_fixture, _route_mock
 
@@ -23,6 +25,26 @@ def _catalog(sections):
         "props": [{"name": "铜怀表", "description": "刻字怀表。", "carrier": "object",
                    "core_prop_reason": "表盖刻字是线索。", "section_ids": list(sections[:1])}],
     }
+
+
+def test_the_orphan_brief_sweep_does_not_kill_the_catalog_call(api):
+    from shine.materialprep import brief
+    from shine.models import AgentTaskRecord
+    from tests.conftest import create_project
+    client, factory, settings = api
+    pid = create_project(client, "统揽")
+    with factory.begin() as db:
+        db.add(AgentTaskRecord(
+            project_id=pid, role_id="producer", input_hash="cat-1",
+            request_identity="cat-1", asset_manifest_hash="cat-1",
+            rulepack_id="material-entity-catalog", rulepack_hash="x",
+            model_profile_id="x", model_id="x", schema_version="1.0",
+            status="RUNNING", trace={"tool": "entity_catalog", "phase": "PREPARING"}))
+    brief.reconcile_orphan_brief_tasks(factory)
+    with factory() as db:
+        row = db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == pid)).first()
+        assert row.status == "RUNNING", "the API-owned catalog call is not a brief orphan"
 
 
 def test_derive_consolidates_identities_and_reuses_the_catalog(api):

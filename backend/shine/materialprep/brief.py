@@ -392,6 +392,10 @@ def reconcile_orphan_brief_tasks(factory) -> int:
         ).all()
         for row in rows:
             trace = dict(row.trace or {})
+            # The project-wide catalog call is owned by the API request, not
+            # by an item's brief execution; the orphan sweep must not kill it.
+            if trace.get("tool") == "entity_catalog":
+                continue
             item_id = trace.get("item_id")
             requirement_id = trace.get("requirement_id")
             if item_id:

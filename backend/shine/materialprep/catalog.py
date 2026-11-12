@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from shine.h3.rulebook import digest
 from shine.materialprep import text_consent
-from shine.materialprep.agent_call import call_material_agent
+from shine.materialprep.agent_call import PRE_REQUEST_PHASES, call_material_agent
 from shine.materialprep.contracts import MaterialEntityCatalog
 from shine.models import AgentArtifact, AgentTaskRecord, utcnow
 from shine.services import add_audit
@@ -88,7 +88,25 @@ def get_or_create_catalog(db, gateway, session_factory, project_id, document,
             if artifact is not None:
                 return artifact.payload_json
         if existing.status == "RUNNING":
-            raise HTTPException(409, "MATERIAL_CATALOG_RUNNING")
+            age = (utcnow() - existing.created_at).total_seconds()
+            if age <= 900:
+                raise HTTPException(409, "MATERIAL_CATALOG_RUNNING")
+            # The API process died with the call in flight: decide by phase,
+            # exactly like a dead scene worker.
+            phase = (existing.trace or {}).get("phase")
+            if phase in PRE_REQUEST_PHASES:
+                previous = existing.request_identity
+                existing.status = "SUPERSEDED"
+                existing.request_identity = None
+                existing.state_version += 1
+                existing.trace = {**(existing.trace or {}), "external_outcome": "NOT_SENT",
+                                  "reconciliation": {"outcome": "NOT_SENT_PROVEN",
+                                                     "last_phase": phase,
+                                                     "checked_at": utcnow().isoformat()}}
+            else:
+                raise HTTPException(409, {"code": "MATERIAL_CATALOG_OUTCOME_UNKNOWN",
+                                          "task_id": existing.id,
+                                          "state_version": existing.state_version})
         if outcome == "UNKNOWN":
             raise HTTPException(409, {"code": "MATERIAL_CATALOG_OUTCOME_UNKNOWN",
                                       "task_id": existing.id,
