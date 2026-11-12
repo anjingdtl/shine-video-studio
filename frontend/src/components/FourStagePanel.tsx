@@ -223,45 +223,13 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
     }
   }
 
-  // A person should not have to invent the next episode out of a blank list.
-  // The first render of a volume with confirmed scripts names the recommended
-  // set; every click afterwards is the person's own decision.
-  useEffect(() => {
-    if (!overview) return;
-    const volume = overview.volumes.find(
-      (v) => v.volume_id === (selectedVolumeId || overview.volumes[0]?.volume_id));
-    if (!volume || volume.scripts_confirmed === 0) return;
-    setEpisodeSections((current) => {
-      if (current.length) return current;
-      const assigned = new Set(volume.episode_contracts.flatMap((contract) => contract.sections));
-      const picked: string[] = [];
-      let seconds = 0;
-      for (const script of volume.scripts) {
-        if (!script.confirmed || assigned.has(script.section_id)) continue;
-        picked.push(script.section_id);
-        seconds += script.estimated_duration_s ?? 0;
-        if (seconds >= 60) break;
-      }
-      return picked;
-    });
-  }, [overview, selectedVolumeId]);
-
-  if (!overview) {
-    return <section className="card" id="four-stage"><div className="notice"><CircleHelp size={13} />
-      {loadFailed
-        ? <><p>四阶段进度读取失败。</p><button type="button" className="btn-secondary"
-            onClick={() => void refresh()}>重新读取</button></>
-        : <p>正在读取四阶段进度…</p>}
-    </div></section>;
-  }
-
-  const volumes = overview.volumes ?? [];
-  const pendingScripts = overview.pending_scripts ?? [];
-  const activeTasks = overview.active_tasks ?? [];
+  const volumes = overview?.volumes ?? [];
+  const pendingScripts = overview?.pending_scripts ?? [];
+  const activeTasks = overview?.active_tasks ?? [];
   const currentVolumeId = volumes.some((volume) => volume.volume_id === selectedVolumeId)
     ? selectedVolumeId : volumes[0]?.volume_id ?? '';
   const currentVolume = volumes.find((v) => v.volume_id === currentVolumeId);
-  const bibleNeedsConfirmation = !overview.bible_confirmed || !!overview.bible_status?.blockers.length;
+  const bibleNeedsConfirmation = !overview?.bible_confirmed || !!overview?.bible_status?.blockers.length;
   // Scene -> episode assignment the server already holds.  A recommendation
   // must not re-offer a scene that is already in another episode contract.
   const assignedSections = new Set(
@@ -290,11 +258,37 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
   // crash or a restart must show the same pending work.
   // The plan draft is local state while generating, and a server field after a
   // refresh. Either way the person must still be able to confirm it.
-  const pendingPlan = volumePlanDraft ?? overview.pending_volume_plan ?? null;
+  const pendingPlan = volumePlanDraft ?? overview?.pending_volume_plan ?? null;
   const draftUnits = currentVolume?.storyboard?.units ?? [];
   const draftStatus = currentVolume?.storyboard?.status ?? null;
   const receipt = currentVolume?.handoff ?? null;
   const contracts = currentVolume?.episode_contracts ?? [];
+
+  // The recommendation is pre-checked from the script so the person only
+  // adjusts or applies it. Once they touch the selection (or ask for a new
+  // recommendation) the auto-pick stops overriding them; confirming an
+  // episode re-arms it for the next one.
+  const episodeTouchedRef = useRef(false);
+  useEffect(() => { episodeTouchedRef.current = false; }, [currentVolumeId]);
+  const suggestionKey = `${currentVolumeId}:${contracts.length}:${episodeTarget}:`
+    + suggestedEpisodeSections.join(',');
+  useEffect(() => {
+    if (episodeTouchedRef.current) return;
+    setEpisodeSections((previous) => (
+      previous.length === suggestedEpisodeSections.length
+      && previous.every((id, index) => id === suggestedEpisodeSections[index])
+        ? previous : suggestedEpisodeSections));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestionKey]);
+
+  if (!overview) {
+    return <section className="card" id="four-stage"><div className="notice"><CircleHelp size={13} />
+      {loadFailed
+        ? <><p>四阶段进度读取失败。</p><button type="button" className="btn-secondary"
+            onClick={() => void refresh()}>重新读取</button></>
+        : <p>正在读取四阶段进度…</p>}
+    </div></section>;
+  }
 
   async function draftAndRecord(volumeId: string, sectionIds?: string[]) {
     setBusy(true);
@@ -848,56 +842,75 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
               </div>
             )}
             {currentVolume.scripts_confirmed > 0 && (
-              <div className="row">
-                <label htmlFor="four-stage-episode-title">按场分集：</label>
-                <input id="four-stage-episode-title" aria-label="分集标题" value={episodeTitle}
-                  onChange={(event) => setEpisodeTitle(event.target.value)}
-                  placeholder={'第' + (currentVolume.episode_contracts.length + 1) + '集'} />
-                <label className="muted small">每集目标
-                  <input type="number" min={10} max={3600} aria-label="每集目标秒数"
-                    value={episodeTarget}
-                    onChange={(event) => setEpisodeTarget(Number(event.target.value) || 60)} />
-                  秒
-                </label>
-                <button type="button" className="btn-secondary" disabled={busy}
-                  onClick={() => setEpisodeSections(suggestedEpisodeSections)}
-                  title="从未分集的已确认场次开始，按顺序装到目标时长为止；你仍可逐场改勾选">
-                  推荐勾选下一集
-                </button>
-                <span className="muted small">
-                  已选 {episodeSections.length} 场 · 约 {Math.round(selectedEpisodeSeconds)} 秒
-                  （估算按原文字数/5，只用于规划）
-                </span>
-                {currentVolume.scripts.map((script) => {
-                  const used = assignedSections.has(script.section_id);
-                  return (
-                    <label key={script.section_id} className="muted small">
-                      <input type="checkbox" checked={episodeSections.includes(script.section_id)}
-                        disabled={used && !episodeSections.includes(script.section_id)}
-                        onChange={(event) => setEpisodeSections((previous) => (
-                          event.target.checked
-                            ? [...previous, script.section_id]
-                            : previous.filter((id) => id !== script.section_id)))} />
-                      {sceneLabel(script)}
-                      {script.estimated_duration_s
-                        ? '（约 ' + Math.round(script.estimated_duration_s) + ' 秒）' : ''}
-                      {used ? ' · 已归入别集' : ''}
-                    </label>
-                  );
-                })}
-                <button type="button" className="btn-secondary"
-                  disabled={busy || !episodeTitle.trim() || episodeSections.length === 0}
-                  onClick={() => run(async () => {
-                    const drafted = await buildEpisodeScript(
-                      projectId, currentVolume.volume_id, episodeTitle.trim(), episodeSections);
-                    const confirmed = await confirmEpisodeScript(
-                      projectId, drafted.artifact_id, drafted.sha256);
-                    setEpisodeTitle('');
-                    setEpisodeSections([]);
-                    return confirmed;
-                  }, () => onMessage('这一集的分集合同已确认', 'success'))}>
-                  生成并确认这一集
-                </button>
+              <div className="episode-picker">
+                <div className="row episode-picker-toolbar">
+                  <label htmlFor="four-stage-episode-title">按场分集：</label>
+                  <input id="four-stage-episode-title" aria-label="分集标题" value={episodeTitle}
+                    onChange={(event) => setEpisodeTitle(event.target.value)}
+                    placeholder={'第' + (currentVolume.episode_contracts.length + 1) + '集'} />
+                  <label className="muted small">每集目标
+                    <input type="number" min={10} max={3600} aria-label="每集目标秒数"
+                      value={episodeTarget}
+                      onChange={(event) => setEpisodeTarget(Number(event.target.value) || 60)} />
+                    秒
+                  </label>
+                  <button type="button" className="btn-secondary" disabled={busy}
+                    onClick={() => { episodeTouchedRef.current = true; setEpisodeSections(suggestedEpisodeSections); }}
+                    title="从未分集的已确认场次开始，按顺序装到目标时长为止；你仍可逐场改勾选">
+                    推荐勾选下一集
+                  </button>
+                  <span className="muted small">
+                    已选 {episodeSections.length} 场 · 约 {Math.round(selectedEpisodeSeconds)} 秒
+                    （估算按原文字数/5，只用于规划；推荐已自动勾选，可直接调整或应用）
+                  </span>
+                </div>
+                <div className="episode-scene-grid" role="group" aria-label="按场分集场次勾选">
+                  {currentVolume.scripts.map((script, index) => {
+                    const used = assignedSections.has(script.section_id);
+                    const checked = episodeSections.includes(script.section_id);
+                    return (
+                      <label key={script.section_id}
+                        className={`episode-scene-cell${checked ? ' is-selected' : ''}${used && !checked ? ' is-assigned' : ''}`}>
+                        <span className="episode-scene-top">
+                          <span className="episode-scene-order">{String(index + 1).padStart(2, '0')}</span>
+                          <input type="checkbox" checked={checked}
+                            disabled={used && !checked}
+                            aria-label={sceneLabel(script)}
+                            onChange={(event) => {
+                              episodeTouchedRef.current = true;
+                              setEpisodeSections((previous) => (
+                                event.target.checked
+                                  ? [...previous, script.section_id]
+                                  : previous.filter((id) => id !== script.section_id)));
+                            }} />
+                        </span>
+                        <span className="episode-scene-title">{sceneLabel(script)}</span>
+                        <span className="episode-scene-meta">
+                          {script.estimated_duration_s
+                            ? `约 ${Math.round(script.estimated_duration_s)} 秒` : '时长待估'}
+                          {used ? ' · 已归入别集' : ''}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="row">
+                  <button type="button" className="btn-secondary"
+                    disabled={busy || episodeSections.length === 0}
+                    onClick={() => run(async () => {
+                      const title = episodeTitle.trim() || '第' + (currentVolume.episode_contracts.length + 1) + '集';
+                      const drafted = await buildEpisodeScript(
+                        projectId, currentVolume.volume_id, title, episodeSections);
+                      const confirmed = await confirmEpisodeScript(
+                        projectId, drafted.artifact_id, drafted.sha256);
+                      setEpisodeTitle('');
+                      setEpisodeSections([]);
+                      episodeTouchedRef.current = false;
+                      return confirmed;
+                    }, () => onMessage('这一集的分集合同已确认', 'success'))}>
+                    生成并确认这一集
+                  </button>
+                </div>
               </div>
             )}
             <div className="row">

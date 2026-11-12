@@ -1552,6 +1552,29 @@ html[data-theme='dark'] .run-episode-plan li,html[data-theme='dark'] .run-episod
 .scripts-grid { display: flex; flex-direction: column; gap: 10px; }
 .small { font-size:var(--fs-body); }
 
+/* 按场分集：整齐的场次网格。推荐自动预勾选，用户只调整或直接应用。 */
+.episode-picker{display:flex;flex-direction:column;gap:10px;width:100%}
+.episode-picker-toolbar{flex-wrap:wrap;align-items:center;gap:10px}
+.episode-picker-toolbar input{width:auto}
+.episode-picker-toolbar #four-stage-episode-title{width:160px}
+.episode-picker-toolbar input[type=number]{width:90px}
+.episode-scene-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;width:100%}
+.episode-scene-cell{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--paper);cursor:pointer;min-height:82px;
+  transition:border-color var(--dur-fast) ease,background var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.episode-scene-cell:hover{border-color:var(--olive-mid)}
+.episode-scene-cell.is-selected{border-color:var(--ok-strong);background:var(--ok-bg-2);box-shadow:inset 0 0 0 1px var(--ok-strong)}
+.episode-scene-cell.is-assigned{opacity:.55;cursor:not-allowed}
+.episode-scene-cell:has(input:focus-visible){outline:2px solid var(--olive-mid);outline-offset:2px}
+.episode-scene-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.episode-scene-order{font:600 var(--fs-caption) var(--mono);color:var(--muted);letter-spacing:.05em}
+.episode-scene-cell input[type=checkbox]{width:15px;height:15px;accent-color:var(--olive-mid);cursor:pointer;margin:0}
+.episode-scene-cell.is-assigned input{cursor:not-allowed}
+.episode-scene-title{font-size:var(--fs-body);color:var(--ink-mid);font-weight:600;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.7em}
+.episode-scene-meta{font-size:var(--fs-caption);color:var(--muted);margin-top:auto}
+@media(max-width:700px){.episode-scene-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
+
 /* ==========================================================================
    2026-11 导演模式交互重构（七阶段版）
    目标：一条旅程、一个顶栏、每页一个主角；工程信息折叠，日志有上限。
