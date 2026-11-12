@@ -10,6 +10,17 @@ from tests.test_four_stage_reacceptance import _confirm_episode, _volume_section
 from tests.test_pipeline import LOCAL, _prepare_handoff_fixture
 
 
+def test_speaker_stage_directions_merge_into_the_known_character():
+    from shine.materialprep.derive import _canonical_name
+
+    known = ["罗兰", "安娜", "面包师"]
+    assert _canonical_name("罗兰低声", known) == "罗兰"
+    assert _canonical_name("面包师压低声音", known) == "面包师"
+    assert _canonical_name("罗兰（穿越者）", known) == "罗兰"
+    assert _canonical_name("守卫队长", known) == "守卫队长"
+    assert _canonical_name("安娜", known) == "安娜"
+
+
 def test_derive_reuses_the_four_stage_analysis_without_model_calls(api):
     client, factory, settings, pid, plan, volume_id, units = _prepare_handoff_fixture(api)
     sections = _volume_sections(factory, pid, volume_id)

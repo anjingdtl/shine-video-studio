@@ -17,6 +17,22 @@ from shine.materialprep.source_spans import segment_document
 from shine.models import AgentArtifact, ProjectDocument
 
 
+def _canonical_name(raw: str, known: list[str]) -> str:
+    """Strip stage directions the crew attached to a speaker or cast entry.
+
+    ``罗兰低声`` is 罗兰 speaking quietly, not a second character; a known
+    name that prefixes the raw entry wins (longest first).  Parentheticals
+    are aliases the bible already resolves.
+    """
+    name = raw.split("（")[0].split("(")[0].strip()
+    if name in known:
+        return name
+    for candidate in sorted(known, key=len, reverse=True):
+        if candidate and name.startswith(candidate):
+            return candidate
+    return name
+
+
 def derive_preparations(db, project_id: str):
     from shine.director import pipeline
 
@@ -81,17 +97,21 @@ def derive_preparations(db, project_id: str):
         if not sids:
             continue
         span_ids = [span.id for span in scene.spans][:8]
-        names: list[str] = []
+        cast: list[str] = []
         for sid in sids:
-            payload = scripts[sid]
-            for entry in payload.get("characters") or []:
+            for entry in scripts[sid].get("characters") or []:
                 raw = entry if isinstance(entry, str) else str(entry.get("name") or "")
                 for part in split_character_names(raw):
-                    if part not in names:
-                        names.append(part)
-            for line in payload.get("dialogue") or []:
+                    part = _canonical_name(part, list(identities))
+                    if part and part not in cast:
+                        cast.append(part)
+        known = list(identities) + cast
+        names = list(cast)
+        for sid in sids:
+            for line in scripts[sid].get("dialogue") or []:
                 for part in split_character_names(line.get("speaker") or line.get("speaker_id") or ""):
-                    if part not in names:
+                    part = _canonical_name(part, known)
+                    if part and part not in names:
                         names.append(part)
         requirements = [
             {"family": "character", "name": name,
