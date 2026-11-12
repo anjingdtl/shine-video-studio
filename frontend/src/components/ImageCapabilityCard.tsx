@@ -173,7 +173,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
     try {
       const result = await jsonPost<{ run_id: string }>('/setup/image-runtime/validate', {
         project_id: projectId,
-        idempotency_key: `image-validate-${projectId}`,
+        idempotency_key: `image-validate-${projectId}-${state?.fingerprint ?? 'unknown'}`,
         families: ['character', 'scene', 'prop'],
       });
       setNote(`三类真实小样已排队（批次 ${result.run_id}）。后台出图期间可以继续做别的；完成后这里会显示验证结果。`);

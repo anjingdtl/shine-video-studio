@@ -35,6 +35,7 @@ from shine.comfyops.models import (
     CandidateAsset,
     PreProductionPlan,
 )
+from shine.materialprep import image_prompts
 from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
 from shine.materialprep.models import MaterialImageAttempt, MaterialItem, MaterialRun
 from shine.materialprep.source_spans import known_span_ids, segment_document, spans_for_scene_key, unknown_span_ids
@@ -662,6 +663,10 @@ def create_validation_batch(
         "families": sorted(families),
         "rights_id": rights_id,
         "confirmation_id": "validation",
+        # Readiness evidence is bound to the prompt template; a template bump
+        # must never replay an older validation batch as if it proved the new
+        # composition rules.
+        "prompt_template_version": image_prompts.template_evidence()["template_version"],
     }
     request_hash = graph_hash(request_payload)
     existing = db.scalar(
