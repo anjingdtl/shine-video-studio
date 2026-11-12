@@ -112,6 +112,22 @@ describe('影片类型', () => {
     });
     expect(stub.callsOf('PUT', PUT_DRAFT)[0].body).toMatchObject({ film_type: 'animation' });
   });
+
+  it('刷新工作台不丢弃未保存的影片类型选择', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /剧本统筹/);
+    await fillSevenOptions(user);
+    const animation = await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ });
+    await user.click(animation);
+    expect(animation).toHaveAttribute('aria-pressed', 'true');
+    const projectGetsBefore = stub.callsOf('GET', /\/api\/v1\/projects\/proj-1$/).length;
+    await user.click(screen.getByTitle('刷新全部数据'));
+    await waitFor(() => {
+      expect(stub.callsOf('GET', /\/api\/v1\/projects\/proj-1$/).length).toBeGreaterThan(projectGetsBefore);
+    });
+    expect(screen.getByRole('button', { name: /动画（2D 赛璐璐）/ })).toHaveAttribute('aria-pressed', 'true');
+  });
 });
 
 describe('风格冻结（下拉交互）', () => {

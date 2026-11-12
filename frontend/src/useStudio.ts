@@ -181,7 +181,16 @@ export function useStudio() {
     ]);
     if (activeProjectId.current !== id) return;
     setAssets(assetRows); setStyles(styleRows); setShots(shotRows); setJobs(jobRows);
-    setStyle(selected.style_draft ?? styleRows.at(-1)?.snapshot ?? emptyStyle);
+    setStyle((previous) => {
+      const next = selected.style_draft ?? styleRows.at(-1)?.snapshot ?? emptyStyle;
+      // A refresh must not discard an unsaved film-type / dialogue-ratio choice;
+      // the server draft only carries them once the user saves.
+      return {
+        ...next,
+        film_type: next.film_type ?? previous.film_type ?? null,
+        dialogue_ratio_percent: next.dialogue_ratio_percent ?? previous.dialogue_ratio_percent ?? null,
+      };
+    });
     await loadSettings(id, signal);
     await loadAudit(id, 0, signal);
   }, [loadAudit, loadSettings]);
