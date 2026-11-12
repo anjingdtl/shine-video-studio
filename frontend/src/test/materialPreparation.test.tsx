@@ -272,6 +272,25 @@ it('没有分集合同的作品保留旧的段落勾选入口', async () => {
   expect(screen.getByText('可选择本次工作范围')).toBeTruthy();
 });
 
+it('已有分集合同时复用四阶段分析，不再提供二次逐场分析', async () => {
+  stub.add({ method: 'GET', pattern: /projects\/p1\/pipeline$/, respond: () => jsonResponse({
+    volumes: [{ episode_contracts: [{ title: '第1集', sections: ['sec-a'], confirmed: true, current: true }] }],
+  }) });
+  stub.add({ method: 'POST', pattern: /material-preparation\/derive$/, respond: () => jsonResponse({
+    status: 'accepted', model_calls: 0, document_id: 'doc-1', plan_revision_id: 'plan-1',
+    requirements: STATE.requirements, expected_snapshot: STATE.expected_snapshot,
+  }) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  const derive = await screen.findByRole('button', { name: '复用分镜分析生成素材清单' });
+  expect(screen.queryByRole('button', { name: /分析剧本/ })).toBeNull();
+  expect(screen.getByText(/不再重复调用模型/)).toBeTruthy();
+  await user.click(derive);
+  await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/derive$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(0);
+  expect(await screen.findByText(/已复用四阶段分镜分析生成需求清单/)).toBeTruthy();
+});
+
 it('停止批次带上服务端给的状态版本', async () => {
   const user = userEvent.setup();
   render(<MaterialPreparationPanel projectId="p1" />);

@@ -1330,3 +1330,13 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   「总体大纲与分集范围 · 已确认（无需再勾选）」摘要（逐集列出已确认场次）；
   范围由 `GET /projects/{id}/pipeline` 的 confirmed episode_contracts 推导。
   无合同的作品保留旧勾选入口。回归 `materialPreparation.test.tsx`（+2）。
+- **素材清单复用四阶段分析，零模型调用（2026-11-12 用户裁定）**：剧组链已逐场
+  读过合同场次，二次整剧逐场分析是重复购买。新增
+  `POST /projects/{id}/material-preparation/derive`（`materialprep/derive.py`）：
+  只认**当前有效**的已确认分集合同，按 `source_refs` 偏移把场次映射到素材分割，
+  人物取自场次剧本 characters+对白说话方（描述用全局圣经 identity），场景描述
+  取场次原文开头；产出同一 ScriptPreparation 合同进 `create_draft_plan`，确认/
+  出图门禁不变。无合同的作品保留「分析剧本」旧入口。面板有合同时主按钮为
+  「复用分镜分析生成素材清单」，隐藏二次分析入口。回归
+  `test_material_derive.py`（2 项，含 forbidden responder 证明零调用）、
+  `materialPreparation.test.tsx`（+1）。

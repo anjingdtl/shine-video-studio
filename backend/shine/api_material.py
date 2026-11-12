@@ -145,6 +145,36 @@ def analyze_material(project_id: str, body: AnalyzeBody, actor: Operator, db: DB
     }
 
 
+@router.post("/projects/{project_id}/material-preparation/derive", status_code=202)
+def derive_material(project_id: str, actor: Operator, db: DBSession):
+    """Open the material plan from the finished four-stage analysis, no model call.
+
+    The crew already read every contracted scene; this reuses those durable
+    artifacts (scene scripts + global bible) instead of paying for a second
+    whole-script analysis.  Same plan contract, same confirmation gates.
+    """
+    from shine.materialprep import derive, service
+    from shine.services import require_project
+
+    project = require_project(db, project_id)
+    document, preparations = derive.derive_preparations(db, project_id)
+    plan, replayed = service.create_draft_plan(db, project, document, preparations, actor=actor)
+    aggregated = service.aggregated_requirements(db, plan)
+    db.commit()
+    return {
+        "status": "accepted",
+        "replayed": replayed,
+        "source": "four_stage_artifacts",
+        "model_calls": 0,
+        "document_id": document.id,
+        "plan_revision_id": plan.id,
+        "requirements": aggregated["requirements"],
+        "conflicts": aggregated["conflicts"],
+        "open_questions": aggregated["open_questions"],
+        "expected_snapshot": service.confirmation_snapshot_hash(plan),
+    }
+
+
 @router.get("/projects/{project_id}/material-preparation")
 def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
     from shine.media.output_layout import output_root

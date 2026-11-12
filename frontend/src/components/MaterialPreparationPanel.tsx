@@ -398,6 +398,23 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     const timer = window.setInterval(() => { void loadScenes().catch(() => undefined); }, 5000);
     return () => window.clearInterval(timer);
   }, [analysing, scenesRunning, loadScenes]);
+  // The four-stage crew already analysed the contracted scenes. When those
+  // contracts exist, the requirement list is derived from the durable
+  // artifacts - a second whole-script model analysis would re-buy the same
+  // facts, so the page offers reuse as the primary action instead.
+  const [hasContracts, setHasContracts] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api<{ volumes?: { episode_contracts?: { confirmed: boolean; current?: boolean }[] }[] }>(
+      `/projects/${projectId}/pipeline`)
+      .then((overview) => {
+        if (!alive) return;
+        setHasContracts((overview.volumes ?? []).some((volume) =>
+          (volume.episode_contracts ?? []).some((c) => c.confirmed && c.current !== false)));
+      })
+      .catch(() => { if (alive) setHasContracts(false); });
+    return () => { alive = false; };
+  }, [projectId]);
 
   // Switching works must not carry the previous work's state into the new one.
   useEffect(() => {
@@ -510,6 +527,14 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         ? `场 ${scene.scene_key} 的已落库结果已核对并采用。`
         : `场 ${scene.scene_key} 仍为 ${result.external_outcome ?? 'UNKNOWN'}；原任务保留，不会创建新请求。`);
     await loadScenes();
+    await load();
+  });
+
+  const deriveFromAnalysis = () => run(async () => {
+    const result = await jsonPost<{ document_id: string; requirements: unknown[] }>(
+      `/projects/${projectId}/material-preparation/derive`, {});
+    setDocumentId(result.document_id);
+    setOperationReport(`已复用四阶段分镜分析生成需求清单（${result.requirements.length} 项，未调用模型）。`);
     await load();
   });
 
@@ -757,6 +782,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   } else if (stage === 'select_materials' || stage === 'materials_ready') {
     materialPrimary = promotable ? { label: '确认使用所选素材为正式素材', onClick: promoteSelected, loading: busy,
       disabled: busy || !promotable, icon: <CircleCheck size={14} /> } : null;
+  } else if (hasContracts) {
+    materialPrimary = { label: '复用分镜分析生成素材清单', onClick: deriveFromAnalysis, loading: busy,
+      disabled: busy, icon: <Sparkles size={14} /> };
   } else {
     materialPrimary = { label: '分析剧本生成素材清单', onClick: analyseScript, loading: busy || analysing,
       disabled: busy || !documentId || analysing || scenesRunning,
@@ -765,7 +793,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       icon: <Sparkles size={14} /> };
   }
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
-    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning]);
+    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -904,14 +932,18 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          {!railPresent && <button type="button" className="btn-primary"
+          {hasContracts && !railPresent && <button type="button" className="btn-primary" disabled={busy} onClick={deriveFromAnalysis}>
+            {busy ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 复用分镜分析生成素材清单
+          </button>}
+          {hasContracts && <p className="material-hint">分集与分镜已由四阶段链路分析过；这里直接复用那些结果生成需求清单，不再重复调用模型。</p>}
+          {!railPresent && !hasContracts && <button type="button" className="btn-primary"
             disabled={busy || !documentId || analysing || scenesRunning} onClick={analyseScript}>
             {busy || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 分析剧本
           </button>}
-          {(analysing || scenesRunning) && <p className="material-hint" role="status">
+          {!hasContracts && (analysing || scenesRunning) && <p className="material-hint" role="status">
             逐场分析进行中：每一场是一次独立的模型调用，进度实时来自服务端台账，刷新页面不会中断。
           </p>}
-          {sceneStatus && sceneStatus.length > 0 && (
+          {!hasContracts && sceneStatus && sceneStatus.length > 0 && (
             <div className="notice" role="status" aria-label="逐场分析进度">
               {scenesRunning || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}
               <div>
