@@ -1320,3 +1320,7 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 回归：`backend/tests/test_material_scene_progress.py`（3 项）+
   `test_material_scenes.py`/`test_scene_dead_worker.py`/`test_material_scene_safety.py`
   共 25 项；前端 `materialPreparation.test.tsx` 17 项、全量 261 项、tsc/build。
+- **分镜输出上限 16K→32K（2026-11-12 用户裁定）**：长分镜答案在 16K 处被
+  `finish_reason=length` 截断、重试表现为「卡」。`DEFAULT_AGENT_OUTPUT_TOKENS`
+  提至 32_768（agent 通道默认 ceiling；显式配置更小仍优先；创作通道
+  `literary.budget` 不受影响）。回归 `test_llm_gateway.py` 等 6 批 100 项。

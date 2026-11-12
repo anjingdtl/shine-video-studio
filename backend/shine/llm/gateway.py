@@ -42,25 +42,18 @@ GENERATION_PROBE_SCHEMA = {
 }
 
 
-DEFAULT_AGENT_OUTPUT_TOKENS = 16_384
+DEFAULT_AGENT_OUTPUT_TOKENS = 32_768
 """The output ceiling for an ordinary agent call.
 
-A reasoning model decides how long to think, and a 131k ceiling lets it decide
-"very long": a live structured extraction ran past fifteen minutes with nothing
-placeholder-shaped to show for it.  16k is ample for a structured role answer
-(outline part, scene preparation, one shot breakdown) while bounding the worst
-case to minutes.  Creative scene writing keeps its own measured budget in
-``shine.literary.budget``, so this ceiling never truncates a scene.
-"""
-"""The completion ceiling one typed agent reply is budgeted against.
-
-A current 1M-context reasoning model bills its thinking as completion, so a
-16K ceiling is spent entirely on reasoning and the visible JSON comes back
-empty with ``finish_reason=length``. 128K is the ceiling the routed provider
-accepts for this class of model, so the default is a real budget instead of a
-guess about the model maximum. The value is a ceiling, never a demand: a
+A reasoning model decides how long to think, and an unbounded ceiling lets it
+decide "very long": a live structured extraction ran past fifteen minutes with
+nothing placeholder-shaped to show for it.  The ceiling bounds the worst case
+while leaving room for a full shot breakdown: 16K truncated long storyboard
+answers (finish_reason=length, then a retry that looks like a hang), so the
+owner raised it to 32K on 2026-11-12.  It is a ceiling, never a demand: a
 profile that declares or configures something smaller still wins through the
-min chain below.
+min chain below.  Creative scene writing keeps its own measured budget in
+``shine.literary.budget``, so this ceiling never truncates a scene.
 """
 
 AGENT_RATE_LIMIT_RETRY_ATTEMPTS = 2
