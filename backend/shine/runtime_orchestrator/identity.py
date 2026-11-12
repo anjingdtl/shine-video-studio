@@ -21,7 +21,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from shine.comfyops.models import ResourceLease
+from shine.comfy.workflow import graph_hash
+from shine.comfyops.models import ComfyInstance, ResourceLease
 from shine.models import AppSetting, Job
 from shine.runtime_orchestrator.contracts import IMAGE_STARTUP_PREFIX
 
@@ -59,11 +60,20 @@ def h3_records_for_installation(db, installation_id: str) -> list[dict[str, Any]
         value = row.value if isinstance(row.value, dict) else {}
         bound = (value.get("installation") or {}).get("id")
         if bound == installation_id:
+            state = _record_state(value)
+            process = value.get("process")
+            released_and_gone = False
+            if state == "ACTIVE":
+                latest_process = _h3_runtime_process(db, key_tail, value)
+                if latest_process:
+                    released_and_gone = _released_h3_processes_are_gone(db, value, latest_process)
+                    process = latest_process
             found.append(
                 {
                     "key": row.key,
                     "run_id": key_tail,
-                    "state": _record_state(value),
+                    "state": "INACTIVE" if released_and_gone else state,
+                    "released_and_gone": released_and_gone,
                     "stage": value.get("stage"),
                     "lease_id": value.get("lease_id"),
                     "job_id": value.get("job_id"),
@@ -71,11 +81,43 @@ def h3_records_for_installation(db, installation_id: str) -> list[dict[str, Any]
                     # Carried so a status read can re-prove the process without
                     # a second query; never used as an authority on its own.
                     "port": value.get("port"),
-                    "process": value.get("process"),
+                    "process": process,
                     "node_inventory": value.get("node_inventory"),
                 }
             )
     return found
+
+
+def _h3_runtime_process(db, run_id: str, startup: dict[str, Any]) -> dict[str, Any] | None:
+    """Use the latest process saved by a handoff for this exact startup."""
+    instance = db.get(ComfyInstance, run_id)
+    payload = instance.payload if instance and isinstance(instance.payload, dict) else {}
+    if (instance and startup.get("startup_id")
+            and payload.get("startup_id") == startup["startup_id"]
+            and payload.get("installation") == startup.get("installation")
+            and payload.get("port") == startup.get("port")
+            and instance.sha256 == graph_hash(payload)
+            and isinstance(payload.get("process"), dict)):
+        return payload["process"]
+    return None
+
+
+def _released_h3_processes_are_gone(db, startup: dict[str, Any], latest_process: dict[str, Any]) -> bool:
+    """Require release and death proof for the original and latest renderer."""
+    lease_id = startup.get("lease_id")
+    lease = db.get(ResourceLease, lease_id) if lease_id else None
+    job_id = startup.get("job_id")
+    job = db.get(Job, job_id) if job_id else None
+    if (not lease or lease.status != "RELEASED" or lease.owner != f"h3:{job_id}"
+            or not job or job.status in IN_FLIGHT_JOB_STATUSES):
+        return False
+
+    from shine.comfyops.renderer_release import managed_process_state
+
+    return managed_process_state(startup) == "GONE" and (
+        latest_process == startup.get("process")
+        or managed_process_state({**startup, "process": latest_process}) == "GONE"
+    )
 
 
 def verified_live_record(record: dict[str, Any]) -> dict[str, Any]:

@@ -956,9 +956,12 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                 and task.submit_intent_at is None
             ):
                 task.status = "QUEUED" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else "FAILED"
-                task.error_code = (
-                    "GPU_BUSY_RETRY_OR_QUEUE" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else type(exc).__name__
-                )
+                if isinstance(exc, image_execution.ImageExecutionError):
+                    task.error_code = exc.details.get("code_detail") or exc.code
+                else:
+                    task.error_code = (
+                        "GPU_BUSY_RETRY_OR_QUEUE" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else type(exc).__name__
+                    )
                 task.worker_id = None
                 task.lease_owner = None
                 task.state_version += 1

@@ -140,7 +140,7 @@ def _owner_alive(record: dict[str, Any]) -> bool:
         return True
 
 
-def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str | None = None) -> None:
+def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str | None = None) -> list[dict[str, Any]]:
     """One physical installation, one managed renderer, one controller.
 
     The image runtime and H3 share the adopted instance row and the recipe
@@ -154,7 +154,8 @@ def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str |
         lease_facts,
     )
 
-    for record in h3_records_for_installation(db, instance_id):
+    h3_records = h3_records_for_installation(db, instance_id)
+    for record in h3_records:
         if record["state"] in ("ACTIVE", "STARTING"):
             raise HTTPException(409, {
                 "code": "IMAGE_RENDERER_INSTALLATION_BUSY_H3",
@@ -197,6 +198,7 @@ def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str |
             "lease_owner": lease["owner"],
             "lease_status": lease["status"],
         })
+    return [record for record in h3_records if record.get("released_and_gone")]
 
 
 def _provably_gone(record: dict[str, Any]) -> bool:
@@ -287,7 +289,7 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         # installation forever.  Uncertainty is untouched and still refuses.
         _normalize_provably_dead_record(factory, instance_id, actor="controller:recorded-gone")
         with factory() as db:
-            _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
+            released_h3 = _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
         try:
             listeners = windows_port_listeners(port)
         except (OSError, ValueError) as exc:
@@ -330,6 +332,17 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                 db.add(AppSetting(key=key, value=intent))
             else:
                 existing.value = intent
+            # The completed H3 handoff leaves the initial startup row at
+            # RUNNING. Both process identities and its released lease were
+            # checked under this guard. Keep that evidence when closing it.
+            for record in released_h3:
+                startup = db.get(AppSetting, record["key"])
+                startup.value = {
+                    **startup.value, "stage": "STOPPED",
+                    "stopped_at": utcnow().isoformat(), "stopped_reason": "h3_released_and_gone",
+                }
+                run = db.get(ComfyInstance, record["run_id"])
+                run.status = "STOPPED"
     group = None
     process = None
     try:

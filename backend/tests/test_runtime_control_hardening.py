@@ -552,6 +552,68 @@ def test_image_start_refuses_external_listener_before_launch(api, tmp_path, monk
         assert db.get(AppSetting, image_renderer.image_startup_key(INSTALLATION)) is None
 
 
+@pytest.mark.parametrize(
+    ("lease_status", "latest_state", "can_start"),
+    [("RELEASED", "GONE", True), ("RELEASED", "UNVERIFIED", False), ("ACTIVE", "GONE", False)],
+)
+def test_image_admission_retires_released_h3_only_when_both_processes_are_gone(
+    api, tmp_path, monkeypatch, lease_status, latest_state, can_start,
+):
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops import image_renderer, renderer_release
+    from shine.comfyops.models import ResourceLease
+    from shine.models import Job
+
+    from .conftest import create_job, create_project, create_shot, freeze_style
+
+    client, factory, settings = api
+    _write_recipe(api, tmp_path)
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job = create_job(client, project, shot["id"])
+    run_id = "finished-h3-run"
+    startup_key = "renderer-startup:" + run_id
+    pin = {"id": INSTALLATION, "sha256": "x", "attempt_id": "install-attempt"}
+    first = {"pid": 1, "birth": "first", "job_name": "first-group"}
+    last = {"pid": 2, "birth": "latest", "job_name": "replacement-group"}
+    base = {"startup_id": "start-id", "installation": pin, "port": 8188}
+    with factory.begin() as db:
+        _installation_row(db)
+        db.get(Job, job["id"]).status = "PASSED"
+        db.add(ResourceLease(
+            id="first-lease", owner="h3:" + job["id"], status=lease_status, expires_at=utcnow(),
+            budget_mb=16384, exclusive=True, priority=100,
+        ))
+        payload = {**base, "process": last}
+        db.add(ComfyInstance(id=run_id, payload=payload, sha256=graph_hash(payload), status="RUNNING_PENDING_HEALTH"))
+        db.add(AppSetting(key=startup_key, value={
+            **base, "stage": "RUNNING", "process": first, "lease_id": "first-lease", "job_id": job["id"],
+        }))
+
+    def no_process_launch(recipe):
+        raise HTTPException(409, "TEST_REACHED_IMAGE_LAUNCH")
+
+    monkeypatch.setattr(
+        renderer_release, "managed_process_state",
+        lambda record: latest_state if record["process"] == last else "GONE",
+    )
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(image_renderer, "build_renderer_launch", no_process_launch)
+    with pytest.raises(HTTPException) as exc:
+        image_renderer.start_image_renderer(factory, settings, instance_id=INSTALLATION, actor="test")
+    with factory() as db:
+        saved = db.get(AppSetting, startup_key).value
+        if can_start:
+            assert exc.value.detail == "TEST_REACHED_IMAGE_LAUNCH"
+            assert saved["stopped_reason"] == "h3_released_and_gone"
+            assert db.get(ComfyInstance, run_id).status == "STOPPED"
+        else:
+            assert exc.value.detail["code"] == "IMAGE_RENDERER_INSTALLATION_BUSY_H3"
+            assert saved["stage"] == "RUNNING"
+        assert saved["process"] == first
+
+
 def test_snapshot_does_not_call_a_dead_record_busy(api, tmp_path, monkeypatch):
     from shine.runtime_orchestrator import status as status_module
 
