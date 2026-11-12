@@ -5,13 +5,19 @@ from the durable records and bounded probes — never a second persistent
 "truth".  A snapshot call never starts a process, loads a model or writes a
 ledger row (plan §3.3/§3.4, §6).
 
-The four states the plan demands to distinguish are the axes of the state
-machine:
+The states the plan demands to distinguish are the axes of the state machine:
 
 * the process is provably gone            -> STOPPED
 * HTTP is momentarily unreachable         -> DEGRADED (process alive: probe again)
 * the model is loading / a start intent   -> STARTING (bounded, never "dead")
 * a real submission's outcome is unknown  -> BLOCKED_UNVERIFIED / RECONCILING
+* an unowned listener on our port         -> EXTERNAL_CONFLICT
+
+The record is intent, not proof.  A startup record that says RUNNING while its
+PID/birth/owned group cannot be confirmed is reported as BLOCKED_UNVERIFIED,
+never as "制作中": believing a record is how a dead renderer used to look busy
+forever (and how "stop" ended up refusing with a busy reason that never
+cleared).
 """
 
 from __future__ import annotations
@@ -65,40 +71,49 @@ def _http_up(base_url: str) -> bool | None:
     return outcome
 
 
-def _classify(activity: dict[str, Any], *, http_up: bool | None) -> str:
+def _classify(activity: dict[str, Any], *, live_image: str | None, http_up: bool | None) -> str:
     reconcile_leases = [lease for lease in activity["gpu_leases"]
                         if lease["status"] == "RECONCILE_REQUIRED"]
     if reconcile_leases:
         return "RECONCILING"
     image = activity.get("image_record")
-    if image:
-        if image["state"] == "STARTING":
-            return "STARTING"
-        if image["state"] == "UNCERTAIN":
-            return "BLOCKED_UNVERIFIED"
+    stage = (image or {}).get("stage")
+    # A record flagged for reconciliation owns an unresolved external side
+    # effect; a dead process does not clear that by itself (only reconcile or
+    # release may), so it outranks every live fact here.
+    if image and (image.get("state") == "UNCERTAIN" or stage == "RECONCILE_REQUIRED"):
+        return "BLOCKED_UNVERIFIED"
+    # A live start intent: the process may not exist yet, and that is normal.
+    if image and stage in ("INTENT", "LAUNCHED", "LISTENING") and live_image != "RUNNING":
+        return "STARTING"
+    # The record claims a running renderer the OS cannot confirm.
+    if live_image == "UNVERIFIED":
+        return "BLOCKED_UNVERIFIED"
     if activity["renderer_state"] == "UNCERTAIN_H3":
         return "BLOCKED_UNVERIFIED"
-    h3_active = any(r["state"] in ("ACTIVE", "STARTING") for r in activity["h3_records"])
-    if h3_active or (image and image["state"] == "ACTIVE"):
-        busy = bool(
-            activity["in_flight_h3_jobs"]
-            or activity["in_flight_image_work"]
-            or [lease for lease in activity["gpu_leases"] if lease["status"] == "ACTIVE"]
-            or any(r["state"] == "STARTING" for r in activity["h3_records"])
-        )
+    h3_active = any(record["state"] in ("ACTIVE", "STARTING") for record in activity["h3_records"])
+    busy = bool(
+        activity["in_flight_h3_jobs"]
+        or activity["in_flight_image_work"]
+        or [lease for lease in activity["gpu_leases"] if lease["status"] == "ACTIVE"]
+        or any(record["state"] == "STARTING" for record in activity["h3_records"])
+    )
+    if live_image == "RUNNING":
         if busy:
             return "BUSY"
-        if image and image["state"] == "ACTIVE":
-            # Process provably alive; transport decides between READY and DEGRADED.
-            if http_up is False:
-                return "DEGRADED"
-            return "READY_IDLE"
-        return "BUSY"  # an H3 renderer is resident behind its series/keeper
+        # Process provably alive; transport decides between READY and DEGRADED.
+        return "DEGRADED" if http_up is False else "READY_IDLE"
+    if h3_active:
+        return "DEGRADED" if http_up is False else "BUSY"
+    if busy:
+        # Work is recorded but no renderer can be proven: reconcile, do not
+        # start a second one on top of an unknown outcome.
+        return "RECONCILING"
     # Nothing recorded as running: a port that still listens is not ours.
     return "STOPPED"
 
 
-_RECOVERY: dict[str, dict[str, str | None]] = {
+_RECOVERY: dict[str, dict[str, Any]] = {
     "NOT_BOUND": {"required": True, "reason_code": "IMAGE_RUNTIME_NOT_BOUND",
                   "safe_action": None, "advice": "先在基础配置里完成本机环境登记。"},
     "STOPPED": {"required": False, "reason_code": None,
@@ -111,8 +126,9 @@ _RECOVERY: dict[str, dict[str, str | None]] = {
              "safe_action": None, "advice": "引擎正在执行任务；按现有租约串行等待。"},
     "DEGRADED": {"required": False, "reason_code": "TRANSPORT_DEGRADED",
                  "safe_action": "probe", "advice": "进程仍在但 HTTP 暂时不可达；已自动重试，可再点“检查连接”。"},
-    "RECONCILING": {"required": True, "reason_code": "LEASE_RECONCILE_REQUIRED",
-                    "safe_action": "reconcile", "advice": "有租约需要对账；恢复动作只核对证据，不重发任务。"},
+    "RECONCILING": {"required": True, "reason_code": "RECONCILE_REQUIRED",
+                    "safe_action": "reconcile",
+                    "advice": "有任务或资源的真实状态需要核对；恢复动作只核对证据，不重发任务。"},
     "BLOCKED_UNVERIFIED": {"required": True, "reason_code": "OWNERSHIP_UNVERIFIED",
                            "safe_action": "reconcile", "advice": "渲染器归属或外部提交结果未核对；禁止盲启/盲杀。"},
     "EXTERNAL_CONFLICT": {"required": True, "reason_code": "EXTERNAL_INSTANCE_ON_PORT",
@@ -121,9 +137,8 @@ _RECOVERY: dict[str, dict[str, str | None]] = {
 
 
 def _recovery_for(state: str) -> dict[str, Any]:
-    entry = dict(_RECOVERY.get(state) or {"required": False, "reason_code": None,
-                                          "safe_action": None, "advice": None})
-    return entry
+    return dict(_RECOVERY.get(state) or {"required": False, "reason_code": None,
+                                         "safe_action": None, "advice": None})
 
 
 def _external_conflict(port: int | None) -> bool:
@@ -140,6 +155,24 @@ def _external_conflict(port: int | None) -> bool:
         return bool(windows_port_listeners(int(port)))
     except (OSError, ValueError):  # includes non-Windows, where this never claims
         return False
+
+
+def _workflow_health(settings, *, live_state: str | None, adapter_sha256: str | None) -> str:
+    """Whether the listening renderer still runs the adapter the recipe names.
+
+    A stored digest comparison, not a re-hash of the installation: the status
+    endpoint must stay cheap enough to poll.  "UNVERIFIED" is a real answer and
+    is never upgraded to "OK" by assumption.
+    """
+    if live_state != "RUNNING":
+        return "NOT_RUNNING"
+    try:
+        pinned = (load_image_recipe(settings)["renderer"] or {}).get("adapter_sha256")
+    except Exception:  # noqa: BLE001 - no recipe means nothing to compare
+        return "UNVERIFIED"
+    if not pinned or not adapter_sha256:
+        return "UNVERIFIED"
+    return "VERIFIED" if pinned == adapter_sha256 else "MISMATCH"
 
 
 def runtime_snapshot(db, settings) -> dict[str, Any]:
@@ -165,8 +198,6 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         # No image binding yet, but a generated recipe still names the
         # installation this workbench adopted.
         try:
-            from shine.comfyops.image_renderer import load_image_recipe
-
             installation_id = load_image_recipe(settings)["renderer"].get("instance_id") or ""
         except Exception:  # noqa: BLE001
             installation_id = ""
@@ -174,9 +205,11 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "schema_version": 1,
         "installation_id": installation_id,
         "state": "NOT_BOUND",
-        "health": {"worker": "DOWN", "comfy_http": "UNKNOWN"},
+        "health": {"worker": "DOWN", "api": "UP", "comfy_http": "UNKNOWN",
+                   "workflow": "NOT_BOUND"},
         "ownership": {"managed": False, "verified": False, "port": None, "pid": None},
-        "current": {"owner_kind": None, "task": None, "operation_id": None},
+        "current": {"owner_kind": None, "task": None, "operation_id": None,
+                    "operation_action": None, "operation_status": None},
         "resource": {"active_leases": 0, "waiting_leases": 0, "reconcile_leases": 0},
         "recovery": _recovery_for("NOT_BOUND"),
         "last_observed_at": None,
@@ -194,20 +227,27 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     snapshot["last_observed_at"] = utcnow().isoformat()
     activity = installation_activity(db, installation_id)
     renderer_facts = image_renderer_state(db, settings, installation_id)
+    image_record = activity.get("image_record")
+    live_image = renderer_facts.get("state")
     # The startup record carries the port while a renderer was started; a
     # stopped/unstarted installation still owns the recipe's port claim, and
     # an external listener there is exactly the conflict to report.
     port = renderer_facts.get("port") or recipe_port(settings)
-    http_up = _http_up(base_url) if activity["renderer_state"] != "NONE" else None
-    state = _classify(activity, http_up=http_up)
+    probe_url = base_url or (f"http://127.0.0.1:{port}" if port else "")
+    anything_recorded = activity["renderer_state"] != "NONE" or live_image in ("RUNNING", "UNVERIFIED")
+    http_up = _http_up(probe_url) if anything_recorded else None
+    state = _classify(activity, live_image=live_image, http_up=http_up)
     if state == "STOPPED" and _external_conflict(port):
         state = "EXTERNAL_CONFLICT"
     snapshot["state"] = state
     snapshot["recovery"] = _recovery_for(state)
     snapshot["health"]["comfy_http"] = "UP" if http_up else ("DOWN" if http_up is False else "UNKNOWN")
-    image_record = activity.get("image_record")
-    active_h3 = next((r for r in activity["h3_records"] if r["state"] == "ACTIVE"), None)
-    owner_kind = "h3" if active_h3 else ("image" if image_record else None)
+    snapshot["health"]["workflow"] = _workflow_health(
+        settings, live_state=live_image,
+        adapter_sha256=(image_record or {}).get("adapter_sha256"),
+    )
+    active_h3 = next((record for record in activity["h3_records"] if record["state"] == "ACTIVE"), None)
+    owner_kind = "h3" if active_h3 else ("image" if live_image == "RUNNING" else None)
     snapshot["current"]["owner_kind"] = owner_kind
     snapshot["current"]["task"] = (active_h3 or {}).get("job_id") or (
         activity["in_flight_image_work"][0]["id"] if activity["in_flight_image_work"] else None
@@ -228,6 +268,8 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         .limit(1)
     )
     snapshot["current"]["operation_id"] = pending.id if pending else None
+    snapshot["current"]["operation_action"] = pending.action if pending else None
+    snapshot["current"]["operation_status"] = pending.status if pending else None
     snapshot["state_version"] = sum(
         int(counts.get(status, 0)) for status in ("SUCCEEDED", "REFUSED", "FAILED")
     )
@@ -237,12 +279,19 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "reconcile_leases": len([lease for lease in leases if lease["status"] == "RECONCILE_REQUIRED"]),
         "waiting_leases": 0,
     }
-    process = (image_record or {}).get("process") if image_record else None
+    h3_verified = False
+    if active_h3 and active_h3.get("process"):
+        from shine.runtime_orchestrator.identity import verified_live_record
+
+        facts = verified_live_record({"process": active_h3["process"]})
+        h3_verified = bool(facts.get("alive") and facts.get("owned"))
     snapshot["ownership"] = {
-        "managed": bool(image_record or active_h3),
-        "verified": bool(image_record),
+        "managed": bool(live_image == "RUNNING" or active_h3),
+        # "verified" is an OS fact, not the presence of a record: PID + birth +
+        # named Job Object membership must agree.
+        "verified": bool(live_image == "RUNNING" or h3_verified),
         "port": port,
-        "pid": (process or {}).get("pid") if process else None,
+        "pid": renderer_facts.get("pid") if live_image == "RUNNING" else None,
     }
     snapshot["activity"] = {
         "h3_runs": len(activity["h3_records"]),

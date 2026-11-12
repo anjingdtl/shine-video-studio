@@ -1,0 +1,564 @@
+"""Final hardening of the unified control plane.
+
+These tests cover the gaps the first acceptance round left open:
+
+* the installation lifecycle guard refuses instead of failing open, and is
+  re-entrant within one thread (a stop inside a start's section);
+* two lifecycle actions on one physical installation never execute at once,
+  and a stale page cannot stop an engine a newer action just started;
+* the H3 startup section takes the *physical* installation guard and clears a
+  proven-idle image renderer itself, so the "make way" step and the H3 intent
+  cannot be separated by a competing image start;
+* a global release owns every involved installation's section, in sorted
+  order, before it opens its write transaction;
+* the snapshot reports what the OS proves, not what a record claims;
+* reconcile says what happened (nothing / cleared / needs a human / failed).
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+from fastapi import HTTPException
+
+from shine.comfyops.models import ComfyInstance
+from shine.models import AppSetting, WorkerInstance, utcnow
+from shine.runtime_orchestrator import executor, guard, operations
+
+pytestmark = pytest.mark.integration
+
+INSTALLATION = "22222222-2222-2222-2222-222222222222"
+OTHER_INSTALLATION = "33333333-3333-3333-3333-333333333333"
+
+
+# --- lifecycle guard ----------------------------------------------------------
+
+
+class _FakeKernel:
+    """A kernel32 stand-in that records calls and returns chosen wait states."""
+
+    def __init__(self, *, create=None, wait=0):
+        self.created = 0
+        self.released = 0
+        self.closed = 0
+        self._create = create
+        self._wait = wait
+        self.CreateMutexW = self._create_mutex
+        self.WaitForSingleObject = self._wait_for
+        self.ReleaseMutex = self._release
+        self.CloseHandle = self._close
+
+    def _create_mutex(self, attributes, initial_owner, name):
+        self.created += 1
+        return self._create
+
+    def _wait_for(self, handle, milliseconds):
+        return self._wait
+
+    def _release(self, handle):
+        self.released += 1
+        return 1
+
+    def _close(self, handle):
+        self.closed += 1
+        return 1
+
+
+def test_guard_refuses_when_the_mutex_cannot_be_created(monkeypatch):
+    fake = _FakeKernel(create=None)
+    monkeypatch.setattr(guard, "_kernel32", lambda: fake)
+    with pytest.raises(guard.LifecycleGuardUnavailable):
+        with guard.renderer_lifecycle_guard(INSTALLATION):
+            pytest.fail("a section must never open without its OS lock")
+
+
+def test_guard_refuses_when_the_lock_cannot_be_taken(monkeypatch):
+    fake = _FakeKernel(create=1234, wait=guard._WAIT_TIMEOUT)
+    monkeypatch.setattr(guard, "_kernel32", lambda: fake)
+    with pytest.raises(guard.LifecycleGuardBusy):
+        with guard.renderer_lifecycle_guard(INSTALLATION):
+            pytest.fail("a locked installation must not be entered")
+    assert fake.closed == 1
+
+
+def test_guard_refuses_an_unexpected_wait_state(monkeypatch):
+    fake = _FakeKernel(create=1234, wait=guard._WAIT_FAILED)
+    monkeypatch.setattr(guard, "_kernel32", lambda: fake)
+    with pytest.raises(guard.LifecycleGuardUnavailable):
+        with guard.renderer_lifecycle_guard(INSTALLATION):
+            pytest.fail("WAIT_FAILED is not ownership")
+
+
+def test_guard_is_reentrant_and_always_closes(monkeypatch):
+    fake = _FakeKernel(create=1234, wait=guard._WAIT_OBJECT_0)
+    monkeypatch.setattr(guard, "_kernel32", lambda: fake)
+    with guard.renderer_lifecycle_guard(INSTALLATION):
+        assert guard.guard_is_held(INSTALLATION)
+        with guard.renderer_lifecycle_guard(INSTALLATION):
+            assert guard.guard_is_held(INSTALLATION)
+        assert guard.guard_is_held(INSTALLATION)
+    assert not guard.guard_is_held(INSTALLATION)
+    # One OS mutex for the outer section, one close, one release: the nested
+    # section must not create a second handle or wait on itself.
+    assert fake.created == 1
+    assert fake.released == 1
+    assert fake.closed == 1
+
+
+def test_guard_name_is_stable_and_installation_scoped():
+    assert guard.lifecycle_guard_name(INSTALLATION) == guard.lifecycle_guard_name(INSTALLATION)
+    assert guard.lifecycle_guard_name(INSTALLATION) != guard.lifecycle_guard_name(OTHER_INSTALLATION)
+    # Same physical installation, different casing/whitespace: same lock.
+    assert guard.lifecycle_guard_name(INSTALLATION) == guard.lifecycle_guard_name(" " + INSTALLATION.upper())
+
+
+# --- operation claiming -------------------------------------------------------
+
+
+def _live_worker(db, worker_id="w-live"):
+    db.add(WorkerInstance(
+        worker_id=worker_id, version="test", status="RUNNING",
+        last_heartbeat_at=utcnow(), started_at=utcnow(),
+    ))
+    return worker_id
+
+
+def test_conflicting_action_is_not_claimed_while_another_runs(api):
+    _, factory, _ = api
+    with factory.begin() as db:
+        owner = _live_worker(db)
+        started = operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-a", request={"params": {}},
+        )
+        operations.claim_pending_operations(db, worker_id=owner, worker_birth="b")
+        assert started.status == "RUNNING"
+        operations.create_or_get_operation(
+            db, action="stop", installation_id=INSTALLATION,
+            idempotency_key="stop-a", request={"params": {}},
+        )
+    with factory.begin() as db:
+        claimed = operations.claim_pending_operations(db, worker_id="w-other", worker_birth="b2")
+    assert [row.action for row in claimed] == [], "a stop must not run while the ensure is live"
+
+
+def test_probe_is_never_blocked_by_a_lifecycle_action(api):
+    _, factory, _ = api
+    with factory.begin() as db:
+        owner = _live_worker(db)
+        operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-b", request={"params": {}},
+        )
+        operations.claim_pending_operations(db, worker_id=owner, worker_birth="b")
+        operations.create_or_get_operation(
+            db, action="probe", installation_id=INSTALLATION,
+            idempotency_key="probe-b", request={"params": {}},
+        )
+    with factory.begin() as db:
+        claimed = operations.claim_pending_operations(db, worker_id="w-other", worker_birth="b2")
+    assert [row.action for row in claimed] == ["probe"]
+
+
+def test_one_batch_never_claims_two_lifecycle_actions_for_one_installation(api):
+    _, factory, _ = api
+    with factory.begin() as db:
+        operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-c", request={"params": {}},
+        )
+        operations.create_or_get_operation(
+            db, action="stop", installation_id=INSTALLATION,
+            idempotency_key="stop-c", request={"params": {}},
+        )
+    with factory.begin() as db:
+        claimed = operations.claim_pending_operations(db, worker_id="w1", worker_birth="b")
+    assert len(claimed) == 1
+    assert claimed[0].action == "ensure"  # first in, first executed
+
+
+def test_a_dead_owner_lets_a_new_worker_take_the_action_over(api):
+    _, factory, _ = api
+    with factory.begin() as db:
+        stale = _live_worker(db, "w-stale")
+        operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-d", request={"params": {}},
+        )
+        operations.claim_pending_operations(db, worker_id=stale, worker_birth="old")
+        db.get(WorkerInstance, stale).last_heartbeat_at = utcnow() - timedelta(minutes=5)
+    with factory.begin() as db:
+        claimed = operations.claim_pending_operations(db, worker_id="w-new", worker_birth="new")
+    assert [row.action for row in claimed] == ["ensure"]
+
+
+# --- version (CAS) ------------------------------------------------------------
+
+
+def test_a_stale_state_version_is_refused(api):
+    _, factory, _ = api
+    with factory.begin() as db:
+        first = operations.create_or_get_operation(
+            db, action="probe", installation_id=INSTALLATION,
+            idempotency_key="probe-e", request={"params": {}},
+        )
+        first.status = "SUCCEEDED"
+        first.state_version += 1
+    with factory() as db:
+        current = operations.state_version_for(db, INSTALLATION)
+    assert current == 1
+    with factory.begin() as db:
+        with pytest.raises(HTTPException) as stale:
+            operations.create_or_get_operation(
+                db, action="ensure", installation_id=INSTALLATION,
+                idempotency_key="ensure-e", request={"params": {}},
+                expected_state_version=current - 1,
+            )
+        assert stale.value.detail["code"] == "RUNTIME_STATE_VERSION_STALE"
+    with factory.begin() as db:
+        accepted = operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-e2", request={"params": {}},
+            expected_state_version=current,
+        )
+        assert accepted.status == "PENDING"
+
+
+def test_the_same_idempotency_key_replays_after_the_state_advanced(api):
+    """A double click is one intent even when the first one already finished."""
+    _, factory, _ = api
+    with factory.begin() as db:
+        first = operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-f", request={"params": {"reason": "x"}},
+            expected_state_version=0,
+        )
+        first.status = "SUCCEEDED"
+        first.state_version += 1
+    with factory.begin() as db:
+        replay = operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-f", request={"params": {"reason": "x"}},
+            expected_state_version=0,
+        )
+        assert replay.id == first.id
+
+
+# --- H3 startup coordination --------------------------------------------------
+
+
+def _image_record(db, *, stage="RUNNING", installation_id=INSTALLATION, **extra):
+    value = {
+        "stage": stage,
+        "instance_id": installation_id,
+        "purpose": "image",
+        "port": 8188,
+        "owner_pid": 4,
+        "owner_birth": "dead",
+        "process": {"pid": 999999, "birth": "nope", "job_name": "Local\\ShineHandoff-" + "0" * 32},
+        "adapter_sha256": "a" * 64,
+    }
+    value.update(extra)
+    db.add(AppSetting(key="renderer-startup:image:" + installation_id, value=value))
+
+
+def test_h3_start_retires_a_proven_idle_image_renderer(api, monkeypatch):
+    from shine.comfyops import handoff_startup
+
+    _, factory, settings = api
+    with factory.begin() as db:
+        _image_record(db, stage="RUNNING")
+    calls = []
+
+    def fake_retire(factory_, settings_, installation_id, actor="x"):
+        calls.append(installation_id)
+        return {"status": "STOPPED"}
+
+    monkeypatch.setattr("shine.comfyops.image_renderer.retire_idle_image_renderer", fake_retire)
+    from shine.runtime_orchestrator import identity
+
+    with factory() as db:
+        record = identity.image_record_for_installation(db, INSTALLATION)
+    monkeypatch.setitem(record, "live_state", "RUNNING")
+    monkeypatch.setattr(identity, "image_record_for_installation", lambda db, iid: record)
+    handoff_startup._make_way_for_h3(factory, settings, INSTALLATION)
+    assert calls == [INSTALLATION]
+
+
+def test_h3_start_refuses_an_unverifiable_image_renderer(api, monkeypatch):
+    from shine.comfyops import handoff_startup
+    from shine.runtime_orchestrator import identity
+
+    _, factory, settings = api
+    record = {"key": "k", "state": "ACTIVE", "live_state": "UNVERIFIED", "stage": "RUNNING"}
+    monkeypatch.setattr(identity, "image_record_for_installation", lambda db, iid: record)
+    with pytest.raises(HTTPException) as refused:
+        handoff_startup._make_way_for_h3(factory, settings, INSTALLATION)
+    assert refused.value.detail["code"] == "COMFY_INSTALLATION_IMAGE_RENDERER_UNVERIFIED"
+
+
+def test_h3_start_takes_the_physical_installation_guard(api, monkeypatch):
+    """The section is keyed by installation id, never by the per-attempt run id."""
+    from shine.comfyops import handoff_startup
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_guard(installation_id, timeout_s=30.0):
+        seen.append(installation_id)
+        raise _Stop()
+
+    monkeypatch.setattr(
+        "shine.runtime_orchestrator.guard.renderer_lifecycle_guard", fake_guard,
+    )
+    _, factory, settings = api
+    with factory.begin() as db:
+        db.add(ComfyInstance(id=INSTALLATION, payload={"managed": True}, sha256="x", status="STOPPED"))
+    with pytest.raises(_Stop):
+        handoff_startup.start_managed_renderer(
+            factory, settings,
+            instance_id="run-identity-not-the-lock-key",
+            lease_id="lease-1", job_id="job-1", worker_id="w",
+            argv=["python", "main.py"], cwd=str(settings.data_dir), env={},
+            pinned_files=[], port=8188, handoff_token="t" * 40,
+            adapter_sha256="a" * 64, gpu_uuid="GPU-x", min_ram_mb=1, min_vram_mb=1,
+            installation={"id": INSTALLATION, "sha256": "x", "attempt_id": "a1"},
+        )
+    assert seen == [INSTALLATION]
+
+
+# --- stop / release serialization ---------------------------------------------
+
+
+def test_image_stop_takes_the_installation_guard(api, monkeypatch):
+    from shine.comfyops import image_renderer
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_guard(installation_id, timeout_s=30.0):
+        seen.append(installation_id)
+        raise _Stop()
+
+    monkeypatch.setattr("shine.runtime_orchestrator.guard.renderer_lifecycle_guard", fake_guard)
+    _, factory, settings = api
+    with pytest.raises(_Stop):
+        image_renderer.stop_image_renderer(
+            factory, settings, instance_id=INSTALLATION, actor="test",
+        )
+    assert seen == [INSTALLATION]
+
+
+def test_release_guards_every_installation_in_sorted_order(api, monkeypatch):
+    from shine.comfyops import renderer_release
+
+    order = []
+    released = {}
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_guard(installation_id, timeout_s=30.0):
+        order.append(installation_id)
+        yield None
+
+    monkeypatch.setattr("shine.runtime_orchestrator.guard.renderer_lifecycle_guard", fake_guard)
+    monkeypatch.setattr(
+        renderer_release, "managed_processes",
+        lambda db: [
+            {"key": "renderer-startup:x", "installation": {"id": OTHER_INSTALLATION}},
+            {"key": "renderer-startup:image:y", "purpose": "image", "instance_id": INSTALLATION},
+        ],
+    )
+
+    def fake_release(db, *, actor, reason):
+        released["actor"] = actor
+        return {"stopped": [], "refused": [], "released": []}
+
+    monkeypatch.setattr(renderer_release, "release_managed_processes", fake_release)
+    _, factory, _ = api
+    report = renderer_release.release_managed_processes_guarded(factory, actor="test", reason="r")
+    assert order == sorted([INSTALLATION, OTHER_INSTALLATION])
+    assert released["actor"] == "test"
+    assert report["stopped"] == []
+
+
+# --- snapshot honesty ---------------------------------------------------------
+
+
+def _write_recipe(api, tmp_path, *, instance_id=INSTALLATION, port=8188):
+    import json
+    import sys
+    from pathlib import Path
+
+    from shine.comfyops.deployment import ADAPTER_DIR
+    from shine.comfyops.image_renderer import recipe_path
+    from shine.comfyops.managed_recipe import adapter_identity
+
+    _, _, settings = api
+    root = tmp_path / "comfy-root"
+    root.mkdir(parents=True, exist_ok=True)
+    bootstrap = Path(__file__).resolve().parents[2] / "scripts" / "managed_comfy_bootstrap.py"
+    recipe = {
+        "renderer": {
+            "instance_id": instance_id,
+            "python": str(Path(sys.executable).resolve()),
+            "root": str(root),
+            "base_directory": str(root),
+            "runtime_data_root": str(root),
+            "bootstrap": str(bootstrap),
+            "adapter_dir": str(ADAPTER_DIR),
+            "adapter_sha256": adapter_identity(ADAPTER_DIR),
+            "gpu_uuid": "GPU-TEST",
+            "port": port,
+            "argv": ["{python}", "{bootstrap}", "--listen", "127.0.0.1", "--port", "{port}"],
+            "pinned_files": ["{python}", "{bootstrap}"],
+        },
+        "reviews": {},
+    }
+    path = recipe_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(recipe), encoding="utf-8")
+
+
+def _installation_row(db, installation_id=INSTALLATION, status="STOPPED"):
+    db.add(ComfyInstance(id=installation_id, payload={"managed": True}, sha256="x", status=status))
+
+
+def test_snapshot_does_not_call_a_dead_record_busy(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    with factory.begin() as db:
+        _installation_row(db)
+        _image_record(db, stage="RUNNING")
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["state"] == "STOPPED"
+    assert snap["ownership"]["verified"] is False
+    assert snap["ownership"]["pid"] is None
+
+
+def test_snapshot_reports_unverifiable_ownership(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    monkeypatch.setattr(
+        status_module, "image_renderer_state",
+        lambda db, settings_, iid: {"state": "UNVERIFIED", "pid": None, "port": 8188},
+    )
+    with factory.begin() as db:
+        _installation_row(db)
+        _image_record(db, stage="RUNNING")
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["state"] == "BLOCKED_UNVERIFIED"
+    assert snap["recovery"]["safe_action"] == "reconcile"
+
+
+def test_snapshot_reports_workflow_mismatch(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    monkeypatch.setattr(
+        status_module, "image_renderer_state",
+        lambda db, settings_, iid: {"state": "RUNNING", "pid": 4, "port": 8188},
+    )
+    with factory.begin() as db:
+        _installation_row(db)
+        _image_record(db, stage="RUNNING", adapter_sha256="b" * 64)
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["health"]["workflow"] == "MISMATCH"
+
+
+def test_snapshot_exposes_a_pending_operation(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    with factory.begin() as db:
+        _installation_row(db)
+        operations.create_or_get_operation(
+            db, action="ensure", installation_id=INSTALLATION,
+            idempotency_key="ensure-live", request={"params": {}},
+        )
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["current"]["operation_id"]
+    assert snap["current"]["operation_action"] == "ensure"
+    assert snap["current"]["operation_status"] == "PENDING"
+
+
+# --- reconcile outcomes -------------------------------------------------------
+
+
+def test_reconcile_reports_nothing_to_reconcile(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    with factory.begin() as db:
+        _installation_row(db)
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_NOTHING
+
+
+def test_reconcile_preserves_an_unknown_submission_for_a_human(api, tmp_path, monkeypatch):
+    from shine.models import Job
+
+    from .conftest import create_job, create_project, create_shot, freeze_style
+
+    client, factory, settings = api
+    project = create_project(client, "未知提交")
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    created = create_job(client, project, shot["id"])
+    with factory.begin() as db:
+        _installation_row(db)
+        job = db.get(Job, created["id"])
+        job.status = "NEEDS_REVIEW"
+        job.failure_code = "COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
+    kinds = {item["kind"] for item in result["uncertain"]}
+    assert "unknown_submission" in kinds
+    assert "不会重发" in result["note"]
+
+
+def test_reconcile_clears_a_proven_dead_record(api, tmp_path, monkeypatch):
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    with factory.begin() as db:
+        _installation_row(db, status="RUNNING_PENDING_HEALTH")
+        _image_record(db, stage="RUNNING")
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] in (executor.OUTCOME_RECONCILED, executor.OUTCOME_NOTHING)
+    with factory() as db:
+        row = db.get(ComfyInstance, INSTALLATION)
+        assert row.status == "STOPPED"
+
+
+def test_reconcile_reports_a_failure_instead_of_crashing(api, monkeypatch):
+    _, factory, settings = api
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("ledger unreadable")
+
+    monkeypatch.setattr("shine.comfyops.renderer_release.describe_managed_processes", explode)
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_FAILED
+    assert result["error"] == "RuntimeError"

@@ -2047,6 +2047,11 @@ html[data-theme='dark'] #output-directory code{background:#26271f;border-color:#
 .engine-detail{position:absolute;top:calc(100% + 8px);right:0;z-index:60;display:flex;flex-direction:column;gap:6px;min-width:280px;max-width:360px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--lib-paper);box-shadow:0 10px 28px var(--fx-rgba60502014);font-size:var(--fs-caption);line-height:var(--lh-body);color:var(--ink)}
 .engine-detail-health{color:var(--ink-2);font-family:var(--mono);font-size:var(--fs-caption)}
 .engine-detail-error{color:var(--danger-deep)}
+/* 一次动作的结论就在状态条旁边说清楚，不必展开详情才算看到。 */
+.engine-feedback{max-width:320px;padding:3px 9px;border-radius:12px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-2);font-size:var(--fs-caption);line-height:var(--lh-body)}
+.engine-feedback.tone-idle{border-color:var(--ok-line);background:var(--lib-bg);color:var(--ink)}
+.engine-feedback.tone-warn{border-color:var(--warn-line);background:var(--warn-bg-3);color:var(--ink-2)}
+.engine-feedback.tone-down{border-color:var(--danger-line);background:var(--danger-bg);color:var(--danger-deep)}
 
 /* ==========================================================================
    2026-11-11 导演模式 UI 统一：唯一设计系统表面（P0–P4）

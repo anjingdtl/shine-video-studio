@@ -68,9 +68,25 @@ def h3_records_for_installation(db, installation_id: str) -> list[dict[str, Any]
                     "lease_id": value.get("lease_id"),
                     "job_id": value.get("job_id"),
                     "purpose": value.get("purpose") or "h3",
+                    # Carried so a status read can re-prove the process without
+                    # a second query; never used as an authority on its own.
+                    "port": value.get("port"),
+                    "process": value.get("process"),
                 }
             )
     return found
+
+
+def verified_live_record(record: dict[str, Any]) -> dict[str, Any]:
+    """PID/birth/named-group facts for one startup record, read-only.
+
+    A startup record is intent plus history; only these facts may ever be used
+    to call a renderer "running" (plan §3.3).  Imported lazily so the control
+    plane keeps working when comfyops cannot load its Windows helpers.
+    """
+    from shine.comfyops.renderer_release import live_process_facts
+
+    return live_process_facts(record)
 
 
 def image_record_for_installation(db, installation_id: str) -> dict[str, Any] | None:
@@ -78,12 +94,19 @@ def image_record_for_installation(db, installation_id: str) -> dict[str, Any] | 
     if row is None or not isinstance(row.value, dict):
         return None
     value = row.value
+    from shine.comfyops.renderer_release import managed_process_state
+
     return {
         "key": row.key,
         "state": _record_state(value),
+        # The record says "RUNNING"; only the OS proves it.  Both are returned
+        # so a conflict decision can stay conservative (stage) while the status
+        # snapshot reports what is physically verifiable (live_state).
+        "live_state": managed_process_state(value),
         "stage": value.get("stage"),
         "port": value.get("port"),
         "process": value.get("process"),
+        "adapter_sha256": value.get("adapter_sha256"),
         "purpose": "image",
     }
 

@@ -1162,6 +1162,9 @@ export const grantTextConsent = (
 
 // ============ 统一运行调度控制面（Runtime Orchestrator） ============
 
+/** 运行配置核对结果：监听中的渲染器是否仍在跑本机登记的那套工作流。 */
+export type RuntimeWorkflowHealth = 'NOT_RUNNING' | 'VERIFIED' | 'MISMATCH' | 'UNVERIFIED' | 'NOT_BOUND';
+
 /** 本地制作引擎统一快照：唯一状态源，页面不得自行拼接多个「真相」。 */
 export type RuntimeSnapshot = {
   schema_version: number;
@@ -1169,9 +1172,16 @@ export type RuntimeSnapshot = {
   installation_id: string;
   state: 'NOT_BOUND' | 'STOPPED' | 'STARTING' | 'READY_IDLE' | 'BUSY' | 'DEGRADED'
     | 'RECONCILING' | 'BLOCKED_UNVERIFIED' | 'EXTERNAL_CONFLICT' | string;
-  health: { worker?: string; comfy_http?: string };
+  health: { worker?: string; comfy_http?: string; api?: string; workflow?: RuntimeWorkflowHealth | string };
   ownership: { managed: boolean; verified: boolean; port?: number | null; pid?: number | null };
-  current: { owner_kind?: string | null; task?: string | null; operation_id?: string | null };
+  current: {
+    owner_kind?: string | null;
+    task?: string | null;
+    operation_id?: string | null;
+    /** 正在进行中的控制操作（如 ensure/stop/reconcile）；只读动作 probe 不占用。 */
+    operation_action?: string | null;
+    operation_status?: 'PENDING' | 'RUNNING' | null;
+  };
   resource: { active_leases: number; waiting_leases: number; reconcile_leases: number };
   recovery: {
     required: boolean;
@@ -1180,6 +1190,7 @@ export type RuntimeSnapshot = {
     advice: string | null;
   };
   last_observed_at: string | null;
+  /** 终态控制操作的累计计数；提交控制请求时作为 CAS 版本回传。 */
   state_version: number;
 };
 
@@ -1190,16 +1201,30 @@ export type ControlOperation = {
   status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REFUSED' | string;
   state_version: number;
   failure_code: string | null;
+  /** 具体动作的结果；`outcome` 是后端给出的唯一结论（如 RECONCILED/NEEDS_REVIEW）。 */
   result: Record<string, unknown>;
 };
 
 export const fetchRuntimeStatus = () => api<RuntimeSnapshot>('/runtime-orchestrator/status');
 
+/** 提交一次控制意图。
+ *
+ *  `expectedStateVersion` 取自最近一次快照的 `state_version`：后端以此为
+ *  compare-and-set，页面看到的世界已经过期时宁可拒绝，也不按旧世界去
+ *  启动/停止本机引擎。省略它只保留给旧调用方，状态条永远会传。 */
 export const submitRuntimeControl = (action: 'ensure' | 'stop' | 'probe' | 'reconcile',
-                                     installationId: string) =>
+                                     installationId: string,
+                                     expectedStateVersion?: number | null) =>
   api<ControlOperation>(`/runtime-orchestrator/${action}`,
     json('POST', {
       installation_id: installationId,
       idempotency_key: `${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       reason: 'web-engine-status',
+      ...(typeof expectedStateVersion === 'number'
+        ? { expected_state_version: expectedStateVersion } : {}),
     }));
+
+/** 控制请求的 409 只有两种：页面版本过期，或幂等键撞了不同意图。
+ *  幂等键每次点击都重新生成，所以 409 在这里就等于「引擎状态已更新」。 */
+export const isStaleRuntimeState = (exc: unknown): boolean =>
+  exc instanceof ApiError && exc.status === 409;

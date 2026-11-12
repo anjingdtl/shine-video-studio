@@ -10,6 +10,22 @@ from shine.comfyops.installer import process_identity
 from shine.comfyops.instances import ProcessRunner
 
 
+def _birth(pid: int):
+    """The birth identity of one pid, or None when the OS will not tell.
+
+    A pid that the OS cannot describe is recorded as unverifiable rather than
+    aborting the whole launcher.  Aborting here left a half-started stack
+    behind (api and worker up, no manifest, web never launched), which is
+    strictly worse than a manifest that names one process it cannot prove:
+    the stop path already refuses to kill an unverifiable entry and reports it
+    for reconciliation.
+    """
+    try:
+        return process_identity(pid)
+    except (OSError, ValueError):
+        return None
+
+
 def snapshot(pid: int, birth: str) -> list[dict]:
     if process_identity(pid) != birth:
         raise ValueError("Launcher identity changed or exited")
@@ -37,7 +53,7 @@ def snapshot(pid: int, birth: str) -> list[dict]:
             break
         ordered.extend(sorted(children - owned))
         owned |= children
-    owners = [{"pid": p, "birth": process_identity(p)} for p in ordered]
+    owners = [{"pid": p, "birth": _birth(p)} for p in ordered]
     return [owner for owner in owners if owner["birth"] is not None]
 
 

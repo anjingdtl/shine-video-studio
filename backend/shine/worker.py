@@ -1129,22 +1129,18 @@ def _retire_idle_image_renderer(factory, settings, installation_id):
 
     The image renderer stays resident between items, which used to deadlock
     H3 behind COMFY_INSTALLATION_BINDING_CHANGED with no automatic way out.
-    Now: the image record is not ACTIVE -> nothing to do; it is ACTIVE and
-    idle -> stop it through the ordinary evidence-checked path; it is busy ->
-    stop_image_renderer refuses with a named busy code and the H3 attempt
-    fails for a later retry instead of looping.
+    The decision and the stop live in ``image_renderer`` so the H3 startup
+    section can repeat it under the installation guard: a renderer that is
+    provably running and idle is stopped, a busy one refuses by name, and a
+    record that cannot be proven is left for reconciliation.
     """
-    from shine.comfyops.image_renderer import stop_image_renderer
-    from shine.runtime_orchestrator.identity import image_record_for_installation
+    from shine.comfyops.image_renderer import retire_idle_image_renderer
 
-    with factory() as db:
-        record = image_record_for_installation(db, installation_id)
-    if not record or record.get("state") != "ACTIVE":
-        return None
-    result = stop_image_renderer(
-        factory, settings, instance_id=installation_id, actor="worker:h3-coordination"
+    result = retire_idle_image_renderer(
+        factory, settings, installation_id, actor="worker:h3-coordination",
     )
-    logger.info("idle image renderer retired for H3 start: %s", result)
+    if result is not None:
+        logger.info("idle image renderer retired for H3 start: %s", result)
     return result
 
 
