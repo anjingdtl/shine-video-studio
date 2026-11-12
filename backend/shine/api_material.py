@@ -146,18 +146,21 @@ def analyze_material(project_id: str, body: AnalyzeBody, actor: Operator, db: DB
 
 
 @router.post("/projects/{project_id}/material-preparation/derive", status_code=202)
-def derive_material(project_id: str, actor: Operator, db: DBSession):
-    """Open the material plan from the finished four-stage analysis, no model call.
+def derive_material(project_id: str, actor: Operator, db: DBSession, request: Request,
+                    gateway: Annotated[LLMGateway, Depends(llm_gateway)]):
+    """Open the material plan from the finished four-stage analysis.
 
-    The crew already read every contracted scene; this reuses those durable
-    artifacts (scene scripts + global bible) instead of paying for a second
-    whole-script analysis.  Same plan contract, same confirmation gates.
+    One project-wide consolidation call merges aliases into single characters
+    (with per-scene appearance variants) and picks key scenes/props; the plan
+    then derives from that catalog.  An unchanged basis reuses the catalog,
+    so repeated derives buy no second call.  Same confirmation gates.
     """
     from shine.materialprep import derive, service
     from shine.services import require_project
 
     project = require_project(db, project_id)
-    document, preparations = derive.derive_preparations(db, project_id)
+    document, preparations = derive.derive_preparations(
+        db, gateway, request.app.state.session_factory, project_id)
     plan, replayed = service.create_draft_plan(db, project, document, preparations, actor=actor)
     aggregated = service.aggregated_requirements(db, plan)
     db.commit()
@@ -165,7 +168,6 @@ def derive_material(project_id: str, actor: Operator, db: DBSession):
         "status": "accepted",
         "replayed": replayed,
         "source": "four_stage_artifacts",
-        "model_calls": 0,
         "document_id": document.id,
         "plan_revision_id": plan.id,
         "requirements": aggregated["requirements"],
@@ -387,8 +389,9 @@ def reconcile_material_scene(project_id: str, task_id: str, body: ReconcileScene
 
     require_project(db, project_id)
     task = db.get(AgentTaskRecord, task_id)
-    if (task is None or task.project_id != project_id or task.role_id != "scriptwriter"
-            or task.trace.get("tool") != "script_prepare"):
+    if (task is None or task.project_id != project_id
+            or (task.role_id, (task.trace or {}).get("tool")) not in {
+                ("scriptwriter", "script_prepare"), ("producer", "entity_catalog")}):
         raise HTTPException(404, "MATERIAL_SCENE_TASK_NOT_FOUND")
     if task.state_version != body.expected_state_version:
         raise HTTPException(409, "MATERIAL_SCENE_TASK_STATE_CHANGED")
@@ -539,8 +542,9 @@ def resend_unknown_material_scene(project_id: str, task_id: str, body: ResendSce
 
     require_project(db, project_id)
     task = db.get(AgentTaskRecord, task_id)
-    if (task is None or task.project_id != project_id or task.role_id != "scriptwriter"
-            or (task.trace or {}).get("tool") != "script_prepare"):
+    if (task is None or task.project_id != project_id
+            or (task.role_id, (task.trace or {}).get("tool")) not in {
+                ("scriptwriter", "script_prepare"), ("producer", "entity_catalog")}):
         raise HTTPException(404, "MATERIAL_SCENE_TASK_NOT_FOUND")
     if task.state_version != body.expected_state_version:
         raise HTTPException(409, "MATERIAL_SCENE_TASK_STATE_CHANGED")

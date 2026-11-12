@@ -1,11 +1,15 @@
 """Derive the material requirement list from the finished four-stage analysis.
 
-The crew already read every contracted scene once: the scene scripts name the
-cast and carry the scene prose, and the global bible holds each character's
-stable identity.  Running a second whole-script scriptwriter analysis would
-buy the same facts again, so this path reuses the durable artifacts and makes
-zero model calls.  The output is the published ScriptPreparation contract, so
-the plan builder, confirmation and generation stay on their existing gates.
+The crew already read every contracted scene once.  A single project-wide
+consolidation call (``materialprep.catalog``) merges aliases into one entry
+per real character, keeps per-scene appearance variants on that entry, and
+picks key scenes / key props.  This module maps that catalog onto the
+server's material segmentation and opens the same ScriptPreparation plan
+contract, so confirmation and generation stay on their existing gates.
+
+Character descriptions are the stable identity only: per-scene clothing
+changes live in the catalog variants and in each shot's visual description,
+never in a second master.
 """
 from __future__ import annotations
 
@@ -13,27 +17,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from shine.asset_identity import split_character_names
+from shine.materialprep.catalog import get_or_create_catalog
 from shine.materialprep.source_spans import segment_document
 from shine.models import AgentArtifact, ProjectDocument
 
 
-def _canonical_name(raw: str, known: list[str]) -> str:
-    """Strip stage directions the crew attached to a speaker or cast entry.
-
-    ``罗兰低声`` is 罗兰 speaking quietly, not a second character; a known
-    name that prefixes the raw entry wins (longest first).  Parentheticals
-    are aliases the bible already resolves.
-    """
-    name = raw.split("（")[0].split("(")[0].strip()
-    if name in known:
-        return name
-    for candidate in sorted(known, key=len, reverse=True):
-        if candidate and name.startswith(candidate):
-            return candidate
-    return name
-
-
-def derive_preparations(db, project_id: str):
+def derive_preparations(db, gateway, session_factory, project_id: str):
     from shine.director import pipeline
 
     volume_ids: list[str] = []
@@ -60,7 +49,7 @@ def derive_preparations(db, project_id: str):
     ).order_by(AgentArtifact.created_at)):
         payload = row.payload_json or {}
         if payload.get("section_id") in section_ids:
-            scripts[payload["section_id"]] = payload
+            scripts[payload["section_id"]] = {**payload, "_sha256": row.sha256}
             document_id = (payload.get("source_refs") or {}).get("volume_document_id") or document_id
     missing = [sid for sid in section_ids if sid not in scripts]
     if missing:
@@ -73,11 +62,9 @@ def derive_preparations(db, project_id: str):
         AgentArtifact.project_id == project_id,
         AgentArtifact.kind == "FourStageGlobalStoryBible",
     ).order_by(AgentArtifact.created_at.desc())).first()
-    identities: dict[str, str] = {}
-    for character in ((bible.payload_json or {}).get("characters") or []) if bible else []:
-        name = str(character.get("name") or "").split("（")[0].strip()
-        if name:
-            identities[name] = str(character.get("identity") or "")
+
+    catalog = get_or_create_catalog(db, gateway, session_factory, project_id,
+                                    document, scripts, bible)
 
     scenes = segment_document(document.text or "")
     by_scene: dict[str, list[str]] = {scene.key: [] for scene in scenes}
@@ -96,37 +83,45 @@ def derive_preparations(db, project_id: str):
         sids = by_scene[scene.key]
         if not sids:
             continue
+        sid_set = set(sids)
         span_ids = [span.id for span in scene.spans][:8]
-        cast: list[str] = []
+        raw_names: set[str] = set()
         for sid in sids:
-            for entry in scripts[sid].get("characters") or []:
+            payload = scripts[sid]
+            for entry in payload.get("characters") or []:
                 raw = entry if isinstance(entry, str) else str(entry.get("name") or "")
-                for part in split_character_names(raw):
-                    part = _canonical_name(part, list(identities))
-                    if part and part not in cast:
-                        cast.append(part)
-        known = list(identities) + cast
-        names = list(cast)
-        for sid in sids:
-            for line in scripts[sid].get("dialogue") or []:
-                for part in split_character_names(line.get("speaker") or line.get("speaker_id") or ""):
-                    part = _canonical_name(part, known)
-                    if part and part not in names:
-                        names.append(part)
-        requirements = [
-            {"family": "character", "name": name,
-             "description": identities.get(name, "")[:600],
-             "source_span_ids": span_ids, "questions": []}
-            for name in names[:24]
-        ]
-        first = scripts[sids[0]]
-        setting = " ".join((first.get("text") or "").split())[:300]
-        requirements.append({
-            "family": "scene", "name": str(first.get("title") or scene.key)[:100],
-            "description": setting[:600], "source_span_ids": span_ids, "questions": []})
+                raw_names.update(split_character_names(raw))
+            for line in payload.get("dialogue") or []:
+                raw_names.update(split_character_names(
+                    line.get("speaker") or line.get("speaker_id") or ""))
+        requirements = []
+        for character in catalog.get("characters") or []:
+            names = {character.get("name"), *(character.get("aliases") or [])}
+            if not (sid_set & set(character.get("section_ids") or [])) and not (names & raw_names):
+                continue
+            requirements.append({
+                "family": "character", "name": character["name"],
+                "description": (character.get("identity") or "")[:600],
+                "source_span_ids": span_ids, "questions": []})
+        for key_scene in catalog.get("scenes") or []:
+            if sid_set & set(key_scene.get("section_ids") or []):
+                requirements.append({
+                    "family": "scene", "name": key_scene["name"],
+                    "description": (key_scene.get("description") or "")[:600],
+                    "source_span_ids": span_ids, "questions": []})
+        for prop in catalog.get("props") or []:
+            if sid_set & set(prop.get("section_ids") or []):
+                requirements.append({
+                    "family": "prop", "name": prop["name"],
+                    "description": (prop.get("description") or "")[:600],
+                    "carrier": prop.get("carrier") or "object",
+                    "core_prop_reason": (prop.get("core_prop_reason") or "")[:200],
+                    "source_span_ids": span_ids, "questions": []})
+        if not requirements:
+            continue
         preparations.append({
             "schema_version": "1.0", "scene_key": scene.key,
-            "summary": str(first.get("title") or "")[:800],
+            "summary": str(scripts[sids[0]].get("title") or "")[:800],
             "locked_facts": [], "requirements": requirements[:32], "questions": []})
     if not preparations:
         raise HTTPException(409, "MATERIAL_DERIVE_EMPTY")

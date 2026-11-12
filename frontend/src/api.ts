@@ -193,7 +193,8 @@ function describeDetail(detail: unknown): string {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
+  constructor(message: string, public readonly status: number, public readonly code?: string,
+              public readonly detail?: unknown) { super(message); }
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -203,12 +204,14 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     let code: string | undefined;
+    let detail: unknown;
     try {
       const body = await response.json();
+      detail = body.detail;
       message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
       if (typeof body.detail?.code === 'string') code = body.detail.code;
     } catch { /* keep HTTP status */ }
-    throw new ApiError(message, response.status, code);
+    throw new ApiError(message, response.status, code, detail);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

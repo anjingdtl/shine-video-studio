@@ -3,7 +3,7 @@ import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { ScriptTextConsent } from './ScriptTextConsent';
-import { API, api, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
+import { API, api, ApiError, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
@@ -403,6 +403,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   // artifacts - a second whole-script model analysis would re-buy the same
   // facts, so the page offers reuse as the primary action instead.
   const [hasContracts, setHasContracts] = useState(false);
+  const [catalogBlock, setCatalogBlock] = useState<{ task_id: string; state_version: number } | null>(null);
   useEffect(() => {
     let alive = true;
     api<{ volumes?: { episode_contracts?: { confirmed: boolean; current?: boolean }[] }[] }>(
@@ -526,16 +527,26 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       : result.outcome === 'RESULT_ADOPTED'
         ? `场 ${scene.scene_key} 的已落库结果已核对并采用。`
         : `场 ${scene.scene_key} 仍为 ${result.external_outcome ?? 'UNKNOWN'}；原任务保留，不会创建新请求。`);
+    setCatalogBlock(null);
     await loadScenes();
     await load();
   });
 
   const deriveFromAnalysis = () => run(async () => {
-    const result = await jsonPost<{ document_id: string; requirements: unknown[] }>(
-      `/projects/${projectId}/material-preparation/derive`, {});
-    setDocumentId(result.document_id);
-    setOperationReport(`已复用四阶段分镜分析生成需求清单（${result.requirements.length} 项，未调用模型）。`);
-    await load();
+    try {
+      const result = await jsonPost<{ document_id: string; requirements: unknown[] }>(
+        `/projects/${projectId}/material-preparation/derive`, {});
+      setCatalogBlock(null);
+      setDocumentId(result.document_id);
+      setOperationReport(`已按全项目统揽目录生成需求清单（${result.requirements.length} 项）；同一人物只定义一次。`);
+      await load();
+    } catch (error) {
+      const detail = (error as ApiError).detail as { task_id?: string; state_version?: number } | undefined;
+      if ((error as ApiError).code === 'MATERIAL_CATALOG_OUTCOME_UNKNOWN' && detail?.task_id) {
+        setCatalogBlock({ task_id: detail.task_id, state_version: detail.state_version ?? 0 });
+      }
+      throw error;
+    }
   });
 
   const resendUnknownScene = (scene: SceneStatus) => {
@@ -547,6 +558,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           evidence: '用户确认对结果未知的素材分场发起一次新请求' },
       );
       setOperationReport(result.note);
+      setCatalogBlock(null);
       await loadScenes();
     });
   };
@@ -935,7 +947,13 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           {hasContracts && !railPresent && <button type="button" className="btn-primary" disabled={busy} onClick={deriveFromAnalysis}>
             {busy ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 复用分镜分析生成素材清单
           </button>}
-          {hasContracts && <p className="material-hint">分集与分镜已由四阶段链路分析过；这里直接复用那些结果生成需求清单，不再重复调用模型。</p>}
+          {hasContracts && <p className="material-hint">分集与分镜已由四阶段链路分析过；这里用一次全项目统揽生成清单：同一人物（含别名）只定义一次，衣服/外貌变化按场记为变体，场景与道具只取关键项。依据不变时复用统揽目录，不重复调用模型。</p>}
+          {hasContracts && catalogBlock && <div className="material-button-row">
+            <button type="button" className="btn-text" disabled={busy}
+              onClick={() => reconcileUnknownScene({ scene_key: '全项目统揽', task_id: catalogBlock.task_id, state_version: catalogBlock.state_version })}>核对统揽任务</button>
+            <button type="button" className="btn-text" disabled={busy}
+              onClick={() => resendUnknownScene({ scene_key: '全项目统揽', task_id: catalogBlock.task_id, state_version: catalogBlock.state_version } as SceneStatus)}>明确重发统揽任务</button>
+          </div>}
           {!railPresent && !hasContracts && <button type="button" className="btn-primary"
             disabled={busy || !documentId || analysing || scenesRunning} onClick={analyseScript}>
             {busy || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 分析剧本

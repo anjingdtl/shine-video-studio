@@ -195,3 +195,52 @@ class MaterialConfirmation(APIModel):
     decisions: list[RequirementDecision] = Field(min_length=1, max_length=200)
     visual_direction: MaterialVisualDirection = Field(default_factory=MaterialVisualDirection)
     notes: str = Field(default="", max_length=600)
+
+
+class EntityAppearanceVariant(APIModel):
+    """One scene's clothing/appearance change for the SAME character."""
+
+    section_id: str = Field(min_length=1, max_length=36)
+    appearance: str = Field(min_length=1, max_length=300)
+
+
+class EntityCatalogCharacter(APIModel):
+    """One real person, project-wide. Aliases (transmigration, titles) merge here."""
+
+    name: str = Field(min_length=1, max_length=100)
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+    identity: str = Field(min_length=1, max_length=400)
+    variants: list[EntityAppearanceVariant] = Field(default_factory=list, max_length=12)
+    section_ids: list[str] = Field(default_factory=list, max_length=40)
+
+
+class EntityCatalogScene(APIModel):
+    """A key location, not every chapter: recurring or plot-critical places."""
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=400)
+    section_ids: list[str] = Field(default_factory=list, max_length=40)
+
+
+class EntityCatalogProp(APIModel):
+    """A key prop with a plot/continuity dependency, never ordinary set dressing."""
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=300)
+    carrier: MaterialCarrier = "object"
+    core_prop_reason: str = Field(min_length=1, max_length=200)
+    section_ids: list[str] = Field(default_factory=list, max_length=40)
+
+
+class MaterialEntityCatalog(APIModel):
+    """The project-wide entity consolidation the material list derives from.
+
+    One entry per real character (aliases merged), key scenes and key props
+    only; per-scene appearance variants hang off the single character so the
+    master identity never forks.
+    """
+
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    characters: list[EntityCatalogCharacter] = Field(default_factory=list, max_length=40)
+    scenes: list[EntityCatalogScene] = Field(default_factory=list, max_length=24)
+    props: list[EntityCatalogProp] = Field(default_factory=list, max_length=24)

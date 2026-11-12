@@ -284,11 +284,11 @@ it('已有分集合同时复用四阶段分析，不再提供二次逐场分析'
   render(<MaterialPreparationPanel projectId="p1" />);
   const derive = await screen.findByRole('button', { name: '复用分镜分析生成素材清单' });
   expect(screen.queryByRole('button', { name: /分析剧本/ })).toBeNull();
-  expect(screen.getByText(/不再重复调用模型/)).toBeTruthy();
+  expect(screen.getByText(/同一人物（含别名）只定义一次/)).toBeTruthy();
   await user.click(derive);
   await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/derive$/)).toHaveLength(1));
   expect(stub.callsOf('POST', /scenes\/prepare$/)).toHaveLength(0);
-  expect(await screen.findByText(/已复用四阶段分镜分析生成需求清单/)).toBeTruthy();
+  expect(await screen.findByText(/已按全项目统揽目录生成需求清单/)).toBeTruthy();
   expect(await screen.findByRole('button', { name: '复用分镜分析重新生成清单' })).toBeTruthy();
 });
 

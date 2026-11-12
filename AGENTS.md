@@ -1347,3 +1347,13 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   重定向到 run。七阶段旅程条是唯一阶段导航；rail 主/次按钮自动共存不丢入口。
   回归 `produceFocus.test.tsx` 重写、`directorEntries/modeEntry/shotDraft` 导航更新，
   全量 265 项。
+- **素材清单全项目统揽（2026-11-12 用户裁定）**：逐场拼名会把同一人拆成多个
+  主素材、前后不一致。新增 `materialprep/catalog.py`：一次全项目模型调用
+  （producer，合同 `MaterialEntityCatalog`）读全局圣经+全部合同场次，产出
+  人物唯一条目（aliases 合并、identity 稳定、variants 按场记衣服/外貌变化）、
+  关键场景、关键道具（core_prop_reason+carrier）。目录按 basis（圣经+场次剧本
+  哈希）落 artifact，basis 不变复用、不买第二次调用；UNKNOWN 不自动重放，
+  核对/授权重发入口与分场同语义（守卫接受 producer/entity_catalog）。derive
+  从目录映射到素材分割生成清单；人物描述只用稳定 identity（变体在目录与镜头
+  视觉描述里），避免跨场描述差异造成假冲突。回归 `test_material_derive.py`
+  重写 3 项（含 UNKNOWN 核对+一次重发）、前端 265 项。
