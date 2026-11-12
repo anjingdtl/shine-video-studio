@@ -1,10 +1,8 @@
 """The resident Worker executes control intents; nobody else does.
 
-Every action re-derives its facts from the durable records inside the
-installation lifecycle guard before it touches a process, so an operation
-replayed after a worker crash is idempotent: "ensure" either reuses the
-recorded renderer or refuses with the named conflict; "stop"/"release" only
-act on processes whose ownership the existing proofs confirm.
+Actions re-derive their facts under the installation guard before touching a
+process. When a worker disappears after claiming a lifecycle operation, its
+successor checks the durable evidence without repeating the operation.
 
 Recovery reporting is explicit.  ``reconcile`` never resubmits anything: it
 re-reads the same evidence the worker's recovery tick uses (startup records,
@@ -24,8 +22,10 @@ import logging
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from shine.runtime_orchestrator.contracts import BUSY_ACTIONS
+from shine.runtime_orchestrator.guard import LifecycleGuardBusy, LifecycleGuardUnavailable
 from shine.runtime_orchestrator.identity import installation_activity
 from shine.runtime_orchestrator.operations import (
     claim_pending_operations,
@@ -67,7 +67,7 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
     the single mutation allowed here is clearing a startup record whose process
     is proven gone, which is what unblocks the next start.
     """
-    from shine.comfyops.image_renderer import stop_image_renderer
+    from shine.comfyops.image_renderer import reconcile_dead_image_renderer
     from shine.comfyops.renderer_release import describe_managed_processes
     from shine.models import Job
     from shine.runtime_orchestrator.identity import (
@@ -118,17 +118,15 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
     # record nobody can act on.  Anything less certain stays for a human.
     if image and image.get("live_state") == "GONE":
         try:
-            result = stop_image_renderer(
-                factory, settings, instance_id=installation_id,
-                actor="controller:reconcile",
-            )
-            normalized.append({"kind": "image_renderer", "outcome": result.get("outcome")})
-        except HTTPException as exc:
+            if reconcile_dead_image_renderer(factory, installation_id):
+                normalized.append({"kind": "image_renderer", "outcome": "recorded_stopped"})
+            else:
+                uncertain.append({"kind": "image_renderer", "state": "RECORD_CHANGED"})
+        except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
             uncertain.append({"kind": "image_renderer", "state": "REFUSED",
-                              "code": str(exc.detail)})
+                              "code": str(exc)})
 
-    remaining = [item for item in uncertain if item.get("kind") != "image_renderer"]
-    if remaining:
+    if uncertain:
         return {"outcome": OUTCOME_NEEDS_REVIEW, "checked": checked, "uncertain": uncertain,
                 "normalized": normalized,
                 "note": "已有提交结果未知的任务保持原证据链，需人工核对；本操作不会重发任何任务。"}
@@ -150,7 +148,9 @@ def _stop(factory, settings, installation_id: str, actor: str) -> dict[str, Any]
     from shine.comfyops.image_renderer import stop_image_renderer
 
     result = stop_image_renderer(factory, settings, instance_id=installation_id, actor=actor)
-    already = result.get("outcome") in ("already_stopped", "recorded_stopped")
+    already = result.get("status") == "NOT_STARTED" or result.get("outcome") in (
+        "already_stopped", "recorded_stopped",
+    )
     return {**result, "outcome": "ALREADY_STOPPED" if already else "STOPPED"}
 
 
@@ -187,7 +187,9 @@ def advance_control_operations(factory, settings, *, worker_id: str, worker_birt
     executed = 0
     try:
         with factory.begin() as db:
-            reap_orphaned_operations(db)
+            db.execute(text("BEGIN IMMEDIATE"))
+            if reap_orphaned_operations(db):
+                db.flush()
             claimed = claim_pending_operations(db, worker_id=worker_id, worker_birth=worker_birth, limit=limit)
             batch = [
                 {
@@ -204,19 +206,38 @@ def advance_control_operations(factory, settings, *, worker_id: str, worker_birt
         return 0
     for item in batch:
         try:
-            result = _execute_operation(factory, settings, item["action"], item["installation_id"], item["request"])
-            with factory.begin() as db:
-                succeed_operation(
-                    db, item["id"],
-                    owner_worker_id=worker_id,
-                    expected_version=item["state_version"],
-                    result=result if isinstance(result, dict) else {"value": result},
+            # An operation starts at version 1 and each claim increments it.
+            # A second claim may follow an external side effect of the first.
+            interrupted = item["state_version"] > 2 and item["action"] in BUSY_ACTIONS
+            if interrupted:
+                evidence = _reconcile(factory, settings, item["installation_id"])
+                result = {
+                    "outcome": OUTCOME_NEEDS_REVIEW,
+                    "reconciliation": evidence,
+                    "note": "上次控制操作中断。已核对现有记录，未重复执行。",
+                }
+            else:
+                result = _execute_operation(
+                    factory, settings, item["action"], item["installation_id"], item["request"],
                 )
+            with factory.begin() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
+                if interrupted:
+                    fail_operation(
+                        db, item["id"], owner_worker_id=worker_id, expected_version=item["state_version"],
+                        code="RUNTIME_OPERATION_INTERRUPTED", refused=True, detail=result,
+                    )
+                else:
+                    succeed_operation(
+                        db, item["id"], owner_worker_id=worker_id, expected_version=item["state_version"],
+                        result=result,
+                    )
             executed += 1
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else (exc.detail or {}).get("code", type(exc).__name__)
             refused = exc.status_code == 409
             with factory.begin() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
                 fail_operation(
                     db, item["id"],
                     owner_worker_id=worker_id,
@@ -230,6 +251,7 @@ def advance_control_operations(factory, settings, *, worker_id: str, worker_birt
         except Exception as exc:  # noqa: BLE001
             logger.exception("control operation %s failed", item["id"])
             with factory.begin() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
                 fail_operation(
                     db, item["id"],
                     owner_worker_id=worker_id,

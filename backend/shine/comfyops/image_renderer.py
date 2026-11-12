@@ -169,7 +169,7 @@ def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str |
                 "run_id": record["run_id"],
             })
     image = image_record_for_installation(db, instance_id)
-    if image and image["state"] in ("STARTING", "UNCERTAIN"):
+    if image and image["state"] in ("STARTING", "UNCERTAIN", "ACTIVE"):
         # A live STARTING intent means another executor is mid-launch right
         # now; doubling it is the duplicate-process bug this guard exists for.
         if image["state"] == "STARTING" and image.get("stage") in ("INTENT", "LAUNCHED", "LISTENING"):
@@ -181,7 +181,7 @@ def _refuse_installation_conflicts(db, instance_id: str, *, held_lease_id: str |
                     "code": "IMAGE_RENDERER_START_IN_PROGRESS",
                     "detail": "另一个启动者正在启动此渲染器；本次不再重复启动。",
                 })
-        elif image["state"] == "UNCERTAIN":
+        elif image["state"] == "UNCERTAIN" or image["live_state"] == "UNVERIFIED":
             raise HTTPException(409, {
                 "code": "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED",
                 "detail": "既有渲染器记录无法证明归属；先核对或释放，再启动。",
@@ -211,6 +211,8 @@ def _provably_gone(record: dict[str, Any]) -> bool:
     """
     if not record:
         return False
+    if record.get("stage") in ("INTENT", "LAUNCHED", "LISTENING") and _owner_alive(record):
+        return False
     if managed_process_state(record) == "GONE":
         return True
     if record.get("stage") != "RUNNING" or record.get("process"):
@@ -224,7 +226,7 @@ def _provably_gone(record: dict[str, Any]) -> bool:
         return False
 
 
-def _normalize_provably_dead_record(factory, settings, instance_id: str) -> bool:
+def _normalize_provably_dead_record(factory, instance_id: str, *, actor: str) -> bool:
     """Clear a record whose renderer is proven gone, so a start is not blocked.
 
     A renderer that died while its record said RUNNING left the shared instance
@@ -239,10 +241,17 @@ def _normalize_provably_dead_record(factory, settings, instance_id: str) -> bool
         return False
     if not _provably_gone(record):
         return False
-    stop_image_renderer(
-        factory, settings, instance_id=instance_id, actor="controller:recorded-gone",
-    )
+    _mark_stopped(factory, instance_id, record, actor=actor)
+    _clear_image_marks(factory, instance_id, (record.get("process") or {}).get("job_name"))
     return True
+
+
+def reconcile_dead_image_renderer(factory, instance_id: str) -> bool:
+    """Clear only a dead renderer record, using fresh proof under its installation lock."""
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+
+    with renderer_lifecycle_guard(instance_id):
+        return _normalize_provably_dead_record(factory, instance_id, actor="controller:reconcile")
 
 
 def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
@@ -276,9 +285,15 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         # A record whose renderer is proven gone is history, not a lock: clear
         # it before the conflict checks so a dead process never blocks the
         # installation forever.  Uncertainty is untouched and still refuses.
-        _normalize_provably_dead_record(factory, settings, instance_id)
+        _normalize_provably_dead_record(factory, instance_id, actor="controller:recorded-gone")
         with factory() as db:
             _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
+        try:
+            listeners = windows_port_listeners(port)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "COMFY_LISTENER_UNVERIFIED") from exc
+        if listeners:
+            raise HTTPException(409, {"code": "EXTERNAL_INSTANCE_ON_PORT", "port": port})
         with factory.begin() as db:
             db.execute(text("BEGIN IMMEDIATE"))
             instance = db.get(ComfyInstance, instance_id)
@@ -315,21 +330,31 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                 db.add(AppSetting(key=key, value=intent))
             else:
                 existing.value = intent
-    argv, cwd, env, pins, token, port = build_renderer_launch(renderer)
     group = None
+    process = None
     try:
+        argv, cwd, env, pins, token, port = build_renderer_launch(renderer)
         group = OwnedProcessGroup.launch(
             argv, cwd=cwd, env=env, pinned_files=pins,
             job_name="Local\\ShineHandoff-" + uuid4().hex,
         )
         birth = process_identity(group.pid)
+        process = {"pid": group.pid, "birth": birth, "job_name": group.job_name}
         if not birth or not group.owns(group.pid, birth):
             raise HTTPException(409, "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED")
-        process = {"pid": group.pid, "birth": birth, "job_name": group.job_name}
         _record(factory, key, {**intent, "stage": "LAUNCHED", "process": process})
         listener = _wait_for_owned_listener(group, port)
-        supervisor = RendererSupervisor(group, f"http://127.0.0.1:{port}", token, renderer["adapter_sha256"])
+        base_url = f"http://127.0.0.1:{port}"
+        supervisor = RendererSupervisor(group, base_url, token, renderer["adapter_sha256"])
         supervisor.require_closed_restart()
+        from shine.comfy.client import ComfyError, ComfyUIClient
+        from shine.materialprep.runtime import verify_graph_against_object_info
+
+        try:
+            object_info = ComfyUIClient(base_url, max_retries=0, trust_env=False).object_info()
+            graph_verified = verify_graph_against_object_info(object_info)["complete"]
+        except (ComfyError, ValueError):
+            graph_verified = False
         # The queue opens only after the adapter proved that it is the pinned
         # one; the image submission is a real prompt, not a rehearsal.
         supervisor.resume()
@@ -363,7 +388,10 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
             # left it.
             instance.status = "RUNNING_PENDING_HEALTH"
             row = db.get(AppSetting, key)
-            row.value = {**row.value, "stage": "RUNNING", "process": process, "listener": listener}
+            row.value = {
+                **row.value, "stage": "RUNNING", "process": process, "listener": listener,
+                "graph_verified": graph_verified,
+            }
             add_audit(db, actor, "IMAGE_RENDERER_STARTED", "comfy_instance", instance_id, {
                 "port": port, "pid": process["pid"], "job_name": process["job_name"],
                 "recipe_sha256": recipe_sha256,
@@ -371,7 +399,7 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         return {
             "status": "RUNNING",
             "instance_id": instance_id,
-            "base_url": f"http://127.0.0.1:{port}",
+            "base_url": base_url,
             "port": port,
             "process": process,
             "listener": listener,
@@ -385,16 +413,19 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         detail = getattr(exc, "detail", None)
         reason = (detail if isinstance(detail, str)
                   else (detail or {}).get("code") if isinstance(detail, dict) else None)
-        _record(factory, key, {
-            **intent, "stage": "FAILED", "error": type(exc).__name__,
-            **({"error_code": reason} if isinstance(reason, str) and reason else {}),
-            "failed_at": utcnow().isoformat(),
-        })
+        failed = {**intent, "stage": "FAILED", "error": type(exc).__name__,
+                  "failed_at": utcnow().isoformat()}
+        if isinstance(reason, str) and reason:
+            failed["error_code"] = reason
         if group is not None:
             try:
                 group.terminate(timeout=15)
-            except Exception:  # noqa: BLE001 - the failure is already recorded
-                pass
+            except Exception:  # noqa: BLE001 - preserve the unresolved process proof
+                failed.update({
+                    "stage": "RECONCILE_REQUIRED",
+                    "process": process or {"pid": group.pid, "job_name": group.job_name},
+                })
+        _record(factory, key, failed)
         raise
 
 
@@ -407,13 +438,14 @@ def ensure_image_renderer(factory, settings, *, instance_id: str) -> dict[str, A
     admission and must not read as someone else's conflict.
     """
     from shine.comfyops.scheduler import CURRENT_RESOURCE
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
 
-    with factory() as db:
+    with renderer_lifecycle_guard(instance_id), factory() as db:
         row = db.get(AppSetting, image_startup_key(instance_id))
-        record = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
-    if record and managed_process_state(record) == "RUNNING":
-        return {"status": "RUNNING", "reused": True, "instance_id": instance_id,
-                "base_url": f"http://127.0.0.1:{record.get('port')}"}
+        record = row.value if row is not None and isinstance(row.value, dict) else {}
+        if record.get("stage") == "RUNNING" and managed_process_state(record) == "RUNNING":
+            return {"status": "RUNNING", "reused": True, "instance_id": instance_id,
+                    "base_url": f"http://127.0.0.1:{record.get('port')}"}
     result = start_image_renderer(
         factory, settings, instance_id=instance_id, actor="worker",
         held_lease_id=CURRENT_RESOURCE.get(),
@@ -469,6 +501,8 @@ def _stop_image_renderer_locked(factory, settings, *, instance_id: str, actor: s
         return {"status": "NOT_STARTED", "instance_id": instance_id}
     state = managed_process_state(record)
     job_name = (record.get("process") or {}).get("job_name")
+    if record.get("stage") in ("INTENT", "LAUNCHED", "LISTENING") and _owner_alive(record):
+        raise HTTPException(409, "IMAGE_RENDERER_START_IN_PROGRESS")
     if state == "STOPPED":
         _clear_image_marks(factory, instance_id, job_name)
         # The startup record already proves the renderer is gone; the shared

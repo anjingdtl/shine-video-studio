@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from shine.api_operator import Operator
 from shine.runtime_orchestrator.contracts import OperationError, orchestrator_enabled
@@ -85,6 +86,7 @@ def submit_control_intent(
     """
     factory = request.app.state.session_factory
     with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
         operation = create_or_get_operation(
             db,
             action=action,
@@ -92,6 +94,7 @@ def submit_control_intent(
             idempotency_key=idempotency_key,
             request={"actor": actor, "params": {"reason": reason}},
             expected_state_version=expected_state_version,
+            reject_conflicts=True,
         )
         operation_id = operation.id
         # Without a live Worker an intent can never leave PENDING; report it

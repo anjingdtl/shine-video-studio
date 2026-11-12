@@ -2,7 +2,7 @@
  *  and only offers the backend's safe action.  It must never invent a state
  *  from raw fetch results, and a STOPPED snapshot must not show a stop
  *  button; a DEGRADED snapshot offers "检查连接" (probe), never a restart. */
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,6 +29,7 @@ const snapshot = (overrides: Record<string, unknown>) => jsonResponse({
 afterEach(() => {
   stub?.restore();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('EngineStatusEntry', () => {
@@ -130,6 +131,43 @@ describe('EngineStatusEntry', () => {
     await user.click(await screen.findByText('核对恢复'));
     expect(await screen.findByText(/仍需人工核对/)).toBeTruthy();
     expect(screen.queryByText(/NEEDS_REVIEW/)).toBeNull();
+  });
+
+  it('reads the final result of an operation that was still running when accepted', async () => {
+    vi.useFakeTimers();
+    const operation = { operation_id: 'op-11', action: 'ensure', installation_id: 'inst-1',
+      status: 'RUNNING', state_version: 2, failure_code: null, result: {} };
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({}) },
+      { method: 'POST', pattern: /runtime-orchestrator\/ensure$/, respond: () => jsonResponse(operation, 202) },
+      { method: 'GET', pattern: /runtime-orchestrator\/operations\/op-11$/, respond: () => jsonResponse({
+        ...operation, status: 'SUCCEEDED', state_version: 3, result: { outcome: 'STARTED' },
+      }) },
+    ]);
+    render(<EngineStatusEntry apiOnline />);
+    await act(async () => {});
+    fireEvent.click(screen.getByText('启动引擎'));
+    await act(async () => {});
+    expect(screen.getByText(/操作已提交/)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(8000); });
+    expect(screen.getByText('引擎已启动。')).toBeTruthy();
+    expect(stub.callsOf('POST', /runtime-orchestrator/)).toHaveLength(1);
+  });
+
+  it('shows why a stale stop button was refused while production is running', async () => {
+    stub = new StudioStub([
+      { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+        state: 'READY_IDLE', recovery: { required: false, safe_action: 'stop' },
+      }) },
+      { method: 'POST', pattern: /runtime-orchestrator\/stop$/, respond: () => jsonResponse({
+        detail: { code: 'RUNTIME_WORK_IN_FLIGHT' },
+      }, 409) },
+    ]);
+    const user = userEvent.setup();
+    render(<EngineStatusEntry apiOnline />);
+    await user.click(await screen.findByText('停止引擎'));
+    expect(await screen.findByText('引擎正在制作，等手头的活做完再操作。')).toBeTruthy();
+    expect(screen.queryByText(/状态已更新/)).toBeNull();
   });
 
   it('disables the action while a control operation is already running', async () => {

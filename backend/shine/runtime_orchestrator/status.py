@@ -23,6 +23,7 @@ cleared).
 from __future__ import annotations
 
 import time
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -30,25 +31,42 @@ from sqlalchemy import select
 
 from shine.comfyops.image_renderer import image_renderer_state, load_image_recipe
 from shine.models import RuntimeControlOperation
-from shine.runtime_orchestrator.identity import installation_activity
+from shine.runtime_orchestrator.identity import installation_activity, verified_live_record
+from shine.runtime_orchestrator.operations import state_version_for
 
 PROBE_TIMEOUT_SECONDS = 2.0
 PROBE_CACHE_TTL_SECONDS = 4.0
 # Short transport failure while the process is provably alive is DEGRADED,
 # not down: one retry before the classification, and a cache so status
 # polling (frontend 8s) can never turn into a probe storm (plan §6.1).
-_probe_cache: dict[str, tuple[float, bool | None]] = {}
+_probe_cache: dict[str, tuple[float, str | None, bool]] = {}
+_probes_in_flight: set[str] = set()
+_probe_lock = Lock()
 
 
-def _http_up(base_url: str) -> bool | None:
+def _http_up(base_url: str, *, job_name: str | None = None) -> bool | None:
     """Bounded loopback probe; True/False, or None when it cannot be told."""
     if not base_url:
         return None
-    now = time.monotonic()
-    cached = _probe_cache.get(base_url)
-    if cached and now - cached[0] < PROBE_CACHE_TTL_SECONDS:
-        return cached[1]
-    outcome: bool | None = None
+    with _probe_lock:
+        entry = _probe_cache.get(base_url)
+        cached = entry if entry and entry[1] == job_name else None
+        if cached and time.monotonic() - cached[0] < PROBE_CACHE_TTL_SECONDS:
+            return cached[2]
+        if base_url in _probes_in_flight:
+            return cached[2] if cached else None
+        _probes_in_flight.add(base_url)
+    try:
+        outcome = _probe_http(base_url)
+        with _probe_lock:
+            _probe_cache[base_url] = (time.monotonic(), job_name, outcome)
+        return outcome
+    finally:
+        with _probe_lock:
+            _probes_in_flight.remove(base_url)
+
+
+def _probe_http(base_url: str) -> bool:
     try:
         response = httpx.get(
             f"{base_url.rstrip('/')}/system_stats",
@@ -67,11 +85,13 @@ def _http_up(base_url: str) -> bool | None:
             outcome = retry.status_code == 200
         except (httpx.HTTPError, OSError):
             outcome = False
-    _probe_cache[base_url] = (now, outcome)
     return outcome
 
 
-def _classify(activity: dict[str, Any], *, live_image: str | None, http_up: bool | None) -> str:
+def _classify(
+    activity: dict[str, Any], *, live_image: str | None, h3_verified: bool,
+    http_up: bool | None, workflow: str,
+) -> str:
     reconcile_leases = [lease for lease in activity["gpu_leases"]
                         if lease["status"] == "RECONCILE_REQUIRED"]
     if reconcile_leases:
@@ -84,27 +104,29 @@ def _classify(activity: dict[str, Any], *, live_image: str | None, http_up: bool
     if image and (image.get("state") == "UNCERTAIN" or stage == "RECONCILE_REQUIRED"):
         return "BLOCKED_UNVERIFIED"
     # A live start intent: the process may not exist yet, and that is normal.
-    if image and stage in ("INTENT", "LAUNCHED", "LISTENING") and live_image != "RUNNING":
+    if (image and stage in ("INTENT", "LAUNCHED", "LISTENING")
+            or any(record["state"] == "STARTING" for record in activity["h3_records"])):
         return "STARTING"
     # The record claims a running renderer the OS cannot confirm.
     if live_image == "UNVERIFIED":
         return "BLOCKED_UNVERIFIED"
     if activity["renderer_state"] == "UNCERTAIN_H3":
         return "BLOCKED_UNVERIFIED"
-    h3_active = any(record["state"] in ("ACTIVE", "STARTING") for record in activity["h3_records"])
+    h3_active = any(record["state"] == "ACTIVE" for record in activity["h3_records"])
     busy = bool(
         activity["in_flight_h3_jobs"]
         or activity["in_flight_image_work"]
         or [lease for lease in activity["gpu_leases"] if lease["status"] == "ACTIVE"]
-        or any(record["state"] == "STARTING" for record in activity["h3_records"])
     )
     if live_image == "RUNNING":
         if busy:
             return "BUSY"
         # Process provably alive; transport decides between READY and DEGRADED.
-        return "DEGRADED" if http_up is False else "READY_IDLE"
+        return "READY_IDLE" if http_up is True and workflow == "VERIFIED" else "DEGRADED"
     if h3_active:
-        return "DEGRADED" if http_up is False else "BUSY"
+        if not h3_verified:
+            return "BLOCKED_UNVERIFIED"
+        return "BUSY" if http_up is True else "DEGRADED"
     if busy:
         # Work is recorded but no renderer can be proven: reconcile, do not
         # start a second one on top of an unknown outcome.
@@ -157,7 +179,23 @@ def _external_conflict(port: int | None) -> bool:
         return False
 
 
-def _workflow_health(settings, *, live_state: str | None, adapter_sha256: str | None) -> str:
+def _owned_listener_pid(port: int | None, process: dict[str, Any] | None) -> int | None:
+    """Re-prove that HTTP on this port belongs to the renderer's Job Object."""
+    from shine.comfyops.installer import process_identity
+    from shine.comfyops.owned_process import inspect_named_group
+    from shine.comfyops.renderer_supervisor import windows_loopback_listener_pid
+
+    if not port or not process or not process.get("job_name"):
+        return None
+    try:
+        pid = windows_loopback_listener_pid(port)
+        birth = process_identity(pid)
+        return pid if birth and inspect_named_group(process["job_name"], pid, birth) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _workflow_health(settings, *, live_state: str | None, image_record: dict[str, Any]) -> str:
     """Whether the listening renderer still runs the adapter the recipe names.
 
     A stored digest comparison, not a re-hash of the installation: the status
@@ -170,9 +208,12 @@ def _workflow_health(settings, *, live_state: str | None, adapter_sha256: str | 
         pinned = (load_image_recipe(settings)["renderer"] or {}).get("adapter_sha256")
     except Exception:  # noqa: BLE001 - no recipe means nothing to compare
         return "UNVERIFIED"
+    adapter_sha256 = image_record.get("adapter_sha256")
     if not pinned or not adapter_sha256:
         return "UNVERIFIED"
-    return "VERIFIED" if pinned == adapter_sha256 else "MISMATCH"
+    if pinned != adapter_sha256:
+        return "MISMATCH"
+    return "VERIFIED" if image_record.get("graph_verified") is True else "UNVERIFIED"
 
 
 def runtime_snapshot(db, settings) -> dict[str, Any]:
@@ -184,15 +225,13 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     about the image binding.
     """
     installation_id = ""
-    base_url = ""
     try:
         from shine.materialprep import runtime as image_runtime
 
         config = image_runtime.load_config(settings)
         installation_id = config.instance_id or ""
-        base_url = config.base_url or ""
     except Exception:  # noqa: BLE001 - an unreadable config is NOT_BOUND, never a crash
-        installation_id, base_url = "", ""
+        installation_id = ""
     port_hint = recipe_port(settings)
     if not installation_id and port_hint:
         # No image binding yet, but a generated recipe still names the
@@ -232,66 +271,69 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     # The startup record carries the port while a renderer was started; a
     # stopped/unstarted installation still owns the recipe's port claim, and
     # an external listener there is exactly the conflict to report.
-    port = renderer_facts.get("port") or recipe_port(settings)
-    probe_url = base_url or (f"http://127.0.0.1:{port}" if port else "")
-    anything_recorded = activity["renderer_state"] != "NONE" or live_image in ("RUNNING", "UNVERIFIED")
-    http_up = _http_up(probe_url) if anything_recorded else None
-    state = _classify(activity, live_image=live_image, http_up=http_up)
+    active_h3 = next((record for record in activity["h3_records"] if record["state"] == "ACTIVE"), None)
+    port = (active_h3 or {}).get("port") or renderer_facts.get("port") or port_hint
+    h3_facts = verified_live_record(active_h3) if active_h3 else {}
+    h3_verified = bool(h3_facts.get("alive") and h3_facts.get("owned"))
+    process = ((active_h3 or {}).get("process") if h3_verified else
+               (image_record or {}).get("process") if live_image == "RUNNING" else None)
+    listener_pid = _owned_listener_pid(port, process)
+    http_up = _http_up(f"http://127.0.0.1:{port}", job_name=process["job_name"]) if listener_pid else None
+    workflow = _workflow_health(
+        settings, live_state=live_image,
+        image_record=image_record or {},
+    )
+    if active_h3 and h3_verified:
+        workflow = "VERIFIED" if active_h3.get("node_inventory") else "UNVERIFIED"
+    state = _classify(
+        activity, live_image=live_image, h3_verified=h3_verified, http_up=http_up, workflow=workflow,
+    )
     if state == "STOPPED" and _external_conflict(port):
         state = "EXTERNAL_CONFLICT"
     snapshot["state"] = state
     snapshot["recovery"] = _recovery_for(state)
+    if state == "DEGRADED" and http_up is True:
+        snapshot["recovery"].update({
+            "reason_code": "WORKFLOW_NOT_READY",
+            "advice": "引擎已连接，运行配置仍需检查。",
+            # An idle owned image renderer can be stopped safely to reload its
+            # configuration, even if the capability probe did not pass.
+            "safe_action": "stop",
+        })
     snapshot["health"]["comfy_http"] = "UP" if http_up else ("DOWN" if http_up is False else "UNKNOWN")
-    snapshot["health"]["workflow"] = _workflow_health(
-        settings, live_state=live_image,
-        adapter_sha256=(image_record or {}).get("adapter_sha256"),
-    )
-    active_h3 = next((record for record in activity["h3_records"] if record["state"] == "ACTIVE"), None)
+    snapshot["health"]["workflow"] = workflow
     owner_kind = "h3" if active_h3 else ("image" if live_image == "RUNNING" else None)
     snapshot["current"]["owner_kind"] = owner_kind
     snapshot["current"]["task"] = (active_h3 or {}).get("job_id") or (
         activity["in_flight_image_work"][0]["id"] if activity["in_flight_image_work"] else None
     )
-    from sqlalchemy import func
-
-    counts = dict(
-        db.execute(
-            select(RuntimeControlOperation.status, func.count())
-            .where(RuntimeControlOperation.installation_id == installation_id)
-            .group_by(RuntimeControlOperation.status)
-        ).all()
-    )
     pending = db.scalar(
         select(RuntimeControlOperation)
-        .where(RuntimeControlOperation.status.in_(("PENDING", "RUNNING")))
+        .where(
+            RuntimeControlOperation.status.in_(("PENDING", "RUNNING")),
+            (RuntimeControlOperation.installation_id == installation_id)
+            | (RuntimeControlOperation.action == "release"),
+        )
         .order_by(RuntimeControlOperation.created_at.desc())
         .limit(1)
     )
     snapshot["current"]["operation_id"] = pending.id if pending else None
     snapshot["current"]["operation_action"] = pending.action if pending else None
     snapshot["current"]["operation_status"] = pending.status if pending else None
-    snapshot["state_version"] = sum(
-        int(counts.get(status, 0)) for status in ("SUCCEEDED", "REFUSED", "FAILED")
-    )
+    snapshot["state_version"] = state_version_for(db, installation_id)
     leases = activity["gpu_leases"]
     snapshot["resource"] = {
         "active_leases": len([lease for lease in leases if lease["status"] == "ACTIVE"]),
         "reconcile_leases": len([lease for lease in leases if lease["status"] == "RECONCILE_REQUIRED"]),
         "waiting_leases": 0,
     }
-    h3_verified = False
-    if active_h3 and active_h3.get("process"):
-        from shine.runtime_orchestrator.identity import verified_live_record
-
-        facts = verified_live_record({"process": active_h3["process"]})
-        h3_verified = bool(facts.get("alive") and facts.get("owned"))
     snapshot["ownership"] = {
         "managed": bool(live_image == "RUNNING" or active_h3),
         # "verified" is an OS fact, not the presence of a record: PID + birth +
         # named Job Object membership must agree.
         "verified": bool(live_image == "RUNNING" or h3_verified),
         "port": port,
-        "pid": renderer_facts.get("pid") if live_image == "RUNNING" else None,
+        "pid": listener_pid or (process or {}).get("pid"),
     }
     snapshot["activity"] = {
         "h3_runs": len(activity["h3_records"]),

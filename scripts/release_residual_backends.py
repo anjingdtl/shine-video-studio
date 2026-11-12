@@ -31,7 +31,7 @@ from shine.comfyops.installer import process_identity  # noqa: E402
 from shine.comfyops.instances import ProcessRunner  # noqa: E402
 from shine.comfyops.renderer_release import (  # noqa: E402
     managed_review_ports,
-    release_managed_processes,
+    release_managed_processes_guarded,
     residual_owned_processes,
 )
 
@@ -74,8 +74,10 @@ def release_residual_backends(data_dir: Path, *, repo_root: Path = REPO_ROOT,
 
             engine = make_engine(f"sqlite:///{database.as_posix()}")
             factory = make_session_factory(engine)
-            with factory.begin() as db:
-                result = release_managed_processes(db, actor="local-user", reason="launcher_residual_cleanup")
+            result = release_managed_processes_guarded(
+                factory, actor="local-user", reason="launcher_residual_cleanup",
+            )
+            with factory() as db:
                 review_ports = managed_review_ports(db)
             report["managed"] = {
                 "stopped": [item.get("id") for item in result["stopped"]],

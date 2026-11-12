@@ -193,7 +193,7 @@ function describeDetail(detail: unknown): string {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) { super(message); }
+  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -202,11 +202,13 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, { ...init, headers });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let code: string | undefined;
     try {
       const body = await response.json();
       message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
+      if (typeof body.detail?.code === 'string') code = body.detail.code;
     } catch { /* keep HTTP status */ }
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, code);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -1206,6 +1208,8 @@ export type ControlOperation = {
 };
 
 export const fetchRuntimeStatus = () => api<RuntimeSnapshot>('/runtime-orchestrator/status');
+export const fetchRuntimeOperation = (id: string) =>
+  api<ControlOperation>(`/runtime-orchestrator/operations/${encodeURIComponent(id)}`);
 
 /** 提交一次控制意图。
  *
@@ -1224,7 +1228,5 @@ export const submitRuntimeControl = (action: 'ensure' | 'stop' | 'probe' | 'reco
         ? { expected_state_version: expectedStateVersion } : {}),
     }));
 
-/** 控制请求的 409 只有两种：页面版本过期，或幂等键撞了不同意图。
- *  幂等键每次点击都重新生成，所以 409 在这里就等于「引擎状态已更新」。 */
 export const isStaleRuntimeState = (exc: unknown): boolean =>
-  exc instanceof ApiError && exc.status === 409;
+  exc instanceof ApiError && exc.status === 409 && exc.code === 'RUNTIME_STATE_VERSION_STALE';

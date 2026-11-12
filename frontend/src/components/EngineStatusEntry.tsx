@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Cpu, Loader2, PlugZap, ShieldAlert, ShieldCheck, Square } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import {
+  ApiError,
   ERROR_CODE_LABELS,
+  fetchRuntimeOperation,
   fetchRuntimeStatus,
   isStaleRuntimeState,
   submitRuntimeControl,
@@ -79,6 +81,10 @@ const ACTION_DEFAULT_TEXTS: Record<string, string> = {
 /** 拒绝原因里最常见的一条：引擎正在做别的事，现在轮不到这个动作。 */
 const REFUSAL_TEXTS: Record<string, string> = {
   IMAGE_RENDERER_BUSY_TASK_IN_FLIGHT: '引擎正在制作，等手头的活做完再操作。',
+  RUNTIME_WORK_IN_FLIGHT: '引擎正在制作，等手头的活做完再操作。',
+  RUNTIME_OPERATION_IN_PROGRESS: '引擎已有控制操作正在处理。',
+  RUNTIME_OPERATION_INTERRUPTED: '上次操作中断，已检查引擎记录，仍需核对。',
+  EXTERNAL_INSTANCE_ON_PORT: '引擎端口已被外部程序占用。',
 };
 
 /** 把机器码翻成一句人话；翻不出来就不显示码，只给一句通用提示。 */
@@ -129,6 +135,7 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const pendingOperation = useRef<ControlOperation | null>(null);
   const alive = useRef(true);
 
   useEffect(() => {
@@ -145,6 +152,15 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
         if (!alive.current) return;
         setSnapshot(next);
         setError(null);
+        const pending = pendingOperation.current;
+        if (pending) {
+          const operation = await fetchRuntimeOperation(pending.operation_id).catch(() => null);
+          if (operation && alive.current && pendingOperation.current === pending
+              && operation.status !== 'PENDING' && operation.status !== 'RUNNING') {
+            pendingOperation.current = null;
+            setFeedback(describeOperation(operation.action, operation));
+          }
+        }
       } catch (exc) {
         if (!alive.current) return;
         setError(exc instanceof Error ? exc.message : String(exc));
@@ -167,6 +183,8 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
         action, snapshot.installation_id || 'workbench', snapshot.state_version);
       if (!alive.current) return;
       setFeedback(describeOperation(action, operation));
+      pendingOperation.current = operation.status === 'PENDING' || operation.status === 'RUNNING'
+        ? operation : null;
       // 结论先说，再刷新快照；其余交给轮询。
       const next = await fetchRuntimeStatus();
       if (!alive.current) return;
@@ -183,7 +201,10 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
           /* 拉不到就交给轮询，提示已经给过了。 */
         }
       } else {
-        setFeedback({ tone: 'down', text: '操作没有提交成功，请稍后再试一次。' });
+        const reason = exc instanceof ApiError ? reasonText(exc.code) : null;
+        setFeedback(reason
+          ? { tone: 'warn', text: reason }
+          : { tone: 'down', text: '操作没有提交成功，请稍后再试一次。' });
       }
     } finally {
       if (alive.current) setBusy(false);

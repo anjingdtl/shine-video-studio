@@ -72,6 +72,7 @@ def h3_records_for_installation(db, installation_id: str) -> list[dict[str, Any]
                     # a second query; never used as an authority on its own.
                     "port": value.get("port"),
                     "process": value.get("process"),
+                    "node_inventory": value.get("node_inventory"),
                 }
             )
     return found
@@ -107,6 +108,7 @@ def image_record_for_installation(db, installation_id: str) -> dict[str, Any] | 
         "port": value.get("port"),
         "process": value.get("process"),
         "adapter_sha256": value.get("adapter_sha256"),
+        "graph_verified": value.get("graph_verified"),
         "purpose": "image",
     }
 

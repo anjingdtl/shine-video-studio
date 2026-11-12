@@ -403,6 +403,13 @@ def _release_lease(db, lease_id: str | None) -> str | None:
     return "released"
 
 
+def _physical_installation_id(record: dict[str, Any]) -> str | None:
+    bound = (record.get("installation") or {}).get("id")
+    if record.get("purpose") == "image":
+        bound = record.get("instance_id")
+    return bound if isinstance(bound, str) and bound else None
+
+
 def installation_ids_of_managed_processes(db) -> list[str]:
     """Every physical installation a managed process record belongs to.
 
@@ -411,13 +418,9 @@ def installation_ids_of_managed_processes(db) -> list[str]:
     """
     found: set[str] = set()
     for record in managed_processes(db):
-        bound = (record.get("installation") or {}).get("id")
-        if isinstance(bound, str) and bound:
+        bound = _physical_installation_id(record)
+        if bound:
             found.add(bound)
-        if record.get("purpose") == "image":
-            instance = record.get("instance_id")
-            if isinstance(instance, str) and instance:
-                found.add(instance)
     return sorted(found)
 
 
@@ -440,10 +443,14 @@ def release_managed_processes_guarded(factory, *, actor: str, reason: str) -> di
         for installation_id in installation_ids:
             stack.enter_context(renderer_lifecycle_guard(installation_id))
         with factory.begin() as db:
-            return release_managed_processes(db, actor=actor, reason=reason)
+            return release_managed_processes(
+                db, actor=actor, reason=reason, locked_installations=set(installation_ids),
+            )
 
 
-def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
+def release_managed_processes(
+    db, *, actor: str, reason: str, locked_installations: set[str] | None = None,
+) -> dict[str, Any]:
     """Stop every managed process this installation owns and free the memory.
 
     A process that is serving an attempt, or whose ownership cannot be
@@ -454,6 +461,14 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
     released: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     for original in managed_processes(db):
+        physical_id = _physical_installation_id(original)
+        if physical_id and locked_installations is not None and physical_id not in locked_installations:
+            refused.append({
+                "id": original.get("instance_id") or original.get("key"),
+                "outcome": "busy",
+                "reason": "installation was recorded after acquiring lifecycle guards",
+            })
+            continue
         record = _handoff_restarted_record(db, original) or original
         facts = _live_facts(record)
         state = _state_of(record, facts)
@@ -488,6 +503,13 @@ def release_managed_processes(db, *, actor: str, reason: str) -> dict[str, Any]:
             entry["reason"] = "an image task is running on this renderer"
             refused.append(entry)
             continue
+        if record.get("purpose") == "image" and record.get("stage") in ("INTENT", "LAUNCHED", "LISTENING"):
+            from shine.comfyops.image_renderer import _owner_alive
+
+            if _owner_alive(record):
+                entry.update({"outcome": "busy", "reason": "image renderer startup is in progress"})
+                refused.append(entry)
+                continue
         if state == "GONE":
             outcome = _release_lease(db, record.get("lease_id"))
             _mark_instance_stopped(db, facts["job_name"], record.get("instance_id"))

@@ -17,6 +17,7 @@ These tests cover the gaps the first acceptance round left open:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pytest
@@ -245,6 +246,60 @@ def test_the_same_idempotency_key_replays_after_the_state_advanced(api):
         assert replay.id == first.id
 
 
+def test_two_tabs_cannot_admit_conflicting_actions_at_the_same_version(api):
+    client, _, _ = api
+
+    def submit(action):
+        return client.post(
+            f"/api/v1/runtime-orchestrator/{action}",
+            json={"installation_id": INSTALLATION, "idempotency_key": action, "expected_state_version": 0},
+            headers={"x-shine-local-action": "1"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ensure, stop = pool.map(submit, ("ensure", "stop"))
+    accepted, rejected = sorted((ensure, stop), key=lambda response: response.status_code)
+    assert accepted.status_code == 202
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "RUNTIME_OPERATION_IN_PROGRESS"
+    replay = submit(accepted.json()["action"])
+    assert replay.json()["operation_id"] == accepted.json()["operation_id"]
+
+
+def test_stop_is_refused_at_admission_while_a_real_job_owns_the_engine(api, monkeypatch):
+    client, _, _ = api
+    monkeypatch.setattr(
+        "shine.runtime_orchestrator.identity.in_flight_image_work",
+        lambda db: [{"kind": "library_task", "id": "real-task"}],
+    )
+    response = client.post(
+        "/api/v1/runtime-orchestrator/stop",
+        json={"installation_id": INSTALLATION, "idempotency_key": "stop-busy", "expected_state_version": 0},
+        headers={"x-shine-local-action": "1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RUNTIME_WORK_IN_FLIGHT"
+    assert response.json()["detail"]["work"][0]["id"] == "real-task"
+
+
+def test_reclaimed_stop_checks_evidence_without_stopping_again(api, monkeypatch):
+    _, factory, settings = api
+    with factory.begin() as db:
+        owner = _live_worker(db)
+        operation = operations.create_or_get_operation(
+            db, action="stop", installation_id=INSTALLATION, idempotency_key="interrupted", request={},
+        )
+        operations.claim_pending_operations(db, worker_id=owner, worker_birth="old")
+        db.get(WorkerInstance, owner).last_heartbeat_at = utcnow() - timedelta(minutes=5)
+    monkeypatch.setattr(executor, "_execute_operation", lambda *a: pytest.fail("replayed a stale stop"))
+    assert executor.advance_control_operations(factory, settings, worker_id="w-new", worker_birth="new") == 1
+    with factory() as db:
+        saved = operations.get_operation(db, operation.id)
+        assert saved.status == "REFUSED"
+        assert saved.failure_code == "RUNTIME_OPERATION_INTERRUPTED"
+        assert saved.result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
+
+
 # --- H3 startup coordination --------------------------------------------------
 
 
@@ -376,8 +431,9 @@ def test_release_guards_every_installation_in_sorted_order(api, monkeypatch):
         ],
     )
 
-    def fake_release(db, *, actor, reason):
+    def fake_release(db, *, actor, reason, locked_installations):
         released["actor"] = actor
+        assert locked_installations == {INSTALLATION, OTHER_INSTALLATION}
         return {"stopped": [], "refused": [], "released": []}
 
     monkeypatch.setattr(renderer_release, "release_managed_processes", fake_release)
@@ -385,6 +441,21 @@ def test_release_guards_every_installation_in_sorted_order(api, monkeypatch):
     report = renderer_release.release_managed_processes_guarded(factory, actor="test", reason="r")
     assert order == sorted([INSTALLATION, OTHER_INSTALLATION])
     assert released["actor"] == "test"
+    assert report["stopped"] == []
+
+
+def test_release_skips_installation_recorded_after_guard_discovery(api, monkeypatch):
+    from shine.comfyops import renderer_release
+
+    _, factory, _ = api
+    calls = iter(([], [{
+        "instance_id": INSTALLATION, "purpose": "image", "stage": "LAUNCHED",
+    }]))
+    monkeypatch.setattr(renderer_release, "managed_processes", lambda db: next(calls))
+    monkeypatch.setattr(renderer_release, "_live_facts", lambda r: pytest.fail("unlocked installation"))
+    report = renderer_release.release_managed_processes_guarded(factory, actor="test", reason="r")
+    assert [(item["id"], item["outcome"]) for item in report["refused"]] == [(INSTALLATION, "busy")]
+
     assert report["stopped"] == []
 
 
@@ -430,6 +501,57 @@ def _installation_row(db, installation_id=INSTALLATION, status="STOPPED"):
     db.add(ComfyInstance(id=installation_id, payload={"managed": True}, sha256="x", status=status))
 
 
+def test_image_start_failure_keeps_the_process_when_cleanup_is_unconfirmed(api, tmp_path, monkeypatch):
+    from shine.comfyops import image_renderer
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    key = image_renderer.image_startup_key(INSTALLATION)
+    with factory.begin() as db:
+        _installation_row(db)
+
+    class UnstoppableGroup:
+        pid = 123
+        job_name = "Local\\ShineHandoff-test"
+
+        def owns(self, pid, birth):
+            return pid == self.pid and birth == "known-birth"
+
+        def terminate(self, *, timeout):
+            with factory() as db:
+                assert db.get(AppSetting, key).value["stage"] == "LAUNCHED"
+            raise RuntimeError("exit could not be confirmed")
+
+    def no_listener(group, port):
+        raise HTTPException(409, "TEST_LISTENER_NOT_READY")
+
+    monkeypatch.setattr(image_renderer, "build_renderer_launch", lambda recipe: ([], ".", {}, [], "", 8188))
+    monkeypatch.setattr(image_renderer.OwnedProcessGroup, "launch", lambda *a, **k: UnstoppableGroup())
+    monkeypatch.setattr(image_renderer, "process_identity", lambda pid: "known-birth")
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(image_renderer, "_wait_for_owned_listener", no_listener)
+    with pytest.raises(HTTPException, match="TEST_LISTENER_NOT_READY"):
+        image_renderer.start_image_renderer(factory, settings, instance_id=INSTALLATION, actor="test")
+    with factory() as db:
+        record = db.get(AppSetting, key).value
+    assert record["stage"] == "RECONCILE_REQUIRED"
+    assert record["process"] == {"pid": 123, "birth": "known-birth", "job_name": UnstoppableGroup.job_name}
+
+
+def test_image_start_refuses_external_listener_before_launch(api, tmp_path, monkeypatch):
+    from shine.comfyops import image_renderer
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [("127.0.0.1", 42)])
+    monkeypatch.setattr(image_renderer.OwnedProcessGroup, "launch", lambda *a, **k: pytest.fail("launched"))
+    with pytest.raises(HTTPException) as refused:
+        image_renderer.start_image_renderer(factory, settings, instance_id=INSTALLATION, actor="test")
+    assert refused.value.detail["code"] == "EXTERNAL_INSTANCE_ON_PORT"
+    with factory() as db:
+        assert db.get(AppSetting, image_renderer.image_startup_key(INSTALLATION)) is None
+
+
 def test_snapshot_does_not_call_a_dead_record_busy(api, tmp_path, monkeypatch):
     from shine.runtime_orchestrator import status as status_module
 
@@ -471,6 +593,8 @@ def test_snapshot_reports_workflow_mismatch(api, tmp_path, monkeypatch):
     _, factory, settings = api
     _write_recipe(api, tmp_path)
     monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    monkeypatch.setattr(status_module, "_owned_listener_pid", lambda port, process: 4)
+    monkeypatch.setattr(status_module, "_http_up", lambda base_url, **kwargs: True)
     monkeypatch.setattr(
         status_module, "image_renderer_state",
         lambda db, settings_, iid: {"state": "RUNNING", "pid": 4, "port": 8188},
@@ -481,6 +605,28 @@ def test_snapshot_reports_workflow_mismatch(api, tmp_path, monkeypatch):
     with factory() as db:
         snap = status_module.runtime_snapshot(db, settings)
     assert snap["health"]["workflow"] == "MISMATCH"
+    assert snap["state"] == "DEGRADED"
+
+
+def test_snapshot_never_probes_a_listener_it_cannot_prove_owned(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_owned_listener_pid", lambda port, process: None)
+    monkeypatch.setattr(status_module, "_http_up", lambda url: pytest.fail("probed an unowned listener"))
+    monkeypatch.setattr(
+        status_module, "image_renderer_state",
+        lambda db, settings_, iid: {"state": "RUNNING", "pid": 4, "port": 8188},
+    )
+    with factory.begin() as db:
+        _installation_row(db)
+        _image_record(db)
+    with factory() as db:
+        snap = status_module.runtime_snapshot(db, settings)
+    assert snap["state"] == "DEGRADED"
+    assert snap["health"]["comfy_http"] == "UNKNOWN"
+    assert snap["recovery"]["safe_action"] == "probe"
 
 
 def test_snapshot_exposes_a_pending_operation(api, tmp_path, monkeypatch):
@@ -546,10 +692,37 @@ def test_reconcile_clears_a_proven_dead_record(api, tmp_path, monkeypatch):
         _installation_row(db, status="RUNNING_PENDING_HEALTH")
         _image_record(db, stage="RUNNING")
     result = executor._reconcile(factory, settings, INSTALLATION)
-    assert result["outcome"] in (executor.OUTCOME_RECONCILED, executor.OUTCOME_NOTHING)
+    assert result["outcome"] == executor.OUTCOME_RECONCILED
     with factory() as db:
         row = db.get(ComfyInstance, INSTALLATION)
         assert row.status == "STOPPED"
+
+
+def test_reconcile_does_not_stop_a_replacement_renderer(api, monkeypatch):
+    from shine.comfyops import image_renderer
+
+    _, factory, settings = api
+    key = image_renderer.image_startup_key(INSTALLATION)
+    with factory.begin() as db:
+        _installation_row(db, status="RUNNING_PENDING_HEALTH")
+        _image_record(db, startup_id="dead-start")
+    original = image_renderer.reconcile_dead_image_renderer
+
+    def replace_before_lock(factory, installation_id):
+        with factory.begin() as db:
+            record = db.get(AppSetting, key)
+            record.value = {**record.value, "startup_id": "replacement-start"}
+        return original(factory, installation_id)
+
+    monkeypatch.setattr(image_renderer, "reconcile_dead_image_renderer", replace_before_lock)
+    monkeypatch.setattr(image_renderer, "_provably_gone", lambda record: record["startup_id"] == "dead-start")
+    monkeypatch.setattr(image_renderer, "terminate_named_group", lambda *a, **k: pytest.fail("stopped replacement"))
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
+    assert result["uncertain"] == [{"kind": "image_renderer", "state": "RECORD_CHANGED"}]
+    with factory() as db:
+        assert db.get(AppSetting, key).value["stage"] == "RUNNING"
+        assert db.get(ComfyInstance, INSTALLATION).status == "RUNNING_PENDING_HEALTH"
 
 
 def test_reconcile_reports_a_failure_instead_of_crashing(api, monkeypatch):

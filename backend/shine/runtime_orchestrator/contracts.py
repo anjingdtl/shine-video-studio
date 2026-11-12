@@ -42,5 +42,5 @@ def orchestrator_enabled() -> bool:
 class OperationError(HTTPException):
     """A control-intent refusal with a machine-readable code."""
 
-    def __init__(self, status_code: int, code: str, detail: str = ""):
-        super().__init__(status_code, {"code": code, "detail": detail or code})
+    def __init__(self, status_code: int, code: str, detail: str = "", **context):
+        super().__init__(status_code, {"code": code, "detail": detail or code, **context})

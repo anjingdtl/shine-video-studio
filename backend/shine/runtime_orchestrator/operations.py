@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from shine.models import RuntimeControlOperation, utcnow
 from shine.runtime_orchestrator.contracts import (
@@ -34,12 +34,19 @@ OWNER_LIVENESS_SECONDS = 30
 
 
 def _owner_alive(db, row: RuntimeControlOperation, now) -> bool:
-    """Whether the executor that claimed this row is still heartbeating."""
+    """Prefer OS identity when deciding whether the claimant can still act."""
     if not row.owner_worker_id:
         return False
     from shine.models import WorkerInstance
 
     worker = db.get(WorkerInstance, row.owner_worker_id)
+    if worker and worker.pid and row.owner_birth not in (None, "", "None"):
+        from shine.comfyops.installer import process_identity
+
+        try:
+            return process_identity(worker.pid) == row.owner_birth
+        except (OSError, ValueError):
+            return True
     return bool(
         worker
         and worker.last_heartbeat_at
@@ -54,25 +61,17 @@ def conflicting_running_operations(
     if action not in BUSY_ACTIONS:
         return []
     now = now or utcnow()
-    rows = db.scalars(
-        select(RuntimeControlOperation).where(
+    query = select(RuntimeControlOperation).where(
+        RuntimeControlOperation.action.in_(BUSY_ACTIONS),
+        RuntimeControlOperation.status.in_(("PENDING", "RUNNING")),
+    )
+    if action != "release":
+        query = query.where(or_(
             RuntimeControlOperation.installation_id == installation_id,
-            RuntimeControlOperation.status.in_(("PENDING", "RUNNING")),
-        )
-    ).all()
-    blocking = []
-    for row in rows:
-        if row.action not in BUSY_ACTIONS:
-            continue
-        if row.status == "PENDING":
-            # A queued lifecycle action on this installation owns the next
-            # slot; executing a conflicting one first would invert the user's
-            # order (a stop that lands before an earlier ensure).
-            blocking.append(row)
-            continue
-        if _owner_alive(db, row, now):
-            blocking.append(row)
-    return blocking
+            RuntimeControlOperation.action == "release",
+        ))
+    rows = db.scalars(query).all()
+    return [row for row in rows if row.status == "PENDING" or _owner_alive(db, row, now)]
 
 
 def state_version_for(db, installation_id: str) -> int:
@@ -84,14 +83,13 @@ def state_version_for(db, installation_id: str) -> int:
     """
     from sqlalchemy import func
 
-    counts = dict(
-        db.execute(
-            select(RuntimeControlOperation.status, func.count())
-            .where(RuntimeControlOperation.installation_id == installation_id)
-            .group_by(RuntimeControlOperation.status)
-        ).all()
+    return db.scalar(
+        select(func.count()).select_from(RuntimeControlOperation).where(
+            or_(RuntimeControlOperation.installation_id == installation_id,
+                RuntimeControlOperation.action == "release"),
+            RuntimeControlOperation.status.in_(TERMINAL_STATUSES),
+        )
     )
-    return sum(int(counts.get(status, 0)) for status in ("SUCCEEDED", "REFUSED", "FAILED"))
 
 
 def any_worker_online(db) -> bool:
@@ -122,6 +120,7 @@ def create_or_get_operation(
     idempotency_key: str,
     request: dict[str, Any],
     expected_state_version: int | None = None,
+    reject_conflicts: bool = False,
 ) -> RuntimeControlOperation:
     if action not in KNOWN_ACTIONS:
         raise OperationError(422, "UNKNOWN_CONTROL_ACTION", action)
@@ -154,7 +153,22 @@ def create_or_get_operation(
                 409,
                 "RUNTIME_STATE_VERSION_STALE",
                 f"expected {expected_state_version}, current {current}",
+                state_version=current,
             )
+    if reject_conflicts:
+        blocking = conflicting_running_operations(db, installation_id=installation_id, action=action)
+        if blocking:
+            raise OperationError(409, "RUNTIME_OPERATION_IN_PROGRESS", operation_id=blocking[0].id)
+        if action == "stop":
+            from shine.runtime_orchestrator.identity import in_flight_h3_jobs, in_flight_image_work, lease_facts
+
+            work = in_flight_h3_jobs(db) + in_flight_image_work(db)
+            leases = lease_facts(db)
+            if work or leases:
+                raise OperationError(
+                    409, "RUNTIME_WORK_IN_FLIGHT", "制作任务或 GPU 租约仍在使用引擎",
+                    work=work[:5], leases=leases[:5],
+                )
     operation = RuntimeControlOperation(
         action=action,
         installation_id=installation_id,
@@ -170,15 +184,12 @@ def create_or_get_operation(
 def claim_pending_operations(db, *, worker_id: str, worker_birth: str, limit: int = 4):
     """Claim PENDING operations whose previous owner provably died.
 
-    RUNNING rows whose owner heartbeat is gone are re-claimed (the executor is
-    idempotent by construction: ensure/stop/release re-derive every fact from
-    durable records before acting).  Terminal rows are never touched.
+    RUNNING rows whose owner heartbeat is gone are re-claimed so the new
+    executor can reconcile the previous outcome. Terminal rows are untouched.
 
-    A conflicting lifecycle action on the same installation is never claimed
-    while another one is queued or running there, and one batch never hands out
-    two conflicting actions for one installation.  Two web pages that click
-    start and stop at the same moment therefore serialize instead of fighting
-    over the same renderer.
+    A live claim excludes conflicting lifecycle actions. Each batch also
+    respects those exclusions, including when an older client queued
+    conflicting actions before this worker started.
     """
     rows = db.scalars(
         select(RuntimeControlOperation)
@@ -198,11 +209,12 @@ def claim_pending_operations(db, *, worker_id: str, worker_birth: str, limit: in
                 continue  # already ours (crash restart of this very worker)
             if _owner_alive(db, row, now):
                 if row.action in BUSY_ACTIONS:
-                    busy_by_installation.setdefault(row.installation_id, row.id)
+                    scope = "workbench" if row.action == "release" else row.installation_id
+                    busy_by_installation.setdefault(scope, row.id)
                 continue
         if row.action in BUSY_ACTIONS:
-            holder = busy_by_installation.get(row.installation_id)
-            if holder is not None:
+            if (row.installation_id in busy_by_installation or "workbench" in busy_by_installation
+                    or (row.action == "release" and busy_by_installation)):
                 continue  # the same installation already has a live claim
             blocking = [
                 other for other in conflicting_running_operations(
@@ -212,7 +224,7 @@ def claim_pending_operations(db, *, worker_id: str, worker_birth: str, limit: in
             ]
             if blocking:
                 continue
-            busy_by_installation[row.installation_id] = row.id
+            busy_by_installation["workbench" if row.action == "release" else row.installation_id] = row.id
         row.status = "RUNNING"
         row.owner_worker_id = worker_id
         row.owner_birth = worker_birth
