@@ -133,9 +133,13 @@ function resolveHash(hash: string): {
     const stageParam = params.get('stage') as ProduceStageFocus | null;
     const produceFocus = stageParam && Object.prototype.hasOwnProperty.call(PRODUCE_FOCUS_LABELS, stageParam)
       ? stageParam : undefined;
-    const page = path as DirectorPage;
+    let page = path as DirectorPage;
+    // 旧四步深链（排产/进度）归并进七阶段的「视频生产」页，不再留在制作页。
+    if (page === 'produce' && (produceFocus === 'produce' || produceFocus === 'monitor')) {
+      page = 'run';
+    }
     if (Object.prototype.hasOwnProperty.call(DIRECTOR_PAGE_LABELS, page)) {
-      return { ui: 'director', view: 'production', page, packageId, produceFocus };
+      return { ui: 'director', view: 'production', page, packageId, produceFocus: page === 'produce' ? produceFocus : undefined };
     }
     return { ui: 'director', view: 'production', page: 'projects' };
   }
@@ -330,24 +334,14 @@ function App() {
     : nextStage
       ? { page: nextStage.page, cta: `继续：${nextStage.text}`, hint: nextStage.hint }
       : { page: 'deliver' as DirectorPage, cta: '查看成片', hint: '全部选定范围已交付，去成片中心播放、核对并导出；艺术验收仍需你确认。' };
-  /** 制作页自动聚焦：没镜头→分镜；正在制作→排产（盯进度）；制作结束→看结果。 */
+  /** 制作页只承载③镜头拆解与④素材准备；排产与进度归⑥视频生产页。
+   *  自动聚焦：没镜头→分镜；有镜头→备料。 */
   const makingNow = jobs.some((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
-  const autoStage = !project || shots.length === 0 ? 'storyboard' : makingNow || !deliverableReady ? 'produce' : 'monitor';
+  const autoStage: ProduceStageFocus = !project || shots.length === 0 ? 'storyboard' : 'assets';
   const focusStage = stageOverride ?? autoStage;
-  // 拍摄进行中离开进度段（排产/监控）需要确认，避免误切走正在跑的运行。
-  const [focusGuard, setFocusGuard] = useState<ProduceStageFocus | null>(null);
-  function requestFocus(target: ProduceStageFocus) {
-    if (makingNow && (focusStage === 'produce' || focusStage === 'monitor')
-      && target !== 'produce' && target !== 'monitor') {
-      setFocusGuard(target);
-      return;
-    }
-    setFocusGuard(null);
-    setStageOverride(target);
-  }
   // The person's own stage choice is theirs: it survives a page switch and the
   // auto advance, and only a new work replaces it.
-  useEffect(() => { setStageOverride(null); setFocusGuard(null); }, [projectId]);
+  useEffect(() => { setStageOverride(null); }, [projectId]);
 
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
     if (action === 'enable_real') setWizard('enable');
@@ -942,35 +936,13 @@ function App() {
                     <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
                   </>,
                 )}
-                <nav className="produce-focus-bar" aria-label="制作分区聚焦">
-                  {([
-                    { id: 'storyboard', label: '① 剧本分镜', done: stageDone.storyboard ?? false, blocked: (stageBlockers.storyboard ?? 0) > 0 },
-                    { id: 'assets', label: '② 素材准备', done: stageDone.assets ?? false, blocked: (stageBlockers.assets ?? 0) > 0 },
-                    { id: 'produce', label: '③ 排产制作', done: deliverableReady, blocked: (stageBlockers.production ?? 0) > 0 },
-                    { id: 'monitor', label: '④ 进度与结果', done: deliverableReady, blocked: false },
-                  ] as const).map((stage) => (
-                    <button type="button" key={stage.id}
-                      className={`produce-focus-item ${focusStage === stage.id ? 'active' : ''} ${stage.done ? 'done' : ''} ${stage.blocked && !stage.done ? 'blocked' : ''}`}
-                      aria-current={focusStage === stage.id ? 'step' : undefined}
-                      onClick={() => requestFocus(stage.id)}>
-                      <span className="produce-focus-dot" aria-hidden="true" />{stage.label}
-                    </button>
-                  ))}
-                  {focusGuard && (
-                    <span className="produce-focus-guard" role="alert">
-                      <AlertTriangle size={13} /> 拍摄进行中，确定离开进度段？
-                      <button type="button" className="btn-text" onClick={() => { setStageOverride(focusGuard); setFocusGuard(null); }}>继续切换</button>
-                      <button type="button" className="btn-text" onClick={() => { setFocusGuard(null); setStageOverride('monitor'); }}>去看进度</button>
-                    </span>
-                  )}
-                </nav>
                 <details className="stage-dock produce-focus-section" id="storyboard-dock" open={focusStage === 'storyboard'}
                   onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('storyboard'); }}>
                   <summary className="produce-focus-summary">
                     <span className="focus-summary-label">
                     {shots.length > 0
-                      ? <><Check size={13} className="stage-done-mark" /> ① 剧本分镜 · {storyboardScopeLabel}（点击展开修改）</>
-                      : '① 剧本分镜 · 当前任务'}
+                      ? <><Check size={13} className="stage-done-mark" /> ③ 镜头拆解 · {storyboardScopeLabel}（点击展开修改）</>
+                      : '③ 镜头拆解 · 当前任务'}
                     </span>
                   </summary>
                   <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
@@ -990,10 +962,10 @@ function App() {
                   <summary className="produce-focus-summary">
                     <span className="focus-summary-label">
                     {materialMissing > 0
-                      ? `② 素材准备 · 还有 ${materialMissing} 项待确认（缺的那个图片由 H3 自行生成）`
+                      ? `④ 拍摄素材准备 · 还有 ${materialMissing} 项待确认（缺的那个图片由 H3 自行生成）`
                       : (stageDone.assets ?? false)
-                        ? <><Check size={13} className="stage-done-mark" /> ② 素材准备 · 需求已核对（点击展开）</>
-                        : '② 素材准备 · 等待分镜定稿'}
+                        ? <><Check size={13} className="stage-done-mark" /> ④ 拍摄素材准备 · 需求已核对（点击展开）</>
+                        : '④ 拍摄素材准备 · 等待分镜定稿'}
                     </span>
                   </summary>
                   <StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备" blockers={railBlockers('assets')}>
@@ -1020,128 +992,6 @@ function App() {
                     onOpenLibrary={() => goToAssets('library')}
                   />
                   </StageRailProvider>
-                </details>
-                <details className="stage-dock produce-focus-section" id="series-dock" open={focusStage === 'produce'}
-                  onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('produce'); }}>
-                  <summary className="produce-focus-summary">
-                    <span className="focus-summary-label">
-                    {makingNow
-                      ? `③ 排产制作 · 制作进行中 ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.filter((job) => job.status !== 'CANCELLED').length} 镜（点击查看进度）`
-                      : deliverableReady
-                        ? <><Check size={13} className="stage-done-mark" /> ③ 排产制作 · {productionScopeLabel ? `本次 ${productionScopeLabel}` : '已出片'}（点击展开再拍）</>
-                        : '③ 排产制作 · 当前任务'}
-                    </span>
-                  </summary>
-                  <StageRailProvider stageId="production" stageLabel="第⑥步 · 排产制作" blockers={railBlockers('production')}>
-                  <ProductionSeriesPanel
-                    key={`series-${projectId}`}
-                    projectId={projectId}
-                    shots={productionShots}
-                    assets={assets}
-                    jobs={jobs}
-                    workflowProfiles={workflowProfiles}
-                    system={system}
-                    demoSelected={demoOverride || queueProvider === 'mock'}
-                    onSelectReal={() => setDemoOverride(false)}
-                    busy={busy}
-                    reviewWidth={reviewWidth}
-                    reviewHeight={reviewHeight}
-                    onStarted={() => refreshAll().catch(() => undefined)}
-                    onMessage={report}
-                    onSaveBindings={saveBindings}
-                    onSetContinuity={setShotContinuity}
-                    onModeAction={handleModeAction}
-                    onGoSetup={() => goToDirectorSetup('models')}
-                  />
-                  {plannedShotCount !== projectShotCount && <p className="empty-inline">
-                    当前制作列表仅包含已确认分集中的 {plannedShotCount} 镜；项目另有 {Math.max(0, projectShotCount - plannedShotCount)} 镜不属于本次计划。
-                  </p>}
-                <details className="advanced-fold">
-                  <summary>单镜头制作与任务明细（高级）</summary>
-                  <div className="queue-provider-card card">
-                    <div className="section-kicker">生成方式</div>
-                    <p className="queue-provider-hint">
-                      {realSubmissionAllowed
-                        ? '默认真实生成（本机显卡 + H3）。也可以临时切回演示，演练单个镜头。'
-                        : '当前为演示体验：不消耗显卡、不出真视频。点击顶部「启用真实制作」后可真实生成。'}
-                    </p>
-                    <label>生成方式
-                      {realSubmissionAllowed
-                        ? <select value={demoOverride ? 'mock' : 'comfyui'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
-                            <option value="comfyui">真实生成（默认）</option>
-                            <option value="mock">演示（不出真视频）</option>
-                          </select>
-                        : <select value={queueProvider} disabled={queueProvider === 'mock'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
-                            <option value="comfyui" disabled>真实制作受阻，请检查环境</option>
-                            <option value="mock">演示体验（真实制作未启用）</option>
-                          </select>}
-                    </label>
-                    {queueProvider === 'comfyui' && <>
-                      <label>生成方案
-                        <select value={queueProfile} onChange={(event) => setQueueProfile(event.target.value)}>
-                          <option value="">请选择…</option>
-                          {workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                        </select>
-                      </label>
-                      <label>审片建议（可选）
-                        <select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                          <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
-                          <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
-                        </select>
-                      </label>
-                      {reviewScope === 'basic' && <>
-                        <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>
-                        <label>预期画面高度<input type="number" min="2" max="8192" step="1" value={reviewHeight} onChange={(event) => setReviewHeight(event.target.value)} /></label>
-                        <p>宽高只做视频技术校验，不会改动生成设置；小模型人物和对白建议不会阻止制作。</p>
-                      </>}
-                    </>}
-                  </div>
-                  <ShotPanel
-                    assets={assets}
-                    shots={shots}
-                    currentStyle={currentStyle}
-                    busy={busy}
-                    preview={preview}
-                    onPreview={previewShot}
-                    onQueue={queueShot}
-                    onCreate={createShot}
-                    onSaveBindings={saveBindings}
-                    onAdoptStyle={adoptShotStyle}
-                    setPreview={setPreview}
-                  />
-                </details>
-                  </StageRailProvider>
-                </details>
-                <details className="stage-dock produce-focus-section" id="production-monitor" open={focusStage === 'monitor'}
-                  onToggle={(event) => { if ((event.target as HTMLDetailsElement).open) setStageOverride('monitor'); }}>
-                  <summary className="produce-focus-summary">
-                    <span className="focus-summary-label">
-                    {productionScopeLabel
-                      ? `④ 进度与结果 · ${productionScopeLabel}`
-                      : jobs.length === 0 ? '④ 进度与结果 · 暂无任务'
-                      : makingNow ? '④ 进度与结果 · 制作中（点击查看）'
-                        : deliverableReady
-                          ? <><Check size={13} className="stage-done-mark" /> ④ 进度与结果 · 全部完成</>
-                          : `④ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
-                    </span>
-                  </summary>
-                  {productionScopeLabel && <div className="empty-inline">
-                    本次确认范围：{scopeShotCount} 镜，{productionScopeLabel}。以下服务统计与任务列表包含工作台/项目历史记录及本次范围外镜头；本次成片状态以“全片生产”和“成片中心”为准。
-                  </div>}
-                  <ProductionPanel
-                    jobs={jobs}
-                    system={system}
-                    busy={busy}
-                    scenario={mockScenario}
-                    setScenario={setMockScenario}
-                    onTogglePause={togglePause}
-                    onLoadQC={loadJobQC}
-                    onLoadGates={loadJobGates}
-                    onSuggest={suggestRepair}
-                    onRepair={applyRepair}
-                    onRecheck={recheckReview}
-                    onAbandon={abandonJob}
-                  />
                 </details>
               </div>
 
@@ -1171,7 +1021,7 @@ function App() {
                 {directorPageIntro(
                   '第 6 阶段',
                   <>一次启动，<em>后台跑完全片。</em></>,
-                  '关了浏览器也会继续；这里只看真实进度、阻塞与每集成片。',
+                  '关了浏览器也会继续；整部运行、排产一键开拍与单镜进度都在这里。',
                   <span className={`head-chip ${deliverableReady ? 'ok' : ''}`}>{productionScopeLabel ?? '等待导演包'}</span>,
                 )}
                 {directorPage === 'run' && <DirectorProductionRunPanel
@@ -1184,6 +1034,124 @@ function App() {
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
                 />}
+                <details className="stage-dock" id="series-dock" open={!makingNow}>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
+                    {makingNow
+                      ? `⑥ 排产与一键开拍 · 制作进行中 ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.filter((job) => job.status !== 'CANCELLED').length} 镜（点击查看进度）`
+                      : deliverableReady
+                        ? <><Check size={13} className="stage-done-mark" /> ⑥ 排产与一键开拍 · {productionScopeLabel ? `本次 ${productionScopeLabel}` : '已出片'}（点击展开再拍）</>
+                        : '⑥ 排产与一键开拍 · 当前任务'}
+                    </span>
+                  </summary>
+                  <ProductionSeriesPanel
+                    key={`series-${projectId}`}
+                    projectId={projectId}
+                    shots={productionShots}
+                    assets={assets}
+                    jobs={jobs}
+                    workflowProfiles={workflowProfiles}
+                    system={system}
+                    demoSelected={demoOverride || queueProvider === 'mock'}
+                    onSelectReal={() => setDemoOverride(false)}
+                    busy={busy}
+                    reviewWidth={reviewWidth}
+                    reviewHeight={reviewHeight}
+                    onStarted={() => refreshAll().catch(() => undefined)}
+                    onMessage={report}
+                    onSaveBindings={saveBindings}
+                    onSetContinuity={setShotContinuity}
+                    onModeAction={handleModeAction}
+                    onGoSetup={() => goToDirectorSetup('models')}
+                  />
+                  {plannedShotCount !== projectShotCount && <p className="empty-inline">
+                    当前制作列表仅包含已确认分集中的 {plannedShotCount} 镜；项目另有 {Math.max(0, projectShotCount - plannedShotCount)} 镜不属于本次计划。
+                  </p>}
+                  <details className="advanced-fold">
+                    <summary>单镜头制作与任务明细（高级）</summary>
+                    <div className="queue-provider-card card">
+                      <div className="section-kicker">生成方式</div>
+                      <p className="queue-provider-hint">
+                        {realSubmissionAllowed
+                          ? '默认真实生成（本机显卡 + H3）。也可以临时切回演示，演练单个镜头。'
+                          : '当前为演示体验：不消耗显卡、不出真视频。点击顶部「启用真实制作」后可真实生成。'}
+                      </p>
+                      <label>生成方式
+                        {realSubmissionAllowed
+                          ? <select value={demoOverride ? 'mock' : 'comfyui'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
+                              <option value="comfyui">真实生成（默认）</option>
+                              <option value="mock">演示（不出真视频）</option>
+                            </select>
+                          : <select value={queueProvider} disabled={queueProvider === 'mock'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
+                              <option value="comfyui" disabled>真实制作受阻，请检查环境</option>
+                              <option value="mock">演示体验（真实制作未启用）</option>
+                            </select>}
+                      </label>
+                      {queueProvider === 'comfyui' && <>
+                        <label>生成方案
+                          <select value={queueProfile} onChange={(event) => setQueueProfile(event.target.value)}>
+                            <option value="">请选择…</option>
+                            {workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                          </select>
+                        </label>
+                        <label>审片建议（可选）
+                          <select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
+                            <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
+                            <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
+                          </select>
+                        </label>
+                        {reviewScope === 'basic' && <>
+                          <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>
+                          <label>预期画面高度<input type="number" min="2" max="8192" step="1" value={reviewHeight} onChange={(event) => setReviewHeight(event.target.value)} /></label>
+                          <p>宽高只做视频技术校验，不会改动生成设置；小模型人物和对白建议不会阻止制作。</p>
+                        </>}
+                      </>}
+                    </div>
+                    <ShotPanel
+                      assets={assets}
+                      shots={shots}
+                      currentStyle={currentStyle}
+                      busy={busy}
+                      preview={preview}
+                      onPreview={previewShot}
+                      onQueue={queueShot}
+                      onCreate={createShot}
+                      onSaveBindings={saveBindings}
+                      onAdoptStyle={adoptShotStyle}
+                      setPreview={setPreview}
+                    />
+                  </details>
+                </details>
+                <details className="stage-dock" id="production-monitor" open={makingNow}>
+                  <summary className="produce-focus-summary">
+                    <span className="focus-summary-label">
+                    {productionScopeLabel
+                      ? `⑥ 进度与结果 · ${productionScopeLabel}`
+                      : jobs.length === 0 ? '⑥ 进度与结果 · 暂无任务'
+                      : makingNow ? '⑥ 进度与结果 · 制作中（点击查看）'
+                        : deliverableReady
+                          ? <><Check size={13} className="stage-done-mark" /> ⑥ 进度与结果 · 全部完成</>
+                          : `⑥ 进度与结果 · ${jobs.filter((job) => job.status === 'PASSED').length}/${jobs.length} 完成（点击查看）`}
+                    </span>
+                  </summary>
+                  {productionScopeLabel && <div className="empty-inline">
+                    本次确认范围：{scopeShotCount} 镜，{productionScopeLabel}。以下服务统计与任务列表包含工作台/项目历史记录及本次范围外镜头；本次成片状态以整部作品运行和成片中心为准。
+                  </div>}
+                  <ProductionPanel
+                    jobs={jobs}
+                    system={system}
+                    busy={busy}
+                    scenario={mockScenario}
+                    setScenario={setMockScenario}
+                    onTogglePause={togglePause}
+                    onLoadQC={loadJobQC}
+                    onLoadGates={loadJobGates}
+                    onSuggest={suggestRepair}
+                    onRepair={applyRepair}
+                    onRecheck={recheckReview}
+                    onAbandon={abandonJob}
+                  />
+                </details>
                 </StageRailProvider>
               </div>
 

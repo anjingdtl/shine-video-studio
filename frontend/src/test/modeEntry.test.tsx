@@ -51,7 +51,7 @@ async function topbarModeEntry(): Promise<HTMLElement> {
 }
 
 async function openSingleShotTools(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: /镜头拆解/ }));
+  await user.click(await screen.findByRole('button', { name: /第 6 阶段：视频生产/ }));
   await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
   await waitFor(() => {
     expect(document.querySelector('.advanced-fold')).not.toBeNull();

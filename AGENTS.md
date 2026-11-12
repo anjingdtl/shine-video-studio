@@ -1340,3 +1340,10 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   「复用分镜分析生成素材清单」，隐藏二次分析入口。回归
   `test_material_derive.py`（2 项，含 forbidden responder 证明零调用）、
   `materialPreparation.test.tsx`（+1）。
+- **旧四步层归并进七阶段（2026-11-12 用户裁定）**：制作页删除旧「①剧本分镜
+  ②素材准备③排产制作④进度与结果」聚焦条与③④两个 dock，只保留③镜头拆解、
+  ④拍摄素材准备两个工作区；排产（一键开拍/单镜高级）与进度结果整体移入
+  ⑥视频生产页（run），与整部作品运行面板同页；旧深链 `#d/produce?stage=produce|monitor`
+  重定向到 run。七阶段旅程条是唯一阶段导航；rail 主/次按钮自动共存不丢入口。
+  回归 `produceFocus.test.tsx` 重写、`directorEntries/modeEntry/shotDraft` 导航更新，
+  全量 265 项。

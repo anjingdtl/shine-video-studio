@@ -86,7 +86,7 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
     <div className="card section-card monitor-card">
       <div className="section-heading compact">
         <div>
-          <div className="section-kicker">④ 进度与结果</div>
+          <div className="section-kicker">⑥ 进度与结果</div>
           <h2>制作进度与结果</h2>
           <p>点开任务看进度、技术检查与审片建议；建议不阻断制作。</p>
         </div>

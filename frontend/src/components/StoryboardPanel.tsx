@@ -563,7 +563,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
   return <section className="card section-card" id="storyboard">
     <div className="section-heading compact">
       <div>
-        <div className="section-kicker">① 剧本分镜</div>
+        <div className="section-kicker">③ 镜头拆解</div>
         <h2>把剧本交给 AI 拆镜头</h2>
         <p>导入剧本，AI 剧组（编剧、导演、摄影、场记、剪辑）会按你冻结的风格依次真实工作，产出分镜方案给你核对。缺素材会明确告诉你，不会自动生成替代。</p>
       </div>
