@@ -553,7 +553,12 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         arbitration = None
         if artifact_id not in continuity.input_revision_ids:
             raise ValueError("CONTINUITY_REVIEW_REQUIRED")
-        if issues or continuity.payload_json.get("recommendation") != "proceed_to_preflight":
+        # Mirror the draft gate: a needs_review recommendation whose issues are
+        # all material requests is answered by the material stage, not by an
+        # arbitration. Only real conflicts (or an unexplained needs_review)
+        # demand a ruling here.
+        if issues or (not requests
+                      and continuity.payload_json.get("recommendation") != "proceed_to_preflight"):
             # A conflict between the crew roles is released only by a valid
             # arbitration of the role that owns the shots, on the official
             # criteria of the locked rule pack.
@@ -618,6 +623,13 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 dialogue.append(line)
             beat = {**beat, "dialogue": dialogue}
             cast = list(dict.fromkeys(name for entry in beat["characters"] for name in split_character_names(entry)))
+            # A speaker the beat forgot to list is still a speaking character
+            # of this shot (voice-only entities included); the ShotSpec
+            # contract requires every dialogue speaker in characters.
+            for line in beat["dialogue"]:
+                for name in split_character_names(line.get("speaker_id") or ""):
+                    if name and name not in cast:
+                        cast.append(name)
             bindings = []
             shot_notices: list[dict] = []
             for identity in dict.fromkeys(intent["asset_ids"]):
@@ -1407,6 +1419,14 @@ def generate_storyboard(
                 "required field of the contract with the right type and no extra keys, and return "
                 "one JSON object only."
             )
+        if reason == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE":
+            field = failure.get("visual_field")
+            where = f" The Chinese text was in {field}." if isinstance(field, str) and field else ""
+            return (
+                where + " Rewrite that field in English prose and re-check every visual and camera "
+                "field, including all cuts: no Chinese names, titles, stage directions or lyrics "
+                "outside dialogue blocks; refer to people by English role labels."
+            )
         return CONTRACT_REPAIR_NOTES.get(reason or "")
 
     def _rejection(role: str, exc: Exception) -> dict:
@@ -1435,7 +1455,7 @@ def generate_storyboard(
             # Which field of the contract the answer missed, named by the
             # record itself.  A JSON pointer and a validator name are not
             # provider text, so a retry may be told exactly what to repair.
-            for key in ("provider_schema_path", "provider_schema_validator"):
+            for key in ("provider_schema_path", "provider_schema_validator", "visual_field"):
                 value = task.trace.get(key)
                 if isinstance(value, str) and value:
                     rejection[key] = value

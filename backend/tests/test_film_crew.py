@@ -7,15 +7,16 @@ import hashlib
 import json
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
 
 from shine.agents.film import eligible_edits
 from shine.agents.film_contracts import FilmAgentRegistry
 from shine.comfy.client import ComfyUIClient
 from shine.h3.compiler import LEGACY_AUDIO_COMPILER_VERSION, H3PromptCompiler
-from shine.h3.rulebook import PACK_ID, SOURCES, H3RulebookRegistry, builtin_manifest
+from shine.h3.rulebook import PACK_ID, SOURCES, H3RulebookRegistry, builtin_manifest, digest
 from shine.llm.base import LLMTimeout
-from shine.models import AgentArtifact, AgentTaskRecord, Job, MediaArtifact, Project, QualityGate, RulePack
+from shine.models import AgentArtifact, AgentTaskRecord, AppSetting, Job, MediaArtifact, Project, QualityGate, RulePack
 from shine.schemas import RenderRequest, SemanticFinding
 from shine.worker import run_one
 from tests.conftest import (
@@ -597,6 +598,110 @@ def test_unapproved_assets_and_chinese_description_block_materialization(api):
     with factory.begin() as db:
         project = db.get(Project, project_id)
         assert project.frozen_style_version_id
+
+
+def test_visual_language_refusal_names_the_offending_field_for_retry(api):
+    """反例（2026-11-12 穿测）：视觉语言拒绝只给通用码，重试说明不点名字段，
+    同一场反复复败。拒绝必须带上违规字段路径，重试才能靶向修复。"""
+    client, factory, _ = api
+    project_id, _, _ = prepare(client)
+    script = call(client, project_id, "scriptwriter", SCRIPT)
+    master = next(a for a in client.get(f"/api/v1/projects/{project_id}/assets").json()
+                  if a["entity_id"] == "Lin")
+    plan = {"shots": [{**DIRECTOR["shots"][0], "asset_ids": [master["id"]]}]}
+    direction = call(client, project_id, "director", plan, inputs=[script["id"]])
+    bad_camera = {"shots": [{**CAMERA["shots"][0], "lighting": "中文摄影描述不能伪装已翻译"}]}
+    client.app.state.mock_llm_responder = lambda *_: bad_camera
+    rejected = client.post(
+        f"/api/v1/projects/{project_id}/film-agents/cinematographer/run",
+        json={"brief": BRIEF, "locked_story_facts": FACTS, "input_revision_ids": [direction["id"]]},
+    )
+    assert rejected.status_code == 422
+    with factory.begin() as db:
+        task = db.scalars(
+            select(AgentTaskRecord)
+            .where(AgentTaskRecord.project_id == project_id,
+                   AgentTaskRecord.role_id == "cinematographer")
+            .order_by(AgentTaskRecord.created_at.desc())
+        ).first()
+        assert task.trace.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
+        assert task.trace.get("visual_field") == "shots[0].lighting"
+
+
+def test_visual_language_error_carries_the_field_path():
+    from shine.agents.film import _visual_language_error
+
+    error = _visual_language_error("shots[0].cuts[1].visual_description")
+    assert str(error) == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
+    assert error.details["visual_field"] == "shots[0].cuts[1].visual_description"
+
+
+def test_apply_camera_lists_dialogue_speakers_missing_from_beat_characters(api):
+    """反例（2026-11-12 穿测）：四阶段场次剧本的说话方可能不在 beat.characters
+    里（仅声音实体），落镜边界必须把说话方补进 characters，否则 ShotSpec
+    校验 422，整场永远落不了镜。"""
+    client, factory, _ = api
+    project_id, _, _ = prepare(client)
+    script, direction, camera, continuity = crew_chain(client, project_id)
+    with factory.begin() as db:
+        row = db.get(AgentArtifact, script["id"])
+        payload = copy.deepcopy(row.payload_json)
+        payload["beats"][0]["characters"] = []
+        row.payload_json = payload
+        row.sha256 = digest(payload)
+        flag_modified(row, "payload_json")
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{camera['id']}/apply-camera",
+        json={"continuity_artifact_id": continuity["id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    shot_id = applied.json()["shot_ids"][0]
+    shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
+    shot = next(s for s in shots if s["id"] == shot_id)
+    assert "Lin" in shot["spec"]["characters"]
+
+
+def test_apply_camera_material_request_needs_review_does_not_demand_arbitration(api):
+    """反例（2026-11-12 穿测）：continuity 的 needs_review 若只因素材缺口，
+    草案门禁放行而 apply 门禁却索要仲裁，整场落不了镜。两道门必须同公式。"""
+    client, factory, _ = api
+    project_id, _, _ = prepare(client)
+    script, direction, camera, continuity = crew_chain(client, project_id)
+    with factory.begin() as db:
+        row = db.get(AgentArtifact, script["id"])
+        payload = copy.deepcopy(row.payload_json)
+        payload["beats"][0]["characters"] = ["Lin", "Guard"]
+        row.payload_json = payload
+        row.sha256 = digest(payload)
+        flag_modified(row, "payload_json")
+        cont = db.get(AgentArtifact, continuity["id"])
+        cp = copy.deepcopy(cont.payload_json)
+        cp["recommendation"] = "needs_review"
+        cp["issues"] = ["I1 缺少主素材：Guard 没有已批准锁定的主素材。"]
+        cont.payload_json = cp
+        cont.sha256 = digest(cp)
+        flag_modified(cont, "payload_json")
+    applied = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{camera['id']}/apply-camera",
+        json={"continuity_artifact_id": continuity["id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    # A real conflict with the same recommendation still demands a ruling.
+    with factory.begin() as db:
+        cached = db.get(AppSetting, f"film-apply:{camera['id']}")
+        if cached:
+            db.delete(cached)
+        cont = db.get(AgentArtifact, continuity["id"])
+        cp = copy.deepcopy(cont.payload_json)
+        cp["issues"] = ["I1 的轴线与上一场相反，时间线冲突。"]
+        cont.payload_json = cp
+        cont.sha256 = digest(cp)
+        flag_modified(cont, "payload_json")
+    blocked = client.post(
+        f"/api/v1/projects/{project_id}/film-artifacts/{camera['id']}/apply-camera",
+        json={"continuity_artifact_id": continuity["id"]},
+    )
+    assert blocked.status_code == 422
 
 
 def test_authorized_cache_import_verifies_both_digests_and_offline_reopen(tmp_path, monkeypatch):

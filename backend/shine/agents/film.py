@@ -405,6 +405,13 @@ def registry_rules() -> list[dict]:
     return H3RulebookRegistry().search(())
 
 
+def _visual_language_error(field: str) -> ValueError:
+    """Name the offending field so a bounded retry can repair exactly it."""
+    error = ValueError("VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+    error.details = {"visual_field": field}
+    return error
+
+
 def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[AgentArtifact], context: dict):
     if isinstance(proposal, StyleInputAssessment):
         def text_values(value):
@@ -467,14 +474,18 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         timing = context.get("editorial_timing")
         timeline = []
         elapsed = 0.0
-        for shot in proposal.shots:
+        for shot_index, shot in enumerate(proposal.shots):
             # Spoken words belong to the dialogue structure, never to the
             # visual prose: text the model renders as picture description is
             # otherwise read aloud by H3 outside the audio channel.
-            visual = " ".join([shot.visual_description, *(cut.visual_description for cut in shot.cuts)])
-            descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", visual)
-            if re.search(r"[㐀-鿿]", descriptive):
-                raise ValueError("VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+            visual_fields = [(f"shots[{shot_index}].visual_description", shot.visual_description)]
+            visual_fields += [(f"shots[{shot_index}].cuts[{cut_index}].visual_description",
+                               cut.visual_description)
+                              for cut_index, cut in enumerate(shot.cuts)]
+            for field, text in visual_fields:
+                descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", text)
+                if re.search(r"[㐀-鿿]", descriptive):
+                    raise _visual_language_error(field)
             beat_ids = [shot.beat_id, *(cut.beat_id for cut in shot.cuts)]
             starts = [0.0, *(cut.start_s for cut in shot.cuts)]
             if any(b not in beats for b in beat_ids) or not set(shot.asset_ids).issubset(assets):
@@ -505,13 +516,13 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         actual = [s.intent_id for s in proposal.shots]
         if set(actual) != expected or len(actual) != len(expected):
             raise ValueError("CAMERA_INTENT_COVERAGE")
-        for shot in proposal.shots:
+        for shot_index, shot in enumerate(proposal.shots):
             # Same rule as the director's visual prose: camera language feeds
             # the compiled H3 prompt and must stay in the prompt language.
-            for text in (shot.composition, shot.movement, shot.lighting, shot.axis):
-                descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", text)
+            for field in ("composition", "movement", "lighting", "axis"):
+                descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", getattr(shot, field))
                 if re.search(r"[㐀-鿿]", descriptive):
-                    raise ValueError("VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+                    raise _visual_language_error(f"shots[{shot_index}].{field}")
     elif isinstance(proposal, SoundPlan):
         voices = {a["id"] for a in context["assets"] if a["kind"] == "audio"}
         if not set(proposal.voice_asset_ids).issubset(voices):
@@ -1122,6 +1133,9 @@ class FilmAgentDispatcher:
                               "provider_schema_validator": exc.details["validator"]}
                              if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
                              and isinstance(exc.details.get("path"), str) else {}),
+                          **({"visual_field": exc.details["visual_field"]}
+                             if isinstance(getattr(exc, "details", None), dict)
+                             and isinstance(exc.details.get("visual_field"), str) else {}),
                           # Why the envelope failed is diagnosable without
                           # storing the answer: a length stop means the budget
                           # truncated it, an empty path means malformed JSON.
