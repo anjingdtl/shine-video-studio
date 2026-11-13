@@ -24,7 +24,7 @@ V2 把导演模式从「七个阶段各有一套重复入口」收成「一份�
 | --- | --- | --- | --- |
 | WP0 | 冻结基线、复验真实旅程 | 完成 | 基线核对、隔离数据、环境重验（1281 节点 / 4 个 Ref2VA 方案 READY） |
 | WP1 | 统一导演旅程投影与按集状态 | 完成 | `backend/shine/director/overview.py`（新）、`api_streamline.py` 两个只读端点 |
-| WP2 | 裁减重复入口、保留专业能力 | 完成 | `App.tsx`、`StreamlinePanels.tsx`、`DirectorShootPanel.tsx`（新） |
+| WP2 | 裁减重复入口、保留专业能力 | 完成 | `App.tsx`、`StreamlinePanels.tsx`、`DirectorShootPanel.tsx`（新）；项目管理与素材页各自独立 |
 | WP3 | 角色/风格/镜头需求合同归一 | 完成 | `backend/shine/director/requirements.py`（新）、`director/streamline.py` |
 | WP4 | 素材中心一次交接与稳定幂等 | 完成 | `api_streamline.py` commit/requirements 端点、`materialprep/service.py` |
 | WP5 | 一处开拍、按集调度 | 完成（工程） | `streamline.start_director_production`、`/director/production/start` |
@@ -74,6 +74,13 @@ V2 把导演模式从「七个阶段各有一套重复入口」收成「一份�
 - 防重：`submitting` ref + 主按钮在提交期间禁用；选择状态显式（用户改过就不再被刷新覆盖）。
 
 导演首页（`#d/projects`）新增「当前作品 · 全剧进度」区块：集数/已确认/可拍/已交付 + 唯一下一步 + 集卡。
+
+### 4.1 页面结构的追加调整（用户现场裁定，2026-11-13）
+
+1. **项目管理独立成页**：`DirectorPage` 增加 `materials`，七阶段导航与演示条只在制作页出现；项目管理页由顶栏「项目管理」按钮进入，不再显示阶段条，也不再被包在①页里。新建作品后自动进入①，避免「建完作品不知道从哪开始」。
+2. **素材准备独立成页**：`#d/materials` 承载④；`#d/produce` 只保留③镜头表。旧深链 `#d/produce?stage=assets` 在挂载时规范化为 `#d/materials`（地址与页面一致），`stage=monitor` 仍归并到⑥。
+3. **素材页保留预览与单项操作**：需求行新增缩略图（`/assets/{id}/thumbnail`）、「重新生成」（只对这一项排队候选）与「上传」（上传 → 确认 → 锁定 → 回绑，一个动作完成）。整表仍有「确认决策并送素材中心」，两条路径共用 `commit` 端点。
+4. 同页双折叠（`#storyboard-dock` / `#assets-dock`）与 `focusStage`/`stageOverride` 自动聚焦逻辑一并移除，避免「一页两套工作区」的旧结构回潮。
 
 ## 5. WP3：需求只从已确认镜头派生
 

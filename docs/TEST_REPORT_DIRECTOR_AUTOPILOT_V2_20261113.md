@@ -48,7 +48,7 @@
 | --- | --- | --- |
 | 类型 | `tsc --noEmit` | 0 错误 |
 | 构建 | `tsc -b && vite build` | 成功（dist JS 925 kB / CSS 204 kB） |
-| 全量测试 | `vitest run --no-file-parallelism` | **42 文件 / 270 项全部通过** |
+| 全量测试 | `vitest run --no-file-parallelism` | **42 文件 / 271 项全部通过** |
 
 测试执行说明（重要，避免误读）：
 
@@ -61,7 +61,9 @@
 | --- | --- | --- |
 | `directorEntries.test.tsx` | ⑥ 页不再断言“一键开拍…全部 N 个镜头”，改为断言该旧文案消失 + 新“第 6 阶段 · 真实拍摄”出现 + 历史 65/72 不混入；② 从旧 `episode-plans` 入口改为“生成分镜书”四参数入口 | 仍是“范围正确、历史不混入、单一入口”的断言 |
 | `directorRun.test.tsx` | 重写为 ⑤ 选集/唯一开拍（POST `/director/production/start`）、未就绪集不可选、⑥ 按集进度、NEEDS_REVIEW 安全续跑 | 覆盖开拍幂等、按集隔离、障碍恢复 |
-| `produceFocus.test.tsx` | ⑥ 双折叠 → 唯一入口 + 诊断折叠 | 旧入口消失、新入口存在 |
+| `produceFocus.test.tsx` | ③④同页双折叠 → 两个独立页面（`#d/produce` / `#d/materials`）；新增旧深链 `stage=assets` 归并断言 | 旧折叠消失、两页互斥显示、地址规范化 |
+| `setupEntry.test.tsx` | 新建作品后自动进入①（建项目入口包装） | 七阶段按钮在建项后出现 |
+| `studioStub.ts` | `gotoDirectorPage` 先回项目管理再从作品卡进入（与真实用户一致） | — |
 | `shotDraft.test.tsx` / `modeEntry.test.tsx` | 单镜提交从导演⑥移到专业模式（同后端合同、同字段级错误断言） | 422 字段定位、输入保留、防重复提交全部保留 |
 | `batchSelection.test.tsx` / `simpleAssets.test.tsx` | 素材确认/锁定/缩略图从导演④移到专业模式 | 批准→锁定顺序、grant 次数、失败保留状态全部保留 |
 | `studioStub.ts` | 新增 `EMPTY_OVERVIEW` 与两个只读端点默认响应 | — |
@@ -100,6 +102,20 @@
 
 - 修复：`/director/materials/commit` 由后端按 `plan_revision_id + expected_snapshot + sorted decisions` 计算 request key，批次键再并入 requirement 集合；成功写 `DIRECTOR_MATERIALS_COMMITTED` 审计作为回执，同请求体重放直接返回同一 confirmation/batch。
 - 回归：`test_material_commit_replays_the_same_intent_instead_of_buying_twice`。
+
+### 3.5b D6（P1）同一人物两份主素材时派生报「缺」
+
+- 现象：项目里存在两份 approved+locked 的「陈默」主素材（上传 + 早前生成各一份），④ 清单显示「必需，缺」，派生匹配返回 None。
+- 根因：`resolve_character_asset` 在候选不唯一时保守返回 None（本意是防止误绑），派生把它当成「没有素材」。
+- 修复：不唯一时取**最近确认并锁定**的一份（两份都保留）；无匹配仍返回 None，不编造。
+- 回归：`test_master_match_prefers_the_latest_when_one_entity_has_two_masters`。
+
+### 3.5c D7（P1，未修复）多次 derive/commit 交错后清单只剩余部分场次
+
+- 现象：第 2 集已落 1 镜，但④ 重新派生后只出现第 1 集的「陈默」，第 2 集的「穿灰雨衣的女人」与两处场景需求不再出现。
+- 定位：`create_draft_plan` 以 `document + preparations` 的 request_hash 复用已有 DRAFT；此前一次 commit 只确认了子集，使「当前计划」的 requirements 变成子集，后续派生复用旧草稿时清单与当前计划不一致。
+- 影响：第 2 集无法从④拿到完整需求，进而未开拍（见验收报告 §4.1）。
+- 建议修复：派生改为「以最近一次确认的计划为基线增量扩展」，或 `director_material_requirements` 合并同项目所有未过期 requirements 再按 entity 去重。本轮未改，避免在收尾阶段引入新的数据迁移风险。
 
 ### 3.6 未修复 / 环境限制（如实记录）
 
