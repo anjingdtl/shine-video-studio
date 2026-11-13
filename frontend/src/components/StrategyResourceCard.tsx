@@ -13,6 +13,8 @@ type ResourceReport = {
   blockers: Array<{ code: string }>;
 };
 type Plan = SetupPlan & { download_bytes: number; disk_required: number };
+type NodeReport = { state: string; missing_nodes?: string[];
+  missing_inputs?: Array<{ class_type: string; input: string }> };
 type LocalInventory = { snapshot_sha256: string; candidate_bytes: number;
   candidates: Array<{ component_id: string; size_bytes: number; state: string }> };
 
@@ -48,6 +50,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
   const [plan, setPlan] = useState<Plan | null>(null);
   const [inventory, setInventory] = useState<LocalInventory | null>(null);
   const [instanceId, setInstanceId] = useState('');
+  const [nodeReport, setNodeReport] = useState<NodeReport | null>(null);
   const [source, setSource] = useState('AUTO');
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState('');
@@ -95,6 +98,17 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       });
       check(); setPlan(created);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    finally { actionInFlight.current = false; if (alive.current) setWorking(false); }
+  };
+  const checkNodes = async () => {
+    if (!instanceId || actionInFlight.current) return;
+    actionInFlight.current = true; setWorking(true); setMessage('');
+    try {
+      const result = await post<NodeReport>('/setup/resources/live-check', {
+        project_id: projectId, strategy, instance_id: instanceId,
+      });
+      check(); setNodeReport(result);
+    } catch (error) { if (alive.current) setMessage(error instanceof Error ? error.message : String(error)); }
     finally { actionInFlight.current = false; if (alive.current) setWorking(false); }
   };
   const reuseLocal = async () => {
@@ -148,6 +162,16 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       </p>)}
       <p>预计下载 {gib(report.missing_download_bytes ?? 0)}；节点兼容性和本机试镜尚未核验。</p>
     </div>}
+    {instanceId && <button type="button" className="btn-secondary" disabled={working}
+      onClick={() => void checkNodes()}>检查已启动引擎的节点</button>}
+    {nodeReport && <p role="status">
+      {nodeReport.state === 'NODE_INPUTS_MISSING'
+        ? `缺少节点或输入：${[...(nodeReport.missing_nodes ?? []),
+            ...(nodeReport.missing_inputs ?? []).map(item => `${item.class_type}.${item.input}`)].join('、')}`
+        : nodeReport.state === 'NODE_INPUTS_PRESENT'
+          ? '单图样例的节点及输入已找到；显卡兼容性和真实试镜仍需核验。'
+          : '节点暂未核验：请先启动并核对受管引擎；系统不会接管外部服务。'}
+    </p>}
     {inventory && inventory.candidates.length > 0 && <div className="notice">
       <p>本机受管目录发现 {inventory.candidates.length} 个大小相符的候选文件，
         最多可复用 {gib(inventory.candidate_bytes)}；确认后会复制并核对 SHA-256，源文件不会修改。</p>

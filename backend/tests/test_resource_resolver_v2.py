@@ -312,3 +312,104 @@ def test_local_inventory_api_rejects_invalid_strategy(studio):
         "project_id": project, "instance_id": "physical", "strategy": {"generation_mode": "T2VA"},
     })
     assert response.status_code == 422
+
+
+def test_live_node_check_never_queries_unowned_service(studio, monkeypatch):
+    from shine.comfyops.resource_diagnostics import check_owned_node_inputs
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, _settings = studio
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.installation_activity", lambda db, iid: {
+        "h3_records": [{"state": "ACTIVE", "process": {"pid": 1}, "port": 8188}], "image_record": None,
+    })
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.verified_live_record",
+                        lambda record: {"alive": True, "owned": False})
+    monkeypatch.setattr("httpx.stream", lambda *args, **kwargs: pytest.fail("unowned service was queried"))
+    with factory() as db:
+        result = check_owned_node_inputs(db, "physical", GenerationStrategy())
+    assert result["state"] == "OWNERSHIP_UNVERIFIED"
+    assert result["production_ready"] is False
+
+
+def test_live_node_check_reports_exact_missing_classes(studio, monkeypatch):
+    from contextlib import contextmanager
+
+    import httpx
+
+    from shine.comfyops.resource_diagnostics import check_owned_node_inputs
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, _settings = studio
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.installation_activity", lambda db, iid: {
+        "h3_records": [{"state": "ACTIVE", "process": {"pid": 1}, "port": 8188}], "image_record": None,
+    })
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.verified_live_record",
+                        lambda record: {"alive": True, "owned": True})
+    monkeypatch.setattr("shine.runtime_orchestrator.status._owned_listener_pid", lambda port, process: 1)
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        yield httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with factory() as db:
+        result = check_owned_node_inputs(db, "physical", GenerationStrategy())
+    assert result["state"] == "NODE_INPUTS_MISSING"
+    assert "MiniMaxH3MemoryEfficientSageAttentionPatch" in result["missing_nodes"]
+    assert result["gpu_compatibility"] == "UNVERIFIED"
+    assert result["production_ready"] is False
+
+
+def test_live_node_check_discards_evidence_if_listener_changes(studio, monkeypatch):
+    from contextlib import contextmanager
+
+    import httpx
+
+    from shine.comfyops.resource_diagnostics import check_owned_node_inputs
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, _settings = studio
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.installation_activity", lambda db, iid: {
+        "h3_records": [{"state": "ACTIVE", "process": {"pid": 1}, "port": 8188}], "image_record": None,
+    })
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.verified_live_record",
+                        lambda record: {"alive": True, "owned": True})
+    listeners = iter([1, 2])
+    monkeypatch.setattr("shine.runtime_orchestrator.status._owned_listener_pid", lambda *args: next(listeners))
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        yield httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with factory() as db:
+        result = check_owned_node_inputs(db, "physical", GenerationStrategy())
+    assert result == {"state": "OWNERSHIP_UNVERIFIED", "production_ready": False}
+
+
+def test_live_node_check_refuses_empty_input_schema(studio, monkeypatch):
+    from contextlib import contextmanager
+
+    import httpx
+
+    from shine.comfyops.resource_diagnostics import check_owned_node_inputs
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, _settings = studio
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.installation_activity", lambda db, iid: {
+        "h3_records": [{"state": "ACTIVE", "process": {"pid": 1}, "port": 8188}], "image_record": None,
+    })
+    monkeypatch.setattr("shine.runtime_orchestrator.identity.verified_live_record",
+                        lambda record: {"alive": True, "owned": True})
+    monkeypatch.setattr("shine.runtime_orchestrator.status._owned_listener_pid", lambda *args: 1)
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        yield httpx.Response(200, json={"UNETLoader": {"input": {}}})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with factory() as db:
+        result = check_owned_node_inputs(db, "physical", GenerationStrategy())
+    assert result["state"] == "NODE_SCHEMA_UNVERIFIED"
+    assert "UNETLoader" in result["missing_schema"]
+    assert result["production_ready"] is False

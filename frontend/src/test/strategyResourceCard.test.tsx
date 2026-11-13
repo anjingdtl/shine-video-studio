@@ -83,3 +83,22 @@ it('does not start two local imports on repeated clicks', async () => {
   finish?.({ reused_bytes: 10, rejected: [] });
   await screen.findByText(/已校验并复用/);
 });
+
+it('shows node input results without claiming GPU readiness', async () => {
+  api.mockImplementation((path: string) => {
+    if (path.endsWith('/resolve')) return Promise.resolve({ components: [], missing_download_bytes: 0,
+      snapshot_sha256: 'a'.repeat(64), download_eligible: true, blockers: [] });
+    if (path.endsWith('/storage')) return Promise.resolve({ free_bytes: 1000 });
+    if (path.endsWith('/inspect-local')) return Promise.resolve({ snapshot_sha256: 'b'.repeat(64),
+      candidate_bytes: 0, candidates: [] });
+    if (path.endsWith('/install-plan')) return Promise.resolve({ plan_id: 'plan', sha256: 'hash',
+      status: 'AWAITING_APPROVAL', download_bytes: 0, disk_required: 0 });
+    if (path.endsWith('/live-check')) return Promise.resolve({ state: 'NODE_INPUTS_PRESENT', production_ready: false });
+    throw new Error(path);
+  });
+  render(<StrategyResourceCard projectId="p" strategy={strategy} />);
+  fireEvent.click(screen.getByText('检测所需资源'));
+  fireEvent.click(await screen.findByText('检查已启动引擎的节点'));
+  expect(await screen.findByText(/单图样例的节点及输入已找到/)).toBeTruthy();
+  expect(screen.getByText(/显卡兼容性和真实试镜仍需核验/)).toBeTruthy();
+});

@@ -795,6 +795,25 @@ def create_resource_install_plan(body: ResourcePlanRequest, settings: SettingsDe
             "source_preference": body.source_preference, "production_ready": False}
 
 
+@router.post("/resources/live-check")
+def check_live_resources(body: ResourceInventoryRequest, settings: SettingsDep, db: DBSession):
+    from pydantic import ValidationError
+
+    from shine.comfyops.resource_diagnostics import check_owned_node_inputs
+    from shine.comfyops.resource_resolver import managed_installation_pin
+    from shine.strategy import GenerationStrategy
+
+    deployment._require_project(db, body.project_id)
+    try:
+        strategy = GenerationStrategy.model_validate(body.strategy)
+        managed_installation_pin(db, body.instance_id)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return check_owned_node_inputs(db, body.instance_id, strategy)
+
+
 @router.post("/resources/inspect-local")
 def inspect_local_resources(body: ResourceInventoryRequest, settings: SettingsDep, db: DBSession):
     from pydantic import ValidationError
