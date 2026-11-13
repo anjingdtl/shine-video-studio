@@ -18,6 +18,17 @@ const post = <T,>(path: string, body: unknown) => api<T>(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 const gib = (size: number) => `${(size / 1024 ** 3).toFixed(2)} GiB`;
+const resourceName = (id: string) => ({
+  'minimax-h3-diffusion-w6a8': '视频模型',
+  'minimax-h3-text-encoder-nvfp4': '文字理解模型',
+  'minimax-h3-vae-int8': '画面解码模型',
+  'minimax-h3-audio-vae-fp32': '声音解码模型',
+} as Record<string, string>)[id] ?? id;
+const stageName = (stage: string) => ({
+  QUEUED: '等待后台处理', DOWNLOADING: '下载中', VERIFYING: '校验中', INSTALLING: '准备中',
+  FILES_VERIFIED_PENDING_RUNTIME: '文件已校验，等待试镜', PAUSED: '已暂停',
+  FAILED_RETRYABLE: '暂时中断，可继续', NEEDS_REVIEW: '需要核对',
+} as Record<string, string>)[stage] ?? '正在处理';
 
 /** All execution still goes through the existing one-use grant and installer. */
 export function StrategyResourceCard({ projectId, strategy }: { projectId: string; strategy: ProductionStrategy }) {
@@ -92,7 +103,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
     {report && <div>
       {report.blockers.map((item, index) => <p key={`${item.code}-${index}`}>暂不能准备：{item.code}</p>)}
       {report.components.map(item => <p key={item.component_id}>
-        {item.component_id} · {gib(item.size_bytes)} · {item.state === 'MISSING' ? '待下载' : '已校验'} ·{' '}
+        {resourceName(item.component_id)} · {gib(item.size_bytes)} · {item.state === 'MISSING' ? '待下载' : '已校验'} ·{' '}
         <a href={item.license_url} target="_blank" rel="noreferrer">{item.license_id}</a>
         {item.files.map(file => <span key={file.sha256}> · <a href={file.url} target="_blank" rel="noreferrer">固定官方来源</a></span>)}
       </p>)}
@@ -106,8 +117,8 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       </button>
     </div>}
     {attempt && <div role="status">
-      <p>准备状态：{attempt.stage} · {gib(attempt.confirmed_bytes)} / {gib(attempt.total_bytes)}</p>
-      {attempt.current_component && <p>正在处理：{attempt.current_component}</p>}
+      <p>准备状态：{stageName(attempt.stage)} · {gib(attempt.confirmed_bytes)} / {gib(attempt.total_bytes)}</p>
+      {attempt.current_component && <p>正在处理：{resourceName(attempt.current_component)}</p>}
       {attempt.error_code && <p>需要处理：{attempt.error_code}</p>}
       {!attempt.terminal && attempt.stage !== 'PAUSED' && <button type="button" disabled={working}
         onClick={() => { void pauseInstallationAttempt(attempt.attempt_id).then(setAttempt); }}>暂停</button>}

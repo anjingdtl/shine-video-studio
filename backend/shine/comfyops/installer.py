@@ -18,7 +18,7 @@ import time
 import zipfile
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
@@ -244,6 +244,17 @@ def _retry_after_seconds(response) -> float | None:
 
 
 class HTTPTransport:
+    def probe(self, url: str) -> float | None:
+        """Bounded source timing; redirects are observed, never followed here."""
+        started = time.monotonic()
+        try:
+            response = httpx.head(url, follow_redirects=False, timeout=2.0)
+            if 200 <= response.status_code < 400:
+                return time.monotonic() - started
+        except (httpx.HTTPError, OSError):
+            pass
+        return None
+
     @contextmanager
     def stream(self, url, offset, *, end=None):
         # Retry only connection establishment and the response headers for this
@@ -317,6 +328,8 @@ class ControlledDownloader:
     # installation skip the repeated connect timeouts and try the mirror directly.
     primary_unreachable: bool = False
     source_preference: str = "AUTO"
+    probe_sources: bool = False
+    _source_timings: dict[str, float | None] = field(default_factory=dict, init=False, repr=False)
     # The wait before a retryable answer is asked again, and the jitter source.
     # Both are injectable so the production algorithm is testable without
     # spending real seconds.
@@ -400,6 +413,18 @@ class ControlledDownloader:
             candidates.append(("primary", spec.url))
         if mirror_allowed:
             candidates.append(("mirror", mirror))
+        probe = getattr(self.transport, "probe", None)
+        if self.source_preference == "AUTO" and self.probe_sources and len(candidates) == 2 and callable(probe):
+            for _kind, url in candidates:
+                host = str(urlsplit(url).hostname or "")
+                if host not in self._source_timings:
+                    self._source_timings[host] = probe(url)
+            timings = self._source_timings
+            # Unknown sources remain fallbacks; availability is not a trust claim.
+            candidates.sort(key=lambda item: (
+                timings.get(str(urlsplit(item[1]).hostname or "")) is None,
+                timings.get(str(urlsplit(item[1]).hostname or "")) or 0.0,
+            ))
         return candidates
 
     def _backoff(self, attempt: int, retry_after: float | None) -> float:

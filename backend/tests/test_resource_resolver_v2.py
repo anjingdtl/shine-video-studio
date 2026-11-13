@@ -67,6 +67,21 @@ def test_candidate_plan_is_approval_required_and_revalidates_catalog(studio, tmp
         bad = {**plan.payload, "packages": plan.payload["packages"][:-1]}
         with pytest.raises(ValueError, match="RESOURCE_PLAN_COMPONENTS_CHANGED"):
             validate_resource_plan(db, settings, bad)
+        from copy import deepcopy
+        from dataclasses import replace
+
+        from shine.comfyops import resource_resolver
+
+        real_binding = resource_resolver.load_binding
+        def changed_binding(variant, **kwargs):
+            binding = real_binding(variant, **kwargs)
+            changed = deepcopy(binding.manifest)
+            changed["summary"] = "changed since approval"
+            return replace(binding, manifest=changed)
+        monkeypatch.setattr(resource_resolver, "load_binding", changed_binding)
+        with pytest.raises(ValueError, match="RESOURCE_PLAN_IDENTITY_CHANGED"):
+            validate_resource_plan(db, settings, plan.payload)
+        monkeypatch.setattr(resource_resolver, "load_binding", real_binding)
     request["snapshot_sha256"] = "0" * 64
     assert client.post("/api/v1/setup/resources/install-plan", json=request).status_code == 409
 
@@ -105,7 +120,7 @@ def test_catalog_pin_mismatch_is_not_download_eligible(studio, monkeypatch):
     catalog = deepcopy(binding.catalog)
     component = next(row for row in catalog["components"] if row["component_id"] == "minimax-h3-diffusion-w6a8")
     component["files"][0]["sha256"] = "0" * 64
-    monkeypatch.setattr(resource_resolver, "load_binding", lambda variant: replace(binding, catalog=catalog))
+    monkeypatch.setattr(resource_resolver, "load_binding", lambda variant, **kwargs: replace(binding, catalog=catalog))
     project = create_project(client, title="错位清单")
     data = client.post("/api/v1/setup/resources/resolve", json={
         "project_id": project, "strategy": {"model_variant_id": binding.variant_id, "accelerator_id": "native20"},
@@ -167,3 +182,29 @@ def test_resource_instance_requires_real_integrity_pinned_physical_installation(
         db.get(ComfyInstance, identity).payload = {**payload, "is_mock": True}
     with factory() as db, pytest.raises(ValueError, match="RESOURCE_INSTANCE_UNVERIFIED"):
         managed_installation_pin(db, identity)
+
+
+def test_resource_binding_rechecks_manifest_instead_of_using_process_cache(monkeypatch):
+    from copy import deepcopy
+
+    from shine.comfyops import variant_binding
+
+    original = variant_binding.load_variant_manifest
+    revised = {"value": False}
+
+    def load(variant_id):
+        manifest = deepcopy(original(variant_id))
+        if revised["value"]:
+            manifest["summary"] = "changed after approval"
+        return manifest
+
+    variant_binding._manifest_and_catalog.cache_clear()
+    monkeypatch.setattr(variant_binding, "load_variant_manifest", load)
+    try:
+        first = variant_binding.load_binding("ref2va-lowend-candidate")
+        revised["value"] = True
+        assert variant_binding.load_binding("ref2va-lowend-candidate").manifest == first.manifest
+        fresh = variant_binding.load_binding("ref2va-lowend-candidate", fresh=True)
+        assert fresh.manifest["summary"] == "changed after approval"
+    finally:
+        variant_binding._manifest_and_catalog.cache_clear()

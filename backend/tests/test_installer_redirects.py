@@ -568,3 +568,19 @@ def test_explicit_source_preference_only_uses_approved_mirror():
     assert only_official._candidates(file) == [("primary", url)]
     non_hf = file.model_copy(update={"url": "https://github.com/org/repo/archive/abc.zip"})
     assert mirror_first._candidates(non_hf) == [("primary", non_hf.url)]
+
+
+def test_auto_source_probe_is_bounded_to_trusted_pinned_candidates():
+    file = spec()
+    class TimedTransport:
+        def __init__(self):
+            self.probed = []
+        def probe(self, url):
+            self.probed.append(url)
+            return 0.3 if url.startswith("https://huggingface.co/") else 0.1
+    transport = TimedTransport()
+    downloader = ControlledDownloader(MIRROR_HOSTS, transport, probe_sources=True)
+    assert [kind for kind, _ in downloader._candidates(file)] == ["mirror", "primary"]
+    assert len(transport.probed) == 2
+    downloader._candidates(file)
+    assert len(transport.probed) == 2  # one bounded probe per host per attempt

@@ -426,7 +426,7 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
     if body.variant_id:
         from shine.comfyops.variant_binding import load_binding
 
-        binding = load_binding(body.variant_id)
+        binding = load_binding(body.variant_id, fresh=True)
         if binding.catalog.get("catalog_id") != raw.get("catalog_id"):
             raise HTTPException(409, {"code": "VARIANT_CATALOG_MISMATCH"})
         try:
@@ -773,9 +773,10 @@ def create_resource_install_plan(body: ResourcePlanRequest, settings: SettingsDe
         identity = managed_installation_pin(db, body.instance_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    binding = load_binding(strategy.model_variant_id)
+    binding = load_binding(strategy.model_variant_id, fresh=True)
     context = {"schema": "shine.resource-plan.v2", "strategy": strategy.model_dump(mode="json"),
                "strategy_sha256": strategy.strategy_sha256(), "catalog_sha256": preview["catalog_sha256"],
+               "manifest_sha256": preview["manifest_sha256"],
                "recipe_sha256": preview["compiled_recipe_sha256"], "snapshot_sha256": body.snapshot_sha256,
                "instance_id": body.instance_id, "instance_pin": identity,
                "source_preference": body.source_preference}

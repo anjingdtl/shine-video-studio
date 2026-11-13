@@ -328,6 +328,7 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
         context = plan.payload.get("resource_context")
         if context:
             installer.downloader.source_preference = context["source_preference"]
+            installer.downloader.probe_sources = context["source_preference"] == "AUTO"
     _update(factory, attempt_id, worker_id, stage=DOWNLOADING, status=DOWNLOADING,
             current_component=None, current_file=None)
     recorder.report(component=None, confirmed=0, total=plan.payload.get("download_bytes"), force=True)

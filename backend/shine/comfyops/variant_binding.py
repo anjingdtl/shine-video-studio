@@ -81,7 +81,7 @@ def profile_files(names: list[str]) -> list[dict[str, Any]]:
     return found
 
 
-def load_binding(variant_id: str, *, catalog_id: str | None = None) -> VariantBinding:
+def load_binding(variant_id: str, *, catalog_id: str | None = None, fresh: bool = False) -> VariantBinding:
     """Resolve one variant against its own catalog and its own profile files.
 
     ``catalog_id`` is the caller's *expected* catalog.  When it disagrees with
@@ -89,10 +89,11 @@ def load_binding(variant_id: str, *, catalog_id: str | None = None) -> VariantBi
     variant with the INT8 catalog would produce a plan whose weights and whose
     graph belong to two different stacks.
 
-    The result is cached: it reads committed files that do not change while
-    the product runs, and the production gate asks for it on every job.
+    Ordinary production reads use the cache. Approval and execution checks
+    request ``fresh`` so on-disk catalog changes cannot hide behind it.
     """
-    manifest, catalog = _manifest_and_catalog(variant_id)
+    reader = _manifest_and_catalog.__wrapped__ if fresh else _manifest_and_catalog
+    manifest, catalog = reader(variant_id)
     declared = str(manifest.get("catalog_id") or "")
     if catalog_id and catalog_id != declared:
         raise _mismatch(variant_id, declared, catalog_id)

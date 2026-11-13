@@ -26,7 +26,7 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
     proof of production readiness. Node ABI is intentionally pending until a
     live owned renderer has been checked.
     """
-    binding = load_binding(strategy.model_variant_id)
+    binding = load_binding(strategy.model_variant_id, fresh=True)
     try:
         compiled = compile_ref2va_workflow(
             variant_id=strategy.model_variant_id, accelerator_id=strategy.accelerator_id,
@@ -113,6 +113,7 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
     result = {
         "schema": "shine.resources.v2", "variant_id": binding.variant_id,
         "strategy_sha256": strategy.strategy_sha256(), "catalog_sha256": graph_hash(binding.catalog),
+        "manifest_sha256": graph_hash(binding.manifest),
         "compiled_recipe_sha256": compiled.recipe_sha256, "components": components,
         "missing_download_bytes": sum(row["missing_download_bytes"] for row in components),
         "required_nodes": compiled.required_nodes, "node_abi": "LIVE_CHECK_PENDING",
@@ -152,12 +153,13 @@ def validate_resource_plan(db, settings, payload: dict) -> None:
         raise ValueError("DOWNLOAD_SOURCE_PREFERENCE_INVALID")
     strategy = GenerationStrategy.model_validate(context.get("strategy"))
     preview = resolve_resources(db, settings, strategy)
-    binding = load_binding(strategy.model_variant_id)
+    binding = load_binding(strategy.model_variant_id, fresh=True)
     from shine.comfyops.deployment import _catalog_package_spec, _component_map, _resolve_closure
 
     identity = managed_installation_pin(db, str(context.get("instance_id") or ""))
     if (context.get("strategy_sha256") != strategy.strategy_sha256()
             or context.get("catalog_sha256") != graph_hash(binding.catalog)
+            or context.get("manifest_sha256") != graph_hash(binding.manifest)
             or context.get("recipe_sha256") != preview.get("compiled_recipe_sha256")
             or context.get("instance_pin") != identity
             or (payload.get("variant") or {}).get("variant_id") != binding.variant_id
