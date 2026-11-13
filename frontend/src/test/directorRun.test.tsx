@@ -73,6 +73,26 @@ function stubRef2vaProfile() {
     }]) });
 }
 
+function stubStrategyOptions() {
+  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/strategy-options$/,
+    respond: () => jsonResponse({
+      model_variants: [
+        { variant_id: 'h3-ref2va-int8-convrot', label: 'h3-ref2va-int8-convrot',
+          acceptance_status: 'SUPPORTED', verified: true, default_recommended: true },
+        { variant_id: 'ref2va-lowend-candidate', label: 'ref2va-lowend-candidate',
+          acceptance_status: 'CANDIDATE', verified: false },
+      ],
+      accelerators: [
+        { accelerator_id: 'pdd8', steps: 8, verified: true },
+        { accelerator_id: 'native20', steps: 20, verified: true },
+        { accelerator_id: 'turbo4', steps: 4, verified: false, unverified_reason: 'ACCELERATOR_UNVERIFIED' },
+      ],
+      second_pass: { supported: true, recipes: ['h3-tail-refine-v1'] },
+      upscale: [{ engine: 'relayvsr', variant: 'x2', enabled: false,
+        status: 'BLOCKED', blockers: [{ code: 'RELAYVSR_WEIGHTS_NOT_PINNED' }] }],
+    }) });
+}
+
 describe('⑤ 拍摄范围', () => {
   it('只允许选择就绪的集，并用一次主操作开拍', async () => {
     stubOverview(overviewBody([
@@ -82,6 +102,7 @@ describe('⑤ 拍摄范围', () => {
         next_action: { kind: 'RETRY_STORYBOARD', label: '修复这一集的分镜' } }),
     ]));
     stubRef2vaProfile();
+    stubStrategyOptions();
     // 真实制作已就绪：主按钮可用；演示模式下的阻断另有专门测试。
     stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
       ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
@@ -113,7 +134,11 @@ describe('⑤ 拍摄范围', () => {
     await user.click(start);
     await waitFor(() => expect(posted).not.toBeNull());
     expect(posted?.['episode_ids']).toEqual(['ep-01']);
-    expect(posted?.['workflow_profile_id']).toBe('profile-1');
+    // 开拍提交的是生产策略（模型+加速），不再是静态方案 id；页面上不出现方案下拉。
+    const strategy = posted?.['strategy'] as unknown as Record<string, unknown>;
+    expect(strategy?.['model_variant_id']).toBe('h3-ref2va-int8-convrot');
+    expect(strategy?.['accelerator_id']).toBe('pdd8');
+    expect(posted?.['workflow_profile_id']).toBeUndefined();
   });
 
   it('没有任何就绪集时不开拍，而是列出每一集的真实状态', async () => {
@@ -122,6 +147,7 @@ describe('⑤ 拍摄范围', () => {
         shots: { landed_count: 0, confirmed_count: 0, confirmed: false, problems: [] } }),
     ]));
     stubRef2vaProfile();
+    stubStrategyOptions();
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 5 阶段：导演包/);
@@ -229,6 +255,7 @@ describe('⑤ 续拍下一集', () => {
         state_label: '可开拍', production: null, next_action: null }),
     ]));
     stubRef2vaProfile();
+    stubStrategyOptions();
     stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
       ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
     let posted: Record<string, unknown> | null = null;

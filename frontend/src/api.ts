@@ -1645,9 +1645,47 @@ export type DirectorShootResult = {
   episodes: Array<{ episode_id: string; position: number; shot_count: number }>;
 };
 
+/** 用户可选的生产策略：量化模型 + 加速 + 二次精修 + 高清视频。 */
+export type ProductionStrategy = {
+  schema_version: '1';
+  generation_mode: 'Ref2VA';
+  model_variant_id: string;
+  accelerator_id: string;
+  second_pass: { enabled: boolean; recipe_id?: string; denoise?: number; latent_scale?: number };
+  upscale: { enabled: boolean; engine?: string; variant?: string; quality_preset?: string };
+};
+
+export type StrategyOptions = {
+  model_variants: Array<{
+    variant_id: string;
+    label: string;
+    acceptance_status: string;
+    verified: boolean;
+    tier?: string | null;
+    default_recommended?: boolean;
+  }>;
+  accelerators: Array<{
+    accelerator_id: string;
+    steps: number;
+    verified: boolean;
+    unverified_reason?: string | null;
+  }>;
+  second_pass: { supported: boolean; recipes: string[] };
+  upscale: Array<{
+    engine: string;
+    variant: string;
+    enabled: boolean;
+    status: string;
+    blockers: Array<{ code: string; detail?: string }>;
+  }>;
+};
+
+export const getStrategyOptions = (projectId: string) =>
+  api<StrategyOptions>(`/projects/${projectId}/director/strategy-options`);
+
 export const startDirectorProduction = (
   projectId: string,
-  body: { episode_ids: string[]; workflow_profile_id?: string | null },
+  body: { episode_ids: string[]; workflow_profile_id?: string | null; strategy?: ProductionStrategy | null },
 ) => api<DirectorShootResult>(`/projects/${projectId}/director/production/start`, json('POST', body));
 
 /* ------------------------------------------------------------------------- *
