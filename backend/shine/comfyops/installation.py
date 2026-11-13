@@ -448,7 +448,7 @@ def _update(factory, attempt_id: str, worker_id: str, **fields) -> None:
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         attempt = db.get(InstallationAttempt, attempt_id)
-        if attempt is None:
+        if attempt is None or attempt.lease_owner != worker_id:
             return
         now = utcnow()
         for key, value in fields.items():

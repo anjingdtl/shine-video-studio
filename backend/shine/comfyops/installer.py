@@ -699,7 +699,21 @@ class LocalInstaller:
         journal = safe_target(self.root, spec.name + ".journal")
         lock = safe_target(self.root, spec.name + ".lock")
         with exclusive_file_lock(lock):
-            if journal.exists() or stage.exists() or backup.exists():
+            if journal.exists():
+                # Only the pre-swap phase can be resumed without an operator:
+                # its staged files are disposable and the content-addressed
+                # .part remains intact. Never infer safety from a missing journal.
+                try:
+                    prior = json.loads(journal.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise ValueError("INSTALL_RECOVERY_REQUIRED") from exc
+                if (not isinstance(prior, dict) or prior.get("phase") != "DOWNLOADING"
+                        or prior.get("spec") != spec.model_dump() or backup.exists()
+                        or type(prior.get("had_destination")) is not bool
+                        or destination.exists() != prior["had_destination"]):
+                    raise ValueError("INSTALL_RECOVERY_REQUIRED")
+                self._recover(spec.name)
+            if stage.exists() or backup.exists():
                 raise ValueError("INSTALL_RECOVERY_REQUIRED")
             state = {"schema": 1, "had_destination": destination.exists(), "spec": spec.model_dump()}
 
@@ -755,6 +769,9 @@ class LocalInstaller:
     def _emit(self, file, confirmed: int) -> None:
         """Report the bytes that are really on disk for one pinned file."""
         self.progress(self._current_component, file.relative_path, int(confirmed or 0), file.size)
+        reason = self.should_stop()
+        if reason:
+            raise InstallationInterrupted(reason)
 
     def _recover(self, name):
         destination = safe_target(self.root, name)

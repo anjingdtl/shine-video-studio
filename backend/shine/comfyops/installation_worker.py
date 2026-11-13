@@ -12,6 +12,9 @@ replayed.
 from __future__ import annotations
 
 import logging
+import threading
+
+from sqlalchemy import text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.installation import (
@@ -33,6 +36,7 @@ from shine.comfyops.models import InstallationAttempt, InstallationPlan, ModelPa
 from shine.services import add_audit
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _read_control(factory, attempt_id: str) -> dict:
@@ -103,11 +107,40 @@ def run_pending_installation(factory, worker_id: str, *, settings) -> str | None
 
 
 def run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer=None) -> str:
+    """Keep the existing attempt lease alive while slow file operations run."""
+    from shine.comfyops.installation import renew_lease
+
+    stop_heartbeat = threading.Event()
+    lost = threading.Event()
+
+    def heartbeat():
+        while not stop_heartbeat.wait(HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                if not renew_lease(factory, attempt_id, worker_id):
+                    lost.set()
+                    return
+            except Exception:  # noqa: BLE001 - transient database locks must not invent lease loss
+                logger.warning("installation heartbeat deferred attempt_id=%s", attempt_id)
+
+    thread = threading.Thread(target=heartbeat, name="shine-install-heartbeat", daemon=True)
+    thread.start()
+    try:
+        return _run_attempt(factory, worker_id, attempt_id, settings=settings, installer=installer,
+                            ownership_lost=lost)
+    finally:
+        stop_heartbeat.set()
+        thread.join(timeout=5)
+
+
+def _run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer=None,
+                 ownership_lost: threading.Event) -> str:
     """Run one claimed attempt to a definite stage."""
     with factory() as db:
         attempt = db.get(InstallationAttempt, attempt_id)
         if attempt is None:
             return "missing"
+        if attempt.lease_owner != worker_id:
+            return NEEDS_REVIEW
         plan = db.get(InstallationPlan, attempt.plan_id)
         payload = dict(attempt.payload or {})
     if plan is None:
@@ -144,6 +177,10 @@ def run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer
                     error_message="Resource identity could not be revalidated; no download was started.")
             return NEEDS_REVIEW
     with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        current_attempt = db.get(InstallationAttempt, attempt_id)
+        if not current_attempt or current_attempt.lease_owner != worker_id or ownership_lost.is_set():
+            return NEEDS_REVIEW
         plan_row = db.get(InstallationPlan, plan.id)
         if plan_row is not None:
             plan_row.status = "INSTALLING"
@@ -166,12 +203,14 @@ def run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer
         )
         return FAILED_RETRYABLE
     if plan.payload.get("resource_context"):
-        return _run_resource_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
-    return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
+        return _run_resource_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer,
+                                     ownership_lost=ownership_lost)
+    return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer,
+                              ownership_lost=ownership_lost)
 
 
 def _run_resource_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan, *, settings,
-                          installer=None) -> str:
+                          installer=None, ownership_lost: threading.Event | None = None) -> str:
     """Keep the physical installation idle while packages are swapped."""
     from sqlalchemy import select
 
@@ -204,8 +243,11 @@ def _run_resource_attempt(factory, worker_id: str, attempt_id: str, plan: Instal
                 if (unknown or activity["renderer_state"] != "NONE" or activity["gpu_leases"]
                         or activity["in_flight_h3_jobs"] or activity["in_flight_image_work"]):
                     raise LifecycleGuardBusy("RESOURCE_INSTALLATION_BUSY")
+            if ownership_lost and ownership_lost.is_set():
+                return NEEDS_REVIEW
             started = True
-            return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
+            return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer,
+                                      ownership_lost=ownership_lost)
     except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
         _finish(factory, attempt_id, worker_id, stage=FAILED_RETRYABLE, status=FAILED_RETRYABLE,
                 error_code=("EXTERNAL_INSTANCE_ON_PORT" if str(exc) == "EXTERNAL_INSTANCE_ON_PORT"
@@ -223,6 +265,10 @@ def _run_resource_attempt(factory, worker_id: str, attempt_id: str, plan: Instal
 def _run_mock_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan) -> str:
     """The mock drill changes nothing on disk and claims nothing real."""
     with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        attempt = db.get(InstallationAttempt, attempt_id)
+        if not attempt or attempt.lease_owner != worker_id:
+            return NEEDS_REVIEW
         for package in plan.payload.get("packages", []):
             cls = ModelPackage if package["spec"]["kind"] == "model" else NodePackage
             row = db.get(cls, package["id"])
@@ -248,7 +294,7 @@ def _run_mock_attempt(factory, worker_id: str, attempt_id: str, plan: Installati
 
 
 def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan, *, settings,
-                       installer=None) -> str:
+                       installer=None, ownership_lost: threading.Event | None = None) -> str:
     """Install every pinned package of the plan behind the pinned digests."""
     from shine.comfyops.installer import InstallationInterrupted
 
@@ -258,6 +304,8 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
     stop = {"reason": None}
 
     def should_stop():
+        if ownership_lost and ownership_lost.is_set():
+            return "INSTALL_LEASE_LOST"
         if stop["reason"]:
             return stop["reason"]
         control = _read_control(factory, attempt_id)
@@ -301,6 +349,8 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
                         attempt_id, spec.name, result.get("status"))
     except InstallationInterrupted as exc:
         reason = str(exc)
+        if reason == "INSTALL_LEASE_LOST":
+            return NEEDS_REVIEW  # a stale owner never writes a new terminal state
         if reason == CANCELLED:
             _finish(
                 factory, attempt_id, worker_id,
@@ -330,6 +380,8 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
         }
         with factory.begin() as db:
             attempt = db.get(InstallationAttempt, attempt_id)
+            if not attempt or attempt.lease_owner != worker_id:
+                return NEEDS_REVIEW
             attempt.retry_count = int(attempt.retry_count or 0) + 1
         if retryable:
             _finish(
@@ -344,8 +396,12 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
             error_code=code, error_message=message[:500],
         )
         with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            current_attempt = db.get(InstallationAttempt, attempt_id)
             plan_row = db.get(InstallationPlan, plan.id)
-            if plan_row is not None:
+            if (plan_row is not None and current_attempt is not None
+                    and current_attempt.stage == NEEDS_REVIEW and current_attempt.error_code == code
+                    and current_attempt.lease_owner is None):
                 # The existing reconciliation path only accepts a plan that is
                 # installing or already needs review.
                 plan_row.status = "NEEDS_REVIEW"
@@ -355,6 +411,10 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
     with factory.begin() as db:
         from shine.comfyops.verification_receipts import save_receipt
 
+        db.execute(text("BEGIN IMMEDIATE"))
+        attempt = db.get(InstallationAttempt, attempt_id)
+        if not attempt or attempt.lease_owner != worker_id or (ownership_lost and ownership_lost.is_set()):
+            return NEEDS_REVIEW
         plan_row = db.get(InstallationPlan, plan.id)
         variant = (plan.payload or {}).get("variant") or {}
         deployment = (plan.payload or {}).get("deployment") or {}

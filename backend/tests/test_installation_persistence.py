@@ -217,8 +217,10 @@ def test_the_local_attempt_runs_and_reports_verified_files(prep, monkeypatch):
         factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
     )
     monkeypatch.setattr("shine.comfyops.installation_worker.local_execution_enabled", lambda: True)
+    from shine.comfyops.installation import claim_next_attempt
     from shine.comfyops.installation_worker import run_attempt
 
+    assert claim_next_attempt(factory, "worker-test") == attempt_id
     installer = RecordingInstaller()
     stage = run_attempt(factory, "worker-test", attempt_id, settings=settings, installer=installer)
     assert stage == "FILES_VERIFIED_PENDING_RUNTIME"
@@ -448,3 +450,172 @@ def test_the_installation_attempt_migration_round_trip(tmp_path, monkeypatch):
     finally:
         connection.close()
     command.upgrade(config, "head")
+
+
+def test_stale_worker_cannot_change_reclaimed_installation_attempt(prep):
+    from shine.comfyops.installation import _update
+
+    client, factory, _settings = prep
+    _, _, plan = approved_plan(client)
+    attempt_id = queue_fake_attempt(client, plan)
+    with factory.begin() as db:
+        attempt = db.get(InstallationAttempt, attempt_id)
+        attempt.lease_owner = "new-worker"
+        original_stage = attempt.stage
+    _update(factory, attempt_id, "old-worker", stage="FAILED_RETRYABLE", lease_owner=None)
+    with factory() as db:
+        attempt = db.get(InstallationAttempt, attempt_id)
+        assert attempt.lease_owner == "new-worker"
+        assert attempt.stage == original_stage
+
+
+def test_installer_checks_pause_during_file_progress(tmp_path):
+    from types import SimpleNamespace
+
+    from shine.comfyops.installer import InstallationInterrupted, LocalInstaller
+
+    installer = LocalInstaller(tmp_path, None, should_stop=lambda: "PAUSED")
+    with pytest.raises(InstallationInterrupted, match="PAUSED"):
+        installer._emit(SimpleNamespace(relative_path="weight.bin", size=1024), 100)
+
+
+def test_slow_installation_renews_its_attempt_claim(prep, monkeypatch):
+    import time
+
+    from shine.comfyops import installation, installation_worker
+    from shine.comfyops.local import queue_install_attempt
+
+    client, factory, settings = prep
+    _, _, plan = approved_plan(client, executor="local")
+    attempt_id, _ = queue_install_attempt(factory, settings, plan["id"], plan["sha256"],
+                                           "v13-test-operator", "LOCAL_ISOLATED")
+    assert installation.claim_next_attempt(factory, "worker-test") == attempt_id
+    renewals = []
+    original = installation.renew_lease
+
+    def renew(*args, **kwargs):
+        renewals.append(True)
+        return original(*args, **kwargs)
+
+    class SlowInstaller(RecordingInstaller):
+        def install(self, spec):
+            time.sleep(0.15)
+            return super().install(spec)
+
+    monkeypatch.setattr(installation, "renew_lease", renew)
+    monkeypatch.setattr(installation_worker, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(installation_worker, "local_execution_enabled", lambda: True)
+    assert installation_worker.run_attempt(factory, "worker-test", attempt_id, settings=settings,
+                                           installer=SlowInstaller()) == "FILES_VERIFIED_PENDING_RUNTIME"
+    assert renewals
+
+
+def test_lost_installation_owner_cannot_record_verified_files(prep, monkeypatch):
+    from shine.comfyops import installation, installation_worker
+    from shine.comfyops.local import queue_install_attempt
+
+    client, factory, settings = prep
+    _, _, plan = approved_plan(client, executor="local")
+    attempt_id, _ = queue_install_attempt(factory, settings, plan["id"], plan["sha256"],
+                                           "v13-test-operator", "LOCAL_ISOLATED")
+    assert installation.claim_next_attempt(factory, "old-worker") == attempt_id
+
+    class ReclaimedInstaller(RecordingInstaller):
+        def install(self, spec):
+            with factory.begin() as db:
+                db.get(InstallationAttempt, attempt_id).lease_owner = "new-worker"
+            return super().install(spec)
+
+    monkeypatch.setattr(installation_worker, "local_execution_enabled", lambda: True)
+    assert installation_worker.run_attempt(factory, "old-worker", attempt_id, settings=settings,
+                                           installer=ReclaimedInstaller()) == "NEEDS_REVIEW"
+    with factory() as db:
+        attempt = db.get(InstallationAttempt, attempt_id)
+        assert attempt.lease_owner == "new-worker"
+        assert attempt.stage != "FILES_VERIFIED_PENDING_RUNTIME"
+
+
+def test_download_phase_crash_resumes_same_verified_partial(tmp_path):
+    import json
+
+    from shine.comfyops.installer import LocalInstaller, PackageSpec
+    from tests.test_v13_preparation import BytesTransport, file_spec
+
+    root = tmp_path / "isolated"
+    root.mkdir()
+    spec = file_spec()
+    package = PackageSpec(name="model", kind="model", revision="v1", license_id="TEST",
+                          usage="research", files=[spec])
+    (root / "model.staging").mkdir()
+    (root / "model.journal").write_text(json.dumps({"phase": "DOWNLOADING", "had_destination": False,
+                                                    "spec": package.model_dump()}), encoding="utf-8")
+    cache = root / ".cache"
+    cache.mkdir()
+    (cache / (spec.sha256 + ".part")).write_bytes(b"da")
+    transport = BytesTransport()
+    installer = LocalInstaller(root, ControlledDownloader({"huggingface.co"}, transport))
+    assert installer.install(package)["status"] == "AVAILABLE"
+    assert transport.offsets == [2]
+    assert (root / "model/中文/test.bin").read_bytes() == b"data"
+
+
+def test_uncertain_swap_journal_is_never_automatically_replayed(tmp_path):
+    import json
+
+    from shine.comfyops.installer import LocalInstaller, PackageSpec
+    from tests.test_v13_preparation import BytesTransport, file_spec
+
+    root = tmp_path / "isolated"
+    root.mkdir()
+    package = PackageSpec(name="model", kind="model", revision="v1", license_id="TEST",
+                          usage="research", files=[file_spec()])
+    journal = root / "model.journal"
+    journal.write_text(json.dumps({"phase": "SWAP_INTENT", "had_destination": False,
+                                   "spec": package.model_dump()}), encoding="utf-8")
+    transport = BytesTransport()
+    installer = LocalInstaller(root, ControlledDownloader({"huggingface.co"}, transport))
+    with pytest.raises(ValueError, match="INSTALL_RECOVERY_REQUIRED"):
+        installer.install(package)
+    assert journal.exists()
+    assert transport.offsets == []
+
+
+def test_mid_file_pause_preserves_partial_and_resumes_at_offset(tmp_path):
+    from shine.comfyops.installer import InstallationInterrupted, LocalInstaller, PackageSpec
+
+    content = b"x" * (5 * 1024 * 1024)
+    spec = pinned_file(content)
+    package = PackageSpec(name="model", kind="model", revision="v1", license_id="TEST",
+                          usage="research", files=[spec])
+
+    class ChunkedTransport:
+        def __init__(self):
+            self.offsets = []
+
+        @contextmanager
+        def stream(self, url, offset):
+            self.offsets.append(offset)
+            class Response:
+                status_code = 206 if offset else 200
+                headers = {"content-range": f"bytes {offset}-{len(content) - 1}/{len(content)}"} if offset else {}
+
+                def iter_bytes(self):
+                    yield content[offset:offset + 4 * 1024 * 1024]
+                    yield content[offset + 4 * 1024 * 1024:]
+            yield Response()
+
+    transport = ChunkedTransport()
+    calls = []
+    def pause_after_start():
+        calls.append(True)
+        return "PAUSED" if len(calls) > 1 else None
+
+    root = tmp_path / "isolated"
+    downloader = ControlledDownloader({"huggingface.co"}, transport)
+    with pytest.raises(InstallationInterrupted, match="PAUSED"):
+        LocalInstaller(root, downloader, should_stop=pause_after_start).install(package)
+    partial = root / ".cache" / (spec.sha256 + ".part")
+    assert partial.stat().st_size == 4 * 1024 * 1024
+    assert LocalInstaller(root, downloader).install(package)["status"] == "AVAILABLE"
+    assert transport.offsets == [0, 4 * 1024 * 1024]
+    assert (root / "model/model.safetensors").read_bytes() == content
