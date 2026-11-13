@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ _spec = importlib.util.spec_from_file_location(
 stop_module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(stop_module)
 
-POWERSHELL = "pwsh" if subprocess.run(["where", "pwsh"], capture_output=True).returncode == 0 else "powershell"
+POWERSHELL = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
 
 GUARD_SNIPPET = r"""
 . '{guard_script}'
