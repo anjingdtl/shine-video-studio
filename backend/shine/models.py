@@ -613,6 +613,10 @@ class ProductionSeries(Base):
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", index=True, nullable=False)
     provider: Mapped[str] = mapped_column(String(24), default="comfyui", nullable=False)
     workflow_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    #: Frozen dynamic-compilation strategy of the dynamic per-shot round.
+    #: Present for series whose jobs compile their graph per shot; when set,
+    #: ``workflow_profile_id`` is legacy/compat and never decides a shot graph.
+    generation_strategy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     generation_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     self_review_scope: Mapped[str] = mapped_column(String(16), default="full", nullable=False)
     basic_review_resolution: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -701,6 +705,68 @@ class RuntimeControlOperation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None, nullable=True)
+
+
+class RelayUpscaleItem(Base):
+    """One shot's RelayVSR X2 post-production upscale inside a production run.
+
+    The item is created only after the source H3 job (base render, or the
+    second-pass artifact when the strategy enabled it) really passed its
+    technical QC.  It owns the same discipline as every other external work
+    unit: the submit intent (``intent_sha256``) persists before the /prompt
+    call, the external ``prompt_id`` lands right after it, and an UNKNOWN
+    outcome is a permanent fact that only reconciliation may resolve.  It is
+    driven by the resident Worker through the same ResourceLease admission -
+    there is no second queue and no second scheduler.
+    """
+
+    __tablename__ = "relay_upscale_items"
+    __table_args__ = (
+        UniqueConstraint("project_id", "job_id", "stage", name="uq_relay_upscale_job_stage"),
+        Index("ix_relay_upscale_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    """The ProductionRun whose policy requested the upscale stage."""
+    series_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    """The source ProductionSeries, kept for traceability only."""
+    job_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    """The source H3 job whose latest PASSED artifact feeds this stage."""
+    shot_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    stage: Mapped[str] = mapped_column(String(24), default="relayvsr_x2", nullable=False)
+    """Which artifact of the source job feeds the upscale (base or second pass)."""
+
+    source_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    intent_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    """SENT / NOT_SENT / UNKNOWN - the same trichotomy as every external call."""
+
+    output_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 # V1.3 extends this same metadata/SQLite ledger.

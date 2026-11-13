@@ -2707,7 +2707,7 @@ def _run_comfy_job(
             return job_id
         profile, request, manifest, assets, _policy, _language = _load_comfy_context(db, job)
         project_id = job.project_id
-        if profile is None:
+        if profile is None and request.strategy is None:
             job.failure_code = "COMFY_WORKFLOW_PROFILE_MISSING"
             job.lease_owner = None
             job.lease_expires_at = None
@@ -2723,6 +2723,97 @@ def _run_comfy_job(
                 project_id=job.project_id,
             )
             return job_id
+    if profile is None and request.strategy is not None:
+        # Dynamic per-shot compilation: this job carries a frozen strategy, so
+        # its graph is compiled here from the strategy plus this shot's own
+        # reference manifest.  The compilation happens OUTSIDE any write
+        # transaction (it reads the live renderer's object_info over HTTP) and
+        # is fully deterministic - the same strategy and manifest re-compile
+        # to the same graph hash that the request builder already recorded.
+        from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
+        from shine.strategy import GenerationStrategy
+
+        try:
+            strategy = GenerationStrategy.model_validate(request.strategy)
+        except ValueError:
+            strategy = None
+        if strategy is None:
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db, job_id=job_id, expected_state_version=expected_version,
+                    worker_id=worker_id, attempt_id=attempt_id, settings=settings)
+                if guarded is None:
+                    return job_id
+                job, attempt = guarded
+                job.failure_code = "STRATEGY_CONTRACT_INVALID"
+                job.lease_owner = None
+                job.lease_expires_at = None
+                attempt.status = "FAILED"
+                attempt.failure_code = job.failure_code
+                try_transition(job, "REPAIR_PENDING")
+            return job_id
+        try:
+            live_object_info = client.object_info()
+        except Exception:  # noqa: BLE001 - the graph still validates at submit
+            live_object_info = None
+        image_count = sum(1 for item in manifest if item.use_as.value in ("subject", "picture"))
+        audio_count = sum(1 for item in manifest if item.use_as.value == "audio")
+        video_count = sum(1 for item in manifest if item.use_as.value == "video")
+        try:
+            profile = compile_ref2va_workflow(
+                variant_id=strategy.model_variant_id,
+                accelerator_id=strategy.accelerator_id,
+                second_pass=strategy.second_pass_spec(),
+                image_count=image_count,
+                audio_count=audio_count,
+                video_count=video_count,
+                object_info=live_object_info,
+            )
+        except GraphCompileError as exc:
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db, job_id=job_id, expected_state_version=expected_version,
+                    worker_id=worker_id, attempt_id=attempt_id, settings=settings)
+                if guarded is None:
+                    return job_id
+                job, attempt = guarded
+                job.failure_code = f"STRATEGY_COMPILE_{exc.code}"
+                job.lease_owner = None
+                job.lease_expires_at = None
+                attempt.status = "FAILED"
+                attempt.failure_code = job.failure_code
+                try_transition(job, "REPAIR_PENDING")
+                add_audit(db, "comfy-worker", "STRATEGY_COMPILE_FAILED", "job", job.id, {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                }, project_id=job.project_id)
+            return job_id
+        if profile.validated_against and (
+                profile.validated_against.get("missing_nodes")
+                or profile.validated_against.get("missing_inputs")):
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db, job_id=job_id, expected_state_version=expected_version,
+                    worker_id=worker_id, attempt_id=attempt_id, settings=settings)
+                if guarded is None:
+                    return job_id
+                job, attempt = guarded
+                job.failure_code = "STRATEGY_GRAPH_NODE_MISSING"
+                job.lease_owner = None
+                job.lease_expires_at = None
+                attempt.status = "FAILED"
+                attempt.failure_code = job.failure_code
+                try_transition(job, "REPAIR_PENDING")
+                add_audit(db, "comfy-worker", "STRATEGY_GRAPH_NODE_MISSING", "job", job.id, {
+                    "missing_nodes": profile.validated_against.get("missing_nodes"),
+                    "missing_inputs": profile.validated_against.get("missing_inputs"),
+                }, project_id=job.project_id)
+            return job_id
+        with session_factory.begin() as db:
+            add_audit(db, "comfy-worker", "STRATEGY_GRAPH_COMPILED", "job", job_id, {
+                "execution_identity": profile.execution_identity(),
+            }, project_id=project_id)
     if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting",
                      expected_state_version=expected_version, attempt_id=attempt_id,
                      lease_seconds=settings.worker_lease_seconds):

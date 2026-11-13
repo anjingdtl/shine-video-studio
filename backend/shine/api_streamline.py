@@ -474,6 +474,10 @@ def director_episode_overview(project_id: str, episode_id: str, db: DBSession,
 class ShootBody(APIModel):
     episode_ids: list[str] = Field(min_length=1, max_length=200)
     workflow_profile_id: str | None = Field(default=None, max_length=36)
+    #: The dynamic per-shot round's production strategy (model variant,
+    #: accelerator, optional second pass / RelayVSR X2).  Mutually exclusive
+    #: with ``workflow_profile_id``.
+    strategy: dict | None = None
 
 
 @router.post("/projects/{project_id}/director/production/start", status_code=201)
@@ -492,6 +496,7 @@ def start_director_production(project_id: str, body: ShootBody, request: Request
         settings=request.app.state.settings,
         episode_ids=body.episode_ids,
         workflow_profile_id=body.workflow_profile_id,
+        strategy=body.strategy,
         actor=actor,
     )
     db.commit()
@@ -963,3 +968,23 @@ def director_material_requirements(project_id: str, db: DBSession,
         "expected_snapshot": confirmation_snapshot_hash(plan),
         "requirements": requirements,
     }
+
+
+# ---------------------------------------------------------------------------
+# Production strategy options (dynamic per-shot round): what the user may pick
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_id}/director/strategy-options")
+def director_strategy_options(project_id: str, db: DBSession) -> dict:
+    """The strategy matrix the director page renders: variants, accelerators,
+    second pass, upscale - each with evidence-derived availability.
+
+    Nothing here turns into a pass flag: an unavailable option carries its
+    named blocker so the UI explains exactly what is missing instead of
+    hiding the choice or substituting another quantization.
+    """
+    require_project(db, project_id)
+    from shine.strategy import strategy_options
+
+    return strategy_options()

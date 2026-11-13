@@ -376,6 +376,11 @@ class CreateJob(APIModel):
     provider: RenderProvider = RenderProvider.MOCK
     generation_mode: GenerationMode | None = None
     workflow_profile_id: str | None = None
+    #: The frozen per-shot dynamic-compilation strategy (model variant,
+    #: accelerator, optional second pass / upscale).  Present for jobs of the
+    #: dynamic per-shot round; ``workflow_profile_id`` stays the legacy path
+    #: and remains authoritative when this is ``None``.
+    strategy: dict | None = None
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
     output: OutputSpec | None = None
@@ -431,6 +436,9 @@ class CreateProductionSeries(APIModel):
     provider: RenderProvider = RenderProvider.COMFYUI
     generation_mode: GenerationMode | None = None
     workflow_profile_id: str | None = None
+    #: The frozen dynamic-compilation strategy of this series; per-shot jobs
+    #: compile their own graph from it.  Mutually exclusive with a profile.
+    strategy: dict | None = None
     self_review_scope: Literal["full", "basic"] = "full"
     basic_review_resolution: BasicReviewResolution | None = None
     edit_intent_artifact_id: str | None = None
@@ -572,6 +580,9 @@ class RenderRequest(APIModel):
     manual_prompt_revision_id: str | None = Field(default=None, max_length=36)
     manual_prompt_warnings: list[str] = Field(default_factory=list, max_length=40)
     workflow_profile_hash: str | None = None
+    #: Frozen dynamic-compilation strategy when this request renders a
+    #: per-shot compiled graph instead of a registered static profile.
+    strategy: dict | None = None
     seed: int | None = Field(default=None, ge=0)
     expected_duration_s: float = Field(ge=4, le=15)
     output_width: int | None = Field(default=None, ge=256, le=2048)

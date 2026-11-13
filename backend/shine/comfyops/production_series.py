@@ -171,6 +171,10 @@ def _create_body(series: ProductionSeries, shot: Shot) -> CreateJob:
         provider=RenderProvider(series.provider),
         generation_mode=GenerationMode(series.generation_mode) if series.generation_mode else None,
         workflow_profile_id=series.workflow_profile_id,
+        # The frozen dynamic-compilation strategy reaches every job of the
+        # series; a job with a strategy compiles its own per-shot graph and
+        # never inherits the series' legacy profile binding.
+        strategy=series.generation_strategy,
         self_review_scope=series.self_review_scope,
         basic_review_resolution=resolution,
         output=output,
@@ -322,6 +326,27 @@ def create_series(
                 db, settings, project.id, profile,
                 output=body.output.model_dump(mode="json") if body.output else None,
             )
+    if body.strategy is not None:
+        # The dynamic per-shot path has no static profile to gate; the strategy
+        # contract is the gate (variant acceptance, accelerator verification,
+        # upscale backend evidence).  It refuses by name, never substitutes.
+        from shine.strategy import GenerationStrategy, strategy_blockers
+
+        try:
+            strategy = GenerationStrategy.model_validate(body.strategy)
+        except ValueError as exc:
+            raise HTTPException(422, detail={
+                "code": "STRATEGY_INVALID",
+                "message": "生产策略合同不合法。",
+                "details": str(exc)[:500],
+            }) from exc
+        blockers = strategy_blockers(strategy)
+        if blockers:
+            raise HTTPException(409, detail={
+                "code": "STRATEGY_BLOCKED",
+                "message": "所选生产策略在本机不可用，不会替换成其他方案。",
+                "blockers": blockers,
+            })
 
     # Every real H3 render belongs to exactly one series.  The answer comes
     # from the same helper the single-shot entry uses, so a shot that is
@@ -363,6 +388,7 @@ def create_series(
         status="QUEUED",
         provider=body.provider.value,
         workflow_profile_id=body.workflow_profile_id,
+        generation_strategy=body.strategy,
         generation_mode=body.generation_mode.value if body.generation_mode else None,
         self_review_scope=body.self_review_scope,
         basic_review_resolution=(

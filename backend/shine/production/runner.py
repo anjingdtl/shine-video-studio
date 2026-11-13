@@ -492,9 +492,22 @@ def _create_series_for_batch(
     manifest = package.manifest if package else {}
     binding = manifest.get("binding") or {}
     policy = manifest.get("policy") or {}
+    frozen_strategy = binding.get("strategy")
     profile = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
-    if profile is None:
+    if profile is None and frozen_strategy is None:
         raise RunBlocked("WORKFLOW_PROFILE_MISSING")
+    if frozen_strategy is not None:
+        # Validate the frozen contract once more at dispatch: a strategy that
+        # stopped being available on this machine must not silently start a
+        # run under a substituted variant.
+        from shine.strategy import GenerationStrategy, strategy_blockers
+
+        try:
+            strategy_contract = GenerationStrategy.model_validate(frozen_strategy)
+        except ValueError:
+            raise RunBlocked("STRATEGY_CONTRACT_INVALID")
+        if strategy_blockers(strategy_contract):
+            raise RunBlocked("STRATEGY_BLOCKED_AT_DISPATCH")
     project = db.get(Project, run.project_id)
     if project is None:
         raise RunBlocked("PROJECT_MISSING")
@@ -519,7 +532,8 @@ def _create_series_for_batch(
     body = CreateJob(
         shot_id=in_order[0].id,
         provider=RenderProvider.COMFYUI,
-        workflow_profile_id=profile.id,
+        workflow_profile_id=profile.id if profile is not None else None,
+        strategy=frozen_strategy,
         generation_mode=mode,
         output=output,
         self_review_scope="full",
