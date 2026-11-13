@@ -232,6 +232,11 @@ def test_stopped_handoff_keeps_uncertain_process_lease(handoff, monkeypatch, fai
                           ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
         record_handoff_stage(factory, attempt_id, before, after, {})
     fail_handoff(factory, attempt_id, "UNCERTAIN")
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "instance_id": instance_id, "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 987, "birth": "8", "job_name": "Local\\ShineHandoff-old"},
+        }))
     if failure == "restart_intent":
         with factory.begin() as db:
             row = db.get(AppSetting, "handoff:" + attempt_id)
@@ -246,6 +251,7 @@ def test_stopped_handoff_keeps_uncertain_process_lease(handoff, monkeypatch, fai
     monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 1 if failure == "group" else 0)
     monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
     assert handoff_startup.reconcile_stopped_handoffs(factory) == []
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
     with factory() as db:
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 

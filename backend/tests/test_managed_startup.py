@@ -312,6 +312,21 @@ def test_recovery_never_touches_a_startup_owned_by_a_live_worker(claimed, render
     assert managed.group.owns(managed.group.pid, _birth(managed.group.pid))
 
 
+def test_recovery_leaves_unreadable_worker_identity_untouched(claimed, renderer, monkeypatch):
+    from shine.comfyops import handoff_startup
+
+    factory, settings, job_id, lease_id, attempt_id, version = claimed
+    start(factory, settings, renderer, claimed)
+    with factory.begin() as db:
+        journal = db.get(AppSetting, STARTUP_PREFIX + "shine-test-renderer")
+        journal.value = {**journal.value, "stage": "LAUNCHED", "owner_pid": 999999, "owner_birth": "1"}
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: (_ for _ in ()).throw(ValueError("unknown")))
+    assert reconcile_managed_startups(factory, settings, terminate=lambda name: pytest.fail("terminated")) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+        assert db.get(AppSetting, STARTUP_PREFIX + "shine-test-renderer").value["stage"] == "LAUNCHED"
+
+
 def test_recovery_reports_an_exited_process_without_touching_it(claimed, renderer):
     """A startup whose process is gone is reconciled without any termination."""
     factory, settings, job_id, lease_id, attempt_id, version = claimed

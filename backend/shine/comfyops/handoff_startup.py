@@ -376,6 +376,12 @@ def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bo
     """Release one exclusive lease whose renderer is provably gone."""
     from shine.comfyops.scheduler import ResourceScheduler
 
+    # A handoff can have launched a replacement after the startup record was
+    # written. Its unresolved journal must not be bypassed by the older PID.
+    handoffs = db.scalars(select(AppSetting).where(AppSetting.key.like(HANDOFF_PREFIX + "%"))).all()
+    if any(isinstance(row.value, dict) and row.value.get("resource_id") == lease.id
+           and row.value.get("stage") != "RECONCILE_COMPLETE" for row in handoffs):
+        return False
     record = startup_record_for_lease(db, lease.id)
     if record is None and (lease.owner or "").startswith("image:"):
         # Image journals written before lease linking carry no lease_id.  The
@@ -839,12 +845,14 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
     for instance_id, prefix, value in pending:
         owner_pid = value.get("owner_pid")
         owner_birth = value.get("owner_birth")
+        if type(owner_pid) is not int or owner_pid <= 0 or not isinstance(owner_birth, str) or not owner_birth:
+            continue  # a missing owner identity is uncertainty, not a dead worker
         owner_alive = False
         if type(owner_pid) is int and owner_pid > 0 and isinstance(owner_birth, str) and owner_birth:
             try:
                 owner_alive = process_identity(owner_pid) == owner_birth
             except (OSError, ValueError):
-                owner_alive = False
+                continue  # an unreadable worker identity cannot authorize termination
         if owner_alive:
             # Another live worker owns this startup; it must not be reconciled
             # or blocked from here.
@@ -856,12 +864,13 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
         finding = {"instance_id": instance_id, "stage": value.get("stage"),
                    "job_name": job_name, "pid": pid, "action": "none"}
         alive = False
+        identity_unknown = False
         owned = False
         if type(pid) is int and pid > 0 and isinstance(birth, str) and birth:
             try:
                 alive = process_identity(pid) == birth
             except (OSError, ValueError):
-                alive = False
+                identity_unknown = True
         if alive and isinstance(job_name, str):
             try:
                 owned = inspect_named_group(job_name, pid, birth)
@@ -874,7 +883,7 @@ def reconcile_managed_startups(factory, settings, *, terminate=None):
             except Exception as exc:
                 finding["action"] = "blocked"
                 finding["reason"] = type(exc).__name__
-        elif alive:
+        elif alive or identity_unknown:
             finding["action"] = "blocked"
             finding["reason"] = "OWNERSHIP_UNVERIFIED"
         else:
