@@ -877,14 +877,19 @@ def _section_apply_evidence(db, project_id, production_section_id):
     # run-shaped ledgers wins for this section.
     from shine.director.streamline import DIRECTOR_STORYBOARD_RUN
 
-    director_run = db.scalars(select(AgentTaskRecord).where(
+    # 一个更新但「没有跑过这一场」的导演任务，不能把上一轮已经落镜的场次
+    # 抹成缺失。逐个看最近的导演任务，取第一个真的为这一场产出过镜头的；
+    # 都没有时，才用最新任务的缺失信息（仍如实报告未落镜）。
+    director_runs = db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
         AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
-    ).order_by(AgentTaskRecord.created_at.desc())).first()
-    if director_run is not None and (run is None
-                                     or director_run.created_at > run.created_at):
-        trace = director_run.trace or {}
+    ).order_by(AgentTaskRecord.created_at.desc()).limit(10)).all()
+    director_pick = None
+    for candidate in director_runs:
+        trace = candidate.trace or {}
         units = [u for u in trace.get("units", []) if u.get("production_section_id") == production_section_id]
+        if not units:
+            continue
         results = {(r.get("unit") or {}).get("start_offset"): r for r in trace.get("results", [])}
         shots: list[str] = []
         missing: list[dict] = []
@@ -897,8 +902,14 @@ def _section_apply_evidence(db, project_id, production_section_id):
                                 "reason": "STORYBOARD_NOT_APPLIED"})
                 continue
             shots.extend(shot_ids)
-        if shots or (units and not run_shots):
-            run, run_shots, run_missing, run_at = director_run, shots, missing, director_run.created_at.isoformat()
+        if shots:
+            director_pick = (candidate, shots, missing, candidate.created_at.isoformat())
+            break
+        if director_pick is None:
+            director_pick = (candidate, shots, missing, candidate.created_at.isoformat())
+    if director_pick is not None and (director_pick[1] or run is None
+                                      or director_pick[0].created_at > run.created_at):
+        run, run_shots, run_missing, run_at = director_pick
     four_units: list[dict] = []
     for ledger in db.scalars(select(AppSetting).where(
             AppSetting.key.like(f"four-stage-storyboard-units:{project_id}:%"))).all():
