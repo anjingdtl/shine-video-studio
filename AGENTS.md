@@ -66,6 +66,34 @@ Never bundle official full-text guides without redistribution permission. Run
 4. Use feature branches/PRs for substantial changes where available; do not destroy history or silently force-push.
 5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
 
+### 全量回归执行方式（固定规则：后端 8 分片并行）
+
+后端全量 `pytest backend/tests -q` 单进程串行要 1.5 小时量级，**不允许**这样跑；本项目
+的全量回归一律按测试文件均分成 **8 个分片并行**执行，单次约 10 分钟。
+
+```bash
+cd <worktree>
+ls backend/tests/test_*.py > /tmp/all-tests.txt
+split -n r/8 /tmp/all-tests.txt /tmp/chunk-          # 按文件均分，不按用例切
+for f in /tmp/chunk-*; do
+  backend/.venv/Scripts/python.exe -m pytest $(tr '\n' ' ' < "$f") -q -p no:cacheprovider \
+    > "$f.log" 2>&1 &
+done
+wait
+grep -H "^FAILED\|^ERROR" /tmp/chunk-*.log          # 无输出才算全绿
+```
+
+判定口径：
+
+1. **8 个分片全部退出码 0，且日志里没有 `FAILED` / `ERROR` 行**才叫通过。
+2. 本仓库 `conftest.py` 把 `[shine-module]` 逐模块摘要打在终端摘要位置，所以看不到
+   "N passed" 汇总行；不要用汇总行判定，也不要因为它缺失就认为没跑。
+3. 分片必须**按文件均分**（`split -n r/8`）。按用例切会让同一模块的 fixture 在多个进程
+   里重复初始化，出现假失败。
+4. 分片日志要留存（`.local-data/` 或 `/tmp`），报告里写清命令、分片数与各分片结果。
+5. 前端全量仍是 `npx vitest run --no-file-parallelism`（tinypool worker 在本机会崩，
+   与代码无关），这一条不受后端 8 分片影响。
+
 ## Distribution package (tester hand-off)
 
 - Build releases only from a committed tree: `pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`.

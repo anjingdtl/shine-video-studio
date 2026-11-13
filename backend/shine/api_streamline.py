@@ -474,8 +474,6 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     return result
 
 
-
-
 def _bind_adopted_masters(db, project_id: str, plan_id: str, actor: str) -> int:
     """Bind every confirmed "reuse this master" onto the shots that asked for it.
 
