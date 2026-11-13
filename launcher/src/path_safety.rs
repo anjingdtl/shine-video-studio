@@ -46,10 +46,11 @@ pub(crate) fn validate_existing_path_components(path: &Path) -> Result<(), Strin
 }
 
 pub(crate) fn reject_reparse_components(path: &Path) -> io::Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
+    for current in path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+    {
+        match fs::symlink_metadata(current) {
             Ok(metadata) if is_reparse_or_symlink(&metadata) => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -60,7 +61,7 @@ pub(crate) fn reject_reparse_components(path: &Path) -> io::Result<()> {
                 ));
             }
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         }
     }
@@ -145,5 +146,20 @@ mod tests {
     #[test]
     fn rejects_network_style_absolute_paths() {
         assert!(!is_local_absolute_path(Path::new("//server/share/shine")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_ancestor_even_when_child_does_not_exist() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+
+        let missing_child = alias.join("not-created/child");
+        assert!(super::reject_reparse_components(&missing_child).is_err());
     }
 }

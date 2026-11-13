@@ -19,7 +19,7 @@ for exact checks, boundaries, and remaining merge gates.
 Verification on the isolated Linux worktree:
 
 - Launcher: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`,
-  `cargo test --locked --lib` (23 tests), `cargo clippy --locked --all-targets
+  `cargo test --locked --lib` (24 tests), `cargo clippy --locked --all-targets
   -- -D warnings`, and `cargo check --locked --target
   x86_64-pc-windows-msvc --all-targets` pass. The Linux release build and
   `--smoke-check` pass; the smoke mode verifies the host probe and does not show
