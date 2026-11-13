@@ -31,15 +31,16 @@ GitHub Actions 已生成真实 Windows x64 EXE，并成功把验证后的 EXE、
 
 | 检查 | 结果 |
 | --- | --- |
-| Windows CI 构建/测试/打包 | [workflow run 43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491) 通过：Windows x64 22 项 Rust 单测、Clippy、Release EXE、host-only smoke-check、build identity/hash、ZIP 构建和解包后复核。CI 未启动 GUI。 |
+| Windows CI 构建/测试/打包 | [workflow run 43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491) 通过：Windows x64 22 项 Rust 单测、Clippy、Release EXE、host-only smoke-check、build identity/hash、ZIP 构建和解包后复核。[PR run 43427054567](https://github.com/anjingdtl/shine-video-studio/actions/runs/43427054567) 对提交 `8010a07` 也成功；其 publisher job 因 `pull_request` 事件按条件跳过。CI 未启动 GUI。 |
 | Windows 构建工件身份 | run `43420629491` 的 EXE SHA-256：`54a09b62df64fcc7ddb7afbd2a7e2046893d3c08d850d7bef6203e40ef683dba`；ZIP SHA-256：`1e58ddae5e7723413413d33a5c6dd2445777dcef177c1d3fdb65881dc83fdf75`；Actions artifact digest：`6a9aa1c1dd9c8f27f97b93bfc99ce0c0d0b9ea533d7fd6986a10e2b878106eab`。 |
-| Clone 根目录 EXE 发布 | [push-only publisher run 43422636863](https://github.com/anjingdtl/shine-video-studio/actions/runs/43422636863) 成功。当前根目录 `ShineLauncher.exe` 为 3,778,048 字节，SHA-256 `be07c704605d79646e4fd266649f1979b846b50d6fe6a2a0ddbace6bcb252607`；build-info 的 source commit 为 `f41e60940968eea6555041db3204b760986f7051`，`windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`。后续 push 应触发重新构建/发布，需再核对产物。 |
+| Clone 根目录 EXE 发布 | [push-only publisher run 43422636863](https://github.com/anjingdtl/shine-video-studio/actions/runs/43422636863) 成功。当前根目录 `ShineLauncher.exe` 为 3,778,048 字节；`file` 识别为 x86-64 Windows PE32+ GUI 程序。SHA-256 `be07c704605d79646e4fd266649f1979b846b50d6fe6a2a0ddbace6bcb252607` 与 sidecar/build-info 一致；source commit 为 `f41e60940968eea6555041db3204b760986f7051`，`windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`。`launcher/`、`config/launcher/` 和工作流文件之后没有源变更；push publisher 对这三类路径过滤，只在对应文件变更时运行。 |
 | Linux Launcher 检查 | 在本阶段前序运行中 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo test --locked --lib`（24 项）、Clippy 和 Windows MSVC target check 通过。当前 shell 没有 Cargo 工具链，故未在合入最新 main 后重跑；main 合并及本次修复没有改动 Launcher Rust 源码。Windows 真正编译由上面的 Windows runner 完成。 |
 | 后端完整回归 | 按当前 `AGENTS.md` 八分片规范按测试文件分组，212 个文件、2,517 项；八片最终退出码均为 0。首次收集暴露 `test_startup_guard.py` 在 Linux 用 Windows `where` 命令的问题；已改为 `shutil.which`，复跑受影响的 `chunk-ac` 并通过。其他七片首轮均通过。Windows-only 进程/端口测试仍待 Windows 执行。日志与隔离 DB 在忽略目录 `work/final-backend-shards/`。 |
 | 前端测试 | `npx vitest run --no-file-parallelism`：47 个文件、278 项通过；输出含既有 React `act(...)` 警告。 |
 | 前端生产构建 | main 合并后 `npm run build` 通过 TypeScript 与 Vite 构建；存在既有大 bundle advisory。 |
 | Python 静态检查 | `CODEBUDDY_SAFE_DELETE_ENABLED=0 work/backend-venv/bin/python -m ruff check backend` 通过。 |
 | 数据库迁移 | 仅对 `work/final-migration/shine.sqlite3` 执行 Alembic；升级至 `f180c0030001`，`alembic check` 显示 `No new upgrade operations detected.` 未访问真实用户项目数据库。 |
+| 仓库 PR CI | 对提交 `8010a07` 的 frontend build 与 L1 backend quick 已通过；L2 backend integration 在本报告更新时仍运行。L3 full Windows/Linux/browser jobs 被工作流判定为手动或条件任务并跳过。 |
 | 差异格式检查 | 在提交前执行 `git diff --check`。 |
 
 ## 主要实现与安全边界
@@ -52,4 +53,4 @@ GitHub Actions 已生成真实 Windows x64 EXE，并成功把验证后的 EXE、
 
 ## 最终 PR 决定
 
-PR [#13](https://github.com/anjingdtl/shine-video-studio/pull/13) 指向 `main`，保持 Draft。当前分支已合并到 `origin/main` 的 `1a55c41`；提交后由 Windows CI 再次构建并验证 Clone 根目录产物。没有真实 Windows GUI、旧版数据保留升级/回退及 GPU/模型 P0 证据时，不得将 PR 标记 Ready 或合并 main。
+PR [#13](https://github.com/anjingdtl/shine-video-studio/pull/13) 指向 `main`，保持 Draft。当前分支已合并到 `origin/main` 的 `1a55c41`。最新 Windows PR 构建通过；它没有运行 Clone publisher，因为该 job 仅适用于匹配路径的 push 事件。根目录 EXE 仍由已成功的 publisher run `43422636863` 提供，且其 Launcher 源码自 `f41e609` 以来未变化。没有真实 Windows GUI、旧版数据保留升级/回退及 GPU/模型 P0 证据时，不得将 PR 标记 Ready 或合并 main。

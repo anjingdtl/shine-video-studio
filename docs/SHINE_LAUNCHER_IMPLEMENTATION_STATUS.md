@@ -42,14 +42,15 @@ for exact evidence, distribution identity, and remaining gates.
   The local shell currently has no Cargo toolchain, so those Linux checks were
   not rerun after the main merge; launcher source is unchanged by that merge.
 
-At this report revision, the published root executable is 3,778,048 bytes with
-SHA-256 `be07c704605d79646e4fd266649f1979b846b50d6fe6a2a0ddbace6bcb252607`.
-Its build identity records source commit
-`f41e60940968eea6555041db3204b760986f7051` and
-`windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`. The next branch push is
-expected to make the publisher rebuild and replace that binary with metadata
-for the latest implementation commit; the source hash and metadata must be
-rechecked after that workflow completes.
+The published root executable is a 3,778,048-byte x86-64 Windows PE32+ GUI
+program with SHA-256
+`be07c704605d79646e4fd266649f1979b846b50d6fe6a2a0ddbace6bcb252607`.
+Publisher run `43422636863` built it from Launcher source commit
+`f41e60940968eea6555041db3204b760986f7051`; no Launcher, deployment protocol,
+or Windows build workflow source has changed since then. Build identity records
+`windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`. The publisher is path-filtered
+to Launcher, protocol, and workflow changes, so documentation/test-only commits
+do not rebuild the binary.
 
 GitHub Windows CI does not open the GUI. The Launcher currently does not
 install, overwrite, migrate, or stop Studio, ComfyUI, user data, models, secrets,
