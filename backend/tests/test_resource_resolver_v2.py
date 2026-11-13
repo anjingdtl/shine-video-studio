@@ -216,6 +216,7 @@ def test_managed_inventory_reuses_renamed_file_only_after_sha_check(studio, tmp_
     import hashlib
     from types import SimpleNamespace
 
+    from shine.comfy.workflow import graph_hash
     from shine.comfyops import resource_inventory
     from shine.comfyops.models import ComfyInstance
     from shine.strategy import GenerationStrategy
@@ -232,11 +233,12 @@ def test_managed_inventory_reuses_renamed_file_only_after_sha_check(studio, tmp_
         "relative_path": "model.bin", "sha256": digest, "size": len(b"exact bytes"),
     }]}
     catalog = {"catalog_id": "test", "catalog_version": "1", "components": [component]}
-    preview = {"download_eligible": True, "manifest_sha256": "m", "catalog_sha256": "c",
+    preview = {"download_eligible": True, "manifest_sha256": graph_hash({}), "catalog_sha256": graph_hash(catalog),
                "components": [{"component_id": "needed-model", "state": "MISSING"}]}
     monkeypatch.setattr(resource_inventory, "managed_installation_pin", lambda db, iid: {"id": iid, "sha256": "x"})
     monkeypatch.setattr(resource_inventory, "resolve_resources", lambda *args: preview)
-    monkeypatch.setattr(resource_inventory, "load_binding", lambda *args, **kwargs: SimpleNamespace(catalog=catalog))
+    monkeypatch.setattr(resource_inventory, "load_binding",
+                        lambda *args, **kwargs: SimpleNamespace(catalog=catalog, manifest={}))
     monkeypatch.setattr("shine.comfyops.storage.require_storage", lambda settings: tmp_path)
     monkeypatch.setattr("shine.comfyops.storage.disk_info", lambda path: {"free_bytes": 10**9})
     with factory.begin() as db:
@@ -245,6 +247,13 @@ def test_managed_inventory_reuses_renamed_file_only_after_sha_check(studio, tmp_
     with factory() as db:
         scan = resource_inventory.inspect_managed_resources(db, settings, strategy, "physical")
         assert scan["candidates"][0]["state"] == "PRESENT_UNVERIFIED"
+        from fastapi import HTTPException
+
+        old_catalog_hash = preview["catalog_sha256"]
+        preview["catalog_sha256"] = "changed"
+        with pytest.raises(HTTPException, match="RESOURCE_INVENTORY_CHANGED"):
+            resource_inventory.import_managed_resources(db, settings, strategy, "physical", scan["snapshot_sha256"])
+        preview["catalog_sha256"] = old_catalog_hash
         result = resource_inventory.import_managed_resources(
             db, settings, strategy, "physical", scan["snapshot_sha256"],
         )
@@ -264,6 +273,7 @@ def test_managed_inventory_rejects_changed_source_snapshot(studio, tmp_path, mon
 
     from fastapi import HTTPException
 
+    from shine.comfy.workflow import graph_hash
     from shine.comfyops import resource_inventory
     from shine.comfyops.models import ComfyInstance
     from shine.strategy import GenerationStrategy
@@ -279,11 +289,12 @@ def test_managed_inventory_rejects_changed_source_snapshot(studio, tmp_path, mon
         "relative_path": "file.bin", "sha256": "0" * 64, "size": 4,
     }]}
     catalog = {"catalog_id": "test", "catalog_version": "1", "components": [component]}
-    preview = {"download_eligible": True, "manifest_sha256": "m", "catalog_sha256": "c",
+    preview = {"download_eligible": True, "manifest_sha256": graph_hash({}), "catalog_sha256": graph_hash(catalog),
                "components": [{"component_id": "needed", "state": "MISSING"}]}
     monkeypatch.setattr(resource_inventory, "managed_installation_pin", lambda db, iid: {"id": iid, "sha256": "x"})
     monkeypatch.setattr(resource_inventory, "resolve_resources", lambda *args: preview)
-    monkeypatch.setattr(resource_inventory, "load_binding", lambda *args, **kwargs: SimpleNamespace(catalog=catalog))
+    monkeypatch.setattr(resource_inventory, "load_binding",
+                        lambda *args, **kwargs: SimpleNamespace(catalog=catalog, manifest={}))
     with factory.begin() as db:
         db.add(ComfyInstance(id="physical", payload={"root": str(root)}, sha256="x", status="STOPPED"))
     strategy = GenerationStrategy(model_variant_id="ref2va-lowend-candidate", accelerator_id="native20")

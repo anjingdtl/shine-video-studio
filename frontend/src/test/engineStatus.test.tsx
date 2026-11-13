@@ -243,3 +243,34 @@ describe('EngineStatusEntry', () => {
     }
   });
 });
+
+it('copies only the allowed connection diagnostics', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  stub = new StudioStub([{ method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+    diagnostics: { transport: 'UNKNOWN', ownership: 'UNVERIFIED', capability: 'MISSING_NODES',
+      missing_nodes: ['SageNode'], reason_code: 'COMFY_REQUIRED_NODE_MISSING', secret_token: 'do-not-copy' },
+  }) }]);
+  render(<EngineStatusEntry apiOnline />);
+  fireEvent.click(await screen.findByText('引擎已停止'));
+  fireEvent.click(screen.getByText('复制诊断信息'));
+  await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+  expect(writeText.mock.calls[0][0]).toContain('SageNode');
+  expect(writeText.mock.calls[0][0]).not.toContain('do-not-copy');
+});
+
+it('does not treat a reachable unowned service as production ready', async () => {
+  stub = new StudioStub([
+    { method: 'GET', pattern: /runtime-orchestrator\/status$/, respond: () => snapshot({
+      state: 'EXTERNAL_CONFLICT',
+      recovery: { required: true, reason_code: 'EXTERNAL_INSTANCE_ON_PORT', safe_action: 'probe', advice: '端口被占用' },
+    }) },
+    { method: 'POST', pattern: /runtime-orchestrator\/probe$/, respond: () => jsonResponse({
+      operation_id: 'probe-1', action: 'probe', installation_id: 'inst-1', status: 'SUCCEEDED',
+      state_version: 1, failure_code: null, result: { transport: 'UP', listener_ownership: 'UNVERIFIED' },
+    }, 202) },
+  ]);
+  render(<EngineStatusEntry apiOnline />);
+  fireEvent.click(await screen.findByText('检查连接'));
+  expect(await screen.findByText(/服务可连接，但无法证明属于本工作台/)).toBeTruthy();
+});

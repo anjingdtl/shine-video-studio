@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, fetchRuntimeStatus, type ProductionStrategy } from '../api';
+import { api, ERROR_CODE_LABELS, fetchRuntimeStatus, type ProductionStrategy } from '../api';
 import { approveAndExecuteSetupPlan, fetchInstallationAttempt, isQueuedInstallation,
   pauseInstallationAttempt, resumeInstallationAttempt, type InstallationAttemptView, type SetupPlan } from '../setupExecution';
 
@@ -26,6 +26,12 @@ const resourceName = (id: string) => ({
   'minimax-h3-vae-int8': '画面解码模型',
   'minimax-h3-audio-vae-fp32': '声音解码模型',
 } as Record<string, string>)[id] ?? id;
+const blockerText = (code: string) => ({
+  VARIANT_RECIPE_UNVERIFIED: '此候选模型目前只登记了原生 20 步单次采样，请调整画面加速和二次精修。',
+  RESOURCE_PIN_MISSING: '所需资源的固定来源或校验信息不完整，暂不能准备。',
+  VARIANT_CATALOG_MISMATCH: '模型清单发生变化，请刷新后重新检测。',
+  RELAYVSR_WEIGHTS_NOT_PINNED: '高清视频模型尚未完成来源和校验登记。',
+} as Record<string, string>)[code] ?? '当前方案还缺少已核实的资源，请到基础配置检查。';
 const stageName = (stage: string) => ({
   QUEUED: '等待后台处理', DOWNLOADING: '下载中', VERIFYING: '校验中', INSTALLING: '准备中',
   FILES_VERIFIED_PENDING_RUNTIME: '文件已校验，等待试镜', PAUSED: '已暂停',
@@ -35,6 +41,7 @@ const stageName = (stage: string) => ({
 /** All execution still goes through the existing one-use grant and installer. */
 export function StrategyResourceCard({ projectId, strategy }: { projectId: string; strategy: ProductionStrategy }) {
   const alive = useRef(true);
+  const actionInFlight = useRef(false);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const check = () => { if (!alive.current) throw new Error('选择已改变，操作已停止。'); };
   const [report, setReport] = useState<ResourceReport | null>(null);
@@ -59,6 +66,8 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
   }, [attemptId]);
 
   const inspect = async () => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setWorking(true); setMessage(''); setPlan(null); setInventory(null);
     try {
       const result = await post<ResourceReport>('/setup/resources/resolve', { project_id: projectId, strategy });
@@ -86,24 +95,27 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       });
       check(); setPlan(created);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
-    finally { setWorking(false); }
+    finally { actionInFlight.current = false; if (alive.current) setWorking(false); }
   };
   const reuseLocal = async () => {
-    if (!inventory || !instanceId || working) return;
+    if (!inventory || !instanceId || working || actionInFlight.current) return;
+    actionInFlight.current = true;
     setWorking(true); setMessage(''); setPlan(null);
     try {
       const result = await post<{ reused_bytes: number; rejected: string[] }>('/setup/resources/import-local', {
         project_id: projectId, strategy, instance_id: instanceId, snapshot_sha256: inventory.snapshot_sha256,
       });
       check();
+      actionInFlight.current = false;
       await inspect();
       check();
       setMessage(`已校验并复用 ${gib(result.reused_bytes)}；${result.rejected.length} 项未通过校验。`);
     } catch (error) { if (alive.current) setMessage(error instanceof Error ? error.message : String(error)); }
-    finally { if (alive.current) setWorking(false); }
+    finally { actionInFlight.current = false; if (alive.current) setWorking(false); }
   };
   const confirm = async () => {
-    if (!plan || working) return;
+    if (!plan || working || actionInFlight.current) return;
+    actionInFlight.current = true;
     setWorking(true); setMessage('');
     try {
       const result = await approveAndExecuteSetupPlan(plan, check, { wait: false });
@@ -113,7 +125,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       setMessage('已交给本机后台准备；文件完成后仍需试镜验证。');
       setPlan(null);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
-    finally { setWorking(false); }
+    finally { actionInFlight.current = false; if (alive.current) setWorking(false); }
   };
   return <div className="strategy-resource-card">
     <h3>模型资源检测</h3>
@@ -128,7 +140,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       {working ? '正在核对…' : '检测所需资源'}
     </button>
     {report && <div>
-      {report.blockers.map((item, index) => <p key={`${item.code}-${index}`}>暂不能准备：{item.code}</p>)}
+      {report.blockers.map((item, index) => <p key={`${item.code}-${index}`}>{blockerText(item.code)}</p>)}
       {report.components.map(item => <p key={item.component_id}>
         {resourceName(item.component_id)} · {gib(item.size_bytes)} · {item.state === 'MISSING' ? '待下载' : '已校验'} ·{' '}
         <a href={item.license_url} target="_blank" rel="noreferrer">{item.license_id}</a>
@@ -153,7 +165,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
     {attempt && <div role="status">
       <p>准备状态：{stageName(attempt.stage)} · {gib(attempt.confirmed_bytes)} / {gib(attempt.total_bytes)}</p>
       {attempt.current_component && <p>正在处理：{resourceName(attempt.current_component)}</p>}
-      {attempt.error_code && <p>需要处理：{attempt.error_code}</p>}
+      {attempt.error_code && <p>需要处理：{ERROR_CODE_LABELS[attempt.error_code] ?? '请到基础配置核对准备任务。'}</p>}
       {!attempt.terminal && attempt.stage !== 'PAUSED' && <button type="button" disabled={working}
         onClick={() => { void pauseInstallationAttempt(attempt.attempt_id).then(setAttempt); }}>暂停</button>}
       {attempt.resumable && <button type="button" disabled={working}

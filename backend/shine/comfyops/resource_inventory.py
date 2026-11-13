@@ -30,6 +30,9 @@ def _inventory(db, settings, strategy: GenerationStrategy, instance_id: str) -> 
         raise HTTPException(409, "RESOURCE_STRATEGY_UNVERIFIED")
     missing = {row["component_id"] for row in preview["components"] if row["state"] == "MISSING"}
     binding = load_binding(strategy.model_variant_id, fresh=True)
+    if (graph_hash(binding.catalog) != preview["catalog_sha256"]
+            or graph_hash(binding.manifest) != preview["manifest_sha256"]):
+        raise HTTPException(409, "RESOURCE_INVENTORY_CHANGED")
     catalog = {**binding.catalog, "components": [row for row in binding.catalog["components"]
                                                   if row["component_id"] in missing]}
     report = inspect(root, catalog)
@@ -63,10 +66,15 @@ def import_managed_resources(db, settings, strategy: GenerationStrategy, instanc
     package_root = storage / "isolated-packages"
     package_root.mkdir(parents=True, exist_ok=True)
     component_ids = sorted({row["component_id"] for row in report["matches"]})
-    with ExitStack() as stack:
-        for component_id in component_ids:
-            stack.enter_context(exclusive_file_lock(safe_target(package_root, component_id + ".lock")))
-        result = import_models(settings, report, report["snapshot"])
+    try:
+        with ExitStack() as stack:
+            for component_id in component_ids:
+                stack.enter_context(exclusive_file_lock(safe_target(package_root, component_id + ".lock")))
+            result = import_models(settings, report, report["snapshot"])
+    except ValueError as exc:
+        if str(exc) == "INSTALL_OWNER_ACTIVE":
+            raise HTTPException(409, "RESOURCE_IMPORT_IN_PROGRESS") from exc
+        raise
     return {"status": result["status"], "reused_bytes": result["reused_bytes"],
             "imported": [row["component_id"] for row in result["imported"]],
             "rejected": [row["component_id"] for row in result["rejected"]], "runtime_verified": False}

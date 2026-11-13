@@ -874,3 +874,41 @@ def test_reconcile_does_not_close_h3_when_process_proof_is_missing(api, monkeypa
     assert result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
     with factory() as db:
         assert db.get(AppSetting, "renderer-startup:test-run").value["stage"] == "RECONCILE_REQUIRED"
+
+
+def test_snapshot_exposes_missing_h3_nodes_without_claiming_production(api, tmp_path, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    _write_recipe(api, tmp_path)
+    monkeypatch.setattr(status_module, "_external_conflict", lambda port: False)
+    with factory.begin() as db:
+        _installation_row(db)
+        db.add(AppSetting(key="renderer-startup:node-test", value={
+            "stage": "RECONCILE_REQUIRED", "installation": {"id": INSTALLATION},
+            "reason": "COMFY_REQUIRED_NODE_MISSING",
+            "missing_nodes": ["MiniMaxH3MemoryEfficientSageAttentionPatch"],
+        }))
+    with factory() as db:
+        snapshot = status_module.runtime_snapshot(db, settings)
+    assert snapshot["diagnostics"]["reason_code"] == "COMFY_REQUIRED_NODE_MISSING"
+    assert snapshot["diagnostics"]["missing_nodes"] == ["MiniMaxH3MemoryEfficientSageAttentionPatch"]
+    assert snapshot["diagnostics"]["production_ready"] is False
+
+
+def test_explicit_probe_distinguishes_http_from_unowned_listener(api, monkeypatch):
+    from shine.runtime_orchestrator import status as status_module
+
+    _, factory, settings = api
+    monkeypatch.setattr(executor, "_activity_summary", lambda db, installation_id: {})
+    monkeypatch.setattr(status_module, "runtime_snapshot", lambda db, settings: {
+        "installation_id": INSTALLATION, "ownership": {"port": 8188},
+        "health": {"comfy_http": "UNKNOWN"},
+    })
+    called = []
+    monkeypatch.setattr(status_module, "_probe_http", lambda url: called.append(url) or True)
+    result = executor._probe(factory, settings, INSTALLATION)
+    assert called == ["http://127.0.0.1:8188"]
+    assert result["transport"] == "UP"
+    assert result["listener_ownership"] == "UNVERIFIED"
+    assert result["production_ready"] is False

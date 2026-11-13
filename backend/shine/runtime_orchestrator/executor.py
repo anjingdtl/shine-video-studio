@@ -54,9 +54,25 @@ def _activity_summary(db, installation_id: str) -> dict[str, Any]:
     }
 
 
-def _probe(factory, installation_id: str) -> dict[str, Any]:
+def _probe(factory, settings, installation_id: str) -> dict[str, Any]:
+    """Explicitly probe loopback transport without adopting the listener."""
+    from shine.runtime_orchestrator.status import _probe_http, runtime_snapshot
+
     with factory() as db:
-        return {"probed": True, "activity": _activity_summary(db, installation_id)}
+        activity = _activity_summary(db, installation_id)
+        snapshot = runtime_snapshot(db, settings)
+    port = (snapshot.get("ownership") or {}).get("port")
+    if snapshot.get("installation_id") != installation_id or not isinstance(port, int) or not 0 < port < 65536:
+        return {"probed": True, "activity": activity, "transport": "UNKNOWN", "listener_ownership": "UNKNOWN"}
+    reachable = _probe_http(f"http://127.0.0.1:{port}")
+    with factory() as db:
+        after = runtime_snapshot(db, settings)
+    # Re-prove the owned listener after HTTP; the port may have changed hands.
+    ownership = ("VERIFIED" if reachable and after.get("installation_id") == installation_id
+                 and (after.get("ownership") or {}).get("port") == port
+                 and (after.get("health") or {}).get("comfy_http") == "UP" else "UNVERIFIED")
+    return {"probed": True, "activity": activity, "transport": "UP" if reachable else "DOWN",
+            "listener_ownership": ownership, "production_ready": False}
 
 
 
@@ -226,7 +242,7 @@ def _release(factory, installation_id: str, actor: str) -> dict[str, Any]:
 
 def _execute_operation(factory, settings, action: str, installation_id: str, request: dict) -> dict[str, Any]:
     if action == "probe":
-        return _probe(factory, installation_id)
+        return _probe(factory, settings, installation_id)
     if action == "reconcile":
         return _reconcile(factory, settings, installation_id)
     if action == "ensure":

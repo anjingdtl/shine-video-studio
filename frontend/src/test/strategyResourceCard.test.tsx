@@ -60,3 +60,26 @@ it('offers hash-checked local reuse before downloading', async () => {
   expect(api.mock.calls.filter(call => String(call[0]).endsWith('/import-local'))).toHaveLength(1);
   expect(approve).not.toHaveBeenCalled();
 });
+
+it('does not start two local imports on repeated clicks', async () => {
+  let finish: ((value: unknown) => void) | undefined;
+  api.mockImplementation((path: string) => {
+    if (path.endsWith('/resolve')) return Promise.resolve({ components: [], missing_download_bytes: 10,
+      snapshot_sha256: 'a'.repeat(64), download_eligible: true, blockers: [] });
+    if (path.endsWith('/storage')) return Promise.resolve({ free_bytes: 1000 });
+    if (path.endsWith('/inspect-local')) return Promise.resolve({ snapshot_sha256: 'b'.repeat(64),
+      candidate_bytes: 10, candidates: [{ component_id: 'weight', size_bytes: 10 }] });
+    if (path.endsWith('/import-local')) return new Promise(resolve => { finish = resolve; });
+    if (path.endsWith('/install-plan')) return Promise.resolve({ plan_id: 'plan', sha256: 'hash',
+      status: 'AWAITING_APPROVAL', download_bytes: 10, disk_required: 20 });
+    throw new Error(path);
+  });
+  render(<StrategyResourceCard projectId="p" strategy={strategy} />);
+  fireEvent.click(screen.getByText('检测所需资源'));
+  const reuse = await screen.findByText('校验并复用本机文件');
+  fireEvent.click(reuse);
+  fireEvent.click(reuse);
+  expect(api.mock.calls.filter(call => String(call[0]).endsWith('/import-local'))).toHaveLength(1);
+  finish?.({ reused_bytes: 10, rejected: [] });
+  await screen.findByText(/已校验并复用/);
+});

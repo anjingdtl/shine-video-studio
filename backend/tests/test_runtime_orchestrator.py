@@ -535,5 +535,5 @@ def test_snapshot_reports_external_conflict_on_recipe_port(api, installation_row
     with factory() as db:
         snap = status_module.runtime_snapshot(db, settings)
     assert snap["state"] == "EXTERNAL_CONFLICT"
-    assert snap["recovery"]["safe_action"] is None
+    assert snap["recovery"]["safe_action"] == "probe"  # read-only, never stop/adopt
     assert snap["recovery"]["reason_code"] == "EXTERNAL_INSTANCE_ON_PORT"

@@ -85,6 +85,10 @@ const REFUSAL_TEXTS: Record<string, string> = {
   RUNTIME_OPERATION_IN_PROGRESS: '引擎已有控制操作正在处理。',
   RUNTIME_OPERATION_INTERRUPTED: '上次操作中断，已检查引擎记录，仍需核对。',
   EXTERNAL_INSTANCE_ON_PORT: '引擎端口已被外部程序占用。',
+  COMFY_HANDOFF_OWNERSHIP_UNVERIFIED: '服务可见，但无法证明它属于本工作台，请核对受管实例。',
+  COMFY_STARTUP_OWNERSHIP_UNVERIFIED: '启动进程的归属无法核实，已保留现场等待核对。',
+  COMFY_REQUIRED_NODE_MISSING: '运行环境缺少本次所需节点，请先准备资源。',
+  COMFY_STARTUP_ALREADY_RECORDED: '已有启动记录，请先核对恢复，系统不会重复启动。',
 };
 
 /** 把机器码翻成一句人话；翻不出来就不显示码，只给一句通用提示。 */
@@ -102,6 +106,13 @@ function operationOutcome(operation: ControlOperation): string | null {
 function describeOperation(action: string, operation: ControlOperation): Feedback {
   const outcome = operationOutcome(operation);
   if (operation.status === 'SUCCEEDED') {
+    if (action === 'probe' && operation.result?.transport === 'UP'
+        && operation.result?.listener_ownership === 'UNVERIFIED') {
+      return { tone: 'warn', text: '服务可连接，但无法证明属于本工作台；不能据此开拍。' };
+    }
+    if (action === 'probe' && operation.result?.transport === 'DOWN') {
+      return { tone: 'warn', text: '本机服务暂时不可连接，请检查受管实例状态。' };
+    }
     const text = (outcome && OUTCOME_TEXTS[action]?.[outcome])
       || ACTION_DEFAULT_TEXTS[action]
       || '操作已完成。';
@@ -275,9 +286,31 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
               {' · '}H3 生产：尚需单独核验
               {snapshot.diagnostics.missing_nodes.length > 0
                 ? ` · 缺少节点：${snapshot.diagnostics.missing_nodes.join('、')}` : ''}
+              {snapshot.diagnostics.reason_code ? ` · ${reasonText(snapshot.diagnostics.reason_code) ?? '需要核对'}` : ''}
             </span>
           )}
           <span className="engine-detail-health">启动引擎用于图片制作；H3 开拍由生产任务另行启动和核验。</span>
+          {snapshot && <button type="button" className="btn-secondary" onClick={() => {
+            const diagnostic = {
+              schema_version: snapshot.schema_version, installation_id: snapshot.installation_id,
+              state: snapshot.state,
+              health: { api: snapshot.health.api, worker: snapshot.health.worker,
+                comfy_http: snapshot.health.comfy_http, workflow: snapshot.health.workflow },
+              ownership: { managed: snapshot.ownership.managed, verified: snapshot.ownership.verified,
+                port: snapshot.ownership.port, pid: snapshot.ownership.pid },
+              diagnostics: snapshot.diagnostics && { transport: snapshot.diagnostics.transport,
+                ownership: snapshot.diagnostics.ownership, capability: snapshot.diagnostics.capability,
+                missing_nodes: snapshot.diagnostics.missing_nodes, reason_code: snapshot.diagnostics.reason_code },
+              recovery_code: snapshot.recovery.reason_code, operation_id: snapshot.current.operation_id,
+            };
+            if (!navigator.clipboard?.writeText) {
+              setFeedback({ tone: 'warn', text: '复制失败，请检查浏览器剪贴板权限。' }); return;
+            }
+            void navigator.clipboard.writeText(JSON.stringify(diagnostic, null, 2)).then(
+              () => setFeedback({ tone: 'idle', text: '脱敏诊断信息已复制。' }),
+              () => setFeedback({ tone: 'warn', text: '复制失败，请检查浏览器剪贴板权限。' }),
+            );
+          }}>复制诊断信息</button>}
           {operationLabel && (
             <span className="engine-detail-health">
               当前操作：{operationLabel}

@@ -251,6 +251,7 @@ def test_execution_identity_snapshot_is_complete_and_hashable():
 
 def test_candidate_stack_uses_pinned_recipe_and_refuses_unverified_combinations():
     compiled = compile_ref2va_workflow(image_count=2, variant_id="ref2va-lowend-candidate", accelerator_id="native20")
+    assert compiled.execution_identity()["compiler"] == "shine.graph_compiler.v2"
     assert compiled.graph["21"]["inputs"]["vae_name"].endswith("minimax_h3_video_vae_int8_convrot.safetensors")
     assert not any(node["class_type"] in {"LoraLoaderModelOnly", "SolAttnPatch"} for node in compiled.graph.values())
     assert "MiniMaxH3MemoryEfficientSageAttentionPatch" in compiled.required_nodes

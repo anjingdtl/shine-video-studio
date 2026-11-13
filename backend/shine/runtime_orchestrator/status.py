@@ -154,7 +154,8 @@ _RECOVERY: dict[str, dict[str, Any]] = {
     "BLOCKED_UNVERIFIED": {"required": True, "reason_code": "OWNERSHIP_UNVERIFIED",
                            "safe_action": "reconcile", "advice": "渲染器归属或外部提交结果未核对；禁止盲启/盲杀。"},
     "EXTERNAL_CONFLICT": {"required": True, "reason_code": "EXTERNAL_INSTANCE_ON_PORT",
-                          "safe_action": None, "advice": "端口上是不属于本工作台的 ComfyUI；不会接管也不会终止它。"},
+                          "safe_action": "probe",
+                          "advice": "端口被外部程序占用；请手动关闭它后再启动，工作台不会接管或终止它。"},
 }
 
 
@@ -339,15 +340,21 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "pid": listener_pid or (process or {}).get("pid"),
     }
     diagnostic_h3 = next((record for record in activity["h3_records"]
-                          if record.get("missing_nodes")), None)
+                          if record.get("missing_nodes") or record.get("reason")), None)
     missing = (diagnostic_h3 or {}).get("missing_nodes") or []
+    reason = (diagnostic_h3 or {}).get("reason")
+    known_reasons = {"COMFY_HANDOFF_OWNERSHIP_UNVERIFIED", "COMFY_STARTUP_OWNERSHIP_UNVERIFIED",
+                     "COMFY_REQUIRED_NODE_MISSING", "COMFY_STARTUP_ALREADY_RECORDED"}
+    reason_code = reason if isinstance(reason, str) and reason in known_reasons else None
+    if missing:
+        reason_code = "COMFY_REQUIRED_NODE_MISSING"
     missing = sorted({name for name in missing if isinstance(name, str) and len(name) <= 160})
     snapshot["diagnostics"] = {
         "transport": snapshot["health"]["comfy_http"],
         "ownership": "VERIFIED" if snapshot["ownership"]["verified"] else (
             "EXTERNAL" if state == "EXTERNAL_CONFLICT" else "UNVERIFIED"),
         "capability": "MISSING_NODES" if missing else "LIVE_CHECK_PENDING",
-        "missing_nodes": missing,
+        "missing_nodes": missing, "reason_code": reason_code,
         # An image engine or HTTP 200 is not H3 production readiness.
         "production_ready": False,
     }

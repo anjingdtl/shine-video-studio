@@ -25,6 +25,12 @@ export const QA_CHECK_LABELS: Record<string, string> = {
 };
 
 export const ERROR_CODE_LABELS: Record<string, string> = {
+  RESOURCE_IMPORT_IN_PROGRESS: '同一批本机文件正在准备，请等待完成后再检查。',
+  RESOURCE_INVENTORY_CHANGED: '本机文件或模型清单已经变化，请重新检测后再复用。',
+  RESOURCE_SNAPSHOT_CHANGED_OR_INELIGIBLE: '资源清单已变化或尚未核实，请重新检测。',
+  RESOURCE_INSTALLATION_BUSY: '制作引擎或任务仍在使用本机资源，请等待空闲后继续。',
+  RESOURCE_INSTANCE_UNVERIFIED: '当前受管安装实例无法核实，请在基础配置检查。',
+  RESOURCE_PLAN_REVALIDATION_FAILED: '资源计划或安装实例已变化，请重新检测后核对。',
   INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
@@ -1181,7 +1187,7 @@ export type RuntimeSnapshot = {
   health: { worker?: string; comfy_http?: string; api?: string; workflow?: RuntimeWorkflowHealth | string };
   ownership: { managed: boolean; verified: boolean; port?: number | null; pid?: number | null };
   diagnostics?: { transport: string; ownership: string; capability: string;
-    missing_nodes: string[]; production_ready: boolean };
+    missing_nodes: string[]; production_ready: boolean; reason_code?: string | null };
   current: {
     owner_kind?: string | null;
     task?: string | null;

@@ -159,7 +159,8 @@ class CompiledWorkflow:
     def execution_identity(self) -> dict[str, Any]:
         """The frozen execution snapshot fields persisted with the attempt."""
         return {
-            "compiler": "shine.graph_compiler.v1",
+            "compiler": ("shine.graph_compiler.v2" if self.variant_id == "ref2va-lowend-candidate"
+                         else "shine.graph_compiler.v1"),
             "variant_id": self.variant_id,
             "accelerator_id": self.accelerator_id,
             "second_pass": (self.second_pass.recipe_hash() if self.second_pass else None),
@@ -586,7 +587,7 @@ def compile_ref2va_workflow(
         media_transfers["audio"] = dict(AUDIO_TRANSFER)
 
     recipe_payload = {
-        "compiler": "shine.graph_compiler.v1",
+        "compiler": "shine.graph_compiler.v2" if candidate else "shine.graph_compiler.v1",
         "variant_id": variant_id,
         "checkpoint_id": checkpoint,
         "accelerator_id": accelerator_id,
@@ -611,7 +612,7 @@ def compile_ref2va_workflow(
         "variant_verified": variant_id in (None, "", "h3-ref2va-int8-convrot"),
         "accelerator_id": accelerator_id,
         "second_pass": bool(second_pass),
-        "graph_version": "dynamic-compiler-v1",
+        "graph_version": "dynamic-compiler-v2" if candidate else "dynamic-compiler-v1",
         "source": "per_shot_compiled_recipe",
         "continuity_modes": ["soft_reference_continuity"],
         "reference_slots": sorted(k for k in parameter_map if k.startswith("reference_")),
