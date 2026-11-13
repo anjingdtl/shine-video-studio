@@ -24,6 +24,7 @@ if ($Matches[1].ToLowerInvariant() -ne $actualHash) {
 $buildInfo = Get-Content -LiteralPath $infoFile -Raw | ConvertFrom-Json
 if ($buildInfo.name -ne "Shine Launcher" -or
     $buildInfo.target -ne "x86_64-pc-windows-msvc" -or
+    $buildInfo.source_commit -notmatch '^[a-fA-F0-9]{40}$' -or
     $buildInfo.exe_sha256 -ne $actualHash) {
     throw "Launcher build identity does not match the executable."
 }

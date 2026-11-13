@@ -24,12 +24,19 @@ try {
     }
 
     $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sourceCommit = $env:LAUNCHER_SOURCE_COMMIT
+    if ($sourceCommit -notmatch '^[a-fA-F0-9]{40}$') {
+        $sourceCommit = (git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-fA-F0-9]{40}$') {
+            throw "Unable to determine the 40-character launcher source commit."
+        }
+    }
     [pscustomobject]@{
         name = "Shine Launcher"
         version = (Select-String -Path (Join-Path $projectRoot "Cargo.toml") -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
         rust_toolchain = "1.100.0"
         target = "x86_64-pc-windows-msvc"
-        source_commit = (git rev-parse HEAD).Trim()
+        source_commit = $sourceCommit.ToLowerInvariant()
         exe_sha256 = $hash
         windows_gui_acceptance = "PENDING_LOCAL_ACCEPTANCE"
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $projectRoot "target/release/launcher-build-info.json") -Encoding utf8

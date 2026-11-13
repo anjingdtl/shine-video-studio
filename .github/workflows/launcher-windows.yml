@@ -54,6 +54,8 @@ jobs:
 
       - name: Build Windows executable
         working-directory: launcher
+        env:
+          LAUNCHER_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./packaging/build_windows.ps1 -SmokeCheck
 
       - name: Verify Windows artifact identity
