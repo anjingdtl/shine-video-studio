@@ -11,7 +11,6 @@ import {
   type RunEvent, type WorkflowProfile,
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
-import { EpisodePostEditor } from './EpisodePostEditor';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
@@ -83,13 +82,15 @@ type Props = {
   packageId?: string | null;
   demo?: boolean;
   workflowProfiles: WorkflowProfile[];
+  /** 按集只读投影：成片要跨运行展示，不能只显示当前这次运行。 */
+  episodes?: import('../api').DirectorEpisodeOverview[] | null;
   onMessage: (text: string, kind: 'success' | 'error') => void;
   onRefresh?: () => void;
   /** post 页：全部交付后去成片库。 */
   onOpenLibrary?: () => void;
 };
 
-export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, workflowProfiles, onMessage, onRefresh, onOpenLibrary }: Props) {
+export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, workflowProfiles, episodes: overviewEpisodes, onMessage, onRefresh, onOpenLibrary }: Props) {
   const railPresent = useRailPresent();
   const [journey, setJourney] = useState<Journey | null>(null);
   const [plans, setPlans] = useState<EpisodePlan[]>([]);
@@ -370,6 +371,47 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
     ?? []).filter((blocker) => blocker.code !== 'PACKAGE_NOT_CONFIRMED');
 
+  // 逐集成片：跨运行按集读取，不跟随"当前这一次运行"。
+  const postCards = mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
+    ? <ol className="run-episodes post-episode-cards">
+      {overviewEpisodes.map((episode) => <li key={episode.episode_id}>
+        <div className="run-ep-head">
+          <span className="run-ep-no">{episode.order ?? '—'}</span>
+          <div>
+            <b>{episode.title || episode.episode_id}</b>
+            <span>{episode.shots.confirmed_count || episode.shots.landed_count} 镜
+              {' '}· 成片 {episode.delivery?.actual_seconds ? `${Math.round(episode.delivery.actual_seconds)} 秒` : '—'}
+              {' '}· {episode.state_label}</span>
+            <em className="run-ep-sub">
+              {episode.delivery?.sha256
+                ? `文件 ${episode.delivery.sha256.slice(0, 10)}…（SHA-256）`
+                : '尚无成片文件'}
+              {' · '}
+              {episode.delivery?.post_contract?.subtitle_revision
+                ? `字幕第 ${Number(episode.delivery.post_contract.subtitle_revision)} 版`
+                : '无字幕轨（按默认剪辑）'}
+              {' · 历史版本见成片库'}
+            </em>
+          </div>
+          <span className={`run-badge ${episode.state === 'DELIVERED' ? 'ok' : episode.state === 'SHOOTING' ? 'run' : 'warn'}`}>
+            {episode.state_label}
+          </span>
+        </div>
+        {episode.delivery?.artifact_id && <div className="run-ep-media">
+          <video src={`${API}/deliveries/${episode.delivery.artifact_id}/media`} controls preload="none" />
+          <OpenVideoFolderButton artifactId={episode.delivery.artifact_id} />
+        </div>}
+        {!episode.delivery?.artifact_id && episode.production && <p className="run-hint">
+          已通过 {episode.production.passed_shot_count}/{episode.production.shot_count} 镜
+          {episode.production.in_current_run ? '' : '（最近一次运行）'}；全部通过后会自动装配成片。
+        </p>}
+        {!episode.delivery?.artifact_id && !episode.production && <p className="run-hint">
+          这一集还没有开拍：到「导演包」勾选它并开始真实制作。
+        </p>}
+      </li>)}
+    </ol>
+    : null;
+
   if (error && !journey) {
     return <section className="card section-card run-panel">
       <div className="blocked-callout"><ShieldAlert size={14} />{error}</div>
@@ -605,7 +647,14 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         </button>
       </div>
 
-      {!activeRun ? <p className="empty-inline">还没有整部作品的运行记录。先在「导演包」阶段确认并启动。</p> : <>
+      {/* 逐集成片与"当前这次运行"无关：第 1 集交付后开始拍第 2 集，第 1 集仍然在这里。 */}
+      {postCards}
+
+      {!activeRun
+        ? (mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
+          ? null
+          : <p className="empty-inline">还没有整部作品的运行记录。先在「导演包」阶段确认并启动。</p>)
+        : <>
         <div className="run-summary-row">
           <span className={`run-badge ${tone(activeRun.status)}`}>{statusText(activeRun.status)}</span>
           <div className="run-summary-facts">
@@ -647,7 +696,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           续跑会逐项验证提交记录、冻结方案和素材身份；无法证明安全的批次继续保留在待处理状态。
         </p>}
 
-        <ol className="run-episodes">
+        {mode === 'run' && <ol className="run-episodes">
           {(activeRun.episodes ?? []).slice(episodePage * 8, episodePage * 8 + 8).map((episode) => <li key={episode.id}>
             <div className="run-ep-head">
               <span className="run-ep-no">{episode.position}</span>
@@ -683,8 +732,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               <OpenVideoFolderButton artifactId={episode.delivered_artifact_id} />
             </div>}
           </li>)}
-        </ol>
-        {(activeRun.episodes?.length ?? 0) > 8 && <div className="run-pager">
+        </ol>}
+        {(mode === 'run' && (activeRun.episodes?.length ?? 0) > 8) && <div className="run-pager">
           <button className="btn-secondary" disabled={episodePage === 0}
             onClick={() => setEpisodePage((page) => Math.max(0, page - 1))}>上一页</button>
           <span>第 {episodePage + 1} / {Math.ceil((activeRun.episodes?.length ?? 0) / 8)} 页</span>
@@ -708,7 +757,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       </>}
     </section>}
 
-    {(mode === 'run' || mode === 'post') && activeRun && (activeRun.episodes ?? []).some((row) => row.delivered_artifact_id)
+    {mode === 'post' && overviewEpisodes && overviewEpisodes.some((row) => row.delivery?.artifact_id)
       && <section className="card section-card run-card">
         <div className="section-heading">
           <div>
@@ -719,12 +768,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           <Film size={16} />
         </div>
         <ul className="run-review-list">
-          {(activeRun.episodes ?? []).filter((row) => row.delivered_artifact_id).map((episode) => <li key={episode.id}
-            title={episode.delivered_sha256 ?? undefined}>
+          {overviewEpisodes.filter((row) => row.delivery?.artifact_id).map((episode) => <li key={episode.episode_id}
+            title={episode.delivery?.sha256 ?? undefined}>
             <Video size={12} />
-            <span>{episode.title || episode.episode_id} · {seconds(episode.actual_seconds)} · 待你确认</span>
-            {mode === 'post' && <EpisodePostEditor runId={activeRun.id} episode={episode}
-              onDone={(text, kind) => { onMessage(text, kind); if (kind === 'success') load().catch(() => undefined); }} />}
+            <span>{episode.title || episode.episode_id} · {seconds(episode.delivery?.actual_seconds)} · 待你确认</span>
+            <em className="run-ep-sub">剪辑/字幕修订在下方「成片文件与导出」；单镜返修在「生成分段」。</em>
           </li>)}
         </ul>
       </section>}

@@ -412,6 +412,10 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     })
     receipt = _material_receipt(db, project_id, request_key)
     if receipt is not None:
+        # 回执命中：确认与批次都已存在，但“回绑镜头”是幂等收尾，补做一次，
+        # 让早期只写了需求、没绑镜头的确认也能被这次重放修好。
+        _bind_adopted_masters(db, project_id, receipt["confirmation"]["plan_revision_id"], actor)
+        db.commit()
         return {**receipt, "replayed": True}
 
     confirmation_body = MaterialConfirmation.model_validate({
@@ -454,9 +458,11 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         "request_key": request_key,
         "replayed": False,
     }
+    bound_shots = _bind_adopted_masters(db, project_id, confirmation["plan_revision_id"], actor)
     add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
               confirmation["plan_revision_id"],
               {"request_key": request_key,
+               "bound_shot_count": bound_shots,
                "confirmation_id": confirmation["confirmation_id"],
                "confirmation_hash": confirmation["confirmation_hash"],
                "generate_count": len(generate_ids),
@@ -466,6 +472,69 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
               project_id=project_id)
     db.commit()
     return result
+
+
+
+
+def _bind_adopted_masters(db, project_id: str, plan_id: str, actor: str) -> int:
+    """Bind every confirmed "reuse this master" onto the shots that asked for it.
+
+    A confirmed requirement is not yet a shot binding: the shot table and the
+    production readiness read ``shot.bindings``, not the material list.  Without
+    this step a person who just confirmed "reuse this master" still sees the
+    shot as missing its reference and cannot start.  The step is idempotent, so
+    a replayed confirmation repairs a half-finished hand-off.  Shots that
+    already own a current passed take are never touched: adopting a master for a
+    new episode can never invalidate an episode that already shipped.
+    """
+    from sqlalchemy import select as sa_select
+
+    from shine.comfyops.models import AssetRequirement
+    from shine.models import Asset, Job, Shot
+    from shine.schemas import ReferenceUse, ShotBindingInput
+    from shine.services import require_project, set_shot_bindings
+
+    project = require_project(db, project_id)
+    bound = 0
+    rows = db.scalars(sa_select(AssetRequirement).where(
+        AssetRequirement.plan_id == plan_id,
+        AssetRequirement.project_id == project_id,
+    )).all()
+    for requirement in rows:
+        payload = dict(requirement.payload or {})
+        if payload.get("strategy") != "reuse_master" or payload.get("family") != "character":
+            continue
+        asset_id = payload.get("bound_asset_id")
+        entity = payload.get("entity_id") or ""
+        if not asset_id or not entity:
+            continue
+        asset = db.get(Asset, asset_id)
+        if asset is None or not asset.approved or not asset.locked:
+            continue
+        for shot_id in payload.get("used_shot_ids") or []:
+            shot = db.get(Shot, shot_id)
+            if shot is None or shot.project_id != project_id:
+                continue
+            if entity not in list((shot.spec or {}).get("characters") or []):
+                continue
+            if any(link.asset_id == asset.id for link in shot.bindings):
+                continue
+            passed = db.scalar(sa_select(Job).where(
+                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
+                Job.shot_revision == shot.revision,
+            ))
+            if passed is not None:
+                continue
+            inputs = [
+                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
+                                 role=link.role, ordinal=index)
+                for index, link in enumerate(shot.bindings)
+            ]
+            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.SUBJECT,
+                                           role=entity, ordinal=len(inputs)))
+            set_shot_bindings(db, project, shot, inputs, actor=actor)
+            bound += 1
+    return bound
 
 
 def _material_receipt(db, project_id: str, request_key: str) -> dict | None:

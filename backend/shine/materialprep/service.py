@@ -266,7 +266,23 @@ def create_draft_plan(
 
     current = current_material_plan(db, project.id)
     if current is not None and (current.payload or {}).get("request_hash") == request_hash:
-        return current, True
+        # 同一个分析可以复用，但前提是这一版真的包含本次要派生的全部实体。
+        # 旧草稿只覆盖子集时（例如某集当时还没落镜）复用它，新场次的需求就
+        # 永远不会出现；此时必须新建一版，而不是让清单静默缺项。
+        wanted = {
+            (requirement.get("family"), requirement.get("name"))
+            for scene in scenes
+            for requirement in scene.get("requirements") or []
+        }
+        stored = {
+            ((row.payload or {}).get("family"), (row.payload or {}).get("entity_id"))
+            for row in db.scalars(select(AssetRequirement).where(
+                AssetRequirement.plan_id == current.id,
+                AssetRequirement.project_id == project.id,
+            ))
+        }
+        if wanted.issubset(stored):
+            return current, True
     aggregated = aggregate_requirements(scenes)
     draft_payload = {
         "purpose": PLAN_PURPOSE_ASSET_PREPARATION,

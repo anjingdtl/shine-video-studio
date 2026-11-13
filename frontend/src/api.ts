@@ -1464,11 +1464,14 @@ export type DirectorEpisodeOverview = {
   } | null;
   production: {
     run_id: string; status: string; shot_count: number; passed_shot_count: number;
+    /** 这一集是否在当前查看的这次运行里；不在就用它自己最近那次运行。 */
+    in_current_run: boolean;
   } | null;
   delivery: {
     artifact_id: string; sha256: string | null; delivered_at: string | null;
     actual_seconds: number | null; status: string;
     post_contract: Record<string, unknown> | null;
+    run_id: string | null;
   } | null;
   next_action: DirectorNextAction | null;
 };

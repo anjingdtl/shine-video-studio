@@ -20,9 +20,9 @@
 
 | 文件 | 数量 | 覆盖 |
 | --- | --- | --- |
-| `test_director_overview.py` | 5 | 两集部分完成不被全局误判；投影两次读取一致（只读）；缺口按实体聚合；单集端点只答本集；服务层可直接调用 |
+| `test_director_overview.py` | 6 | 两集部分完成不被全局误判；投影两次读取一致（只读）；缺口按实体聚合；单集端点只答本集；服务层可直接调用；**拍第 2 集不隐藏第 1 集成片、也不把第 1 集显示成在拍** |
 | `test_director_shoot.py` | 4 | 一集就绪另一集未就绪时只拍就绪集；同选择重放返回同一 Run；未就绪集为具名 409；未知集 404；导演路径自动钉规则包（幂等、不换版本） |
-| `test_director_material_commit.py` | 3 | 同请求体重放返回同一 confirmation + batch、不重复建批次；快照过期 409 MATERIAL_PLAN_STALE；需求读取不触发再次派生 |
+| `test_director_material_commit.py` | 5 | 同请求体重放返回同一 confirmation + batch、不重复建批次；快照过期 409 MATERIAL_PLAN_STALE；需求读取不触发再次派生 |
 
 ### 1.3 改动直接相关的定向回归
 
@@ -48,12 +48,12 @@
 | --- | --- | --- |
 | 类型 | `tsc --noEmit` | 0 错误 |
 | 构建 | `tsc -b && vite build` | 成功（dist JS 925 kB / CSS 204 kB） |
-| 全量测试 | `vitest run --no-file-parallelism` | **42 文件 / 271 项全部通过** |
+| 全量测试 | `vitest run --no-file-parallelism` | **42 文件 / 273 项全部通过** |
 
 测试执行说明（重要，避免误读）：
 
 - 本 worktree 内直接 `vitest run` 会让 tinypool 的 worker 子进程异常退出（`Worker exited unexpectedly`），与代码无关：同一份 `node_modules`（vitest 2.1.9）在对照 worktree 上同样表现；`--no-file-parallelism` 下稳定。
-- 为保证“跑的是本轮代码”，前端全量在**同一套已安装依赖**的对照 worktree 上执行：把本轮 7 个改动文件（`App.tsx`、`api.ts`、`styles.css`、`AssetPanel.tsx`、`DeliveryPanel.tsx`、`DirectorProductionRunPanel.tsx`、`StreamlinePanels.tsx`、新增 `DirectorShootPanel.tsx`）与 9 个测试文件复制过去，`tsc` 与全量 vitest 通过后，用 `git checkout -- frontend/src` 还原对照树（已确认干净）。
+- 早期为绕开该问题，曾把改动复制到对照 worktree 跑全量；本轮已在本 worktree 内直接 `vitest run --no-file-parallelism` 跑通全量（42/273），不再需要复制，结论直接对应当前分支代码。
 
 ### 2.1 随入口收敛更新的断言（未删测试）
 
@@ -67,6 +67,7 @@
 | `shotDraft.test.tsx` / `modeEntry.test.tsx` | 单镜提交从导演⑥移到专业模式（同后端合同、同字段级错误断言） | 422 字段定位、输入保留、防重复提交全部保留 |
 | `batchSelection.test.tsx` / `simpleAssets.test.tsx` | 素材确认/锁定/缩略图从导演④移到专业模式 | 批准→锁定顺序、grant 次数、失败保留状态全部保留 |
 | `studioStub.ts` | 新增 `EMPTY_OVERVIEW` 与两个只读端点默认响应 | — |
+| `directorRun.test.tsx`（新增 2 项） | ⑤ 已交付集默认不勾选、重拍需手勾并提示；⑦ 第 2 集开拍后第 1 集成片仍在册且 `<video>` 指向其交付产物 | 直接对应用户报障 D8/D9/D10 |
 | `four_stage_reacceptance.py`（后端） | notice 文案断言从“无图片素材将由H3自行生成”改为“缺少已确认的参考图…” | 仍断言“撤销的主素材绝不绑定、required_asset_ids 不含它” |
 
 ## 3. 穿测中发现并修复的缺陷
@@ -110,12 +111,34 @@
 - 修复：不唯一时取**最近确认并锁定**的一份（两份都保留）；无匹配仍返回 None，不编造。
 - 回归：`test_master_match_prefers_the_latest_when_one_entity_has_two_masters`。
 
-### 3.5c D7（P1，部分修复）第 2 集的场次镜头没有进入派生清单
+### 3.5c D7（P1，已修复）第 2 集的场次镜头没有进入派生清单
 
 - 现象：第 2 集已落 1 镜，但④ 重新派生后只出现第 1 集的「陈默」，第 2 集的「穿灰雨衣的女人」与两处场景需求不出现。
 - 已修：`_section_apply_evidence` 过去只读「全局最新」的导演分镜任务；一个更新、但没有跑过这一场的任务会把上一轮已落镜的场次抹成未落镜。现在按创建时间倒序逐个检查最近 10 个导演任务，取第一个**真的为这一场产出过镜头**的；都没有时才用最新任务的缺失信息。
-- 仍未解决：当前项目第 2 集的 1 镜不在任何一个已 apply 的 section 证据里（它来自一次被暂停的 6 集任务，apply 回执没有落到该 section），因此本轮派生仍只含第 1 集需求。复验方式：在③对第 2 集重新生成并确认该集镜头，再派生。
-- 影响：第 2 集未开拍（见验收报告 §4.1）。
+- 另一半根因：`materialprep/service.create_draft_plan` 会按 request_hash 复用旧草稿，但旧草稿的需求集合可能只是本次需求的子集（多场次交错 derive 时），于是"复用"给出了一份缺项的清单。现在复用前要求**已存实体集合 ⊇ 本次需求实体集合**，否则新建草稿。
+- 真机验证（2026-11-13 追补）：重新派生后清单同时含 `ep-01 陈默（3 镜）` 与 `ep-02 穿灰雨衣的女人（1 镜）`，两项都显示 matched（`a46abd6a…` / `66b61b9e…`）；第 2 集随后成功开拍并出片。
+
+### 3.5d D8（P0，用户报障）拍第 2 集后第 1 集成片消失
+
+- 现象：第 1 集已交付、⑦ 可播放；在 ⑤ 开拍第 2 集后，⑦ 只剩第 2 集，第 1 集成片"不见了"。
+- 根因：⑦ 的审片列表来自"当前这一次运行"（`run.episodes`），而第 2 集的新运行只含 ep-02；第 1 集的交付在另一次运行里，于是被整体隐藏。
+- 修复：新增 `overview._latest_delivery()` 按集跨运行读最近一次交付；⑦ 列表改为项目级按集投影（`overview.episodes`），且不再依赖 `activeRun` 是否存在；`delivery.run_id` 标明交付来自哪次运行。
+- 回归：`test_starting_episode_two_never_hides_the_take_episode_one_delivered`（后端）、`⑦ 逐集成片 > 开始拍第二集后，第一集已交付的成片仍然在册并可播放`（前端）。
+- 真机验证：两集同时在册，第 1 集 `<video>` 播放真实画面。
+
+### 3.5e D9（P0，用户报障）⑤ 默认勾选包含已交付的集
+
+- 现象：第 1 集已交付后进 ⑤，勾选框默认把第 1 集一起勾上；点「确认拍摄方案并开始真实制作」等于把已出片的集重拍一遍（重复占用 GPU、覆盖既有交付）。
+- 根因：默认勾选集合 = 后端允许开拍的集合（含 `DELIVERED`/`REVIEW_READY`）。
+- 修复：默认集合拆为 `pendingShoot`（只含 `READY_TO_SHOOT`/`READY_TO_PACKAGE`）；已交付集仍可手动勾选重拍，但行内显示「勾选即重拍这一集」。
+- 回归：`⑤ 续拍下一集 > 已交付的集不默认勾选，拍第二集不会顺手重拍第一集`（断言 POST 只带 ep-02）。
+
+### 3.5f D10（P1，与 D8 同源）每集进度借用无关运行
+
+- 现象：开拍第 2 集后，第 1 集卡片显示「可开拍 · 已通过 0/3 镜」。
+- 根因：`_episode_node` 用"当前运行"的 `run_episode` 计算通过镜数；当前运行不含该集时落回 0。
+- 修复：新增 `_latest_run_episode()`，本集不在当前运行时回落到它自己最近一次运行；`production.in_current_run` 供 UI 标注「（最近一次运行）」。
+- 真机验证：`overview` 现在对 ep-01 返回 `run=bd6c59d5 / COMPLETED / pass=3/3 / in_current_run=false`，对 ep-02 返回 `run=07d83dcf / COMPLETED / pass=1/1 / in_current_run=true`。
 
 ### 3.6 未修复 / 环境限制（如实记录）
 
@@ -123,7 +146,7 @@
 | --- | --- | --- |
 | 出图模型显存不足 | 三类小样批次 `PARTIAL_FAILED`，3 项均 `IMAGE_RENDERER_MEMORY_INSUFFICIENT`（RTX 5080 16 GB） | “AI 制作候选 → 人工采用 → 回绑”链路本轮无法在本机真实跑通；④ 的复用/跳过/必需判定已真机验证 |
 | 内置浏览器无文件选择器 | 无法操作 `<input type=file>` | “上传剧本”入口未做真人点击穿测；①仍用文本入口完成大纲并编辑确认。素材文件上传用同一后端合同（multipart + approve/lock + grant）完成 |
-| vitest 并行 worker | `Worker exited unexpectedly`（同版本依赖在对照树复现） | 前端全量改为串行执行，结果 270/270 |
+| vitest 并行 worker | `Worker exited unexpectedly`（同版本依赖在对照树复现） | 前端全量改为串行执行，结果 42 文件 / 273 项通过 |
 
 ## 4. 回归风险与边界
 

@@ -2411,3 +2411,15 @@ html[data-theme='dark'] .episode-card-state.run{background:#1e2831;color:#93b4cc
 /* 项目管理首屏按钮不拉满整行 */
 .welcome-row>.btn-primary{width:auto;flex:0 0 auto}
 .welcome-row{gap:16px}
+
+/* ⑤ 没有可拍的集：一句人话指明下一步，别只留灰色按钮。 */
+.shoot-empty-hint {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2, #f4f3ee);
+  border: 1px solid var(--line, #e2e0d8);
+  color: var(--muted, #6b6b62);
+  font-size: 13px;
+  line-height: 1.6;
+}

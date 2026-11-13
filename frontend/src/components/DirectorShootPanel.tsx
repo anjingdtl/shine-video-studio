@@ -137,16 +137,23 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
 
   // 稳定的空数组：每次渲染新建 [] 会让下面的选择 effect 无限触发。
   const episodes = useMemo(() => overview?.episodes ?? [], [overview]);
+  // 后端允许重拍，但"默认要拍的集"只包含真的还没拍的：已交付的集被默认勾上，
+  // 会让"拍第 2 集"顺手把第 1 集重拍一遍。
   const shootable = useMemo(
     () => episodes.filter((row) => ['READY_TO_SHOOT', 'READY_TO_PACKAGE', 'SHOOTING', 'REVIEW_READY', 'DELIVERED']
       .includes(row.state)).map((row) => row.episode_id),
     [episodes],
   );
+  const pendingShoot = useMemo(
+    () => episodes.filter((row) => ['READY_TO_SHOOT', 'READY_TO_PACKAGE'].includes(row.state))
+      .map((row) => row.episode_id),
+    [episodes],
+  );
   useEffect(() => {
     if (touched) return;
-    setSelected((current) => (current.length === shootable.length
-      && current.every((id, index) => id === shootable[index]) ? current : shootable));
-  }, [shootable, touched]);
+    setSelected((current) => (current.length === pendingShoot.length
+      && current.every((id, index) => id === pendingShoot[index]) ? current : pendingShoot));
+  }, [pendingShoot, touched]);
 
   const ref2va = useMemo(
     () => workflowProfiles.filter((row) => (row.mode || '').toLowerCase() === 'ref2va'),
@@ -261,6 +268,8 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
         <div className="shoot-episode-list">
           {episodes.map((episode) => {
             const selectable = shootable.includes(episode.episode_id);
+            // 已交付/待确认的集仍然可以勾选（等于重拍），但必须让人看见代价。
+            const reshoot = episode.state === 'DELIVERED' || episode.state === 'REVIEW_READY';
             return <label key={episode.episode_id} className={`shoot-episode ${selectable ? '' : 'disabled'}`}>
               <input type="checkbox" checked={selected.includes(episode.episode_id)}
                 disabled={!selectable || running || busy !== ''}
@@ -269,7 +278,8 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
                 <b>第 {episode.order ?? '—'} 集 · {episode.title || episode.episode_id}</b>
                 <em>{episode.state_label}
                   {episode.shots.confirmed_count ? ` · ${episode.shots.confirmed_count} 镜` : ''}
-                  {episode.materials.missing_count ? ` · 缺 ${episode.materials.missing_count} 项必需素材` : ''}</em>
+                  {episode.materials.missing_count ? ` · 缺 ${episode.materials.missing_count} 项必需素材` : ''}
+                  {reshoot ? ' · 勾选即重拍这一集' : ''}</em>
               </span>
             </label>;
           })}
@@ -291,6 +301,13 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
           onClick={() => void start()}>
           <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
         </button>}
+
+        {/* 没有可拍的集时，必须说清下一步在哪里，而不是只留一个灰色按钮。 */}
+        {pendingShoot.length === 0 && blockedEpisodes.length > 0 && <p className="shoot-empty-hint">
+          {episodes.every((row) => row.state === 'DELIVERED')
+            ? '这部作品已经全部交付：到「后期成片」逐集播放确认即可。'
+            : '这次没有可开拍的集：先到「镜头拆解」把待修复的集修好，或到「拍摄素材准备」补齐必需素材，再回到这一页。'}
+        </p>}
 
         {blockedEpisodes.length > 0 && <details className="advanced-fold">
           <summary>{blockedEpisodes.length} 集这次还不能拍（点击看原因）</summary>

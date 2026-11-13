@@ -46,6 +46,7 @@ V2 把导演模式从「七个阶段各有一套重复入口」收成「一份�
 3. **素材缺口按实体聚合**：同一缺失主素材被 200 镜引用时是一行「罗兰 等 62 镜缺主素材」，不是 200 行。
 4. **下一动作只指向能推进的工作**：优先级 `SHOTS_TO_CONFIRM → MATERIAL_MISSING → READY_TO_PACKAGE → READY_TO_SHOOT → REVIEW_READY → STORYBOARD_BLOCKED → ...`。阻塞集是并列待办，不是全局停止。
 5. **技术完成 ≠ 艺术认可**：有 `delivered_artifact_id` 但集行未 `DELIVERED` → `REVIEW_READY`。
+6. **按集读自己的运行**（2026-11-13 追补）：一次运行只覆盖它那一批集，所以每集的进度、通过镜数、交付指针都回「这一集自己的最近一次运行」读（`_latest_run_episode` / `_latest_delivery`）。`production.in_current_run` 标明这一集是否属于当前查看的运行。此前借用"最新运行"导致拍第 2 集时第 1 集显示"可开拍、已通过 0/3 镜、无成片"。
 
 端点（`api_streamline.py`）：
 
@@ -127,9 +128,12 @@ V2 把导演模式从「七个阶段各有一套重复入口」收成「一份�
 
 端点：`POST /api/v1/projects/{project_id}/director/production/start`。
 
+前端配套规则（2026-11-13 追补）：⑤ 的默认勾选只含 `READY_TO_SHOOT / READY_TO_PACKAGE`。已交付/待审的集仍可勾选（后端允许重拍），但必须自己勾，并显示「勾选即重拍这一集」——否则"拍第 2 集"会连带把第 1 集重拍一遍。
+
 ## 8. WP6：成片视图
 
 - 审片卡（`DirectorProductionRunPanel` post 模式）每集补充：成片文件 SHA 前 10 位、字幕版本（`post_contract.subtitle_revision` 或「无字幕轨」）、「历史版本见成片库」。
+- **逐集成片跨运行**：列表来自 `overview.episodes` 而不是"当前这次运行"，且不依赖 `activeRun` 是否存在。交付来自哪一次运行由 `delivery.run_id` 标明；某集最近一次运行不是当前运行，提示会写「（最近一次运行）」。
 - `DeliveryPanel` 标题改为「成片文件与导出（历史版本）」，与审片卡职责分开。
 - 未新建装配/QC 流水线：仍由既有 Run/EDL/字幕/技术 QC 生成 `delivered_artifact_id`。
 
@@ -147,3 +151,13 @@ V2 把导演模式从「七个阶段各有一套重复入口」收成「一份�
 1. 前端内置浏览器无法操作文件选择器，「上传剧本」入口的真人穿测改用①页文本入口（详见验收报告）；上传链路本身由既有测试覆盖。
 2. 真实 H3 双集出片结论见 `ACCEPTANCE_DIRECTOR_AUTOPILOT_V2_20261113.md`；本报告不替代该结论。
 3. `derive` 的 scene/prop 需求依赖场次标题与 catalog；无 catalog 时场景名取场次标题，可能比人工命名更朴素（不臆造）。
+4. AI 候选素材在本机（RTX 5080 16 GB）无法与 H3 同时驻留，**候选生成未真机跑通**；复用主素材 / 跳过可选项 / 上传替代三条路径已真机跑通（见验收报告 4.1）。
+
+## 11. 2026-11-13 追补修复（用户现场报障）
+
+| 现象 | 根因 | 改动 |
+| --- | --- | --- |
+| 拍第 2 集后第 1 集成片消失 | ⑦ 列表取"当前这一次运行"，第 2 集新运行不含第 1 集 | `_latest_delivery` 跨运行按集取交付；成片列表改为项目级投影且不再依赖 `activeRun` |
+| 第 1 集显示"可开拍、0/3 镜" | 每集进度借用最新运行 | `_latest_run_episode` 按集回落到自己那次运行；新增 `production.in_current_run` |
+| ⑤ 默认勾选含已交付集（等于重拍） | 默认勾选集合 = 可勾选集合 | 默认集合拆成 `pendingShoot`（只含可开拍/可打包）；重拍需手勾并显式提示 |
+| 第 2 集需求项不出现（D7） | 场次证据只读最新一次运行；草稿复用不校验实体覆盖 | `materialprep/story.py` 回溯最近 10 次运行；`create_draft_plan` 增加"已存实体 ⊇ 本次需求"守卫 |

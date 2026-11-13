@@ -1059,6 +1059,8 @@ function App() {
                   key={`post-${projectId}`}
                   projectId={projectId}
                   mode="post"
+                  // 成片按集读取：拍第 2 集时第 1 集仍要留在这一页。
+                  episodes={overview?.episodes ?? null}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   workflowProfiles={workflowProfiles}
                   onMessage={report}

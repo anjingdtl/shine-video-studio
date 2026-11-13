@@ -14,10 +14,10 @@ never hand-written plan rows pretending to be confirmed.
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from shine.director.overview import build_episode_overview, build_overview
 from shine.models import Project
-
 from tests.test_director_streamline import (
     LOCAL,
     _confirm_book,
@@ -165,5 +165,81 @@ def test_build_overview_accepts_a_project_object(api):
         project = db.get(Project, project_id)
         body = build_overview(db, project)
         assert body["project_id"] == project_id
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPException) as raised:
             build_episode_overview(db, project, "ep-none")
+        assert raised.value.status_code == 404
+
+
+def test_starting_episode_two_never_hides_the_take_episode_one_delivered(api):
+    """拍第 2 集不能把第 1 集的成片弄丢，也不能把第 1 集显示成"又开拍了"。
+
+    回归用例：先前总览只认"当前这一次运行"，于是第 2 集一开始，第 1 集既没有
+    交付、也显示成 0/3 镜在拍。本集进度必须回它自己那次运行去读。
+    """
+    from datetime import datetime, timedelta
+
+    from shine.director.models import DirectorPackageVersion
+    from shine.production.models import ProductionRun, ProductionRunEpisode
+
+    client, factory, _settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+
+    first_artifact = "11111111-2222-3333-4444-555555555555"
+    start = datetime(2026, 11, 13, 6, 0, 0)
+    with factory.begin() as db:
+        package = DirectorPackageVersion(
+            project_id=project, revision=1, status="CONFIRMED", manifest={},
+            scope_digest="a" * 64, manifest_sha256="b" * 64, policy_hash="c" * 64,
+            episode_count=2, shot_count=3)
+        db.add(package)
+        db.flush()
+        first_run = ProductionRun(
+            project_id=project, package_id=package.id, package_revision=1,
+            manifest_sha256=package.manifest_sha256, scope_digest=package.scope_digest,
+            policy_hash=package.policy_hash, scope={"shot_count": 3}, budget={}, counters={},
+            status="COMPLETED", idempotency_key="test-first-episode", request_hash="d" * 64,
+            created_at=start, updated_at=start + timedelta(minutes=20))
+        second_run = ProductionRun(
+            project_id=project, package_id=package.id, package_revision=1,
+            manifest_sha256=package.manifest_sha256, scope_digest=package.scope_digest,
+            policy_hash=package.policy_hash, scope={"shot_count": 3}, budget={}, counters={},
+            status="RUNNING", idempotency_key="test-second-episode", request_hash="e" * 64,
+            created_at=start + timedelta(hours=1), updated_at=start + timedelta(hours=1))
+        db.add_all([first_run, second_run])
+        db.flush()
+        db.add_all([
+            ProductionRunEpisode(
+                run_id=first_run.id, project_id=project, episode_id="ep-01", position=0,
+                title="第1集", manifest_sha256="f" * 64, shot_ids=[], status="DELIVERED",
+                delivered_artifact_id=first_artifact, delivered_sha256="9" * 64,
+                actual_seconds=20.479, delivered_at=start + timedelta(minutes=21)),
+            # The second run only covers episode 2: episode 1 is not part of it.
+            ProductionRunEpisode(
+                run_id=second_run.id, project_id=project, episode_id="ep-02", position=0,
+                title="第2集", manifest_sha256="7" * 64, shot_ids=[], status="PRODUCING"),
+        ])
+        first_run_id, second_run_id = first_run.id, second_run.id
+
+    overview = _overview(client, project)
+    episodes = {row["episode_id"]: row for row in overview["episodes"]}
+    first, second = episodes["ep-01"], episodes["ep-02"]
+
+    # 第 1 集仍然是"已交付"，成片来自它自己那次运行。
+    assert first["state"] == "DELIVERED"
+    assert first["delivery"]["artifact_id"] == first_artifact
+    assert first["delivery"]["run_id"] == first_run_id
+    assert first["production"]["run_id"] == first_run_id
+    assert first["production"]["in_current_run"] is False
+    assert first["next_action"] is None
+
+    # 第 2 集才是正在拍的那一集。
+    assert second["state"] == "SHOOTING"
+    assert second["delivery"] is None
+    assert second["production"]["run_id"] == second_run_id
+    assert second["production"]["in_current_run"] is True
+
+    # 项目主行动指向还在进行的那一集，不会把已交付的集再推一次。
+    assert overview["next_action"]["episode_id"] == "ep-02"

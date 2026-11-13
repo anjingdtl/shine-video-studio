@@ -148,3 +148,38 @@ def test_master_match_prefers_the_latest_when_one_entity_has_two_masters():
     assert _master_for("character", "陈默", [older]).id == "a-old"
     # 没有匹配时仍然如实返回 None（不编造素材）。
     assert _master_for("character", "另一个人", [older, newer]) is None
+
+
+def test_confirming_a_master_binds_it_onto_the_shots_that_asked_for_it(api):
+    """确认「复用主素材」必须同时回绑镜头，否则该集仍然显示缺素材。
+
+    镜头表与开拍预检读的是 shot.bindings，不是素材清单。只写 requirement
+    会让用户“确认了素材却还是不能拍”。
+    """
+    from sqlalchemy import select
+
+    from shine.models import Shot
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    body = {
+        "plan_revision_id": derived["plan_revision_id"],
+        "expected_snapshot": derived["expected_snapshot"],
+        "decisions": _decisions_for(derived),
+    }
+    committed = client.post(f"/api/v1/projects/{project}/director/materials/commit",
+                            json=body, headers=LOCAL)
+    assert committed.status_code == 201, committed.text
+
+    master_id = next(row["matched_master"]["asset_id"] for row in derived["requirements"]
+                     if row["family"] == "character" and row["matched_master"])
+    with factory() as db:
+        shots = db.scalars(select(Shot).where(Shot.project_id == project)).all()
+        assert shots
+        bound = [shot for shot in shots if any(link.asset_id == master_id for link in shot.bindings)]
+        assert bound, "确认复用后，镜头必须真的绑定这份主素材"
+
+    overview = client.get(f"/api/v1/projects/{project}/director/overview").json()
+    episode = overview["episodes"][0]
+    assert episode["materials"]["missing_count"] == 0
+    assert episode["state"] in {"READY_TO_PACKAGE", "READY_TO_SHOOT"}

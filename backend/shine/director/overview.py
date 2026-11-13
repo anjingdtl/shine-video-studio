@@ -214,6 +214,45 @@ def _run_for(db: Session, project_id: str, run_id: str | None):
     ).first()
 
 
+def _latest_delivery(db: Session, project_id: str, episode_id: str, cache: dict[str, Any]):
+    """The newest delivered take of one episode, across every run.
+
+    A run owns one shooting scope; starting episode 2 must not hide the take
+    episode 1 already delivered.  The delivery is per episode, so it is read
+    per episode and never borrowed from "the current run".
+    """
+    from shine.production.models import ProductionRunEpisode
+
+    if episode_id in cache:
+        return cache[episode_id]
+    row = db.scalars(select(ProductionRunEpisode).where(
+        ProductionRunEpisode.project_id == project_id,
+        ProductionRunEpisode.episode_id == episode_id,
+        ProductionRunEpisode.delivered_artifact_id.is_not(None),
+    ).order_by(ProductionRunEpisode.delivered_at.desc())).first()
+    cache[episode_id] = row
+    return row
+
+
+def _latest_run_episode(db: Session, project_id: str, episode_id: str, cache: dict[str, Any]):
+    """The newest run that ever covered one episode, plus that run.
+
+    一次运行只覆盖它自己那一批集：拍第 2 集时，第 1 集的进度必须回它自己的
+    那次运行去读，否则会显示成"这一集正在拍、0/3 镜通过"。
+    """
+    from shine.production.models import ProductionRun, ProductionRunEpisode
+
+    if episode_id in cache:
+        return cache[episode_id]
+    row = db.scalars(select(ProductionRunEpisode).where(
+        ProductionRunEpisode.project_id == project_id,
+        ProductionRunEpisode.episode_id == episode_id,
+    ).order_by(ProductionRunEpisode.created_at.desc())).first()
+    run = db.get(ProductionRun, row.run_id) if row is not None else None
+    cache[episode_id] = (row, run)
+    return row, run
+
+
 def _run_episodes(db: Session, run) -> dict[str, Any]:
     from shine.production.models import ProductionRunEpisode
 
@@ -241,6 +280,8 @@ def _episode_node(
     readiness_cache: dict[str, dict],
     run,
     run_episodes: dict[str, Any],
+    delivery_cache: dict[str, Any],
+    run_episode_cache: dict[str, Any],
 ) -> dict[str, Any]:
     from shine.director.journey import _passed_shots
 
@@ -285,16 +326,27 @@ def _episode_node(
                      and package_readiness_row.get("startable") and not package_blockers)
 
     run_episode = run_episodes.get(episode_id)
+    latest_delivery = _latest_delivery(db, project.id, episode_id, delivery_cache)
+    # 这一集在本轮运行里 → 用本轮；本轮没覆盖它 → 回它自己最近的那次运行。
+    in_current_run = run_episode is not None
+    if in_current_run:
+        active_run, active_episode = run, run_episode
+    else:
+        active_episode, active_run = _latest_run_episode(db, project.id, episode_id, run_episode_cache)
     passed: dict[str, Any] = {}
-    if run is not None and run_episode is not None:
-        passed, _demo = _passed_shots(db, project.id, shot_ids=list(run_episode.shot_ids or []),
-                                      run_id=run.id)
-    run_shot_count = len(run_episode.shot_ids or []) if run_episode is not None else len(confirmed_shots)
-    passed_count = sum(1 for shot_id in (run_episode.shot_ids if run_episode is not None else [])
+    if active_run is not None and active_episode is not None:
+        passed, _demo = _passed_shots(db, project.id, shot_ids=list(active_episode.shot_ids or []),
+                                      run_id=active_run.id)
+    run_shot_count = len(active_episode.shot_ids or []) if active_episode is not None else len(confirmed_shots)
+    passed_count = sum(1 for shot_id in (active_episode.shot_ids if active_episode is not None else [])
                        if shot_id in passed)
-    run_active = bool(run is not None and run.status in _ACTIVE_RUN)
-    delivered = bool(run_episode is not None and run_episode.delivered_artifact_id)
-    episode_delivered = bool(run_episode is not None and run_episode.status == "DELIVERED")
+    run_active = bool(active_run is not None and active_run.status in _ACTIVE_RUN)
+    # 本集的交付可以来自任何一次运行：先看这一集是否在拍，再退回它最近一次交付。
+    shooting_this_episode = bool(run_active and in_current_run and active_episode is not None
+                                 and active_episode.status != "DELIVERED")
+    delivery_row = latest_delivery or run_episode
+    delivered = bool(delivery_row is not None and delivery_row.delivered_artifact_id)
+    episode_delivered = bool(delivery_row is not None and delivery_row.status == "DELIVERED")
 
     ledger_episode = next(
         (row for row in (storyboard.get("episodes") or []) if row.get("episode_id") == episode_id),
@@ -303,6 +355,7 @@ def _episode_node(
     ledger_status = (ledger_episode or {}).get("status")
 
     state = _episode_state(
+        shooting_this_episode=shooting_this_episode,
         episode_confirmed=episode_confirmed,
         landed=landed,
         missing_sections=missing_sections,
@@ -312,8 +365,6 @@ def _episode_node(
         material_gaps=material_gaps,
         covering=covering,
         startable=startable,
-        run_active=run_active,
-        run_episode=run_episode,
         delivered=delivered,
         episode_delivered=episode_delivered,
     )
@@ -324,7 +375,7 @@ def _episode_node(
         material_gaps=material_gaps,
         package_blockers=package_blockers,
         ledger_episode=ledger_episode,
-        run_episode=run_episode,
+        delivery_row=delivery_row if delivered else None,
         covering=covering,
     )
     action = _episode_action(state, episode_id=episode_id, blockers=blockers)
@@ -362,25 +413,28 @@ def _episode_node(
             "blockers": package_blockers[:20],
         } if covering is not None else None),
         "production": ({
-            "run_id": run.id,
-            "status": run.status,
+            "run_id": active_run.id,
+            "status": active_run.status,
             "shot_count": run_shot_count,
             "passed_shot_count": passed_count,
-        } if run is not None else None),
+            "in_current_run": in_current_run,
+        } if active_run is not None else None),
         "delivery": ({
-            "artifact_id": run_episode.delivered_artifact_id,
-            "sha256": run_episode.delivered_sha256,
-            "delivered_at": run_episode.delivered_at.isoformat() if run_episode.delivered_at else None,
-            "actual_seconds": run_episode.actual_seconds,
-            "status": run_episode.status,
-            "post_contract": run_episode.post_contract,
-        } if run_episode is not None and delivered else None),
+            "artifact_id": delivery_row.delivered_artifact_id,
+            "sha256": delivery_row.delivered_sha256,
+            "delivered_at": delivery_row.delivered_at.isoformat() if delivery_row.delivered_at else None,
+            "actual_seconds": delivery_row.actual_seconds,
+            "status": delivery_row.status,
+            "post_contract": delivery_row.post_contract,
+            "run_id": delivery_row.run_id,
+        } if delivery_row is not None and delivered else None),
         "next_action": action,
     }
 
 
 def _episode_state(
     *,
+    shooting_this_episode: bool,
     episode_confirmed: bool,
     landed: list[str],
     missing_sections: list[dict[str, Any]],
@@ -390,19 +444,18 @@ def _episode_state(
     material_gaps: list[dict[str, Any]],
     covering: DirectorPackageVersion | None,
     startable: bool,
-    run_active: bool,
-    run_episode,
     delivered: bool,
     episode_delivered: bool,
 ) -> str:
+    if shooting_this_episode:
+        # 正在拍（含重拍）：即使这一集以前交付过，也先显示拍摄中。
+        return "SHOOTING"
     if episode_delivered:
         return "DELIVERED"
     if delivered:
         # A real reel exists but the episode row itself has not been accepted:
         # that is "ready for review", never "finished".
         return "REVIEW_READY"
-    if run_active and run_episode is not None and run_episode.status != "DELIVERED":
-        return "SHOOTING"
     if startable:
         return "READY_TO_SHOOT"
     if not episode_confirmed:
@@ -428,7 +481,7 @@ def _episode_blockers(
     material_gaps: list[dict[str, Any]],
     package_blockers: list[dict[str, Any]],
     ledger_episode: dict[str, Any] | None,
-    run_episode,
+    delivery_row,
     covering: DirectorPackageVersion | None,
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
@@ -457,7 +510,7 @@ def _episode_blockers(
         })
     for blocker in package_blockers[:6]:
         blockers.append(blocker)
-    if state == "REVIEW_READY" and run_episode is not None:
+    if state == "REVIEW_READY" and delivery_row is not None:
         blockers.append({
             "code": "EPISODE_PENDING_REVIEW",
             "message": "成片已生成，等待你播放确认后再交付",
@@ -526,6 +579,8 @@ def build_overview(
     run_episodes = _run_episodes(db, run)
 
     section_cache: dict[str, dict] = {}
+    delivery_cache: dict[str, Any] = {}
+    run_episode_cache: dict[str, Any] = {}
     episodes: list[dict[str, Any]] = []
     for plan_row in ((plan.payload or {}).get("episodes") or []) if plan is not None else []:
         episodes.append(_episode_node(
@@ -540,6 +595,8 @@ def build_overview(
             readiness_cache=readiness_cache,
             run=run,
             run_episodes=run_episodes,
+            delivery_cache=delivery_cache,
+            run_episode_cache=run_episode_cache,
         ))
 
     counts = {
