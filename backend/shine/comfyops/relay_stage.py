@@ -34,8 +34,8 @@ from sqlalchemy.orm import Session
 
 from shine.comfyops import relayvsr
 from shine.comfyops.scheduler import resource_slot
-from shine.security import sha256_bytes
 from shine.models import Job, MediaArtifact, RelayUpscaleItem, utcnow
+from shine.security import sha256_bytes
 
 #: Item states.  ``SUBMIT_INTENT``/``RUNNING`` are live; ``NEEDS_REVIEW``
 #: covers QC failures and UNKNOWN external outcomes - both wait for the

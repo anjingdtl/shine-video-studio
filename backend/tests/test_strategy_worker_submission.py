@@ -17,15 +17,12 @@ import pytest
 
 from shine.comfy.client import ComfyUIClient
 from shine.comfy.graph_compiler import compile_ref2va_workflow
-from shine.comfy.workflow import graph_hash
-from shine.config import Settings
 from shine.models import Job
 from shine.strategy import DEFAULT_STRATEGY, GenerationStrategy, SecondPassConfig
 from shine.worker import run_one
 from tests.conftest import (
     create_project,
     create_referenced_shot,
-    create_shot,
     freeze_style,
     make_test_video_bytes,
 )
@@ -60,7 +57,7 @@ def _seed_strategy_job(client, project_id: str, style_id: str, strategy: Generat
     return response.json()["id"]
 
 
-def test_worker_submits_the_compiled_strategy_graph(api, fake_comfy, monkeypatch):
+def test_worker_submits_the_compiled_strategy_graph(api, fake_comfy, monkeypatch):  # noqa: F811
     monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
@@ -99,7 +96,7 @@ def test_worker_submits_the_compiled_strategy_graph(api, fake_comfy, monkeypatch
     assert submitted["40"]["inputs"]["image"].startswith("shine")
 
 
-def test_worker_refuses_strategy_graph_missing_live_nodes(api, fake_comfy, monkeypatch):
+def test_worker_refuses_strategy_graph_missing_live_nodes(api, fake_comfy, monkeypatch):  # noqa: F811
     monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     project_id = create_project(client)
@@ -119,7 +116,7 @@ def test_worker_refuses_strategy_graph_missing_live_nodes(api, fake_comfy, monke
     assert result["failure_code"] == "STRATEGY_GRAPH_NODE_MISSING"
 
 
-def test_worker_submits_second_pass_graph(api, fake_comfy, monkeypatch):
+def test_worker_submits_second_pass_graph(api, fake_comfy, monkeypatch):  # noqa: F811
     monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
     client, factory, settings = api
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)

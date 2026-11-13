@@ -14,19 +14,17 @@ Covers the WP1 contract of the dynamic per-shot workflow round:
 """
 import json
 import os
-from dataclasses import replace
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from shine.comfyops import mode_capabilities
 from shine.comfy.workflow import graph_hash
+from shine.comfyops import mode_capabilities
 from shine.comfyops.runtime_configuration import (
     SERVICE_EVIDENCE_KEY,
     service_evidence_status,
 )
-from shine.comfy.workflow import graph_hash
 from shine.models import AppSetting, WorkflowProfile
 from tests.conftest import make_studio
 

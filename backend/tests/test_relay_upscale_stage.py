@@ -113,7 +113,7 @@ def _enqueue_one(factory, project_id, job_id, shot_id) -> None:
             db, run, episode, {shot_id: db.get(Job, job_id)}) == 1
 
 
-def test_unavailable_backend_fails_the_item_by_name_without_submitting(studio, fake_comfy):
+def test_unavailable_backend_fails_the_item_by_name_without_submitting(studio, fake_comfy):  # noqa: F811
     """The pinned machine has no RelayVSR: the item names the blocker, no prompt."""
     client, factory, settings = studio
     project_id, job_id, _artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
@@ -132,7 +132,7 @@ def test_unavailable_backend_fails_the_item_by_name_without_submitting(studio, f
         assert item.prompt_id is None
 
 
-def test_full_chain_with_available_backend(studio, fake_comfy, monkeypatch):
+def test_full_chain_with_available_backend(studio, fake_comfy, monkeypatch):  # noqa: F811
     """Upload → intent → submit → download → audio mux → 2x contract → artifact."""
     client, factory, settings = studio
     project_id, job_id, artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
@@ -171,7 +171,7 @@ def test_full_chain_with_available_backend(studio, fake_comfy, monkeypatch):
         assert info.has_audio, "the source audio must survive the mux"
 
 
-def test_not_exactly_2x_is_a_named_refusal(studio, fake_comfy, monkeypatch):
+def test_not_exactly_2x_is_a_named_refusal(studio, fake_comfy, monkeypatch):  # noqa: F811
     client, factory, settings = studio
     project_id, job_id, _artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
     _enqueue_one(factory, project_id, job_id, shot_id)

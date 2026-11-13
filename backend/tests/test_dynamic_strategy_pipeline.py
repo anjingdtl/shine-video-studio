@@ -27,7 +27,6 @@ from tests.conftest import (
     create_shot,
     freeze_style,
     make_studio,
-    upload_asset,
 )
 
 pytestmark = pytest.mark.integration
@@ -82,7 +81,6 @@ def test_strategy_series_carries_strategy_and_compiled_graph_hash(studio):
         # The request carries this shot's real compiled graph identity, which
         # a one-image shot distinguishes from any other reference layout.
         assert request["workflow_profile_hash"]
-        from shine.comfy.workflow import graph_hash as _hash
         expected = compile_ref2va_workflow(image_count=1, audio_count=0)
         assert request["workflow_profile_hash"] == expected.graph_sha256
 

@@ -29,8 +29,8 @@ from shine.comfyops.managed_recipe import (
     build_review_launch,
     load_managed_recipe,
 )
-from shine.comfyops.models import ComfyInstance
 from shine.comfyops.mode_capabilities import auto_register_missing_baseline_profiles
+from shine.comfyops.models import ComfyInstance
 from shine.comfyops.owned_process import OwnedProcessGroup
 from shine.comfyops.runtime_configuration import (
     ACTIVE_KEY,

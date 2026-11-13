@@ -88,7 +88,6 @@ def claimed(api):
 
     from shine.models import JobAttempt
     from tests.conftest import (
-        create_comfy_job,
         create_job,
         create_project,
         create_shot,

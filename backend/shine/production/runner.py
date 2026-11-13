@@ -504,10 +504,10 @@ def _create_series_for_batch(
 
         try:
             strategy_contract = GenerationStrategy.model_validate(frozen_strategy)
-        except ValueError:
-            raise RunBlocked("STRATEGY_CONTRACT_INVALID")
+        except ValueError as exc:
+            raise RunBlocked("STRATEGY_CONTRACT_INVALID") from exc
         if strategy_blockers(strategy_contract):
-            raise RunBlocked("STRATEGY_BLOCKED_AT_DISPATCH")
+            raise RunBlocked("STRATEGY_BLOCKED_AT_DISPATCH") from None
     project = db.get(Project, run.project_id)
     if project is None:
         raise RunBlocked("PROJECT_MISSING")

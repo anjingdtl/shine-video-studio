@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shine.comfy.graph_compiler import ACCELERATORS, SecondPassSpec, graph_hash
+from shine.comfy.graph_compiler import ACCELERATORS, SecondPassSpec
 from shine.comfy.workflow import graph_hash as _dict_hash
 
 
