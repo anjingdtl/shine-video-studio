@@ -1139,16 +1139,22 @@ def start_managed_review_service(
 
 
 def required_workflow_node_types(factory):
-    """Every node type that a registered production workflow needs.
+    """Node types the baseline Ref2VA mode needs a renderer to expose.
 
-    The registered workflow profiles are the authoritative statement of what
-    this installation must be able to run. A renderer that cannot serve all of
-    them is not a valid renderer for this project.
+    The startup gate is the mode's audited baseline recipe set, not the union
+    of every registered profile: a candidate variant registered by one project
+    (extra node packs of an unaccepted quantization, project-local wide graphs)
+    must not become a hard requirement for every renderer this installation
+    starts.  Shots that actually compile those graphs validate their own nodes
+    against live ``object_info`` before submission.
     """
+    from shine.comfyops.mode_capabilities import baseline_profile_names
     from shine.models import WorkflowProfile
 
+    baseline = set(baseline_profile_names())
     with factory() as db:
-        rows = db.scalars(select(WorkflowProfile)).all()
+        rows = db.scalars(select(WorkflowProfile).where(
+            WorkflowProfile.name.in_(sorted(baseline)))).all()
     needed = set()
     for row in rows:
         graph = row.graph

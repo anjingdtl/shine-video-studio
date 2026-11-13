@@ -59,9 +59,16 @@ def _evidence_seal(payload: dict) -> str:
 
 
 def record_service_evidence(db, identity, evidence: dict) -> dict:
-    """Persist one sealed live service/node validation for the current identity."""
+    """Persist one sealed live service/node validation for the current identity.
+
+    ``version: 2`` seals the mode-level capability contract: the core node
+    classes the baseline Ref2VA mode needs, plus the node inventory digest
+    they were checked against.  The per-template contract hashes are kept as
+    an identity record of what was validated, but a later drift of one
+    historical template is advisory - it never blocks the whole mode.
+    """
     payload = {
-        'version': 1,
+        'version': 2,
         'configuration_sha256': graph_hash(identity),
         'recipe_sha256': identity['recipe_sha256'],
         'instance_id': identity['instance_id'],
@@ -77,12 +84,35 @@ def record_service_evidence(db, identity, evidence: dict) -> dict:
     return payload
 
 
+def _template_drift_advisories(db, evidence: dict) -> list[dict]:
+    """Report drifted historical templates as advisories, never as blockers.
+
+    The v1 seal treated any workflow-contract drift as a machine-wide block,
+    which let one historical template lock the entire Ref2VA mode.  The same
+    drift is now a re-validation hint: the audited repository template is the
+    source of truth and the operator can re-register at any time.  This
+    function never rewrites the stored hashes - it only reads them.
+    """
+    advisories = []
+    for name, expected in (evidence.get('workflow_profiles') or {}).items():
+        profile = db.get(WorkflowProfile, expected.get('id'))
+        if (profile is None or profile.name != name
+                or workflow_contract_sha256(profile) != expected.get('contract_sha256')):
+            advisories.append({
+                'code': 'WORKFLOW_TEMPLATE_DRIFTED',
+                'template': name,
+                'advisory': True,
+            })
+    return advisories
+
+
 def service_evidence_status(db, settings, *, identity=None) -> dict:
     """Return readiness derived from evidence, never from a hard-coded flag.
 
-    Core readiness depends on the complete H3 configuration and workflow
-    contracts. Reviewer routes are reported separately because they are
-    optional suggestions and must not gate production.
+    Core readiness depends on the sealed H3 configuration and the mode-level
+    capability contract (v2) or the legacy per-template seal (v1, upgraded to
+    advisory drift handling). Reviewer routes are reported separately because
+    they are optional suggestions and must not gate production.
     """
     try:
         identity = identity or _current_identity(db, settings)
@@ -99,11 +129,16 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         blockers.append('SERVICE_VALIDATION_STALE_CONFIGURATION')
     if evidence.get('recipe_sha256') != identity.get('recipe_sha256'):
         blockers.append('SERVICE_VALIDATION_STALE_RECIPE')
-    for name, expected in (evidence.get('workflow_profiles') or {}).items():
-        profile = db.get(WorkflowProfile, expected.get('id'))
-        if (profile is None or profile.name != name
-                or workflow_contract_sha256(profile) != expected.get('contract_sha256')):
-            blockers.append(f'WORKFLOW_CONTRACT_CHANGED:{name}')
+    template_advisories = _template_drift_advisories(db, evidence)
+    version = evidence.get('version')
+    if version != 1:
+        # v2+ seals the mode capability set; a change in the audited core
+        # node classes means the seal was computed against another recipe
+        # generation and must be re-derived, not trusted.
+        from shine.comfyops.mode_capabilities import core_mode_node_types
+        sealed = (evidence.get('mode_capabilities') or {}).get('required_nodes') or []
+        if sorted(core_mode_node_types()) != sorted(sealed):
+            blockers.append('MODE_CAPABILITY_CONTRACT_CHANGED')
     advisory_reviews = dict(evidence.get('advisory_reviews') or {})
     for role, expected in (evidence.get('review_profiles') or {}).items():
         route_role = {'VLM': 'vlm_reviewer', 'ASR': 'asr_reviewer'}.get(role, role)
@@ -118,7 +153,8 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
             }
     if blockers:
         return {'status': 'PENDING', 'blockers': sorted(set(blockers)),
-                'validated_at': evidence.get('validated_at')}
+                'validated_at': evidence.get('validated_at'),
+                'template_advisories': template_advisories}
     return {
         'status': 'READY',
         'blockers': [],
@@ -126,6 +162,8 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         'node_count': evidence.get('node_count'),
         'node_inventory_sha256': evidence.get('node_inventory_sha256'),
         'workflow_profiles': sorted((evidence.get('workflow_profiles') or {}).keys()),
+        'mode_capabilities': evidence.get('mode_capabilities'),
+        'template_advisories': template_advisories,
         'review_models': {role: item.get('model') for role, item in
                           (evidence.get('review_profiles') or {}).items()},
         'advisory_reviews': advisory_reviews,

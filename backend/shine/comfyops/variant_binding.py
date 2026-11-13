@@ -197,7 +197,11 @@ def resolve_registration_target(*, variant_id: str | None = None,
                 "cause": exc.detail,
             }) from exc
         binding = binding_for_catalog(catalog)
-        if catalog_id != binding.catalog_id:
+        # ``load_deployment_catalog`` resolves by file stem while the catalog's
+        # declared identity carries the "shine-" prefix; a caller may name
+        # either form, and only anything else is a real mismatch.
+        normalized = binding.catalog_id.removeprefix("shine-")
+        if catalog_id not in (binding.catalog_id, normalized):
             raise _mismatch(binding.variant_id, binding.catalog_id, catalog_id)
         return binding
     return binding_for_catalog(deployment.load_default_catalog())
