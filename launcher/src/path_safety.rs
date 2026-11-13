@@ -24,7 +24,8 @@ pub(crate) fn is_local_absolute_path(path: &Path) -> bool {
     {
         use std::path::Prefix;
         match path.components().next() {
-            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {}
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
             _ => return false,
         }
     }
@@ -121,4 +122,28 @@ fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
 
     #[cfg(not(windows))]
     metadata.file_type().is_symlink()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::is_local_absolute_path;
+
+    #[cfg(windows)]
+    #[test]
+    fn accepts_local_verbatim_disk_paths_but_rejects_network_and_device_namespaces() {
+        assert!(is_local_absolute_path(Path::new(r"\\?\C:\Shine\Studio")));
+        assert!(!is_local_absolute_path(Path::new(r"\\server\share\Shine")));
+        assert!(!is_local_absolute_path(Path::new(
+            r"\\?\UNC\server\share\Shine"
+        )));
+        assert!(!is_local_absolute_path(Path::new(r"\\.\pipe\shine")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn rejects_network_style_absolute_paths() {
+        assert!(!is_local_absolute_path(Path::new("//server/share/shine")));
+    }
 }
