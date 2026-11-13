@@ -87,13 +87,25 @@ def claimed(api):
     from datetime import timedelta
 
     from shine.models import JobAttempt
-    from tests.conftest import create_comfy_job, create_project, create_shot, freeze_style
+    from tests.conftest import (
+        create_comfy_job,
+        create_job,
+        create_project,
+        create_shot,
+        freeze_style,
+        register_workflow_profile,
+    )
 
     client, factory, settings = api
     project = create_project(client)
     style = freeze_style(client, project)
     shot = create_shot(client, project, style["id"])
-    job = create_comfy_job(client, project, shot["id"])
+    # The startup node gate covers the baseline mode's registered profiles, so
+    # the fixture's job must own one of those names for the missing-node
+    # refusal below to be about the baseline contract, not a random test row.
+    baseline = register_workflow_profile(client, name="local-h3-ref2va-pdd8-2img")
+    job = create_job(client, project, shot["id"], provider="comfyui",
+                     workflow_profile_id=baseline["id"])
     with factory.begin() as db:
         lease = ResourceScheduler().enqueue(db, "h3:" + job["id"], 16384, True, 100)
         db.flush()
