@@ -281,29 +281,44 @@ it('读取已确认人物后先明确补齐文本同意，再直接从导演续�
   stub.restore();
 });
 
-it('切换素材步骤再返回时保留正在运行的分镜请求和最终结果', async () => {
+it('切换素材步骤再返回时保留正在运行的分镜任务和最终状态', async () => {
+  // 收束后的 ③ 是持久后台任务：排队一次后，切到 ④ 再回来不会重复提交，
+  // 进度从服务端状态恢复。
   window.history.replaceState(null, '', '#d/produce');
-  let finish!: (value: ReturnType<typeof jsonResponse>) => void;
-  const response = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finish = resolve; });
+  let queued = 0;
   const stub = new StudioStub([
     ...baseRoutes(),
-    { method: 'POST', pattern: /storyboard\/generate$/, respond: () => response },
+    { method: 'POST', pattern: /director\/storyboard\/generate$/, respond: () => {
+      queued += 1;
+      return jsonResponse({ task_id: 'task-run-1', status: 'QUEUED', replayed: false }, 202);
+    } },
+    { method: 'GET', pattern: /director\/storyboard\/state$/, respond: () => jsonResponse(
+      queued > 0
+        ? { task_id: 'task-run-1', status: 'RUNNING', state_version: 2,
+            episodes: [{ episode_id: 'ep-01', order: 1, units: [
+              { index: 0, production_section_id: 'sec-01', state: 'APPLIED', shot_count: 2, material_notices: [] },
+              { index: 1, production_section_id: 'sec-02', state: 'PENDING', shot_count: 0, material_notices: [] },
+            ], shot_ids: ['shot-a', 'shot-b'], status: 'IN_PROGRESS', blocker: null }] }
+        : { task_id: null, status: null, episodes: [] }) },
+    { method: 'GET', pattern: /director\/storyboard\/episodes\/[^/]+\/shots$/, respond: () => jsonResponse({
+      episode_id: 'ep-01', shots: [], total_editorial_seconds: 0, shot_count: 0 }) },
   ]);
   const user = userEvent.setup();
   render(<App />);
-  await user.type(await screen.findByLabelText('粘贴完整剧本文本'), '剧本不会因切页丢失');
-  await user.click(screen.getByRole('checkbox', { name: /我同意把该剧本/ }));
-  await user.click(screen.getByRole('button', { name: /生成 AI 分镜方案/ }));
-  await waitFor(() => expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1));
-  await gotoDirectorPage(user, /剧本统筹/);
-  await gotoDirectorPage(user, /镜头拆解/);
-  expect(screen.getByLabelText('粘贴完整剧本文本')).toHaveValue('剧本不会因切页丢失');
-  // 新 UI：运行中主操作变为吸顶栏的进度态（不再是禁用按钮），请求仍在跑且不可重提交。
-  expect(screen.getByText(/分镜链进行中/)).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: /生成 AI 分镜方案/ })).toBeNull();
-  await act(async () => { finish(jsonResponse({ status: 'PROPOSED', steps: {}, script_source: 'inline' })); });
-  expect(await screen.findByText(/五个 Agent 已完成真实调用/)).toBeInTheDocument();
-  expect(stub.callsOf('POST', /storyboard\/generate$/)).toHaveLength(1);
+  const railButton = await waitFor(async () => {
+    const found = screen.getAllByRole('button', { name: /^生成分镜$/ })
+      .find((button) => button.closest('.action-rail'));
+    expect(found).toBeTruthy();
+    return found as HTMLElement;
+  });
+  await user.click(railButton);
+  await waitFor(() => expect(queued).toBe(1));
+  await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+  await gotoDirectorPage(user, /第 3 阶段：镜头拆解/);
+  // 回来后看到的是服务端的运行状态；运行中不提供重复提交入口。
+  expect(await screen.findByText(/分镜生成中/, undefined, { timeout: 9000 })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^生成分镜$/ })).toBeNull();
+  expect(queued).toBe(1);
   stub.restore();
 });
 

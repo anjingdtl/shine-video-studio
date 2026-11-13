@@ -416,6 +416,29 @@ def compute_journey(
     plan_materialized = bool(plan is not None and all(
         episode.get("shot_ids") for episode in (plan.payload or {}).get("episodes", [])
     ))
+    # Per-episode storyboard state: a project whose second episode is still
+    # pending must still show "1/2 集分镜已确认" and let the finished episode
+    # move on to materials, packaging and shooting (streamline plan §3).
+    episode_storyboard = []
+    if plan is not None and plan_mode == "sections":
+        from shine.materialprep.story import section_storyboard_shot_ids
+
+        for episode in (plan.payload or {}).get("episodes", []):
+            landed = 0
+            pending_sections = 0
+            for section_id in episode.get("section_ids") or []:
+                resolved = section_storyboard_shot_ids(db, project_id, section_id)
+                if resolved["shot_ids"]:
+                    landed += len(resolved["shot_ids"])
+                else:
+                    pending_sections += 1
+            episode_storyboard.append({
+                "episode_id": episode.get("episode_id"),
+                "confirmed": bool(episode.get("shot_ids")) and pending_sections == 0,
+                "shot_count": len(episode.get("shot_ids") or []),
+                "landed_shot_count": landed,
+                "pending_section_count": pending_sections,
+            })
     if plan is not None and plan_mode == "sections" and not plan_materialized:
         shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
                               "message": "按剧本分好的集还没有全部拆成镜头"})
@@ -431,6 +454,10 @@ def compute_journey(
     storyboard_summary = f"{len(scope_shot_ids)} 个计划内镜头" if plan is not None else f"{len(shots)} 个镜头"
     if plan is not None and len(shots) != len(scope_shot_ids):
         storyboard_summary += f"（项目共 {len(shots)} 个）"
+    confirmed_episodes = [row for row in episode_storyboard if row["confirmed"]]
+    if episode_storyboard and len(confirmed_episodes) != len(episode_storyboard):
+        storyboard_summary = (f"{len(confirmed_episodes)}/{len(episode_storyboard)} 集分镜已确认 · "
+                              + storyboard_summary)
     stages.append({
         "id": "storyboard",
         "label": "镜头拆解",
@@ -441,7 +468,11 @@ def compute_journey(
                   "planned_shot_ids": scope_shot_ids,
                   "package_shot_count": len(overview_shot_ids),
                   "scope_episode_ids": run_episode_ids,
-                  "plan_mode": plan_mode, "plan_materialized": plan_materialized},
+                  "plan_mode": plan_mode, "plan_materialized": plan_materialized,
+                  "episode_total": len(episode_storyboard),
+                  "episode_confirmed_count": len(confirmed_episodes),
+                  "ready_episode_ids": [row["episode_id"] for row in confirmed_episodes],
+                  "episodes": episode_storyboard},
     })
 
     # ④ 拍摄素材准备: what the storyboard asked for is really prepared.

@@ -325,6 +325,103 @@ def derive_episode_plan_from_sections(
     )
 
 
+def derive_episode_plan_by_count(
+    sections: list[dict[str, Any]],
+    *,
+    episode_count: int,
+    target_seconds: int = DEFAULT_TARGET_SECONDS,
+    tolerance_seconds: int = DEFAULT_TOLERANCE_SECONDS,
+    source: dict[str, Any] | None = None,
+    title_prefix: str = "第{n}集",
+) -> EpisodePlanPayload:
+    """Plan a fixed number of episodes from the confirmed script sections.
+
+    The streamline entry: the person names the episode count and a per-episode
+    target length.  The count is the priority — the sections are partitioned
+    into exactly ``episode_count`` contiguous groups on whole-section boundaries
+    (a scene and its dialogue are never severed), balanced so each episode's
+    estimated length stays as close to the total/count ideal as the natural
+    boundaries allow.  ``target_seconds`` is reported as the goal and any
+    deviation is written into ``boundary_note``; nothing is truncated or invented
+    to make a number.  When there are fewer sections than episodes the request is
+    refused rather than fabricating an empty episode.
+    """
+    ordered = sorted(sections, key=lambda row: int(row.get("order") or 0))
+    if not ordered:
+        raise ValueError("EPISODE_PLAN_REQUIRES_SECTIONS")
+    if episode_count < 1:
+        raise ValueError("EPISODE_COUNT_INVALID")
+    if episode_count > len(ordered):
+        raise ValueError("EPISODE_COUNT_EXCEEDS_SECTIONS")
+    if episode_count > MAX_EPISODES:
+        raise ValueError("EPISODE_PLAN_EXCEEDS_MAX_EPISODES")
+    seconds = [float(row.get("estimated_duration_s") or 0.0) for row in ordered]
+    total = sum(seconds)
+    ideal = total / episode_count if episode_count else total
+    # Cumulative prefix sums let a boundary cost be read in O(1).
+    prefix = [0.0]
+    for value in seconds:
+        prefix.append(prefix[-1] + value)
+    # Dynamic programming: split the first i sections into k episodes minimising
+    # the summed squared deviation from the ideal length.  Squared deviation
+    # spreads the length evenly instead of dumping the remainder on the last
+    # episode.  Whole sections only — a boundary never falls inside a scene.
+    import math
+
+    inf = math.inf
+    cost = [[inf] * (episode_count + 1) for _ in range(len(ordered) + 1)]
+    back = [[0] * (episode_count + 1) for _ in range(len(ordered) + 1)]
+    cost[0][0] = 0.0
+    for k in range(1, episode_count + 1):
+        for i in range(k, len(ordered) + 1):
+            for j in range(k - 1, i):
+                if cost[j][k - 1] == inf:
+                    continue
+                length = prefix[i] - prefix[j]
+                candidate = cost[j][k - 1] + (length - ideal) ** 2
+                if candidate < cost[i][k]:
+                    cost[i][k] = candidate
+                    back[i][k] = j
+    if cost[len(ordered)][episode_count] == inf:
+        raise ValueError("EPISODE_COUNT_NOT_PARTITIONABLE")
+    bounds: list[int] = []
+    i, k = len(ordered), episode_count
+    while k > 0:
+        j = back[i][k]
+        bounds.append(j)
+        i, k = j, k - 1
+    bounds.reverse()
+    bounds.append(len(ordered))
+    high = target_seconds + tolerance_seconds
+    episodes: list[PlannedEpisode] = []
+    for index in range(episode_count):
+        left, right = bounds[index], bounds[index + 1]
+        group = ordered[left:right]
+        length = round(max(prefix[right] - prefix[left], 1.0), 3)
+        note = "balanced_by_episode_count"
+        if length > high:
+            note += f"; planned {length:.1f}s exceeds {high}s target window"
+        elif length < max(1, target_seconds - tolerance_seconds):
+            note += f"; planned {length:.1f}s below {target_seconds - tolerance_seconds}s target window"
+        episodes.append(PlannedEpisode(
+            episode_id=f"ep-{index + 1:02d}",
+            order=index + 1,
+            title=title_prefix.format(n=index + 1),
+            shot_ids=[],
+            section_ids=[str(row["production_section_id"]) for row in group],
+            planned_seconds=length,
+            boundary_note=note,
+        ))
+    return EpisodePlanPayload(
+        mode="sections",
+        target_seconds=target_seconds,
+        tolerance_seconds=tolerance_seconds,
+        episodes=episodes,
+        allowed_repeats=[],
+        source={**(source or {}), "episode_count": episode_count},
+    )
+
+
 def validate_section_coverage(payload: EpisodePlanPayload, section_ids: Iterable[str]) -> list[str]:
     """Coverage problems of a section plan against the confirmed outline sections."""
     confirmed = list(section_ids)

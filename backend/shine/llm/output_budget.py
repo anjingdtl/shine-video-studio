@@ -21,6 +21,7 @@ The four-stage plan pins the rule:
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from shine.llm.base import ProviderConfig
 
@@ -205,17 +206,18 @@ def apply_output_budget(config: ProviderConfig, budget: dict) -> ProviderConfig:
     streaming = bool(budget.get("streaming"))
     if isinstance(config.kind, str) and cap:
         if config.kind == "openai_compatible":
-            from dataclasses import replace
             return replace(config, generation_options={
                 **config.generation_options, "max_completion_tokens": cap}, streaming=streaming)
         if config.kind == "ollama":
-            from dataclasses import replace
             return replace(config, generation_options={
                 **config.generation_options, "max_tokens": cap}, streaming=streaming)
         if config.kind == "anthropic":
-            from dataclasses import replace
             return replace(config, generation_options={
                 **config.generation_options, "max_tokens": cap}, streaming=streaming)
+    # The module-level import above is the only `replace`: the fallback path
+    # (a kind with no dedicated branch, e.g. the mock provider) used to
+    # reference an import that only existed inside the branches and died with
+    # UnboundLocalError.
     return replace(config, streaming=streaming)
 
 

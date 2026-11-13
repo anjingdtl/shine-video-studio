@@ -376,6 +376,8 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
 
         if decision.strategy == "omit_prop" and (requirement_payload.get("family") != "prop" or decision.asset_id):
             raise HTTPException(422, "MATERIAL_OMIT_PROP_ONLY")
+        if decision.strategy == "skip" and (requirement_payload.get("family") == "character" or decision.asset_id):
+            raise HTTPException(422, "MATERIAL_SKIP_OPTIONAL_ONLY")
         canonical_entity = requirement_payload.get("canonical_entity_id")
         selected_id = canonical_selections.get(canonical_entity, decision.asset_id)
         selected = db.get(Asset, selected_id) if selected_id else None
@@ -429,7 +431,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         row.payload = {
             **(row.payload or {}),
             "strategy": decision["strategy"],
-            "critical": decision["strategy"] != "omit_prop",
+            "critical": decision["strategy"] not in {"omit_prop", "skip"},
             "bound_asset_id": decision["asset_id"],
             "bound_asset_sha256": decision["bound_asset_sha256"],
             "brief_note": decision["brief_note"],
@@ -1173,7 +1175,7 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         family = payload.get("family")
         entity_id = payload.get("entity_id")
         critical = bool(payload.get("critical", True))
-        if payload.get("strategy") == "omit_prop":
+        if payload.get("strategy") in {"omit_prop", "skip"}:
             judged.append({"requirement_id": row.id, "family": family, "entity_id": entity_id,
                            "asset_id": None, "status": "OMITTED", "reason": None})
             continue
@@ -1245,9 +1247,19 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
     if plan is None:
         return {"project_id": project_id, "stage": "no_plan", "plan_revision_id": None,
                 "requirements": [], "runs": [], "blockers": []}
+    from shine.models import Asset
+
+    masters = {
+        (a.role, a.entity_id): a
+        for a in db.scalars(select(Asset).where(
+            Asset.project_id == project_id, Asset.approved.is_(True), Asset.locked.is_(True)))
+        if a.entity_id
+    }
     requirements = []
     for row in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
         payload = row.payload or {}
+        master = masters.get((payload.get("family"), payload.get("entity_id")))
+        used_shot_ids = payload.get("used_shot_ids") or []
         requirements.append({
             "requirement_id": row.id,
             "requirement_hash": row.sha256,
@@ -1260,6 +1272,14 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
             "brief_note": payload.get("brief_note"),
             "description": payload.get("description") or "",
             "core_prop_reason": payload.get("core_prop_reason") or "",
+            "name": payload.get("entity_id"),
+            "optional": payload.get("family") != "character",
+            "critical": bool(payload.get("critical", True)),
+            "used_shot_ids": used_shot_ids,
+            "used_shot_count": len(used_shot_ids),
+            "used_episodes": payload.get("used_episodes") or [],
+            "matched_master": ({"asset_id": master.id, "sha256": master.sha256,
+                                "entity_id": master.entity_id} if master else None),
         })
     runs = [public_run(db, run.id) for run in db.scalars(
         select(MaterialRun).where(MaterialRun.project_id == project_id)

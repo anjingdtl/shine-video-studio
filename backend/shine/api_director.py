@@ -450,6 +450,10 @@ class PackageBody(APIModel):
     output: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None
     fill_missing_character_bindings: bool = False
+    # A whole-plan build stays the default; a streamline build may freeze only
+    # the episodes that are really ready (plan §9) while another episode is
+    # still being fixed.
+    episode_ids: list[str] | None = Field(default=None, max_length=200)
 
 
 @router.get("/projects/{project_id}/director-packages")
@@ -477,12 +481,14 @@ def create_package(project_id: str, body: PackageBody, request: Request,
         output=body.output,
         policy=body.policy,
         fill_missing_character_bindings=body.fill_missing_character_bindings,
+        episode_ids=body.episode_ids,
         created_by=actor,
     )
     add_audit(db, actor, "DIRECTOR_PACKAGE_CREATED", "director_package", package.id,
               {"revision": package.revision, "scope_digest": package.scope_digest,
                "episodes": package.episode_count, "shots": package.shot_count,
-               "workflow_profile_id": body.workflow_profile_id},
+               "workflow_profile_id": body.workflow_profile_id,
+               **({"selected_episode_ids": body.episode_ids} if body.episode_ids is not None else {})},
               project_id=project_id)
     db.commit()
     db.refresh(package)

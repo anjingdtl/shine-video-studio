@@ -31,6 +31,10 @@ SAFE_REJECTIONS = {
     "REPAIR_CHANGED_LOCKED_SHOT_STRUCTURE", "REPAIR_DID_NOT_CHANGE_PLAN",
     "H3_LOCKED_FACT_TRANSLATION_REQUIRED",
     "H3_STYLE_TRANSLATION_REQUIRED",
+    # A request the literary budget refused before it was sent (streamline
+    # §6.3): the named reason tells the person to split the unit, not that the
+    # model misbehaved.
+    "LLM_CREATIVE_CONTEXT_OVERFLOW", "LLM_OUTPUT_BUDGET_STARVED",
 }
 
 

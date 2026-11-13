@@ -63,7 +63,9 @@ function singleShotCard(): HTMLElement {
 }
 
 function advancedFold(): HTMLElement {
-  return document.querySelector('.advanced-fold') as HTMLElement;
+  // The manual shot form lives in the run page's own fold; earlier stages
+  // (storyboard, materials) carry their own advanced folds now.
+  return document.querySelector('#series-dock .advanced-fold') as HTMLElement;
 }
 
 beforeEach(() => {

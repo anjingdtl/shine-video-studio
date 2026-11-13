@@ -673,7 +673,8 @@ export const listDirectorPackages = (projectId: string) =>
 export const createDirectorPackage = (
   projectId: string,
   body: { workflow_profile_id: string; generation_mode?: string | null; output?: Record<string, unknown> | null;
-    policy?: Record<string, unknown> | null; fill_missing_character_bindings?: boolean },
+    policy?: Record<string, unknown> | null; fill_missing_character_bindings?: boolean;
+    episode_ids?: string[] | null },
 ) => api<DirectorPackage>(`/projects/${projectId}/director-packages`, json('POST', body));
 
 export const getPackageReadiness = (packageId: string) =>
@@ -1233,3 +1234,176 @@ export const submitRuntimeControl = (action: 'ensure' | 'stop' | 'probe' | 'reco
 
 export const isStaleRuntimeState = (exc: unknown): boolean =>
   exc instanceof ApiError && exc.status === 409 && exc.code === 'RUNTIME_STATE_VERSION_STALE';
+
+/* ======================= 导演模式收束（①–④ streamline） ======================= */
+
+/** ① 可编辑大纲：Markdown 正文 + 提示性疑问 + 一次确认。 */
+export type DirectorOutline = {
+  artifact_id: string | null;
+  sha256?: string;
+  markdown: string;
+  questions: string[];
+  user_edited?: boolean;
+  approved?: boolean;
+  confirmed: boolean;
+  confirmed_artifact_id?: string | null;
+};
+
+export const fetchDirectorOutline = (projectId: string) =>
+  api<DirectorOutline>(`/projects/${projectId}/director/outline`);
+
+export const reviseDirectorOutline = (projectId: string, markdown: string, expectedSha256: string) =>
+  api<{ artifact_id: string; sha256: string; markdown: string; questions: string[] }>(
+    `/projects/${projectId}/director/outline/revision`,
+    json('POST', { markdown, expected_sha256: expectedSha256 }));
+
+export const confirmDirectorOutline = (projectId: string, artifactId: string, expectedSha256: string) =>
+  api<Record<string, unknown>>(`/projects/${projectId}/director/outline/confirm`,
+    json('POST', { artifact_id: artifactId, expected_sha256: expectedSha256 }));
+
+/** ② 分镜书：四项设置 → 预览 → 一次确认（分集计划 + 风格冻结成对提交）。 */
+export type StoryboardBookSection = {
+  production_section_id: string;
+  order: number | null;
+  title: string;
+  estimated_seconds: number;
+  beats: Array<{ id?: string; description?: string; characters?: string[] }>;
+  dialogue: Array<{ speaker: string | null; text: string | null }>;
+  source: string;
+};
+
+export type StoryboardBookEpisode = {
+  episode_id: string;
+  order: number;
+  title: string;
+  planned_seconds: number;
+  deviation_seconds: number;
+  boundary_note: string | null;
+  section_count: number;
+  sections: StoryboardBookSection[];
+};
+
+export type StoryboardBook = {
+  plan_version: number;
+  plan_sha256: string;
+  preview: {
+    mode: string;
+    target_seconds: number;
+    tolerance_seconds: number;
+    episode_count: number;
+    total_planned_seconds: number;
+    episodes: StoryboardBookEpisode[];
+  };
+};
+
+export const generateStoryboardBook = (projectId: string, body: {
+  episode_count: number; target_seconds: number; tolerance_seconds: number,
+}) => api<StoryboardBook>(`/projects/${projectId}/director/storyboard-book`, json('POST', body));
+
+export const confirmStoryboardBook = (projectId: string, body: {
+  plan_version: number; expected_sha256: string;
+  style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number } | null,
+}) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
+  `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
+
+/** ③ 按集镜头表与一次落镜。 */
+export type EpisodeShotRow = {
+  shot_id: string;
+  position: number;
+  name: string;
+  revision: number;
+  section_id: string | null;
+  story_beat: string;
+  characters: string[];
+  dialogue: Array<{ speaker_id: string; text: string; start_s: number; end_s: number }>;
+  duration_target_s: number;
+  editorial_seconds: number;
+  h3_segment_count: number;
+  h3_generation_seconds: number;
+  internal_cuts: Array<{ start_s: number }>;
+  continuity_mode: 'cut' | 'last_frame' | string;
+  previous_shot_id: string | null;
+  required_asset_ids: string[];
+};
+
+export type EpisodeStoryboardState = {
+  task_id: string | null;
+  status: string | null;
+  state_version?: number;
+  error_code?: string | null;
+  cursor?: number;
+  total_units?: number;
+  episodes: Array<{
+    episode_id: string;
+    order?: number;
+    units: Array<{ index: number; production_section_id: string; state: string;
+                   shot_count: number; material_notices: Array<{ code: string; entity?: string }> }>;
+    shot_ids: string[];
+    status: 'PENDING' | 'IN_PROGRESS' | 'APPLIED' | 'BLOCKED' | string;
+    blocker?: {
+      status: string; failed_role: string | null; failed_task_id: string | null;
+      rejections: Array<{ role: string; code: string; rejection_reason_code?: string;
+                          external_outcome?: string }>;
+    } | null;
+  }>;
+};
+
+export const fetchDirectorStoryboardState = (projectId: string) =>
+  api<EpisodeStoryboardState>(`/projects/${projectId}/director/storyboard/state`);
+
+export const queueDirectorStoryboard = (projectId: string) =>
+  api<{ task_id: string; status: string; replayed: boolean }>(
+    `/projects/${projectId}/director/storyboard/generate`, json('POST', {}));
+
+export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
+  api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number }>(
+    `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
+
+export const confirmEpisodeShots = (projectId: string, episodeId: string) =>
+  api<{ plan_version: number; episode_id: string; shot_ids: string[] }>(
+    `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/confirm`,
+    json('POST', {}));
+
+export const retryEpisodeStoryboard = (projectId: string, episodeId: string, expectedStateVersion: number) =>
+  api<{ task_id: string; status: string; episode_id: string }>(
+    `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/retry`,
+    json('POST', { expected_state_version: expectedStateVersion }));
+
+export const editEpisodeShotRow = (projectId: string, shotId: string, body: {
+  expected_revision: number; duration_target_s?: number; continuity_mode?: 'cut' | 'last_frame',
+}) => api<{ shot_id: string; revision: number; changed: boolean }>(
+  `/projects/${projectId}/director/storyboard/shots/${shotId}`, json('PATCH', body));
+
+/** ④ 按镜头素材清单：匹配主素材 + 用户决策 + 送素材中心。 */
+export type ShotMaterialRequirement = {
+  requirement_id: string;
+  family: 'character' | string;
+  entity_id: string | null;
+  name: string | null;
+  description: string;
+  critical: boolean;
+  optional: boolean;
+  used_shot_ids: string[];
+  used_shot_count: number;
+  used_episodes: string[];
+  matched_master: { asset_id: string; sha256: string; entity_id: string } | null;
+  status: 'matched' | 'missing' | string;
+};
+
+export type DerivedShotMaterials = {
+  plan_revision_id: string;
+  replayed: boolean;
+  expected_snapshot: string;
+  requirements: ShotMaterialRequirement[];
+  shot_count: number;
+};
+
+export const deriveShotMaterials = (projectId: string, episodeIds: string[] | null) =>
+  api<DerivedShotMaterials>(`/projects/${projectId}/director/materials/derive`,
+    json('POST', { episode_ids: episodeIds }));
+
+/** ③ 后台分镜任务的暂停/继续（复用故事任务控制入口，带状态版本 fencing）。 */
+export const controlDirectorStoryboardTask = (projectId: string, taskId: string,
+  action: 'pause' | 'resume' | 'cancel', expectedStateVersion: number) =>
+  api<Record<string, unknown>>(`/projects/${projectId}/story-preparation/tasks/${taskId}/${action}`,
+    json('POST', { expected_state_version: expectedStateVersion }));

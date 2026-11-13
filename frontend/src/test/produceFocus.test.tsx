@@ -28,10 +28,11 @@ describe('制作页单导航', () => {
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 3 阶段：镜头拆解/);
-    expect(screen.getByLabelText('粘贴完整剧本文本')).toBeInTheDocument();
+    const stagePanel = await screen.findByText(/一次生成，按集落镜/);
+    expect(stagePanel).toBeInTheDocument();
     await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
-    // 切走后分镜面板仍在 DOM（挂载不卸载），运行中的链不中断。
-    expect(screen.getByLabelText('粘贴完整剧本文本')).toBeInTheDocument();
+    // 切走后分镜面板仍在 DOM（挂载不卸载），后台分镜任务不中断。
+    expect(screen.getByText(/一次生成，按集落镜/)).toBeInTheDocument();
     await gotoDirectorPage(user, /第 6 阶段：视频生产/);
     expect(screen.getByText(/⑥ 排产与一键开拍/)).toBeInTheDocument();
     expect(screen.getByText(/⑥ 进度与结果 ·/)).toBeInTheDocument();

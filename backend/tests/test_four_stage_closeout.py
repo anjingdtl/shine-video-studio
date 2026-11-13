@@ -711,8 +711,14 @@ def test_f05_the_crew_lane_really_consults_the_persisted_consent(api, monkeypatc
 
     def complete(self, db, role, **kwargs):
         sent.append(role)
-        value = chain([SimpleNamespace(content=kwargs["system"]),
-                       SimpleNamespace(content=kwargs["user"])], kwargs["schema"])
+        # The crew lane now sends the Call Governor's compiled request verbatim;
+        # read the same bytes from it so the double still sees what left.
+        pre = kwargs.get("precompiled")
+        system = pre.system if pre is not None else kwargs["system"]
+        user = pre.user if pre is not None else kwargs["user"]
+        schema = pre.schema if pre is not None else kwargs["schema"]
+        value = chain([SimpleNamespace(content=system),
+                       SimpleNamespace(content=user)], schema)
         return LLMResponse("", copy.deepcopy(value), "transport-double", 0)
 
     monkeypatch.setattr(Gateway, "complete_for_role", complete)

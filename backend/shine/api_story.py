@@ -445,9 +445,14 @@ def resend_unknown_subtask(project_id: str, task_id: str, body: ResendUnknownBod
 def control(project_id: str, task_id: str, action: str, body: TaskControl, actor: Operator, db: DBSession):
     db.execute(text("BEGIN IMMEDIATE"))
     row = db.get(AgentTaskRecord, task_id)
-    if not row or row.project_id != project_id or row.role_id not in {story.OUTLINE_RUN, story.SECTION_RUN}:
+    from shine.director.streamline import DIRECTOR_STORYBOARD_RUN
+
+    if not row or row.project_id != project_id or row.role_id not in {
+            story.OUTLINE_RUN, story.SECTION_RUN, DIRECTOR_STORYBOARD_RUN}:
         raise HTTPException(404, "STORY_TASK_NOT_FOUND")
     if action not in {"pause", "cancel", "resume", "reconcile", "replace-unknown", "retry"}:
+        raise HTTPException(422, "STORY_ACTION_UNKNOWN")
+    if row.role_id == DIRECTOR_STORYBOARD_RUN and action not in {"pause", "resume", "cancel"}:
         raise HTTPException(422, "STORY_ACTION_UNKNOWN")
     if action == "replace-unknown":
         raise HTTPException(409, "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")

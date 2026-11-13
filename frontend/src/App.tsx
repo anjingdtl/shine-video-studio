@@ -31,6 +31,7 @@ import VideoLibraryPanel from './components/VideoLibraryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
+import { EpisodeStoryboardPanel, ShotMaterialsPanel, StoryboardBookPanel } from './components/StreamlinePanels';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
 import { Meter } from './components/Meter';
@@ -893,37 +894,22 @@ function App() {
                 {directorPageIntro(
                   '第 2 阶段',
                   <>把剧本切成<em>能拍的集。</em></>,
-                  '先按场次分集，再冻结风格；两个都确认后才能拆镜头。',
+                  '四个决定（风格、类型、集数、每集秒数）生成分镜书；一次确认同时定稿分集与风格。',
                   <>
                     <span className="head-chip">{journey?.episode_plan ? `${journey.episode_plan.episodes} 集` : '分集待确认'}</span>
                     <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
                   </>,
                 )}
-                {directorPage === 'assets' && <DirectorProductionRunPanel
-                  key={`plan-${projectId}`}
+                {directorPage === 'assets' && <StoryboardBookPanel
+                  key={`book-${projectId}`}
                   projectId={projectId}
-                  mode="plan"
-                  workflowProfiles={workflowProfiles}
-                  onMessage={report}
-                  onRefresh={() => refreshAll().catch(() => undefined)}
-                />}
-                <StylePanel
-                  key={`style-${projectId}`}
-                  projectId={projectId}
-                  style={style}
-                  setStyle={setStyle}
-                  serverDraft={project.style_draft}
                   currentStyle={currentStyle}
-                  styles={styles}
-                  busy={busy}
-                  onSave={saveStyle}
-                  onFreeze={freezeStyle}
-                  onApplyStyleToAllShots={() => void applyStyleToAllShots()}
-                  onRefreshFreeze={() => void refreshStyleFreeze()}
-                  onDraftApplied={() => { refreshAll().catch(() => undefined); }}
-                  onNavigate={(id) => (id === 'settings' ? goToDirectorSetup('models') : goTo(id))}
                   onMessage={report}
-                />
+                  onConfirmed={() => refreshAll().catch(() => undefined)}
+                />}
+                <p className="empty-inline">
+                  需要逐项微调七个风格维度或按镜头兼容分集？这些专业入口保留在专业模式的「素材与风格 / 项目概览」里。
+                </p>
                 </StageRailProvider>
               </div>
 
@@ -947,17 +933,20 @@ function App() {
                     </span>
                   </summary>
                   <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
-                  <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
-                    backendDisconnected={systemChecked && !apiOnline}
-                    visible={directorPage === 'produce' && focusStage === 'storyboard'}
-                    onNavigate={(page) => page === 'long-story' ? goToDirectorPage('produce', 'assets') : goToDirectorPage(page as DirectorPage)} />
+                  <EpisodeStoryboardPanel key={`ep-storyboard-${projectId}`} projectId={projectId}
+                    onMessage={report} onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
                   {routes.length === 0 && <div className="blocked-callout">
                     <Sparkles size={15} />
-                    <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以手工新建分镜，或</span>
+                    <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以在下方手工新建分镜，或</span>
                     <button type="button" className="btn-text" onClick={() => goToDirectorSetup('models')}>去配置模型服务</button>
                   </div>}
-                  <DirectorStoryboardStage projectId={projectId} onMessage={report}
-                    onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
+                  <details className="advanced-fold">
+                    <summary>手工单镜与整篇分镜（无需模型）</summary>
+                    <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
+                      backendDisconnected={systemChecked && !apiOnline}
+                      visible={directorPage === 'produce' && focusStage === 'storyboard'}
+                      onNavigate={(page) => page === 'long-story' ? goToDirectorPage('produce', 'assets') : goToDirectorPage(page as DirectorPage)} />
+                  </details>
                   </StageRailProvider>
                 </details>
                 <details className="stage-dock produce-focus-section" id="assets-dock" open={focusStage === 'assets'}
@@ -976,16 +965,21 @@ function App() {
                     <AlertTriangle size={15} />
                     <span>分镜要求的素材还没有全部确认为主素材。可以逐项补齐，也可以直接继续——缺的那个图片由 H3 自行生成。</span>
                   </div>}
-                  <MaterialPreparationPanel
-                    key={`material-${projectId}`}
-                    projectId={projectId}
-                    documentsVersion={documentsVersion}
-                    shots={shots}
-                    onMessage={report}
-                    frozenStyle={currentStyle}
-                    storyboardReady={!!stageDone.storyboard}
-                    onPromoted={() => { refreshAll().catch(() => undefined); }}
-                  />
+                  <ShotMaterialsPanel key={`shot-materials-${projectId}`} projectId={projectId}
+                    onMessage={report} onOpenLibrary={() => goToAssets('images')} />
+                  <details className="advanced-fold">
+                    <summary>按场次的素材分析、批次与候选采用（含回绑到镜头）</summary>
+                    <MaterialPreparationPanel
+                      key={`material-${projectId}`}
+                      projectId={projectId}
+                      documentsVersion={documentsVersion}
+                      shots={shots}
+                      onMessage={report}
+                      frozenStyle={currentStyle}
+                      storyboardReady={!!stageDone.storyboard}
+                      onPromoted={() => { refreshAll().catch(() => undefined); }}
+                    />
+                  </details>
                   <AssetPanel
                     assets={assets}
                     busy={busy}

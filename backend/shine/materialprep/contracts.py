@@ -166,11 +166,14 @@ class MaterialVisualDirection(APIModel):
     notes: str = Field(default="", max_length=600)
 
 
-RequirementStrategy = Literal["reuse_master", "upload", "generate", "omit_prop"]
+RequirementStrategy = Literal["reuse_master", "upload", "generate", "omit_prop", "skip"]
 """What the user decided for one requirement.
 
 ``upload`` means a file is on its way or already pending approval, so the item
 must NOT be treated as missing and regenerated behind the user's back.
+``skip`` is the streamline table's decision for an optional (non-character)
+item: nothing is prepared and the missing picture is left to H3, exactly like
+``omit_prop`` but for any optional family.
 """
 
 

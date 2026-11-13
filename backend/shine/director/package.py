@@ -193,6 +193,7 @@ def build_package(
     workflow_profile_id: str,
     plan: DirectorEpisodePlan | None = None,
     scope_shot_ids: list[str] | None = None,
+    episode_ids: list[str] | None = None,
     generation_mode: str | None = None,
     output: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
@@ -206,6 +207,12 @@ def build_package(
     An incomplete package is still built so the person can see what is missing.
     The interactive entry may explicitly fill unbound cast slots before the
     new package snapshots the resulting shot revisions.
+
+    ``episode_ids`` scopes the package to a subset of the plan's episodes
+    (streamline plan §9): a project whose second episode is still being fixed
+    may package and shoot its finished first episode.  Every *selected*
+    episode must be fully materialised; unselected episodes and their shots
+    are simply not part of this package's frozen scope.
 
     ``creative_lineage`` is the four-stage pipeline's contract: when supplied,
     the package pins the exact scene scripts, blueprint and episode contracts
@@ -231,15 +238,32 @@ def build_package(
             "message": basis_problems[0]["message"],
             "blockers": basis_problems,
         })
+    selected_episodes = plan_payload.episodes
+    if episode_ids is not None:
+        known = {episode.episode_id for episode in plan_payload.episodes}
+        unknown = [episode_id for episode_id in episode_ids if episode_id not in known]
+        if unknown:
+            raise HTTPException(409, {"code": "PACKAGE_EPISODE_NOT_IN_PLAN",
+                                      "message": "指定的集不在当前分集方案里", "unknown": unknown})
+        selected_episodes = [e for e in plan_payload.episodes if e.episode_id in set(episode_ids)]
+        if not selected_episodes:
+            raise HTTPException(422, "PACKAGE_EPISODE_SCOPE_EMPTY")
     if plan_payload.mode == "sections":
         # A script-first plan names its scope by sections; it may only be
-        # packaged once every episode was materialised into the shots its
-        # sections really produced.  Shots outside the scope are not part of
-        # this production, so only unknown or missing plan shots are refused.
-        if not plan_payload.materialized():
-            raise HTTPException(409, {"code": "EPISODE_PLAN_NOT_MATERIALIZED",
-                                      "message": "分集方案中的场次尚未全部拆成镜头"})
-        unknown = [shot_id for shot_id in plan_payload.shot_order() if shot_id not in by_id]
+        # packaged once every *selected* episode was materialised into the
+        # shots its sections really produced.  Shots outside the scope are not
+        # part of this production, so only unknown or missing plan shots are
+        # refused.
+        unmaterialized = [e.episode_id for e in selected_episodes if not e.shot_ids]
+        if unmaterialized:
+            raise HTTPException(409, {
+                "code": "EPISODE_PLAN_NOT_MATERIALIZED",
+                "message": "所选范围内这些集还没有全部拆成镜头："
+                           + "、".join(unmaterialized[:10]),
+                "episodes": unmaterialized,
+            })
+        scoped_order = [shot_id for e in selected_episodes for shot_id in e.shot_ids]
+        unknown = [shot_id for shot_id in scoped_order if shot_id not in by_id]
         problems = (["PLAN_REFERENCES_UNKNOWN_SHOTS:" + ",".join(unknown)[:400]] if unknown else [])
     else:
         problems = validate_episode_coverage(plan_payload, coverage_scope)
@@ -292,11 +316,13 @@ def build_package(
         "validated_against": profile.validated_against or {},
     }
     resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
+    scoped_shot_order = [shot_id for e in selected_episodes for shot_id in e.shot_ids] \
+        if plan_payload.mode == "sections" else plan_payload.shot_order()
     if fill_missing_character_bindings and profile.mode.lower() == "ref2va":
         from shine.services import apply_missing_character_bindings
 
         apply_missing_character_bindings(
-            db, project, [by_id[shot_id] for shot_id in plan_payload.shot_order()], actor=created_by,
+            db, project, [by_id[shot_id] for shot_id in scoped_shot_order], actor=created_by,
         )
 
     revision = (db.scalars(
@@ -307,7 +333,7 @@ def build_package(
     ).first() or 0) + 1
 
     episodes: list[dict[str, Any]] = []
-    for planned in plan_payload.episodes:
+    for planned in selected_episodes:
         manifest_shots = [_shot_manifest(db, by_id[shot_id]) for shot_id in planned.shot_ids]
         episode_entry: dict[str, Any] = {
             "episode_id": planned.episode_id,
@@ -343,6 +369,10 @@ def build_package(
             # that names B's script and A's plan is detectable after the fact,
             # not only at the moment it was built.
             "source": plan_payload.source or {},
+            # A scoped build names the episodes it froze; an all-episode build
+            # leaves this absent so old manifests keep their exact shape.
+            **({"selected_episode_ids": [e.episode_id for e in selected_episodes]}
+               if episode_ids is not None else {}),
         },
         "script": _script_ref(db, project),
         "style": style,

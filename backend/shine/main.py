@@ -500,6 +500,10 @@ def create_app(
 
     app.include_router(director_router)
 
+    from shine.api_streamline import router as streamline_router
+
+    app.include_router(streamline_router)
+
     from shine.api_asset_center import router as asset_center_router
 
     app.include_router(asset_center_router)

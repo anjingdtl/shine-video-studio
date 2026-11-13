@@ -205,6 +205,11 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({
       draft_sha256: 'c'.repeat(64), draft_source: null, frozen_source: null,
     }) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard\/state$/, respond: () => jsonResponse({ task_id: null, status: null, episodes: [] }) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/outline$/, respond: () => jsonResponse({ artifact_id: null, markdown: '', questions: [], confirmed: false }) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/material-preparation$/, respond: () => jsonResponse({ plan_revision_id: null, requirements: [] }) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/shots$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/jobs$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/events/, respond: () => jsonResponse({ items: [], total: 0, limit: 30, offset: 0 }) },

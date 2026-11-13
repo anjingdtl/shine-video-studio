@@ -592,6 +592,21 @@ def _pinned_profile(factory, task_id: str) -> tuple[ProviderProfile | None, str 
 
 
 def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):
+    """One durable unit per tick; the director streamline run follows story tasks.
+
+    The resident Worker already calls this entry every tick, so the streamline
+    storyboard run is dispatched here instead of touching the pinned worker.
+    """
+    if _run_pending_story_unit(factory, settings, worker_id, gateway=gateway,
+                               heartbeat_fn=heartbeat_fn):
+        return True
+    from shine.director.streamline import run_pending_director_storyboard
+
+    return run_pending_director_storyboard(factory, settings, worker_id,
+                                           gateway=gateway, heartbeat_fn=heartbeat_fn)
+
+
+def _run_pending_story_unit(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):
     """One durable unit per tick, with no database writer held over a model call."""
     gateway = gateway or LLMGateway(SecretStore(settings.secret_store_dir or settings.data_dir / "secrets"))
     now = utcnow()
@@ -832,10 +847,12 @@ def _shot_state(db, project_id, shot_id, position):
 def _section_apply_evidence(db, project_id, production_section_id):
     """The applied shots of one section, from whichever ledger produced them.
 
-    Two entries write storyboards: the section runner (story_section_run) and
-    the four-stage per-volume draft ledger.  Both end in the same apply
-    receipts, so the newer evidence wins; a section neither entry applied
-    stays missing instead of borrowing shots that merely exist in the project.
+    Three entries write storyboards now: the section runner
+    (story_section_run), the four-stage per-volume draft ledger, and the
+    director streamline's whole-plan run (director_storyboard_run).  All end
+    in the same apply receipts, so the newer evidence wins; a section no entry
+    applied stays missing instead of borrowing shots that merely exist in the
+    project.
     """
     from shine.models import AppSetting
 
@@ -855,6 +872,33 @@ def _section_apply_evidence(db, project_id, production_section_id):
                 run_missing.append({"unit_start_offset": unit.get("start_offset"), "reason": "STORYBOARD_NOT_APPLIED"})
                 continue
             run_shots.extend(str(shot_id) for shot_id in receipt.value.get("shot_ids", []))
+    # The director streamline's run is the third writer; it uses the same
+    # unit/result shape the section runner uses, so the newest of the two
+    # run-shaped ledgers wins for this section.
+    from shine.director.streamline import DIRECTOR_STORYBOARD_RUN
+
+    director_run = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
+    ).order_by(AgentTaskRecord.created_at.desc())).first()
+    if director_run is not None and (run is None
+                                     or director_run.created_at > run.created_at):
+        trace = director_run.trace or {}
+        units = [u for u in trace.get("units", []) if u.get("production_section_id") == production_section_id]
+        results = {(r.get("unit") or {}).get("start_offset"): r for r in trace.get("results", [])}
+        shots: list[str] = []
+        missing: list[dict] = []
+        for unit in units:
+            result = results.get(unit.get("start_offset"))
+            applied = ((result or {}).get("apply") or {})
+            shot_ids = [str(shot_id) for shot_id in applied.get("shot_ids", [])]
+            if not shot_ids:
+                missing.append({"unit_start_offset": unit.get("start_offset"),
+                                "reason": "STORYBOARD_NOT_APPLIED"})
+                continue
+            shots.extend(shot_ids)
+        if shots or (units and not run_shots):
+            run, run_shots, run_missing, run_at = director_run, shots, missing, director_run.created_at.isoformat()
     four_units: list[dict] = []
     for ledger in db.scalars(select(AppSetting).where(
             AppSetting.key.like(f"four-stage-storyboard-units:{project_id}:%"))).all():
@@ -871,7 +915,7 @@ def _section_apply_evidence(db, project_id, production_section_id):
         if receipt is None or not (receipt.value or {}).get("shot_ids"):
             four_missing.append({"unit_id": unit.get("unit_id"), "reason": "STORYBOARD_NOT_APPLIED"})
             continue
-        four_shots.extend(str(shot_id) for shot_id in (receipt.value or {}).get("shot_ids", []))
+        four_shots.extend(str(shot_id) for shot_id in receipt.value.get("shot_ids", []))
         four_at = max(four_at, unit.get("updated_at") or "")
     if four_shots and (not run_shots or four_at > run_at):
         return {"shot_ids": four_shots, "missing": four_missing, "run": run}

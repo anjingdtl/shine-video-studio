@@ -122,6 +122,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   // A deep link names one exact package; the selection follows it.
   useEffect(() => { setSelectedPackageId(packageId ?? ''); }, [packageId]);
   const [episodePage, setEpisodePage] = useState(0);
+  /** 包范围：null 表示跟随默认（全部已确认分镜的集）；手动勾选后按勾选集合。 */
+  const [scopeIds, setScopeIds] = useState<string[] | null>(null);
   /** 进展日志只渲染最近几条：记录可以一直增长，页面高度不能跟着长。 */
   const [eventLimit, setEventLimit] = useState(8);
   const mounted = useRef(true);
@@ -148,6 +150,12 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const canPlan = planMode === 'sections' ? outlineConfirmed : shotCount > 0;
   const latestPlan = plans[0] ?? null;
   const confirmedPlan = plans.find((row) => row.status === 'CONFIRMED') ?? null;
+  const storyboardFacts = (journey?.stages.find((stage) => stage.id === 'storyboard')?.facts ?? {}) as {
+    ready_episode_ids?: string[];
+  };
+  const readyEpisodeIds = storyboardFacts.ready_episode_ids ?? [];
+  const planEpisodeIds = (confirmedPlan ?? latestPlan)?.payload.episodes.map((row) => row.episode_id) ?? [];
+  const effectiveScope = scopeIds ?? readyEpisodeIds;
   const latestPlanIsSections = latestPlan?.payload.mode === 'sections';
   const latestPlanMaterialized = !!latestPlan && latestPlan.payload.episodes.every((row) => row.shot_ids.length > 0);
   // The package the person is looking at: the one they asked for, or the
@@ -277,6 +285,7 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       generation_mode: profileMode,
       fill_missing_character_bindings: profileMode === 'Ref2VA',
       policy: { batch_shot_limit: 6, max_repairs_per_shot: 2 },
+      episode_ids: effectiveScope.length ? effectiveScope : null,
     }), '导演包已生成，请查看就绪检查后确认');
   };
   const confirmPackage = () => {
@@ -318,8 +327,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     : null;
   const buildPackageAction: RailAction = {
     label: '生成导演包', onClick: () => void buildPackage(), loading: busy === 'package',
-    disabled: busyAny || !confirmedPlan || !profileId,
-    disabledReason: !profileId ? '先在基础配置登记本机生成方案' : !confirmedPlan ? '先确认分集方案，才能生成导演包' : undefined,
+    disabled: busyAny || !confirmedPlan || !profileId || effectiveScope.length === 0,
+    disabledReason: !profileId ? '先在基础配置登记本机生成方案' : !confirmedPlan ? '先确认分集方案，才能生成导演包' : effectiveScope.length === 0 ? '没有已确认分镜的集可以打包' : undefined,
     icon: <LockKeyhole size={14} />,
   };
   const confirmPackageAction: RailAction | null = latestPackage && latestPackage.status !== 'CONFIRMED'
@@ -494,11 +503,31 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
-          {!railPresent && <button className="btn-secondary" disabled={busy !== '' || !confirmedPlan} onClick={buildPackage}>
+          {!railPresent && <button className="btn-secondary" disabled={busy !== '' || !confirmedPlan || effectiveScope.length === 0} onClick={buildPackage}>
             <LockKeyhole size={13} /> 生成导演包
           </button>}
           {!confirmedPlan && <span className="run-hint">先确认分集方案，才能生成导演包。</span>}
         </div>
+
+        {planEpisodeIds.length > 0 && <div className="run-binding-row package-scope-row">
+          <span>包范围：</span>
+          {(confirmedPlan ?? latestPlan)?.payload.episodes.map((episode) => {
+            const id = episode.episode_id;
+            const ready = readyEpisodeIds.includes(id);
+            return <label key={id} className="head-chip">
+              <input type="checkbox" checked={effectiveScope.includes(id)} disabled={!ready || busy !== ''}
+                onChange={() => {
+                  const base = scopeIds ?? readyEpisodeIds;
+                  const next = base.includes(id) ? base.filter((row) => row !== id) : [...base, id];
+                  setScopeIds(planEpisodeIds.filter((row) => next.includes(row)));
+                }} />
+              {episode.title || id}{!ready ? '（分镜未确认）' : ''}
+            </label>;
+          })}
+          {effectiveScope.length < planEpisodeIds.length && <span className="run-hint">
+            只打包勾选的集；未确认的集等分镜确认后可单独打包。
+          </span>}
+        </div>}
 
         {latestPackage && <div className="run-package">
           <div className="run-package-head">

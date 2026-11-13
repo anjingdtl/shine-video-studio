@@ -998,12 +998,34 @@ class FilmAgentDispatcher:
                 text_consent.guard(project_id, source.get("document_id") or body.consent_document_id,
                                    source.get("document_sha256") or body.consent_document_sha256,
                                    role, text_consent.fingerprint(profile), self.gateway)(db)
-            response = self.gateway.complete_for_role(
-                db,
-                role,
+            # The five crew roles share the literary chain's one call-budget
+            # calculation (streamline plan §6.3): the rendered request is
+            # measured exactly once, the completion budget follows the 60%
+            # hard-cap rule with the role's own ceiling, and a request that
+            # cannot fit the window is refused by name before it is sent.
+            from shine.literary.budget import plan_call_budget
+            from shine.literary.requests import compile_request
+
+            crew_request = compile_request(
                 system=system_prompt,
                 user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
                 schema=wire_contract.model_json_schema(),
+            )
+            crew_budget = plan_call_budget(
+                bounded_config, crew_request, purpose="structured",
+                output_ceiling=agent_output_limit,
+            )
+            task.trace = {**task.trace, "call_budget": crew_budget.as_dict()}
+            db.commit()  # the approved budget is durable evidence before the call
+            if not crew_budget.fits:
+                raise ValueError(str((crew_budget.refusal or {}).get("code")
+                                     or "LLM_CREATIVE_CONTEXT_OVERFLOW"))
+            response = self.gateway.complete_for_role(
+                db,
+                role,
+                precompiled=crew_request,
+                budget={"completion_cap": crew_budget.output_request_tokens,
+                        "streaming": crew_budget.streaming},
                 on_progress=record_progress,
             )
             task.trace = {**task.trace, "received_result_sha256": digest(response.parsed),
@@ -1023,8 +1045,21 @@ class FilmAgentDispatcher:
                 # Immutable user facts are owned by the application, so the
                 # model need not echo them just to reproduce the snapshot.
                 response_data = {**response_data, "locked_story_facts": body.locked_story_facts}
-            proposal = (bind_input_judgments(response_data, context) if role == "qc_reviewer"
-                        else contract.model_validate(response_data))
+            if role == "qc_reviewer":
+                proposal = bind_input_judgments(response_data, context)
+                salvage_notes: list[str] = []
+            else:
+                # A complete proposal inside a slightly wrong envelope is kept
+                # (streamline plan §6.2): the local normalisation only drops
+                # unknown keys and fills documented aliases, never content.
+                # An answer that stays unusable re-raises the original
+                # ValidationError, so the refusal code stays honest.
+                from shine.agents.crew_salvage import parse_with_salvage
+
+                proposal, salvage_notes = parse_with_salvage(response_data, contract)
+            if salvage_notes:
+                task.trace = {**task.trace, "salvage_notes": salvage_notes}
+                db.commit()
             proposal = canonicalize_script_character_asset_ids(proposal, context["assets"])
             validate_output(role, proposal, body, inputs, context)
             if role == "editor" and body.tool == "edit_intent" and isinstance(proposal, EditIntentPlan):
@@ -1193,6 +1228,11 @@ class FilmAgentDispatcher:
                 safe_detail = (
                     detail if isinstance(detail, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", detail) else None
                 )
+                # The refusal is persisted without the exception text, but the
+                # operator log still needs the cause: an undiagnosable
+                # NOT_SENT used to hide the real broken step.
+                logger.warning("film_crew_pre_request_failed role=%s safe_detail=%s exc_type=%s",
+                               role, safe_detail, type(exc).__name__, exc_info=True)
                 task.status = "REJECTED"
                 task.state_version += 1
                 task.error_code = "AGENT_PRE_REQUEST_FAILED"

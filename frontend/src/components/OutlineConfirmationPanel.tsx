@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, json } from '../api';
+import { api, json, reviseDirectorOutline } from '../api';
 import { ScriptTextConsent } from './ScriptTextConsent';
 import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
 import { useStageRail, useRailPresent } from './StageRail';
@@ -48,11 +48,25 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const submitting = useRef(false);
   const [problem, setProblem] = useState('');
   const [scriptwriterAllowed, setScriptwriterAllowed] = useState(false);
+  // ① 收束后的可编辑正文：直接改主线、人物、场次顺序或保留悬念，
+  // 一次确认即定稿；疑问是提示，不再是必答项。
+  const [markdown, setMarkdown] = useState('');
+  const [outlineSha, setOutlineSha] = useState('');
+  const [outlineArtifactId, setOutlineArtifactId] = useState('');
 
   const load = useCallback(async () => {
     const rows = await api<StoryTask[]>(
       `/projects/${projectId}/story-preparation?document_id=${documentId}`);
     setTasks(rows);
+    try {
+      const body = await api<{ artifact_id: string | null; sha256?: string; markdown: string }>(
+        `/projects/${projectId}/director/outline`);
+      if (body.artifact_id) {
+        setOutlineArtifactId(body.artifact_id);
+        setOutlineSha(body.sha256 ?? '');
+        setMarkdown((current) => current || body.markdown);
+      }
+    } catch { /* the editable body is an enhancement, not a gate */ }
   }, [projectId, documentId]);
 
   useEffect(() => { void load().catch(() => undefined); }, [load]);
@@ -92,14 +106,24 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     expected_document_hash: documentHash,
     locked_facts: lockedFacts,
   })), '大纲任务已排队；关掉页面也会由常驻 Worker 继续。');
-  const confirmOutline = () => void act(() => api(
-    `/projects/${projectId}/story-preparation/outlines/${outline?.artifact_id}/confirm`,
-    json('POST', { expected_sha256: outline?.sha256 })), '大纲已确认，可以进入第 2 阶段分集。');
+  const saveRevision = () => void act(async () => {
+    const body = await reviseDirectorOutline(projectId, markdown, outlineSha);
+    setOutlineArtifactId(body.artifact_id);
+    setOutlineSha(body.sha256);
+  }, '修改已保存为新一版大纲草稿；确认后生效。');
+  const confirmOutline = () => void act(() => (
+    outlineArtifactId && outlineSha
+      ? api(`/projects/${projectId}/director/outline/confirm`,
+          json('POST', { artifact_id: outlineArtifactId, expected_sha256: outlineSha }))
+      : api(`/projects/${projectId}/story-preparation/outlines/${outline?.artifact_id}/confirm`,
+          json('POST', { expected_sha256: outline?.sha256 }))),
+    '大纲已确认，可以进入第 2 阶段分集。');
   const resumeOutline = () => void act(() => api(
     `/projects/${projectId}/story-preparation/tasks/${outlineTask?.task_id}/resume`,
     json('POST', { expected_state_version: outlineTask?.state_version })), '大纲任务已恢复。');
 
-  // ① 创意与剧本的顺序主操作：提取大纲 → 确认大纲 → （已确认后为空）。
+  // ① 创意与剧本的顺序主操作：提取大纲 → （直接编辑正文）→ 确认大纲。
+  //    疑问是提示不是必答项：确认动作会把当前疑问列表作为「保留的悬念」记入审计。
   const needsConsentResume = outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry
     && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED';
   let outlinePrimary: RailAction | null = null;
@@ -113,8 +137,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         : blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined };
   } else if (!outline.approved) {
     outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
-      disabled: busy || outline.stale || outline.payload.questions.length > 0,
-      disabledReason: outline.payload.questions.length > 0 ? '有创作问题待你过目（可在内容区按当前设定确认）' : undefined };
+      disabled: busy || outline.stale };
   } else {
     // 已确认后仍要留修订路径：补充锁定事实 → 重新提取。否则「补充锁定事实后
     // 重新生成」的提示没有可点的入口。
@@ -142,9 +165,12 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
 
     <ScriptTextConsent projectId={projectId} documentId={documentId}
       expanded={!scriptwriterAllowed} onScriptwriterAccess={setScriptwriterAllowed} />
-    <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新的大纲输入）</span>
-      <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
-    </label>
+    <details className="advanced-fold">
+      <summary>锁定事实（高级：每行一条；变更会创建新的大纲输入并重新提取）</summary>
+      <label className="material-field"><span>补充锁定事实</span>
+        <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
+      </label>
+    </details>
     {!railPresent && <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
       onClick={extractOutline}>
       {busy ? '提交中…' : '后台提取并归并总体大纲'}
@@ -178,33 +204,26 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
 
     {outline && <div className="outline-body">
       <b>大纲版本 {outline.artifact_id.slice(0, 8)} · {outline.approved ? '你已确认' : '待你审阅'}</b>
-      <p>{outline.payload.summary}</p>
-      <details><summary>主线、人物、关系、时间线与锁定事实</summary>
-        <p>{outline.payload.story_line.join(' / ')}</p>
-        <p>{outline.payload.characters.map((c) => `${c.name}（${c.entity_id}）`).join('、')}</p>
-        <p>{outline.payload.relationships.join(' / ')}</p>
-        <p>{outline.payload.timeline.join(' / ')}</p>
-        <ul>{outline.payload.locked_facts.map((f, index) => <li key={index}>{f}</li>)}</ul>
-      </details>
-      {outline.payload.questions.length > 0 && <div role="alert">
-        <p>仍有待确认事实：{outline.payload.questions.join('；')}。</p>
-        <p>补充锁定事实后重新生成；如果这些疑问是你有意保留的悬念，可以按当前设定确认，确认记录会写下你接受的全部疑问。</p>
+      {markdown && <>
+        <p className="run-hint">
+          正文可以直接改：主线、人物、场次顺序或保留悬念都行。改完先保存为新一版，
+          再点一次「确认这版总体大纲」；确认后的正文就是分集、分镜和导演包的共同依据。
+        </p>
+        <textarea className="outline-editor" value={markdown} rows={14} disabled={busy}
+          onChange={(event) => setMarkdown(event.target.value)} />
+        <div className="outline-actions">
+          <button type="button" className="btn-secondary" disabled={busy || !outlineSha}
+            onClick={saveRevision}>保存修改为新版本</button>
+        </div>
+      </>}
+      {outline.payload.questions.length > 0 && <div className="notice" role="note">
+        <p>模型疑问（可保留的悬念，不影响确认）：{outline.payload.questions.join('；')}。</p>
       </div>}
       {!outline.approved && <div className="outline-actions">
         {!railPresent && <button type="button" className="btn-primary"
-          disabled={busy || outline.stale || outline.payload.questions.length > 0}
+          disabled={busy || outline.stale}
           onClick={confirmOutline}>
           确认这版总体大纲
-        </button>}
-        {outline.payload.questions.length > 0 && <button type="button" className="btn-secondary"
-          disabled={busy || outline.stale || !outline.questions_sha256}
-          onClick={() => void act(() => api(
-            `/projects/${projectId}/story-preparation/outlines/${outline.artifact_id}/confirm`,
-            json('POST', {
-              expected_sha256: outline.sha256,
-              acknowledge_questions_sha256: outline.questions_sha256,
-            })), '已按当前设定确认，疑问保留为悬念。')}>
-          按当前设定确认（这些疑问保留为悬念）
         </button>}
       </div>}
     </div>}

@@ -2244,3 +2244,87 @@ html[data-theme='dark'] .toast{background:#2a2b23;border-color:#3f4036;color:#d6
 .material-character-definition .material-canonical-name{font-weight:600;color:var(--ink-mid)}
 .material-character-definition details summary{cursor:pointer;font-size:var(--fs-caption);color:var(--ink-mid)}
 .material-character-definition ul{margin:4px 0 0;padding-left:16px;font-size:var(--fs-caption)}
+
+/* ======================= 导演模式收束 ①–④（streamline 2026-11-13） ======================= */
+
+/* ① 可编辑大纲正文 */
+.outline-editor {
+  width: 100%;
+  min-height: 320px;
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.7;
+  padding: 12px;
+  border: 1px solid var(--border, #d8d2c4);
+  border-radius: 10px;
+  background: var(--surface-raised, #fffdf8);
+  resize: vertical;
+}
+
+/* ② 分镜书：四个设置 + 预览 */
+.book-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: end;
+  margin: 12px 0;
+}
+.book-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  min-width: 130px;
+}
+.book-preview {
+  margin-top: 14px;
+  border-top: 1px dashed var(--border, #d8d2c4);
+  padding-top: 12px;
+}
+.book-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.book-section {
+  padding: 6px 0 6px 14px;
+  border-left: 2px solid var(--border, #d8d2c4);
+  margin: 6px 0;
+}
+.book-section ul { margin: 4px 0; padding-left: 18px; }
+.book-dialogue { color: var(--muted, #6f6a5e); font-size: 0.85rem; }
+
+/* ③ 按集镜头表 */
+.episode-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+.episode-dock { margin: 10px 0; }
+.episode-body { padding: 10px 4px 14px; }
+.shot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin: 10px 0;
+}
+.shot-table th, .shot-table td {
+  border-bottom: 1px solid var(--border, #e4ded0);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.shot-table th { font-weight: 600; color: var(--muted, #6f6a5e); white-space: nowrap; }
+.shot-table .shot-beat { max-width: 320px; }
+.shot-table .muted { color: var(--muted, #8a8477); }
+.shot-table td input[type='number'] { width: 64px; }
+.shot-row-actions { white-space: nowrap; }
+
+/* ④ 素材清单决策表 */
+.material-table select { min-width: 190px; }
+.ok-hint { display: flex; align-items: center; gap: 6px; }
