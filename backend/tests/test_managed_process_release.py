@@ -192,6 +192,8 @@ def test_an_interrupted_startup_keeps_the_identity_it_needs_to_be_released(api, 
     with factory.begin() as db:
         lease = _lease(db)
         _record(db, stage="LISTENING", lease_id=lease.id)
+        row = db.get(AppSetting, "renderer-startup:renderer-1")
+        row.value = {**row.value, "owner_pid": 999999, "owner_birth": "1"}
     monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
     monkeypatch.setattr(handoff_startup, "inspect_named_group", lambda name, pid, birth: False)
     findings = handoff_startup.reconcile_managed_startups(factory, None, terminate=lambda name: {})
@@ -203,6 +205,21 @@ def test_an_interrupted_startup_keeps_the_identity_it_needs_to_be_released(api, 
         assert value["process"]["job_name"] == JOB_NAME
         assert value["lease_id"]
         assert value["port"] == 8188
+
+
+def test_an_interrupted_startup_without_worker_identity_is_not_reconciled(api, monkeypatch):
+    from shine.comfyops import handoff_startup
+
+    _, factory, _ = api
+    with factory.begin() as db:
+        lease = _lease(db)
+        _record(db, stage="LISTENING", lease_id=lease.id)
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    assert handoff_startup.reconcile_managed_startups(
+        factory, None, terminate=lambda name: pytest.fail("unverified worker"),
+    ) == []
+    with factory() as db:
+        assert db.get(AppSetting, "renderer-startup:renderer-1").value["stage"] == "LISTENING"
 
 
 def test_an_uncertain_startup_is_released_once_the_renderer_is_provably_gone(api, monkeypatch):
