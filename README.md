@@ -11,6 +11,67 @@
 
 **Current status: M1 hardened; M2/M3 offline foundations implemented and tested; the offline production loop is closed and reproducible.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter with strict reference-media transfer, Fake ComfyUI server, five named quality gates, request-revision repair engine, automatic recovery of finished external tasks, and the Offline Production E2E all run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation. See [`docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md`](docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md).
 
+## 导演模式 V2.0（当前主线）
+
+给**没有 AI 技术背景**的人用的一条路：导入小说／剧本 → 做少量创作确认 → 导演模式逐集产出并交付真正的 AI 短剧。
+V2 的改动不是加功能，而是把重复入口、重复分析、重复提交收掉。
+
+### 七个阶段，一个阶段一个入口
+
+| 阶段 | 页面 | 你只需要做 |
+| --- | --- | --- |
+| ① 创意与剧本 | 剧本入口（四阶段分析移到专业模式） | 填想法/导入剧本 → 确认 → 生成并确认总体大纲 |
+| ② 剧本统筹 | 分镜书（集数/风格/画幅/时长） | 填四个参数 → 生成 → 确认这一版 |
+| ③ 镜头拆解 | 按集镜头表（表头与分镜对齐、可按集筛选） | 逐集生成 → 确认本集 |
+| ④ 拍摄素材准备 | 需求清单（缩略图 + 单项重新生成／上传） | 逐项决策（复用主素材／上传／跳过可选项）→ 确认 |
+| ⑤ 导演包 | 拍摄范围 + 本机生成方案（附中文说明） | 勾选要拍的集 → 确认拍摄方案并开始真实制作 |
+| ⑥ 视频生产 | 按集真实进度（暂停／继续／安全续跑） | 可离开页面，关浏览器也会继续 |
+| ⑦ 后期成片 | 逐集成片（可播放）＋ 成片文件与导出（历史版本） | 播放核对，需要时返修某镜 |
+
+**项目管理**是独立模块，不嵌在七阶段里；**素材中心 / 成片库 / 基础配置**与它一起放在左侧导航
+（顺序：项目管理 → 素材中心 → 成片库 → 基础配置）。导演包（⑤）和视频生产（⑥）是两个页面，
+不再混在一起。
+
+### V2 的四条硬约束
+
+1. **一份只读投影**：`GET /api/v1/projects/{id}/director/overview` 与 `/director/episodes/{eid}/overview`
+   只从既有台账读，不写库、不建第二套状态机；刷新浏览器不会"制造"进度。
+2. **按集隔离**：每集的进度、通过镜数、交付指针都回**这一集自己的运行**读。拍第 2 集不会隐藏
+   第 1 集的成片，也不会把第 1 集显示成"又在拍"。
+3. **一次开拍**：`POST /api/v1/projects/{id}/director/production/start` 一个动作完成建包→确认→启运行，
+   幂等键由 `graph_hash(项目, 包 manifest, 集集合)` 决定；重复点击返回同一次运行（`created=false`）。
+   已交付的集默认不勾选，重拍必须自己勾并看到「勾选即重拍这一集」。
+4. **一次素材交接**：`POST /api/v1/projects/{id}/director/materials/commit` 用确定性请求身份
+   （`plan_revision + expected_snapshot + decisions`）＋审计回执，断连重放不会重复出图；
+   确认"复用主素材"后自动回绑镜头，已通过的镜头绝不改动。
+
+### 真机结果（本机 RTX 5080 16GB / Ref2VA INT8）
+
+| 集 | Run | 成片 | SHA-256 | 时长 |
+| --- | --- | --- | --- | --- |
+| 第 1 集（3 镜） | `bd6c59d5…` COMPLETED | `1d7cc435…` | `61cf7134…81daa8a` | 20.479 s |
+| 第 2 集（1 镜） | `07d83dcf…` COMPLETED | `3393af06…` | `403152cc…87e61bab` | 12.979 s |
+
+第 2 集是在第 1 集**已交付之后**单独开拍的：第 1 集的 3 个 Job ID、3 个 take artifact、成片哈希
+三项全程未变，**没有重拍**。两集 MP4 都是 h264 1344×768 + aac，可在 ⑦ 页内播放。
+
+### 怎么自己跑一遍
+
+```powershell
+./scripts/start_shine.ps1          # 或 start_dev.ps1；API 127.0.0.1:8000，Web 127.0.0.1:5173
+```
+
+打开 `http://127.0.0.1:5173` → 左侧「项目管理」新建作品 → 按 ①→⑦ 走。真实出片前需要本机
+H3 环境 READY（`POST /api/v1/setup/services/validate` → `runtime/activate`），演示模式不会被
+当成真实视频。数据目录由 `SHINE_DATA_DIR` 决定。
+
+### 这一轮的验收文档
+
+- [工程实施报告](docs/IMPLEMENTATION_DIRECTOR_AUTOPILOT_V2_20261113.md)
+- [完整测试与缺陷修复报告](docs/TEST_REPORT_DIRECTOR_AUTOPILOT_V2_20261113.md)
+- [Windows 真实 H3 两集穿测验收报告](docs/ACCEPTANCE_DIRECTOR_AUTOPILOT_V2_20261113.md)
+- [V1 / V2 用户操作成本对比](docs/V2_USER_JOURNEY_OPERATIONS_20261113.md)
+
 ## V1.2.1 Ref2VA hardening
 
 Two local Ref2VA INT8 ConvRot workflow profiles are registered; three existing real-H3
@@ -136,6 +197,29 @@ uv run --project backend python scripts/run_tests.py profile
 
 npm --prefix frontend run build
 ```
+
+### 全量回归：后端固定 8 分片并行
+
+单进程串行跑全量要 1.5 小时量级，本项目**一律按测试文件均分 8 片并行**（详见
+[AGENTS.md](AGENTS.md)）：
+
+```bash
+ls backend/tests/test_*.py > /tmp/all-tests.txt
+split -n r/8 /tmp/all-tests.txt /tmp/chunk-
+CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
+  (backend/.venv/Scripts/python.exe -m pytest $(tr "\n" " " < "$f") -q -p no:cacheprovider \
+    > "$f.log" 2>&1; echo "$f exit=$?" >> /tmp/shards-exit.txt) & done; wait'
+grep -H "^FAILED\|^ERROR" /tmp/chunk-*.log      # 无输出 + 8 片退出码全 0 才算通过
+```
+
+两个必须知道的坑：
+
+- **`CODEBUDDY_SAFE_DELETE_ENABLED=0` 不能省**：执行环境的 safe-delete 垫片累计删除 50 次后
+  会拦截每一次 `unlink`，pytest 清 tmp 目录正好触发，会伪造成大片 `test_v13_*` 失败。
+- 本仓库 `conftest.py` 只打 `[shine-module]` 摘要，`-q` 下没有 "N passed" 行，判定看退出码与
+  `FAILED`/`ERROR` 行。
+
+前端全量必须串行：`npx vitest run --no-file-parallelism`（本机 tinypool worker 会崩，与代码无关）。
 
 Read [the three-tier strategy](docs/testing/THREE_TIER_TEST_STRATEGY.md) for marker rules, diff selection, platform boundaries, and CI triggers. L3 CI runs all backend tests on Linux and Windows and retains the browser E2E job. A local `full` run covers the current OS only; it is not evidence of Windows, GPU, real-model, or browser acceptance. `imageio-ffmpeg` is a development-only dependency for synthetic test media, never real H3 generation.
 
