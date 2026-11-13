@@ -102,7 +102,9 @@ def test_install_plan_via_setup_endpoint(prep):
     # The installation is a persistent task: the API queues the attempt, the
     # Worker executes it, and the browser re-attaches by attempt id.
     assert exec_result["status"] == "QUEUED" and exec_result["attempt_id"]
+    from shine.comfyops.installation import claim_next_attempt
     from shine.comfyops.installation_worker import run_attempt
+    assert claim_next_attempt(factory, "test-worker") == exec_result["attempt_id"]
     with mock.patch("shine.comfyops.installation_worker.local_execution_enabled", lambda: True):
         stage = run_attempt(factory, "test-worker", exec_result["attempt_id"], settings=settings,
                             installer=AvailableInstaller())
