@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, api, json } from '../api';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 
@@ -71,17 +71,34 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(0);
+  /** 多集拍摄后分段会很长：先按集筛选，再分页。 */
+  const [episodeFilter, setEpisodeFilter] = useState<string>('');
   const reload = useCallback(async () => {
     const result = await api<SegmentState>(`/projects/${projectId}/generation-segments`);
     setState(result);
   }, [projectId]);
   useEffect(() => { void reload().catch((e) => setMessage(String(e))); }, [reload, fingerprint]);
   useEffect(() => { setPage(0); }, [projectId, fingerprint, state.run_id]);
-  const pageCount = Math.max(1, Math.ceil(state.segments.length / PAGE_SIZE));
+  const episodeOptions = useMemo(() => {
+    const seen = new Map<string, { value: string; label: string }>();
+    for (const segment of state.segments) {
+      const value = String(segment.episode_position ?? '');
+      if (!value || seen.has(value)) continue;
+      seen.set(value, {
+        value,
+        label: `第 ${segment.episode_position} 集${segment.episode_title ? ` · ${segment.episode_title}` : ''}`,
+      });
+    }
+    return [...seen.values()].sort((a, b) => Number(a.value) - Number(b.value));
+  }, [state.segments]);
+  const filteredSegments = episodeFilter
+    ? state.segments.filter((segment) => String(segment.episode_position ?? '') === episodeFilter)
+    : state.segments;
+  const pageCount = Math.max(1, Math.ceil(filteredSegments.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
-  const visibleSegments = state.segments.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
-  const firstVisible = state.segments.length ? currentPage * PAGE_SIZE + 1 : 0;
-  const lastVisible = Math.min((currentPage + 1) * PAGE_SIZE, state.segments.length);
+  const visibleSegments = filteredSegments.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const firstVisible = filteredSegments.length ? currentPage * PAGE_SIZE + 1 : 0;
+  const lastVisible = Math.min((currentPage + 1) * PAGE_SIZE, filteredSegments.length);
   const pending = state.segments.some((s) => s.replacement_status && ['QUEUED', 'RUNNING', 'QC_PENDING'].includes(s.replacement_status));
   useEffect(() => {
     if (!pending) return;
@@ -110,11 +127,20 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
   }
   return <section aria-label="H3 生成分段">
     <h3>生成分段</h3>
-    <p>每张卡片是一次 H3 输出。当前作品共 {state.segments.length} 镜，每页最多显示 {PAGE_SIZE} 镜。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。</p>
+    {episodeOptions.length > 1 && <label className="segment-filter">按集筛选
+      <select value={episodeFilter} onChange={(event) => { setEpisodeFilter(event.target.value); setPage(0); }}>
+        <option value="">全部（{state.segments.length} 镜）</option>
+        {episodeOptions.map((option) => <option key={option.value} value={option.value}>
+          {option.label}（{state.segments.filter((segment) => String(segment.episode_position ?? '') === option.value).length} 镜）
+        </option>)}
+      </select>
+    </label>}
+    <p>每张卡片是一次 H3 输出。当前{episodeFilter ? `第 ${episodeFilter} 集` : '作品'}共 {filteredSegments.length} 镜，每页最多显示 {PAGE_SIZE} 镜。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。</p>
     <p>已通过镜头发现画面或声音问题，可点「重新生成此段」排入新的串行制作；旧版本保留。新版本通过质检后，再点「选为当前装配版本」。失败、待核对或租约未对账的镜头，先到「生成进度与检查」查看原任务和错误原因；UNKNOWN 任务只能核对，不能直接重发。</p>
     {!state.segments.length && <p className="material-hint">尚无制作系列。选定生产范围并开拍后，这里显示每个生成分段。</p>}
-    {state.segments.length > PAGE_SIZE && <nav className="segment-pagination" aria-label="生成分段分页">
-      <span>第 {currentPage + 1} / {pageCount} 页 · 显示 {firstVisible}–{lastVisible} / {state.segments.length} 镜</span>
+    {state.segments.length > 0 && !filteredSegments.length && <p className="material-hint">这一集还没有生成分段。</p>}
+    {filteredSegments.length > PAGE_SIZE && <nav className="segment-pagination" aria-label="生成分段分页">
+      <span>第 {currentPage + 1} / {pageCount} 页 · 显示 {firstVisible}–{lastVisible} / {filteredSegments.length} 镜</span>
       <div>
         <button type="button" disabled={currentPage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button>
         <button type="button" disabled={currentPage + 1 >= pageCount} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button>

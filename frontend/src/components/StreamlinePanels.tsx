@@ -425,13 +425,21 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
               </button>)}
           </div>}
           {table && table.shots.length > 0 && <>
-            <table className="shot-table">
+            <div className="shot-table-wrap">
+            <table className="shot-table shot-table-fixed">
+              <colgroup>
+                <col style={{ width: '4%' }} /><col style={{ width: '7%' }} />
+                <col style={{ width: '27%' }} /><col style={{ width: '22%' }} />
+                <col style={{ width: '8%' }} /><col style={{ width: '7%' }} />
+                <col style={{ width: '7%' }} /><col style={{ width: '13%' }} />
+                <col style={{ width: '5%' }} />
+              </colgroup>
               <thead><tr>
                 <th>#</th><th>场次</th><th>画面动作</th><th>对白</th>
-                <th>成片秒</th><th>与上一镜</th><th>镜内切点</th><th>H3 生成</th><th></th>
+                <th>成片秒</th><th>衔接</th><th>切点</th><th>H3 生成</th><th></th>
               </tr></thead>
               <tbody>
-                {table.shots.map((shot) => <tr key={shot.shot_id} className="shot-row">
+                {table.shots.map((shot) => <tr key={shot.shot_id} className="shot-table-row">
                   <td>{shot.position}</td>
                   <td>{shot.section_id ?? '—'}</td>
                   <td className="shot-beat">{shot.story_beat.split('\n')[0].slice(0, 60)}</td>
@@ -456,11 +464,12 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
                           onClick={() => void saveDuration(shot)}>保存</button>
                       : <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
                           onClick={() => setEditing({ shotId: shot.shot_id, duration: String(shot.duration_target_s) })}>
-                          改时长</button>}
+                          改</button>}
                   </td>
                 </tr>)}
               </tbody>
             </table>
+            </div>
             <p className="run-hint">
               本集合计成片时长约 {Math.round(table.total)} 秒；每镜由 {table.shots.length} 个 4–15 秒的 H3 生成片段承载。
             </p>

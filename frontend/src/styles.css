@@ -903,7 +903,7 @@ html[data-theme='dark'] .edl-visual{background:#22231d;border-color:#3d3e34}
 .advanced-fold[open] summary::before{content:'▾'}
 .advanced-fold > *:not(summary){margin:0 14px 14px}
 .ui-director .sidebar{display:none}
-.ui-director .main-content{margin-left:0}
+.ui-director .main-content{margin-left:228px}
 @media (max-width:1100px){.director-step{padding:9px 10px;font-size:var(--fs-body)}}
 /* 窄屏只收起非当前阶段的文字，当前/下一步必须还能读出来 */
 @media (max-width:760px){.director-step .director-step-text{display:none}.director-step{padding:9px 11px}}
@@ -2384,3 +2384,30 @@ html[data-theme='dark'] .episode-card-state.run{background:#1e2831;color:#93b4cc
 .material-row-actions{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
 .material-upload{cursor:pointer;display:inline-flex;align-items:center;gap:4px}
 .material-upload.disabled{opacity:.5;pointer-events:none}
+.segment-filter{display:flex;align-items:center;gap:8px;font-size:var(--fs-caption);color:var(--muted);margin:2px 0 8px}
+.segment-filter select{width:auto;min-width:200px}
+/* ③ 镜头表：表格行不能复用 .shot-row 的 flex 布局，否则表头与内容会错位 */
+.shot-table-wrap{margin:10px 0}
+.shot-table-fixed{table-layout:fixed;width:100%;margin:0}
+.shot-table-fixed th{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.shot-table-fixed td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shot-table-fixed .shot-beat,.shot-table-fixed td:nth-child(4){white-space:normal;line-height:1.35;max-height:2.9em;overflow:hidden}
+.shot-table-fixed .shot-beat{max-width:none}
+.shot-table-row td{vertical-align:top}
+/* 导演模式左侧导航：项目管理 / 素材中心 / 成片库 / 基础配置（不占七阶段序号） */
+.director-sidebar{width:228px;position:fixed;inset:0 auto 0 0;background:var(--sidebar-bg);color:var(--sidebar-ink);display:flex;flex-direction:column;padding:22px 14px 16px;z-index:2}
+.director-sidebar-brand{display:flex;align-items:center;gap:10px;padding:0 8px 28px}
+.director-sidebar-brand b{font-size:17px;letter-spacing:2.4px;display:block}
+.director-sidebar-brand span{display:block;font-size:var(--fs-caption);color:var(--faint);margin-top:3px;letter-spacing:1px}
+.director-sidebar-nav{display:flex;flex-direction:column;gap:3px}
+.director-sidebar-nav button{display:flex;align-items:center;gap:10px;padding:10px 11px;border:0;background:none;color:var(--sidebar-ink-2);border-radius:8px;font-size:var(--fs-body);text-align:left;cursor:pointer;position:relative}
+.director-sidebar-nav button:hover{background:var(--sidebar-bg-2);color:var(--sidebar-ink)}
+.director-sidebar-nav button.active{background:var(--sidebar-bg-3);color:var(--sidebar-ink)}
+.director-sidebar-nav button.active svg{color:var(--sidebar-accent)}
+.director-sidebar-nav button.needs-setup{color:var(--sidebar-accent-2)}
+.director-sidebar-foot{margin-top:auto;border-top:1px solid var(--sidebar-line);padding:14px 8px 0;display:flex;align-items:center;gap:8px;font-size:var(--fs-caption);color:var(--faint)}
+@media(max-width:1050px){.ui-director .main-content{margin-left:190px}.director-sidebar{width:190px}}
+@media(max-width:700px){.ui-director .main-content{margin-left:58px}.director-sidebar{width:58px;padding:16px 6px}.director-sidebar-brand{padding:0 2px 18px;justify-content:center}.director-sidebar-brand>div:last-child{display:none}.director-sidebar-nav button{justify-content:center;padding:12px 6px}.director-sidebar-nav button span,.director-sidebar-foot span{display:none}}
+/* 项目管理首屏按钮不拉满整行 */
+.welcome-row>.btn-primary{width:auto;flex:0 0 auto}
+.welcome-row{gap:16px}

@@ -95,17 +95,36 @@ export function EpisodeCards({ episodes, onAction, compact }: {
   </div>;
 }
 
-/* ============================ ⑤⑥ 唯一开拍入口 ============================ */
+/* ============================ ⑤ 导演包 / ⑥ 视频生产 ============================ */
 
 type ProfileOption = { id: string; name: string; mode: string };
 
-export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo, onMessage, onRefresh }: {
+/** 把工程里的方案名翻译成普通人能懂的说法（原名保留，中文放在括号里）。 */
+export function describeProfileName(name: string): string {
+  const lower = (name || '').toLowerCase();
+  const parts: string[] = [];
+  if (/pdd8|8step|8-step/.test(lower)) parts.push('8 步加速');
+  else if (/pdd|step/.test(lower)) parts.push('多步采样');
+  else parts.push('原生采样');
+  const images = lower.match(/(\d+)img/);
+  if (images) parts.push(`${images[1]} 张参考图`);
+  if (/1aud|audio/.test(lower)) parts.push('1 段参考音频');
+  if (/portrait/.test(lower)) parts.push('竖屏');
+  if (/w6a8|fp8/.test(lower)) parts.push('低显存档');
+  if (/int8/.test(lower)) parts.push('INT8 量化');
+  return parts.join(' · ');
+}
+
+export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo, mode, onMessage, onRefresh, onNavigate }: {
   projectId: string;
   overview: DirectorOverview | null;
   workflowProfiles: ProfileOption[];
   demo: boolean;
+  /** package：第⑤步只做拍摄方案与开拍；run：第⑥步只看真实生产进度。 */
+  mode: 'package' | 'run';
   onMessage?: (message: string, tone?: 'success' | 'error') => void;
   onRefresh?: () => void;
+  onNavigate?: (page: 'package' | 'run') => void;
 }) {
   const railPresent = useRailPresent();
   const [selected, setSelected] = useState<string[]>([]);
@@ -116,16 +135,13 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
   const [touched, setTouched] = useState(false);
   const submitting = useRef(false);
 
-  // A stable empty list matters: a fresh ``[]`` on every render would make the
-  // selection effect below fire forever (state → render → new array → state).
+  // 稳定的空数组：每次渲染新建 [] 会让下面的选择 effect 无限触发。
   const episodes = useMemo(() => overview?.episodes ?? [], [overview]);
   const shootable = useMemo(
     () => episodes.filter((row) => ['READY_TO_SHOOT', 'READY_TO_PACKAGE', 'SHOOTING', 'REVIEW_READY', 'DELIVERED']
       .includes(row.state)).map((row) => row.episode_id),
     [episodes],
   );
-  // The default is "the episodes that can go now"; an explicit choice wins and
-  // is never overwritten by a refresh.
   useEffect(() => {
     if (touched) return;
     setSelected((current) => (current.length === shootable.length
@@ -172,6 +188,7 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
         ? `已开始真实制作：第 ${result.episodes.map((row) => row.position).join('、')} 集，共 ${result.episodes.reduce((sum, row) => sum + row.shot_count, 0)} 镜。`
         : '这次选择已经开拍，返回了同一次运行，没有重复启动。', 'success');
       onRefresh?.();
+      onNavigate?.('run');
     } catch (error) {
       setProblem(describeError(error));
       onMessage?.(describeError(error), 'error');
@@ -179,7 +196,7 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
       submitting.current = false;
       setBusy('');
     }
-  }, [onMessage, onRefresh, profileId, projectId, selected]);
+  }, [onMessage, onNavigate, onRefresh, profileId, projectId, selected]);
 
   const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!run) return;
@@ -196,91 +213,117 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
     }
   };
 
-  const primary: RailAction | null = running
-    ? null
-    : { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
+  const primary: RailAction | null = mode === 'package' && !running
+    ? { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
         onClick: () => void start(),
         loading: busy === 'start',
         disabled: busy !== '' || !selected.length || demo || !profileId,
         disabledReason: demo ? '当前是演示模式：先启用真实制作'
           : !profileId ? '先在基础配置登记本机 H3 生成方案'
             : !selected.length ? '至少选择一集' : undefined,
-        icon: <Clapperboard size={14} /> };
-  useStageRail('director-shoot', { priority: 1, primary }, [selected, busy, demo, profileId, running]);
+        icon: <Clapperboard size={14} /> }
+    : null;
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, profileId, running]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
-  return <div className="shoot-panel">
-    {demo && <div className="blocked-callout">
-      <AlertTriangle size={14} />
-      <span>当前是演示模式：不会生成真视频。先在顶部「启用真实制作」完成本机 H3 校验，再回来开拍。</span>
-    </div>}
+  /* ---------------- ⑤ 导演包：只决定"拍哪几集、用什么方案" ---------------- */
+  if (mode === 'package') {
+    return <div className="shoot-panel">
+      {demo && <div className="blocked-callout">
+        <AlertTriangle size={14} />
+        <span>当前是演示模式：不会生成真视频。先在顶部「启用真实制作」完成本机 H3 校验，再回来开拍。</span>
+      </div>}
 
-    <section className="card section-card">
-      <div className="section-heading">
-        <div>
-          <div className="section-kicker">第 5 阶段 · 拍摄范围</div>
-          <h2>这次要拍哪几集</h2>
-          <p>只把准备好的集纳入本次拍摄；没准备好的集不参与，也不影响其他集。确认后系统会冻结这一版拍摄方案并直接开始真实制作。</p>
+      {running && <section className="card section-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">第 5 阶段 · 已经开拍的运行</div>
+            <h2>这次拍摄正在视频生产里进行</h2>
+            <p>进度、暂停和核对都在「视频生产」页；这里不再重复一份，避免两处按钮互相覆盖。</p>
+          </div>
+          <button type="button" className="btn-secondary" onClick={() => onNavigate?.('run')}>
+            去视频生产看进度
+          </button>
         </div>
-        <span className={`head-chip ${selected.length ? 'ok' : ''}`}>{selected.length} 集已选</span>
-      </div>
+      </section>}
 
-      <div className="shoot-episode-list">
-        {episodes.map((episode) => {
-          const selectable = shootable.includes(episode.episode_id);
-          return <label key={episode.episode_id} className={`shoot-episode ${selectable ? '' : 'disabled'}`}>
-            <input type="checkbox" checked={selected.includes(episode.episode_id)}
-              disabled={!selectable || running || busy !== ''}
-              onChange={() => toggle(episode.episode_id)} />
-            <span>
-              <b>第 {episode.order ?? '—'} 集 · {episode.title || episode.episode_id}</b>
-              <em>{episode.state_label}
-                {episode.shots.confirmed_count ? ` · ${episode.shots.confirmed_count} 镜` : ''}
-                {episode.materials.missing_count ? ` · 缺 ${episode.materials.missing_count} 项必需素材` : ''}</em>
-            </span>
-          </label>;
-        })}
-      </div>
+      <section className="card section-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">第 5 阶段 · 拍摄范围</div>
+            <h2>这次要拍哪几集</h2>
+            <p>只把准备好的集纳入本次拍摄；没准备好的集不参与，也不影响其他集。确认后系统会冻结这一版拍摄方案并直接开始真实制作。</p>
+          </div>
+          <span className={`head-chip ${selected.length ? 'ok' : ''}`}>{selected.length} 集已选</span>
+        </div>
 
-      <label className="shoot-profile">本机生成方案
-        <select value={profileId} disabled={running || busy !== ''}
-          onChange={(event) => setProfileId(event.target.value)}>
-          {ref2va.length === 0 && <option value="">还没有登记 Ref2VA 方案</option>}
-          {ref2va.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
-        </select>
-        <em>只会使用本机已登记的 Ref2VA 方案；不会自动换成演示或其他模型。</em>
-      </label>
+        <div className="shoot-episode-list">
+          {episodes.map((episode) => {
+            const selectable = shootable.includes(episode.episode_id);
+            return <label key={episode.episode_id} className={`shoot-episode ${selectable ? '' : 'disabled'}`}>
+              <input type="checkbox" checked={selected.includes(episode.episode_id)}
+                disabled={!selectable || running || busy !== ''}
+                onChange={() => toggle(episode.episode_id)} />
+              <span>
+                <b>第 {episode.order ?? '—'} 集 · {episode.title || episode.episode_id}</b>
+                <em>{episode.state_label}
+                  {episode.shots.confirmed_count ? ` · ${episode.shots.confirmed_count} 镜` : ''}
+                  {episode.materials.missing_count ? ` · 缺 ${episode.materials.missing_count} 项必需素材` : ''}</em>
+              </span>
+            </label>;
+          })}
+        </div>
 
-      {problem && <p role="alert" className="form-error">{problem}</p>}
-      {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== ''}
-        onClick={() => void start()}>
-        <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
-      </button>}
+        <label className="shoot-profile">本机生成方案
+          <select value={profileId} disabled={running || busy !== ''}
+            onChange={(event) => setProfileId(event.target.value)}>
+            {ref2va.length === 0 && <option value="">还没有登记 Ref2VA 方案</option>}
+            {ref2va.map((row) => <option key={row.id} value={row.id}>
+              {row.name}（{describeProfileName(row.name)}）
+            </option>)}
+          </select>
+          <em>只会使用本机已登记的 Ref2VA 方案；不会自动换成演示或其他模型。</em>
+        </label>
 
-      {blockedEpisodes.length > 0 && <details className="advanced-fold">
-        <summary>{blockedEpisodes.length} 集这次还不能拍（点击看原因）</summary>
-        <ul className="shoot-blocked-list">
-          {blockedEpisodes.map((episode) => <li key={episode.episode_id}>
-            <b>第 {episode.order ?? '—'} 集</b>
-            <span>{episode.state_label}</span>
-            {episode.next_action && <em>{episode.next_action.label}</em>}
-          </li>)}
-        </ul>
-      </details>}
-    </section>
+        {problem && <p role="alert" className="form-error">{problem}</p>}
+        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== ''}
+          onClick={() => void start()}>
+          <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
+        </button>}
 
+        {blockedEpisodes.length > 0 && <details className="advanced-fold">
+          <summary>{blockedEpisodes.length} 集这次还不能拍（点击看原因）</summary>
+          <ul className="shoot-blocked-list">
+            {blockedEpisodes.map((episode) => <li key={episode.episode_id}>
+              <b>第 {episode.order ?? '—'} 集</b>
+              <span>{episode.state_label}</span>
+              {episode.next_action && <em>{episode.next_action.label}</em>}
+            </li>)}
+          </ul>
+        </details>}
+      </section>
+    </div>;
+  }
+
+  /* ---------------- ⑥ 视频生产：只读进度与运行控制 ---------------- */
+  return <div className="shoot-panel">
     <section className="card section-card">
       <div className="section-heading">
         <div>
           <div className="section-kicker">第 6 阶段 · 真实拍摄</div>
-          <h2>{running ? '后台正在逐镜生成' : '还没有在拍的运行'}</h2>
+          <h2>{running ? '后台正在逐镜生成'
+          : run ? (run.status === 'COMPLETED' ? '这次运行已经完成' : `运行${run.status === 'CANCELLED' ? '已取消' : '已停止'}`)
+            : '还没有在拍的运行'}</h2>
           <p>拍摄由常驻 Worker 推进，关掉浏览器也会继续；每一镜的产物、质检和成片都落在这台电脑上。</p>
         </div>
         {run && <span className={`head-chip ${run.status === 'COMPLETED' ? 'ok' : ''}`}>{run.status}</span>}
       </div>
 
-      {!run && <p className="empty-inline">还没有运行：选择好集后点上面的主按钮即可开始。</p>}
+      {!run && <div className="empty-inline">
+        还没有运行。到「导演包」选择要拍的集并确认拍摄方案，开拍后这里会逐集显示进度。
+        {onNavigate && <button type="button" className="btn-text" onClick={() => onNavigate('package')}>去导演包</button>}
+      </div>}
       {run && <>
         <div className="shoot-run-facts">
           <span>本次范围：{run.scope.episode_ids.length} 集 · {run.scope.shot_count} 镜</span>

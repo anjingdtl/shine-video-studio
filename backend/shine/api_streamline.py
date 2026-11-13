@@ -527,11 +527,11 @@ def director_material_requirements(project_id: str, db: DBSession,
         used_episodes = list(payload.get("used_episodes") or [])
         if wanted and not wanted.intersection(used_episodes):
             continue
-        # ``matched_master_id`` is the derivation's match (a real approved
-        # master for this entity); ``bound_asset_id`` is what the person
-        # confirmed.  The panel must see the match, otherwise every row looks
-        # missing until a confirmation writes a binding.
-        matched_id = payload.get("matched_master_id") or payload.get("bound_asset_id")
+        # ``bound_asset_id`` is what the person actually confirmed (including a
+        # freshly uploaded file); ``matched_master_id`` is only the derivation's
+        # suggestion.  The confirmed binding wins, so the row's thumbnail and
+        # status update the moment an upload is adopted.
+        matched_id = payload.get("bound_asset_id") or payload.get("matched_master_id")
         requirements.append({
             "requirement_id": row.id,
             "family": payload.get("family"),

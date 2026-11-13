@@ -31,7 +31,7 @@ import VideoLibraryPanel from './components/VideoLibraryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
-import { DirectorShootPanel, EpisodeCards } from './components/DirectorShootPanel';
+import { DirectorShootPanel } from './components/DirectorShootPanel';
 import { EpisodeStoryboardPanel, ShotMaterialsPanel, StoryboardBookPanel } from './components/StreamlinePanels';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
@@ -39,7 +39,7 @@ import { Meter } from './components/Meter';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
-import { getDirectorOverview, getJourney, type DirectorEpisodeOverview, type DirectorOverview, type Journey, type JourneyStage } from './api';
+import { getDirectorOverview, getJourney, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
 import type { Asset, Project } from './api';
@@ -283,23 +283,6 @@ function App() {
       .catch(() => { if (alive) setOverview(null); });
     return () => { alive = false; };
   }, [projectId, dataEpoch, directorPackageId]);
-  /** 集卡上的下一步：跳到真正能处理它的阶段，不做“一键跳过”。 */
-  const handleEpisodeAction = (episode: DirectorEpisodeOverview) => {
-    switch (episode.next_action?.kind) {
-      case 'RETRY_STORYBOARD':
-      case 'RUN_STORYBOARD':
-      case 'CONFIRM_EPISODE_SHOTS':
-        goToDirectorPage('produce', 'storyboard'); break;
-      case 'PREPARE_MATERIALS':
-        goToDirectorPage('materials'); break;
-      case 'BUILD_PACKAGE':
-      case 'START_PRODUCTION':
-        goToDirectorPage('package'); break;
-      case 'REVIEW_EPISODE':
-        goToDirectorPage('deliver'); break;
-      default: break;
-    }
-  };
   const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
   ), [journey]);
@@ -624,6 +607,36 @@ function App() {
 
   return (
     <div className={`app-shell ${ui === 'director' ? 'ui-director' : 'ui-expert'}`}>
+      {ui === 'director' && <aside className="director-sidebar">
+        <div className="director-sidebar-brand">
+          <div className="brand-mark"><Clapperboard size={18} /></div>
+          <div><b>SHINE</b><span>导演工作台</span></div>
+        </div>
+        <nav className="director-sidebar-nav" aria-label="导演工作台导航">
+          <button type="button" className={directorPage === 'projects' ? 'active' : ''}
+            onClick={() => goToDirectorPage('projects')}>
+            <FolderKanban size={15} /><span>项目管理</span>
+          </button>
+          <button type="button" onClick={() => goToAssets('home')}>
+            <Images size={15} /><span>素材中心</span>
+          </button>
+          <button type="button" className={directorPage === 'library' ? 'active' : ''}
+            onClick={() => goToDirectorPage('library')}>
+            <Film size={15} /><span>成片库</span>
+          </button>
+          <button type="button"
+            className={`${directorPage === 'setup' ? 'active' : ''} ${production && !['READY', 'RUNNING'].includes(production.mode) ? 'needs-setup' : ''}`}
+            onClick={() => goToDirectorSetup('env')}>
+            <Settings2 size={15} /><span>基础配置</span>
+            {production && !['READY', 'RUNNING'].includes(production.mode) && <i className="setup-entry-dot" aria-hidden="true" />}
+          </button>
+        </nav>
+        <div className="director-sidebar-foot">
+          <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
+          <span>{apiOnline ? '本机服务在线' : systemChecked ? '本机服务失联' : '正在检查服务'}</span>
+        </div>
+      </aside>}
+
       {ui === 'expert' && <aside className="sidebar">
         <div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><b>SHINE</b><span>VIDEO STUDIO</span></div></div>
         <nav className="nav-groups" aria-label="工作区导航">
@@ -686,10 +699,6 @@ function App() {
 
       <main className="main-content">
         <header className={`topbar ${ui === 'director' ? 'director-topbar' : ''}`}>
-          {ui === 'director' && <div className="director-brand">
-            <span className="director-brand-mark"><Clapperboard size={16} /></span>
-            <span className="director-brand-text"><b>SHINE</b><i>导演工作台</i></span>
-          </div>}
           <div className="topbar-context">
             <nav className="breadcrumb" aria-label="当前位置">
               <span>工作区</span><span className="crumb-slash">/</span>
@@ -722,30 +731,6 @@ function App() {
               <EngineStatusEntry apiOnline={apiOnline} />
             </div>
             <div className="topbar-controls">
-              {ui === 'director' && <button
-                type="button"
-                className={`btn-secondary library-entry ${directorPage === 'library' ? 'active' : ''}`}
-                onClick={() => goToDirectorPage('library')}
-                title="成片库：管理这部作品在本机落盘的全部视频（单镜、分集、成片与历史版本）"
-              >
-                <Film size={13} /><span>成片库</span>
-              </button>}
-              <button type="button" className="btn-secondary" onClick={() => goToDirectorPage('projects')}
-                title="项目管理：新建、切换与查看每一部作品的进度（独立于七阶段）">
-                <FolderKanban size={13} />项目管理
-              </button>
-              <button type="button" className="btn-secondary" onClick={() => goToAssets('home')} title="素材中心：图片、声音与全局素材库">
-                <Images size={13} />素材中心
-              </button>
-              {ui === 'director' && <button
-                type="button"
-                className={`setup-entry ${directorPage === 'setup' ? 'active' : ''} ${production && !['READY', 'RUNNING'].includes(production.mode) ? 'needs-setup' : ''}`}
-                title="配置文本模型、安装本机环境、登记生成方案（不需要切换到专业模式）"
-                onClick={() => goToDirectorSetup('env')}
-              >
-                <Settings2 size={13} /><span>基础配置</span>
-                {production && !['READY', 'RUNNING'].includes(production.mode) && <i className="setup-entry-dot" aria-hidden="true" />}
-              </button>}
               <button
                 type="button"
                 className={`ui-toggle ${ui === 'director' ? 'on-director' : 'on-expert'}`}
@@ -859,37 +844,10 @@ function App() {
                       : '所有作品的进度和产出物都在这里；选中哪部就继续。'}</p>
                   </div>
                   <button className="btn-primary" disabled={journeyState === 'loading' && !journey}
-                    onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>{heroGuidance.cta}</button>
+                    onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>
+                    {journeyState === 'error' ? '重新读取进度' : '打开当前作品'}
+                  </button>
                 </section>
-                {project && overview && overview.episodes.length > 0 && <section className="card director-home">
-                  <div className="section-heading">
-                    <div>
-                      <div className="section-kicker">当前作品 · 全剧进度</div>
-                      <h2>{overview.title}</h2>
-                      <p>
-                        {overview.counts.episode_count} 集 · 已确认分镜 {overview.counts.confirmed_episode_count} 集 ·
-                        可拍 {overview.counts.shootable_episode_count} 集 · 已交付 {overview.counts.delivered_episode_count} 集
-                        {overview.style ? ` · 风格第 ${overview.style.version} 版` : ' · 风格待冻结'}
-                      </p>
-                    </div>
-                    {overview.next_action && <button type="button" className="btn-primary"
-                      onClick={() => {
-                        switch (overview.next_action?.kind) {
-                          case 'BUILD_PACKAGE':
-                          case 'START_PRODUCTION': goToDirectorPage('package'); break;
-                          case 'PREPARE_MATERIALS': goToDirectorPage('materials'); break;
-                          case 'GENERATE_BOOK':
-                          case 'CONFIRM_BOOK': goToDirectorPage('assets'); break;
-                          case 'REVIEW_EPISODE': goToDirectorPage('deliver'); break;
-                          case 'IMPORT_SCRIPT': goToDirectorPage('creative'); break;
-                          default: goToDirectorPage('produce', 'storyboard');
-                        }
-                      }}>
-                      {overview.next_action.label}
-                    </button>}
-                  </div>
-                  <EpisodeCards episodes={overview.episodes} onAction={handleEpisodeAction} compact />
-                </section>}
                 <ProjectPortfolio
                   projects={projects as Project[]}
                   currentProjectId={projectId}
@@ -1030,11 +988,13 @@ function App() {
                 )}
                 {directorPage === 'package' && <DirectorShootPanel
                   projectId={projectId}
+                  mode="package"
                   overview={overview}
                   workflowProfiles={workflowProfiles}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
+                  onNavigate={(page) => goToDirectorPage(page)}
                 />}
                 </StageRailProvider>
               </div>
@@ -1049,11 +1009,13 @@ function App() {
                 )}
                 {directorPage === 'run' && <DirectorShootPanel
                   projectId={projectId}
+                  mode="run"
                   overview={overview}
                   workflowProfiles={workflowProfiles}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
+                  onNavigate={(page) => goToDirectorPage(page)}
                 />}
                 <details className="stage-dock" id="production-monitor" open={false}>
                   <summary className="produce-focus-summary">

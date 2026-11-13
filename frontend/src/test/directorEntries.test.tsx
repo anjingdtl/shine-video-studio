@@ -39,7 +39,7 @@ describe('journey 读取状态', () => {
     expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
     fail = false;
     await user.click(await screen.findByRole('button', { name: '重新读取进度' }));
-    expect(await screen.findByRole('button', { name: /继续：/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /打开当前作品/ })).toBeInTheDocument();
     expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
   });
 
@@ -47,8 +47,9 @@ describe('journey 读取状态', () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/,
       respond: () => new Promise(() => undefined) });
     render(<App />);
-    // 读取期间只显示读取态文案，绝不显示“已交付/已完成”。
-    expect(await screen.findByText(/正在读取|正在连接/)).toBeInTheDocument();
+    // 读取期间绝不显示“已交付/已完成”：项目管理页只有读取入口。
+    await screen.findByRole('button', { name: /打开当前作品|正在读取进度…|重新读取进度/ });
+    expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
     expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
     expect(screen.queryByText(/六个阶段全部完成/)).toBeNull();
   });
@@ -265,7 +266,7 @@ describe('本机服务版本提示', () => {
     stub.add({ method: 'GET', pattern: /^\/health$/, respond: () => jsonResponse({
       status: 'ok', schema_revision: null, schema_head: 'f180b0010001', schema_up_to_date: null }) });
     render(<App />);
-    await screen.findByRole('button', { name: /继续：|正在读取进度…/ });
+    await screen.findByRole('button', { name: /打开当前作品|重新读取进度/ });
     expect(screen.queryByText(/落后于当前程序/)).toBeNull();
   });
 });
