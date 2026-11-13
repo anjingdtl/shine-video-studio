@@ -65,3 +65,9 @@
 - 连接：`runtime_orchestrator` 管理 image 控制意图；H3 的 startup、handoff 和 GPU Lease 仍由 `handoff_startup.py` 及现有控制面拥有。此分支未变更 `worker.py`、H3 提交语义、VLM 校准和历史工件。
 - 共享改动冲突点：`api_setup.py`、`deployment.py`、`installer.py`、`installation_worker.py`、`runtime_orchestrator/*` 和导演拍摄 UI；合并前须针对当时的 main 再审查，不能覆盖其他 worktree。
 - 来源沿用仓库现有固定的 Comfy-Org/MiniMax-H3 catalog、变体 manifest 和工作流；未增加新的上游源、wheel、节点包或许可证结论。RTX 4070 的 Sage 实现与 wheel 没有经本轮核实，不得自动安装或声明兼容。
+
+## 2026-11-14：同步 main 与回归边界
+
+开发期间 `origin/main` 前进到 `10585e3d752a4496acb8222107c9a004f62752bf`（合并独立 launcher PR #13）。本功能分支已在独立 worktree 合并该提交；共享测试文件自动合并，无冲突。`23467957` 仍是原方案审计基线，但当前代码以合并后的 main 为准。
+
+第二轮后端 8 分片均退出 0、日志没有 FAILED/ERROR，但运行期间修改了安装安全门禁，且之后合并了 main；因此仅作为中间结果。最终版本按文件轮转均分 8 片运行，日志以 `.local-data/h3-v2-main10585/` 为准。该目录是本机测试证据，不纳入 Git。
