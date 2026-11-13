@@ -584,3 +584,21 @@ def test_auto_source_probe_is_bounded_to_trusted_pinned_candidates():
     assert len(transport.probed) == 2
     downloader._candidates(file)
     assert len(transport.probed) == 2  # one bounded probe per host per attempt
+
+
+def test_missing_approved_mirror_falls_back_to_official_without_guessing(monkeypatch, tmp_path):
+    file = spec()
+    calls = []
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        if url.startswith("https://hf-mirror.com/"):
+            yield httpx.Response(404)
+        else:
+            yield httpx.Response(200, content=b"data")
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    downloader = ControlledDownloader(MIRROR_HOSTS, HTTPTransport(), source_preference="MIRROR_FIRST")
+    assert downloader.download(file, tmp_path).read_bytes() == b"data"
+    assert len(calls) == 2 and calls[0].startswith("https://hf-mirror.com/") and calls[1] == file.url

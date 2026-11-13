@@ -379,6 +379,11 @@ class ControlledDownloader:
                 # and the primary may be tried again after the mirror failed.
                 candidate_index = (candidate_index + 1) % len(candidates)
             except ValueError as exc:
+                if str(exc) == "DOWNLOAD_HTTP_REJECTED" and candidate_index + 1 < len(candidates):
+                    # A mirror may not carry this pinned file. Try only the
+                    # already approved alternative; final SHA/size still gate it.
+                    candidate_index += 1
+                    continue
                 if not str(exc).startswith("DOWNLOAD_CONNECTION_FAILED"):
                     raise
                 retries += 1
