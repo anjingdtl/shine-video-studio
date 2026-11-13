@@ -17,9 +17,9 @@ try {
     }
 
     if ($SmokeCheck) {
-        & $exe --smoke-check
-        if ($LASTEXITCODE -ne 0) {
-            throw "Launcher smoke check failed with exit code $LASTEXITCODE"
+        $smokeProcess = Start-Process -FilePath $exe -ArgumentList @("--smoke-check") -Wait -PassThru
+        if ($smokeProcess.ExitCode -ne 0) {
+            throw "Launcher smoke check failed with exit code $($smokeProcess.ExitCode)"
         }
     }
 

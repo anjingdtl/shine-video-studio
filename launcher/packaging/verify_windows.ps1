@@ -31,9 +31,9 @@ if ($buildInfo.windows_gui_acceptance -ne "PENDING_LOCAL_ACCEPTANCE") {
     throw "Build metadata must not claim Windows GUI acceptance from CI."
 }
 
-& $exe --smoke-check
-if ($LASTEXITCODE -ne 0) {
-    throw "Launcher dependency-independent smoke check failed with exit code $LASTEXITCODE"
+$smokeProcess = Start-Process -FilePath $exe -ArgumentList @("--smoke-check") -Wait -PassThru
+if ($smokeProcess.ExitCode -ne 0) {
+    throw "Launcher dependency-independent smoke check failed with exit code $($smokeProcess.ExitCode)"
 }
 
 [pscustomobject]@{

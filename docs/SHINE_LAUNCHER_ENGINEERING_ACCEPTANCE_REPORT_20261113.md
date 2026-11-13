@@ -44,7 +44,7 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | 前端 `npm run build` | TypeScript 与 Vite 构建通过；有现存大 bundle 提示 |
 | `git diff --check` | 通过 |
 
-Windows workflow 前四次执行均真实完成 Windows x64 `cargo check`。第一次 Windows 单测 14/21 通过；Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径，被原先只接受普通盘符的白名单拒绝。修正后，第二次测试 15/22 通过；逐段重建的重解析点检查仍误判。现已对原始路径及各级父目录直接读取元数据，缺失路径仍继续检查父目录，并加上 UNC/Verbatim UNC/设备路径拒绝与符号链接祖先测试。第三次 Windows 测试 20/22 通过，余下 2 项仅是测试期望未规范化路径；测试现对照 `canonicalize` 结果。第四次 Windows 单测 22/22 通过，但 Windows Clippy 报告三个仅在 Windows cfg 下生效的末尾 `return`。这些分支现改为尾表达式，Linux 上 Windows MSVC 目标 Clippy 检查已通过。第五次 Windows workflow 待确认；Windows Release EXE 和 ZIP 尚未生成。Linux 本地 Launcher 回归 24/24 通过。
+Windows workflow 前五次执行均真实完成 Windows x64 `cargo check`。第一次 Windows 单测 14/21 通过；Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径，被原先只接受普通盘符的白名单拒绝。修正后，第二次测试 15/22 通过；逐段重建的重解析点检查仍误判。现已对原始路径及各级父目录直接读取元数据，缺失路径仍继续检查父目录，并加上 UNC/Verbatim UNC/设备路径拒绝与符号链接祖先测试。第三次 Windows 测试 20/22 通过，余下 2 项仅是测试期望未规范化路径；测试现对照 `canonicalize` 结果。第四次 Windows 单测 22/22 通过，但 Windows Clippy 报告三个仅在 Windows cfg 下生效的末尾 `return`；这些分支现改为尾表达式，Linux 上 Windows MSVC 目标 Clippy 检查已通过。第五次 Windows 单测 22/22、Clippy 与 Release 编译通过，但 artifact 校验脚本使用 `$LASTEXITCODE` 检查 GUI 子系统 EXE 时拿到空值，校验步骤失败；构建脚本中的 smoke-check 同样需要可靠读取进程退出码。两处现改用 `Start-Process -Wait -PassThru` 检查 `ExitCode`。第六次 Windows workflow 待确认，EXE 身份与 ZIP 自检尚未通过。Linux 本地 Launcher 回归 24/24 通过。
 
 后端 Linux 回归中发现若干测试实际依赖 Windows named mutex、Windows TCP 表或 Windows 管理进程启动。仅为这些既有测试补充 `windows_only` 维度和 `os.name != "nt"` 跳过条件，未修改业务实现、未放宽断言或安全标准。分片日志和隔离数据库位于本机忽略目录，不作为提交内容。
 
