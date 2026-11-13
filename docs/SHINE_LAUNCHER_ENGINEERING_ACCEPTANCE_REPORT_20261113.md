@@ -43,7 +43,7 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | 前端 `npm run build` | TypeScript 与 Vite 构建通过；有现存大 bundle 提示 |
 | `git diff --check` | 通过 |
 
-Windows workflow 的前两次执行均真实完成 Windows x64 `cargo check`。第一次单元测试因 Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径而失败（7/21）；安全路径白名单原先只接受普通盘符前缀。现已接受 `Disk` 与 `VerbatimDisk`，并添加 Windows 专项断言拒绝 UNC、Verbatim UNC 与设备命名空间。第二次运行通过该边界单测，但扫描用例仍因逐段重建路径的重解析点检查误判而失败（7/22）。现改为直接检查原路径及其各级父路径元数据，缺失路径仍继续检查父目录，并加入“缺失子路径下拒绝符号链接祖先”的回归测试。Linux 本地 Launcher 回归现为 24/24 通过；第三次 Windows workflow 重跑待确认。
+Windows workflow 的前三次执行均真实完成 Windows x64 `cargo check`。第一次单元测试因 Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径而失败（7/21）；安全路径白名单原先只接受普通盘符前缀。现已接受 `Disk` 与 `VerbatimDisk`，并添加 Windows 专项断言拒绝 UNC、Verbatim UNC 与设备命名空间。第二次运行通过该边界单测，但扫描用例仍因逐段重建路径的重解析点检查误判而失败（7/22）。现改为直接检查原路径及其各级父路径元数据，缺失路径仍继续检查父目录，并加入“缺失子路径下拒绝符号链接祖先”的回归测试。第三次运行中，路径安全和扫描器均通过；剩余 2 项是测试期望值未使用 `canonicalize` 的格式差异（20/22 通过）。测试现按契约比较规范化路径；修正后的第四次 Windows workflow 待确认。Linux 本地 Launcher 回归 24/24 通过。
 
 后端 Linux 回归中发现若干测试实际依赖 Windows named mutex、Windows TCP 表或 Windows 管理进程启动。仅为这些既有测试补充 `windows_only` 维度和 `os.name != "nt"` 跳过条件，未修改业务实现、未放宽断言或安全标准。分片日志和隔离数据库位于本机忽略目录，不作为提交内容。
 

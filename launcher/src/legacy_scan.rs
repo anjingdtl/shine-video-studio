@@ -505,9 +505,10 @@ mod tests {
             result.database_evidence,
             DatabaseEvidence::SqliteHeaderFound
         );
+        let expected_data_root = fs::canonicalize(root.join(".local-data")).unwrap();
         assert_eq!(
             result.data_root.as_deref(),
-            Some(root.join(".local-data").as_path())
+            Some(expected_data_root.as_path())
         );
         assert_eq!(result.model_directories_unverified.len(), 1);
         assert!(!result.runtime_ready);
@@ -582,7 +583,8 @@ mod tests {
 
         let result = scan_existing_installation(&root).unwrap();
 
-        assert_eq!(result.data_root, Some(bootstrap.join("data")));
+        let expected_data_root = fs::canonicalize(bootstrap.join("data")).unwrap();
+        assert_eq!(result.data_root, Some(expected_data_root));
         assert_eq!(
             result.database_evidence,
             DatabaseEvidence::SqliteHeaderFound
