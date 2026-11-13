@@ -920,24 +920,27 @@ def reconcile_stopped_handoffs(factory) -> list[dict]:
         attempt_id = key.removeprefix(HANDOFF_PREFIX)
         if value.get("last_confirmed_stage") not in STOPPED_HANDOFF_STAGES:
             continue
-        process = value.get("process") or {}
-        pid, birth = process.get("pid"), process.get("birth")
-        if type(pid) is not int or pid <= 0 or not isinstance(birth, str) or not birth:
-            continue  # nothing proves the renderer exited
-        try:
-            if process_identity(pid) == birth:
-                continue  # the recorded renderer is still alive
-        except (OSError, ValueError):
-            pass
         port = urlsplit(value.get("instance_url") or "").port
-        if not port or windows_port_listeners(port):
-            continue  # an unclear or occupied port cannot be declared released
+        stage = value.get("last_confirmed_stage")
+        # An interrupted launch may have created a process before its identity
+        # was journalled. It cannot be cleared from the old process alone.
+        if stage in {"REVIEW_INTENT", "REVIEW_FINISHED", "RESTART_INTENT"}:
+            continue
+        processes = [value.get("process")]
+        if stage == "RESTARTED":
+            processes.append(((value.get("evidence") or {}).get("RESTARTED") or {}).get("process"))
+        if not port or any(
+            not isinstance(process, dict) or not process.get("job_name")
+            or not renderer_is_gone({"process": process, "port": port})
+            for process in processes
+        ):
+            continue
         finding = {"attempt_id": attempt_id, "job_id": value.get("job_id"), "action": "released"}
         with factory.begin() as db:
             db.execute(text("BEGIN IMMEDIATE"))
             row = db.get(AppSetting, key)
             current = dict(row.value) if row and isinstance(row.value, dict) else {}
-            if current.get("stage") != "RECONCILE_REQUIRED":
+            if current != value:
                 continue
             lease = db.get(ResourceLease, current.get("resource_id"))
             if (not lease or lease.owner != "h3:" + str(current.get("job_id") or "")

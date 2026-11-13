@@ -44,7 +44,7 @@ def handoff(api):
         db.flush()
         row.artifact_id = artifact.id
         instance_payload = {"managed": True, "is_mock": False, "url": "http://127.0.0.1:8190",
-                            "process": {"pid": 123, "birth": "4"}}
+                            "process": {"pid": 123, "birth": "4", "job_name": "Local\\ShineHandoff-test"}}
         instance = ComfyInstance(payload=instance_payload, sha256=graph_hash(instance_payload),
                                  status="RUNNING_PENDING_HEALTH")
         lease = ResourceLease(owner=owner, budget_mb=16384, exclusive=True, priority=100, status="ACTIVE",
@@ -207,6 +207,7 @@ def test_stopped_handoff_releases_the_gpu_without_turning_a_failure_into_a_pass(
         record_handoff_stage(factory, attempt_id, before, after, {})
     fail_handoff(factory, attempt_id, "COMFY_RESTART_OUTCOME_UNCONFIRMED")
     monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
     monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
 
     findings = handoff_startup.reconcile_stopped_handoffs(factory)
@@ -218,6 +219,60 @@ def test_stopped_handoff_releases_the_gpu_without_turning_a_failure_into_a_pass(
         job = db.get(Job, job_id)
         assert job.status == "NEEDS_REVIEW"
         assert job.failure_code == "COMFY_HANDOFF_RECONCILIATION_REQUIRED"
+
+
+@pytest.mark.parametrize("failure", ["identity", "group", "restart_intent"])
+def test_stopped_handoff_keeps_uncertain_process_lease(handoff, monkeypatch, failure):
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    fail_handoff(factory, attempt_id, "UNCERTAIN")
+    if failure == "restart_intent":
+        with factory.begin() as db:
+            row = db.get(AppSetting, "handoff:" + attempt_id)
+            row.value = {**row.value, "last_confirmed_stage": "RESTART_INTENT"}
+
+    def identity(pid):
+        if failure == "identity":
+            raise ValueError("unreadable")
+        return None
+
+    monkeypatch.setattr(handoff_startup, "process_identity", identity)
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 1 if failure == "group" else 0)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    assert handoff_startup.reconcile_stopped_handoffs(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
+
+
+def test_restarted_handoff_requires_both_processes_gone(handoff, monkeypatch):
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    for before, after in (("INTENT", "DRAIN_INTENT"), ("DRAIN_INTENT", "DRAINED"),
+                          ("DRAINED", "STOP_INTENT"), ("STOP_INTENT", "STOPPED")):
+        record_handoff_stage(factory, attempt_id, before, after, {})
+    fail_handoff(factory, attempt_id, "UNCERTAIN")
+    with factory.begin() as db:
+        row = db.get(AppSetting, "handoff:" + attempt_id)
+        row.value = {**row.value, "last_confirmed_stage": "RESTARTED", "evidence": {
+            **row.value["evidence"], "RESTARTED": {
+                "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-restart"},
+            },
+        }}
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "7" if pid == 456 else None)
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    assert handoff_startup.reconcile_stopped_handoffs(factory) == []
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 
 
 def test_live_renderer_keeps_a_failed_handoff_blocked(handoff, monkeypatch):
