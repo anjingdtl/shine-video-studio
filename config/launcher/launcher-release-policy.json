@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "repository": "anjingdtl/shine-video-studio",
+  "launcher_tag_prefix": "launcher-v",
+  "studio_tag_prefix": "studio-v",
+  "launcher_release_asset": "shine-launcher-windows-x64.zip",
+  "required_assets": [
+    "shine-launcher.exe",
+    "shine-launcher.exe.sha256",
+    "launcher-build-info.json"
+  ],
+  "studio_channels": {
+    "stable": "GitHub non-prerelease release with a signed Deployment Protocol V1 manifest",
+    "beta": "GitHub prerelease with a signed Deployment Protocol V1 manifest",
+    "development": "Explicitly selected immutable commit; never used as a stable update"
+  },
+  "automatic_update_policy": "deny-until-trusted-publisher-key-is-configured",
+  "max_release_list_age_seconds": 86400
+}

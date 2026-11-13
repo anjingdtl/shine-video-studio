@@ -7,8 +7,10 @@ while the exclusive lease blocked every later render.
 """
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import select
 
 from shine.comfyops.handoff_startup import reconcile_dead_renderer_leases
@@ -27,6 +29,8 @@ def _dead_image_journal(db, port: int) -> None:
     }))
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="proving an empty Windows TCP listener table is Windows-only")
 def test_image_lease_releases_when_the_unlinked_journal_proves_death(api):
     client, factory, _ = api
     with factory.begin() as db:
@@ -43,6 +47,8 @@ def test_image_lease_releases_when_the_unlinked_journal_proves_death(api):
         assert db.get(ResourceLease, lease_id).status == "RELEASED"
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="renderer listener ownership uses the Windows TCP table")
 def test_image_lease_stays_blocked_while_a_recorded_renderer_lives(api):
     import os
 

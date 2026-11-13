@@ -1,0 +1,76 @@
+name: shine-launcher-windows
+
+on:
+  push:
+    paths:
+      - "launcher/**"
+      - "config/launcher/**"
+      - ".github/workflows/launcher-windows.yml"
+  pull_request:
+    paths:
+      - "launcher/**"
+      - "config/launcher/**"
+      - ".github/workflows/launcher-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-windows-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 build and smoke check
+    runs-on: windows-latest
+    env:
+      CODEBUDDY_SAFE_DELETE_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+
+      - name: Check formatting
+        working-directory: launcher
+        run: cargo +1.100.0 fmt --all -- --check
+
+      - name: Check Windows source
+        working-directory: launcher
+        run: cargo +1.100.0 check --locked --all-targets
+
+      - name: Run launcher unit tests
+        working-directory: launcher
+        run: cargo +1.100.0 test --locked --lib
+
+      - name: Run Clippy
+        working-directory: launcher
+        run: cargo +1.100.0 clippy --locked --all-targets -- -D warnings
+
+      - name: Build Windows executable
+        working-directory: launcher
+        run: ./packaging/build_windows.ps1 -SmokeCheck
+
+      - name: Verify Windows artifact identity
+        working-directory: launcher
+        run: ./packaging/verify_windows.ps1
+
+      - name: Build and verify release ZIP
+        working-directory: launcher
+        run: ./packaging/package_windows.ps1
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shine-launcher-windows-x64-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            launcher/target/release/shine-launcher.exe
+            launcher/target/release/shine-launcher.exe.sha256
+            launcher/target/release/launcher-build-info.json
+            launcher/target/release/shine-launcher-windows-x64.zip
