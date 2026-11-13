@@ -1,5 +1,9 @@
 # Upstream source and license audit
 
+## 2026-11-14 H3 资源自整备增量
+
+审计基线 `23467957ab7e6c6b9dee10cf0d1b6db011e7dcc1`，实施分支已合入 main `10585e3d752a4496acb8222107c9a004f62752bf`。本轮复用仓库已有 `existing_installation`、`ControlledDownloader`、变体 manifest 和固定工作流，未复制第三方代码、引入新下载源或 CUDA wheel。候选资源沿用 manifest 中 `Comfy-Org/MiniMax-H3` 固定 revision `54472221d27c695fca9621b0c3ed52f06c4af707` 及其已登记的许可证链接；本轮未重新核实上游当前许可证或 SageAttention wheel。RelayVSR 权重 SHA 仍缺失，不开放自动下载或声称真机通过。详细状态见 [阶段报告](H3_RESOURCE_V2_PROGRESS_20261114.md)。
+
 ## 2026-11-08 四阶段流水线对照
 
 基线为 `7081104a79e6758228eb98e96d74e0bb36da52f8`。本轮核对 Toonflow-app 的章节事件与分镜审阅、Huobao Drama 的集内成员资格校验、NarratoAI 的脚本解析边界和 Temporal 的 Activity 幂等合同。仓库修订、对应模块、许可证与适用范围见 [四阶段对抗审查](ADVERSARIAL_REVIEW_FOUR_STAGE_PIPELINE_20261108.md#4-高星-github-模块的可移植做法)。本轮只记录设计借鉴，产品依赖与上游代码均未变动。

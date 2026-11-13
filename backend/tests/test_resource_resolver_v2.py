@@ -208,3 +208,96 @@ def test_resource_binding_rechecks_manifest_instead_of_using_process_cache(monke
         assert fresh.manifest["summary"] == "changed after approval"
     finally:
         variant_binding._manifest_and_catalog.cache_clear()
+
+
+@pytest.mark.parametrize("contents,verified", [(b"exact bytes", True), (b"wrong bytes", False)])
+def test_managed_inventory_reuses_renamed_file_only_after_sha_check(studio, tmp_path, monkeypatch,
+                                                                     contents, verified):
+    import hashlib
+    from types import SimpleNamespace
+
+    from shine.comfyops import resource_inventory
+    from shine.comfyops.models import ComfyInstance
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, settings = studio
+    root = tmp_path / "comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("", encoding="utf-8")
+    (root / "models" / "renamed").mkdir(parents=True)
+    source = root / "models" / "renamed" / "existing.bin"
+    source.write_bytes(contents)
+    digest = hashlib.sha256(b"exact bytes").hexdigest()
+    component = {"component_id": "needed-model", "kind": "model", "status": "READY", "files": [{
+        "relative_path": "model.bin", "sha256": digest, "size": len(b"exact bytes"),
+    }]}
+    catalog = {"catalog_id": "test", "catalog_version": "1", "components": [component]}
+    preview = {"download_eligible": True, "manifest_sha256": "m", "catalog_sha256": "c",
+               "components": [{"component_id": "needed-model", "state": "MISSING"}]}
+    monkeypatch.setattr(resource_inventory, "managed_installation_pin", lambda db, iid: {"id": iid, "sha256": "x"})
+    monkeypatch.setattr(resource_inventory, "resolve_resources", lambda *args: preview)
+    monkeypatch.setattr(resource_inventory, "load_binding", lambda *args, **kwargs: SimpleNamespace(catalog=catalog))
+    monkeypatch.setattr("shine.comfyops.storage.require_storage", lambda settings: tmp_path)
+    monkeypatch.setattr("shine.comfyops.storage.disk_info", lambda path: {"free_bytes": 10**9})
+    with factory.begin() as db:
+        db.add(ComfyInstance(id="physical", payload={"root": str(root)}, sha256="x", status="STOPPED"))
+    strategy = GenerationStrategy(model_variant_id="ref2va-lowend-candidate", accelerator_id="native20")
+    with factory() as db:
+        scan = resource_inventory.inspect_managed_resources(db, settings, strategy, "physical")
+        assert scan["candidates"][0]["state"] == "PRESENT_UNVERIFIED"
+        result = resource_inventory.import_managed_resources(
+            db, settings, strategy, "physical", scan["snapshot_sha256"],
+        )
+    target = tmp_path / "isolated-packages" / ".cache" / digest
+    if verified:
+        assert result["reused_bytes"] == len(b"exact bytes")
+        assert target.read_bytes() == b"exact bytes"
+    else:
+        assert result["reused_bytes"] == 0
+        assert result["rejected"] == ["needed-model"]
+        assert not target.exists()
+    assert source.read_bytes() == contents
+
+
+def test_managed_inventory_rejects_changed_source_snapshot(studio, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from shine.comfyops import resource_inventory
+    from shine.comfyops.models import ComfyInstance
+    from shine.strategy import GenerationStrategy
+
+    _client, factory, settings = studio
+    root = tmp_path / "comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("", encoding="utf-8")
+    (root / "models").mkdir()
+    source = root / "models" / "file.bin"
+    source.write_bytes(b"same")
+    component = {"component_id": "needed", "kind": "model", "status": "READY", "files": [{
+        "relative_path": "file.bin", "sha256": "0" * 64, "size": 4,
+    }]}
+    catalog = {"catalog_id": "test", "catalog_version": "1", "components": [component]}
+    preview = {"download_eligible": True, "manifest_sha256": "m", "catalog_sha256": "c",
+               "components": [{"component_id": "needed", "state": "MISSING"}]}
+    monkeypatch.setattr(resource_inventory, "managed_installation_pin", lambda db, iid: {"id": iid, "sha256": "x"})
+    monkeypatch.setattr(resource_inventory, "resolve_resources", lambda *args: preview)
+    monkeypatch.setattr(resource_inventory, "load_binding", lambda *args, **kwargs: SimpleNamespace(catalog=catalog))
+    with factory.begin() as db:
+        db.add(ComfyInstance(id="physical", payload={"root": str(root)}, sha256="x", status="STOPPED"))
+    strategy = GenerationStrategy(model_variant_id="ref2va-lowend-candidate", accelerator_id="native20")
+    with factory() as db:
+        scan = resource_inventory.inspect_managed_resources(db, settings, strategy, "physical")
+        source.write_bytes(b"changed")
+        with pytest.raises(HTTPException, match="RESOURCE_INVENTORY_CHANGED"):
+            resource_inventory.import_managed_resources(db, settings, strategy, "physical", scan["snapshot_sha256"])
+
+
+def test_local_inventory_api_rejects_invalid_strategy(studio):
+    client, _factory, _settings = studio
+    project = create_project(client, title="本机资源")
+    response = client.post("/api/v1/setup/resources/inspect-local", json={
+        "project_id": project, "instance_id": "physical", "strategy": {"generation_mode": "T2VA"},
+    })
+    assert response.status_code == 422

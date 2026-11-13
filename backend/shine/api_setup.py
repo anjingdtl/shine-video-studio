@@ -56,6 +56,11 @@ class ResourcePlanRequest(ResourceResolveRequest):
     disk_free: int = Field(ge=0)
 
 
+class ResourceInventoryRequest(ResourceResolveRequest):
+    instance_id: str = Field(min_length=1, max_length=96)
+    snapshot_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
 class InstanceChainRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     catalog: str = "h3-ref2va-windows-x64"
@@ -788,6 +793,45 @@ def create_resource_install_plan(body: ResourcePlanRequest, settings: SettingsDe
     return {"plan_id": plan.id, "sha256": plan.sha256, "status": plan.status,
             "download_bytes": plan.payload["download_bytes"], "disk_required": plan.payload["disk_required"],
             "source_preference": body.source_preference, "production_ready": False}
+
+
+@router.post("/resources/inspect-local")
+def inspect_local_resources(body: ResourceInventoryRequest, settings: SettingsDep, db: DBSession):
+    from pydantic import ValidationError
+
+    from shine.comfyops.resource_inventory import inspect_managed_resources
+    from shine.strategy import GenerationStrategy
+
+    deployment._require_project(db, body.project_id)
+    try:
+        strategy = GenerationStrategy.model_validate(body.strategy)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    return inspect_managed_resources(db, settings, strategy, body.instance_id)
+
+
+@router.post("/resources/import-local")
+def import_local_resources(body: ResourceInventoryRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    from pydantic import ValidationError
+
+    from shine.comfyops.resource_inventory import import_managed_resources
+    from shine.services import add_audit
+    from shine.strategy import GenerationStrategy
+
+    deployment._require_project(db, body.project_id)
+    if not body.snapshot_sha256:
+        raise HTTPException(422, "RESOURCE_INVENTORY_SNAPSHOT_REQUIRED")
+    try:
+        strategy = GenerationStrategy.model_validate(body.strategy)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    result = import_managed_resources(db, settings, strategy, body.instance_id, body.snapshot_sha256)
+    add_audit(db, actor, "RESOURCE_LOCAL_REUSE", "project", body.project_id,
+              {"instance_id": body.instance_id, "snapshot": body.snapshot_sha256,
+               "imported": result["imported"], "rejected": result["rejected"],
+               "reused_bytes": result["reused_bytes"]}, project_id=body.project_id)
+    db.commit()
+    return result
 
 
 @router.get("/variant-readiness")

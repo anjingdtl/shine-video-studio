@@ -13,6 +13,8 @@ type ResourceReport = {
   blockers: Array<{ code: string }>;
 };
 type Plan = SetupPlan & { download_bytes: number; disk_required: number };
+type LocalInventory = { snapshot_sha256: string; candidate_bytes: number;
+  candidates: Array<{ component_id: string; size_bytes: number; state: string }> };
 
 const post = <T,>(path: string, body: unknown) => api<T>(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -37,6 +39,8 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
   const check = () => { if (!alive.current) throw new Error('选择已改变，操作已停止。'); };
   const [report, setReport] = useState<ResourceReport | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [inventory, setInventory] = useState<LocalInventory | null>(null);
+  const [instanceId, setInstanceId] = useState('');
   const [source, setSource] = useState('AUTO');
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState('');
@@ -55,7 +59,7 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
   }, [attemptId]);
 
   const inspect = async () => {
-    setWorking(true); setMessage(''); setPlan(null);
+    setWorking(true); setMessage(''); setPlan(null); setInventory(null);
     try {
       const result = await post<ResourceReport>('/setup/resources/resolve', { project_id: projectId, strategy });
       check(); setReport(result);
@@ -67,6 +71,15 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       const candidates = result.managed_installations ?? [];
       const installationId = runtime.installation_id || (candidates.length === 1 ? candidates[0].id : '');
       if (!installationId) throw new Error('请先在基础配置中登记或选定本机受管安装实例。');
+      setInstanceId(installationId);
+      try {
+        const local = await post<LocalInventory>('/setup/resources/inspect-local', {
+          project_id: projectId, strategy, instance_id: installationId,
+        });
+        check(); setInventory(local);
+      } catch {
+        check(); setMessage('暂时无法扫描受管模型目录，仍可查看下载计划。');
+      }
       const created = await post<Plan>('/setup/resources/install-plan', {
         project_id: projectId, strategy, snapshot_sha256: result.snapshot_sha256,
         instance_id: installationId, disk_free: storage.free_bytes, source_preference: source,
@@ -74,6 +87,20 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       check(); setPlan(created);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setWorking(false); }
+  };
+  const reuseLocal = async () => {
+    if (!inventory || !instanceId || working) return;
+    setWorking(true); setMessage(''); setPlan(null);
+    try {
+      const result = await post<{ reused_bytes: number; rejected: string[] }>('/setup/resources/import-local', {
+        project_id: projectId, strategy, instance_id: instanceId, snapshot_sha256: inventory.snapshot_sha256,
+      });
+      check();
+      await inspect();
+      check();
+      setMessage(`已校验并复用 ${gib(result.reused_bytes)}；${result.rejected.length} 项未通过校验。`);
+    } catch (error) { if (alive.current) setMessage(error instanceof Error ? error.message : String(error)); }
+    finally { if (alive.current) setWorking(false); }
   };
   const confirm = async () => {
     if (!plan || working) return;
@@ -108,6 +135,13 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
         {item.files.map(file => <span key={file.sha256}> · <a href={file.url} target="_blank" rel="noreferrer">固定官方来源</a></span>)}
       </p>)}
       <p>预计下载 {gib(report.missing_download_bytes ?? 0)}；节点兼容性和本机试镜尚未核验。</p>
+    </div>}
+    {inventory && inventory.candidates.length > 0 && <div className="notice">
+      <p>本机受管目录发现 {inventory.candidates.length} 个大小相符的候选文件，
+        最多可复用 {gib(inventory.candidate_bytes)}；确认后会复制并核对 SHA-256，源文件不会修改。</p>
+      <button type="button" className="btn-secondary" disabled={working} onClick={() => void reuseLocal()}>
+        校验并复用本机文件
+      </button>
     </div>}
     {plan && <div className="required-action">
       <p>本次计划下载 {gib(plan.download_bytes)}，需预留 {gib(plan.disk_required)} 磁盘空间。

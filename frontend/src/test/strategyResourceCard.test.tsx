@@ -35,3 +35,28 @@ it('previews fixed resources before the explicit download confirmation', async (
   fireEvent.click(screen.getByText('确认并下载上述资源'));
   await waitFor(() => expect(approve).toHaveBeenCalledTimes(1));
 });
+
+it('offers hash-checked local reuse before downloading', async () => {
+  let imported = false;
+  api.mockImplementation((path: string) => {
+    if (path.endsWith('/resolve')) return Promise.resolve({ components: [{ component_id: 'weight', size_bytes: 10,
+      state: imported ? 'HASH_VERIFIED' : 'MISSING', license_id: 'license',
+      license_url: 'https://example.com/license', files: [] }], missing_download_bytes: imported ? 0 : 10,
+      snapshot_sha256: 'a'.repeat(64), download_eligible: true, blockers: [] });
+    if (path.endsWith('/storage')) return Promise.resolve({ free_bytes: 1000 });
+    if (path.endsWith('/inspect-local')) return Promise.resolve({ snapshot_sha256: 'b'.repeat(64),
+      candidate_bytes: imported ? 0 : 10, candidates: imported ? [] : [{ component_id: 'weight', size_bytes: 10 }] });
+    if (path.endsWith('/import-local')) { imported = true; return Promise.resolve({ reused_bytes: 10, rejected: [] }); }
+    if (path.endsWith('/install-plan')) return Promise.resolve({ plan_id: 'plan', sha256: 'hash',
+      status: 'AWAITING_APPROVAL', download_bytes: 10, disk_required: 20 });
+    throw new Error(path);
+  });
+  render(<StrategyResourceCard projectId="p" strategy={strategy} />);
+  fireEvent.click(screen.getByText('检测所需资源'));
+  const reuse = await screen.findByText('校验并复用本机文件');
+  expect(api.mock.calls.some(call => String(call[0]).endsWith('/import-local'))).toBe(false);
+  fireEvent.click(reuse);
+  await screen.findByText(/已校验并复用/);
+  expect(api.mock.calls.filter(call => String(call[0]).endsWith('/import-local'))).toHaveLength(1);
+  expect(approve).not.toHaveBeenCalled();
+});
