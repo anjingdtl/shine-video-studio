@@ -34,6 +34,7 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | `cargo test --locked --lib` | 24 项通过 |
 | `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
 | `cargo check --locked --target x86_64-pc-windows-msvc --all-targets` | 通过；这是 Linux 上的交叉目标类型检查，不是 Windows EXE 构建或 GUI 验收 |
+| `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings` | 通过；Linux 上启用 Windows cfg 的交叉目标静态检查，不替代 Windows runner |
 | `cargo build --locked --release`（Linux） | 通过；生成 Linux ELF，不是 Windows 交付物 |
 | `cargo run --locked --release -- --smoke-check` | 通过；只读检查宿主信息，不创建 GUI 窗口 |
 | 后端完整回归 | 按 `AGENTS.md` 八分片规范执行，204 个测试文件均已分配，8/8 分片退出码为 0；收集 2,485 个测试项。Windows-only 进程/端口测试在 Linux 跳过，Windows 真实执行仍待验收 |
@@ -43,7 +44,7 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | 前端 `npm run build` | TypeScript 与 Vite 构建通过；有现存大 bundle 提示 |
 | `git diff --check` | 通过 |
 
-Windows workflow 的前三次执行均真实完成 Windows x64 `cargo check`。第一次单元测试因 Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径而失败（7/21）；安全路径白名单原先只接受普通盘符前缀。现已接受 `Disk` 与 `VerbatimDisk`，并添加 Windows 专项断言拒绝 UNC、Verbatim UNC 与设备命名空间。第二次运行通过该边界单测，但扫描用例仍因逐段重建路径的重解析点检查误判而失败（7/22）。现改为直接检查原路径及其各级父路径元数据，缺失路径仍继续检查父目录，并加入“缺失子路径下拒绝符号链接祖先”的回归测试。第三次运行中，路径安全和扫描器均通过；剩余 2 项是测试期望值未使用 `canonicalize` 的格式差异（20/22 通过）。测试现按契约比较规范化路径；修正后的第四次 Windows workflow 待确认。Linux 本地 Launcher 回归 24/24 通过。
+Windows workflow 前四次执行均真实完成 Windows x64 `cargo check`。第一次 Windows 单测 14/21 通过；Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径，被原先只接受普通盘符的白名单拒绝。修正后，第二次测试 15/22 通过；逐段重建的重解析点检查仍误判。现已对原始路径及各级父目录直接读取元数据，缺失路径仍继续检查父目录，并加上 UNC/Verbatim UNC/设备路径拒绝与符号链接祖先测试。第三次 Windows 测试 20/22 通过，余下 2 项仅是测试期望未规范化路径；测试现对照 `canonicalize` 结果。第四次 Windows 单测 22/22 通过，但 Windows Clippy 报告三个仅在 Windows cfg 下生效的末尾 `return`。这些分支现改为尾表达式，Linux 上 Windows MSVC 目标 Clippy 检查已通过。第五次 Windows workflow 待确认；Windows Release EXE 和 ZIP 尚未生成。Linux 本地 Launcher 回归 24/24 通过。
 
 后端 Linux 回归中发现若干测试实际依赖 Windows named mutex、Windows TCP 表或 Windows 管理进程启动。仅为这些既有测试补充 `windows_only` 维度和 `os.name != "nt"` 跳过条件，未修改业务实现、未放宽断言或安全标准。分片日志和隔离数据库位于本机忽略目录，不作为提交内容。
 

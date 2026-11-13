@@ -94,7 +94,7 @@ fn check_python() -> String {
         if let Some(path) = find_path_entry("python.exe") {
             return run_version_command(&path.to_string_lossy(), &["--version"]);
         }
-        return "未检测到可直接使用的 Python".to_owned();
+        "未检测到可直接使用的 Python".to_owned()
     }
 
     #[cfg(not(windows))]
@@ -113,11 +113,11 @@ fn check_python() -> String {
 fn check_npm() -> String {
     #[cfg(windows)]
     {
-        return if find_path_entry("npm.cmd").is_some() {
+        if find_path_entry("npm.cmd").is_some() {
             "npm.cmd 已找到（未执行脚本）".to_owned()
         } else {
             "未检测到 npm.cmd".to_owned()
-        };
+        }
     }
 
     #[cfg(not(windows))]

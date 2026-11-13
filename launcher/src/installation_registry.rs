@@ -280,7 +280,7 @@ fn normalize_identity_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     #[cfg(windows)]
     {
-        return text.replace('/', "\\").to_ascii_lowercase();
+        text.replace('/', "\\").to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     text.into_owned()
