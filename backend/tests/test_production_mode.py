@@ -30,14 +30,17 @@ def _register_worker(factory, worker_id='mode-worker'):
 def _seed_service_evidence(factory):
     """Seal live-service evidence for the ACTIVE identity with no extra
     workflow/review contracts so service_evidence_status() reports READY."""
+    from shine.comfyops.mode_capabilities import core_mode_node_types
     from shine.comfyops.runtime_configuration import ACTIVE_KEY, record_service_evidence
     from shine.models import AppSetting
 
     with factory.begin() as db:
         active = db.get(AppSetting, ACTIVE_KEY)
         assert active is not None, 'activation must exist before evidence'
-        record_service_evidence(db, active.value['identity'],
-                                {'workflow_profiles': {}, 'review_profiles': {}, 'node_count': 1})
+        record_service_evidence(db, active.value['identity'], {
+            'workflow_profiles': {}, 'review_profiles': {}, 'node_count': 1,
+            'mode_capabilities': {'required_nodes': sorted(core_mode_node_types())},
+        })
         db.commit()
 
 

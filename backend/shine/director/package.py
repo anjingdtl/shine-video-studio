@@ -190,7 +190,7 @@ def build_package(
     db: Session,
     project: Project,
     *,
-    workflow_profile_id: str,
+    workflow_profile_id: str | None = None,
     plan: DirectorEpisodePlan | None = None,
     scope_shot_ids: list[str] | None = None,
     episode_ids: list[str] | None = None,
@@ -201,6 +201,7 @@ def build_package(
     created_by: str = "user",
     settings=None,
     fill_missing_character_bindings: bool = False,
+    strategy: dict[str, Any] | None = None,
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
 
@@ -270,40 +271,81 @@ def build_package(
     if problems:
         raise HTTPException(409, {"code": "DIRECTOR_EPISODE_PLAN_STALE", "problems": problems})
 
-    profile = db.get(WorkflowProfile, workflow_profile_id)
-    if profile is None or (profile.project_id not in (None, project.id)):
-        raise HTTPException(404, "WORKFLOW_PROFILE_NOT_FOUND")
+    profile = None
+    strategy_contract = None
+    if strategy is not None:
+        # The dynamic per-shot round: the package freezes the user's strategy
+        # (variant / accelerator / second pass / upscale) instead of one
+        # static profile; every shot compiles its own graph from it.
+        from shine.strategy import GenerationStrategy, strategy_blockers
 
-    # A candidate variant may only be packaged when this project really owns
-    # it and this machine really checked it.  The package pins exactly one
-    # identity, so a profile that cannot run here never reaches a package and
-    # can never be silently replaced by the INT8 baseline.
-    from shine.comfyops.profile_gate import profile_blockers, size_blockers
+        if workflow_profile_id:
+            raise HTTPException(422, {
+                "code": "STRATEGY_PROFILE_EXCLUSIVE",
+                "message": "生产策略与静态生成方案不能同时冻结。",
+            })
+        try:
+            strategy_contract = GenerationStrategy.model_validate(strategy)
+        except ValueError as exc:
+            raise HTTPException(422, detail={
+                "code": "STRATEGY_INVALID",
+                "message": "生产策略合同不合法。",
+                "details": str(exc)[:500],
+            }) from exc
+        blockers = strategy_blockers(strategy_contract)
+        if blockers:
+            raise HTTPException(409, {
+                "code": "STRATEGY_BLOCKED",
+                "message": "所选生产策略在本机不可用，不会替换成其他方案。",
+                "blockers": blockers,
+            })
+    else:
+        if not workflow_profile_id:
+            raise HTTPException(404, "WORKFLOW_PROFILE_NOT_FOUND")
+        profile = db.get(WorkflowProfile, workflow_profile_id)
+        if profile is None or (profile.project_id not in (None, project.id)):
+            raise HTTPException(404, "WORKFLOW_PROFILE_NOT_FOUND")
 
-    # The package promises what the run will really do, so it reads the same
-    # facts: the live machine (when the caller can provide it) and the output
-    # size this package freezes.  A size the profile cannot map is refused
-    # here, at the same boundary that names it later, instead of confirming a
-    # package that the first batch dispatch would refuse (J09).
-    gate_blockers = profile_blockers(
-        db, settings, project.id, profile,
-        require_runtime=settings is not None,
-    )
-    gate_blockers.extend(size_blockers(profile, output))
-    if gate_blockers:
-        first = gate_blockers[0]
-        raise HTTPException(422 if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else 409, {
-            "code": first["code"],
-            "message": first["message"],
-            "blockers": gate_blockers,
-            "details": {
-                "missing_parameters": first.get("missing_parameters") or [],
-                "mapped_parameters": first.get("mapped_parameters") or [],
-            } if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else None,
-        })
+        # A candidate variant may only be packaged when this project really owns
+        # it and this machine really checked it.  The package pins exactly one
+        # identity, so a profile that cannot run here never reaches a package and
+        # can never be silently replaced by the INT8 baseline.
+        from shine.comfyops.profile_gate import profile_blockers, size_blockers
+
+        # The package promises what the run will really do, so it reads the same
+        # facts: the live machine (when the caller can provide it) and the output
+        # size this package freezes.  A size the profile cannot map is refused
+        # here, at the same boundary that names it later, instead of confirming a
+        # package that the first batch dispatch would refuse (J09).
+        gate_blockers = profile_blockers(
+            db, settings, project.id, profile,
+            require_runtime=settings is not None,
+        )
+        gate_blockers.extend(size_blockers(profile, output))
+        if gate_blockers:
+            first = gate_blockers[0]
+            raise HTTPException(422 if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else 409, {
+                "code": first["code"],
+                "message": first["message"],
+                "blockers": gate_blockers,
+                "details": {
+                    "missing_parameters": first.get("missing_parameters") or [],
+                    "mapped_parameters": first.get("mapped_parameters") or [],
+                } if first["code"] == "WORKFLOW_SIZE_NOT_MAPPED" else None,
+            })
 
     style = _style_snapshot(db, project)
-    binding = {
+    if strategy_contract is not None:
+        binding = {
+            "workflow_profile_id": None,
+            "strategy": strategy_contract.model_dump(mode="json"),
+            "strategy_sha256": strategy_contract.strategy_sha256(),
+            "mode": strategy_contract.generation_mode,
+            "generation_mode": generation_mode,
+            "output": output or {},
+        }
+    else:
+        binding = {
         "workflow_profile_id": profile.id,
         "mode": profile.mode,
         "graph_sha256": profile.graph_sha256,
@@ -318,7 +360,8 @@ def build_package(
     resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
     scoped_shot_order = [shot_id for e in selected_episodes for shot_id in e.shot_ids] \
         if plan_payload.mode == "sections" else plan_payload.shot_order()
-    if fill_missing_character_bindings and profile.mode.lower() == "ref2va":
+    if fill_missing_character_bindings and (
+            profile is None or profile.mode.lower() == "ref2va"):
         from shine.services import apply_missing_character_bindings
 
         apply_missing_character_bindings(
@@ -483,11 +526,19 @@ def _compiled_shot_blockers(
 
     binding = manifest.get("binding") or {}
     profile = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
+    strategy_contract = None
+    if binding.get("strategy") is not None:
+        from shine.strategy import GenerationStrategy
+
+        try:
+            strategy_contract = GenerationStrategy.model_validate(binding["strategy"])
+        except ValueError:
+            return [_blocker("STRATEGY_CONTRACT_INVALID", "冻结的生产策略合同无法解析，请重新生成导演包")]
     if policy_warnings is None:
         policy_warnings = []
     pinned_style = manifest.get("style") or {}
     style_row = db.get(StyleVersion, pinned_style.get("style_version_id") or "")
-    if profile is None or style_row is None:
+    if (profile is None and strategy_contract is None) or style_row is None:
         return []
     try:
         bible = StyleBible.model_validate(style_row.snapshot)
@@ -582,6 +633,37 @@ def _compiled_shot_blockers(
                     "shot_id": shot.id,
                     "message": f"镜头「{shot.name}」的人工提示词暂时不生效，已改用编译器版本",
                 })
+            if strategy_contract is not None:
+                # Per-shot dynamic compilation check: the same compiler the
+                # Worker will run must accept this shot's reference layout
+                # under the frozen strategy, or the package is not startable.
+                from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
+
+                def _family(item) -> str:
+                    return getattr(item.use_as, "value", str(item.use_as))
+
+                families = [_family(item) for item in reference_manifest]
+                image_count = sum(1 for family in families if family in ("subject", "picture"))
+                audio_count = sum(1 for family in families if family == "audio")
+                video_count = sum(1 for family in families if family == "video")
+                try:
+                    compile_ref2va_workflow(
+                        variant_id=strategy_contract.model_variant_id,
+                        accelerator_id=strategy_contract.accelerator_id,
+                        second_pass=strategy_contract.second_pass_spec(),
+                        image_count=image_count,
+                        audio_count=audio_count,
+                        video_count=video_count,
+                    )
+                except GraphCompileError as exc:
+                    problems.append(_blocker(
+                        exc.code,
+                        f"镜头「{shot.name}」按所选生产策略无法编译执行图：{exc.message}",
+                        shot_id=shot.id,
+                        details=exc.details,
+                    ))
+                    continue
+                continue  # dynamic shots carry no static profile constraints
             if profile.mode and compiled_mode.value.lower() != profile.mode.lower():
                 problems.append(_blocker(
                     "H3_MODE_REFERENCE_MISMATCH",
@@ -662,6 +744,7 @@ def _execution_fingerprint(
         "media_transfers": binding.get("media_transfers") or {},
         "profile_mode": binding.get("mode"),
         "generation_mode": binding.get("generation_mode"),
+        "strategy_sha256": binding.get("strategy_sha256"),
         "output": binding.get("output") or {},
         "style": (manifest.get("style") or {}).get("sha256"),
         "director_style": (manifest.get("style") or {}).get("director_style"),
@@ -766,9 +849,28 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
                     outline_artifact_id=script.get("outline_artifact_id"),
                 ))
 
-    profile_row = db.get(WorkflowProfile, (manifest.get("binding") or {}).get("workflow_profile_id") or "")
+    binding = manifest.get("binding") or {}
+    frozen_strategy = binding.get("strategy")
+    profile_row = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
     drift: list[str] = []
-    if profile_row is None:
+    if frozen_strategy is not None:
+        # A strategy package has no static profile to drift: the frozen
+        # strategy contract itself is re-validated, and every shot's dynamic
+        # compilation is checked in _compiled_shot_blockers below.
+        from shine.strategy import GenerationStrategy, strategy_blockers
+
+        try:
+            strategy_contract = GenerationStrategy.model_validate(frozen_strategy)
+        except ValueError:
+            blockers.append(_blocker("STRATEGY_CONTRACT_INVALID", "冻结的生产策略合同无法解析，请重新生成导演包"))
+        else:
+            if strategy_contract.strategy_sha256() != binding.get("strategy_sha256"):
+                blockers.append(_blocker("STRATEGY_CHANGED", "冻结的生产策略已被改动，请重新生成导演包"))
+            strategy_gates = strategy_blockers(strategy_contract)
+            if strategy_gates:
+                first = strategy_gates[0]
+                blockers.append(_blocker(first["code"], "所选生产策略在本机不可用", blockers=strategy_gates))
+    elif profile_row is None:
         blockers.append(_blocker("WORKFLOW_PROFILE_MISSING", "生成方案已不存在"))
     else:
         drift = _profile_execution_drift(manifest.get("binding") or {}, profile_row)

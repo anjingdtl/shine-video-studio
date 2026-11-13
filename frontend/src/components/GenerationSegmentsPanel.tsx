@@ -10,6 +10,7 @@ type Segment = {
   editorial_cuts: { beat_id?: string; start_s?: number }[];
   dependent_job_ids: string[]; replacement_job_id: string | null;
   replacement_status: string | null; can_select_replacement: boolean;
+  upscale?: { status: string; output_artifact_id: string | null; error_code: string | null } | null;
 };
 type SegmentState = { series_id: string | null; run_id?: string | null; segments: Segment[] };
 const PAGE_SIZE = 6;
@@ -19,6 +20,11 @@ const SEGMENT_STATUS: Record<string, string> = {
   PASSED: '已通过', RUNNING: '生成中', QUEUED: '排队中', SUBMITTING: '提交中',
   QC_PENDING: '质检中', REPAIR_PENDING: '返工中', FAILED: '失败',
   NEEDS_REVIEW: '待人工处理', BLOCKED: '已阻断', CANCELLED: '已取消', STALE: '已失效',
+};
+/** 后处理（X2 高清）阶段的中文说法。 */
+const UPSCALE_STATUS: Record<string, string> = {
+  PENDING: 'X2 高清排队中', SUBMIT_INTENT: 'X2 高清提交中', RUNNING: 'X2 高清处理中',
+  PASSED: 'X2 高清完成', NEEDS_REVIEW: 'X2 高清待处理', FAILED: 'X2 高清失败',
 };
 
 /**
@@ -153,14 +159,20 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
           <span className={`segment-status is-${(segment.status || 'none').toLowerCase()}`}>
             {SEGMENT_STATUS[segment.status] ?? segment.status}
           </span>
+          {segment.upscale && <span className="segment-status is-upscale">
+            {UPSCALE_STATUS[segment.upscale.status] ?? segment.upscale.status}
+          </span>}
         </div>
         {segment.artifact_id && segment.job_id ? <>
           <VideoPreview poster={`${API}/jobs/${segment.job_id}/thumbnail?poster=1s`}
             video={`${API}/jobs/${segment.job_id}/media`}
             label={`生成段 ${segment.position} 当前版本`} />
           <div className="segment-card-foot">
-            <small>{segment.editorial_cuts?.length ? `段内 ${segment.editorial_cuts.length} 个剪辑点` : '整段一次生成'}</small>
-            <OpenVideoFolderButton artifactId={segment.artifact_id} />
+            <small>{segment.upscale?.status === 'PASSED' && segment.upscale.output_artifact_id
+              ? '成片已用 X2 高清版本'
+              : segment.editorial_cuts?.length ? `段内 ${segment.editorial_cuts.length} 个剪辑点` : '整段一次生成'}</small>
+            <OpenVideoFolderButton artifactId={segment.upscale?.status === 'PASSED' && segment.upscale.output_artifact_id
+              ? segment.upscale.output_artifact_id : segment.artifact_id} />
           </div>
         </> : <p className="material-hint">尚无视频：等待前序通过、生成或质检完成。</p>}
         <details className="segment-detail">

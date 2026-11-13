@@ -990,7 +990,6 @@ function App() {
                   projectId={projectId}
                   mode="package"
                   overview={overview}
-                  workflowProfiles={workflowProfiles}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}
@@ -1011,7 +1010,6 @@ function App() {
                   projectId={projectId}
                   mode="run"
                   overview={overview}
-                  workflowProfiles={workflowProfiles}
                   demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                   onMessage={report}
                   onRefresh={() => refreshAll().catch(() => undefined)}

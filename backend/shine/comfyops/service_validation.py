@@ -29,6 +29,7 @@ from shine.comfyops.managed_recipe import (
     build_review_launch,
     load_managed_recipe,
 )
+from shine.comfyops.mode_capabilities import auto_register_missing_baseline_profiles
 from shine.comfyops.models import ComfyInstance
 from shine.comfyops.owned_process import OwnedProcessGroup
 from shine.comfyops.runtime_configuration import (
@@ -294,30 +295,40 @@ def _probe_review(role: str, spec: dict) -> dict:
     return result
 
 
-def _workflow_contracts(db: Session, project_id: str) -> tuple[dict, dict]:
-    from shine.comfyops import deployment
+def _workflow_contracts(db: Session, project_id: str) -> tuple[dict, dict, dict]:
+    """Classify baseline templates; drift and gaps are advisory, not a block.
 
-    files = {}
-    for path in deployment.PROFILE_DIR.glob("*.json"):
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        name = raw.get("name")
-        if name:
-            files[name] = raw
-    profiles = db.scalars(select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)).all()
-    by_name = {profile.name: profile for profile in profiles}
-    contracts = {}
-    for name in deployment.load_default_catalog()["workflow_profiles"]:
-        profile = by_name.get(name)
-        raw = files.get(name)
-        if profile is None or raw is None:
-            raise HTTPException(409, f"REGISTER_WORKFLOW_PROFILES_FIRST:{name}")
-        if (profile.graph_sha256 != graph_hash(raw["graph"])
-                or profile.parameter_map != raw["parameter_map"]
-                or profile.media_transfers != raw.get("media_transfers", {})
-                or profile.required_nodes != raw["required_nodes"]):
-            raise HTTPException(409, f"WORKFLOW_PROFILE_CONTENT_CHANGED:{name}")
-        contracts[name] = profile
-    return files, contracts
+    The mode-level contract replaced the byte-exact startup check: a renderer
+    is valid for production when the core H3 node classes of the baseline
+    Ref2VA mode are present (see :func:`_validate_core_mode_nodes`).  A
+    historical template that drifted from its repository file, or one the
+    project never registered, only means "this template needs re-validation";
+    it must not lock the whole Ref2VA mode on this machine.
+    """
+    from shine.comfyops.mode_capabilities import classify_baseline_profiles
+
+    state = classify_baseline_profiles(db, project_id)
+    return state["templates"], state["contracts"], {
+        "drifted": state["drifted"],
+        "missing": state["missing"],
+    }
+
+
+def _validate_core_mode_nodes(object_info: dict) -> None:
+    """Refuse READY when the renderer lacks the baseline mode's core nodes."""
+    from shine.comfyops.mode_capabilities import core_mode_node_types
+
+    required = core_mode_node_types()
+    if not required:
+        # No repository template at all means the mode has no audited recipe;
+        # an empty pass here would be a fabricated READY.
+        raise HTTPException(409, "BASELINE_MODE_TEMPLATES_UNAVAILABLE")
+    missing = sorted(name for name in required if name not in object_info)
+    if missing:
+        raise HTTPException(409, {
+            "code": "CORE_MODE_NODES_MISSING",
+            "missing_nodes": missing,
+        })
 
 
 def _review_resource_blockers(recipe: dict) -> list[dict]:
@@ -513,13 +524,17 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     instance = db.get(ComfyInstance, identity["instance_id"])
     if instance is None or instance.status != "STOPPED" or instance.payload.get("process"):
         raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_VALIDATION")
-    _files, contracts = _workflow_contracts(db, project_id)
+    _files, contracts, template_advisory = _workflow_contracts(db, project_id)
+    auto_registered = auto_register_missing_baseline_profiles(db, project_id, actor=actor)
+    if auto_registered:
+        _files, contracts, template_advisory = _workflow_contracts(db, project_id)
     recipe = load_managed_recipe(identity["recipe"], expected_sha256=identity["recipe_sha256"])
     missing_resources = _review_resource_blockers(recipe)
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
     object_info = renderer["object_info"]
     _validate_workflows_against_object_info(contracts, object_info)
+    _validate_core_mode_nodes(object_info)
     if renderer["port"] != recipe["renderer"].get("port"):
         raise HTTPException(409, "SERVICE_VALIDATION_RENDERER_PORT_CHANGED")
 
@@ -584,12 +599,18 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         for name, profile in contracts.items()
     }
     object_info_payload = json.dumps(object_info, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    from shine.comfyops.mode_capabilities import core_mode_node_types
     evidence = record_service_evidence(db, identity, {
         "project_id": project_id,
         "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "node_count": len(object_info),
         "node_inventory_sha256": hashlib.sha256(object_info_payload.encode("utf-8")).hexdigest(),
         "workflow_profiles": profiles_inventory,
+        "mode_capabilities": {
+            "required_nodes": sorted(core_mode_node_types()),
+        },
+        "template_advisory": template_advisory,
+        "auto_registered_profiles": auto_registered,
         "review_profiles": profiles,
         "advisory_reviews": advisory_reviews,
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
@@ -601,6 +622,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         "recipe_sha256": recipe_sha256,
         "node_count": len(object_info),
         "workflows": sorted(contracts),
+        "template_advisory": template_advisory,
+        "auto_registered_profiles": auto_registered,
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
         "advisory_reviews": advisory_reviews,
         "services_stopped": True,
@@ -612,6 +635,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         "recipe_sha256": recipe_sha256,
         "node_count": len(object_info),
         "workflow_profiles": sorted(contracts),
+        "template_advisory": template_advisory,
+        "auto_registered_profiles": auto_registered,
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
         "advisory_reviews": advisory_reviews,

@@ -1379,6 +1379,7 @@ def create_app(
                 provider=body.provider,
                 generation_mode=body.generation_mode,
                 workflow_profile_id=body.workflow_profile_id,
+                strategy=body.strategy,
                 self_review_scope=body.self_review_scope,
                 basic_review_resolution=body.basic_review_resolution,
                 output=body.output,

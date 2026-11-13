@@ -13,10 +13,13 @@ import {
   ApiError,
   controlProductionRun,
   getProductionRun,
+  getStrategyOptions,
   startDirectorProduction,
   type DirectorEpisodeOverview,
   type DirectorOverview,
   type ProductionRun,
+  type ProductionStrategy,
+  type StrategyOptions,
 } from '../api';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
@@ -97,28 +100,42 @@ export function EpisodeCards({ episodes, onAction, compact }: {
 
 /* ============================ ⑤ 导演包 / ⑥ 视频生产 ============================ */
 
-type ProfileOption = { id: string; name: string; mode: string };
-
-/** 把工程里的方案名翻译成普通人能懂的说法（原名保留，中文放在括号里）。 */
-export function describeProfileName(name: string): string {
-  const lower = (name || '').toLowerCase();
-  const parts: string[] = [];
-  if (/pdd8|8step|8-step/.test(lower)) parts.push('8 步加速');
-  else if (/pdd|step/.test(lower)) parts.push('多步采样');
-  else parts.push('原生采样');
-  const images = lower.match(/(\d+)img/);
-  if (images) parts.push(`${images[1]} 张参考图`);
-  if (/1aud|audio/.test(lower)) parts.push('1 段参考音频');
-  if (/portrait/.test(lower)) parts.push('竖屏');
-  if (/w6a8|fp8/.test(lower)) parts.push('低显存档');
-  if (/int8/.test(lower)) parts.push('INT8 量化');
-  return parts.join(' · ');
+/** 模型版本的普通人说法（工程名保留，中文放在括号里）。 */
+export function describeVariantName(variantId: string): string {
+  const lower = (variantId || '').toLowerCase();
+  if (/int8-convrot/.test(lower)) return '标准画质 · INT8';
+  if (/lowend|w6a8/.test(lower)) return '低显存候选 · W6A8';
+  if (/nvfp4/.test(lower)) return '低显存候选 · NVFP4';
+  if (/w4/.test(lower)) return '候选 · W4';
+  return variantId;
 }
 
-export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo, mode, onMessage, onRefresh, onNavigate }: {
+/** 加速配方的普通人说法。 */
+export function describeAccelerator(acceleratorId: string, steps?: number): string {
+  const lower = (acceleratorId || '').toLowerCase();
+  if (lower === 'pdd8') return '快速 · 8 步加速';
+  if (lower === 'native20') return '高质量 · 原生 20 步';
+  if (lower === 'turbo4') return '极速 · 4 步（未验收）';
+  return steps ? `${acceleratorId} · ${steps} 步` : acceleratorId;
+}
+
+/** 服务端读不到选项时的最保守回退：只给已验收的 INT8 + PDD8，其余不可选。 */
+const FALLBACK_OPTIONS: StrategyOptions = {
+  model_variants: [{
+    variant_id: 'h3-ref2va-int8-convrot', label: 'h3-ref2va-int8-convrot',
+    acceptance_status: 'SUPPORTED', verified: true, default_recommended: true,
+  }],
+  accelerators: [
+    { accelerator_id: 'pdd8', steps: 8, verified: true },
+    { accelerator_id: 'native20', steps: 20, verified: true },
+  ],
+  second_pass: { supported: true, recipes: ['h3-tail-refine-v1'] },
+  upscale: [],
+};
+
+export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage, onRefresh, onNavigate }: {
   projectId: string;
   overview: DirectorOverview | null;
-  workflowProfiles: ProfileOption[];
   demo: boolean;
   /** package：第⑤步只做拍摄方案与开拍；run：第⑥步只看真实生产进度。 */
   mode: 'package' | 'run';
@@ -128,7 +145,11 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
 }) {
   const railPresent = useRailPresent();
   const [selected, setSelected] = useState<string[]>([]);
-  const [profileId, setProfileId] = useState('');
+  const [options, setOptions] = useState<StrategyOptions>(FALLBACK_OPTIONS);
+  const [variantId, setVariantId] = useState('h3-ref2va-int8-convrot');
+  const [acceleratorId, setAcceleratorId] = useState('pdd8');
+  const [secondPass, setSecondPass] = useState(false);
+  const [upscale, setUpscale] = useState(false);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const [run, setRun] = useState<ProductionRun | null>(null);
@@ -155,13 +176,15 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
       && current.every((id, index) => id === pendingShoot[index]) ? current : pendingShoot));
   }, [pendingShoot, touched]);
 
-  const ref2va = useMemo(
-    () => workflowProfiles.filter((row) => (row.mode || '').toLowerCase() === 'ref2va'),
-    [workflowProfiles],
-  );
+  // 生产策略选项来自服务端能力矩阵；读不到时保持最保守回退，
+  // 由服务端在提交时做最终裁决（前端不发明拒绝理由）。
   useEffect(() => {
-    if (!profileId && ref2va.length) setProfileId(ref2va[0].id);
-  }, [profileId, ref2va]);
+    let cancelled = false;
+    getStrategyOptions(projectId)
+      .then((rows) => { if (!cancelled) setOptions(rows); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId]);
 
   const activeRunId = overview?.run?.run_id ?? null;
   useEffect(() => {
@@ -187,12 +210,22 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
     submitting.current = true;
     setBusy('start'); setProblem('');
     try {
+      const strategy: ProductionStrategy = {
+        schema_version: '1',
+        generation_mode: 'Ref2VA',
+        model_variant_id: variantId,
+        accelerator_id: acceleratorId,
+        second_pass: { enabled: secondPass, recipe_id: 'h3-tail-refine-v1', denoise: 0.25, latent_scale: 1.0 },
+        upscale: upscale ? { enabled: true, engine: 'relayvsr', variant: 'x2', quality_preset: 'balanced' }
+          : { enabled: false },
+      };
       const result = await startDirectorProduction(projectId, {
         episode_ids: selected,
-        workflow_profile_id: profileId || null,
+        strategy,
       });
+      const shotCount = result.episodes.reduce((sum, row) => sum + row.shot_count, 0);
       onMessage?.(result.created
-        ? `已开始真实制作：第 ${result.episodes.map((row) => row.position).join('、')} 集，共 ${result.episodes.reduce((sum, row) => sum + row.shot_count, 0)} 镜。`
+        ? `已开始真实制作：第 ${result.episodes.map((row) => row.position).join('、')} 集，系统已为 ${shotCount} 镜自动安排参考素材和生成策略。`
         : '这次选择已经开拍，返回了同一次运行，没有重复启动。', 'success');
       onRefresh?.();
       onNavigate?.('run');
@@ -203,7 +236,7 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
       submitting.current = false;
       setBusy('');
     }
-  }, [onMessage, onNavigate, onRefresh, profileId, projectId, selected]);
+  }, [acceleratorId, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
 
   const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!run) return;
@@ -224,13 +257,12 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
     ? { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
         onClick: () => void start(),
         loading: busy === 'start',
-        disabled: busy !== '' || !selected.length || demo || !profileId,
+        disabled: busy !== '' || !selected.length || demo,
         disabledReason: demo ? '当前是演示模式：先启用真实制作'
-          : !profileId ? '先在基础配置登记本机 H3 生成方案'
-            : !selected.length ? '至少选择一集' : undefined,
+          : !selected.length ? '至少选择一集' : undefined,
         icon: <Clapperboard size={14} /> }
     : null;
-  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, profileId, running]);
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -285,16 +317,67 @@ export function DirectorShootPanel({ projectId, overview, workflowProfiles, demo
           })}
         </div>
 
-        <label className="shoot-profile">本机生成方案
-          <select value={profileId} disabled={running || busy !== ''}
-            onChange={(event) => setProfileId(event.target.value)}>
-            {ref2va.length === 0 && <option value="">还没有登记 Ref2VA 方案</option>}
-            {ref2va.map((row) => <option key={row.id} value={row.id}>
-              {row.name}（{describeProfileName(row.name)}）
-            </option>)}
-          </select>
-          <em>只会使用本机已登记的 Ref2VA 方案；不会自动换成演示或其他模型。</em>
-        </label>
+        {/* 生产策略：模型版本 / 加速 / 二次精修 / 高清视频。参考素材和每一镜的工作流由系统自动安排。 */}
+        <div className="strategy-picker">
+          <p className="strategy-note">
+            系统会按每一镜的分镜和已确认素材自动安排参考图/音频与生成流程；这里只需要选模型与生产策略。
+          </p>
+          <div className="strategy-row" role="radiogroup" aria-label="模型版本">
+            <span className="strategy-label">模型版本</span>
+            {options.model_variants.map((row) => (
+              <button key={row.variant_id} type="button" role="radio"
+                aria-checked={variantId === row.variant_id}
+                className={`strategy-option${variantId === row.variant_id ? ' active' : ''}`}
+                disabled={!row.verified || running || busy !== ''}
+                title={row.verified ? row.label : `未验收（${row.acceptance_status}）：不能用于真实制作`}
+                onClick={() => setVariantId(row.variant_id)}>
+                {describeVariantName(row.variant_id)}
+                {!row.verified && <em className="strategy-flag">未验收</em>}
+              </button>
+            ))}
+          </div>
+          <div className="strategy-row" role="radiogroup" aria-label="画面加速">
+            <span className="strategy-label">画面加速</span>
+            {options.accelerators.map((row) => (
+              <button key={row.accelerator_id} type="button" role="radio"
+                aria-checked={acceleratorId === row.accelerator_id}
+                className={`strategy-option${acceleratorId === row.accelerator_id ? ' active' : ''}`}
+                disabled={!row.verified || running || busy !== ''}
+                title={row.verified ? undefined : '这个加速配方还没有真机验收'}
+                onClick={() => setAcceleratorId(row.accelerator_id)}>
+                {describeAccelerator(row.accelerator_id, row.steps)}
+                {!row.verified && <em className="strategy-flag">未验收</em>}
+              </button>
+            ))}
+          </div>
+          <div className="strategy-row">
+            <span className="strategy-label">二次精修</span>
+            <label className="strategy-toggle">
+              <input type="checkbox" checked={secondPass} disabled={running || busy !== ''}
+                onChange={(event) => setSecondPass(event.target.checked)} />
+              <span>启用（第二次采样精修画面，成片更细）</span>
+            </label>
+          </div>
+          <div className="strategy-row">
+            <span className="strategy-label">高清视频</span>
+            {options.upscale.length === 0 && (
+              <label className="strategy-toggle">
+                <input type="checkbox" checked={upscale} disabled
+                  onChange={() => setUpscale(false)} />
+                <span>RelayVSR 2 倍超分（本机还没就绪）</span>
+              </label>
+            )}
+            {options.upscale.map((row) => (
+              <label key={row.engine} className="strategy-toggle">
+                <input type="checkbox" checked={upscale && row.enabled}
+                  disabled={!row.enabled || running || busy !== ''}
+                  title={row.enabled ? undefined : (row.blockers[0]?.detail || row.blockers[0]?.code || '暂不可用')}
+                  onChange={(event) => setUpscale(event.target.checked && row.enabled)} />
+                <span>RelayVSR 2 倍超分{row.enabled ? '' : '（本机还没就绪）'}</span>
+              </label>
+            ))}
+          </div>
+        </div>
 
         {problem && <p role="alert" className="form-error">{problem}</p>}
         {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== ''}

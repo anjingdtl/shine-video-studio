@@ -726,7 +726,34 @@ def make_render_request(
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
     spec = spec or ShotSpec.model_validate(shot.spec)
     style = validate_shot_style(db, project.id, spec, require_current=True)
-    if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id:
+    strategy = None
+    if body.strategy is not None:
+        from shine.strategy import GenerationStrategy, strategy_blockers
+
+        try:
+            strategy = GenerationStrategy.model_validate(body.strategy)
+        except ValueError as exc:
+            raise HTTPException(422, detail={
+                "code": "STRATEGY_INVALID",
+                "message": "生产策略合同不合法。",
+                "details": str(exc)[:500],
+            }) from exc
+        blockers = strategy_blockers(strategy)
+        if blockers:
+            raise HTTPException(409, detail={
+                "code": "STRATEGY_BLOCKED",
+                "message": "所选生产策略在本机不可用，不会替换成其他方案。",
+                "blockers": blockers,
+            })
+        if body.workflow_profile_id:
+            # A strategy job compiles its own per-shot graph; binding a static
+            # profile at the same time would reintroduce the single-profile
+            # coupling this path exists to remove.
+            raise HTTPException(422, detail={
+                "code": "STRATEGY_PROFILE_EXCLUSIVE",
+                "message": "生产策略与静态生成方案不能同时指定。",
+            })
+    if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id and strategy is None:
         raise HTTPException(status_code=409, detail="ComfyUI renders require a registered workflow profile")
 
     stored = _binding_rows(db, shot)
@@ -814,6 +841,7 @@ def make_render_request(
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
     manifest = build_reference_manifest(ordered, assets)
     profile = None
+    compiled_strategy_graph = None
     if body.workflow_profile_id:
         profile = db.get(WorkflowProfile, body.workflow_profile_id)
         if not profile or (profile.project_id and profile.project_id != project.id):
@@ -825,7 +853,8 @@ def make_render_request(
         name for entry in spec.characters for name in split_character_names(entry)
         if not is_narrator_speaker(name)
     ]
-    if (profile is not None and profile.mode.lower() == "ref2va" and visible_characters
+    if (((profile is not None and profile.mode.lower() == "ref2va") or strategy is not None)
+            and visible_characters
             and not any(item.use_as == ReferenceUse.SUBJECT for item in manifest)):
         raise HTTPException(status_code=422, detail={
             "code": "H3_CHARACTER_REFERENCE_MISSING",
@@ -990,8 +1019,43 @@ def make_render_request(
         transfer_warnings = collect_unbound_transfer_families(profile.media_transfers, manifest, assets)
         transfer_warning_lines = [unbound_transfer_family_warning(family) for family in transfer_warnings]
 
+    if strategy is not None and body.provider == RenderProvider.COMFYUI:
+        # Per-shot dynamic compilation preflight: build this shot's graph now
+        # so the request carries its real execution identity (graph hash and
+        # checkpoint) and every named refusal (limits, unverified recipes,
+        # video references without a proven loader) fires at request time -
+        # the Worker re-compiles the same deterministic graph before submit.
+        from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
+
+        image_count = sum(
+            1 for item in manifest if item.use_as in (ReferenceUse.SUBJECT, ReferenceUse.PICTURE)
+        )
+        audio_count = sum(1 for item in manifest if item.use_as == ReferenceUse.AUDIO)
+        video_count = sum(1 for item in manifest if item.use_as == ReferenceUse.VIDEO)
+        try:
+            compiled_strategy_graph = compile_ref2va_workflow(
+                variant_id=strategy.model_variant_id,
+                accelerator_id=strategy.accelerator_id,
+                second_pass=strategy.second_pass_spec(),
+                image_count=image_count,
+                audio_count=audio_count,
+                video_count=video_count,
+            )
+        except GraphCompileError as exc:
+            raise HTTPException(422, detail={
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }) from exc
+        workflow_hash = compiled_strategy_graph.graph_sha256
+
     render_request = RenderRequest(
-        model_checkpoint_id=profile.checkpoint_id if profile is not None else "MiniMax-H3-Base",
+        model_checkpoint_id=(
+            compiled_strategy_graph.checkpoint_id if compiled_strategy_graph is not None
+            else profile.checkpoint_id if profile is not None
+            else "MiniMax-H3-Base"
+        ),
+        strategy=strategy.model_dump() if strategy is not None else None,
         project_language=project.language,
         idempotency_key=idempotency_key or uuid4().hex,
         shot_id=shot.id,
@@ -1218,8 +1282,15 @@ def job_request_identity(project_id: str, shot: Shot, body: CreateJob) -> str:
 
 
 #: The refusals that belong to the whole batch, not to one shot.
-BATCH_LEVEL_CODES = frozenset({"WORKFLOW_SIZE_NOT_MAPPED", "WORKFLOW_PROFILE_NOT_FOUND"})
-"""A profile that cannot apply the requested size refuses every shot equally."""
+BATCH_LEVEL_CODES = frozenset({
+    "WORKFLOW_SIZE_NOT_MAPPED",
+    "WORKFLOW_PROFILE_NOT_FOUND",
+    "STRATEGY_BLOCKED",
+    "STRATEGY_INVALID",
+    "STRATEGY_PROFILE_EXCLUSIVE",
+})
+"""A profile that cannot apply the requested size - or a strategy this
+machine cannot execute at all - refuses every shot equally."""
 
 
 def shot_static_blockers(

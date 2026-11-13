@@ -195,6 +195,22 @@ def _segment_row(db, project_id, shot_id, position, *, root=None, episode_positi
     reason = _blocker(db, job, shot) if job else ("GENERATION_NOT_STARTED" if shot else "SHOT_NOT_FOUND")
     if replacement:
         reason = "RETAKE_AWAITS_SELECTION_OR_REVIEW"
+    # The post-production upscale stage of this shot, when the run's strategy
+    # enabled it: the segment card shows the stage chain honestly.
+    upscale = None
+    if job:
+        from shine.models import RelayUpscaleItem
+
+        row = db.scalar(select(RelayUpscaleItem).where(
+            RelayUpscaleItem.job_id == job.id,
+            RelayUpscaleItem.stage == "relayvsr_x2",
+        ).order_by(RelayUpscaleItem.updated_at.desc()))
+        if row is not None:
+            upscale = {
+                "status": row.status,
+                "output_artifact_id": row.output_artifact_id,
+                "error_code": row.error_code,
+            }
     return {
         "shot_id": shot_id,
         "position": position,
@@ -209,6 +225,7 @@ def _segment_row(db, project_id, shot_id, position, *, root=None, episode_positi
         "attempt_no": attempt.attempt_no if attempt else None,
         "status": job.status if job else (item.status if item else batch_status or "PLANNED"),
         "artifact_id": job.artifact_id if job else None,
+        "upscale": upscale,
         "blocker": reason,
         "can_regenerate": reason is None,
         "dependent_job_ids": _impact(db, job.id) if job else [],

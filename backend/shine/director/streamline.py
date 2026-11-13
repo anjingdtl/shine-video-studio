@@ -1232,6 +1232,7 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
 
 def start_director_production(
     db, project, *, settings, episode_ids: list[str], workflow_profile_id: str | None = None,
+    strategy: dict | None = None,
     actor: str = "local-user",
 ) -> dict[str, Any]:
     """The single main operation of the director page: shoot the chosen episodes.
@@ -1242,6 +1243,12 @@ def start_director_production(
     the existing Run engine starts it with a deterministic request key.  A
     replay of the same selection returns the same run instead of starting a
     second one, and an unfinished episode never drags a ready one down.
+
+    ``strategy`` is the dynamic per-shot round's user choice (model variant,
+    accelerator, optional second pass / RelayVSR X2).  With a strategy the
+    package freezes the strategy contract instead of one static profile and
+    every shot compiles its own graph; the legacy ``workflow_profile_id``
+    path stays byte-for-byte for existing callers.
     """
     from shine.comfy.workflow import graph_hash
     from shine.director.overview import build_overview
@@ -1282,34 +1289,61 @@ def start_director_production(
         })
 
     ensure_project_rulepack(db, project_id)
-    package = _package_for_selection(db, project_id, requested)
+    strategy_sha = None
+    if strategy is not None:
+        from shine.strategy import GenerationStrategy
+
+        try:
+            strategy_contract = GenerationStrategy.model_validate(strategy)
+        except ValueError as exc:
+            raise HTTPException(422, {"code": "STRATEGY_INVALID",
+                                      "message": "生产策略合同不合法。",
+                                      "details": str(exc)[:400]}) from exc
+        strategy = strategy_contract.model_dump(mode="json")
+        strategy_sha = strategy_contract.strategy_sha256()
+        if workflow_profile_id:
+            raise HTTPException(422, {"code": "STRATEGY_PROFILE_EXCLUSIVE",
+                                      "message": "生产策略与静态生成方案不能同时指定。"})
+    package = _package_for_selection(db, project_id, requested, strategy_sha=strategy_sha)
     built = False
     if package is None:
-        profile_id = workflow_profile_id
-        if not profile_id:
-            from shine.director.requirements import bound_profile
+        if strategy is not None:
+            package = build_package(
+                db, project,
+                strategy=strategy,
+                episode_ids=requested,
+                generation_mode="Ref2VA",
+                policy=None,
+                fill_missing_character_bindings=True,
+                created_by=actor,
+                settings=settings,
+            )
+        else:
+            profile_id = workflow_profile_id
+            if not profile_id:
+                from shine.director.requirements import bound_profile
 
-            bound = bound_profile(db, project_id)
-            if bound is None:
-                raise HTTPException(409, {"code": "WORKFLOW_PROFILE_REQUIRED",
-                                          "message": "先登记本机生成方案，才能真实开拍"})
-            profile_id = bound.id
-        profile = db.get(WorkflowProfile, profile_id)
-        # A profile registered for the whole machine has no project owner; a
-        # project-owned profile must belong to this project.
-        if profile is None or (profile.project_id and profile.project_id != project_id):
-            raise HTTPException(404, {"code": "WORKFLOW_PROFILE_NOT_FOUND",
-                                      "message": "选择的生成方案不属于这个作品"})
-        package = build_package(
-            db, project,
-            workflow_profile_id=profile.id,
-            episode_ids=requested,
-            generation_mode=profile.mode,
-            policy=None,
-            fill_missing_character_bindings=(profile.mode or "").lower() == "ref2va",
-            created_by=actor,
-            settings=settings,
-        )
+                bound = bound_profile(db, project_id)
+                if bound is None:
+                    raise HTTPException(409, {"code": "WORKFLOW_PROFILE_REQUIRED",
+                                              "message": "先登记本机生成方案，才能真实开拍"})
+                profile_id = bound.id
+            profile = db.get(WorkflowProfile, profile_id)
+            # A profile registered for the whole machine has no project owner; a
+            # project-owned profile must belong to this project.
+            if profile is None or (profile.project_id and profile.project_id != project_id):
+                raise HTTPException(404, {"code": "WORKFLOW_PROFILE_NOT_FOUND",
+                                          "message": "选择的生成方案不属于这个作品"})
+            package = build_package(
+                db, project,
+                workflow_profile_id=profile.id,
+                episode_ids=requested,
+                generation_mode=profile.mode,
+                policy=None,
+                fill_missing_character_bindings=(profile.mode or "").lower() == "ref2va",
+                created_by=actor,
+                settings=settings,
+            )
         built = True
         readiness = package_readiness(db, package)
         # ``ready`` answers "can this content be produced at all"; ``startable``
@@ -1354,8 +1388,14 @@ def start_director_production(
     }
 
 
-def _package_for_selection(db, project_id: str, episode_ids: list[str]):
-    """A confirmed, non-stale package whose scope is exactly this selection."""
+def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strategy_sha: str | None = None):
+    """A confirmed, non-stale package whose scope - and strategy - match.
+
+    A package only replays when it was frozen for the same production
+    strategy: reusing a profile package for a strategy shoot (or the
+    reverse) would silently render under a different execution contract the
+    user never confirmed.
+    """
     from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
 
     wanted = set(episode_ids)
@@ -1367,6 +1407,10 @@ def _package_for_selection(db, project_id: str, episode_ids: list[str]):
     for package in rows:
         covered = set(db.scalars(select(DirectorPackageEpisode.episode_id).where(
             DirectorPackageEpisode.package_id == package.id)).all())
-        if covered == wanted:
-            return package
+        if covered != wanted:
+            continue
+        frozen_sha = ((package.manifest or {}).get("binding") or {}).get("strategy_sha256")
+        if frozen_sha != strategy_sha:
+            continue
+        return package
     return None
