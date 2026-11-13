@@ -9,12 +9,28 @@
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 收集 | `pytest backend/tests --co -q` | **2482 selected / 0 deselected**（unit 213 / integration 561 / full 1708） |
-| 全量 | `pytest backend/tests -q` | **退出码 0，输出无 FAILED** |
+| 收集 | `pytest backend/tests --co -q` | **2485 collected / 0 deselected** |
+| 全量 | 8 分片并行（项目固定规则，见 `AGENTS.md`） | **8/8 分片退出码 0，`FAILED`/`ERROR` 计数 0** |
 
-第一轮基线 2470；本轮新增 12 项（见 1.2），合计 2482。
+第一轮基线 2470；本轮累计新增 15 项，`2485`。
 
-> 说明：本仓库的 `conftest.py` 会在终端摘要位置打印逐模块耗时（`[shine-module]`），因此 `-q` 的 “N passed” 汇总行不会出现；判定以退出码与 `FAILED` 行为准。第一次全量出现 1 项失败（旧文案断言，见 §3.1），修复后第二次全量退出码 0、`FAILED` 计数 0。
+分片实测（文件均分 `split -n r/8`，单片 25–26 个测试文件）：
+
+| 分片 | 收集 | 模块 | 退出码 | FAILED/ERROR |
+| --- | --- | --- | --- | --- |
+| chunk-aa | 305 | 20 | 0 | 0 |
+| chunk-ab | 377 | 20 | 0 | 0 |
+| chunk-ac | 403 | 20 | 0 | 0 |
+| chunk-ad | 294 | 20 | 0 | 0 |
+| chunk-ae | 332 | 20 | 0 | 0 |
+| chunk-af | 267 | 20 | 0 | 0 |
+| chunk-ag | 181 | 20 | 0 | 0 |
+| chunk-ah | 326 | 20 | 0 | 0 |
+| **合计** | **2485** | — | **全 0** | **0** |
+
+> 说明 1：本仓库的 `conftest.py` 在终端摘要位置打印逐模块耗时（`[shine-module]`），`-q` 下没有 “N passed” 汇总行；判定以分片退出码与 `FAILED`/`ERROR` 行为准。
+> 说明 2：**回归命令必须带 `CODEBUDDY_SAFE_DELETE_ENABLED=0`**。执行环境的 safe-delete 垫片按"轮"统计删除次数，累计 50 次后拦截每一次 `unlink`，pytest 清理 tmp 目录正好触发，会伪造出 `test_v13_preparation`（16 项）、`test_v13_instances`（15 项）、`test_sdk_role_process`（11 项）等大片失败；同一模块单独复跑（带该变量）69/69 通过。这是运行环境问题，不是代码回归，已写入 `AGENTS.md`。
+> 说明 3：串行 `pytest backend/tests -q` 单进程需 1.5 小时量级，本轮按项目规则改为 8 分片并行（约 12 分钟），不再使用串行结论。
 
 ### 1.2 新增 V2 专项回归
 

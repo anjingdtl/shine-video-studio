@@ -8,7 +8,7 @@
 
 | 维度 | 结论 | 依据 |
 | --- | --- | --- |
-| ENGINEERING_PASS | **通过** | 后端全量 `pytest backend/tests -q` 退出码 0；前端 42 文件 / 273 项通过；Ruff / `tsc --noEmit` / `vite build` 全绿 |
+| ENGINEERING_PASS | **通过** | 后端全量按项目规则 **8 分片并行**：2485 项、8/8 退出码 0、零 FAILED/ERROR；前端 42 文件 / 273 项通过；Ruff / `tsc --noEmit` / `vite build` 全绿 |
 | REAL_H3_PASS | **通过（两集）** | 第 1 集 3 镜、第 2 集 1 镜均在本机 Ref2VA INT8 上真实生成、QC 通过、逐集装配成片；两集 MP4 均在 ⑦ 页内真实播放 |
 | HUMAN_ART_REVIEW | **NOT_REVIEWED** | 无授权审片人签署；画面仅由操作者本人过目 |
 
