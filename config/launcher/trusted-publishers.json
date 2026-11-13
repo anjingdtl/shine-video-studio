@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "signature_algorithm": "ed25519",
+  "policy": "fail-closed-if-key-is-not-listed",
+  "keys": []
+}

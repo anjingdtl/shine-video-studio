@@ -11,6 +11,7 @@ records intents without touching a process in the request thread.
 from __future__ import annotations
 
 import json
+import os
 from uuid import uuid4
 
 import pytest
@@ -159,6 +160,8 @@ def _write_recipe(api, tmp_path, *, instance_id=INSTALLATION, port=8188):
     path.write_text(json.dumps(recipe), encoding="utf-8")
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_start_refuses_when_h3_owns_the_installation(api, installation_row, tmp_path):
     from shine.comfyops.image_renderer import start_image_renderer
 
@@ -171,6 +174,8 @@ def test_start_refuses_when_h3_owns_the_installation(api, installation_row, tmp_
     assert failure.value.detail["code"] == "IMAGE_RENDERER_INSTALLATION_BUSY_H3"
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_start_refuses_when_another_start_is_in_progress(api, installation_row, tmp_path):
     import os
 
@@ -190,6 +195,8 @@ def test_start_refuses_when_another_start_is_in_progress(api, installation_row, 
     assert failure.value.detail["code"] == "IMAGE_RENDERER_START_IN_PROGRESS"
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_start_refuses_when_a_gpu_lease_is_active(api, installation_row, tmp_path):
     from shine.comfyops.image_renderer import start_image_renderer
 

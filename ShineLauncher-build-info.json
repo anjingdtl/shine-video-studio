@@ -1,0 +1,9 @@
+{
+  "name": "Shine Launcher",
+  "version": "0.1.0",
+  "rust_toolchain": "1.100.0",
+  "target": "x86_64-pc-windows-msvc",
+  "source_commit": "f41e60940968eea6555041db3204b760986f7051",
+  "exe_sha256": "be07c704605d79646e4fd266649f1979b846b50d6fe6a2a0ddbace6bcb252607",
+  "windows_gui_acceptance": "PENDING_LOCAL_ACCEPTANCE"
+}

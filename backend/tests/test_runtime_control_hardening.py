@@ -17,6 +17,7 @@ These tests cover the gaps the first acceptance round left open:
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -66,6 +67,8 @@ class _FakeKernel:
         return 1
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="the lifecycle guard uses a Windows named mutex")
 def test_guard_refuses_when_the_mutex_cannot_be_created(monkeypatch):
     fake = _FakeKernel(create=None)
     monkeypatch.setattr(guard, "_kernel32", lambda: fake)
@@ -74,6 +77,8 @@ def test_guard_refuses_when_the_mutex_cannot_be_created(monkeypatch):
             pytest.fail("a section must never open without its OS lock")
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="the lifecycle guard uses a Windows named mutex")
 def test_guard_refuses_when_the_lock_cannot_be_taken(monkeypatch):
     fake = _FakeKernel(create=1234, wait=guard._WAIT_TIMEOUT)
     monkeypatch.setattr(guard, "_kernel32", lambda: fake)
@@ -83,6 +88,8 @@ def test_guard_refuses_when_the_lock_cannot_be_taken(monkeypatch):
     assert fake.closed == 1
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="the lifecycle guard uses a Windows named mutex")
 def test_guard_refuses_an_unexpected_wait_state(monkeypatch):
     fake = _FakeKernel(create=1234, wait=guard._WAIT_FAILED)
     monkeypatch.setattr(guard, "_kernel32", lambda: fake)
@@ -91,6 +98,8 @@ def test_guard_refuses_an_unexpected_wait_state(monkeypatch):
             pytest.fail("WAIT_FAILED is not ownership")
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="the lifecycle guard uses a Windows named mutex")
 def test_guard_is_reentrant_and_always_closes(monkeypatch):
     fake = _FakeKernel(create=1234, wait=guard._WAIT_OBJECT_0)
     monkeypatch.setattr(guard, "_kernel32", lambda: fake)
@@ -501,6 +510,8 @@ def _installation_row(db, installation_id=INSTALLATION, status="STOPPED"):
     db.add(ComfyInstance(id=installation_id, payload={"managed": True}, sha256="x", status=status))
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_image_start_failure_keeps_the_process_when_cleanup_is_unconfirmed(api, tmp_path, monkeypatch):
     from shine.comfyops import image_renderer
 
@@ -538,6 +549,8 @@ def test_image_start_failure_keeps_the_process_when_cleanup_is_unconfirmed(api, 
     assert record["process"] == {"pid": 123, "birth": "known-birth", "job_name": UnstoppableGroup.job_name}
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_image_start_refuses_external_listener_before_launch(api, tmp_path, monkeypatch):
     from shine.comfyops import image_renderer
 
@@ -552,6 +565,8 @@ def test_image_start_refuses_external_listener_before_launch(api, tmp_path, monk
         assert db.get(AppSetting, image_renderer.image_startup_key(INSTALLATION)) is None
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer admission is Windows-only")
 @pytest.mark.parametrize(
     ("lease_status", "latest_state", "can_start"),
     [("RELEASED", "GONE", True), ("RELEASED", "UNVERIFIED", False), ("ACTIVE", "GONE", False)],
@@ -614,6 +629,8 @@ def test_image_admission_retires_released_h3_only_when_both_processes_are_gone(
         assert saved["process"] == first
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="image renderer process/port proof is Windows-only")
 def test_snapshot_does_not_call_a_dead_record_busy(api, tmp_path, monkeypatch):
     from shine.runtime_orchestrator import status as status_module
 
@@ -747,6 +764,8 @@ def test_reconcile_preserves_an_unknown_submission_for_a_human(api, tmp_path, mo
     assert "不会重发" in result["note"]
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="image renderer process/port proof is Windows-only")
 def test_reconcile_clears_a_proven_dead_record(api, tmp_path, monkeypatch):
     _, factory, settings = api
     _write_recipe(api, tmp_path)
@@ -760,6 +779,8 @@ def test_reconcile_clears_a_proven_dead_record(api, tmp_path, monkeypatch):
         assert row.status == "STOPPED"
 
 
+@pytest.mark.windows_only
+@pytest.mark.skipif(os.name != "nt", reason="image renderer process/port proof is Windows-only")
 def test_reconcile_does_not_stop_a_replacement_renderer(api, monkeypatch):
     from shine.comfyops import image_renderer
 

@@ -1,0 +1,143 @@
+name: shine-launcher-windows
+
+on:
+  push:
+    paths:
+      - "launcher/**"
+      - "config/launcher/**"
+      - ".github/workflows/launcher-windows.yml"
+  pull_request:
+    paths:
+      - "launcher/**"
+      - "config/launcher/**"
+      - ".github/workflows/launcher-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-windows-${{ github.event_name }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 build and smoke check
+    runs-on: windows-latest
+    env:
+      CODEBUDDY_SAFE_DELETE_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+
+      - name: Check formatting
+        working-directory: launcher
+        run: cargo +1.100.0 fmt --all -- --check
+
+      - name: Check Windows source
+        working-directory: launcher
+        run: cargo +1.100.0 check --locked --all-targets
+
+      - name: Run launcher unit tests
+        working-directory: launcher
+        run: cargo +1.100.0 test --locked --lib
+
+      - name: Run Clippy
+        working-directory: launcher
+        run: cargo +1.100.0 clippy --locked --all-targets -- -D warnings
+
+      - name: Build Windows executable
+        working-directory: launcher
+        env:
+          LAUNCHER_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./packaging/build_windows.ps1 -SmokeCheck
+
+      - name: Verify Windows artifact identity
+        working-directory: launcher
+        run: ./packaging/verify_windows.ps1
+
+      - name: Build and verify release ZIP
+        working-directory: launcher
+        run: ./packaging/package_windows.ps1
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shine-launcher-windows-x64-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            launcher/target/release/shine-launcher.exe
+            launcher/target/release/shine-launcher.exe.sha256
+            launcher/target/release/launcher-build-info.json
+            launcher/target/release/shine-launcher-windows-x64.zip
+
+  publish-clone-executable:
+    name: Publish verified EXE to Clone root
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/shine-launcher-impl-20261113'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verified build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: shine-launcher-windows-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/shine-launcher-artifact
+
+      - name: Verify and commit Clone executable
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:RUNNER_TEMP "shine-launcher-artifact"
+          $exe = Join-Path $artifact "shine-launcher.exe"
+          $hashFile = Join-Path $artifact "shine-launcher.exe.sha256"
+          $infoFile = Join-Path $artifact "launcher-build-info.json"
+          foreach ($path in @($exe, $hashFile, $infoFile)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Verified Launcher build file is missing: $path"
+            }
+          }
+
+          $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sidecar = (Get-Content -LiteralPath $hashFile -Raw).Trim()
+          if ($sidecar -notmatch '^([a-fA-F0-9]{64})\s+shine-launcher\.exe$' -or
+              $Matches[1].ToLowerInvariant() -ne $sha) {
+            throw "Launcher executable hash does not match its build sidecar."
+          }
+          $buildInfo = Get-Content -LiteralPath $infoFile -Raw | ConvertFrom-Json
+          if ($buildInfo.source_commit -ne $env:GITHUB_SHA -or
+              $buildInfo.exe_sha256 -ne $sha -or
+              $buildInfo.windows_gui_acceptance -ne "PENDING_LOCAL_ACCEPTANCE") {
+            throw "Launcher build metadata does not match this branch push."
+          }
+
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $env:GITHUB_WORKSPACE "ShineLauncher.exe") -Force
+          Copy-Item -LiteralPath $infoFile -Destination (Join-Path $env:GITHUB_WORKSPACE "ShineLauncher-build-info.json") -Force
+          "$sha  ShineLauncher.exe" | Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "ShineLauncher.exe.sha256") -Encoding ascii -NoNewline
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- ShineLauncher.exe ShineLauncher.exe.sha256 ShineLauncher-build-info.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "Clone executable already matches this build."
+            exit 0
+          }
+          git commit -m "build(launcher): publish verified Windows executable"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to commit the verified Clone executable."
+          }
+          git push origin "HEAD:$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fast-forward the implementation branch with the verified executable."
+          }

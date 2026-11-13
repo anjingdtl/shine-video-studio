@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anjingdtl/shine-video-studio/blob/main/config/launcher/deployment-protocol-v1.schema.json",
+  "title": "Shine Deployment Protocol V1",
+  "description": "Declarative, signed Studio deployment contract. It cannot carry shell commands or executable scripts.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "studio",
+    "compatibility",
+    "artifacts",
+    "toolchain_catalog",
+    "capability_catalogs",
+    "workflow_root",
+    "operations",
+    "data_policy",
+    "source_identity",
+    "signature"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "studio": {
+      "type": "object",
+      "required": ["name", "version", "channel", "commit", "build_id"],
+      "properties": {
+        "name": { "const": "Shine Video Studio" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "channel": { "enum": ["stable", "beta", "development"] },
+        "commit": { "type": "string", "pattern": "^[a-fA-F0-9]{40}([a-fA-F0-9]{24})?$" },
+        "build_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$" }
+      },
+      "additionalProperties": false
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["min_launcher_version", "supported_protocol_major", "platform"],
+      "properties": {
+        "min_launcher_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([+-][A-Za-z0-9.-]+)?$" },
+        "supported_protocol_major": { "const": 1 },
+        "platform": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["windows-x64"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "url", "sha256", "size_bytes"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+          "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+          "size_bytes": { "type": "integer", "minimum": 1, "maximum": 21474836480 },
+          "media_type": { "type": "string", "maxLength": 128 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "toolchain_catalog": { "$ref": "#/$defs/relativePath" },
+    "capability_catalogs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/relativePath" }
+    },
+    "workflow_root": { "$ref": "#/$defs/relativePath" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["probe", "install", "repair", "start", "stop", "upgrade"] }
+    },
+    "required_features": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+    },
+    "optional_features": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+    },
+    "data_policy": { "const": "preserve-and-backup" },
+    "source_identity": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$" },
+        "value": { "type": "string", "contentEncoding": "base64", "minLength": 80, "maxLength": 100 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    }
+  },
+  "additionalProperties": true
+}

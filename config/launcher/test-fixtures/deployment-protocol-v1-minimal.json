@@ -1,0 +1,36 @@
+{
+  "protocol_version": "1.0",
+  "studio": {
+    "name": "Shine Video Studio",
+    "version": "0.3.0",
+    "channel": "stable",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "build_id": "test-build-001"
+  },
+  "compatibility": {
+    "min_launcher_version": "1.0.0",
+    "supported_protocol_major": 1,
+    "platform": ["windows-x64"]
+  },
+  "artifacts": [
+    {
+      "id": "studio-package",
+      "url": "https://github.com/anjingdtl/shine-video-studio/releases/download/test/ShineStudio.zip",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 123456
+    }
+  ],
+  "toolchain_catalog": "config/deployment/tools-windows-x64.json",
+  "capability_catalogs": ["config/deployment/h3-ref2va-windows-x64.json"],
+  "workflow_root": "config/workflows",
+  "operations": ["probe", "install", "repair", "start", "stop", "upgrade"],
+  "required_features": ["typed-operations-v1", "sha256-artifacts", "ed25519-manifest-signature"],
+  "optional_features": ["test-fixture-marker"],
+  "data_policy": "preserve-and-backup",
+  "source_identity": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "test-only",
+    "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+  }
+}

@@ -96,3 +96,7 @@ Desktop.ini
 
 # Personal material dropped by external agent tools; never enter the repo
 .codex-attachments/
+
+# Rust build outputs for the native launcher
+/launcher/target/
+/work/
