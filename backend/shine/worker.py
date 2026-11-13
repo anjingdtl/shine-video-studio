@@ -4416,6 +4416,15 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
     if images:
         return f"material-image:{images}"
     if settings.render_provider == "comfyui" and not settings.offline_simulation:
+        # The RelayVSR post-production stage runs after H3 series are done
+        # (items exist only for finished episodes), on the same lease table:
+        # one item per tick, re-queued while the GPU is busy.
+        from shine.comfyops.relay_stage import run_pending_relay_items
+
+        relay = run_pending_relay_items(
+            session_factory, settings=settings, worker_id=worker_id, limit=1)
+        if relay:
+            return f"relay-upscale:{relay}"
         from shine.quality.advisory_queue import run_pending_advisory_reviews
 
         # Advisory reviews run only here: after every real H3 series and queued

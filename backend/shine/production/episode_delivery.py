@@ -227,13 +227,19 @@ def build_episode_edl(
         if not attempts:
             raise DeliveryBlock("EPISODE_SHOT_ATTEMPT_MISSING")
         attempt = max(attempts, key=lambda row: row.attempt_no)
-        artifact = db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None
+        # The shot's approved highest stage wins: a passed RelayVSR X2 upscale
+        # artifact is the final clip, the base render stays the fallback.
+        from shine.comfyops.relay_stage import relay_artifact_for_job
+
+        relay_artifact = relay_artifact_for_job(db, job.id)
+        artifact = relay_artifact or (db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None)
         if artifact is None or artifact.is_mock:
             raise DeliveryBlock("EPISODE_SOURCE_NOT_REAL_VIDEO")
-        if artifact.artifact_kind != "video" or artifact.attempt_id != attempt.id:
+        if artifact.artifact_kind != "video":
             raise DeliveryBlock("EPISODE_SOURCE_IDENTITY_MISMATCH")
-        if artifact.sha256 != attempt.output_sha256:
-            raise DeliveryBlock("EPISODE_SOURCE_IDENTITY_MISMATCH")
+        if relay_artifact is None:
+            if artifact.attempt_id != attempt.id or artifact.sha256 != attempt.output_sha256:
+                raise DeliveryBlock("EPISODE_SOURCE_IDENTITY_MISMATCH")
         path = safe_asset_path(asset_root, artifact.storage_path)
         if not path.is_file():
             raise DeliveryBlock("EPISODE_SOURCE_FILE_MISSING")

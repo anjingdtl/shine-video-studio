@@ -703,6 +703,21 @@ def _ensure_episode_delivery(
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
         return None, False
+    # 2b. The upscale stage runs between "all H3 shots passed" and "this
+    #     episode may be assembled".  Items are created once, idempotently,
+    #     and the delivery order waits until every item reached a terminal
+    #     state - assembling earlier would silently deliver the un-upscaled
+    #     clip as the final one.
+    from shine.comfyops.relay_stage import (
+        enqueue_relay_items_for_episode,
+        episode_relay_items_unfinished,
+        run_upscale_enabled,
+    )
+
+    if run_upscale_enabled(package.manifest if package else None):
+        enqueue_relay_items_for_episode(db, run, episode, passed)
+        if episode_relay_items_unfinished(db, run.id, episode):
+            return None, False
     digest = episode_input_digest(db, run, episode, batches)
     existing = db.scalars(
         select(DeliveryOrder).where(
