@@ -10,7 +10,7 @@ for exact evidence, distribution identity, and remaining gates.
 
 | Stage | Status | Evidence / remaining gate |
 | --- | --- | --- |
-| L0 native executable prototype | `SOURCE_IMPLEMENTED / PENDING_GUI_ACCEPTANCE` | Rust + Slint CPU software-rendered GUI source, Chinese UI, and independent read-only host probe. Windows Server 2025 CI compiled the executable, passed 22 Windows unit tests and Clippy, and verified smoke-check, binary identity, hash, and ZIP contents. Windows 10/11 GUI startup, Chinese text, DPI, and path behavior remain unverified. |
+| L0 native executable prototype | `SOURCE_IMPLEMENTED / PENDING_GUI_ACCEPTANCE` | Rust + Slint CPU software-rendered GUI source, Chinese UI, and independent read-only host probe. Windows CI run [43429296982](https://github.com/anjingdtl/shine-video-studio/actions/runs/43429296982) passed source checks, 22 Windows unit tests, Clippy, EXE build, smoke-check, identity/hash, and ZIP verification. Windows 10/11 GUI startup, Chinese text, DPI, and path behavior remain unverified. |
 | L1 registry and legacy discovery | `SOURCE_IMPLEMENTED / PARTIAL` | Read-only selected-path scan, protected data-path evidence, atomic per-user installation registry, and host checks are implemented. New-install flow, full ComfyUI/model inventory, multi-instance management, and Windows no-write acceptance remain outstanding. |
 | L2 deployment protocol and channels | `PARTIAL / FAIL_CLOSED` | V1 schema/parser/compatibility checks, JCS source identity, scoped Ed25519 verification, GitHub release metadata scanning/cache, and immutable development-ref resolution are implemented. The trusted publisher store is empty; no asset downloader or Studio/Launcher installer/self-updater exists, so remote installation remains disabled. |
 | L3 install/upgrade/recovery | `NOT STARTED` | Transaction journal, backup/rollback, dependency repair, process identity control, launch/stop, diagnostics, and recovery are not implemented. |
@@ -34,6 +34,12 @@ for exact evidence, distribution identity, and remaining gates.
 - Migrations: Alembic upgraded an isolated SQLite database to
   `f180c0030001` and `alembic check` reported no new operations. The database
   is under `work/final-migration/`; no user/project database was used.
+- Repository CI: first L2 integration run [43427054603](https://github.com/anjingdtl/shine-video-studio/actions/runs/43427054603)
+  exposed that its runner lacked FFmpeg/FFprobe; five media/candidate tests
+  failed from unavailable technical QC while 561 passed. `.github/workflows/ci.yml`
+  now installs those tools for L2. Rerun [43429297002](https://github.com/anjingdtl/shine-video-studio/actions/runs/43429297002)
+  passed all 566 selected tests with 23 Windows-only skips. Frontend build and
+  L1 quick also passed; L3 jobs were skipped by their manual/branch conditions.
 - Launcher: prior isolated Linux run passed fmt, check, 24 Rust unit tests,
   Clippy, and Windows MSVC target checks. GitHub Actions Windows run
   [43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491)

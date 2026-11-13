@@ -40,7 +40,7 @@ GitHub Actions 已生成真实 Windows x64 EXE，并成功把验证后的 EXE、
 | 前端生产构建 | main 合并后 `npm run build` 通过 TypeScript 与 Vite 构建；存在既有大 bundle advisory。 |
 | Python 静态检查 | `CODEBUDDY_SAFE_DELETE_ENABLED=0 work/backend-venv/bin/python -m ruff check backend` 通过。 |
 | 数据库迁移 | 仅对 `work/final-migration/shine.sqlite3` 执行 Alembic；升级至 `f180c0030001`，`alembic check` 显示 `No new upgrade operations detected.` 未访问真实用户项目数据库。 |
-| 仓库 PR CI | 对提交 `8010a07` 的 frontend build 与 L1 backend quick 已通过；L2 backend integration 在本报告更新时仍运行。L3 full Windows/Linux/browser jobs 被工作流判定为手动或条件任务并跳过。 |
+| 仓库 PR CI | 首轮 [run 43427054603](https://github.com/anjingdtl/shine-video-studio/actions/runs/43427054603) 的 L2 integration 因未安装 FFmpeg/FFprobe 而有 5 项失败（素材 QC 失败导致候选不获批）；其余 561 项通过。已在 `.github/workflows/ci.yml` 为 L2 安装两项媒体工具。修复后 [run 43429297002](https://github.com/anjingdtl/shine-video-studio/actions/runs/43429297002) 通过：566 项通过、23 项 Windows-only 跳过、0 失败。Frontend build 和 L1 quick 也通过；L3 full Windows/Linux/browser jobs 按手动或条件规则跳过。 |
 | 差异格式检查 | 在提交前执行 `git diff --check`。 |
 
 ## 主要实现与安全边界
@@ -53,4 +53,4 @@ GitHub Actions 已生成真实 Windows x64 EXE，并成功把验证后的 EXE、
 
 ## 最终 PR 决定
 
-PR [#13](https://github.com/anjingdtl/shine-video-studio/pull/13) 指向 `main`，保持 Draft。当前分支已合并到 `origin/main` 的 `1a55c41`。最新 Windows PR 构建通过；它没有运行 Clone publisher，因为该 job 仅适用于匹配路径的 push 事件。根目录 EXE 仍由已成功的 publisher run `43422636863` 提供，且其 Launcher 源码自 `f41e609` 以来未变化。没有真实 Windows GUI、旧版数据保留升级/回退及 GPU/模型 P0 证据时，不得将 PR 标记 Ready 或合并 main。
+PR [#13](https://github.com/anjingdtl/shine-video-studio/pull/13) 指向 `main`，保持 Draft。当前分支已合并到 `origin/main` 的 `1a55c41`。修复媒体工具 CI 环境后 L2 integration 通过；最新 Windows PR 构建通过，未运行 Clone publisher，因为该 job 仅适用于匹配路径的 push 事件。根目录 EXE 仍由已成功的 publisher run `43422636863` 提供，且其 Launcher 源码自 `f41e609` 以来未变化。没有真实 Windows GUI、旧版数据保留升级/回退及 GPU/模型 P0 证据时，不得将 PR 标记 Ready 或合并 main。
