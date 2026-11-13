@@ -9,12 +9,12 @@ for exact checks, boundaries, and remaining merge gates.
 
 | Stage | Status | Evidence / remaining gate |
 | --- | --- | --- |
-| L0 native executable prototype | SOURCE_IMPLEMENTED / PENDING_WINDOWS | Rust + Slint CPU software-rendered GUI source, Chinese UI, file picker and independent read-only host probe. Linux Rust checks and `--smoke-check` pass; a Windows artifact and real Windows 10/11 GUI start are not yet verified. |
+| L0 native executable prototype | SOURCE_IMPLEMENTED / PENDING_GUI_ACCEPTANCE | Rust + Slint CPU software-rendered GUI source, Chinese UI, file picker and independent read-only host probe. Windows Server 2025 CI compiled the executable, passed 22 Windows unit tests and Clippy, and verified the dependency-independent smoke-check and binary hash. Actual GUI startup and Windows 10/11 Chinese text/DPI/path behavior remain unverified. |
 | L1 registry and legacy discovery | SOURCE_IMPLEMENTED / PARTIAL | Read-only selected-path scan, protected data-path evidence, atomic per-user installation registry, and host checks are implemented. Rust unit tests pass. New-install directory flow, full ComfyUI/version inventory, multi-instance GUI handling, Chinese Windows paths, and Windows no-write acceptance remain outstanding. |
 | L2 deployment protocol and channels | PARTIAL / FAIL_CLOSED | V1 schema/parser/compatibility checks, JCS source identity, scoped Ed25519 verification, configured Studio/Launcher release tags, explicit GitHub metadata scanner/cache, and immutable development-ref resolver are implemented. The embedded publisher store is empty; no asset downloader or Studio/Launcher installer/self-updater exists, so remote installation remains disabled. |
 | L3 install/upgrade/recovery | NOT STARTED | Must reuse controlled deployment paths and durable receipts. |
-| L4 capability packs and distribution | NOT STARTED | Requires verified model/runtime contracts and a built Windows EXE. |
-| L5 final regression and acceptance | NOT STARTED | Requires Windows clean install, legacy upgrade/rollback, Clone/ZIP artifact verification, full regression, packaging and data-preservation evidence. |
+| L4 capability packs and distribution | PARTIAL | Windows ZIP pack and extracted-artifact identity verification pass in workflow run [43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491). A push-only publisher job is configured to add the verified EXE, hash, and build identity to the implementation branch root; that commit remains pending. Capability packs, full deployment, and independent Launcher release remain unimplemented. |
+| L5 final regression and acceptance | PARTIAL / PENDING_LOCAL_ACCEPTANCE | Linux regression and a full Windows x64 build, test, Clippy, smoke, hash, and ZIP verification pass. Still requires Windows 10/11 GUI, clean install, legacy data-preserving upgrade/rollback, root Clone binary publication, and real GPU/model acceptance. |
 
 Verification on the isolated Linux worktree:
 
@@ -37,8 +37,12 @@ Verification on the isolated Linux worktree:
   operations.
 
 The GitHub release tag prefixes are currently a proposed repository convention;
-the checked remote has no matching release tags. No Windows or GPU acceptance
-result is claimed. A prebuilt EXE is not yet present in a fresh Git Clone.
-True Windows GUI startup, Chinese rendering, Clone-provided EXE, old-install
+the checked remote has no matching release tags. Windows CI did not open the
+GUI. The current branch head still lacks the root Clone EXE; a push-only
+publisher is configured to copy the hash-verified Windows binary into the
+branch after a successful push build. The artifact's temporary download URL
+was blocked by the local network proxy, so that publisher path will be
+validated against GitHub Actions directly. Windows 10/11 GUI and Chinese
+rendering, Clone-provided EXE after publisher completion, old-install
 upgrade/rollback, self-update rollback, and real model inference remain
 `PENDING_LOCAL_ACCEPTANCE`.

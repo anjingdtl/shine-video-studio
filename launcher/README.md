@@ -12,9 +12,12 @@ scanner are implemented. The scanner runs only after an explicit user click; it
 does not download release assets. The trust store is empty, so installation,
 Studio updates and Launcher self-updates are disabled.
 
-Windows GUI startup, Chinese rendering, DPI behavior, clean-machine dependency
-independence, Clone distribution and packaging remain
-`PENDING_LOCAL_ACCEPTANCE` until checked on Windows 10/11 x64. See
+Windows GUI startup, Chinese rendering, DPI behavior, clean-machine GUI
+interaction and data-preserving installation remain
+`PENDING_LOCAL_ACCEPTANCE` until checked on Windows 10/11 x64. The Windows CI
+builds and smoke-checks the native executable, verifies the ZIP after
+extraction, and on the implementation branch publishes the verified binary as
+root `ShineLauncher.exe` with SHA-256 and source-commit metadata. See
 [`../docs/SHINE_LAUNCHER_IMPLEMENTATION_STATUS.md`](../docs/SHINE_LAUNCHER_IMPLEMENTATION_STATUS.md)
 for stage evidence and remaining gates.
 
@@ -42,9 +45,9 @@ Linux is useful for source checks only and is not Windows acceptance evidence.
 
 ## Current implementation boundary
 
-The implementation currently provides source code and a Windows CI build
-workflow. A prebuilt `ShineLauncher.exe` is not yet present in a fresh Git clone.
-There is no deployment artifact downloader, installer transaction, rollback
-engine, process controller, capability-pack validator, or self-updater. Those
-stages must pass Windows recovery and data-preservation acceptance before the
-Launcher can be marked ready for release.
+The Windows GUI executable is unsigned; Windows SmartScreen may warn about it.
+The implementation does not yet provide a deployment artifact downloader,
+installer transaction, rollback engine, process controller, capability-pack
+validator, or self-updater. Those stages must pass Windows recovery and
+data-preservation acceptance before the Launcher can be marked ready for
+release.

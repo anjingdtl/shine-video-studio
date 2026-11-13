@@ -16,12 +16,12 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 
 | 阶段 | 状态 | 已交付内容 | 阻断项 |
 | --- | --- | --- | --- |
-| L0 原生 EXE 技术验证 | `SOURCE_IMPLEMENTED / PENDING_WINDOWS` | Rust/Slint GUI、中文界面源码、software renderer、后台只读环境探测、无环境依赖的 smoke-check、Windows 构建/校验脚本和 CI 工作流。 | 尚未运行 Windows 构建工作流；没有 Windows 10/11 真机 GUI 启动、中文字体/输入、DPI、中文目录及无 GPU/无 Python/Node 的实测证据；没有可追溯 Windows EXE 进入 Clone。 |
+| L0 原生 EXE 技术验证 | `SOURCE_IMPLEMENTED / PENDING_GUI_ACCEPTANCE` | Rust/Slint GUI、中文界面源码、software renderer、后台只读环境探测。Windows Server 2025 workflow 通过格式、源码编译、22 项单测、Clippy、Release EXE、宿主 smoke-check 与身份/hash 校验。 | CI 未启动可视窗口；Windows 10/11 真机 GUI、中文字体/输入、DPI、中文路径和无 GPU/无 Python/Node 交互验收仍待本地执行。 |
 | L1 安装登记与旧版识别 | `PARTIAL` | 显式选择路径后的只读目录扫描、数据库/数据目录证据、路径保护、本机原子写入的 per-user 安装登记。 | 新安装目录流程、ComfyUI/模型/节点全量识别、多实例 UI 和 Windows 只读性/中文路径验收未完成。 |
 | L2 通道与协议 | `PARTIAL / FAIL_CLOSED` | Deployment Protocol V1 schema、兼容解析、规范化哈希身份、范围限定的 Ed25519 校验、Stable/Beta/Development 与 Launcher 通道元数据扫描、缓存及不可变开发引用解析。 | 可信发布者密钥库为空；没有资源下载器、安装器或 Launcher 自更新/回滚。远端安装/更新明确禁用。仓库没有匹配的现行 release tags。 |
 | L3 安装、升级与恢复 | `NOT_STARTED` | 无。 | 安装事务、耐久 journal、备份/回滚、进程身份核验/生命周期管理、诊断和修复均未实现。 |
-| L4 能力包与分发 | `NOT_STARTED` | 协议配置结构和 Windows ZIP 打包/自校验脚本已建立。 | H3/Qwen 能力清单与 Studio 权威目录对接、ComfyUI/节点/运行时部署、真实模型验证、Git Clone 可直接双击的 EXE、Launcher 独立发行均未完成。ZIP 脚本尚无真实 Windows 执行证据。 |
-| L5 最终回归 | `NOT_STARTED` | Linux 环境下的仓库回归已完成，见下节。 | Windows 新机启动、旧版保数据升级/回滚、Windows ZIP 和 Clone 一致性、Windows 专项测试及真实 GPU/模型验收均待执行。 |
+| L4 能力包与分发 | `PARTIAL` | Windows workflow 在 Windows runner 上构建并验证 ZIP 解包；已配置 push-only publisher，在实现分支 push 后将通过校验的 EXE、SHA-256 和 source commit 元数据提交到仓库根目录。 | Publisher 自动提交还需由下一次 branch push 实际验证；H3/Qwen 清单、ComfyUI/节点/运行时部署、真实模型验证与独立 Launcher 发行均未完成。 |
+| L5 最终回归 | `NOT_STARTED` | Linux 全仓库回归和一次完整 Windows x64 构建、单测、Clippy、EXE smoke/hash 与 ZIP 自检已通过。 | Windows 新机 GUI、旧版保数据升级/回滚、Clone 根目录自动产物提交、Windows 10/11、GPU/模型验收仍待执行。 |
 
 ## 已执行的检查
 
@@ -35,6 +35,7 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
 | `cargo check --locked --target x86_64-pc-windows-msvc --all-targets` | 通过；这是 Linux 上的交叉目标类型检查，不是 Windows EXE 构建或 GUI 验收 |
 | `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings` | 通过；Linux 上启用 Windows cfg 的交叉目标静态检查，不替代 Windows runner |
+| GitHub Actions Windows workflow | [run 43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491) 通过：Windows 22 项单测、Clippy、Release 编译、依赖独立 smoke-check、EXE/build identity/hash 校验、ZIP 打包和解压后复核均成功 |
 | `cargo build --locked --release`（Linux） | 通过；生成 Linux ELF，不是 Windows 交付物 |
 | `cargo run --locked --release -- --smoke-check` | 通过；只读检查宿主信息，不创建 GUI 窗口 |
 | 后端完整回归 | 按 `AGENTS.md` 八分片规范执行，204 个测试文件均已分配，8/8 分片退出码为 0；收集 2,485 个测试项。Windows-only 进程/端口测试在 Linux 跳过，Windows 真实执行仍待验收 |
@@ -44,13 +45,13 @@ Linux 上 Rust、前端、后端分片、静态检查和隔离数据库迁移检
 | 前端 `npm run build` | TypeScript 与 Vite 构建通过；有现存大 bundle 提示 |
 | `git diff --check` | 通过 |
 
-Windows workflow 前六次执行均完成 Windows x64 源码编译。第一次 Windows 单测 14/21 通过；Windows `canonicalize` 返回本机 `\\?\C:\...` 扩展盘符路径，被原先只接受普通盘符的白名单拒绝。修正后，第二次测试 15/22 通过；逐段重建的重解析点检查仍误判。现已对原始路径及各级父目录直接读取元数据，缺失路径仍继续检查父目录，并加上 UNC/Verbatim UNC/设备路径拒绝与符号链接祖先测试。第三次 Windows 测试 20/22 通过，余下 2 项仅是测试期望未规范化路径；测试现对照 `canonicalize` 结果。第四次 Windows 单测 22/22 通过，但 Windows Clippy 报告三个仅在 Windows cfg 下生效的末尾 `return`；这些分支现改为尾表达式，Linux 上 Windows MSVC 目标 Clippy 检查已通过。第五次 Windows 单测 22/22、Clippy 与 Release 编译通过，但 `$LASTEXITCODE` 无法可靠取得 GUI 子系统 EXE 的退出码。构建与校验脚本现用 `Start-Process -Wait -PassThru` 检查真实 `ExitCode`。第六次 Windows 单测、Clippy、Release 编译、smoke-check 与 EXE hash/build identity 校验全部通过；ZIP 打包发现许可证文件名和脚本路径不一致。许可证文件已按 `LICENSE_NOTICES.md` 的标准路径重命名；构建身份改为明确绑定 PR head commit，并在校验中要求完整 40 位 SHA。第七次 Windows workflow 待确认。Linux 本地 Launcher 回归 24/24 通过。
+Windows workflow 前六次执行陆续修复了扩展盘符、重解析点校验、规范化路径断言、Windows-only Clippy 与 GUI 子系统 smoke 退出码问题。第七次 [Windows workflow run 43420629491](https://github.com/anjingdtl/shine-video-studio/actions/runs/43420629491) 全部通过：22 项 Windows 单测、Clippy、Release 编译、smoke-check、EXE hash/build identity 和 ZIP 解包复核。artifact source commit 为 `4d9514180a537dde89df3125901b787d83784746`；EXE SHA-256 为 `54a09b62df64fcc7ddb7afbd2a7e2046893d3c08d850d7bef6203e40ef683dba`；发布 ZIP SHA-256 为 `1e58ddae5e7723413413d33a5c6dd2445777dcef177c1d3fdb65881dc83fdf75`；GitHub Actions artifact 的 SHA-256 为 `6a9aa1c1dd9c8f27f97b93bfc99ce0c0d0b9ea533d7fd6986a10e2b878106eab`。构建身份明确保留 `windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`；CI 没有启动实际 GUI 窗口。下一次 push-only workflow 将提交经验证的 `ShineLauncher.exe`、hash 和构建信息到实现分支根目录；该发布步骤尚待执行。Linux 本地 Launcher 回归 24/24 通过。
 
 后端 Linux 回归中发现若干测试实际依赖 Windows named mutex、Windows TCP 表或 Windows 管理进程启动。仅为这些既有测试补充 `windows_only` 维度和 `os.name != "nt"` 跳过条件，未修改业务实现、未放宽断言或安全标准。分片日志和隔离数据库位于本机忽略目录，不作为提交内容。
 
 ## 交付边界与风险
 
-- 本次提交不包含 Windows EXE，也不把 Linux ELF 冒充 Windows 启动器。CI 生成的 Windows 构建身份必须保留 `windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`，CI smoke-check 不启动窗口。
+- 当前分支头尚未包含根目录 Windows EXE；受限 publisher job 会在 push build 全部通过后将真实 Windows artifact 提交到实现分支，不使用 Linux ELF 代替。CI 构建身份必须保留 `windows_gui_acceptance=PENDING_LOCAL_ACCEPTANCE`，smoke-check 不启动窗口。
 - `config/launcher/trusted-publishers.json` 当前没有生产信任锚；协议签名验证失败关闭。TLS、同地址哈希或 GitHub 元数据扫描均不构成安全安装授权。
 - Launcher 当前不会安装、覆盖、迁移或停止 Studio、ComfyUI、用户数据/数据库、模型、密钥配置或任何真实进程；它也不能提供完整修复能力。
 - 未经真实模型推理验证的能力保持未验证，不能显示 READY。
