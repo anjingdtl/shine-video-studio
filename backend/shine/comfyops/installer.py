@@ -316,6 +316,7 @@ class ControlledDownloader:
     # Once the primary origin is proven unreachable, later files in the same
     # installation skip the repeated connect timeouts and try the mirror directly.
     primary_unreachable: bool = False
+    source_preference: str = "AUTO"
     # The wait before a retryable answer is asked again, and the jitter source.
     # Both are injectable so the production algorithm is testable without
     # spending real seconds.
@@ -324,6 +325,8 @@ class ControlledDownloader:
 
     def download(self, spec: PackageFile, cache: Path, *, progress=None):
         check_url(spec.url, self.hosts)
+        if self.source_preference not in {"AUTO", "MIRROR_FIRST", "OFFICIAL_FIRST"}:
+            raise ValueError("DOWNLOAD_SOURCE_PREFERENCE_INVALID")
         if spec.size > self.max_bytes:
             raise ValueError("DOWNLOAD_BUDGET_EXCEEDED")
         if type(self.max_stream_attempts) is not int or not 1 <= self.max_stream_attempts <= 3:
@@ -391,7 +394,9 @@ class ControlledDownloader:
         candidates = []
         mirror = mirror_url(spec.url)
         mirror_allowed = mirror is not None and urlsplit(mirror).hostname in self.hosts
-        if not (self.primary_unreachable and mirror_allowed):
+        if self.source_preference == "MIRROR_FIRST" and mirror_allowed:
+            return [("mirror", mirror), ("primary", spec.url)]
+        if not (self.source_preference == "AUTO" and self.primary_unreachable and mirror_allowed):
             candidates.append(("primary", spec.url))
         if mirror_allowed:
             candidates.append(("mirror", mirror))

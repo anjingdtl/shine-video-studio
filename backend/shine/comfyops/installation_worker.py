@@ -129,6 +129,20 @@ def run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer
         )
         return NEEDS_REVIEW
     executor = payload.get("executor") or plan.payload.get("executor")
+    if executor == "LOCAL_ISOLATED":
+        from shine.comfyops.resource_resolver import reject_unbound_candidate_checkpoint, validate_resource_plan
+
+        try:
+            reject_unbound_candidate_checkpoint(plan.payload)
+            if plan.payload.get("resource_context") is not None:
+                with factory() as db:
+                    validate_resource_plan(db, settings, plan.payload)
+        except Exception as exc:  # noqa: BLE001 - fail closed on unreadable or changed evidence
+            logger.warning("resource plan revalidation failed: %s", type(exc).__name__)
+            _finish(factory, attempt_id, worker_id, stage=NEEDS_REVIEW, status="FAILED_RECONCILE_REQUIRED",
+                    error_code="RESOURCE_PLAN_REVALIDATION_FAILED",
+                    error_message="Resource identity could not be revalidated; no download was started.")
+            return NEEDS_REVIEW
     with factory.begin() as db:
         plan_row = db.get(InstallationPlan, plan.id)
         if plan_row is not None:
@@ -151,7 +165,59 @@ def run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installer
             error_message="Local execution is disabled on this host; enable it and resume the attempt.",
         )
         return FAILED_RETRYABLE
+    if plan.payload.get("resource_context"):
+        return _run_resource_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
     return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
+
+
+def _run_resource_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan, *, settings,
+                          installer=None) -> str:
+    """Keep the physical installation idle while packages are swapped."""
+    from sqlalchemy import select
+
+    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.renderer_supervisor import windows_port_listeners
+    from shine.comfyops.resource_resolver import validate_resource_plan
+    from shine.models import Job
+    from shine.runtime_orchestrator.guard import (
+        LifecycleGuardBusy,
+        LifecycleGuardUnavailable,
+        renderer_lifecycle_guard,
+    )
+    from shine.runtime_orchestrator.identity import installation_activity
+    from shine.services import UNKNOWN_SUBMISSION_CODES
+
+    instance_id = plan.payload["resource_context"]["instance_id"]
+    started = False
+    try:
+        with renderer_lifecycle_guard(instance_id):
+            with factory() as db:
+                validate_resource_plan(db, settings, plan.payload)
+                activity = installation_activity(db, instance_id)
+                instance = db.get(ComfyInstance, instance_id)
+                port = (instance.payload or {}).get("port") if instance else None
+                if not isinstance(port, int) or windows_port_listeners(port):
+                    raise LifecycleGuardBusy("EXTERNAL_INSTANCE_ON_PORT")
+                unknown = db.scalar(select(Job.id).where(
+                    Job.status == "NEEDS_REVIEW", Job.failure_code.in_(sorted(UNKNOWN_SUBMISSION_CODES)),
+                ).limit(1))
+                if (unknown or activity["renderer_state"] != "NONE" or activity["gpu_leases"]
+                        or activity["in_flight_h3_jobs"] or activity["in_flight_image_work"]):
+                    raise LifecycleGuardBusy("RESOURCE_INSTALLATION_BUSY")
+            started = True
+            return _run_local_attempt(factory, worker_id, attempt_id, plan, settings=settings, installer=installer)
+    except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
+        _finish(factory, attempt_id, worker_id, stage=FAILED_RETRYABLE, status=FAILED_RETRYABLE,
+                error_code=("EXTERNAL_INSTANCE_ON_PORT" if str(exc) == "EXTERNAL_INSTANCE_ON_PORT"
+                            else "RESOURCE_INSTALLATION_BUSY"), error_message=str(exc))
+        return FAILED_RETRYABLE
+    except Exception as exc:  # noqa: BLE001 - unknown ownership is never a maintenance window
+        logger.warning("resource installation safety check failed: %s", type(exc).__name__)
+        _finish(factory, attempt_id, worker_id, stage=NEEDS_REVIEW, status="FAILED_RECONCILE_REQUIRED",
+                error_code="RESOURCE_PLAN_REVALIDATION_FAILED",
+                error_message=("Installation was interrupted; reconcile its recorded state."
+                               if started else "Resource or installation evidence changed; no download was started."))
+        return NEEDS_REVIEW
 
 
 def _run_mock_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan) -> str:
@@ -211,6 +277,9 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
 
     if installer is None:
         installer = _build_installer(settings, progress=progress, should_stop=should_stop)
+        context = plan.payload.get("resource_context")
+        if context:
+            installer.downloader.source_preference = context["source_preference"]
     _update(factory, attempt_id, worker_id, stage=DOWNLOADING, status=DOWNLOADING,
             current_component=None, current_file=None)
     recorder.report(component=None, confirmed=0, total=plan.payload.get("download_bytes"), force=True)

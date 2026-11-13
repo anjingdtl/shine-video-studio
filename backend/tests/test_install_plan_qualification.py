@@ -102,8 +102,8 @@ def test_a_candidate_variant_is_never_installed_automatically(prep):
     }, headers=HEADERS)
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
-    assert detail["code"] == "VARIANT_NOT_DOWNLOADABLE"
-    assert detail["acceptance_status"] == "CANDIDATE"
+    # A candidate cannot be paired with the default INT8 catalog.
+    assert detail["code"] == "VARIANT_CATALOG_MISMATCH"
 
 
 def test_the_blocked_w4_slot_is_never_installed_either(prep):
@@ -114,7 +114,7 @@ def test_the_blocked_w4_slot_is_never_installed_either(prep):
         "variant_id": "ref2va-w4-convrot",
     }, headers=HEADERS)
     assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "VARIANT_NOT_DOWNLOADABLE"
+    assert response.json()["detail"]["code"] == "VARIANT_CATALOG_MISMATCH"
 
 
 def test_a_component_only_plan_is_not_gated_by_the_video_variant(prep):

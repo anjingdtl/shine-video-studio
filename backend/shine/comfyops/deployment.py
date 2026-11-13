@@ -413,7 +413,8 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
                         project_id: str, disk_free: int, *,
                         variant: dict | None = None,
                         qualification: dict | None = None,
-                        configuration: dict | None = None) -> InstallationPlan:
+                        configuration: dict | None = None,
+                        resource_context: dict | None = None) -> InstallationPlan:
     """Assemble a LOCAL_ISOLATED install plan from the pinned catalog.
 
     Reuses the same payload contract as the manual /comfyops/install-plans path,
@@ -469,6 +470,8 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
         # approving the plan approves the same configuration the card showed.
         "configuration": configuration or {"h3_video": True, "image_prep": False},
     }
+    if resource_context is not None:
+        payload["resource_context"] = resource_context
     payload["target_key"] = target_identity(
         payload["storage_root"], payload["executor"], payload["packages"]
     )
@@ -487,6 +490,7 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
             ).all()
             if (row.payload or {}).get("target_key") == payload["target_key"]
             and (row.payload or {}).get("configuration") == payload["configuration"]
+            and (row.payload or {}).get("resource_context") == payload.get("resource_context")
             # A cache that changed since the plan was assembled changes the
             # download this approval covers; reusing the stale number would
             # approve bytes the host no longer has to fetch.

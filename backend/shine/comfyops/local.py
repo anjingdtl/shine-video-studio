@@ -210,7 +210,12 @@ def validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor="LO
         ):
             raise ValueError("PLAN_HASH_CHANGED")
     if executor == "LOCAL_ISOLATED":
+        from shine.comfyops.resource_resolver import reject_unbound_candidate_checkpoint
         from shine.comfyops.storage import disk_info, require_storage
+
+        # Keep the SQLite writer transaction short; the Worker revalidates
+        # the full resource identity outside this transaction before transfer.
+        reject_unbound_candidate_checkpoint(plan.payload)
         selected_root = require_storage(settings)
         if plan.payload.get('storage_root', str(selected_root)) != str(selected_root):
             raise ValueError('DEPLOYMENT_STORAGE_CHANGED_RECREATE_PLAN')

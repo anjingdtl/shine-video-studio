@@ -17,7 +17,10 @@ all work unchanged.
 """
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from shine.comfy.workflow import (
@@ -181,6 +184,41 @@ def _variant_checkpoint(variant_id: str) -> str:
             {"variant_id": variant_id},
         )
     return checkpoint
+
+
+
+def _candidate_stack(accelerator_id: str, second_pass: SecondPassSpec | None) -> tuple[dict, dict, list, str]:
+    """Read the pinned candidate recipe; absence or drift never falls back to INT8."""
+    from shine.comfyops.variants import load_variant_manifest
+
+    if accelerator_id != "native20" or second_pass is not None:
+        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该候选模型仅登记 native20 单采配方。")
+    manifest = load_variant_manifest("ref2va-lowend-candidate")
+    profile_id = "local-h3-ref2va-lowend-pdd-free-2img"
+    path = Path(__file__).resolve().parents[3] / "config/workflows/ref2va-lowend-pdd-free-2img.json"
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    source = profile["graph"]
+    digest = graph_hash(source)
+    if digest != manifest.get("graph_sha256", {}).get(profile_id):
+        raise GraphCompileError("VARIANT_RECIPE_DRIFT", "候选工作流与登记的配方哈希不一致。")
+    roles = {item["role"]: item for item in manifest.get("files", [])}
+    for role, node, key in (("dit", "10", "unet_name"), ("text_encoder", "20", "clip_name"),
+                            ("video_vae", "21", "vae_name")):
+        name = str(source[node]["inputs"][key]).replace("\\", "/").split("/")[-1]
+        if role not in roles or name != str(roles[role]["relative_path"]).split("/")[-1]:
+            raise GraphCompileError("VARIANT_RECIPE_MISMATCH", "候选配方与变体清单不一致。", {"role": role})
+    # The candidate's five audited model nodes are remapped to the existing
+    # compiler's output node 16, without introducing the baseline LoRA/SolAttn.
+    mapping = {"10": "10", "11": "12", "12": "13", "13": "14", "14": "16"}
+    nodes = {}
+    for old, new in mapping.items():
+        node = deepcopy(source[old])
+        model = node["inputs"].get("model")
+        if isinstance(model, list):
+            model[0] = mapping[model[0]]
+        nodes[new] = node
+    loaders = {key: deepcopy(source[key]) for key in ("20", "21", "22")}
+    return nodes, loaders, list(profile["required_nodes"]), digest
 
 
 def _model_stack(unet: str) -> dict[str, Any]:
@@ -349,7 +387,17 @@ def compile_ref2va_workflow(
     checkpoint = _variant_checkpoint(variant_id)
     steps = int(ACCELERATORS[accelerator_id]["steps"])
     graph: dict[str, Any] = {}
-    graph.update(_model_stack(checkpoint))
+    candidate = variant_id == "ref2va-lowend-candidate"
+    candidate_digest = None
+    if candidate:
+        model_nodes, candidate_loaders, candidate_required, candidate_digest = _candidate_stack(
+            accelerator_id, second_pass
+        )
+        graph.update(model_nodes)
+    elif variant_id in (None, "", "h3-ref2va-int8-convrot"):
+        graph.update(_model_stack(checkpoint))
+    else:
+        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该模型变体尚无完整的已审核动态配方。")
     sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(accelerator_id, steps)
     graph.update(sampling)
 
@@ -364,6 +412,8 @@ def compile_ref2va_workflow(
             "inputs": {"expression": LENGTH_EXPRESSION, "values.a": 7.0},
         },
     })
+    if candidate:
+        graph.update(candidate_loaders)
     parameter_map: dict[str, str] = {
         "positive_prompt": "31.inputs.prompt",
         "duration": "30.inputs.values.a",
@@ -404,7 +454,7 @@ def compile_ref2va_workflow(
         },
     }
 
-    required_nodes = list(BASE_MODEL_NODES)
+    required_nodes = list(candidate_required if candidate else BASE_MODEL_NODES)
     if accelerator_id == "pdd8":
         required_nodes += PDD_NODES
 
@@ -545,6 +595,8 @@ def compile_ref2va_workflow(
         "image_count": image_count,
         "audio_count": audio_count,
     }
+    if candidate_digest:
+        recipe_payload["variant_recipe_sha256"] = candidate_digest
     recipe_sha256 = graph_hash(recipe_payload)
 
     validate_graph(graph, required_nodes=required_nodes)

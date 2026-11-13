@@ -555,3 +555,16 @@ def test_interrupted_ranges_finish_the_original_block_instead_of_extending_its_e
     path = ControlledDownloader({"huggingface.co"}, HTTPTransport(), segment_bytes=3).download(file, tmp_path)
     assert path.read_bytes() == data
     assert ranges == [(0, 2), (1, 2), (2, 2), (3, 5), (4, 5), (5, 5), (6, 7), (7, 7)]
+
+
+def test_explicit_source_preference_only_uses_approved_mirror():
+    url = "https://huggingface.co/Qwen/model/resolve/" + "a" * 40 + "/model.safetensors"
+    file = spec().model_copy(update={"url": url})
+    mirror_first = ControlledDownloader(MIRROR_HOSTS, HTTPTransport(), source_preference="MIRROR_FIRST")
+    official_first = ControlledDownloader(MIRROR_HOSTS, HTTPTransport(), source_preference="OFFICIAL_FIRST")
+    assert [kind for kind, _ in mirror_first._candidates(file)] == ["mirror", "primary"]
+    assert [kind for kind, _ in official_first._candidates(file)] == ["primary", "mirror"]
+    only_official = ControlledDownloader({"huggingface.co"}, HTTPTransport(), source_preference="MIRROR_FIRST")
+    assert only_official._candidates(file) == [("primary", url)]
+    non_hf = file.model_copy(update={"url": "https://github.com/org/repo/archive/abc.zip"})
+    assert mirror_first._candidates(non_hf) == [("primary", non_hf.url)]

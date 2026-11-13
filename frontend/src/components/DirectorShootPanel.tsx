@@ -23,6 +23,7 @@ import {
 } from '../api';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
+import { StrategyResourceCard } from './StrategyResourceCard';
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -196,6 +197,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     return () => { cancelled = true; };
   }, [activeRunId]);
 
+  const chosenVariantVerified = options.model_variants.find(row => row.variant_id === variantId)?.verified === true;
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 
   const toggle = (episodeId: string) => {
@@ -206,7 +208,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   };
 
   const start = useCallback(async () => {
-    if (submitting.current || !selected.length) return;
+    if (submitting.current || !selected.length || !chosenVariantVerified) return;
     submitting.current = true;
     setBusy('start'); setProblem('');
     try {
@@ -236,7 +238,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
       submitting.current = false;
       setBusy('');
     }
-  }, [acceleratorId, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
+  }, [acceleratorId, chosenVariantVerified, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
 
   const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!run) return;
@@ -257,12 +259,12 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     ? { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
         onClick: () => void start(),
         loading: busy === 'start',
-        disabled: busy !== '' || !selected.length || demo,
-        disabledReason: demo ? '当前是演示模式：先启用真实制作'
+        disabled: busy !== '' || !selected.length || demo || !chosenVariantVerified,
+        disabledReason: !chosenVariantVerified ? '候选模型尚未通过本机生产验收' : demo ? '当前是演示模式：先启用真实制作'
           : !selected.length ? '至少选择一集' : undefined,
         icon: <Clapperboard size={14} /> }
     : null;
-  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running]);
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running, chosenVariantVerified]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -328,7 +330,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
               <button key={row.variant_id} type="button" role="radio"
                 aria-checked={variantId === row.variant_id}
                 className={`strategy-option${variantId === row.variant_id ? ' active' : ''}`}
-                disabled={!row.verified || running || busy !== ''}
+                disabled={(!row.verified && row.variant_id !== 'ref2va-lowend-candidate') || running || busy !== ''}
                 title={row.verified ? row.label : `未验收（${row.acceptance_status}）：不能用于真实制作`}
                 onClick={() => setVariantId(row.variant_id)}>
                 {describeVariantName(row.variant_id)}
@@ -336,6 +338,11 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
               </button>
             ))}
           </div>
+          {variantId === 'ref2va-lowend-candidate' && <StrategyResourceCard
+            key={`${projectId}-${variantId}-${acceleratorId}-${secondPass}-${upscale}`}
+            projectId={projectId} strategy={{ schema_version: '1', generation_mode: 'Ref2VA',
+              model_variant_id: variantId, accelerator_id: acceleratorId,
+              second_pass: { enabled: secondPass }, upscale: { enabled: upscale } }} />}
           <div className="strategy-row" role="radiogroup" aria-label="画面加速">
             <span className="strategy-label">画面加速</span>
             {options.accelerators.map((row) => (
@@ -380,7 +387,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
         </div>
 
         {problem && <p role="alert" className="form-error">{problem}</p>}
-        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== ''}
+        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== '' || !chosenVariantVerified}
           onClick={() => void start()}>
           <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
         </button>}

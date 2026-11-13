@@ -90,7 +90,7 @@ def claimed(api):
     from tests.conftest import (
         create_job,
         create_project,
-        create_shot,
+        create_referenced_shot,
         freeze_style,
         register_workflow_profile,
     )
@@ -98,11 +98,11 @@ def claimed(api):
     client, factory, settings = api
     project = create_project(client)
     style = freeze_style(client, project)
-    shot = create_shot(client, project, style["id"])
+    shot = create_referenced_shot(client, project, style["id"], character="测试角色")
     # The startup node gate covers the baseline mode's registered profiles, so
     # the fixture's job must own one of those names for the missing-node
     # refusal below to be about the baseline contract, not a random test row.
-    baseline = register_workflow_profile(client, name="local-h3-ref2va-pdd8-2img")
+    baseline = register_workflow_profile(client, name="local-h3-ref2va-pdd8-2img-1aud")
     job = create_job(client, project, shot["id"], provider="comfyui",
                      workflow_profile_id=baseline["id"])
     with factory.begin() as db:

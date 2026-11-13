@@ -221,7 +221,7 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
   const canStop = safeAction === 'stop';
   // 已有控制操作在跑：动手的按钮变成「处理中…」，但只读的检查连接照旧可用。
   const operationInFlight = Boolean(snapshot?.current?.operation_id);
-  const actionPending = busy || (operationInFlight && safeAction !== 'probe');
+  const actionPending = busy || (operationInFlight && (safeAction !== 'probe' || snapshot?.current?.operation_action === 'probe'));
   const operationLabel = snapshot?.current?.operation_action
     ? (ACTION_LABELS[snapshot.current.operation_action] ?? '引擎控制') : null;
 
@@ -241,7 +241,7 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
           type="button"
           className={`btn-secondary${canStop && !actionPending ? ' engine-stop' : ''}`}
           disabled={actionPending}
-          title={operationInFlight && safeAction !== 'probe'
+          title={actionPending && operationInFlight
             ? '本机引擎正在执行上一个操作，结束前不能再提交。'
             : (snapshot?.recovery?.advice || actionLabel)}
           onClick={() => act(safeAction)}
@@ -268,6 +268,16 @@ export function EngineStatusEntry({ apiOnline }: { apiOnline: boolean }) {
           {snapshot?.health && (
             <span className="engine-detail-health">运行配置：{workflowText(snapshot.health.workflow)}</span>
           )}
+          {snapshot?.diagnostics && (
+            <span className="engine-detail-health">
+              归属：{snapshot.diagnostics.ownership === 'VERIFIED' ? '已核实' :
+                snapshot.diagnostics.ownership === 'EXTERNAL' ? '外部实例，不会接管' : '未核实'}
+              {' · '}H3 生产：尚需单独核验
+              {snapshot.diagnostics.missing_nodes.length > 0
+                ? ` · 缺少节点：${snapshot.diagnostics.missing_nodes.join('、')}` : ''}
+            </span>
+          )}
+          <span className="engine-detail-health">启动引擎用于图片制作；H3 开拍由生产任务另行启动和核验。</span>
           {operationLabel && (
             <span className="engine-detail-health">
               当前操作：{operationLabel}

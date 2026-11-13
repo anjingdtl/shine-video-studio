@@ -797,3 +797,59 @@ def test_reconcile_reports_a_failure_instead_of_crashing(api, monkeypatch):
     result = executor._reconcile(factory, settings, INSTALLATION)
     assert result["outcome"] == executor.OUTCOME_FAILED
     assert result["error"] == "RuntimeError"
+
+
+def test_reconcile_reports_uncertain_h3_startup_and_missing_nodes(api, monkeypatch):
+    _, factory, settings = api
+    monkeypatch.setattr("shine.comfyops.renderer_release.describe_managed_processes", lambda db: [])
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:test-run", value={
+            "stage": "RECONCILE_REQUIRED", "installation": {"id": INSTALLATION},
+            "missing_nodes": ["MiniMaxH3MemoryEfficientSageAttentionPatch"],
+        }))
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
+    assert result["uncertain"] == [{"kind": "h3_renderer", "run_id": "test-run",
+                                    "stage": "RECONCILE_REQUIRED",
+                                    "missing_nodes": ["MiniMaxH3MemoryEfficientSageAttentionPatch"]}]
+    with factory() as db:
+        assert db.get(AppSetting, "renderer-startup:test-run").value["stage"] == "RECONCILE_REQUIRED"
+
+
+def test_reconcile_closes_only_h3_record_with_released_identity_proof(api, monkeypatch):
+    from shine.runtime_orchestrator import identity
+
+    _, factory, settings = api
+    monkeypatch.setattr("shine.comfyops.renderer_release.describe_managed_processes", lambda db: [])
+    monkeypatch.setattr(identity, "_h3_runtime_process", lambda db, run_id, startup: {"pid": 8})
+    monkeypatch.setattr(identity, "_released_h3_processes_are_gone", lambda db, startup, process: True)
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:test-run", value={
+            "stage": "RECONCILE_REQUIRED", "installation": {"id": INSTALLATION},
+            "lease_id": "released-lease", "job_id": "past-job", "process": {"pid": 8},
+        }))
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_RECONCILED
+    with factory() as db:
+        row = db.get(AppSetting, "renderer-startup:test-run")
+        assert row.value["stage"] == "STOPPED"
+        assert row.value["lease_id"] == "released-lease"
+        assert row.value["process"] == {"pid": 8}
+
+
+def test_reconcile_does_not_close_h3_when_process_proof_is_missing(api, monkeypatch):
+    from shine.runtime_orchestrator import identity
+
+    _, factory, settings = api
+    monkeypatch.setattr("shine.comfyops.renderer_release.describe_managed_processes", lambda db: [])
+    monkeypatch.setattr(identity, "_h3_runtime_process", lambda db, run_id, startup: {"pid": 8})
+    monkeypatch.setattr(identity, "_released_h3_processes_are_gone", lambda db, startup, process: False)
+    with factory.begin() as db:
+        db.add(AppSetting(key="renderer-startup:test-run", value={
+            "stage": "RECONCILE_REQUIRED", "installation": {"id": INSTALLATION},
+            "lease_id": "uncertain-lease", "job_id": "past-job", "process": {"pid": 8},
+        }))
+    result = executor._reconcile(factory, settings, INSTALLATION)
+    assert result["outcome"] == executor.OUTCOME_NEEDS_REVIEW
+    with factory() as db:
+        assert db.get(AppSetting, "renderer-startup:test-run").value["stage"] == "RECONCILE_REQUIRED"

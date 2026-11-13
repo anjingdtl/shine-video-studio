@@ -1180,6 +1180,8 @@ export type RuntimeSnapshot = {
     | 'RECONCILING' | 'BLOCKED_UNVERIFIED' | 'EXTERNAL_CONFLICT' | string;
   health: { worker?: string; comfy_http?: string; api?: string; workflow?: RuntimeWorkflowHealth | string };
   ownership: { managed: boolean; verified: boolean; port?: number | null; pid?: number | null };
+  diagnostics?: { transport: string; ownership: string; capability: string;
+    missing_nodes: string[]; production_ready: boolean };
   current: {
     owner_kind?: string | null;
     task?: string | null;
@@ -1226,7 +1228,9 @@ export const submitRuntimeControl = (action: 'ensure' | 'stop' | 'probe' | 'reco
   api<ControlOperation>(`/runtime-orchestrator/${action}`,
     json('POST', {
       installation_id: installationId,
-      idempotency_key: `${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      idempotency_key: typeof expectedStateVersion === 'number'
+        ? `web-${action}-${installationId}-${expectedStateVersion}`
+        : `${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       reason: 'web-engine-status',
       ...(typeof expectedStateVersion === 'number'
         ? { expected_state_version: expectedStateVersion } : {}),

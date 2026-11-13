@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from collections import Counter
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,6 +41,19 @@ class InstallPlanRequest(BaseModel):
     #: is a *separate* catalog and therefore a separate companion plan: it is
     #: never silently merged into the H3 installation.
     include_image_capability: bool = False
+
+
+class ResourceResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str
+    strategy: dict
+
+
+class ResourcePlanRequest(ResourceResolveRequest):
+    snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    instance_id: str = Field(min_length=1, max_length=96)
+    source_preference: Literal["AUTO", "MIRROR_FIRST", "OFFICIAL_FIRST"] = "AUTO"
+    disk_free: int = Field(ge=0)
 
 
 class InstanceChainRequest(BaseModel):
@@ -402,8 +415,20 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
     valid_ids = {c["component_id"] for c in raw["components"]}
     if not set(body.components) <= valid_ids:
         raise HTTPException(422, "CATALOG_COMPONENT_UNKNOWN")
+    catalog_variant = str(raw.get("variant_id") or "")
+    if catalog_variant and body.variant_id and body.variant_id != catalog_variant:
+        raise HTTPException(409, {"code": "VARIANT_CATALOG_MISMATCH"})
+    if catalog_variant and not body.variant_id:
+        declared = variant_manifests.load_variant_manifest(catalog_variant)
+        if not declared.get("auto_download_allowed"):
+            raise HTTPException(409, "VARIANT_ID_REQUIRED")
     variant = deployment.resolve_variant(raw, body.components)
     if body.variant_id:
+        from shine.comfyops.variant_binding import load_binding
+
+        binding = load_binding(body.variant_id)
+        if binding.catalog.get("catalog_id") != raw.get("catalog_id"):
+            raise HTTPException(409, {"code": "VARIANT_CATALOG_MISMATCH"})
         try:
             variant = variant_manifests.load_variant_manifest(body.variant_id)
         except (OSError, ValueError, FileNotFoundError):
@@ -709,6 +734,59 @@ def validate_profiles(body: ProfileRegistrationRequest, settings: SettingsDep, d
         results.append({**entry, "validated": True, "code": None,
                         "validated_against": validated})
     return {"profiles": results}
+
+
+@router.post("/resources/resolve")
+def resolve_strategy_resources(body: ResourceResolveRequest, settings: SettingsDep, db: DBSession):
+    """Inspect the selected strategy; this never approves, downloads or starts anything."""
+    from pydantic import ValidationError
+
+    from shine.comfyops.resource_resolver import resolve_resources
+    from shine.strategy import GenerationStrategy
+
+    deployment._require_project(db, body.project_id)
+    try:
+        strategy = GenerationStrategy.model_validate(body.strategy)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    return resolve_resources(db, settings, strategy)
+
+
+@router.post("/resources/install-plan")
+def create_resource_install_plan(body: ResourcePlanRequest, settings: SettingsDep, db: DBSession):
+    """Freeze a preview into an existing approval-required installation plan."""
+    from pydantic import ValidationError
+
+    from shine.comfyops.resource_resolver import managed_installation_pin, resolve_resources
+    from shine.comfyops.variant_binding import load_binding
+    from shine.strategy import GenerationStrategy
+
+    deployment._require_project(db, body.project_id)
+    try:
+        strategy = GenerationStrategy.model_validate(body.strategy)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    preview = resolve_resources(db, settings, strategy)
+    if not preview.get("download_eligible") or preview.get("snapshot_sha256") != body.snapshot_sha256:
+        raise HTTPException(409, "RESOURCE_SNAPSHOT_CHANGED_OR_INELIGIBLE")
+    try:
+        identity = managed_installation_pin(db, body.instance_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    binding = load_binding(strategy.model_variant_id)
+    context = {"schema": "shine.resource-plan.v2", "strategy": strategy.model_dump(mode="json"),
+               "strategy_sha256": strategy.strategy_sha256(), "catalog_sha256": preview["catalog_sha256"],
+               "recipe_sha256": preview["compiled_recipe_sha256"], "snapshot_sha256": body.snapshot_sha256,
+               "instance_id": body.instance_id, "instance_pin": identity,
+               "source_preference": body.source_preference}
+    plan = deployment.create_install_plan(
+        db, settings, binding.catalog, [item["component_id"] for item in preview["components"]],
+        body.project_id, body.disk_free, variant=binding.manifest,
+        qualification={"status": "NOT_EVALUATED_FOR_DOWNLOAD"}, resource_context=context,
+    )
+    return {"plan_id": plan.id, "sha256": plan.sha256, "status": plan.status,
+            "download_bytes": plan.payload["download_bytes"], "disk_required": plan.payload["disk_required"],
+            "source_preference": body.source_preference, "production_ready": False}
 
 
 @router.get("/variant-readiness")

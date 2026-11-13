@@ -250,6 +250,9 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "current": {"owner_kind": None, "task": None, "operation_id": None,
                     "operation_action": None, "operation_status": None},
         "resource": {"active_leases": 0, "waiting_leases": 0, "reconcile_leases": 0},
+        "diagnostics": {"transport": "UNKNOWN", "ownership": "UNKNOWN",
+                        "capability": "LIVE_CHECK_PENDING", "missing_nodes": [],
+                        "production_ready": False},
         "recovery": _recovery_for("NOT_BOUND"),
         "last_observed_at": None,
         "state_version": 0,
@@ -334,6 +337,19 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "verified": bool(live_image == "RUNNING" or h3_verified),
         "port": port,
         "pid": listener_pid or (process or {}).get("pid"),
+    }
+    diagnostic_h3 = next((record for record in activity["h3_records"]
+                          if record.get("missing_nodes")), None)
+    missing = (diagnostic_h3 or {}).get("missing_nodes") or []
+    missing = sorted({name for name in missing if isinstance(name, str) and len(name) <= 160})
+    snapshot["diagnostics"] = {
+        "transport": snapshot["health"]["comfy_http"],
+        "ownership": "VERIFIED" if snapshot["ownership"]["verified"] else (
+            "EXTERNAL" if state == "EXTERNAL_CONFLICT" else "UNVERIFIED"),
+        "capability": "MISSING_NODES" if missing else "LIVE_CHECK_PENDING",
+        "missing_nodes": missing,
+        # An image engine or HTTP 200 is not H3 production readiness.
+        "production_ready": False,
     }
     snapshot["activity"] = {
         "h3_runs": len(activity["h3_records"]),

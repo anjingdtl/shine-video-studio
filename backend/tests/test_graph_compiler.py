@@ -191,7 +191,7 @@ def test_unknown_accelerator_is_refused():
 
 
 def test_candidate_variant_uses_its_own_declared_checkpoint():
-    compiled = compile_ref2va_workflow(image_count=2, variant_id="ref2va-lowend-candidate")
+    compiled = compile_ref2va_workflow(image_count=2, variant_id="ref2va-lowend-candidate", accelerator_id="native20")
     assert compiled.checkpoint_id.endswith("minimax_h3_ref2va_pruned_w6a8.safetensors")
     assert compiled.graph["10"]["inputs"]["unet_name"] == compiled.checkpoint_id
     baseline = compile_ref2va_workflow(image_count=2)
@@ -247,3 +247,16 @@ def test_execution_identity_snapshot_is_complete_and_hashable():
     assert identity["second_pass"]
     assert identity["recipe_sha256"] == compiled.recipe_sha256
     assert graph_hash(identity)
+
+
+def test_candidate_stack_uses_pinned_recipe_and_refuses_unverified_combinations():
+    compiled = compile_ref2va_workflow(image_count=2, variant_id="ref2va-lowend-candidate", accelerator_id="native20")
+    assert compiled.graph["21"]["inputs"]["vae_name"].endswith("minimax_h3_video_vae_int8_convrot.safetensors")
+    assert not any(node["class_type"] in {"LoraLoaderModelOnly", "SolAttnPatch"} for node in compiled.graph.values())
+    assert "MiniMaxH3MemoryEfficientSageAttentionPatch" in compiled.required_nodes
+    for accelerator, second in (("pdd8", None), ("native20", SecondPassSpec())):
+        with pytest.raises(GraphCompileError, match="候选模型"):
+            compile_ref2va_workflow(
+                image_count=2, variant_id="ref2va-lowend-candidate",
+                accelerator_id=accelerator, second_pass=second,
+            )

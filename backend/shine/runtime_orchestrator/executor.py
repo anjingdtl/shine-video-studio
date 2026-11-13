@@ -59,6 +59,52 @@ def _probe(factory, installation_id: str) -> dict[str, Any]:
         return {"probed": True, "activity": _activity_summary(db, installation_id)}
 
 
+
+def _normalize_released_h3(factory, installation_id: str) -> list[dict[str, Any]]:
+    """Close H3 history only after the existing lease and both process proofs agree."""
+    from shine.comfyops.models import ComfyInstance
+    from shine.models import AppSetting, Job, utcnow
+    from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+    from shine.runtime_orchestrator.identity import (
+        _h3_runtime_process,
+        _released_h3_processes_are_gone,
+        h3_records_for_installation,
+    )
+    from shine.services import UNKNOWN_SUBMISSION_CODES, add_audit
+
+    normalized = []
+    with renderer_lifecycle_guard(installation_id):
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            activity = installation_activity(db, installation_id)
+            unknown = db.scalar(select(Job.id).where(
+                Job.status == "NEEDS_REVIEW", Job.failure_code.in_(sorted(UNKNOWN_SUBMISSION_CODES)),
+            ).limit(1))
+            if (unknown or activity["gpu_leases"] or activity["in_flight_h3_jobs"]
+                    or activity["in_flight_image_work"] or activity["image_record"]):
+                return []
+            for record in h3_records_for_installation(db, installation_id):
+                if record["state"] not in {"ACTIVE", "UNCERTAIN"} and not record.get("released_and_gone"):
+                    continue
+                row = db.get(AppSetting, record["key"])
+                current = dict(row.value) if row and isinstance(row.value, dict) else {}
+                latest = _h3_runtime_process(db, record["run_id"], current)
+                if not latest or not _released_h3_processes_are_gone(db, current, latest):
+                    continue
+                # No prompt is submitted and the historical identity is retained.
+                row.value = {**current, "stage": "STOPPED", "stopped_at": utcnow().isoformat(),
+                             "reconciled_from_stage": current.get("stage"),
+                             "stopped_reason": "released_h3_renderer_proven_gone"}
+                instance = db.get(ComfyInstance, record["run_id"])
+                if instance:
+                    instance.status = "STOPPED"
+                add_audit(db, "controller:reconcile", "H3_STARTUP_RECONCILED", "comfy_instance",
+                          record["run_id"], {"resubmitted": False, "lease_id": record["lease_id"]})
+                normalized.append({"kind": "h3_renderer", "run_id": record["run_id"],
+                                   "outcome": "recorded_stopped"})
+    return normalized
+
+
 def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
     """Read-only evidence gathering plus the one provably safe cleanup.
 
@@ -89,6 +135,13 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
                         "kind": "managed_process",
                         **{key: entry.get(key) for key in ("id", "stage", "port", "pid")},
                     })
+            activity = installation_activity(db, installation_id)
+            checked["h3_records"] = len(activity["h3_records"])
+            for record in activity["h3_records"]:
+                if record["state"] == "UNCERTAIN":
+                    uncertain.append({"kind": "h3_renderer", "run_id": record["run_id"],
+                                      "stage": record["stage"],
+                                      "missing_nodes": record.get("missing_nodes") or []})
             image = image_record_for_installation(db, installation_id)
             checked["image_record"] = bool(image)
             leases = [lease for lease in lease_facts(db) if lease["status"] == "RECONCILE_REQUIRED"]
@@ -125,6 +178,15 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
         except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
             uncertain.append({"kind": "image_renderer", "state": "REFUSED",
                               "code": str(exc)})
+
+    try:
+        closed = _normalize_released_h3(factory, installation_id)
+        normalized.extend(closed)
+        closed_runs = {item["run_id"] for item in closed}
+        uncertain = [item for item in uncertain
+                     if not (item.get("kind") == "h3_renderer" and item.get("run_id") in closed_runs)]
+    except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
+        uncertain.append({"kind": "h3_renderer", "state": "REFUSED", "code": str(exc)})
 
     if uncertain:
         return {"outcome": OUTCOME_NEEDS_REVIEW, "checked": checked, "uncertain": uncertain,

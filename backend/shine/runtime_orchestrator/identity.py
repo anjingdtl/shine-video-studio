@@ -83,6 +83,8 @@ def h3_records_for_installation(db, installation_id: str) -> list[dict[str, Any]
                     "port": value.get("port"),
                     "process": process,
                     "node_inventory": value.get("node_inventory"),
+                    "missing_nodes": value.get("missing_nodes"),
+                    "reason": value.get("reason"),
                 }
             )
     return found
