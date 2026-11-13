@@ -379,9 +379,24 @@ def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bo
     # A handoff can have launched a replacement after the startup record was
     # written. Its unresolved journal must not be bypassed by the older PID.
     handoffs = db.scalars(select(AppSetting).where(AppSetting.key.like(HANDOFF_PREFIX + "%"))).all()
-    if any(isinstance(row.value, dict) and row.value.get("resource_id") == lease.id
-           and row.value.get("stage") != "RECONCILE_COMPLETE" for row in handoffs):
-        return False
+    for row in handoffs:
+        value = row.value
+        if not isinstance(value, dict) or value.get("resource_id") != lease.id:
+            continue
+        if value.get("stage") == "RECONCILE_COMPLETE":
+            continue
+        if value.get("stage") != "COMPLETE":
+            return False
+        try:
+            port = urlsplit(value.get("instance_url") or "").port
+            restarted = ((value.get("evidence") or {}).get("RESTARTED") or {}).get("process")
+            processes = (value.get("process"), restarted)
+            if not port or any(not isinstance(process, dict) or not process.get("job_name")
+                               or not renderer_is_gone({"process": process, "port": port})
+                               for process in processes):
+                return False
+        except (ValueError, TypeError, AttributeError):
+            return False
     record = startup_record_for_lease(db, lease.id)
     if record is None and (lease.owner or "").startswith("image:"):
         # Image journals written before lease linking carry no lease_id.  The

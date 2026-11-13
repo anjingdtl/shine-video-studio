@@ -281,6 +281,29 @@ def test_restarted_handoff_requires_both_processes_gone(handoff, monkeypatch):
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 
 
+def test_completed_handoff_releases_only_after_both_renderers_exit(handoff, monkeypatch):
+    from shine.comfyops import handoff_startup
+
+    factory, job_id, attempt_id, lease_id, instance_id, version = handoff
+    begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
+                  "http://127.0.0.1:8190")
+    with factory.begin() as db:
+        row = db.get(AppSetting, "handoff:" + attempt_id)
+        row.value = {**row.value, "stage": "COMPLETE", "evidence": {"RESTARTED": {
+            "process": {"pid": 456, "birth": "7", "job_name": "Local\\ShineHandoff-restart"},
+        }}}
+        db.add(AppSetting(key="renderer-startup:" + instance_id, value={
+            "stage": "RUNNING", "lease_id": lease_id, "port": 8190,
+            "process": {"pid": 123, "birth": "4", "job_name": "Local\\ShineHandoff-test"},
+        }))
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "7" if pid == 456 else None)
+    assert handoff_startup.reconcile_dead_renderer_leases(factory) == []
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    assert [item["lease_id"] for item in handoff_startup.reconcile_dead_renderer_leases(factory)] == [lease_id]
+
+
 def test_live_renderer_keeps_a_failed_handoff_blocked(handoff, monkeypatch):
     """A renderer whose ownership is still provable must never be released by inference."""
     from shine.comfyops import handoff_startup
