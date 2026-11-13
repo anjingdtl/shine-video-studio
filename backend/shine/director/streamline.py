@@ -354,6 +354,7 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     strength = style.get("strength") or "balanced"
     film_type = style.get("film_type")
     dialogue_ratio = style.get("dialogue_ratio_percent")
+    narration_level = style.get("narration_level")
     if not profile_id:
         raise HTTPException(422, "STYLE_PROFILE_REQUIRED")
     try:
@@ -368,6 +369,10 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     style_bible = entry.profile.style_bible.model_copy(update={
         "dialogue_ratio_percent": dialogue_ratio if dialogue_ratio is not None
         else current.get("dialogue_ratio_percent"),
+        # Narration is a storyboard-style decision: it tells the crew how much
+        # voice-over the episode may use.  It is guidance, not a render gate.
+        "narration_level": narration_level if narration_level in {"none", "low", "high"}
+        else current.get("narration_level"),
         "film_type": FilmType(film_type) if film_type else (
             FilmType(current["film_type"]) if current.get("film_type") else None),
     })
@@ -916,6 +921,30 @@ def digest_of_payload(payload: dict[str, Any]) -> str:
 _CUT_MARKER = re.compile(r"At 00:(\d+\.\d+), hard cut\.\s*")
 
 
+def episode_of_shot(db, project_id: str, shot_id: str) -> str:
+    """Which episode owns this shot, read from the confirmed episode plan.
+
+    The shot table and the subtitle ledger both need this answer.  Deriving it
+    once from the plan keeps them from disagreeing about which episode a shot
+    belongs to.
+    """
+    from shine.director.contracts import EpisodePlanPayload
+    from shine.materialprep.story import section_storyboard_shot_ids
+
+    plan = _latest_plan(db, project_id)
+    if plan is None:
+        return "unassigned"
+    payload = EpisodePlanPayload.model_validate(plan.payload)
+    for episode in payload.episodes:
+        if shot_id in (episode.shot_ids or []):
+            return episode.episode_id
+    for episode in payload.episodes:
+        for section_id in episode.section_ids:
+            if shot_id in section_storyboard_shot_ids(db, project_id, section_id)["shot_ids"]:
+                return episode.episode_id
+    return "unassigned"
+
+
 def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
     """The editable shot table of one episode, read from the landed shots.
 
@@ -943,6 +972,19 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
                     for sid in section_storyboard_shot_ids(db, project_id, section_id)["shot_ids"]:
                         shot_ids.append(sid)
                         section_of[sid] = section_id
+    from shine.director.models import ShotPromptRevision, ShotSubtitle
+    from shine.director.prompt_revisions import manual_status_for
+
+    frozen_prompts = {
+        row.shot_id: row for row in db.scalars(select(ShotPromptRevision).where(
+            ShotPromptRevision.shot_id.in_(shot_ids),
+            ShotPromptRevision.status == "FROZEN",
+        ).order_by(ShotPromptRevision.revision.desc())).all()
+    } if shot_ids else {}
+    subtitles = {
+        row.shot_id: row for row in db.scalars(select(ShotSubtitle).where(
+            ShotSubtitle.shot_id.in_(shot_ids))).all()
+    } if shot_ids else {}
     rows = []
     total = 0.0
     for position, shot_id in enumerate(shot_ids):
@@ -950,6 +992,17 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
         if shot is None or shot.project_id != project_id:
             continue
         spec = shot.spec or {}
+        prompt_row = frozen_prompts.get(shot.id)
+        # A frozen prompt is only "in effect" while it still describes this
+        # shot.  The table must not claim 人工冻结 over text that will not be
+        # submitted.
+        prompt_status = "compiled"
+        prompt_reason = None
+        if prompt_row is not None:
+            prompt_reason = manual_status_for(db, shot, prompt_row)
+            prompt_status = "frozen" if prompt_reason is None else "inactive"
+        subtitle_row = subtitles.get(shot.id)
+        requested = list(spec.get("requested_assets") or [])
         beat = str(spec.get("story_beat") or "")
         cuts = [{"start_s": float(m.group(1))} for m in _CUT_MARKER.finditer(beat)]
         duration = float(spec.get("duration_target_s") or 0.0)
@@ -972,6 +1025,21 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
             "continuity_mode": continuity.get("mode") or "cut",
             "previous_shot_id": continuity.get("previous_shot_id"),
             "required_asset_ids": list(spec.get("required_asset_ids") or []),
+            "requested_assets": requested,
+            "prompt": {
+                "status": prompt_status,
+                "reason": prompt_reason,
+                "revision": prompt_row.revision if prompt_row is not None else None,
+                "mode": prompt_row.mode if prompt_row is not None else None,
+                "chars": len(prompt_row.prompt) if prompt_row is not None else None,
+                "frozen_at": (prompt_row.frozen_at.isoformat() + "Z"
+                              if prompt_row is not None and prompt_row.frozen_at else None),
+            },
+            "subtitle": {
+                "status": subtitle_row.status if subtitle_row is not None else "EMPTY",
+                "revision": subtitle_row.revision if subtitle_row is not None else 0,
+                "line_count": len(subtitle_row.lines or []) if subtitle_row is not None else 0,
+            },
         })
     return {"episode_id": episode_id, "shots": rows,
             "total_editorial_seconds": round(total, 3), "shot_count": len(rows)}
@@ -980,6 +1048,56 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # ④ Shot-driven, deduplicated material list
 # ---------------------------------------------------------------------------
+
+
+def _frozen_material_prompts(db, project_id: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Every frozen hand-written prompt of this project, keyed by identity.
+
+    A re-derived list opens a new plan revision, and a new revision has new
+    requirement rows.  The person's own words must travel with the item they
+    wrote them for, or a second derivation would silently reset them to the
+    model's description.
+    """
+    from shine.comfyops.models import AssetRequirement
+
+    carried: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in db.scalars(select(AssetRequirement).where(
+            AssetRequirement.project_id == project_id).order_by(
+            AssetRequirement.created_at.desc())).all():
+        payload = dict(row.payload or {})
+        frozen = payload.get("manual_prompt")
+        if not isinstance(frozen, dict) or not frozen.get("prompt"):
+            continue
+        key = (str(payload.get("family") or ""), str(payload.get("entity_id") or ""))
+        carried.setdefault(key, frozen)
+    return carried
+
+
+def _confirmed_material_bindings(db, project_id: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """The asset each confirmed requirement already adopted, keyed by identity.
+
+    A re-derived list is a new revision with new rows.  The upload a person
+    made and the choice they confirmed are facts about *them*, not about the
+    revision, so they travel with the item instead of being dropped by a fresh
+    row.
+    """
+    from shine.comfyops.models import AssetRequirement
+
+    carried: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in db.scalars(select(AssetRequirement).where(
+            AssetRequirement.project_id == project_id,
+            AssetRequirement.status == "CONFIRMED",
+    ).order_by(AssetRequirement.created_at.desc())).all():
+        payload = dict(row.payload or {})
+        asset_id = payload.get("bound_asset_id")
+        if not asset_id:
+            continue
+        key = (str(payload.get("family") or ""), str(payload.get("entity_id") or ""))
+        carried.setdefault(key, {
+            "bound_asset_id": asset_id,
+            "bound_asset_sha256": payload.get("bound_asset_sha256"),
+        })
+    return carried
 
 
 def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None = None,
@@ -1013,6 +1131,11 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
     derived = requirement_source.derive(db, project, episode_ids=episode_ids)
     if not derived["preparations"]:
         raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
+    # A hand-written prompt and an adopted upload are the person's own work.
+    # A re-derived list opens a new plan revision with new requirement rows, so
+    # both travel over by identity instead of being dropped by a fresh row.
+    carried_prompts = _frozen_material_prompts(db, project_id)
+    carried_bindings = _confirmed_material_bindings(db, project_id)
     plan_row, replayed = service.create_draft_plan(
         db, project, document, derived["preparations"], actor=actor)
 
@@ -1025,19 +1148,31 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
     for row in db.scalars(select(AssetRequirement).where(
             AssetRequirement.plan_id == plan_row.id, AssetRequirement.project_id == project_id)):
         payload = dict(row.payload or {})
-        evidence = usage.get((payload.get("family"), payload.get("entity_id"))) or {}
+        identity = (payload.get("family"), payload.get("entity_id"))
+        carried = carried_prompts.get(identity)
+        if carried and not payload.get("manual_prompt"):
+            payload["manual_prompt"] = carried
+        adopted = carried_bindings.get(identity)
+        if adopted and not payload.get("bound_asset_id"):
+            payload.update(adopted)
+        if payload != dict(row.payload or {}):
+            row.payload = payload
+            row.sha256 = graph_hash(payload)
+        evidence = usage.get(identity) or {}
         shot_ids = sorted(set(evidence.get("shot_ids") or []))
         episodes_used = sorted(evidence.get("used_episodes") or [])
         critical = bool(evidence.get("critical", payload.get("critical", True)))
         strategy = evidence.get("strategy") or payload.get("strategy")
         matched_id = evidence.get("matched_master_id")
+        user_specified = bool(evidence.get("user_specified") or payload.get("user_specified"))
         shot_ids_seen.update(shot_ids)
         if (payload.get("used_shot_ids") != shot_ids
                 or payload.get("used_episodes") != episodes_used
                 or payload.get("critical") != critical
                 or payload.get("optional") != (not critical)
                 or payload.get("strategy") != strategy
-                or payload.get("matched_master_id") != matched_id):
+                or payload.get("matched_master_id") != matched_id
+                or bool(payload.get("user_specified")) != user_specified):
             row.payload = {
                 **payload,
                 "used_shot_ids": shot_ids,
@@ -1046,9 +1181,13 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
                 "optional": not critical,
                 "strategy": strategy,
                 "matched_master_id": matched_id,
+                "user_specified": user_specified,
                 "variants": list(evidence.get("variants") or payload.get("variants") or []),
             }
             row.sha256 = graph_hash(row.payload)
+        # The view reads the persisted row, so the answer the derive endpoint
+        # gives is the same one the requirements endpoint will give later.
+        payload = dict(row.payload or {})
         requirements_view.append({
             "requirement_id": row.id,
             "family": payload.get("family"),
@@ -1058,6 +1197,12 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
             "critical": critical,
             "optional": not critical,
             "cited_by_shot": bool(evidence.get("cited_by_shot")),
+            "user_specified": bool(payload.get("user_specified")),
+            "manual_prompt": ({
+                "sha256": (payload.get("manual_prompt") or {}).get("sha256"),
+                "chars": len(str((payload.get("manual_prompt") or {}).get("prompt") or "")),
+                "frozen_at": (payload.get("manual_prompt") or {}).get("frozen_at"),
+            } if (payload.get("manual_prompt") or {}).get("prompt") else None),
             "variants": list(evidence.get("variants") or []),
             "used_shot_ids": shot_ids,
             "used_shot_count": len(shot_ids),

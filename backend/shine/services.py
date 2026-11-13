@@ -13,7 +13,15 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.h3.compiler import CompiledPrompt, H3PromptCompiler, PromptCompilationError
+from shine.h3.compiler import (
+    BASE_RULE_SHA256,
+    REF_RULE_SHA256,
+    RULE_VERSION,
+    SKILL_SHA256,
+    CompiledPrompt,
+    H3PromptCompiler,
+    PromptCompilationError,
+)
 from shine.models import (
     Asset,
     AuditEvent,
@@ -711,6 +719,8 @@ def make_render_request(
     continuity_artifact_id: str | None = None,
     offline: bool = False,
     idempotency_key: str | None = None,
+    ignore_manual_prompt: bool = False,
+    require_ref2va: bool | None = None,
 ) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
@@ -808,7 +818,14 @@ def make_render_request(
         profile = db.get(WorkflowProfile, body.workflow_profile_id)
         if not profile or (profile.project_id and profile.project_id != project.id):
             raise HTTPException(status_code=404, detail="Workflow profile not found for this project")
-    if (profile is not None and profile.mode.lower() == "ref2va" and spec.characters
+    from shine.asset_identity import split_character_names
+    from shine.h3.narrator import is_narrator_speaker
+
+    visible_characters = [
+        name for entry in spec.characters for name in split_character_names(entry)
+        if not is_narrator_speaker(name)
+    ]
+    if (profile is not None and profile.mode.lower() == "ref2va" and visible_characters
             and not any(item.use_as == ReferenceUse.SUBJECT for item in manifest)):
         raise HTTPException(status_code=422, detail={
             "code": "H3_CHARACTER_REFERENCE_MISSING",
@@ -868,6 +885,51 @@ def make_render_request(
             status_code=422,
             detail={"code": exc.code, "message": str(exc), "details": exc.details},
         ) from exc
+
+    # A frozen, hand-written prompt replaces the compiled one verbatim.  The
+    # resolver is the one place that decides this, so the package readiness
+    # check and this render path can never disagree about what is submitted.
+    # The project's mode rule is checked first: a T2VA request is refused
+    # regardless of which prompt text it would carry.
+    strict_mode = (body.provider != RenderProvider.MOCK
+                   if require_ref2va is None else require_ref2va)
+    if strict_mode:
+        from shine.h3.mode_policy import MODE_POLICY_MESSAGE, ModePolicyError, require_project_mode
+
+        try:
+            require_project_mode(compiled.mode)
+        except ModePolicyError as exc:
+            raise HTTPException(status_code=422, detail={
+                "code": exc.code,
+                "message": MODE_POLICY_MESSAGE,
+                "inferred_mode": exc.actual,
+                "required_mode": "Ref2VA",
+                "shot_id": shot.id,
+                "action": "BIND_SUBJECT_REFERENCE",
+            }) from exc
+
+    from shine.director.prompt_revisions import resolve_manual_prompt
+
+    resolution = resolve_manual_prompt(
+        db, shot, compiled=compiled, manifest=manifest, spec=spec,
+        ignore_manual=ignore_manual_prompt,
+    )
+    manual_warnings = list(resolution.warnings)
+    manual_status = resolution.status
+    if resolution.manual:
+        compiled = CompiledPrompt(
+            mode=compiled.mode,
+            compiler_version=resolution.source,
+            rule_version=RULE_VERSION,
+            skill_sha256=SKILL_SHA256,
+            base_rule_sha256=BASE_RULE_SHA256,
+            ref_rule_sha256=REF_RULE_SHA256,
+            sections=dict(resolution.sections),
+            prompt=resolution.prompt,
+            prompt_sha256=resolution.prompt_sha256,
+            labels={item.label: item.asset_id for item in manifest},
+            warnings=manual_warnings,
+        )
 
     workflow_hash = None
     transfer_warning_lines: list[str] = []
@@ -947,6 +1009,9 @@ def make_render_request(
         prompt_skill_hash=compiled.skill_sha256,
         compiler_version=compiled.compiler_version,
         rule_version=compiled.rule_version,
+        manual_prompt=resolution.manual,
+        manual_prompt_revision_id=resolution.revision_id,
+        manual_prompt_warnings=manual_warnings,
         workflow_profile_hash=workflow_hash,
         expected_duration_s=spec.duration_target_s,
         output_width=body.output.width if body.output else None,
@@ -982,11 +1047,16 @@ def make_render_request(
                 for item in bindings
             ],
         })
+    stale_warning = [manual_status] if manual_status else []
     compiler_meta = {
         "mode": compiled.mode.value,
-        "warnings": [*compiled.warnings, *transfer_warning_lines],
+        "warnings": [*compiled.warnings, *transfer_warning_lines, *stale_warning],
         "labels": compiled.labels,
         "rule_version": compiled.rule_version,
+        "source": resolution.source,
+        "manual_prompt": resolution.manual,
+        "manual_status": manual_status,
+        "manual_prompt_revision_id": resolution.revision_id,
     }
     return render_request, list(assets.values()), compiler_meta
 
@@ -1531,6 +1601,53 @@ def create_shot_record(
     return shot
 
 
+def bump_shot_revision(
+    db: Session,
+    project: Project,
+    shot: Shot,
+    *,
+    actor: str = "user",
+    event_type: str = "SHOT_REVISED",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Start a new shot revision and retire every take of the previous one.
+
+    The revision counter is what jobs compare against, so anything that changes
+    what the shot *is* — its spec, or a person's frozen prompt — must go through
+    this one place.  Takes are marked stale rather than deleted, and an unknown
+    external outcome keeps its own code for reconciliation.
+    """
+    old_jobs = list(db.scalars(select(Job).where(Job.shot_id == shot.id)).all())
+    old_ids = [job.id for job in old_jobs]
+    shot.revision += 1
+    for job in old_jobs:
+        job.stale = True
+        if job.failure_code in UNKNOWN_SUBMISSION_CODES:
+            # Revision and reconciliation are two different facts.  The take is
+            # out of the current cut, but what the provider received is still
+            # unknown and keeps its own code until a person reconciles it.
+            continue
+        job.failure_code = "SHOT_REVISION_REPLACED"
+        if job.status not in {"FAILED", "NEEDS_REVIEW"}:
+            try_transition(job, "NEEDS_REVIEW")
+    affected = mark_stale_descendants(db, old_ids, project_id=project.id)
+    add_audit(
+        db,
+        actor,
+        event_type,
+        "shot",
+        shot.id,
+        {"revision": shot.revision, "invalidated_job_ids": sorted(affected), **(payload or {})},
+        project_id=project.id,
+    )
+    return {
+        "id": shot.id,
+        "revision": shot.revision,
+        "invalidated_job_ids": sorted(affected),
+        "stale_source_job_ids": old_ids,
+    }
+
+
 def revise_shot_record(
     db: Session,
     project: Project,
@@ -1557,37 +1674,15 @@ def revise_shot_record(
         )
         if approved_count != len(set(spec.required_asset_ids)):
             raise HTTPException(status_code=409, detail="Shot requires user-approved, locked assets")
-    old_jobs = list(db.scalars(select(Job).where(Job.shot_id == shot.id)).all())
-    old_ids = [job.id for job in old_jobs]
-    shot.revision += 1
     shot.spec = spec.model_dump(mode="json")
-    for job in old_jobs:
-        job.stale = True
-        if job.failure_code in UNKNOWN_SUBMISSION_CODES:
-            # Revision and reconciliation are two different facts.  The take is
-            # out of the current cut, but what the provider received is still
-            # unknown and keeps its own code until a person reconciles it.
-            continue
-        job.failure_code = "SHOT_REVISION_REPLACED"
-        if job.status not in {"FAILED", "NEEDS_REVIEW"}:
-            try_transition(job, "NEEDS_REVIEW")
-    affected = mark_stale_descendants(db, old_ids, project_id=project.id)
+    bumped = bump_shot_revision(db, project, shot, actor=actor, event_type="SHOT_REVISED")
     if bindings is not None:
         set_shot_bindings(db, project, shot, bindings, actor=actor, bump_revision=False)
-    add_audit(
-        db,
-        actor,
-        "SHOT_REVISED",
-        "shot",
-        shot.id,
-        {"revision": shot.revision, "invalidated_job_ids": sorted(affected)},
-        project_id=project.id,
-    )
     return {
         "id": shot.id,
-        "revision": shot.revision,
-        "invalidated_job_ids": sorted(affected),
-        "stale_source_job_ids": old_ids,
+        "revision": bumped["revision"],
+        "invalidated_job_ids": bumped["invalidated_job_ids"],
+        "stale_source_job_ids": bumped["stale_source_job_ids"],
         "spec": shot.spec,
     }
 

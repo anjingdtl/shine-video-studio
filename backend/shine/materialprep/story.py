@@ -315,13 +315,26 @@ def _merge(factory, gateway, project_id, document, ids, facts):
         return {"status": "SUCCEEDED", "task_id": task_id, "artifact_id": artifact.id}
 
 
-def _finish_step(factory, task_id, version, worker_id, trace, status="QUEUED", error=None):
+def _finish_step(factory, task_id, version, worker_id, trace, status="QUEUED", error=None, *,
+                 merge_trace=False):
+    """Write the outcome of a claimed unit, fenced on owner and state version.
+
+    ``merge_trace`` keeps the facts the claim already carried (document, shot,
+    requested material) and applies ``trace`` on top.  A caller that only has a
+    patch must use it, or the ledger loses the identity the patch describes.
+    """
     with factory.begin() as db:
+        values = {"status": status, "error_code": error, "lease_owner": None,
+                  "lease_expires_at": None, "state_version": version + 1}
+        if merge_trace:
+            row = db.get(AgentTaskRecord, task_id)
+            values["trace"] = {**((row.trace or {}) if row is not None else {}), **trace}
+        else:
+            values["trace"] = trace
         changed = db.execute(update(AgentTaskRecord).where(
             AgentTaskRecord.id == task_id, AgentTaskRecord.state_version == version,
             AgentTaskRecord.lease_owner == worker_id, AgentTaskRecord.status == "RUNNING",
-        ).values(trace=trace, status=status, error_code=error, lease_owner=None, lease_expires_at=None,
-                 state_version=version + 1)).rowcount
+        ).values(**values)).rowcount
         return bool(changed)
 
 
@@ -602,8 +615,15 @@ def run_pending_story_task(factory, settings, worker_id, *, gateway=None, heartb
         return True
     from shine.director.streamline import run_pending_director_storyboard
 
-    return run_pending_director_storyboard(factory, settings, worker_id,
-                                           gateway=gateway, heartbeat_fn=heartbeat_fn)
+    if run_pending_director_storyboard(factory, settings, worker_id,
+                                       gateway=gateway, heartbeat_fn=heartbeat_fn):
+        return True
+    # A person's requested material has its own one-shot rewrite queue.  It runs
+    # after the storyboard chain so a whole-episode run is never interleaved with
+    # a single-shot edit, and it is bounded to one shot per tick.
+    from shine.director.shot_revision import run_pending_shot_revision
+
+    return run_pending_shot_revision(factory, settings, worker_id, gateway=gateway)
 
 
 def _run_pending_story_unit(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):

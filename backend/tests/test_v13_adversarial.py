@@ -272,16 +272,16 @@ def ready_production(client, *, bind_prop=False):
         f"/projects/{project}/preproduction/analyze",
         {
             "document_id": doc["id"],
-            "h3_category": "H3_I2VA" if bind_prop else "H3_T2VA",
+            "h3_category": "H3_REF2VA",
             "requirements": [{"family": "prop", "entity_id": "Ledger", "critical": True}],
         },
     )
-    profile = register_workflow_profile(client, mode="I2VA" if bind_prop else "T2VA")
+    profile = register_workflow_profile(client, mode="Ref2VA")
     from tests.conftest import COMFY_GRAPH, COMFY_PARAM_MAP
 
     workflow(
         client,
-        "H3_I2VA" if bind_prop else "H3_T2VA",
+        "H3_REF2VA",
         graph=COMFY_GRAPH,
         parameter_map=COMFY_PARAM_MAP,
         legacy_profile_id=profile["id"],
@@ -295,7 +295,8 @@ def ready_production(client, *, bind_prop=False):
         project,
         style["id"],
         beat="Rain falls on an empty street.",
-        bindings=[{"asset_id": row["formal_asset_id"], "use_as": "picture", "ordinal": 0}] if bind_prop else [],
+        bindings=[{"asset_id": row["formal_asset_id"], "use_as": "subject",
+                   "role": "Ledger", "ordinal": 0}] if bind_prop else [],
     )
     return project, shot, right, row, profile
 

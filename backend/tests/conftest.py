@@ -579,6 +579,42 @@ def create_shot(client: TestClient, project_id: str, style_id: str, **kwargs) ->
     return response.json()
 
 
+def _approve_lock_keeping_operator(client: TestClient, asset_id: str) -> None:
+    """Approve and lock a fixture master without changing the caller's operator.
+
+    The legacy grant path rewrites ``app.state.settings`` with its own operator
+    credential.  A caller that later uses the real operator token would then be
+    refused, so the fixture restores the settings it borrowed.
+    """
+    saved = client.app.state.settings
+    try:
+        approve_lock(client, asset_id)
+    finally:
+        client.app.state.settings = saved
+
+
+def create_referenced_shot(client: TestClient, project_id: str, style_id: str, *,
+                           character: str = "REF_A", **kwargs) -> dict:
+    """A shot carrying one approved subject reference.
+
+    The project invariant is Ref2VA-only, so a provider-level fixture that
+    really submits a shot must bind a master instead of creating a text-only
+    shot.  The content differs per call because the same bytes would be the
+    same approved asset and could not be confirmed twice.
+    """
+    asset = upload_asset(
+        client, project_id, content=PNG + uuid4().hex.encode("utf-8"),
+        filename=f"{character}.png", role="character", entity_id=character,
+    )
+    _approve_lock_keeping_operator(client, asset["id"])
+    kwargs.setdefault("characters", [character])
+    kwargs.setdefault("asset_ids", [asset["id"]])
+    kwargs.setdefault("bindings", [{
+        "asset_id": asset["id"], "use_as": "subject", "role": character, "ordinal": 0,
+    }])
+    return create_shot(client, project_id, style_id, **kwargs)
+
+
 def create_job(client: TestClient, project_id: str, shot_id: str, **kwargs) -> dict:
     response = client.post(f"/api/v1/projects/{project_id}/jobs", json={"shot_id": shot_id, **kwargs})
     assert response.status_code == 201, response.text
@@ -593,9 +629,10 @@ def register_workflow_profile(client: TestClient, **overrides) -> dict:
         # "a workflow profile with this name already exists" depending on
         # allocation order.  A uuid is what the test actually means: a fresh name.
         "name": overrides.pop("name", f"test-profile-{uuid4().hex[:12]}"),
-        # Default is text-only: a test that binds references must ask for the
-        # multi-reference profile explicitly, exactly like a real project must.
-        "mode": "T2VA",
+        # The project is Ref2VA-only, so the default profile is the real
+        # reference-driven one.  A test that needs another mode asks for it
+        # explicitly, exactly like a real project must.
+        "mode": "Ref2VA",
         "graph": overrides.pop("graph", COMFY_GRAPH),
         "parameter_map": overrides.pop("parameter_map", COMFY_PARAM_MAP),
         "required_nodes": overrides.pop("required_nodes", ["H3BaseSampler"]),
@@ -606,6 +643,55 @@ def register_workflow_profile(client: TestClient, **overrides) -> dict:
     return response.json()
 
 
+def ensure_shot_references(client: TestClient, project_id: str, shot_id: str) -> None:
+    """Bind one approved subject master per character a real job would submit.
+
+    The project invariant is Ref2VA-only: a ComfyUI job without a reference is
+    refused by name.  Provider-level fixtures still exercise their own subject
+    (leases, recovery, QC), so this helper supplies the reference they would
+    carry in a real project instead of weakening the product rule.
+    """
+    bindings = client.get(f"/api/v1/shots/{shot_id}/bindings").json()
+    if bindings:
+        return
+    shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
+    shot = next((row for row in shots if row["id"] == shot_id), None)
+    characters = list(((shot or {}).get("spec") or {}).get("characters") or [])
+    # Reuse an approved master first: creating one would change the project's
+    # asset context and invalidate crew artifacts a later step must read.
+    approved = [row for row in client.get(f"/api/v1/projects/{project_id}/assets").json()
+                if row.get("approved") and row.get("locked")]
+    rows = []
+
+    def _master(character: str) -> dict:
+        if not characters and approved:
+            # A shot that names nobody still needs one reference; any approved
+            # master keeps the asset context unchanged.
+            return approved[0]
+        match = next((row for row in approved if row.get("entity_id") == character), None)
+        if match is not None:
+            return match
+        created = upload_asset(
+            client, project_id, content=PNG + uuid4().hex.encode("utf-8"),
+            filename=f"{character}.png",
+            role="character" if characters else "scene", entity_id=character,
+        )
+        _approve_lock_keeping_operator(client, created["id"])
+        approved.append(created)
+        return created
+
+    for index, character in enumerate(characters or ["参考场景"]):
+        asset = _master(character)
+        rows.append({"asset_id": asset["id"], "use_as": "subject",
+                     "role": character, "ordinal": index})
+    response = client.put(
+        f"/api/v1/shots/{shot_id}/bindings",
+        headers={"X-Shine-Local-Action": "1"},
+        json={"bindings": rows},
+    )
+    assert response.status_code == 200, response.text
+
+
 def create_comfy_job(
     client: TestClient,
     project_id: str,
@@ -614,6 +700,7 @@ def create_comfy_job(
     profile: dict | None = None,
     **kwargs,
 ) -> dict:
+    ensure_shot_references(client, project_id, shot_id)
     if profile is None:
         profile = register_workflow_profile(client)
     return create_job(

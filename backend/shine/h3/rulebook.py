@@ -21,7 +21,9 @@ from shine.h3.compiler import (
     SKILL_SHA256,
     H3PromptCompiler,
     PromptCompilationError,
+    validate_reference_manifest,
 )
+from shine.h3.spec_review import review_h3_prompt
 from shine.models import ProjectRuleLock, RulePack, utcnow
 from shine.schemas import APIModel, GenerationMode, RenderRequest
 
@@ -173,6 +175,9 @@ class RuleValidationReport(APIModel):
     rulepack_hash: str
     passed: bool
     violations: list[RuleViolation] = Field(default_factory=list)
+    #: Advisory findings only.  A hand-written prompt is accepted whatever its
+    #: distance from the published guidance; the list says how far that is.
+    warnings: list[RuleViolation] = Field(default_factory=list)
 
 
 class H3RulebookRegistry:
@@ -311,7 +316,74 @@ class H3RulebookRegistry:
             ],
         )
 
+    def _warning_violation(self, pack: RulePack, finding: dict) -> RuleViolation:
+        rule = next((r for r in RULES if r["id"] == finding.get("rule_id")), RULES[0])
+        return RuleViolation(
+            rule_id=rule["id"],
+            origin=rule["origin"],
+            severity="warning",
+            source_path=rule["source_path"],
+            locator=rule["locator"],
+            affected_field=str(finding.get("field") or "compiled_prompt"),
+            evidence=str(finding.get("message") or finding.get("code") or ""),
+            remediation=rule["summary"],
+            rulepack_id=pack.id,
+        )
+
+    def validate_manual(self, request: RenderRequest, pack: RulePack) -> RuleValidationReport:
+        """Accept a hand-written prompt and report how far it is from the guide.
+
+        The official prompt-writing rules are guidance.  What remains hard is
+        integrity: the submitted text is the text the person froze, the style and
+        duration still belong to this shot, and the references still fit the
+        transport.  Everything stylistic becomes a warning.
+        """
+        self.verify_pack(pack)
+        violations: list[RuleViolation] = []
+        warnings: list[RuleViolation] = []
+
+        def reject(rule_id: str, field: str, evidence: str):
+            rule = next(r for r in RULES if r["id"] == rule_id)
+            violations.append(RuleViolation(
+                rule_id=rule_id, origin=rule["origin"], source_path=rule["source_path"],
+                locator=rule["locator"], affected_field=field, evidence=evidence,
+                remediation=rule["summary"], rulepack_id=pack.id,
+            ))
+
+        if request.rulepack_id != pack.id or request.rulepack_hash != pack.sha256:
+            reject("SHINE_PROVENANCE", "rulepack_hash", "Request rule pin does not match the project lock")
+        prompt = request.compiled_prompt or ""
+        digest_of_prompt = hashlib.sha256(prompt.encode("utf-8")).hexdigest() if prompt else ""
+        if not prompt.strip() or digest_of_prompt != (request.prompt_sha256 or ""):
+            reject("SHINE_PROVENANCE", "compiled_prompt",
+                   "The manual prompt differs from the text frozen with it")
+        if (
+            request.style_version_id != request.shot_spec.style_version_id
+            or digest(request.style_snapshot.model_dump(mode="json")) != request.style_hash
+            or request.shot_spec.duration_target_s != request.expected_duration_s
+        ):
+            reject("SHINE_PROVENANCE", "style_hash", "Style snapshot, version, or duration differs from request")
+        try:
+            validate_reference_manifest(request.reference_manifest)
+        except PromptCompilationError as exc:
+            reject("H3_LIMITS", "reference_manifest", exc.code)
+        findings = review_h3_prompt(
+            prompt,
+            request.compiled_prompt_sections,
+            mode=request.generation_mode.value,
+            dialogue=request.shot_spec.dialogue,
+            duration_s=request.expected_duration_s,
+            defined_labels={item.label for item in request.reference_manifest},
+        )
+        warnings.extend(self._warning_violation(pack, finding) for finding in findings)
+        return RuleValidationReport(
+            rulepack_id=pack.id, rulepack_hash=pack.sha256, passed=not violations,
+            violations=violations, warnings=warnings,
+        )
+
     def validate(self, request: RenderRequest, pack: RulePack) -> RuleValidationReport:
+        if request.manual_prompt:
+            return self.validate_manual(request, pack)
         self.verify_pack(pack)
         violations = []
 

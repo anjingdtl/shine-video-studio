@@ -56,6 +56,7 @@ class SubtitleRevisionBody(BaseModel):
     srt: str = Field(default="", max_length=200000)
     created_by: str = Field(default="operator", max_length=64)
     source: str = Field(default="human", max_length=24)
+    episode_id: str | None = Field(default=None, max_length=80)
 
 
 def _subtitle_data(row: SubtitleTrack) -> dict[str, Any]:
@@ -64,6 +65,7 @@ def _subtitle_data(row: SubtitleTrack) -> dict[str, Any]:
         "project_id": row.project_id,
         "revision": row.revision,
         "status": row.status,
+        "episode_id": row.episode_id,
         "cues": row.cues,
         "sha256": row.sha256,
         "source": row.source,
@@ -130,6 +132,7 @@ def create_subtitle_revision(
         project_id=project_id,
         revision=revision,
         status="DRAFT",
+        episode_id=body.episode_id,
         cues=[{"index": c.index, "start_s": c.start_s, "end_s": c.end_s, "text": c.text} for c in cues],
         srt=srt,
         ass=ass,
@@ -141,7 +144,8 @@ def create_subtitle_revision(
     db.add(row)
     db.flush()
     add_audit(db, body.created_by, "SUBTITLE_REVISION_SAVED", "subtitle_track", row.id,
-              {"revision": row.revision, "cue_count": len(cues), "sha256": row.sha256},
+              {"revision": row.revision, "cue_count": len(cues), "sha256": row.sha256,
+               "episode_id": row.episode_id, "source": row.source},
               project_id=project_id)
     db.commit()
     db.refresh(row)

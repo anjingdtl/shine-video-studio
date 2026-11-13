@@ -823,14 +823,13 @@ def test_a_profile_without_the_declared_media_family_warns_and_renders(api):
     assert "audio" in silent_warnings, silent_response.text
 
 
-def test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile(api):
-    """素材是可选类需求：没绑图片的镜头放行，缺的那张由 H3 生成。
+def test_a_shot_without_any_reference_is_refused_by_name(api):
+    """The project is Ref2VA-only: a shot with no reference cannot be queued.
 
-    The profile declares an image transfer, but this shot binds no picture at
-    all: H3 generates the missing one and the submitted graph prunes the
-    unused image loader, so no placeholder reaches the renderer.  Before the
-    materials became optional this shot was refused with
-    WORKFLOW_MEDIA_FAMILY_NOT_BOUND.
+    A missing picture used to be an optional material the renderer could
+    invent.  The project rule supersedes that: with no reference at all the
+    request can only compile as T2VA, so it is refused by name before any
+    workflow mapping is even consulted.
     """
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=1)
@@ -840,7 +839,7 @@ def test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile(api):
     )
     profile = register_workflow_profile(
         client,
-        mode="T2VA",
+        mode="Ref2VA",
         parameter_map={
             "positive_prompt": "1.inputs.positive_prompt",
             "seed": "1.inputs.seed",
@@ -867,7 +866,10 @@ def test_a_shot_without_a_picture_is_accepted_by_an_image_transfer_profile(api):
         f"/api/v1/projects/{project_id}/jobs",
         json={"shot_id": bare["id"], "provider": "comfyui", "workflow_profile_id": profile["id"]},
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "PROJECT_REQUIRES_REF2VA", detail
+    assert detail["action"] == "BIND_SUBJECT_REFERENCE", detail
     assert "WORKFLOW_MEDIA_FAMILY_NOT_BOUND" not in response.text
 
 

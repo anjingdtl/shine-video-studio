@@ -27,7 +27,7 @@ from shine.comfyops.owned_process import terminate_named_group
 from shine.comfyops.renderer_supervisor import windows_port_listeners
 from shine.comfyops.scheduler import ResourceScheduler
 from shine.models import AppSetting, Job, JobAttempt, utcnow
-from tests.conftest import create_comfy_job, create_shot, freeze_style
+from tests.conftest import create_comfy_job, create_referenced_shot, freeze_style
 from tests.test_managed_startup import (  # noqa: F401
     DIGEST,
     TOKEN,
@@ -79,7 +79,7 @@ def install(prep):
 
 def claim(factory, client, project, style_id, *, worker="worker-a"):
     """A claimed ComfyUI job with one admitted exclusive lease and one attempt."""
-    shot = create_shot(client, project, style_id)
+    shot = create_referenced_shot(client, project, style_id)
     job = create_comfy_job(client, project, shot["id"])
     with factory.begin() as db:
         lease = ResourceScheduler().enqueue(db, "h3:" + job["id"], 16384, True, 100)

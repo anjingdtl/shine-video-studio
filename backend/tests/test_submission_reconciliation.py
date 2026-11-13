@@ -11,7 +11,7 @@ from shine.worker import recover_expired_jobs, run_one
 from tests.conftest import (
     create_comfy_job,
     create_project,
-    create_shot,
+    create_referenced_shot,
     freeze_style,
     make_test_video_bytes,
 )
@@ -44,7 +44,7 @@ def test_accepted_but_unacknowledged_submission_is_never_resubmitted(api, fake_c
     fake_comfy.mode = "accept_then_drop"
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     offline = comfy_settings(settings)
     assert (
@@ -70,7 +70,7 @@ def test_uncertain_submission_is_recovered_from_history_without_a_second_render(
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     fake_comfy.mode = "accept_then_drop"
     offline = comfy_settings(settings)
@@ -106,7 +106,7 @@ def test_lost_history_is_reported_and_never_resubmitted(api, fake_comfy):
     client, factory, settings = api
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     with factory.begin() as db:
         row = db.get(Job, job["id"])
@@ -145,7 +145,7 @@ def test_offline_comfyui_is_reported_as_unavailable(api, fake_comfy):
     client, factory, settings = api
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     with factory.begin() as db:
         row = db.get(Job, job["id"])
@@ -186,7 +186,7 @@ def test_explicit_rejection_is_a_safe_failure_not_an_uncertain_submission(api, f
     fake_comfy.mode = "reject"
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     offline = comfy_settings(settings)
     run_one(
@@ -207,7 +207,7 @@ def test_execution_error_is_reported_distinctly(api, fake_comfy, monkeypatch):
     fake_comfy.mode = "error"
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    shot = create_referenced_shot(client, project_id, style["id"])
     job = create_comfy_job(client, project_id, shot["id"])
     offline = comfy_settings(settings)
     run_one(

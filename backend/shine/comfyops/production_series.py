@@ -286,6 +286,25 @@ def create_series(
         raise HTTPException(422, "PRODUCTION_SERIES_REQUIRES_DISTINCT_SHOTS")
     if body.provider != RenderProvider.COMFYUI:
         raise HTTPException(422, "PRODUCTION_SERIES_REQUIRES_COMFYUI")
+    if body.generation_mode is not None:
+        # Same decision point the request builder uses, asked earlier: a series
+        # that names a mode this project does not render would otherwise be
+        # created only to fail at its first shot.
+        from shine.h3.mode_policy import (
+            MODE_POLICY_MESSAGE,
+            ModePolicyError,
+            require_project_mode,
+        )
+
+        try:
+            require_project_mode(body.generation_mode)
+        except ModePolicyError as exc:
+            raise HTTPException(422, {
+                "code": exc.code,
+                "message": MODE_POLICY_MESSAGE,
+                "inferred_mode": exc.actual,
+                "required_mode": "Ref2VA",
+            }) from exc
 
     # A candidate variant may only enter a production run when this machine can
     # really execute it.  The refusal happens here - before any shot spec is

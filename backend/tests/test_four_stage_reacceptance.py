@@ -677,16 +677,19 @@ def test_r09_a_missing_material_is_a_notice_not_a_block(api):
     notices = stages["assets"]["facts"]["material_notices"]
     assert any(row["code"].startswith("SHOT_CHARACTER_MASTER_MISSING")
                for row in notices), notices
-    # The director package freezes as well: a missing material is a notice
-    # there too, never a production blocker.
+    # A missing material is still a notice, never the reason the package is
+    # refused.  The project is Ref2VA-only, though: these shots really carry no
+    # reference at all, so the only blocker may be that rule.
     profile = register_workflow_profile(client)
     handoff = client.post(
         f"/api/v1/projects/{pid}/pipeline/volumes/{volume_id}/handoff",
         json={"workflow_profile_id": profile["id"]}, headers=LOCAL)
-    assert handoff.status_code == 201, handoff.text
-    codes = {row["code"] for row in handoff.json()["readiness"]["blockers"]}
+    assert handoff.status_code == 409, handoff.text
+    detail = handoff.json()["detail"]
+    assert detail["code"] == "DIRECTOR_PACKAGE_NOT_READY", detail
+    codes = {row["code"] for row in detail["blockers"]}
     assert "SHOT_CHARACTER_MASTER_MISSING" not in codes, codes
-    assert handoff.json()["readiness"]["startable"] is True, handoff.json()["readiness"]
+    assert codes == {"PROJECT_REQUIRES_REF2VA"}, codes
 
 
 def test_volume_handoff_pins_a_character_confirmed_after_the_storyboard_landed(api):

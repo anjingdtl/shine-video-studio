@@ -7,6 +7,7 @@ from typing import Any
 
 from shine.asset_identity import character_reference_matches
 from shine.h3.film_type import film_type_sentence
+from shine.h3.narrator import is_narrator_speaker, narrator_sentence
 from shine.h3.spoken_language import (
     DEFAULT_SPOKEN_LANGUAGE,
     canonical_spoken_language,
@@ -124,6 +125,16 @@ def _format_timestamp(seconds: float) -> str:
     minutes = int(seconds // 60)
     remainder = seconds - minutes * 60
     return f"{minutes:02d}:{remainder:06.3f}"
+
+
+def validate_reference_manifest(manifest: list[ReferenceManifestItem]) -> None:
+    """Public entry to the request-local reference limits.
+
+    A hand-written prompt skips compilation but not the transport contract: the
+    renderer still has hard slot caps, and exceeding them must be named before a
+    job exists rather than failing inside the submitted graph.
+    """
+    _validate_manifest(manifest)
 
 
 def _count_references(manifest: list[ReferenceManifestItem]) -> dict[str, int]:
@@ -294,6 +305,12 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
         raise PromptCompilationError("H3_DURATION", "H3 supports 4 to 15 second clips")
     if len(ctx.speaker_order) and mode == GenerationMode.REF2VA:
         for speaker in ctx.speaker_order:
+            # A narrator talks over the picture and is never visible in it, so
+            # it owns no face to keep consistent.  Requiring a subject image
+            # here would force a fake "narrator portrait" into every narrated
+            # shot; the prompt still states the narrator never appears.
+            if is_narrator_speaker(speaker):
+                continue
             if not _label_for_character(speaker, ctx):
                 raise PromptCompilationError(
                     "H3_SPEAKER_REFERENCE_MISSING",
@@ -313,6 +330,8 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
         )))
         used: set[str] = set()
         for character in characters:
+            if is_narrator_speaker(character):
+                continue
             label = _label_for_character(character, ctx)
             if not label or (not ctx.legacy_style and label in used):
                 raise PromptCompilationError(
@@ -327,7 +346,12 @@ def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     language = _language_tag(line.text, ctx.project_language)
     speakers = _speakers_of(line)
     labels = [label for label in (_label_for_character(speaker, ctx) for speaker in speakers) if label]
-    subject = ", ".join(labels) if labels else "The speaker"
+    if labels:
+        subject = ", ".join(labels)
+    elif all(is_narrator_speaker(speaker) for speaker in speakers):
+        subject = "The off-screen narrator"
+    else:
+        subject = "The speaker"
     speaker = ", ".join(ctx.speaker_labels[name] for name in speakers)
     return (
         f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}) says: "
@@ -382,6 +406,8 @@ def _shot_text(ctx: _Context) -> str:
             "Story continuity facts below are background context only; they are not dialogue and must "
             "never be spoken, narrated or performed as voice-over: " + continuity_notes
         )
+    if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
+        parts.append(narrator_sentence())
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
         parts.append(_dialogue_sentence(ctx, line))
     continuity = ctx.spec.continuity

@@ -11,7 +11,14 @@ from shine.config import Settings
 from shine.media.probe import make_mp4_fixture
 from shine.schemas import GenerationMode, RenderRequest, ShotSpec, StyleBible
 from shine.worker import run_one
-from tests.conftest import create_job, create_project, create_shot, freeze_style
+from tests.conftest import (
+    approve_lock,
+    create_job,
+    create_project,
+    create_shot,
+    freeze_style,
+    upload_asset,
+)
 from tests.fake_http import FakeComfyServer
 
 pytestmark = pytest.mark.integration
@@ -235,12 +242,17 @@ def test_comfy_worker_never_reports_a_real_video_as_passed_without_decode(api, f
     fake_comfy.output_bytes = make_mp4_fixture(duration_s=6, width=768, height=1344, fps=24, audio=True)
     project_id = create_project(client)
     style = freeze_style(client, project_id)
-    shot = create_shot(client, project_id, style["id"])
+    # The project is Ref2VA-only: a provider-level fixture binds one approved
+    # picture reference instead of submitting a text-only shot.
+    picture = upload_asset(client, project_id, role="scene", entity_id="码头")
+    approve_lock(client, picture["id"])
+    shot = create_shot(client, project_id, style["id"], asset_ids=[picture["id"]], bindings=[
+        {"asset_id": picture["id"], "use_as": "picture", "ordinal": 0}])
     profile = client.post(
         "/api/v1/workflow-profiles",
         json={
             "name": "worker-profile",
-            "mode": "T2VA",
+            "mode": "Ref2VA",
             "graph": GRAPH,
             "parameter_map": PARAM_MAP,
             "required_nodes": ["H3BaseSampler"],

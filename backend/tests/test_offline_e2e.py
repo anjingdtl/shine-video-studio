@@ -493,6 +493,11 @@ def test_offline_e2e_survives_a_worker_crash_without_duplicating_the_render(api,
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6)
     project_id = create_project(client, title="崩溃恢复")
     style = freeze_style(client, project_id)
+    # Ref2VA-only: this fixture submits a real job, so it binds a master.
+    from tests.conftest import approve_lock, upload_asset
+
+    master = upload_asset(client, project_id, role="character", entity_id="林岚")
+    approve_lock(client, master["id"])
     shot = client.post(
         f"/api/v1/projects/{project_id}/shots",
         json={
@@ -503,8 +508,11 @@ def test_offline_e2e_survives_a_worker_crash_without_duplicating_the_render(api,
                 "shot_priority": "B",
                 "style_version_id": style["id"],
                 "characters": ["林岚"],
+                "required_asset_ids": [master["id"]],
                 "dialogue": [{"speaker_id": "林岚", "text": "东西在里面", "start_s": 0.0, "end_s": 2.0}],
             },
+            "bindings": [{"asset_id": master["id"], "use_as": "subject",
+                          "role": "林岚", "ordinal": 0}],
         },
     )
     assert shot.status_code == 201, shot.text
@@ -512,12 +520,13 @@ def test_offline_e2e_survives_a_worker_crash_without_duplicating_the_render(api,
         "/api/v1/workflow-profiles",
         json={
             "name": "crash-profile",
-            "mode": "T2VA",
+            "mode": "Ref2VA",
             "graph": COMFY_GRAPH,
             "parameter_map": {
                 "positive_prompt": "1.inputs.positive_prompt",
                 "seed": "1.inputs.seed",
                 "duration": "1.inputs.duration",
+                "reference_subject_1": "1.inputs.reference_subject_1",
                 "reference_picture_1": "1.inputs.reference_picture_1",
             },
             "required_nodes": ["H3BaseSampler"],

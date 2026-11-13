@@ -16,12 +16,14 @@ import { Check, Film, ListChecks, Play, RefreshCw, Sparkles, TriangleAlert, Uplo
 import {
   ApiError,
   api,
+  compileEpisodeSubtitles,
   confirmEpisodeShots,
   confirmStoryboardBook,
   controlDirectorStoryboardTask,
   editEpisodeShotRow,
   fetchDirectorStoryboardState,
   fetchEpisodeShots,
+  fetchEpisodeSubtitles,
   generateStoryboardBook,
   deriveShotMaterials,
   queueDirectorStoryboard,
@@ -36,15 +38,34 @@ import {
   type DirectorMaterialsView,
   type EpisodeShotRow,
   type EpisodeStoryboardState,
+  type ShotSubtitleLine,
   type StoryboardBook,
 } from '../api';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
+import { MaterialPromptModal, ShotAssetRequestModal, ShotPromptModal, ShotSubtitleModal } from './ShotEditors';
 
 const FILM_TYPES = [
   { id: 'live_action', label: '真人实拍' },
   { id: 'animation', label: '动画' },
 ];
+
+/** 对白密度是建议值：它决定分镜书里多少节拍带台词，不是渲染门槛。 */
+const DIALOGUE_LEVELS = [
+  { id: 'high', label: '多对白', ratio: 70 },
+  { id: 'balanced', label: '平衡', ratio: 45 },
+  { id: 'low', label: '少对白', ratio: 20 },
+] as const;
+
+/** 旁白只出声音、不出画面；官方 H3 提示词会明确声明这一点。 */
+const NARRATION_LEVELS = [
+  { id: 'none', label: '无旁白' },
+  { id: 'low', label: '少旁白' },
+  { id: 'high', label: '多旁白' },
+] as const;
+
+type DialogueLevelId = (typeof DIALOGUE_LEVELS)[number]['id'];
+type NarrationLevelId = (typeof NARRATION_LEVELS)[number]['id'];
 
 type StyleCatalogEntry = { id: string; name_zh: string; summary_zh: string; version: string };
 
@@ -66,6 +87,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
+  const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
+  const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [book, setBook] = useState<StoryboardBook | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
@@ -121,7 +144,12 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       await confirmStoryboardBook(projectId, {
         plan_version: book.plan_version,
         expected_sha256: book.plan_sha256,
-        style: { profile_id: profileId, film_type: filmType },
+        style: {
+          profile_id: profileId,
+          film_type: filmType,
+          dialogue_ratio_percent: DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45,
+          narration_level: narrationLevel,
+        },
       });
       setConfirmedPlan({ version: book.plan_version });
       setPendingDraft(null);
@@ -137,7 +165,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         ? { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> }
         : { label: '生成分镜书', onClick: () => void generate(), loading: busy, icon: <Sparkles size={14} /> })
     : null;
-  useStageRail('storyboard-book', { priority: 1, primary }, [book, busy, confirmedPlan, profileId, filmType]);
+  useStageRail('storyboard-book', { priority: 1, primary },
+    [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
@@ -180,6 +209,25 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       <button type="button" className="btn-secondary" disabled={busy || !profileId} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书
       </button>
+    </div>
+
+    <div className="book-tone">
+      <div className="tone-group" role="group" aria-label="对白设定">
+        <span>对白设定</span>
+        {DIALOGUE_LEVELS.map((row) => <button key={row.id} type="button"
+          className={dialogueLevel === row.id ? 'active' : ''} aria-pressed={dialogueLevel === row.id}
+          onClick={() => setDialogueLevel(row.id)}>{row.label}</button>)}
+      </div>
+      <div className="tone-group" role="group" aria-label="旁白设定">
+        <span>旁白设定</span>
+        {NARRATION_LEVELS.map((row) => <button key={row.id} type="button"
+          className={narrationLevel === row.id ? 'active' : ''} aria-pressed={narrationLevel === row.id}
+          onClick={() => setNarrationLevel(row.id)}>{row.label}</button>)}
+      </div>
+      <p className="run-hint">
+        这两项会随分镜书一起冻结进导演风格：对白决定多少节拍带台词；旁白决定是否允许画外旁白。
+        旁白只出声、不出画面，不需要人物参考图。
+      </p>
     </div>
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
@@ -245,6 +293,12 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const [confirmedEpisodes, setConfirmedEpisodes] = useState<Record<string, number>>({});
+  const [promptTarget, setPromptTarget] = useState<EpisodeShotRow | null>(null);
+  const [assetTarget, setAssetTarget] = useState<EpisodeShotRow | null>(null);
+  const [subtitleTarget, setSubtitleTarget] = useState<{
+    shot: EpisodeShotRow; episodeId: string; lines: ShotSubtitleLine[];
+  } | null>(null);
+  const [subtitleResult, setSubtitleResult] = useState('');
   const submitting = useRef(false);
 
   const load = useCallback(async () => {
@@ -324,6 +378,29 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
     setEditing(null);
   });
 
+  /** 字幕按集读取一次，找到这一镜现有的行；保存后由子面板回调刷新。 */
+  const openSubtitle = async (episodeId: string, shot: EpisodeShotRow) => {
+    setBusy(`subtitle-${shot.shot_id}`); setProblem(''); setSubtitleResult('');
+    try {
+      const body = await fetchEpisodeSubtitles(projectId, episodeId);
+      const row = body.shots.find((item) => item.shot_id === shot.shot_id);
+      setSubtitleTarget({ shot, episodeId, lines: row?.lines ?? [] });
+    } catch (error) {
+      setProblem(describeError(error));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const compileSubtitles = (episodeId: string) => act(`subtitles-${episodeId}`, async () => {
+    const body = await compileEpisodeSubtitles(projectId, episodeId);
+    setSubtitleResult(
+      `已生成字幕第 ${body.revision} 版（${body.cue_count} 行，`
+      + `${body.basis === 'actual' ? '按真实成片时长' : '按计划时长'}）。`
+      + (body.basis === 'planned' ? ' 出片后建议再生成一次以对齐真实时长。' : ''));
+    onMessage?.(`本集字幕轨第 ${body.revision} 版已生成；到后期批准并合成。`);
+  }, '本集字幕轨已生成。');
+
   const episodes = state?.episodes ?? [];
   const railPresent = useRailPresent();
   const readyCount = episodes.filter((row) => confirmedEpisodes[row.episode_id]).length;
@@ -391,6 +468,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
       </span>}
     </div>
     {problem && <p role="alert" className="form-error">{problem}</p>}
+    {subtitleResult && <p className="run-hint ok-hint"><Check size={12} /> {subtitleResult}</p>}
 
     {episodes.map((episode) => {
       const table = tables[episode.episode_id];
@@ -428,25 +506,30 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
             <div className="shot-table-wrap">
             <table className="shot-table shot-table-fixed">
               <colgroup>
-                <col style={{ width: '4%' }} /><col style={{ width: '7%' }} />
-                <col style={{ width: '27%' }} /><col style={{ width: '22%' }} />
-                <col style={{ width: '8%' }} /><col style={{ width: '7%' }} />
-                <col style={{ width: '7%' }} /><col style={{ width: '13%' }} />
-                <col style={{ width: '5%' }} />
+                <col style={{ width: '4%' }} /><col style={{ width: '6%' }} />
+                <col style={{ width: '24%' }} /><col style={{ width: '17%' }} />
+                <col style={{ width: '7%' }} /><col style={{ width: '6%' }} />
+                <col style={{ width: '10%' }} /><col style={{ width: '8%' }} />
+                <col style={{ width: '18%' }} />
               </colgroup>
               <thead><tr>
                 <th>#</th><th>场次</th><th>画面动作</th><th>对白</th>
-                <th>成片秒</th><th>衔接</th><th>切点</th><th>H3 生成</th><th></th>
+                <th>成片秒</th><th>衔接</th><th>提示词</th><th>字幕</th><th>操作</th>
               </tr></thead>
               <tbody>
                 {table.shots.map((shot) => <tr key={shot.shot_id} className="shot-table-row">
                   <td>{shot.position}</td>
                   <td>{shot.section_id ?? '—'}</td>
-                  <td className="shot-beat">{shot.story_beat.split('\n')[0].slice(0, 60)}</td>
+                  <td className="shot-beat">
+                    {shot.story_beat.split('\n')[0].slice(0, 56)}
+                    {shot.internal_cuts.length > 0 && <em className="shot-cut-note">
+                      镜内切点 {shot.internal_cuts.map((cut) => `${cut.start_s}s`).join(' / ')}
+                    </em>}
+                  </td>
                   <td>{shot.dialogue.length
                     ? shot.dialogue.map((line) => `${line.speaker_id}：「${line.text}」`).join(' ')
                     : <span className="muted">无对白</span>}</td>
-                  <td>
+                  <td title={`H3：${shot.h3_segment_count} 段 · ${shot.h3_generation_seconds}s`}>
                     {editing?.shotId === shot.shot_id
                       ? <input type="number" min={4} max={15} step={0.5}
                           value={editing.duration}
@@ -454,17 +537,36 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
                       : shot.duration_target_s}
                   </td>
                   <td>{shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}</td>
-                  <td>{shot.internal_cuts.length
-                    ? shot.internal_cuts.map((cut) => `${cut.start_s}s`).join(' / ')
-                    : <span className="muted">—</span>}</td>
-                  <td>{shot.h3_segment_count} 段 · {shot.h3_generation_seconds}s</td>
+                  <td>
+                    <span className={`head-chip ${shot.prompt?.status === 'frozen' ? 'ok'
+                      : shot.prompt?.status === 'inactive' ? 'warn' : ''}`}
+                      title={shot.prompt?.reason ?? undefined}>
+                      {shot.prompt?.status === 'frozen' ? `人工冻结 v${shot.prompt.revision}`
+                        : shot.prompt?.status === 'inactive' ? '冻结版暂不生效'
+                          : '编译器'}
+                    </span>
+                  </td>
+                  <td>
+                    {shot.subtitle && shot.subtitle.line_count > 0
+                      ? <span className={`head-chip ${shot.subtitle.status === 'FROZEN' ? 'ok' : ''}`}>
+                          {shot.subtitle.line_count} 行
+                        </span>
+                      : <span className="muted">—</span>}
+                  </td>
                   <td className="shot-row-actions">
                     {editing?.shotId === shot.shot_id
                       ? <button type="button" className="btn-text" disabled={busy !== ''}
                           onClick={() => void saveDuration(shot)}>保存</button>
                       : <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
                           onClick={() => setEditing({ shotId: shot.shot_id, duration: String(shot.duration_target_s) })}>
-                          改</button>}
+                          改时长</button>}
+                    <button type="button" className="btn-text" disabled={busy !== ''}
+                      onClick={() => setPromptTarget(shot)}>提示词</button>
+                    <button type="button" className="btn-text"
+                      disabled={busy !== '' || busy === `subtitle-${shot.shot_id}`}
+                      onClick={() => void openSubtitle(episode.episode_id, shot)}>字幕</button>
+                    <button type="button" className="btn-text" disabled={busy !== ''}
+                      onClick={() => setAssetTarget(shot)}>+素材</button>
                   </td>
                 </tr>)}
               </tbody>
@@ -472,7 +574,18 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
             </div>
             <p className="run-hint">
               本集合计成片时长约 {Math.round(table.total)} 秒；每镜由 {table.shots.length} 个 4–15 秒的 H3 生成片段承载。
+              提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
             </p>
+            <div className="episode-subtitle-bar">
+              <button type="button" className="btn-secondary" disabled={busy !== ''}
+                onClick={() => void compileSubtitles(episode.episode_id)}>
+                <ListChecks size={12} /> 生成 / 更新本集字幕轨
+              </button>
+              <span className="run-hint">
+                只使用已冻结的镜头字幕；未出片前按计划时长排布，出片后可再生成一次对齐真实时长。
+                本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
+              </span>
+            </div>
           </>}
           {applied && !confirmedVersion && <button type="button" className="btn-primary"
             disabled={busy !== '' || !table?.shots.length}
@@ -485,6 +598,32 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
         </div>
       </details>;
     })}
+
+    {promptTarget && <ShotPromptModal
+      projectId={projectId}
+      shot={{ shot_id: promptTarget.shot_id, name: promptTarget.name,
+        revision: promptTarget.revision, duration_target_s: promptTarget.duration_target_s }}
+      onClose={() => setPromptTarget(null)}
+      onChanged={(message) => { onMessage?.(message); void load().catch(() => undefined); }}
+    />}
+    {assetTarget && <ShotAssetRequestModal
+      projectId={projectId}
+      shot={{ shot_id: assetTarget.shot_id, name: assetTarget.name }}
+      onClose={() => setAssetTarget(null)}
+      onChanged={(message) => {
+        onMessage?.(message);
+        onJourneyRefresh?.();
+        void load().catch(() => undefined);
+      }}
+    />}
+    {subtitleTarget && <ShotSubtitleModal
+      projectId={projectId}
+      shot={{ shot_id: subtitleTarget.shot.shot_id, name: subtitleTarget.shot.name,
+        duration_target_s: subtitleTarget.shot.duration_target_s }}
+      initialLines={subtitleTarget.lines}
+      onClose={() => setSubtitleTarget(null)}
+      onChanged={(message) => { onMessage?.(message); void load().catch(() => undefined); }}
+    />}
   </section>;
 }
 
@@ -514,6 +653,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
   const [problem, setProblem] = useState('');
   const [result, setResult] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [promptTarget, setPromptTarget] = useState<DirectorMaterialRequirement | null>(null);
   const submitting = useRef(false);
 
   const apply = useCallback((body: DirectorMaterialsView) => {
@@ -722,6 +862,10 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
             <td><b>{row.name ?? row.entity_id}</b>
               <span className="muted">（{FAMILY_LABEL[row.family] ?? row.family}
                 {row.critical ? ' · 必需' : ' · 可选'}）</span>
+              <span className="material-flags">
+                {row.user_specified && <span className="head-chip">用户指定</span>}
+                {row.manual_prompt && <span className="head-chip ok">提示词已冻结</span>}
+              </span>
               {row.variants.length > 0 && <em className="material-variants">
                 变体：{row.variants.slice(0, 3).join('、')}</em>}
             </td>
@@ -746,6 +890,9 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
             </td>
             <td className="material-row-actions">
               <button type="button" className="btn-text" disabled={busy !== ''}
+                title="直接编辑这一项出图用的提示词；保存并冻结后，下一次出图原样使用"
+                onClick={() => setPromptTarget(row)}>人工修订</button>
+              <button type="button" className="btn-text" disabled={busy !== ''}
                 title="只对这一项重新排队制作候选，不影响其他素材和已通过的镜头"
                 onClick={() => void commitOne(row, 'generate')}>
                 <RefreshCw size={12} /> {rowBusy ? '处理中…' : '重新生成'}
@@ -765,5 +912,17 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
         </tbody>
       </table>
     </>}
+
+    {promptTarget && <MaterialPromptModal
+      projectId={projectId}
+      requirement={{
+        requirement_id: promptTarget.requirement_id,
+        name: promptTarget.name ?? promptTarget.entity_id ?? '这一项素材',
+        family: promptTarget.family,
+        description: promptTarget.description,
+      }}
+      onClose={() => setPromptTarget(null)}
+      onChanged={(message) => { onMessage?.(message); void load(); }}
+    />}
   </section>;
 }

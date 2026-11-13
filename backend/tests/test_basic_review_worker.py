@@ -62,6 +62,9 @@ def test_basic_character_job_continues_without_a_frozen_qualified_reviewer(api):
     project = create_project(client)
     style = freeze_style(client, project)
     shot = create_shot(client, project, style["id"], characters=["A"])
+    from tests.conftest import ensure_shot_references
+
+    ensure_shot_references(client, project, shot["id"])
     profile = register_workflow_profile(client)
     response = client.post(f"/api/v1/projects/{project}/jobs", json={
         "shot_id": shot["id"], "provider": "comfyui", "workflow_profile_id": profile["id"],

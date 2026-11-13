@@ -90,6 +90,11 @@ class StyleBible(APIModel):
         default=None, strict=True, ge=0, le=100,
         description="Target percentage of storyboard beats with dialogue. A positive value allows script adaptation.",
     )
+    narration_level: Literal["none", "low", "high"] | None = Field(
+        default=None,
+        description="How much off-screen narration the storyboard may use. Guidance for the crew, "
+                    "not a render gate; the narrator speaks without a picture reference.",
+    )
 
     @model_serializer(mode="wrap")
     def _omit_unset_settings(self, handler):
@@ -175,6 +180,20 @@ class ContinuitySettings(APIModel):
         return self
 
 
+class RequestedAsset(APIModel):
+    """A material the person explicitly asked this shot to use.
+
+    It is not an approved asset yet, which is why it cannot live in
+    ``required_asset_ids``: that field promises a real, locked master.  A
+    requested asset is a requirement the material stage must satisfy.
+    """
+
+    family: Literal["character", "scene", "prop"]
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    carrier: Literal["object", "paper", "screen"] | None = None
+
+
 class ShotSpec(APIModel):
     schema_version: Literal["1.0"] = "1.0"
     story_beat: str = Field(min_length=1, max_length=2000)
@@ -192,6 +211,17 @@ class ShotSpec(APIModel):
     locked_story_facts: list[str] = Field(default_factory=list, max_length=30)
     prompt_story_facts: list[str] = Field(default_factory=list, max_length=30)
     prompt_style: StyleBible | None = None
+    requested_assets: list[RequestedAsset] = Field(default_factory=list, max_length=12)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_requested_assets(self, handler):
+        # Old shots must keep byte-identical specs: every hash and request
+        # fingerprint is computed over this snapshot, and a new empty list would
+        # change all of them without changing a single creative fact.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("requested_assets"):
+            data.pop("requested_assets", None)
+        return data
 
     @model_validator(mode="after")
     def dialogue_fits_duration(self) -> ShotSpec:
@@ -537,6 +567,10 @@ class RenderRequest(APIModel):
     prompt_skill_hash: str | None = None
     compiler_version: str | None = None
     rule_version: str | None = None
+    #: The prompt text was written and frozen by a person, not compiled.
+    manual_prompt: bool = False
+    manual_prompt_revision_id: str | None = Field(default=None, max_length=36)
+    manual_prompt_warnings: list[str] = Field(default_factory=list, max_length=40)
     workflow_profile_hash: str | None = None
     seed: int | None = Field(default=None, ge=0)
     expected_duration_s: float = Field(ge=4, le=15)

@@ -226,6 +226,7 @@ def crew_prompt(
     reference_budget_note: str = "",
     repair_director: bool = False,
     dialogue_ratio_percent: int | None = None,
+    narration_level: str | None = None,
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "script_prepare":
@@ -280,6 +281,26 @@ def crew_prompt(
         )
     else:
         parts.append(_VERBATIM_DIALOGUE)
+    if role == "scriptwriter" and narration_level:
+        parts.append({
+            "none": (
+                "Narration is switched off for this production: never turn exposition, inner "
+                "thoughts or scene description into narration, voice-over or a narrator line. "
+                "Express them through visible action, performance and the picture instead."
+            ),
+            "low": (
+                "Narration is used sparingly. At most one short narrator line per section, and "
+                "only when that section's own text is itself narrated. Write it as a normal "
+                "dialogue entry with speaker_id set to the narrator name and list that name in "
+                "the beat's characters. Never convert ordinary action or dialogue into narration."
+            ),
+            "high": (
+                "Narration carries the story where the source narrates. Write those passages as "
+                "dialogue entries with speaker_id set to the narrator name and list that name in "
+                "the beat's characters, keeping the original wording where the source has it. "
+                "Do not narrate action that the picture already shows."
+            ),
+        }.get(narration_level, ""))
     parts.append(_ASSET_SCOPE)
 
     if role == "scriptwriter":

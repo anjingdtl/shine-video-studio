@@ -458,6 +458,7 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         if len({beat.id for beat in proposal.beats}) != len(proposal.beats):
             raise ValueError("DUPLICATE_BEAT")
         ratio = context.get("dialogue_ratio_percent")
+        narration_level = context.get("narration_level")
         timing = (context.get("editorial_timing_plan") or {}).get("editorial_shot_lengths_s") or []
         for index, beat in enumerate(proposal.beats):
             lines = sorted(beat.dialogue, key=lambda line: line.start_s)
@@ -469,6 +470,27 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                     # ellipsis/dash variants are still the user's line; the
                     # no-invention contract is about content, not typography.
                     continue
+                from shine.h3.narrator import is_narrator_speaker
+
+                speakers = split_character_names(line.speaker_id)
+                is_narration = bool(speakers) and all(is_narrator_speaker(name) for name in speakers)
+                if is_narration and narration_level == "none":
+                    # The person switched narration off; a narrator line is an
+                    # invented line like any other.
+                    error = ValueError("DIALOGUE_NOT_IN_USER_SCRIPT")
+                    error.details = {"offending_line": line.text, "speaker": line.speaker_id}
+                    raise error
+                if is_narration and narration_level in {"low", "high"}:
+                    # Narration is a chosen style, so the ratio gate does not
+                    # apply to it; its cast and its window still do.
+                    if any(name not in beat.characters for name in speakers):
+                        raise ValueError("NARRATOR_NOT_LISTED_IN_BEAT")
+                    window = timing[index] if index < len(timing) else 15
+                    if (not line.text.strip() or line.end_s > window
+                            or position > 0 and line.start_s < lines[position - 1].end_s
+                            or position + 1 < len(lines) and line.end_s > lines[position + 1].start_s):
+                        raise ValueError("ADAPTED_DIALOGUE_OUTSIDE_BEAT_WINDOW")
+                    continue
                 if ratio == 0:
                     # The user explicitly asked for no dialogue: any line the
                     # script does not contain is a refusal.
@@ -478,7 +500,6 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                 # With no ratio stated (or a positive one) an adapted line is
                 # allowed, but its speaker must belong to the beat and the
                 # source, and its timecodes must stay inside the beat window.
-                speakers = split_character_names(line.speaker_id)
                 if not speakers or any(name not in beat.characters or name not in body.brief for name in speakers):
                     raise ValueError("ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT")
                 window = timing[index] if index < len(timing) else 15
@@ -755,6 +776,11 @@ class FilmAgentDispatcher:
                 context["project_spoken_language"] = (
                     canonical_spoken_language(project.language) or DEFAULT_SPOKEN_LANGUAGE
                 )
+            narration = style.snapshot.get("narration_level")
+            if narration in {"none", "low", "high"}:
+                # Guidance for the scriptwriter: how much of the story may be
+                # told by an off-screen narrator.
+                context["narration_level"] = narration
         if body.production_context is not None:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
@@ -961,6 +987,7 @@ class FilmAgentDispatcher:
                 reference_budget_note=reference_budget_note(context.get("workflow_reference_budget") or []),
                 repair_director=repair_director,
                 dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
+                narration_level=context.get("narration_level"),
             )
 
         def record_progress(phase: str) -> None:
