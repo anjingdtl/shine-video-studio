@@ -1,5 +1,5 @@
 /** 12GB 低端机的变体推荐必须真的出现在安装向导里，
- *  而且候选要标成候选：未完成真机验收不是生产可用。 */
+ *  而且候选只占一行：名称 + 状态，没有一长串证据说明。 */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,8 +40,8 @@ describe('安装向导里的 H3 变体推荐', () => {
     await user.click(screen.getByRole('button', { name: '检测本机' }));
     expect(await screen.findByText('这台电脑能用哪套 H3 变体')).toBeInTheDocument();
     expect(await screen.findByText('H3 Ref2VA NVFP4 候选（12GB 级）')).toBeInTheDocument();
-    expect(screen.getByText(/未完成真机验收，不能当作生产可用/)).toBeInTheDocument();
-    expect(screen.getByText(/第三方声明（非本项目实测）/)).toBeInTheDocument();
+    expect(screen.getByText('候选 · 本机未准备')).toBeInTheDocument();
+    expect(screen.queryByText(/第三方声明/)).toBeNull();
     await waitFor(() => {
       expect(stub.callsOf('GET', /variant-recommendations$/)).toHaveLength(1);
     });

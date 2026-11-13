@@ -74,6 +74,12 @@ function stubRef2vaProfile() {
 }
 
 function stubStrategyOptions() {
+  // 模型版本的可选状态直接来自基础配置台账：准备好的点亮，没准备的灰色。
+  stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-availability/,
+    respond: () => jsonResponse({ project_id: 'proj-1', variants: [
+      { variant_id: 'h3-ref2va-int8-convrot', available: true, reason: '本机已就绪' },
+      { variant_id: 'ref2va-lowend-candidate', available: false, reason: '本机没有这套权重' },
+    ] }) });
   stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/strategy-options$/,
     respond: () => jsonResponse({
       model_variants: [

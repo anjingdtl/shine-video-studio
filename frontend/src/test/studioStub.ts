@@ -195,6 +195,10 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/setup\/voice-readiness$/, respond: () => jsonResponse({ status: 'BLOCKED', voice_master_capable: false, roles: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/environment$/, respond: () => jsonResponse(ENV_REPORT) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/existing-installations$/, respond: () => jsonResponse({ installations: [] }) },
+    { method: 'POST', pattern: /\/api\/v1\/setup\/existing-installations\/inspect$/, respond: () => jsonResponse({
+      root: 'D:////ComfyUI', snapshot: 'a'.repeat(64), candidate_bytes: 0, scanned_files: 0,
+      matches: [], missing: [], software: { installed: true, version_status: 'INSTALLED_VERSION_MATCH' },
+    }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/catalog$/, respond: () => jsonResponse(CATALOG) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/variant-recommendations$/, respond: () => jsonResponse({
       tier: 'standard', host: { gpu: null, vram_mb: null, ram_mb: null, free_gb: null },
@@ -203,6 +207,32 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/setup\/readiness$/, respond: () => jsonResponse(READINESS) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/runtime$/, respond: () => jsonResponse(RUNTIME) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/storage$/, respond: () => jsonResponse(STORAGE) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/image-readiness$/, respond: () => jsonResponse({
+      configured: false, layer: 'NOT_CONFIGURED', families: {}, renderer: { state: 'NOT_STARTED', instance_id: '', port: null, pid: null },
+      fingerprint: 'f', config_revision: 0, config_digest: '', graph_sha256: '', output_node_id: '', output_class_type: '',
+      model_files: [], graph_report: null, prompt_template: { template_version: 'v', families: [] }, blockers: [],
+      license: { name: 'test', scope: 'test', note: '' },
+      upstream: { template_repository: '', template_commit: '', template_sha256: '', model_repository: '', model_revision: '', required_bytes: 0 },
+    }) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/work-stacks$/, respond: () => jsonResponse({
+      checked_at: '', stacks: [], workers: [], jobs: [],
+      counts: { stacks: 0, working_stacks: 0, workers_online: 0, running_jobs: 0 }, process_error: null,
+    }) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/variant-availability/, respond: () => jsonResponse({
+      project_id: 'proj-1', variants: [
+        { variant_id: 'h3-ref2va-int8-convrot', label: '标准', title: '标准', acceptance_status: 'SUPPORTED',
+          downloadable: true, installed: true, verified: true, profiles_registered: true,
+          runtime_validated: true, available: true, reason: '本机已就绪' },
+      ],
+    }) },
+    { method: 'GET', pattern: /\/api\/v1\/settings\/output-directory$/, respond: () => jsonResponse({
+      root: 'D:////Shine', default_root: 'D:////Shine', custom: false,
+      layout: { material: '素材', video: '视频', voice: '音色', material_center: '素材中心' },
+      projects: [], file_count: 0, byte_size: 0, free_gb: 100, migration: null, blockers: [],
+    }) },
+    { method: 'POST', pattern: /\/api\/v1\/settings\/output-directory\/select$/, respond: () => jsonResponse({
+      available: true, cancelled: true, path: null, message: '已取消选择。',
+    }) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/execution-context$/, respond: () => jsonResponse({ local_execution_enabled: true }) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/install-plans/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/workflow-capabilities$/, respond: () => jsonResponse({ revisions: [] }) },

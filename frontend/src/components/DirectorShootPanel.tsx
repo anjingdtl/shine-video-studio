@@ -14,6 +14,7 @@ import {
   controlProductionRun,
   getProductionRun,
   getStrategyOptions,
+  getVariantAvailability,
   startDirectorProduction,
   type DirectorEpisodeOverview,
   type DirectorOverview,
@@ -24,6 +25,7 @@ import {
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { StrategyResourceCard } from './StrategyResourceCard';
+import { GuideTip } from './GuideTip';
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -116,7 +118,7 @@ export function describeAccelerator(acceleratorId: string, steps?: number): stri
   const lower = (acceleratorId || '').toLowerCase();
   if (lower === 'pdd8') return '快速 · 8 步加速';
   if (lower === 'native20') return '高质量 · 原生 20 步';
-  if (lower === 'turbo4') return '极速 · 4 步（未验收）';
+  if (lower === 'turbo4') return '极速 · 4 步';
   return steps ? `${acceleratorId} · ${steps} 步` : acceleratorId;
 }
 
@@ -155,6 +157,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   const [problem, setProblem] = useState('');
   const [run, setRun] = useState<ProductionRun | null>(null);
   const [touched, setTouched] = useState(false);
+  /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。 */
+  const [availability, setAvailability] = useState<Record<string, { available: boolean; reason: string }>>({});
   const submitting = useRef(false);
 
   // 稳定的空数组：每次渲染新建 [] 会让下面的选择 effect 无限触发。
@@ -197,7 +201,22 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     return () => { cancelled = true; };
   }, [activeRunId]);
 
-  const chosenVariantVerified = options.model_variants.find(row => row.variant_id === variantId)?.verified === true;
+  // 模型版本状态直接来自基础配置的台账：不在这里另算一套「验收」。
+  useEffect(() => {
+    let cancelled = false;
+    getVariantAvailability(projectId)
+      .then((rows) => {
+        if (cancelled) return;
+        setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, { available: row.available, reason: row.reason }])));
+        const ready = rows.find((row) => row.available);
+        if (ready) setVariantId((current) => (rows.find((row) => row.variant_id === current)?.available ? current : ready.variant_id));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  const chosenVariantAvailable = availability[variantId]?.available ?? false;
+  const chosenVariantReason = availability[variantId]?.reason ?? '本机没有这套权重';
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 
   const toggle = (episodeId: string) => {
@@ -208,7 +227,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   };
 
   const start = useCallback(async () => {
-    if (submitting.current || !selected.length || !chosenVariantVerified) return;
+    if (submitting.current || !selected.length || !chosenVariantAvailable) return;
     submitting.current = true;
     setBusy('start'); setProblem('');
     try {
@@ -238,7 +257,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
       submitting.current = false;
       setBusy('');
     }
-  }, [acceleratorId, chosenVariantVerified, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
+  }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
 
   const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!run) return;
@@ -259,12 +278,12 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     ? { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
         onClick: () => void start(),
         loading: busy === 'start',
-        disabled: busy !== '' || !selected.length || demo || !chosenVariantVerified,
-        disabledReason: !chosenVariantVerified ? '候选模型尚未通过本机生产验收' : demo ? '当前是演示模式：先启用真实制作'
+        disabled: busy !== '' || !selected.length || demo || !chosenVariantAvailable,
+        disabledReason: !chosenVariantAvailable ? chosenVariantReason : demo ? '当前是演示模式：先启用真实制作'
           : !selected.length ? '至少选择一集' : undefined,
         icon: <Clapperboard size={14} /> }
     : null;
-  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running, chosenVariantVerified]);
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running, chosenVariantAvailable]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -298,6 +317,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
           </div>
           <span className={`head-chip ${selected.length ? 'ok' : ''}`}>{selected.length} 集已选</span>
         </div>
+        <GuideTip>三步：勾选要拍的集 → 确认模型版本 → 点底部「确认拍摄方案并开始真实制作」</GuideTip>
 
         <div className="shoot-episode-list">
           {episodes.map((episode) => {
@@ -326,18 +346,23 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
           </p>
           <div className="strategy-row" role="radiogroup" aria-label="模型版本">
             <span className="strategy-label">模型版本</span>
-            {options.model_variants.map((row) => (
-              <button key={row.variant_id} type="button" role="radio"
+            {options.model_variants.map((row) => {
+              const state = availability[row.variant_id];
+              const ready = state?.available ?? false;
+              return <button key={row.variant_id} type="button" role="radio"
                 aria-checked={variantId === row.variant_id}
-                className={`strategy-option${variantId === row.variant_id ? ' active' : ''}`}
-                disabled={(!row.verified && row.variant_id !== 'ref2va-lowend-candidate') || running || busy !== ''}
-                title={row.verified ? row.label : `未验收（${row.acceptance_status}）：不能用于真实制作`}
+                className={`strategy-option${variantId === row.variant_id ? ' active' : ''}${ready ? '' : ' not-ready'}`}
+                disabled={!ready || running || busy !== ''}
+                title={ready ? row.label : state?.reason ?? '本机没有这套权重'}
                 onClick={() => setVariantId(row.variant_id)}>
                 {describeVariantName(row.variant_id)}
-                {!row.verified && <em className="strategy-flag">未验收</em>}
-              </button>
-            ))}
+                {!ready && <em className="strategy-flag">{state?.reason ?? '本机没有'}</em>}
+              </button>;
+            })}
           </div>
+          {!chosenVariantAvailable && <p className="strategy-note">
+            {describeVariantName(variantId)}：{chosenVariantReason}。到「基础配置 · 安装与下载」准备后再回来开拍。
+          </p>}
           {variantId === 'ref2va-lowend-candidate' && <StrategyResourceCard
             key={`${projectId}-${variantId}-${acceleratorId}-${secondPass}-${upscale}`}
             projectId={projectId} strategy={{ schema_version: '1', generation_mode: 'Ref2VA',
@@ -350,10 +375,10 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
                 aria-checked={acceleratorId === row.accelerator_id}
                 className={`strategy-option${acceleratorId === row.accelerator_id ? ' active' : ''}`}
                 disabled={!row.verified || running || busy !== ''}
-                title={row.verified ? undefined : '这个加速配方还没有真机验收'}
+                title={row.verified ? undefined : '这个加速配方本机还没就绪'}
                 onClick={() => setAcceleratorId(row.accelerator_id)}>
                 {describeAccelerator(row.accelerator_id, row.steps)}
-                {!row.verified && <em className="strategy-flag">未验收</em>}
+                {!row.verified && <em className="strategy-flag">本机未就绪</em>}
               </button>
             ))}
           </div>
@@ -387,7 +412,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
         </div>
 
         {problem && <p role="alert" className="form-error">{problem}</p>}
-        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== '' || !chosenVariantVerified}
+        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== '' || !chosenVariantAvailable}
+          title={chosenVariantAvailable ? undefined : chosenVariantReason}
           onClick={() => void start()}>
           <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
         </button>}
@@ -430,6 +456,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
       {!run && <div className="empty-inline">
         还没有运行。到「导演包」选择要拍的集并确认拍摄方案，开拍后这里会逐集显示进度。
         {onNavigate && <button type="button" className="btn-text" onClick={() => onNavigate('package')}>去导演包</button>}
+        <GuideTip tight>第一次开拍：先在「导演包」勾选集数并确认方案</GuideTip>
       </div>}
       {run && <>
         <div className="shoot-run-facts">

@@ -410,7 +410,15 @@ def _physical_installation_id(record: dict[str, Any]) -> str | None:
     return bound if isinstance(bound, str) and bound else None
 
 
-def installation_ids_of_managed_processes(db) -> list[str]:
+def _record_key(record: dict[str, Any]) -> str:
+    """The stable id a targeted close names, identical to the monitor's rows."""
+    kind = "review" if record.get("prefix") == REVIEW_PREFIX else "renderer"
+    identity = (record.get("service_id") or record.get("instance_id")
+                or record.get("key") or record.get("pid") or "unknown")
+    return f"{kind}:{identity}"
+
+
+def installation_ids_of_managed_processes(db, *, only: set[str] | None = None) -> list[str]:
     """Every physical installation a managed process record belongs to.
 
     Sorted, so a global release can take several lifecycle guards without any
@@ -418,14 +426,21 @@ def installation_ids_of_managed_processes(db) -> list[str]:
     """
     found: set[str] = set()
     for record in managed_processes(db):
+        if only is not None and _record_key(record) not in only:
+            continue
         bound = _physical_installation_id(record)
         if bound:
             found.add(bound)
     return sorted(found)
 
 
-def release_managed_processes_guarded(factory, *, actor: str, reason: str) -> dict[str, Any]:
-    """Release every managed process while owning each installation's section.
+def release_managed_processes_guarded(factory, *, actor: str, reason: str,
+                                      only: set[str] | None = None) -> dict[str, Any]:
+    """Release managed processes while owning each installation's section.
+
+    ``only`` names the process records a targeted close asked for; the same
+    evidence checks run for them, so a busy or unverifiable stack is refused
+    exactly like it is during a global release.
 
     The plain ``release_managed_processes`` receives an already-open write
     transaction.  Taking the lifecycle mutex there would invert the lock order
@@ -438,29 +453,35 @@ def release_managed_processes_guarded(factory, *, actor: str, reason: str) -> di
     from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
 
     with factory() as db:
-        installation_ids = installation_ids_of_managed_processes(db)
+        installation_ids = installation_ids_of_managed_processes(db, only=only)
     with ExitStack() as stack:
         for installation_id in installation_ids:
             stack.enter_context(renderer_lifecycle_guard(installation_id))
         with factory.begin() as db:
             return release_managed_processes(
                 db, actor=actor, reason=reason, locked_installations=set(installation_ids),
+                only=only,
             )
 
 
 def release_managed_processes(
     db, *, actor: str, reason: str, locked_installations: set[str] | None = None,
+    only: set[str] | None = None,
 ) -> dict[str, Any]:
     """Stop every managed process this installation owns and free the memory.
 
     A process that is serving an attempt, or whose ownership cannot be
     proven, is reported and left alone.  The report is the operator's evidence:
     it names every process that was stopped and every one that was not.
+    ``only`` restricts the release to the named records; every control still
+    runs against the real live facts.
     """
     stopped: list[dict[str, Any]] = []
     released: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     for original in managed_processes(db):
+        if only is not None and _record_key(original) not in only:
+            continue
         physical_id = _physical_installation_id(original)
         if physical_id and locked_installations is not None and physical_id not in locked_installations:
             refused.append({

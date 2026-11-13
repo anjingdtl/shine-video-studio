@@ -70,7 +70,9 @@ describe('空数据库与两层界面入口', () => {
     await user.click(screen.getByRole('button', { name: '打开基础配置' }));
     expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
-    expect(screen.getByText(/1 · 环境检查/)).toBeInTheDocument();
+    // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
+    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /确认并下载安装|确认并完成配置/ })).toBeDisabled();
   });
 
   it('无项目时依赖项目的操作有明确说明', async () => {
@@ -79,7 +81,8 @@ describe('空数据库与两层界面入口', () => {
     render(<App />);
     await user.click(await screen.findByRole('button', { name: '打开基础配置' }));
     await screen.findByRole('heading', { name: '制作环境' });
-    expect(screen.getByText(/计划生成、Profile 登记、配置生成与激活需要先创建一个项目/)).toBeInTheDocument();
+    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
+    expect(screen.getByText(/安装、生成方案和素材都要绑定到一个作品/)).toBeInTheDocument();
   });
 
   it('建立第一个项目后导演流程完整出现', async () => {
@@ -121,10 +124,10 @@ describe('空数据库与两层界面入口', () => {
     await screen.findAllByText('雾港夜账');
     await user.click(screen.getByRole('button', { name: /基础配置/ }));
     expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '② 模型与生成方案' }));
-    expect(await screen.findByRole('heading', { name: '模型、ComfyUI 与本机状态' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '③ 固定音色（可选）' }));
-    expect(await screen.findByText(/固定音色是加分项，不是开拍前提/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '② 文本模型' }));
+    expect(await screen.findByRole('heading', { name: /AI 模型/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '③ 独立能力（可选）' }));
+    expect(await screen.findByText(/这三项都不影响出片/)).toBeInTheDocument();
   });
 
   it('已有项目时默认导演模式；专业模式保留完整四板块', async () => {

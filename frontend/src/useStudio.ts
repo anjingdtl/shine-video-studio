@@ -491,15 +491,30 @@ export function useStudio() {
       report('真实制作尚未就绪，请先在顶部完成「启用真实制作」。', 'error');
       return;
     }
-    const profile = queueProvider === 'comfyui' ? workflowProfiles.find(p => p.id === queueProfile) : undefined;
+    // 用户没手选方案时自动适配一个：单镜头开拍不应该因为「没选模板」而死路。
+    // 规则与「一键开拍」一致——优先带画面宽高的 Ref2VA 方案。
+    const autoProfile = (() => {
+      const ref2va = workflowProfiles.filter((item) => item.mode.toLowerCase() === 'ref2va');
+      const sized = ref2va.filter((item) => 'width' in (item.parameter_map ?? {}) && 'height' in (item.parameter_map ?? {}));
+      return (sized.length ? sized : ref2va)[0];
+    })();
+    const profile = queueProvider === 'comfyui'
+      ? workflowProfiles.find(p => p.id === queueProfile) ?? autoProfile
+      : undefined;
+    const autoPicked = queueProvider === 'comfyui' && !workflowProfiles.some(p => p.id === queueProfile) && !!autoProfile;
     const basic = queueProvider === 'comfyui' && reviewScope === 'basic';
     const width = Number(reviewWidth), height = Number(reviewHeight);
     if (queueProvider === 'comfyui') {
-      if (!profile) { report('请先选择一个生成方案。', 'error'); return; }
+      if (!profile) {
+        report('本机还没有可用的生成方案：先到「制片准备」一键登记，再去基础配置完成安装。', 'error');
+        return;
+      }
+      if (autoPicked) report(`已自动选用「${profile.name}」方案：想换档位可在下方「高级设置」里改。`);
       if (basic && (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2 || width > 8192 || height > 8192)) {
         report('基础自审需要填写预期画面宽高（2 到 8192 的整数，如 1280×720）。', 'error'); return;
       }
-      if (!window.confirm(`确认用真实模式生成？\n镜头：${shot.name}\n方案：${profile.name}\n会占用本机显卡，耗时较长。`)) return;
+      // 真实生成是花钱花时间的动作：确认放在按钮上（点一次展开、再点一次提交），
+      // 不用系统对话框打断页面，也不会因为浏览器自动关闭对话框而误提交。
     }
     const requestSignature = JSON.stringify({
       project: projectId, shot: shot.id, shot_revision: shot.revision,

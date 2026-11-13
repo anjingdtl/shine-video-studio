@@ -590,6 +590,43 @@ function activateRuntime() {    const candidate = runtime?.candidate;
     });
   }
 
+  /**
+   * 一键准备：登记生成方案 → 生成运行配置 → 核验服务与工作流 → 激活。
+   *
+   * 这四步以前要人依次点四个按钮，顺序错了就得到「还没有候选配方」这类
+   * 与用户无关的报错。检测到什么就登记什么，中间不再要求人做技术选择。
+   */
+  function prepareAll() {
+    const project = projectRef.current;
+    if (!project) return;
+    void run(async () => {
+      setProgress('正在自动登记生成方案并核验本机服务…');
+      const steps: string[] = [];
+      const profiles = await api<{ profiles: Array<{ name: string; status: string }> }>(
+        '/setup/profiles', withJson('POST', { project_id: project }));
+      steps.push(`登记 ${profiles.profiles.length} 套生成方案`);
+      await api('/setup/configuration', withJson('POST', { project_id: project }));
+      steps.push('生成运行配置');
+      const state = await api<RuntimeState>('/setup/runtime');
+      setRuntime(state);
+      const candidate = state.candidate;
+      if (!candidate || candidate.project_id !== project) {
+        throw new Error('运行配置没有为本项目生成候选配方：请确认本机已安装 H3 组件后再试。');
+      }
+      const services = await api<{ status: string }>('/setup/services/validate', withJson('POST', {
+        project_id: project, recipe_sha256: candidate.recipe_sha256,
+      }));
+      steps.push(`服务核验 ${services.status}`);
+      await api('/setup/runtime/activate', withJson('POST', {
+        project_id: project, recipe_sha256: candidate.recipe_sha256,
+      }));
+      steps.push('激活');
+      await loadRuntime(); await loadReadiness(); await onRefresh();
+      setProgress('');
+      return `已自动完成：${steps.join(' → ')}。`;
+    });
+  }
+
   function registerProfiles() {
     void run(async () => {
       const result = await api<{ profiles: Array<{ name: string; status: string }> }>('/setup/profiles',
@@ -1009,16 +1046,23 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             {storage?.requires_selection && ' 请先选择非系统盘目录，才能自动安装。'}
           </p>
           <div className="inline-form">
+            <button className="btn-primary" disabled={busy || !projectId || !storage || storage.requires_selection}
+              onClick={prepareAll}>一键准备（自动登记并激活）</button>
             <button className="btn-secondary" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
             <button className="btn-secondary" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
-            <button className="btn-secondary" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
-            <button className="btn-secondary" disabled={busy || !projectId} onClick={validateProfiles}>验证本项目工作流</button>
-            <button className="btn-secondary" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
-            <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
-              onClick={validateServices}>验证服务与工作流</button>
-            <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
-              onClick={activateRuntime}>确认并激活运行配置</button>
           </div>
+          <details className="inline-manual-path">
+            <summary>单步操作（高级）</summary>
+            <div className="inline-form">
+              <button className="btn-secondary" disabled={busy || !projectId} onClick={registerProfiles}>登记工作流 Profile</button>
+              <button className="btn-secondary" disabled={busy || !projectId} onClick={validateProfiles}>验证本项目工作流</button>
+              <button className="btn-secondary" disabled={busy || !projectId} onClick={generateConfiguration}>生成受管配置</button>
+              <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
+                onClick={validateServices}>验证服务与工作流</button>
+              <button className="btn-secondary" disabled={busy || runtime?.candidate?.project_id !== projectId}
+                onClick={activateRuntime}>确认并激活运行配置</button>
+            </div>
+          </details>
           {!projectId && <p className="guardrail-note">计划生成、Profile 登记、配置生成与激活需要先创建一个项目（本页下方即可创建）；环境检查、上游可达性与部署清单无需项目。</p>}
           <p className="guardrail-note">验证会短暂启动已安装的 ComfyUI、VLM 和 ASR，读取真实节点/工作流契约并探测审片协议，完成后停止；不加载 H3 权重，也不提交镜头。</p>
           <p className="guardrail-note">「验证本项目工作流」只登记并核验本项目自己的 H3 Ref2VA Profile，并把结果写回该 Profile；核验只比对真实节点与输入，不代表已经生成过画面。</p>

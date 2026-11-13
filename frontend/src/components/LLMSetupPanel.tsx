@@ -66,8 +66,11 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
   const [notice, setNotice] = useState('');
   const [mutationStatus, setMutationStatus] = useState<MutationStatus>('idle');
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>('idle');
+  const [autoNote, setAutoNote] = useState('');
+  const [routingOpen, setRoutingOpen] = useState(false);
   const mounted = useRef(true);
   const locked = useRef(false);
+  const autoRan = useRef(false);
 
   async function api<T>(path: string, init?: RequestInit, timeoutMs = 60_000): Promise<T> {
     return request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
@@ -152,6 +155,50 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
     return () => { mounted.current = false; };
   }, []);
 
+  /** 只有一个可用模型时：自动分配给全部工种，并各做一次真实检查。
+   *
+   * 这是用户明确要求的默认动作：不需要逐个点。已经有分配、或有多个模型时
+   * 不自动改派，避免覆盖用户自己的安排。 */
+  useEffect(() => {
+    if (autoRan.current || busy || locked.current) return;
+    if (!profiles.length || !roles.length || !routeRevision) return;
+    const usable = profiles.filter((row) => row.enabled && row.kind !== 'mock' && row.model.trim());
+    if (usable.length !== 1) return;
+    const profileId = usable[0].id;
+    const assigned = new Set(routes.map((route) => route.role));
+    const missing = roles.filter((role) => !assigned.has(role.role));
+    const needsTest = readiness?.status !== 'READY' || roles.some((role) => role.code);
+    if (missing.length === 0 && !needsTest) return;
+    autoRan.current = true;
+    void (async () => {
+      try {
+        if (missing.length > 0) {
+          const preview = await api<AgentRoutePreview>('/agent-routes/preview', json('POST', {
+            updates: roles.map((role) => ({ role: role.role, provider_profile_id: profileId })),
+          }));
+          if (!preview.can_apply) {
+            setAutoNote('还有未结束的任务占用模型分配；结束后再点一次「重新读取」即可自动补齐。');
+            return;
+          }
+          await api('/agent-routes/batch', json('PUT', {
+            updates: preview.updates,
+            expected_revision: preview.expected_revision || routeRevision,
+          }));
+        }
+        // 只有一个模型时，连接与生成检查也自动做一次：用户不必逐个工种点。
+        await api(`/provider-profiles/${profileId}/test`, { method: 'POST' }, timeoutFor(profileId));
+        await api(`/provider-profiles/${profileId}/test-generation`, { method: 'POST' }, timeoutFor(profileId));
+        setAutoNote(missing.length > 0
+          ? `只有一个模型：已自动分配给全部 ${roles.length} 个工种，并完成连接与生成检查。`
+          : '只有一个模型：已自动完成连接与生成检查。');
+        await load();
+        await onChanged?.();
+      } catch (error) {
+        setAutoNote('自动配置没有完成：' + describeFailure(error));
+      }
+    })();
+  }, [profiles, roles, routes, routeRevision, readiness, busy, onChanged]);
+
   function timeoutFor(profileId: string): number {
     const profile = profiles.find(row => row.id === profileId);
     return Math.max(60, Math.ceil(profile?.timeout_s ?? 180) + 30) * 1000;
@@ -175,14 +222,15 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
 
   return <div data-testid="llm-setup" className="llm-setup-panel">
     {notice && <p role="alert" className="llm-notice">{notice}</p>}
+    {autoNote && <p className="llm-auto-note" role="status">{autoNote}</p>}
     <div className="llm-write-state" role="status">
-      写入：{mutationStatus === 'idle' ? '尚未操作'
+      <span>{mutationStatus === 'idle' ? '尚未操作'
         : mutationStatus === 'succeeded' ? '已保存'
           : mutationStatus === 'failed' ? '未完成' : '结果未知，请重新检查'}
-      <span>状态刷新：{refreshStatus === 'idle' ? '尚未刷新' : refreshStatus === 'succeeded' ? '已刷新' : '刷新失败'}</span>
+        {refreshStatus === 'failed' ? ' · 刷新失败' : ''}</span>
       <button className="btn-text" type="button" disabled={busy} onClick={() => void run(async () => {
         await load();
-      }, { successMessage: '已重新读取模型与路由状态。' })}>重新读取模型状态</button>
+      }, { successMessage: '已重新读取模型与路由状态。' })}>重新读取</button>
     </div>
 
     <LLMConfiguration profiles={profiles} routes={routes} busy={busy}
@@ -200,17 +248,18 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
       onSetKey={(id, key) => run(() => api('/provider-profiles/' + id + '/key', json('PUT', { api_key: key })), { successMessage: '新密钥已安全保存；原检查证据已过期。' })}
       onDeleteProfile={id => void run(() => api('/provider-profiles/' + id, { method: 'DELETE' }), { successMessage: '模型配置已删除。' })} />
 
-    {readiness && <div className="llm-readiness-summary" aria-label="LLM 就绪状态">
-      <div><b>模型配置</b><span>{profiles.length} 个模型已保存</span></div>
-      <div><b>连接</b><span>{readiness.status === 'READY' ? '角色路由已配置，连接检查满足当前要求' : '还有角色或连接检查待完成'}</span></div>
-      <div><b>结构化生成</b><span>{readiness.text_agent_ready ? '所有文本 Agent 检查通过' : '尚未完成全部角色的生成检查'}</span></div>
-    </div>}
-    {readiness?.roles.filter(role => role.code).length ? <ul className="llm-missing-roles">
-      {readiness.roles.filter(role => role.code).map(role => <li key={role.role}>{role.label_zh || routeRoleLabels[role.role] || role.role}：{role.code}</li>)}
-    </ul> : null}
+    <div className="llm-readiness-summary" aria-label="LLM 就绪状态">
+      <span>{readiness?.status === 'READY' ? '全部工种已配好并通过检查' : '还有工种等待配置'}
+        {' · '}{profiles.length} 个模型{readiness?.text_agent_ready ? ' · 生成检查通过' : ''}</span>
+    </div>
+    {(readiness?.roles.filter(role => role.code).length ?? 0) > 0 && <p className="llm-compact-hint">
+      还有 {readiness?.roles.filter(role => role.code).length} 个工种没有分配模型：在「Agent 分配」里一次全选即可，只影响用到它的步骤。
+    </p>}
 
-    <AgentModelRouting roles={roles} profiles={profiles} routes={routes} revision={routeRevision} busy={busy}
-      multimodal={multimodal} onPreview={previewRoutes} onApply={applyRoutes} />
-    <p className="llm-data-safety-note">每个新任务使用保存时明确指定的 Agent 路由；排队和运行中的任务不会因路由变更而重选模型。远端文本发送仍须遵守项目授权、上下文窗口、创作输出预算和任务审计规则。</p>
+    <details className="llm-routing-fold" open={routingOpen} onToggle={(event) => setRoutingOpen((event.target as HTMLDetailsElement).open)}>
+      <summary>Agent 模型分配（{roles.length} 个工种）</summary>
+      <AgentModelRouting roles={roles} profiles={profiles} routes={routes} revision={routeRevision} busy={busy}
+        multimodal={multimodal} onPreview={previewRoutes} onApply={applyRoutes} />
+    </details>
   </div>;
 }

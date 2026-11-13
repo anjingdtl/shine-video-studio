@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Check, Cpu, Mic, Settings2, Sparkles, Wand2 } from 'lucide-react';
-import { api, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
-import { SetupPanel } from './SetupPanel';
-import { VariantReadinessCard } from './VariantReadinessCard';
-import { DeploymentRecommendationCard, type DeploymentChoice } from './DeploymentRecommendationCard';
-import { ImageCapabilityCard } from './ImageCapabilityCard';
+import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
+import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
+import { SetupCenter } from './SetupCenter';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
-import SettingsPanel from './SettingsPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { GuideTip } from './GuideTip';
+import { approveAndExecuteSetupPlan, isQueuedInstallation, waitForInstallationAttempt } from '../setupExecution';
 
-type Tab = 'env' | 'models' | 'voice';
+type Tab = 'env' | 'models' | 'extra';
 
-/** 官方 W6A8 低显存候选：它有自己的部署目录、自己的生成方案和自己的验收状态，
- *  不与 INT8 基线共用任何一条结论。 */
-const LOWEND_VARIANT_ID = 'ref2va-lowend-candidate';
-const LOWEND_PROFILE_NAME = 'local-h3-ref2va-lowend-pdd-free-2img';
+type Advisory = {
+  status: string;
+  model_id: string;
+  advisory: boolean;
+  model_files_present: number;
+  model_files_expected: number;
+  runtime_ready: boolean;
+  code?: string | null;
+};
+
+type EnvReport = { advisory_reviews?: { VLM?: Advisory; ASR?: Advisory } };
 
 type VoiceReadiness = {
   status: string;
@@ -24,8 +29,9 @@ type VoiceReadiness = {
 
 type LlmReadiness = { status: string; roles: Array<{ role: string; profile_name: string | null; code: string | null }> };
 
+type ImageState = { configured: boolean; layer: string; renderer: { state: string }; upstream: { required_bytes: number } };
+
 type Props = {
-  /** 进入基础配置时直达的分区：导演模式内“去配置模型服务/生成方案”等引导会指到 models。 */
   focusTab?: Tab;
   project?: Project;
   projectId: string;
@@ -50,61 +56,97 @@ type Props = {
   onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
   onBindStandardParameters: (profileId: string) => void;
-  /** 新用户不知道专业模式在哪：由 App 负责切过去。 */
   onOpenExpert: () => void;
 };
 
-function roleText(role: { role: string; code: string | null }): string {
-  const names: Record<string, string> = { design: '角色声音设计', base: '声音克隆', asr: '语音转写', align: '强制对齐' };
-  const name = names[role.role] ?? role.role;
-  return role.code ? `${name}：未配置（可选）` : `${name}：可用`;
+function gib(bytes?: number | null): string {
+  if (!bytes) return '—';
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
-/** 导演模式的基础配置页：新用户不切换到专业模式也能把机器装好。
+/**
+ * 导演模式的基础配置：三步，一处确认。
  *
- * 三件事按依赖顺序排列：先看本机能不能跑（安装/下载），再配文本模型与生成
- * 方案（LLM/H3 工作流），最后才是可选的固定音色。所有面板都复用专业模式的
- * 同一套接口，导演模式不另造一套能力。
+ * ① 安装与下载 —— 检测、选预设、确认下载都在同一张卡里完成；
+ * ② 文本模型 —— 只有一个模型时自动配好全部工种并测一次，然后折叠；
+ * ③ 独立能力 —— 画面审片、语音核对、素材出图各自可选，互不阻断。
+ *
+ * 工作流登记、运行配置、服务核验与激活都是自动的：这一页不再要求人选。
  */
 export default function DirectorSetupPanel({
-  focusTab = 'env',
-  project, projectId, projectTitle, setProjectTitle, createProject, system, profiles, routes,
-  workflowProfiles, busy, refreshEpoch, onRefresh,
-  onProjectSettings, onCreateProfile, onTestProfile, onSetKey, onDeleteProfile, onRoute,
-  onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow, onBindStandardParameters,
-  onOpenExpert,
+  focusTab = 'env', projectId, projectTitle, setProjectTitle, createProject,
+  system, refreshEpoch, onRefresh,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
-  /** 推荐卡片里的用途选择：只决定下方显示哪些安装计划，不替你下载任何东西。 */
-  const [deploymentChoice, setDeploymentChoice] = useState<DeploymentChoice>({ h3_video: true, image_prep: true });
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
+  const [advisory, setAdvisory] = useState<{ VLM?: Advisory; ASR?: Advisory }>({});
+  const [image, setImage] = useState<ImageState | null>(null);
+  const [extraBusy, setExtraBusy] = useState('');
+  const [extraNote, setExtraNote] = useState('');
 
-  const loadSummaries = useCallback(async () => {
-    const [llmState, voiceState] = await Promise.allSettled([
+  useEffect(() => { setTab(focusTab); }, [focusTab]);
+
+  const load = useCallback(async () => {
+    const [llmState, voiceState, envState, imageState] = await Promise.allSettled([
       api<LlmReadiness>('/setup/llm-readiness'),
       api<VoiceReadiness>('/setup/voice-readiness'),
+      api<EnvReport>('/setup/environment'),
+      api<ImageState>('/setup/image-readiness'),
     ]);
     if (llmState.status === 'fulfilled') setLlm(llmState.value);
     if (voiceState.status === 'fulfilled') setVoice(voiceState.value);
+    if (envState.status === 'fulfilled') setAdvisory(envState.value.advisory_reviews ?? {});
+    if (imageState.status === 'fulfilled') setImage(imageState.value);
   }, []);
 
-  useEffect(() => { void loadSummaries(); }, [loadSummaries, refreshEpoch]);
+  useEffect(() => { void load(); }, [load, refreshEpoch]);
 
   const mode = system?.production_mode?.mode ?? null;
-  const profiled = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
-  const lowendRegistered = workflowProfiles.some((profile) => profile.name === LOWEND_PROFILE_NAME);
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
   const missingRoles = (llm?.roles ?? []).filter((row) => row.code);
-  const blockedVoice = (voice?.roles ?? []).filter((row) => row.code);
+
+  async function installAdvisory(kind: 'VLM' | 'ASR') {
+    if (!projectId) return;
+    const model = kind === 'VLM' ? 'qwen3-vl-8b-fp8' : 'qwen3-asr-0.6b';
+    const label = kind === 'VLM' ? '画面审片' : '语音核对';
+    if (!window.confirm(`下载并启用${label}模型？\n这是独立能力，只给建议、不阻断出片；权重按固定清单逐字节核验。`)) return;
+    setExtraBusy(kind);
+    setExtraNote('');
+    try {
+      const storage = await api<{ free_bytes: number }>('/setup/storage');
+      const plan = await api<{ plan_id: string; sha256: string; status: string; download_bytes: number }>(
+        '/setup/install-plan', json('POST', {
+          catalog: 'h3-ref2va-windows-x64',
+          components: [model],
+          project_id: projectId,
+          disk_free: storage.free_bytes,
+        }),
+      );
+      const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, () => undefined, { wait: false });
+      if (isQueuedInstallation(queued)) {
+        await waitForInstallationAttempt(queued.attempt_id);
+      }
+      setExtraNote(`${label}模型已下载并核验；可以在审片设置里启用它。`);
+      await load();
+      await onRefresh();
+    } catch (error) {
+      setExtraNote(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExtraBusy('');
+    }
+  }
+
+  const vlm = advisory.VLM;
+  const asr = advisory.ASR;
 
   return <div className="director-page director-setup" id="director-setup">
     <section className="welcome-row">
       <div>
         <div className="eyebrow"><span className="eyebrow-line" /> 基础配置</div>
         <h1>先把机器调好，<em>再让 AI 开工。</em></h1>
-        <p>这三步不需要专业模式：装好本机环境、配置文本模型、选一个生成方案。任何一步没完成，制作页都会明确告诉你缺什么。</p>
+        <p>检测、确认、自动完成。以后想补审片或语音能力，再到「独立能力」里单独开。</p>
       </div>
       <button className="btn-secondary" onClick={() => void onRefresh()}>刷新全部状态</button>
     </section>
@@ -120,140 +162,133 @@ export default function DirectorSetupPanel({
         <div><b>文本模型（LLM）</b><span>{llmReady ? '连接检查通过，可用于分镜与导演' : missingRoles.length ? `还有 ${missingRoles.length} 个工种没配模型` : '尚未配置'}</span></div>
         {llmReady ? <Check size={15} /> : <AlertTriangle size={15} />}
       </div>
-      <div className={`setup-status ${profiled.length ? 'ok' : 'pending'}`}>
-        <div className="setup-status-icon"><Settings2 size={16} /></div>
-        <div><b>生成方案</b><span>{profiled.length ? `${profiled.length} 个生成方案已登记` : '还没有可用的生成方案'}</span></div>
-        {profiled.length ? <Check size={15} /> : <AlertTriangle size={15} />}
+      <div className={`setup-status ${vlm?.status === 'READY' || asr?.status === 'READY' ? 'ok' : ''}`}>
+        <div className="setup-status-icon"><ShieldCheck size={16} /></div>
+        <div><b>独立能力（可选）</b><span>{vlm?.status === 'READY' ? '画面审片可用' : '画面审片未装'}{' · '}
+          {asr?.status === 'READY' ? '语音核对可用' : '语音核对未装'}</span></div>
+        {vlm?.status === 'READY' || asr?.status === 'READY' ? <Check size={15} /> : <Sparkles size={15} />}
       </div>
     </section>
 
     <nav className="setup-tabs" aria-label="基础配置分区">
       <button type="button" className={tab === 'env' ? 'active' : ''} onClick={() => setTab('env')}>① 安装与下载</button>
-      <button type="button" className={tab === 'models' ? 'active' : ''} onClick={() => setTab('models')}>② 模型与生成方案</button>
-      <button type="button" className={tab === 'voice' ? 'active' : ''} onClick={() => setTab('voice')}>③ 固定音色（可选）</button>
+      <button type="button" className={tab === 'models' ? 'active' : ''} onClick={() => setTab('models')}>② 文本模型</button>
+      <button type="button" className={tab === 'extra' ? 'active' : ''} onClick={() => setTab('extra')}>③ 独立能力（可选）</button>
     </nav>
 
     {!projectId && <section className="setup-needs-project card">
       <div>
         <b>还差一个作品</b>
-        <p>安装计划、生成方案和素材都要绑定到一个作品。先起个名字即可，之后可以改；这一步不需要本机环境已经就绪。</p>
+        <p>安装、生成方案和素材都要绑定到一个作品。先起个名字即可，之后可以改。</p>
       </div>
       <div className="create-project">
         <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)}
           placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-        <button className="btn-secondary" disabled={busy || !projectTitle.trim()} onClick={createProject}>创建并继续</button>
+        <button className="btn-secondary" title="创建作品后即可继续配置" disabled={!projectTitle.trim()} onClick={createProject}>创建并继续</button>
+        <GuideTip>建好作品后，这一页的按钮就会亮起来</GuideTip>
       </div>
     </section>}
 
     {tab === 'env' && <div className="setup-tab-body">
-      <div className="notice">
-        <Sparkles size={13} />
-        <div>
-          <p><b>第一次使用：</b>点「检测本机」看已有环境；没有 ComfyUI 或 H3 模型时，按页面给出的安装计划下载。安装会先让你确认体积与目录，不会静默下载。</p>
-          <p><b>已经装过：</b>可以复用现有目录，系统会核对固定版本文件，不会重复下载，也不会覆盖你的自定义节点。</p>
-        </div>
-      </div>
-      <DeploymentRecommendationCard onChoice={setDeploymentChoice} />
+      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch} onRefresh={onRefresh} />
       <OutputDirectoryPanel />
-      <SetupPanel projectId={projectId} onRefresh={onRefresh} refreshEpoch={refreshEpoch}
-        includeImageCapability={deploymentChoice.image_prep} />
-      {deploymentChoice.image_prep
-        ? <ImageCapabilityCard projectId={projectId} busy={busy} />
-        : <p className="run-hint">你选择了不安装生图组合：素材全部自行上传即可，正式视频生产不受影响。需要时可在上方重新勾选。</p>}
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">
-      <div className="notice">
-        <Settings2 size={13} />
-        <div>
-          <p><b>文本模型</b>负责写分镜、导演、摄影与剪辑方案；一个模型可以承担全部文本工种。密钥只存在本机。</p>
-          <p><b>生成方案</b>决定 H3 怎么出片。只有登记并通过本机节点验证的方案，才能用于真实制作；方案缺少宽高映射时，制作页的分辨率设置会明确报错，而不是偷偷按旧尺寸渲染。</p>
-        </div>
-      </div>
       <LLMSetupPanel onChanged={onRefresh} />
-      <section className="card section-card">
-        <div className="section-heading compact">
-          <div>
-            <div className="section-kicker">GENERATION PROFILES</div>
-            <h2>生成方案参考</h2>
-            <p>这是一份<b>参考清单</b>：本机登记过哪些出片方案、各自是什么状态。
-              <b>真正用哪一套，由你在制作页自己选</b>，系统不会替你决定，也不会在你选好后偷偷换一套。
-              带「宽高可调」的方案才能按你选的分辨率渲染。</p>
-          </div>
-        </div>
-        {profiled.length === 0 && <div className="blocked-callout">
-          <AlertTriangle size={15} />
-          <span>还没有生成方案。先在「安装与下载」完成环境检测，系统会自动登记并验证本项目可用的出片方案。</span>
-        </div>}
-        <div className="workflow-list">
-          {profiled.map((profile) => {
-            const sized = 'width' in (profile.parameter_map ?? {}) && 'height' in (profile.parameter_map ?? {});
-            return <div className="workflow-row" key={profile.id}>
-              <div><b>{profile.name}</b><span>{profile.mode} · SHA {profile.graph_sha256.slice(0, 10)}…</span></div>
-              {sized ? <span className="workflow-size-ok">宽高可调</span> : <button className="btn-secondary" disabled={busy}
-                onClick={() => onBindStandardParameters(profile.id)}>补齐宽高参数</button>}
-              <button className="btn-secondary" disabled={busy} onClick={() => onValidateWorkflow(profile.id)}>验证本机节点</button>
-            </div>;
-          })}
-          <div className="workflow-row">
-            <div>
-              <b>{LOWEND_PROFILE_NAME}</b>
-              <span>Ref2VA · 官方 W6A8 候选 · 宽高可调 · {lowendRegistered ? '已登记' : '未登记'}</span>
-            </div>
-            <span className="chip warn">候选</span>
-            <button type="button" className="btn-secondary"
-              onClick={() => document.getElementById('variant-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
-              查看就绪状态
-            </button>
-          </div>
-        </div>
-      </section>
-      <VariantReadinessCard
-        projectId={projectId}
-        variantId={LOWEND_VARIANT_ID}
-        title="W6A8 · 低显存候选"
-        onChanged={onRefresh}
-      />
-      <SettingsPanel
-        includeLlm={false}
-        onRefresh={onRefresh}
-        project={project}
-        profiles={profiles}
-        routes={routes}
-        workflowProfiles={workflowProfiles}
-        system={system}
-        busy={busy}
-        onProjectSettings={onProjectSettings}
-        onCreateProfile={onCreateProfile}
-        onTestProfile={onTestProfile}
-        onSetKey={onSetKey}
-        onDeleteProfile={onDeleteProfile}
-        onRoute={onRoute}
-        onTestComfy={onTestComfy}
-        onRegisterWorkflow={onRegisterWorkflow}
-        onValidateWorkflow={onValidateWorkflow}
-        onDeleteWorkflow={onDeleteWorkflow}
-        onBindStandardParameters={onBindStandardParameters}
-      />
     </div>}
 
-    {tab === 'voice' && <div className="setup-tab-body">
-      <section className="card section-card">
-        <div className="section-heading compact">
+    {tab === 'extra' && <div className="setup-tab-body">
+      <div className="notice">
+        <Sparkles size={13} />
+        <div>
+          <p><b>这三项都不影响出片。</b>不装时用人工复核；装好后只给建议，仍然不阻断任何镜头。</p>
+          <p>素材出图在「① 安装与下载」里勾选并测试；这里单独开关审片与语音。</p>
+        </div>
+      </div>
+
+      <section className="card section-card capability-card">
+        <div className="capability-head">
           <div>
-            <div className="section-kicker">OPTIONAL / VOICE</div>
-            <h2><Mic size={15} /> 固定音色是加分项，不是开拍前提</h2>
-            <p>H3 会按台词直接生成对白声音。只有当你需要「每个角色始终是同一个音色」时，才需要绑定音色参考。</p>
+            <div className="section-kicker">ADVISORY / VLM</div>
+            <h3><MonitorCheck size={15} /> 画面审片</h3>
+            <p>检查人物一致性、构图和明显穿帮；结果只作建议。</p>
           </div>
+          <span className={`chip ${vlm?.status === 'READY' ? 'ok' : 'warn'}`}>
+            {vlm?.status === 'READY' ? '已启用' : '未启用'}
+          </span>
         </div>
-        <div className="voice-state">
-          <b>本机声音能力：{voice?.voice_master_capable ? '可以生成角色音色参考' : '未配置（不影响出片）'}</b>
-          {blockedVoice.length > 0 && <ul>{blockedVoice.map((row) => <li key={row.role}>{roleText(row)}</li>)}</ul>}
-          <p>不绑定音色时，每个镜头的对白由 H3 原生生成；音色会在镜头之间自由变化，这是当前方案的已知取舍。</p>
-          <p>需要固定音色：在专业模式「制片准备 → 音色」里设计并冻结音色，再把它作为音频参考绑定到镜头。音色参考同样受 2–15 秒时长限制。</p>
-        </div>
-        <button type="button" className="btn-secondary" onClick={onOpenExpert}>去专业模式配置音色</button>
+        <p className="capability-facts">
+          模型文件 {vlm?.model_files_present ?? 0}/{vlm?.model_files_expected ?? 13}
+          {vlm && !vlm.runtime_ready ? ' · 运行依赖还需要补齐' : ''}
+          {vlm?.code ? ' · 只影响建议，不影响出片' : ''}
+        </p>
+        {vlm?.status !== 'READY' && <button type="button" className="btn-secondary"
+          disabled={!projectId || !!extraBusy} onClick={() => void installAdvisory('VLM')}>
+          {extraBusy === 'VLM' ? <Loader2 size={13} className="spin" /> : <MonitorCheck size={13} />}
+          下载并启用画面审片
+        </button>}
       </section>
+
+      <section className="card section-card capability-card">
+        <div className="capability-head">
+          <div>
+            <div className="section-kicker">ADVISORY / ASR</div>
+            <h3><Mic size={15} /> 语音核对</h3>
+            <p>把生成的台词转回文字，核对是否念错、漏念；结果只作建议。</p>
+          </div>
+          <span className={`chip ${asr?.status === 'READY' ? 'ok' : 'warn'}`}>
+            {asr?.status === 'READY' ? '已启用' : '未启用'}
+          </span>
+        </div>
+        <p className="capability-facts">
+          模型文件 {asr?.model_files_present ?? 0}/{asr?.model_files_expected ?? 10}
+          {asr && !asr.runtime_ready ? ' · 运行依赖还需要补齐' : ''}
+          {asr?.code ? ' · 只影响建议，不影响出片' : ''}
+        </p>
+        {asr?.status !== 'READY' && <button type="button" className="btn-secondary"
+          disabled={!projectId || !!extraBusy} onClick={() => void installAdvisory('ASR')}>
+          {extraBusy === 'ASR' ? <Loader2 size={13} className="spin" /> : <Mic size={13} />}
+          下载并启用语音核对
+        </button>}
+      </section>
+
+      <section className="card section-card capability-card">
+        <div className="capability-head">
+          <div>
+            <div className="section-kicker">MATERIAL / IMAGE</div>
+            <h3><ImageIcon size={15} /> 素材出图</h3>
+            <p>生成人物、场景、道具参考图；不装时素材全部由你上传。</p>
+          </div>
+          <span className={`chip ${image?.layer === 'RENDER_VERIFIED' ? 'ok' : ''}`}>
+            {image?.configured ? (image.layer === 'RENDER_VERIFIED' ? '已验证' : '已配置') : '未配置'}
+          </span>
+        </div>
+        <p className="capability-facts">
+          {image?.configured
+            ? `权重约 ${gib(image.upstream.required_bytes)} · 渲染器${image.renderer.state === 'RUNNING' ? '运行中' : '空闲'}`
+            : '还没有安装出图权重'}
+        </p>
+        <button type="button" className="btn-secondary" onClick={() => {
+          setTab('env');
+          window.setTimeout(() => document.getElementById('setup')?.scrollIntoView({ block: 'start' }), 40);
+        }}>到「安装与下载」检测并测试出图</button>
+      </section>
+
+      <section className="card section-card capability-card">
+        <div className="capability-head">
+          <div>
+            <div className="section-kicker">VOICE / TIMBRE</div>
+            <h3><Mic size={15} /> 固定音色</h3>
+            <p>需要每个角色始终同一音色时才用；不配时对白由 H3 原生生成。</p>
+          </div>
+          <span className={`chip ${voice?.voice_master_capable ? 'ok' : ''}`}>
+            {voice?.voice_master_capable ? '可用' : '未配置'}
+          </span>
+        </div>
+      </section>
+
+      {extraNote && <p className="run-hint" role="status">{extraNote}</p>}
     </div>}
 
     <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> DIRECTOR SETUP</span><span>所有配置保存在本机</span></footer>

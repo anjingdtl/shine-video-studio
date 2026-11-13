@@ -169,8 +169,8 @@ export function LLMConfiguration({
     <div className="llm-manager-heading">
       <div>
         <span className="section-kicker">MODEL LIBRARY</span>
-        <h3><KeyRound size={16} /> AI 模型管理中心</h3>
-        <p>在此管理不同平台的文本模型。密钥保存在本机安全存储，不会回显给浏览器。</p>
+        <h3><KeyRound size={16} /> AI 模型</h3>
+        <p>密钥只在本机安全存储；一个模型可以承担全部文本工种。</p>
       </div>
       <span className="llm-profile-count">{profiles.length} 个模型</span>
     </div>
@@ -205,58 +205,63 @@ export function LLMConfiguration({
     </details>
 
     <div className="llm-model-list">
-      {profiles.length === 0 && <p className="empty-inline">还没有模型。先添加一套文本模型，再完成连接与结构化生成检查。</p>}
+      {profiles.length === 0 && <p className="empty-inline">还没有模型。添加一套文本模型后，点一次检查即可用于分镜与导演。</p>}
       {profiles.map(profile => {
         const routeUses = routes.filter(route => route.provider_profile_id === profile.id);
-        const caps = profile.capabilities as { model_context?: { context_window_tokens?: number; source?: string } };
-        const contextTokens = caps.model_context?.context_window_tokens;
         const evidence = profile.evidence;
-        return <article className={`llm-model-card ${profile.enabled ? '' : 'disabled'}`} key={profile.id}>
+        const caps = profile.capabilities as { model_context?: { context_window_tokens?: number } };
+        const contextTokens = caps.model_context?.context_window_tokens;
+        const connection = checkLabel(evidence?.connection_status);
+        const generation = checkLabel(evidence?.generation_status, 'generation');
+        return <article className={`llm-model-card compact ${profile.enabled ? '' : 'disabled'}`} key={profile.id}>
           <div className="llm-model-card-head">
             <div>
-              <h4>{profile.name}</h4>
-              <p>{label(providerKindLabels, profile.kind)} · {profile.model || '未设置 Model ID'} · {profile.enabled ? '已启用' : '已停用'}</p>
+              <h4>{profile.name}<span className="llm-model-id">{profile.model || '未设置 Model ID'}</span></h4>
+              <p>
+                {profile.enabled ? '已启用' : '已停用'} · {connection} · {generation}
+                {contextTokens ? ` · 输入上下文：${contextTokens.toLocaleString()} tokens` : ''}
+                {routeUses.length ? ` · 服务 ${routeUses.length} 个工种` : ''}
+              </p>
             </div>
             <span className={`llm-secret-state ${profile.secret_status === 'stored' ? 'secure' : ''}`}><ShieldCheck size={13} /> {secretLabel(profile)}</span>
           </div>
-          <div className="llm-evidence-grid" aria-label={profile.name + '检查状态'}>
-            <span>连接：{checkLabel(evidence?.connection_status)}</span>
-            <span>模型目录：{checkLabel(evidence?.catalog_status, 'catalog')}</span>
-            <span>结构化生成：{checkLabel(evidence?.generation_status, 'generation')}</span>
-          </div>
-          {contextTokens ? <p className="llm-context-note">输入上下文：{contextTokens.toLocaleString()} tokens · {caps.model_context?.source?.includes('official') ? '官方模型说明' : '服务商模型目录'}</p>
-            : <p className="llm-context-note">输入上下文由模型能力检查；每次创作仍会执行上下文预算校验。</p>}
-          {routeUses.length > 0 && <p className="llm-route-usage">当前服务 {routeUses.length} 个 Agent</p>}
           <div className="llm-model-actions">
             <button className="btn-text" type="button" disabled={busy} onClick={() => onTestProfile(profile.id)}><FlaskConical size={13} /> 测试连接</button>
-            <button className="btn-text" type="button" disabled={busy} onClick={() => onTestGeneration(profile.id)}><CheckCircle2 size={13} /> 测试结构化生成</button>
-            <label className="llm-enabled-toggle"><Power size={13} />
-              <input type="checkbox" checked={profile.enabled} disabled={busy} aria-label={'启用模型 ' + profile.name}
-                onChange={event => void onUpdateProfile(profile.id, { enabled: event.target.checked })} /> {profile.enabled ? '启用中' : '已停用'}
-            </label>
+            <button className="btn-text" type="button" disabled={busy} onClick={() => onTestGeneration(profile.id)}><CheckCircle2 size={13} /> 测试生成</button>
+            <details className="llm-advanced-settings llm-inline-details">
+              <summary><Pencil size={13} /> 设置</summary>
+              <ProfileEditor profile={profile} busy={busy} onSave={payload => onUpdateProfile(profile.id, payload)} />
+              <label className="llm-enabled-toggle"><Power size={13} />
+                <input type="checkbox" checked={profile.enabled} disabled={busy} aria-label={'启用模型 ' + profile.name}
+                  onChange={event => void onUpdateProfile(profile.id, { enabled: event.target.checked })} /> {profile.enabled ? '启用中' : '已停用'}
+              </label>
+              <div className="llm-evidence-grid" aria-label={profile.name + '检查状态'}>
+                <span>连接：{connection}</span>
+                <span>模型目录：{checkLabel(evidence?.catalog_status, 'catalog')}</span>
+                <span>结构化生成：{generation}</span>
+              </div>
+              <details className="llm-advanced-settings">
+                <summary><KeyRound size={13} /> 更新密钥</summary>
+                <div className="llm-key-form">
+                  <input aria-label={'更新密钥 ' + profile.name} type="password" autoComplete="new-password" placeholder="输入新密钥；不会显示旧密钥"
+                    disabled={busy} value={keyDrafts[profile.id] ?? ''}
+                    onChange={event => setKeyDrafts(values => ({ ...values, [profile.id]: event.target.value }))} />
+                  <button className="btn-secondary" type="button" disabled={busy || !keyDrafts[profile.id]}
+                    onClick={() => clearWhenSaved(onSetKey(profile.id, keyDrafts[profile.id]), () => setKeyDrafts(values => ({ ...values, [profile.id]: '' })))}>
+                    保存新密钥
+                  </button>
+                </div>
+              </details>
+              <DuplicateForm profile={profile} busy={busy} onDuplicate={onDuplicateProfile} />
+              <button className="btn-text llm-delete" type="button" disabled={busy} onClick={() => {
+                const roles = routeUses.map(route => route.role).join('、');
+                const note = routeUses.length ? `当前还有 Agent 指向此模型：${roles}。` : '';
+                if (window.confirm(`${note}删除模型配置？仍被 Agent 或未结束任务使用时，服务端会阻止删除。`)) onDeleteProfile(profile.id);
+              }}><Trash2 size={13} /> 删除模型</button>
+            </details>
           </div>
-          <ProfileEditor profile={profile} busy={busy} onSave={payload => onUpdateProfile(profile.id, payload)} />
-          <details className="llm-advanced-settings">
-            <summary><KeyRound size={13} /> 更新密钥</summary>
-            <div className="llm-key-form">
-              <input aria-label={'更新密钥 ' + profile.name} type="password" autoComplete="new-password" placeholder="输入新密钥；不会显示旧密钥"
-                disabled={busy} value={keyDrafts[profile.id] ?? ''}
-                onChange={event => setKeyDrafts(values => ({ ...values, [profile.id]: event.target.value }))} />
-              <button className="btn-secondary" type="button" disabled={busy || !keyDrafts[profile.id]}
-                onClick={() => clearWhenSaved(onSetKey(profile.id, keyDrafts[profile.id]), () => setKeyDrafts(values => ({ ...values, [profile.id]: '' })))}>
-                保存新密钥
-              </button>
-            </div>
-          </details>
-          <DuplicateForm profile={profile} busy={busy} onDuplicate={onDuplicateProfile} />
-          <button className="btn-text llm-delete" type="button" disabled={busy} onClick={() => {
-            const roles = routeUses.map(route => route.role).join('、');
-            const note = routeUses.length ? `当前还有 Agent 指向此模型：${roles}。` : '';
-            if (window.confirm(`${note}删除模型配置？仍被 Agent 或未结束任务使用时，服务端会阻止删除。`)) onDeleteProfile(profile.id);
-          }}><Trash2 size={13} /> 删除模型</button>
         </article>;
       })}
     </div>
-    <p className="llm-security-note">连接检查、模型目录和结构化生成是三项不同证据。真实生成检查会产生一次服务商 API 请求；不会发送项目剧本或素材。配置变更后，旧检查会标记过期。</p>
   </section>;
 }

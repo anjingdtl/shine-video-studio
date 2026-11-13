@@ -47,7 +47,7 @@ it('模型配置正在保存或检查时禁用其他操作按钮', () => {
   }]} routes={[]} busy {...handlers} />);
 
   expect(screen.getByRole('button', { name: '测试连接' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: '测试结构化生成' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: '测试生成' })).toBeDisabled();
 });
 
 it('显示模型报告的长上下文窗口并允许清除偏小的固定回复上限', async () => {
@@ -62,6 +62,7 @@ it('显示模型报告的长上下文窗口并允许清除偏小的固定回复�
   }]} routes={[]} busy={false} {...handlers} />);
 
   expect(screen.getByText(/输入上下文：1,000,000 tokens/)).toBeInTheDocument();
+  await user.click(screen.getByText('设置'));
   await user.click(screen.getByText('编辑连接与模型参数'));
   await user.click(screen.getByText('高级参数'));
   await user.clear(screen.getByLabelText('回复上限 MiniMax 测试'));

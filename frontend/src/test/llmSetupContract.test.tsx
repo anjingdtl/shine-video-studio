@@ -108,7 +108,10 @@ describe('文本工种事务性路由', () => {
   it('先预览影响，再以版本号发送一笔异构批量保存', async () => {
     const user = userEvent.setup();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([PROFILE]) });
+    // 两个模型时不做自动分配：这里验证的是手动「先预览、再保存」的契约。
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([
+      PROFILE, { ...PROFILE, id: 'profile-2', name: '备用模型', model: 'qwen-local' },
+    ]) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/llm\/roles$/, respond: () => jsonResponse({ route_revision: 'r'.repeat(64) }) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/llm-readiness$/, respond: () => jsonResponse({
       status: 'READY', generation_status: 'CONNECTION_READY', text_agent_ready: false,
@@ -127,6 +130,12 @@ describe('文本工种事务性路由', () => {
     }) });
 
     render(<LLMSetupPanel />);
+    const routingFold = await waitFor(() => {
+      const summary = document.querySelector('.llm-routing-fold > summary');
+      expect(summary).not.toBeNull();
+      return summary as HTMLElement;
+    });
+    await user.click(routingFold);
     await user.selectOptions(await screen.findByLabelText('批量分配模型'), 'profile-1');
     await user.click(screen.getByText('按工作阶段选择'));
     await user.click(screen.getByRole('button', { name: '全部文本 Agent' }));

@@ -115,6 +115,13 @@ class RecommendationRequest(BaseModel):
     reuse_installed: bool = True
 
 
+class ManagedReleaseRequest(BaseModel):
+    """An optional target: close exactly one work stack instead of all of them."""
+
+    model_config = ConfigDict(extra="forbid")
+    target_id: str | None = Field(default=None, max_length=200)
+
+
 class ExistingInstallationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     path: str = Field(min_length=1, max_length=1024)
@@ -362,6 +369,103 @@ def variant_recommendations(settings: SettingsDep):
     return recommend_variants(env)
 
 
+@router.get("/variant-availability")
+def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
+    """本机实际准备好的 H3 方案清单：有就是有，没有就是没有。
+
+    「导演包」的模型版本按钮直接读这一份：不再让用户判断「验收」术语，
+    只回答两件事——这套权重在本机吗、现在能不能开拍。每一行仍然来自
+    真实台账与磁盘事实，不会因为界面想点亮就点亮。
+
+    「在本机」优先看已采用的 ComfyUI 安装目录里是否真的有这套文件的
+    全部组件（目录事实，扫描约 0.4 秒）；台账里已经核验过的结果优先。
+    """
+    from sqlalchemy import select as _select
+
+    from shine.comfyops.existing_installation import inspect as inspect_installation
+    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.variant_binding import load_binding
+    from shine.comfyops.variant_readiness import readiness as variant_readiness
+    from shine.comfyops.variants import list_variant_manifests
+    from shine.models import WorkflowProfile
+    from shine.services import require_project
+
+    require_project(db, project_id)
+    adopted_root = None
+    for row in db.scalars(_select(ComfyInstance)):
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if payload.get("adopted") and payload.get("root"):
+            adopted_root = str(payload["root"])
+            break
+    project_profiles = {
+        row.name: row
+        for row in db.scalars(_select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))
+    }
+    rows = []
+    for manifest in list_variant_manifests():
+        variant_id = str(manifest.get("variant_id") or "")
+        if not variant_id:
+            continue
+        acceptance = str(manifest.get("acceptance_status") or "UNKNOWN")
+        profile_names = list(manifest.get("workflow_profile_ids") or [])
+        registered = [project_profiles[name] for name in profile_names if name in project_profiles]
+        validated = [row for row in registered if (row.validated_against or {})]
+        entry = {
+            "variant_id": variant_id,
+            "label": manifest.get("label") or variant_id,
+            "title": manifest.get("title"),
+            "acceptance_status": acceptance,
+            "downloadable": bool(manifest.get("auto_download_allowed")),
+            "installed": False,
+            "verified": False,
+            "profiles_registered": bool(registered),
+            "runtime_validated": bool(validated),
+            "available": False,
+            "reason": "本机没有这套权重",
+        }
+        try:
+            binding = load_binding(variant_id, fresh=True)
+        except HTTPException:
+            entry["reason"] = "这套方案没有可核对的部署清单"
+            rows.append(entry)
+            continue
+        except Exception:  # noqa: BLE001 - an unreadable variant is a fact
+            entry["reason"] = "这套方案的清单读不出来"
+            rows.append(entry)
+            continue
+        required = set(manifest.get("required_component_ids") or [])
+        present: set[str] = set()
+        if adopted_root:
+            try:
+                report = inspect_installation(adopted_root, binding.catalog)
+                present = {row["component_id"] for row in report.get("matches") or []}
+            except Exception:  # noqa: BLE001 - an unreadable directory is a fact
+                present = set()
+        entry["installed"] = bool(required) and required <= present
+        try:
+            readiness_report = variant_readiness(db, settings, binding, project_id)
+        except Exception:  # noqa: BLE001 - the ledger may be unreadable
+            readiness_report = None
+        if readiness_report is not None:
+            weights = readiness_report.get("weights") or []
+            entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
+        accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
+        entry["available"] = (accepted and entry["installed"]
+                              and entry["profiles_registered"] and entry["runtime_validated"])
+        if not entry["installed"]:
+            entry["reason"] = "本机没有这套权重"
+        elif not entry["profiles_registered"]:
+            entry["reason"] = "生成方案还没登记"
+        elif not entry["runtime_validated"]:
+            entry["reason"] = "还没在本机核对节点"
+        elif not accepted:
+            entry["reason"] = "候选方案，暂不能开拍"
+        else:
+            entry["reason"] = "本机已就绪"
+        rows.append(entry)
+    return {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
+
+
 @router.get("/connectivity")
 def connectivity():
     """Read-only upstream reachability for the deployment materials.
@@ -540,14 +644,32 @@ def managed_processes(db: DBSession):
     return {"processes": describe_managed_processes(db)}
 
 
+@router.get('/work-stacks')
+def work_stacks(request: Request, db: DBSession):
+    """Every background unit this machine is running, including other projects.
+
+    Read-only: it starts nothing, stops nothing and loads no weight.  A stack
+    that belongs to another project is listed too, because it is exactly what
+    keeps the GPU busy while the open project looks idle.
+    """
+    from shine.workstacks import work_stack_snapshot
+
+    return work_stack_snapshot(db, request.app.state.settings)
+
+
 @router.post('/managed-processes/release')
-def release_managed_processes(request: Request, actor: Operator, db: DBSession):
+def release_managed_processes(request: Request, actor: Operator, db: DBSession,
+                              body: "ManagedReleaseRequest | None" = None):
     """Stop the owned renderer and reviewers and give the GPU memory back.
 
     This is the workbench's own "close the backend" action: ComfyUI and the
     local reviewers are started by this installation, so closing the workbench
     closes them.  A process that serves a running attempt, or whose ownership
     cannot be proven, is reported and left alone.
+
+    ``target_id`` closes exactly one stack (the monitor's own row id).  It runs
+    the same evidence checks; a targeted close can never kill a busy renderer
+    or a process this installation does not own.
 
     Under the unified control plane the release runs through the resident
     Worker so it can never race a lifecycle start; when no worker is online
@@ -557,7 +679,15 @@ def release_managed_processes(request: Request, actor: Operator, db: DBSession):
     from shine.comfyops.renderer_release import release_managed_processes_guarded as release
     from shine.runtime_orchestrator.contracts import orchestrator_enabled
 
-    if orchestrator_enabled() and _any_worker_online(db):
+    target = (body.target_id or "").strip() if body is not None else ""
+    only = {target} if target else None
+    if target and orchestrator_enabled() and _any_worker_online(db):
+        # A targeted close is a narrow operator decision; it takes the same
+        # lifecycle guards directly so it can name one stack instead of all.
+        db.rollback()
+        return release(request.app.state.session_factory, actor=actor,
+                       reason=f"operator_release:{target}", only=only)
+    if not target and orchestrator_enabled() and _any_worker_online(db):
         from uuid import uuid4
 
         from shine.runtime_orchestrator.api import submit_control_intent
@@ -588,7 +718,9 @@ def release_managed_processes(request: Request, actor: Operator, db: DBSession):
     # transaction: the release takes every involved installation's lifecycle
     # mutex *before* it writes, so it must not inherit a transaction here.
     db.rollback()
-    report = release(request.app.state.session_factory, actor=actor, reason="operator_release")
+    report = release(request.app.state.session_factory, actor=actor,
+                     reason="operator_release" + (f":{target}" if target else ""),
+                     only=only)
     return report
 
 

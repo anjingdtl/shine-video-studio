@@ -1694,6 +1694,26 @@ export type StrategyOptions = {
 export const getStrategyOptions = (projectId: string) =>
   api<StrategyOptions>(`/projects/${projectId}/director/strategy-options`);
 
+/** 本机实际准备好的模型方案：导演包的版本按钮只读这一份。 */
+export type VariantAvailability = {
+  variant_id: string;
+  label: string;
+  title: string | null;
+  acceptance_status: string;
+  downloadable: boolean;
+  installed: boolean;
+  verified: boolean;
+  profiles_registered: boolean;
+  runtime_validated: boolean;
+  available: boolean;
+  reason: string;
+};
+
+export const getVariantAvailability = (projectId: string) =>
+  api<{ project_id: string; variants: VariantAvailability[] }>(
+    `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
+  ).then((row) => row.variants);
+
 export const startDirectorProduction = (
   projectId: string,
   body: { episode_ids: string[]; workflow_profile_id?: string | null; strategy?: ProductionStrategy | null },

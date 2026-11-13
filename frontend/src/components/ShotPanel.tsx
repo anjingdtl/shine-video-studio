@@ -41,6 +41,8 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
   const [shotSize, setShotSize] = useState('medium');
   const [movement, setMovement] = useState('static');
   const [submitting, setSubmitting] = useState(false);
+  /** 真实生成二次确认：第一下展开，第二下才提交。 */
+  const [confirmShot, setConfirmShot] = useState<string | null>(null);
   const [bindingSaving, setBindingSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const approved = assets.filter((asset) => asset.approved && asset.locked);
@@ -275,7 +277,16 @@ export default function ShotPanel({ assets, shots, currentStyle, busy, preview, 
                   采用当前风格
                 </button>
               )}
-              <button className="btn-secondary" disabled={!currentStyle || busy} onClick={() => onQueue(shot)}><ArrowUpRight size={12} /> 加入队列</button>
+              {confirmShot === shot.id
+                ? <span className="queue-confirm">
+                  <button className="btn-primary" disabled={busy} onClick={() => { setConfirmShot(null); onQueue(shot); }}>
+                    确认真实生成
+                  </button>
+                  <button className="btn-text" onClick={() => setConfirmShot(null)}>取消</button>
+                </span>
+                : <button className="btn-secondary" disabled={!currentStyle || busy}
+                  title="会占用本机显卡，耗时较长；点一下先确认"
+                  onClick={() => setConfirmShot(shot.id)}><ArrowUpRight size={12} /> 加入队列</button>}
             </div>
             {editingShot === shot.id && <div className="binding-editor">
               {approved.length === 0 && <span className="empty-inline">没有已批准并锁定的素材。</span>}

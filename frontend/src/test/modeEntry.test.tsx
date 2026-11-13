@@ -248,6 +248,8 @@ describe('任务提交与模式一致', () => {
     const queue = await within(advancedFold()).findByRole('button', { name: /加入队列/ });
     await waitFor(() => { expect(queue).toBeEnabled(); });
     await user.click(queue);
+    // 真实生成是二次确认：第一下展开，第二下才提交。
+    await user.click(await within(advancedFold()).findByRole('button', { name: /确认真实生成/ }));
     await waitFor(() => {
       const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string; workflow_profile_id: string };
       expect(body.provider).toBe('comfyui');
@@ -263,6 +265,7 @@ describe('任务提交与模式一致', () => {
     const provider = await within(singleShotCard()).findByLabelText(/生成方式/);
     expect((provider as HTMLSelectElement).disabled).toBe(true);
     await user.click(within(advancedFold()).getByRole('button', { name: /加入队列/ }));
+    await user.click(await within(advancedFold()).findByRole('button', { name: /确认真实生成/ }));
     await waitFor(() => {
       const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string };
       expect(body.provider).toBe('mock');

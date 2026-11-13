@@ -39,6 +39,21 @@ def get_output_directory(request: Request, db: DBSession) -> dict:
     )
 
 
+@router.post("/settings/output-directory/select")
+def select_output_directory(actor: Operator, request: Request, db: DBSession) -> dict:
+    """Open the OS folder dialog; the choice is returned, never saved.
+
+    Saving stays a separate PUT, because moving the output root migrates files
+    and must never happen as a side effect of browsing.
+    """
+    from shine.media.directory_picker import pick_directory
+
+    current = directory_summary(
+        db, request.app.state.settings, default_root=_default_root(request)
+    )
+    return pick_directory(current.get("root"))
+
+
 @router.put("/settings/output-directory")
 def update_output_directory(
     body: OutputDirectoryUpdate,

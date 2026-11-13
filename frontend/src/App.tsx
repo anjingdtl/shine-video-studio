@@ -36,6 +36,8 @@ import { EpisodeStoryboardPanel, ShotMaterialsPanel, StoryboardBookPanel } from 
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
 import { Meter } from './components/Meter';
+import { WorkStackMonitor } from './components/WorkStackMonitor';
+import { GuideTip } from './components/GuideTip';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
@@ -209,7 +211,7 @@ function App() {
   /** The exact package a deep link named, so the workbench opens that one. */
   const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
     () => resolveHash(window.location.hash).packageId);
-  const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'voice'>('env');
+  const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'extra'>('env');
   /** 建好作品后直接进入第一步：项目管理不占阶段序号，但新作品要立刻能开工。 */
   const createProjectAndEnter = async () => {
     const created = await createProject();
@@ -248,6 +250,20 @@ function App() {
   const viewMountedRef = useRef(false);
 
   useEffect(() => { if (ui !== 'assets') window.localStorage.setItem('shine-interface', ui); }, [ui]);
+
+  /**
+   * 生成方案没手动选过时自动挑一个：单镜头开拍与一键开拍用同一套默认，
+   * 用户不必先去「请选择…」里做一次技术选择。优先带画面宽高的 Ref2VA 方案。
+   */
+  useEffect(() => {
+    if (queueProfile && workflowProfiles.some((profile) => profile.id === queueProfile)) return;
+    const ref2va = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
+    if (ref2va.length === 0) return;
+    const sized = ref2va.filter((profile) => 'width' in (profile.parameter_map ?? {})
+      && 'height' in (profile.parameter_map ?? {}));
+    const chosen = (sized.length ? sized : ref2va)[0];
+    if (chosen) setQueueProfile(chosen.id);
+  }, [queueProfile, workflowProfiles, setQueueProfile]);
 
   /** 七阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
@@ -416,7 +432,7 @@ function App() {
 
   /** 进入导演层基础配置，可直达指定分区；普通入口回到①安装与下载。
    *  导演模式内所有“去配置模型/生成方案”的引导都走这里，不再甩去专业模式。 */
-  function goToDirectorSetup(tab: 'env' | 'models' | 'voice' = 'env') {
+  function goToDirectorSetup(tab: 'env' | 'models' | 'extra' = 'env') {
     setSetupFocusTab(tab);
     setUi('director');
     setDirectorPage('setup');
@@ -629,8 +645,11 @@ function App() {
             onClick={() => goToDirectorSetup('env')}>
             <Settings2 size={15} /><span>基础配置</span>
             {production && !['READY', 'RUNNING'].includes(production.mode) && <i className="setup-entry-dot" aria-hidden="true" />}
+            {production && !['READY', 'RUNNING'].includes(production.mode)
+              && <em className="sidebar-tip">先配这里</em>}
           </button>
         </nav>
+        <WorkStackMonitor />
         <div className="director-sidebar-foot">
           <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
           <span>{apiOnline ? '本机服务在线' : systemChecked ? '本机服务失联' : '正在检查服务'}</span>
@@ -693,6 +712,7 @@ function App() {
             );
           })}
         </nav>
+        <WorkStackMonitor />
         <div className="privacy-card"><ShieldCheck size={17} /><div><b>本地优先</b><span>素材与密钥不离开本机</span></div><Check size={15} /></div>
         <div className="profile"><div className="avatar">S</div><div><b>本地工作区</b><span>{studio.apiOnline ? '已连接本机服务' : '本机服务未连接'}</span></div><ChevronDown size={16} /></div>
       </aside>}
@@ -795,7 +815,8 @@ function App() {
                 </ol>
                 <div className="create-project">
                   <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-                  <button className="btn-secondary" disabled={busy || !projectTitle.trim()} onClick={() => void createProjectAndEnter()}>创建作品</button>
+                  <button className="btn-secondary" title="创建后直接进入第 1 阶段" disabled={busy || !projectTitle.trim()} onClick={() => void createProjectAndEnter()}>创建作品</button>
+                  <GuideTip>起个名字，点这里开始第 1 步</GuideTip>
                 </div>
                 <div className="first-run-setup">
                   <b>第一次使用？先花两分钟把机器调好。</b>
@@ -847,6 +868,7 @@ function App() {
                     onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>
                     {journeyState === 'error' ? '重新读取进度' : '打开当前作品'}
                   </button>
+                  <GuideTip>接着上次停下的那一步继续</GuideTip>
                 </section>
                 <ProjectPortfolio
                   projects={projects as Project[]}
@@ -1319,7 +1341,9 @@ function App() {
               <div className={`view-page ${view === 'setup' ? '' : 'hidden'}`} data-view="setup">
                 {viewHero('设置板块', '先把工具调教顺手，再开工。', 'SYSTEM SETUP')}
                 <SetupPanel key={`setup-${projectId}`} projectId={projectId} onRefresh={refreshAll} refreshEpoch={dataEpoch} />
+                {/* AI 模型只出现在上面的「制作环境」里：这里再渲染一次就是同一张卡片重复两遍。 */}
                 <SettingsPanel
+                  includeLlm={false}
                   onRefresh={refreshAll}
                   project={project}
                   profiles={profiles}

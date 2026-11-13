@@ -219,38 +219,44 @@ describe('② 剧本统筹先分集', () => {
   });
 });
 
-describe('基础配置：部署组合推荐', () => {
-  it('列出可满足/不满足的组合与具名原因，生图不满足时不预先勾选', async () => {
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/setup\/deployment-recommendations$/,
-      respond: () => jsonResponse({
-        host: { gpu: 'NVIDIA RTX 4090', vram_mb: 24564, ram_mb: 65536, free_gb: 322.8 },
-        notes: ['多张显卡的显存不会相加。'],
-        recommended: [],
-        blocked: [],
-        options: [
-          { purpose: 'h3_video', label: 'H3 正式视频生成', skippable: false, catalog_id: 'h3-ref2va-windows-x64',
-            catalog_version: '1.2.0', status: 'SUPPORTED', total_bytes: 50 * 1024 ** 3,
-            reuse_bytes: 20 * 1024 ** 3, download_bytes: 30 * 1024 ** 3, blockers: [], warnings: [],
-            requirements: { min_vram_mb: 23552, min_ram_mb: 31744, min_disk_gb: 180 },
-            evidence: { level: 'estimated', verified: false } },
-          { purpose: 'image_prep', label: '生图候选准备', skippable: true, catalog_id: 'qwen-image-2.1-windows-x64',
-            catalog_version: '1.0.0', status: 'BLOCKED', total_bytes: 40 * 1024 ** 3, reuse_bytes: 0,
-            download_bytes: 40 * 1024 ** 3,
-            blockers: [{ code: 'VRAM_INSUFFICIENT', required: 32768, actual: 24564 }], warnings: [],
-            evidence: { level: 'estimated', verified: false } },
-        ],
-      }) });
+describe('基础配置：一次检测、一处确认', () => {
+  it('检测后直接给出 H3 预设与能力勾选，并在这里确认下载', async () => {
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-recommendations$/, respond: () => jsonResponse({
+      tier: 'standard',
+      host: { gpu: 'NVIDIA RTX 4090', vram_mb: 24564, ram_mb: 65536, free_gb: 322.8 },
+      recommended: [{
+        variant_id: 'h3-ref2va-int8-convrot', title: 'H3 Ref2VA INT8 ConvRot（当前生产基线）',
+        acceptance_status: 'SUPPORTED', status: 'SUPPORTED', usable_in_production: true,
+        auto_download_allowed: true, total_bytes: 50 * 1024 ** 3,
+        required_component_ids: ['minimax-h3-diffusion', 'minimax-h3-text-encoder', 'minimax-h3-vae'],
+      }],
+      candidates: [{
+        variant_id: 'ref2va-nvfp4-lowend', title: 'H3 Ref2VA NVFP4（第三方量化，低端机候选）',
+        acceptance_status: 'CANDIDATE', status: 'UNKNOWN', usable_in_production: false,
+        auto_download_allowed: false, total_bytes: 33 * 1024 ** 3, required_component_ids: [],
+      }],
+      blocked: [], options: [], notes: [],
+    }) });
     const user = userEvent.setup();
     window.history.replaceState(null, '', '#d/setup');
     render(<App />);
-    await user.click(await screen.findByRole('button', { name: /检测并推荐/ }));
-    expect(await screen.findByText('H3 正式视频生成')).toBeInTheDocument();
-    expect(screen.getByText(/显存不足（需要 32768 MB，本机 24564 MB）/)).toBeInTheDocument();
-    expect(screen.getAllByText('估算（尚未实测）').length).toBe(2);
-    const imageBox = screen.getByRole('checkbox', { name: /生图候选准备/ });
-    expect(imageBox).not.toBeChecked();
-    expect(screen.getByRole('checkbox', { name: /H3 正式视频生成/ })).toBeDisabled();
-    expect(screen.getAllByText(/可以不装生图/).length).toBeGreaterThan(0);
+
+    // 自动检测后只有一行结论，不再是整页的变体说明。
+    expect(await screen.findByText(/可以运行 H3 Ref2VA INT8 ConvRot/)).toBeInTheDocument();
+    expect(screen.getByText('H3 Ref2VA INT8 ConvRot（当前生产基线）')).toBeInTheDocument();
+    expect(screen.getByText(/候选方案：本机还没有跑通，暂不能直接安装/)).toBeInTheDocument();
+    // 下载确认就在检测卡里，不需要再往下找另一个按钮。
+    const confirm = screen.getByRole('button', { name: /确认并下载安装|确认并完成配置/ });
+    expect(confirm).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /画面审片/ })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /语音核对/ })).toBeInTheDocument();
+    // 点一次就在原地展开确认条：写清目录与下载量，再点「开始准备」才真的执行。
+    await user.click(confirm);
+    expect(await screen.findByRole('group', { name: '确认准备制作环境' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '开始准备' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('group', { name: '确认准备制作环境' })).toBeNull();
   });
 });
 

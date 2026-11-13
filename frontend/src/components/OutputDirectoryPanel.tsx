@@ -42,6 +42,7 @@ export default function OutputDirectoryPanel() {
   const [state, setState] = useState<OutputDirectoryState | null>(null);
   const [path, setPath] = useState('');
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [message, setMessage] = useState('');
   const [result, setResult] = useState<MigrationResult | null>(null);
 
@@ -79,6 +80,29 @@ export default function OutputDirectoryPanel() {
     }
   }
 
+  /** 拉起系统的「选择文件夹」窗口；选中后直接保存并迁移。 */
+  async function choose() {
+    setPicking(true);
+    setMessage('');
+    try {
+      const picked = await api<{ available: boolean; cancelled: boolean; path: string | null; message: string }>(
+        '/settings/output-directory/select', json('POST', {}),
+      );
+      if (picked.cancelled) { setMessage('已取消选择。'); return; }
+      if (!picked.path) { setMessage(picked.message || '没有选择目录。'); return; }
+      setPath(picked.path);
+      if (!window.confirm(`把作品输出目录切换到：\n${picked.path}\n\n会先复制并逐个核验已有文件，全部通过后才切换；有镜头正在生产时会拒绝。继续？`)) {
+        setMessage(`已填入 ${picked.path}；需要时再点「保存并迁移」。`);
+        return;
+      }
+      await save(picked.path);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPicking(false);
+    }
+  }
+
   if (!state) {
     return <div className="settings-block" id="output-directory">
       <h3><FolderTree size={14} /> 作品输出目录</h3>
@@ -93,8 +117,7 @@ export default function OutputDirectoryPanel() {
 
   return <div className="settings-block" id="output-directory">
     <h3><FolderTree size={14} /> 作品输出目录</h3>
-    <p>素材、镜头视频、成片和音色都放在这个目录下，并按「项目 → 类型」两级自动归档。
-      文件名统一是「项目_类型_名称」，不再使用随机名称。</p>
+    <p>素材、镜头视频、成片和音色都放在这个目录下，按「项目 → 类型」自动归档，文件名统一为「项目_类型_名称」。</p>
     <div className="guardrail-note">
       当前目录：{state.root}{state.custom ? '（自定义）' : '（默认）'}
       {' · '}{state.file_count ?? 0} 个文件 · {sizeText(state.byte_size ?? 0)} · 可用 {state.free_gb ?? 0} GB
@@ -112,26 +135,29 @@ export default function OutputDirectoryPanel() {
     </div>}
     {blockers.length > 0 && <div className="blocked-callout">
       <RefreshCw size={13} />
-      <span>现在还不能迁移：{blockers.join('；')}。等这些任务结束后再保存目录。</span>
+      <span>现在还不能迁移：{blockers.join('；')}。等这些任务结束后再切换目录。</span>
     </div>}
-    <label className="field-line">指定输出目录（留空使用默认目录）
-      <input aria-label="作品输出目录" value={path} placeholder={state.default_root}
-        onChange={(event) => setPath(event.target.value)} />
-    </label>
     <div className="inline-actions">
-      <button className="btn-secondary" disabled={busy || blockers.length > 0}
-        onClick={() => void save(path.trim() || null)}>
-        {busy ? '正在迁移文件…' : '保存并迁移'}
+      <button className="btn-primary" disabled={busy || picking || blockers.length > 0} onClick={() => void choose()}>
+        <FolderTree size={13} /> {picking ? '正在等待选择…' : '选择目录'}
       </button>
       {state.custom && <button className="btn-secondary" disabled={busy || blockers.length > 0}
         onClick={() => void save(null)}>
         恢复默认目录
       </button>}
       <button className="btn-secondary" disabled={busy} onClick={() => void load()}>刷新</button>
+      <details className="inline-manual-path">
+        <summary>手动填写路径</summary>
+        <label className="field-line">绝对路径
+          <input aria-label="作品输出目录" value={path} placeholder={state.default_root}
+            onChange={(event) => setPath(event.target.value)} />
+        </label>
+        <button className="btn-secondary" disabled={busy || !path.trim() || blockers.length > 0}
+          onClick={() => void save(path.trim())}>保存并迁移</button>
+      </details>
     </div>
     <p className="guardrail-note">
-      调整目录会先复制并逐个核验文件，全部通过后才切换台账，最后清理旧位置；任何一步失败都不会切换。
-      有镜头正在拍摄或素材正在生成时保存会被拒绝，不会打断任务。
+      切换目录会先复制并逐个核验文件，全部通过后才切换；任何一步失败都不会切换。有镜头正在拍摄或素材正在生成时会被拒绝，不会打断任务。
     </p>
     {result && <div className="guardrail-note">
       已复制 {result.copied} 个 / {sizeText(result.bytes_copied)}，清理旧文件 {result.deleted} 个，

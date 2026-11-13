@@ -69,7 +69,7 @@ export default function SettingsPanel({
       <div className="section-heading">
         <div>
           <div className="section-kicker">05 / SYSTEM SETTINGS</div>
-          <h2>模型、ComfyUI 与本机状态</h2>
+          <h2>存储、ComfyUI 与本机状态</h2>
           <p>密钥只存本机安全存储，页面上永远不会显示；管理接口只监听本机（127.0.0.1）。</p>
         </div>
         <div className="section-icon"><Server size={17} /></div>
@@ -117,13 +117,30 @@ export default function SettingsPanel({
 
         <div className="settings-block">
           <h3><Activity size={14} /> 后台执行器状态</h3>
-          {system?.workers.length ? system.workers.map((worker) => (
-            <div className="worker-row" key={worker.worker_id}>
-              <span className={`status-led ${worker.online ? 'mock' : 'offline'}`} />
-              <div><b>{worker.worker_id}</b><span>{label(statusLabels, worker.status)} · {label(workerPhaseLabels, worker.current_phase ?? 'idle')} · 已处理 {worker.processed_count} 个</span></div>
-              <small>{worker.online ? '在线' : '离线'}</small>
-            </div>
-          )) : <div className="empty-inline">尚无 Worker 心跳。启动独立 Worker 后会在此显示。</div>}
+          {(() => {
+            // 心跳表会长期累积：在线的要立刻看见，离线的只是历史，塞进可滚动日志里。
+            const online = (system?.workers ?? []).filter((worker) => worker.online);
+            const offline = (system?.workers ?? []).filter((worker) => !worker.online);
+            const row = (worker: typeof offline[number]) => (
+              <div className="worker-row" key={worker.worker_id}>
+                <span className={`status-led ${worker.online ? 'mock' : 'offline'}`} />
+                <div><b>{worker.worker_id}</b><span>{label(statusLabels, worker.status)} · {label(workerPhaseLabels, worker.current_phase ?? 'idle')} · 已处理 {worker.processed_count} 个</span></div>
+                <small>{worker.online ? '在线' : '离线'}</small>
+              </div>
+            );
+            if (!system?.workers.length) {
+              return <div className="empty-inline">尚无 Worker 心跳。启动独立 Worker 后会在此显示。</div>;
+            }
+            return <>
+              {online.length > 0
+                ? online.map(row)
+                : <div className="empty-inline">当前没有在线 Worker；最近的心跳记录见下方历史。</div>}
+              {offline.length > 0 && <details className="inline-manual-path">
+                <summary>历史心跳 {offline.length} 条</summary>
+                <div className="worker-history">{offline.map(row)}</div>
+              </details>}
+            </>;
+          })()}
           {system?.last_error && <div className="error-line">{system.last_error}</div>}
         </div>
       </div>

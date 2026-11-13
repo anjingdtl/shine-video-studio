@@ -457,17 +457,34 @@ export default function ProductionSeriesPanel({
     const userChoseProfile = profileChosenByUser && !!explicitProfile;
     const tierPool = ref2vaProfiles.filter((p) => tierOfProfile(p.name) === quality);
     let target = profileId;
-    if (!userChoseProfile) {
-      if (tierPool.length === 0) {
-        onMessage('本作品还没有该质量档的生成方案：点下方「为本作品一键登记生成方案」补齐（登记不会改动已有方案）。', 'error');
+    let pool = tierPool;
+    let chosenProfile: WorkflowProfile | undefined;
+    if (!userChoseProfile && pool.length === 0) {
+      // 缺这一档方案时自动登记，不再让用户去找「一键登记」按钮。
+      onMessage('正在为本作品自动登记这一档生成方案…', 'success');
+      try {
+        await registerProfiles();
+        const fresh = await api<WorkflowProfile[]>(`/workflow-profiles?project_id=${projectId}`);
+        pool = fresh.filter((profile) => profile.mode.toLowerCase() === 'ref2va'
+          && tierOfProfile(profile.name) === quality);
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '自动登记生成方案失败，请到基础配置检查安装状态。', 'error');
         return;
       }
-      const sized = tierPool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
-      const pool = sized.length ? sized : tierPool;
-      target = pool[0]?.id ?? '';
+      if (pool.length === 0) {
+        onMessage('本机还没有这一档的生成方案：请到基础配置完成安装后再开拍。', 'error');
+        return;
+      }
+    }
+    if (!userChoseProfile) {
+      const sized = pool.filter((p) => 'width' in (p.parameter_map ?? {}) && 'height' in (p.parameter_map ?? {}));
+      const chosenPool = sized.length ? sized : pool;
+      chosenProfile = chosenPool[0];
+      target = chosenProfile?.id ?? '';
       if (target) { setProfileId(target); rememberProductionProfile(projectId, target); }
     }
-    const profile = ref2vaProfiles.find((p) => p.id === target);
+    // 刚自动登记的方案可能还没进入这一次渲染的 props：直接用刚取到的那一条。
+    const profile = chosenProfile ?? ref2vaProfiles.find((p) => p.id === target);
     if (!profile) { onMessage('本机还没有可用的生成方案：先点下方「为本作品一键登记生成方案」，或去基础配置完成安装。', 'error'); return; }
     const gate = gates[target];
     if (gate && !gate.selectable) {

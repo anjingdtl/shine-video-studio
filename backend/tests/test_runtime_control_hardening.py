@@ -440,8 +440,10 @@ def test_release_guards_every_installation_in_sorted_order(api, monkeypatch):
         ],
     )
 
-    def fake_release(db, *, actor, reason, locked_installations):
+    def fake_release(db, *, actor, reason, locked_installations, only=None):
         released["actor"] = actor
+        # A global release (no target) still guards every installation.
+        assert only is None
         assert locked_installations == {INSTALLATION, OTHER_INSTALLATION}
         return {"stopped": [], "refused": [], "released": []}
 

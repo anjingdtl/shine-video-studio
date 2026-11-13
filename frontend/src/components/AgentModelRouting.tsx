@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowRight, Eye, Mic, RotateCcw, Save, WandSparkles } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Eye, RotateCcw, Save, WandSparkles } from 'lucide-react';
 import type { AgentRoute, AgentRoutePreview, LlmRole, ProviderProfile } from '../api';
 import { routeRoleLabels } from '../constants';
 
 type Props = {
   roles: LlmRole[]; profiles: ProviderProfile[]; routes: AgentRoute[];
   revision: string; busy: boolean;
-  multimodal: Array<Record<string, unknown>>;
+  /** 独立能力（审片/语音）已经移到「独立能力」页，这里只保留文本工种。 */
+  multimodal?: Array<Record<string, unknown>>;
   onPreview: (updates: AgentRoutePreview['updates']) => Promise<AgentRoutePreview | null>;
   onApply: (preview: AgentRoutePreview) => Promise<boolean>;
 };
@@ -31,7 +32,7 @@ function roleDisplay(role: LlmRole): string {
 }
 
 export function AgentModelRouting({
-  roles, profiles, routes, revision, busy, multimodal, onPreview, onApply,
+  roles, profiles, routes, revision, busy, onPreview, onApply,
 }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [selectedRoles, setSelectedRoles] = useState<string[]>([]);
@@ -123,7 +124,6 @@ export function AgentModelRouting({
     await onApply(preview);
   }
 
-  const groupedMultimodal = multimodal.filter(item => item.role === 'vlm_reviewer' || item.role === 'asr_reviewer');
   return <section className="agent-routing" aria-label="Agent 模型分配">
     <div className="agent-routing-heading">
       <div>
@@ -210,12 +210,6 @@ export function AgentModelRouting({
       </button>}
     </div>}
 
-    <details className="llm-multimodal-note">
-      <summary>画面审片与语音核对（独立能力）</summary>
-      <p>VLM 和 ASR 不属于文本 Agent 路由矩阵，不会被这里的批量分配覆盖。</p>
-      {groupedMultimodal.length === 0 ? <p>当前未配置独立能力。</p> : groupedMultimodal.map(item => <p key={String(item.role)}>
-        {item.role === 'vlm_reviewer' ? <Eye size={13} /> : <Mic size={13} />} {String(item.label_zh ?? item.role)}：{String(item.status ?? '状态未知')} {item.profile_name ? `· ${String(item.profile_name)}` : ''}
-      </p>)}
-    </details>
+
   </section>;
 }
