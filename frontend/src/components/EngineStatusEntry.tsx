@@ -87,6 +87,7 @@ const REFUSAL_TEXTS: Record<string, string> = {
   EXTERNAL_INSTANCE_ON_PORT: '引擎端口已被外部程序占用。',
   COMFY_HANDOFF_OWNERSHIP_UNVERIFIED: '服务可见，但无法证明它属于本工作台，请核对受管实例。',
   COMFY_STARTUP_OWNERSHIP_UNVERIFIED: '启动进程的归属无法核实，已保留现场等待核对。',
+  COMFY_LISTENER_OWNERSHIP_UNVERIFIED: '监听端口的进程归属无法核实，已保留现场等待核对。',
   COMFY_REQUIRED_NODE_MISSING: '运行环境缺少本次所需节点，请先准备资源。',
   COMFY_STARTUP_ALREADY_RECORDED: '已有启动记录，请先核对恢复，系统不会重复启动。',
 };

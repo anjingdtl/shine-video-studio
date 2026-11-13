@@ -427,26 +427,42 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
     _require_project(db, project_id)
     from shine.comfyops.storage import disk_info, require_storage
     storage_root = require_storage(settings)
-    rows = register_catalog_packages(db, catalog, requested)
-    packages = []
-    for component_id in _resolve_closure(_component_map(catalog), requested):
-        row = rows[component_id]
-        packages.append({"id": row.id, "hash": row.sha256, "spec": row.payload})
-    size = sum(f["size"] for p in packages for f in p["spec"]["files"])
+    components = _component_map(catalog)
+    ordered = _resolve_closure(components, requested)
+    specs = [
+        _catalog_package_spec(components[component_id], {
+            dep: components[dep]["revision"] for dep in components[component_id].get("dependencies", [])
+        }).model_dump()
+        for component_id in ordered
+    ]
+    files = [f for spec in specs for f in spec["files"]]
+    size = sum(f["size"] for f in files)
     from shine.comfyops.installer import ControlledDownloader
 
+    # File hashing can take minutes. Do it before package registration opens
+    # a SQLite writer transaction, so Worker heartbeats remain unblocked.
     cache = storage_root / 'isolated-packages' / '.cache'
-    cached_bytes = sum(f['size'] for p in packages for f in p['spec']['files']
-                       if (cache / f['sha256']).is_file()
-                       and ControlledDownloader.valid(cache / f['sha256'], PackageFile.model_validate(f)))
+    cached = [f for f in files if (cache / f['sha256']).is_file()
+              and ControlledDownloader.valid(cache / f['sha256'], PackageFile.model_validate(f))]
+    cached_bytes = sum(f['size'] for f in cached)
+    if resource_context is not None:
+        cached_ids = {(f['sha256'], f['size']) for f in cached}
+        resource_context = {**resource_context, "authorized_download_files": sorted(
+            ({"sha256": f["sha256"], "size": f["size"]} for f in files
+             if (f["sha256"], f["size"]) not in cached_ids),
+            key=lambda item: (item["sha256"], item["size"]),
+        )}
     reserve = int(catalog.get('dependency_policy', {}).get('runtime_disk', {}).get('runtime_reserve_bytes', 0))
-    if WHEEL_COMPONENT_ID not in rows:
+    if WHEEL_COMPONENT_ID not in ordered:
         reserve = 0
     disk_required = size * 2 + reserve
     if disk_required > disk_free:
         raise HTTPException(409, "INSUFFICIENT_DISK")
     if disk_info(storage_root)['free_bytes'] < disk_required:
         raise HTTPException(409, "INSUFFICIENT_DISK_ON_HOST")
+    rows = register_catalog_packages(db, catalog, requested)
+    packages = [{"id": rows[component_id].id, "hash": rows[component_id].sha256,
+                 "spec": rows[component_id].payload} for component_id in ordered]
     payload = {
         "packages": packages,
         "download_bytes": size - cached_bytes,

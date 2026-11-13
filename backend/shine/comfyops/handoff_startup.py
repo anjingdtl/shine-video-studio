@@ -790,8 +790,11 @@ def start_managed_renderer(
                 add_audit(db, "comfy-worker", "COMFY_STARTUP_RUNNING", "job", job_id,
                           {"instance_id": instance_id, "pid": group.pid}, project_id=job.project_id)
     except BaseException as exc:
-        _fail(factory, instance_id, getattr(exc, "detail", None) or type(exc).__name__,
-              lease_id=lease_id, job_id=job_id)
+        reason = getattr(exc, "detail", None)
+        if not reason and isinstance(exc, ValueError) and re.fullmatch(r"COMFY_[A-Z0-9_]+", str(exc)):
+            # Preserve a known code, never arbitrary exception text or secrets.
+            reason = str(exc)
+        _fail(factory, instance_id, reason or type(exc).__name__, lease_id=lease_id, job_id=job_id)
         raise
     return ManagedRenderer(
         instance_id=instance_id,

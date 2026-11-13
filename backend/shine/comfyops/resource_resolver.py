@@ -172,6 +172,36 @@ def validate_resource_plan(db, settings, payload: dict) -> None:
     packages = payload.get("packages") or []
     if [item.get("id") for item in packages] != ordered:
         raise ValueError("RESOURCE_PLAN_COMPONENTS_CHANGED")
+    from pathlib import Path
+
+    from shine.comfyops.storage import require_storage
+    from shine.comfyops.verification_receipts import cache_candidates
+
+    selected_root = require_storage(settings)
+    if Path(str(payload.get("storage_root") or "")).resolve() != selected_root.resolve():
+        raise ValueError("DEPLOYMENT_STORAGE_CHANGED_RECREATE_PLAN")
+    cache = selected_root / "isolated-packages" / ".cache"
+    authorized = context.get("authorized_download_files")
+    if not isinstance(authorized, list) or any(
+        not isinstance(item, dict) or set(item) != {"sha256", "size"}
+        or not isinstance(item["sha256"], str) or type(item["size"]) is not int or item["size"] <= 0
+        for item in authorized
+    ):
+        raise ValueError("RESOURCE_PLAN_INVALID")
+    authorized_files = {(item["sha256"], item["size"]) for item in authorized}
+    approved_bytes = payload.get("download_bytes")
+    if type(approved_bytes) is not int or sum(item["size"] for item in authorized) != approved_bytes:
+        raise ValueError("RESOURCE_DOWNLOAD_CHANGED")
+    plan_files = {(entry["sha256"], entry["size"]) for package in packages
+                  for entry in (package.get("spec") or {}).get("files") or []}
+    if not authorized_files <= plan_files:
+        raise ValueError("RESOURCE_PLAN_COMPONENTS_CHANGED")
+    for package in packages:
+        files = (package.get("spec") or {}).get("files") or []
+        checked = cache_candidates(cache, {"files": files})["files"]
+        for entry, evidence in zip(files, checked, strict=True):
+            if not evidence.get("verified") and (entry["sha256"], entry["size"]) not in authorized_files:
+                raise ValueError("RESOURCE_DOWNLOAD_CHANGED")
     for package in packages:
         component = components[package["id"]]
         dependencies = {dep: str(components[dep].get("revision") or "")

@@ -172,8 +172,10 @@ def _run_attempt(factory, worker_id: str, attempt_id: str, *, settings, installe
                     validate_resource_plan(db, settings, plan.payload)
         except Exception as exc:  # noqa: BLE001 - fail closed on unreadable or changed evidence
             logger.warning("resource plan revalidation failed: %s", type(exc).__name__)
+            code = "RESOURCE_DOWNLOAD_CHANGED" if str(exc) == "RESOURCE_DOWNLOAD_CHANGED" else (
+                "RESOURCE_PLAN_REVALIDATION_FAILED")
             _finish(factory, attempt_id, worker_id, stage=NEEDS_REVIEW, status="FAILED_RECONCILE_REQUIRED",
-                    error_code="RESOURCE_PLAN_REVALIDATION_FAILED",
+                    error_code=code,
                     error_message="Resource identity could not be revalidated; no download was started.")
             return NEEDS_REVIEW
     with factory.begin() as db:
@@ -293,6 +295,17 @@ def _run_mock_attempt(factory, worker_id: str, attempt_id: str, plan: Installati
     return MOCK_VERIFIED
 
 
+def _resource_transfer_authorizer(context: dict):
+    """Permit only files explicitly frozen as missing in the approved plan."""
+    authorized = {(item["sha256"], item["size"]) for item in context["authorized_download_files"]}
+
+    def authorize(file):
+        if (file.sha256, file.size) not in authorized:
+            raise ValueError("RESOURCE_DOWNLOAD_CHANGED")
+
+    return authorize
+
+
 def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan, *, settings,
                        installer=None, ownership_lost: threading.Event | None = None) -> str:
     """Install every pinned package of the plan behind the pinned digests."""
@@ -300,7 +313,7 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
 
     packages = list(plan.payload.get("packages", []))
     recorder = ProgressRecorder(factory, attempt_id, worker_id)
-    counter = {"done": 0}
+    progress_files: dict[tuple[str, str], int] = {}
     stop = {"reason": None}
 
     def should_stop():
@@ -316,12 +329,11 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
         return stop["reason"]
 
     def progress(component, relative_path, confirmed, total):
-        recorder.report(
-            component=component,
-            file=relative_path,
-            confirmed=counter["done"] + int(confirmed or 0),
-            total=plan.payload.get("download_bytes"),
-        )
+        key = (component, relative_path)
+        if key in progress_files:
+            progress_files[key] = min(int(confirmed or 0), int(total or 0))
+        recorder.report(component=component, file=relative_path, confirmed=sum(progress_files.values()),
+                        total=plan.payload.get("download_bytes"))
 
     if installer is None:
         installer = _build_installer(settings, progress=progress, should_stop=should_stop)
@@ -329,6 +341,7 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
         if context:
             installer.downloader.source_preference = context["source_preference"]
             installer.downloader.probe_sources = context["source_preference"] == "AUTO"
+            installer.downloader.before_transfer = _resource_transfer_authorizer(context)
     _update(factory, attempt_id, worker_id, stage=DOWNLOADING, status=DOWNLOADING,
             current_component=None, current_file=None)
     recorder.report(component=None, confirmed=0, total=plan.payload.get("download_bytes"), force=True)
@@ -340,11 +353,29 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
             reason = should_stop()
             if reason:
                 raise InstallationInterrupted(reason)
+            from shine.comfyops.verification_receipts import cache_candidates
+
+            cache = settings.comfyops_dir / "isolated-packages" / ".cache"
+            entries = [item.model_dump() for item in spec.files]
+            checked = cache_candidates(cache, {"files": entries})["files"]
+            missing = [item for item, evidence in zip(spec.files, checked, strict=True)
+                       if not evidence.get("verified")]
+            for item in missing:
+                key = (spec.name, item.relative_path)
+                partial = cache / (item.sha256 + ".part")
+                try:
+                    partial_size = partial.stat().st_size
+                    progress_files[key] = partial_size if partial_size < item.size else 0
+                except OSError:
+                    progress_files[key] = 0
             _update(factory, attempt_id, worker_id, stage=DOWNLOADING, status=DOWNLOADING,
                     current_component=spec.name)
+            recorder.report(component=spec.name, confirmed=sum(progress_files.values()),
+                            total=plan.payload.get("download_bytes"), force=True)
             result = installer.install(spec)
-            counter["done"] += sum(f.size for f in spec.files)
-            recorder.report(component=spec.name, confirmed=counter["done"],
+            for item in missing:
+                progress_files[(spec.name, item.relative_path)] = item.size
+            recorder.report(component=spec.name, confirmed=sum(progress_files.values()),
                             total=plan.payload.get("download_bytes"), force=True)
             logger.info("installation_package_installed attempt_id=%s package=%s status=%s",
                         attempt_id, spec.name, result.get("status"))

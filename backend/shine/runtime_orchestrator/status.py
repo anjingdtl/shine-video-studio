@@ -343,7 +343,8 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
                           if record.get("missing_nodes") or record.get("reason")), None)
     missing = (diagnostic_h3 or {}).get("missing_nodes") or []
     reason = (diagnostic_h3 or {}).get("reason")
-    known_reasons = {"COMFY_HANDOFF_OWNERSHIP_UNVERIFIED", "COMFY_STARTUP_OWNERSHIP_UNVERIFIED",
+    known_reasons = {"COMFY_HANDOFF_OWNERSHIP_UNVERIFIED", "COMFY_LISTENER_OWNERSHIP_UNVERIFIED",
+                     "COMFY_STARTUP_OWNERSHIP_UNVERIFIED",
                      "COMFY_REQUIRED_NODE_MISSING", "COMFY_STARTUP_ALREADY_RECORDED"}
     reason_code = reason if isinstance(reason, str) and reason in known_reasons else None
     if missing:

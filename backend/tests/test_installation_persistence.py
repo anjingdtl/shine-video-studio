@@ -619,3 +619,57 @@ def test_mid_file_pause_preserves_partial_and_resumes_at_offset(tmp_path):
     assert LocalInstaller(root, downloader).install(package)["status"] == "AVAILABLE"
     assert transport.offsets == [0, 4 * 1024 * 1024]
     assert (root / "model/model.safetensors").read_bytes() == content
+
+
+def test_transfer_authorization_runs_before_any_network(tmp_path):
+    file = pinned_file()
+    class NoNetwork:
+        def stream(self, *args, **kwargs):
+            pytest.fail("network must not be contacted")
+    def reject(_file):
+        raise ValueError("RESOURCE_DOWNLOAD_CHANGED")
+    downloader = ControlledDownloader({"huggingface.co"}, NoNetwork(), before_transfer=reject)
+    with pytest.raises(ValueError, match="RESOURCE_DOWNLOAD_CHANGED"):
+        downloader.download(file, tmp_path)
+
+
+def test_cached_file_does_not_count_as_download_progress(prep, monkeypatch):
+    from shine.comfyops import installation, installation_worker
+    from shine.comfyops.local import queue_install_attempt
+
+    client, factory, settings = prep
+    project = create_project(client)
+    file_hash = hashlib.sha256(b"data").hexdigest()
+    model = package(client, files=[{"url": f"https://huggingface.co/Qwen/model/resolve/{REVISION}/model.bin",
+                                    "relative_path": "model.bin", "size": 4, "sha256": file_hash}])
+    plan = post(client, "/comfyops/install-plans", {"project_id": project, "package_ids": [model["id"]],
+                "disk_free": 10**12, "executor": "local"})
+    plan = approve(client, plan, "install", f"/comfyops/install-plans/{plan['id']}/approve")
+    attempt_id, _ = queue_install_attempt(factory, settings, plan["id"], plan["sha256"],
+                                           "v13-test-operator", "LOCAL_ISOLATED")
+    assert installation.claim_next_attempt(factory, "worker-test") == attempt_id
+    cache = settings.comfyops_dir / "isolated-packages" / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / file_hash).write_bytes(b"data")
+    monkeypatch.setattr(installation_worker, "local_execution_enabled", lambda: True)
+    assert installation_worker.run_attempt(factory, "worker-test", attempt_id, settings=settings,
+                                           installer=RecordingInstaller()) == "FILES_VERIFIED_PENDING_RUNTIME"
+    with factory() as db:
+        assert db.get(InstallationAttempt, attempt_id).confirmed_bytes == 0
+
+
+def test_frozen_download_file_set_rejects_newly_missing_cache_before_network(tmp_path):
+    from shine.comfyops.installation_worker import _resource_transfer_authorizer
+
+    missing_now = pinned_file(b"data")
+    originally_approved = pinned_file(b"other")
+    class NoNetwork:
+        def stream(self, *args, **kwargs):
+            pytest.fail("network must not be contacted")
+    authorize = _resource_transfer_authorizer({"authorized_download_files": [
+        {"sha256": originally_approved.sha256, "size": originally_approved.size},
+    ]})
+    downloader = ControlledDownloader({"huggingface.co"}, NoNetwork(), before_transfer=authorize)
+    with pytest.raises(ValueError, match="RESOURCE_DOWNLOAD_CHANGED"):
+        downloader.download(missing_now, tmp_path)
+    authorize(originally_approved)

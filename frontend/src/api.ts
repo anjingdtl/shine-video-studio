@@ -31,6 +31,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   RESOURCE_INSTALLATION_BUSY: '制作引擎或任务仍在使用本机资源，请等待空闲后继续。',
   RESOURCE_INSTANCE_UNVERIFIED: '当前受管安装实例无法核实，请在基础配置检查。',
   RESOURCE_PLAN_REVALIDATION_FAILED: '资源计划或安装实例已变化，请重新检测后核对。',
+  RESOURCE_DOWNLOAD_CHANGED: '已确认计划中的缓存文件发生变化，请重新检测并确认下载量。',
   INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',

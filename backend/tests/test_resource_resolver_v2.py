@@ -2,6 +2,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
+# Load before identity is patched, so snapshot imports never retain a fake.
+import shine.runtime_orchestrator.status  # noqa: F401
 from tests.conftest import create_project, make_studio
 
 
@@ -64,6 +66,13 @@ def test_candidate_plan_is_approval_required_and_revalidates_catalog(studio, tmp
         plan = db.get(InstallationPlan, response.json()["plan_id"])
         assert plan.payload["resource_context"]["source_preference"] == "MIRROR_FIRST"
         validate_resource_plan(db, settings, plan.payload)
+        context = dict(plan.payload["resource_context"])
+        originally_cached = context["authorized_download_files"][0]
+        context["authorized_download_files"] = context["authorized_download_files"][1:]
+        changed = {**plan.payload, "resource_context": context,
+                   "download_bytes": plan.payload["download_bytes"] - originally_cached["size"]}
+        with pytest.raises(ValueError, match="RESOURCE_DOWNLOAD_CHANGED"):
+            validate_resource_plan(db, settings, changed)
         bad = {**plan.payload, "packages": plan.payload["packages"][:-1]}
         with pytest.raises(ValueError, match="RESOURCE_PLAN_COMPONENTS_CHANGED"):
             validate_resource_plan(db, settings, bad)

@@ -329,6 +329,7 @@ class ControlledDownloader:
     primary_unreachable: bool = False
     source_preference: str = "AUTO"
     probe_sources: bool = False
+    before_transfer: Callable[[PackageFile], None] | None = None
     _source_timings: dict[str, float | None] = field(default_factory=dict, init=False, repr=False)
     # The wait before a retryable answer is asked again, and the jitter source.
     # Both are injectable so the production algorithm is testable without
@@ -350,6 +351,8 @@ class ControlledDownloader:
         final = cache / spec.sha256
         if final.exists() and self.valid(final, spec):
             return final
+        if self.before_transfer is not None:
+            self.before_transfer(spec)
         partial = cache / (spec.sha256 + ".part")
         if partial.exists() and partial.stat().st_size >= spec.size and not self.valid(partial, spec):
             partial.unlink()

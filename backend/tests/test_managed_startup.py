@@ -226,6 +226,7 @@ def test_startup_requires_a_closed_renderer(claimed, renderer, monkeypatch):
     with factory() as db:
         journal = db.get(AppSetting, STARTUP_PREFIX + "shine-test-renderer")
         assert journal.value["stage"] == "RECONCILE_REQUIRED"
+        assert journal.value["reason"] == "COMFY_LISTENER_OWNERSHIP_UNVERIFIED"
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
         assert db.get(ComfyInstance, "shine-test-renderer") is None
 
