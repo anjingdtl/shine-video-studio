@@ -17,9 +17,9 @@ from sqlalchemy import select
 from shine.api_common import DBSession
 from shine.api_operator import Operator
 from shine.director import streamline
-from shine.models import AgentArtifact
+from shine.models import AgentArtifact, utcnow
 from shine.schemas import APIModel
-from shine.services import require_project
+from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["director streamline"])
 
@@ -259,15 +259,154 @@ def edit_shot_row(project_id: str, shot_id: str, body: ShotRowEditBody, actor: O
                                       "message": "成片秒数装不下这一镜的台词"})
         update["duration_target_s"] = body.duration_target_s
     if body.continuity_mode is not None:
-        continuity = (spec.continuity.model_dump(mode="json")
-                      if spec.continuity else {})
-        continuity["mode"] = body.continuity_mode
-        update["continuity"] = continuity
+        # Keep the typed model: a raw dict here would round-trip through the
+        # node's serializer as an unexpected value and lose its field order.
+        from shine.schemas import ContinuityMode
+
+        update["continuity"] = spec.continuity.model_copy(
+            update={"mode": ContinuityMode(body.continuity_mode)})
     if not update:
         return {"shot_id": shot.id, "revision": shot.revision, "changed": False}
     result = revise_shot_record(db, project, shot, spec=spec.model_copy(update=update), actor=actor)
     db.commit()
     return {"shot_id": shot.id, "revision": result["revision"], "changed": True}
+
+
+class ShotPromptBody(APIModel):
+    """The prompt a person wrote for this shot.
+
+    ``freeze`` makes it the submitted text.  The official H3 guidance is
+    reviewed as warnings; nothing here refuses a save because of style.
+    """
+
+    prompt: str = Field(min_length=1, max_length=12000)
+    mode: str = Field(min_length=1, max_length=16)
+    freeze: bool = False
+    expected_revision: int | None = Field(default=None, ge=1)
+
+
+@router.get("/projects/{project_id}/director/storyboard/shots/{shot_id}/prompt")
+def shot_prompt(project_id: str, shot_id: str, db: DBSession,
+                compiler: int = 0) -> dict:
+    """The compiled preview, the current frozen revision, and advisory findings."""
+    from shine.director.prompt_revisions import shot_prompt_view
+    from shine.models import Shot
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    payload = shot_prompt_view(db, project, shot, compiler_preview=bool(compiler))
+    db.rollback()
+    return payload
+
+
+@router.post("/projects/{project_id}/director/storyboard/shots/{shot_id}/prompt", status_code=201)
+def save_shot_prompt(project_id: str, shot_id: str, body: ShotPromptBody, actor: Operator,
+                     db: DBSession) -> dict:
+    from shine.director.prompt_revisions import save_shot_prompt as save_prompt
+    from shine.models import Shot
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    result = save_prompt(
+        db, project, shot, prompt=body.prompt, mode=body.mode, freeze=body.freeze,
+        expected_revision=body.expected_revision, actor=actor,
+    )
+    db.commit()
+    db.refresh(shot)
+    return {**result, "shot_id": shot.id, "shot_revision": shot.revision}
+
+
+@router.post("/projects/{project_id}/director/storyboard/shots/{shot_id}/prompt/unfreeze")
+def unfreeze_shot_prompt(project_id: str, shot_id: str, actor: Operator, db: DBSession) -> dict:
+    from shine.director.prompt_revisions import unfreeze_shot_prompt as unfreeze
+    from shine.models import Shot
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    result = unfreeze(db, project, shot, actor=actor)
+    db.commit()
+    return result
+
+
+class RequestedAssetBody(APIModel):
+    """A material the person says this shot must contain."""
+
+    family: Literal["character", "scene", "prop"]
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    carrier: Literal["object", "paper", "screen"] | None = None
+
+
+@router.post("/projects/{project_id}/director/storyboard/shots/{shot_id}/requested-assets", status_code=201)
+def add_requested_asset(project_id: str, shot_id: str, body: RequestedAssetBody,
+                        actor: Operator, db: DBSession) -> dict:
+    """Record the requirement, then queue one bounded rewrite of this shot."""
+    from shine.director.shot_revision import add_requested_asset as add_asset
+    from shine.models import Shot
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    result = add_asset(db, project, shot, body.model_dump(mode="json"), actor=actor)
+    db.commit()
+    return result
+
+
+class SubtitleLineBody(APIModel):
+    start_s: float = Field(ge=0, allow_inf_nan=False)
+    end_s: float = Field(gt=0, allow_inf_nan=False)
+    text: str = Field(min_length=1, max_length=200)
+
+
+class ShotSubtitleBody(APIModel):
+    """Lines relative to this shot; they compile into the external subtitle track."""
+
+    lines: list[SubtitleLineBody] = Field(default_factory=list, max_length=12)
+    freeze: bool = False
+
+
+@router.get("/projects/{project_id}/director/storyboard/episodes/{episode_id}/subtitles")
+def episode_shot_subtitles(project_id: str, episode_id: str, db: DBSession) -> dict:
+    from shine.director.subtitles import episode_shot_subtitles as view
+
+    project = require_project(db, project_id)
+    return view(db, project, episode_id)
+
+
+@router.put("/projects/{project_id}/director/storyboard/shots/{shot_id}/subtitles")
+def save_shot_subtitles(project_id: str, shot_id: str, body: ShotSubtitleBody,
+                        actor: Operator, db: DBSession) -> dict:
+    from shine.director.subtitles import save_shot_subtitle_lines
+    from shine.models import Shot
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    result = save_shot_subtitle_lines(
+        db, project, shot, [line.model_dump(mode="json") for line in body.lines],
+        freeze=body.freeze, actor=actor,
+    )
+    db.commit()
+    return result
+
+
+@router.post("/projects/{project_id}/director/storyboard/episodes/{episode_id}/subtitles/compile", status_code=201)
+def compile_episode_subtitles(project_id: str, episode_id: str, actor: Operator,
+                              db: DBSession) -> dict:
+    from shine.director.subtitles import compile_episode_subtitle_track
+
+    project = require_project(db, project_id)
+    result = compile_episode_subtitle_track(db, project, episode_id, actor=actor)
+    db.commit()
+    return result
 
 
 class EpisodeConfirmBody(APIModel):
@@ -567,6 +706,201 @@ def _material_receipt(db, project_id: str, request_key: str) -> dict | None:
     return None
 
 
+class MaterialPromptBody(APIModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    negative_prompt: str = Field(default="", max_length=1200)
+
+
+def _qwen_prompt_warnings(prompt: str, negative_prompt: str) -> list[str]:
+    """Advisory findings for a hand-written image prompt (the standard is guidance)."""
+    import re
+
+    from shine.materialprep import qwen_image_standard as standard
+    from shine.materialprep.image_prompts import (
+        MAX_COMPOSED_NEGATIVE_CHARS,
+        MAX_COMPOSED_PROMPT_CHARS,
+    )
+
+    warnings: list[str] = []
+    slogan_hit = [
+        slogan for slogan in standard.QUALITY_SLOGANS
+        if re.search(r"(?i)\b" + re.escape(slogan) + r"\b", prompt)
+    ]
+    if slogan_hit:
+        warnings.append("提示词包含质量口号（无画面信息）：" + "、".join(slogan_hit[:6]))
+    if not standard.is_prompt_language(prompt):
+        warnings.append("提示词含中文；Qwen-Image-2.1 按英文自然句读图，中文通常会被削弱")
+    if len(prompt) > MAX_COMPOSED_PROMPT_CHARS:
+        warnings.append(f"提示词 {len(prompt)} 字符，超过建议上限 {MAX_COMPOSED_PROMPT_CHARS}")
+    if len(negative_prompt) > MAX_COMPOSED_NEGATIVE_CHARS:
+        warnings.append(f"负向提示词 {len(negative_prompt)} 字符，超过建议上限 {MAX_COMPOSED_NEGATIVE_CHARS}")
+    if not prompt.strip().endswith((".", "!", "?")):
+        warnings.append("建议用完整句子收尾；Qwen-Image-2.1 按自然句理解画面")
+    return warnings
+
+
+def _requirement_or_404(db, project_id: str, requirement_id: str):
+    from shine.comfyops.models import AssetRequirement
+
+    row = db.get(AssetRequirement, requirement_id)
+    if row is None or row.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
+    return row
+
+
+def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]:
+    """The prompt the renderer would use now, plus the reason it is unavailable.
+
+    The preview and the render share one composer, so what the person edits is
+    what the renderer sends.
+    """
+    from shine.comfyops.models import PreProductionPlan
+    from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
+    from shine.materialprep.models import MaterialItem
+    from shine.materialprep.prompt_source import (
+        PromptSourceError,
+        compose_requirement_prompt,
+        film_style_for,
+        frozen_prompt,
+    )
+    from shine.models import StyleVersion
+
+    payload = dict(requirement.payload or {})
+    item = db.scalars(select(MaterialItem).where(
+        MaterialItem.project_id == requirement.project_id,
+        MaterialItem.requirement_id == requirement.id,
+    ).order_by(MaterialItem.created_at.desc())).first()
+    brief_raw = ((item.payload or {}).get("brief") if item is not None else None) or payload.get("brief")
+    plan = db.get(PreProductionPlan, requirement.plan_id) if requirement.plan_id else None
+    direction = MaterialVisualDirection.model_validate(
+        (plan.payload or {}).get("visual_direction") or {} if plan is not None else {})
+    style = db.scalars(select(StyleVersion).where(
+        StyleVersion.project_id == requirement.project_id,
+        StyleVersion.frozen_at.is_not(None),
+    ).order_by(StyleVersion.version.desc())).first()
+    try:
+        composed = compose_requirement_prompt(
+            family=str(payload.get("family") or ""),
+            brief=MaterialImageBrief.model_validate(brief_raw) if brief_raw else None,
+            visual_direction=direction,
+            requirement_name=str(payload.get("entity_id") or ""),
+            carrier=payload.get("carrier"),
+            film_style=film_style_for((style.snapshot if style is not None else {}) or {}),
+            description=str(payload.get("description") or ""),
+            manual=frozen_prompt(payload),
+        )
+    except PromptSourceError as exc:
+        code = "MATERIAL_BRIEF_NOT_GENERATED" if exc.code == "MATERIAL_BRIEF_MISSING" else exc.code
+        return "", "", code
+    except ValueError:
+        return "", "", "MATERIAL_BRIEF_INVALID"
+    return composed.prompt, composed.negative_prompt, None
+
+
+@router.get("/projects/{project_id}/director/materials/requirements/{requirement_id}/prompt")
+def material_requirement_prompt(project_id: str, requirement_id: str, db: DBSession) -> dict:
+    """The frozen prompt, or the prompt the current brief would compose."""
+    from shine.materialprep import qwen_image_standard as standard
+
+    require_project(db, project_id)
+    requirement = _requirement_or_404(db, project_id, requirement_id)
+    payload = dict(requirement.payload or {})
+    frozen = dict(payload.get("manual_prompt") or {})
+    prompt, negative, blocked = _composed_requirement_prompt(db, requirement)
+    if frozen.get("prompt"):
+        prompt, negative = frozen["prompt"], frozen.get("negative_prompt") or ""
+        source = "frozen"
+    elif prompt:
+        source = "composed"
+    else:
+        source = "empty"
+    return {
+        "requirement_id": requirement.id,
+        "family": payload.get("family"),
+        "entity_id": payload.get("entity_id"),
+        "description": payload.get("description") or "",
+        "prompt": prompt,
+        "negative_prompt": negative,
+        "source": source,
+        "blocked": blocked,
+        "frozen": ({
+            "sha256": frozen.get("sha256"),
+            "frozen_at": frozen.get("frozen_at"),
+            "frozen_by": frozen.get("frozen_by"),
+            "chars": len(frozen.get("prompt") or ""),
+        } if frozen.get("prompt") else None),
+        "warnings": _qwen_prompt_warnings(prompt, negative) if prompt else [],
+        "standard": {
+            "standard_id": standard.STANDARD_ID,
+            "standard_version": standard.STANDARD_VERSION,
+            "layer_order": list(standard.LAYER_ORDER),
+            "quality_slogans": list(standard.QUALITY_SLOGANS),
+        },
+    }
+
+
+@router.put("/projects/{project_id}/director/materials/requirements/{requirement_id}/prompt")
+def freeze_material_requirement_prompt(project_id: str, requirement_id: str,
+                                       body: MaterialPromptBody, actor: Operator,
+                                       db: DBSession) -> dict:
+    """Freeze a hand-written prompt; the worker then skips the brief and uses it."""
+    import hashlib
+
+    from shine.comfy.workflow import graph_hash
+    from shine.materialprep import qwen_image_standard as standard
+
+    require_project(db, project_id)
+    requirement = _requirement_or_404(db, project_id, requirement_id)
+    prompt = body.prompt.strip()
+    if not prompt:
+        raise HTTPException(422, {"code": "MATERIAL_PROMPT_EMPTY", "message": "提示词不能为空"})
+    warnings = _qwen_prompt_warnings(prompt, body.negative_prompt)
+    payload = dict(requirement.payload or {})
+    payload["manual_prompt"] = {
+        "prompt": prompt,
+        "negative_prompt": body.negative_prompt.strip(),
+        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "standard_version": standard.STANDARD_VERSION,
+        "frozen_at": utcnow().isoformat() + "Z",
+        "frozen_by": actor,
+        "warnings": warnings,
+    }
+    requirement.payload = payload
+    requirement.sha256 = graph_hash(payload)
+    add_audit(db, actor, "MATERIAL_PROMPT_FROZEN", "asset_requirement", requirement.id,
+              {"family": payload.get("family"), "entity_id": payload.get("entity_id"),
+               "prompt_sha256": payload["manual_prompt"]["sha256"],
+               "warnings": len(warnings)},
+              project_id=project_id)
+    db.commit()
+    return {
+        "requirement_id": requirement.id,
+        "prompt": prompt,
+        "negative_prompt": payload["manual_prompt"]["negative_prompt"],
+        "frozen": payload["manual_prompt"],
+        "warnings": warnings,
+    }
+
+
+@router.delete("/projects/{project_id}/director/materials/requirements/{requirement_id}/prompt")
+def unfreeze_material_requirement_prompt(project_id: str, requirement_id: str,
+                                         actor: Operator, db: DBSession) -> dict:
+    """Return this requirement to the producer's brief."""
+    from shine.comfy.workflow import graph_hash
+
+    require_project(db, project_id)
+    requirement = _requirement_or_404(db, project_id, requirement_id)
+    payload = dict(requirement.payload or {})
+    removed = payload.pop("manual_prompt", None)
+    if removed is not None:
+        requirement.payload = payload
+        requirement.sha256 = graph_hash(payload)
+        add_audit(db, actor, "MATERIAL_PROMPT_UNFROZEN", "asset_requirement", requirement.id,
+                  {"prompt_sha256": removed.get("sha256")}, project_id=project_id)
+    db.commit()
+    return {"requirement_id": requirement.id, "unfrozen": removed is not None}
+
+
 @router.get("/projects/{project_id}/director/materials/requirements")
 def director_material_requirements(project_id: str, db: DBSession,
                                    episode_ids: str | None = None) -> dict:
@@ -599,6 +933,7 @@ def director_material_requirements(project_id: str, db: DBSession,
         # suggestion.  The confirmed binding wins, so the row's thumbnail and
         # status update the moment an upload is adopted.
         matched_id = payload.get("bound_asset_id") or payload.get("matched_master_id")
+        manual_prompt = dict(payload.get("manual_prompt") or {})
         requirements.append({
             "requirement_id": row.id,
             "family": payload.get("family"),
@@ -607,7 +942,13 @@ def director_material_requirements(project_id: str, db: DBSession,
             "description": payload.get("description") or "",
             "critical": bool(payload.get("critical", True)),
             "optional": bool(payload.get("optional", False)),
+            "user_specified": bool(payload.get("user_specified")),
             "strategy": payload.get("strategy"),
+            "manual_prompt": ({
+                "sha256": manual_prompt.get("sha256"),
+                "chars": len(str(manual_prompt.get("prompt") or "")),
+                "frozen_at": manual_prompt.get("frozen_at"),
+            } if manual_prompt.get("prompt") else None),
             "variants": list(payload.get("variants") or []),
             "used_shot_ids": list(payload.get("used_shot_ids") or []),
             "used_shot_count": len(payload.get("used_shot_ids") or []),

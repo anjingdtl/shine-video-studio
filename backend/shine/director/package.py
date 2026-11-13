@@ -46,7 +46,7 @@ from shine.models import (
     WorkflowProfile,
     utcnow,
 )
-from shine.schemas import ShotSpec
+from shine.schemas import GenerationMode, ShotSpec
 
 PACKAGE_SCHEMA_VERSION = "1.0"
 DEFAULT_POLICY: dict[str, Any] = {
@@ -462,7 +462,8 @@ def _profile_execution_drift(pinned: dict[str, Any], profile: WorkflowProfile) -
 
 
 def _compiled_shot_blockers(
-    db: Session, project: Project, manifest: dict[str, Any], episodes: list[Any]
+    db: Session, project: Project, manifest: dict[str, Any], episodes: list[Any],
+    policy_warnings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Re-run the one H3 compiler over every shot this package freezes.
 
@@ -477,11 +478,13 @@ def _compiled_shot_blockers(
     """
     from shine.comfy.capabilities import continuity_capability, profile_metadata
     from shine.h3.compiler import H3PromptCompiler, PromptCompilationError
-    from shine.schemas import GenerationMode, ShotBindingInput, StyleBible
+    from shine.schemas import ShotBindingInput, StyleBible
     from shine.services import build_reference_manifest, order_bindings_for_cast
 
     binding = manifest.get("binding") or {}
     profile = db.get(WorkflowProfile, binding.get("workflow_profile_id") or "")
+    if policy_warnings is None:
+        policy_warnings = []
     pinned_style = manifest.get("style") or {}
     style_row = db.get(StyleVersion, pinned_style.get("style_version_id") or "")
     if profile is None or style_row is None:
@@ -534,9 +537,11 @@ def _compiled_shot_blockers(
                 ))
             if len(assets) != len(entry.get("bindings", [])):
                 continue  # ASSET_MISSING already reported
+            from shine.director.prompt_revisions import resolve_manual_prompt
+
+            ordered = order_bindings_for_cast(bindings, list(spec.characters), assets)
+            reference_manifest = build_reference_manifest(ordered, assets)
             try:
-                ordered = order_bindings_for_cast(bindings, list(spec.characters), assets)
-                reference_manifest = build_reference_manifest(ordered, assets)
                 compiled = compiler.compile(
                     spec=spec, style=bible, manifest=reference_manifest,
                     project_language=project.language, mode_hint=mode_hint,
@@ -550,13 +555,40 @@ def _compiled_shot_blockers(
                     details=exc.details,
                 ))
                 continue
-            if profile.mode and compiled.mode.value.lower() != profile.mode.lower():
+            # The project renders Ref2VA only.  A shot that would fall back to
+            # text-only has no reference to anchor identity, so it is named here
+            # before a run is started rather than refused later at job creation.
+            from shine.h3.mode_policy import MODE_POLICY_MESSAGE, REQUIRED_GENERATION_MODE
+
+            if compiled.mode != REQUIRED_GENERATION_MODE:
+                problems.append(_blocker(
+                    "PROJECT_REQUIRES_REF2VA",
+                    f"镜头「{shot.name}」没有可用的参考素材，本项目只允许 Ref2VA。{MODE_POLICY_MESSAGE}",
+                    shot_id=shot.id,
+                    inferred_mode=compiled.mode.value,
+                    required_mode=REQUIRED_GENERATION_MODE.value,
+                ))
+                continue
+            # The same resolver the render path uses decides whether the
+            # person's frozen text is the one being submitted.  A prompt that no
+            # longer describes this shot is not a blocker: the compiler's text
+            # is used instead and the person is told which fact moved.
+            resolution = resolve_manual_prompt(
+                db, shot, compiled=compiled, manifest=reference_manifest, spec=spec)
+            compiled_mode = compiled.mode
+            if resolution.status:
+                policy_warnings.append({
+                    "code": resolution.status,
+                    "shot_id": shot.id,
+                    "message": f"镜头「{shot.name}」的人工提示词暂时不生效，已改用编译器版本",
+                })
+            if profile.mode and compiled_mode.value.lower() != profile.mode.lower():
                 problems.append(_blocker(
                     "H3_MODE_REFERENCE_MISMATCH",
-                    f"镜头「{shot.name}」编译出 {compiled.mode.value}，生成方案登记的是 {profile.mode}",
+                    f"镜头「{shot.name}」编译出 {compiled_mode.value}，生成方案登记的是 {profile.mode}",
                     shot_id=shot.id,
                     mode=profile.mode,
-                    compiled_mode=compiled.mode.value,
+                    compiled_mode=compiled_mode.value,
                 ))
                 continue
             try:
@@ -785,8 +817,15 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
         blockers.append(_blocker("PACKAGE_HAS_NO_EPISODES", "导演包没有分集"))
     # Static impossibility is named before anything is queued.  A dynamic
     # continuity reference stays a declared dependency instead of a refusal.
-    compile_problems = _compiled_shot_blockers(db, project, manifest, episodes)
+    policy_warnings: list[dict[str, Any]] = []
+    compile_problems = _compiled_shot_blockers(
+        db, project, manifest, episodes, policy_warnings)
     blockers.extend(compile_problems)
+    if policy_warnings:
+        # A person's frozen prompt that no longer describes this shot is a fact
+        # the person must see, not a silent fallback.
+        package.manifest = {**(package.manifest or {}), "prompt_policy_warnings": policy_warnings}
+        package.sha256 = digest_of(package.manifest)
     lineage = manifest.get("creative_lineage") or {}
     if not lineage:
         # A four-stage delivery that predates the lineage contract cannot

@@ -16,13 +16,14 @@ from shine.schemas import (
     ShotSpec,
     StyleBible,
 )
+from shine.script_labels import PLANNER_SCENE_LABELS
 
 SPEAKER_PATTERN = re.compile(r"^\s*([^\s：:]{1,20})\s*[：:]\s*(.+)$")
 SCENE_PATTERN = re.compile(
     r"^\s*(?:场景|第[一二三四五六七八九十百0-9]+场|INT\.|EXT\.|内景|外景|SCENE\b)",
     re.IGNORECASE,
 )
-NON_SPEAKER_LABELS = {"场景", "地点", "时间", "人物", "动作", "旁白", "字幕", "备注", "镜头"}
+NON_SPEAKER_LABELS = set(PLANNER_SCENE_LABELS)
 
 
 @dataclass

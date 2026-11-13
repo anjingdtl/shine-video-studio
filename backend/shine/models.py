@@ -189,6 +189,9 @@ class SubtitleTrack(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
+    #: Set when the revision was compiled for one episode's reel.  A revision
+    #: without it keeps the legacy project-wide behaviour.
+    episode_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     cues: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     srt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ass: Mapped[str] = mapped_column(Text, default="", nullable=False)

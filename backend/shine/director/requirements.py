@@ -35,6 +35,7 @@ from shine.asset_identity import (
     resolve_character_asset,
     split_character_names,
 )
+from shine.h3.narrator import is_narrator_speaker
 from shine.models import AgentArtifact, Asset, Project, Shot, WorkflowProfile
 
 CATALOG_KIND = "MaterialEntityCatalog"
@@ -143,7 +144,10 @@ def _character_names(spec: dict[str, Any]) -> list[str]:
         names.extend(split_character_names(entry))
     for line in spec.get("dialogue") or []:
         names.extend(split_character_names(line.get("speaker_id") or ""))
-    return list(dict.fromkeys(name for name in names if name))
+    # The narrator speaks without a picture reference, so it is not a character
+    # material: requiring a "narrator portrait" would buy an image nobody sees.
+    return list(dict.fromkeys(name for name in names
+                              if name and not is_narrator_speaker(name)))
 
 
 def _master_for(family: str, name: str, masters: list[Asset]) -> Asset | None:
@@ -235,11 +239,13 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
 
     def note(family: str, name: str, *, shot_id: str, episode_id: str,
              description: str = "", variant: str | None = None,
-             cited_by_shot: bool = False) -> None:
+             cited_by_shot: bool = False, user_specified: bool = False) -> None:
         entry = usage.setdefault((family, name), {
             "family": family, "entity_id": name, "description": "",
             "shot_ids": [], "episode_ids": [], "variants": [], "cited_by_shot": False,
+            "user_specified": False,
         })
+        entry["user_specified"] = entry.get("user_specified", False) or user_specified
         if shot_id not in entry["shot_ids"]:
             entry["shot_ids"].append(shot_id)
         if episode_id not in entry["episode_ids"]:
@@ -285,6 +291,19 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                          or identity_by_name.get(reference) or "",
                          variant=(reference if canonical != reference else None),
                          cited_by_shot=True)
+                # A material the person explicitly added to this shot.  It is a
+                # real requirement even though no approved master exists yet:
+                # that is exactly what the material stage is for.
+                for requested in spec.get("requested_assets") or []:
+                    family = str(requested.get("family") or "")
+                    name = str(requested.get("name") or "").strip()
+                    if family not in {"character", "scene", "prop"} or not name:
+                        continue
+                    canonical = aliases.get(character_reference_key(name), name)
+                    _note_local(local, family, canonical, cited=True)
+                    note(family, canonical, shot_id=shot.id, episode_id=episode.episode_id,
+                         description=str(requested.get("description") or "")[:600],
+                         cited_by_shot=True, user_specified=True)
                 # A reference the shot promised by id is a real need whatever
                 # the family: the shot already names it.
                 for asset_id in spec.get("required_asset_ids") or []:
@@ -357,7 +376,8 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
     rows = []
     for (family, name), entry in sorted(usage.items(), key=lambda item: (item[0][0], item[0][1])):
         master = _master_for(family, name, masters)
-        critical = _is_critical(family, capacity, cited_by_shot=entry["cited_by_shot"])
+        critical = entry.get("user_specified") or _is_critical(
+            family, capacity, cited_by_shot=entry["cited_by_shot"])
         rows.append({
             **entry,
             "family": family,

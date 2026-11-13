@@ -106,6 +106,16 @@ def normalized_post_contract(
         )
         if track is None or track.status != "APPROVED":
             raise HTTPException(409, "EPISODE_SUBTITLE_NOT_APPROVED")
+        from shine.director.subtitles import track_matches_episode
+
+        if not track_matches_episode(track, episode.episode_id):
+            # A revision compiled for another episode's reel has its own zero
+            # point; compositing it here would put the wrong words on the picture.
+            raise HTTPException(409, {
+                "code": "EPISODE_SUBTITLE_EPISODE_MISMATCH",
+                "message": "这一版字幕是为另一集生成的，不能用于本集",
+                "track_episode_id": track.episode_id,
+            })
         pinned["subtitle_sha256"] = track.sha256
     return pinned
 
@@ -372,6 +382,10 @@ def run_episode_delivery(
                 )
                 if track is None or track.status != "APPROVED":
                     raise DeliveryBlock("EPISODE_SUBTITLE_NOT_APPROVED")
+                from shine.director.subtitles import track_matches_episode
+
+                if not track_matches_episode(track, order.scope_id or ""):
+                    raise DeliveryBlock("EPISODE_SUBTITLE_EPISODE_MISMATCH")
                 if order.subtitle_sha256 and track.sha256 != order.subtitle_sha256:
                     # The order pinned one subtitle identity; a different text
                     # under the same revision number is not what was confirmed.

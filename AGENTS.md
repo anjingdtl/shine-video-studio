@@ -11,6 +11,7 @@ Before editing code, read in order:
 
 ## Product invariants
 - Local MiniMax-H3 through ComfyUI is the only official video-generation execution path. Mock adapters are for development/testing, never presented as real video.
+- **Ref2VA only.** Every real render is reference-driven; T2VA and the first/last-frame modes are not allowed. `shine/h3/mode_policy.py` is the single decision point, `make_render_request` is the single enforcement point, and package readiness asks the same question. A shot without a usable reference is refused by name (`PROJECT_REQUIRES_REF2VA`), never silently rendered from text alone.
 - Windows local-first Web UI: FastAPI + React/TypeScript + SQLite, with a separately restartable worker.
 - Independent Agent Runtime; configurable LLM/VLM API providers and capability detection.
 - User-uploaded and user-approved character, location, prop and voice assets only. Agents must not silently create, replace, approve or mutate master assets. Technical derivatives are permitted with provenance, but cannot be promoted automatically.

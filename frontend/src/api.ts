@@ -1302,7 +1302,8 @@ export const generateStoryboardBook = (projectId: string, body: {
 
 export const confirmStoryboardBook = (projectId: string, body: {
   plan_version: number; expected_sha256: string;
-  style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number } | null,
+  style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number;
+    narration_level?: 'none' | 'low' | 'high' } | null,
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
 
@@ -1324,6 +1325,10 @@ export type EpisodeShotRow = {
   continuity_mode: 'cut' | 'last_frame' | string;
   previous_shot_id: string | null;
   required_asset_ids: string[];
+  requested_assets?: Array<{ family: string; name: string; description?: string }>;
+  prompt?: { status: 'compiled' | 'frozen' | 'inactive' | string; reason?: string | null;
+    revision: number | null; mode: string | null; chars: number | null; frozen_at: string | null };
+  subtitle?: { status: string; revision: number; line_count: number };
 };
 
 export type EpisodeStoryboardState = {
@@ -1385,6 +1390,8 @@ export type ShotMaterialRequirement = {
   optional: boolean;
   /** 镜头已按 id 承诺的引用：这类需求是硬性的，不是建议。 */
   cited_by_shot?: boolean;
+  user_specified?: boolean;
+  manual_prompt?: { sha256: string | null; chars: number; frozen_at: string | null } | null;
   /** 同一角色在本范围的造型/别名变体，只作展示，不另建主素材。 */
   variants?: string[];
   used_shot_ids: string[];
@@ -1415,6 +1422,124 @@ export const controlDirectorStoryboardTask = (projectId: string, taskId: string,
   action: 'pause' | 'resume' | 'cancel', expectedStateVersion: number) =>
   api<Record<string, unknown>>(`/projects/${projectId}/story-preparation/tasks/${taskId}/${action}`,
     json('POST', { expected_state_version: expectedStateVersion }));
+
+/* ------------------------------------------------------------------------- *
+ * ③ 每镜人工内容：H3 提示词、用户指定素材、外挂字幕
+ * ------------------------------------------------------------------------- */
+
+export type SpecWarning = { code: string; severity: string; message: string; field?: string };
+
+export type ShotPromptFrozen = {
+  id: string; revision: number; shot_revision: number; mode: string;
+  prompt: string; sections: Record<string, string>; prompt_sha256: string;
+  spec_report: SpecWarning[]; frozen_at: string | null;
+};
+
+export type ShotPromptView = {
+  shot_id: string;
+  shot_revision: number;
+  duration_target_s: number;
+  characters: string[];
+  dialogue: Array<{ speaker_id: string; text: string; start_s: number; end_s: number }>;
+  has_bindings: boolean;
+  mode: string | null;
+  prompt: string;
+  sections: Record<string, string>;
+  prompt_sha256: string | null;
+  labels: Record<string, string>;
+  warnings: string[];
+  compiler_version: string | null;
+  source?: 'compiler' | 'manual' | string;
+  manual_status?: string | null;
+  blocked?: { code?: string; message?: string };
+  frozen: ShotPromptFrozen | null;
+};
+
+export const fetchShotPrompt = (projectId: string, shotId: string, compiler = false) =>
+  api<ShotPromptView>(
+    `/projects/${projectId}/director/storyboard/shots/${shotId}/prompt${compiler ? '?compiler=1' : ''}`);
+
+export const saveShotPrompt = (projectId: string, shotId: string, body: {
+  prompt: string; mode: string; freeze: boolean; expected_revision?: number;
+}) => api<{ shot_id: string; revision: number; shot_revision: number; status: string;
+  prompt_sha256: string; sections: Record<string, string>; warnings: SpecWarning[] }>(
+  `/projects/${projectId}/director/storyboard/shots/${shotId}/prompt`, json('POST', body));
+
+export const unfreezeShotPrompt = (projectId: string, shotId: string) =>
+  api<{ shot_id: string; unfrozen: boolean }>(
+    `/projects/${projectId}/director/storyboard/shots/${shotId}/prompt/unfreeze`, json('POST', {}));
+
+export type RequestedAssetInput = {
+  family: 'character' | 'scene' | 'prop';
+  name: string;
+  description?: string;
+  carrier?: 'object' | 'paper' | 'screen' | null;
+};
+
+export const addShotRequestedAsset = (projectId: string, shotId: string, body: RequestedAssetInput) =>
+  api<{ shot_id: string; shot_revision: number; task_id: string; task_status: string;
+    task_created: boolean; requested_assets: RequestedAssetInput[] }>(
+  `/projects/${projectId}/director/storyboard/shots/${shotId}/requested-assets`, json('POST', body));
+
+export type ShotSubtitleLine = { start_s: number; end_s: number; text: string };
+
+export type EpisodeSubtitleRow = {
+  shot_id: string; position: number; name: string; duration_target_s: number;
+  lines: ShotSubtitleLine[]; revision: number; status: string;
+  sha256: string | null; frozen_at: string | null;
+};
+
+export type EpisodeSubtitlesView = {
+  episode_id: string; shots: EpisodeSubtitleRow[];
+  configured_count: number; frozen_count: number;
+};
+
+export const fetchEpisodeSubtitles = (projectId: string, episodeId: string) =>
+  api<EpisodeSubtitlesView>(
+    `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/subtitles`);
+
+export const saveShotSubtitle = (projectId: string, shotId: string,
+  body: { lines: ShotSubtitleLine[]; freeze: boolean }) =>
+  api<{ shot_id: string; episode_id: string; revision: number; status: string;
+    lines: ShotSubtitleLine[]; sha256: string; frozen_at: string | null }>(
+  `/projects/${projectId}/director/storyboard/shots/${shotId}/subtitles`, json('PUT', body));
+
+export const compileEpisodeSubtitles = (projectId: string, episodeId: string) =>
+  api<{ revision: number; episode_id: string; status: string; cue_count: number;
+    basis: 'planned' | 'actual'; warnings: string[]; sha256: string }>(
+  `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/subtitles/compile`,
+  json('POST', {}));
+
+/* ------------------------------------------------------------------------- *
+ * ④ 素材提示词人工修订（Qwen-Image-2.1 规范为软检查）
+ * ------------------------------------------------------------------------- */
+
+export type MaterialPromptView = {
+  requirement_id: string; family: string; entity_id: string | null; description: string;
+  prompt: string; negative_prompt: string;
+  source: 'frozen' | 'composed' | 'empty';
+  blocked: string | null;
+  frozen: { sha256: string; frozen_at: string; frozen_by: string; chars: number } | null;
+  warnings: string[];
+  standard: { standard_id: string; standard_version: string; layer_order: string[];
+    quality_slogans: string[] };
+};
+
+export const fetchMaterialPrompt = (projectId: string, requirementId: string) =>
+  api<MaterialPromptView>(
+    `/projects/${projectId}/director/materials/requirements/${requirementId}/prompt`);
+
+export const saveMaterialPrompt = (projectId: string, requirementId: string,
+  body: { prompt: string; negative_prompt: string }) =>
+  api<{ requirement_id: string; prompt: string; negative_prompt: string;
+    frozen: { sha256: string }; warnings: string[] }>(
+  `/projects/${projectId}/director/materials/requirements/${requirementId}/prompt`,
+  json('PUT', body));
+
+export const unfreezeMaterialPrompt = (projectId: string, requirementId: string) =>
+  api<{ requirement_id: string; unfrozen: boolean }>(
+    `/projects/${projectId}/director/materials/requirements/${requirementId}/prompt`,
+    { method: 'DELETE' });
 
 /* ------------------------------------------------------------------------- *
  * V2 导演总览：一份只读投影，项目与按集两个粒度
@@ -1538,6 +1663,10 @@ export type DirectorMaterialRequirement = {
   critical: boolean;
   optional: boolean;
   cited_by_shot?: boolean;
+  /** 用户在镜头页明确指定要用的素材：不是建议，不能静默跳过。 */
+  user_specified?: boolean;
+  /** 已冻结的人工提示词；下一次出图原样使用。 */
+  manual_prompt?: { sha256: string | null; chars: number; frozen_at: string | null } | null;
   variants: string[];
   used_shot_ids: string[];
   used_shot_count: number;

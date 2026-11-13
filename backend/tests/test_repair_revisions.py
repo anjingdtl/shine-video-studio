@@ -24,7 +24,7 @@ from shine.worker import run_one
 from tests.conftest import (
     create_comfy_job,
     create_project,
-    create_shot,
+    create_referenced_shot,
     ffmpeg_executable,
     ffprobe_executable,
     freeze_style,
@@ -266,11 +266,11 @@ def _prepare_project(client, *, auto_repair: bool = True):
     )
     assert settings.status_code == 200, settings.text
     style = freeze_style(client, project_id)
-    shot = create_shot(
+    shot = create_referenced_shot(
         client,
         project_id,
         style["id"],
-        characters=["林岚"],
+        character="林岚",
         beat="雨夜码头交换线索",
     )
     return project_id, style, shot

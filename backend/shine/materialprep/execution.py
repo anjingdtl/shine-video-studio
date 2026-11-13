@@ -390,38 +390,42 @@ def _ensure_renderer(factory, settings, family: str) -> dict[str, Any]:
     }
 
 
+def _manual_prompt(context: dict[str, Any]) -> dict[str, Any] | None:
+    """The prompt a person froze for this requirement, when there is one."""
+    from shine.materialprep.prompt_source import frozen_prompt
+
+    return frozen_prompt(context.get("requirement_payload") or {})
+
+
 def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
+    """The prompt this item renders with.
+
+    The material centre shows the same text before the picture exists, so the
+    preview and the render share one composer.
+    """
+    from shine.materialprep.prompt_source import (
+        PromptSourceError,
+        compose_requirement_prompt,
+    )
+
     payload = context["item_payload"]
     brief_raw = payload.get("brief")
-    if not brief_raw:
-        raise ImageExecutionError("MATERIAL_BRIEF_MISSING", item_id=context["item_id"])
-    brief = MaterialImageBrief.model_validate(brief_raw)
     requirement = context["requirement_payload"]
-    direction = MaterialVisualDirection.model_validate(payload.get("visual_direction") or {})
-    if not (brief.appearance or "").strip():
-        # The producer may answer with a question instead of a look when a fact
-        # is missing. That question is worth showing the person, but it must not
-        # stop the render: the first confirmed description of the requirement is
-        # enough to make one candidate, and a candidate is only a proposal the
-        # person still has to promote. Blocking on the question left a real list
-        # unrenderable whenever the producer wanted one more detail.
-        fallback = str(requirement.get("description") or "").strip()
-        if not fallback:
-            raise ImageExecutionError(
-                "MATERIAL_BRIEF_EMPTY_APPEARANCE", questions=brief.questions, item_id=context["item_id"]
-            )
-        brief = brief.model_copy(update={"appearance": fallback})
-    family = requirement.get("family") or payload.get("family")
-    if family not in image_prompts.COMPOSITION_RULES:
-        raise ImageExecutionError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
-    return image_prompts.compose(
-        family,
-        brief,
-        visual_direction=direction,
-        requirement_name=str(requirement.get("entity_id") or ""),
-        carrier=requirement.get("carrier") or payload.get("carrier"),
-        film_style=str(context.get("film_style") or ""),
-    )
+    try:
+        return compose_requirement_prompt(
+            family=str(requirement.get("family") or payload.get("family") or ""),
+            brief=MaterialImageBrief.model_validate(brief_raw) if brief_raw else None,
+            visual_direction=MaterialVisualDirection.model_validate(
+                payload.get("visual_direction") or {}),
+            requirement_name=str(requirement.get("entity_id") or ""),
+            carrier=requirement.get("carrier") or payload.get("carrier"),
+            film_style=str(context.get("film_style") or ""),
+            description=str(requirement.get("description") or ""),
+            manual=_manual_prompt(context),
+        )
+    except PromptSourceError as exc:
+        raise ImageExecutionError(
+            exc.code, item_id=context["item_id"], **exc.details) from exc
 
 
 def _submit_outcome(exc: Exception) -> tuple[str, str, str | None]:
@@ -580,17 +584,22 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
 
     # The producer's brief comes first: the appearance text is the producer's
     # authority, and the call happens before the GPU lease is taken because the
-    # gateway refuses to run a text model while a resource slot is held.
-    brief_result = brief.ensure_brief(factory, settings, item_id, worker_id, version=version)
-    if brief_result.get("state_version") is None:
-        return {"item_id": item_id, "status": "CLAIM_LOST", "code": "CLAIM_LOST"}
-    version = brief_result["state_version"]
-    if not brief_result.get("ready"):
-        return {"item_id": item_id, "status": brief_result.get("status"),
-                "code": brief_result.get("code")}
+    # gateway refuses to run a text model while a resource slot is held.  A
+    # frozen, hand-written prompt replaces that step entirely: spending a model
+    # call to produce text nobody will read is pure cost.
+    if _manual_prompt(context) is not None:
+        context["manual_prompt"] = _manual_prompt(context)
+    else:
+        brief_result = brief.ensure_brief(factory, settings, item_id, worker_id, version=version)
+        if brief_result.get("state_version") is None:
+            return {"item_id": item_id, "status": "CLAIM_LOST", "code": "CLAIM_LOST"}
+        version = brief_result["state_version"]
+        if not brief_result.get("ready"):
+            return {"item_id": item_id, "status": brief_result.get("status"),
+                    "code": brief_result.get("code")}
 
-    # The composition reads the brief the item now carries.
-    context["item_payload"] = {**context["item_payload"], "brief": brief_result.get("brief")}
+        # The composition reads the brief the item now carries.
+        context["item_payload"] = {**context["item_payload"], "brief": brief_result.get("brief")}
 
     # The prompt is composed before the GPU is touched: the gateway refuses to run
     # while a resource slot is held, and a prompt failure must not burn a lease.

@@ -124,6 +124,11 @@ def revision_for_prompt(
     mode_hint: GenerationMode | None = None,
 ) -> RequestRevision | None:
     """Recompile the prompt through the H3 compiler after an authorised change."""
+    if request.get("manual_prompt"):
+        # A person wrote and froze this prompt.  Recompiling would silently
+        # replace their words with the compiler's, so a repair keeps the text
+        # and changes only parameters or references.
+        return None
     revised_spec = _apply_directive(spec, root_cause=root_cause, attempt_no=attempt_no)
     if revised_spec is None:
         return None

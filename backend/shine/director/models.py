@@ -26,6 +26,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -91,6 +92,65 @@ class DirectorPackageVersion(Base):
     confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ShotPromptRevision(Base):
+    """One version of a shot's H3 prompt, written by a person.
+
+    A frozen revision is submitted verbatim instead of the compiled prompt.  The
+    reference set that existed when it was frozen travels with it: a prompt that
+    says ``<Subject 1>`` must never be handed a different cast, so a changed
+    binding set falls back to the compiler and says why.
+    """
+
+    __tablename__ = "shot_prompt_revisions"
+    __table_args__ = (UniqueConstraint("shot_id", "revision", name="uq_shot_prompt_revision"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    shot_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    sections: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference_set: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: The dialogue and duration the written text quotes.  The story beat and
+    #: the camera are deliberately not here: a frozen prompt *is* the picture,
+    #: so the crew may keep rewriting the beat around it.
+    content_signature: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    spec_report: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), default="user", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ShotSubtitle(Base):
+    """The subtitle lines a person configured for one shot.
+
+    The lines stay in the external subtitle layer: they are compiled into an
+    episode subtitle revision, never burned into the H3 prompt.  ``lines`` use
+    times relative to this shot, so re-cutting a shot keeps them meaningful.
+    """
+
+    __tablename__ = "shot_subtitles"
+    __table_args__ = (UniqueConstraint("shot_id", name="uq_shot_subtitle_shot"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"))
+    episode_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    lines: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), default="user", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DirectorPackageEpisode(Base):

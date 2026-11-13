@@ -290,12 +290,12 @@ def test_h3_preflight_release_failure_blocks_without_creating_attempt(api, monke
 
     from shine.models import Job
     from shine.worker import run_one
-    from tests.conftest import create_comfy_job, create_project, create_shot, freeze_style
+    from tests.conftest import create_comfy_job, create_project, create_referenced_shot, freeze_style
 
     client, factory, settings = api
     project = create_project(client)
     style = freeze_style(client, project)
-    shot = create_shot(client, project, style["id"])
+    shot = create_referenced_shot(client, project, style["id"])
     job = create_comfy_job(client, project, shot["id"])
 
     def unavailable():

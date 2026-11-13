@@ -21,6 +21,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from shine.script_labels import LITERARY_SCENE_LABELS
+
 SCENE_TEXT_FIELD = "text"
 SCENE_TEXT_ALIASES = {"content": "text", "script": "text", "scene_text": "text",
                       "screenplay": "text", "body": "text"}
@@ -36,10 +38,7 @@ QUESTION_LIMIT = 300
 #: the dialogue *index* locally when the model did not provide one; the scene
 #: text itself is never modified.
 _SPEAKER_LINE = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z0-9·]{1,12})\s*[：:]\s*(\S.{0,199})\s*$")
-_NON_SPEAKER_LABELS = {
-    "时间", "地点", "场景", "内景", "外景", "日", "夜", "旁白", "字幕", "画外音",
-    "注", "备注", "标题", "人物", "道具", "音效", "音乐", "镜头", "转场",
-}
+_NON_SPEAKER_LABELS = set(LITERARY_SCENE_LABELS)
 
 
 class SceneDraft(BaseModel):
