@@ -490,13 +490,13 @@ def compute_journey(
     stages.append({
         "id": "assets",
         "label": "拍摄素材准备",
-        # 素材不是落镜的硬前置：缺的那个图片由 H3 自行生成。这一步如实告诉
-        # 用户每一镜要什么、还缺什么，但不再把流程堵在这里。
+        # 素材不是落镜的硬前置，但也不是“H3 会自己生成正式资产”。必需项缺失只
+        # 暂停引用它的镜头，其余镜头照常开拍；可选项可以明确跳过。
         "done": bool(scoped_shots),
         "summary": (
             f"{len(scoped_shots)} 镜的素材需求已核对" if scoped_shots and not material_blockers
-            else (f"{len(scoped_shots)} 镜的素材需求已核对（还缺 {len(material_blockers)} 项，"
-                  "缺的那个图片由 H3 自行生成）" if scoped_shots
+            else (f"{len(scoped_shots)} 镜的素材需求已核对（{len(material_blockers)} 项必需素材缺失，"
+                  "只影响引用它的镜头）" if scoped_shots
                   else "等待分镜定稿")
         ),
         "blockers": [],

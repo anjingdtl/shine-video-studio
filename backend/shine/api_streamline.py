@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 from sqlalchemy import select
 
@@ -298,3 +298,260 @@ def derive_materials(project_id: str, body: ShotMaterialsBody, actor: Operator, 
     result = streamline.derive_shot_materials(db, project_id, episode_ids=body.episode_ids, actor=actor)
     db.commit()
     return result
+
+
+# ---------------------------------------------------------------------------
+# Unified read-only overview (V2 §5): one projection, project and episode grain
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_id}/director/overview")
+def director_overview(project_id: str, db: DBSession, package_id: str | None = None,
+                      run_id: str | None = None) -> dict:
+    """The only progress aggregate the director page reads.
+
+    Read-only and derived from the real ledgers: a reload returns the same
+    answer, and one pending episode never becomes a global stop.
+    """
+    from shine.director.overview import build_overview
+
+    project = require_project(db, project_id)
+    return build_overview(db, project, package_id=package_id, run_id=run_id)
+
+
+@router.get("/projects/{project_id}/director/episodes/{episode_id}/overview")
+def director_episode_overview(project_id: str, episode_id: str, db: DBSession,
+                              package_id: str | None = None, run_id: str | None = None) -> dict:
+    from shine.director.overview import build_episode_overview
+
+    project = require_project(db, project_id)
+    return build_episode_overview(db, project, episode_id, package_id=package_id, run_id=run_id)
+
+# ---------------------------------------------------------------------------
+# ⑤⑥ One explicit shoot action (V2 §8): the only main CTA of production
+# ---------------------------------------------------------------------------
+
+
+class ShootBody(APIModel):
+    episode_ids: list[str] = Field(min_length=1, max_length=200)
+    workflow_profile_id: str | None = Field(default=None, max_length=36)
+
+
+@router.post("/projects/{project_id}/director/production/start", status_code=201)
+def start_director_production(project_id: str, body: ShootBody, request: Request,
+                              actor: Operator, db: DBSession) -> dict:
+    """Confirm the selected episodes' package and start the real run, once.
+
+    This is the only main production action in director mode.  It reuses the
+    package and Run engines: the same selection replays the same run, an
+    unfinished episode is a named per-episode refusal, and nothing is silently
+    switched to a mock renderer.
+    """
+    project = require_project(db, project_id)
+    result = streamline.start_director_production(
+        db, project,
+        settings=request.app.state.settings,
+        episode_ids=body.episode_ids,
+        workflow_profile_id=body.workflow_profile_id,
+        actor=actor,
+    )
+    db.commit()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# ④ One material hand-off (V2 §7.3): confirm the decisions and queue the
+#    selected candidates under a deterministic request identity
+# ---------------------------------------------------------------------------
+
+
+class MaterialDecisionBody(APIModel):
+    requirement_id: str = Field(min_length=1, max_length=36)
+    strategy: str = Field(pattern="^(reuse_master|generate|upload|skip|omit_prop)$")
+    entity_id: str | None = Field(default=None, max_length=100)
+    asset_id: str | None = Field(default=None, max_length=36)
+
+
+class MaterialCommitBody(APIModel):
+    plan_revision_id: str = Field(min_length=1, max_length=36)
+    expected_snapshot: str = Field(min_length=64, max_length=64)
+    decisions: list[MaterialDecisionBody] = Field(min_length=1, max_length=200)
+    queue_generation: bool = True
+    notes: str = Field(default="", max_length=600)
+
+
+@router.post("/projects/{project_id}/director/materials/commit", status_code=201)
+def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: Operator,
+                              db: DBSession) -> dict:
+    """Record the decisions and queue exactly the selected candidates, once.
+
+    The request identity is derived from what the person confirmed (plan
+    revision + the exact decision set), never from a clock.  A dropped response
+    therefore retries into the same receipt: the same batch, the same
+    confirmation, no second round of images.  The confirmation and the batch are
+    two steps of one intent; if the batch cannot be queued the confirmation is
+    still reported as committed, because it really is, and the response names the
+    step that failed.
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.materialprep import service
+    from shine.materialprep.contracts import MaterialConfirmation
+    from shine.services import add_audit
+
+    require_project(db, project_id)
+    decision_rows = sorted(
+        ({"requirement_id": row.requirement_id, "strategy": row.strategy,
+          "entity_id": row.entity_id, "asset_id": row.asset_id} for row in body.decisions),
+        key=lambda row: row["requirement_id"],
+    )
+    request_key = "director-materials:" + graph_hash({
+        "project": project_id,
+        "plan_revision_id": body.plan_revision_id,
+        "expected_snapshot": body.expected_snapshot,
+        "decisions": decision_rows,
+    })
+    receipt = _material_receipt(db, project_id, request_key)
+    if receipt is not None:
+        return {**receipt, "replayed": True}
+
+    confirmation_body = MaterialConfirmation.model_validate({
+        "plan_revision_id": body.plan_revision_id,
+        "expected_snapshot": body.expected_snapshot,
+        "decisions": [
+            {"requirement_id": row["requirement_id"], "strategy": row["strategy"],
+             "entity_id": row["entity_id"], "asset_id": row["asset_id"]}
+            for row in decision_rows
+        ],
+        "notes": body.notes,
+    })
+    confirmation = service.confirm(db, actor, project_id, confirmation_body)
+    generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
+                    if row["strategy"] == "generate"]
+    batch = None
+    batch_error = None
+    if body.queue_generation and generate_ids:
+        try:
+            batch = service.create_batch(
+                db,
+                project_id,
+                confirmation_id=confirmation["confirmation_id"],
+                confirmation_hash=confirmation["confirmation_hash"],
+                requirement_ids=generate_ids,
+                idempotency_key=request_key + ":" + graph_hash(sorted(generate_ids)),
+                rights_id=None,
+            )
+        except HTTPException as exc:
+            batch_error = {
+                "code": "MATERIAL_BATCH_REFUSED",
+                "message": "决策已确认，但候选生成没有排队；按下面的原因处理后重试",
+                "detail": exc.detail,
+            }
+    result = {
+        "confirmation": confirmation,
+        "generate_count": len(generate_ids),
+        "batch": batch,
+        "batch_error": batch_error,
+        "request_key": request_key,
+        "replayed": False,
+    }
+    add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
+              confirmation["plan_revision_id"],
+              {"request_key": request_key,
+               "confirmation_id": confirmation["confirmation_id"],
+               "confirmation_hash": confirmation["confirmation_hash"],
+               "generate_count": len(generate_ids),
+               "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
+                         if batch else None),
+               **({"batch_error": batch_error} if batch_error else {})},
+              project_id=project_id)
+    db.commit()
+    return result
+
+
+def _material_receipt(db, project_id: str, request_key: str) -> dict | None:
+    """The receipt of this exact commit, when it already happened.
+
+    A lost HTTP answer must not turn into a second confirmation or a second
+    image batch.  The audit row is the existing ledger for that intent; reading
+    it needs no new table and no second state machine.
+    """
+    from shine.models import AuditEvent
+
+    rows = db.scalars(select(AuditEvent).where(
+        AuditEvent.project_id == project_id,
+        AuditEvent.event_type == "DIRECTOR_MATERIALS_COMMITTED",
+    ).order_by(AuditEvent.created_at.desc()).limit(40)).all()
+    for row in rows:
+        payload = dict(row.payload or {})
+        if payload.get("request_key") == request_key:
+            return {
+                "confirmation": {
+                    "plan_revision_id": row.entity_id,
+                    "confirmation_id": payload.get("confirmation_id"),
+                    "confirmation_hash": payload.get("confirmation_hash"),
+                    "decisions": [],
+                    "status": "CONFIRMED",
+                },
+                "generate_count": payload.get("generate_count") or 0,
+                "batch": payload.get("batch"),
+                "batch_error": payload.get("batch_error"),
+                "request_key": request_key,
+            }
+    return None
+
+
+@router.get("/projects/{project_id}/director/materials/requirements")
+def director_material_requirements(project_id: str, db: DBSession,
+                                   episode_ids: str | None = None) -> dict:
+    """The current requirement list with its real use, without re-deriving it.
+
+    Reading never buys a model call: it answers with the stored ledger rows and
+    their shot usage.  The plan is only created by the explicit derive action.
+    """
+    from shine.comfyops.models import AssetRequirement
+    from shine.comfyops.preproduction import current_material_plan
+    from shine.materialprep.service import confirmation_snapshot_hash
+
+    require_project(db, project_id)
+    plan = current_material_plan(db, project_id)
+    if plan is None:
+        return {"plan_revision_id": None, "expected_snapshot": None, "requirements": []}
+    rows = db.scalars(select(AssetRequirement).where(
+        AssetRequirement.plan_id == plan.id,
+        AssetRequirement.project_id == project_id,
+    )).all()
+    wanted = {item for item in (episode_ids or "").split(",") if item}
+    requirements = []
+    for row in rows:
+        payload = dict(row.payload or {})
+        used_episodes = list(payload.get("used_episodes") or [])
+        if wanted and not wanted.intersection(used_episodes):
+            continue
+        # ``matched_master_id`` is the derivation's match (a real approved
+        # master for this entity); ``bound_asset_id`` is what the person
+        # confirmed.  The panel must see the match, otherwise every row looks
+        # missing until a confirmation writes a binding.
+        matched_id = payload.get("matched_master_id") or payload.get("bound_asset_id")
+        requirements.append({
+            "requirement_id": row.id,
+            "family": payload.get("family"),
+            "entity_id": payload.get("entity_id"),
+            "name": payload.get("entity_id"),
+            "description": payload.get("description") or "",
+            "critical": bool(payload.get("critical", True)),
+            "optional": bool(payload.get("optional", False)),
+            "strategy": payload.get("strategy"),
+            "variants": list(payload.get("variants") or []),
+            "used_shot_ids": list(payload.get("used_shot_ids") or []),
+            "used_shot_count": len(payload.get("used_shot_ids") or []),
+            "used_episodes": used_episodes,
+            "matched_master": ({"asset_id": matched_id,
+                                "sha256": payload.get("bound_asset_sha256")}
+                               if matched_id else None),
+            "status": "matched" if matched_id else "missing",
+        })
+    return {
+        "plan_revision_id": plan.id,
+        "expected_snapshot": confirmation_snapshot_hash(plan),
+        "requirements": requirements,
+    }

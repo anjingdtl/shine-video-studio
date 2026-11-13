@@ -47,7 +47,8 @@ describe('journey 读取状态', () => {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/,
       respond: () => new Promise(() => undefined) });
     render(<App />);
-    expect(await screen.findByRole('button', { name: '正在读取进度…' })).toBeDisabled();
+    // 读取期间只显示读取态文案，绝不显示“已交付/已完成”。
+    expect(await screen.findByText(/正在读取|正在连接/)).toBeInTheDocument();
     expect(screen.queryByText(/全部选定范围已交付/)).toBeNull();
     expect(screen.queryByText(/六个阶段全部完成/)).toBeNull();
   });
@@ -95,14 +96,18 @@ describe('journey 读取状态', () => {
     render(<App />);
     await gotoDirectorPage(user, /第 3 阶段：镜头拆解/);
 
-    expect(await screen.findByText(/已应用 64 个计划镜头（项目共 70 镜）/)).toBeInTheDocument();
+    // 镜头页按确认计划范围显示在册镜头数（64 而非项目历史 70）。
+    expect(await screen.findByText(/64 镜在册/)).toBeInTheDocument();
     // 排产与进度已归并进⑥视频生产页（旧四步层移除）。
     await gotoDirectorPage(user, /第 6 阶段：视频生产/);
-    expect(screen.getByText('一键开拍：自动制作全部 64 个镜头')).toBeInTheDocument();
+    // V2 收敛：导演⑥只保留一个真实开拍入口，旧排产面板的“一键开拍…全部 N 个镜头”不再出现。
+    expect(screen.queryByText('一键开拍：自动制作全部 64 个镜头')).toBeNull();
     expect(screen.queryByText('一键开拍：自动制作全部 70 个镜头')).toBeNull();
-    expect(screen.getByText('⑥ 进度与结果 · 64/64 个计划镜头已通过')).toBeInTheDocument();
-    expect(screen.getByText(/本次确认范围：64 镜，64\/64 个计划镜头已通过/)).toBeInTheDocument();
+    expect(await screen.findByText('第 6 阶段 · 真实拍摄')).toBeInTheDocument();
+    expect(screen.getByText('还没有在拍的运行')).toBeInTheDocument();
+    // 项目历史任务（65/72）不因为任务列表存在就被当成“本次范围已完成”。
     expect(screen.queryByText(/65\/72 完成/)).toBeNull();
+    expect(screen.getByText(/⑥ 任务明细（诊断）/)).toBeInTheDocument();
   });
 });
 
@@ -190,26 +195,26 @@ describe('② 剧本统筹先分集', () => {
         next_stage: 'materials',
       }) });
     let posted: Record<string, unknown> | null = null;
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/,
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book$/,
       respond: (_url, init) => {
         posted = JSON.parse(String(init?.body));
         return jsonResponse({
-          id: 'plan-1', project_id: 'proj-1', version: 1, status: 'DRAFT', target_seconds: 60,
-          tolerance_seconds: 15, sha256: 'b'.repeat(64), source: 'script_sections',
-          payload: { mode: 'sections', target_seconds: 60, tolerance_seconds: 15, episodes: [
-            { episode_id: 'ep-01', order: 1, title: '第1集', shot_ids: [], section_ids: ['sec-1', 'sec-2'],
-              planned_seconds: 50, boundary_note: 'final_episode' }] },
-          created_at: '2026-11-06T00:00:00Z', confirmed_at: null,
+          plan_version: 1, plan_sha256: 'b'.repeat(64),
+          preview: { mode: 'sections', target_seconds: 60, tolerance_seconds: 30,
+            episode_count: 2, total_planned_seconds: 100, episodes: [] },
         }, 201);
       } });
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 5 阶段：导演包/);
-    const generate = await screen.findByRole('button', { name: /生成分集草案/ });
+    await gotoDirectorPage(user, /第 2 阶段：剧本统筹/);
+    // 吸顶栏与面板各有一个同名主操作：点面板内的那个即可（两者同一意图）。
+    const [generate] = await screen.findAllByRole('button', { name: /生成分镜书/ });
     await waitFor(() => expect(generate).toBeEnabled());
     await user.click(generate);
     await waitFor(() => expect(posted).not.toBeNull());
-    expect(posted?.['mode']).toBe('sections');
+    // 集数优先、按场次自然切分：不需要先有镜头，也不再有第二套分集入口。
+    expect(posted?.['episode_count']).toBe(2);
+    expect(posted?.['target_seconds']).toBe(60);
   });
 });
 

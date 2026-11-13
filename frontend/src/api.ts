@@ -1383,11 +1383,16 @@ export type ShotMaterialRequirement = {
   description: string;
   critical: boolean;
   optional: boolean;
+  /** 镜头已按 id 承诺的引用：这类需求是硬性的，不是建议。 */
+  cited_by_shot?: boolean;
+  /** 同一角色在本范围的造型/别名变体，只作展示，不另建主素材。 */
+  variants?: string[];
   used_shot_ids: string[];
   used_shot_count: number;
   used_episodes: string[];
-  matched_master: { asset_id: string; sha256: string; entity_id: string } | null;
+  matched_master: { asset_id: string; sha256: string | null; entity_id?: string } | null;
   status: 'matched' | 'missing' | string;
+  strategy?: string | null;
 };
 
 export type DerivedShotMaterials = {
@@ -1396,6 +1401,9 @@ export type DerivedShotMaterials = {
   expected_snapshot: string;
   requirements: ShotMaterialRequirement[];
   shot_count: number;
+  capacity?: DirectorMaterialsView['capacity'];
+  profile?: DirectorMaterialsView['profile'];
+  catalog_present?: boolean;
 };
 
 export const deriveShotMaterials = (projectId: string, episodeIds: string[] | null) =>
@@ -1407,3 +1415,212 @@ export const controlDirectorStoryboardTask = (projectId: string, taskId: string,
   action: 'pause' | 'resume' | 'cancel', expectedStateVersion: number) =>
   api<Record<string, unknown>>(`/projects/${projectId}/story-preparation/tasks/${taskId}/${action}`,
     json('POST', { expected_state_version: expectedStateVersion }));
+
+/* ------------------------------------------------------------------------- *
+ * V2 导演总览：一份只读投影，项目与按集两个粒度
+ * ------------------------------------------------------------------------- */
+
+export type DirectorEpisodeState =
+  | 'WAITING_STORYBOARD' | 'STORYBOARD_RUNNING' | 'STORYBOARD_BLOCKED'
+  | 'SHOTS_TO_CONFIRM' | 'MATERIAL_MISSING' | 'READY_TO_PACKAGE'
+  | 'READY_TO_SHOOT' | 'SHOOTING' | 'REVIEW_READY' | 'DELIVERED';
+
+export type DirectorNextAction = {
+  kind: string;
+  label: string;
+  episode_id?: string;
+};
+
+export type DirectorEpisodeOverview = {
+  episode_id: string;
+  order: number | null;
+  title: string;
+  planned_seconds: number;
+  state: DirectorEpisodeState | string;
+  state_label: string;
+  storyboard: {
+    section_count: number;
+    landed_section_count: number;
+    pending_sections: Array<{ section_id: string; missing: Array<{ reason?: string }> }>;
+    ledger_task_id: string | null;
+    ledger_task_status: string | null;
+    state_version: number | null;
+    blocker: Record<string, unknown> | null;
+  };
+  shots: {
+    landed_count: number;
+    confirmed_count: number;
+    confirmed: boolean;
+    problems: Array<{ shot_id: string; code: string }>;
+  };
+  materials: {
+    missing_count: number;
+    missing: Array<{ code: string; family: string; entity_id: string | null;
+                     shot_count: number; shot_ids: string[] }>;
+  };
+  package: {
+    package_id: string; revision: number; startable: boolean;
+    blockers: Array<{ code: string; message: string }>;
+  } | null;
+  production: {
+    run_id: string; status: string; shot_count: number; passed_shot_count: number;
+  } | null;
+  delivery: {
+    artifact_id: string; sha256: string | null; delivered_at: string | null;
+    actual_seconds: number | null; status: string;
+    post_contract: Record<string, unknown> | null;
+  } | null;
+  next_action: DirectorNextAction | null;
+};
+
+export type DirectorOverview = {
+  project_id: string;
+  title: string;
+  plan: { version: number; sha256: string; status: string; episode_count: number } | null;
+  style: { version: number; sha256: string } | null;
+  counts: {
+    episode_count: number;
+    confirmed_episode_count: number;
+    shootable_episode_count: number;
+    delivered_episode_count: number;
+    shot_count: number;
+    passed_shot_count: number;
+  };
+  episodes: DirectorEpisodeOverview[];
+  next_action: DirectorNextAction | null;
+  package: { package_id: string; revision: number; episode_count: number;
+             shot_count: number; startable: boolean } | null;
+  run: { run_id: string; status: string; active: boolean; scope_episode_ids: string[] } | null;
+  storyboard_task: { task_id: string | null; status: string | null; state_version: number | null };
+};
+
+export const getDirectorOverview = (projectId: string, opts?: { packageId?: string; runId?: string }) => {
+  const query = new URLSearchParams();
+  if (opts?.packageId) query.set('package_id', opts.packageId);
+  if (opts?.runId) query.set('run_id', opts.runId);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return api<DirectorOverview>(`/projects/${projectId}/director/overview${suffix}`);
+};
+
+/* ------------------------------------------------------------------------- *
+ * ⑤⑥ 唯一起拍动作：冻结所选集的导演包并启动既有 Run
+ * ------------------------------------------------------------------------- */
+
+export type DirectorShootResult = {
+  package_id: string;
+  package_revision: number;
+  package_built: boolean;
+  run_id: string;
+  run_status: string;
+  created: boolean;
+  episode_ids: string[];
+  episodes: Array<{ episode_id: string; position: number; shot_count: number }>;
+};
+
+export const startDirectorProduction = (
+  projectId: string,
+  body: { episode_ids: string[]; workflow_profile_id?: string | null },
+) => api<DirectorShootResult>(`/projects/${projectId}/director/production/start`, json('POST', body));
+
+/* ------------------------------------------------------------------------- *
+ * ④ 素材一次交接：确定性请求身份，断连重放不重复出图
+ * ------------------------------------------------------------------------- */
+
+export type DirectorMaterialRequirement = {
+  requirement_id: string;
+  family: string;
+  entity_id: string | null;
+  name: string | null;
+  description: string;
+  critical: boolean;
+  optional: boolean;
+  cited_by_shot?: boolean;
+  variants: string[];
+  used_shot_ids: string[];
+  used_shot_count: number;
+  used_episodes: string[];
+  matched_master: { asset_id: string; sha256: string | null } | null;
+  status: string;
+  strategy?: string | null;
+};
+
+export type DirectorMaterialsView = {
+  plan_revision_id: string | null;
+  expected_snapshot: string | null;
+  requirements: DirectorMaterialRequirement[];
+  capacity?: {
+    profile_id: string | null; profile_name: string | null; mode: string | null;
+    subjects: number; pictures: number; videos: number; audios: number;
+    image_transfer: boolean; audio_transfer: boolean;
+  };
+  profile?: { id: string; name: string; mode: string } | null;
+  catalog_present?: boolean;
+  shot_count?: number;
+};
+
+export const fetchDirectorRequirements = (projectId: string, episodeIds?: string[] | null) => {
+  const query = episodeIds && episodeIds.length ? `?episode_ids=${encodeURIComponent(episodeIds.join(','))}` : '';
+  return api<DirectorMaterialsView>(`/projects/${projectId}/director/materials/requirements${query}`);
+};
+
+export type DirectorMaterialCommitResult = {
+  confirmation: {
+    plan_revision_id: string; confirmation_id: string; confirmation_hash: string;
+    status: string; decisions: Array<Record<string, unknown>>;
+  };
+  generate_count: number;
+  batch: { run_id?: string; item_count?: number; status?: string } | null;
+  batch_error: { code: string; message: string; detail: unknown } | null;
+  request_key: string;
+  replayed: boolean;
+};
+
+export const commitDirectorMaterials = (
+  projectId: string,
+  body: {
+    plan_revision_id: string;
+    expected_snapshot: string;
+    decisions: Array<{ requirement_id: string; strategy: string; entity_id?: string | null;
+                       asset_id?: string | null }>;
+    queue_generation?: boolean;
+    notes?: string;
+  },
+) => api<DirectorMaterialCommitResult>(`/projects/${projectId}/director/materials/commit`, json('POST', body));
+
+/* ------------------------------------------------------------------------- *
+ * 单个素材：上传、确认、锁定（导演素材页的逐项操作）
+ * ------------------------------------------------------------------------- */
+
+export const uploadProjectAsset = (
+  projectId: string,
+  file: File,
+  opts: { role: string; entityId?: string | null },
+) => {
+  const form = new FormData();
+  const kind = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
+  form.append('asset_kind', kind);
+  form.append('file', file);
+  form.append('role', opts.role);
+  if (opts.entityId) form.append('entity_id', opts.entityId);
+  return api<Asset>(`/projects/${projectId}/assets`, { method: 'POST', body: form });
+};
+
+export const requestAssetGrant = (action: 'asset_approve' | 'asset_lock', targetId: string) =>
+  api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+    json('POST', { action, target_id: targetId }));
+
+const ASSET_GRANT_EVIDENCE = '用户在本机确认使用，并确认素材内容及使用权。';
+
+export const approveProjectAsset = async (assetId: string) => {
+  const grant = await requestAssetGrant('asset_approve', assetId);
+  return api<Asset>(`/assets/${assetId}/approve`, json('POST', {
+    grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence: ASSET_GRANT_EVIDENCE,
+  }));
+};
+
+export const lockProjectAsset = async (assetId: string) => {
+  const grant = await requestAssetGrant('asset_lock', assetId);
+  return api<Asset>(`/assets/${assetId}/lock`, json('POST', {
+    grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence: ASSET_GRANT_EVIDENCE,
+  }));
+};

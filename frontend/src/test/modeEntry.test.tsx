@@ -51,11 +51,12 @@ async function topbarModeEntry(): Promise<HTMLElement> {
 }
 
 async function openSingleShotTools(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: /第 6 阶段：视频生产/ }));
+  // 单镜提交是专业能力：导演模式只保留一个开拍入口（V2 §8）。
+  await switchToExpert(user);
   await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
   await waitFor(() => {
     expect(document.querySelector('.advanced-fold')).not.toBeNull();
-  });
+  }, { timeout: 4000 });
 }
 
 function singleShotCard(): HTMLElement {
@@ -63,9 +64,9 @@ function singleShotCard(): HTMLElement {
 }
 
 function advancedFold(): HTMLElement {
-  // The manual shot form lives in the run page's own fold; earlier stages
-  // (storyboard, materials) carry their own advanced folds now.
-  return document.querySelector('#series-dock .advanced-fold') as HTMLElement;
+  // 单镜表单已移入专业模式的生产板块；导演页只保留一个开拍入口。
+  // 专业模式下导演页不渲染，因此页面唯一的 advanced-fold 就是它。
+  return document.querySelector('.advanced-fold') as HTMLElement;
 }
 
 beforeEach(() => {
@@ -77,6 +78,29 @@ afterEach(() => {
   vi.restoreAllMocks();
   window.localStorage.clear();
 });
+
+async function switchToDirector(user: ReturnType<typeof userEvent.setup>) {
+  if (document.querySelector('.app-shell.ui-director')) return;
+  const toggle = await waitFor(() => {
+    const node = document.querySelector('.ui-toggle');
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  await user.click(toggle);
+  await waitFor(() => expect(document.querySelector('.app-shell.ui-director')).not.toBeNull(), { timeout: 5000 });
+}
+
+async function switchToExpert(user: ReturnType<typeof userEvent.setup>) {
+  // 界面会记住上次的模式（localStorage）：已经在专业模式时再点一次是“回到导演模式”。
+  if (document.querySelector('.app-shell.ui-expert')) return;
+  const toggle = await waitFor(() => {
+    const node = document.querySelector('.ui-toggle');
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  await user.click(toggle);
+  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull(), { timeout: 5000 });
+}
 
 describe('顶部模式入口（唯一权威状态）', () => {
   it('后端失联时显示重连入口，点击后按实际响应恢复在线灯', async () => {
@@ -104,7 +128,9 @@ describe('顶部模式入口（唯一权威状态）', () => {
     // 3 秒连接轮询发现恢复且列表未加载过，应自动补拉并渲染作品
     // （顶栏项目芯片与首页作品表格都会出现这个名字）。
     expect((await screen.findAllByText('雾港夜账', undefined, { timeout: 9000 })).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('button', { name: '重连工作台' })).toBeNull();
+    // 恢复后重连入口应当消失（轮询与渲染有先后，等到它真的消失）。
+    await waitFor(() => expect(screen.queryByRole('button', { name: '重连工作台' })).toBeNull(),
+      { timeout: 9000 });
   }, 15000);
   it('演示徽章常驻且提供启用入口；点击打开向导', async () => {
     const user = userEvent.setup();
@@ -217,7 +243,7 @@ describe('任务提交与模式一致', () => {
     const user = userEvent.setup();
     render(<App />);
     await openSingleShotTools(user);
-    await user.selectOptions(await within(singleShotCard()).findByLabelText(/生成方案/), 'wf-1');
+    await user.selectOptions(await within(singleShotCard()).findByLabelText(/生成模板|生成方案/), 'wf-1');
     await user.selectOptions(await within(singleShotCard()).findByLabelText(/审片建议/), 'full');
     const queue = await within(advancedFold()).findByRole('button', { name: /加入队列/ });
     await waitFor(() => { expect(queue).toBeEnabled(); });
@@ -247,10 +273,13 @@ describe('任务提交与模式一致', () => {
     realReadyProject();
     const user = userEvent.setup();
     render(<App />);
+    await switchToDirector(user);
     await user.click(await screen.findByRole('button', { name: /镜头拆解/ }));
     expect(await screen.findByText(/AI 分镜能力未就绪/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /去配置模型服务/ })).toBeInTheDocument();
-    // 手工分镜入口仍在（高级折叠里的镜头表单）。
+    // 手工分镜入口不再占用导演页，改由专业模式提供。
+    expect(screen.queryByText('单镜头制作与任务明细（高级）')).toBeNull();
+    await switchToExpert(user);
     await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
     await waitFor(() => {
       expect(within(advancedFold()).getByText(/时长（4–15 秒）/)).toBeInTheDocument();

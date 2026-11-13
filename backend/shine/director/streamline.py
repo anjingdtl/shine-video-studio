@@ -31,9 +31,9 @@ from shine.h3.rulebook import digest
 from shine.models import (
     AgentArtifact,
     AgentTaskRecord,
-    Asset,
     ProjectDocument,
     Shot,
+    WorkflowProfile,
     utcnow,
 )
 from shine.services import add_audit, require_project
@@ -397,6 +397,38 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
 # ---------------------------------------------------------------------------
 
 
+
+def ensure_project_rulepack(db, project_id: str) -> str | None:
+    """Pin the built-in H3 rule pack on first use in the director path.
+
+    The rule pack is not a creative decision: it is one immutable built-in
+    version the compiler always follows, and a project can only ever pin it
+    once.  Making a non-expert discover a "freeze the rule pack first" error at
+    the storyboard step is exactly the kind of cross-stage stop the V2 plan
+    removes, so the director path pins it here, once, and records the pin in the
+    project's own ledger.  An existing lock is never replaced.
+    """
+    from shine.h3.rulebook import H3RulebookRegistry
+
+    registry = H3RulebookRegistry(None)
+    try:
+        existing = registry.for_project(db, project_id)
+    except ValueError:
+        # An invalid/tampered pin is not silently replaced: the compiler gate
+        # must still refuse it, and the person sees the real diagnosis.
+        return None
+    if existing is not None:
+        return existing.id
+    try:
+        lock = registry.lock(db, project_id)
+    except ValueError:
+        return None
+    add_audit(db, "local-user", "PROJECT_RULEPACK_PINNED", "project", project_id,
+              {"rulepack_id": lock.rulepack_id, "sha256": lock.rulepack_hash,
+               "streamline": True}, project_id=project_id)
+    return lock.rulepack_id
+
+
 def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: int | None = None) -> dict:
     """Queue one durable run that storyboards every section of the confirmed
     episode plan, in script order, landing each unit's shots before the next.
@@ -415,6 +447,9 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
     project = require_project(db, project_id)
     if not project.frozen_style_version_id:
         raise HTTPException(409, "STORYBOARD_STYLE_NOT_FROZEN")
+    # The built-in rule pack is pinned here rather than left as a surprise
+    # refusal inside the five-role chain (FREEZE_PROJECT_RULEPACK_FIRST).
+    ensure_project_rulepack(db, project_id)
     outline = _confirmed_outline(db, project_id)
     if outline is None:
         raise HTTPException(409, "SCRIPT_OUTLINE_NOT_CONFIRMED")
@@ -739,6 +774,9 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
     from sqlalchemy import update
 
     require_project(db, project_id)
+    # A retry is the person saying "continue": the same first-use pin applies,
+    # so an old refusal cannot repeat forever because of a missing rule pack.
+    ensure_project_rulepack(db, project_id)
     row = db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
         AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
@@ -948,19 +986,21 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
                           actor: str = "local-user") -> dict[str, Any]:
     """Build the material requirement list from the *confirmed shots*.
 
-    Characters are aggregated from the shots' cast and speakers, deduplicated by
-    the name the shots actually use (the master's entity_id), and linked to the
-    episodes/shots that use them.  Existing approved masters are matched so a
-    reuse is explicit.  The list opens the same ScriptPreparation plan contract
-    the expert path uses, so confirmation, generation, candidate selection and
-    adoption stay on their existing gates.  Only items the user later selects
-    for generation are ever sent to the material centre.
+    The list is a projection of what the shots already carry (their cast, their
+    speaker tags, the references they promised by id, the masters they are
+    already bound to) plus the entity catalogue when one exists.  It never
+    re-reads the novel: the confirmed design is the only authority, and the
+    same confirmed shots always produce the same list.
+
+    Required and optional are different gates.  A character subject is required
+    whenever the bound renderer declares a subject slot; a scene or prop plate is
+    required only when a shot promised that exact asset by id.  Everything else
+    is a suggestion the person may skip, and skipping it never blocks a render.
     """
     from shine.api_director import _confirmed_outline
-    from shine.asset_identity import split_character_names
+    from shine.director import requirements as requirement_source
     from shine.materialprep import service
-    from shine.materialprep.source_spans import segment_document
-    from shine.materialprep.story import section_storyboard_shot_ids
+    from shine.materialprep.service import confirmation_snapshot_hash
 
     project = require_project(db, project_id)
     outline = _confirmed_outline(db, project_id)
@@ -969,113 +1009,219 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
     document = db.get(ProjectDocument, outline.payload_json["document_id"])
     if document is None:
         raise HTTPException(409, "MATERIAL_DOCUMENT_NOT_FOUND")
-    plan = _latest_plan(db, project_id)
-    if plan is None:
-        raise HTTPException(409, "EPISODE_PLAN_NOT_CONFIRMED")
-    from shine.director.contracts import EpisodePlanPayload
 
-    payload = EpisodePlanPayload.model_validate(plan.payload)
-    episodes = [e for e in payload.episodes if not episode_ids or e.episode_id in episode_ids]
-    sections_by_id = {str(s["production_section_id"]): s
-                      for s in outline.payload_json["production_sections"]}
-    document_scenes = segment_document(document.text or "")
-    # shot -> (episode, section) and per-section cast, from the landed shots.
-    shot_episode: dict[str, str] = {}
-    section_cast: dict[str, set[str]] = {}
-    section_shots: dict[str, list[str]] = {}
-    for episode in episodes:
-        for section_id in episode.section_ids:
-            resolved = section_storyboard_shot_ids(db, project_id, section_id)
-            for sid in resolved["shot_ids"]:
-                shot = db.get(Shot, sid)
-                if shot is None or shot.project_id != project_id:
-                    continue
-                shot_episode[sid] = episode.episode_id
-                section_shots.setdefault(section_id, []).append(sid)
-                spec = shot.spec or {}
-                names = set()
-                for entry in spec.get("characters") or []:
-                    names.update(split_character_names(entry))
-                for line in spec.get("dialogue") or []:
-                    names.update(split_character_names(line.get("speaker_id") or ""))
-                section_cast.setdefault(section_id, set()).update(n for n in names if n)
-    if not shot_episode:
-        raise HTTPException(409, "MATERIAL_NO_CONFIRMED_SHOTS")
-    # Character identity descriptions from the outline, when present.
-    identity_by_name = {
-        str(c.get("name")): str(c.get("identity") or c.get("description") or "")
-        for c in (outline.payload_json.get("characters") or [])
-    }
-    preparations = []
-    used_by_entity: dict[str, dict] = {}
-    for section_id, names in section_cast.items():
-        section = sections_by_id.get(section_id)
-        if section is None:
-            continue
-        start, end = section["start_offset"], section["end_offset"]
-        scene = next((sc for sc in document_scenes
-                      if sc.spans[0].start_offset < end and sc.spans[-1].end_offset > start), None)
-        if scene is None:
-            continue
-        span_ids = [span.id for span in scene.spans][:8]
-        requirements = []
-        for name in sorted(names):
-            requirements.append({
-                "family": "character", "name": name,
-                "description": (identity_by_name.get(name) or "")[:600],
-                "source_span_ids": span_ids,
-            })
-            usage = used_by_entity.setdefault(name, {"entity_id": name, "family": "character",
-                                                     "shot_ids": [], "episodes": set()})
-            usage["shot_ids"].extend(section_shots.get(section_id, []))
-            usage["episodes"].add(shot_episode.get(section_shots.get(section_id, [""])[0], ""))
-        if requirements:
-            preparations.append({"scene_key": scene.key,
-                                 "requirements": requirements, "questions": []})
-    if not preparations:
+    derived = requirement_source.derive(db, project, episode_ids=episode_ids)
+    if not derived["preparations"]:
         raise HTTPException(409, "MATERIAL_NO_REQUIREMENTS")
-    plan_row, replayed = service.create_draft_plan(db, project, document, preparations, actor=actor)
-    # Enrich the persisted requirements with shot usage and matched masters.
+    plan_row, replayed = service.create_draft_plan(
+        db, project, document, derived["preparations"], actor=actor)
+
+    from shine.comfy.workflow import graph_hash
     from shine.comfyops.models import AssetRequirement
 
-    masters = {
-        (a.role, a.entity_id): a
-        for a in db.scalars(select(Asset).where(
-            Asset.project_id == project_id, Asset.approved.is_(True), Asset.locked.is_(True)))
-        if a.entity_id
-    }
+    usage = {(row["family"], row["entity_id"]): row for row in derived["requirements"]}
     requirements_view = []
+    shot_ids_seen: set[str] = set()
     for row in db.scalars(select(AssetRequirement).where(
             AssetRequirement.plan_id == plan_row.id, AssetRequirement.project_id == project_id)):
-        p = row.payload or {}
-        entity = p.get("entity_id")
-        usage = used_by_entity.get(entity, {})
-        master = masters.get((p.get("family"), entity))
-        shot_ids = sorted(set(usage.get("shot_ids", [])))
-        episodes_used = sorted(e for e in usage.get("episodes", set()) if e)
-        if p.get("used_shot_ids") != shot_ids or p.get("used_episodes") != episodes_used:
-            from shine.comfy.workflow import graph_hash
-
-            row.payload = {**p, "used_shot_ids": shot_ids, "used_episodes": episodes_used}
+        payload = dict(row.payload or {})
+        evidence = usage.get((payload.get("family"), payload.get("entity_id"))) or {}
+        shot_ids = sorted(set(evidence.get("shot_ids") or []))
+        episodes_used = sorted(evidence.get("used_episodes") or [])
+        critical = bool(evidence.get("critical", payload.get("critical", True)))
+        strategy = evidence.get("strategy") or payload.get("strategy")
+        matched_id = evidence.get("matched_master_id")
+        shot_ids_seen.update(shot_ids)
+        if (payload.get("used_shot_ids") != shot_ids
+                or payload.get("used_episodes") != episodes_used
+                or payload.get("critical") != critical
+                or payload.get("optional") != (not critical)
+                or payload.get("strategy") != strategy
+                or payload.get("matched_master_id") != matched_id):
+            row.payload = {
+                **payload,
+                "used_shot_ids": shot_ids,
+                "used_episodes": episodes_used,
+                "critical": critical,
+                "optional": not critical,
+                "strategy": strategy,
+                "matched_master_id": matched_id,
+                "variants": list(evidence.get("variants") or payload.get("variants") or []),
+            }
             row.sha256 = graph_hash(row.payload)
         requirements_view.append({
             "requirement_id": row.id,
-            "family": p.get("family"),
-            "entity_id": entity,
-            "name": entity,
-            "description": p.get("description") or "",
-            "critical": bool(p.get("critical")),
-            "optional": p.get("family") != "character",
+            "family": payload.get("family"),
+            "entity_id": payload.get("entity_id"),
+            "name": payload.get("entity_id"),
+            "description": payload.get("description") or "",
+            "critical": critical,
+            "optional": not critical,
+            "cited_by_shot": bool(evidence.get("cited_by_shot")),
+            "variants": list(evidence.get("variants") or []),
             "used_shot_ids": shot_ids,
             "used_shot_count": len(shot_ids),
             "used_episodes": episodes_used,
-            "matched_master": ({"asset_id": master.id, "sha256": master.sha256,
-                                "entity_id": master.entity_id} if master else None),
-            "status": "matched" if master else "missing",
+            "matched_master": ({"asset_id": matched_id,
+                                "sha256": evidence.get("matched_master_sha256")}
+                               if matched_id else None),
+            "status": "matched" if matched_id else "missing",
+            "strategy": strategy,
         })
-    from shine.materialprep.service import confirmation_snapshot_hash
+    return {
+        "plan_revision_id": plan_row.id,
+        "replayed": replayed,
+        "expected_snapshot": confirmation_snapshot_hash(plan_row),
+        "requirements": requirements_view,
+        "shot_count": len(shot_ids_seen),
+        "capacity": derived["capacity"],
+        "profile": derived["profile"],
+        "catalog_present": derived["catalog_present"],
+    }
 
-    return {"plan_revision_id": plan_row.id, "replayed": replayed,
-            "expected_snapshot": confirmation_snapshot_hash(plan_row),
-            "requirements": requirements_view,
-            "shot_count": len(shot_episode)}
+
+# ---------------------------------------------------------------------------
+# ⑤⑥ One shoot action: freeze the selected episodes, then start the real run
+# ---------------------------------------------------------------------------
+
+
+def start_director_production(
+    db, project, *, settings, episode_ids: list[str], workflow_profile_id: str | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """The single main operation of the director page: shoot the chosen episodes.
+
+    It composes the existing services rather than owning a second production
+    engine: readiness is read from the real ledger, a package covering exactly
+    the selected episodes is built and confirmed when one does not exist, and
+    the existing Run engine starts it with a deterministic request key.  A
+    replay of the same selection returns the same run instead of starting a
+    second one, and an unfinished episode never drags a ready one down.
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.director.overview import build_overview
+    from shine.director.package import (
+        build_package,
+        confirm_package,
+        package_episodes,
+        package_readiness,
+    )
+    from shine.production import runner as run_engine
+
+    project_id = project.id
+    requested = list(dict.fromkeys(str(item) for item in (episode_ids or []) if str(item).strip()))
+    if not requested:
+        raise HTTPException(422, {"code": "EPISODE_SCOPE_REQUIRED",
+                                  "message": "先选择要拍摄的集"})
+    overview = build_overview(db, project)
+    known = {row["episode_id"]: row for row in overview["episodes"]}
+    unknown = [item for item in requested if item not in known]
+    if unknown:
+        raise HTTPException(404, {"code": "EPISODE_NOT_IN_PLAN",
+                                  "message": "选择的集不在当前分集方案里",
+                                  "episode_ids": unknown})
+    blocked = [
+        {"episode_id": item,
+         "state": known[item]["state"],
+         "blockers": known[item].get("next_action"),
+         "episode_blockers": [b for b in (known[item].get("package") or {}).get("blockers", [])][:5]}
+        for item in requested
+        if known[item]["state"] not in {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING",
+                                        "REVIEW_READY", "DELIVERED"}
+    ]
+    if blocked:
+        raise HTTPException(409, {
+            "code": "EPISODE_NOT_SHOOTABLE",
+            "message": "选中的集里还有没准备好的；先处理这些集，其他集不受影响",
+            "episodes": blocked,
+        })
+
+    ensure_project_rulepack(db, project_id)
+    package = _package_for_selection(db, project_id, requested)
+    built = False
+    if package is None:
+        profile_id = workflow_profile_id
+        if not profile_id:
+            from shine.director.requirements import bound_profile
+
+            bound = bound_profile(db, project_id)
+            if bound is None:
+                raise HTTPException(409, {"code": "WORKFLOW_PROFILE_REQUIRED",
+                                          "message": "先登记本机生成方案，才能真实开拍"})
+            profile_id = bound.id
+        profile = db.get(WorkflowProfile, profile_id)
+        # A profile registered for the whole machine has no project owner; a
+        # project-owned profile must belong to this project.
+        if profile is None or (profile.project_id and profile.project_id != project_id):
+            raise HTTPException(404, {"code": "WORKFLOW_PROFILE_NOT_FOUND",
+                                      "message": "选择的生成方案不属于这个作品"})
+        package = build_package(
+            db, project,
+            workflow_profile_id=profile.id,
+            episode_ids=requested,
+            generation_mode=profile.mode,
+            policy=None,
+            fill_missing_character_bindings=(profile.mode or "").lower() == "ref2va",
+            created_by=actor,
+            settings=settings,
+        )
+        built = True
+        readiness = package_readiness(db, package)
+        # ``ready`` answers "can this content be produced at all"; ``startable``
+        # additionally needs the confirmation this action is about to write.
+        if not readiness.get("ready"):
+            # The incomplete package stays visible so the person can read the
+            # exact gap; nothing is started and no run is created.
+            raise HTTPException(409, {
+                "code": "DIRECTOR_PACKAGE_NOT_READY",
+                "message": "这一版拍摄方案还没有通过预检；按下面的缺项处理后重试",
+                "package_id": package.id,
+                "revision": package.revision,
+                "blockers": (readiness.get("blockers") or [])[:20],
+            })
+        confirm_package(db, package, actor=actor)
+
+    request_key = "director:" + graph_hash({
+        "project": project_id,
+        "package": package.manifest_sha256,
+        "episodes": sorted(requested),
+    })
+    run, created = run_engine.create_run(
+        db, package, episode_ids=requested, idempotency_key=request_key, actor=actor)
+    add_audit(db, actor, "DIRECTOR_PRODUCTION_STARTED", "production_run", run.id,
+              {"package_id": package.id, "revision": package.revision,
+               "episode_ids": requested, "created": created,
+               "package_built": built, "streamline": True}, project_id=project_id)
+    return {
+        "package_id": package.id,
+        "package_revision": package.revision,
+        "package_built": built,
+        "run_id": run.id,
+        "run_status": run.status,
+        "created": created,
+        "episode_ids": requested,
+        "episodes": [
+            {"episode_id": row.episode_id, "position": row.position,
+             "shot_count": row.shot_count}
+            for row in package_episodes(db, package.id)
+            if row.episode_id in set(requested)
+        ],
+    }
+
+
+def _package_for_selection(db, project_id: str, episode_ids: list[str]):
+    """A confirmed, non-stale package whose scope is exactly this selection."""
+    from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
+
+    wanted = set(episode_ids)
+    rows = db.scalars(select(DirectorPackageVersion).where(
+        DirectorPackageVersion.project_id == project_id,
+        DirectorPackageVersion.status == "CONFIRMED",
+        DirectorPackageVersion.stale.is_(False),
+    ).order_by(DirectorPackageVersion.revision.desc())).all()
+    for package in rows:
+        covered = set(db.scalars(select(DirectorPackageEpisode.episode_id).where(
+            DirectorPackageEpisode.package_id == package.id)).all())
+        if covered == wanted:
+            return package
+    return None

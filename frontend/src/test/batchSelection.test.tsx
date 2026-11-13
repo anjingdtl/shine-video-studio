@@ -5,7 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import App from '../App';
-import { StudioStub, baseRoutes, jsonResponse, gotoDirectorPage } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 beforeEach(() => { stub = new StudioStub(baseRoutes()); });
@@ -23,7 +23,14 @@ describe('待确认素材批量选择', () => {
     ]) });
     const user = userEvent.setup();
     render(<App />);
-    await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+    // 素材文件的批量确认是专业模式的能力；导演④只保留按镜头的需求与决策。
+  const toggle = await waitFor(() => {
+    const node = document.querySelector('.ui-toggle');
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  await user.click(toggle);
+  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull(), { timeout: 5000 });
 
     const selectAll = await screen.findByRole('checkbox', { name: '全选待确认素材' });
     await user.click(selectAll);

@@ -154,7 +154,9 @@ export default function AssetPanel({ assets, busy, onUpload, onConfirm, onUnlock
           <small>确认会固定素材版本，AI 不能替你确认或替换。确认后这张素材才能被分镜引用。</small>
         </div>
         {!railPresent && <button className="btn-primary" disabled={busy || !selection.length}
-          onClick={() => onConfirm(selection)}>确认使用所选待确认素材</button>}
+          onClick={() => onConfirm(selection)}>
+          {selection.length ? `确认使用所选 ${selection.length} 项素材` : '确认使用所选待确认素材'}
+        </button>}
       </div>}
       {pending.length > 0 && <div className="batch-bar">
         <label>

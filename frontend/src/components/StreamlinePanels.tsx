@@ -12,7 +12,7 @@
  * 已持久化状态恢复。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Film, ListChecks, Play, RefreshCw, Sparkles, TriangleAlert } from 'lucide-react';
+import { Check, Film, ListChecks, Play, RefreshCw, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import {
   ApiError,
   api,
@@ -23,9 +23,17 @@ import {
   fetchDirectorStoryboardState,
   fetchEpisodeShots,
   generateStoryboardBook,
-  json,
+  deriveShotMaterials,
   queueDirectorStoryboard,
   retryEpisodeStoryboard,
+  API,
+  fetchDirectorRequirements,
+  commitDirectorMaterials,
+  uploadProjectAsset,
+  approveProjectAsset,
+  lockProjectAsset,
+  type DirectorMaterialRequirement,
+  type DirectorMaterialsView,
   type EpisodeShotRow,
   type EpisodeStoryboardState,
   type StoryboardBook,
@@ -62,6 +70,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
   const [confirmedPlan, setConfirmedPlan] = useState<{ version: number } | null>(null);
+  /** 比已确认版本更新的一版草稿：需要重新生成预览并确认。 */
+  const [pendingDraft, setPendingDraft] = useState<number | null>(null);
 
   useEffect(() => {
     api<StyleCatalogEntry[]>('/director-styles')
@@ -73,6 +83,16 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     api<Array<{ version: number; status: string }>>(`/projects/${projectId}/episode-plans`)
       .then((rows) => {
         const confirmed = rows.find((row) => row.status === 'CONFIRMED');
+        // 重新生成过分镜书时，最新一版是 DRAFT：它必须重新确认，
+        // 不能让旧的「已确认」挡住新版本的确认入口。
+        const latestDraft = rows
+          .filter((row) => row.status === 'DRAFT')
+          .sort((a, b) => b.version - a.version)[0];
+        if (latestDraft && (!confirmed || latestDraft.version > confirmed.version)) {
+          setConfirmedPlan(null);
+          setPendingDraft(latestDraft.version);
+          return;
+        }
         if (confirmed) setConfirmedPlan({ version: confirmed.version });
       })
       .catch(() => undefined);
@@ -86,6 +106,9 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         episode_count: episodeCount, target_seconds: targetSeconds, tolerance_seconds: 30,
       });
       setBook(body);
+      // 新生成的一版尚未确认：旧的确认态不能继续挡住确认按钮。
+      setConfirmedPlan(null);
+      setPendingDraft(null);
       onMessage?.('分镜书已生成；确认后即冻结分集与风格。');
     } catch (error) { setProblem(describeError(error)); }
     finally { setBusy(false); }
@@ -101,6 +124,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         style: { profile_id: profileId, film_type: filmType },
       });
       setConfirmedPlan({ version: book.plan_version });
+      setPendingDraft(null);
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
       onConfirmed?.();
     } catch (error) { setProblem(describeError(error)); }
@@ -193,6 +217,10 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           </li>
         ))}
       </ol>
+    </div>}
+    {pendingDraft !== null && !book && <div className="blocked-callout">
+      <TriangleAlert size={14} />
+      <span>有一版未确认的分镜书（第 {pendingDraft} 版）。点上方「生成分镜书」重新预览，再确认。</span>
     </div>}
     {!book && !confirmedPlan && <p className="empty-inline">
       先确认大纲（第 1 阶段），再在这里生成分镜书。
@@ -455,75 +483,85 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
 
 type Decision = 'reuse_master' | 'generate' | 'upload' | 'skip';
 
-function defaultDecision(row: { strategy?: string | null; matched_master: unknown; optional: boolean }): Decision {
-  if (row.strategy === 'omit_prop') return 'skip';
-  if (row.strategy === 'reuse_master' || row.strategy === 'upload'
-    || row.strategy === 'generate' || row.strategy === 'skip') return row.strategy;
-  return row.matched_master ? 'reuse_master' : (row.optional ? 'skip' : 'generate');
+/** 默认决策只由真实事实决定：已有主素材就复用，必需项缺就制作，可选项默认跳过。 */
+function defaultDecision(row: DirectorMaterialRequirement): Decision {
+  if (row.matched_master) return 'reuse_master';
+  if (row.critical) return 'generate';
+  return 'skip';
 }
+
+const FAMILY_LABEL: Record<string, string> = {
+  character: '人物', scene: '场景', prop: '道具',
+};
 
 export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onOpenLibrary?: () => void;
 }) {
-  const [derived, setDerived] = useState<{
-    plan_revision_id: string; expected_snapshot: string;
-    requirements: Array<{
-      requirement_id: string; family: string; entity_id: string | null; name: string | null;
-      description: string; optional: boolean; used_shot_count: number; used_episodes: string[];
-      matched_master: { asset_id: string } | null; status: string;
-    }>;
-  } | null>(null);
+  const [view, setView] = useState<DirectorMaterialsView | null>(null);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const [result, setResult] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const submitting = useRef(false);
 
-  const load = useCallback(async () => {
-    const body = await api<{
-      plan_revision_id: string; expected_snapshot: string; replayed: boolean;
-      requirements: Array<{
-        requirement_id: string; family: string; entity_id: string | null; name: string | null;
-        description: string; optional: boolean; used_shot_count: number; used_episodes: string[];
-        matched_master: { asset_id: string } | null; status: string; strategy?: string | null;
-      }>;
-    }>(`/projects/${projectId}/material-preparation`).catch(() => null);
-    if (body?.requirements?.length) {
-      setDerived(body);
-      setDecisions(Object.fromEntries(body.requirements.map((row) => [row.requirement_id,
-        defaultDecision(row)])));
-    }
-  }, [projectId]);
+  const apply = useCallback((body: DirectorMaterialsView) => {
+    setView(body);
+    setDecisions((current) => {
+      // 已经做过的选择不会被一次刷新覆盖；新条目按其真实状态取默认值。
+      const next: Record<string, Decision> = {};
+      for (const row of body.requirements) {
+        next[row.requirement_id] = current[row.requirement_id] ?? defaultDecision(row);
+      }
+      return next;
+    });
+  }, []);
 
-  useEffect(() => { void load().catch(() => undefined); }, [load]);
+  const load = useCallback(async () => {
+    try {
+      const body = await fetchDirectorRequirements(projectId);
+      apply(body);
+    } catch {
+      /* 读不到就保持现状：页面不因此谎称“没有需求”。 */
+    } finally {
+      setLoaded(true);
+    }
+  }, [apply, projectId]);
+
+  useEffect(() => { void load(); }, [load]);
 
   async function derive() {
     if (submitting.current) return;
     submitting.current = true;
-    setBusy(true); setProblem(''); setResult(null);
+    setBusy('derive'); setProblem(''); setResult(null);
     try {
-      const { deriveShotMaterials } = await import('../api');
       const body = await deriveShotMaterials(projectId, null);
-      setDerived(body);
-      setDecisions(Object.fromEntries(body.requirements.map((row) => [row.requirement_id,
-        defaultDecision(row)])));
-      onMessage?.('素材清单已按已确认镜头生成。');
+      apply({
+        plan_revision_id: body.plan_revision_id,
+        expected_snapshot: body.expected_snapshot,
+        requirements: body.requirements.map((row) => ({
+          ...row,
+          variants: row.variants ?? [],
+          cited_by_shot: row.cited_by_shot ?? false,
+        })),
+      });
+      onMessage?.('素材清单已按已确认镜头生成；每一项都标了用在哪些镜头。');
     } catch (error) {
       setProblem(describeError(error));
     } finally {
       submitting.current = false;
-      setBusy(false);
+      setBusy('');
     }
   }
 
-  async function confirmAndSend() {
-    if (!derived || submitting.current) return;
+  async function commit() {
+    if (!view?.plan_revision_id || !view.expected_snapshot || submitting.current) return;
     submitting.current = true;
-    setBusy(true); setProblem('');
+    setBusy('commit'); setProblem(''); setResult(null);
     try {
-      const decisionRows = derived.requirements
+      const rows = view.requirements
         .filter((row) => decisions[row.requirement_id])
         .map((row) => ({
           requirement_id: row.requirement_id,
@@ -532,96 +570,191 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
           asset_id: decisions[row.requirement_id] === 'reuse_master'
             ? (row.matched_master?.asset_id ?? null) : null,
         }));
-      const confirmed = await api<{ confirmation_id: string; confirmation_hash: string; revision_id: string }>(
-        `/projects/${projectId}/material-preparation/confirm`,
-        json('POST', {
-          plan_revision_id: derived.plan_revision_id,
-          expected_snapshot: derived.expected_snapshot,
-          decisions: decisionRows,
-        }));
-      const generateIds = derived.requirements
-        .filter((row) => decisions[row.requirement_id] === 'generate')
-        .map((row) => row.requirement_id);
-      let batchInfo = '';
-      if (generateIds.length) {
-        const batch = await api<{ run_id?: string; item_count?: number }>(
-          `/projects/${projectId}/material-preparation/generate`,
-          json('POST', {
-            confirmation_id: confirmed.confirmation_id,
-            confirmation_hash: confirmed.confirmation_hash,
-            requirement_ids: generateIds,
-            idempotency_key: `director-${Date.now().toString(36)}`,
-          }));
-        batchInfo = `，已排队 ${batch.item_count ?? generateIds.length} 项 AI 制作`;
-      }
-      setResult(`已确认 ${decisionRows.length} 项决策${batchInfo}。候选生成后到素材中心选定并回绑。`);
-      onMessage?.('素材决策已确认并送素材中心。');
+      const outcome = await commitDirectorMaterials(projectId, {
+        plan_revision_id: view.plan_revision_id,
+        expected_snapshot: view.expected_snapshot,
+        decisions: rows,
+        queue_generation: true,
+      });
+      const queued = outcome.batch?.item_count ?? outcome.generate_count;
+      const parts = [
+        outcome.replayed
+          ? '这次提交之前已经生效，没有重复出图'
+          : `已确认 ${rows.length} 项决策`,
+        queued ? `已排队 ${queued} 项 AI 候选` : '没有需要 AI 制作的项',
+      ];
+      setResult(parts.join('；') + '。候选生成后由你在这里选定并采用，再回绑镜头。');
+      if (outcome.batch_error) setProblem(outcome.batch_error.message);
+      onMessage?.('素材决策已确认。');
+      await load();
     } catch (error) {
       setProblem(describeError(error));
+      // 断连或超时：先读台账，确认是否其实已经生效，再让用户决定。
+      await load().catch(() => undefined);
     } finally {
       submitting.current = false;
-      setBusy(false);
+      setBusy('');
     }
   }
 
-  const requirements = derived?.requirements ?? [];
+  /** 单条需求立即执行一个决策（重新生成 / 复用新素材），不影响其他行。 */
+  async function commitOne(row: DirectorMaterialRequirement, strategy: Decision, assetId?: string | null) {
+    if (!view?.plan_revision_id || !view.expected_snapshot) return;
+    setBusy(`row-${row.requirement_id}`); setProblem(''); setResult(null);
+    try {
+      await commitDirectorMaterials(projectId, {
+        plan_revision_id: view.plan_revision_id,
+        expected_snapshot: view.expected_snapshot,
+        decisions: [{
+          requirement_id: row.requirement_id,
+          strategy,
+          entity_id: row.entity_id ?? row.name ?? 'unknown',
+          asset_id: assetId ?? null,
+        }],
+        queue_generation: strategy === 'generate',
+      });
+      setResult(strategy === 'generate'
+        ? `「${row.name ?? row.entity_id}」已重新排队制作候选；出图后由你选定并采用。`
+        : `「${row.name ?? row.entity_id}」已改用你上传的主素材。`);
+      onMessage?.('这一项素材已更新。');
+      await load();
+    } catch (error) {
+      setProblem(describeError(error));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /** 用户自行上传：上传 → 确认 → 锁定 → 直接把这一项回绑到新素材。 */
+  async function uploadFor(row: DirectorMaterialRequirement, file: File) {
+    setBusy(`row-${row.requirement_id}`); setProblem(''); setResult(null);
+    try {
+      const asset = await uploadProjectAsset(projectId, file, {
+        role: row.family, entityId: row.entity_id ?? row.name ?? undefined,
+      });
+      await approveProjectAsset(asset.id);
+      await lockProjectAsset(asset.id);
+      await commitOne(row, 'reuse_master', asset.id);
+    } catch (error) {
+      setProblem(describeError(error));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const requirements = view?.requirements ?? [];
   const pendingChoice = requirements.some((row) => !decisions[row.requirement_id]);
+  const missingCritical = requirements.filter(
+    (row) => row.critical && !row.matched_master).length;
   const primary: RailAction | null = requirements.length
-    ? { label: '确认并送素材中心', onClick: () => void confirmAndSend(), loading: busy,
-        disabled: busy || pendingChoice, icon: <ListChecks size={14} />,
+    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并送素材中心',
+        onClick: () => void commit(), loading: busy === 'commit',
+        disabled: busy !== '' || pendingChoice,
+        icon: <ListChecks size={14} />,
         disabledReason: pendingChoice ? '每一项都要选一个处理方式（可选项可选「跳过」）' : undefined }
-    : { label: '按已确认镜头生成素材清单', onClick: () => void derive(), loading: busy, icon: <Film size={14} /> };
-  useStageRail('shot-materials', { priority: 1, primary }, [derived, decisions, busy]);
+    : { label: '按已确认镜头生成素材清单', onClick: () => void derive(),
+        loading: busy === 'derive', icon: <Film size={14} /> };
+  useStageRail('shot-materials', { priority: 1, primary }, [view, decisions, busy]);
 
   return <section className="card section-card" id="shot-materials">
     <div className="section-heading">
       <div>
         <div className="section-kicker">第 4 阶段 · 拍摄素材准备</div>
         <h2>镜头要什么，就准备什么</h2>
-        <p>清单来自你确认过的镜头：每个条目列出用在哪些镜头；已有主素材直接复用，
-          缺项由你决定「AI 制作 / 上传 / 跳过」，只有明确选中的才送素材中心。</p>
+        <p>清单直接来自你确认过的镜头：人物、场景、道具各自的真实引用与使用镜头。
+          已有主素材自动标为复用；缺的<b>必需项</b>只暂停用到它的镜头，可选项可以跳过。</p>
       </div>
-      <button type="button" className="btn-secondary" disabled={busy}
+      <button type="button" className="btn-secondary" disabled={busy !== ''}
         onClick={() => void derive()}>
-        <RefreshCw size={12} /> 重新按镜头生成清单
+        <RefreshCw size={12} /> {busy === 'derive' ? '正在生成…' : '重新按镜头生成清单'}
       </button>
     </div>
+
+    {view?.capacity && <p className="run-hint">
+      本机方案：{view.capacity.profile_name ?? '未登记'} · 人物槽位 {view.capacity.subjects} ·
+      参考图槽位 {view.capacity.pictures}
+      {view.capacity.audios ? ` · 音频槽位 ${view.capacity.audios}` : ''}
+      {view.capacity.subjects === 0 ? '（没有人物槽位：人物主素材不计为必需）' : ''}
+    </p>}
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {result && <p className="run-hint ok-hint"><Check size={12} /> {result}
       {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>去素材中心</button>}
     </p>}
 
-    {!requirements.length && <p className="empty-inline">
+    {loaded && !requirements.length && <p className="empty-inline">
       还没有按镜头的素材清单。先确认至少一集的镜头，再生成清单。
     </p>}
 
-    {requirements.length > 0 && <table className="shot-table material-table">
-      <thead><tr>
-        <th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th>
-      </tr></thead>
-      <tbody>
-        {requirements.map((row) => <tr key={row.requirement_id}>
-          <td><b>{row.name ?? row.entity_id}</b>
-            <span className="muted">（{row.family === 'character' ? '人物' : row.family}）</span></td>
-          <td className="shot-beat">{(row.description || '—').slice(0, 80)}</td>
-          <td>{row.used_shot_count} 镜{row.used_episodes.length ? ` · ${row.used_episodes.join('、')}` : ''}</td>
-          <td>{row.matched_master
-            ? <span className="head-chip ok">已匹配，可复用</span>
-            : <span className="head-chip">缺</span>}</td>
-          <td>
-            <select value={decisions[row.requirement_id] ?? ''} disabled={busy}
-              onChange={(event) => setDecisions((current) => (
-                { ...current, [row.requirement_id]: event.target.value as Decision }))}>
-              {row.matched_master && <option value="reuse_master">复用现有主素材</option>}
-              <option value="generate">AI 制作</option>
-              <option value="upload">我自己上传</option>
-              {row.optional && <option value="skip">跳过（缺的图由 H3 自行生成）</option>}
-              {!row.matched_master && !row.optional && <option value="">请选择…</option>}
-            </select>
-          </td>
-        </tr>)}
-      </tbody>
-    </table>}
+    {requirements.length > 0 && <>
+      <div className="material-summary">
+        <span>{requirements.length} 项需求</span>
+        <span className={missingCritical ? 'warn' : 'ok'}>
+          必需缺项 {missingCritical}
+        </span>
+        <span>{requirements.filter((row) => row.matched_master).length} 项可复用</span>
+      </div>
+      <table className="shot-table material-table">
+        <thead><tr>
+          <th>预览</th><th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th><th>单项操作</th>
+        </tr></thead>
+        <tbody>
+          {requirements.map((row) => {
+            const rowBusy = busy === `row-${row.requirement_id}`;
+            return <tr key={row.requirement_id}>
+            <td className="material-thumb-cell">
+              {row.matched_master
+                ? <img className="material-thumb" src={`${API}/assets/${row.matched_master.asset_id}/thumbnail`}
+                    alt={row.name ?? row.entity_id ?? '素材预览'} loading="lazy" />
+                : <span className={`material-thumb placeholder ${row.critical ? 'warn' : ''}`}>
+                    {row.critical ? '缺' : '可选'}
+                  </span>}
+            </td>
+            <td><b>{row.name ?? row.entity_id}</b>
+              <span className="muted">（{FAMILY_LABEL[row.family] ?? row.family}
+                {row.critical ? ' · 必需' : ' · 可选'}）</span>
+              {row.variants.length > 0 && <em className="material-variants">
+                变体：{row.variants.slice(0, 3).join('、')}</em>}
+            </td>
+            <td className="shot-beat">{(row.description || '—').slice(0, 80)}</td>
+            <td>{row.used_shot_count} 镜
+              {row.used_episodes.length ? ` · ${row.used_episodes.join('、')}` : ''}</td>
+            <td>{row.matched_master
+              ? <span className="head-chip ok">已匹配，可复用</span>
+              : <span className={`head-chip ${row.critical ? 'warn' : ''}`}>
+                  {row.critical ? '必需，缺' : '可选，缺'}
+                </span>}</td>
+            <td>
+              <select value={decisions[row.requirement_id] ?? ''} disabled={busy !== ''}
+                onChange={(event) => setDecisions((current) => (
+                  { ...current, [row.requirement_id]: event.target.value as Decision }))}>
+                {row.matched_master && <option value="reuse_master">复用现有主素材</option>}
+                <option value="generate">AI 制作</option>
+                <option value="upload">我自己上传</option>
+                {!row.critical && <option value="skip">跳过（可选项，不影响生成）</option>}
+                {row.critical && !row.matched_master && <option value="">请选择…</option>}
+              </select>
+            </td>
+            <td className="material-row-actions">
+              <button type="button" className="btn-text" disabled={busy !== ''}
+                title="只对这一项重新排队制作候选，不影响其他素材和已通过的镜头"
+                onClick={() => void commitOne(row, 'generate')}>
+                <RefreshCw size={12} /> {rowBusy ? '处理中…' : '重新生成'}
+              </button>
+              <label className={`btn-text material-upload ${busy !== '' ? 'disabled' : ''}`}
+                title="上传你已有的素材；确认并锁定后直接把这一项回绑到它">
+                <Upload size={12} /> 上传
+                <input type="file" accept="image/*,video/*,audio/*" hidden disabled={busy !== ''}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = '';
+                    if (file) void uploadFor(row, file);
+                  }} />
+              </label>
+            </td>
+          </tr>})}
+        </tbody>
+      </table>
+    </>}
   </section>;
 }

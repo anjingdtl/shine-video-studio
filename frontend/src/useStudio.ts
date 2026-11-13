@@ -294,13 +294,16 @@ export function useStudio() {
     return () => window.clearInterval(timer);
   }, [projectId]);
 
-  async function createProject() {
-    if (!projectTitle.trim()) return;
+  async function createProject(): Promise<string | null> {
+    if (!projectTitle.trim()) return null;
+    let createdId: string | null = null;
     await withBusy(async () => {
       const created = await api<Project>('/projects', json('POST', { title: projectTitle.trim(), description: '' }));
       setProjectTitle(''); setProjects((rows) => [created, ...rows]); setProjectId(created.id);
+      createdId = created.id;
       report('作品已建好。下一步：在「创意与剧本」输入想法或导入剧本。');
     });
+    return createdId;
   }
 
   async function saveStyle(preserveDirectorStyle = false) {

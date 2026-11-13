@@ -168,7 +168,7 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
   }
 
   return <section className="card delivery-panel" id="delivery">
-    <div className="panel-header"><h2>成片与导出</h2><button type="button" className="btn-secondary" disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
+    <div className="panel-header"><h2>成片文件与导出（历史版本）</h2><button type="button" className="btn-secondary" disabled={busy} onClick={() => reload().catch(e => setMessage(String(e)))}>刷新交付列表</button></div>
     <div className="notice">
       <HelpCircle size={13} />
       <div>

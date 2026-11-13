@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from '../App';
-import { StudioStub, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 beforeEach(() => {
@@ -10,6 +10,18 @@ beforeEach(() => {
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
+
+/** 素材文件的确认/锁定是专业模式的能力；导演④只保留需求清单与素材入口。 */
+async function switchToExpert(user: ReturnType<typeof userEvent.setup>) {
+  if (document.querySelector('.app-shell.ui-expert')) return;
+  const toggle = await waitFor(() => {
+    const node = document.querySelector('.ui-toggle');
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  await user.click(toggle);
+  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull(), { timeout: 5000 });
+}
 
 it('刷新后按 director 深链接恢复素材页，而不是回到作品概览', async () => {
   window.history.replaceState(null, '', '#d/produce?stage=assets');
@@ -28,7 +40,8 @@ it('从导演页面进入素材中心再返回时恢复原页面与地址', asyn
   expect(window.location.hash).toBe('#a/home');
   await user.click(screen.getByRole('button', { name: /导演工作台/ }));
   expect(await screen.findByRole('heading', { name: '项目素材' })).toBeInTheDocument();
-  expect(window.location.hash).toBe('#d/produce?stage=assets');
+  // 素材准备已是独立一页：旧的 produce?stage=assets 地址会规范化为 #d/materials。
+  expect(window.location.hash).toBe('#d/materials');
 });
 
 it('往返素材中心时保留指定导演包的深链标识', async () => {
@@ -53,7 +66,7 @@ it('一次确认先批准再锁定；取消不写入，重复操作不覆盖已�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+  await switchToExpert(user);
   const confirm = await screen.findByRole('button', { name: '确认使用' });
   expect(screen.queryByLabelText(/操作员凭据|核验依据/)).toBeNull();
   vi.mocked(window.confirm).mockReturnValue(false);
@@ -73,7 +86,7 @@ it('图片素材显示缩略图，待确认素材用高对比按钮提示必做'
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/assets$/, respond: () => jsonResponse([{ ...asset }]) });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+  await switchToExpert(user);
 
   const thumb = await screen.findByAltText('主角.png');
   expect(thumb).toHaveAttribute('src', '/api/v1/assets/asset-1/thumbnail');
@@ -98,7 +111,7 @@ it('锁定失败会保留已批准状态；再次确认只补锁定，不重复�
   } });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+  await switchToExpert(user);
   await user.click(await screen.findByRole('button', { name: '确认使用' }));
   await screen.findByText('PLAN_HASH_CHANGED');
   await waitFor(() => expect(screen.getByRole('button', { name: '确认使用' })).toBeEnabled());
@@ -117,7 +130,7 @@ it('项目锁定素材直接进入全局候选，不自动晋升', async () => {
   }, 201) });
   const user = userEvent.setup();
   render(<App />);
-  await gotoDirectorPage(user, /第 4 阶段：拍摄素材准备/);
+  await switchToExpert(user);
 
   await user.click(await screen.findByRole('button', { name: '收藏到素材中心' }));
   await user.click(screen.getByRole('button', { name: '保存为待审核候选' }));

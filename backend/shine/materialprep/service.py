@@ -123,8 +123,19 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
             entry = merged.setdefault(
                 key,
                 {"family": family, "entity_id": name, "descriptions": [], "scene_keys": [], "questions": [],
-                 "carriers": []},
+                 "carriers": [], "critical": requirement.get("critical", True),
+                 "optional": requirement.get("optional", not requirement.get("critical", True)),
+                 "variants": []},
             )
+            if requirement.get("critical") is False:
+                # One source that says "optional" makes the merged need
+                # optional: a prop plate is never promoted to a hard gate by
+                # a second scene that merely mentions it.
+                entry["critical"] = False
+                entry["optional"] = True
+            for variant in requirement.get("variants") or []:
+                if variant and variant not in entry["variants"]:
+                    entry["variants"].append(variant)
             if description and description not in entry["descriptions"]:
                 entry["descriptions"].append(description)
             if scene_key and scene_key not in entry["scene_keys"]:
@@ -161,6 +172,9 @@ def aggregate_requirements(scenes: list[dict[str, Any]]) -> dict[str, Any]:
                 "carrier_variants": entry["carriers"] if len(entry["carriers"]) > 1 else [],
                 "scene_keys": entry["scene_keys"],
                 "questions": entry["questions"],
+                "critical": entry["critical"],
+                "optional": entry["optional"],
+                **({"variants": entry["variants"]} if entry["variants"] else {}),
                 **({"core_prop_reason": entry["core_prop_reason"]} if entry.get("core_prop_reason") else {}),
             }
             for (family, name), entry in sorted(merged.items())

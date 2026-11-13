@@ -636,12 +636,12 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 asset = db.get(Asset, identity)
                 if (not asset or asset.project_id != project_id
                         or not asset.approved or not asset.locked):
-                    # 素材不是落镜的硬前置：还没备齐就如实告诉用户「无图片素材
-                    # 将由 H3 自行生成」，这一镜照样落。绝不绑定一个还没确认
-                    # 的素材——没确认的字节不能进渲染。
+                    # 素材不是落镜的硬前置：这一镜照样落，但如实说明它少了哪个
+                    # 参考图——真实开拍时这一镜会停在素材缺口上，不会被伪装成
+                    # “模型会自己画出正式资产”。绝不绑定一个还没确认的素材。
                     shot_notices.append({
                         "code": "MISSING_IMAGE_MATERIAL",
-                        "message": "无图片素材将由H3自行生成",
+                        "message": "这一镜缺少已确认的参考图；开拍前需要补上，或改为不使用该参考",
                         "asset_id": identity,
                     })
                     continue
@@ -1514,8 +1514,8 @@ def generate_storyboard(
     if missing:
         material_requirements = {
             "characters": list(missing),
-            "note": "这些角色还没有已确认的主素材；素材层准备、确认并锁定后可以绑到镜头上，"
-                    "缺的那张图片由 H3 自行生成，落镜不再因此停下。",
+            "note": "这些角色还没有已确认的主素材；落镜不因此停下，但真实开拍前需要先准备、"
+                    "确认并锁定主素材，否则用到这些角色的镜头会停在素材缺口上。",
         }
 
     def _run_step(name: str, role: str, **kwargs) -> dict:

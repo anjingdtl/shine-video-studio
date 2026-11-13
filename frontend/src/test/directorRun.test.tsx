@@ -1,13 +1,15 @@
-/** 导演包与全片运行面板：状态必须来自服务端，按钮必须只在真的可以推进时出现。
+/** ⑤⑥ 唯一开拍入口与按集进度（V2 §8）。
  *
- *  这些是界面契约测试（stub 出来的服务端形状），不是真实生产的证据。
+ * 导演模式只保留一个“确认拍摄方案并开始真实制作”主操作，它复用导演包与
+ * Run 引擎；没准备好的集是具名拒绝，不会拖住已就绪的集。这里用 stub 的
+ * 服务端形状验证界面按真实事实行事，不是生产证据。
  */
 import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 
 import App from '../App';
-import { EMPTY_JOURNEY, StudioStub, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
+import { PRODUCTION_MODE_READY, StudioStub, SYSTEM_STATUS, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
@@ -17,201 +19,198 @@ beforeEach(() => {
 
 afterEach(() => {
   stub.restore();
-  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
-function scopeJourney(runId: string, shotCount = 4) {
-  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey(\?|$)/,
-    respond: () => jsonResponse({ ...EMPTY_JOURNEY,
-      scope: { package_id: 'package-1', run_id: runId, shot_count: shotCount } }) });
+function episode(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    episode_id: 'ep-01', order: 1, title: '第1集', planned_seconds: 60,
+    state: 'READY_TO_PACKAGE', state_label: '可打包',
+    storyboard: { section_count: 2, landed_section_count: 2, pending_sections: [],
+      ledger_task_id: 'task-1', ledger_task_status: 'APPLIED', state_version: 3, blocker: null },
+    shots: { landed_count: 4, confirmed_count: 4, confirmed: true, problems: [] },
+    materials: { missing_count: 0, missing: [] },
+    package: null,
+    production: null,
+    delivery: null,
+    next_action: { kind: 'BUILD_PACKAGE', label: '把这一集生成导演包' },
+    ...overrides,
+  };
 }
 
-const CONFIRMED_PLAN = {
-  id: 'plan-1', project_id: 'proj-1', version: 2, status: 'CONFIRMED', target_seconds: 60,
-  tolerance_seconds: 15, sha256: 'b'.repeat(64), source: 'derived',
-  payload: {
-    target_seconds: 60, tolerance_seconds: 15,
-    episodes: [{
-      episode_id: 'ep-01', order: 1, title: '第1集', shot_ids: ['shot-1', 'shot-2'],
-      planned_seconds: 12, boundary_note: 'final_episode',
-    }],
-  },
-  created_at: '2026-11-01T00:00:00', confirmed_at: '2026-11-01T00:01:00',
-};
-
-const CONFIRMED_PACKAGE = {
-  id: 'package-1', project_id: 'proj-1', revision: 3, status: 'CONFIRMED', stale: false,
-  stale_reason: null, scope_digest: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64),
-  policy_hash: 'e'.repeat(64), episode_count: 1, shot_count: 2,
-  episode_plan: { plan_id: 'plan-1', version: 2, sha256: 'b'.repeat(64), target_seconds: 60 },
-  script: { outline_confirmed: true }, style: { style_version_id: 'style-1', version: 1, sha256: 'a'.repeat(64) },
-  binding: {
-    workflow_profile_id: 'profile-1', mode: 'Ref2VA', graph_sha256: 'f'.repeat(64),
-    checkpoint_id: 'MiniMax-H3-Base', generation_mode: 'Ref2VA', output: {},
-  },
-  policy: { max_repairs_per_shot: 2 }, episodes: [
-    { episode_id: 'ep-01', position: 1, title: '第1集', shot_count: 2,
-      planned_seconds: 12, manifest_sha256: '9'.repeat(64) },
-  ],
-  created_at: '2026-11-01T00:02:00', confirmed_at: '2026-11-01T00:03:00',
-};
-
-function stubPackageStage({ startable, blockers }: { startable: boolean; blockers: unknown[] }) {
-  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/,
-    respond: () => jsonResponse([CONFIRMED_PLAN]) });
-  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/,
-    respond: () => jsonResponse([CONFIRMED_PACKAGE]) });
-  stub.add({ method: 'GET', pattern: /\/api\/v1\/director-packages\/package-1\/readiness$/,
-    respond: () => jsonResponse({
-      package_id: 'package-1', revision: 3, status: 'CONFIRMED', stale: false,
-      scope_digest: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64),
-      config_fingerprint: '7'.repeat(64), ready: startable, startable,
-      blockers, episode_count: 1, shot_count: 2, checked_at: '2026-11-01T00:04:00Z',
-    }) });
+function overviewBody(episodes: Array<Record<string, unknown>>, run: unknown = null) {
+  return {
+    project_id: 'proj-1', title: '雨夜钟表铺',
+    plan: { version: 2, sha256: 'b'.repeat(64), status: 'CONFIRMED', episode_count: episodes.length },
+    style: { version: 1, sha256: 'a'.repeat(64) },
+    counts: {
+      episode_count: episodes.length,
+      confirmed_episode_count: episodes.filter((row) => (row.shots as { confirmed: boolean }).confirmed).length,
+      shootable_episode_count: episodes.filter((row) => ['READY_TO_SHOOT', 'READY_TO_PACKAGE']
+        .includes(String(row.state))).length,
+      delivered_episode_count: episodes.filter((row) => row.state === 'DELIVERED').length,
+      shot_count: episodes.reduce((sum, row) => sum + Number((row.shots as { confirmed_count: number }).confirmed_count), 0),
+      passed_shot_count: 0,
+    },
+    episodes,
+    next_action: null,
+    package: null,
+    run,
+    storyboard_task: { task_id: 'task-1', status: 'SUCCEEDED', state_version: 3 },
+  };
 }
 
-describe('导演包阶段', () => {
-  it('已确认且本机可执行时，才出现“启动整部作品生产”', async () => {
-    stubPackageStage({ startable: true, blockers: [] });
+function stubOverview(body: unknown) {
+  stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/overview/,
+    respond: () => jsonResponse(body) });
+}
+
+function stubRef2vaProfile() {
+  stub.add({ method: 'GET', pattern: /\/api\/v1\/workflow-profiles\?project_id=proj-1$/,
+    respond: () => jsonResponse([{
+      id: 'profile-1', project_id: 'proj-1', name: 'local-h3-ref2va-pdd8-2img-1aud',
+      mode: 'Ref2VA', created_at: '2026-11-01T00:00:00Z',
+    }]) });
+}
+
+describe('⑤ 拍摄范围', () => {
+  it('只允许选择就绪的集，并用一次主操作开拍', async () => {
+    stubOverview(overviewBody([
+      episode({}),
+      episode({ episode_id: 'ep-02', order: 2, title: '第2集', state: 'STORYBOARD_BLOCKED',
+        state_label: '分镜待修复', shots: { landed_count: 0, confirmed_count: 0, confirmed: false, problems: [] },
+        next_action: { kind: 'RETRY_STORYBOARD', label: '修复这一集的分镜' } }),
+    ]));
+    stubRef2vaProfile();
+    // 真实制作已就绪：主按钮可用；演示模式下的阻断另有专门测试。
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
+      ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
     let posted: Record<string, unknown> | null = null;
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/director\/production\/start$/,
       respond: (_url, init) => {
         posted = JSON.parse(String(init?.body));
-        return jsonResponse({ id: 'run-1', status: 'QUEUED', created: true }, 201);
+        return jsonResponse({
+          package_id: 'package-1', package_revision: 1, package_built: true,
+          run_id: 'run-1', run_status: 'QUEUED', created: true,
+          episode_ids: ['ep-01'],
+          episodes: [{ episode_id: 'ep-01', position: 1, shot_count: 4 }],
+        }, 201);
       } });
+
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 5 阶段：导演包/);
 
-    expect(await screen.findByText(/第 3 版 · 1 集 · 2 镜/)).toBeInTheDocument();
-    expect(await screen.findByText(/本机检查通过/)).toBeInTheDocument();
-    await user.click(await screen.findByRole('button', { name: /启动整部作品生产/ }));
+    expect(await screen.findByText('这次要拍哪几集')).toBeInTheDocument();
+    // 就绪集默认勾选；未就绪集的勾选框不可点。
+    const [first, second] = await screen.findAllByRole('checkbox');
+    expect(first).toBeChecked();
+    expect(second).toBeDisabled();
+    expect(screen.getByText(/1 集这次还不能拍/)).toBeInTheDocument();
+
+    const [start] = await screen.findAllByRole('button', { name: /确认拍摄方案并开始真实制作/ });
+    await waitFor(() => expect(start).toBeEnabled());
+    await user.click(start);
     await waitFor(() => expect(posted).not.toBeNull());
-    expect(posted?.['package_id']).toBe('package-1');
+    expect(posted?.['episode_ids']).toEqual(['ep-01']);
+    expect(posted?.['workflow_profile_id']).toBe('profile-1');
   });
 
-  it('有阻塞时不给启动按钮，而是列出原因', async () => {
-    stubPackageStage({
-      startable: false,
-      blockers: [{ code: 'STYLE_SUPERSEDED', message: '冻结风格已变更，请重新生成导演包' }],
-    });
+  it('没有任何就绪集时不开拍，而是列出每一集的真实状态', async () => {
+    stubOverview(overviewBody([
+      episode({ state: 'STORYBOARD_BLOCKED', state_label: '分镜待修复',
+        shots: { landed_count: 0, confirmed_count: 0, confirmed: false, problems: [] } }),
+    ]));
+    stubRef2vaProfile();
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 5 阶段：导演包/);
 
-    expect(await screen.findByText('冻结风格已变更，请重新生成导演包')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /启动整部作品生产/ })).toBeNull();
-    // 没有任何分镜时不能生成分集：按钮先禁用，别让人点出一个 422。
-    expect(screen.getByRole('button', { name: /生成分集草案/ })).toBeDisabled();
+    expect(await screen.findByText('这次要拍哪几集')).toBeInTheDocument();
+    expect(screen.getByText('0 集已选')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /确认拍摄方案并开始真实制作（/ })).toBeNull();
   });
 });
 
-describe('全片生产阶段', () => {
-  it('按集展示真实进度、批次与阻塞，并保留播放已交付那一集', async () => {
-    scopeJourney('run-1');
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
-      respond: () => jsonResponse([{ id: 'run-1', status: 'RUNNING' }]) });
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1$/,
-      respond: () => jsonResponse({
-        id: 'run-1', project_id: 'proj-1', package_id: 'package-1', package_revision: 3,
-        manifest_sha256: 'd'.repeat(64), scope_digest: 'c'.repeat(64), status: 'RUNNING',
-        state_version: 7, control_reason: null, blocker_count: 1,
-        scope: { episode_ids: ['ep-01', 'ep-02'], all_episodes: true, shot_count: 4 },
-        counters: {},
-        progress: {
-          required_episode_count: 2, delivered_episode_count: 1, producing_episode_count: 1,
-          blocked_episode_count: 1, batch_count: 3, passed_batch_count: 2,
-          delivered_seconds: 61.5, passed_shot_count: 3,
-        },
-        created_at: '2026-11-01T00:05:00Z', started_at: '2026-11-01T00:05:01Z',
-        finished_at: null, last_progress_at: new Date().toISOString(), heartbeat_at: null,
-        episodes: [
-          { id: 're-1', episode_id: 'ep-01', position: 1, title: '第1集', status: 'DELIVERED',
-            shot_count: 2, passed_shot_count: 2, planned_seconds: 12, actual_seconds: 61.5,
-            delivery_order_id: 'order-1', delivered_artifact_id: 'artifact-1',
-            delivered_sha256: '8'.repeat(64), blocker_code: null,
-            delivered_at: '2026-11-01T00:20:00Z',
-            batches: [{ batch_key: 'ep-01-b01', status: 'PASSED', series_id: 'series-1',
-              shot_count: 1, failure_code: null, dispatched_at: null },
-              { batch_key: 'ep-01-b02', status: 'PASSED', series_id: 'series-2',
-                shot_count: 1, failure_code: null, dispatched_at: null }] },
-          { id: 're-2', episode_id: 'ep-02', position: 2, title: '第2集', status: 'BLOCKED',
-            shot_count: 2, passed_shot_count: 1, planned_seconds: 12, actual_seconds: null,
-            delivery_order_id: null, delivered_artifact_id: null, delivered_sha256: null,
-            blocker_code: 'EPISODE_SHOT_NOT_PASSED', delivered_at: null,
-            batches: [{ batch_key: 'ep-02-b01', status: 'BLOCKED', series_id: 'series-3',
-              shot_count: 1, failure_code: 'SERIES_FAILED', dispatched_at: null }] },
-        ],
-      }) });
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1\/events$/,
-      respond: () => jsonResponse([{ id: 1, kind: 'RUN_CREATED', message: '启动整部作品：2 集',
-        payload: {}, created_at: '2026-11-01T00:05:00Z' }]) });
+describe('⑥ 真实拍摄进度', () => {
+  const RUN = {
+    id: 'run-1', project_id: 'proj-1', package_id: 'package-1', package_revision: 3,
+    manifest_sha256: 'd'.repeat(64), scope_digest: 'c'.repeat(64), status: 'RUNNING',
+    state_version: 7, control_reason: null, blocker_count: 1,
+    scope: { episode_ids: ['ep-01', 'ep-02'], all_episodes: true, shot_count: 4 },
+    counters: {},
+    progress: {
+      required_episode_count: 2, delivered_episode_count: 1, producing_episode_count: 1,
+      blocked_episode_count: 1, batch_count: 3, passed_batch_count: 2,
+      delivered_seconds: 61.5, passed_shot_count: 3,
+    },
+    created_at: '2026-11-01T00:05:00Z', started_at: '2026-11-01T00:05:01Z',
+    finished_at: null, last_progress_at: new Date().toISOString(), heartbeat_at: null,
+    episodes: [],
+  };
 
-    const user = userEvent.setup();
-    render(<App />);
-    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
-
-    await waitFor(() => expect(document.querySelector('.run-summary-facts')).not.toBeNull());
-    const summary = document.querySelector('.run-summary-facts');
-    expect(summary?.textContent).toContain('1 / 2 集已交付');
-    expect(summary?.textContent).toContain('3 / 4 镜已通过');
-    expect(await screen.findByText(/阻塞：EPISODE_SHOT_NOT_PASSED/)).toBeInTheDocument();
-    const video = document.querySelector('video');
-    expect(video?.getAttribute('src')).toBe('/api/v1/deliveries/artifact-1/media');
-    expect(screen.getByRole('button', { name: /暂停/ })).toBeInTheDocument();
-    // 演示态必须说清楚后台不会真的开拍，而不是让人一直等。
-    expect(screen.getByText(/当前是演示体验：后台不会真的开拍/)).toBeInTheDocument();
-  });
-
-  it('待人工处理时，用户可从界面尝试安全续跑现有批次，不会新建 Run', async () => {
-    scopeJourney('run-1', 6);
-    let status = 'NEEDS_REVIEW';
+  function stubRun(status = 'RUNNING') {
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/,
       respond: () => jsonResponse([{ id: 'run-1', status }]) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1$/,
-      respond: () => jsonResponse({
-        id: 'run-1', project_id: 'proj-1', package_id: 'package-1', package_revision: 3,
-        manifest_sha256: 'd'.repeat(64), scope_digest: 'c'.repeat(64), status,
-        state_version: 7, control_reason: 'SERIES_EXECUTION_FAILED:HTTPException', blocker_count: 1,
-        scope: { episode_ids: ['ep-01'], all_episodes: true, shot_count: 6 }, counters: {},
-        progress: { required_episode_count: 1, delivered_episode_count: 0, producing_episode_count: 0,
-          blocked_episode_count: 1, batch_count: 1, passed_batch_count: 0, delivered_seconds: 0,
-          passed_shot_count: 0 },
-        created_at: '2026-11-01T00:05:00Z', started_at: '2026-11-01T00:05:01Z',
-        finished_at: null, last_progress_at: new Date().toISOString(), heartbeat_at: null,
-        episodes: [{ id: 're-1', episode_id: 'ep-01', position: 1, title: '第1集', status: 'BLOCKED',
-          shot_count: 6, passed_shot_count: 0, planned_seconds: 30, actual_seconds: null,
-          delivery_order_id: null, delivered_artifact_id: null, delivered_sha256: null,
-          blocker_code: 'SERIES_EXECUTION_FAILED:HTTPException', delivered_at: null,
-          batches: [{ batch_key: 'ep-01-b01', status: 'BLOCKED', series_id: 'series-1',
-            shot_count: 6, failure_code: 'SERIES_EXECUTION_FAILED:HTTPException', dispatched_at: null }] }],
-      }) });
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1\/events$/,
+      respond: () => jsonResponse({ ...RUN, status }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1\/events/,
       respond: () => jsonResponse([]) });
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/production-runs\/run-1\/resume$/,
-      respond: () => {
-        status = 'RUNNING';
-        return jsonResponse({ id: 'run-1', status }, 202);
-      } });
+  }
+
+  it('按集展示真实进度，并把可审片的集单独标出来', async () => {
+    stubRun();
+    stubOverview(overviewBody([
+      episode({ state: 'REVIEW_READY', state_label: '可审片',
+        production: { run_id: 'run-1', status: 'RUNNING', shot_count: 2, passed_shot_count: 2 },
+        delivery: { artifact_id: 'artifact-1', sha256: '8'.repeat(64), delivered_at: '2026-11-01T00:20:00Z',
+          actual_seconds: 61.5, status: 'DELIVERED', post_contract: null },
+        next_action: { kind: 'REVIEW_EPISODE', label: '播放并确认这一集' } }),
+      episode({ episode_id: 'ep-02', order: 2, title: '第2集', state: 'SHOOTING', state_label: '拍摄中',
+        production: { run_id: 'run-1', status: 'RUNNING', shot_count: 2, passed_shot_count: 1 },
+        next_action: { kind: 'WAIT', label: '拍摄进行中，可离开页面' } }),
+    ], { run_id: 'run-1', status: 'RUNNING', active: true, scope_episode_ids: ['ep-01', 'ep-02'] }));
 
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 6 阶段：视频生产/);
 
-    expect(await screen.findByRole('button', { name: /继续安全可恢复批次/ })).toBeInTheDocument();
-    expect(screen.getByText(/无法证明安全的批次继续保留在待处理状态/)).toBeInTheDocument();
-    expect(stub.callsOf('POST', /\/production-runs\/run-1\/resume$/)).toHaveLength(0);
-    await user.click(screen.getByRole('button', { name: /继续安全可恢复批次/ }));
-
-    await waitFor(() => expect(stub.callsOf('POST', /\/production-runs\/run-1\/resume$/)).toHaveLength(1));
-    expect(await screen.findByText('进行中')).toBeInTheDocument();
-    expect(stub.callsOf('POST', /\/projects\/proj-1\/production-runs$/)).toHaveLength(0);
+    expect(await screen.findByText(/本次范围：2 集 · 4 镜/)).toBeInTheDocument();
+    expect(screen.getByText(/已通过：3 镜/)).toBeInTheDocument();
+    expect(screen.getByText(/已交付：1\/2 集/)).toBeInTheDocument();
+    expect(screen.getAllByText('可审片').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('拍摄中').length).toBeGreaterThan(0);
   });
 
-  it('还没有运行时明确说明先确认导演包，而不是假装在跑', async () => {
+  it('还没有运行时说明还没开拍，而不是假装在跑', async () => {
+    stubOverview(overviewBody([episode({})]));
     const user = userEvent.setup();
     render(<App />);
     await gotoDirectorPage(user, /第 6 阶段：视频生产/);
-    expect(await screen.findByText(/还没有整部作品的运行记录/)).toBeInTheDocument();
+
+    expect(await screen.findByText('还没有在拍的运行')).toBeInTheDocument();
+    expect(screen.queryByText(/已交付：/)).toBeNull();
+  });
+
+  it('待人工处理时提供核对与安全续跑，不会新建 Run', async () => {
+    stubRun('NEEDS_REVIEW');
+    let resumed = 0;
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/production-runs\/run-1\/resume$/,
+      respond: () => { resumed += 1; return jsonResponse({ id: 'run-1', status: 'RUNNING' }); } });
+    stubOverview(overviewBody([episode({
+      state: 'SHOOTING', state_label: '拍摄中',
+      production: { run_id: 'run-1', status: 'NEEDS_REVIEW', shot_count: 2, passed_shot_count: 1 },
+      next_action: { kind: 'WAIT', label: '等待核对' },
+    })], { run_id: 'run-1', status: 'NEEDS_REVIEW', active: true, scope_episode_ids: ['ep-01'] }));
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
+
+    const resume = await screen.findByRole('button', { name: /继续安全可恢复批次/ });
+    await user.click(resume);
+    await waitFor(() => expect(resumed).toBe(1));
+    expect(stub.calls.filter((call) => call.method === 'POST'
+      && /production-runs$/.test(call.url))).toHaveLength(0);
   });
 });

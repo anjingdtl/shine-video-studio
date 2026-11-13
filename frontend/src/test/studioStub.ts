@@ -1,5 +1,7 @@
 import { vi } from 'vitest';
 import { screen } from '@testing-library/react';
+import { waitFor } from '@testing-library/react';
+import { expect } from 'vitest';
 
 /** 导演模式导航：通过真实的步骤按钮进入目标页面（与用户操作一致，
  *  不直接改内部状态）。 */
@@ -7,6 +9,18 @@ export async function gotoDirectorPage(
   user: { click: (element: Element) => Promise<void> },
   name: RegExp,
 ): Promise<void> {
+  // 项目管理是独立模块，不在七阶段之内：先像真实用户那样从顶栏回到项目管理，
+  // 再从作品卡进入制作页，最后用阶段条切到目标阶段。
+  if (!document.querySelector('.journey-rail')) {
+    const projects = screen.queryByRole('button', { name: /^项目管理$/ });
+    if (projects) {
+      await user.click(projects);
+    }
+    // 项目管理页里首屏主按钮与作品卡都能进入制作页；取第一个即可。
+    const opens = await screen.findAllByRole('button', { name: /继续处理|继续：/ });
+    await user.click(opens[0]);
+    await waitFor(() => expect(document.querySelector('.journey-rail')).not.toBeNull());
+  }
   await user.click(await screen.findByRole('button', { name }));
 }
 
@@ -243,6 +257,9 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/workflow-profiles/, respond: () => jsonResponse([]) },
     // 七阶段的完成态来自服务端；基线里是一个“还没开始制作”的真实形状。
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/, respond: () => jsonResponse(EMPTY_JOURNEY) },
+    // V2 唯一只读投影：没有内容的默认答案，测试按需覆盖。
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/overview/, respond: () => jsonResponse(EMPTY_OVERVIEW) },
+    { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/materials\/requirements/, respond: () => jsonResponse({ plan_revision_id: null, expected_snapshot: null, requirements: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/production-runs$/, respond: () => jsonResponse([]) },
@@ -270,6 +287,15 @@ export function baseRoutes(project = baseProject()): Route[] {
 }
 
 /** 新建作品、还没有任何物料时的七阶段状态（服务端真实会返回的形状）。 */
+export const EMPTY_OVERVIEW = {
+  project_id: 'proj-1', title: '雨夜钟表铺',
+  plan: null, style: null,
+  counts: { episode_count: 0, confirmed_episode_count: 0, shootable_episode_count: 0,
+    delivered_episode_count: 0, shot_count: 0, passed_shot_count: 0 },
+  episodes: [], next_action: null, package: null, run: null,
+  storyboard_task: { task_id: null, status: null, state_version: null },
+};
+
 export const EMPTY_JOURNEY = {
   project_id: 'proj-1',
   stages: [

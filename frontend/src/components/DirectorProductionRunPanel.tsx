@@ -656,6 +656,16 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
                 <span>{episode.shot_count} 镜 · 通过 {episode.passed_shot_count}
                   {' '}· 计划 {seconds(episode.planned_seconds)}
                   {episode.actual_seconds ? ` · 成片 ${seconds(episode.actual_seconds)}` : ''}</span>
+                <em className="run-ep-sub">
+                  {episode.delivered_sha256
+                    ? `文件 ${episode.delivered_sha256.slice(0, 10)}…（SHA-256）`
+                    : '尚无成片文件'}
+                  {' · '}
+                  {episode.post_contract?.subtitle_revision
+                    ? `字幕第 ${episode.post_contract.subtitle_revision} 版`
+                    : '无字幕轨（按默认剪辑）'}
+                  {' · 历史版本见成片库'}
+                </em>
               </div>
               <span className={`run-badge ${tone(episode.status)}`}>{statusText(episode.status)}</span>
             </div>
