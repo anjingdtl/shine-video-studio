@@ -59,4 +59,14 @@
 ## 启动器验收
 
 `start_shine.ps1` 仅新增 `.env` ownedKeys 透传 `SHINE_IDLE_SHUTDOWN_MINUTES`；
-四条入口（干净重启/端口被占/半残栈/停止）按 AGENTS.md 执行并记录。
+四条入口本轮全部执行：
+
+1. 干净重启：scratch 数据目录启动 exit 0，API/Web 200（见生命周期真机节）。
+2. 默认端口被占：dummy 监听 8000 时 `-AutoPorts` 自动选 8001/5173，API/Web 200。
+3. 半启动残栈：身份核验杀掉 web 后重跑启动器，日志出现 reconciling，整栈对账重启，
+   web 200。
+4. 停止：`stop_shine.py` exit 0，端口无监听；监督进程按 supervisor.json 清理。
+
+另：验证调用点内联门 `WorkerValidationGate`（SetupPanel / RealProductionWizard）：
+捕获 `STOP_WORKER_BEFORE_SERVICE_VALIDATION` 后显示「停止 Worker 并继续验证」→
+自动重试 → 「恢复 Worker」；与监控全局入口同一监督进程端点。
