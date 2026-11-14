@@ -66,7 +66,13 @@ def current_script_basis(db: Session, project: Project) -> dict[str, Any]:
 
 
 def outline_for_document(db: Session, project_id: str, document) -> AgentArtifact | None:
-    """The newest readable outline that was really built from this document.
+    """The confirmed outline of this document; a draft only if nothing was confirmed.
+
+    A saved-but-unconfirmed revision must not displace the confirmed basis:
+    episodes, packages and the journey keep reading the last confirmed version
+    until the person confirms the new one.  When no version was ever confirmed,
+    the newest readable draft is returned so the workbench can point at what
+    needs confirmation.
 
     An outline written before provenance was recorded has no document_id.
     It cannot *claim* to belong to another script, so it stays usable as the
@@ -81,15 +87,26 @@ def outline_for_document(db: Session, project_id: str, document) -> AgentArtifac
         )
         .order_by(AgentArtifact.created_at.desc())
     ).all()
-    legacy: AgentArtifact | None = None
+    draft: AgentArtifact | None = None
+    legacy_confirmed: AgentArtifact | None = None
+    legacy_draft: AgentArtifact | None = None
     for row in rows:
         payload = row.payload_json or {}
         declared = payload.get("document_id")
         if document is not None and declared == document.id:
-            return row
-        if not declared and legacy is None:
-            legacy = row
-    return legacy if document is not None else None
+            if row.approved_at:
+                return row
+            if draft is None:
+                draft = row
+        elif not declared:
+            if row.approved_at:
+                if legacy_confirmed is None:
+                    legacy_confirmed = row
+            elif legacy_draft is None:
+                legacy_draft = row
+    if document is None:
+        return None
+    return legacy_confirmed or draft or legacy_draft
 
 
 def confirmed_outline(db: Session, project: Project) -> AgentArtifact | None:

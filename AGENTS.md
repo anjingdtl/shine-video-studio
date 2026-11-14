@@ -1475,3 +1475,27 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   移除；未知变体 404 `VARIANT_MANIFEST_UNKNOWN`）。2026-11-07「登记为显式未钉住候选槽位」
   的描述自此失效；历史文档保留为记录。
 - 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-14 大纲版本管理轮（用户报障：确认后保存新版本无进度/状态）
+
+- **未确认草稿不得顶掉确认依据**。`director/basis.py::outline_for_document` 改为优先返回
+  该文档**最新已确认**大纲；仅当从未确认时才回退最新草稿（legacy 无 document_id 回退保留，
+  且 legacy 已确认优先于本文档草稿）。修复前它取「最新非 stale」含草稿，使
+  `_confirmed_outline`/journey/分集/导演包在草稿挂起时全部翻成「未确认」。
+- **大纲接口暴露版本链**。`GET /director/outline` 增加 `versions`（同文档最近 30 版，含
+  approved/stale/user_edited/revision_of/confirmed/sha/created_at）并支持 `?artifact_id=`
+  读指定版本（404 具名）。确认仍走唯一 `confirm_outline_artifact`，旧版本不重写。
+- **面板以视图为当前版本真相**。`OutlineConfirmationPanel` 不再用任务附带的旧产物渲染
+  横幅/徽章/确认按钮；保存新版本后立即显示「待你审阅 · 用户编辑稿」+「当前确认依据是版本 X」
+  + 确认入口；版本历史折叠列表可「确认此版 / 查看正文」（旧版载入编辑器、以旧版 sha 保存）；
+  编辑器 dirty 跟踪，未改动不可保存。
+- **重新提取如实报告复用**。相同（剧本+锁定事实+provider）输入 `queue_outline` 复用旧
+  SUCCEEDED 任务（不重跑模型）；前端按回执区分：QUEUED/RUNNING=已排队，SUCCEEDED=「复用已有
+  大纲结果，没有重跑模型」，不再谎报排队。保存新版本是同步草稿创建，无需模型调用，文案写明。
+- 回归（定向，用户裁定不做全量）：后端 `test_director_streamline`（+版本链用例）/
+  `test_story_preparation`/`test_story_outline_unblock` 及 basis 影响面 6 模块共 85 例；
+  前端新增 `outlineVersions.test.tsx`（3）+ `storyOutlineUnblock`（7）+ 4 个入口文件 43 例；
+  tsc/build/Ruff 通过。浏览器真实 MiniMax 旅程：提取进度透传→确认 v1→保存 v2 草稿可见→
+  草稿挂起 journey 仍认 v1→确认 v2→相同输入复用提示。证据
+  `docs/ACCEPTANCE_20261114_OUTLINE_VERSIONS.md`。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

@@ -2601,6 +2601,10 @@ html[data-theme='dark'] .sidebar-tip{background:var(--tip-bg-dark);color:var(--t
 .variant-line-list li.ok{border-color:var(--ok-line);background:var(--ok-bg-2)}
 .variant-line-list b{font-size:var(--fs-caption);color:var(--ink-soft);font-weight:650;min-width:0}
 .variant-line-list .chip{flex:none}
+.outline-versions{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.outline-versions li{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid var(--line-soft);border-radius:8px;padding:6px 8px}
+.outline-versions .ov-id{font-weight:650}
+.outline-versions .ov-actions{margin-left:auto;display:flex;gap:6px}
 .setup-preset input[type=radio]{width:auto;min-width:0;flex:none;margin:0;padding:0;border:0;background:none;box-shadow:none}
 .setup-cap input[type=checkbox]{width:auto;min-width:0;flex:none;margin:0;padding:0;border:0;background:none;box-shadow:none}
 .capability-card .btn-secondary{align-self:flex-start;padding:7px 13px}
