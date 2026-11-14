@@ -1351,6 +1351,7 @@ def generate_storyboard(
         last: ValueError | LLMError | None = None
         repair_visual_language = False
         repair_contract_note: str | None = None
+        escalate_output_budget = False
         # A bounded retry of one crew call must be able to replace the record
         # that the *same* request just created.  Without this the guard sees the
         # first refusal and blocks the second attempt, so the designed retry
@@ -1375,6 +1376,7 @@ def generate_storyboard(
                     repair_visual_language=repair_visual_language,
                     repair_contract_note=repair_contract_note,
                     repair_director=repair_director,
+                    escalate_output_budget=escalate_output_budget,
                     replace_interrupted_task_id=(body.replace_interrupted_task_id
                         if role == body.start_role and role in {"director", "editor"} and not repair_director
                         and kwargs.get("tool") != "continuity_arbitration" else None),
@@ -1401,6 +1403,12 @@ def generate_storyboard(
                     role in {"director", "cinematographer"}
                     and failure.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
                 )
+                # A truncated answer (finish_reason=length) is a budget miss, not
+                # a content refusal: one bounded retry may spend up to the verified
+                # output ceiling instead of re-buying the same truncation.  This
+                # never raises max_tokens beyond what the model declared.
+                escalate_output_budget = failure.get("provider_finish_reason") in {
+                    "length", "max_tokens", "content_filter"}
                 # A refusal without a named reason repeats itself: the retry
                 # has to say what the server refused, or the same answer is
                 # bought twice and refused twice.
@@ -1426,6 +1434,15 @@ def generate_storyboard(
                 where + " Rewrite that field in English prose and re-check every visual and camera "
                 "field, including all cuts: no Chinese names, titles, stage directions or lyrics "
                 "outside dialogue blocks; refer to people by English role labels."
+            )
+        if reason == "SCHEMA_VALIDATION_FAILED":
+            paths = [item.get("path") for item in (failure.get("schema_errors") or [])
+                     if isinstance(item, dict) and item.get("path")]
+            where = f" at: {', '.join(paths[:5])}" if paths else ""
+            return (
+                " The previous answer did not satisfy the JSON contract" + where + ". Return every "
+                "required field of the contract with the right type and no extra keys; do not omit "
+                "any required field, and return one JSON object only."
             )
         note = CONTRACT_REPAIR_NOTES.get(reason or "")
         if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):
@@ -1462,10 +1479,12 @@ def generate_storyboard(
             # record itself.  A JSON pointer and a validator name are not
             # provider text, so a retry may be told exactly what to repair.
             for key in ("provider_schema_path", "provider_schema_validator", "visual_field",
-                        "offending_line"):
+                        "offending_line", "provider_finish_reason"):
                 value = task.trace.get(key)
                 if isinstance(value, str) and value:
                     rejection[key] = value
+            if isinstance(task.trace.get("schema_errors"), list):
+                rejection["schema_errors"] = task.trace["schema_errors"]
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:
                 rejection["external_outcome"] = outcome

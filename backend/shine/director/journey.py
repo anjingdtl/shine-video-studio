@@ -428,6 +428,10 @@ def compute_journey(
             pending_sections = 0
             for section_id in episode.get("section_ids") or []:
                 resolved = section_storyboard_shot_ids(db, project_id, section_id)
+                if resolved.get("merged_into"):
+                    # A title merged into a narrative neighbour is satisfied; it
+                    # is neither a landed shot nor a pending section.
+                    continue
                 if resolved["shot_ids"]:
                     landed += len(resolved["shot_ids"])
                 else:

@@ -49,11 +49,13 @@ def _confirmed_first_episode(client, project: str, episode_id: str) -> dict:
 
 
 def test_overview_keeps_a_finished_episode_usable_while_another_is_blocked(api):
-    """Episode 1 lands and is confirmed; episode 2 stays blocked on one section.
+    """Episode 1 lands and self-confirms; episode 2 stays blocked on one section.
 
     The whole-project answer must not become "not materialised": episode 1 is
     already past storyboarding and keeps its own state, its own shot count and
-    its own next action, and the blocked episode never borrows it.
+    its own next action, and the blocked episode never borrows it.  Since the
+    autopilot round, episode 1 materialises itself once its units land (no manual
+    per-episode click); an explicit confirm stays idempotent.
     """
     client, _factory, settings = api
     prepared = _prepare_project(client, sections=4)
@@ -71,9 +73,10 @@ def test_overview_keeps_a_finished_episode_usable_while_another_is_blocked(api):
     first = episodes["ep-01"]
     second = episodes["ep-02"]
 
-    assert first["state"] == "SHOTS_TO_CONFIRM"
+    # Episode 1 auto-confirms once its units land; episode 2 stays blocked.
+    assert first["state"] in {"MATERIAL_MISSING", "READY_TO_PACKAGE"}
     assert first["shots"]["landed_count"] > 0
-    assert first["shots"]["confirmed"] is False
+    assert first["shots"]["confirmed"] is True
     assert second["state"] == "STORYBOARD_BLOCKED"
 
     confirmed = _confirmed_first_episode(client, project, "ep-01")

@@ -24,7 +24,7 @@ from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import scenes, text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent
-from shine.materialprep.source_spans import HEADING, MAX_SCENE_CHARS, segment_document
+from shine.materialprep.source_spans import HEADING, MAX_SCENE_CHARS, is_narrative_fragment, segment_document
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, ProviderProfile, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit
@@ -925,6 +925,19 @@ def _section_apply_evidence(db, project_id, production_section_id):
     # run-shaped ledgers wins for this section.
     from shine.director.streamline import DIRECTOR_STORYBOARD_RUN
 
+    # A section the director run merged into a narrative neighbour (a bare
+    # volume/chapter title) has no shots of its own and is satisfied by that
+    # merge: it must not read as "missing" and block the episode, and it must
+    # not contribute the owner's shots a second time.
+    for candidate in db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
+    ).order_by(AgentTaskRecord.created_at.desc()).limit(10)).all():
+        for unit in (candidate.trace or {}).get("units", []):
+            if production_section_id in (unit.get("merged_section_ids") or []):
+                return {"shot_ids": [], "missing": [], "run": candidate,
+                        "merged_into": unit.get("production_section_id")}
+
     # 一个更新但「没有跑过这一场」的导演任务，不能把上一轮已经落镜的场次
     # 抹成缺失。逐个看最近的导演任务，取第一个真的为这一场产出过镜头的；
     # 都没有时，才用最新任务的缺失信息（仍如实报告未落镜）。
@@ -995,7 +1008,8 @@ def section_storyboard_shot_ids(db, project_id, production_section_id):
     Returns ``{"shot_ids": [...], "missing": [...]}``.
     """
     evidence = _section_apply_evidence(db, project_id, production_section_id)
-    return {"shot_ids": evidence["shot_ids"], "missing": evidence["missing"]}
+    return {"shot_ids": evidence["shot_ids"], "missing": evidence["missing"],
+            **({"merged_into": evidence["merged_into"]} if evidence.get("merged_into") else {})}
 
 
 def compute_section_continuity(db, project_id, production_section_id):
@@ -1081,13 +1095,36 @@ def verified_production_context(db, project_id, source_text, supplied):
             or outline.sha256 != digest(outline.payload_json)):
         raise ValueError("STORY_OUTLINE_NOT_CONFIRMED")
     document = db.get(ProjectDocument, outline.payload_json["document_id"])
-    section = next((s for s in outline.payload_json["production_sections"]
-                    if s["production_section_id"] == supplied.get("production_section_id")), None)
+    sections_by_id = {s["production_section_id"]: s
+                      for s in outline.payload_json["production_sections"]}
+    section = sections_by_id.get(supplied.get("production_section_id"))
     span = supplied.get("source_offsets") or {}
     left, right = span.get("start_offset"), span.get("end_offset")
+    # A merged creation unit spans its owner section plus the title-only sections
+    # it absorbed.  The valid range is the contiguous union of those sections, and
+    # only a non-narrative (bare title/marker) section may be absorbed — a caller
+    # cannot widen its range into another narrative section's prose.
+    range_sections = [section] if section is not None else []
+    for merged_id in span.get("merged_section_ids") or []:
+        merged = sections_by_id.get(merged_id)
+        if merged is None or document is None or is_narrative_fragment(
+                document.text[merged["start_offset"]:merged["end_offset"]]):
+            range_sections = []
+            break
+        range_sections.append(merged)
+    if range_sections:
+        ordered = sorted(range_sections, key=lambda s: s["start_offset"])
+        contiguous = all(a["end_offset"] == b["start_offset"]
+                         for a, b in zip(ordered, ordered[1:], strict=False))
+        min_start = ordered[0]["start_offset"]
+        max_end = ordered[-1]["end_offset"]
+        covered = contiguous and sum(s["end_offset"] - s["start_offset"]
+                                     for s in ordered) == max_end - min_start
+    else:
+        covered, min_start, max_end = False, 0, 0
     if (document is None or document.sha256 != outline.payload_json["document_sha256"] or section is None
             or type(left) is not int or type(right) is not int
-            or not section["start_offset"] <= left < right <= section["end_offset"]
+            or not covered or not min_start <= left < right <= max_end
             or source_text.strip() != document.text[left:right].strip()):
         raise ValueError("STORY_SOURCE_RANGE_INVALID")
     from shine.models import AppSetting

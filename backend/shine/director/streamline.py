@@ -476,7 +476,7 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
     from shine.api_director import _confirmed_outline
     from shine.director.contracts import EpisodePlanPayload
     from shine.materialprep import story
-    from shine.materialprep.source_spans import segment_document
+    from shine.materialprep.source_spans import merge_non_narrative_fragments, segment_document
 
     project = require_project(db, project_id)
     if not project.frozen_style_version_id:
@@ -501,6 +501,13 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
     asset_hash = digest(asset_context(db, project_id))
     units = []
     for episode in payload.episodes:
+        # Collect every source fragment of this episode first, then merge the
+        # title-only / empty ones into an adjacent narrative fragment.  A bare
+        # volume or chapter heading is not a creation unit: the crew cannot
+        # storyboard a title, and asking it to buys an empty or contract-breaking
+        # answer.  Merging stays inside the episode (never across a frozen episode
+        # boundary) and keeps the source coverage exact.
+        fragments = []
         for section_id in episode.section_ids:
             section = sections_by_id.get(section_id)
             if section is None:
@@ -508,14 +515,25 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
             raw = document.text[section["start_offset"]:section["end_offset"]]
             offset = section["start_offset"]
             for fragment in segment_document(raw, max_scene_chars=1200):
-                units.append({
+                fragments.append({
                     "episode_id": episode.episode_id,
                     "production_section_id": section_id,
                     "section_order": section.get("order"),
                     "start_offset": offset,
                     "end_offset": offset + len(fragment.text),
+                    "text": fragment.text,
                 })
                 offset += len(fragment.text)
+        for merged in merge_non_narrative_fragments(fragments):
+            units.append({
+                "episode_id": merged["episode_id"],
+                "production_section_id": merged["production_section_id"],
+                "section_order": merged["section_order"],
+                "start_offset": merged["start_offset"],
+                "end_offset": merged["end_offset"],
+                "merged_section_ids": merged.get("merged_section_ids", []),
+                **({"non_narrative": True} if merged.get("non_narrative") else {}),
+            })
     identity = digest({"tool": DIRECTOR_STORYBOARD_RUN, "outline": outline.sha256,
                        "plan": plan.sha256, "units": units,
                        "style": project.frozen_style_version_id, "assets": asset_hash})
@@ -678,8 +696,16 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
             # (the API boundary refuses mock targets by design).
             if failed is not None and failed_trace.get("is_mock") is not True:
                 reconciliation = (failed_trace.get("reconciliation") or {}).get("outcome")
-                if (failed_trace.get("external_outcome") == "RESPONSE_RECEIVED"
-                        and failed.status in {"REJECTED", "FAILED"}):
+                # A received response is a decided refusal even when the fault
+                # was post-processing (e.g. a validation error): the durable
+                # received_result_sha256 proves the answer arrived, so one new
+                # call buys a new answer, never a duplicate.  A task without it
+                # stays UNKNOWN and keeps the reconciliation gate.
+                answered_refusal = (
+                    failed_trace.get("external_outcome") == "RESPONSE_RECEIVED"
+                    or bool(failed_trace.get("received_result_sha256"))
+                )
+                if answered_refusal and failed.status in {"REJECTED", "FAILED"}:
                     authorize = state["failed_task_id"]
                 elif reconciliation in {"USER_AUTHORIZED_NEW_REQUEST", "NOT_SENT_PROVEN"}:
                     # The UNKNOWN call was reconciled and the person authorized
@@ -761,6 +787,47 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
              "results": [*state.get("results", []),
                          {"unit": unit, "storyboard": result, "apply": applied}]}
     _finish_step(factory, task_id, version, worker_id, state)
+    # Confirm only after the landed unit is durable in the run trace: the episode
+    # coverage gate reads its shots from that trace, not from this local state.
+    _auto_confirm_completed_episode(factory, project_id, state, unit["episode_id"])
+
+
+def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episode_id: str) -> None:
+    """Materialise an episode into the confirmed plan once all its units landed.
+
+    The person already confirmed the episode plan and the frozen style before this
+    run was queued; landing the shots and writing them into that confirmed plan is
+    the authorised continuation, not a new creative decision.  Doing it here removes
+    the per-episode manual click while keeping the same coverage gate, the same
+    audit trail and the same idempotent reuse of landed shots.  A confirmation that
+    cannot pass (a real coverage gap) is recorded and left for the person — it never
+    kills the run or re-buys a landed unit.
+    """
+    units = state.get("units", [])
+    episode_units = [u for u in units if u.get("episode_id") == episode_id]
+    if not episode_units:
+        return
+    applied_offsets = {(r.get("unit") or {}).get("start_offset")
+                       for r in state.get("results", [])}
+    if not all(u.get("start_offset") in applied_offsets for u in episode_units):
+        return
+    try:
+        with factory.begin() as db:
+            plan = _latest_plan(db, project_id)
+            if plan is None or plan.status != "CONFIRMED":
+                return
+            episode = next((e for e in (plan.payload or {}).get("episodes", [])
+                            if e.get("episode_id") == episode_id), None)
+            if episode is None or episode.get("shot_ids"):
+                # Already materialised (or absent): nothing to confirm again.
+                return
+            confirm_episode_shots(db, project_id, episode_id, actor="local-user")
+    except HTTPException as exc:
+        logger.warning("director_auto_confirm_blocked project=%s episode=%s detail=%s",
+                       project_id, episode_id, exc.detail)
+    except Exception:  # noqa: BLE001 - an auto-confirm fault must not kill the run
+        logger.exception("director_auto_confirm_failed project=%s episode=%s",
+                         project_id, episode_id)
 
 
 def _asset_context(db, project_id):
@@ -923,6 +990,11 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -
     shot_ids: list[str] = []
     for section_id in target.section_ids:
         resolved = section_storyboard_shot_ids(db, project_id, section_id)
+        if resolved.get("merged_into"):
+            # A bare title merged into a narrative neighbour is satisfied by the
+            # merge; it owns no shots and must not block the episode or duplicate
+            # the owner's shots.
+            continue
         if resolved["missing"] or not resolved["shot_ids"]:
             pending.append({"section_id": section_id,
                             "missing": resolved["missing"] or [{"reason": "SECTION_HAS_NO_SHOTS"}]})

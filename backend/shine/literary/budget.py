@@ -156,8 +156,17 @@ def plan_call_budget(
     visible_goal_tokens: int | None = None,
     reasoning_reserve_tokens: int | None = None,
     output_ceiling: int | None = None,
+    output_floor_tokens: int | None = None,
 ) -> CallBudget:
-    """Compute the one approved completion budget for this request."""
+    """Compute the one approved completion budget for this request.
+
+    ``output_floor_tokens`` raises the requested completion toward a verified
+    floor (never above the hard cap).  It is the bounded escalation a retry uses
+    after a ``finish_reason=length`` truncation: the first attempt spends the
+    estimated budget, and one retry may spend up to the verified ceiling instead
+    of re-buying the same truncation.  It never invents capacity the model did
+    not declare.
+    """
     cap_info = creative_completion_cap(config)
     warnings: list[str] = []
     sources = list(cap_info.get("sources") or [])
@@ -182,6 +191,8 @@ def plan_call_budget(
 
     requested = min(hard_cap, int(math.ceil(goal + reserve + FORMAT_OVERHEAD_TOKENS)))
     requested = max(requested, min(hard_cap, MIN_COMPLETION_TOKENS))
+    if output_floor_tokens:
+        requested = min(hard_cap, max(requested, int(output_floor_tokens)))
 
     declared_window = _positive(config.context_window_tokens)
     window = declared_window or UNVERIFIED_PLANNING_WINDOW

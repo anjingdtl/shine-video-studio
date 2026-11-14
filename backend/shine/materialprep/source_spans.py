@@ -29,6 +29,36 @@ HEADING = re.compile(
     re.IGNORECASE,
 )
 
+CHAPTER_MARKER = re.compile(r"^\s*第[^\n]{1,20}[章节回卷]")
+"""A chapter/volume title line.  Like a scene heading it names a unit but is
+not itself story prose, so a fragment made only of these lines carries no
+plot a crew could storyboard."""
+
+MIN_NARRATIVE_BODY_CHARS = 20
+"""The smallest body that counts as a narratable creation unit.
+
+A fragment whose prose (headings and markers removed) is shorter than this is
+a title, a marker or a stray blank — not a scene.  Sending it to the five-role
+crew buys an empty or contract-breaking answer; it is merged into a neighbouring
+narrative unit instead, or refused by name when it stands alone.
+"""
+
+
+def narrative_body(text: str) -> str:
+    """The story prose of a fragment, with heading/marker lines removed."""
+    parts: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or HEADING.match(line) or CHAPTER_MARKER.match(line):
+            continue
+        parts.append(stripped)
+    return "".join(parts)
+
+
+def is_narrative_fragment(text: str, *, min_body_chars: int = MIN_NARRATIVE_BODY_CHARS) -> bool:
+    """True when a fragment carries enough prose to be a creation unit."""
+    return len(narrative_body(text)) >= min_body_chars
+
 MAX_SCENE_CHARS = 4000
 """The floor for one extraction unit.  The real ceiling is measured from the
 provider's own budget in ``story._extract_segment_chars``; this constant only
@@ -120,6 +150,68 @@ def segment_document(text: str, *, max_scene_chars: int = MAX_SCENE_CHARS) -> li
             scenes.append(Scene(key=key, title=title, text=body, spans=spans))
             cursor = chunk_end
     return scenes
+
+
+def merge_non_narrative_fragments(fragments: list[dict]) -> list[dict]:
+    """Deterministically absorb title-only / empty fragments into a neighbour.
+
+    Each fragment carries ``episode_id``, ``production_section_id``,
+    ``section_order``, ``start_offset``, ``end_offset`` and ``text``.  A fragment
+    with no narrative body is merged into the adjacent narrative fragment of the
+    SAME episode (forward first, backward for a trailing title), so the crew is
+    never asked to storyboard a bare heading.  Merging only moves boundaries: the
+    concatenation of every unit's text still covers the episode's source exactly,
+    in order, with no dropped or duplicated character.
+
+    A merged unit keeps the narrative owner's ``production_section_id`` and lists
+    the absorbed sections in ``merged_section_ids`` (only those different from the
+    owner).  A fragment that cannot merge (an isolated title with no adjacent
+    narrative) is returned unchanged and flagged ``non_narrative`` so the caller
+    can refuse it by name instead of inventing plot.
+    """
+    units: list[dict] = []
+    pending: list[dict] = []
+
+    def absorb(target: dict, extras: list[dict], *, forward: bool) -> None:
+        for extra in extras:
+            if forward:
+                target["start_offset"] = extra["start_offset"]
+                target["text"] = extra["text"] + target["text"]
+            else:
+                target["end_offset"] = extra["end_offset"]
+                target["text"] = target["text"] + extra["text"]
+            section = extra["production_section_id"]
+            if section != target["production_section_id"] \
+                    and section not in target["merged_section_ids"]:
+                target["merged_section_ids"].append(section)
+
+    for fragment in fragments:
+        if is_narrative_fragment(fragment["text"]):
+            unit = {**fragment, "merged_section_ids": []}
+            adjacent = [p for p in pending if p["end_offset"] == unit["start_offset"]]
+            isolated = [p for p in pending if p["end_offset"] != unit["start_offset"]]
+            # An isolated title cannot join this unit without spanning unrelated
+            # text; it stays its own (refusable) unit.
+            for stray in isolated:
+                units.append({**stray, "merged_section_ids": [], "non_narrative": True})
+            absorb(unit, adjacent, forward=True)
+            units.append(unit)
+            pending = []
+        else:
+            pending.append(fragment)
+    if pending:
+        narrative_units = [u for u in units if not u.get("non_narrative")]
+        if narrative_units:
+            last = narrative_units[-1]
+            adjacent = [p for p in pending if p["start_offset"] == last["end_offset"]]
+            isolated = [p for p in pending if p["start_offset"] != last["end_offset"]]
+            absorb(last, adjacent, forward=False)
+            for stray in isolated:
+                units.append({**stray, "merged_section_ids": [], "non_narrative": True})
+        else:
+            for stray in pending:
+                units.append({**stray, "merged_section_ids": [], "non_narrative": True})
+    return units
 
 
 def spans_for_scene_key(scenes: list[Scene], key: str) -> set[str] | None:

@@ -448,7 +448,8 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         if any(re.search(r"[\u3400-\u9fff]", value) for value in style_values if isinstance(value, str)):
             translated_style = proposal.prompt_style
             if not translated_style or any(re.search(r"[\u3400-\u9fff]", value)
-                                           for value in translated_style.model_dump().values()):
+                                           for value in translated_style.model_dump().values()
+                                           if isinstance(value, str)):
                 raise ValueError("H3_STYLE_TRANSLATION_REQUIRED")
         if any(re.search(r"[\u3400-\u9fff]", fact) for fact in body.locked_story_facts):
             translations = proposal.prompt_story_facts
@@ -684,6 +685,7 @@ class FilmAgentDispatcher:
         replace_interrupted_task_id: str | None = None,
         authorize_replay_task_id: str | None = None,
         repair_director: bool = False,
+        escalate_output_budget: bool = False,
     ) -> AgentArtifact:
         if replace_interrupted_task_id is not None:
             raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
@@ -1041,8 +1043,10 @@ class FilmAgentDispatcher:
             crew_budget = plan_call_budget(
                 bounded_config, crew_request, purpose="structured",
                 output_ceiling=agent_output_limit,
+                output_floor_tokens=agent_output_limit if escalate_output_budget else None,
             )
-            task.trace = {**task.trace, "call_budget": crew_budget.as_dict()}
+            task.trace = {**task.trace, "call_budget": crew_budget.as_dict(),
+                          **({"output_budget_escalated": True} if escalate_output_budget else {})}
             db.commit()  # the approved budget is durable evidence before the call
             if not crew_budget.fits:
                 raise ValueError(str((crew_budget.refusal or {}).get("code")
@@ -1205,8 +1209,19 @@ class FilmAgentDispatcher:
             diagnostic = ("schema_validation" if isinstance(exc, ValidationError) else
                           "provider_format" if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT" else
                           "provider_error" if isinstance(exc, LLMError) else "contract_or_policy")
+            # The failing field paths make a schema refusal diagnosable and let a
+            # bounded retry target exactly them.  Only the location and the rule
+            # type are kept — never the rejected value or any provider text.
+            schema_errors = None
+            if isinstance(exc, ValidationError):
+                schema_errors = [
+                    {"path": ".".join(str(part) for part in err.get("loc", ())),
+                     "type": err.get("type")}
+                    for err in exc.errors()[:20]
+                ]
             task.trace = {**task.trace, "automatic_replay": False,
                           "diagnostic_category": diagnostic,
+                          **({"schema_errors": schema_errors} if schema_errors else {}),
                           **({"http_status": exc.details["status"]}
                              if isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int) else {}),
                           **({"provider_code": exc.details["provider_code"]}
