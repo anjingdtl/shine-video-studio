@@ -1596,6 +1596,10 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   打断用户与其他 agent 正在运行的工作台（该事故曾使 8000/5173 工作台掉线，后用 `npm --prefix frontend ci`
   按锁文件还原修复）。**绝不抢占他人端口**（8010/5180 可能被别的 agent 建设占用，先查端口）。
   要装依赖或起停工作栈，先问用户。隔离实例用 `scripts/start_eval_instance.ps1`（复用现有依赖，不重装）。
+- **端口实况随时变**：多套栈常并行（2026-11-15 06:25 实测为 8010/5180、8020/5190、8030/5200，5173 无监听），
+  起实例前先 `Get-NetTCPConnection` 查端口，被占用就换端口；最新实况记在团队记忆 `shine.ports`。
+  另：8000 曾被别的 agent 用 `python -m http.server` 直接服务仓库根，导致 `.env`、`.git`、`.local-data`
+  可被本机 HTTP 读取——此类静态根目录服务不得用于本仓库，发现即上报用户，不要擅自停止他人进程。
 
 ## 2026-11-15 工作栈生命周期与全流程依赖一键整备轮
 
