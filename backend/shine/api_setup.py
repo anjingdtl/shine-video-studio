@@ -1794,7 +1794,8 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     require_project(db, body.project_id)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
                     installation_path=body.installation_path, port=body.port,
-                    variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor)
+                    variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,
+                    settings=settings)
     db.commit()
     return {"status": value.get("status"), "task_id": value.get("task_id"),
             "steps": [row["id"] for row in value.get("steps") or []],

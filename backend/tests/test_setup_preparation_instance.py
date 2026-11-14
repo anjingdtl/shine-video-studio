@@ -104,6 +104,24 @@ def test_instance_step_needs_review_stops_named(studio, monkeypatch):
     assert detail["code"] == "INSTANCE_REQUIRES_RECONCILIATION"
 
 
+def test_enqueue_includes_instance_only_on_bare_machine(studio, monkeypatch):
+    client, factory, _tmp, settings = studio
+    project_id = create_project(client)
+    monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
+                        lambda db, settings, path=None: {"selected": {}})
+    with factory() as db:
+        bare = setup_preparation.enqueue(db, project_id=project_id,
+                                         capabilities=["h3"], settings=settings)
+    assert bare["steps"][0]["id"] == "INSTANCE"
+    monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
+                        lambda db, settings, path=None: {"selected": {"instance_id": "i-1"}})
+    project2 = create_project(client, title="已有安装")
+    with factory() as db:
+        existing = setup_preparation.enqueue(db, project_id=project2,
+                                             capabilities=["h3"], settings=settings)
+    assert existing["steps"][0]["id"] == "TARGET"
+
+
 def test_runtime_closure_gap_bare_machine(studio):
     _client, factory, _tmp, settings = studio
     from shine.comfyops.setup_summary import runtime_closure_gap

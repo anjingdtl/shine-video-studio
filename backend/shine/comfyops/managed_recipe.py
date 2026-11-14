@@ -47,6 +47,16 @@ def _absolute(value):
     return str(path)
 
 
+def _optional_absolute(value):
+    # Output paths (renderer log) are created by the bootstrap at start, so they
+    # must be absolute but need not exist yet at recipe validation time.
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise HTTPException(409, "COMFY_RECIPE_INVALID")
+    return str(Path(value))
+
+
 def _expand(template, values):
     def replace(match):
         name = match.group(1)
@@ -84,7 +94,7 @@ def _renderer(raw):
         "argv": list(raw["argv"]),
         "pinned_files": list(raw["pinned_files"]),
         "port": int(raw["port"]) if raw.get("port") else None,
-        "log_file": _absolute(raw["log_file"]) if raw.get("log_file") else None,
+        "log_file": _optional_absolute(raw.get("log_file")),
     }
     if (not isinstance(recipe["instance_id"], str) or not recipe["instance_id"]
             or not re.fullmatch(r"[a-f0-9]{64}", str(recipe["adapter_sha256"]))

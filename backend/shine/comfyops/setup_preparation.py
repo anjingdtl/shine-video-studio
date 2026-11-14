@@ -68,7 +68,8 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool) -> list[str]:
 
 def enqueue(db, *, project_id: str, capabilities: list[str], installation_path: str | None = None,
             port: int | None = None, variant_id: str | None = None,
-            verify_runtime: bool = True, actor: str = "local-user") -> dict[str, Any]:
+            verify_runtime: bool = True, actor: str = "local-user",
+            settings=None) -> dict[str, Any]:
     """Freeze one authorization into a resumable task.
 
     Enqueuing the same request twice returns the running task instead of
@@ -88,6 +89,14 @@ def enqueue(db, *, project_id: str, capabilities: list[str], installation_path: 
         current["status"] = "SUPERSEDED"
         current["message"] = "已被新的准备请求取代"
     steps = _steps_for(capabilities, verify_runtime=verify_runtime)
+    if settings is not None:
+        # The instance ladder only belongs in the chain when the machine has no
+        # usable installation yet; an existing (possibly adopted) installation
+        # must not be mutated by the preparation task.
+        from shine.comfyops.setup_summary import resolve_installation
+        selected = (resolve_installation(db, settings, path=installation_path).get("selected") or {})
+        if selected.get("instance_id"):
+            steps = [step for step in steps if step != "INSTANCE"]
     value = {
         "version": 1,
         "task_id": "setup-" + uuid4().hex[:12],
