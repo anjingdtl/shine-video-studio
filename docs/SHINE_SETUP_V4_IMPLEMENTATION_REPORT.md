@@ -14,7 +14,7 @@
 | WP3 一次授权与统一身份 | DONE | `POST /setup/prepare/execute` + `setup_preparation.py`（Worker 推进的持久步骤机）、端口/实例身份统一 |
 | WP4 下载兜底 | DONE | `missing-files` 真实缺项清单、`POST /setup/manual-files/reconcile`、`<deployment_root>/manual-downloads` 暂存目录 |
 | WP5 UI 收束与渲染器接入 | DONE | 设置页唯一闭环、导演页只读摘要、`PENDING_RECIPE` 语义修正、错误文案中文化 |
-| WP6 回归与 PR | IN PROGRESS | 前端全量 / Ruff / tsc / build 已过；后端 8 分片执行中；PR 待提交 |
+| WP6 回归与 PR | DONE | 前端 60 files/347 tests、Ruff、tsc/build、后端 8 分片 8/8、Alembic 隔离库；PR #27 已合入 main（`66ca746`） |
 
 ## 2. 新增 API
 
