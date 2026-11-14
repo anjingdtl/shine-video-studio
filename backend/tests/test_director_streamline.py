@@ -671,6 +671,56 @@ def test_journey_reports_per_episode_storyboard_progress(api):
     assert "1/2 集分镜已确认" in stage["summary"]
 
 
+def test_journey_follows_the_current_plan_beside_an_older_scoped_package(api):
+    """A package frozen for ep-01 must not keep the journey on its old plan.
+
+    The panel and the auto-confirm write landed shots into the newest confirmed
+    plan version; the journey's storyboard gate used to re-judge the plan the
+    package pinned, so a later episode that landed and auto-confirmed still left
+    the stage blocked with EPISODE_PLAN_NOT_MATERIALIZED.
+    """
+    client, factory, settings = api
+    from tests.conftest import register_workflow_profile
+
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    pending_section = prepared["outline"]["sections"][2]["production_section_id"]
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
+
+    profile = register_workflow_profile(client, mode="Ref2VA")
+    package = _confirmed_scoped_package(client, factory, project, profile, ["ep-01"])
+
+    # The finished episode moves on even while ep-02 is still pending: the gate
+    # covers the package's own scope, not the whole old plan.
+    journey = client.get(f"/api/v1/projects/{project}/journey").json()
+    stage = next(row for row in journey["stages"] if row["id"] == "storyboard")
+    assert not any(b["code"] == "EPISODE_PLAN_NOT_MATERIALIZED" for b in stage["blockers"])
+    assert stage["done"] is True, stage["blockers"]
+
+    # Retry the blocked episode; landing auto-confirms it into a new plan version.
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    retried = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retried.status_code == 202, retried.text
+    _run_storyboard_to_rest(client, settings, project)
+
+    plans = client.get(f"/api/v1/projects/{project}/episode-plans").json()
+    confirmed = next(row for row in plans if row["status"] == "CONFIRMED")
+    assert confirmed["version"] > package["episode_plan"]["version"]
+    assert all(ep["shot_ids"] for ep in confirmed["payload"]["episodes"])
+
+    journey = client.get(f"/api/v1/projects/{project}/journey").json()
+    stage = next(row for row in journey["stages"] if row["id"] == "storyboard")
+    assert not any(b["code"] == "EPISODE_PLAN_NOT_MATERIALIZED" for b in stage["blockers"])
+    assert stage["done"] is True, stage["blockers"]
+    assert stage["facts"]["episode_confirmed_count"] == 2
+    assert stage["facts"]["storyboard_plan_version"] == confirmed["version"]
+
+
 # ---------------------------------------------------------------------------
 # crew salvage and budget
 # ---------------------------------------------------------------------------
