@@ -1180,8 +1180,20 @@ def save_project_terminology(
     """
     from shine.quality.terminology import TerminologyError, parse_table
 
+    # The rows arrive from an API model, so they may still be model instances
+    # rather than plain dicts.  Normalise them here: a caller that forgets to
+    # dump them must not surface as a confusing "row invalid" 422 for every
+    # single row it sends.
+    normalised: list[dict[str, Any]] = []
+    for term in terms:
+        if isinstance(term, dict):
+            normalised.append(term)
+        elif hasattr(term, "model_dump"):
+            normalised.append(term.model_dump())
+        else:
+            raise HTTPException(status_code=422, detail="TERMINOLOGY_ROW_INVALID")
     try:
-        table = parse_table(terms, notes)
+        table = parse_table(normalised, notes)
     except TerminologyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     current = db.scalar(

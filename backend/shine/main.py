@@ -1001,8 +1001,12 @@ def create_app(
         from shine.services import save_project_terminology
 
         project = require_project(db, project_id)
+        # parse_table 只认 dict：请求体里的词条是 Pydantic 模型，
+        # 直接传过去会让每一行都被判成非法行（TERMINOLOGY_ROW_INVALID），
+        # 于是界面上的「保存人名对照表」必然 422，ASR 的专名提示永远拿不到词条。
         row = save_project_terminology(
-            db, project, terms=body.terms, notes=body.notes, created_by=body.created_by or "operator",
+            db, project, terms=[term.model_dump() for term in body.terms],
+            notes=body.notes, created_by=body.created_by or "operator",
             source=body.source or "human",
         )
         add_audit(db, body.created_by or "operator", "PROJECT_TERMINOLOGY_SAVED", "project_terminology",
