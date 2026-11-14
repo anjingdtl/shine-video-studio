@@ -1450,3 +1450,28 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md`；回归
   `test_resource_resolver_v2`（+2）、`test_graph_compiler`、`directorRun.test.tsx`（+1）、
   `timeoutSignal.test.ts`（新增）。
+
+## 2026-11-14 设置可用性与输出目录迁移修复轮（用户裁定）
+
+- **环境检测只由用户点击触发**：`SetupCenter` 挂载/切页不再自动检测；检测结果存
+  sessionStorage 快照（含方案选择与能力勾选），回来直接读快照并显示「上次检测」时间；
+  「刷新全部状态」是唯一的重新检测入口；切页只补顶卡轻量状态读取。
+  回归 `frontend/src/test/setupCenter.test.tsx`（4 项），`setupEntry`/`directorEntries`
+  改为点击「检测本机」后断言。
+- **候选权重下载解锁（用户裁定，覆盖 2026-11-09「候选下载关闭」的下载层决定；
+  验收状态与生产门禁不变）**：`POST /setup/install-plan` 新增
+  `candidate_download_acknowledged`；候选（CANDIDATE/EXPERIMENTAL）显式确认后可下载，
+  审计 `CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED`；BLOCKED 仍拒绝。候选的硬件门槛
+  unknown 记录但不阻挡已确认下载，实测 BLOCKED 仍拒绝。UI 候选 radio 可选
+  （BLOCKED 禁用），确认卡写明「下载不等于验收」。回归
+  `test_install_plan_qualification.py`（+3）。
+- **能力勾选「本机已找到权重」标红**（`.cap-found-warn`）；勾选时二次确认
+  「重复下载 / 仅复用，不下载 / 取消」；重复下载计入下载体积并走安装计划。
+- **输出目录迁移不再被历史缺文件挡死**：源文件已缺失的台账记录具名报告并跳过
+  （路径保持不变），其余文件仍逐字节核验、哈希不一致仍拒绝；响应带
+  `missing/missing_count`，面板如实显示。真实台账副本端到端：132 迁移 / 133 缺失报告。
+  回归 `test_output_directory.py::test_missing_sources_are_reported_and_skipped_not_fatal`。
+- **W4 ConvRot 第三方槽位按用户裁定删除**（`config/deployment/variants/ref2va-w4-convrot.json`
+  移除；未知变体 404 `VARIANT_MANIFEST_UNKNOWN`）。2026-11-07「登记为显式未钉住候选槽位」
+  的描述自此失效；历史文档保留为记录。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

@@ -41,6 +41,10 @@ class InstallPlanRequest(BaseModel):
     #: is a *separate* catalog and therefore a separate companion plan: it is
     #: never silently merged into the H3 installation.
     include_image_capability: bool = False
+    #: The person explicitly confirmed downloading a not-yet-accepted
+    #: candidate's weights (2026-11-14 user decision).  Acceptance status and
+    #: every production gate stay unchanged; BLOCKED variants never download.
+    candidate_download_acknowledged: bool = False
 
 
 class ResourceResolveRequest(BaseModel):
@@ -577,23 +581,40 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
     if variant is not None:
         env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
         qualification = variant_manifests.qualify(variant_manifests.variant_requirements(variant), env)
+        candidate_ack = False
         if not variant.get("auto_download_allowed"):
-            raise HTTPException(409, {
-                "code": "VARIANT_NOT_DOWNLOADABLE",
-                "message": "这个变体还没有进入自动安装路径；它的验收状态是 "
-                           + str(variant.get("acceptance_status")) + "。",
-                "variant_id": variant.get("variant_id"),
-                "acceptance_status": variant.get("acceptance_status"),
-            })
+            acceptance = str(variant.get("acceptance_status") or "")
+            if acceptance == "BLOCKED" or not body.candidate_download_acknowledged:
+                raise HTTPException(409, {
+                    "code": "VARIANT_NOT_DOWNLOADABLE",
+                    "message": "这个变体还没有进入自动安装路径；它的验收状态是 "
+                               + acceptance + "。候选权重可以在制作环境卡片里"
+                               "显式确认后下载（下载不等于验收）；BLOCKED 变体没有"
+                               "可核对的权重来源，不能下载。",
+                    "variant_id": variant.get("variant_id"),
+                    "acceptance_status": acceptance,
+                })
+            candidate_ack = True
+            from shine.services import add_audit
+
+            add_audit(
+                db, "local-user", "CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED",
+                "variant", str(variant.get("variant_id")),
+                {"acceptance_status": acceptance, "catalog_id": raw.get("catalog_id")},
+                project_id=body.project_id,
+            )
         if qualification["status"] != variant_manifests.STATUS_SUPPORTED:
-            raise HTTPException(409, {
-                "code": "HOST_NOT_QUALIFIED",
-                "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
-                "variant_id": variant.get("variant_id"),
-                "status": qualification["status"],
-                "blockers": qualification["blockers"],
-                "unknowns": qualification["unknowns"],
-            })
+            # 显式确认的候选下载：门槛未核实（UNKNOWN）是候选的本性，记录但不
+            # 阻挡；实测不兼容（BLOCKED）仍然拒绝。生产门禁不受影响。
+            if qualification["status"] == "BLOCKED" or not candidate_ack:
+                raise HTTPException(409, {
+                    "code": "HOST_NOT_QUALIFIED",
+                    "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
+                    "variant_id": variant.get("variant_id"),
+                    "status": qualification["status"],
+                    "blockers": qualification["blockers"],
+                    "unknowns": qualification["unknowns"],
+                })
     plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free,
                                           variant=variant, qualification=qualification,
                                           configuration={

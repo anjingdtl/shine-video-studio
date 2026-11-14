@@ -52,6 +52,7 @@ type VariantOption = {
   catalog_id?: string;
   total_bytes?: number;
   required_component_ids?: string[];
+  install_component_ids?: string[];
   workflow_profile_ids?: string[];
   blockers?: Array<{ code: string; message: string }>;
   unknowns?: Array<{ code: string; message: string }>;
@@ -98,6 +99,10 @@ const TIER_LABELS: Record<string, string> = {
   standard: '标准档', lowend_12gb: '12GB 级档位', below_lowend: '低于 12GB 级档位', unknown: '显卡档位未知',
 };
 
+const CAP_LABELS: Record<'image' | 'vlm' | 'asr', string> = {
+  image: '素材出图', vlm: '画面审片', asr: '语音核对',
+};
+
 function gib(bytes?: number | null): string {
   if (bytes == null) return '—';
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
@@ -109,10 +114,44 @@ function mbAsGib(mb?: number | null): string {
 }
 
 function variantPresence(variant: VariantOption, scan: ExistingScan | null): { found: number; required: number } {
-  const required = variant.required_component_ids ?? [];
+  const required = weightIdsOf(variant);
   if (!scan || required.length === 0) return { found: 0, required: required.length };
   const found = required.filter((id) => scan.matches.some((row) => row.component_id === id)).length;
   return { found, required: required.length };
+}
+
+/** 候选变体的 required_component_ids 可能为空（图推导权重），下载与 presence 用 install 清单。 */
+function weightIdsOf(variant: VariantOption): string[] {
+  return variant.required_component_ids?.length
+    ? variant.required_component_ids
+    : (variant.install_component_ids ?? []);
+}
+
+const SNAPSHOT_KEY = 'shine-setup-center-snapshot-v1';
+
+type DetectionSnapshot = {
+  detectedAt: string;
+  env: EnvReport; storage: Storage; runtime: RuntimeState; readiness: Readiness;
+  scan: ExistingScan | null; imageScan: ExistingScan | null;
+  variants: VariantRecommendation; image: ImageReadiness | null;
+  catalog: CatalogSummary | null; adoptedRoot: string | null;
+  variantId: string; caps: { image: boolean; vlm: boolean; asr: boolean };
+};
+
+function readSnapshot(): DetectionSnapshot | null {
+  try {
+    const raw = window.sessionStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DetectionSnapshot;
+    return parsed && parsed.variants ? parsed : null;
+  } catch { return null; }
+}
+
+function writeSnapshot(patch: Partial<DetectionSnapshot>) {
+  try {
+    const current = readSnapshot() ?? ({} as DetectionSnapshot);
+    window.sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ ...current, ...patch }));
+  } catch { /* 快照只是便利，不是门禁 */ }
 }
 
 /** 一句人话结论：只写这台电脑能用什么，不写验收术语。 */
@@ -136,21 +175,27 @@ type Props = {
 };
 
 export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProject }: Props) {
-  const [phase, setPhase] = useState<'idle' | 'detecting' | 'ready' | 'error'>('idle');
+  // 检测只由用户点击触发；结果存快照，切页/刷新回来直接读快照，不重复检测。
+  const [restored] = useState<DetectionSnapshot | null>(() => readSnapshot());
+  const [phase, setPhase] = useState<'idle' | 'detecting' | 'ready' | 'error'>(restored ? 'ready' : 'idle');
   const [problem, setProblem] = useState('');
-  const [env, setEnv] = useState<EnvReport | null>(null);
-  const [storage, setStorage] = useState<Storage | null>(null);
-  const [runtime, setRuntime] = useState<RuntimeState | null>(null);
-  const [readiness, setReadiness] = useState<Readiness | null>(null);
-  const [scan, setScan] = useState<ExistingScan | null>(null);
-  const [imageScan, setImageScan] = useState<ExistingScan | null>(null);
-  const [variants, setVariants] = useState<VariantRecommendation | null>(null);
-  const [image, setImage] = useState<ImageReadiness | null>(null);
-  const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
+  const [env, setEnv] = useState<EnvReport | null>(restored?.env ?? null);
+  const [storage, setStorage] = useState<Storage | null>(restored?.storage ?? null);
+  const [runtime, setRuntime] = useState<RuntimeState | null>(restored?.runtime ?? null);
+  const [readiness, setReadiness] = useState<Readiness | null>(restored?.readiness ?? null);
+  const [scan, setScan] = useState<ExistingScan | null>(restored?.scan ?? null);
+  const [imageScan, setImageScan] = useState<ExistingScan | null>(restored?.imageScan ?? null);
+  const [variants, setVariants] = useState<VariantRecommendation | null>(restored?.variants ?? null);
+  const [image, setImage] = useState<ImageReadiness | null>(restored?.image ?? null);
+  const [catalog, setCatalog] = useState<CatalogSummary | null>(restored?.catalog ?? null);
   /** 已采用的 ComfyUI 根目录：存在时不再创建受管实例，直接复用。 */
-  const [adoptedRoot, setAdoptedRoot] = useState<string | null>(null);
-  const [variantId, setVariantId] = useState('');
-  const [caps, setCaps] = useState({ image: true, vlm: false, asr: false });
+  const [adoptedRoot, setAdoptedRoot] = useState<string | null>(restored?.adoptedRoot ?? null);
+  const [variantId, setVariantId] = useState(restored?.variantId ?? '');
+  const [caps, setCaps] = useState(restored?.caps ?? { image: true, vlm: false, asr: false });
+  const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
+  /** 用户确认「重复下载」的能力：已有权重也重新下载。 */
+  const [force, setForce] = useState({ image: false, vlm: false, asr: false });
+  const [redownloadPrompt, setRedownloadPrompt] = useState<null | 'image' | 'vlm' | 'asr'>(null);
   const [attempt, setAttempt] = useState<InstallationAttemptView | null>(null);
   const [running, setRunning] = useState<{ label: string; note: string } | null>(null);
   const [result, setResult] = useState('');
@@ -160,6 +205,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   const mounted = useRef(true);
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  useEffect(() => { writeSnapshot({ variantId, caps }); }, [variantId, caps]);
 
   const loadImage = useCallback(async () => {
     try { setImage(await api<ImageReadiness>('/setup/image-readiness')); } catch { /* 保持上次结果 */ }
@@ -205,6 +252,13 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       const preferred = variantRows.recommended.find((row) => row.auto_download_allowed)
         ?? variantRows.recommended[0] ?? variantRows.candidates[0];
       setVariantId((current) => current || preferred?.variant_id || '');
+      const stamp = new Date().toISOString();
+      setDetectedAt(stamp);
+      writeSnapshot({
+        detectedAt: stamp, env: environment, storage: disk, runtime: state, readiness: ready,
+        scan: main, imageScan: imageInstall, variants: variantRows, image: imageState,
+        catalog: catalogRows, adoptedRoot: availability?.adopted_root ?? null,
+      });
       setPhase('ready');
     } catch (error) {
       if (!mounted.current) return;
@@ -213,7 +267,24 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     }
   }, [projectId]);
 
-  useEffect(() => { void detect(); }, [detect, refreshEpoch, projectId]);
+  // 挂载不自动检测：有快照读快照，没有就等用户点「检测本机」。
+  // 「刷新全部状态」（refreshEpoch 变化）是用户动作，才重新检测。
+  const epochRef = useRef(refreshEpoch);
+  useEffect(() => {
+    if (epochRef.current === refreshEpoch) return;
+    epochRef.current = refreshEpoch;
+    void detect();
+  }, [refreshEpoch, detect]);
+
+  // 作品 id 异步到达或切换时，只补一个轻量的「已采用安装」读取，不重跑检测。
+  useEffect(() => {
+    if (!projectId || phase !== 'ready') return;
+    let alive = true;
+    api<{ adopted_root?: string | null }>(
+      `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
+    ).then((row) => { if (alive) setAdoptedRoot(row.adopted_root ?? null); }).catch(() => {});
+    return () => { alive = false; };
+  }, [projectId, phase]);
 
   const allVariants = useMemo(() => {
     if (!variants) return [];
@@ -246,12 +317,15 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   // 出图权重可能已经由受管运行时装好（文件已核验），不能因为「已有 ComfyUI 里没找到」就再下载一遍。
   const imagePresent = (!!image?.configured && image.layer !== 'NOT_CONFIGURED')
     || (!!imageScan && IMAGE_COMPONENTS.every((id) => imageScan.matches.some((row) => row.component_id === id)));
-  const needsDownload = !h3Complete || (caps.image && !imagePresent);
+  // 勾选且（缺权重 或 用户确认重复下载）才计入下载体积。
+  const imageWant = caps.image && (!imagePresent || force.image);
+  const vlmWant = caps.vlm && (!vlmReady || force.vlm);
+  const asrWant = caps.asr && (!asrReady || force.asr);
 
-  const downloadBytes = (needsDownload && !h3Complete ? (selectedVariant?.total_bytes ?? 0) : 0)
-    + (caps.image && !imagePresent ? imageBytes : 0)
-    + (caps.vlm && !vlmReady ? REVIEW_BYTES.vlm : 0)
-    + (caps.asr && !asrReady ? REVIEW_BYTES.asr : 0);
+  const downloadBytes = (!h3Complete ? (selectedVariant?.total_bytes ?? 0) : 0)
+    + (imageWant ? imageBytes : 0)
+    + (vlmWant ? REVIEW_BYTES.vlm : 0)
+    + (asrWant ? REVIEW_BYTES.asr : 0);
 
   const canPrepare = !!projectId && !envBlocked && !running && !!storage && !storage.requires_selection
     && !!selectedVariant;
@@ -276,10 +350,11 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       ensure();
       const filesReady = ready.layers.some((layer) => layer.layer === 'L2_files_verified' && layer.status === 'READY');
 
-      if (!filesReady) {
+      if (!filesReady || !h3Complete) {
         // 先尝试复用本机已有安装：只读核验 + 登记，不复制、不下载。
+        // 仅当选中的方案权重确实在本机时才复用；选了别的方案就直接下载它。
         let reused = false;
-        if (comfyInstalled && scan) {
+        if (h3Complete && comfyInstalled && scan) {
           setRunning({ label: '核验本机已有权重…', note: '只读哈希，不复制、不修改你的 ComfyUI' });
           try {
             const verify = await api<{ status: string; rejected?: unknown[]; verified?: unknown[] }>(
@@ -306,9 +381,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         }
         if (!reused) {
           const components = new Set<string>(STRUCTURE_COMPONENTS);
-          for (const id of selectedVariant?.required_component_ids ?? []) components.add(id);
-          if (caps.vlm && !vlmReady) components.add(REVIEW_COMPONENTS.vlm);
-          if (caps.asr && !asrReady) components.add(REVIEW_COMPONENTS.asr);
+          for (const id of selectedVariant ? weightIdsOf(selectedVariant) : []) components.add(id);
+          if (vlmWant) components.add(REVIEW_COMPONENTS.vlm);
+          if (asrWant) components.add(REVIEW_COMPONENTS.asr);
           setRunning({ label: '创建安装计划…', note: '只包含这台电脑缺的部分' });
           const plan = await api<{ plan_id: string; sha256: string; status: string; download_bytes: number }>(
             '/setup/install-plan', json('POST', {
@@ -316,7 +391,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
               components: [...components],
               project_id: projectId,
               disk_free: storage?.free_bytes ?? 0,
-              variant_id: selectedVariant?.auto_download_allowed ? selectedVariant.variant_id : undefined,
+              variant_id: selectedVariant?.variant_id,
+              candidate_download_acknowledged: !!selectedVariant && !selectedVariant.auto_download_allowed,
             }),
           );
           ensure();
@@ -330,7 +406,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         }
       }
 
-      if (caps.image && !imagePresent) {
+      if (imageWant) {
         setRunning({ label: '安装素材出图能力…', note: `约 ${gib(imageBytes)}，独立计划` });
         const imagePlan = await api<{ plan_id: string; sha256: string; status: string; download_bytes: number }>(
           '/setup/install-plan', json('POST', {
@@ -431,6 +507,13 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     }
   }
 
+  /** 已有权重时勾选能力：先二次确认「重复下载 / 仅复用」，不静默重下。 */
+  function toggleCap(key: 'image' | 'vlm' | 'asr', present: boolean, checked: boolean) {
+    if (checked && present) { setRedownloadPrompt(key); return; }
+    setCaps((current) => ({ ...current, [key]: checked }));
+    if (!checked) setForce((current) => ({ ...current, [key]: false }));
+  }
+
   const verdict = verdictLine(variants);
   const modelChips = [
     { id: 'comfyui', label: 'ComfyUI', found: comfyInstalled ? 1 : 0, total: 1 },
@@ -453,12 +536,14 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           {phase === 'detecting' ? <RefreshCw size={13} className="spin" /> : <Cpu size={13} />}
           {phase === 'ready' ? '重新检测' : '检测本机'}
         </button>
-        {phase !== 'ready' && <GuideTip>第一次先点这里：只读检测，不下载、不启动任何东西</GuideTip>}
+        {phase === 'ready' && detectedAt && <span className="run-hint">上次检测 {new Date(detectedAt).toLocaleTimeString()}</span>}
+        {phase === 'idle' && <GuideTip>只读检测，不下载、不启动任何东西；检测一次后结果保留，切页不再重复检测</GuideTip>}
       </div>
     </div>
 
     {phase === 'error' && <p className="form-error" role="alert">检测没有完成：{problem}</p>}
     {phase === 'detecting' && <p className="run-hint">正在读取显卡、显存、磁盘和已有安装…</p>}
+    {phase === 'idle' && <p className="run-hint">点「检测本机」看清这台电脑能跑什么；检测只在你点击时运行。</p>}
 
     {phase === 'ready' && <>
       <p className="setup-verdict"><b>{verdict}</b></p>
@@ -486,11 +571,14 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           {allVariants.map((row) => {
             const presence = variantPresence(row, scan);
             const local = presence.required > 0 && presence.found === presence.required;
-            const selectable = row.auto_download_allowed || local;
+            const blocked = row.acceptance_status === 'BLOCKED';
+            // 已有一套权重不锁死其他方案：候选也可选、可显式确认后下载；
+            // 只有没有可核对权重来源的 BLOCKED 槽位才禁用。
+            const selectable = !blocked;
             const reason = local ? '本机已找到这套权重'
               : row.auto_download_allowed ? `需要下载 ${gib(row.total_bytes)}`
-                : row.acceptance_status === 'BLOCKED' ? '这套没有可核对的权重来源，暂不能使用'
-                  : '候选方案：本机还没有跑通，暂不能直接安装';
+                : blocked ? '这套没有可核对的权重来源，暂不能使用'
+                  : '候选 · 未真机验收；确认后可下载权重（下载不等于验收）';
             return <label key={row.variant_id} className={`setup-preset${variantId === row.variant_id ? ' active' : ''}${selectable ? '' : ' disabled'}`}>
               <input type="radio" name="h3-preset" checked={variantId === row.variant_id} disabled={!selectable || !!running}
                 onChange={() => setVariantId(row.variant_id)} />
@@ -499,7 +587,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
                 <em>{reason}</em>
               </span>
               <span className={`chip ${local ? 'ok' : row.auto_download_allowed ? '' : 'warn'}`}>
-                {local ? '本机已有' : row.auto_download_allowed ? '可安装' : '候选'}
+                {local ? '本机已有' : row.auto_download_allowed ? '可安装' : blocked ? '候选' : '候选 · 可下载'}
               </span>
             </label>;
           })}
@@ -514,23 +602,41 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.image} disabled={!!running}
-            onChange={(event) => setCaps((current) => ({ ...current, image: event.target.checked }))} />
+            onChange={(event) => toggleCap('image', imagePresent, event.target.checked)} />
           <ImageIcon size={14} /><span><b>素材出图（人物 / 场景 / 道具）</b>
-            <em>{imagePresent ? '本机已找到权重' : `需要下载 ${gib(imageBytes)}`}</em></span>
+            <em className={imagePresent ? 'cap-found-warn' : undefined}>{imagePresent ? '本机已找到权重' : `需要下载 ${gib(imageBytes)}`}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.vlm} disabled={!!running}
-            onChange={(event) => setCaps((current) => ({ ...current, vlm: event.target.checked }))} />
+            onChange={(event) => toggleCap('vlm', vlmReady, event.target.checked)} />
           <MonitorCheck size={14} /><span><b>画面审片（只给建议，不卡出片）</b>
-            <em>{vlmReady ? '本机已有' : vlmPresence.found ? `只找到 ${vlmPresence.found}/${vlmTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.vlm)}`}</em></span>
+            <em className={vlmReady ? 'cap-found-warn' : undefined}>{vlmReady ? '本机已有' : vlmPresence.found ? `只找到 ${vlmPresence.found}/${vlmTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.vlm)}`}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.asr} disabled={!!running}
-            onChange={(event) => setCaps((current) => ({ ...current, asr: event.target.checked }))} />
+            onChange={(event) => toggleCap('asr', asrReady, event.target.checked)} />
           <Mic size={14} /><span><b>语音核对（只给建议，不卡出片）</b>
-            <em>{asrReady ? '本机已有' : asrPresence.found ? `只找到 ${asrPresence.found}/${asrTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.asr)}`}</em></span>
+            <em className={asrReady ? 'cap-found-warn' : undefined}>{asrReady ? '本机已有' : asrPresence.found ? `只找到 ${asrPresence.found}/${asrTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.asr)}`}</em></span>
         </label>
       </div>
+
+      {redownloadPrompt && <div className="setup-confirm" role="group" aria-label="重复下载确认">
+        <div>
+          <b>「{CAP_LABELS[redownloadPrompt]}」本机已找到权重。</b>
+          <span>默认直接复用已有权重，不重复下载；仍要重复下载会再下载约 {gib(redownloadPrompt === 'image' ? imageBytes : redownloadPrompt === 'vlm' ? REVIEW_BYTES.vlm : REVIEW_BYTES.asr)} 并写入隔离缓存，不会删除已核验文件。</span>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => {
+          setCaps((current) => ({ ...current, [redownloadPrompt]: true }));
+          setForce((current) => ({ ...current, [redownloadPrompt]: true }));
+          setRedownloadPrompt(null);
+        }}>重复下载</button>
+        <button type="button" className="btn-secondary" onClick={() => {
+          setCaps((current) => ({ ...current, [redownloadPrompt]: true }));
+          setForce((current) => ({ ...current, [redownloadPrompt]: false }));
+          setRedownloadPrompt(null);
+        }}>仅复用，不下载</button>
+        <button type="button" className="btn-text" onClick={() => setRedownloadPrompt(null)}>取消</button>
+      </div>}
 
       <div className="setup-actions">
         <button type="button" className="btn-primary" disabled={!canPrepare || confirming}
@@ -551,6 +657,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           <b>{downloadBytes > 0 ? `将下载约 ${gib(downloadBytes)}，并自动完成配置` : '本机权重已齐，将自动完成配置'}</b>
           <span>目录 {storage?.root} · 不会改动你原有的 ComfyUI，也不会删除已核验的模型</span>
           <span>复用/下载 → 登记生成方案 → 生成受管配置 → 启动检测服务 → 激活</span>
+          {selectedVariant && !selectedVariant.auto_download_allowed && selectedVariant.acceptance_status !== 'BLOCKED' && (
+            <span className="setup-warn"><AlertTriangle size={12} /> 候选方案：下载权重不等于验收，用于生产前必须先在本机真机跑通。点「开始准备」即确认下载候选权重。</span>
+          )}
         </div>
         <button type="button" className="btn-primary" onClick={() => void prepare()}>开始准备</button>
         <button type="button" className="btn-text" onClick={() => setConfirming(false)}>取消</button>

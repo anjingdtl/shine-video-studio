@@ -2542,6 +2542,7 @@ html[data-theme='dark'] .sidebar-tip{background:var(--tip-bg-dark);color:var(--t
 .setup-cap span{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .setup-cap b{font-size:var(--fs-caption);color:var(--ink-soft);font-weight:650}
 .setup-cap em{font-style:normal;font-size:var(--fs-caption);color:var(--muted)}
+.setup-cap em.cap-found-warn{color:#b3261e;font-weight:650}
 .setup-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0 6px}
 .setup-actions .btn-primary{padding:10px 18px}
 .setup-warn{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-caption);color:var(--warn-ink)}

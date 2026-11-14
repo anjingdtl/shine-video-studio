@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FolderTree, HardDrive, RefreshCw } from 'lucide-react';
+import { AlertTriangle, FolderTree, HardDrive, RefreshCw } from 'lucide-react';
 import { api, json } from '../api';
 
 type Layout = { material: string; video: string; voice: string; material_center: string };
@@ -25,6 +25,8 @@ type MigrationResult = {
   bytes_copied: number;
   deleted: number;
   kept: string[];
+  missing?: Array<{ label: string; path: string; reason: string }>;
+  missing_count?: number;
   duration_s: number;
 };
 
@@ -158,10 +160,19 @@ export default function OutputDirectoryPanel() {
     </div>
     <p className="guardrail-note">
       切换目录会先复制并逐个核验文件，全部通过后才切换；任何一步失败都不会切换。有镜头正在拍摄或素材正在生成时会被拒绝，不会打断任务。
+      源文件已缺失的台账记录会被如实报告并跳过（路径保持不变），不阻挡其余文件迁移。
     </p>
     {result && <div className="guardrail-note">
       已复制 {result.copied} 个 / {sizeText(result.bytes_copied)}，清理旧文件 {result.deleted} 个，
       用时 {result.duration_s} 秒{result.kept.length ? `；${result.kept.length} 个旧文件未能删除，已保留` : ''}。
+    </div>}
+    {result && (result.missing_count ?? 0) > 0 && <div className="blocked-callout">
+      <AlertTriangle size={13} />
+      <span>
+        {result.missing_count} 条台账记录的源文件已缺失，未移动、路径保持不变：
+        {(result.missing ?? []).slice(0, 3).map((row) => row.label).join('；')}
+        {(result.missing_count ?? 0) > 3 ? ' 等' : ''}。这些记录在迁移前就已缺文件，如需清理可在素材/成片库处理。
+      </span>
     </div>}
     {message && <div role="status">{message}</div>}
   </div>;

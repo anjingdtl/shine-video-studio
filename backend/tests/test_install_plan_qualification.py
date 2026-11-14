@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 
+from sqlalchemy import select
+
 from tests.conftest import create_project
 from tests.test_v13_preparation import HEADERS, prep  # noqa: F401
 
@@ -106,15 +108,17 @@ def test_a_candidate_variant_is_never_installed_automatically(prep):
     assert detail["code"] == "VARIANT_CATALOG_MISMATCH"
 
 
-def test_the_blocked_w4_slot_is_never_installed_either(prep):
+def test_a_removed_variant_slot_is_refused(prep):
+    """W4 ConvRot 槽位按用户裁定（2026-11-14）删除；未知变体一律具名拒绝。"""
     client, _, _ = prep
     project = create_project(client)
     response = client.post("/api/v1/setup/install-plan", json={
-        "components": H3_MODEL_COMPONENTS, "project_id": project, "disk_free": 10 ** 15,
+        "catalog": "qwen-image-2.1-windows-x64", "components": ["qwen-image-2.1-unet"],
+        "project_id": project, "disk_free": 10 ** 15,
         "variant_id": "ref2va-w4-convrot",
     }, headers=HEADERS)
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "VARIANT_CATALOG_MISMATCH"
+    assert response.status_code == 404, response.text
+    assert "VARIANT_MANIFEST_UNKNOWN" in response.json()["detail"]
 
 
 def test_a_component_only_plan_is_not_gated_by_the_video_variant(prep):
@@ -126,3 +130,46 @@ def test_a_component_only_plan_is_not_gated_by_the_video_variant(prep):
     }, headers=HEADERS)
     assert response.status_code == 200, response.text
     assert response.json()["variant_id"] is None
+
+
+LOWEND_CATALOG = "h3-ref2va-lowend-candidate-windows-x64"
+LOWEND_COMPONENTS = [
+    "minimax-h3-diffusion-w6a8", "minimax-h3-text-encoder-nvfp4", "minimax-h3-vae-int8",
+]
+
+
+def test_a_candidate_download_needs_explicit_acknowledgement(prep):
+    client, _, _ = prep
+    project = create_project(client)
+    response = client.post("/api/v1/setup/install-plan", json={
+        "catalog": LOWEND_CATALOG, "components": LOWEND_COMPONENTS,
+        "project_id": project, "disk_free": 10 ** 15,
+        "variant_id": "ref2va-lowend-candidate",
+    }, headers=HEADERS)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "VARIANT_NOT_DOWNLOADABLE"
+
+
+def test_an_acknowledged_candidate_download_is_planned_and_audited(prep):
+    """2026-11-14 用户裁定：候选权重可显式确认后下载；验收与生产门禁不变。"""
+    client, factory, _ = prep
+    project = create_project(client)
+    response = client.post("/api/v1/setup/install-plan", json={
+        "catalog": LOWEND_CATALOG, "components": LOWEND_COMPONENTS,
+        "project_id": project, "disk_free": 10 ** 15,
+        "variant_id": "ref2va-lowend-candidate",
+        "candidate_download_acknowledged": True,
+    }, headers=HEADERS)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["variant_id"] == "ref2va-lowend-candidate"
+    with factory() as db:
+        from shine.models import AuditEvent
+
+        rows = db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED"
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].entity_id == "ref2va-lowend-candidate"

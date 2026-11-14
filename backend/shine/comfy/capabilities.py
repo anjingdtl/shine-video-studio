@@ -3,8 +3,8 @@
 The variant identity of a profile comes from the versioned variant manifests:
 a profile is the verified variant only when its own graph hash is declared by
 that variant and the variant has a real acceptance.  A profile that merely
-names another variant's checkpoint file inherits nothing - a W6A8, NVFP4 or
-W4 profile is unverified until it has its own checkpoint, graph hash,
+names another variant's checkpoint file inherits nothing - a W6A8 or NVFP4
+profile is unverified until it has its own checkpoint, graph hash,
 parameter map and evidence.
 """
 

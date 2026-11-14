@@ -11,7 +11,9 @@ file is copied to its readable target, verified against the ledger hash, and
 only then is the ledger switched in one transaction.  The old bytes are
 removed afterwards.  A failure before the switch leaves the old root active;
 an interruption leaves harmless extra copies in the new root, never a ledger
-that points at a file which does not exist.
+that points at a file which does not exist.  Ledger rows whose source bytes
+are already absent are reported as missing and left untouched; they never
+block the move of the files that do exist.
 """
 
 from __future__ import annotations
@@ -878,9 +880,27 @@ def migrate_output_root(
     started = utcnow()
     try:
         moves = _plan(db, new_root)
+        # Ledger rows whose bytes are already absent (historical fixtures,
+        # files removed before this root existed) cannot be copied.  They are
+        # reported and left untouched instead of failing the whole migration;
+        # every source that does exist is still verified byte for byte.
+        missing: list[dict] = []
+        movable: list[PlannedMove] = []
+        for move in moves:
+            try:
+                source = safe_asset_path(old_root, move.old_rel)
+            except HTTPException:
+                missing.append({"label": move.label, "path": move.old_rel,
+                                "reason": "台账路径无法解析"})
+                continue
+            if not source.is_file():
+                missing.append({"label": move.label, "path": move.old_rel,
+                                "reason": "源文件已缺失"})
+                continue
+            movable.append(move)
         copied = 0
         bytes_copied = 0
-        for move in moves:
+        for move in movable:
             source = safe_asset_path(old_root, move.old_rel)
             target_path = safe_asset_path(new_root, move.new_rel)
             if source.resolve() == target_path.resolve():
@@ -889,11 +909,11 @@ def migrate_output_root(
                 copied += 1
                 bytes_copied += move.byte_size
         relocated = [
-            move for move in moves
+            move for move in movable
             if (old_root / move.old_rel).resolve() != (new_root / move.new_rel).resolve()
         ]
-        _apply_moves(db, target, moves, actor=actor, moved_count=len(relocated))
-        deleted, kept = _cleanup_old_files(db, old_root, new_root, moves)
+        _apply_moves(db, target, movable, actor=actor, moved_count=len(relocated))
+        deleted, kept = _cleanup_old_files(db, old_root, new_root, movable)
         return {
             "root": str(new_root),
             "custom": target is not None,
@@ -902,6 +922,8 @@ def migrate_output_root(
             "bytes_copied": bytes_copied,
             "deleted": deleted,
             "kept": kept,
+            "missing": missing,
+            "missing_count": len(missing),
             "duration_s": round((utcnow() - started).total_seconds(), 2),
         }
     except HTTPException:

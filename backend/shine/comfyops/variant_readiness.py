@@ -471,7 +471,8 @@ def _next_step(*, layers: list[dict[str, Any]], manifest: dict[str, Any], accept
                 "reason": "这个变体还没有进入自动下载路径（验收状态是 " + acceptance + "）。"
                           "不能用改 SUPPORTED、改 auto_download_allowed 或跳过资格检查的方式解锁下载；"
                           "请用已有的「检测已有安装 / 导入模型」流程，"
-                          "把官方权重按 revision、字节数与 SHA-256 校验后放进来。",
+                          "把官方权重按 revision、字节数与 SHA-256 校验后放进来，"
+                          "或在制作环境卡片里显式确认后下载候选权重（下载不等于验收）。",
                 "action": "EXISTING_INSTALLATION_IMPORT",
                 "blocked": True,
             }
