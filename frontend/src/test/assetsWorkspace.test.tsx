@@ -17,6 +17,10 @@ const apiMock = vi.hoisted(() => ({
   getLibraryAsset: vi.fn(async (_id: string): Promise<unknown> => { throw new Error('asset not found'); }),
   grantVersionPromotion: vi.fn(async () => ({ grant_id: 'grant-1', snapshot: 'version-snapshot', expires_at: '2026-11-09' })),
   promoteLibraryVersion: vi.fn(async () => ({})),
+  assignLibraryVersion: vi.fn(async (_body: Record<string, unknown>) => ({
+    id: 'assignment-1', project_id: 'project-a', title: 'Portrait', role: 'character',
+    entity_id: '林岚', usage_scope: 'project', project_asset_id: 'project-asset-1',
+  })),
 }));
 
 vi.mock('../asset-center/api', () => ({
@@ -28,6 +32,7 @@ vi.mock('../asset-center/api', () => ({
   getLibraryAsset: apiMock.getLibraryAsset,
   grantVersionPromotion: apiMock.grantVersionPromotion,
   promoteLibraryVersion: apiMock.promoteLibraryVersion,
+  assignLibraryVersion: apiMock.assignLibraryVersion,
   getCapabilities: vi.fn(async () => ({
     workspaces: ['director', 'assets'],
     image_capabilities: Object.fromEntries(['T2I', 'I2I', 'INPAINT', 'MULTIREF', 'WARDROBE', 'RGBA'].map((mode) => [
@@ -44,6 +49,9 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.clearAllMocks();
+  // 列表默认实现必须复位：clearAllMocks 只清调用记录，不清实现，
+  // 否则某个用例塞进去的素材会漏到下一个用例里。
+  apiMock.listLibraryAssets.mockResolvedValue({ items: [], limit: 100, offset: 0 });
   window.history.replaceState(null, '', '/');
 });
 
@@ -96,6 +104,72 @@ it('可以直接收藏已锁定的项目素材', async () => {
   const saveButton = await screen.findByRole('button', { name: '收藏到全局库' });
   await user.click(saveButton);
   await waitFor(() => expect(apiMock.saveProjectAssetToLibrary).toHaveBeenCalledWith('project-1', 'asset-1', { title: 'portrait', category: 'character', tags: [] }));
+});
+
+it('直接进入项目分配页：作品异步到达后也能真的分配到作品', async () => {
+  // 症状：全新会话直接打开 #a/assignments 时，App 传入的 projectId 为空、
+  // 作品列表随后才异步到达；「目标作品」看着已选（浏览器回落的第一项），
+  // 但 state 是空串，点「分配到作品」不发任何请求。
+  apiMock.assignLibraryVersion.mockClear();
+  const promoted = {
+    id: 'asset-1', title: 'Portrait', kind: 'image', category: 'character', tags: [],
+    collection: null, favorite: false, status: 'ACTIVE', state_version: 1, version_count: 1,
+    current_version: { id: 'version-1', ordinal: 1, status: 'PROMOTED', is_mock: false },
+    versions: [],
+  };
+  apiMock.listLibraryAssets.mockResolvedValue({ items: [promoted], limit: 100, offset: 0 });
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <AssetsWorkspace page="assignments" onNavigate={vi.fn()} onWorkspace={vi.fn()}
+      projects={[]} projectId="" projectAssets={[]} />,
+  );
+  // 作品列表在首帧之后才到达。
+  rerender(
+    <AssetsWorkspace page="assignments" onNavigate={vi.fn()} onWorkspace={vi.fn()}
+      projects={[{ id: 'project-a', title: '作品 A' } as never]} projectId="" projectAssets={[]} />,
+  );
+
+  await waitFor(() => expect(screen.getByLabelText('目标作品')).toHaveDisplayValue('作品 A'));
+  await user.selectOptions(await screen.findByLabelText('全局素材版本'), 'version-1');
+  await user.type(screen.getByPlaceholderText('例如：林岚'), '林岚');
+  await user.click(screen.getByRole('button', { name: '分配到作品' }));
+
+  await waitFor(() => expect(apiMock.assignLibraryVersion).toHaveBeenCalledTimes(1));
+  expect(apiMock.assignLibraryVersion.mock.calls[0][0]).toMatchObject({
+    project_id: 'project-a', library_version_id: 'version-1', entity_id: '林岚',
+  });
+  expect(await screen.findByText(/已分配到作品/)).toBeInTheDocument();
+});
+
+it('用户手动切换目标作品后，作品列表再次到达也不会把选择弹回第一项', async () => {
+  // 回填必须读当前值：作品列表每来一次就重算的话，用户刚选好的作品会被弹回第一项。
+  const promoted = {
+    id: 'asset-1', title: 'Portrait', kind: 'image', category: 'character', tags: [],
+    collection: null, favorite: false, status: 'ACTIVE', state_version: 1, version_count: 1,
+    current_version: { id: 'version-1', ordinal: 1, status: 'PROMOTED', is_mock: false },
+    versions: [],
+  };
+  apiMock.listLibraryAssets.mockResolvedValue({ items: [promoted], limit: 100, offset: 0 });
+  const makeProjects = () => ([
+    { id: 'project-a', title: '作品 A' } as never,
+    { id: 'project-b', title: '作品 B' } as never,
+  ]);
+  const view = (projects: unknown[]) => (
+    <AssetsWorkspace page="assignments" onNavigate={vi.fn()} onWorkspace={vi.fn()}
+      projects={projects as never} projectId="" projectAssets={[]} />
+  );
+  const user = userEvent.setup();
+  const { rerender } = render(view(makeProjects()));
+
+  const select = await screen.findByLabelText('目标作品');
+  await user.selectOptions(select, 'project-b');
+  expect(select).toHaveValue('project-b');
+  // 已选中时不再显示「请选择作品」这个占位项。
+  expect(screen.queryByRole('option', { name: '请选择作品' })).toBeNull();
+
+  // 作品列表随后又到达一次（新的数组引用）：回填不得改掉用户的选择。
+  rerender(view(makeProjects()));
+  await waitFor(() => expect(screen.getByLabelText('目标作品')).toHaveValue('project-b'));
 });
 
 it('素材中心可以在没有影视项目时独立打开并进入图片工坊', async () => {

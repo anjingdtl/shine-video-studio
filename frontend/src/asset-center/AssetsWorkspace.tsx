@@ -1035,6 +1035,13 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
   const [savingProjectAsset, setSavingProjectAsset] = useState('');
 
   useEffect(() => { listAssignments().then((row) => setAssignments(row.items)).catch((reason) => setError(errorText(reason))); }, []);
+  // 作品列表是异步到达的：直接进入素材中心时初值拿不到作品，而受控 select 在没有
+  // 匹配 option 时会显示浏览器回落的第一项、state 仍是空串——用户看着「已选」却
+  // 永远分配失败。这里在作品到达后回填，控件与 state 保持一致。
+  useEffect(() => {
+    if (!projects.length) { setTargetProject(''); return; }
+    setTargetProject((current) => (current && projects.some((row) => row.id === current) ? current : projects[0].id));
+  }, [projects]);
   const choices = assets.filter((asset) => asset.current_version?.status === 'PROMOTED' && !asset.current_version.is_mock);
   async function assign() {
     if (!targetProject || !selectedVersion) { setError('请选择作品和已晋升版本，并填写作品内素材身份。'); return; }
@@ -1066,7 +1073,10 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
     <div className="asset-card"><div className="asset-eyebrow">全局素材 → 作品</div><h2>分配一个已晋升版本</h2><p className="asset-muted">每个作品会得到独立 Asset 身份；旧项目冻结引用保持原样。</p>
       {loading && <div className="asset-empty-small">正在读取全局素材…</div>}
       {projects.length ? <>
-        <label className="asset-field"><span>目标作品</span><select value={targetProject} onChange={(event) => setTargetProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
+        <label className="asset-field"><span>目标作品</span><select value={targetProject} onChange={(event) => setTargetProject(event.target.value)}>
+          {!targetProject && <option value="">请选择作品</option>}
+          {projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
+        </select></label>
         <label className="asset-field"><span>搜索素材</span><input value={query} onChange={(event) => {
           setQuery(event.target.value);
           setSelectedVersion('');
