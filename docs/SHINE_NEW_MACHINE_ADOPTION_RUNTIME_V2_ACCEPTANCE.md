@@ -2,6 +2,8 @@
 
 - 基准主线：`21f3e728e5f0e34fefe7b22bb84efc3265540aff`
 - 开发分支：`fix/shine-new-machine-adoption-runtime-v2-20261114`
+- 最终提交：`972afbd`
+- Pull Request：https://github.com/anjingdtl/shine-video-studio/pull/24
 - 验证环境：Linux 云端沙箱（无 Windows、无 NVIDIA GPU、无真实 ComfyUI）
 - 审计样本：Windows 11 / RTX 4070 12282 MiB / ComfyUI 0.39.0 / 43.97GB H3 权重
 
@@ -89,11 +91,9 @@
 ### P1-05 独立能力不被 H3 门禁阻断 —— 保持并回归
 
 - 图片/审片/ASR 计划走各自 catalog，不继承 H3 变体资格。
-- 既有 `test_install_plan_qualification.py::test_a_component_only_plan_is_not_gated_by_the_video_variant`
-  与图片独立计划测试保持通过。
-- 说明：`qualification=UNKNOWN` 的设计是“允许准备资源、所有生产门禁保持关闭”，
-  与审计要求一致；该文件里另有一条断言 UNKNOWN 也返回 409 的旧用例，
-  在基准 `21f3e72` 上同样失败（已用独立 worktree 复核），本轮未改变该语义。
+- 合并 `origin/main`（含 PR #23 的按能力门禁解耦）后，
+  `test_install_plan_qualification.py` 8 例全绿；按能力拆分的安装计划
+  （`test_setup_capability_gates.py` 21 例）也全绿。
 
 ### P1-06 真实任务闭环 —— 状态如实
 
@@ -109,7 +109,7 @@
 | `uv run --project backend python scripts/run_tests.py quick` | 817 passed / 24 skipped / 0 failed（13m10s，pytest 阶段） |
 | 新增/定向后端测试 | `test_host_tool_resolution` 10、`test_installation_queue` 7、`test_existing_binding` 4、`test_existing_installation` 21、`test_existing_comfy_adoption` 7 |
 | 相关回归 | `test_installation_persistence` 26、`test_runtime_activation` 16、`test_runtime_orchestrator` 22、`test_setup_cold_start` 14、`test_new_machine_setup` 15、`test_installer_redirects` 55、`test_resource_resolver_v2` 19 |
-| 前端 | 56 files / 332 tests passed；`npm run build` 通过；`tsc --noEmit` 通过 |
+| 前端 | 58 files / 341 tests passed；`npm run build` 通过；`tsc --noEmit` 通过 |
 | lint | `ruff check backend/shine ...` 全部通过 |
 
 Windows-only 测试（真实 bootstrap、`.cmd` 执行、受管实例启停）在本环境跳过，

@@ -1520,3 +1520,53 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   tsc/build/Ruff 通过。浏览器真实 MiniMax：选紧凑→新任务→正文出现登场人物介绍+「紧凑剧情」。
   证据 `docs/ACCEPTANCE_20261114_OUTLINE_PACING_CHARACTERS.md`。
 - 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-14 P1 第二轮：资源整备与 H3 生产准入解耦（RTX 4070 实障）
+
+- **实障**：RTX 4070（12282 MiB）/ 32GB / 503GB 可用 / ComfyUI 已有 / H3 INT8 本机 3 个权重文件已找到，
+  勾选素材出图并点「确认并下载安装（约16.1GiB）」，**没有开始下载**，收到 `HOST_NOT_QUALIFIED`
+  并伴随 `[object Object]; [object Object]`。
+- **根因（前端）**：`SetupCenter.prepare()` 用**综合就绪**（`filesReady`，全局 L2 层）而不是
+  「用户勾了什么」来决定是否创建 H3 安装计划；409 抛出后整条链进入 `catch`，
+  **图片计划根本没有提交**。H3 计划还混入了审片组件，审片权重被 H3 显存门禁一起挡住。
+- **根因（后端）**：`deployment.resolve_variant()` 遍历**全部**变体 manifest，不以**清单**为边界，
+  "图片计划绝不绑定 H3 生产变体"只是组件碰巧不匹配，没有结构保证。
+- **根因（错误渲染）**：`api.ts::describeDetail()` 对 `blockers` 对象数组直接 `join()`
+  → `Array.prototype.join` 把对象 `toString()` 成 `[object Object]`，原因与数字全被吃掉。
+- **能力门禁（新增 `backend/shine/comfyops/capability.py`）**：能力由**服务端按清单**判定
+  （`CATALOG_CAPABILITIES` 登记「清单 → 能力 → 期望 catalog_id」，核对清单身份，
+  未登记清单一律 409 `CATALOG_CAPABILITY_UNKNOWN`）；`InstallPlanRequest.capability` 是
+  **声明**而非开关，服务端重推不一致即 409 `CAPABILITY_CATALOG_MISMATCH`。
+  **下载是存储行为、推理才是算力行为**：各能力自己的显存/内存门槛以
+  `runtime_requirements` / `runtime_advisories` **如实报告**（图片 15360MB/32768MB、
+  审片 VLM 8000MB、ASR 4000MB），门禁回到渲染器启动时，**不是被取消**。
+- **变体解析以清单为边界**：`resolve_variant()` 要求 `catalog["variant_id"] == manifest["variant_id"]`；
+  Qwen Image 清单没有 `variant_id` → 图片计划**结构上**不可能绑定 H3 生产变体。
+- **前端一份计划 = 一个能力**：H3 视频生成由「必装」改为**可勾选能力**（默认勾选）；
+  素材出图/画面审片/语音核对同理；一项能力失败被单独记账，**其它合法能力继续执行**；
+  H3 计划只在「权重确实不在本机」或「人明确要求重下」时创建；权重已在本机时走
+  **只读哈希核验 + 补充登记**，**核验没做完不会重新下载几十 GB**，只有哈希**核验不通过**才按清单重下。
+  H3 生产激活（受管实例 → 方案登记 → 配置 → 服务核验 → 激活）**只在勾选 H3 且其资源就绪时**进行。
+- **按钮语义**：按实际选择计算（"确认下载素材出图权重（约16.1GiB）"/"确认准备 H3 候选模型"/
+  "确认整备所选能力"/"自动补装缺失基础工具"/"确认并完成配置（不下载）"），并展示**分项下载量**
+  与**分项结论**；本机已有 H3 文件但硬件不达标时明说
+  「本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件」（不暗切模型、不自动改下候选）。
+- **顺带修复的上游回归**：`test_install_plan_qualification.py` 的
+  "unqualified host is refused" 在 `main`（`6fbf498`）上**本来就是红的**；
+  `cc618a2` 的生产门禁语义（生产变体 UNKNOWN 也拒绝）被 `89dbfd2` 误删了
+  `or not candidate_ack`。本轮**恢复**该条件（未改测试预期、未放宽任何资格检查）。
+- **回归**：新增 `backend/tests/test_setup_capability_gates.py`（21 例，CASE-01/02/03/04/05/07/08/10）
+  与 `frontend/src/test/setupCapabilityGates.test.tsx`（10 例，CASE-01/06/07/09）；
+  既有 3 个前端文件只更新按钮文案契约断言。PR #23
+  （https://github.com/anjingdtl/shine-video-studio/pull/23），PR 必要状态
+  L1/L2/Frontend build 全绿，合并 commit `afb596940f07ed71c82fc7cfb1ec9baf73df8cb0`。证据
+  `docs/ACCEPTANCE_20261114_P1_CAPABILITY_DECOUPLING.md`。
+- **既有失败（未由本轮引入）**：`test_deployment_recommendation`（2 例 RAM 门槛）与
+  `simpleAssets.test.tsx`（2 例素材锁定按钮）在未改动的 `main` 上同样失败（后者来自 PR #21）；
+  `test_sdk_role_process`/`test_v13_instances`/`test_runtime_activation`（5 例）是 2 核上并行跑时的
+  计时抖动，三个模块在本分支单独跑全过。本轮未动这些模块，也未用改测试预期的方式制造 PASS。
+- **真机边界**：云端无 RTX 4070，本轮全部是**注入硬件事实 + 端到端请求**验证，
+  **不构成任何真机生产通过结论**；Windows 真实安装（FFmpeg/PowerShell 补装、断点续传）
+  亦未执行。Qwen Image 清单自身要求 15GB 显存 / 32GB 内存，4070 **下载得到但跑不动**，
+  是否降档出图方案属产品裁定，不得私换模型。本轮未改 `worker.py`/`preproduction.py`，
+  不触发 VLM 重校准义务。
