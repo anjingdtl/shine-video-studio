@@ -114,7 +114,7 @@ def test_runtime_closure_gap_bare_machine(studio):
     assert "comfyui" in gap["missing_components"]
 
 
-def test_prepare_plan_reports_runtime_gap_and_closure(studio):
+def test_prepare_plan_reports_runtime_gap_and_closure(studio, fake_deployment_host):
     client, _factory, _tmp, _settings = studio
     project_id = create_project(client)
     response = client.post("/api/v1/setup/prepare-plan",
