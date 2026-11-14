@@ -8,6 +8,7 @@
 夹具用 diagnose 降级为可诊断提示——缺失必须被如实记录，不是静默通过。
 """
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -67,6 +68,41 @@ def test_a_real_installation_missing_node_packs_is_still_refused(prep, monkeypat
     detail = response.json()["detail"]
     assert detail["code"] == "NODE_PACK_DIRECTORY_MISSING", detail
     assert detail["missing"], detail
+
+
+def test_the_diagnostic_note_has_a_reader_in_the_readiness_layer(prep, monkeypatch):
+    """降级不是静默通过：readiness 必须带着缺失包，用户看得见。"""
+    client, factory, settings = prep
+    client.app.state.settings = replace(settings, node_pack_gate="diagnose")
+    project = create_project(client)
+    root = _synthetic_root(settings)
+    _seed_instance(factory, root)
+
+    response = _configure(client, settings, project, monkeypatch)
+    assert response.status_code == 200, response.text
+
+    readiness = client.get("/api/v1/setup/readiness").json()
+    layers = {row["layer"]: row for row in readiness.get("layers", [])}
+    environment = layers.get("L3_environment_installed")
+    assert environment is not None, readiness
+    notes = environment.get("notes") or []
+    assert notes and notes[0]["code"] == "NODE_PACK_DIRECTORY_MISSING", environment
+    assert notes[0]["missing"], environment
+
+
+def test_the_gate_cannot_be_lowered_by_an_environment_variable():
+    """生产门禁不得被机器级环境变量悄悄关掉。"""
+    from shine.config import Settings
+
+    monkey = os.environ.get("SHINE_NODE_PACK_GATE")
+    try:
+        os.environ["SHINE_NODE_PACK_GATE"] = "diagnose"
+        assert Settings.from_env().node_pack_gate == "enforce"
+    finally:
+        if monkey is None:
+            os.environ.pop("SHINE_NODE_PACK_GATE", None)
+        else:
+            os.environ["SHINE_NODE_PACK_GATE"] = monkey
 
 
 def test_the_offline_fixture_gate_reports_the_missing_packs_instead_of_raising(prep, monkeypatch):

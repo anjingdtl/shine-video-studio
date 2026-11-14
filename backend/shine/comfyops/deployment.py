@@ -1176,10 +1176,27 @@ def deployment_readiness(db, settings: Settings) -> dict:
         layer_two["layer"] = "L2_files_verified"
     layers.append(layer_two)
     install_blockers = installed_instance_blockers(db, settings, instance, catalog)
+    # The gate's diagnostic note needs a reader: the readiness layer carries it,
+    # so "the node packs are missing" is visible to the operator instead of
+    # being swallowed by the configuration response.
+    node_pack_notes = []
+    if instance is not None and getattr(settings, "node_pack_gate", "enforce") == "diagnose":
+        from shine.comfyops.existing_installation import resolve_node_pack_dirs
+
+        _, missing_packs = resolve_node_pack_dirs(
+            Path(instance.payload.get("root", "")).resolve(), catalog)
+        if missing_packs:
+            node_pack_notes.append({
+                "code": "NODE_PACK_DIRECTORY_MISSING",
+                "missing": missing_packs,
+                "message": "这些节点包在安装的 custom_nodes 里找不到对应目录；"
+                           "请先在「安装与下载」补装节点，再重新生成运行配置。",
+            })
     environment_layer = {
         "layer": "L3_environment_installed",
         "status": "READY" if not install_blockers else "PENDING",
         "blockers": install_blockers,
+        "notes": node_pack_notes,
         "instance": instance.id if instance else None,
         "root": instance.payload.get("root") if instance else None,
     }
