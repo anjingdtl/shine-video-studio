@@ -46,6 +46,22 @@ def _continuity_responder(master_id: str):
             return {"schema_version": "1.0", "summary": "一次离家与归来。",
                     "story_line": ["开端", "发展"], "timeline": ["按原文顺序"],
                     "relationships": [], "questions": []}
+        if title == "ScriptStructure":
+            return {"character_names": {}, "ranges": [{"id": "B1", "last_fragment": len(payload["fragments"])}],
+                    "prompt_story_facts": ["A locked fact of the script." for _ in payload["locked_story_facts"]]}
+        if title == "SceneBeat":
+            dialogue = [{"speaker_id": "Lin", "text": "你来了。", "start_s": 1, "end_s": 2}
+                        ] if "你来了" in payload["beat_text"] else []
+            return {"id": payload["beat_id"], "description": "She waits beside a sealed letter.",
+                    "characters": ["Lin"], "dialogue": dialogue}
+        if title == "DirectorStructure":
+            return {"segments": [{"id": "I1", "beat_id": "B1", "duration_s": 7}]}
+        if title == "ShotDetails":
+            return {"visual_description": "A woman waits beside a sealed letter at a wooden table.",
+                    "asset_ids": [master_id], "cut_descriptions": []}
+        if title == "CameraShot":
+            return {"intent_id": payload["segment"]["id"], "composition": "Medium shot",
+                    "movement": "Static", "lighting": "Soft key", "axis": "Keep axis"}
         if title == "ScriptBreakdown":
             brief = payload.get("brief", "")
             dialogue = [{"speaker_id": "Lin", "text": "你来了。",

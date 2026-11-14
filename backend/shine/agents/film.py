@@ -13,6 +13,16 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from shine.agents.crew_decompose import (
+    CrewCalls,
+    decompose_camera,
+    decompose_director,
+    decompose_scriptwriter,
+    record_crew_call,
+)
+from shine.agents.crew_decompose import (
+    external_outcome as crew_external_outcome,
+)
 from shine.agents.crew_prompts import arbiter_prompt, crew_prompt
 from shine.agents.editorial_timing import (
     editorial_timing_blocker,
@@ -664,6 +674,12 @@ def _storyboard_memory_view(db, project_id: str, *, role: str) -> dict | None:
         return None
 
 
+def _uses_focused_crew_calls(body, context, contract, *, repair_director: bool) -> bool:
+    return (body.production_context is not None and not context.get("editorial_timing_plan")
+            and not repair_director and body.tool == "propose"
+            and contract in {ScriptBreakdown, DirectorialPlan, CameraPlan})
+
+
 class FilmAgentDispatcher:
     def __init__(self, gateway: LLMGateway, data_dir: Path | None = None,
                  asset_root: Path | None = None):
@@ -992,11 +1008,15 @@ class FilmAgentDispatcher:
                 narration_level=context.get("narration_level"),
             )
 
+        crew_request = crew_budget = None
+
         def record_progress(phase: str) -> None:
             # Commit diagnostic state before waiting externally; never hold
             # SQLite's writer across resource admission or a provider call.
             task.trace = {**task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
                           "network_timeout_s": profile.timeout_s}
+            if phase == "WAITING_PROVIDER" and crew_request is not None:
+                record_crew_call(db, task, crew_request, crew_budget, phase="SENDING", outcome="UNKNOWN")
             db.commit()
 
         if repair_visual_language:
@@ -1021,44 +1041,62 @@ class FilmAgentDispatcher:
                 # match it.  The run is refused with the real reason instead
                 # of spending a model call on a plan the server would reject.
                 raise ValueError(refusal["code"])
-            if body.consent_document_id or body.production_context is not None:
-                from shine.materialprep import text_consent
-                source = context.get("production_context") or {}
-                text_consent.guard(project_id, source.get("document_id") or body.consent_document_id,
-                                   source.get("document_sha256") or body.consent_document_sha256,
-                                   role, text_consent.fingerprint(profile), self.gateway)(db)
-            # The five crew roles share the literary chain's one call-budget
-            # calculation (streamline plan §6.3): the rendered request is
-            # measured exactly once, the completion budget follows the 60%
-            # hard-cap rule with the role's own ceiling, and a request that
-            # cannot fit the window is refused by name before it is sent.
-            from shine.literary.budget import plan_call_budget
-            from shine.literary.requests import compile_request
+            def verify_consent() -> None:
+                if body.consent_document_id or body.production_context is not None:
+                    from shine.materialprep import text_consent
+                    source = context.get("production_context") or {}
+                    text_consent.guard(project_id, source.get("document_id") or body.consent_document_id,
+                                       source.get("document_sha256") or body.consent_document_sha256,
+                                       role, text_consent.fingerprint(profile), self.gateway)(db)
 
-            crew_request = compile_request(
-                system=system_prompt,
-                user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
-                schema=wire_contract.model_json_schema(),
-            )
-            crew_budget = plan_call_budget(
-                bounded_config, crew_request, purpose="structured",
-                output_ceiling=agent_output_limit,
-                output_floor_tokens=agent_output_limit if escalate_output_budget else None,
-            )
-            task.trace = {**task.trace, "call_budget": crew_budget.as_dict(),
-                          **({"output_budget_escalated": True} if escalate_output_budget else {})}
-            db.commit()  # the approved budget is durable evidence before the call
-            if not crew_budget.fits:
-                raise ValueError(str((crew_budget.refusal or {}).get("code")
-                                     or "LLM_CREATIVE_CONTEXT_OVERFLOW"))
-            response = self.gateway.complete_for_role(
-                db,
-                role,
-                precompiled=crew_request,
-                budget={"completion_cap": crew_budget.output_request_tokens,
-                        "streaming": crew_budget.streaming},
-                on_progress=record_progress,
-            )
+            verify_consent()
+            if _uses_focused_crew_calls(body, context, contract, repair_director=repair_director):
+                calls = CrewCalls(db, self.gateway, task, agent_output_limit,
+                                  before_send=verify_consent, escalate=escalate_output_budget)
+                calls.ensure_no_unresolved_child()
+                note = repair_contract_note or ""
+                if contract is ScriptBreakdown:
+                    payload = decompose_scriptwriter(calls, body, context, system_prompt, note)
+                elif contract is DirectorialPlan:
+                    payload = decompose_director(calls, context, system_prompt, note)
+                else:
+                    payload = decompose_camera(calls, context, system_prompt)
+                response = calls.response(payload)
+            else:
+                # The five crew roles share the literary chain's one call-budget
+                # calculation (streamline plan §6.3): the rendered request is
+                # measured exactly once, the completion budget follows the 60%
+                # hard-cap rule with the role's own ceiling, and a request that
+                # cannot fit the window is refused by name before it is sent.
+                from shine.literary.budget import plan_call_budget
+                from shine.literary.requests import compile_request
+
+                crew_request = compile_request(
+                    system=system_prompt,
+                    user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
+                    schema=wire_contract.model_json_schema(),
+                )
+                crew_budget = plan_call_budget(
+                    bounded_config, crew_request, purpose="structured",
+                    output_ceiling=agent_output_limit,
+                    output_floor_tokens=agent_output_limit if escalate_output_budget else None,
+                )
+                task.trace = {**task.trace, "call_budget": crew_budget.as_dict(),
+                              **({"output_budget_escalated": True} if escalate_output_budget else {})}
+                db.commit()  # the approved budget is durable evidence before the call
+                if not crew_budget.fits:
+                    raise ValueError(str((crew_budget.refusal or {}).get("code")
+                                         or "LLM_CREATIVE_CONTEXT_OVERFLOW"))
+                response = self.gateway.complete_for_role(
+                    db,
+                    role,
+                    precompiled=crew_request,
+                    budget={"completion_cap": crew_budget.output_request_tokens,
+                            "streaming": crew_budget.streaming},
+                    on_progress=record_progress,
+                )
+                record_crew_call(db, task, crew_request, crew_budget, phase="FINISHED",
+                                 outcome="RESPONSE_RECEIVED", response=response)
             task.trace = {**task.trace, "received_result_sha256": digest(response.parsed),
                           "response_latency_ms": response.latency_ms,
                           **{key: response.raw_meta[key] for key in ("http_status", "provider_code")
@@ -1201,6 +1239,9 @@ class FilmAgentDispatcher:
                     external_outcome = "NOT_SENT"
                 else:
                     external_outcome = "UNKNOWN"
+            if crew_request is not None and crew_budget.fits and not task.trace.get("received_result_sha256"):
+                record_crew_call(db, task, crew_request, crew_budget, phase="FINISHED",
+                                 outcome=external_outcome, error=exc)
             uncertain = external_outcome == "UNKNOWN" and not task.trace.get("is_mock")
             task.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
             task.state_version += 1
@@ -1265,6 +1306,9 @@ class FilmAgentDispatcher:
             pre_request = phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
             unknown = (not pre_request and not task.trace.get("is_mock")
                        and not task.trace.get("received_result_sha256"))
+            if crew_request is not None and crew_budget.fits and not task.trace.get("received_result_sha256"):
+                record_crew_call(db, task, crew_request, crew_budget, phase="FINISHED",
+                                 outcome=crew_external_outcome(exc, phase), error=exc)
             if pre_request:
                 detail = getattr(exc, "detail", None)
                 safe_detail = (

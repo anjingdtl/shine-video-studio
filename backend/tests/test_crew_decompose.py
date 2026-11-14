@@ -1,102 +1,127 @@
-"""WP7: per-beat decomposition of the scriptwriter (small focused calls).
+"""WP7 decomposition and one-shot recovery against the real task ledger."""
 
-Proves the helper assembles the original ScriptBreakdown from one globals call
-plus per-beat calls, each owning a distinct sub-task record, without changing
-the downstream contract.  Uses a schema-aware mock responder (the decomposition
-sends small per-beat schemas, not the whole breakdown).
-"""
+import json
 
-from __future__ import annotations
-
+import pytest
 from sqlalchemy import select
 
-from shine.agents.crew_decompose import _split_beat_candidates, decompose_scriptwriter
+from shine.agents.crew_decompose import CrewCalls, decompose_scriptwriter, source_fragments
 from shine.agents.film_contracts import FilmRunRequest, ScriptBreakdown
 from shine.h3.rulebook import digest
+from shine.literary.models import LLMCallAttempt
+from shine.llm.base import LLMResponse, LLMTimeout, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
-from shine.models import AgentTaskRecord, Project
-from tests.conftest import create_project, freeze_style
+from shine.models import AgentTaskRecord
+from tests.conftest import create_project
 
-SCENE = (
-    "老周推开钟表铺的门，雨水顺着檐角滴落。\n\n"
-    "灰雨衣女人站在柜台前，手里攥着一块停摆的怀表。\n\n"
-    "「修好它，」她说，「无论代价。」"
-)
+SCENE = "Clockmaker opens the shop.\r\n\r\nA guest enters.\nThe clock stops."
+LOCAL = {"x-shine-local-action": "1"}
 
 
-def _responder(messages, schema):
-    props = schema.get("properties") or {}
-    if "character_names" in props:
-        return {
-            "character_names": {"S1": "老周", "S2": "灰雨衣女人"},
-            "prompt_story_facts": ["The watch has stopped."],
-            "prompt_style": None,
-        }
-    # SceneBeat schema: one beat per call, id derived from the requested index.
-    user = " ".join(str(m.content) for m in messages if m.role == "user")
-    import json
-    data, _ = json.JSONDecoder().raw_decode(user.lstrip())
-    idx = data.get("beat_index", 1)
-    return {
-        "id": f"b{idx}",
-        "description": f"beat {idx} visual action",
-        "characters": ["老周"] if idx == 1 else ["灰雨衣女人"],
-        "dialogue": [],
-    }
+def test_source_fragments_preserve_original_text():
+    assert "".join(source_fragments(SCENE)) == SCENE
 
 
-def test_split_beat_candidates_keeps_paragraphs():
-    parts = _split_beat_candidates(SCENE)
-    assert len(parts) == 3
-    assert all(parts)
-
-
-def test_decompose_scriptwriter_assembles_breakdown_from_small_calls(api):
+def test_timeout_cascades_to_parent_and_retries_only_the_unknown_child(api, monkeypatch):
     client, factory, settings = api
-    project_id = create_project(client, "雨夜钟表铺")
-    freeze_style(client, project_id)
-    assert client.post(f"/api/v1/projects/{project_id}/rulepack/freeze", json={}).status_code == 200
-    profile = client.post("/api/v1/provider-profiles",
-                          json={"name": "decompose-mock", "kind": "mock", "model": "crew"}).json()
-    assert client.put("/api/v1/agent-routes",
-                      json={"role": "scriptwriter", "provider_profile_id": profile["id"]}).status_code == 200
+    project = create_project(client, "Clock shop")
+    parent_path = f"/api/v1/projects/{project}/film-runs"
+    profile_id = client.post("/api/v1/provider-profiles", json={
+        "name": "crew", "kind": "openai_compatible", "model": "crew",
+        "base_url": "https://example.invalid/v1",
+    }).json()["id"]
+    assert client.put("/api/v1/agent-routes", json={
+        "role": "scriptwriter", "provider_profile_id": profile_id,
+    }).status_code == 200
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir))
+    sent = []
+    fail = True
 
-    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_responder)
-    from shine.h3.rulebook import H3RulebookRegistry
-    with factory() as db:
-        project = db.get(Project, project_id)
-        pack = H3RulebookRegistry(settings.data_dir / "h3-source-cache").for_project(db, project_id)
-        parent = AgentTaskRecord(
-            project_id=project_id, role_id="scriptwriter", input_hash=digest({"scene": SCENE}),
-            style_version_id=project.frozen_style_version_id, asset_manifest_hash=digest([]),
-            rulepack_id=pack.id, rulepack_hash=pack.sha256,
-            model_profile_id=profile["id"], model_id="crew", schema_version="1.1",
-            status="RUNNING", trace={"phase": "PREPARING"},
+    def complete(db, role, *, precompiled, on_progress, budget):
+        assert role == "scriptwriter"
+        on_progress("WAITING_PROVIDER")
+        data, _ = json.JSONDecoder().raw_decode(precompiled.user)
+        title = precompiled.schema["title"]
+        if title == "ScriptStructure":
+            sent.append("structure")
+            answer = {"character_names": {}, "prompt_story_facts": [],
+                      "ranges": [{"id": "b1", "last_fragment": 2},
+                                 {"id": "b2", "last_fragment": len(data["fragments"])}]}
+        else:
+            sent.append(data["beat_id"])
+            if data["beat_id"] == "b2" and fail:
+                raise LLMTimeout("provider connection ended")
+            if data["beat_id"] == "b1":
+                assert "A guest enters." in data["beat_text"]
+                assert "The clock stops." not in data["beat_text"]
+            answer = {"id": data["beat_id"], "description": "An action in the clock shop."}
+        on_progress("VALIDATING_RESULT")
+        return LLMResponse("", answer, "crew", 1800, {
+            "completion_tokens_details": {"reasoning_tokens": 8},
+        })
+
+    monkeypatch.setattr(gateway, "complete_for_role", complete)
+    monkeypatch.setattr("shine.agents.crew_decompose.crew_call_delay", lambda: 0)
+
+    def parent(db):
+        profile = gateway.profile_for_role(db, "scriptwriter")
+        row = AgentTaskRecord(
+            project_id=project, role_id="scriptwriter", input_hash=digest(SCENE),
+            asset_manifest_hash=digest([]), rulepack_id="test", rulepack_hash=digest("test"),
+            model_profile_id=profile.id, model_id=profile.model, status="RUNNING",
+            trace={"phase": "PREPARING", "is_mock": False, "review_provider": text_provider_snapshot(profile)},
         )
-        db.add(parent)
+        db.add(row)
         db.commit()
-        body = FilmRunRequest(brief=SCENE, locked_story_facts=["The watch has stopped."])
-        context = {"assets": [], "style": None}
-        payload, usage, latency, sub_roles = decompose_scriptwriter(
-            db, gateway, project_id, body=body, context=context,
-            system_prompt="You are the scriptwriter.", parent_task=parent,
-            output_ceiling=8192,
-        )
-        breakdown = ScriptBreakdown.model_validate(payload)
-        assert len(breakdown.beats) == 3
-        assert breakdown.character_names == {"S1": "老周", "S2": "灰雨衣女人"}
-        assert breakdown.prompt_story_facts == ["The watch has stopped."]
-        assert breakdown.locked_story_facts == ["The watch has stopped."]
-        # one globals call + three beat calls, each its own sub-task role
-        assert sub_roles == ["scriptwriter_globals"] + ["scriptwriter_beat"] * 3
-        assert usage.get("completion_tokens", 0) >= 0
-        sub_tasks = db.scalars(select(AgentTaskRecord).where(
-            AgentTaskRecord.project_id == project_id,
-            AgentTaskRecord.role_id.in_(["scriptwriter_globals", "scriptwriter_beat"]))).all()
-        assert len(sub_tasks) == 4
-        assert all(t.status == "SUCCEEDED" for t in sub_tasks)
-        assert all(t.trace.get("parent_task_id") == parent.id for t in sub_tasks)
-        assert all(t.trace.get("decomposed") is True for t in sub_tasks)
-        # the parent role's own record is untouched by the sub-calls
-        assert parent.role_id == "scriptwriter"
+        return row
+
+    def execute(db, row):
+        calls = CrewCalls(db, gateway, row, 8192, before_send=lambda: None, escalate=False)
+        body = FilmRunRequest(brief=SCENE)
+        return calls.response(decompose_scriptwriter(calls, body, {"assets": []}, "Write one beat.", ""))
+
+    with factory() as db:
+        row = parent(db)
+        with pytest.raises(LLMTimeout) as err:
+            execute(db, row)
+        assert err.value.details["external_outcome"] == "UNKNOWN"
+        child_id = row.trace["blocked_child_task_id"]
+        child = db.get(AgentTaskRecord, child_id)
+        assert child.status == "NEEDS_REVIEW"
+        assert child.trace["parent_task_id"] == row.id
+        assert child.trace["external_outcome"] == "UNKNOWN"
+        row.status = "NEEDS_REVIEW"
+        row.trace = {**row.trace, "external_outcome": err.value.details["external_outcome"]}
+        db.commit()
+        row_id = row.id
+        version = row.state_version
+
+    denied = client.post(f"{parent_path}/{row_id}/resend-unknown", headers=LOCAL,
+                         json={"expected_state_version": version})
+    assert denied.status_code == 409
+    checked = client.post(f"{parent_path}/{row_id}/reconcile", headers=LOCAL,
+                          json={"expected_state_version": version})
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["child_task_id"] == child_id
+    allowed = client.post(f"{parent_path}/{row_id}/resend-unknown", headers=LOCAL,
+                          json={"expected_state_version": checked.json()["state_version"]})
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["child_task_id"] == child_id
+    assert client.post(f"{parent_path}/{row_id}/resend-unknown", headers=LOCAL,
+                       json={"expected_state_version": allowed.json()["state_version"]}).status_code == 409
+
+    fail = False
+    with factory() as db:
+        row = parent(db)
+        response = execute(db, row)
+        assert [beat.id for beat in ScriptBreakdown.model_validate(response.parsed).beats] == ["b1", "b2"]
+        assert sent == ["structure", "b1", "b2", "b2"]
+        assert len(row.trace["child_task_ids"]) == 3
+        assert response.usage["reasoning_tokens"] == 8
+        assert db.get(AgentTaskRecord, child_id).trace["external_outcome"] == "UNKNOWN"
+        attempts = db.scalars(select(LLMCallAttempt).where(LLMCallAttempt.project_id == project)).all()
+        assert len(attempts) == 4
+        assert sum(attempt.external_outcome == "UNKNOWN" for attempt in attempts) == 1
+    runs = client.get(parent_path).json()
+    assert all("checkpoint" not in run["trace"] for run in runs)

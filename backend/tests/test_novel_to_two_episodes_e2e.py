@@ -62,6 +62,9 @@ def _six_second_responder(master: str):
         if title == "DirectorialPlan":
             for shot in answer["shots"]:
                 shot["duration_s"] = 6.0
+        elif title == "DirectorStructure":
+            for shot in answer["segments"]:
+                shot["duration_s"] = 6.0
         elif title == "EditIntentPlan":
             for clip in answer["clips"]:
                 clip["planned_duration_s"] = 6.0

@@ -134,6 +134,36 @@ def _chain_responder(registry: dict, *, fail_section: str | None = None):
     character = "老周"
 
     def respond(messages, schema):
+        import json
+
+        title = schema.get("title")
+        if title in {"ScriptStructure", "SceneBeat", "DirectorStructure", "ShotDetails", "CameraShot"}:
+            data, _ = json.JSONDecoder().raw_decode(next(m.content for m in messages if m.role == "user"))
+            if title == "ScriptStructure":
+                if fail_section and data["production_section_id"] == fail_section:
+                    return {}
+                payload = whole(messages, {"title": "ScriptBreakdown"})
+                return {key: payload[key] for key in ("prompt_style", "prompt_story_facts")} | {
+                    "character_names": {},
+                    "ranges": [{"id": "B1", "last_fragment": 1},
+                               {"id": "B2", "last_fragment": len(data["fragments"])}],
+                }
+            if title == "SceneBeat":
+                payload = whole(messages, {"title": "ScriptBreakdown"})
+                return next(beat for beat in payload["beats"] if beat["id"] == data["beat_id"])
+            if title == "CameraShot":
+                payload = whole(messages, {"title": "CameraPlan"})
+                return next(shot for shot in payload["shots"] if shot["intent_id"] == data["segment"]["id"])
+            payload = whole(messages, {"title": "DirectorialPlan"})
+            if title == "DirectorStructure":
+                return {"segments": [{key: shot[key] for key in ("id", "beat_id", "duration_s")}
+                                     for shot in payload["shots"]]}
+            shot = next(shot for shot in payload["shots"] if shot["id"] == data["segment"]["id"])
+            return {"visual_description": shot["visual_description"], "cut_descriptions": [],
+                    "asset_ids": shot["asset_ids"]}
+        return whole(messages, schema)
+
+    def whole(messages, schema):
         import re
 
         title = schema.get("title")
